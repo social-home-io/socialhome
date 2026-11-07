@@ -702,6 +702,11 @@ the space is at v_83 or above (an older one keeps the eager upload). It goes
 only when someone plays it. A member's large video, and any large video of a
 private space's channel, still goes at once, as before; so do pictures.
 
+**Followers don't get pages.** Page files on demand (v_82 × v_83) reach
+members only: followers of a global space never receive a space's pages, so
+they never hold a page descriptor to ask with (see
+[pages.md](./pages.md#scope)) — an allowed follower subset.
+
 **Follower subset (written down per the "members equal" rule).** Followers
 are not told apart by version, so a follower household below v_83 gets no
 lazy video: it never asks, and the video is not in the cache until a v_83

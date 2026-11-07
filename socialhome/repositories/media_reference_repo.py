@@ -298,15 +298,32 @@ _LIVE_SPACE_SOURCES: tuple[tuple[str, str, str, str], ...] = (
         "one",
         "t.space_id = ? AND t.deleted_at IS NULL",
     ),
+    # A page's RAW names are our own files only on the space's host; on a
+    # member household they are the host's, and only our page-scoped sp-
+    # copies count (:meth:`SqliteMediaReferenceRepo._page_names_of`).
     (
         "space_pages",
         "cover_image_url",
         "one",
-        "t.space_id = ? AND t.deleted_at IS NULL",
+        f"t.space_id = ? AND t.deleted_at IS NULL AND {_HOSTED_SPACE}",
     ),
     # v_82 — every picture a live page's body shows.
-    ("space_pages", "content", "markdown", "t.space_id = ? AND t.deleted_at IS NULL"),
+    (
+        "space_pages",
+        "content",
+        "markdown",
+        f"t.space_id = ? AND t.deleted_at IS NULL AND {_HOSTED_SPACE}",
+    ),
 )
+
+#: Page tables whose RAW names make a file this space's only where the
+#: row's names are our own (the space's host; our own draft) — on a member
+#: household a hostile host could otherwise name one of our shared files in
+#: a page (#1317 review). Applied by :meth:`confined_to_space`.
+_PAGE_ROWS_HERE: dict[str, str] = {
+    "space_pages": _SPACE_PAGE_HERE,
+    "page_edit_history": _HISTORY_HERE,
+}
 
 #: The space each :data:`_ACCESS_SOURCES` table's row belongs to (an SQL
 #: expression over the row ``t``); a table not listed is household-level
@@ -346,6 +363,34 @@ def _names_in_payload(raw: object) -> set[str]:
     if not isinstance(raw, str) or not raw:
         return set()
     return {name for name in _MEDIA_REF_RE.findall(raw) if name not in (".", "..")}
+
+
+def _names_in_side(raw: object) -> set[str]:
+    """The files an open conflict side of a page shows: its body is the
+    side's JSON (``content`` markdown, ``cover_image_url``), read with the
+    page-body pattern (the shared strict :data:`LOCAL_MEDIA_REF_RE`) — never
+    a loose scan of the encoded text."""
+    if not isinstance(raw, str) or not raw:
+        return set()
+    try:
+        side = orjson.loads(raw)
+    except orjson.JSONDecodeError:
+        return set()
+    if not isinstance(side, dict):
+        return set()
+    names = _names_in_markdown(side.get("content"))
+    cover = side.get("cover_image_url")
+    name = media_basename(cover if isinstance(cover, str) else None)
+    if name and name not in (".", ".."):
+        names.add(name)
+    return names
+
+
+def _names_in_column(table: str, raw: object) -> set[str]:
+    """The files a free-form payload column names (:data:`_PAYLOAD_SCANS`)."""
+    if table == "space_page_snapshots":
+        return _names_in_side(raw)
+    return _names_in_payload(raw)
 
 
 def _names_in_markdown(raw: object) -> set[str]:
@@ -457,7 +502,7 @@ class SqliteMediaReferenceRepo:
                 f"SELECT {col} AS v FROM {table} WHERE {where}"
             )
             for r in rows_to_dicts(rows):
-                out.update(_names_in_payload(r.get("v")))
+                out.update(_names_in_column(table, r.get("v")))
         for table, col, live in _MARKDOWN_COLUMNS:
             where = f"{col} LIKE '%api/media/%'" + (f" AND {live}" if live else "")
             rows = await self._db.fetchall(
@@ -491,7 +536,7 @@ class SqliteMediaReferenceRepo:
                         if name:
                             names.add(name)
                     elif col == "body":
-                        names |= _names_in_payload(raw)
+                        names |= _names_in_side(raw)
                     else:
                         names |= _names_in_markdown(raw)
                 out.update(space_page_media_name(str(r["s"]), n) for n in names)
@@ -593,6 +638,9 @@ class SqliteMediaReferenceRepo:
                 guard = f" AND json_valid(t.{col})"
             else:
                 value, guard = f"t.{col}", ""
+            here = _PAGE_ROWS_HERE.get(table)
+            if here:
+                guard += f" AND {here}"
             rows = await self._db.fetchall(
                 f"SELECT {value} AS v, {space_of} AS s FROM {table} t"
                 f" WHERE t.{col} LIKE ? ESCAPE '\\'{guard}",
@@ -679,7 +727,7 @@ class SqliteMediaReferenceRepo:
                         if name:
                             names.add(name)
                     elif col == "body":
-                        names |= _names_in_payload(raw)
+                        names |= _names_in_side(raw)
                     else:
                         names |= _names_in_markdown(raw)
         return {space_page_media_name(space_id, n) for n in names}
@@ -728,7 +776,7 @@ class SqliteMediaReferenceRepo:
             rows = await self._db.fetchall(
                 f"SELECT {col} AS v FROM {table} WHERE {where}", (pattern,)
             )
-            if any(basename in _names_in_payload(r["v"]) for r in rows):
+            if any(basename in _names_in_column(table, r["v"]) for r in rows):
                 return True
         for table, col, live in _MARKDOWN_COLUMNS:
             where = f"{col} LIKE ? ESCAPE '\\'" + (f" AND {live}" if live else "")

@@ -5886,6 +5886,7 @@ def create_app(config: Config | None = None) -> web.Application:
             ]
         )
         await startup_announcer.start()
+        app[K.startup_announcer_key] = startup_announcer
 
         # 10. Household dashboard listener — last, once everything it reads
         #     is up. A taken port must not stop the main app: the admin UI

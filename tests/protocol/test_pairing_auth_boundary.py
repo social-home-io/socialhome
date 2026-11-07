@@ -10,7 +10,6 @@ refused before any pairing state exists or any outbound request is made.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from types import MappingProxyType
 from urllib.parse import urlparse
@@ -24,6 +23,7 @@ from socialhome.app_keys import (
     federation_repo_key,
     federation_service_key,
     pairing_cancel_service_key,
+    startup_announcer_key,
 )
 from socialhome.auth import (
     _DEFAULT_PUBLIC_PATH_PATTERNS,
@@ -210,9 +210,11 @@ async def test_every_trust_mutation_refuses_anonymous_and_non_admin(
     # was seeded and land in the spy as if a refused call had reached the
     # federation layer. Let it finish first (root cause of the intermittent
     # failure; it never came from a refused call).
-    for task in asyncio.all_tasks():
-        if task.get_name() == "startup-announcer":
-            await task
+    announcer = app.get(startup_announcer_key)
+    # Must be there: a rewiring must fail loudly here, never turn this wait
+    # into a silent no-op.
+    assert announcer is not None, "the startup announcer is not wired"
+    await announcer.wait()
     repo = app[federation_repo_key]
     await repo.save_instance(_seeded_peer())
     fed = app[federation_service_key]

@@ -23,6 +23,7 @@ from socialhome.domain.gfs_space_media_on_demand import (
     MediaRequestFrame,
 )
 from socialhome.domain.space_media_ref import space_page_media_name
+from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.services import space_media_gfs_responder as mod
 from socialhome.services.inbound_media_store import (
     gfs_space_media_name,
@@ -580,4 +581,38 @@ async def test_a_page_copy_the_live_page_no_longer_shows_is_declined(tmp_path):
             scope_id=CHANNEL,
         ),
     )
+    assert gfs.reasons == ["not_held"]
+
+
+async def test_a_member_never_serves_its_own_file_a_hostile_page_names(db, tmp_path):
+    """#1317 review 1: on a MEMBER household a page body naming one of our
+    own raw files (an orphan, a deleted post's picture) makes it neither
+    confined nor live — asked with a hint that names us as the sealer, we
+    decline ``not_held`` and send nothing. Real repository, member DB."""
+    await db.enqueue(
+        "INSERT INTO users(user_id, username, display_name) VALUES('u1', 'u1', 'U1')"
+    )
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?, 'S', 'the-host', 'u1', 'k')",
+        (SPACE,),
+    )
+    await db.enqueue(
+        "INSERT INTO space_pages(id, space_id, title, content, created_by)"
+        " VALUES('pg', ?, 'P', '![x](api/media/orphan.webp)', 'u1')",
+        (SPACE,),
+    )
+    data = _file(tmp_path, "orphan.webp")
+    _b, bid = _blob(data, filename="orphan.webp", scope="channel", scope_id=CHANNEL)
+    gfs = _Gfs()
+    r = _responder(
+        tmp_path,
+        gfs=gfs,
+        spaces=_Spaces(channel=CHANNEL),
+        refs=SqliteMediaReferenceRepo(db),
+    )
+    await _ask(
+        r, _frame(bid, filename="orphan.webp", scope="channel", scope_id=CHANNEL)
+    )
+    assert [x[2] for x in gfs.serves] == [None]
     assert gfs.reasons == ["not_held"]

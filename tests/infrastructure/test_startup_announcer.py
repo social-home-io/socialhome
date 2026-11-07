@@ -117,3 +117,26 @@ async def test_stop_cancels_a_step_that_outlives_the_timeout(monkeypatch):
 @pytest.mark.parametrize("steps", [[]])
 async def test_stop_without_start_is_a_noop(steps):
     await StartupAnnouncer(steps).stop()
+
+
+async def test_wait_returns_once_every_step_ran():
+    """A caller (a test seeding peers, say) can wait for the steps without
+    knowing the task's name; before ``start`` and after the end it returns
+    at once."""
+    ran: list[str] = []
+    gate = asyncio.Event()
+
+    async def slow() -> None:
+        await gate.wait()
+        ran.append("slow")
+
+    announcer = StartupAnnouncer([("slow", slow)])
+    await announcer.wait()  # not started: nothing to wait for
+    await announcer.start()
+    waiter = asyncio.create_task(announcer.wait())
+    await asyncio.sleep(0.01)
+    assert not waiter.done()
+    gate.set()
+    await asyncio.wait_for(waiter, 1)
+    assert ran == ["slow"]
+    await announcer.wait()  # done: returns at once

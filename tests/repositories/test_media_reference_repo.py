@@ -932,8 +932,18 @@ async def test_a_live_pages_files_are_live_and_its_history_is_not(db):
         "UPDATE space_pages SET cover_image_url = 'api/media/pcover.webp' WHERE id = 'pg'"
     )
     repo = SqliteMediaReferenceRepo(db)
+    # A MEMBER household (sp1 is not hosted here): a page's raw names are the
+    # host's — they never make a file of our shared store confined or live
+    # (#1317 review: a hostile host naming one of our own files in a page
+    # body would otherwise have us re-seal and send it). Only our
+    # page-scoped sp- copies count.
+    for name in ("body.webp", "body2.webp", "pcover.webp"):
+        assert not await repo.live_in_space(name, "sp1"), name
+        assert not await repo.confined_to_space(name, "sp1"), name
+    await _host_here(db)
     for name in ("body.webp", "body2.webp", "pcover.webp"):
         assert await repo.live_in_space(name, "sp1"), name
+        assert await repo.confined_to_space(name, "sp1"), name
         page_copy = space_page_media_name("sp1", name)
         assert await repo.confined_to_space(page_copy, "sp1"), name
         assert await repo.live_in_space(page_copy, "sp1"), name
@@ -952,3 +962,30 @@ async def test_a_live_pages_files_are_live_and_its_history_is_not(db):
     assert not await repo.live_in_space(
         space_page_media_name("sp1", "body.webp"), "sp1"
     )
+
+
+_SIDE = (
+    '{"content": "![s](api/media/side.webp) '
+    '[x](https://evil.example/api/media/notours.webp)",'
+    ' "cover_image_url": "api/media/sidecover.webp"}'
+)
+
+
+async def test_a_conflict_sides_names_are_read_with_the_strict_pattern(db):
+    """#1317 review 2: an open conflict side's body is decoded and read like
+    a page body (the shared strict pattern) — a path inside another URL is
+    no reference."""
+    await _seed_parents(db)
+    await _host_here(db)
+    await db.enqueue(
+        "INSERT INTO space_page_snapshots(page_id, space_id, snapshot_at, body,"
+        " snapshot_by, side, conflict) VALUES('pg', 'sp1', '2026-01-01', ?,"
+        " 'u1', 'theirs', 1)",
+        (_SIDE,),
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.is_referenced("side.webp")
+    assert await repo.is_referenced("sidecover.webp")
+    assert not await repo.is_referenced("notours.webp")
+    names = await repo.referenced_basenames()
+    assert "side.webp" in names and "notours.webp" not in names

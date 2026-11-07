@@ -24,6 +24,12 @@ sets.
 - **GFS**: uninvolved. Pages never leave the space's member mesh.
 - **Household pages** (`/api/pages`) never federate. Their edit locks and
   two-step delete are local only.
+- **Followers** (households that follow a global space through a GFS, not
+  members) **do not receive pages** — neither the versions nor their files,
+  live, on demand (v_83) or in a catch-up. This is the follower subset the
+  "every space member is equal" rule allows, written down here: every
+  MEMBER household — paired, reached over the mesh, or seated from an
+  invite link — gets the pages and their files alike.
 
 A household applies v_48 rules when it is the host, or when
 `peer_supports(owner, 48)`. Otherwise it is **legacy**: last write wins,
