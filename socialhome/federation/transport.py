@@ -66,6 +66,10 @@ from .gfs_relay_transport import (
     RELAY_STATUS_TOO_LARGE,
 )
 from .inbound_validator import UnpairedPeerRefusedError
+from .media_envelope import (
+    MEDIA_HTTPS_CONTENT_TYPE,
+    encode_media_body,
+)
 
 if TYPE_CHECKING:
     from ..infrastructure.event_bus import EventBus
@@ -148,13 +152,37 @@ class HttpsInboxTransport:
         ``(False, None)`` so the caller can record a failure and
         enqueue for retry.
         """
+        return await self._post(instance, json=envelope_dict)
+
+    async def send_media(
+        self,
+        *,
+        instance: RemoteInstance,
+        body: bytes,
+    ) -> tuple[bool, int | None]:
+        """POST one binary media body (proto v_81) to the peer's inbox URL —
+        the same URL as :meth:`send`, whatever sits in front of it (Home
+        Assistant's inbox relay forwards the bytes as they are). Raw bytes,
+        no JSON, no base64; the receiver recognises the body by its magic.
+        Same result contract as :meth:`send`."""
+        return await self._post(
+            instance,
+            data=body,
+            headers={"Content-Type": MEDIA_HTTPS_CONTENT_TYPE},
+        )
+
+    async def _post(
+        self,
+        instance: RemoteInstance,
+        **kwargs: Any,
+    ) -> tuple[bool, int | None]:
         try:
             client = await self._client_once()
             async with post_to_peer(
                 client,
                 instance.remote_inbox_url,
-                json=envelope_dict,
                 timeout=ClientTimeout(total=self._timeout_s),
+                **kwargs,
             ) as resp:
                 status = resp.status
                 return 200 <= status < 300, status
@@ -2118,6 +2146,36 @@ class FederationTransport:
                 exc,
             )
             return False
+
+    async def send_media_https(
+        self,
+        *,
+        instance: RemoteInstance,
+        header_dict: dict,
+        payload_bytes: bytes,
+    ) -> bool:
+        """Deliver one binary media body to the peer's inbox URL over HTTPS
+        (proto v_81) — the frame :meth:`send_media` puts on the channel (the
+        signed header JSON verbatim + the sealed chunk) behind the body
+        magic and suite byte.
+
+        ``True`` only on a 2xx. Anything else (peer away, 429, refused, a
+        body over the receiver's cap) is ``False`` and
+        :meth:`FederationService.send_media_chunk` sends the JSON chunk
+        instead, which the outbox redelivers.
+
+        Like :meth:`send`, a peer with no PeerConnection gets the lazy
+        handshake kicked (within its backoff), so media-only traffic still
+        brings up ``fed-media-v1`` for the next chunks."""
+        if self._peers.get(instance.id) is None and not self._rtc_suppressed(
+            instance.id
+        ):
+            await self._ensure_handshake(instance)
+        body = encode_media_body(header_dict, payload_bytes)
+        if len(body) > media_framing.HTTPS_MEDIA_MAX_BODY_BYTES:
+            return False
+        ok, _status = await self._https_inbox.send_media(instance=instance, body=body)
+        return ok
 
     def is_media_ready(self, instance_id: str) -> bool:
         peer = self._peers.get(instance_id)

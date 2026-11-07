@@ -1287,7 +1287,24 @@ from __future__ import annotations
 #:   files, and its catch-up gets no pictures — its people see posts without
 #:   the pictures that did not fit. Labelled "Pictures in a space for members
 #:   who joined by link".
-OURS: int = 80
+#: * **v_81** (2026-11-07) — **Binary media over HTTPS**. A media chunk
+#:   (``SPACE_MEDIA_BLOB`` / ``DM_MEDIA_BLOB``) to a CONFIRMED direct peer
+#:   with an inbox URL and no open ``fed-media-v1`` channel is POSTed to
+#:   the SAME inbox URL as one binary body — ``\x00SHM`` magic, a frame
+#:   suite byte, then the ``fed-media-v1`` frame — instead of the
+#:   base64-in-JSON envelope: the signed envelope header (routing fields
+#:   only in plaintext) + the AES-256-GCM-sealed chunk as raw bytes, bound by
+#:   ``chunk_sha256`` in the signed, encrypted metadata, which also carries
+#:   ``media_frame_suite`` (``fed-media-v1``, required over HTTPS and equal
+#:   to the suite byte). The receiver tells it from JSON by the body alone,
+#:   so Home Assistant's inbox relay (which rewrites ``Content-Type`` and
+#:   drops custom headers) carries it unchanged. A 512 KiB chunk is
+#:   ~513 KiB on the wire instead of ~933 KB. Same §24.11 inbox pipeline,
+#:   same replay cache, same media handlers. **Fallback**: a peer below
+#:   v_81 — and any failed POST — gets the JSON chunk as before; mesh
+#:   (``SPACE_ROUTED``) and GFS-relay targets stay JSON. Not space-scoped,
+#:   no sync stream change. Labelled "Lighter photo and file transfers".
+OURS: int = 81
 
 
 class FederationCapability:
@@ -1901,6 +1918,11 @@ class FederationCapability:
     #: it: no descriptor (live, the old ``SPACE_MEDIA_BLOB`` push; a catch-up
     #: never pushes bytes to any link-joined requester).
     MIN_FOR_SPACE_MEDIA_REFS = 80
+    #: v_81 — media chunks to a CONFIRMED direct peer ride
+    #: the peer's inbox URL as one binary ``fed-media-v1`` body when no
+    #: media channel is open (:meth:`FederationService.send_media_chunk`).
+    #: Below it: the JSON (base64) chunk on the inbox, as before.
+    MIN_FOR_MEDIA_HTTPS = 81
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2207,6 +2229,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_MEDIA_REFS,
         "Pictures in a space for members who joined by link",
     ),
+    (
+        FederationCapability.MIN_FOR_MEDIA_HTTPS,
+        "Lighter photo and file transfers",
+    ),
 ]
 
 
@@ -2298,6 +2324,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_APP_ENGINES: "app_engines",
     FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT: "space_gallery_item_edits",
     FederationCapability.MIN_FOR_SPACE_MEDIA_REFS: "space_media_refs",
+    FederationCapability.MIN_FOR_MEDIA_HTTPS: "lighter_media_transfers",
 }
 
 

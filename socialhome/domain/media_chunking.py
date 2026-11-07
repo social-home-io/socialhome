@@ -11,9 +11,13 @@ every tier that may carry it:
   :data:`ADVERTISED_MAX_MESSAGE_BYTES`, so two such households negotiate
   1 MiB and an older one keeps 256 KiB. A bigger frame fails with
   "Message size exceeds limit".
-* **HTTPS inbox** — the JSON fallback carries the chunk base64'ed in the
-  payload, which is then encrypted and base64'ed again (~1.8x), under the
-  inbox's 1 MiB body cap (``hardening.DEFAULT_JSON_MAX_BYTES``).
+* **HTTPS inbox** — to a v_81 household a chunk is one binary body (raw
+  sealed bytes, ~1.0x) under a cap of :data:`HTTPS_CHUNK_BYTES` +
+  :data:`FRAME_OVERHEAD_BYTES`; to an older one the JSON chunk carries it
+  base64'ed in the payload, which is then encrypted and base64'ed again
+  (~1.8x), under the inbox's 1 MiB body cap
+  (``hardening.DEFAULT_JSON_MAX_BYTES``). Chunks are sized for the JSON
+  case, so a fallback mid-transfer always fits.
 * **Mesh route** — a space member that is not a CONFIRMED direct peer
   gets the JSON chunk sealed inside ``SPACE_ROUTED``: sealed and
   base64'ed once more before the outer envelope encrypts and base64s it

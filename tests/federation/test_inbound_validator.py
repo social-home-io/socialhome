@@ -31,6 +31,7 @@ from socialhome.federation.inbound_validator import (
     UnpairedPeerRefusedError,
     make_ban_check,
     make_check_deprovisioned_author,
+    make_check_event_types,
     make_check_peer_class,
     make_check_relay_opt_in,
     make_check_replay,
@@ -1713,3 +1714,24 @@ async def test_relay_approval_step_runs_after_decrypt_and_before_dispatch():
     names = [getattr(s, "__name__", "") for s in steps]
     assert names.index("verify_signature") < names.index("confirm_relay_approval")
     assert names.index("decrypt_and_parse") < names.index("confirm_relay_approval")
+
+
+# ─── Event-type gate (binary media route) ────────────────────────────────
+
+
+async def test_check_event_types_passes_an_allowed_type():
+    step = make_check_event_types(
+        frozenset({FederationEventType.DM_MEDIA_BLOB}),
+    )
+    ctx = InboundContext(envelope=_minimal_envelope(event_type="dm_media_blob"))
+    await step(ctx)
+    assert ctx.early_response is None
+
+
+async def test_check_event_types_refuses_any_other_type():
+    step = make_check_event_types(
+        frozenset({FederationEventType.DM_MEDIA_BLOB}),
+    )
+    ctx = InboundContext(envelope=_minimal_envelope(event_type="dm_message"))
+    with pytest.raises(ValueError, match="Event type not allowed"):
+        await step(ctx)

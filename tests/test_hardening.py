@@ -569,3 +569,29 @@ async def test_iter_part_chunks_hands_out_the_whole_part(aiohttp_client):
     assert r.status == 200
     assert int(await r.text()) == 3 * 1024 * 1024 + 7
     assert len(got) >= 3
+
+
+async def test_read_body_capped_counts_an_already_read_prefix(aiohttp_client):
+    """The federation inbox peeks a few bytes before it picks the cap; they
+    lead the result and count toward the cap."""
+
+    async def raw(request: web.Request) -> web.Response:
+        head = await request.content.readexactly(4)
+        try:
+            data = await read_body_capped(request, 10, prefix=head)
+        except PayloadTooLargeError:
+            return web.Response(status=413)
+        return web.Response(body=data)
+
+    app = web.Application()
+    app.router.add_post("/raw", raw)
+    client = await aiohttp_client(app)
+
+    async def gen(body: bytes):
+        yield body
+
+    r = await client.post("/raw", data=gen(b"abcdefghij"))
+    assert r.status == 200
+    assert await r.read() == b"abcdefghij"
+    r = await client.post("/raw", data=gen(b"abcdefghijk"))
+    assert r.status == 413

@@ -32,6 +32,23 @@ nonetheless tolerates a peer that coalesces or splits messages — it
 extracts every complete frame from a running buffer and returns the
 unconsumed tail.
 
+The same frame also rides the HTTPS inbox (proto v_81) — POSTed to the
+very inbox URL the peer advertised (``…/federation/inbox/{inbox_id}``, or
+Home Assistant's ``/api/socialhome/inbox/{inbox_id}`` relay in front of
+it), so nothing between the two households needs to know a new path. The
+body tells the receiver what it is, never a header (a relay may rewrite
+``Content-Type`` and drops custom headers)::
+
+    [MEDIA_BODY_MAGIC "\x00SHM"][u8 frame-suite id][one frame as above]
+
+``\x00`` can never start (or appear outside a string in) a JSON envelope,
+so a JSON body is never mistaken for a frame and vice versa
+(:func:`is_media_body`). The suite byte names the frame format
+(:data:`MEDIA_FRAME_SUITE_IDS`); :func:`decode_body` refuses an unknown one
+(:class:`UnsupportedMediaFrameSuite`), trailing bytes and any frame type
+but :data:`FRAME_TYPE_MEDIA_CHUNK` (a body has no stream to skip forward
+in), under the cap :data:`HTTPS_MEDIA_MAX_BODY_BYTES`.
+
 This is a deliberately separate module from
 :mod:`socialhome.services.highlight_public_framing`: that one
 multiplexes several JSON-header *kinds* on one channel and canonicalises
@@ -43,6 +60,8 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
+
+from ..domain.media_chunking import FRAME_OVERHEAD_BYTES, HTTPS_CHUNK_BYTES
 
 # ─── Wire constants ──────────────────────────────────────────────────────
 
@@ -65,6 +84,37 @@ MEDIA_AEAD_SUITE_AESGCM_256: str = "aesgcm-256"
 SUPPORTED_MEDIA_AEAD_SUITES: frozenset[str] = frozenset(
     {MEDIA_AEAD_SUITE_AESGCM_256},
 )
+
+#: Frame-format suite: how a media chunk travels as one binary frame —
+#: the layout above, the signed envelope as the header, the AEAD-sealed
+#: chunk as the payload, bound by the ``chunk_sha256`` inside the signed,
+#: encrypted metadata. Carried as ``media_frame_suite`` in that signed
+#: metadata on both transports and, on HTTPS, also as the body's suite byte
+#: (:data:`MEDIA_FRAME_SUITE_IDS`) so the receiver knows the layout before
+#: it parses; the two must agree. A receiver refuses a value outside
+#: :data:`SUPPORTED_MEDIA_FRAME_SUITES` with
+#: :class:`UnsupportedMediaFrameSuite`. Required over HTTPS; a DataChannel
+#: frame from a sender that predates the field (v_14..v_80) defaults to
+#: this single value.
+MEDIA_FRAME_SUITE_V1: str = "fed-media-v1"
+SUPPORTED_MEDIA_FRAME_SUITES: frozenset[str] = frozenset({MEDIA_FRAME_SUITE_V1})
+
+#: The first bytes of a binary media body on the HTTPS inbox. ``\x00`` is
+#: never valid at the start of a JSON text, so the inbox tells the two
+#: apart from the body alone.
+MEDIA_BODY_MAGIC: bytes = b"\x00SHM"
+
+#: The suite byte after :data:`MEDIA_BODY_MAGIC` → the frame suite it names.
+#: A new layout takes a new byte; an unknown byte is refused.
+MEDIA_FRAME_SUITE_IDS: dict[int, str] = {0x01: MEDIA_FRAME_SUITE_V1}
+_SUITE_ID_BY_NAME: dict[str, int] = {v: k for k, v in MEDIA_FRAME_SUITE_IDS.items()}
+_BODY_PREFIX_LEN: int = len(MEDIA_BODY_MAGIC) + 1
+
+#: The largest binary media body the inbox accepts: one
+#: :data:`~socialhome.domain.media_chunking.HTTPS_CHUNK_BYTES` chunk plus
+#: room for the magic, the signed header and the frame (528 KiB). Refused
+#: from ``Content-Length`` once the magic is read, and while streaming.
+HTTPS_MEDIA_MAX_BODY_BYTES: int = HTTPS_CHUNK_BYTES + FRAME_OVERHEAD_BYTES
 
 #: Upper bounds to cap allocation from a malicious/garbled peer. A
 #: federation envelope is a few KiB; a media chunk is bounded by the
@@ -95,6 +145,13 @@ class UnsupportedMediaAeadSuite(ValueError):
     crypto surfaces (signatures, KEM, key delivery). Receivers reject —
     never fall back to a default.
     """
+
+    __slots__ = ()
+
+
+class UnsupportedMediaFrameSuite(ValueError):
+    """Raised when a media frame names a ``media_frame_suite`` we don't
+    support. Receivers reject — never fall back to a default."""
 
     __slots__ = ()
 
@@ -178,6 +235,51 @@ def decode(buf: bytes) -> MediaFrame:
         header=bytes(buf[header_off : header_off + header_len]),
         payload=bytes(buf[payload_off : payload_off + payload_len]),
     )
+
+
+def is_media_body(buf: bytes) -> bool:
+    """Whether an inbox body is a binary media frame (it starts with
+    :data:`MEDIA_BODY_MAGIC`) rather than a JSON envelope."""
+    return bytes(buf[: len(MEDIA_BODY_MAGIC)]) == MEDIA_BODY_MAGIC
+
+
+def encode_body(
+    header: bytes, payload: bytes, *, suite: str = MEDIA_FRAME_SUITE_V1
+) -> bytes:
+    """One HTTPS inbox media body: magic, suite byte, one chunk frame."""
+    suite_id = _SUITE_ID_BY_NAME.get(suite)
+    if suite_id is None:
+        raise UnsupportedMediaFrameSuite(f"unknown media frame suite: {suite!r}")
+    return MEDIA_BODY_MAGIC + bytes([suite_id]) + encode(header, payload)
+
+
+def decode_body(buf: bytes) -> tuple[str, MediaFrame]:
+    """Decode an HTTPS inbox media body → ``(frame suite, frame)``.
+
+    Refuses a body without the magic or too short (:class:`MediaFramingError`),
+    an unknown suite byte (:class:`UnsupportedMediaFrameSuite` — no default),
+    and, unlike :func:`decode`, trailing bytes (a body is one frame, nothing
+    may ride behind it) and any frame type but
+    :data:`FRAME_TYPE_MEDIA_CHUNK`.
+    """
+    if not is_media_body(buf) or len(buf) < _BODY_PREFIX_LEN:
+        raise MediaFramingError("not a media body")
+    suite = MEDIA_FRAME_SUITE_IDS.get(buf[len(MEDIA_BODY_MAGIC)])
+    if suite is None:
+        raise UnsupportedMediaFrameSuite(
+            f"unknown media frame suite id: {buf[len(MEDIA_BODY_MAGIC)]}"
+        )
+    frame_buf = bytes(buf[_BODY_PREFIX_LEN:])
+    span = _frame_span(frame_buf, 0)
+    if span is None:
+        raise MediaFramingError("body too short for a complete frame")
+    _header_off, _header_len, payload_off, payload_len = span
+    if payload_off + payload_len != len(frame_buf):
+        raise MediaFramingError("trailing bytes after the frame")
+    frame = decode(frame_buf)
+    if frame.frame_type != FRAME_TYPE_MEDIA_CHUNK:
+        raise MediaFramingError(f"unexpected frame_type: {frame.frame_type}")
+    return suite, frame
 
 
 def iter_complete_frames(buf: bytes) -> tuple[list[MediaFrame], bytes]:

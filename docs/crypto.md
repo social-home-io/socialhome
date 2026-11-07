@@ -1189,7 +1189,18 @@ so the hash commits to the exact bytes written to disk; tampering with
 the payload fails the hash, tampering with the hash fails the GCM tag
 or the signature. The metadata carries a `media_aead_suite` tag (today
 only `"aesgcm-256"`, validated against `SUPPORTED_MEDIA_AEAD_SUITES`,
-rejected-not-defaulted on unknown). **Nonce budget:** both the metadata
+rejected-not-defaulted on unknown). **Frame suite (v_81):** the frame
+format itself is tagged `media_frame_suite` (`"fed-media-v1"`,
+`MEDIA_FRAME_SUITE_V1` in `SUPPORTED_MEDIA_FRAME_SUITES`, unknown →
+`UnsupportedMediaFrameSuite`) inside the same signed metadata. Over the
+HTTPS inbox the same frame is the body behind a 4-byte magic `"\0SHM"`
+(never the start of a JSON text — the inbox tells the shapes apart from
+the body, not a header) and a suite byte (`MEDIA_FRAME_SUITE_IDS`:
+`0x01` = `fed-media-v1`), so the receiver knows the layout before it
+parses; an unknown byte is refused, and the signed `media_frame_suite`
+must equal it (the byte itself is unsigned). A channel frame from a
+v_14..v_80 sender has no field and reads as v1 — the migration tripwire.
+A new layout ships as a sibling byte + suite name. **Nonce budget:** both the metadata
 AEAD and the chunk AEAD draw a fresh random 96-bit nonce under the same
 directional session key already used for every JSON envelope to that
 peer. Chunking raises the messages-per-key count (a 200 MiB video ≈ 400

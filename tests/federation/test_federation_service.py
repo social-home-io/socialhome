@@ -47,7 +47,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
-from socialhome.domain.federation_capabilities import FederationCapability
+from socialhome.domain.federation_capabilities import OURS, FederationCapability
 from socialhome.domain.media_chunking import (
     FRAME_OVERHEAD_BYTES,
     HTTPS_CHUNK_BYTES,
@@ -56,9 +56,16 @@ from socialhome.domain.media_chunking import (
 )
 from socialhome.federation import FederationService, routed_crypto
 from socialhome.federation import federation_service as federation_service_mod
+from socialhome.federation import media_framing as _mf
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.federation_service import UNPAIR_SEND_RACE_S
 from socialhome.federation.invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
+from socialhome.federation.media_envelope import (
+    build_media_envelope as _build_media_envelope,
+)
+from socialhome.federation.media_envelope import (
+    encode_media_body as _encode_media_body,
+)
 from socialhome.federation.media_framing import (
     MEDIA_AEAD_SUITE_AESGCM_256,
     UnsupportedMediaAeadSuite,
@@ -6136,3 +6143,530 @@ def test_media_chunk_bytes_follows_the_peers_media_channel():
     )
     with pytest.raises(TypeError):
         svc.media_chunk_bytes("floor")  # type: ignore[call-arg]
+
+
+# ─── Binary media over HTTPS (v_81, a binary body on the same inbox) ───────
+#
+# Sender: a CONFIRMED v_81 peer with no open media channel gets the chunk as
+# one binary body on its inbox URL (no base64); older peers keep the JSON
+# path. Receiver: the body runs the SAME §24.11 inbox pipeline, then the
+# shared media tail (frame suite, AEAD suite, decrypt, chunk_sha256 binding).
+
+
+class _CaptureHttpsMediaTransport(_CaptureMediaTransport):
+    """Adds the HTTPS binary media leg; the channel is down by default."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.media_ready = False
+        self.https_media: list[tuple[dict, bytes]] = []
+        self.https_returns = True
+
+    async def send_media_https(self, *, instance, header_dict, payload_bytes):
+        self.https_media.append((header_dict, payload_bytes))
+        return self.https_returns
+
+
+def _paired_https(*, peer_proto_version: int | None = None):
+    p = _paired(
+        peer_proto_version=(
+            FederationCapability.MIN_FOR_MEDIA_HTTPS
+            if peer_proto_version is None
+            else peer_proto_version
+        )
+    )
+    p.cap = _CaptureHttpsMediaTransport()
+    p.svc_a.attach_transport(p.cap)
+    p.inbox_id = p.repo_b._instances[p.a_id].local_inbox_id
+    return p
+
+
+def _frame_from(p, *, raw=b"chunk", meta_extra=None, drop_frame_suite=False):
+    """A frame built with the production builder, with metadata knobs."""
+    enc_a = FederationEncoder(p.a_kp.private_key)
+    header, sealed = _build_media_envelope(
+        encoder=enc_a,
+        session_key=p.session,
+        from_instance=p.a_id,
+        to_instance=p.b_id,
+        sig_suite="ed25519",
+        event_type=FederationEventType.DM_MEDIA_BLOB,
+        payload={"media_blob_id": "m1", "message_id": "m1"},
+        raw_chunk=raw,
+        space_id=None,
+    )
+    if meta_extra is not None or drop_frame_suite:
+        # Re-seal the metadata with the knob applied, then re-sign.
+        meta = orjson.loads(
+            enc_a.decrypt_payload(header["encrypted_payload"], p.session)
+        )
+        meta.update(meta_extra or {})
+        if drop_frame_suite:
+            meta.pop("media_frame_suite")
+        header.pop("signatures")
+        header["encrypted_payload"] = enc_a.encrypt_payload(
+            orjson.dumps(meta).decode(), p.session
+        )
+        header["signatures"] = enc_a.sign_envelope_all(
+            orjson.dumps(header), suite="ed25519"
+        )
+    return header, sealed
+
+
+def _resign(p, header: dict) -> dict:
+    header.pop("signatures", None)
+    enc_a = FederationEncoder(p.a_kp.private_key)
+    header["signatures"] = enc_a.sign_envelope_all(
+        orjson.dumps(header), suite="ed25519"
+    )
+    return header
+
+
+@pytest.mark.asyncio
+async def test_media_https_capability_is_the_current_version():
+    assert (
+        FederationCapability.MIN_FOR_MEDIA_HTTPS
+        > FederationCapability.MIN_FOR_SPACE_MEDIA_REFS
+    )
+    assert OURS >= FederationCapability.MIN_FOR_MEDIA_HTTPS
+
+
+@pytest.mark.asyncio
+async def test_v_n_peer_without_a_media_channel_gets_a_binary_https_frame():
+    p = _paired_https()
+    raw = os.urandom(HTTPS_CHUNK_BYTES)
+    result = await p.svc_a.send_media_chunk(
+        to_instance_id=p.b_id,
+        event_type=FederationEventType.DM_MEDIA_BLOB,
+        payload={"media_blob_id": "m1", "message_id": "m1"},
+        raw_chunk=raw,
+    )
+    assert result.ok
+    assert p.cap.json_envelopes == []  # no base64 JSON envelope
+    assert p.cap.media is None  # not the channel
+    [(header, sealed)] = p.cap.https_media
+    assert len(sealed) == 12 + len(raw) + 16  # raw AEAD, no base64
+    body = _encode_media_body(header, sealed)
+    # A full 512 KiB chunk fits the route's cap with room to spare.
+    assert len(body) <= _mf.HTTPS_MEDIA_MAX_BODY_BYTES
+    meta = orjson.loads(
+        p.svc_b._encoder.decrypt_payload(header["encrypted_payload"], p.session)
+    )
+    assert meta["media_frame_suite"] == _mf.MEDIA_FRAME_SUITE_V1
+    assert "bytes_b64" not in meta
+
+
+@pytest.mark.asyncio
+async def test_an_older_peer_keeps_the_json_path():
+    p = _paired_https(peer_proto_version=FederationCapability.MIN_FOR_MEDIA_HTTPS - 1)
+    result = await p.svc_a.send_media_chunk(
+        to_instance_id=p.b_id,
+        event_type=FederationEventType.DM_MEDIA_BLOB,
+        payload={"media_blob_id": "m1", "message_id": "m1"},
+        raw_chunk=b"bytes",
+    )
+    assert result.ok
+    assert p.cap.https_media == []
+    assert len(p.cap.json_envelopes) == 1
+
+
+@pytest.mark.asyncio
+async def test_open_media_channel_still_wins_over_https():
+    p = _paired_https()
+    p.cap.media_ready = True
+    await p.svc_a.send_media_chunk(
+        to_instance_id=p.b_id,
+        event_type=FederationEventType.DM_MEDIA_BLOB,
+        payload={"media_blob_id": "m1", "message_id": "m1"},
+        raw_chunk=b"bytes",
+    )
+    assert p.cap.media is not None
+    assert p.cap.https_media == []
+
+
+@pytest.mark.asyncio
+async def test_failed_https_frame_falls_back_to_json():
+    p = _paired_https()
+    p.cap.https_returns = False
+    result = await p.svc_a.send_media_chunk(
+        to_instance_id=p.b_id,
+        event_type=FederationEventType.DM_MEDIA_BLOB,
+        payload={"media_blob_id": "m1", "message_id": "m1"},
+        raw_chunk=b"bytes",
+    )
+    assert result.ok
+    assert len(p.cap.https_media) == 1
+    assert len(p.cap.json_envelopes) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_chunk_over_the_route_cap_goes_json():
+    """Never POST a body the receiver's cap would refuse."""
+    p = _paired_https()
+    await p.svc_a.send_media_chunk(
+        to_instance_id=p.b_id,
+        event_type=FederationEventType.DM_MEDIA_BLOB,
+        payload={"media_blob_id": "m1", "message_id": "m1"},
+        raw_chunk=b"x" * _mf.HTTPS_MEDIA_MAX_BODY_BYTES,
+    )
+    assert p.cap.https_media == []
+    assert len(p.cap.json_envelopes) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"source": InstanceSource.SPACE_SESSION},
+        {"remote_inbox_url": ""},
+        {"status": PairingStatus.PENDING_SENT},
+    ],
+    ids=["link-seated", "no-inbox-url", "not-confirmed"],
+)
+async def test_no_https_frame_without_a_direct_inbox(change):
+    p = _paired_https()
+    p.repo_a._instances[p.b_id] = dataclasses.replace(
+        p.repo_a._instances[p.b_id], **change
+    )
+    await p.svc_a.send_media_chunk(
+        to_instance_id=p.b_id,
+        event_type=FederationEventType.SPACE_MEDIA_BLOB,
+        payload={"filename": "f.webp", "transfer_id": "t1"},
+        raw_chunk=b"x",
+        mesh_fallback=True,
+    )
+    assert p.cap.https_media == []
+
+
+@pytest.mark.asyncio
+async def test_https_frame_round_trips_through_the_inbox_pipeline():
+    p = _paired_https()
+    raw = os.urandom(70_000)
+    await p.svc_a.send_media_chunk(
+        to_instance_id=p.b_id,
+        event_type=FederationEventType.SPACE_MEDIA_BLOB,
+        payload={"filename": "img.webp", "transfer_id": "t1"},
+        raw_chunk=raw,
+        space_id="sp1",
+    )
+    [(header, sealed)] = p.cap.https_media
+    res = await p.svc_b.handle_inbound_media_https(
+        p.inbox_id, _encode_media_body(header, sealed)
+    )
+    assert res == {"status": "ok"}
+    [event] = p.received
+    assert event.event_type is FederationEventType.SPACE_MEDIA_BLOB
+    assert event.media_bytes == raw
+    assert event.payload["filename"] == "img.webp"
+
+
+@pytest.mark.asyncio
+async def test_https_frame_with_a_tampered_body_is_refused():
+    p = _paired_https()
+    header, sealed = _frame_from(p, raw=b"good bytes")
+    body = bytearray(_encode_media_body(header, sealed))
+    body[-1] ^= 0x01  # GCM tag of the sealed chunk
+    with pytest.raises(ValueError, match="decrypt media chunk"):
+        await p.svc_b.handle_inbound_media_https(p.inbox_id, bytes(body))
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+async def test_https_frame_with_a_swapped_chunk_is_refused():
+    """A validly sealed but different chunk fails the signed sha256."""
+    p = _paired_https()
+    header, _ = _frame_from(p, raw=b"committed")
+    other = p.svc_b._encoder.encrypt_bytes(b"swapped", p.session)
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        await p.svc_b.handle_inbound_media_https(
+            p.inbox_id, _encode_media_body(header, other)
+        )
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+async def test_https_frame_with_a_tampered_header_is_refused():
+    p = _paired_https()
+    header, sealed = _frame_from(p)
+    header["space_id"] = "another-space"  # a signed routing field
+    with pytest.raises(ValueError, match="signature"):
+        await p.svc_b.handle_inbound_media_https(
+            p.inbox_id, _encode_media_body(header, sealed)
+        )
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+async def test_https_frame_with_a_bad_signature_is_refused():
+    p = _paired_https()
+    header, sealed = _make_frame(p, corrupt_sig=True)
+    with pytest.raises(ValueError, match="signature"):
+        await p.svc_b.handle_inbound_media_https(
+            p.inbox_id, _mf.encode_body(header, sealed)
+        )
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+async def test_https_frame_replay_is_refused():
+    p = _paired_https()
+    header, sealed = _frame_from(p)
+    body = _encode_media_body(header, sealed)
+    await p.svc_b.handle_inbound_media_https(p.inbox_id, body)
+    with pytest.raises(ValueError, match="Replay detected"):
+        await p.svc_b.handle_inbound_media_https(p.inbox_id, body)
+    assert len(p.received) == 1
+
+
+@pytest.mark.asyncio
+async def test_https_frame_replayed_from_the_channel_is_refused():
+    """One replay cache across both binary transports."""
+    p = _paired_https()
+    header, sealed = _frame_from(p)
+    await p.svc_b.handle_inbound_media_frame(p.a_id, orjson.dumps(header), sealed)
+    with pytest.raises(ValueError, match="Replay detected"):
+        await p.svc_b.handle_inbound_media_https(
+            p.inbox_id, _encode_media_body(header, sealed)
+        )
+    assert len(p.received) == 1
+
+
+@pytest.mark.asyncio
+async def test_https_frame_with_an_unknown_frame_suite_is_refused():
+    p = _paired_https()
+    header, sealed = _frame_from(p, meta_extra={"media_frame_suite": "fed-media-v9"})
+    with pytest.raises(_mf.UnsupportedMediaFrameSuite):
+        await p.svc_b.handle_inbound_media_https(
+            p.inbox_id, _encode_media_body(header, sealed)
+        )
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+async def test_https_frame_without_a_frame_suite_is_refused():
+    """A new surface: no default-on-missing over HTTPS."""
+    p = _paired_https()
+    header, sealed = _frame_from(p, drop_frame_suite=True)
+    with pytest.raises(_mf.UnsupportedMediaFrameSuite):
+        await p.svc_b.handle_inbound_media_https(
+            p.inbox_id, _encode_media_body(header, sealed)
+        )
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+async def test_channel_frame_without_a_frame_suite_defaults_to_v1():
+    """A v_14..v_80 sender never sent the field on the channel."""
+    p = _paired_https()
+    header, sealed = _frame_from(p, drop_frame_suite=True)
+    await p.svc_b.handle_inbound_media_frame(p.a_id, orjson.dumps(header), sealed)
+    assert len(p.received) == 1
+
+
+@pytest.mark.asyncio
+async def test_channel_frame_with_an_unknown_frame_suite_is_refused():
+    p = _paired_https()
+    header, sealed = _frame_from(p, meta_extra={"media_frame_suite": "nope"})
+    with pytest.raises(_mf.UnsupportedMediaFrameSuite):
+        await p.svc_b.handle_inbound_media_frame(p.a_id, orjson.dumps(header), sealed)
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+async def test_https_frame_with_an_unknown_aead_suite_is_refused():
+    p = _paired_https()
+    header, sealed = _frame_from(p, meta_extra={"media_aead_suite": "chacha-bogus"})
+    with pytest.raises(UnsupportedMediaAeadSuite):
+        await p.svc_b.handle_inbound_media_https(
+            p.inbox_id, _encode_media_body(header, sealed)
+        )
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+async def test_https_frame_for_an_unknown_inbox_is_refused():
+    p = _paired_https()
+    header, sealed = _frame_from(p)
+    with pytest.raises(ValueError, match="No instance found"):
+        await p.svc_b.handle_inbound_media_https(
+            "no-such-inbox", _encode_media_body(header, sealed)
+        )
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+async def test_https_frame_from_a_banned_household_is_dropped():
+    p = _paired_https()
+    await p.repo_b.ban_instance_from_space("sp1", p.a_id)
+    header, sealed = _make_frame(
+        p,
+        event_type=FederationEventType.SPACE_MEDIA_BLOB,
+        payload={"filename": "f.webp", "transfer_id": "t1"},
+        space_id="sp1",
+    )
+    res = await p.svc_b.handle_inbound_media_https(
+        p.inbox_id, _mf.encode_body(header, sealed)
+    )
+    assert res == {"status": "ok"}  # the uniform answer, no ban oracle
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+async def test_https_frame_with_a_stale_timestamp_is_refused():
+    p = _paired_https()
+    header, sealed = _frame_from(p)
+    header["timestamp"] = (datetime.now(UTC) - timedelta(seconds=600)).isoformat()
+    _resign(p, header)
+    with pytest.raises(ValueError, match="Timestamp skew"):
+        await p.svc_b.handle_inbound_media_https(
+            p.inbox_id, _encode_media_body(header, sealed)
+        )
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+async def test_https_frame_must_carry_a_media_event():
+    """The media route is for media chunks only — a signed DM_MESSAGE is
+    refused before any crypto."""
+    p = _paired_https()
+    header, sealed = _make_frame(
+        p, event_type=FederationEventType.DM_MESSAGE, payload={"x": 1}
+    )
+    with pytest.raises(ValueError, match="Event type not allowed"):
+        await p.svc_b.handle_inbound_media_https(
+            p.inbox_id, _mf.encode_body(header, sealed)
+        )
+    assert p.received == []
+
+
+def _trailing(b: bytes) -> bytes:
+    return b + b"x"
+
+
+def _truncated(b: bytes) -> bytes:
+    return b[:-1]
+
+
+def _empty(b: bytes) -> bytes:
+    return b""
+
+
+def _unknown_type(b: bytes) -> bytes:
+    at = len(_mf.MEDIA_BODY_MAGIC) + 1  # the frame_type byte
+    return b[:at] + bytes([9]) + b[at + 1 :]
+
+
+def _no_magic(b: bytes) -> bytes:
+    return b[len(_mf.MEDIA_BODY_MAGIC) + 1 :]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mangle", [_trailing, _truncated, _empty, _unknown_type, _no_magic]
+)
+async def test_malformed_https_bodies_are_refused(mangle):
+    p = _paired_https()
+    header, sealed = _frame_from(p)
+    with pytest.raises(ValueError, match="Invalid media frame"):
+        await p.svc_b.handle_inbound_media_https(
+            p.inbox_id, mangle(_encode_media_body(header, sealed))
+        )
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+async def test_https_body_with_an_unknown_suite_byte_is_refused():
+    p = _paired_https()
+    header, sealed = _frame_from(p)
+    body = bytearray(_encode_media_body(header, sealed))
+    body[len(_mf.MEDIA_BODY_MAGIC)] = 0x7F
+    with pytest.raises(_mf.UnsupportedMediaFrameSuite):
+        await p.svc_b.handle_inbound_media_https(p.inbox_id, bytes(body))
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+async def test_signed_frame_suite_must_match_the_suite_byte(monkeypatch):
+    """The suite byte is not signed — the signed ``media_frame_suite``
+    binds it. A body whose byte names another (supported) suite than the
+    signed metadata is refused."""
+    p = _paired_https()
+    monkeypatch.setitem(_mf.MEDIA_FRAME_SUITE_IDS, 0x02, "fed-media-v2")
+    monkeypatch.setattr(
+        _mf,
+        "SUPPORTED_MEDIA_FRAME_SUITES",
+        frozenset({_mf.MEDIA_FRAME_SUITE_V1, "fed-media-v2"}),
+    )
+    monkeypatch.setattr(
+        federation_service_mod,
+        "SUPPORTED_MEDIA_FRAME_SUITES",
+        _mf.SUPPORTED_MEDIA_FRAME_SUITES,
+    )
+    header, sealed = _frame_from(p)
+    body = bytearray(_encode_media_body(header, sealed))
+    body[len(_mf.MEDIA_BODY_MAGIC)] = 0x02
+    with pytest.raises(_mf.UnsupportedMediaFrameSuite, match="does not match"):
+        await p.svc_b.handle_inbound_media_https(p.inbox_id, bytes(body))
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+async def test_a_peer_known_to_be_away_skips_the_https_leg():
+    """One timed-out POST per chunk, not two: a peer marked unreachable
+    gets the JSON leg (relay / outbox) straight away."""
+    p = _paired_https()
+    p.repo_a._instances[p.b_id] = dataclasses.replace(
+        p.repo_a._instances[p.b_id], unreachable_since="2026-11-07T00:00:00+00:00"
+    )
+    await p.svc_a.send_media_chunk(
+        to_instance_id=p.b_id,
+        event_type=FederationEventType.DM_MEDIA_BLOB,
+        payload={"media_blob_id": "m1", "message_id": "m1"},
+        raw_chunk=b"bytes",
+    )
+    assert p.cap.https_media == []
+    assert len(p.cap.json_envelopes) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_binary_chunk_to_a_returning_peer_fires_the_reachable_edge():
+    """Like ``send_event``: the first thing that reaches a household that
+    was away publishes ``ConnectionReachable`` (SPA dot, DM resync)."""
+    p = _paired_https()
+    p.cap.media_ready = True
+    p.repo_a._instances[p.b_id] = dataclasses.replace(
+        p.repo_a._instances[p.b_id], unreachable_since="2026-11-07T00:00:00+00:00"
+    )
+    seen: list = []
+
+    async def _record(event):
+        seen.append(event)
+
+    p.svc_a._bus.subscribe(ConnectionReachable, _record)
+    result = await p.svc_a.send_media_chunk(
+        to_instance_id=p.b_id,
+        event_type=FederationEventType.DM_MEDIA_BLOB,
+        payload={"media_blob_id": "m1", "message_id": "m1"},
+        raw_chunk=b"bytes",
+    )
+    assert result.ok
+    assert [e.instance_id for e in seen] == [p.b_id]
+
+
+@pytest.mark.asyncio
+async def test_a_binary_chunk_to_a_reachable_peer_fires_no_edge():
+    p = _paired_https()
+    seen: list = []
+
+    async def _record(event):
+        seen.append(event)
+
+    p.svc_a._bus.subscribe(ConnectionReachable, _record)
+    await p.svc_a.send_media_chunk(
+        to_instance_id=p.b_id,
+        event_type=FederationEventType.DM_MEDIA_BLOB,
+        payload={"media_blob_id": "m1", "message_id": "m1"},
+        raw_chunk=b"bytes",
+    )
+    assert len(p.cap.https_media) == 1
+    assert seen == []

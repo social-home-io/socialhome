@@ -3,7 +3,7 @@
 ## Summary
 
 Cross-household media (DM attachments and space-post / gallery images)
-is delivered as **chunks**. Two transports carry those chunks:
+is delivered as **chunks**. Three transports carry those chunks:
 
 1. **JSON over `fed-v1`** (the original path) — each chunk is a
    base64 string inside the `DM_MEDIA_BLOB` / `SPACE_MEDIA_BLOB`
@@ -14,6 +14,11 @@ is delivered as **chunks**. Two transports carry those chunks:
    DataChannel multiplexed on the *same* federation `PeerConnection`
    carries each chunk as a length-prefixed binary frame with the raw
    bytes encrypted directly (no base64).
+3. **Binary over the HTTPS inbox** (capability **v_81**) — when no
+   channel is open, the same frame is POSTed to the peer's own inbox URL
+   behind a 4-byte magic and a suite byte; the inbox tells it from a
+   JSON envelope by the body alone (see
+   [Binary frames on the HTTPS inbox](#binary-frames-on-the-https-inbox-v_81)).
 
 The binary path exists because the JSON path inflates media ~1.77× on
 the wire (base64 of the chunk, then base64 of the ciphertext) **and**
@@ -32,6 +37,11 @@ handshake.
   member keeps receiving the JSON `SPACE_MEDIA_BLOB` over the mesh,
   in smaller 384 KiB chunks so the routed envelope fits the first hop's
   inbox (see [DM media → Chunking](dm-media.md#chunking)).
+- **The HTTPS leg (v_81)** follows the same rule: a CONFIRMED direct
+  peer with an inbox URL (never a household seated from an invite link,
+  which has none) advertising `proto_version ≥ 81`
+  (`FederationCapability.MIN_FOR_MEDIA_HTTPS`). Mesh (`SPACE_ROUTED`) and
+  GFS-relay targets stay JSON.
 - **Capability-gated.** The sender uses the binary channel only when
   the peer advertises `proto_version ≥ 14`
   (`FederationCapability.MIN_FOR_MEDIA_CHANNEL`) **and** is CONFIRMED
@@ -74,6 +84,44 @@ metadata** (the same fields the JSON `*_MEDIA_BLOB` payload carries —
   default fallback (the project-wide crypto-suite rule).
 - `chunk_sha256` — b64url SHA-256 of the **plaintext** chunk. This is
   the binding (see Security).
+- `media_frame_suite` — `"fed-media-v1"` (v_81 on; a channel frame from
+  an older sender has none and reads as v1), validated against
+  `SUPPORTED_MEDIA_FRAME_SUITES`. Required on the HTTPS inbox, where it
+  must equal the body's suite byte.
+
+## Binary frames on the HTTPS inbox (v_81)
+
+With no media channel open, a v_81 peer gets each chunk as one POST to
+the inbox URL it advertised — `…/federation/inbox/{inbox_id}`, or Home
+Assistant's `/api/socialhome/inbox/{inbox_id}` in ha / haos — instead
+of the base64 JSON chunk:
+
+```
+[ "\0SHM" ][ u8 frame suite (0x01 = fed-media-v1) ][ one fed-media-v1 frame ]
+```
+
+The frame is exactly the channel's (`frame_type` 1, signed header,
+sealed chunk); the body carries everything §24.11 needs, nothing rides in
+a header. `"\0"` never starts a JSON text, so the inbox decides from the
+body alone (`media_framing.is_media_body`) — Home Assistant's inbox
+relay (the companion integration through socialhome-client
+`forward_inbox_envelope`) forwards every body raw as
+`application/octet-stream` and drops custom headers, so it carries both
+shapes unchanged and needs no update; the peer's `proto_version` is all
+a sender needs. An unknown suite byte is refused
+(`UnsupportedMediaFrameSuite`, no default), as are trailing bytes, any
+other frame type and any event but `SPACE_MEDIA_BLOB` /
+`DM_MEDIA_BLOB` (an extra pipeline step, before any crypto). The header
+runs the JSON inbox's §24.11 chain (lookup by inbox id), then the
+channel's tail (suites, decrypt, `chunk_sha256`). The body cap is one
+512 KiB chunk + 16 KiB (`HTTPS_MEDIA_MAX_BODY_BYTES`), checked against
+`Content-Length` once the magic is read and while streaming; binary
+bodies have their own per-IP bucket (600 / min). Any non-2xx answer
+sends the JSON chunk instead.
+
+Wire cost for a 512 KiB chunk: **525 323 B** binary vs **932 911 B**
+JSON (−44 %); a 200 MiB video (400 chunks) 210.1 MB vs 373.2 MB per
+receiving household.
 
 ## Security model
 
@@ -126,7 +174,13 @@ sequenceDiagram
         B->>B: check media_aead_suite + decrypt payload
         B->>B: verify sha256(plaintext) == chunk_sha256
         B->>B: dispatch event(media_bytes=raw) → assemble chunk
-    else sub-v14 / non-CONFIRMED / channel down
+    else peer CONFIRMED & v≥81 & has an inbox URL (channel down)
+        A-->>B: POST remote_inbox_url (direct or via HA's inbox relay):<br/>["\0SHM"][0x01][frame_type][header][payload]
+        B->>B: is_media_body → decode_body (suite byte)
+        B->>B: media HTTPS pipeline(header)  (§24.11 + event-type gate)
+        B->>B: frame suite == byte, media_aead_suite, decrypt, sha256
+        B->>B: dispatch event(media_bytes=raw) → assemble chunk
+    else sub-v81 / non-CONFIRMED / mesh / POST failed
         A-->>B: fed-v1 / HTTPS / SPACE_ROUTED:<br/>JSON *_MEDIA_BLOB { bytes_b64 }
         B->>B: §24.11 dispatch → base64-decode → assemble chunk
     end
@@ -560,7 +614,9 @@ scope only while the space is listed on that GFS.
 
 ## Implementation pointers
 
-- Framing: [`socialhome/federation/media_framing.py`](../../socialhome/federation/media_framing.py)
+- Framing: [`socialhome/federation/media_framing.py`](../../socialhome/federation/media_framing.py) (`encode` / `decode` for the channel; `encode_body` / `decode_body` / `is_media_body` for the inbox)
+- Signed header + sealed chunk (both binary legs): [`socialhome/federation/media_envelope.py`](../../socialhome/federation/media_envelope.py)
+- Inbox body sniffing: [`socialhome/routes/federation.py`](../../socialhome/routes/federation.py) (`FederationInboxView`); `FederationService.handle_inbound_media_https`, `FederationTransport.send_media_https`
 - Channel lifecycle + `send_media`: [`socialhome/federation/transport.py`](../../socialhome/federation/transport.py) (`_RtcPeer`, `FederationTransport.send_media`)
 - Send + receive + per-chunk crypto: [`socialhome/federation/federation_service.py`](../../socialhome/federation/federation_service.py) (`send_media_chunk`, `handle_inbound_media_frame`, `validate_inbound_rtc`)
 - Raw-bytes AEAD: [`socialhome/federation/encoder.py`](../../socialhome/federation/encoder.py) (`encrypt_bytes` / `decrypt_bytes`)
