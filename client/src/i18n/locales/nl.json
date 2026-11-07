@@ -2096,6 +2096,8 @@
   "emoji_field.hint_pick": "Kies een emoji voor deze space",
   "emoji_field.hint_change": "Tik op het pictogram om het te wijzigen",
   "emoji_field.remove": "Verwijderen",
+  "emoji_field.symbols": "Symbolen",
+  "emoji_field.home_assistant": "Home Assistant",
   "space.bots.intro": "Laat Home Assistant-automatiseringen berichten plaatsen in deze space. Elke bot heeft een eigen naam, pictogram en geheim token. Zijn berichten tonen de afbeelding van de bot in plaats van alleen \"Home Assistant\".",
   "space.bots.allow": "Bots mogen berichten plaatsen in deze space",
   "space.bots.enabled": "Bots aangezet",

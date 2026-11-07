@@ -2101,6 +2101,8 @@
   "emoji_field.hint_pick": "Wähle ein Emoji für diesen Space",
   "emoji_field.hint_change": "Tippe auf das Symbol, um es zu ändern",
   "emoji_field.remove": "Entfernen",
+  "emoji_field.symbols": "Symbole",
+  "emoji_field.home_assistant": "Home Assistant",
   "space.bots.intro": "Lass Home-Assistant-Automationen in diesem Space posten. Jeder Bot hat einen eigenen Namen, ein Symbol und einen geheimen Token. Seine Beiträge zeigen das Bild des Bots statt nur „Home Assistant“.",
   "space.bots.allow": "Bots dürfen in diesem Space posten",
   "space.bots.enabled": "Bots eingeschaltet",

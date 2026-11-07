@@ -16462,6 +16462,29 @@ a.sh-link-preview-link:focus-visible {
   text-decoration: underline;
 }
 .sh-emoji-field-clear:hover { color: var(--sh-primary-hover, var(--sh-primary)); }
+/* Ready-made symbols above the emoji grid (a space's field: the Home
+ * Assistant logo). One chip each, the logo beside its name. */
+.sh-emoji-field-symbols { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); }
+.sh-emoji-field-symbol {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  min-height: 44px;
+  padding: 0 var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  font: inherit;
+  cursor: pointer;
+}
+.sh-emoji-field-symbol .sh-ha-logo { font-size: 1.5rem; }
+.sh-emoji-field-symbol:hover { background: var(--sh-bg-secondary); }
+.sh-emoji-field-symbol:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 2px; }
+.sh-emoji-field-symbol.is-on { border-color: var(--sh-primary); background: var(--sh-bg-secondary); }
+/* The Home Assistant logomark wherever a space glyph shows: sized by the
+ * tile's font like an emoji, coloured by its text. */
+.sh-ha-logo { display: inline-block; flex: none; vertical-align: -0.125em; }
 
 /* Notification bell + panel */
 .sh-notif-bell {

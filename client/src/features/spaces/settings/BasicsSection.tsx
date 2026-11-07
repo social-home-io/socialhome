@@ -21,7 +21,7 @@ import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
 import { cssUrl } from '@/utils/cssUrl'
 import { SpaceLinksTab, type LinksDraftHandle } from '@/features/spaces/SpaceLinksTab'
-import { spaceGlyph } from '@/features/spaces/spaceGlyph'
+import { SpaceGlyph } from '@/features/spaces/SpaceGlyph'
 import type { BasicsForm } from './useBasicsForm'
 
 interface Props {
@@ -111,7 +111,7 @@ export function BasicsSection({ space, form, isRemoteSpace, onUpdate, onThemeDra
         <span class="sh-ss-basics__icon" data-testid="basics-icon"
               style={space.icon_url ? { backgroundImage: cssUrl(space.icon_url) } : undefined}
               aria-hidden="true">
-          {!space.icon_url && spaceGlyph(emoji.value || null, name.value || space.name)}
+          {!space.icon_url && <SpaceGlyph emoji={emoji.value || null} name={name.value || space.name} />}
         </span>
         <div class="sh-ss-basics__icon-actions">
           <label class="sh-btn sh-btn--secondary">
@@ -130,7 +130,7 @@ export function BasicsSection({ space, form, isRemoteSpace, onUpdate, onThemeDra
       <p class="sh-ss-hint">{t('space.settings_page.basics.pictures_hint')}</p>
 
       <div class="sh-form sh-ss-basics__form">
-        <EmojiField value={emoji} openKey="space-settings-emoji"
+        <EmojiField value={emoji} openKey="space-settings-emoji" offerHaSymbol
                     label={t('space.settings_page.basics.emoji')}
                     hint={space.icon_url ? t('space.settings_page.basics.emoji_hint_icon') : undefined} />
         <label>

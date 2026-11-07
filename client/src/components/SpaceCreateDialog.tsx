@@ -211,7 +211,7 @@ export function SpaceCreateDialog() {
             onInput={(e) => description.value = (e.target as HTMLTextAreaElement).value}
             placeholder={t('space.create.description_placeholder')} rows={2} />
         </label>
-        <EmojiField value={emoji} openKey="space-create-icon" />
+        <EmojiField value={emoji} openKey="space-create-icon" offerHaSymbol />
         <RadioCardGroup
           legend={t('space.create.visibility')}
           name="space-create-visibility"

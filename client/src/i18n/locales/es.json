@@ -2123,6 +2123,8 @@
   "emoji_field.hint_pick": "Elige un emoji para este espacio",
   "emoji_field.hint_change": "Toca el icono para cambiarlo",
   "emoji_field.remove": "Quitar",
+  "emoji_field.symbols": "Símbolos",
+  "emoji_field.home_assistant": "Home Assistant",
   "space.bots.intro": "Deja que las automatizaciones de Home Assistant publiquen en este espacio. Cada bot tiene su propio nombre, icono y token secreto. Sus publicaciones muestran la imagen del bot en lugar de solo «Home Assistant».",
   "space.bots.allow": "Permitir que los bots publiquen en este espacio",
   "space.bots.enabled": "Bots activados",
