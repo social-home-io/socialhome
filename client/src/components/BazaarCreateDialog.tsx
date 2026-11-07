@@ -14,6 +14,7 @@ import { api } from '@/api'
 import { contentWrite } from '@/utils/contentWrite'
 import { Modal } from './Modal'
 import { Button } from './Button'
+import { SpaceInlineGlyph } from '@/features/spaces/SpaceGlyph'
 import { ProtectedNotice, isRestricted } from './ProtectedNotice'
 import { isOne, t } from '@/i18n/i18n'
 import { showToast } from './Toast'
@@ -209,7 +210,9 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
                   const s = availableSpaces.value.find(
                     (x) => x.id === lockedSpaceId.value,
                   )
-                  return s ? `${s.emoji ? `${s.emoji} ` : ''}${s.name}` : t('bazaar.create.this_space')
+                  return s
+                    ? <><SpaceInlineGlyph iconUrl={s.icon_url} emoji={s.emoji} name={s.name} />{s.name}</>
+                    : t('bazaar.create.this_space')
                 })()}
               </span>
             </label>

@@ -13,6 +13,8 @@ export interface ShareSpace {
   id: string
   name: string
   emoji: string | null
+  /** The uploaded picture (signed), when the server sends it. */
+  icon_url?: string | null
   space_type: string
   households: number
   /** May share as a post (``post_review``: the admins check it first). */

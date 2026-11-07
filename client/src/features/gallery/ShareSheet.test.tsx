@@ -37,6 +37,8 @@ vi.mock('@/store/auth', async () => {
 })
 
 import { ShareSheet } from './ShareSheet'
+import { spaces as spaceList } from '@/store/spaces'
+import { HA_SPACE_SYMBOL } from '@/features/spaces/spaceGlyph'
 import type { ShareItem } from './gallerySharing'
 
 const items: ShareItem[] = [
@@ -59,6 +61,26 @@ function mount(list: ShareItem[] = items) {
 }
 
 describe('ShareSheet', () => {
+  it("a space shows its picture (from the spaces list), the HA symbol its logo", async () => {
+    spaceList.value = [{ id: 'sp-oma', name: 'Grandparents', icon_url: '/api/media/oma.webp?sig=x' } as never]
+    targets.spaces[1].emoji = HA_SPACE_SYMBOL as never
+    try {
+      const { view } = mount()
+      await waitFor(() => view.getByRole('radio', { name: /Grandparents/ }))
+      const iconOf = (name: RegExp) =>
+        view.getByRole('radio', { name }).closest('.sh-share-row')!.querySelector('.sh-share-icon') as HTMLElement
+      const oma = iconOf(/Grandparents/)
+      expect(oma.querySelector('img')?.getAttribute('src')).toBe('/api/media/oma.webp?sig=x')
+      expect(oma.textContent).not.toContain('👵')
+      const club = iconOf(/U11 football/)
+      expect(club.querySelector('svg.sh-ha-logo')).not.toBeNull()
+      expect(club.textContent).toBe('')
+    } finally {
+      spaceList.value = []
+      targets.spaces[1].emoji = null as never
+    }
+  })
+
   it('lists feed, spaces and chats; the audience shows before sending', async () => {
     const { view } = mount()
     await waitFor(() => view.getByRole('radio', { name: /Household feed/ }))

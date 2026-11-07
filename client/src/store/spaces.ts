@@ -6,6 +6,14 @@ import type { Space } from '@/types'
 export const spaces       = signal<Space[]>([])
 export const activeSpace  = signal<Space | null>(null)
 
+/** The uploaded picture (signed) of one of the caller's spaces, from the
+ *  cached list — for a row whose own payload names the space but carries
+ *  no picture. ``null`` when the space has none or isn't listed (yet). */
+export function spaceIconUrl(spaceId: string | null | undefined): string | null {
+  if (!spaceId) return null
+  return spaces.value.find(s => s.id === spaceId)?.icon_url ?? null
+}
+
 /** Refresh the cached spaces list from the server. Used by the spaces
  *  list page on mount and by SpaceCreateDialog after a successful
  *  create so the new row shows up without a manual reload. */

@@ -33,6 +33,7 @@ import { ensureHouseholdHome, householdHome } from '@/store/householdHome'
 import { directoryCache, getCachedEntry } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
+import { SpaceGlyph } from './SpaceGlyph'
 import { askLocationConsent, isApiCode, locationConsentText, noHomeText } from '@/components/localConsent'
 import {
   contentIsGated, discoverAction, entryAreaVerdict, entryRadiusKm, GATED_CHIP, hostLabel, requestSentToast,
@@ -99,6 +100,7 @@ async function loadAsLocal(spaceId: string): Promise<DirectoryEntry | null> {
       name:               space.name,
       description:        space.description,
       emoji:              space.emoji,
+      icon_url:           space.icon_url ?? null,
       member_count:       space.member_count ?? 0,
       scope:              space.space_type,
       join_mode:          space.join_mode,
@@ -323,7 +325,7 @@ export default function SpacePublicDetailPage() {
       </a>
       <div class={`sh-space-public__hero sh-space-public__hero--${entry.scope}`}>
         <span class="sh-space-public__emoji" aria-hidden="true">
-          {entry.emoji || '🗂'}
+          <SpaceGlyph iconUrl={entry.icon_url} emoji={entry.emoji || '🗂'} name={entry.name} />
         </span>
         <div class="sh-space-public__title">
           <h1>{entry.name}</h1>

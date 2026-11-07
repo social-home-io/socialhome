@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { renderHook, act } from '@testing-library/preact'
-import { pageTitle, pageTitleAvatar, useTitle, useTitleAvatar } from './pageTitle'
+import {
+  pageTitle, pageTitleAvatar, pageTitleGlyph, useTitle, useTitleAvatar, useTitleGlyph,
+} from './pageTitle'
 
 describe('useTitle', () => {
   it('sets the in-app pageTitle signal and document.title', () => {
@@ -40,6 +42,37 @@ describe('useTitle', () => {
     act(() => { newer.unmount() })
     expect(pageTitle.value).toBe('')
     expect(document.title).toBe('Social Home')
+  })
+})
+
+describe('useTitle with a separate tab title', () => {
+  it('the TopBar shows the heading, the browser tab the tab title', () => {
+    const { unmount } = renderHook(() => useTitle('Garden', '🌻 Garden'))
+    expect(pageTitle.value).toBe('Garden')
+    expect(document.title).toBe('🌻 Garden · Social Home')
+    act(() => { unmount() })
+    expect(document.title).toBe('Social Home')
+  })
+})
+
+describe('useTitleGlyph', () => {
+  it('sets the glyph and clears it when the page leaves', () => {
+    const { unmount } = renderHook(() =>
+      useTitleGlyph({ iconUrl: '/api/media/x.webp', emoji: '🌻', name: 'Garden' }))
+    expect(pageTitleGlyph.value).toEqual({ iconUrl: '/api/media/x.webp', emoji: '🌻', name: 'Garden' })
+    act(() => { unmount() })
+    expect(pageTitleGlyph.value).toBeNull()
+  })
+
+  it('null sets no glyph; a replaced setter unmounting late leaves the newer one', () => {
+    const older = renderHook(() => useTitleGlyph({ iconUrl: null, emoji: '🌻', name: 'Garden' }))
+    const newer = renderHook(() => useTitleGlyph({ iconUrl: null, emoji: '📚', name: 'Books' }))
+    act(() => { older.unmount() })
+    expect(pageTitleGlyph.value?.name).toBe('Books')
+    act(() => { newer.unmount() })
+    const none = renderHook(() => useTitleGlyph(null))
+    expect(pageTitleGlyph.value).toBeNull()
+    none.unmount()
   })
 })
 

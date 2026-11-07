@@ -32,6 +32,7 @@ import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { Button } from './Button'
+import { SpaceGlyph } from '@/features/spaces/SpaceGlyph'
 import { askLocationConsent, isApiCode } from './localConsent'
 import { showToast } from './Toast'
 import { isOne, t } from '@/i18n/i18n'
@@ -58,14 +59,18 @@ type ConfirmState = Record<string, boolean>
 
 const CONFIRM_RESET_MS = 4000
 
-/** The invited space's icon: the uploaded icon, else its emoji, else
- *  nothing (the name alone still reads). */
+/** The invited space's icon: the uploaded icon, else its Home Assistant
+ *  logo / emoji, else nothing (the name alone still reads). */
 function SpaceMark({ inv }: { inv: LocalInvite }) {
   if (inv.space_icon_url) {
     return <img class="sh-remote-invite-banner__icon" src={inv.space_icon_url} alt="" />
   }
   if (inv.space_emoji) {
-    return <span class="sh-remote-invite-banner__icon" aria-hidden="true">{inv.space_emoji}</span>
+    return (
+      <span class="sh-remote-invite-banner__icon" aria-hidden="true">
+        <SpaceGlyph emoji={inv.space_emoji} name={inv.space_name} />
+      </span>
+    )
   }
   return null
 }

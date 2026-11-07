@@ -14,6 +14,8 @@ import { Avatar } from '@/components/Avatar'
 import { isOne, formatLocale, t } from '@/i18n/i18n'
 import type { EffectiveLesson, TimetableColor } from '@/types'
 import { addBase } from '@/baseUrl'
+import { spaceIconUrl } from '@/store/spaces'
+import { SpaceGlyph } from '@/features/spaces/SpaceGlyph'
 
 // ─── Types — match the slice of ``GET /api/me/corner`` we render ───
 
@@ -374,7 +376,8 @@ export function CatchUpCard({
             <li key={p.post_id}>
               <a class="sh-welcome-catchup-row" href={addBase(`/spaces/${p.space_id}`)}>
                 <span class="sh-welcome-catchup-emoji" aria-hidden="true">
-                  {p.space_emoji || '🪐'}
+                  <SpaceGlyph iconUrl={spaceIconUrl(p.space_id)} emoji={p.space_emoji || '🪐'}
+                    name={p.space_name} />
                 </span>
                 <span class="sh-welcome-catchup-body">
                   <span class="sh-welcome-catchup-meta">

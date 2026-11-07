@@ -25,3 +25,16 @@ export function SpaceGlyph({ iconUrl, emoji, name, imgClass }: Props) {
   if (isHaSymbol(emoji)) return <HaLogo />
   return <>{spaceGlyph(emoji, name)}</>
 }
+
+/** The symbol before a space's name in running text (a table cell, a
+ *  toggle's label): nothing when the space has neither a picture nor an
+ *  emoji — the name alone, as before — else ``SpaceGlyph`` at text size
+ *  (``.sh-space-inline-glyph``), hidden from assistive tech. */
+export function SpaceInlineGlyph({ iconUrl, emoji, name }: Omit<Props, 'imgClass'>) {
+  if (!iconUrl && !emoji) return null
+  return (
+    <span class="sh-space-inline-glyph" aria-hidden="true">
+      <SpaceGlyph iconUrl={iconUrl} emoji={emoji} name={name} />
+    </span>
+  )
+}

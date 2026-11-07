@@ -17,8 +17,9 @@ import { t, isOne } from '@/i18n/i18n'
 import { api, ApiError } from '@/api'
 import { Modal } from '@/components/Modal'
 import { Button } from '@/components/Button'
-import { spaceGlyph } from '@/features/spaces/spaceGlyph'
+import { SpaceGlyph } from '@/features/spaces/SpaceGlyph'
 import { currentUser } from '@/store/auth'
+import { spaceIconUrl } from '@/store/spaces'
 import {
   audienceLine, clock, longVideos, resultMessage, shareBody, shareTitle, tooManyFor,
   uploadersLine,
@@ -303,8 +304,13 @@ export function ShareSheet({ items: picked, nameOf, onClose, onShared }: {
                     : t(isOne(space.households) ? 'gallery.share.space_sub_one' : 'gallery.share.space_sub', {
                       scope, n: String(space.households),
                     })
+                  // The space's picture: the target's own, else the one the
+                  // spaces list already holds (no extra fetch).
+                  const iconUrl = space.icon_url ?? spaceIconUrl(space.id)
                   return row(
-                    `space:${space.id}`, spaceGlyph(space.emoji, space.name), space.name, sub, reason,
+                    `space:${space.id}`,
+                    <SpaceGlyph iconUrl={iconUrl} emoji={space.emoji} name={space.name} />,
+                    space.name, sub, reason,
                     spaceExtra(space),
                   )
                 })}
