@@ -113,6 +113,7 @@ from ....services.link_preview_service import (
     space_wire_link_preview,
 )
 from ....services.page_conflict_service import PageMode, canonical_from_wire
+from ....services.space_media_names import SpaceMediaNamer
 from ....services.space_service import (
     apply_inviter_reproof,
     apply_owner_statement_from_metadata,
@@ -532,6 +533,7 @@ class SpaceSyncReceiver:
         "_health",
         "_legacy_album_deletes",
         "_media_dir",
+        "_media_names",
         "_media_refs",
         "_page_conflicts",
         "_page_repo",
@@ -613,6 +615,8 @@ class SpaceSyncReceiver:
         #: v_80 — keeps the ``media_refs`` a record streamed to a link-joined
         #: member carries (``None``: ignored).
         self._gfs_media: _GfsMediaSink | None = None
+        #: Received space files take this household's names (sender-bound).
+        self._media_names = SpaceMediaNamer()
         #: §24.11 authorship for a chunk streamed by a household that is NOT
         #: the space's host (see :meth:`_admit`). ``None`` refuses such
         #: chunks outright rather than trusting them.
@@ -654,6 +658,7 @@ class SpaceSyncReceiver:
         *,
         provider: str,
         takes_descriptor: bool,
+        held: list[str] | None = None,
     ) -> SpaceMediaLocalization:
         """v_80 — this household's names for a streamed item's files kept
         in a GFS media cache, bound to the household that streamed it.
@@ -663,16 +668,29 @@ class SpaceSyncReceiver:
         household streaming an item this household already holds can't
         attach its own blobs to it (#1309 re-review 2) — the item keeps the
         names it has here. Apply before the item is saved; keep the rows
-        (:meth:`_keep_media`) only once it was."""
+        (:meth:`_keep_media`) only once it was.
+
+        Under those, every file takes its direct name as the provider
+        delivers it (:class:`SpaceMediaNamer`, *held* — what the stored row
+        shows already): the provider's §25.6 catch-up ships the bytes under
+        the same names."""
+        direct = self._media_names.localize(space_id, provider, urls, held=held or ())
         if self._gfs_media is None:
-            return SpaceMediaLocalization()
-        return await self._gfs_media.localize(
-            space_id,
-            record.get(MEDIA_REFS_FIELD) if takes_descriptor else None,
-            urls,
-            item_id=item_id,
-            origin=provider,
+            return direct
+        return SpaceMediaNamer.combine(
+            direct,
+            await self._gfs_media.localize(
+                space_id,
+                record.get(MEDIA_REFS_FIELD) if takes_descriptor else None,
+                urls,
+                item_id=item_id,
+                origin=provider,
+            ),
         )
+
+    def attach_media_names(self, namer: SpaceMediaNamer) -> None:
+        """Wire the shared namer (it knows this household's instance id)."""
+        self._media_names = namer
 
     async def _keep_media(self, media: SpaceMediaLocalization) -> None:
         if self._gfs_media is not None:
@@ -1398,6 +1416,9 @@ class SpaceSyncReceiver:
                     post_media_urls(post),
                     provider=provider,
                     takes_descriptor=held_post is None or from_host,
+                    held=(
+                        post_media_urls(held_post[1]) if held_post is not None else None
+                    ),
                 )
                 post = media.post(post)
                 if await self._space_post_repo.save(space_id, post) is None:
@@ -1558,11 +1579,7 @@ class SpaceSyncReceiver:
                 ):
                     log.debug("sync: event %s was deleted here — skipped", event.id)
                     continue
-                held_event = (
-                    await self._space_calendar_repo.get_event(event.id)
-                    if self._gfs_media is not None
-                    else None
-                )
+                held_event = await self._space_calendar_repo.get_event(event.id)
                 media = await self._localize_record(
                     space_id,
                     r,
@@ -1570,6 +1587,11 @@ class SpaceSyncReceiver:
                     [event.cover_url] if event.cover_url else [],
                     provider=provider,
                     takes_descriptor=held_event is None or from_host,
+                    held=(
+                        [held_event[1].cover_url]
+                        if held_event is not None and held_event[1].cover_url
+                        else None
+                    ),
                 )
                 event = replace(event, cover_url=media.url(event.cover_url))
                 if not await self._space_calendar_repo.save_event(
@@ -1714,6 +1736,22 @@ class SpaceSyncReceiver:
             for r in records:
                 listing = _bazaar_listing_from_record(r, space_id)
                 if listing is not None:
+                    # The provider ships the photos (catch-up): its names.
+                    held_listing = await self._bazaar_repo.get_listing(listing.post_id)
+                    names = self._media_names.localize(
+                        space_id,
+                        provider,
+                        list(listing.image_urls),
+                        held=(
+                            list(held_listing.image_urls)
+                            if held_listing is not None
+                            else ()
+                        ),
+                    )
+                    listing = replace(
+                        listing,
+                        image_urls=tuple(names.url(u) or u for u in listing.image_urls),
+                    )
                     try:
                         if not await self._bazaar_repo.save_listing(
                             listing, space_id=space_id

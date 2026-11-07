@@ -812,6 +812,9 @@ async def test_bazaar_catchup_save_failure_is_a_warning_naming_the_listing(
         async def save_listing(self, listing, *, space_id):
             raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
 
+        async def get_listing(self, post_id):
+            return None
+
     r = SpaceSyncReceiver(
         bus=bus,
         encoder=FederationEncoder(kp_self.private_key),

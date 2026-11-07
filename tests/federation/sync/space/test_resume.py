@@ -1141,3 +1141,45 @@ def test_post_to_payload_carries_link_preview_only_when_set():
     payload = _post_to_payload(Post(**base, link_preview=card))
     assert payload["link_preview"]["title"] == "T"
     assert payload["link_preview"]["url"] == "https://example.com/"
+
+
+class _FakeMediaOutbox:
+    def __init__(self) -> None:
+        self.rows: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = []
+
+    async def enqueue_for_blob(
+        self, *, space_id, correlation_id, target_instance_ids, media_urls
+    ):
+        self.rows.append(
+            (space_id, correlation_id, tuple(target_instance_ids), tuple(media_urls))
+        )
+
+
+async def test_a_replayed_rows_files_ship_from_the_replaying_household():
+    """A receiver names a file by the household that delivered its row, so
+    the files of every replayed post / cover / gallery item ship from us —
+    to the one household that asked, under the names our rows hold."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    at = base + timedelta(minutes=1)
+    post = replace(
+        _post(0, at),
+        type=PostType.IMAGE,
+        media_url="api/media/sd-a.webp",
+        image_urls=("api/media/sd-b.webp",),
+    )
+    event = replace(_cal_event(0, at), cover_url="api/media/cover.webp")
+    outbox = _FakeMediaOutbox()
+    provider = SpaceSyncResumeProvider(
+        federation_service=_FakeFederation(),
+        space_repo=_FakeSpaceRepo(["peer-a"]),
+        space_post_repo=_FakePostRepo(posts=[post, _post(1, at)]),
+        space_calendar_repo=_FakeListSinceRepo([event]),
+        media_sync=outbox,
+    )
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    assert outbox.rows == [
+        ("sp-1", "p-0", ("peer-a",), ("api/media/sd-a.webp", "api/media/sd-b.webp")),
+        ("sp-1", "ev-0", ("peer-a",), ("api/media/cover.webp",)),
+    ]

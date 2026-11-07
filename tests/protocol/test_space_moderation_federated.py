@@ -69,6 +69,7 @@ from socialhome.federation.owner_bound_id import (
     SPACE_TASK_LIST_KIND,
     mint_owner_bound_id,
 )
+from socialhome.services.inbound_media_store import space_direct_media_name
 from socialhome.services.space_moderation_federation import (
     MAX_EXPIRY,
     MAX_PENDING_PER_HOUSEHOLD,
@@ -491,6 +492,47 @@ async def test_a_reviewed_event_with_a_capacity_is_released_everywhere(mesh):
         assert [tuple(x) for x in rows] == [("Workshop", 10)], house.name
     rows = await d.db.fetchall("SELECT summary FROM space_calendar_events", ())
     assert [x["summary"] for x in rows] == ["Workshop"]
+
+
+async def test_a_reviewed_picture_keeps_one_file_per_delivering_household(mesh):
+    """A space file takes, on each household, the name of the household that
+    delivered it (``SpaceMediaNamer``): the reviewers hold the submitter's
+    picture under the submitter's name, the host's release names it as the
+    host holds it, and every household — the submitter's own included —
+    still takes the release (its comparison aligns the names)."""
+    a, h, c, d = mesh["A"], mesh["H"], mesh["C"], mesh["D"]
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/posts",
+        json={"type": "image", "image_urls": ["api/media/pic.webp"]},
+        headers=a.headers,
+    )
+    assert r.status == 202, await r.text()
+    item_id = (await r.json())["item_id"]
+    await _pump(mesh)
+    from_a = space_direct_media_name(SID, a.iid, "pic.webp")
+    for reviewer in (h, c):
+        row = await reviewer.db.fetchone(
+            "SELECT payload_json FROM space_moderation_queue WHERE id=?", (item_id,)
+        )
+        assert from_a in row["payload_json"], reviewer.name
+        assert "api/media/pic.webp" not in row["payload_json"], reviewer.name
+    await _approve(c, item_id)
+    await _pump(mesh, only={FET.SPACE_MODERATION_DECIDED}, once=True)
+    released = _sends(h, FET.SPACE_POST_CREATED)
+    assert {tuple(p["image_urls"]) for _to, p in released} == {(f"api/media/{from_a}",)}
+    await _pump(mesh)
+    from_h = space_direct_media_name(SID, h.iid, from_a)
+    expected = {"H": from_a, "A": from_h, "C": from_h, "D": from_h}
+    for house in (a, h, c, d):
+        rows = await house.db.fetchall("SELECT image_urls_json FROM space_posts", ())
+        assert [x["image_urls_json"] for x in rows] == [
+            f'["api/media/{expected[house.name]}"]'
+        ], house.name
+    # The host ships the bytes under the name its rows hold.
+    shipped = await h.db.fetchall(
+        "SELECT target_instance_id FROM space_media_outbox WHERE blob_id=?", (from_a,)
+    )
+    assert {x["target_instance_id"] for x in shipped} >= {a.iid, d.iid}
 
 
 async def test_a_member_edit_of_someone_elses_sticky_is_released_everywhere(mesh):

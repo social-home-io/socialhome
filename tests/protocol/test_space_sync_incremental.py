@@ -78,6 +78,7 @@ from socialhome.federation.sync.space.exporter import (
 )
 from socialhome.federation.sync.space.watermark import parse_have_seq
 from socialhome.federation.sync_rtc import SyncSessionRecord
+from socialhome.services.inbound_media_store import space_direct_media_name
 
 pytestmark = pytest.mark.security
 
@@ -1259,7 +1260,9 @@ async def test_a_synced_photo_post_shows_in_the_members_posts_album(houses):
     assert await _posts(h).save(SPACE, post) is not None
     await _h_to_c(h, c)
     mirrored = await _gallery(c).list_items_by_source_post(pid)
-    assert [i.url for i in mirrored] == ["api/media/pic.webp"]
+    # The picture, by the name it takes on c as delivered by h.
+    pic = space_direct_media_name(SPACE, HOST, "pic.webp")
+    assert [i.url for i in mirrored] == [f"api/media/{pic}"]
     album = await _gallery(c).get_album(mirrored[0].album_id)
     assert album is not None and album.is_system and album.space_id == SPACE
     # Re-applying the post on the next full stream changes nothing.

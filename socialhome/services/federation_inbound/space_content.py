@@ -154,6 +154,7 @@ from ..page_conflict_service import (
     canonical_from_wire,
     proposal_from_wire,
 )
+from ..space_media_names import SpaceMediaNamer
 
 if TYPE_CHECKING:
     import pathlib
@@ -229,6 +230,7 @@ class SpaceContentInboundHandlers:
         "_gfs_media",
         "_legacy_album_deletes",
         "_media_dir",
+        "_media_names",
         "_media_refs",
         "_page_conflicts",
         "_page_repo",
@@ -285,6 +287,8 @@ class SpaceContentInboundHandlers:
         #: v_80 — keeps a calendar cover's / gallery item's ``media_refs``
         #: (its files in a GFS media cache) and fetches them.
         self._gfs_media: SpaceMediaGfsFetcher | None = None
+        #: Received space files take this household's names (sender-bound).
+        self._media_names = SpaceMediaNamer()
 
     def attach_gfs_media(self, fetcher: SpaceMediaGfsFetcher) -> None:
         """Wire the v_80 GFS media fetcher."""
@@ -296,20 +300,35 @@ class SpaceContentInboundHandlers:
         space_id: str,
         item_id: str,
         urls: list[str | None],
+        *,
+        held: list[str | None] | None = None,
     ) -> SpaceMediaLocalization:
-        """v_80 — this household's names for an item's files kept in a GFS
-        media cache (it reached a link-joined member without its bytes), as
-        delivered by the envelope's authenticated sender. Apply it before
-        the item is saved; :meth:`_keep_media` once it is."""
-        if self._gfs_media is None:
-            return SpaceMediaLocalization()
-        return await self._gfs_media.localize(
-            space_id,
-            event.payload.get(MEDIA_REFS_FIELD),
-            [u for u in urls if u],
-            item_id=item_id,
-            origin=event.from_instance,
+        """This household's names for an item's files, as delivered by the
+        envelope's authenticated sender: its direct names
+        (:class:`SpaceMediaNamer`; *held* — what the stored row shows
+        already) under the v_80 names of copies kept in a GFS media cache
+        (it reached a link-joined member without its bytes). Apply it
+        before the item is saved; :meth:`_keep_media` once it is."""
+        present = [u for u in urls if u]
+        direct = self._media_names.localize(
+            space_id, event.from_instance, present, held=held or ()
         )
+        if self._gfs_media is None:
+            return direct
+        return SpaceMediaNamer.combine(
+            direct,
+            await self._gfs_media.localize(
+                space_id,
+                event.payload.get(MEDIA_REFS_FIELD),
+                present,
+                item_id=item_id,
+                origin=event.from_instance,
+            ),
+        )
+
+    def attach_media_names(self, namer: SpaceMediaNamer) -> None:
+        """Wire the shared namer (it knows this household's instance id)."""
+        self._media_names = namer
 
     async def _keep_media(self, media: SpaceMediaLocalization) -> None:
         if self._gfs_media is not None:
@@ -1534,7 +1553,13 @@ class SpaceContentInboundHandlers:
             row_owner=created_by if existing is None else existing[1].created_by,
         ):
             return
-        media = await self._localize_media(event, space_id, ev.id, [ev.cover_url])
+        media = await self._localize_media(
+            event,
+            space_id,
+            ev.id,
+            [ev.cover_url],
+            held=[existing[1].cover_url] if existing is not None else None,
+        )
         ev = replace(ev, cover_url=media.url(ev.cover_url))
         if not await self._calendar_repo.save_event(ev, space_id=space_id):
             log_cross_space_refusal(
@@ -3005,6 +3030,14 @@ class SpaceContentInboundHandlers:
                 user_id=seller_user_id,
             )
             return
+        # The seller's household ships the photos: they take its names here.
+        names = self._media_names.localize(
+            space_id, event.from_instance, list(listing.image_urls)
+        )
+        listing = replace(
+            listing,
+            image_urls=tuple(names.url(u) or u for u in listing.image_urls),
+        )
         try:
             if not await self._bazaar_repo.save_listing(listing, space_id=space_id):
                 # The wrapper post is not in this space (or has not landed

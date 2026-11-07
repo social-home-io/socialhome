@@ -61,6 +61,7 @@ from socialhome.federation.sync.space.exporter import (
     ROSTER_RESOURCES,
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.services.inbound_media_store import space_direct_media_name
 from socialhome.services.space_crypto_service import (
     sign_authority_event,
     strip_authority_sig_fields,
@@ -258,25 +259,19 @@ def _blob(name: str) -> dict:
 
 async def test_media_bytes_do_not_land_in_an_archived_space(env, tmp_dir):
     """``SPACE_MEDIA_BLOB`` writes files, not rows: checked on the media
-    store. Positive control first — the author's household delivers its
-    post's file."""
+    store. Positive control first — a blob that overtook its post lands."""
     app, db = env
     media = tmp_dir / "media"
-    await db.enqueue(
-        "INSERT INTO space_posts(id, space_id, author, type, content, media_url,"
-        " image_urls_json) VALUES('post-later', ?, 'u-a', 'image', '',"
-        " 'api/media/live.webp', '[\"api/media/frozen.webp\"]')",
-        (SP,),
-    )
     await _through_the_gates(
         app, FET.SPACE_MEDIA_BLOB, _blob("live.webp"), sender=AUTHOR
     )
-    assert (media / "live.webp").exists()
+    # Stored under the sender's name for it (``SpaceMediaNamer``).
+    assert (media / space_direct_media_name(SP, AUTHOR, "live.webp")).exists()
     await _archive(db)
     await _through_the_gates(
         app, FET.SPACE_MEDIA_BLOB, _blob("frozen.webp"), sender=AUTHOR
     )
-    assert not (media / "frozen.webp").exists()
+    assert not (media / space_direct_media_name(SP, AUTHOR, "frozen.webp")).exists()
 
 
 async def test_the_host_can_unarchive_the_space(env):

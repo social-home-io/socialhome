@@ -37,6 +37,7 @@ from socialhome.federation.owner_bound_id import (
 from socialhome.federation.sync.space.exporter import serialise_chunk
 from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.inbound_media_store import space_direct_media_name
 
 
 class _FakeCrypto:
@@ -213,6 +214,9 @@ class _CalendarRepoStub:
     async def is_event_deleted(self, event_id, *, space_id):
         return False
 
+    async def get_event(self, event_id):
+        return None
+
 
 class _GalleryRepoStub:
     def __init__(self, collector):
@@ -281,6 +285,9 @@ class _BazaarRepoStub:
     async def save_listing(self, listing, *, space_id):
         self._c.bazaar_listings.append(listing)
         return True
+
+    async def get_listing(self, post_id):
+        return None
 
 
 class _SpaceRepoStub:
@@ -366,6 +373,12 @@ def setup(bus, peer):
         bazaar_repo=_BazaarRepoStub(collector),
     )
     return r, collector, peer_kp
+
+
+def _here(name: str, space_id: str = "sp-1") -> str:
+    """The reference a file streamed by ``peer-a`` takes here: its name as
+    delivered by that household (``SpaceMediaNamer``)."""
+    return f"api/media/{space_direct_media_name(space_id, 'peer-a', name)}"
 
 
 async def _send(r, kp, resource, records, *, space_id="sp-1", sync_id="sync-1"):
@@ -503,7 +516,7 @@ async def test_posts_keep_their_image_urls(setup):
         ],
     )
     _sid, post = c.posts[0]
-    assert post.image_urls[0] == "api/media/a.webp"
+    assert post.image_urls[0] == _here("a.webp")
     assert all(isinstance(u, str) for u in post.image_urls)
     assert len(post.image_urls) == FEED_POST_MAX_IMAGES
 
@@ -628,9 +641,9 @@ async def test_synced_media_references_keep_only_the_local_shape(setup):
     )
     _sid, post = c.posts[0]
     assert post.media_url is None
-    assert post.image_urls == ("api/media/ok.webp", "api/media/ok3.webp")
+    assert post.image_urls == (_here("ok.webp"), _here("ok3.webp"))
     assert c.comments[0].media_url is None
-    assert c.bazaar_listings[0].image_urls == ("api/media/chair.webp",)
+    assert c.bazaar_listings[0].image_urls == (_here("chair.webp"),)
 
 
 async def test_tasks(setup):
@@ -1421,7 +1434,7 @@ async def test_bazaar_listings(setup):
     assert listing.mode.value == "fixed"
     assert listing.status.value == "active"
     assert listing.price == 4500
-    assert listing.image_urls == ("api/media/chair.webp",)
+    assert listing.image_urls == (_here("chair.webp"),)
 
 
 async def test_bazaar_listings_malformed_record_dropped(setup):
@@ -1691,7 +1704,7 @@ async def test_synced_item_media_references_are_normalised(setup):
         ],
     )
     item = c.gallery_items[0]
-    assert (item.url, item.thumbnail_url) == ("", "api/media/t.webp")
+    assert (item.url, item.thumbnail_url) == ("", _here("t.webp"))
 
 
 # ─── Space timetables (v_39) ─────────────────────────────────────────

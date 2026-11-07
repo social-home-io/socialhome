@@ -64,7 +64,10 @@ from socialhome.services.federation_inbound_service import (
     FederationInboundService,
     _moment_expired,
 )
-from socialhome.services.inbound_media_store import dm_media_name
+from socialhome.services.inbound_media_store import (
+    dm_media_name,
+    space_direct_media_name,
+)
 
 
 @pytest.fixture
@@ -80,6 +83,11 @@ async def inbound(db, bus):
         space_remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
     )
     return service
+
+
+def _here(space_id: str, name: str, sender: str = "peer-a") -> str:
+    """The reference a file ``sender`` delivers takes here."""
+    return f"api/media/{space_direct_media_name(space_id, sender, name)}"
 
 
 def _event(
@@ -2358,25 +2366,6 @@ async def test_users_sync_binding_roundtrip_outbound_to_inbound(db, bus):
 # ─── SPACE_MEDIA_BLOB — write the bytes the sender shipped ─────────
 
 
-async def _media_host(db, bus, media_dir, space_id: str) -> FederationInboundService:
-    """A receiver with the roster mirror, for a space ``peer-a`` hosts —
-    the host may deliver the files of any row of its space."""
-    await db.enqueue(
-        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
-        " identity_public_key) VALUES(?, ?, 'peer-a', 'anna', ?)",
-        (space_id, space_id, "00" * 32),
-    )
-    return FederationInboundService(
-        bus=bus,
-        conversation_repo=SqliteConversationRepo(db),
-        space_post_repo=SqliteSpacePostRepo(db),
-        space_repo=SqliteSpaceRepo(db),
-        user_repo=SqliteUserRepo(db),
-        space_remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
-        media_dir=media_dir,
-    )
-
-
 async def test_space_media_blob_writes_bytes_to_local_media_dir(
     db,
     bus,
@@ -2388,7 +2377,14 @@ async def test_space_media_blob_writes_bytes_to_local_media_dir(
     but the picture is broken."""
     import base64
 
-    service = await _media_host(db, bus, tmp_path, "sp-mediated")
+    service = FederationInboundService(
+        bus=bus,
+        conversation_repo=SqliteConversationRepo(db),
+        space_post_repo=SqliteSpacePostRepo(db),
+        space_repo=SqliteSpaceRepo(db),
+        user_repo=SqliteUserRepo(db),
+        media_dir=tmp_path,
+    )
     body = b"WEBP-bytes-from-the-sender"
     await service._on_space_media_blob(
         _event(
@@ -2402,7 +2398,8 @@ async def test_space_media_blob_writes_bytes_to_local_media_dir(
             },
         )
     )
-    assert (tmp_path / "abc123.webp").read_bytes() == body
+    local = space_direct_media_name("sp-mediated", "peer-a", "abc123.webp")
+    assert (tmp_path / local).read_bytes() == body
 
 
 async def test_a_calendar_cover_blob_is_checked_against_its_event(db, bus, tmp_path):
@@ -2433,11 +2430,12 @@ async def test_a_calendar_cover_blob_is_checked_against_its_event(db, bus, tmp_p
     )
 
     async def ok(space_id: str, filename: str) -> bool:
-        owner = await service._space_media_owner(
-            space_id=space_id, correlation_id="ev-cover", filename=filename
+        return (
+            await service._space_media_in_scope(
+                space_id=space_id, correlation_id="ev-cover", filename=filename
+            )
+            is None
         )
-        assert owner is not None and owner.collaborative
-        return owner.in_scope
 
     assert await ok("sp-a", "cover123.webp")
     # Another file under the event's id, or the event's file pushed into
@@ -2449,7 +2447,14 @@ async def test_a_calendar_cover_blob_is_checked_against_its_event(db, bus, tmp_p
 async def test_space_media_blob_prefers_raw_media_bytes(db, bus, tmp_path):
     """Binary ``fed-media-v1`` path: ``event.media_bytes`` is used and
     written verbatim, with NO base64 field in the payload."""
-    service = await _media_host(db, bus, tmp_path, "sp-bin")
+    service = FederationInboundService(
+        bus=bus,
+        conversation_repo=SqliteConversationRepo(db),
+        space_post_repo=SqliteSpacePostRepo(db),
+        space_repo=SqliteSpaceRepo(db),
+        user_repo=SqliteUserRepo(db),
+        media_dir=tmp_path,
+    )
     body = b"\x00\x01raw-binary-no-base64\xff"
     await service._on_space_media_blob(
         _event(
@@ -2465,7 +2470,8 @@ async def test_space_media_blob_prefers_raw_media_bytes(db, bus, tmp_path):
             media_bytes=body,
         )
     )
-    assert (tmp_path / "binary.webp").read_bytes() == body
+    local = space_direct_media_name("sp-bin", "peer-a", "binary.webp")
+    assert (tmp_path / local).read_bytes() == body
 
 
 async def test_dm_media_blob_prefers_raw_media_bytes(db, bus, tmp_path):
@@ -2564,7 +2570,14 @@ async def test_space_media_blob_assembles_chunked_transfer(db, bus, tmp_path):
     filename. Mirrors :class:`SpaceMediaSyncService`'s sender shape."""
     import base64
 
-    service = await _media_host(db, bus, tmp_path, "sp-chunked")
+    service = FederationInboundService(
+        bus=bus,
+        conversation_repo=SqliteConversationRepo(db),
+        space_post_repo=SqliteSpacePostRepo(db),
+        space_repo=SqliteSpaceRepo(db),
+        user_repo=SqliteUserRepo(db),
+        media_dir=tmp_path,
+    )
     full = b"".join(bytes([i]) * 256 for i in range(8))  # 2 KiB
     # Split into 4 chunks of 512 bytes each.
     chunks = [full[i * 512 : (i + 1) * 512] for i in range(4)]
@@ -2585,7 +2598,8 @@ async def test_space_media_blob_assembles_chunked_transfer(db, bus, tmp_path):
                 },
             )
         )
-    assert (tmp_path / "big.webm").read_bytes() == full
+    local = space_direct_media_name("sp-chunked", "peer-a", "big.webm")
+    assert (tmp_path / local).read_bytes() == full
     # Partial directory cleaned up.
     assert list((tmp_path / ".partial").iterdir()) == []
 
@@ -4664,7 +4678,8 @@ async def test_space_post_created_keeps_the_image_urls(db, bus, inbound):
     got = await SqliteSpacePostRepo(db).get("p-img")
     assert got is not None
     urls = got[1].image_urls
-    assert urls[0] == "api/media/a.webp"
+    # The sender's file, by the name it takes here (``SpaceMediaNamer``).
+    assert urls[0] == _here("sp-img", "a.webp")
     assert all(isinstance(u, str) for u in urls)
     assert len(urls) == FEED_POST_MAX_IMAGES
 
@@ -4695,7 +4710,7 @@ async def test_space_post_created_keeps_only_local_media_references(db, bus, inb
     got = await SqliteSpacePostRepo(db).get("p-ref")
     assert got is not None
     assert got[1].media_url is None
-    assert got[1].image_urls == ("api/media/fine.webp",)
+    assert got[1].image_urls == (_here("sp-ref", "fine.webp"),)
 
 
 @pytest.mark.parametrize(
@@ -5521,4 +5536,4 @@ async def test_a_space_post_never_names_a_reserved_media_file(db, bus, inbound):
     )
     _sid, post = await SqliteSpacePostRepo(db).get("post-rs")
     assert post.media_url is None
-    assert post.image_urls == ("api/media/a.webp",)
+    assert post.image_urls == (_here("sp-rs", "a.webp"),)

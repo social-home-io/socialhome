@@ -47,15 +47,17 @@ re-emitted event with no special-case logic and dedups by primary key.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ....domain.federation import FederationEventType
 from ....domain.federation_capabilities import FederationCapability
 from ....domain.link_preview import link_preview_to_dict
 from ....domain.page import page_tombstone_to_wire_dict
 from ....domain.page_version import version_hash
+from ....domain.space_media_ref import post_media_urls
 from ....domain.task import (
     task_list_to_wire_dict,
     task_list_tombstone_to_wire_dict,
@@ -84,6 +86,17 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+class _MediaOutbox(Protocol):
+    async def enqueue_for_blob(
+        self,
+        *,
+        space_id: str,
+        correlation_id: str,
+        target_instance_ids: list[str],
+        media_urls: list[str],
+    ) -> None: ...
+
+
 #: A space holds at most ``gallery_service.ALBUMS_PER_SPACE`` albums; the
 #: repo caps a listing at the same 200.
 MAX_ALBUMS_REPLAYED: int = 200
@@ -109,6 +122,7 @@ class SpaceSyncResumeProvider:
     __slots__ = (
         "_federation",
         "_gallery_repo",
+        "_media_sync",
         "_page_repo",
         "_space_calendar_repo",
         "_space_post_repo",
@@ -128,8 +142,13 @@ class SpaceSyncResumeProvider:
         sticky_repo: AbstractStickyRepo | None = None,
         space_calendar_repo: AbstractSpaceCalendarRepo | None = None,
         gallery_repo: AbstractGalleryRepo | None = None,
+        media_sync: _MediaOutbox | None = None,
     ) -> None:
         self._federation = federation_service
+        #: Ships the files of the replayed posts / covers / gallery items:
+        #: the receiver names a file by the household that delivered its
+        #: row, so a replayed row's pictures come from us, not its author.
+        self._media_sync = media_sync
         self._space_repo = space_repo
         self._space_post_repo = space_post_repo
         self._space_task_repo = space_task_repo
@@ -274,6 +293,7 @@ class SpaceSyncResumeProvider:
             _post_to_payload,
             space_id=space_id,
             to=to,
+            media_of=post_media_urls,
         )
 
     async def _replay_comments(
@@ -528,6 +548,7 @@ class SpaceSyncResumeProvider:
             _calendar_to_payload,
             space_id=space_id,
             to=to,
+            media_of=lambda ev: [ev.cover_url] if ev.cover_url else [],
         )
 
     async def _replay_gallery_items(
@@ -605,6 +626,7 @@ class SpaceSyncResumeProvider:
             _gallery_item_to_payload,
             space_id=space_id,
             to=to,
+            media_of=lambda item: [u for u in (item.thumbnail_url, item.url) if u],
         )
 
     async def _send_each(
@@ -615,6 +637,7 @@ class SpaceSyncResumeProvider:
         *,
         space_id: str,
         to: str,
+        media_of: Callable[[Any], list[str]] | None = None,
     ) -> int:
         sent = 0
         for row in rows:
@@ -626,6 +649,15 @@ class SpaceSyncResumeProvider:
                     space_id=space_id,
                 )
                 sent += 1
+                if media_of is not None and self._media_sync is not None:
+                    urls = media_of(row)
+                    if urls:
+                        await self._media_sync.enqueue_for_blob(
+                            space_id=space_id,
+                            correlation_id=row.id,
+                            target_instance_ids=[to],
+                            media_urls=urls,
+                        )
             except Exception as exc:  # pragma: no cover — defensive
                 log.debug(
                     "SPACE_SYNC_RESUME %s replay to %s failed: %s",

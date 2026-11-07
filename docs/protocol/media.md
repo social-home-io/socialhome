@@ -177,61 +177,79 @@ sending household was sent it for. Both blob types share
   1) × len(chunk) < file_size_bytes`, true of every sender's equal split)
   — the parts on disk stay under twice the declared size. A refused
   chunk is dropped with a WARNING and nothing is written.
+- **Sender-bound names (`SPACE_MEDIA_BLOB`).** A received space file
+  never keeps the name its sender used. A file `F` that household `H`
+  delivers is stored and referenced here as
+  `sd-<sha256("space-direct", space_id, H, F)[:40]>.<ext>`
+  (`space_direct_media_name`), where `H` is the household this one
+  authenticated: the envelope's sender, a `SPACE_ROUTED` inner event's
+  origin (`path[0]`, proven by `_origin_authenticated`), or the §25.6
+  provider. Both sides use it:
+  - a `SPACE_MEDIA_BLOB` from `H` for `filename` is assembled under `H`'s
+    name for it;
+  - a row `H` delivers has each of its files renamed the same way before
+    it is stored (`SpaceMediaNamer`). That covers a post (media, pictures,
+    file, link-preview image), a bazaar listing's photos, a gallery item,
+    a calendar cover, a held moderation submission, and the §25.6 records
+    of the same kinds.
+
+  So a file name is never first come, first served. A member household
+  that learned `F` from someone else's post and pushes bytes for it,
+  correlated with that post or with a decoy row of its own that names
+  `F`, only ever fills its own name. No row from another household points
+  there. Before 2026-11-07 the first complete copy of a name was the one
+  every row naming it showed, here and in what this household re-sealed
+  for its link-joined readers through the GFS media cache.
+
+  The name does not depend on the receiver, so every household that got
+  `F` from `H` calls it the same. A row this household already holds
+  keeps the file it has when the incoming name is that same file: the
+  identical name (a relay of a file from the same origin), the sender's
+  name mapped (the same household again), or this household's own upload
+  as another household calls it (`space_direct_media_name(space, us, F)`).
+  A collaborator's edit of an event that kept its cover therefore keeps
+  it. A new cover in an update takes the updating household's name, since
+  that household ships the bytes (`_ship_cover`). A moderation release
+  names the item's files as the host holds them: the receiver aligns
+  those names with its own copy of the item before comparing
+  (`SpaceAuthorship._aligned_media`). The release then takes the host's
+  names, and the host ships the bytes.
+
+  Every household that relays a row ships the bytes under the name its
+  own row holds. The paths that do this are: the author's live push, the
+  §25.6 catch-up (`_enqueue_catchup_media`), the §4.4 resume / §319.6
+  resync replay (`SpaceSyncResumeProvider`, which now enqueues the
+  replayed rows' files for the one household that asked), the
+  moderation submission (`_send_media`), and a released post or cover
+  from the host. The wire is unchanged, so there is no protocol version.
 - **Space scope (`SPACE_MEDIA_BLOB`).** The envelope must name one space
   (`resolve_space_id`: routing `space_id`, payload copy as fallback, a
   mismatch is a refusal) and a `correlation_id` (`post_id` on older
-  senders). When that row is already known — a space post, the bazaar
+  senders). When that row is already known (a space post, the bazaar
   listing behind a bazaar post, a gallery item, or a space calendar
-  event — it must live in that space and reference `filename` (post
-  `media_url` / `image_urls` / `file_meta.url`, listing `image_urls`,
-  gallery `url` / `thumbnail_url`, event `cover_url`); otherwise the blob
-  is refused with a WARNING. Files of a submission held for moderation
-  (a new event's cover, an edit's new cover or pictures) are correlated
-  by the **moderation queue item id**, never the target row (whose
-  current media an edit replaces): when the reviewer household holds that
-  item, it must be in that space and propose `filename`
-  (`moderation_media_urls`). Files the target already has (its
-  `current_snapshot`: an event's cover, a post's pictures) are not sent again.
-- **Sender binding (`SPACE_MEDIA_BLOB`).** Write-once makes the first
-  complete copy of a name the one every row naming it shows — and the one
-  this household re-seals for the link-joined readers its §25.6 catch-up
-  serves through the GFS media cache. So the authenticated sender
-  (`from_instance`: the origin household, also for a `SPACE_ROUTED` inner
-  event after the unwrap) must be one the correlated row binds
-  (`_space_media_verdict`, `domain/space_media_sender.py`):
-  - the row's **own household** — the post's author (a bazaar post's
-    listing photos too), the gallery item's uploader, the moderation
-    item's submitter holds a live seat on the sender in the roster mirror
-    (`SpaceAuthorship.acts_for`; never a payload field);
-  - a household with **content authority** — the host (owner, or the
-    delegated admin household), whose §25.6 catch-up ships every member's
-    files, and admin / moderator households, which ship the files of a
-    submission they released from the moderation queue;
-  - for a **calendar event** (collaborative: any member may change the
-    cover, and that household ships it) any writer household
-    (`writes_here`).
+  event), two things are checked:
+  - It must live in that space. If not, the blob is refused with a
+    WARNING.
+  - It must show the sender's name for `filename` (post `media_url` /
+    `image_urls` / `file_meta.url` / link-preview image, listing
+    `image_urls`, gallery `url` / `thumbnail_url`, event `cover_url`). If
+    not, the blob is skipped at INFO. This is routine: another household
+    delivered the row here, for example the host's catch-up of a post its
+    author also pushed.
 
-  Anyone else is refused with a WARNING. A member household that learned
-  a file name from another's post can no longer claim it first.
-- **Blob before its row.** The post's own event, the mesh, a held write
-  waiting for its seat or the §25.6 catch-up can deliver a blob before the
-  row it belongs to. From the **host** it is accepted at once (it may name
-  any row of its space; still write-once). From anyone else it is
-  **held**: assembled into `media_dir/.partial/held-<sha256(sender,
-  filename)[:32]>/blob` with a `meta.json` (sender, space, row, file name)
-  — never served, one folder per (sender, file), so two households'
-  copies never meet. When a row of that space arrives
-  (`SPACE_POST_CREATED`, `BAZAAR_LISTING_CREATED`,
-  `SPACE_GALLERY_ITEM_CREATED/UPDATED`, `SPACE_CALENDAR_EVENT_CREATED/UPDATED`,
-  `SPACE_MODERATION_SUBMITTED` — live, mesh-routed or replayed), the
-  adopter registered after every handler of those events re-judges the
-  space's held files: one the row binds is moved into place write-once,
-  one it does not bind is dropped, one whose row is still missing waits.
-  A held file nobody adopts is removed by the same 3-day `.partial` sweep
-  as an incomplete chunk set (below). Held, not refused: the media outbox
-  sends a file after its row, but the two travel separately (another
-  channel, separate retries), and a refused blob is gone — the sender has
-  already dropped its outbox row.
+  Files of a submission held for moderation (a new event's cover, an
+  edit's new cover or pictures) are correlated by the **moderation queue
+  item id**, never the target row, whose current media an edit replaces.
+  When the reviewer household holds that item, the item must be in that
+  space and propose the file (`moderation_media_urls`). Files the target
+  already has (its `current_snapshot`: an event's cover, a post's
+  pictures) are not sent again.
+- **Blob before its row.** The row's own event, the mesh, a held write
+  or the §25.6 catch-up can deliver a blob before the post, listing or
+  gallery item it belongs to. Such a blob is stored at once under the
+  sender's name. When the same household's row lands, it points there.
+  A row from another household points elsewhere, and the unreferenced
+  file goes to the orphan sweep. There is no hold and no adoption step.
 - **Per-sender assembly.** Part files live under
   `media_dir/.partial/<sha256(from_instance, transfer_id, chunk_count)>/`
   (DM: `transfer_id` = `dm:<message_id>`), so two households' chunks
@@ -259,19 +277,27 @@ sending household was sent it for. Both blob types share
   `.partial` or part folder that is a symlink. DM rules (sender household, announced `media_blob_id`) are in
   [`dm-media.md`](./dm-media.md#chunking).
 
-Residuals, by design: among the households a row binds, the first
-complete copy of a new file wins — the author's household, the host and
-content-authority households are trusted with the row's content anyway,
-and a calendar event's cover may be changed by any writer household
-outright. A §25.6 catch-up from a provider that is neither the host nor
-the row's household no longer fills another member's missing picture
-(the receiver would not take that provider's copy of the row either —
-`SpaceAuthorship.may_author`); the host's catch-up does. A held file whose
-row arrives only through a §25.6 stream (not one of the events above) waits
-for the next such event in that space, or is swept.
-`tests/protocol/test_media_blob_scope.py` pins these rules. No protocol
-version: only the receiver got stricter, and every sender path already is
-the row's household, the host, an approver or (calendar) a writer.
+Residuals, by design:
+
+- Bytes for a row come from the household that delivered that row here.
+  Suppose the author's push for a row never arrives (it failed past its
+  retries). A later delivery of the same row by another household, such
+  as the host's catch-up, does not rename it, so it does not fill the
+  file either.
+- A household reaching a member's post first through the GFS relay
+  (`space_public_inbound`) keeps the post's own names. Described files
+  take the reader names of the GFS cache. A file without a descriptor
+  (over 8 MiB) then has no direct push to match.
+- Rows stored before this change keep their names. A push for one of
+  them still in flight lands under the new name and goes unreferenced.
+- One file relayed through several households is stored once per
+  delivering household. That costs bytes, not correctness.
+
+`tests/protocol/test_media_blob_scope.py` pins these rules: the decoy
+post, the bazaar decoy, a cover race by another writer, a push before its
+row, the host's catch-up round trip and the mesh.
+`test_space_moderation_federated.py` covers a reviewed picture released
+everywhere.
 
 Residual: a household may start many transfers it never completes; each
 is bounded (chunk count, size cap, twice-the-declared-size parts) and
