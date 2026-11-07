@@ -227,6 +227,7 @@ describe('SpacePublicDetailPage — a GFS-listed space whose household we never 
     scope:             'global',
     join_mode,
     allow_subscribers: allow,
+    gfs_askable:       true,
   })
 
   it('asks to join an "ask to join" space through the GFS, unpaired', async () => {

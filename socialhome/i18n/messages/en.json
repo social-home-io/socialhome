@@ -25,6 +25,8 @@
   "notification.space.ownership.transferred": "You now own {space_name}",
   "notification.space.join.denied": "Your join request was declined.",
   "notification.space.join.requested": "{name} wants to join {space_name}",
+  "notification.space.join.requested_gfs": "{count} people asked to join {space_name} through the GFS",
+  "notification.space.join.requested_gfs_one": "Someone asked to join {space_name} through the GFS",
   "notification.space.member.joined": "{name} joined {space_name}",
   "notification.space.mention": "{author} mentioned you in {space_name}",
   "notification.space.moderation.queued": "Something is waiting for review in {space_name}",

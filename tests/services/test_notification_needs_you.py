@@ -397,6 +397,34 @@ async def test_unusual_requests_are_flagged_for_review(env):
     assert await env.svc._join_request_flags(space, "unknown") == ("unpaired",)
 
 
+async def test_requests_through_the_gfs_ring_one_grouped_bell(env):
+    """Anyone on a GFS can ask (v_84): a burst of such requests is one row
+    per admin — "3 people asked to join Salon through the GFS" — never one
+    bell each, and it names nobody (the names are unverified)."""
+    anna = await env.user("anna")
+    space = await _salon(env)
+    for n in range(3):
+        rid = await env.spaces.save_join_request(
+            space.id,
+            f"far-{n}",
+            remote_applicant_instance_id=f"far-house-{n}",
+            gfs_relay='{"side": "host"}',
+        )
+        await env.bus.publish(
+            SpaceJoinRequested(space_id=space.id, user_id=f"far-{n}", request_id=rid)
+        )
+        if n == 0:
+            (one,) = await _rows(env, anna.user_id, "space_join_requested")
+            assert one.title == "Someone asked to join Salon through the GFS"
+    rows = await _rows(env, anna.user_id, "space_join_requested")
+    assert len(rows) == 1
+    assert rows[0].object_key == object_key(NotificationObject.SPACE, space.id)
+    assert rows[0].title == "3 people asked to join Salon through the GFS"
+    assert rows[0].params.flags == ("gfs",)
+    raw = await env.spaces.get_join_request(rid)
+    assert await env.svc._join_request_flags(space, raw["id"]) == ("gfs",)
+
+
 async def test_pending_actions_drop_work_that_is_gone(env):
     """A request answered or expired behind the service's back, a seat that
     lost its admin role, an emptied queue: each resolves on the next look."""

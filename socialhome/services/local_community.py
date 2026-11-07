@@ -303,7 +303,7 @@ async def file_remote_join_request(
     applicant_pk: str | None = None,
     message: str | None = None,
     request_id: str | None = None,
-    applicant_relay: str | None = None,
+    gfs_relay: str | None = None,
 ) -> str:
     """File a pending join request of a REMOTE person for the admins — an
     inbound ``SPACE_JOIN_REQUEST``, or a remote step near the edge of a
@@ -320,7 +320,7 @@ async def file_remote_join_request(
         request_id=request_id,
         area_verdict=area_verdict.value if area_verdict is not None else None,
         # Only a request that came through a GFS has one (migration 0143).
-        applicant_relay=applicant_relay,
+        gfs_relay=gfs_relay,
     )
     # The same event a local request publishes: the admins' bell row
     # ("{name} wants to join …") and their live list refresh.

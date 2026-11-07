@@ -64,3 +64,24 @@ describe('JoinRequestList — local communities', () => {
     expect(chips[0].closest('.sh-join-request')?.textContent).toContain('Ana')
   })
 })
+
+describe('JoinRequestList — asked through the GFS (v_84)', () => {
+  it('shows the name the applicant sent, marked "via the GFS, not verified"', async () => {
+    householdUsers.value = new Map() as never
+    get.mockImplementation(async (url: string) => (url.endsWith('/join-requests')
+      ? [
+        {
+          id: 'g1', space_id: 's4', user_id: 'u-far', display_name: null, requested_at: '',
+          via_gfs: true, unverified_name: 'Noor', unverified_household: 'Zürich flat',
+        },
+        { id: 'p1', space_id: 's4', user_id: 'u-near', display_name: 'Ben', requested_at: '' },
+      ]
+      : []))
+    const view = render(<JoinRequestList spaceId="s4" />)
+    await waitFor(() => expect(view.getByText('Noor')).toBeTruthy())
+    const chips = view.getAllByTestId('join-request-gfs')
+    expect(chips).toHaveLength(1)
+    expect(chips[0].textContent).toBe('Via the GFS · says “Zürich flat” · not verified')
+    expect(chips[0].getAttribute('title')).toMatch(/nobody checked/)
+  })
+})

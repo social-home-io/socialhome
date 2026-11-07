@@ -101,7 +101,7 @@ class _FakeSpaceRepo:
         remote_applicant_pk=None,
         request_id=None,
         area_verdict=None,
-        applicant_relay=None,
+        gfs_relay=None,
     ):
         # Accept both positional (legacy) and keyword calls.
         self.pending.append(

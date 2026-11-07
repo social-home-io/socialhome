@@ -53,6 +53,7 @@ const ABOUT_LABEL: Record<AboutAction, () => string> = {
   request: () => t('space.public.request_join'),
   follow: () => t('spaces.discover.follow'),
   pending: () => t('space.public.request_pending'),
+  joining: () => t('spaces.discover.joining'),
 }
 
 /** Shown when the space's owner has NOT opted into read-only followers
@@ -371,7 +372,10 @@ export default function SpacePublicDetailPage() {
 
       {action && primaryLabel && (
         <div class="sh-space-public__cta-row">
-          <Button onClick={() => void onPrimary(entry, action)} disabled={action === 'pending'}>
+          <Button
+            onClick={() => void onPrimary(entry, action)}
+            disabled={action === 'pending' || action === 'joining'}
+          >
             {primaryLabel}
           </Button>
         </div>

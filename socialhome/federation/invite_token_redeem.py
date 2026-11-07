@@ -1266,6 +1266,9 @@ class SpaceInviteTokenRedeemCoordinator:
                 # longer exhaust a twenty-use link (and the uniform reason
                 # below means they learn nothing from trying).
                 redeemer_user_id=redeemer_user_id,
+                # A token an "Ask to join" approval minted (v_84) is bound to
+                # the approved household and person: dead to anyone else.
+                redeemer_instance_id=redeemer_instance_id,
             )
         except Exception:
             log.exception(

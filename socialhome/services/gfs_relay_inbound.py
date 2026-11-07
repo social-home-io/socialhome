@@ -112,8 +112,6 @@ _PROCESS_WIDE_KEY = "invite-bootstrap:inbound"
 _ENVELOPES_KEY = "invite-bootstrap:envelopes"
 #: Relayed §11 pairing bodies — their own bucket, the bootstrap-body budget.
 _PAIRING_KEY = "invite-bootstrap:pairing"
-#: Relayed "Ask to join" bodies (v_84) — their own bucket, the same budget.
-_JOIN_KEY = "invite-bootstrap:join-request"
 
 
 class GfsRelayInbound:
@@ -197,17 +195,13 @@ class GfsRelayInbound:
                 raise ValueError("relayed pairing rate limit exceeded")
             return await self._dispatch_pairing(body, gfs_url=gfs_url)
         if body.get("kind") in JOIN_REQUEST_KINDS:
-            # "Ask to join" a global space (v_84): the bootstrap-body bucket,
-            # then the coordinator's own per-sender budget once the
-            # signature proved who sent it.
+            # "Ask to join" a global space (v_84). No household-wide bucket
+            # here: a flood at one space would starve every other one. The
+            # coordinator budgets per sender and PER SPACE once the
+            # signature proved who sent it (the process-wide throttle above
+            # still sheds a raw flood before any unseal).
             if self._join is None:
                 raise ValueError("gfs join requests are not wired on this household")
-            if self._rate_limiter is not None and not self._rate_limiter.is_allowed(
-                _JOIN_KEY,
-                limit=BOOTSTRAP_BODY_INBOUND_LIMIT,
-                window_s=BOOTSTRAP_INBOUND_WINDOW_S,
-            ):
-                raise ValueError("relayed join request rate limit exceeded")
             return await self._join.handle_body(body, gfs_url=gfs_url)
         return await self._invite.handle_bootstrap_body(body, gfs_url=gfs_url)
 

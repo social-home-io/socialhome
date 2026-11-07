@@ -87,8 +87,14 @@ describe('discoverAction', () => {
     expect(discoverAction({ ...far, allow_subscribers: false })).toBeNull()
   })
   it('an "ask to join" global space from an unpaired host is asked through the GFS (v_84)', () => {
-    const far = entry({ scope: 'global', host_is_paired: false, join_mode: 'request' })
+    const far = entry({
+      scope: 'global', host_is_paired: false, join_mode: 'request', gfs_askable: true,
+    })
     expect(discoverAction({ ...far, allow_subscribers: false })).toBe('request')
+    // No verified join contact on the listing (an older host): no ask.
+    expect(discoverAction({ ...far, gfs_askable: false, allow_subscribers: false })).toBeNull()
+    // Approved through the GFS, the seat still being made.
+    expect(discoverAction({ ...far, request_pending: true, request_joining: true })).toBe('joining')
     expect(discoverAction({ ...far, allow_subscribers: true })).toBe('request')
     expect(approvalSeatsUs(far)).toBe(true)
     // A paired household's public space still needs the pairing.

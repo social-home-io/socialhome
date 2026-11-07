@@ -2019,7 +2019,19 @@ listed on the GFS; e (paired with nobody, no link) refreshes and lists it
 (``host_is_paired: false``), asks to join (``202``, pending on e), a finds
 the request with e's message and approves, e is seated and reads a's post,
 and e is still no paired connection of a. Before v_84 the ask answered
-``403 NOT_PAIRED``.
+``403 NOT_PAIRED``. The host's keys come off the GFS listing (``join_contact``,
+signed by the space authority key) — the GFS is asked for nothing.
+
+### ``gfs-join-request-offline`` — the same ask with each side down > 5 min (v_84)
+
+Not in ``all`` (two 330 s waits). Prereqs: ``gfs-up`` + ``gfs-pair``. a is
+killed; e asks (the GFS queues the sealed request); 330 s later a comes back,
+drains it and files it (``via_gfs``, the name unverified). Then e is killed;
+a approves (the GFS queues the answer); 330 s later e comes back, drains the
+answer, keeps the approval with its request and is seated on the reconnect;
+e reads a's post. Proves a body that waited in the relay queue past the
+±300 s live window is still taken (its ``ts`` is judged against the queue's
+TTL, its nonce's replay entry outlives it).
 
 ### ``gfs-moment-late-delete`` — a public delete leaves its signed certificate on the GFS (v_66)
 

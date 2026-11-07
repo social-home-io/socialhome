@@ -11,6 +11,7 @@ from aiohttp import web
 from .. import app_keys as K
 from ..domain.federation import InstanceSource, PairingStatus
 from ..domain.space import normalize_category, normalize_join_mode
+from ..federation.join_contact_pin import usable_contact
 from .base import BaseView
 
 
@@ -89,6 +90,10 @@ class PublicSpaceCollectionView(BaseView):
                     # is discoverable but its content is NOT publicly readable
                     # — the SPA must not offer Subscribe for it.
                     "allow_subscribers": bool(lst.allow_subscribers),
+                    # v_84 — the listing carries a verified, pinned join
+                    # contact for its host: an "Ask to join" can go through
+                    # the GFS without a pairing.
+                    "gfs_askable": usable_contact(lst.join_contact) is not None,
                 }
                 for lst in listings
             ]

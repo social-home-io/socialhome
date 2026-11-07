@@ -278,6 +278,8 @@
   "notification.calendar.reminder": "Recordatorio: {summary}",
   "notification.calendar.updated": "Evento modificado: {summary}",
   "notification.space.join.requested": "{name} quiere unirse a {space_name}",
+  "notification.space.join.requested_gfs": "{count} personas quieren unirse a {space_name} a través del GFS",
+  "notification.space.join.requested_gfs_one": "Alguien quiere unirse a {space_name} a través del GFS",
   "notification.space.member.joined": "{name} se unió a {space_name}",
   "notification.task.completed": "{name} completó: {title}",
   "notification.comment.added": "{author} comentó una publicación",

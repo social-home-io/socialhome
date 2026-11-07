@@ -967,13 +967,12 @@ def _build_gfs_join_requests(
     repos: SimpleNamespace,
     bus: EventBus,
     relay_sender: GfsEnvelopeSender,
-    gfs_connection_service: GfsConnectionService,
     identity,
     rate_limiter: RateLimiter,
 ) -> GfsJoinRequestCoordinator:
     """ "Ask to join" through the GFS (v_84): our own published key-wrap
-    key + binding signature (never a fresh key), the relay sender, and the
-    signed GFS lookup of a listed host's keys."""
+    key + binding signature (never a fresh key) and the relay sender; the
+    host's keys come off the GFS listing (authority-signed, pinned)."""
     return GfsJoinRequestCoordinator(
         federation=federation_service,
         federation_repo=repos.federation,
@@ -982,7 +981,6 @@ def _build_gfs_join_requests(
         user_repo=repos.user,
         bus=bus,
         relay_sender=relay_sender,
-        lookup_contact=gfs_connection_service.fetch_space_contact,
         keywrap_public_key=identity.keywrap_public_key,
         keywrap_sig=identity.keywrap_sig,
         rate_limiter=rate_limiter,
@@ -4255,6 +4253,12 @@ def create_app(config: Config | None = None) -> web.Application:
             cover_repo=repos.space_cover,
             icon_repo=repos.space_icon,
         )
+        # v_84 — a global space that takes requests lists the keys an "Ask to
+        # join" is sealed to: our own published key-wrap key + its binding
+        # signature (never a fresh key), signed with the space authority key.
+        gfs_connection_service.attach_join_contact_keys(
+            identity.keywrap_public_key.hex(), identity.keywrap_sig
+        )
         # The owner's GFS list is signed with the household identity key.
         gfs_server_selection.attach_identity(
             own_instance_id=real_instance_id, own_signing_key=identity_seed
@@ -4984,12 +4988,14 @@ def create_app(config: Config | None = None) -> web.Application:
             repos=repos,
             bus=bus,
             relay_sender=gfs_envelope_sender,
-            gfs_connection_service=gfs_connection_service,
             identity=identity,
             rate_limiter=limiter,
         )
         gfs_relay_inbound.attach_join_requests(gfs_join_requests)
         real_space_service.attach_gfs_join_requests(gfs_join_requests)
+        # An approval whose redeem did not seat its person yet (the host was
+        # offline, we restarted): retried now, and on every GFS reconnect.
+        gfs_join_requests.resume_soon()
         # v_53 — which connection servers we share with each opted-in
         # paired peer, found by probing through each of our own servers
         # (``docs/protocol/gfs-relay.md``). Started with the other
@@ -5395,6 +5401,9 @@ def create_app(config: Config | None = None) -> web.Application:
             # so a reconnect storm or a flapping socket costs one round.
             if gfs_route_discovery_scheduler is not None:
                 gfs_route_discovery_scheduler.trigger()
+            # v_84 — a connection came up: retry approvals of "Ask to join"
+            # that have not seated their person yet (own task, non-blocking).
+            gfs_join_requests.resume_soon()
             await gfs_connection_service.refresh_connection_metadata(gfs_id)
             # Proof of possession: once this connection's server has proved
             # it holds the pinned key (the persisted ratchet), the bulk

@@ -34,3 +34,10 @@ class PublicSpaceListing:
     #: offer Subscribe. Fail-closed default so a directory that reports none
     #: never widens access.
     allow_subscribers: bool = False
+    #: The host's join contact as this household verified and pinned it
+    #: (JSON, migration 0143, v_84): ``{"contact": {...} | null,
+    #: "authority_pk": hex, "seq": int, "gfs": url, "conflict": bool}`` — the
+    #: keys an "Ask to join" through the GFS is sealed to, the space
+    #: authority key that signed them (pinned on first sight), and the GFS it
+    #: was pinned from. ``None`` when no listing carried an authority key.
+    join_contact: str | None = None

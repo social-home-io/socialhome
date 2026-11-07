@@ -68,6 +68,7 @@ from ..domain.subscriber_accepts import (
     seat_bits,
 )
 from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH
+from ..space_join_contact import parse_join_contact, verify_join_contact
 from .domain import (
     MIN_EPOCH_STEP_INTERVAL_S,
     ClientInstance,
@@ -231,6 +232,41 @@ def _bounded_image_uri(uri: str | None, *, space_id: str, kind: str) -> str | No
         )
         return ""
     return uri
+
+
+def _served_join_contact(
+    raw: object,
+    *,
+    space_id: str,
+    owning_instance: str,
+    join_mode: str,
+    space_public_key_hex: str,
+) -> dict | None:
+    """The join contact this listing serves (v_84), or ``None``.
+
+    Applied AFTER the publish signature verified over the value as sent.
+    Served only for a space that takes requests, when it names the owning
+    instance and its space-authority signature verifies against the key this
+    server pinned for the space — so a listing never carries a contact a
+    reader would refuse anyway. A dropped one is logged at WARNING.
+    """
+    if raw is None or join_mode not in ("request", "open"):
+        return None
+    contact = parse_join_contact(raw)
+    if (
+        contact is None
+        or contact["instance_id"] != owning_instance
+        or not space_public_key_hex
+        or not verify_join_contact(
+            contact, space_id=space_id, space_public_key_hex=space_public_key_hex
+        )
+    ):
+        log.warning(
+            "GFS: space %s published a join contact that does not verify; dropped",
+            space_id,
+        )
+        return None
+    return contact
 
 
 def _burn_dummy_verify(event_type: str, space_id: str, payload: object) -> None:
@@ -1202,68 +1238,6 @@ class GfsFederationService:
             reason=NEW_SUBSCRIBER_REASON_RECONNECT,
         )
 
-    async def space_contact(
-        self,
-        instance_id: str,
-        space_id: str,
-        ts: str,
-        signature: str,
-    ) -> dict[str, str] | None:
-        """The owner household's sealing keys for *space_id*, for a household
-        registered here that wants to ask to join it (``space_contact``).
-
-        A global space in ``request`` / ``open`` mode lists its owner's
-        instance id but never its keys (the directory is unauthenticated).
-        A household registered on this server — the audience the listing is
-        for — asks with a request signed over ``{action: "space_contact",
-        instance_id, space_id, ts}`` (:meth:`_verify_signed_request`) and gets
-        the owner's REGISTERED identity key, key-wrap key and its
-        self-signature, which it binds to the listed ``owning_instance`` end
-        to end before sealing anything (``verify_keywrap_binding``). The join
-        request itself then rides ``POST /gfs/envelope`` sealed: this server
-        never reads it and the relay leg names only the recipient.
-
-        ``None`` (one answer for every case) when the space is not actively
-        listed, takes no requests, is the caller's own, or its owner has no
-        key-wrap key here. Raises :class:`PermissionError` on a bad signature
-        or a caller that is not an active household here."""
-        inst = await self._verify_signed_request(
-            instance_id,
-            {
-                "action": "space_contact",
-                "instance_id": instance_id,
-                "space_id": space_id,
-                "ts": ts,
-            },
-            signature=signature,
-        )
-        if inst.status != "active":
-            raise PermissionError("instance is not active on this server")
-        space = await self._repo.get_space(space_id)
-        if (
-            space is None
-            or space.status != "active"
-            or space.withdrawn
-            or space.join_mode not in ("request", "open")
-            or space.owning_instance == instance_id
-        ):
-            return None
-        owner = await self._repo.get_instance(space.owning_instance)
-        if (
-            owner is None
-            or owner.status != "active"
-            or not owner.keywrap_public_key
-            or not owner.keywrap_sig
-        ):
-            return None
-        return {
-            "instance_id": owner.instance_id,
-            "identity_public_key": owner.public_key,
-            "keywrap_public_key": owner.keywrap_public_key,
-            "kem_suite": owner.kem_suite or "x25519",
-            "keywrap_sig": owner.keywrap_sig,
-        }
-
     async def _notify_owner_new_subscriber(
         self,
         owning_instance: str,
@@ -1750,6 +1724,7 @@ class GfsFederationService:
         ts: str = "",
         authority_cert: dict | None = None,
         place: object = None,
+        join_contact: object = None,
     ) -> GlobalSpace:
         """Register / refresh a space row from the owning instance.
 
@@ -1843,6 +1818,10 @@ class GfsFederationService:
         # who removed it sends none either).
         if place is not None:
             signed["place"] = place
+        # v_84 — the owner's join contact rides inside the signed bytes too
+        # (an older household sends none and signs a body without it).
+        if join_contact is not None:
+            signed["join_contact"] = join_contact
         # The signed ``ts`` is OPTIONAL, for backward compatibility: unlike
         # subscribe/unsubscribe, ``publish_space`` has shipped production
         # callers, so hard-requiring ``ts`` would 403 every older household
@@ -1957,6 +1936,13 @@ class GfsFederationService:
         pin = parse_place_pin_wire(place)
         if place is not None and pin is None:
             log.warning("GFS: space %s published a malformed place; ignored", space_id)
+        contact = _served_join_contact(
+            join_contact,
+            space_id=space_id,
+            owning_instance=owning_instance,
+            join_mode=normalized_join_mode,
+            space_public_key_hex=pinned_pubkey,
+        )
         space = GlobalSpace(
             space_id=space_id,
             owning_instance=owning_instance,
@@ -1988,6 +1974,7 @@ class GfsFederationService:
             place_lon=pin.lon if pin is not None else None,
             # The hint is inside the same signed ``place`` object.
             place_radius_km=pin.radius_km if pin is not None else None,
+            join_contact=contact,
         )
         if existing is not None and existing.withdrawn and not has_ts:
             log.info(

@@ -58,6 +58,7 @@ from ..domain.errors import (
     TierChangeRequiredError,
     WrongTypeError,
 )
+from ..federation.gfs_join_request import APPROVAL_TOKEN_TTL, unverified_names
 from ..federation.host_equivalence import acts_as_host
 from ..federation.invite_code import (
     build_invite_code,
@@ -356,11 +357,6 @@ class UnsupportedSeedSuite(ValueError):
 #: Upper bound on simultaneously-advertised public spaces per instance
 #: (spec §13). Enforced at ``create_space`` time for PUBLIC spaces.
 MAX_PUBLIC_SPACES = 5
-
-#: Life of the single-use token an approval sends to a household that asked
-#: through the GFS (v_84): the sealed answer may wait in the GFS queue while
-#: that household is offline.
-GFS_JOIN_TOKEN_TTL_DAYS: int = 3
 
 #: ``SPACE_CATEGORIES`` + ``normalize_category`` (§23.50) live in the pure
 #: ``domain.space`` module so the GFS server can import them without pulling in
@@ -773,8 +769,17 @@ class SpaceService(
     def attach_gfs_join_requests(self, coordinator: GfsJoinRequestCoordinator) -> None:
         """Wire "Ask to join" through the GFS (v_84): a request to a global
         space whose host we never paired with rides the GFS relay sealed,
-        and our answer to such a request goes back the same way."""
+        and our answer to such a request goes back the same way. The
+        coordinator seats an approved person through our redeem."""
         self._gfs_join = coordinator
+        coordinator.attach_redeem(self.redeem_invite_token)
+
+    async def list_joining_space_ids(self, user_id: str) -> list[str]:
+        """Spaces *user_id* asked to join through the GFS whose host
+        approved and whose seat is still being made ("approved, joining…")."""
+        if self._gfs_join is None:
+            return []
+        return await self._gfs_join.joining_space_ids(user_id)
 
     def attach_redeem_coordinator(self, coordinator) -> None:
         """Wire the §D2 cross-instance invite-token redeem driver.
@@ -7381,6 +7386,13 @@ class SpaceService(
                 if user is not None:
                     name = user.display_name
             enriched["display_name"] = name
+            # Asked through the GFS (v_84): the names the applicant sent,
+            # marked as such — nobody vouched for them.
+            names = unverified_names(row)
+            enriched.pop("gfs_relay", None)
+            enriched["via_gfs"] = names is not None
+            if names is not None:
+                enriched["unverified_name"], enriched["unverified_household"] = names
             out.append(enriched)
         return out
 
@@ -7567,25 +7579,29 @@ class SpaceService(
             # federate it back; the applicant's household consumes via
             # the existing POST /api/spaces/join path.
             assert self._federation is not None
-            ttl = (
-                timedelta(days=GFS_JOIN_TOKEN_TTL_DAYS)
-                if row.get("applicant_relay")
-                else timedelta(minutes=5)
-            )
+            # Asked through the GFS (v_84): the answer may wait in the GFS
+            # queue while the applicant is offline, and the applicant then
+            # retries its redeem — so its token lives as long as both.
+            via_gfs = bool(row.get("gfs_relay")) and self._gfs_join is not None
+            ttl = APPROVAL_TOKEN_TTL if via_gfs else timedelta(minutes=5)
             expires = (datetime.now(UTC) + ttl).isoformat()
             token = await self._spaces.create_invite_token(
                 row["space_id"],
                 created_by=actor.user_id,
                 uses=1,
                 expires_at=expires,
+                # Redeemable by the approved household and person only — an
+                # approval is not a link to pass on.
+                bound_instance_id=str(remote_instance),
+                bound_user_id=str(row["user_id"]),
             )
-            if row.get("applicant_relay") and self._gfs_join is not None:
-                # Asked through the GFS by a household we never paired with
-                # (v_84): the answer goes back sealed the same way. It may
-                # wait in the GFS queue while that household is offline, so
-                # its single-use token lives longer than a direct one (above).
+            if via_gfs:
+                assert self._gfs_join is not None
                 await self._gfs_join.send_answer(
-                    row, answer="approved", invite_token=token
+                    row,
+                    answer="approved",
+                    invite_token=token,
+                    token_expires_at=expires,
                 )
             else:
                 # Direct when paired, else over the mesh (sealed end to end):
@@ -7651,7 +7667,7 @@ class SpaceService(
         )
         await self._answer_join_request(request_id, "denied", reviewed_by=actor.user_id)
         remote_instance = r.get("remote_applicant_instance_id")
-        if remote_instance and r.get("applicant_relay") and self._gfs_join is not None:
+        if remote_instance and r.get("gfs_relay") and self._gfs_join is not None:
             # Asked through the GFS (v_84): answered the same way.
             await self._gfs_join.send_answer(r, answer="denied")
         elif remote_instance and self._federation is not None:
@@ -7770,18 +7786,15 @@ class SpaceService(
         # seats locally). For a LOCAL approval (host None/self),
         # redeem_invite_token falls back to accept_invite_token.
         host = r.get("remote_applicant_instance_id")
-        # Asked through the GFS (v_84): the approval left the host's keys
-        # and the relay that reaches it, so the redeem can take the sealed
-        # §D2b leg to a host we are not paired with.
-        bootstrap = (
-            self._gfs_join.take_hint(request_id) if self._gfs_join is not None else None
-        )
+        if r.get("gfs_relay"):
+            # Asked through the GFS (v_84): its coordinator seats the person
+            # (and retries until the token expires) — not this handler.
+            return
         try:
             await self.redeem_invite_token(
                 invite_token,
                 user_id=user_id,
                 issuer_instance_id=host,
-                bootstrap=bootstrap,
             )
         except KeyError:
             # Token already consumed/replayed — expected on a duplicate

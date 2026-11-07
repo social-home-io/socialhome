@@ -39,6 +39,11 @@ interface JoinRequest {
    *  carried (``inside`` / ``edge``; never the location itself). ``edge``
    *  — the home may be just outside: the admins decide. */
   area_verdict?: 'inside' | 'edge' | null
+  /** Asked through the GFS by a household we never paired with (v_84):
+   *  ``unverified_*`` are what the applicant SAYS — nobody vouched. */
+  via_gfs?: boolean
+  unverified_name?: string | null
+  unverified_household?: string | null
 }
 
 const requestsBySpace = signal<Record<string, JoinRequest[]>>({})
@@ -112,12 +117,22 @@ export function JoinRequestList({ spaceId }: { spaceId: string }) {
       {rows.map(r => {
         // The server resolves a remote applicant's name when it can; else a
         // member of this household, else "Someone" — never the raw id.
-        const name = r.display_name || resolveDisplayName(spaceId, r.user_id)
+        const name = r.display_name
+          || (r.via_gfs ? r.unverified_name : null)
+          || resolveDisplayName(spaceId, r.user_id)
         return (
           <div key={r.id} class="sh-join-request">
             <Avatar name={name} src={r.picture_url ?? null} size={32} />
             <div class="sh-join-info">
               <strong>{name}</strong>
+              {r.via_gfs && (
+                <span class="sh-join-gfs-chip" data-testid="join-request-gfs"
+                      title={t('join_requests.via_gfs_hint')}>
+                  {r.unverified_household
+                    ? t('join_requests.via_gfs_from', { household: r.unverified_household })
+                    : t('join_requests.via_gfs')}
+                </span>
+              )}
               {r.area_verdict === 'edge' && (
                 <span class="sh-join-edge-chip" data-testid="join-request-edge"
                       title={t('join_requests.near_edge_hint')}>

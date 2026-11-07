@@ -120,6 +120,7 @@ from ..outbound_fetch import OutboundFetchRefused, open_pinned_session
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
+from ..space_join_contact import sign_join_contact
 from .gfs_http import gfs_server_address
 from .gfs_publish_retry import (
     GfsPublish,
@@ -422,6 +423,8 @@ class GfsConnectionService:
         "_icon_repo",
         "_info_failed_at",
         "_invite_links",
+        "_join_contact",
+        "_join_contact_keys",
         "_listing_failed_at",
         "_listing_proven_at",
         "_listing_seen",
@@ -455,7 +458,6 @@ class GfsConnectionService:
         "_repo",
         "_rotation_warned",
         "_sealed_highlight_stream",
-        "_space_contact",
         "_space_item_followers",
         "_space_key_pull",
         "_space_media",
@@ -572,10 +574,13 @@ class GfsConnectionService:
         # …and ``space_key_pull`` (#5b): the GFS takes a follower's
         # ``/gfs/spaces/{id}/key_request``. Asked only once proved.
         self._space_key_pull: dict[str, bool] = {}
-        # …and ``space_contact``: the GFS hands a listed space owner's keys to
-        # a household registered there that asks to join. Asked only once
-        # proved.
-        self._space_contact: dict[str, bool] = {}
+        # …and ``join_contact`` (v_84): the GFS serves a listing's
+        # authority-signed join contact. Sent only to a server that proved it.
+        self._join_contact: dict[str, bool] = {}
+        #: Our own published key-wrap key (hex) + its self-signature, for the
+        #: join contact a global space's listing carries
+        #: (:meth:`attach_join_contact_keys`). Empty: no contact is sent.
+        self._join_contact_keys: tuple[str, str] = ("", "")
         # …and ``space_item_followers`` (step 12): the GFS counts the
         # followers that cannot read a member's own item.
         self._space_item_followers: dict[str, bool] = {}
@@ -816,7 +821,7 @@ class GfsConnectionService:
             self._moment_reactions,
             self._moment_counts,
             self._space_key_pull,
-            self._space_contact,
+            self._join_contact,
             self._space_item_followers,
             self._payload_zlib1,
             self._payload_zlib1_dict1,
@@ -967,6 +972,14 @@ class GfsConnectionService:
     async def stop(self) -> None:
         """Stop the GFS publish retry loop (app ``on_cleanup``)."""
         await self._publish_retry.stop()
+
+    def attach_join_contact_keys(
+        self, keywrap_public_key_hex: str, keywrap_sig: str
+    ) -> None:
+        """This household's published key-wrap key + its self-signature (the
+        same pair ``/gfs/register`` publishes), for the join contact a
+        global space's listing carries (v_84)."""
+        self._join_contact_keys = (keywrap_public_key_hex, keywrap_sig)
 
     def attach_publish_context(
         self,
@@ -2490,7 +2503,18 @@ class GfsConnectionService:
         ) and await self._signed_capability_supported(
             conn, "place_pin", self._place_pin
         )
-        body = await self._build_publish_body(space_id, with_place=with_place)
+        # v_84 — the owner's join contact goes only to a server that proved
+        # it folds the field into the signed bytes and serves it. Probed only
+        # for a space that would carry one, so an invite-only publish costs no
+        # extra ``/gfs/info`` round-trip.
+        with_contact = await self._wants_join_contact(
+            space_id
+        ) and await self._signed_capability_supported(
+            conn, "join_contact", self._join_contact
+        )
+        body = await self._build_publish_body(
+            space_id, with_place=with_place, with_contact=with_contact
+        )
         if "authority_cert" in body and not await self._signed_capability_supported(
             conn, "authority_rotation", self._authority_rotation
         ):
@@ -2500,7 +2524,10 @@ class GfsConnectionService:
             # the cert: it keeps the old pin, and we say so.
             self._warn_no_authority_rotation(conn)
             body = await self._build_publish_body(
-                space_id, with_cert=False, with_place=with_place
+                space_id,
+                with_cert=False,
+                with_place=with_place,
+                with_contact=with_contact,
             )
         client = self._client()
         publish_url = f"{conn.inbox_url}/gfs/spaces/{space_id}/publish"
@@ -2572,7 +2599,12 @@ class GfsConnectionService:
         return space is not None and place_pin_of(space) is not None
 
     async def _build_publish_body(
-        self, space_id: str, *, with_cert: bool = True, with_place: bool = False
+        self,
+        space_id: str,
+        *,
+        with_cert: bool = True,
+        with_place: bool = False,
+        with_contact: bool = False,
     ) -> dict:
         """Compose + sign the publish body.
 
@@ -2669,11 +2701,51 @@ class GfsConnectionService:
         pin = place_pin_of(space) if with_place else None
         if pin is not None:
             body["place"] = place_pin_wire(pin)
+        # v_84 — a space that takes requests lists the keys an "Ask to join"
+        # is sealed to, signed with the space authority key (the one the GFS
+        # pins), inside the signed body. A GFS cannot swap them.
+        contact = await self._join_contact_for(space) if with_contact else None
+        if contact is not None:
+            body["join_contact"] = contact
         canonical = canonical_bytes(body)
         body["signature"] = b64url_encode(
             sign_ed25519(self._own_signing_key, canonical),
         )
         return body
+
+    async def _wants_join_contact(self, space_id: str) -> bool:
+        """Would *space_id*'s listing carry a join contact? (Keys wired, a
+        space that takes requests.)"""
+        if not all(self._join_contact_keys) or self._space_repo is None:
+            return False
+        space = await self._space_repo.get(space_id)
+        return (
+            space is not None
+            and normalize_join_mode(getattr(space, "join_mode", None)) != "invite_only"
+        )
+
+    async def _join_contact_for(self, space) -> dict | None:
+        """The authority-signed join contact for *space*, or ``None`` (an
+        invite-only space, no key-wrap key wired, no space seed here)."""
+        keywrap_pk, keywrap_sig = self._join_contact_keys
+        if (
+            not keywrap_pk
+            or not keywrap_sig
+            or self._space_repo is None
+            or normalize_join_mode(getattr(space, "join_mode", None)) == "invite_only"
+        ):
+            return None
+        seed = await self._space_repo.get_space_seed(space.id)
+        if not seed:
+            return None
+        return sign_join_contact(
+            space_id=space.id,
+            instance_id=self._own_instance_id,
+            identity_pk=ed25519_public_key(self._own_signing_key).hex(),
+            keywrap_pk=keywrap_pk,
+            keywrap_sig=keywrap_sig,
+            space_seed=seed,
+        )
 
     async def _brand_colors(self, space_id: str) -> tuple[str, str]:
         """The space's (primary, accent) theme colours, or the defaults."""
@@ -3745,85 +3817,6 @@ class GfsConnectionService:
             return False
         log.info("gfs: asked %s for the content key of space %s", gfs_id, space_id)
         return True
-
-    async def fetch_space_contact(
-        self, space_id: str, owner_instance_id: str
-    ) -> tuple[dict[str, str], str] | None:
-        """The owner household's sealing keys for the listed space
-        *space_id*, from the first active GFS that proved ``space_contact``
-        and answers — with that GFS's base URL (the relay that reaches the
-        owner). ``None`` when no GFS has them.
-
-        Signed over ``{action: "space_contact", instance_id, space_id, ts}``.
-        The answer is NOT trusted here: the caller binds the keys to
-        *owner_instance_id* end to end before it seals anything. An answer
-        naming another instance is dropped. Never raises."""
-        if not self._own_instance_id or not self._own_signing_key:
-            return None
-        if not is_path_safe_id(space_id):
-            return None
-        for conn in await self._repo.list_active():
-            if not conn.inbox_url or not await self._signed_capability_supported(
-                conn, "space_contact", self._space_contact
-            ):
-                continue
-            ts = datetime.now(UTC).isoformat()
-            canonical = canonical_bytes(
-                {
-                    "action": "space_contact",
-                    "instance_id": self._own_instance_id,
-                    "space_id": space_id,
-                    "ts": ts,
-                }
-            )
-            body = {
-                "instance_id": self._own_instance_id,
-                "ts": ts,
-                "signature": b64url_encode(
-                    sign_ed25519(self._own_signing_key, canonical)
-                ),
-            }
-            url = f"{conn.inbox_url.rstrip('/')}/gfs/spaces/{space_id}/contact"
-            try:
-                async with self._client().post(
-                    url,
-                    allow_redirects=False,
-                    json=body,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status != 200:
-                        log.warning(
-                            "gfs: %s has no contact for space %s — HTTP %d",
-                            conn.id,
-                            space_id,
-                            resp.status,
-                        )
-                        continue
-                    answer = await resp.json()
-            except (TimeoutError, aiohttp.ClientError, ValueError) as exc:
-                log.warning("gfs: contact request to %s failed: %s", conn.id, exc)
-                continue
-            if not isinstance(answer, dict):
-                continue
-            contact = {
-                k: str(answer.get(k) or "")
-                for k in (
-                    "instance_id",
-                    "identity_public_key",
-                    "keywrap_public_key",
-                    "kem_suite",
-                    "keywrap_sig",
-                )
-            }
-            if contact["instance_id"] != owner_instance_id:
-                log.warning(
-                    "gfs: %s named another owner for space %s — ignored",
-                    conn.id,
-                    space_id,
-                )
-                continue
-            return contact, conn.inbox_url.rstrip("/")
-        return None
 
     async def publish_space_event_to(
         self,

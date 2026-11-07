@@ -1050,29 +1050,47 @@ Anything that sends who reacted, sends totals per reaction rather than at
 checkpoints, or lets the GFS read a count is a §2-principle change requiring
 a new sign-off.
 
-### Sign-off needed: a GFS hands a listed space owner's public keys to its households (v_84)
+### Sign-off needed: a global space's listing carries its owner's public keys (v_84)
 
 A global space in "ask to join" (or open) mode can now be asked through
 the GFS that lists it, by a household that never paired with its host
 ([discovery](protocol/discovery.md#ask-to-join-through-the-gfs-v_84)). To
 seal the request, that household needs the host's identity key and key-wrap
-key. The GFS gives them out — `POST /gfs/spaces/{id}/contact` — but only to
-a household **registered with it**, on a request that household signed, and
-never on a public page (the unauthenticated directory still carries the
-owner's instance id only).
+key. The owner puts them **on its own public listing** (`join_contact`),
+signed with the space authority key, only for a space it lists on a GFS and
+that takes requests. The household reads them from the directory it already
+polls — nobody asks the GFS for anything, so the GFS keeps no record of who
+wants which space.
 
 What this relaxes: the owner household's **public** identity and key-wrap
-keys reach the GFS's other households (until now they reached a stranger
-only through an invite link that owner minted). They are public keys: they
-name no address, reveal no person and let nobody read anything; the owner's
-instance id, which they derive, was already in the listing. What it does
-not relax: the GFS reads nothing it relays (the request is sealed to the
-host, the outer shape names only the recipient), the applicant binds the
-keys to the listed host end to end before sealing (a GFS that substitutes a
-key it holds gets nothing sealed), the host still decides every request, and
-households met through a GFS still never learn each other's address. The GFS
-learns that household B asked for space X's contact — the same it could
-infer from the sealed envelope it then relays.
+keys appear on the public listing of a space the owner chose to list (until
+now they reached a stranger only through an invite link the owner minted).
+They are public keys: they name no address, reveal no person and let nobody
+read anything; the owner's instance id, which the identity key derives, was
+already on the listing.
+
+What it does not relax: the GFS reads nothing it relays (the request is
+sealed to the host; the outer shape names only the recipient); the host
+decides every request; households met through a GFS still never learn each
+other's address; a request's bytes never name the applicant outside the
+seal.
+
+**The first-contact trust that remains, stated plainly.** The space
+authority key a household pins comes from the first GFS that listed the
+space to it — trust on first use, as for a follower's first pin of that
+key. A GFS that lies on that first contact can list an authority and a
+contact of its own, and the household's request is then sealed to that
+GFS's key: it would learn that request (the person's id, names and message
+— not a password, a location or any space content). It cannot swap the keys
+of a space a household already pinned (that breaks a signature it cannot
+make), and two GFSs listing a space under different authorities make the
+space unaskable from that household rather than picking one. A household
+that wants no first-contact trust asks with an invite link instead.
+
+The GFS can still try to tell which household sent a sealed blob by its
+network address and timing, as for every envelope it relays (see the
+link-joined pair sign-off above) — the lookup that would have told it
+directly is gone.
 
 ## No third-party fetches from user content
 

@@ -1377,7 +1377,9 @@ class JoinRequestHandledError(CodedError):
 #: is not paired with, an admin grant (only the owner decides), or a space
 #: with an age limit. Such a request is decided on the review page, which
 #: shows what the list can't (:func:`join_request_flags`).
-JOIN_REQUEST_FLAGS: frozenset[str] = frozenset({"edge", "unpaired", "admin", "age"})
+JOIN_REQUEST_FLAGS: frozenset[str] = frozenset(
+    {"edge", "unpaired", "gfs", "admin", "age"}
+)
 
 #: Where an approval of a join request came from: the one-tap button of
 #: the "Needs you" list, or the review page (the default).
@@ -1408,7 +1410,12 @@ def join_request_flags(
         flags.add("admin")
     if min_age:
         flags.add("age")
-    if request.get("remote_applicant_instance_id") and not household_paired:
+    if request.get("gfs_relay"):
+        # Asked through the GFS (v_84): the names it carries are the
+        # applicant's own word — decided on the review page, where they are
+        # marked "not verified".
+        flags.add("gfs")
+    elif request.get("remote_applicant_instance_id") and not household_paired:
         flags.add("unpaired")
     return tuple(sorted(flags))
 

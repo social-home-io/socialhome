@@ -3297,9 +3297,11 @@ class MyJoinRequestsView(BaseView):
     """``GET /api/me/join-requests`` — the caller's own outstanding
     (``pending``) join-requests, as a list of space ids.
 
-    Returns ``{"pending_space_ids": [...]}``. The SPA merges these into
-    its directory entries so a "Request pending" card survives a reload
-    (the optimistic in-memory flag is otherwise lost on the next mount).
+    Returns ``{"pending_space_ids": [...], "joining_space_ids": [...]}``.
+    The SPA merges these into its directory entries so a "Request pending"
+    card survives a reload (the optimistic in-memory flag is otherwise lost
+    on the next mount). ``joining_space_ids`` (v_84): asked through the GFS,
+    approved, the seat still being made — "approved, joining…".
     """
 
     async def get(self) -> web.Response:
@@ -3310,6 +3312,7 @@ class MyJoinRequestsView(BaseView):
                 "pending_space_ids": await svc.list_pending_join_request_space_ids(
                     ctx.user_id
                 ),
+                "joining_space_ids": await svc.list_joining_space_ids(ctx.user_id),
             },
         )
 

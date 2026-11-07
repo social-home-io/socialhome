@@ -5649,6 +5649,13 @@ class NotificationService(ProtectionGateMixin):
         space = await self._spaces.get(event.space_id)
         if space is None:
             return
+        request = await self._spaces.get_join_request(event.request_id)
+        if (request or {}).get("gfs_relay"):
+            # Asked through the GFS (v_84): anyone on the GFS can ask, so a
+            # burst must not become a burst of bells — one grouped row per
+            # space ("3 people asked to join X through the GFS").
+            await self._notify_gfs_join_requests(space)
+            return
         members = await self._space_members(event.space_id)
         blocked = await self._withheld_from(event.user_id)
         flags = await self._join_request_flags(space, event.request_id)
@@ -5690,6 +5697,52 @@ class NotificationService(ProtectionGateMixin):
                 actor_name=name,
                 withheld=blocked,
                 flags=flags,
+            )
+
+    async def _notify_gfs_join_requests(self, space) -> None:
+        """One grouped row per admin for a space's requests from the GFS:
+        the count of those waiting, no names (they are unverified), the
+        link to the review page."""
+        waiting = len(
+            await self._spaces.list_pending_gfs_join_requests(space_id=space.id)
+        )
+        if waiting == 0:
+            return
+        for member in await self._space_members(space.id):
+            if member.role not in SETTINGS_AUTHORITY_ROLES:
+                continue
+            recipient = await self._local_user(member.user_id)
+            if recipient is None:
+                continue
+            await self._save_notif(
+                new_notification(
+                    user_id=member.user_id,
+                    type="space_join_requested",
+                    title=self._t(
+                        "notification.space.join.requested_gfs"
+                        if waiting > 1
+                        else "notification.space.join.requested_gfs_one",
+                        locale=self._locale(recipient),
+                        fallback=(
+                            "{count} people asked to join {space_name} through the GFS"
+                            if waiting > 1
+                            else "Someone asked to join {space_name} through the GFS"
+                        ),
+                        count=str(waiting),
+                        space_name=space.name,
+                    ),
+                    link_url=space_moderation_link(space.id),
+                ),
+                # The space, not the request: every new request updates this
+                # one row (D7) instead of adding a bell.
+                about=NotificationSubject.of(
+                    NotificationObject.SPACE,
+                    space.id,
+                    space_id=space.id,
+                    space_name=space.name,
+                ),
+                actor_user_id=None,
+                flags=("gfs",),
             )
 
     async def _join_request_flags(self, space, request_id: str) -> tuple[str, ...]:

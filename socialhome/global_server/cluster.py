@@ -47,6 +47,7 @@ from ..domain.space import normalize_category, normalize_join_mode
 from ..domain.space_place import PlacePin, parse_place_pin_wire, place_pin_wire
 from ..domain.subscriber_accepts import parse_accepts
 from ..gfs_proof import sign_possession_proof
+from ..space_join_contact import parse_join_contact
 from .cluster_relay import (
     RELAY_FORWARD_MAX_FRAME_BYTES,
     RELAY_FORWARD_MAX_PENDING,
@@ -2920,6 +2921,9 @@ def _space_to_wire(s: GlobalSpace) -> dict:
         # The owner's place pin travels too, or a peer sync would drop it
         # until the owner's next publish.
         "place": _place_wire(s),
+        # …and its join contact (v_84), authority-signed by the owner; a
+        # reader verifies it, this server only carries it.
+        "join_contact": s.join_contact,
     }
 
 
@@ -2952,6 +2956,7 @@ def _wire_to_space(d: dict) -> GlobalSpace:
         place_lat=_wire_place(d)[0],
         place_lon=_wire_place(d)[1],
         place_radius_km=_wire_place(d)[2],
+        join_contact=parse_join_contact(d.get("join_contact")),
     )
 
 

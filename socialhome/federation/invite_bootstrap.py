@@ -459,8 +459,16 @@ def validate_bootstrap_body(
     *,
     expected_kinds: frozenset[str],
     now: datetime | None = None,
+    max_age_seconds: int = TIMESTAMP_SKEW_SECONDS,
 ) -> dict[str, Any]:
-    """Validate an already-unsealed bootstrap body (steps 3-7 above)."""
+    """Validate an already-unsealed bootstrap body (steps 3-7 above).
+
+    ``max_age_seconds`` — how OLD the signed ``ts`` may be. The live
+    handshakes (the redeem and its reply) keep the ±300 s window; a body the
+    relay may have queued for an offline household (an "Ask to join" and its
+    answer, v_84) passes the relay's queue TTL plus that skew, and its
+    nonce's replay entry is kept at least as long (``REPLAY_CACHE_WINDOW``).
+    A ``ts`` in the FUTURE is held to ±300 s either way."""
     kind = body.get("kind")
     if not isinstance(kind, str) or kind not in _KNOWN_KINDS:
         raise ValueError(f"unknown bootstrap kind {kind!r}")
@@ -511,7 +519,8 @@ def validate_bootstrap_body(
     if ts.tzinfo is None:
         raise ValueError("bootstrap ts is not timezone-aware")
     current = now if now is not None else datetime.now(UTC)
-    if abs((current - ts).total_seconds()) > TIMESTAMP_SKEW_SECONDS:
+    age = (current - ts).total_seconds()
+    if age > max_age_seconds or -age > TIMESTAMP_SKEW_SECONDS:
         raise ValueError("bootstrap ts skew too large")
 
     return body
