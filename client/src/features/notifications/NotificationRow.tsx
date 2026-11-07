@@ -29,7 +29,7 @@ import { appHref } from '@/baseUrl'
 import { formatLocale, isOne, t } from '@/i18n/i18n'
 import { householdPictureUrl } from '@/store/householdUsers'
 import { spaces } from '@/store/spaces'
-import { spaceGlyph } from '@/features/spaces/spaceGlyph'
+import { SpaceGlyph } from '@/features/spaces/SpaceGlyph'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import type { Notification } from '@/types'
 import { currentUser } from '@/store/auth'
@@ -108,9 +108,7 @@ export function RowAvatar({ n, size }: { n: Notification, size: number }) {
   } else if (n.space_id && spaceName) {
     pic = (
       <span class="sh-notif-av__space" style={{ width: `${size}px`, height: `${size}px` }}>
-        {space?.icon_url
-          ? <img src={space.icon_url} alt="" loading="lazy" />
-          : spaceGlyph(space?.emoji ?? null, spaceName)}
+        <SpaceGlyph iconUrl={space?.icon_url} emoji={space?.emoji ?? null} name={spaceName} />
       </span>
     )
   } else {

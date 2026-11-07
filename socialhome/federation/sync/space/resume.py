@@ -62,7 +62,7 @@ from ....domain.federation_capabilities import FederationCapability
 from ....domain.link_preview import link_preview_to_dict
 from ....domain.page import page_tombstone_to_wire_dict
 from ....domain.page_version import version_hash
-from ....domain.space_media_ref import post_media_urls
+from ....domain.space_media_ref import page_media_urls, post_media_urls
 from ....domain.task import (
     task_list_to_wire_dict,
     task_list_tombstone_to_wire_dict,
@@ -71,6 +71,7 @@ from ....domain.task import (
 )
 from ....services.inbound_media_store import media_basename, media_file_path
 from ....services.page_conflict_service import side_to_wire
+from ....services.space_media_names import space_own_files
 
 if TYPE_CHECKING:
     from ....domain.calendar import CalendarEvent
@@ -81,6 +82,7 @@ if TYPE_CHECKING:
     from ....domain.sticky import Sticky
     from ....repositories.calendar_repo import AbstractSpaceCalendarRepo
     from ....repositories.gallery_repo import AbstractGalleryRepo
+    from ....repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ....repositories.page_repo import AbstractPageRepo
     from ....repositories.space_post_repo import AbstractSpacePostRepo
     from ....repositories.space_repo import AbstractSpaceRepo
@@ -146,6 +148,7 @@ class SpaceSyncResumeProvider:
         "_gallery_repo",
         "_last_resume",
         "_media_dir",
+        "_media_refs",
         "_media_sync",
         "_page_repo",
         "_space_calendar_repo",
@@ -169,8 +172,11 @@ class SpaceSyncResumeProvider:
         media_sync: _MediaOutbox | None = None,
         media_dir: pathlib.Path | None = None,
         clock: Callable[[], float] = time.monotonic,
+        media_refs: AbstractMediaReferenceRepo | None = None,
     ) -> None:
         self._federation = federation_service
+        #: v_82: only a page's files that are the space's own ship.
+        self._media_refs = media_refs
         #: Where the replayed files live — their sizes bound a request.
         self._media_dir = media_dir
         self._clock = clock
@@ -313,7 +319,7 @@ class SpaceSyncResumeProvider:
         sent += await self._replay_task_deletes(space_id, since, to=instance_id)
         sent += await self._replay_tasks(space_id, since, to=instance_id)
         sent += await self._replay_page_deletes(space_id, since, to=instance_id)
-        sent += await self._replay_pages(space_id, since, to=instance_id)
+        sent += await self._replay_pages(space_id, since, to=instance_id, media=media)
         sent += await self._replay_stickies(space_id, since, to=instance_id)
         sent += await self._replay_calendar(
             space_id, since, to=instance_id, media=media
@@ -573,6 +579,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        media: list[tuple[str, list[str]]] | None = None,
     ) -> int:
         if self._page_repo is None:
             return 0
@@ -628,13 +635,34 @@ class SpaceSyncResumeProvider:
             payloads[page.id] = payload
             replayed.append(page)
         pages = replayed
-        return await self._send_each(
+        # v_82: the host's replay ships the pages' files too — on a
+        # receiver only the host fills the names a page shows.
+        ships_files = (
+            media is not None
+            and self._media_sync is not None
+            and space is not None
+            and space.owner_instance_id == self._federation.own_instance_id
+            and await self._federation.space_member_supports(
+                to, min_version=FederationCapability.MIN_FOR_PAGE_MEDIA
+            )
+        )
+        sent = await self._send_each(
             pages,
             FederationEventType.SPACE_PAGE_CREATED,
             lambda page: payloads[page.id],
             space_id=space_id,
             to=to,
         )
+        if ships_files and media is not None:
+            for page in pages:
+                urls = await space_own_files(
+                    self._media_refs,
+                    space_id,
+                    page_media_urls(page.cover_image_url, page.content),
+                )
+                if urls:
+                    media.append((page.id, urls))
+        return sent
 
     async def _replay_stickies(
         self,

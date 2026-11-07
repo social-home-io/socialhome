@@ -42,6 +42,9 @@ class _FakeFederation:
     async def peer_supports(self, instance_id, *, min_version):
         return self.versions.get(instance_id, 48) >= min_version
 
+    async def space_member_supports(self, instance_id, *, min_version):
+        return self.versions.get(instance_id, 48) >= min_version
+
     async def send_event(self, *, to_instance_id, event_type, payload, space_id=None):
         self.sent.append(
             {
@@ -1185,6 +1188,55 @@ async def test_a_replayed_rows_files_ship_from_the_replaying_household():
         ("sp-1", "p-0", ("peer-a",), ("api/media/sd-a.webp", "api/media/sd-b.webp")),
         ("sp-1", "ev-0", ("peer-a",), ("api/media/cover.webp",)),
     ]
+
+
+class _AllSpaceFiles:
+    async def confined_to_space(self, name, space_id):
+        return name != "elsewhere.webp"
+
+
+class _HostSpaceRepo(_FakeSpaceRepo):
+    async def get(self, space_id: str):
+        return SimpleNamespace(id=space_id, owner_instance_id="us")
+
+
+@pytest.mark.parametrize(
+    ("host", "version", "shipped"),
+    [("us", 82, True), ("us", 80, False), ("the-host", 82, False)],
+)
+async def test_the_hosts_page_replay_ships_its_files_to_v81(host, version, shipped):
+    """v_82: a replayed page's files (cover, body pictures) ship with it —
+    only from the space's host (on a receiver only it fills the names the
+    page shows), only to a household at v_82."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    at = (base + timedelta(minutes=1)).isoformat()
+    page = replace(
+        _page(0, at),
+        content="![a](api/media/a.webp) ![e](api/media/elsewhere.webp)",
+        cover_image_url="api/media/c.webp",
+        seq=2,
+    )
+    fed = _FakeFederation()
+    fed.own_instance_id = "us"
+    fed.versions["peer-a"] = version
+    outbox = _FakeMediaOutbox()
+    spaces = (_HostSpaceRepo if host == "us" else _FakeSpaceRepo)(["peer-a"])
+    provider = SpaceSyncResumeProvider(
+        federation_service=fed,
+        space_repo=spaces,
+        space_post_repo=_FakePostRepo(),
+        page_repo=_FakeListSinceRepo([page]),
+        media_sync=outbox,
+        media_refs=_AllSpaceFiles(),
+    )
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    assert [s["type"] for s in fed.sent] == [FederationEventType.SPACE_PAGE_CREATED]
+    expected = [
+        ("sp-1", page.id, ("peer-a",), ("api/media/c.webp", "api/media/a.webp"))
+    ]
+    assert outbox.rows == (expected if shipped else [])
 
 
 def _image_post(i: int, at: datetime, *names: str) -> Post:

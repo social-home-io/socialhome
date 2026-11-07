@@ -319,6 +319,29 @@ class SpaceMediaGfsUploader:
         channel uploads under the channel scope."""
         self._channels = channels
 
+    async def can_upload(self, space_id: str) -> bool:
+        """Whether this household holds an upload authorization for
+        *space_id*'s scope right now — the very one :meth:`_put` would sign
+        with (space authority, writer key or writer cert; for a private
+        space's channel, the channel key or this household's grant). A
+        link-joined proposer describes a page's files only when it does."""
+        scope, scope_id = await self.scope_of(space_id)
+        now = int(time.time())
+        claim = SpaceMediaClaim(
+            scope=scope,
+            scope_id=scope_id,
+            blob_id="0" * 64,
+            size=1,
+            expires_at=now + KEEP_S,
+            ts=now,
+        )
+        auth = (
+            await self._authorize_channel(claim, space_id)
+            if scope == SCOPE_CHANNEL
+            else await self._authorize(claim)
+        )
+        return auth is not None
+
     async def scope_of(self, space_id: str) -> tuple[str, str]:
         """``(scope, scope_id)`` *space_id*'s blobs are uploaded under: the
         opaque channel of a PRIVATE space that uses one (``private_gfs``),

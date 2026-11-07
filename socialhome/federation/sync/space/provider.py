@@ -34,8 +34,13 @@ from ....domain.federation_capabilities import FederationCapability
 from ....domain.space_media_ref import (
     MEDIA_REF_RESOURCES,
     MEDIA_REFS_FIELD,
+    PAGE_HISTORY_FILES,
+    STREAM_HISTORY_FILES,
+    page_media_urls,
+    recent_history_files,
     record_media_urls,
 )
+from ....services.space_media_names import space_own_files
 from .exporter import (
     RESOURCE_ORDER,
     BatchedExporter,
@@ -411,6 +416,9 @@ class SpaceSyncService:
         "_member_gate",
         "_own_members",
         "_owner_statement_for",
+        "_page_media_refs",
+        "_page_repo",
+        "_pages_hosted",
         "_roster_authority",
         "_roster_sent",
         "_sig_suite",
@@ -484,6 +492,11 @@ class SpaceSyncService:
         #: Space calendar events — their cover files ride the catch-up
         #: media too (the record carries only the reference).
         self._space_calendar_repo = space_calendar_repo
+        #: v_82 — space pages, whose files (cover, body pictures) ride the
+        #: catch-up media of the space's host (:meth:`attach_pages`).
+        self._page_repo = None
+        self._page_media_refs = None
+        self._pages_hosted: Callable[[str], Awaitable[bool]] | None = None
         #: Set by :meth:`attach_federation` after the federation
         #: service is constructed (resolves the chicken/egg between
         #: ``FederationService`` and ``SpaceSyncService``). Required
@@ -514,6 +527,33 @@ class SpaceSyncService:
         ``FederationCapability.MIN_FOR_SPACE_MEDIA_REFS`` (sync line 80)
         carry ``media_refs``."""
         self._media_gfs = media_gfs
+
+    def attach_pages(
+        self, page_repo, *, hosts: Callable[[str], Awaitable[bool]], media_refs
+    ) -> None:
+        """Wire the space pages (v_82): the host's catch-up ships each
+        page's files to a requester at v_82 — a page keeps the names the
+        host's version shows, which only the host fills on a receiver — and
+        a link-joined one gets them as the ``pages`` records' descriptor.
+        ``hosts(space_id)``: whether this household is the space's host.
+        Only the space's own files ship (``media_refs.confined_to_space``):
+        a page stored before v_82 may name a household file."""
+        self._page_repo = page_repo
+        self._pages_hosted = hosts
+        self._page_media_refs = media_refs
+
+    async def _takes_page_media(self, space_id: str, requester: str) -> bool:
+        """Whether *requester* gets the files of *space_id*'s pages from us:
+        we host the space, and it is at v_82 (unknown without federation)."""
+        if self._pages_hosted is None or not await self._pages_hosted(space_id):
+            return False
+        if self._federation is None:
+            return True
+        return bool(
+            await self._federation.space_member_supports(
+                requester, min_version=FederationCapability.MIN_FOR_PAGE_MEDIA
+            )
+        )
 
     def attach_roster_authority(
         self,
@@ -556,6 +596,12 @@ class SpaceSyncService:
             and resource in MEDIA_REF_RESOURCES
             and self._media_gfs is not None
             and await self._media_gfs.is_relay_reader(session.requester_instance_id)
+            and (
+                resource != "pages"
+                or await self._takes_page_media(
+                    session.space_id, session.requester_instance_id
+                )
+            )
         ):
             exporter = _WithMediaRefs(
                 exporter, self._media_gfs, session.requester_instance_id
@@ -1110,6 +1156,55 @@ class SpaceSyncService:
                     "sync-catchup-media: list calendar events failed for space=%s",
                     space_id,
                 )
+        # Page files — the host's catch-up only (v_82).
+        await self._enqueue_page_media(space_id, target_instance_id)
+
+    async def _enqueue_page_media(self, space_id: str, target_instance_id: str) -> None:
+        """v_82 — every live page's files, from the space's host only."""
+        if self._page_repo is None or not await self._takes_page_media(
+            space_id, target_instance_id
+        ):
+            return
+        try:
+            pages = await self._page_repo.list(space_id=space_id)
+        except sqlite3.Error:
+            log.exception(
+                "sync-catchup-media: list pages failed for space=%s", space_id
+            )
+            return
+        history_budget = STREAM_HISTORY_FILES
+        for page in pages:
+            # The version and its open sides (each bounded by the page cap),
+            # and its newest history files — at most PAGE_HISTORY_FILES per
+            # page and STREAM_HISTORY_FILES per stream. An older one comes
+            # back with the version that shows it again.
+            urls = page_media_urls(page.cover_image_url, page.content)
+            try:
+                for side in await self._page_repo.list_conflict_sides(
+                    page.id, space_id=space_id
+                ):
+                    urls.extend(page_media_urls(side.cover_image_url, side.content))
+                if history_budget > 0:
+                    versions = await self._page_repo.list_versions(
+                        page.id, space_id=space_id
+                    )
+                    history = recent_history_files(
+                        ((v.cover_image_url, v.content) for v in reversed(versions)),
+                        shown=urls,
+                        limit=min(PAGE_HISTORY_FILES, history_budget),
+                    )
+                    history_budget -= len(history)
+                    urls.extend(history)
+            except sqlite3.Error:
+                log.exception("sync-catchup-media: history of page %s failed", page.id)
+            await self._enqueue_media(
+                space_id,
+                target_instance_id,
+                page.id,
+                await space_own_files(
+                    self._page_media_refs, space_id, list(dict.fromkeys(urls))
+                ),
+            )
 
     def _calendar_pages(self, space_id: str):
         repo = self._space_calendar_repo

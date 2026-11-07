@@ -22,6 +22,7 @@ from socialhome.domain.gfs_space_media_on_demand import (
     MODE_STREAM,
     MediaRequestFrame,
 )
+from socialhome.domain.space_media_ref import space_page_media_name
 from socialhome.services import space_media_gfs_responder as mod
 from socialhome.services.inbound_media_store import (
     gfs_space_media_name,
@@ -526,3 +527,57 @@ async def test_one_locator_reseals_once_whatever_blob_ids_it_is_asked_for(tmp_pa
         await _ask(r, _frame(f"{n}" * 64))
     assert gfs.reasons == ["bad_hint"] * 6
     assert refs.asked == asked
+
+
+async def test_a_members_page_copy_is_served_for_a_channel(tmp_path):
+    """v_83 × v_82 — a private space's seated member keeps a page's file
+    under its page-scoped name (``sp-`` of space and the host's name); asked
+    for it over the channel, it re-seals that copy byte-identical."""
+    name = space_page_media_name(SPACE, "pagepic.webp")
+    data = _file(tmp_path, name)
+    blob, bid = _blob(
+        data,
+        origin=AUTHOR,
+        filename="pagepic.webp",
+        scope="channel",
+        scope_id=CHANNEL,
+    )
+    gfs = _Gfs()
+    r = _responder(tmp_path, gfs=gfs, spaces=_Spaces(channel=CHANNEL))
+    await _ask(
+        r,
+        _frame(
+            bid,
+            origin=AUTHOR,
+            filename="pagepic.webp",
+            scope="channel",
+            scope_id=CHANNEL,
+        ),
+    )
+    assert gfs.serves[0][2] == blob
+
+
+async def test_a_page_copy_the_live_page_no_longer_shows_is_declined(tmp_path):
+    name = space_page_media_name(SPACE, "pagepic.webp")
+    data = _file(tmp_path, name)
+    _b, bid = _blob(
+        data, origin=AUTHOR, filename="pagepic.webp", scope="channel", scope_id=CHANNEL
+    )
+    gfs = _Gfs()
+    r = _responder(
+        tmp_path,
+        gfs=gfs,
+        spaces=_Spaces(channel=CHANNEL),
+        refs=_MediaRefs(gone={name}),
+    )
+    await _ask(
+        r,
+        _frame(
+            bid,
+            origin=AUTHOR,
+            filename="pagepic.webp",
+            scope="channel",
+            scope_id=CHANNEL,
+        ),
+    )
+    assert gfs.reasons == ["not_held"]

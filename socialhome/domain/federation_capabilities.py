@@ -1304,6 +1304,28 @@ from __future__ import annotations
 #:   v_81 — and any failed POST — gets the JSON chunk as before; mesh
 #:   (``SPACE_ROUTED``) and GFS-relay targets stay JSON. Not space-scoped,
 #:   no sync stream change. Labelled "Lighter photo and file transfers".
+#: * **v_82** (2026-11-07) — **Pictures in a space's pages reach every
+#:   member**. A page's files are its cover and the ``api/media/`` pictures
+#:   its body shows (``page_media_urls``; at most ``MAX_PAGE_FILES`` = 16 per
+#:   version, for everyone). Pages are host-sequenced (v_48) and every
+#:   household keeps the host's version byte for byte, so a page keeps the
+#:   names the host chose — and on a MEMBER household those names never
+#:   address the shared store: a page's file ``N`` is kept page-scoped as
+#:   ``space_page_media_name(space, N)`` (``sp-``), mapped on read. A file a
+#:   member household adds (a page proposal or a reviewed item) takes that
+#:   household's ``sd-`` name on the host (the body rewritten to it; a file
+#:   the page, its history or an open side shows keeps its name); the
+#:   proposer ships it to the host alone. The host ships each version's new
+#:   files (new against its whole history) and its open sides' files to
+#:   every other v_82 member household (``SPACE_MEDIA_BLOB`` correlated by the
+#:   page — a member takes a page's file from the host only), and describes
+#:   the version and its sides to a link-joined v_82 member in one
+#:   ``media_refs`` (kept page-scoped). The §25.6 ``pages`` records carry the
+#:   descriptor and the host's catch-up ships every live page's files
+#:   (version, history, sides) — sync line 82. **Fallback**: a member
+#:   household below v_82 is sent no page file (its people see the page
+#:   without the pictures it does not hold); a host below v_82 is shipped
+#:   no proposal files. Labelled "Pictures in a space's pages".
 #: * **v_83** (2026-11-07) — **Older space pictures come back on view**
 #:   (space media on demand). A GFS keeps space blobs only as a cache (TTL,
 #:   LRU). A reader that misses one on view asks that GFS
@@ -1945,6 +1967,11 @@ class FederationCapability:
     #: media channel is open (:meth:`FederationService.send_media_chunk`).
     #: Below it: the JSON (base64) chunk on the inbox, as before.
     MIN_FOR_MEDIA_HTTPS = 81
+    #: v_82 — a page's files (cover + body pictures) ship with the host's
+    #: versions to member households at or above it (``SPACE_MEDIA_BLOB``,
+    #: and ``media_refs`` toward a link-joined member), and a proposer ships
+    #: a draft's new files to a host at or above it. Below it: no page file.
+    MIN_FOR_PAGE_MEDIA = 82
     #: v_83 — space media on demand: a reader asks a GFS for a blob it
     #: missed and a holder re-uploads or streams it on request. The
     #: household-side gate: a large video is uploaded lazily (only when
@@ -2262,6 +2289,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         "Lighter photo and file transfers",
     ),
     (
+        FederationCapability.MIN_FOR_PAGE_MEDIA,
+        "Pictures in a space's pages",
+    ),
+    (
         FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND,
         "Older space pictures come back on view",
     ),
@@ -2357,6 +2388,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT: "space_gallery_item_edits",
     FederationCapability.MIN_FOR_SPACE_MEDIA_REFS: "space_media_refs",
     FederationCapability.MIN_FOR_MEDIA_HTTPS: "lighter_media_transfers",
+    FederationCapability.MIN_FOR_PAGE_MEDIA: "space_page_media",
     FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND: "space_media_on_demand",
 }
 
@@ -2466,6 +2498,9 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # A behind link-joined member household gets no pictures through
         # the GFS media cache.
         FederationCapability.MIN_FOR_SPACE_MEDIA_REFS,
+        # A behind member household's people see the space's pages without
+        # the pictures another household added.
+        FederationCapability.MIN_FOR_PAGE_MEDIA,
     }
 )
 

@@ -989,6 +989,23 @@ async def test_no_plan_before_this_household_knows_its_own_id(tmp_path):
     )
 
 
+async def test_can_upload_answers_with_the_authorization_a_put_would_use(tmp_path):
+    """v_82: a link-joined proposer describes a page's files only when it
+    holds an upload authorization — the same one a PUT would sign with."""
+    gfs = _Gfs([])
+    assert await _uploader(tmp_path, gfs=gfs, seed=b"\x02" * 32).can_upload(SPACE)
+    key = _uploader(tmp_path, gfs=gfs, certs=_Certs(writer_key=b"\x03" * 32))
+    assert await key.can_upload(SPACE)
+    cert = _uploader(tmp_path, gfs=gfs, certs=_Certs(cert=_Cert(scope="write")))
+    assert await cert.can_upload(SPACE)
+    for nothing in (
+        _uploader(tmp_path, gfs=gfs),
+        _uploader(tmp_path, gfs=gfs, certs=_Certs()),
+        _uploader(tmp_path, gfs=gfs, certs=_Certs(cert=_Cert(scope="comment"))),
+    ):
+        assert not await nothing.can_upload(SPACE)
+
+
 # ── On demand (v_83): large videos are uploaded lazily ───────────────────
 
 

@@ -203,8 +203,6 @@
 
   "remote_invite.minutes_ago": "Very short relative time after 'last seen'. {n} = minutes.",
 
-  "space.icon.ha_logo": "Button / checkbox: makes the Home Assistant logo the space's picture. 'Home Assistant' is a product name — never translate it. Keep short (button).",
-  "space.icon.ha_logo_sub": "Hint under the checkbox: the logo picture is shown instead of the space's emoji.",
   "space.about.upload_failed": "Toast. {error} = technical error text.",
   "space.about.remove_failed": "Toast. {error} = technical error text.",
   "space.about.text_hint": "'Markdown' is a text-formatting syntax name — keep it as is.",
@@ -217,7 +215,9 @@
   "space.links.save_failed": "Toast. {error} = technical error text.",
   "space.links.remove_failed": "Toast. {error} = technical error text.",
   "space.age.no_restriction": "Option in the minimum-age picker; the other options are '13+', '16+', '18+'.",
-  "emoji_field.change_aria": "Screen-reader label. {emoji} = the chosen emoji.",
+  "emoji_field.change_aria": "Screen-reader label. {emoji} = the chosen emoji, or \"Home Assistant\" when the Home Assistant logo is the icon.",
+  "emoji_field.symbols": "Accessible name of the row above the emoji grid that holds ready-made symbols (today only the Home Assistant logo).",
+  "emoji_field.home_assistant": "The Home Assistant logo as a space icon choice. Product name: never translated.",
   "space.bots.intro": "'Home Assistant' is a product name — never translate. 'Token' = a secret key the user pastes into Home Assistant.",
   "space.bots.update_failed": "Toast. {error} = technical error text.",
   "space.bots.load_failed": "Toast. {error} = technical error text.",

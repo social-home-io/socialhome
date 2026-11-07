@@ -15,6 +15,7 @@ from socialhome.domain.media_constraints import (
     IMAGE_MAX_UPLOAD_BYTES,
     VIDEO_MAX_UPLOAD_BYTES,
 )
+from socialhome.domain.space_media_ref import space_page_media_name
 from socialhome.services import inbound_media_store as store
 
 
@@ -590,3 +591,14 @@ def test_a_gfs_space_media_name_is_reserved():
     assert store.space_media_ref("api/media/" + name) is None
     assert not store.is_gfs_space_media_name("abc.webp")
     assert not store.is_gfs_space_media_name("dm-" + "0" * 40 + ".webp")
+
+
+def test_a_page_scoped_name_is_reserved():
+    """v_82: only a page's own path writes these (a member's copy of a page
+    file from the host): a space item naming one, or a SPACE_MEDIA_BLOB for
+    one, is refused."""
+    name = space_page_media_name("sp-1", "abc.webp")
+    assert store.is_space_page_media_name(name)
+    assert store.is_reserved_media_name(name)
+    assert store.space_media_ref("api/media/" + name) is None
+    assert not store.is_space_page_media_name("abc.webp")

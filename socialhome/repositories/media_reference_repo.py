@@ -29,6 +29,9 @@ noted:
   * ``moments.media_url``
   * ``calendar_events.cover_url`` / ``space_calendar_events.cover_url``
   * ``pages`` / ``space_pages`` / ``page_edit_history`` ``.cover_image_url``
+    and every picture their markdown ``content`` shows (``api/media/<file>``,
+    never the same path inside another URL); an open conflict side's
+    ``space_page_snapshots.body``
   * ``task_attachments.url``
   * ``post_drafts.media_url``
   * ``feed_posts`` / ``space_posts`` ``.link_preview_json`` → ``$.thumbnail_url``
@@ -56,11 +59,31 @@ from typing import Protocol, runtime_checkable
 import orjson
 
 from ..db import AsyncDatabase
-from ..domain.media_constraints import SPACE_DIRECT_MEDIA_PREFIX
+from ..domain.media_constraints import (
+    SPACE_DIRECT_MEDIA_PREFIX,
+    SPACE_PAGE_MEDIA_PREFIX,
+)
+from ..domain.space_media_ref import page_body_media_refs, space_page_media_name
 from ..media.cleanup import media_basename
 from .base import rows_to_dicts
 
 log = logging.getLogger(__name__)
+
+#: A space page row whose raw names count here (v_82), decided from LOCAL
+#: state only: its space is hosted here (the names are our own files), or
+#: the row is our own draft (``pending_base_seq`` — only this household's
+#: own edit sets it). Every other column of a member's copy is the host's
+#: (creator, editor …), so on a member household a page's names keep only
+#: their page-scoped ``sp-`` copies alive
+#: (:meth:`SqliteMediaReferenceRepo._page_scoped_names`), never a shared
+#: file.
+_HOSTED_SPACE = (
+    "space_id IN (SELECT hs.id FROM spaces hs, instance_identity ii"
+    " WHERE hs.owner_instance_id = ii.instance_id)"
+)
+_SPACE_PAGE_HERE = f"({_HOSTED_SPACE} OR pending_base_seq IS NOT NULL)"
+_HISTORY_HERE = f"(space_id IS NULL OR {_HOSTED_SPACE})"
+_SNAPSHOT_HERE = _HOSTED_SPACE
 
 #: ``(table, column, live-row filter)`` for single-reference columns.
 _SINGLE_COLUMNS: tuple[tuple[str, str, str], ...] = (
@@ -76,8 +99,8 @@ _SINGLE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("calendar_events", "cover_url", ""),
     ("space_calendar_events", "cover_url", ""),
     ("pages", "cover_image_url", ""),
-    ("space_pages", "cover_image_url", ""),
-    ("page_edit_history", "cover_image_url", ""),
+    ("space_pages", "cover_image_url", _SPACE_PAGE_HERE),
+    ("page_edit_history", "cover_image_url", _HISTORY_HERE),
     ("task_attachments", "url", ""),
     ("post_drafts", "media_url", ""),
 )
@@ -111,6 +134,16 @@ _HELD_LIVE = (
 #: ``api/media/<file>`` inside a free-form JSON payload.
 _PAYLOAD_SCANS: tuple[tuple[str, str, str], ...] = (
     ("space_moderation_queue", "payload_json", _HELD_LIVE),
+    # An open conflict side of a space page (its body, JSON-encoded).
+    ("space_page_snapshots", "body", _SNAPSHOT_HERE),
+)
+
+#: ``(table, markdown column)`` whose pictures (:func:`page_body_media_refs`)
+#: are references: a page's body, and each version in its history.
+_MARKDOWN_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("pages", "content", ""),
+    ("space_pages", "content", _SPACE_PAGE_HERE),
+    ("page_edit_history", "content", _HISTORY_HERE),
 )
 _MEDIA_REF_RE = re.compile(r"api/media/([A-Za-z0-9._-]+)")
 
@@ -137,6 +170,16 @@ _SEAT = (
     "EXISTS (SELECT 1 FROM space_members sm WHERE sm.space_id = {col}"
     " AND sm.user_id = me.uid)"
 )
+#: A space page's names are its host's choice (v_82). On the host they are
+#: its own files; on a member household they never name the shared store —
+#: the page's files live there under page-scoped ``sp-`` names — so a page
+#: grants a seat access to a shared file only on the space's host.
+_HOSTED_SEAT = (
+    _SEAT.format(col="t.space_id")
+    + " AND EXISTS (SELECT 1 FROM spaces hs, instance_identity ii"
+    " WHERE hs.id = t.space_id AND hs.owner_instance_id = ii.instance_id)"
+)
+
 _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     (
         "conversation_messages",
@@ -181,14 +224,20 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ("calendar_events", "cover_url", "one", _HOUSEHOLD),
     ("space_calendar_events", "cover_url", "one", _SEAT.format(col="t.space_id")),
     ("pages", "cover_image_url", "one", _HOUSEHOLD),
-    ("space_pages", "cover_image_url", "one", _SEAT.format(col="t.space_id")),
+    ("pages", "content", "markdown", _HOUSEHOLD),
+    ("space_pages", "cover_image_url", "one", _HOSTED_SEAT),
+    ("space_pages", "content", "markdown", _HOSTED_SEAT),
     (
         "page_edit_history",
         "cover_image_url",
         "one",
-        f"((t.space_id IS NULL AND {_HOUSEHOLD}) OR "
-        + _SEAT.format(col="t.space_id")
-        + ")",
+        f"((t.space_id IS NULL AND {_HOUSEHOLD}) OR {_HOSTED_SEAT})",
+    ),
+    (
+        "page_edit_history",
+        "content",
+        "markdown",
+        f"((t.space_id IS NULL AND {_HOUSEHOLD}) OR {_HOSTED_SEAT})",
     ),
     ("task_attachments", "url", "one", "t.uploaded_by = me.uid"),
     ("post_drafts", "media_url", "one", "t.username = me.uname"),
@@ -255,6 +304,8 @@ _LIVE_SPACE_SOURCES: tuple[tuple[str, str, str, str], ...] = (
         "one",
         "t.space_id = ? AND t.deleted_at IS NULL",
     ),
+    # v_82 — every picture a live page's body shows.
+    ("space_pages", "content", "markdown", "t.space_id = ? AND t.deleted_at IS NULL"),
 )
 
 #: The space each :data:`_ACCESS_SOURCES` table's row belongs to (an SQL
@@ -295,6 +346,26 @@ def _names_in_payload(raw: object) -> set[str]:
     if not isinstance(raw, str) or not raw:
         return set()
     return {name for name in _MEDIA_REF_RE.findall(raw) if name not in (".", "..")}
+
+
+def _names_in_markdown(raw: object) -> set[str]:
+    """The files a page body shows (:func:`page_body_media_refs`)."""
+    return {
+        name
+        for name in (media_basename(ref) for ref in page_body_media_refs(raw))
+        if name and name not in (".", "..")
+    }
+
+
+def _hit(shape: str, raw: object, basename: str) -> bool:
+    """Does the value *raw* of a column of *shape* reference *basename*?"""
+    if shape == "list":
+        return basename in _names_in_list(raw)
+    if shape == "payload":
+        return basename in _names_in_payload(raw)
+    if shape == "markdown":
+        return basename in _names_in_markdown(raw)
+    return media_basename(raw if isinstance(raw, str) else None) == basename
 
 
 def _like_escape(value: str) -> str:
@@ -381,11 +452,49 @@ class SqliteMediaReferenceRepo:
                 if name:
                     out.add(name)
         for table, col, live in _PAYLOAD_SCANS:
+            where = f"{col} IS NOT NULL" + (f" AND {live}" if live else "")
             rows = await self._db.fetchall(
-                f"SELECT {col} AS v FROM {table} WHERE {col} IS NOT NULL AND {live}"
+                f"SELECT {col} AS v FROM {table} WHERE {where}"
             )
             for r in rows_to_dicts(rows):
                 out.update(_names_in_payload(r.get("v")))
+        for table, col, live in _MARKDOWN_COLUMNS:
+            where = f"{col} LIKE '%api/media/%'" + (f" AND {live}" if live else "")
+            rows = await self._db.fetchall(
+                f"SELECT {col} AS v FROM {table} WHERE {where}"
+            )
+            for r in rows_to_dicts(rows):
+                out.update(_names_in_markdown(r.get("v")))
+        out.update(await self._page_scoped_names())
+        return out
+
+    async def _page_scoped_names(self) -> set[str]:
+        """Every ``sp-`` name a space page, a version in its history or an
+        open side shows here (v_82: a member household keeps a page's files
+        under ``space_page_media_name(space, file)``)."""
+        out: set[str] = set()
+        for table, cols in (
+            ("space_pages", ("cover_image_url", "content")),
+            ("page_edit_history", ("cover_image_url", "content")),
+            ("space_page_snapshots", ("body",)),
+        ):
+            rows = await self._db.fetchall(
+                f"SELECT space_id AS s, {', '.join(cols)} FROM {table}"
+                " WHERE space_id IS NOT NULL"
+            )
+            for r in rows_to_dicts(rows):
+                names: set[str] = set()
+                for col in cols:
+                    raw = r.get(col)
+                    if col == "cover_image_url":
+                        name = media_basename(raw if isinstance(raw, str) else None)
+                        if name:
+                            names.add(name)
+                    elif col == "body":
+                        names |= _names_in_payload(raw)
+                    else:
+                        names |= _names_in_markdown(raw)
+                out.update(space_page_media_name(str(r["s"]), n) for n in names)
         return out
 
     async def may_reference(self, basename: str, user_id: str) -> bool:
@@ -420,14 +529,7 @@ class SqliteMediaReferenceRepo:
                 (*me, pattern),
             )
             for r in rows_to_dicts(rows):
-                raw = r.get("v")
-                if shape == "list":
-                    hit = basename in _names_in_list(raw)
-                elif shape == "payload":
-                    hit = basename in _names_in_payload(raw)
-                else:
-                    hit = media_basename(raw) == basename
-                if hit:
+                if _hit(shape, r.get("v"), basename):
                     referenced = True
                     allowed = allowed or bool(r.get("ok"))
             if allowed:
@@ -468,6 +570,10 @@ class SqliteMediaReferenceRepo:
         the page, and those references outside the space are ignored."""
         if not basename or not space_id:
             return False
+        if basename.startswith(SPACE_PAGE_MEDIA_PREFIX):
+            # A member's page-scoped copy (v_82): bound to its space by its
+            # name, so it is this space's iff a page row of it shows the file.
+            return basename in await self._page_names_of(space_id, live=False)
         referenced = False
         rows = await self._db.fetchall(
             "SELECT a.space_id AS s FROM gallery_items i"
@@ -493,14 +599,7 @@ class SqliteMediaReferenceRepo:
                 (pattern,),
             )
             for r in rows_to_dicts(rows):
-                raw = r.get("v")
-                if shape == "list":
-                    hit = basename in _names_in_list(raw)
-                elif shape == "payload":
-                    hit = basename in _names_in_payload(raw)
-                else:
-                    hit = media_basename(raw) == basename
-                if not hit:
+                if not _hit(shape, r.get("v"), basename):
                     continue
                 if r.get("s") != space_id:
                     if col == "link_preview_json":
@@ -521,9 +620,13 @@ class SqliteMediaReferenceRepo:
         or space-album item not deleted — never only a moderation queue
         entry or a page's edit history. On demand (v_83) a household sends
         a file only when this holds as well as :meth:`confined_to_space`,
-        so a deleted item's picture is never sent again."""
+        so a deleted item's picture is never sent again. A member's
+        page-scoped ``sp-`` copy is live iff the space's live page shows the
+        file (v_82)."""
         if not basename or not space_id:
             return False
+        if basename.startswith(SPACE_PAGE_MEDIA_PREFIX):
+            return basename in await self._page_names_of(space_id, live=True)
         rows = await self._db.fetchall(
             "SELECT 1 FROM gallery_items i JOIN gallery_albums a ON a.id = i.album_id"
             " WHERE a.space_id = ? AND i.deleted_at IS NULL"
@@ -545,16 +648,50 @@ class SqliteMediaReferenceRepo:
                 (space_id, pattern),
             )
             for r in rows_to_dicts(rows):
-                raw = r.get("v")
-                if shape == "list":
-                    hit = basename in _names_in_list(raw)
-                else:
-                    hit = media_basename(raw) == basename
-                if hit:
+                if _hit(shape, r.get("v"), basename):
                     return True
         return False
 
+    async def _page_names_of(self, space_id: str, *, live: bool) -> set[str]:
+        """The page-scoped ``sp-`` names of the files *space_id*'s pages
+        show — the live pages only (*live*), else every page row of it (its
+        pages, their history, open sides)."""
+        sources: tuple[tuple[str, tuple[str, ...], str], ...] = (
+            ("space_pages", ("cover_image_url", "content"), " AND deleted_at IS NULL"),
+        )
+        if not live:
+            sources = (
+                ("space_pages", ("cover_image_url", "content"), ""),
+                ("page_edit_history", ("cover_image_url", "content"), ""),
+                ("space_page_snapshots", ("body",), ""),
+            )
+        names: set[str] = set()
+        for table, cols, extra in sources:
+            rows = await self._db.fetchall(
+                f"SELECT {', '.join(cols)} FROM {table} WHERE space_id = ?{extra}",
+                (space_id,),
+            )
+            for r in rows_to_dicts(rows):
+                for col in cols:
+                    raw = r.get(col)
+                    if col == "cover_image_url":
+                        name = media_basename(raw if isinstance(raw, str) else None)
+                        if name:
+                            names.add(name)
+                    elif col == "body":
+                        names |= _names_in_payload(raw)
+                    else:
+                        names |= _names_in_markdown(raw)
+        return {space_page_media_name(space_id, n) for n in names}
+
     async def is_referenced(self, basename: str) -> bool:
+        """``True`` when any row still points at the file ``basename``
+        (a page-scoped ``sp-`` name: when a space page here shows its file)."""
+        if basename.startswith(SPACE_PAGE_MEDIA_PREFIX):
+            return basename in await self._page_scoped_names()
+        return await self._is_referenced(basename)
+
+    async def _is_referenced(self, basename: str) -> bool:
         """``True`` when any row still points at the file ``basename``.
 
         A ``LIKE`` pre-filter narrows each column to candidate rows; the
@@ -587,11 +724,17 @@ class SqliteMediaReferenceRepo:
             if any(media_basename(r["v"]) == basename for r in rows):
                 return True
         for table, col, live in _PAYLOAD_SCANS:
+            where = f"{col} LIKE ? ESCAPE '\\'" + (f" AND {live}" if live else "")
             rows = await self._db.fetchall(
-                f"SELECT {col} AS v FROM {table} "
-                f"WHERE {col} LIKE ? ESCAPE '\\' AND {live}",
-                (pattern,),
+                f"SELECT {col} AS v FROM {table} WHERE {where}", (pattern,)
             )
             if any(basename in _names_in_payload(r["v"]) for r in rows):
+                return True
+        for table, col, live in _MARKDOWN_COLUMNS:
+            where = f"{col} LIKE ? ESCAPE '\\'" + (f" AND {live}" if live else "")
+            rows = await self._db.fetchall(
+                f"SELECT {col} AS v FROM {table} WHERE {where}", (pattern,)
+            )
+            if any(basename in _names_in_markdown(r["v"]) for r in rows):
                 return True
         return False

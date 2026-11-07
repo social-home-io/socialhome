@@ -10,9 +10,12 @@ from dataclasses import dataclass
 
 from socialhome.domain.federation import InstanceSource
 from socialhome.domain.gfs_space_media import space_media_address
-from socialhome.domain.space_media_ref import SpaceMediaRef
+from socialhome.domain.space_media_ref import SpaceMediaRef, space_page_media_name
 from socialhome.services import space_media_gfs_fetcher as fetch_mod
-from socialhome.services.inbound_media_store import gfs_space_media_name
+from socialhome.services.inbound_media_store import (
+    gfs_space_media_name,
+    space_direct_media_name,
+)
 from socialhome.services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 from socialhome.space_media_hint import open_space_media_hint, parse_hint_wire
 from socialhome.space_media_seal import (
@@ -900,6 +903,179 @@ async def test_has_item_refs(tmp_path):
     await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
     assert await f.has_item_refs(SPACE, ITEM) is True
     assert await f.has_item_refs(SPACE, "post-9") is False
+
+
+# ── v_82: a page's files, page-scoped on a reader ───────────────────────
+
+PAGE = "pg-1"
+SHOWN = "sd-" + "1" * 40 + ".webp"
+
+
+def _sp(name: str) -> str:
+    return space_page_media_name(SPACE, name)
+
+
+@dataclass
+class _Page:
+    content: str
+    cover_image_url: str | None = None
+
+
+class _Pages:
+    def __init__(self) -> None:
+        self.pages: dict[tuple[str, str], _Page] = {}
+        self.sides: dict[tuple[str, str], list[_Page]] = {}
+
+    async def get_space_page(self, page_id, *, space_id):
+        return self.pages.get((space_id, page_id))
+
+    async def list_conflict_sides(self, page_id, *, space_id):
+        return list(self.sides.get((space_id, page_id), ()))
+
+
+def _page_fetcher(tmp_path, gfs):
+    f = _fetcher(tmp_path, gfs)
+    pages = _Pages()
+    f.attach_pages(pages)
+    return f, pages
+
+
+async def _keep_page(f, raw, urls):
+    loc = f.localize_as_shown(SPACE, raw, urls, item_id=PAGE, origin=ORIGIN)
+    return await f.keep(loc, prefetch=False)
+
+
+async def test_a_pages_files_are_kept_page_scoped_and_fetched(tmp_path):
+    """A page is the host's version byte for byte; its files are kept under
+    page-scoped names (never the shared name the page shows) and fetched
+    while the page — or an open side — shows them."""
+    data = b"page picture"
+    blob = _blob(SHOWN, data, item_id=PAGE)
+    side = _blob("s.webp", b"side picture", item_id=PAGE)
+    gfs = _Gfs({_addr(blob): blob, _addr(side): side})
+    f, pages = _page_fetcher(tmp_path, gfs)
+    pages.pages[(SPACE, PAGE)] = _Page(content="", cover_image_url=f"api/media/{SHOWN}")
+    pages.sides[(SPACE, PAGE)] = [_Page(content="![s](api/media/s.webp)")]
+    rows = await _keep_page(
+        f,
+        {**_wire(SHOWN, blob), **_wire("s.webp", side)},
+        [f"api/media/{SHOWN}", "api/media/s.webp"],
+    )
+    assert {(r.local_name, r.filename, r.item_id) for r in rows} == {
+        (_sp(SHOWN), SHOWN, PAGE),
+        (_sp("s.webp"), "s.webp", PAGE),
+    }
+    assert await f.ensure_local(_sp(SHOWN)) is True
+    assert await f.ensure_local(_sp("s.webp")) is True
+    assert (tmp_path / _sp(SHOWN)).read_bytes() == data
+    assert not (tmp_path / SHOWN).exists()  # never the shared name
+    assert await f.ensure_local(SHOWN) is False
+
+
+async def test_a_page_file_its_page_no_longer_shows_is_never_fetched(tmp_path):
+    blob = _blob(SHOWN, b"x", item_id=PAGE)
+    gfs = _Gfs({_addr(blob): blob})
+    f, pages = _page_fetcher(tmp_path, gfs)
+    await _keep_page(f, _wire(SHOWN, blob), [f"api/media/{SHOWN}"])
+    assert await f.ensure_local(_sp(SHOWN)) is False
+    pages.pages[(SPACE, PAGE)] = _Page(content="no pictures")
+    assert await f.ensure_local(_sp(SHOWN)) is False
+    assert gfs.fetches == []
+
+
+async def test_a_page_descriptor_never_names_a_reserved_or_unshown_file(tmp_path):
+    blob = _blob("dm-x.webp", b"x", item_id=PAGE)
+    f, _pages = _page_fetcher(tmp_path, _Gfs({_addr(blob): blob}))
+    rows = await _keep_page(
+        f,
+        {**_wire("dm-x.webp", blob), **_wire("other.webp", blob)},
+        ["api/media/dm-x.webp"],
+    )
+    assert rows == []
+
+
+async def test_without_pages_attached_nothing_page_scoped_is_kept(tmp_path):
+    blob = _blob(SHOWN, b"x", item_id=PAGE)
+    f = _fetcher(tmp_path, _Gfs({_addr(blob): blob}))
+    loc = f.localize_as_shown(
+        SPACE, _wire(SHOWN, blob), [f"api/media/{SHOWN}"], item_id=PAGE, origin=ORIGIN
+    )
+    assert loc.refs == ()
+    assert await f.ensure_local(_sp(SHOWN)) is False
+
+
+# ── v_82: a link-joined proposer's page files, fetched by the host ───────
+
+PROPOSER = "hh-e"
+
+
+def _sd(name: str, origin: str = PROPOSER) -> str:
+    return space_direct_media_name(SPACE, origin, name)
+
+
+async def test_the_host_fetches_a_proposers_file_under_its_sender_bound_name(
+    tmp_path,
+):
+    """A link-joined proposer can't push bytes to the host: it describes
+    its new files, and the host fetches each under the proposer's own
+    ``sd-`` name — the one the renamed page shows, which nobody else can
+    fill. The blob's AAD names the page and the proposer."""
+    data = b"new picture"
+    blob = _blob("n.webp", data, item_id=PAGE, origin=PROPOSER)
+    gfs = _Gfs({_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs)
+    loc = f.localize_proposal(
+        SPACE,
+        _wire("n.webp", blob),
+        {"n.webp": _sd("n.webp")},
+        item_id=PAGE,
+        origin=PROPOSER,
+    )
+    rows = await f.keep(loc, prefetch=False)
+    assert [(r.local_name, r.filename, r.origin) for r in rows] == [
+        (_sd("n.webp"), "n.webp", PROPOSER)
+    ]
+    assert await f.ensure_local(_sd("n.webp")) is True
+    assert (tmp_path / _sd("n.webp")).read_bytes() == data
+
+
+async def test_a_proposal_descriptor_never_names_another_households_file(tmp_path):
+    """Only the files the proposal ADDS are described — each under the
+    name bound to the proposer. A descriptor entry for a file the page
+    already shows (another household's ``sd-`` file) or for a name not
+    bound to the proposer is dropped, never fetched."""
+    theirs = space_direct_media_name(SPACE, "hh-b", "f.webp")
+    blob = _blob(theirs, b"planted", item_id=PAGE, origin=PROPOSER)
+    f = _fetcher(tmp_path, _Gfs({_addr(blob): blob}))
+    loc = f.localize_proposal(
+        SPACE,
+        {**_wire(theirs, blob), **_wire("n.webp", blob)},
+        {"n.webp": theirs},  # a local name not bound to the proposer
+        item_id=PAGE,
+        origin=PROPOSER,
+    )
+    assert loc.refs == ()
+    assert await f.ensure_local(theirs) is False
+    assert not (tmp_path / theirs).exists()
+
+
+async def test_a_blob_sealed_by_another_household_is_refused(tmp_path, caplog):
+    """A forged descriptor: the blob at the address was sealed for another
+    household (or page) — the AAD fails, nothing is written."""
+    blob = _blob("n.webp", b"x", item_id=PAGE, origin="hh-mallory")
+    f = _fetcher(tmp_path, _Gfs({_addr(blob): blob}))
+    loc = f.localize_proposal(
+        SPACE,
+        _wire("n.webp", blob),
+        {"n.webp": _sd("n.webp")},
+        item_id=PAGE,
+        origin=PROPOSER,
+    )
+    await f.keep(loc, prefetch=False)
+    with caplog.at_level("WARNING"):
+        assert await f.ensure_local(_sd("n.webp")) is False
+    assert not (tmp_path / _sd("n.webp")).exists()
+    assert "cannot decrypt" in caplog.text
 
 
 # ── On demand (v_83): a view that misses asks the GFS ────────────────────

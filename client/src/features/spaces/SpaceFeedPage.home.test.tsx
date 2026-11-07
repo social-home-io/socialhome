@@ -127,6 +127,32 @@ describe('the hero', () => {
   }, 20000)
 })
 
+describe('the top bar', () => {
+  it("names the space and sets its picture as the glyph; the tab title keeps a real emoji", async () => {
+    wire('member', { icon_url: '/api/media/ic.webp?sig=x' })
+    const { tl } = await open()
+    const { pageTitle, pageTitleGlyph } = await import('@/store/pageTitle')
+    await tl.waitFor(() => expect(pageTitle.value).toBe('Neighbourhood Garden'))
+    expect(pageTitleGlyph.value).toEqual({
+      iconUrl: '/api/media/ic.webp?sig=x', emoji: '🥕', name: 'Neighbourhood Garden',
+    })
+    expect(document.title).toBe('🥕 Neighbourhood Garden · Social Home')
+  }, 20000)
+
+  it('the Home Assistant symbol never reaches the tab title', async () => {
+    const { HA_SPACE_SYMBOL } = await import('./spaceGlyph')
+    wire('member', { emoji: HA_SPACE_SYMBOL, icon_url: null })
+    const { tl, r } = await open()
+    const { pageTitle, pageTitleGlyph } = await import('@/store/pageTitle')
+    await tl.waitFor(() => expect(pageTitle.value).toBe('Neighbourhood Garden'))
+    expect(pageTitleGlyph.value?.emoji).toBe(HA_SPACE_SYMBOL)
+    expect(document.title).toBe('Neighbourhood Garden · Social Home')
+    expect(document.title).not.toContain('\uFE0E')
+    r.unmount()
+    await tl.waitFor(() => expect(pageTitleGlyph.value).toBeNull())
+  }, 20000)
+})
+
 describe('Needs you', () => {
   const attention = {
     pending_review: 2, reports: 0, join_requests: 1,

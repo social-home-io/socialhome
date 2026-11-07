@@ -27,6 +27,7 @@ from socialhome.app import (
     _build_gfs_route_resolver,
     _build_link_previews,
     _build_middleware,
+    _build_page_files_reach_host,
     create_app,
     dispatch_gfs_relay_frame,
 )
@@ -939,3 +940,36 @@ async def test_gfs_picture_proxy_limit_stays_household_wide(tmp_path):
     for i in range(300):
         assert await _signed_get(rate_mw, path, f"10.0.{i // 250}.{i % 250}") == 200
     assert await _signed_get(rate_mw, path, "10.9.9.9") == 429
+
+
+async def test_page_files_reach_the_host_unless_a_link_seat_lacks_upload_rights():
+    """v_82: only a household seated from an invite link (the host is a GFS
+    relay reader to it) needs a GFS upload authorization to hand a page's
+    new files over; the host itself and paired / mesh members always can."""
+    from socialhome.services.page_conflict_service import PageMode
+
+    class _Conflicts:
+        def __init__(self, mode):
+            self.mode_ = mode
+
+        async def mode(self, space_id):
+            return self.mode_, "host"
+
+    class _Uploader:
+        def __init__(self, reader, can):
+            self.reader, self.can = reader, can
+
+        async def is_relay_reader(self, iid):
+            return self.reader
+
+        async def can_upload(self, space_id):
+            return self.can
+
+    async def _check(mode, reader, can):
+        reach = _build_page_files_reach_host(_Conflicts(mode), _Uploader(reader, can))
+        return await reach("sp")
+
+    assert await _check(PageMode.HOST, True, False)
+    assert await _check(PageMode.MEMBER, False, False)
+    assert await _check(PageMode.MEMBER, True, True)
+    assert not await _check(PageMode.MEMBER, True, False)

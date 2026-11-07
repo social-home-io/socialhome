@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from socialhome.db.database import AsyncDatabase
@@ -17,6 +19,7 @@ from socialhome.domain.space import (
     ModerationTargetGoneError,
     SpacePermissionError,
 )
+from socialhome.domain.space_media_ref import MAX_PAGE_FILES, space_page_media_name
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.page_repo import SqlitePageRepo
@@ -26,6 +29,7 @@ from socialhome.services.media_ref_guard import MediaRefGuard
 from socialhome.services.page_conflict_service import (
     NoActiveConflictError,
     PageConflictService,
+    PageMode,
 )
 from socialhome.services.space_moderation_service import SpaceModerationService
 from socialhome.services.space_page_service import (
@@ -318,6 +322,62 @@ async def test_a_reviewed_pages_cover_and_pictures_are_released(env):
     [page] = await env.svc.list("sp-a")
     assert page.cover_image_url == "api/media/page-cover.webp"
     assert "api/media/in-page.webp" in page.content
+
+
+async def test_an_edit_rechecks_only_the_files_the_page_does_not_show(env):
+    """An edit repeats the pictures the page shows already (a body patch
+    carries the whole body): those are the page's own, re-published to the
+    same space — only a file the edit adds is checked for its writer. A
+    remote member's reviewed edit keeping another member's picture is
+    released (a held item naming it is someone else's)."""
+    mod = await _moderated(env)
+    guard = MediaRefGuard(SqliteMediaReferenceRepo(env.db))
+    page = await env.svc.create(
+        "sp-a",
+        actor_user_id="u-owner",
+        title="T",
+        content="![k](api/media/kept.webp)",
+        cover_image_url="api/media/cover.webp",
+    )
+    env.svc.attach_media_guard(guard)
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?, ?, ?)",
+        ("mia", "u-member", "Mia"),
+    )
+    # Another submitter's held item names the page's picture too.
+    await env.db.enqueue(
+        "INSERT INTO space_moderation_queue(id, space_id, feature, action,"
+        " submitted_by, payload_json, submitted_at, expires_at, status)"
+        " VALUES('other', 'sp-a', 'posts', 'create', 'u-x',"
+        " '{\"media_url\": \"api/media/kept.webp\"}', datetime('now'),"
+        " datetime('now', '+1 day'), 'pending')"
+    )
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await env.svc.update(
+            "sp-a",
+            page.id,
+            actor_user_id="u-member",
+            content="![k](api/media/kept.webp) ![n](api/media/new.webp)",
+            cover_image_url="api/media/cover.webp",
+        )
+    await mod.approve("sp-a", exc.value.item.id, actor_user_id="u-mod")
+    got = await env.svc.get("sp-a", page.id)
+    assert "api/media/new.webp" in got.content
+    # A file another row shows that the page does not is still refused.
+    await env.db.enqueue(
+        "INSERT INTO space_moderation_queue(id, space_id, feature, action,"
+        " submitted_by, payload_json, submitted_at, expires_at, status)"
+        " VALUES('other2', 'sp-a', 'posts', 'create', 'u-x',"
+        " '{\"media_url\": \"api/media/theirs.webp\"}', datetime('now'),"
+        " datetime('now', '+1 day'), 'pending')"
+    )
+    with pytest.raises(InvalidMediaRefError):
+        await env.svc.update(
+            "sp-a",
+            page.id,
+            actor_user_id="u-owner",
+            content="![t](api/media/theirs.webp)",
+        )
 
 
 async def test_moderated_own_edit_proceeds_others_queues(env):
@@ -627,3 +687,289 @@ async def test_page_cover_must_be_local_media(env):
         "sp-a", page.id, actor_user_id="u-member", cover_image_url=None
     )
     assert cleared.cover_image_url is None
+
+
+# ── v_82: a page's files on a member household ──────────────────────────
+
+
+def _as_member(env, monkeypatch) -> None:
+    async def _mode(space_id):
+        return PageMode.MEMBER, "host-x"
+
+    monkeypatch.setattr(PageConflictService, "mode", lambda self, sid: _mode(sid))
+
+
+async def _page_by(env, author: str, content: str, cover: str | None = None):
+    """A space page row as a host version would store it (written by
+    *author*), straight into the repo."""
+    page = await env.svc.create("sp-a", actor_user_id="u-owner", title="T", content="x")
+    await env.db.enqueue(
+        "UPDATE space_pages SET content=?, cover_image_url=?, created_by=?,"
+        " last_editor_user_id=? WHERE id=?",
+        (content, cover, author, author, page.id),
+    )
+    return await env.svc.get("sp-a", page.id)
+
+
+async def test_a_member_shows_a_pages_files_as_its_page_scoped_copies(
+    env, monkeypatch, tmp_path
+):
+    """A page keeps its host's names byte for byte; a member shows each as
+    its page-scoped copy — never the shared file of that name (another
+    space's, a household file). The host shows its names as they are."""
+    page = await _page_by(
+        env,
+        "u-remote",
+        "![a](api/media/a.webp) ![b](/api/media/b.webp)",
+        "api/media/c.webp",
+    )
+    assert await env.svc.media_view(page) == page  # the host
+    _as_member(env, monkeypatch)
+    env.svc._media_dir = tmp_path
+    (tmp_path / "a.webp").write_bytes(b"a household file")  # never shown
+    shown = await env.svc.media_view(page)
+    sp = {n: space_page_media_name("sp-a", n) for n in ("a.webp", "b.webp", "c.webp")}
+    assert shown.content == (
+        f"![a](api/media/{sp['a.webp']}) ![b](/api/media/{sp['b.webp']})"
+    )
+    assert shown.cover_image_url == f"api/media/{sp['c.webp']}"
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        "./api/media/dm-x.webp",
+        "x/api/media/f.webp",
+        "%2Fapi/media/f.webp",
+        "https://evil.example/api/media/f.webp",
+        "api/media/dm-x.webp",
+        "/api/media/gm-x.webp",
+    ],
+)
+async def test_a_member_never_signs_a_shared_file_inside_a_page(
+    env, monkeypatch, tmp_path, link
+):
+    """Review finding 1 (HIGH): the signer, the guard and the page rename
+    share ONE pattern, so every link the signer would sign in a page is one
+    the page maps to its page-scoped copy; a reserved name is stripped. A
+    path inside another URL or path is never signed at all. No signed URL to
+    the shared store ever leaves a member household's page."""
+    from socialhome.media_signer import MediaUrlSigner, sign_media_urls_in_markdown
+
+    page = await _page_by(env, "u-remote", f"![x]({link})")
+    _as_member(env, monkeypatch)
+    env.svc._media_dir = tmp_path
+    for name in ("dm-x.webp", "gm-x.webp", "f.webp"):
+        (tmp_path / name).write_bytes(b"shared")
+    shown = await env.svc.media_view(page)
+    signed = sign_media_urls_in_markdown(shown.content, MediaUrlSigner(b"k" * 32))
+    for name in ("dm-x.webp", "gm-x.webp", "f.webp"):
+        assert f"{name}?exp=" not in signed, signed
+
+
+async def test_only_our_own_drafts_new_files_keep_their_names(
+    env, monkeypatch, tmp_path
+):
+    """Final review finding 1: "our own file" is decided from LOCAL state
+    only — a file our own draft of this page ADDS (``pending_base_seq`` and
+    the draft's base are written only by this household) keeps its name
+    while no page-scoped copy exists. Fields the host's version carries
+    (creator, last editor) never count: a host naming one of our users as
+    editor and linking a plain shared file gets it neither resolved nor
+    signed. A file the draft's base (the host's version) shows maps too."""
+    from socialhome.domain.page_version import DraftBase
+    from socialhome.media_signer import MediaUrlSigner, sign_media_urls_in_markdown
+
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES('o', 'u-owner', 'O')"
+    )
+    # The host claims our user wrote it, and links a plain file of ours.
+    forged = await _page_by(env, "u-owner", "![p](api/media/private.webp)")
+    assert forged.pending_base_seq is None
+    _as_member(env, monkeypatch)
+    env.svc._media_dir = tmp_path
+    for name in ("mine.webp", "private.webp"):
+        (tmp_path / name).write_bytes(b"a file of ours")
+    shown = await env.svc.media_view(forged)
+    sp_private = space_page_media_name("sp-a", "private.webp")
+    assert shown.content == f"![p](api/media/{sp_private})"
+    signed = sign_media_urls_in_markdown(shown.content, MediaUrlSigner(b"k" * 32))
+    assert "private.webp?exp=" not in signed
+    # Our own draft: the file it adds keeps its name; the base's doesn't.
+    draft = replace(
+        forged,
+        content="![p](api/media/private.webp) ![m](api/media/mine.webp)",
+        pending_base_seq=forged.seq,
+    )
+    await env.pages.set_draft_base(
+        forged.id,
+        space_id="sp-a",
+        base=DraftBase(
+            title="T", content="![p](api/media/private.webp)", seq=forged.seq, by="u"
+        ),
+    )
+    shown = await env.svc.media_view(draft)
+    assert shown.content == (f"![p](api/media/{sp_private}) ![m](api/media/mine.webp)")
+    # Once the host's copy arrived, the page-scoped copy wins.
+    (tmp_path / space_page_media_name("sp-a", "mine.webp")).write_bytes(b"host")
+    shown = await env.svc.media_view(draft)
+    assert "api/media/mine.webp" not in shown.content
+
+
+async def test_what_a_member_edits_carries_the_hosts_names(env, monkeypatch):
+    """A member's editor sends back what it was shown: the page-scoped names
+    map back to the names the page stores, so the proposal carries the
+    host's names (and a file it adds keeps its own)."""
+    page = await env.svc.create(
+        "sp-a",
+        actor_user_id="u-owner",
+        title="T",
+        content="![a](api/media/a.webp)",
+        cover_image_url="api/media/c.webp",
+    )
+    _as_member(env, monkeypatch)
+    sp_a = space_page_media_name("sp-a", "a.webp")
+    sp_c = space_page_media_name("sp-a", "c.webp")
+    content, cover = await env.svc._as_stored(
+        "sp-a",
+        page.id,
+        f"![a](api/media/{sp_a}?sig=1) ![n](api/media/n.webp)",
+        f"api/media/{sp_c}",
+    )
+    assert content == "![a](api/media/a.webp?sig=1) ![n](api/media/n.webp)"
+    assert cover == "api/media/c.webp"
+    # Another space's page-scoped name maps to nothing (and the guard
+    # refuses a write naming it).
+    other = space_page_media_name("sp-b", "a.webp")
+    content, _ = await env.svc._as_stored(
+        "sp-a", page.id, f"![x](api/media/{other})", None
+    )
+    assert content == f"![x](api/media/{other})"
+
+
+async def test_a_page_shows_at_most_its_file_cap(env):
+    """Review finding 5: every household ships and describes a whole
+    version, so a page version shows at most MAX_PAGE_FILES files — enforced
+    on create, edit and resolution with a clear error."""
+    many = " ".join(f"![p](api/media/p{i}.webp)" for i in range(MAX_PAGE_FILES))
+    with pytest.raises(ValueError, match="at most"):
+        await env.svc.create(
+            "sp-a",
+            actor_user_id="u-owner",
+            title="T",
+            content=many,
+            cover_image_url="api/media/cover.webp",
+        )
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-owner", title="T", content=many
+    )
+    with pytest.raises(ValueError, match="at most"):
+        await env.svc.update(
+            "sp-a", page.id, actor_user_id="u-owner", cover_image_url="api/media/c.webp"
+        )
+    # The same file twice counts once.
+    await env.svc.update(
+        "sp-a",
+        page.id,
+        actor_user_id="u-owner",
+        content=many + " ![p](api/media/p0.webp)",
+    )
+
+
+async def test_a_file_a_version_brings_back_from_history_ships_again(env):
+    """Final review finding 3: a household that joined later got only the
+    newest history files its catch-up had room for (per page and per
+    stream), and the host keeps no per-household record of which. So a
+    version that brings a file back from history (a revert, a picture put
+    back) ships it again — what counts as shipped is the replaced version
+    alone. Receivers keep the first copy (write-once); the cost is at most
+    MAX_PAGE_FILES files per such version. Unchanged files never re-ship."""
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-owner", title="T", content="![a](api/media/a.webp)"
+    )
+    await env.svc.update("sp-a", page.id, actor_user_id="u-owner", content="gone")
+    await env.svc.update(
+        "sp-a", page.id, actor_user_id="u-owner", content="![a](api/media/a.webp) back"
+    )
+    last = [e for e in env.events if isinstance(e, PageUpdated)][-1]
+    assert "api/media/a.webp" not in last.shown_before
+    await env.svc.update(
+        "sp-a",
+        page.id,
+        actor_user_id="u-owner",
+        content="![a](api/media/a.webp) back again",
+    )
+    last = [e for e in env.events if isinstance(e, PageUpdated)][-1]
+    assert "api/media/a.webp" in last.shown_before
+
+
+def test_a_queued_page_item_over_the_file_cap_is_refused():
+    """A queued create / edit / resolution (local or from another
+    household) over MAX_PAGE_FILES is refused like any invalid payload."""
+    handler = PageModerationHandler.__new__(PageModerationHandler)
+    many = " ".join(f"![p](api/media/p{i}.webp)" for i in range(MAX_PAGE_FILES + 1))
+    for payload in (
+        {"entity": "page", "target_id": "pg", "title": "T", "content": many},
+        {"entity": "page", "target_id": "pg", "patch": {"content": many}},
+        {
+            "entity": "page",
+            "target_id": "pg",
+            "op": "resolve_conflict",
+            "resolution": "merged_content",
+            "merged_content": many,
+        },
+    ):
+        with pytest.raises(ValueError, match="at most"):
+            handler.validate(None, payload)  # type: ignore[arg-type]
+
+
+async def test_an_edit_adding_files_the_host_could_never_get_is_refused(env):
+    """Review finding 7: a household seated from an invite link without an
+    upload authorization can't hand the host a page's new files — the edit
+    is refused with PAGE_FILES_NOT_SHAREABLE (the SPA translates it) instead
+    of landing with pictures broken for everyone. Words alone still save."""
+    from socialhome.domain.errors import PageFilesNotShareableError
+
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-owner", title="T", content="![k](api/media/k.webp)"
+    )
+
+    async def _never(space_id):
+        return False
+
+    env.svc.attach_files_reach_host(_never)
+    with pytest.raises(PageFilesNotShareableError) as err:
+        await env.svc.update(
+            "sp-a",
+            page.id,
+            actor_user_id="u-owner",
+            content="![k](api/media/k.webp) ![n](api/media/n.webp)",
+        )
+    assert err.value.code == "PAGE_FILES_NOT_SHAREABLE"
+    with pytest.raises(PageFilesNotShareableError):
+        await env.svc.create(
+            "sp-a",
+            actor_user_id="u-owner",
+            title="T2",
+            content="![n](api/media/n.webp)",
+        )
+    # Keeping the page's own picture, or words only: fine.
+    await env.svc.update(
+        "sp-a", page.id, actor_user_id="u-owner", content="words ![k](api/media/k.webp)"
+    )
+
+
+async def test_a_sides_and_a_versions_cover_are_shown_page_scoped(env, monkeypatch):
+    """Review finding 8: conflict-side covers and the history drawer's
+    versions show the same page-scoped names the page does, so a diff never
+    marks an unchanged picture as changed — and never resolves a shared
+    file."""
+    _as_member(env, monkeypatch)
+    sp = space_page_media_name("sp-a", "c.webp")
+    assert (
+        await env.svc.media_view_cover("sp-a", "api/media/c.webp") == f"api/media/{sp}"
+    )
+    assert await env.svc.media_view_cover("sp-a", "api/media/dm-x.webp") is None
+    assert await env.svc.media_view_cover("sp-a", None) is None
+    body = await env.svc.media_view_text("sp-a", "![c](api/media/c.webp)")
+    assert body == f"![c](api/media/{sp})"

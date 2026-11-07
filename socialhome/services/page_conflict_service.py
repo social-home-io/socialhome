@@ -59,6 +59,7 @@ from ..domain.page_version import (
     merge_scalar,
     version_hash,
 )
+from ..domain.space_media_ref import page_media_urls
 from ..rate_limiter import RateLimiter
 from ..repositories.page_repo import AbstractPageRepo, PageNotFoundError
 from .bus_publisher import BusPublisherMixin
@@ -430,6 +431,10 @@ class Proposal:
     resolves: tuple[str, ...] = ()
     #: For a proposed create: the creator.
     created_by: str = ""
+    #: v_82, the host only: the hash of the proposal AS SENT, when the host
+    #: renamed its new files to the proposer's names (``SpaceMediaNamer``)
+    #: — the answer names it, so the proposer settles its draft.
+    answers: str = ""
 
     @property
     def hash(self) -> str:
@@ -614,6 +619,9 @@ class SequenceResult:
     #: The open sides as committed with this version (snapshotted under
     #: the page lock, so version N ships with N's sides).
     sides: tuple[PageConflictSide, ...] = ()
+    #: The page as it was before this version (``None`` for a create): the
+    #: outbound ships only the files the new version adds (v_82).
+    previous: Page | None = None
 
 
 def _now() -> str:
@@ -814,7 +822,7 @@ class PageConflictService(BusPublisherMixin):
             await self.refuse(
                 space_id=space_id,
                 page_id=page_id,
-                proposal_hash=proposal.hash,
+                proposal_hash=proposal.answers or proposal.hash,
                 proposer_instance=proposer_instance,
                 reason="rate_limited",
             )
@@ -883,7 +891,7 @@ class PageConflictService(BusPublisherMixin):
         remote = bool(proposer_instance) and proposer_instance != self._own_instance_id
         sequenced = Sequenced(
             proposer_instance=proposer_instance or self._own_instance_id,
-            proposal_hash=proposal.hash,
+            proposal_hash=proposal.answers or proposal.hash,
             outcome="refused"
             if result.outcome is SequenceOutcome.REFUSED
             else "applied",
@@ -898,6 +906,7 @@ class PageConflictService(BusPublisherMixin):
                 sequenced=sequenced,
                 created=result.created,
                 sides=result.sides,
+                previous=result.previous,
             )
             if result.outcome is SequenceOutcome.SIDE:
                 await self._emit(
@@ -947,6 +956,7 @@ class PageConflictService(BusPublisherMixin):
     async def _sequence_edit(
         self, space_id: str, page: Page, proposal: Proposal
     ) -> SequenceResult:
+        previous = page
         state = _HostState(page=page, sides=await self.sides(space_id, page.id))
         before_sides = [s.hash for s in state.sides]
         cur_hash = await asyncio.to_thread(_page_hash, page)
@@ -1089,6 +1099,7 @@ class PageConflictService(BusPublisherMixin):
             stored or updated,
             created=unsequenced,
             sides=tuple(state.sides),
+            previous=None if unsequenced else previous,
         )
 
     @staticmethod
@@ -1319,11 +1330,24 @@ class PageConflictService(BusPublisherMixin):
         sequenced: Sequenced | None,
         created: bool,
         sides: Sequence[PageConflictSide] = (),
+        previous: Page | None = None,
     ) -> None:
         """Publish the canonical version — the outbound broadcasts it to
         every member household (it doubles as the proposer's ack).
         ``sides`` are the ones committed with it."""
         extras = canonical_extras(page, sides, sequenced)
+        # The files the replaced version showed went out with it already.
+        # Only the replaced version's files went out to every member for
+        # sure: a household that joined later got just the newest history
+        # files its catch-up had room for, and no per-household record says
+        # which. So a file a version brings back from history ships again
+        # (receivers keep the first copy — write-once; ≤ MAX_PAGE_FILES per
+        # version).
+        shown_before = (
+            tuple(page_media_urls(previous.cover_image_url, previous.content))
+            if previous is not None
+            else ()
+        )
         if created:
             await self._emit(
                 PageCreated(
@@ -1333,6 +1357,7 @@ class PageConflictService(BusPublisherMixin):
                     content=page.content,
                     actor_user_id=actor or page.created_by,
                     canonical={**extras, "created_by": page.created_by},
+                    shown_before=shown_before,
                 )
             )
             return
@@ -1344,6 +1369,7 @@ class PageConflictService(BusPublisherMixin):
                 content=page.content,
                 actor_user_id=actor,
                 canonical=extras,
+                shown_before=shown_before,
             )
         )
 

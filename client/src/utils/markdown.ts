@@ -159,10 +159,14 @@ function _onlyTaskBoxes(root: DocumentFragment): void {
   }
 }
 
-/** A local picture: an ``api/…`` path on this household's own origin
- *  (uploads are ``api/media/…``; the sanitize hook has already turned
- *  ``/api/…`` into ``api/…`` for ingress). */
-const _LOCAL_IMAGE = /^api\//
+/** A local picture: an upload on this household's own origin, exactly the
+ *  shape the server matches, signs and serves (``LOCAL_MEDIA_REF_RE`` in
+ *  ``domain/space_media_ref.py``): ``api/media/<plain name>`` with an
+ *  optional query. The sanitize hook has already turned ``/api/…`` into
+ *  ``api/…`` for ingress. A percent-escaped name (``api/media/%64m-x``) is
+ *  never a picture here: the server signs no such link, and the router
+ *  would decode it to another file. */
+const _LOCAL_IMAGE = /^api\/media\/[A-Za-z0-9._-]+(\?|$)/
 
 /** Replace every non-local ``<img>`` so rendering a body never makes the
  *  viewer's browser fetch from a host the author picked (owner decision

@@ -13,7 +13,10 @@ kept in its cache again. This service answers that:
    name the descriptor used;
 2. **finds the file** among the names THIS household computes for it: the
    name itself when this household sealed it, else the name it got the file
-   under from that household (``sd-``, direct) or through a GFS (``sg-``).
+   under from that household (``sd-``, direct) or through a GFS (``sg-``),
+   or — a page's file (v_82) — its page-scoped copy (``sp-``). Page files are
+   served as the page is NOW (cover and body); a file only an edit history
+   or an open conflict side shows is not.
    A name another receiving path owns (DM / moment) is never one; each
    candidate must be referenced only by this space's content
    (``confined_to_space``) — a household is never made to send a file the
@@ -71,6 +74,7 @@ from ..domain.gfs_space_media_on_demand import (
     InvalidOnDemandWire,
     MediaRequestFrame,
 )
+from ..domain.space_media_ref import space_page_media_name
 from ..space_media_hint import (
     InvalidSpaceMediaHint,
     SpaceMediaLocator,
@@ -391,6 +395,9 @@ class SpaceMediaGfsResponder:
         names.append(
             gfs_space_media_name(space_id, loc.origin, loc.item_id, loc.filename)
         )
+        # v_82 — a member's page-scoped copy of a page's file (a page keeps
+        # its host's names; the copy is bound to the space by its name).
+        names.append(space_page_media_name(space_id, loc.filename))
         return names
 
     async def _space_of(

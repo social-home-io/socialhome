@@ -288,6 +288,20 @@ requesters keep the catch-up push unchanged. Cost: ~150 B of descriptor per
 file per record; one upload per file to the requester's GFS (`200
 already_stored` when it is there already).
 
+**Page files come from the host (v_82).** A page keeps the names the host's
+version shows on every household (its hash is the version's identity); a
+member household keeps the files page-scoped (`sp-`) and takes them from the
+host only. So only the host's catch-up ships them: every live page's files
+— its version, every version in its history, its open sides — to a paired
+or mesh requester at v_82 (`provider._enqueue_page_media`, the space's own
+files only), and the `pages` records carry `media_refs` toward a link-joined
+v_82 requester, kept page-scoped (`SpaceMediaGfsFetcher.localize_as_shown`),
+never rewritten. Both are version gates, so **sync line 82**
+(`SYNC_RECORD_LINES`): a household crossing v_82 gets one full stream, and
+with it the pictures of pages it was sent while older. The §4.4 resume /
+§319.6 resync replay of a page from the host ships its files too, within
+the replay's file and byte budget. See [`pages.md`](./pages.md#files-v_82).
+
 **Long streams are not reaped mid-way.** A session's `last_activity` is
 stamped on every chunk (the provider on each shipped chunk, the requester
 on each received one); `SyncSessionManager.reap_stale` closes sessions

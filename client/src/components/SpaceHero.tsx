@@ -28,7 +28,7 @@ import { Modal } from './Modal'
 import { Avatar } from './Avatar'
 import { isOne, t } from '@/i18n/i18n'
 import type { QuickLink } from '@/features/spaces/useSpaceLinks'
-import { spaceGlyph } from '@/features/spaces/spaceGlyph'
+import { SpaceGlyph } from '@/features/spaces/SpaceGlyph'
 
 /** A face in the facepile. */
 export interface HeroMember {
@@ -80,7 +80,6 @@ export function SpaceHero({
   name, emoji, coverUrl, iconUrl, about, memberCount, members = [], membersHref,
   tier, links = [],
 }: Props) {
-  const fallback = spaceGlyph(emoji, name)
   const aboutRef = useRef<HTMLDivElement>(null)
   // "Read more" only when the two-line clamp actually hides something.
   const [clamped, setClamped] = useState(false)
@@ -114,7 +113,10 @@ export function SpaceHero({
       <div class="sh-space-hero-body">
         <div class="sh-space-hero-identity">
           <span class="sh-space-hero-avatar" aria-hidden="true">
-            {iconUrl ? <img class="sh-space-hero-avatar-img" src={iconUrl} alt="" /> : fallback}
+            {/* The hero's picture loads eagerly (above the fold). */}
+            {iconUrl
+              ? <img class="sh-space-hero-avatar-img" src={iconUrl} alt="" />
+              : <SpaceGlyph emoji={emoji} name={name} />}
           </span>
           <div class="sh-space-hero-meta">
             <h2 class="sh-space-hero-name">{name}</h2>

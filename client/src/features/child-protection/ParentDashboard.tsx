@@ -13,6 +13,7 @@ import { ws } from '@/ws'
 import { Avatar } from '@/components/Avatar'
 import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
+import { SpaceInlineGlyph } from '@/features/spaces/SpaceGlyph'
 import { showToast } from '@/components/Toast'
 import type { User } from '@/types'
 import { GuardianAuditLog } from './GuardianAuditLog'
@@ -277,7 +278,10 @@ export default function ParentDashboard() {
                   <ul>
                     {m.spaces.map(s => (
                       <li key={s.id} class="sh-row">
-                        <span>{s.emoji} {s.name}</span>
+                        <span>
+                          <SpaceInlineGlyph emoji={s.emoji} name={s.name} />
+                          {s.name}
+                        </span>
                         <span class="sh-muted">{s.space_type}</span>
                         <Button variant="danger"
                                 onClick={() =>

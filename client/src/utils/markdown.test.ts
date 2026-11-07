@@ -53,6 +53,18 @@ describe('renderMarkdown', () => {
     expect(html).not.toContain('<iframe')
   })
 
+  it('renders only a plain api/media name as a picture — never an escaped one', () => {
+    // The server neither renames nor signs ``api/media/%64m-x.webp``, but
+    // its router would decode it to ``dm-x.webp`` (behind ingress the
+    // viewer is authenticated): such a source is no picture here.
+    for (const src of ['api/media/%64m-x.webp', 'api/media/a%2Fb.webp', 'api/users/u1/picture']) {
+      const html = renderMarkdown(`![x](${src})`)
+      expect(html).not.toContain('<img')
+    }
+    expect(renderMarkdown('![x](api/media/ok.webp?exp=1)')).toContain('src="api/media/ok.webp?exp=1"')
+    expect(renderMarkdown('![x](/api/media/ok.webp)')).toContain('src="api/media/ok.webp"')
+  })
+
   it('strips the leading slash from /api/ image sources for ingress', () => {
     // Server-rendered Page markdown can carry ``![](/api/media/<token>)``;
     // an absolute path bypasses ``<base href>``, which under HA Supervisor

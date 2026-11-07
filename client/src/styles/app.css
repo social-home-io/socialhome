@@ -169,6 +169,16 @@ a:focus:not(:focus-visible) { outline: none; }
    * a long title bumps against the SearchBar. */
   flex: 0 0 auto;
 }
+/* A space page's symbol before its name: its picture, else the Home
+ * Assistant logo / emoji / initial, centred. Inherits the text colour
+ * so the logo follows the theme. Fixed size — the title truncates. */
+.sh-topbar-glyph {
+  flex: 0 0 auto; width: 24px; height: 24px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 6px; overflow: hidden; background: var(--sh-bg-secondary);
+  color: var(--sh-text); font-size: 15px; font-weight: 700; line-height: 1;
+}
+.sh-topbar-glyph img { width: 100%; height: 100%; object-fit: cover; }
 /* Page title sits on the left of the bar; ``flex-grow`` on the
  * trailing search keeps it pushed against the title even when the
  * title is short. */
@@ -491,7 +501,10 @@ a:focus:not(:focus-visible) { outline: none; }
   height: 18px;
   font-size: 14px;
   flex-shrink: 0;
+  border-radius: 4px;
+  overflow: hidden;
 }
+.sh-sidenav-subitem__emoji img { width: 100%; height: 100%; object-fit: cover; }
 
 .sh-sidenav-group {
   display: flex;
@@ -12454,6 +12467,9 @@ a.sh-welcome-card:hover {
   line-height: 1;
   margin-top: 2px;
 }
+.sh-welcome-catchup-emoji img {
+  display: block; width: 1em; height: 1em; object-fit: cover; border-radius: 6px;
+}
 .sh-welcome-catchup-body {
   flex: 1;
   min-width: 0;
@@ -13084,6 +13100,9 @@ a.sh-welcome-card:hover {
 .sh-followed-picker-emoji {
   font-size: var(--sh-font-size-lg);
   flex-shrink: 0;
+}
+.sh-followed-picker-emoji img {
+  display: block; width: 1.5em; height: 1.5em; object-fit: cover; border-radius: 6px;
 }
 .sh-followed-picker-name {
   flex: 1;
@@ -14272,11 +14291,6 @@ a.sh-space-hero-members:focus-visible,
   font-size: 2rem;
 }
 .sh-ss-basics__icon-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sh-space-xs); }
-/* The ready-made Home Assistant logo (Settings button, create-dialog
- * toggle): the bundled logo beside its label. */
-.sh-ha-logo-btn { display: inline-flex; align-items: center; gap: var(--sh-space-xs); }
-.sh-ha-logo-btn img, .sh-ha-logo-toggle img { flex: 0 0 auto; object-fit: contain; }
-.sh-ha-logo-toggle { border-bottom: none; }
 .sh-ss-basics__form { gap: var(--sh-space-md); }
 .sh-ss-basics__form label { margin-bottom: 0; }
 .sh-ss-basics__form input { font-weight: 400; }
@@ -16467,6 +16481,33 @@ a.sh-link-preview-link:focus-visible {
   text-decoration: underline;
 }
 .sh-emoji-field-clear:hover { color: var(--sh-primary-hover, var(--sh-primary)); }
+/* Ready-made symbols above the emoji grid (a space's field: the Home
+ * Assistant logo). One chip each, the logo beside its name. */
+.sh-emoji-field-symbols { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); margin-bottom: var(--sh-space-sm); }
+.sh-emoji-field-symbol {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  min-height: 44px;
+  padding: 0 var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  font: inherit;
+  cursor: pointer;
+}
+.sh-emoji-field-symbol .sh-ha-logo { font-size: 1.5rem; }
+.sh-emoji-field-symbol:hover { background: var(--sh-bg-secondary); }
+.sh-emoji-field-symbol:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 2px; }
+.sh-emoji-field-symbol.is-on { border-color: var(--sh-primary); background: var(--sh-bg-secondary); }
+/* The Home Assistant logomark wherever a space glyph shows: sized by the
+ * tile's font like an emoji, coloured by its text. */
+.sh-ha-logo { display: inline-block; flex: none; vertical-align: -0.125em; }
+/* A space's symbol before its name in running text (SpaceInlineGlyph):
+ * emoji / logo at text size, a picture as a small rounded square. */
+.sh-space-inline-glyph { display: inline-flex; align-items: center; vertical-align: -0.2em; margin-inline-end: 0.35em; }
+.sh-space-inline-glyph img { display: block; width: 1.25em; height: 1.25em; object-fit: cover; border-radius: 4px; }
 
 /* Notification bell + panel */
 .sh-notif-bell {
@@ -18687,6 +18728,10 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
   font-size: 3rem;
   line-height: 1;
   flex: 0 0 auto;
+}
+/* The space's own picture, when it has one: a 3rem rounded tile. */
+.sh-space-public__emoji img {
+  display: block; width: 3rem; height: 3rem; object-fit: cover; border-radius: 12px;
 }
 .sh-space-public__title h1 {
   margin: 0 0 var(--sh-space-xs);
@@ -21516,6 +21561,8 @@ span.sh-hlv__who { cursor: default; }
   background: rgba(255, 255, 255, 0.1);
 }
 .sh-hlv-row__emoji { font-size: 1.25rem; line-height: 1; }
+/* A space's picture fills the row's 40px tile. */
+.sh-hlv-row__emoji img { display: block; width: 40px; height: 40px; border-radius: 12px; object-fit: cover; }
 .sh-hlv-row__body { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 .sh-hlv-row__t { font-weight: 600; overflow-wrap: anywhere; }
 .sh-hlv-row__m { color: var(--sh-text-muted); font-size: 0.875rem; overflow-wrap: anywhere; }
@@ -30057,7 +30104,9 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-focus-ring); o
   border-radius: var(--sh-radius-md);
   background: var(--sh-bg-secondary);
   font-size: 18px;
+  overflow: hidden;
 }
+.sh-share-icon img { width: 100%; height: 100%; object-fit: cover; }
 .sh-share-initials { font-size: var(--sh-font-size-sm); font-weight: 700; }
 .sh-share-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .sh-share-name { font-weight: 700; overflow-wrap: anywhere; }

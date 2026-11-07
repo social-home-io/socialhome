@@ -215,6 +215,7 @@ class _FakePageRepo:
         self.deleted = []
         self.rows = _ScopedRows()
         self.tombstones: dict[tuple[str, str], str] = {}
+        self.versions: dict[tuple[str, str], list] = {}
         self.confirmed: set[tuple[str, str]] = set()
 
     async def get(self, page_id):
@@ -244,6 +245,9 @@ class _FakePageRepo:
 
     async def is_page_deleted(self, page_id, *, space_id):
         return (page_id, space_id) in self.tombstones
+
+    async def list_versions(self, page_id, *, space_id):
+        return list(self.versions.get((page_id, space_id), ()))
 
     async def tombstone(self, page_id, *, space_id, created_by, deleted_by=""):
         if self.rows.row(page_id) is not None or any(
@@ -1067,6 +1071,9 @@ class _FakeConflicts:
     async def refuse(self, **kwargs):
         self.refused.append(kwargs)
 
+    async def sides(self, space_id, page_id):
+        return list(getattr(self, "sides_", ()))
+
     async def legacy_apply(self, page, incoming, *, space_id):
         self.legacy.append((page.id, incoming.content))
 
@@ -1091,6 +1098,13 @@ def _page_handlers(bus, repos, conflicts, *, auth=None):
         calendar_repo=repos["calendar"],
         page_conflicts=conflicts,
     )
+
+
+def _async_value(value):
+    async def _get(*_a, **_kw):
+        return value
+
+    return _get
 
 
 def _held(repos, page_id="p-1"):
@@ -1123,6 +1137,219 @@ async def test_the_host_sequences_a_members_proposal(bus, repos):
     assert call["proposer_instance"] == "peer-a"
     assert (call["proposal"].base_seq, call["proposal"].base_hash) == (2, _H)
     assert repos["page"].saved == []
+
+
+async def test_the_host_names_a_proposals_new_files_after_its_household(bus, repos):
+    """v_82: a file a proposal adds takes the proposer household's name
+    (only it, or the host, can fill that name — never a file of ours it
+    learned); the page's own files — current, an open side, a version in
+    its history — keep theirs; a reserved name is dropped. The answer names
+    the proposal as sent, so the proposer settles its draft."""
+    from socialhome.domain.page import PageVersion
+    from socialhome.services.inbound_media_store import space_direct_media_name
+    from socialhome.services.page_conflict_service import Proposal
+
+    engine = _FakeConflicts("host", host="self")
+    engine.sides_ = [
+        SimpleNamespace(content="![s](api/media/side.webp)", cover_image_url=None)
+    ]
+    h = _page_handlers(bus, repos, engine)
+    _held(repos)
+    held_row = repos["page"].rows.row("p-1")
+    held_row.content = "![k](api/media/k.webp)"
+    held_row.cover_image_url = "api/media/cover.webp"
+    repos["page"].get = _async_value(held_row)
+    repos["page"].versions[("p-1", "sp-1")] = [
+        PageVersion(
+            id="v1",
+            page_id="p-1",
+            version=1,
+            title="T",
+            content="![o](api/media/old.webp)",
+            edited_by="u",
+            edited_at="2026-01-01",
+        )
+    ]
+    sent = (
+        "![k](api/media/k.webp) ![s](api/media/side.webp) "
+        "![o](/api/media/old.webp) ![n](api/media/n.webp) "
+        "![d](api/media/dm-x.webp)"
+    )
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {
+                "id": "p-1",
+                "title": "T",
+                "content": sent,
+                "cover_image_url": "api/media/cover.webp",
+                "actor_user_id": "u-ed",
+                "base_seq": 2,
+            },
+            space_id="sp-1",
+        )
+    )
+    (call,) = engine.sequenced
+    proposal = call["proposal"]
+    n = space_direct_media_name("sp-1", "peer-a", "n.webp")
+    assert proposal.content == (
+        "![k](api/media/k.webp) ![s](api/media/side.webp) "
+        f"![o](/api/media/old.webp) ![n](api/media/{n}) ![d]()"
+    )
+    assert proposal.cover_image_url == "api/media/cover.webp"
+    as_sent = Proposal(
+        title="T",
+        content=sent,
+        cover_image_url="api/media/cover.webp",
+        actor_user_id="u-ed",
+        base_seq=2,
+    )
+    assert proposal.answers == as_sent.hash
+
+
+class _ProposalSink:
+    """The GFS fetcher as the host uses it for a proposal's files."""
+
+    def __init__(self) -> None:
+        self.proposed: list[tuple] = []
+        self.kept = 0
+
+    def localize_proposal(self, space_id, raw_refs, added, *, item_id, origin):
+        self.proposed.append((space_id, raw_refs, dict(added), item_id, origin))
+        return SpaceMediaLocalization(refs=(object(),))
+
+    async def keep(self, loc, *, prefetch=True):
+        self.kept += 1
+        return []
+
+
+def _link_joined_host(bus, repos):
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine)
+    sink = _ProposalSink()
+    h.attach_gfs_media(sink)  # type: ignore[arg-type]
+    _held(repos)
+    held_row = repos["page"].rows.row("p-1")
+    held_row.content = "![k](api/media/k.webp)"
+    held_row.cover_image_url = None
+    repos["page"].get = _async_value(held_row)
+    return h, engine, sink
+
+
+_PROPOSED = "![k](api/media/k.webp) ![a](api/media/a.webp) ![b](api/media/b.webp)"
+_DESCRIBED = {
+    name: {"blob_id": c * 64, "suite": "s", "epoch": 1, "size": 9}
+    for name, c in (("a.webp", "a"), ("b.webp", "b"), ("k.webp", "c"))
+}
+
+
+def _proposal_payload(*, refs=None, **over):
+    return {
+        "id": "p-1",
+        "title": "T",
+        "content": _PROPOSED,
+        "actor_user_id": "u-ed",
+        "base_seq": 2,
+        "media_refs": refs or _DESCRIBED,
+        **over,
+    }
+
+
+async def test_a_link_joined_proposers_new_files_are_fetched_by_the_host(bus, repos):
+    """v_82 (members equal): a proposer reached only through a GFS can't
+    push bytes; the descriptor inside its envelope-signed proposal makes the
+    host fetch each file it ADDS under the proposer's own name — the name
+    the renamed page shows — bound to the authenticated sender. The page's
+    own file (k) is not fetched."""
+    from socialhome.services.inbound_media_store import space_direct_media_name
+
+    h, engine, sink = _link_joined_host(bus, repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            _proposal_payload(),
+            space_id="sp-1",
+        )
+    )
+    (call,) = engine.sequenced
+    a = space_direct_media_name("sp-1", "peer-a", "a.webp")
+    b = space_direct_media_name("sp-1", "peer-a", "b.webp")
+    assert f"api/media/{a}" in call["proposal"].content
+    assert sink.proposed == [
+        ("sp-1", _DESCRIBED, {"a.webp": a, "b.webp": b}, "p-1", "peer-a")
+    ]
+    assert sink.kept == 1
+
+
+async def test_a_descriptor_naming_another_households_file_fetches_nothing(bus, repos):
+    """A proposal repeating a file the page shows (another household's
+    ``sd-`` file) and describing it: that file is the page's own — never
+    fetched, never refilled from the proposer's blob."""
+    from socialhome.services.inbound_media_store import space_direct_media_name
+
+    h, _engine, sink = _link_joined_host(bus, repos)
+    theirs = space_direct_media_name("sp-1", "peer-b", "f.webp")
+    held_row = await repos["page"].get("p-1")
+    held_row.content = f"![f](api/media/{theirs})"
+    content = f"![f](api/media/{theirs})"
+    refs = {theirs: {"blob_id": "e" * 64, "suite": "s", "epoch": 1, "size": 9}}
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            _proposal_payload(content=content, refs=refs),
+            space_id="sp-1",
+        )
+    )
+    assert sink.proposed == []
+
+
+async def test_the_host_refuses_a_proposal_over_the_page_file_cap(bus, repos):
+    """Every household ships and describes a whole version: a proposal
+    showing more than MAX_PAGE_FILES files (only a pre-v_82 editor sends
+    one) is refused, never sequenced."""
+    from socialhome.domain.space_media_ref import MAX_PAGE_FILES
+
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine)
+    _held(repos)
+    many = " ".join(f"![p](api/media/p{i}.webp)" for i in range(MAX_PAGE_FILES + 1))
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {
+                "id": "p-1",
+                "title": "T",
+                "content": many,
+                "actor_user_id": "u-ed",
+                "base_seq": 2,
+            },
+            space_id="sp-1",
+        )
+    )
+    assert engine.sequenced == []
+    (refusal,) = engine.refused
+    assert refusal["reason"] == "access"
+
+
+async def test_a_proposal_without_new_files_is_sequenced_as_sent(bus, repos):
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_CREATED,
+            {
+                "id": "p-new",
+                "title": "T",
+                "content": "words only",
+                "actor_user_id": "u-ed",
+                "created_by": "u-ed",
+                "base_seq": 0,
+            },
+            space_id="sp-1",
+        )
+    )
+    for call in engine.sequenced:
+        assert call["proposal"].answers == ""
 
 
 async def test_the_host_refuses_an_access_refused_proposal(bus, repos):
@@ -6824,6 +7051,7 @@ class _GfsMediaSink:
         self.received: list[tuple] = []
         self.items: list[tuple] = []
         self.kept: list[dict] = []
+        self.as_shown: list[tuple] = []
 
     async def localize(self, space_id, raw_refs, media_urls, *, item_id, origin):
         urls = [u for u in media_urls if u]
@@ -6838,6 +7066,10 @@ class _GfsMediaSink:
         }
         return SpaceMediaLocalization(names=names, refs=(object(),) if names else ())
 
+    def localize_as_shown(self, space_id, raw_refs, media_urls, *, item_id, origin):
+        self.as_shown.append((space_id, raw_refs, list(media_urls), item_id, origin))
+        return SpaceMediaLocalization(refs=(object(),))
+
     async def keep(self, loc, *, prefetch=True):
         if loc.refs:
             self.kept.append(dict(loc.names))
@@ -6845,6 +7077,101 @@ class _GfsMediaSink:
 
 
 _V80_REFS = {"c.webp": {"blob_id": "c" * 64, "suite": "s", "epoch": 0, "size": 9}}
+
+
+async def test_a_hosts_page_version_keeps_its_files_under_the_pages_names(bus, repos):
+    """v_82: the page is the host's version byte for byte — its descriptor
+    is kept under the names the page shows, the version never rewritten."""
+    engine = _FakeConflicts("member", host="peer-a")
+    h = _page_handlers(bus, repos, engine)
+    sink = _GfsMediaSink()
+    h.attach_gfs_media(sink)
+    _held(repos)
+    body = "![p](api/media/p.webp)"
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {
+                "id": "p-1",
+                "title": "T",
+                "content": body,
+                "cover_image_url": "api/media/c.webp",
+                "seq": 4,
+                "conflict": [],
+                "media_refs": _V80_REFS,
+            },
+            space_id="sp-1",
+        )
+    )
+    assert sink.as_shown == [
+        ("sp-1", _V80_REFS, ["api/media/c.webp", "api/media/p.webp"], "p-1", "peer-a")
+    ]
+    assert sink.kept == [{}]
+    assert engine.mirrored[0]["version"].content == body
+
+
+async def test_a_link_joined_member_keeps_an_open_sides_files_too(bus, repos):
+    """Review finding 2: the host's descriptor describes the version AND its
+    open sides — a page whose version shows no file still has a side's
+    pictures to keep."""
+    engine = _FakeConflicts("member", host="peer-a")
+    h = _page_handlers(bus, repos, engine)
+    sink = _GfsMediaSink()
+    h.attach_gfs_media(sink)
+    _held(repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {
+                "id": "p-1",
+                "title": "T",
+                "content": "no pictures",
+                "seq": 4,
+                "conflict": [
+                    {
+                        "title": "T",
+                        "content": "![s](api/media/s.webp)",
+                        "cover": "api/media/sc.webp",
+                        "by": "u-x",
+                        "at": "2026-01-01T00:00:00+00:00",
+                    }
+                ],
+                "media_refs": _V80_REFS,
+            },
+            space_id="sp-1",
+        )
+    )
+    assert sink.as_shown == [
+        (
+            "sp-1",
+            _V80_REFS,
+            ["api/media/sc.webp", "api/media/s.webp"],
+            "p-1",
+            "peer-a",
+        )
+    ]
+
+
+async def test_another_households_page_descriptor_is_never_kept(bus, repos):
+    engine = _FakeConflicts("member", host="host-iid")
+    h = _page_handlers(bus, repos, engine)
+    sink = _GfsMediaSink()
+    h.attach_gfs_media(sink)
+    _held(repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {
+                "id": "p-1",
+                "title": "T",
+                "content": "![p](api/media/p.webp)",
+                "seq": 9,
+                "media_refs": _V80_REFS,
+            },
+            space_id="sp-1",
+        )
+    )
+    assert sink.as_shown == [] and sink.kept == []
 
 
 async def test_calendar_cover_media_refs_are_kept(repos, handlers):

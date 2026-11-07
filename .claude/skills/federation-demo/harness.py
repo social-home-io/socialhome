@@ -10956,6 +10956,19 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_79 space photo edit gate in place ✓")
+    # v_82 — a space page's files (cover, body pictures) ship with the
+    # host's versions to member households at >= v_82 (the round-trip of
+    # OURS above proves every peer advertises it; the file rules are
+    # ``tests/protocol/test_space_moderation_federated.py`` and
+    # ``tests/protocol/test_media_blob_scope.py``).
+    if int(_Cap.MIN_FOR_PAGE_MEDIA) != 82 or _OURS < 82:
+        failures.append(
+            "MIN_FOR_PAGE_MEDIA moved off v_82 (or OURS fell below it) — a "
+            "page's files would reach households that keep them under names "
+            "their page never shows"
+        )
+    else:
+        print("  v_82 page files gate in place ✓")
     # v_83 — space media on demand: a reader's view of a blob that left the
     # GFS cache asks the GFS, which asks the host (``space_media_serve`` in
     # its hello) to re-upload or stream it. Nothing is gated between
