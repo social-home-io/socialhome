@@ -10,6 +10,7 @@ refused before any pairing state exists or any outbound request is made.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from types import MappingProxyType
 from urllib.parse import urlparse
@@ -203,6 +204,15 @@ async def test_every_trust_mutation_refuses_anonymous_and_non_admin(
     anon_client, monkeypatch
 ):
     app = anon_client.server.app
+    # The startup announcement (``StartupAnnouncer``, a background task
+    # started by ``on_startup``) sends our ``proto_version`` to every
+    # CONFIRMED peer it lists. Under load it could run after the peer below
+    # was seeded and land in the spy as if a refused call had reached the
+    # federation layer. Let it finish first (root cause of the intermittent
+    # failure; it never came from a refused call).
+    for task in asyncio.all_tasks():
+        if task.get_name() == "startup-announcer":
+            await task
     repo = app[federation_repo_key]
     await repo.save_instance(_seeded_peer())
     fed = app[federation_service_key]

@@ -99,6 +99,7 @@ from .repositories import (
     SqliteGfsMomentKeyMailboxRepo,
     SqliteGfsMomentMediaRepo,
     SqliteGfsSpaceEpochRepo,
+    SqliteGfsSpaceMediaDemandRepo,
     SqliteGfsSpaceMediaRepo,
     SqliteGfsUserPictureRepo,
     SqliteGfsUserRegistrationRepo,
@@ -107,6 +108,10 @@ from .routes import register_routes
 from .rtc_transport import GfsRtcSession
 from .space_media import GfsSpaceMediaStore, SpaceMediaLimits
 from .space_media_auth import GfsSpaceMediaAuth, build_space_media_rate_limit
+from .space_media_on_demand import (
+    GfsSpaceMediaOnDemand,
+    build_space_media_wanted_rate_limit,
+)
 from .viewer_cors import install_viewer_cors
 from .ws_registry import GfsWebSocketRegistry
 
@@ -322,6 +327,7 @@ class GfsApp:
             moment_key_mailbox=SqliteGfsMomentKeyMailboxRepo(db),
             moment_media=SqliteGfsMomentMediaRepo(db),
             space_media=SqliteGfsSpaceMediaRepo(db),
+            space_media_demand=SqliteGfsSpaceMediaDemandRepo(db),
             moment_delete_log=SqliteGfsMomentDeleteLogRepo(db),
             moment_public_pictures=SqliteGfsUserPictureRepo(db),
             envelope_queue=SqliteGfsEnvelopeQueueRepo(db),
@@ -368,6 +374,9 @@ class GfsApp:
             ip_key_secret=hashlib.blake2b(
                 self.signing_seed, person=b"gfs-sm-ip-key", digest_size=32
             ).digest(),
+            # v_83 — what leaves the cache is remembered for the on-demand
+            # cache-vs-stream decision.
+            demand=repos.space_media_demand,
         )
         admin = GfsAdminService(
             fed_repo=repos.federation,
@@ -528,6 +537,19 @@ class GfsApp:
             member_publish=member_publish,
             channels=channels,
         )
+        # v_83 — a blob that left the cache comes back on demand: re-uploaded
+        # or streamed by a holder asked over its socket (on any node).
+        space_media_on_demand = GfsSpaceMediaOnDemand(
+            store=space_media,
+            demand=repos.space_media_demand,
+            federation=federation,
+            channels=channels,
+            config=config.space_media_on_demand,
+            fan_out=cluster_fan_out,
+            ws_registry=ws_registry,
+            route_tag=config.cluster_route_tag,
+        )
+        admin.attach_space_media_on_demand(space_media_on_demand)
         maintenance = GfsMaintenanceScheduler(
             space_media=space_media,
             moment_media=moment_media,
@@ -545,6 +567,7 @@ class GfsApp:
             moment_media=moment_media,
             space_media=space_media,
             space_media_auth=space_media_auth,
+            space_media_on_demand=space_media_on_demand,
             moment_delete_log=moment_delete_log,
             admin_auth=AdminAuth(repos.admin),
             admin=admin,
@@ -586,6 +609,7 @@ class GfsApp:
             build_member_publish_rate_limit(self.client_ip),
             build_channel_rate_limit(self.client_ip),
             build_space_media_rate_limit(self.client_ip, nodes=live_nodes),
+            build_space_media_wanted_rate_limit(self.client_ip, nodes=live_nodes),
         ]
         app = web.Application(middlewares=middlewares)
         # ``nosniff``, ``X-Frame-Options: SAMEORIGIN``, ``Referrer-Policy``
@@ -631,6 +655,7 @@ class GfsApp:
         a[K.gfs_moment_delete_log_key] = self.services.moment_delete_log
         a[K.gfs_space_media_store_key] = self.services.space_media
         a[K.gfs_space_media_auth_key] = self.services.space_media_auth
+        a[K.gfs_space_media_on_demand_key] = self.services.space_media_on_demand
         a[K.gfs_envelope_queue_repo_key] = self.repos.envelope_queue
         a[K.gfs_envelope_relay_key] = self.services.envelope_relay
         a[K.gfs_space_epoch_repo_key] = self.repos.space_epochs
@@ -701,6 +726,7 @@ class GfsApp:
         # After the cluster settled its unsent items (their offline copies),
         # before the database goes.
         await self.services.cluster_fan_out.close()
+        await self.services.space_media_on_demand.close()
         await self.services.ws_registry.close_all()
         session = app.get(K.gfs_http_session_key)
         if session is not None:

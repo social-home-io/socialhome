@@ -45,6 +45,18 @@ descriptor for a blob that is not cached and shows the item without that
 picture until it is re-uploaded.
 
 Cost per item: one upload per file per GFS (never per reader).
+
+**On demand (v_83).** A video whose blob is at least
+:data:`LAZY_VIDEO_MIN_BYTES` is described but NOT uploaded eagerly to a GFS
+that proved ``on_demand`` while every link-joined reader of the space is at
+v_83 or above (followers can't be told apart; an older link-joined reader
+keeps the eager upload) — and only by the household the GFS would ask for
+it: the OWNER of a listed space (a member's or a private channel's large
+video goes eagerly, as before, or nobody could ever be asked for it). It
+goes only when a reader plays it and the GFS
+asks a holder (:mod:`.space_media_gfs_responder`), which re-uses
+:meth:`SpaceMediaGfsUploader.authorize` and
+:meth:`~SpaceMediaGfsUploader.remember_stored`. Pictures go at once, as before.
 """
 
 from __future__ import annotations
@@ -129,6 +141,13 @@ KEEP_S: int = 7 * 86_400
 #: the blob and a repeat sends it again.
 MAX_REMEMBERED: int = 4096
 
+#: v_83 — a video blob at least this big is uploaded only on demand (a
+#: reader plays it); smaller clips and every picture go at once.
+LAZY_VIDEO_MIN_BYTES: int = 1024 * 1024
+
+#: What counts as a video (by extension) for the lazy upload.
+VIDEO_EXTENSIONS: frozenset[str] = frozenset({"mp4", "m4v", "mov", "webm", "mkv"})
+
 #: Descriptors remembered per (space, epoch, file, size, mtime), so one item
 #: planned by two senders (the member broadcast and the seed holder's
 #: follower relay) or re-streamed in a catch-up is sealed once.
@@ -207,6 +226,9 @@ class SpaceMediaPlan:
     space_id: str
     refs: tuple[SpaceMediaRef, ...]
     targets: tuple[GfsConnection, ...]
+    #: Every link-joined reader can ask for a missed blob (v_83): a large
+    #: video may wait for a GFS's request.
+    lazy_ok: bool = False
 
     def wire(self) -> dict[str, dict]:
         """The ``media_refs`` descriptor."""
@@ -218,6 +240,13 @@ class _Job:
     ref: SpaceMediaRef
     conns: tuple[GfsConnection, ...]
     attempt: int = 1
+    lazy_ok: bool = False
+
+
+def is_lazy_ref(ref: SpaceMediaRef) -> bool:
+    """A video whose blob is at least :data:`LAZY_VIDEO_MIN_BYTES` (v_83)."""
+    ext = ref.filename.rpartition(".")[2].lower()
+    return ext in VIDEO_EXTENSIONS and ref.size >= LAZY_VIDEO_MIN_BYTES
 
 
 class SpaceMediaGfsUploader:
@@ -354,13 +383,27 @@ class SpaceMediaGfsUploader:
             return None
         return await self._gfs.connection_for_url(inst.relay_via)
 
-    async def _relay_reader_conns(self, space_id: str) -> list[GfsConnection]:
+    async def _relay_reader_conns(
+        self, space_id: str
+    ) -> tuple[list[GfsConnection], bool]:
+        """The link-joined readers' GFSs, and whether every such reader can
+        ask for a missed blob (v_83)."""
         out: list[GfsConnection] = []
+        all_on_demand = True
         for iid in await self._federation_repo.list_member_instance_ids(space_id):
             conn = await self._reader_conn(iid)
             if conn is not None:
                 out.append(conn)
-        return out
+                all_on_demand = all_on_demand and await self._on_demand_reader(iid)
+        return out, all_on_demand
+
+    async def _on_demand_reader(self, instance_id: str) -> bool:
+        if self._federation is None:
+            return False
+        return await self._federation.peer_supports(
+            instance_id,
+            min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND,
+        )
 
     async def _capable(
         self, conns: Iterable[GfsConnection], scope: str
@@ -392,10 +435,10 @@ class SpaceMediaGfsUploader:
         names = media_names(media_urls)
         if not names:
             return None
-        conns = await self._relay_reader_conns(space_id)
+        conns, lazy_ok = await self._relay_reader_conns(space_id)
         if followers:
             conns.extend(await self._gfs.space_media_follower_targets(space_id))
-        return await self._plan(space_id, names, conns, item_id)
+        return await self._plan(space_id, names, conns, item_id, lazy_ok=lazy_ok)
 
     async def plan_for_reader(
         self,
@@ -411,7 +454,13 @@ class SpaceMediaGfsUploader:
         conn = await self._reader_conn(instance_id) if names else None
         if conn is None:
             return None
-        return await self._plan(space_id, names, [conn], item_id)
+        return await self._plan(
+            space_id,
+            names,
+            [conn],
+            item_id,
+            lazy_ok=await self._on_demand_reader(instance_id),
+        )
 
     async def _plan(
         self,
@@ -419,16 +468,20 @@ class SpaceMediaGfsUploader:
         names: list[str],
         conns: list[GfsConnection],
         item_id: str,
+        *,
+        lazy_ok: bool = False,
     ) -> SpaceMediaPlan | None:
         scope, _scope_id = await self.scope_of(space_id)
         targets = await self._capable(conns, scope)
         if not targets:
             return None
+        # Lazy only where the GFS asks THIS household for it on demand.
+        lazy_ok = lazy_ok and scope == SCOPE_SPACE and await self._owns(space_id)
         refs = await self._describe_names(space_id, names, item_id)
         if not refs:
             return None
         return SpaceMediaPlan(
-            space_id=space_id, refs=tuple(refs), targets=tuple(targets)
+            space_id=space_id, refs=tuple(refs), targets=tuple(targets), lazy_ok=lazy_ok
         )
 
     async def _describe_names(
@@ -492,6 +545,12 @@ class SpaceMediaGfsUploader:
             refs.append(ref)
         return refs
 
+    async def _owns(self, space_id: str) -> bool:
+        """Whether this household owns *space_id* (the holder a GFS asks)."""
+        own = self._federation.own_instance_id if self._federation else ""
+        space = await self._spaces.get(space_id)
+        return bool(own) and space is not None and space.owner_instance_id == own
+
     async def _space_file(self, space_id: str, name: str) -> bool:
         """Whether *name* may be sealed under *space_id*'s key: never a
         name another receiving path owns (DM / moment media), and only a
@@ -543,7 +602,9 @@ class SpaceMediaGfsUploader:
                 )
                 continue
             self._pending += 1
-            self._queue.put_nowait(_Job(ref=ref, conns=plan.targets))
+            self._queue.put_nowait(
+                _Job(ref=ref, conns=plan.targets, lazy_ok=plan.lazy_ok)
+            )
 
     async def drain(self) -> None:
         """Wait until every queued upload (and retry) finished — tests and
@@ -599,6 +660,12 @@ class SpaceMediaGfsUploader:
         todo = [
             c for c in job.conns if self._stored.get((c.id, ref.blob_id), 0.0) <= now
         ]
+        if job.lazy_ok and is_lazy_ref(ref):
+            # v_83 — a large video waits for a reader to play it: a GFS that
+            # can ask for it gets it then (:mod:`.space_media_gfs_responder`).
+            todo = [
+                c for c in todo if await self._gfs.space_media_on_demand_wait(c) is None
+            ]
         if not todo:
             return
         scope, scope_id = await self.scope_of(ref.space_id)
@@ -666,6 +733,20 @@ class SpaceMediaGfsUploader:
             self._pending -= 1
             raise
         self._queue.put_nowait(job)
+
+    async def remember_stored(self, conn: GfsConnection, blob_id: str) -> None:
+        """Note that *conn*'s GFS holds *blob_id* now (a re-upload on demand
+        stored it), so an eager upload of it in the meantime is skipped."""
+        await self._remember(conn, blob_id)
+
+    async def authorize(
+        self, claim: SpaceMediaClaim, space_id: str
+    ) -> SpaceMediaUploadAuth | None:
+        """The upload authorization this household holds for *claim* of
+        *space_id* (the claim's scope decides which kind), or ``None``."""
+        if claim.scope == SCOPE_CHANNEL:
+            return await self._authorize_channel(claim, space_id)
+        return await self._authorize(claim)
 
     async def _remember(self, conn: GfsConnection, blob_id: str) -> None:
         """Remember *blob_id* as held by *conn* until min(:data:`KEEP_S`,
@@ -738,11 +819,7 @@ class SpaceMediaGfsUploader:
             expires_at=now + KEEP_S,
             ts=now,
         )
-        auth = (
-            await self._authorize_channel(claim, ref.space_id)
-            if scope == SCOPE_CHANNEL
-            else await self._authorize(claim)
-        )
+        auth = await self.authorize(claim, ref.space_id)
         if auth is None:
             if ref.space_id not in self._unauthorized:
                 self._unauthorized.add(ref.space_id)

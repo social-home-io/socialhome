@@ -332,6 +332,8 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
             "space_max_bytes": 256 * 1024**2,
             "space_uploads_per_hour": 300,
             "scopes": ["channel", "space"],
+            # v_83 — a reader may ask for a blob it missed, waiting this long.
+            "on_demand": {"wait_s": 25},
         },
         # ``POST /gfs/proof`` needs a real base_url to bind; this fixture's
         # env fallback infers ``http://0.0.0.0:8765`` (a wildcard bind

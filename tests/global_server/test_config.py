@@ -12,6 +12,7 @@ from socialhome.global_server.config import (
     DEFAULT_TURN_TTL_SECONDS,
     EXAMPLE_TOML,
     GfsConfig,
+    SpaceMediaOnDemandConfig,
     set_password_in_toml,
     write_example_config,
 )
@@ -836,3 +837,66 @@ def test_no_per_household_channel_count_any_more():
     member's 6th private space — gone (fairness is per household)."""
     assert not hasattr(GfsConfig(), "space_media_channels_per_household")
     assert "channels_per_household" not in EXAMPLE_TOML
+
+
+def test_space_media_on_demand_defaults():
+    """v_83 — the cache-vs-stream thresholds sit next to the cache bounds,
+    with sensible defaults."""
+    od = GfsConfig().space_media_on_demand
+    assert od == SpaceMediaOnDemandConfig()
+    assert od.enabled is True
+    assert od.fresh_seconds == 7 * 86_400
+    assert od.cache_after_requests == 3
+    assert od.request_window_seconds == 3600
+    assert od.coalesce_seconds == 60
+    assert od.full_percent == 95
+    assert od.stream_wait_seconds == 25
+    assert od.max_streams == 16
+    assert od.scope_max_streams == 4
+    assert od.scope_stream_bytes_per_hour == 512 * 1024**2
+    assert od.prefix_wanted_per_hour == 240
+
+
+def test_space_media_on_demand_from_toml_and_env(tmp_dir, monkeypatch):
+    p = _space_media_toml(
+        tmp_dir,
+        "on_demand = false\nfresh_seconds = 3600\ncache_after_requests = 5\n"
+        "full_percent = 80\nscope_max_streams = 2\n",
+    )
+    od = GfsConfig.from_toml(p).space_media_on_demand
+    assert (od.enabled, od.fresh_seconds, od.cache_after_requests) == (
+        False,
+        3600,
+        5,
+    )
+    assert (od.full_percent, od.scope_max_streams) == (80, 2)
+    monkeypatch.setenv("GFS_SPACE_MEDIA_ON_DEMAND", "1")
+    monkeypatch.setenv("GFS_SPACE_MEDIA_CACHE_AFTER_REQUESTS", "7")
+    od = GfsConfig.load(p).space_media_on_demand
+    assert (od.enabled, od.cache_after_requests, od.fresh_seconds) == (True, 7, 3600)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "cache_after_requests = 0\n",
+        "full_percent = 101\n",
+        "stream_wait_seconds = 0\n",
+        "stream_wait_seconds = 61\n",
+        "coalesce_seconds = 0\n",
+        "max_streams = 0\n",
+        "fresh_seconds = -1\n",
+        'on_demand = "maybe"\n',
+    ],
+)
+def test_space_media_on_demand_out_of_range(tmp_dir, body):
+    with pytest.raises(ValueError, match="space_media"):
+        GfsConfig.from_toml(_space_media_toml(tmp_dir, body))
+
+
+def test_example_toml_documents_on_demand(tmp_dir):
+    for key in ("on_demand", "fresh_seconds", "cache_after_requests", "full_percent"):
+        assert key in EXAMPLE_TOML
+    p = tmp_dir / "example.toml"
+    write_example_config(p)
+    assert GfsConfig.from_toml(p).space_media_on_demand == SpaceMediaOnDemandConfig()

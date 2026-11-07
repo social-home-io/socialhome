@@ -33,6 +33,7 @@ import aiohttp
 import orjson
 
 from ..crypto import b64url_encode, sign_ed25519
+from ..domain.gfs_space_media_on_demand import SPACE_MEDIA_REQUEST_FRAME
 from ..domain.subscriber_accepts import OUR_HELLO_ACCEPTS
 from ..domain.ws_binary_frame import InvalidBinaryFrame, decode_binary_frame
 
@@ -92,6 +93,7 @@ class GfsWebSocketClient:
         "_on_moment_public",
         "_on_new_subscriber",
         "_on_relay",
+        "_on_space_media_request",
         "_reconnect_delays",
         "_session_factory",
         "_signing_key",
@@ -115,6 +117,7 @@ class GfsWebSocketClient:
         on_new_subscriber: Callable[[dict], Awaitable[None]] | None = None,
         on_envelope: Callable[[dict], Awaitable[None]] | None = None,
         on_connected: Callable[[], Awaitable[None]] | None = None,
+        on_space_media_request: Callable[[dict], Awaitable[None]] | None = None,
         reconnect_delays: tuple[float, ...] = RECONNECT_DELAYS,
     ) -> None:
         self._gfs_url = gfs_url
@@ -128,6 +131,8 @@ class GfsWebSocketClient:
         self._on_new_subscriber = on_new_subscriber
         self._on_envelope = on_envelope
         self._on_connected = on_connected
+        #: v_83 — a GFS asks this household for a space blob a reader missed.
+        self._on_space_media_request = on_space_media_request
         self._reconnect_delays = reconnect_delays
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -158,6 +163,12 @@ class GfsWebSocketClient:
         client.
         """
         self._on_highlight_signal = handler
+
+    def attach_space_media_request_handler(
+        self, handler: Callable[[dict], Awaitable[None]]
+    ) -> None:
+        """Late-bound — the v_83 holder side (``space_media_request``)."""
+        self._on_space_media_request = handler
 
     def attach_moment_public_handler(
         self,
@@ -525,6 +536,20 @@ class GfsWebSocketClient:
                 # "signature verification failed"), never the blob.
                 log.warning(
                     "gfs.ws.client: on_envelope handler raised for %s: %s",
+                    self._gfs_url,
+                    exc,
+                    exc_info=True,
+                )
+            return
+        if frame_type == SPACE_MEDIA_REQUEST_FRAME:
+            # v_83 — the GFS asks for a space blob a reader missed.
+            if self._on_space_media_request is None:
+                return
+            try:
+                await self._on_space_media_request(frame)
+            except Exception as exc:  # defensive
+                log.warning(
+                    "gfs.ws.client: space media request handler raised for %s: %s",
                     self._gfs_url,
                     exc,
                     exc_info=True,

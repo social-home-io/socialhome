@@ -39,6 +39,15 @@ The balancer reads the tag back from:
 | `POST /gfs/highlight_rtc/answer` | JSON body `session_id` |
 | `POST /gfs/highlight_rtc/ice/viewer` | JSON body `session_id` |
 | `POST /gfs/highlight_rtc/ice/author` | JSON body `session_id` |
+| `PUT /gfs/media/serve/<ticket>` | last path segment (v_83, space media on demand) |
+| `POST /gfs/media/serve/<ticket>/decline` | fourth path segment (v_83) |
+
+The space media ticket works the same way: a reader's
+`POST /gfs/media/{blob}/wanted` — which may land on **any** node — opens a
+session in that node's memory, and the node asks a holder household (over
+the cluster, wherever its socket is) to send the blob to
+`/gfs/media/serve/<route_tag>.<32 hex>`. That upload must reach the node
+holding the waiting reader.
 
 Everything else — the offer and the relay GET that create a session, and
 every other GFS route — keeps the normal balancing. The author's household
@@ -64,8 +73,10 @@ HAProxy 2.4 or newer (`wait-for-body`, `json_query`). In the frontend, before
 
 ```haproxy
   acl hl_id_in_path path_reg ^/gfs/highlight_rtc/(session|relay-stream)/[^/]+$
+  acl sm_ticket_in_path path_reg ^/gfs/media/serve/[^/]+(/decline)?$
   acl hl_id_in_body path /gfs/highlight_rtc/answer /gfs/highlight_rtc/ice/viewer /gfs/highlight_rtc/ice/author
   http-request set-var(txn.gfs_node) path,field(5,/),field(1,.) if hl_id_in_path
+  http-request set-var(txn.gfs_node) path,field(5,/),field(1,.) if sm_ticket_in_path
   http-request wait-for-body time 2s if hl_id_in_body METH_POST
   http-request set-var(txn.gfs_node) req.body,json_query('$.session_id'),field(1,.) if hl_id_in_body METH_POST
   use_backend gfs_node_%[var(txn.gfs_node)] if { var(txn.gfs_node) -m found }
@@ -88,9 +99,14 @@ ICE candidate. The gfs-deployment repository renders both parts from the
 Nomad service registry (`route_tag = NOMAD_ALLOC_ID`, one backend per
 `nomadService "gfs"` entry, keyed by its `AllocID`).
 
+The space media serve upload is a body of up to 8 MiB: it is never buffered
+by these rules (the ticket is in the path), only routed.
+
 Other balancers need the same two things: route by the text before the first
-`.` of the id in those five places, and fall back to normal balancing when it
-names no node.
+`.` of the id in those seven places, and fall back to normal balancing when it
+names no node. Without the serve rule, a holder's upload lands on another
+node, which answers `404 unknown_ticket`; the reader then gets a clean miss
+after its wait (one in N on an N-node cluster still works).
 
 ## Space media cache on a shared data dir
 
@@ -129,10 +145,48 @@ and this node's evictions and refusals since it started (or "Turned off"
 while `max_bytes = 0`). Each node counts its own; reload against another
 node to see its counters.
 
+### Missed pictures on request (v_83)
+
+When a reader views a picture the cache no longer holds, it asks
+(`POST /gfs/media/{blob}/wanted`) and the GFS asks one household that holds
+the file to send it again — streamed to the waiting reader(s) and not kept,
+or re-uploaded into the cache when the content is fresh or asked for
+repeatedly ([protocol/discovery.md](../protocol/discovery.md#space-media-on-demand-v_83)).
+The `wanted` request can land on any node; the holder's upload is routed
+to the node that took it by the ticket's route tag (the HAProxy rule
+above). What a blob needs across nodes — when it was stored, how often it
+was asked, the one re-upload claim — is in `gfs.db`
+(`gfs_space_media_demand`), so a blob is re-uploaded once per
+`coalesce_seconds` cluster-wide; streams are per node (at most one per node
+per window), held in memory only. All keys go in `[space_media]`, each
+with an env override `GFS_SPACE_MEDIA_<KEY>` (upper case):
+
+| Key | Default | |
+|---|---|---|
+| `on_demand` | `true` | Turn the whole thing off (`false`): every `wanted` is a `404` and `/gfs/info` stops advertising it. |
+| `fresh_seconds` | `604800` (7 days) | Content stored here at most this long ago goes back into the cache. |
+| `cache_after_requests` | `3` | Requests within `request_window_seconds` that earn a re-upload, however full the cache. |
+| `request_window_seconds` | `3600` | The window for that count. |
+| `coalesce_seconds` | `60` | One re-upload per blob per window; a delivered stream stays joinable this long; one the holder could not serve (not an unusable hint) is not asked again on that node this long. |
+| `full_percent` | `95` | Above this share of `max_bytes`, only repeatedly asked content is cached. |
+| `stream_wait_seconds` | `25` | The longest a reader waits for a holder (1–60). |
+| `max_streams` | `16` | Holder sessions per node (each ≤ 8 MiB in memory). |
+| `scope_max_streams` | `4` | Holder sessions per space or channel per node. |
+| `scope_stream_bytes_per_hour` | `536870912` (512 MiB) | Bytes one space or channel may stream an hour, cluster-wide; one reader network prefix may use at most 1/8 of it (64 MiB by default). |
+| `prefix_wanted_per_hour` | `240` | Holder requests one reader network prefix (/48, IPv4 /24) may trigger an hour, cluster-wide. |
+
+Memory: at most `max_streams` × 8 MiB (128 MiB by default) per node for
+sessions in flight — a session a slow reader is still being written from
+counts too, and a reader that stops reading is cut off; a holder must
+deliver within 120 s. The **Media cache** card on Overview adds this node's
+holder requests, streams served (and bytes), re-uploads, declines and
+requests nobody could serve ("Not found"), or says the feature is off.
+
 ## Rate limits across nodes
 
 The anonymous per-IP limits on the public pages, the highlight offer /
-relay entry points and `/gfs/highlights/ice-servers` count in each node's
+relay entry points, `/gfs/highlights/ice-servers` and the space media
+`wanted` requests (60 / min) count in each node's
 memory, so each node allows its share — the limit divided by the live
 nodes, rounded up (`public.node_share`). Behind round-robin, a client gets
 about one budget across the cluster. When a node goes away its peers mark

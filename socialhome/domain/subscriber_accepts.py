@@ -58,6 +58,13 @@ ACCEPTS_WS_BINARY1: str = "ws_binary1"
 #: frame (which never carries one). A HELLO-only label, per connection.
 ACCEPTS_SPACE_ITEM_NO_CERT: str = "space_item_no_cert"
 
+#: The household answers a GFS's ``space_media_request`` (v_83): it
+#: re-uploads or streams a space blob a reader missed, when it holds the
+#: file. A HELLO-only label, per connection: the GFS asks only sockets that
+#: listed it (an older household would drop the unknown frame and leave a
+#: reader waiting).
+ACCEPTS_SPACE_MEDIA_SERVE: str = "space_media_serve"
+
 #: What this household lists on every subscribe — follower and member seats
 #: alike, so the label never tells the GFS which seats are writers'.
 OUR_ACCEPTS: tuple[str, ...] = (
@@ -102,6 +109,7 @@ OUR_HELLO_ACCEPTS: tuple[str, ...] = (
     *OUR_ACCEPTS,
     ACCEPTS_WS_BINARY1,
     ACCEPTS_SPACE_ITEM_NO_CERT,
+    ACCEPTS_SPACE_MEDIA_SERVE,
 )
 
 #: The most labels one subscribe may carry.

@@ -965,6 +965,7 @@ python .claude/skills/federation-demo/harness.py gfs-authority-rotate
 python .claude/skills/federation-demo/harness.py gfs-space-no-subscribers
 python .claude/skills/federation-demo/harness.py gfs-invite-link
 python .claude/skills/federation-demo/harness.py gfs-invite-link-content
+python .claude/skills/federation-demo/harness.py gfs-media-on-demand
 python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
 python .claude/skills/federation-demo/harness.py gfs-private-channel
@@ -1331,6 +1332,23 @@ WS pushes across allocs. The step:
    address answers ``deleted: false`` (still ``200`` to fetch); the space's
    own delete via node 1 removes it on every node (``404``) while the
    channel's copy stays.
+   Then (step 3j) **space media on demand** (v_83) across nodes: a fake
+   holder household (real Ed25519 key) owns a listed space and holds its
+   socket on node 0 (hello ``accepts: ["space_media_serve"]``). Ten readers
+   (distinct ``X-Forwarded-For`` prefixes) POST ``/gfs/media/{blob}/wanted``
+   at once DIRECTLY to node 1 for a blob the cache never held: the holder
+   must get exactly ONE ``space_media_request`` (mode ``stream``, ticket
+   tagged ``gfs-1``), PUT the blob signed (``serve_signing_body`` with op
+   ``serve``, ``X-SH-Instance`` / ``-Timestamp`` / ``-Signature``) to the
+   BALANCER's ``/gfs/media/serve/{ticket}`` — routed by the ticket's tag to
+   node 1 (the ``sm_ticket_in_path`` HAProxy rule, mirrored by the stand-in)
+   — and every reader gets it byte-identical with ``Cache-Control:
+   no-store``; node 2 does not serve it (nothing stored). Then cache mode: a
+   second blob with a fresh ``gfs_space_media_demand`` row gets one
+   ``cache`` request, the holder's serve carries its upload authorization,
+   ``{"stored": true}``, and node 2 serves it from the shared cache
+   (immutable). Node 1's admin overview counts 2 holder requests, 2 streams,
+   1 re-upload over both legs.
 6. Confirms a client registered via one node is served by the other
    (shared DB → the round-robin LB is safe).
 
@@ -1807,6 +1825,37 @@ relayed posts still present on e, the revoked ``/join`` page still a
 token-free 404, and e's link-admin seat still without a signing seed.
 ``verify``'s capability block additionally asserts **v_29** round-trips
 on the one wire that cannot fall back to a peer row — see below.
+
+### ``gfs-media-on-demand`` — a picture that left the GFS cache comes back on a view (v_83)
+
+Prereqs: the chain through ``gfs-invite-link-content`` (the two photos
+``gfs-space-post`` and ``gfs-invite-link-content`` proved through the GFS
+media cache: d, a follower, holds a's space photo; e, a link-joined member,
+holds a's invite-space photo). Each blob is expired exactly as the GFS
+store does it (``gfs_space_media`` row + ``data_dir/space_media/<blob>``
+deleted, ``gfs_space_media_demand`` upserted with ``stored_at`` as
+``_remember_left`` writes it) and the reader's own ``sg-`` copy is deleted;
+then the reader VIEWS it (``GET /api/media/<sg-name>``) — a miss everywhere
+→ ``POST /gfs/media/{blob}/wanted`` → the GFS asks the host a
+(``space_media_request``) → a re-seals and serves the ticket.
+
+1. **Fresh** (``stored_at`` = the row's ``created_at``) → cache: the reader
+   gets the photo byte-identical; the GFS row and file are back; a logged
+   exactly one ``re-uploaded on demand`` line for the blob; the admin
+   overview (``/admin/api/overview`` → ``space_media``) counts +1 holder
+   request, +1 re-upload. The other reader kind, when it holds the same
+   blob (d does for the invite photo), then views it from the cache
+   (``fetched blob … from GFS``) with no new holder request.
+2. **Old** (``stored_at`` 30 days ago) → stream: byte-identical again, but
+   no row and no file afterwards; ``streams_served`` +1, ``reuploads`` +0;
+   a logged ``streamed on demand``. Waits first until the GFS has no live
+   sessions (a delivered session stays joinable ``coalesce_seconds``).
+
+Both legs run for e and for d (members and followers alike). Not
+re-runnable within ~10 min (a attaches its upload authorization once per
+(GFS, blob) per ``REUPLOAD_COALESCE_S``). ``verify`` asserts
+``MIN_FOR_SPACE_MEDIA_ON_DEMAND`` is v_83 and covered by the ``OURS``
+round-trip.
 
 ### ``local-community`` — who gets into a local community, and what the join carries (#1057)
 
