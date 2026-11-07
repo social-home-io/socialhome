@@ -69,6 +69,7 @@ from ..domain.media_constraints import (
     AUDIO_MAX_UPLOAD_BYTES,
     FILE_MAX_UPLOAD_BYTES,
     IMAGE_MAX_UPLOAD_BYTES,
+    SPACE_DIRECT_MEDIA_PREFIX,
     VIDEO_MAX_UPLOAD_BYTES,
 )
 
@@ -86,12 +87,6 @@ DM_MEDIA_PREFIX: str = "dm-"
 #: Prefix of a space file fetched from a GFS media cache
 #: (:func:`gfs_space_media_name`).
 GFS_SPACE_MEDIA_PREFIX: str = "sg-"
-
-#: Prefix of a space file received over federation
-#: (:func:`space_direct_media_name`). Not reserved: a household relays the
-#: names it stores (the host's §25.6 catch-up), and a receiver maps every
-#: name it is sent — so a received ``sd-`` name only ever becomes another.
-SPACE_DIRECT_MEDIA_PREFIX: str = "sd-"
 
 #: Name prefixes owned by one receiving path each — a ``SPACE_MEDIA_BLOB``
 #: never writes them, and a received space item never names them: ``dm-``

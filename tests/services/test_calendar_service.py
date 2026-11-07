@@ -39,6 +39,7 @@ from socialhome.repositories.calendar_repo import (
     SqliteCalendarRepo,
     SqliteSpaceCalendarRepo,
 )
+from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services import calendar_service as calendar_service_module
@@ -46,6 +47,7 @@ from socialhome.services.calendar_service import (
     CalendarModerationHandler,
     CalendarService,
 )
+from socialhome.services.media_ref_guard import MediaRefGuard
 from socialhome.services.moderation_release import release_scope
 from socialhome.services.space_moderation_service import SpaceModerationService
 
@@ -2889,6 +2891,50 @@ async def test_moderated_others_event_edit_and_delete_queue(env):
     assert await env.space_cal_repo.get_event(theirs.id) is None
 
 
+async def test_a_reviewed_events_cover_is_released_with_the_real_guard(env):
+    """Regression: with the media guard wired (as ``app.py`` does), the
+    release re-checks the cover for the submitter after the approve has
+    claimed the item — and the held item, the only row naming the file,
+    no longer counted as theirs. Create and edit both release."""
+    svc, mod, _ev, now = await _moderated_calendar(env)
+    svc.attach_media_guard(MediaRefGuard(SqliteMediaReferenceRepo(env.db)))
+    # A local submitter: one of this household's people (a ``users`` row).
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?, ?, ?)",
+        ("mia", "u-member", "Mia"),
+    )
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await svc.create_event(
+            space_id="cal-ao",
+            summary="Picnic",
+            start=now.isoformat(),
+            end=(now + timedelta(hours=1)).isoformat(),
+            created_by="u-member",
+            cover_url="api/media/held-cover.webp",
+        )
+    await mod.approve("cal-ao", exc.value.item.id, actor_user_id="u-mod")
+    held = await env.space_cal_repo.get_event(exc.value.item.payload["target_id"])
+    assert held is not None
+    assert held[1].cover_url == "api/media/held-cover.webp"
+    theirs = await svc.create_event(
+        space_id="cal-ao",
+        summary="Owner's",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="u-owner",
+    )
+    with pytest.raises(ContentQueuedForReview) as edit:
+        await svc.update_event(
+            theirs.id,
+            space_id="cal-ao",
+            actor_user_id="u-member",
+            cover_url="api/media/new-cover.webp",
+        )
+    await mod.approve("cal-ao", edit.value.item.id, actor_user_id="u-mod")
+    got = (await env.space_cal_repo.get_event(theirs.id))[1]
+    assert got.cover_url == "api/media/new-cover.webp"
+
+
 async def test_moderated_event_edit_of_deleted_event_410(env):
     svc, mod, _ev, now = await _moderated_calendar(env)
     theirs = await svc.create_event(
@@ -3538,6 +3584,55 @@ async def test_a_new_cover_carries_media_refs_for_link_joined_members(space_cal_
     assert to_e["media_refs"] == _CoverPlan().wire()
     assert "media_refs" not in await kw["per_peer"]("peer-b", payload)
     assert len(media.uploaded) == 1
+
+
+async def test_a_released_cover_reaches_every_kind_of_member_household(env):
+    """A reviewed event's cover, once approved (with the real media guard),
+    goes the way any new cover goes: the bytes to every other member
+    household (paired or mesh-reached — ``space_instances``), and the GFS
+    descriptor to a member that joined by link and reads through the GFS."""
+    svc, mod, _ev, now = await _moderated_calendar(env)
+    svc.attach_media_guard(MediaRefGuard(SqliteMediaReferenceRepo(env.db)))
+    # A local submitter: one of this household's people (a ``users`` row).
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?, ?, ?)",
+        ("mia", "u-member", "Mia"),
+    )
+    for iid in ("self-instance", "peer-b", "peer-c"):
+        await env.db.enqueue(
+            "INSERT INTO space_instances(space_id, instance_id) VALUES(?, ?)",
+            ("cal-ao", iid),
+        )
+    fed = _PerPeerFed()
+    fed.own_instance_id = "self-instance"  # type: ignore[attr-defined]
+    svc.attach_federation(fed)
+    sync = _FakeMediaSync()
+    svc.attach_media_sync(sync)
+    media = _CoverMediaGfs()
+    svc.attach_media_gfs(media)
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await svc.create_event(
+            space_id="cal-ao",
+            summary="Picnic",
+            start=now.isoformat(),
+            end=(now + timedelta(hours=1)).isoformat(),
+            created_by="u-member",
+            cover_url="api/media/cover.webp",
+        )
+    assert sync.calls == [] and media.planned == []  # nothing before approval
+    await mod.approve("cal-ao", exc.value.item.id, actor_user_id="u-mod")
+    target = exc.value.item.payload["target_id"]
+    (call,) = sync.calls
+    assert call["correlation_id"] == target
+    assert call["media_urls"] == ["api/media/cover.webp"]
+    assert sorted(call["target_instance_ids"]) == ["peer-b", "peer-c"]
+    assert media.planned == [("cal-ao", ["api/media/cover.webp"], False)]
+    created = [c for c in fed.calls if c[0].value == "space_calendar_event_created"]
+    _evt, payload, kw = created[0]
+    assert payload["cover_url"] == "api/media/cover.webp"
+    assert (await kw["per_peer"]("peer-e", payload))["media_refs"] == (
+        _CoverPlan().wire()
+    )
 
 
 async def test_an_unchanged_cover_plans_nothing_on_edit(space_cal_env):

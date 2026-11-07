@@ -220,3 +220,10 @@ SPACE_IMAGE_DATA_URI_PREFIX: str = "data:image/webp;base64,"
 SPACE_IMAGE_DATA_URI_MAX_CHARS: int = len(SPACE_IMAGE_DATA_URI_PREFIX) + 4 * -(
     -SPACE_IMAGE_EMBED_MAX_BYTES // 3
 )
+
+#: Prefix of a space file received over federation
+#: (``services.inbound_media_store.space_direct_media_name``). Not
+#: reserved: a household relays the names it stores (the host's §25.6
+#: catch-up), and a receiver maps every name it is sent — so a received
+#: ``sd-`` name only ever becomes another.
+SPACE_DIRECT_MEDIA_PREFIX: str = "sd-"

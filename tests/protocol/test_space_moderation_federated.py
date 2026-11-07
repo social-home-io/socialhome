@@ -535,6 +535,103 @@ async def test_a_reviewed_picture_keeps_one_file_per_delivering_household(mesh):
     assert {x["target_instance_id"] for x in shipped} >= {a.iid, d.iid}
 
 
+async def _submit_event_with_cover(mesh, cover: str = "api/media/cover.webp") -> str:
+    a = mesh["A"]
+    start = datetime.now(UTC) + timedelta(days=2)
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/calendar/events",
+        json={
+            "summary": "Picnic",
+            "start": start.isoformat(),
+            "end": (start + timedelta(hours=1)).isoformat(),
+            "cover_url": cover,
+        },
+        headers=a.headers,
+    )
+    assert r.status == 202, await r.text()
+    return (await r.json())["item_id"]
+
+
+async def _covers(house: House) -> list[str | None]:
+    rows = await house.db.fetchall("SELECT cover_url FROM space_calendar_events", ())
+    return [x["cover_url"] for x in rows]
+
+
+@pytest.mark.parametrize("approver", ["H", "C"])
+async def test_a_reviewed_event_with_a_cover_from_another_household_is_released(
+    mesh, approver
+):
+    """Regression: the host refused to release a remote member's event with
+    a cover (``InvalidMediaRefError``). The queue item is the only row that
+    names the submitter's file, and the approve claims it (``approved``)
+    before the apply re-checks the cover — which then counted only a
+    *pending* item as the submitter's. Released by the host itself or by a
+    moderator elsewhere, the event lands on every household with the cover
+    under the delivering household's name, and the host ships the bytes to
+    every other member household."""
+    a, h, c, d = mesh["A"], mesh["H"], mesh["C"], mesh["D"]
+    item_id = await _submit_event_with_cover(mesh)
+    await _pump(mesh)
+    from_a = space_direct_media_name(SID, a.iid, "cover.webp")
+    row = await h.db.fetchone(
+        "SELECT payload_json FROM space_moderation_queue WHERE id=?", (item_id,)
+    )
+    assert f"api/media/{from_a}" in row["payload_json"]
+    await _approve(mesh[approver], item_id)
+    await _pump(mesh, only={FET.SPACE_MODERATION_DECIDED}, once=True)
+    (status,) = [r["status"] for r in await _queue_rows(h)]
+    assert status == "approved"
+    released = _sends(h, FET.SPACE_CALENDAR_EVENT_CREATED)
+    assert sorted(to for to, _p in released) == sorted([a.iid, c.iid, d.iid])
+    assert {p["cover_url"] for _to, p in released} == {f"api/media/{from_a}"}
+    await _pump(mesh)
+    from_h = space_direct_media_name(SID, h.iid, from_a)
+    expected = {"H": from_a, "A": from_h, "C": from_h, "D": from_h}
+    for house in (a, h, c, d):
+        assert await _covers(house) == [f"api/media/{expected[house.name]}"], house.name
+    # The host ships the cover file to every other member household.
+    shipped = await h.db.fetchall(
+        "SELECT target_instance_id FROM space_media_outbox WHERE blob_id=?", (from_a,)
+    )
+    assert {x["target_instance_id"] for x in shipped} >= {a.iid, c.iid, d.iid}
+
+
+async def test_a_reviewed_cover_naming_another_spaces_file_never_reaches_it(mesh):
+    """A remote member that names a file it never delivered — here a file
+    only another space's post on the host shows — is never given the
+    host's file: the submission takes the submitter household's own name
+    for it, so the release points at that household's copy, not ours."""
+    a, h, c = mesh["A"], mesh["H"], mesh["C"]
+    await h.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp-other', 'Other', ?, 'hanna', ?)",
+        (h.iid, "cd" * 32),
+    )
+    await h.db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role)"
+        " VALUES('sp-other', ?, 'owner')",
+        (h.user_id,),
+    )
+    await h.db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, media_url)"
+        " VALUES('p-other', 'sp-other', ?, 'image', 'api/media/secret.webp')",
+        (h.user_id,),
+    )
+    item_id = await _submit_event_with_cover(mesh, "api/media/secret.webp")
+    await _pump(mesh)
+    await _approve(c, item_id)
+    await _pump(mesh, only={FET.SPACE_MODERATION_DECIDED}, once=True)
+    from_a = space_direct_media_name(SID, a.iid, "secret.webp")
+    assert await _covers(h) == [f"api/media/{from_a}"]
+    released = _sends(h, FET.SPACE_CALENDAR_EVENT_CREATED)
+    assert released
+    assert all("secret.webp" not in json.dumps(p) for _to, p in released)
+    shipped = await h.db.fetchall(
+        "SELECT blob_id FROM space_media_outbox WHERE blob_id='secret.webp'", ()
+    )
+    assert shipped == []
+
+
 async def test_a_member_edit_of_someone_elses_sticky_is_released_everywhere(mesh):
     a, h, c, d = mesh["A"], mesh["H"], mesh["C"], mesh["D"]
     r = await h.tc.post(

@@ -56,6 +56,7 @@ from typing import Protocol, runtime_checkable
 import orjson
 
 from ..db import AsyncDatabase
+from ..domain.media_constraints import SPACE_DIRECT_MEDIA_PREFIX
 from ..media.cleanup import media_basename
 from .base import rows_to_dicts
 
@@ -97,10 +98,19 @@ _JSON_FIELD_COLUMNS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+#: A moderation queue item still to publish its files: pending, or
+#: approved inside its review window — the approve claims the item before
+#: its apply, and an apply that stopped part-way resumes only while the
+#: window is open (``SpaceModerationService._approve``).
+_HELD_LIVE = (
+    "(status = 'pending' OR (status = 'approved'"
+    " AND datetime(expires_at) > datetime('now')))"
+)
+
 #: ``(table, text column, live-row filter)`` scanned for every
 #: ``api/media/<file>`` inside a free-form JSON payload.
 _PAYLOAD_SCANS: tuple[tuple[str, str, str], ...] = (
-    ("space_moderation_queue", "payload_json", "status='pending'"),
+    ("space_moderation_queue", "payload_json", _HELD_LIVE),
 )
 _MEDIA_REF_RE = re.compile(r"api/media/([A-Za-z0-9._-]+)")
 
@@ -115,6 +125,12 @@ _MEDIA_REF_RE = re.compile(r"api/media/([A-Za-z0-9._-]+)")
 # (a single reference), ``list`` (a JSON array) or ``json:<path>`` (a
 # field of a JSON object); ``access`` is an SQL boolean over the row ``t``
 # and the writer ``me`` (``me.uid`` / ``me.uname``).
+
+#: The writer is one of this household's own people (a ``users`` row): a
+#: household-level row (the feed, a personal calendar, a household page or
+#: album) is open to them — never to a remote space member, whose user id
+#: reaches this check only through a reviewed item it submitted.
+_HOUSEHOLD = "me.uname IS NOT NULL"
 
 #: The writer holds a seat in the space ``{col}`` names.
 _SEAT = (
@@ -131,10 +147,10 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
             " WHERE cm.conversation_id = t.conversation_id AND cm.username = me.uname)"
         ),
     ),
-    ("feed_posts", "media_url", "one", "1"),
-    ("feed_posts", "image_urls_json", "list", "1"),
-    ("feed_posts", "link_preview_json", "json:$.thumbnail_url", "1"),
-    ("post_comments", "media_url", "one", "1"),
+    ("feed_posts", "media_url", "one", _HOUSEHOLD),
+    ("feed_posts", "image_urls_json", "list", _HOUSEHOLD),
+    ("feed_posts", "link_preview_json", "json:$.thumbnail_url", _HOUSEHOLD),
+    ("post_comments", "media_url", "one", _HOUSEHOLD),
     ("space_posts", "media_url", "one", _SEAT.format(col="t.space_id")),
     ("space_posts", "image_urls_json", "list", _SEAT.format(col="t.space_id")),
     (
@@ -162,25 +178,41 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
         ),
     ),
     ("moments", "media_url", "one", "t.author_user_id = me.uid"),
-    ("calendar_events", "cover_url", "one", "1"),
+    ("calendar_events", "cover_url", "one", _HOUSEHOLD),
     ("space_calendar_events", "cover_url", "one", _SEAT.format(col="t.space_id")),
-    ("pages", "cover_image_url", "one", "1"),
+    ("pages", "cover_image_url", "one", _HOUSEHOLD),
     ("space_pages", "cover_image_url", "one", _SEAT.format(col="t.space_id")),
     (
         "page_edit_history",
         "cover_image_url",
         "one",
-        "(t.space_id IS NULL OR " + _SEAT.format(col="t.space_id") + ")",
+        f"((t.space_id IS NULL AND {_HOUSEHOLD}) OR "
+        + _SEAT.format(col="t.space_id")
+        + ")",
     ),
     ("task_attachments", "url", "one", "t.uploaded_by = me.uid"),
     ("post_drafts", "media_url", "one", "t.username = me.uname"),
+    # The submitter's own held item (:data:`_HELD_LIVE` — the approve
+    # claims the item BEFORE its apply re-checks the files for the
+    # submitter). A fallback with its own rules: :data:`_HELD_SOURCE`.
     (
         "space_moderation_queue",
         "payload_json",
         "payload",
-        "t.status = 'pending' AND t.submitted_by = me.uid",
+        f"t.submitted_by = me.uid AND {_HELD_LIVE}",
     ),
 )
+
+#: The :data:`_ACCESS_SOURCES` table that counts only when no other row
+#: references the file, and only when EVERY held item naming it is the
+#: writer's own (one of them live). A held item is its submitter's
+#: proposal, never a key: not to a file some other row shows, not to a
+#: file another submitter's item names. A remote submission is not checked
+#: on its way in — its files take the submitter household's ``sd-`` names
+#: (``SpaceMediaNamer``) — so a remote submitter's item opens only such a
+#: name, never an unreferenced file of ours (an orphan, or a fresh upload
+#: not posted yet).
+_HELD_SOURCE = "space_moderation_queue"
 
 #: The space each :data:`_ACCESS_SOURCES` table's row belongs to (an SQL
 #: expression over the row ``t``); a table not listed is household-level
@@ -204,7 +236,8 @@ _GALLERY_ACCESS_SQL = (
     "SELECT i.filename AS f, i.thumbnail_filename AS th,"
     " CASE WHEN a.space_id IS NOT NULL THEN "
     + _SEAT.format(col="a.space_id")
-    + " WHEN a.audience = 'chosen' THEN i.uploaded_by = me.uid ELSE 1 END AS ok,"
+    + " WHEN a.audience = 'chosen' THEN i.uploaded_by = me.uid"
+    + f" ELSE {_HOUSEHOLD} END AS ok,"
     " (a.space_id IS NULL AND a.audience = 'chosen'"
     " AND i.uploaded_by IS NOT me.uid) AS private"
     " FROM gallery_items i JOIN gallery_albums a ON a.id = i.album_id, me"
@@ -314,6 +347,7 @@ class SqliteMediaReferenceRepo:
             _ME_CTE + _GALLERY_ACCESS_SQL, (*me, basename, basename)
         )
         referenced = allowed = False
+        held = held_ok = False
         for r in rows_to_dicts(rows):
             if r.get("private"):
                 return False  # a private album's file: its uploader only
@@ -321,6 +355,11 @@ class SqliteMediaReferenceRepo:
             allowed = allowed or bool(r.get("ok"))
         pattern = f"%{_like_escape(basename)}%"
         for table, col, shape, access in _ACCESS_SOURCES:
+            if table == _HELD_SOURCE:
+                held, held_ok = await self._held_access(
+                    basename, me, pattern, col, access
+                )
+                continue
             if shape.startswith("json:"):
                 value = f"json_extract(t.{col}, '{shape[5:]}')"
                 guard = f" AND json_valid(t.{col})"
@@ -344,7 +383,31 @@ class SqliteMediaReferenceRepo:
                     allowed = allowed or bool(r.get("ok"))
             if allowed:
                 return True
-        return allowed or not referenced
+        if referenced:
+            return False
+        # Only held items name it: their submitter's — or nobody's yet.
+        return held_ok or not held
+
+    async def _held_access(
+        self, basename: str, me: tuple[str, str], pattern: str, col: str, access: str
+    ) -> tuple[bool, bool]:
+        """``(referenced, allowed)`` over the moderation queue's payloads."""
+        rows = await self._db.fetchall(
+            _ME_CTE + f"SELECT t.{col} AS v, ({access}) AS ok,"
+            " t.submitted_by = me.uid AS mine, me.uname IS NOT NULL AS local"
+            f" FROM {_HELD_SOURCE} t, me WHERE t.{col} LIKE ? ESCAPE '\\'",
+            (*me, pattern),
+        )
+        referenced = allowed = False
+        everyone_mine = local = True
+        for r in rows_to_dicts(rows):
+            if basename in _names_in_payload(r.get("v")):
+                referenced = True
+                allowed = allowed or bool(r.get("ok"))
+                everyone_mine = everyone_mine and bool(r.get("mine"))
+                local = bool(r.get("local"))
+        own_copy = local or basename.startswith(SPACE_DIRECT_MEDIA_PREFIX)
+        return referenced, allowed and everyone_mine and own_copy
 
     async def confined_to_space(self, basename: str, space_id: str) -> bool:
         """Whether the file *basename* is referenced, and ONLY by content of
