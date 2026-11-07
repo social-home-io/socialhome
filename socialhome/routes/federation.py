@@ -7,6 +7,13 @@ signature verify -> replay cache -> decrypt -> dispatch) lives in
 thin shim that forwards the raw body and converts the service's
 canonical ``ValueError`` rejections into HTTP 400 / 403 / 410.
 
+Binary media (proto v_81) rides the same URL: a body that starts with
+``MEDIA_BODY_MAGIC`` is one media chunk frame
+(:meth:`FederationService.handle_inbound_media_https` — the same §24.11
+chain), anything else is a JSON envelope. The body decides, never
+``Content-Type`` or a header: Home Assistant's inbox relay forwards every
+body as ``application/octet-stream`` and drops custom headers.
+
 §11 peer-pairing bootstrap (``PAIRING_PEER_ACCEPT`` /
 ``PAIRING_PEER_CONFIRM``) rides the same URL. The view peeks the
 body's ``event_type`` before invoking the pipeline because pairing
@@ -29,14 +36,22 @@ per-IP bucket on top, mirroring ``/api/auth/token``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import orjson
 from aiohttp import web
 
 from .. import app_keys as K
+from ..domain.errors import PayloadTooLargeError
 from ..domain.federation import FederationEventType
 from ..federation.inbound_validator import UnpairedPeerRefusedError
+from ..federation.media_framing import (
+    HTTPS_MEDIA_MAX_BODY_BYTES,
+    MEDIA_BODY_MAGIC,
+    is_media_body,
+)
+from ..hardening import DEFAULT_JSON_MAX_BYTES, read_body_capped
 from ..rate_limiter import client_bucket
 from .base import BaseView
 
@@ -47,6 +62,17 @@ log = logging.getLogger(__name__)
 #: still drains in under 17 minutes; a flood from one IP gets 429'd.
 INBOX_RATE_LIMIT = 1000
 INBOX_RATE_WINDOW_S = 60
+
+#: Largest JSON envelope the inbox takes (§25.7).
+INBOX_MAX_BODY_BYTES = DEFAULT_JSON_MAX_BYTES
+
+#: Own per-IP bucket for binary media bodies on the inbox (proto v_81):
+#: each request is up to a 512 KiB chunk, so 600 / min is ~300 MiB a minute
+#: from one address — a 200 MiB video (400 chunks) in well under a minute —
+#: and it never eats into the JSON inbox's budget. A 429 sends the sender's
+#: chunk down the JSON path, which the outbox redelivers.
+MEDIA_INBOX_RATE_LIMIT = 600
+MEDIA_INBOX_RATE_WINDOW_S = 60
 
 #: Event types whose replay-cache hit is expected noise rather than
 #: a signal. The federation transport's DataChannel → HTTPS-inbox
@@ -169,8 +195,66 @@ def _classify_pairing(msg: str) -> int:
     return 400
 
 
+def _throttled(
+    request: web.Request, prefix: str, *, limit: int, window_s: int
+) -> web.Response | None:
+    """The per-IP bucket of an unauthenticated federation route: a 429 with
+    ``Retry-After`` when *request*'s address is over *limit* per
+    *window_s*, else ``None``. The global rate-limit middleware buckets by
+    user_id (empty here), so these routes would otherwise be uncapped."""
+    limiter = request.app.get(K.rate_limiter_key)
+    if limiter is None:
+        return None
+    # Fall back to "unknown" so a missing peername still hits *some*
+    # shared bucket.
+    bucket = f"{prefix}:{client_bucket(request.remote)}"
+    if limiter.is_allowed(bucket, limit=limit, window_s=window_s):
+        return None
+    # ``Retry-After`` (delta-seconds) tells the sender's outbox when the
+    # window frees up, so it waits instead of hammering — a 429 is
+    # back-pressure the sender retries, never a drop.
+    return web.json_response(
+        {"error": _GENERIC_ERROR_BY_STATUS[429]},
+        status=429,
+        headers={
+            "Retry-After": str(limiter.retry_after_s(bucket, window_s=window_s) or 1)
+        },
+    )
+
+
+async def _read_body_head(request: web.Request) -> bytes:
+    """The first ``len(MEDIA_BODY_MAGIC)`` bytes of the body (fewer for a
+    shorter body) — enough to tell a binary media body from JSON. A
+    declared ``Content-Length`` over the JSON cap is refused first."""
+    declared = request.content_length
+    if declared is not None and declared > INBOX_MAX_BODY_BYTES:
+        raise PayloadTooLargeError(INBOX_MAX_BODY_BYTES)
+    try:
+        return await request.content.readexactly(len(MEDIA_BODY_MAGIC))
+    except asyncio.IncompleteReadError as exc:
+        return exc.partial
+
+
+def _bad_body(status: int) -> web.Response:
+    return web.json_response({"error": _GENERIC_ERROR_BY_STATUS[status]}, status=status)
+
+
 class FederationInboxView(BaseView):
     """POST /federation/inbox/{inbox_id} — federation envelope arrives here.
+
+    Two body shapes, told apart by the body alone — never by
+    ``Content-Type`` or a header, which Home Assistant's inbox relay
+    (``/api/socialhome/inbox/{inbox_id}``) rewrites to
+    ``application/octet-stream`` / drops:
+
+    * a JSON envelope (at most 1 MiB) —
+      :meth:`FederationService.handle_inbound_envelope`;
+    * a binary media body (proto v_81) — the ``MEDIA_BODY_MAGIC``, a
+      suite byte, one ``fed-media-v1`` frame (at most one 512 KiB chunk +
+      overhead, :data:`~socialhome.federation.media_framing.HTTPS_MEDIA_MAX_BODY_BYTES`)
+      — :meth:`FederationService.handle_inbound_media_https`, the same
+      §24.11 chain. Its own per-IP bucket, so media never eats the
+      envelope budget.
 
     Returns ``{"status":"ok"}`` on successful dispatch (200), or
     an error code on validation failure. All errors are silent
@@ -181,48 +265,45 @@ class FederationInboxView(BaseView):
     async def post(self) -> web.Response:
         inbox_id = self.match("inbox_id")
 
-        # §Audit #4: per-IP throttle. The global rate-limit middleware
-        # buckets by user_id (empty here), so an unauthenticated path
-        # would otherwise be uncapped. Mirror the ``/api/auth/token``
-        # pattern — bucket on remote IP, fall back to "unknown" so that
-        # a missing peername still hits *some* shared bucket.
-        limiter = self.request.app.get(K.rate_limiter_key)
-        if limiter is not None:
-            client_ip = client_bucket(self.request.remote)
-            bucket = f"federation-inbox:{client_ip}"
-            if not limiter.is_allowed(
-                bucket,
-                limit=INBOX_RATE_LIMIT,
-                window_s=INBOX_RATE_WINDOW_S,
-            ):
-                # ``Retry-After`` (delta-seconds) tells the sender's outbox
-                # when the window frees up, so it waits instead of hammering
-                # — a 429 is back-pressure the sender retries, never a drop.
-                return web.json_response(
-                    {"error": _GENERIC_ERROR_BY_STATUS[429]},
-                    status=429,
-                    headers={
-                        "Retry-After": str(
-                            limiter.retry_after_s(bucket, window_s=INBOX_RATE_WINDOW_S)
-                            or 1
-                        )
-                    },
-                )
-
         try:
-            raw_body = await self.request.read()
+            head = await _read_body_head(self.request)
+        except PayloadTooLargeError:
+            return _bad_body(413)
         except Exception as exc:
             log.debug("federation inbox: body read error: %s", exc, exc_info=True)
-            return web.json_response(
-                {"error": _GENERIC_ERROR_BY_STATUS[400]},
-                status=400,
-            )
+            return _bad_body(400)
+        media = is_media_body(head)
 
-        if len(raw_body) > 1 * 1024 * 1024:  # 1 MiB cap
-            return web.json_response(
-                {"error": _GENERIC_ERROR_BY_STATUS[413]},
-                status=413,
+        # §Audit #4: per-IP throttle, mirroring ``/api/auth/token``.
+        throttled = (
+            _throttled(
+                self.request,
+                "federation-media",
+                limit=MEDIA_INBOX_RATE_LIMIT,
+                window_s=MEDIA_INBOX_RATE_WINDOW_S,
             )
+            if media
+            else _throttled(
+                self.request,
+                "federation-inbox",
+                limit=INBOX_RATE_LIMIT,
+                window_s=INBOX_RATE_WINDOW_S,
+            )
+        )
+        if throttled is not None:
+            return throttled
+
+        try:
+            raw_body = await read_body_capped(
+                self.request,
+                HTTPS_MEDIA_MAX_BODY_BYTES if media else INBOX_MAX_BODY_BYTES,
+                prefix=head,
+            )
+        except PayloadTooLargeError:
+            return _bad_body(413)
+        except Exception as exc:
+            log.debug("federation inbox: body read error: %s", exc, exc_info=True)
+            return _bad_body(400)
 
         federation_service = self.request.app.get(K.federation_service_key)
         if federation_service is None:
@@ -238,20 +319,28 @@ class FederationInboxView(BaseView):
         # §11 bootstrap fast-path: peek ``event_type`` before the §24.11
         # pipeline. Pairing bodies carry their own Ed25519 signature
         # and the receiver doesn't yet have a ``RemoteInstance`` row
-        # for the sender, so the pipeline would reject them.
-        pairing_response = await self._maybe_dispatch_pairing(
-            federation_service,
-            raw_body,
-            inbox_id,
-        )
-        if pairing_response is not None:
-            return pairing_response
+        # for the sender, so the pipeline would reject them. (A binary
+        # media body is never a pairing event.)
+        if not media:
+            pairing_response = await self._maybe_dispatch_pairing(
+                federation_service,
+                raw_body,
+                inbox_id,
+            )
+            if pairing_response is not None:
+                return pairing_response
 
         try:
-            result = await federation_service.handle_inbound_envelope(
-                inbox_id,
-                raw_body,
-            )
+            if media:
+                result = await federation_service.handle_inbound_media_https(
+                    inbox_id,
+                    raw_body,
+                )
+            else:
+                result = await federation_service.handle_inbound_envelope(
+                    inbox_id,
+                    raw_body,
+                )
         except ValueError as exc:
             status = _classify(str(exc))
             # §Audit #7: never echo ``str(exc)`` to the wire — that

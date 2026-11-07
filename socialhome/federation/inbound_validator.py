@@ -311,6 +311,24 @@ def make_parse_json(*, loads) -> InboundStep:
     return parse_json
 
 
+def make_check_event_types(allowed: frozenset[FederationEventType]) -> InboundStep:
+    """Step 1b (a transport that carries one kind of event): refuse any
+    ``event_type`` outside *allowed* — before the lookup and any crypto.
+
+    A binary media body on the inbox (proto v_81) carries media chunks
+    only; a signed envelope of any other type belongs in a JSON body and
+    is refused here, so the binary shape never becomes a second door for
+    the whole event vocabulary.
+    """
+
+    async def check_event_types(ctx: InboundContext) -> None:
+        event_type = FederationEventType(ctx.envelope["event_type"])
+        if event_type not in allowed:
+            raise ValueError(f"Event type not allowed here: {event_type.value!r}")
+
+    return check_event_types
+
+
 def make_lookup_instance(*, repo, lookup_fn) -> InboundStep:
     """Step 2 (inbox): resolve RemoteInstance by inbox_id."""
 

@@ -125,7 +125,9 @@ def _large_upload_cap(
 # ─── Capped streaming readers ────────────────────────────────────────────
 
 
-async def read_body_capped(request: web.BaseRequest, max_bytes: int) -> bytes:
+async def read_body_capped(
+    request: web.BaseRequest, max_bytes: int, *, prefix: bytes = b""
+) -> bytes:
     """Read the raw request body, refusing anything over *max_bytes*.
 
     Independent of the app-wide ``client_max_size``: ``request.read()``
@@ -142,11 +144,18 @@ async def read_body_capped(request: web.BaseRequest, max_bytes: int) -> bytes:
     :class:`~socialhome.domain.errors.PayloadTooLargeError` is raised the
     moment the total crosses the cap — the rest of the body is never
     buffered.
+
+    ``prefix`` is what the caller already read off the stream (the
+    federation inbox peeks the first bytes to tell a binary body from
+    JSON before it picks the cap); it counts toward *max_bytes* and leads
+    the result.
     """
     declared = request.content_length
     if declared is not None and declared > max_bytes:
         raise PayloadTooLargeError(max_bytes)
-    raw = bytearray()
+    raw = bytearray(prefix)
+    if len(raw) > max_bytes:
+        raise PayloadTooLargeError(max_bytes)
     # ``StreamReader.read(n)`` returns only what is buffered, so the cap is
     # enforced by accumulating chunk by chunk and bailing the moment the
     # total crosses it.

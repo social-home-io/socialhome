@@ -83,6 +83,7 @@ from ..domain.federation import (
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.federation_retention import moment_delete_key, supersede_key
 from ..domain.media_chunking import (
+    HTTPS_CHUNK_BYTES,
     fits_channel,
     media_chunk_bytes,
     routed_media_chunk_bytes,
@@ -108,6 +109,7 @@ from .inbound_validator import (
     _InboxInstance,
     make_ban_check,
     make_check_deprovisioned_author,
+    make_check_event_types,
     make_check_peer_class,
     make_check_relay_opt_in,
     make_check_replay,
@@ -126,11 +128,17 @@ from .inbound_validator import (
     run_post_decrypt_gates,
 )
 from .invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
+from .media_envelope import MEDIA_HTTPS_EVENT_TYPES, build_media_envelope
 from .media_framing import (
-    MEDIA_AEAD_SUITE_AESGCM_256,
+    MEDIA_FRAME_SUITE_V1,
     SUPPORTED_MEDIA_AEAD_SUITES,
+    SUPPORTED_MEDIA_FRAME_SUITES,
+    MediaFramingError,
     UnsupportedMediaAeadSuite,
+    UnsupportedMediaFrameSuite,
+    decode_body,
 )
+from .media_https_backoff import MediaHttpsBackoff
 from .mesh_member_claim import (
     MESH_CLAIM_IDENTITY_PK_FIELD,
     MESH_CLAIM_VERSION_FIELD,
@@ -149,6 +157,20 @@ def _dumps(obj: dict) -> str:
 
 def _loads(s: str | bytes) -> dict:
     return _orjson.loads(s)
+
+
+def _digest_matches(expected: object, actual: str) -> bool:
+    """Constant-time check of a peer-supplied b64url digest against ours.
+
+    Anything but a non-empty string is a mismatch, and the comparison is on
+    UTF-8 bytes: ``hmac.compare_digest`` raises ``TypeError`` on a
+    non-ASCII ``str``, which would surface as a 500 instead of a refusal.
+    """
+    return (
+        isinstance(expected, str)
+        and bool(expected)
+        and hmac.compare_digest(expected.encode("utf-8"), actual.encode("ascii"))
+    )
 
 
 log = logging.getLogger(__name__)
@@ -325,6 +347,8 @@ class FederationService:
         "_inbound_pipeline",
         "_key_manager",
         "_last_mesh_begin_at",
+        "_media_https_backoff",
+        "_media_https_inbound_pipeline",
         "_online_status_service",
         "_outbox_repo",
         "_own_identity_pk",
@@ -493,6 +517,10 @@ class FederationService:
         )
         # §24.11 inbound validation pipeline (middleware chain).
         self._inbound_pipeline = None  # lazy-built on first use
+        self._media_https_inbound_pipeline = None  # lazy-built on first frame
+        # Per-peer memory of the binary HTTPS media leg: a peer whose inbox
+        # keeps refusing binary bodies gets JSON only for a while.
+        self._media_https_backoff = MediaHttpsBackoff()
         self._rtc_inbound_pipeline = None  # lazy-built on first RTC frame
         # Event dispatch registry for federation event handlers.
         # Handlers register themselves via attach_* methods.
@@ -553,6 +581,24 @@ class FederationService:
                 ),
             )
         )
+
+    def _build_media_https_pipeline(self):
+        """The §24.11 inbox pipeline for a binary media body on the inbox.
+
+        Exactly the JSON inbox chain (lookup by ``inbox_id``) with one gate
+        added straight after the parse: the envelope must be a media chunk
+        (:data:`~socialhome.federation.media_envelope.MEDIA_HTTPS_EVENT_TYPES`),
+        so the binary route never opens a second door for the rest of the
+        vocabulary. Composed from the shared step list — never a copy.
+        """
+        steps = self._common_pipeline_steps(
+            lookup_step=make_lookup_instance(
+                repo=self._federation_repo,
+                lookup_fn=_lookup_by_inbox_id,
+            ),
+        )
+        steps.insert(1, make_check_event_types(MEDIA_HTTPS_EVENT_TYPES))
+        return InboundPipeline(steps)
 
     def _build_rtc_inbound_pipeline(self):
         """Build the §24.11 pipeline variant for WebRTC DataChannel frames.
@@ -1101,9 +1147,8 @@ class FederationService:
         # Verify payload integrity: sha256(plaintext) must match the hash inside
         # the signed+encrypted metadata — same constant-time check as the media
         # handler's chunk_sha256, preventing payload-splice attacks by a relay.
-        expected_sha = str(meta.get("payload_sha256") or "")
         actual_sha = b64url_encode(hashlib.sha256(raw).digest())
-        if not expected_sha or not hmac.compare_digest(expected_sha, actual_sha):
+        if not _digest_matches(meta.get("payload_sha256"), actual_sha):
             log.warning(
                 "app frame payload_sha256 mismatch from %s — dropping",
                 instance_id,
@@ -2315,45 +2360,42 @@ class FederationService:
         space_id: str | None = None,
         mesh_fallback: bool = False,
     ) -> DeliveryResult:
-        """Ship one media chunk, preferring the binary ``fed-media-v1`` channel.
+        """Ship one media chunk as binary when the peer can take it.
 
-        The binary channel is used iff **all** hold: the peer is a
-        CONFIRMED direct peer, advertises
-        :data:`FederationCapability.MIN_FOR_MEDIA_CHANNEL`, its media
-        channel is currently open, and the chunk fits that channel's
-        negotiated message size. Then ``raw_chunk`` ships encrypted as
-        binary (no base64) alongside a signed envelope whose encrypted
-        metadata carries a ``chunk_sha256`` binding.
+        Three legs, tried in order; a leg that doesn't land falls through
+        to the next, so the chunk always delivers:
 
-        Otherwise — sub-v_14 peer, non-CONFIRMED / mesh-only member, or
-        the channel not yet open / a send error — falls back transparently
-        to the JSON path: :meth:`send_event` for DM, or
-        :meth:`send_with_mesh_fallback` when ``mesh_fallback`` is set (so
-        a mesh-only space member still receives the bytes via
-        ``SPACE_ROUTED``). The fallback adds the base64 ``bytes_b64``
-        field, producing the exact wire shape sub-v_14 peers already
-        understand.
+        1. **The ``fed-media-v1`` DataChannel** iff the peer is a CONFIRMED
+           direct peer advertising
+           :data:`FederationCapability.MIN_FOR_MEDIA_CHANNEL`, its media
+           channel is open and the chunk fits that channel's negotiated
+           message size.
+        2. **A binary body on the HTTPS inbox** (v_81) iff the peer is a
+           CONFIRMED direct peer with an inbox URL (not a household seated
+           from an invite link) advertising
+           :data:`FederationCapability.MIN_FOR_MEDIA_HTTPS`, and the chunk
+           is at most :data:`~socialhome.domain.media_chunking.HTTPS_CHUNK_BYTES`.
+        3. **The JSON chunk** — :meth:`send_event` for DM, or
+           :meth:`send_with_mesh_fallback` when ``mesh_fallback`` is set (so
+           a mesh-only space member still receives the bytes via
+           ``SPACE_ROUTED``). Adds the base64 ``bytes_b64`` field: the wire
+           shape every older peer understands.
 
-        ``payload`` is the chunk metadata dict **without** the bytes; the
-        binary path encrypts ``raw_chunk`` separately, the JSON fallback
-        re-attaches it as base64.
+        Legs 1 and 2 carry the same frame
+        (:mod:`~socialhome.federation.media_envelope`): a signed envelope
+        whose encrypted metadata binds ``chunk_sha256``, plus the
+        AES-256-GCM-sealed chunk as raw bytes — no base64.
+
+        ``payload`` is the chunk metadata dict **without** the bytes.
         """
         instance = await self._federation_repo.get_instance(to_instance_id)
         if (
             self._transport is not None
             and instance is not None
             and instance.status is PairingStatus.CONFIRMED
-            and self._transport.is_media_ready(to_instance_id)
-            # A chunk sized for the inbox (the channel is below the floor,
-            # see ``media_chunking``) is never tried as a frame it can't
-            # carry — it goes straight over HTTPS.
-            and fits_channel(len(raw_chunk), self._media_channel_limit(to_instance_id))
-            and await self.peer_supports(
-                to_instance_id,
-                min_version=FederationCapability.MIN_FOR_MEDIA_CHANNEL,
-            )
         ):
-            result = await self._send_media_binary(
+            result = await self._send_media_direct(
+                self._transport,
                 instance=instance,
                 event_type=event_type,
                 payload=payload,
@@ -2362,8 +2404,6 @@ class FederationService:
             )
             if result is not None:
                 return result
-            # Binary send didn't land (channel raced closed / over HWM) —
-            # fall through to the JSON path so the chunk still delivers.
 
         json_payload = {
             **payload,
@@ -2383,8 +2423,9 @@ class FederationService:
             space_id=space_id,
         )
 
-    async def _send_media_binary(
+    async def _send_media_direct(
         self,
+        transport: FederationTransport,
         *,
         instance: RemoteInstance,
         event_type: FederationEventType,
@@ -2392,18 +2433,81 @@ class FederationService:
         raw_chunk: bytes,
         space_id: str | None,
     ) -> DeliveryResult | None:
-        """Build + sign the media envelope and ship it as a binary frame.
+        """Legs 1 and 2 of :meth:`send_media_chunk` for a CONFIRMED peer:
+        the media channel, then the binary inbox body. ``None`` when
+        neither applies or lands (the caller sends the JSON chunk)."""
+        if (
+            transport.is_media_ready(instance.id)
+            # A chunk sized for the inbox (the channel is below the floor,
+            # see ``media_chunking``) is never tried as a frame it can't
+            # carry — it goes straight over HTTPS.
+            and fits_channel(len(raw_chunk), self._media_channel_limit(instance.id))
+            and await self.peer_supports(
+                instance.id,
+                min_version=FederationCapability.MIN_FOR_MEDIA_CHANNEL,
+            )
+        ):
+            result = await self._send_media_binary(
+                transport,
+                instance=instance,
+                event_type=event_type,
+                payload=payload,
+                raw_chunk=raw_chunk,
+                space_id=space_id,
+                via_https=False,
+            )
+            if result is not None:
+                return result
+            # Binary send didn't land (channel raced closed / over HWM) —
+            # try the HTTPS leg so the chunk still goes as binary.
+        if (
+            instance.source is not InstanceSource.SPACE_SESSION
+            and instance.remote_inbox_url
+            # A peer already known to be away gets the JSON leg straight
+            # away (relay / outbox) — never two timed-out POSTs per chunk.
+            and instance.unreachable_since is None
+            # …nor a wasted POST per chunk to an inbox that keeps refusing
+            # binary bodies (proxy, bug, the shared bucket behind HA's relay).
+            and self._media_https_backoff.allows(instance.id)
+            and len(raw_chunk) <= HTTPS_CHUNK_BYTES
+            and await self.peer_supports(
+                instance.id,
+                min_version=FederationCapability.MIN_FOR_MEDIA_HTTPS,
+            )
+        ):
+            # ``None`` when the POST didn't land (peer away, 429, refused):
+            # the JSON leg then queues the chunk in the outbox.
+            return await self._send_media_binary(
+                transport,
+                instance=instance,
+                event_type=event_type,
+                payload=payload,
+                raw_chunk=raw_chunk,
+                space_id=space_id,
+                via_https=True,
+            )
+        return None
 
-        Returns :class:`DeliveryResult` on success, ``None`` when the
-        binary send didn't land (caller falls back to JSON). Mirrors
-        :meth:`send_event`'s envelope construction byte-for-byte — same
-        field set, same ``proto_version=1``, same ``_dumps`` + suite-aware
-        signing — so the receiver's signature reconstruction matches and
-        the chunk inherits the full §24.11 guarantees. The only addition
-        is the second AEAD over the raw chunk bytes.
+    async def _send_media_binary(
+        self,
+        transport: FederationTransport,
+        *,
+        instance: RemoteInstance,
+        event_type: FederationEventType,
+        payload: dict,
+        raw_chunk: bytes,
+        space_id: str | None,
+        via_https: bool,
+    ) -> DeliveryResult | None:
+        """Build + sign the media envelope and ship it as one binary frame,
+        on the media channel or (``via_https``) to the peer's inbox URL.
+
+        Returns :class:`DeliveryResult` on success, ``None`` when the send
+        didn't land (the caller tries the next leg). The envelope is
+        :func:`~socialhome.federation.media_envelope.build_media_envelope`
+        — the field set and canonical order of :meth:`send_event`, so the
+        receiver's §24.11 pipeline verifies it unchanged.
         """
-        if self._transport is None:  # pragma: no cover — caller gates on transport
-            return None
         try:
             session_key = self._key_manager.decrypt(instance.key_self_to_remote)
         except Exception:
@@ -2413,41 +2517,34 @@ class FederationService:
                 exc_info=True,
             )
             return None
-        chunk_sha256 = b64url_encode(hashlib.sha256(raw_chunk).digest())
-        metadata = {
-            **payload,
-            "chunk_sha256": chunk_sha256,
-            "media_aead_suite": MEDIA_AEAD_SUITE_AESGCM_256,
-        }
-        encrypted_payload = self._encrypt_payload(_dumps(metadata), session_key)
-        msg_id = str(uuid.uuid4())
-        timestamp = datetime.now(UTC).isoformat()
-        effective_suite = instance.sig_suite or self._encoder.sig_suite
-        envelope_dict: dict = {
-            "msg_id": msg_id,
-            "event_type": event_type.value,
-            "from_instance": self._own_instance_id,
-            "to_instance": instance.id,
-            "timestamp": timestamp,
-            "encrypted_payload": encrypted_payload,
-            "space_id": space_id,
-            "proto_version": 1,
-            "sig_suite": effective_suite,
-        }
-        envelope_bytes = _dumps(envelope_dict).encode("utf-8")
-        envelope_dict["signatures"] = self._encoder.sign_envelope_all(
-            envelope_bytes,
-            suite=effective_suite,
+        header, sealed = build_media_envelope(
+            encoder=self._encoder,
+            session_key=session_key,
+            from_instance=self._own_instance_id,
+            to_instance=instance.id,
+            sig_suite=instance.sig_suite or self._encoder.sig_suite,
+            event_type=event_type,
+            payload=payload,
+            raw_chunk=raw_chunk,
+            space_id=space_id,
         )
-        payload_bytes = self._encoder.encrypt_bytes(raw_chunk, session_key)
-        sent = await self._transport.send_media(
-            instance=instance,
-            header_dict=envelope_dict,
-            payload_bytes=payload_bytes,
-        )
+        if via_https:
+            answer = await transport.send_media_https(
+                instance=instance, header_dict=header, payload_bytes=sealed
+            )
+            self._media_https_backoff.record(instance.id, answer)
+            sent = answer.ok
+        else:
+            sent = await transport.send_media(
+                instance=instance, header_dict=header, payload_bytes=sealed
+            )
         if not sent:
             return None
+        # Same reachability edge as :meth:`send_event`: a chunk can be the
+        # first thing that reaches a household that was away.
         await self._federation_repo.mark_reachable(instance.id)
+        if instance.unreachable_since is not None:
+            await self._bus.publish(ConnectionReachable(instance_id=instance.id))
         return DeliveryResult(instance_id=instance.id, ok=True, status_code=None)
 
     async def send_app_message(
@@ -3340,8 +3437,9 @@ class FederationService:
            Ed25519, replay, timestamp, ban, decrypt metadata). Honour
            ``ctx.early_response`` (idempotency / deprovisioned-author)
            exactly like dispatch would — skip assembly on a short-circuit.
-        2. Validate ``media_aead_suite`` against the supported set — no
-           default fallback (CLAUDE.md crypto-suite rule).
+        2. Validate ``media_frame_suite`` (absent from a v_14..v_80
+           sender: v1) and ``media_aead_suite`` against their supported
+           sets — no default fallback (CLAUDE.md crypto-suite rule).
         3. Decrypt the chunk under the directional receive key.
         4. Verify ``sha256(plaintext) == chunk_sha256`` (constant-time).
            Because the hash lives inside the signature-covered encrypted
@@ -3358,6 +3456,63 @@ class FederationService:
         on any validation failure so the transport logs + drops the frame.
         """
         ctx = await self.validate_inbound_rtc(instance_id, header_bytes)
+        return await self._finish_media_frame(ctx, payload_bytes, wire_frame_suite=None)
+
+    async def handle_inbound_media_https(self, inbox_id: str, body: bytes) -> dict:
+        """Validate + decrypt one binary media body POSTed to the inbox
+        ``/federation/inbox/{inbox_id}`` (proto v_81), then dispatch.
+
+        The body is the magic, a frame-suite byte and exactly one
+        ``fed-media-v1`` frame
+        (:func:`~socialhome.federation.media_framing.decode_body`): the
+        signed envelope header, then the sealed chunk. The header runs the
+        JSON inbox's §24.11 chain (:meth:`_build_media_https_pipeline` —
+        the same steps plus a media-only event-type gate); the chunk then
+        takes the same tail as a channel frame (:meth:`_finish_media_frame`),
+        with the signed ``media_frame_suite`` required and equal to the
+        suite byte — a new surface has no sender that predates it.
+
+        Raises :class:`ValueError` on any refusal (the route maps it to a
+        generic status).
+        """
+        try:
+            wire_suite, frame = decode_body(body)
+        except MediaFramingError as exc:
+            raise ValueError(f"Invalid media frame: {exc}") from exc
+        if self._media_https_inbound_pipeline is None:
+            self._media_https_inbound_pipeline = self._build_media_https_pipeline()
+        pipeline: InboundPipeline = self._media_https_inbound_pipeline  # type: ignore[assignment]
+        ctx = InboundContext(raw_body=frame.header, inbox_id=inbox_id)
+        await pipeline.run(ctx)
+        # The pipeline has persisted this msg_id in the replay cache BEFORE
+        # the chunk is checked against ``chunk_sha256`` below, so a body
+        # whose chunk then fails burns its msg_id. That is acceptable: the
+        # sender's fallback for a refused body is a NEW envelope (the JSON
+        # chunk, fresh msg_id), whose part lands under the same transfer key
+        # and index (a re-send overwrites its part, the assembled file is
+        # write-once), so nothing legitimate is lost or applied twice.
+        return await self._finish_media_frame(
+            ctx, frame.payload, wire_frame_suite=wire_suite
+        )
+
+    async def _finish_media_frame(
+        self,
+        ctx: InboundContext,
+        payload_bytes: bytes,
+        *,
+        wire_frame_suite: str | None,
+    ) -> dict:
+        """The tail both binary media transports share, after the §24.11
+        pipeline validated the header: honour an early response, check the
+        frame and AEAD suites, decrypt the chunk, verify its
+        ``chunk_sha256`` binding and dispatch it with ``media_bytes``.
+
+        ``wire_frame_suite`` is the suite an HTTPS body named in its suite
+        byte: the signed ``media_frame_suite`` is then required and must
+        equal it (the byte is not signed — this binds it). On the channel
+        (``None``) a frame without the field comes from a v_14..v_80 sender
+        and is :data:`~socialhome.federation.media_framing.MEDIA_FRAME_SUITE_V1`.
+        """
         if ctx.early_response is not None:
             return ctx.early_response
         event = ctx.event
@@ -3366,6 +3521,18 @@ class FederationService:
         ):  # pragma: no cover — pipeline always sets event or early_response
             return {"status": "ok"}
         meta = event.payload if isinstance(event.payload, dict) else {}
+        frame_suite = meta.get("media_frame_suite")
+        if frame_suite is None and wire_frame_suite is None:
+            frame_suite = MEDIA_FRAME_SUITE_V1
+        if frame_suite not in SUPPORTED_MEDIA_FRAME_SUITES:
+            raise UnsupportedMediaFrameSuite(
+                f"unknown media_frame_suite: {frame_suite!r}",
+            )
+        if wire_frame_suite is not None and frame_suite != wire_frame_suite:
+            raise UnsupportedMediaFrameSuite(
+                f"media_frame_suite {frame_suite!r} does not match the body's "
+                f"{wire_frame_suite!r}",
+            )
         suite = meta.get("media_aead_suite")
         if suite not in SUPPORTED_MEDIA_AEAD_SUITES:
             raise UnsupportedMediaAeadSuite(
@@ -3379,9 +3546,8 @@ class FederationService:
             raw = self._encoder.decrypt_bytes(payload_bytes, session_key)
         except Exception as exc:
             raise ValueError(f"Failed to decrypt media chunk: {exc}") from exc
-        expected = str(meta.get("chunk_sha256") or "")
         actual = b64url_encode(hashlib.sha256(raw).digest())
-        if not expected or not hmac.compare_digest(expected, actual):
+        if not _digest_matches(meta.get("chunk_sha256"), actual):
             raise ValueError("media chunk sha256 mismatch")
         await self._dispatch_event(replace(event, media_bytes=raw))
         return {"status": "ok"}

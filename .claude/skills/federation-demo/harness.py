@@ -4904,6 +4904,134 @@ def _check_writer_key_on_e(state: dict, failures: list[str], cap) -> None:
     )
 
 
+def _check_binary_media_https(state: dict, failures: list[str]) -> None:
+    """v_81 — a binary media body round-trips on a real household's inbox.
+
+    Builds one ``DM_MEDIA_BLOB`` chunk exactly as **a**'s
+    ``send_media_chunk`` HTTPS leg does (a's identity seed and a→c session
+    key, read from a's DB under a's KEK; the production
+    ``build_media_envelope`` + ``encode_media_body``) and POSTs the raw
+    bytes to the inbox URL a holds for **c** — the same URL a JSON
+    envelope goes to; no new path. c must answer 200 (magic sniffed, the
+    full §24.11 chain, suites, GCM, ``chunk_sha256``), then refuse the
+    same bytes as a replay (410), a body with a flipped chunk byte (400)
+    and an unknown suite byte (400). The chunk names no message, so c's
+    handler drops it at DEBUG — nothing is stored. (The demo runs
+    standalone, so no Home Assistant inbox relay sits in front; the relay
+    is covered by ``tests/routes/test_federation_media_inbox.py``.)
+    """
+    import os as _os
+
+    from socialhome.domain.federation import FederationEventType
+    from socialhome.domain.federation_capabilities import FederationCapability
+    from socialhome.federation import media_framing as mf
+    from socialhome.federation.encoder import FederationEncoder
+    from socialhome.federation.media_envelope import (
+        MEDIA_HTTPS_CONTENT_TYPE,
+        build_media_envelope,
+        encode_media_body,
+    )
+    from socialhome.infrastructure.key_manager import KeyManager
+
+    a_iid = state["instances"]["a"]["instance_id"]
+    c_iid = state["instances"]["c"]["instance_id"]
+    need = int(FederationCapability.MIN_FOR_MEDIA_HTTPS)
+    row = _rows(
+        "a",
+        "SELECT remote_inbox_url, key_self_to_remote, sig_suite, proto_version "
+        "FROM remote_instances WHERE id = ?",
+        (c_iid,),
+    )
+    pv_c = _rows(
+        "c", "SELECT proto_version FROM remote_instances WHERE id = ?", (a_iid,)
+    )
+    if not row or not pv_c:
+        failures.append("binary media HTTPS: a and c hold no row for each other")
+        return
+    inbox_url, wrapped_key, sig_suite, pv_a_sees = row[0]
+    if int(pv_a_sees or 1) < need or int(pv_c[0][0] or 1) < need:
+        failures.append(
+            f"binary media HTTPS: a↔c at proto_version {pv_a_sees}/{pv_c[0][0]} "
+            f"(< {need}) — the v_{need} bump didn't round-trip"
+        )
+        return
+    kek = KeyManager.from_data_dir(_instance_dir("a"))
+    (seed_wire,) = _rows(
+        "a", "SELECT identity_private_key FROM instance_identity WHERE id='self'"
+    )[0]
+    encoder = FederationEncoder(kek.decrypt(seed_wire))
+    raw = _os.urandom(200_000)
+    session_key = kek.decrypt(wrapped_key)
+
+    def _body() -> bytes:
+        """A fresh chunk body — its own ``msg_id``, so each refusal below is
+        judged on its own merits, not by the replay cache."""
+        header, sealed = build_media_envelope(
+            encoder=encoder,
+            session_key=session_key,
+            from_instance=a_iid,
+            to_instance=c_iid,
+            sig_suite=sig_suite or "ed25519",
+            event_type=FederationEventType.DM_MEDIA_BLOB,
+            payload={"harness_probe": "binary-media-https"},
+            raw_chunk=raw,
+            space_id=None,
+        )
+        return encode_media_body(header, sealed)
+
+    body = _body()
+
+    def _post(data: bytes) -> int:
+        req = urllib.request.Request(
+            inbox_url,
+            data=data,
+            method="POST",
+            headers={"Content-Type": MEDIA_HTTPS_CONTENT_TYPE},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+
+    flipped = bytearray(_body())
+    flipped[-1] ^= 0x01  # the sealed chunk's GCM tag
+    other_suite = bytearray(_body())
+    other_suite[len(mf.MEDIA_BODY_MAGIC)] = 0x7F
+    # c refuses three of these on purpose, each with a WARNING naming the
+    # inbox id a posts to — expected, for exactly these posts.
+    refusals = _open_noise_window(
+        about="a",
+        reason="binary media HTTPS: deliberate replay / tamper / suite probes",
+        witnesses=("c",),
+        named=("federation inbox: rejected",),
+        names=[f"inbox_id={inbox_url.rstrip('/').rsplit('/', 1)[-1]} "],
+    )
+    try:
+        got = {
+            "round trip": _post(body),
+            "replay": _post(body),
+            "tampered chunk": _post(bytes(flipped)),
+            "unknown suite byte": _post(bytes(other_suite)),
+        }
+    finally:
+        _close_noise_windows(refusals)
+    want = {
+        "round trip": 200,
+        "replay": 410,
+        "tampered chunk": 400,
+        "unknown suite byte": 400,
+    }
+    if got != want:
+        failures.append(f"binary media HTTPS a→c: got {got}, want {want}")
+        return
+    print(
+        f"  a→c binary media body on c's inbox URL ({len(body)} B for a "
+        f"{len(raw)} B chunk, no base64): 200, replay 410, tamper 400, "
+        f"unknown suite 400 (v_{need}) ✓"
+    )
+
+
 def _instance_row(label: str, instance_id: str) -> dict | None:
     """One ``remote_instances`` row on ``label`` as a dict, or ``None``.
 
@@ -10735,6 +10863,10 @@ def cmd_verify() -> None:
                                     "  a↔c at proto_version>=14 — media rode "
                                     "the binary fed-media-v1 channel ✓",
                                 )
+                            # v_81: the same frame as one binary body on
+                            # c's inbox URL (the leg a channel-less peer
+                            # gets) — a real-wire round trip + refusals.
+                            _check_binary_media_https(state, failures)
     else:
         print("  DM a→c was skipped during traffic step")
 

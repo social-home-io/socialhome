@@ -125,7 +125,14 @@ That single command runs the full sequence:
      embeds a 320 px preview in the outbound ``DM_MESSAGE``; the
      :class:`DmMediaSyncService` scheduler ships the full bytes via
      a follow-up ``DM_MEDIA_BLOB`` event. ``verify`` asserts both
-     legs landed on Carol's instance.
+     legs landed on Carol's instance. **v_81 binary media on the
+     inbox:** ``verify`` then builds one ``DM_MEDIA_BLOB`` chunk as
+     **a**'s HTTPS media leg does (a's keys, the production
+     ``build_media_envelope`` / ``encode_media_body``) and POSTs the raw
+     body to the inbox URL a holds for **c** — the same URL as JSON: 200,
+     then 410 on replay, 400 for a flipped chunk byte and for an unknown
+     suite byte. (Standalone, so no Home Assistant inbox relay in front;
+     the relay is simulated in ``tests/routes/test_federation_media_inbox.py``.)
    - **b** creates a space (``invite_only``) and mints a ``remote-invites``
      token for each of **a**'s and **c**'s admin users.
    - **b** posts a ``mode=fixed`` bazaar listing in the salon space;
