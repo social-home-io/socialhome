@@ -41,6 +41,7 @@ from socialhome.federation.inbound_validator import (
     make_confirm_relay_approval,
     make_idempotency_check,
     make_lookup_instance,
+    make_lookup_instance_by_id,
     make_parse_json,
     make_persist_replay,
     run_post_decrypt_gates,
@@ -165,6 +166,33 @@ async def test_lookup_instance_rejects_provisional_row():
     step = make_lookup_instance(repo=None, lookup_fn=_lookup)
     ctx = InboundContext(inbox_id="wh-prov")
     with pytest.raises(ValueError, match="No instance found"):
+        await step(ctx)
+
+
+class _EmptyRepo:
+    async def get_instance(self, instance_id, *, include_unpairing=False):
+        return None
+
+
+@pytest.mark.parametrize("callback", [None, lambda iid: False])
+async def test_lookup_by_id_rejects_unknown_as_stranger(callback):
+    step = make_lookup_instance_by_id(repo=_EmptyRepo(), unpaired_recently=callback)
+    ctx = InboundContext(instance_id="nobody")
+    ctx.envelope = _minimal_envelope()
+    with pytest.raises(ValueError, match="No instance found") as info:
+        await step(ctx)
+    assert not isinstance(info.value, UnpairedPeerRefusedError)
+
+
+async def test_lookup_by_id_refuses_just_unpaired_peer_quietly():
+    """A DataChannel frame the ex-peer sealed before it learned of the
+    unpair: same wire text, but typed so it is not logged at WARNING."""
+    step = make_lookup_instance_by_id(
+        repo=_EmptyRepo(), unpaired_recently=lambda iid: iid == "ex-peer"
+    )
+    ctx = InboundContext(instance_id="ex-peer")
+    ctx.envelope = _minimal_envelope()
+    with pytest.raises(UnpairedPeerRefusedError, match="No instance found"):
         await step(ctx)
 
 

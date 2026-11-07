@@ -821,6 +821,18 @@ The first attempt is bounded (5 s, `UNPAIR_NOTIFY_TIMEOUT_S`) so an
 unreachable peer never blocks the admin's unpair. When it lands, both sides
 run the cleanup below and the route reports `peer_notified: true`.
 
+**Frames already on the way.** The `UNPAIR` and the peer's own traffic
+travel independently (the `UNPAIR` often over the HTTPS inbox, the peer's
+frames over the still-open DataChannel), so envelopes the peer sealed
+before it processed the `UNPAIR` — typically a just-restarted household's
+catch-up burst (`SPACE_SYNC_BEGIN`, roster snapshot, routed frames) — can
+reach our pipeline after we purged its row. For `UNPAIR_SEND_RACE_S`
+(300 s) after the purge such a DataChannel frame is refused as an unpaired
+peer: the same `No instance found` a stranger gets, logged at INFO instead
+of WARNING. The purge marks the household before its row goes, so a frame
+landing mid-purge counts too. Past the window, or from a household we never
+held, the refusal stays a WARNING.
+
 ### A peer that is offline at unpair time
 
 When the first attempt does not land, the route reports

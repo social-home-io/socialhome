@@ -115,13 +115,17 @@ RELAY_TIMESTAMP_SKEW_SECONDS = RELAY_QUEUE_TTL_SECONDS + TIMESTAMP_SKEW_SECONDS
 
 
 class UnpairedPeerRefusedError(ValueError):
-    """An unpair tombstone's envelope, refused by :func:`make_check_unpairing`.
+    """An envelope from a household we are unpairing or just unpaired.
+
+    Raised by :func:`make_check_unpairing` (an unpair tombstone) and by
+    :func:`make_lookup_instance_by_id` (a DataChannel frame from a peer
+    whose row was purged moments ago, sealed before it learned).
 
     Its text is exactly the ``No instance found`` a stranger gets, so the
     wire answer (404 ``unknown_inbox``) cannot tell the two apart. The type
-    is for OUR log only: the step already logged the refusal (INFO when it
-    pulled the ``UNPAIR`` forward, DEBUG for every repeat), so the inbox
-    route must not log each of the ex-peer's envelopes again at WARNING.
+    is for OUR log only: the step already logged the refusal, so the inbox
+    route and the DataChannel must not log each of the ex-peer's envelopes
+    again at WARNING.
     """
 
 
@@ -332,20 +336,43 @@ def make_lookup_instance(*, repo, lookup_fn) -> InboundStep:
     return lookup_instance
 
 
-def make_lookup_instance_by_id(*, repo) -> InboundStep:
+def make_lookup_instance_by_id(
+    *,
+    repo,
+    unpaired_recently: Callable[[str], bool] | None = None,
+) -> InboundStep:
     """Step 2 (WebRTC): resolve RemoteInstance by instance_id.
 
     When the envelope arrives over a DataChannel the sender's
     ``instance_id`` is already known from the peer connection. This
     step fetches the full ``RemoteInstance`` row so later steps (sig
     verify, decrypt) have the keys they need.
+
+    ``unpaired_recently`` names the households whose pairing ended moments
+    ago. Their frames still in flight were sealed before they learned of
+    the unpair (our ``UNPAIR`` and their DataChannel traffic travel
+    independently, so nothing orders the two); they are refused with
+    :class:`UnpairedPeerRefusedError` — the same ``No instance found`` a
+    stranger gets, logged quietly instead of at WARNING. The window is
+    bounded by the callback (:data:`~socialhome.federation
+    .federation_service.UNPAIR_SEND_RACE_S`), so an ex-peer that keeps
+    talking after it is loud again.
     """
 
     async def lookup_instance_by_id(ctx: InboundContext) -> None:
         # Tombstones included: :func:`make_check_unpairing` refuses them.
         instance = await repo.get_instance(ctx.instance_id, include_unpairing=True)
         if instance is None:
-            raise ValueError(f"No instance found for instance_id={ctx.instance_id!r}")
+            ref = f"No instance found for instance_id={ctx.instance_id!r}"
+            if unpaired_recently is not None and unpaired_recently(ctx.instance_id):
+                log.info(
+                    "inbound: dropping %r from %s — unpaired moments ago, "
+                    "sent before it learned",
+                    ctx.envelope.get("event_type"),
+                    ctx.instance_id,
+                )
+                raise UnpairedPeerRefusedError(ref)
+            raise ValueError(ref)
         # See :func:`make_lookup_instance` — a provisional row (created
         # at ``request_via`` time, before the relay ack lands) has an
         # empty ``remote_identity_pk`` and would 403 at sig verify.

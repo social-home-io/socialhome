@@ -183,6 +183,9 @@ class _NoSendFederation:
     async def send_event(self, **kw):
         raise AssertionError("an inbound UNPAIR must never be echoed back")
 
+    def note_unpaired(self, instance_id):
+        pass
+
 
 @pytest.fixture
 def outbox():

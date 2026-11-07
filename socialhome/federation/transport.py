@@ -2282,8 +2282,9 @@ class FederationTransport:
                 try:
                     await self._inbound_handler(instance_id, raw)
                 except ValueError as exc:
-                    # An unpair tombstone's frame was already logged by the
-                    # pipeline step (see ``make_check_unpairing``).
+                    # A frame from a peer we are unpairing or just unpaired
+                    # was already logged by the pipeline step (see
+                    # ``make_check_unpairing`` / ``make_lookup_instance_by_id``).
                     log.log(
                         logging.DEBUG
                         if isinstance(exc, UnpairedPeerRefusedError)

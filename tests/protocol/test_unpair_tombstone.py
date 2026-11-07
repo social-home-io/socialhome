@@ -19,6 +19,7 @@ peer's identity key and session keys, so it must grant **no** trust:
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -33,8 +34,13 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.federation import federation_service as federation_service_module
 from socialhome.federation.encoder import FederationEncoder
-from socialhome.federation.federation_service import FederationService
+from socialhome.federation.federation_service import (
+    UNPAIR_SEND_RACE_S,
+    FederationService,
+)
+from socialhome.federation.inbound_validator import UnpairedPeerRefusedError
 from socialhome.infrastructure import EventBus, KeyManager
 from socialhome.repositories import SqliteFederationRepo, SqliteOutboxRepo
 from socialhome.repositories.dm_media_outbox_repo import SqliteDmMediaOutboxRepo
@@ -391,3 +397,99 @@ async def test_send_landing_mid_purge_queues_nothing(env):
         (iid,),
     )
     assert rows == []
+
+
+# ─── Frames sealed before the unpair, landing after it ─────────────────────
+
+
+async def _confirmed_peer(env, name: str):
+    kp = generate_identity_keypair()
+    iid = derive_instance_id(kp.public_key)
+    await env["repo"].save_instance(
+        RemoteInstance(
+            id=iid,
+            display_name=name,
+            remote_identity_pk=kp.public_key.hex(),
+            key_self_to_remote=env["wrapped"],
+            key_remote_to_self=env["wrapped"],
+            remote_inbox_url=f"https://{name}.invalid/wh",
+            local_inbox_id=f"wh-{name}",
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.MANUAL,
+        )
+    )
+    return kp, iid
+
+
+def _frame(env, kp, iid: str, msg_id: str) -> bytes:
+    return _envelope(
+        signer_seed=kp.private_key,
+        from_instance=iid,
+        to_instance=env["own_iid"],
+        event_type=FederationEventType.SPACE_SYNC_BEGIN,
+        msg_id=msg_id,
+    )
+
+
+@pytest.mark.parametrize("ended_by", ["forget", "tombstone_settled"])
+async def test_frame_sealed_before_the_unpair_is_refused_as_unpaired(env, ended_by):
+    """Regression (federation-demo ``unpair``, ~2 runs in 3): a household
+    that just restarted fires its catch-up burst (``SPACE_SYNC_BEGIN``,
+    roster snapshot, routed frames) over the DataChannel while our
+    ``UNPAIR`` is on its way. It sealed them while still paired — it had
+    not processed the ``UNPAIR`` yet — but they reach our pipeline after
+    we purged its row. That is the expected tail of an unpair, not an
+    unknown sender: refuse it with the unpaired-peer error (same ``No
+    instance found`` text on the wire, quiet in our log), never the
+    WARNING a stranger gets."""
+    if ended_by == "forget":
+        kp, iid = await _confirmed_peer(env, "d")
+        await env["unpair"].forget(iid)
+    else:
+        kp, iid = env["kp"], env["iid"]
+        await env["unpair"].finish_unpair(iid)
+    assert await env["repo"].get_instance(iid, include_unpairing=True) is None
+    with pytest.raises(UnpairedPeerRefusedError, match="No instance found"):
+        await env["svc"].handle_inbound_rtc(iid, _frame(env, kp, iid, "m-late"))
+
+
+async def test_frame_landing_mid_purge_is_refused_as_unpaired(env):
+    """The row goes before ``PeerUnpaired`` is published, so a frame the
+    DataChannel delivers in between must already count as unpaired."""
+    kp, iid = await _confirmed_peer(env, "d")
+    repo = env["repo"]
+    real_delete = repo.delete_instance
+    seen: list[BaseException] = []
+
+    async def _delete_then_frame(instance_id: str) -> None:
+        await real_delete(instance_id)
+        try:
+            await env["svc"].handle_inbound_rtc(
+                instance_id, _frame(env, kp, instance_id, "m-mid")
+            )
+        except ValueError as exc:
+            seen.append(exc)
+
+    repo.delete_instance = _delete_then_frame
+    await env["unpair"].forget(iid)
+    assert len(seen) == 1 and isinstance(seen[0], UnpairedPeerRefusedError)
+
+
+async def test_frame_from_a_household_we_never_knew_stays_unknown(env):
+    kp = generate_identity_keypair()
+    iid = derive_instance_id(kp.public_key)
+    with pytest.raises(ValueError, match="No instance found") as info:
+        await env["svc"].handle_inbound_rtc(iid, _frame(env, kp, iid, "m-new"))
+    assert not isinstance(info.value, UnpairedPeerRefusedError)
+
+
+async def test_late_frame_window_is_bounded(env, monkeypatch):
+    """Past :data:`UNPAIR_SEND_RACE_S` an ex-peer that still talks is no
+    longer a race — it is an unknown sender again, and loud."""
+    kp, iid = await _confirmed_peer(env, "d")
+    await env["unpair"].forget(iid)
+    later = time.monotonic() + UNPAIR_SEND_RACE_S + 1
+    monkeypatch.setattr(federation_service_module.time, "monotonic", lambda: later)
+    with pytest.raises(ValueError, match="No instance found") as info:
+        await env["svc"].handle_inbound_rtc(iid, _frame(env, kp, iid, "m-stale"))
+    assert not isinstance(info.value, UnpairedPeerRefusedError)
