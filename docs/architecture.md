@@ -1913,8 +1913,9 @@ drives it) and is then served by a **separate aiohttp application on its own por
   catalog), so the firmware is locale-free and layout-only. Responses carry
   an `ETag` (`If-None-Match` → 304, so the 30 s poll is cheap; the clock is
   truncated to the minute for that reason). Images: WebP avatars are
-  transcoded to PNG (`dashboard/avatars.py`) and emoji are served from a
-  bundled Twemoji subset (`dashboard/emoji.py`, CC-BY 4.0) — Pillow runs in
+  transcoded to PNG (`dashboard/avatars.py`) and emoji are transcoded to
+  PNG from a bundled lossless-WebP Twemoji subset (`dashboard/emoji.py`,
+  CC-BY 4.0) — the panel firmware decodes PNG only — Pillow runs in
   `asyncio.to_thread`, nothing is fetched from a third party. A panel whose
   record is `locked` gets `423` with only the lock-screen data. The contract
   is the JSON Schemas in `docs/display-api/v1/`; see

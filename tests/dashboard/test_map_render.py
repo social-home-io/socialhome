@@ -15,7 +15,7 @@ from PIL import Image
 
 import socialhome.i18n as i18n_pkg
 from socialhome.dashboard.boards import board_base
-from socialhome.dashboard.emoji import EMOJI_DIR
+from socialhome.dashboard.emoji import EMOJI_DIR, EMOJI_SUFFIX
 from socialhome.dashboard.map_frame import project
 from socialhome.dashboard.map_render import (
     drawable,
@@ -76,9 +76,9 @@ def _scene(snap=None):
 
 def _emoji(scene) -> dict[str, bytes]:
     return {
-        c: (EMOJI_DIR / f"{c}.png").read_bytes()
+        c: (EMOJI_DIR / f"{c}{EMOJI_SUFFIX}").read_bytes()
         for c in scene_emoji(scene)
-        if (EMOJI_DIR / f"{c}.png").is_file()
+        if (EMOJI_DIR / f"{c}{EMOJI_SUFFIX}").is_file()
     }
 
 

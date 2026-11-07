@@ -10,6 +10,7 @@ from PIL import Image
 from socialhome.dashboard import icons, map_view, messages, picture, presenter
 from socialhome.dashboard.emoji import (
     EMOJI_DIR,
+    EMOJI_SUFFIX,
     FALLBACK_CODE,
     SOURCE_SIZE,
     EmojiImages,
@@ -64,23 +65,50 @@ def _wall_emoji() -> set[str]:
 
 
 def test_every_wall_emoji_is_bundled():
+    """Every emoji the dashboard can put on the wall resolves to a WebP."""
     missing = sorted(
-        e for e in _wall_emoji() if not (EMOJI_DIR / f"{emoji_code(e)}.png").is_file()
+        e
+        for e in _wall_emoji()
+        if not (EMOJI_DIR / f"{emoji_code(e)}{EMOJI_SUFFIX}").is_file()
     )
     assert missing == []
 
 
-def test_bundle_has_its_licence_and_only_pngs():
+def test_bundle_is_webp_only_with_its_licence():
+    """Bundled assets are the protocol's picture format: no PNG is kept
+    (the panel's PNG is encoded per request, see ``EmojiImages.png``)."""
     names = {p.name for p in EMOJI_DIR.iterdir()}
     assert "LICENSE.md" in names
-    assert all(n.endswith(".png") and is_code(n[:-4]) for n in names - {"LICENSE.md"})
-    assert (EMOJI_DIR / f"{FALLBACK_CODE}.png").is_file()
-    assert "CC-BY 4.0" in (EMOJI_DIR / "LICENSE.md").read_text(encoding="utf-8")
+    pictures = names - {"LICENSE.md"}
+    assert not [n for n in pictures if n.endswith(".png")]
+    assert all(
+        n.endswith(EMOJI_SUFFIX) and is_code(n.removesuffix(EMOJI_SUFFIX))
+        for n in pictures
+    )
+    assert (EMOJI_DIR / f"{FALLBACK_CODE}{EMOJI_SUFFIX}").is_file()
+    licence = (EMOJI_DIR / "LICENSE.md").read_text(encoding="utf-8")
+    assert "CC-BY 4.0" in licence and "WebP" in licence
+
+
+def test_bundled_files_are_72px_rgba_webp():
+    for path in sorted(EMOJI_DIR.glob(f"*{EMOJI_SUFFIX}")):
+        with Image.open(path) as img:
+            assert img.format == "WEBP", path.name
+            assert img.size == (SOURCE_SIZE, SOURCE_SIZE), path.name
+            assert img.mode == "RGBA", path.name
 
 
 def _png(size: int = 10) -> bytes:
     out = io.BytesIO()
     Image.new("RGBA", (size, size), (255, 0, 0, 255)).save(out, format="PNG")
+    return out.getvalue()
+
+
+def _webp(size: int = SOURCE_SIZE) -> bytes:
+    out = io.BytesIO()
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    img.paste((255, 0, 0, 255), (0, 0, size // 2, size))
+    img.save(out, format="WEBP", lossless=True)
     return out.getvalue()
 
 
@@ -97,16 +125,35 @@ async def test_resolve_and_fallback():
     assert await store.resolve("10ffff") == FALLBACK_CODE
 
 
-async def test_png_sizes_and_cache(tmp_path):
+async def test_resolve_ignores_a_stray_png(tmp_path):
     (tmp_path / "1f3ca.png").write_bytes(_png(SOURCE_SIZE))
+    assert await EmojiImages(tmp_path).resolve("1f3ca") == FALLBACK_CODE
+
+
+async def test_png_sizes_and_cache(tmp_path):
+    (tmp_path / f"1f3ca{EMOJI_SUFFIX}").write_bytes(_webp())
     store = EmojiImages(tmp_path, max_entries=1)
-    raw = await store.png("1f3ca", SOURCE_SIZE)
-    assert raw == (tmp_path / "1f3ca.png").read_bytes()
+    native = await store.png("1f3ca", SOURCE_SIZE)
+    with Image.open(io.BytesIO(native)) as img:
+        # The panel gets a PNG (the firmware decodes PNG only), same pixels.
+        assert img.format == "PNG" and img.size == (SOURCE_SIZE, SOURCE_SIZE)
+        assert img.mode == "RGBA"
+        assert img.getpixel((0, 0)) == (255, 0, 0, 255)
+        assert img.getpixel((SOURCE_SIZE - 1, 0))[3] == 0
     small = await store.png("1f3ca", 24)
     with Image.open(io.BytesIO(small)) as img:
-        assert img.size == (24, 24)
+        assert img.format == "PNG" and img.size == (24, 24)
     # Cached (and the cache is bounded): the file can go away.
-    (tmp_path / "1f3ca.png").unlink()
+    (tmp_path / f"1f3ca{EMOJI_SUFFIX}").unlink()
     assert await store.png("1f3ca", 24) == small
     with pytest.raises(FileNotFoundError):
         await store.png("1f3ca", SOURCE_SIZE)
+
+
+async def test_bundled_emoji_reach_a_panel_as_png():
+    store = EmojiImages()
+    for path in sorted(EMOJI_DIR.glob(f"*{EMOJI_SUFFIX}"))[::40]:
+        code = path.name.removesuffix(EMOJI_SUFFIX)
+        assert await store.resolve(code) == code
+        with Image.open(io.BytesIO(await store.png(code, 48))) as img:
+            assert img.format == "PNG" and img.size == (48, 48)

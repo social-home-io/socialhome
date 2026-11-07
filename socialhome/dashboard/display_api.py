@@ -935,7 +935,7 @@ class DisplayAvatarView(web.View):
 
 class DisplayEmojiView(web.View):
     """``GET /api/display/v1/emoji/{code}?size=N`` — a bundled Twemoji
-    PNG (:mod:`.emoji`); one the bundle lacks is 📍."""
+    as PNG (stored as WebP, :mod:`.emoji`); one the bundle lacks is 📍."""
 
     async def get(self) -> web.Response:
         size = _size(self.request, EMOJI_SIZES, SOURCE_SIZE)

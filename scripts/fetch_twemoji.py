@@ -12,23 +12,33 @@ runtime). It collects every emoji the household dashboard can show:
 * :data:`EXTRA` — a common set for event titles and statuses;
 
 and downloads each 72 × 72 PNG from the pinned Twemoji release
-(github.com/jdecked/twemoji, graphics CC-BY 4.0). Emoji Twemoji lacks are
-skipped (the API falls back to 📍).
+(github.com/jdecked/twemoji, graphics CC-BY 4.0), storing it as a
+lossless WebP (``<code>.webp`` — bundled assets are the protocol's
+picture format; the panel route encodes PNG on the way out). Emoji
+Twemoji lacks are skipped (the API falls back to 📍).
 
 Usage: ``python scripts/fetch_twemoji.py`` from the repository root.
 """
 
 from __future__ import annotations
 
+import io
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 
+from PIL import Image
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from socialhome.dashboard.emoji import EMOJI_DIR, FALLBACK_CODE, emoji_code  # noqa: E402
+from socialhome.dashboard.emoji import (  # noqa: E402
+    EMOJI_DIR,
+    EMOJI_SUFFIX,
+    FALLBACK_CODE,
+    emoji_code,
+)
 from socialhome.domain.household_dashboard import leading_emoji  # noqa: E402
 from socialhome.platform.ha.zones import MDI_ZONE_EMOJI  # noqa: E402
 
@@ -107,10 +117,19 @@ def wanted() -> set[str]:
     return codes
 
 
+def to_webp(png: bytes) -> bytes:
+    """A Twemoji PNG as a lossless RGBA WebP (same pixels, ~15 % smaller)."""
+    with Image.open(io.BytesIO(png)) as img:
+        rgba = img.convert("RGBA")
+    out = io.BytesIO()
+    rgba.save(out, format="WEBP", lossless=True, quality=100, method=6)
+    return out.getvalue()
+
+
 def main() -> int:
     EMOJI_DIR.mkdir(parents=True, exist_ok=True)
     codes = sorted(wanted())
-    have = {p.stem for p in EMOJI_DIR.glob("*.png")}
+    have = {p.stem for p in EMOJI_DIR.glob(f"*{EMOJI_SUFFIX}")}
     missing = []
     for code in codes:
         if code in have:
@@ -125,9 +144,9 @@ def main() -> int:
             raise
         if not body.startswith(b"\x89PNG\r\n\x1a\n"):
             raise SystemExit(f"{code}: not a PNG")
-        (EMOJI_DIR / f"{code}.png").write_bytes(body)
+        (EMOJI_DIR / f"{code}{EMOJI_SUFFIX}").write_bytes(to_webp(body))
     for stale in sorted(have - set(codes)):
-        (EMOJI_DIR / f"{stale}.png").unlink()
+        (EMOJI_DIR / f"{stale}{EMOJI_SUFFIX}").unlink()
     print(f"{len(codes) - len(missing)} emoji bundled; not in Twemoji: {missing}")
     return 0
 

@@ -264,10 +264,11 @@ don't crop it. Its text is drawn with **Roboto** (SIL Open Font License
 ## Emoji attribution
 
 The emoji images are **Twemoji** (<https://github.com/jdecked/twemoji>,
-v17.0.3, 72 × 72 PNGs), © Twitter, Inc and other contributors, © jdecked
+v17.0.3, 72 × 72), © Twitter, Inc and other contributors, © jdecked
 and other contributors, licensed under
 [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). Only the subset
 the dashboard can show is bundled (`socialhome/dashboard/static/emoji/`,
-licence note alongside); `scripts/fetch_twemoji.py` refreshes it. Nothing
-is fetched at runtime. Panels showing these images should credit Twemoji
+stored as lossless WebP, licence note alongside);
+`scripts/fetch_twemoji.py` refreshes it. The route always answers a PNG
+(the firmware decodes PNG only). Nothing is fetched at runtime. Panels showing these images should credit Twemoji
 (e.g. on their about / settings screen).
