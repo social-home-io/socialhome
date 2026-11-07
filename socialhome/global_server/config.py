@@ -113,7 +113,13 @@ class SpaceMediaOnDemandConfig:
     * ``scope_stream_bytes_per_hour`` — bytes one scope may stream an hour
       (cluster-wide, shared DB).
     * ``prefix_wanted_per_hour`` — holder requests one reader network
-      prefix (IPv6 /48, IPv4 /24) may trigger an hour (cluster-wide)."""
+      prefix (IPv6 /48, IPv4 /24) may trigger an hour (cluster-wide).
+    * ``member_fallback`` — for a listed space whose owner is offline, slow
+      or busy, offer the want to the space's members, who pull it
+      anonymously with the writer group key; ``member_pull_hold_seconds``
+      — how long a pull is held open; ``member_pullers_per_scope`` /
+      ``member_pullers_max`` — pulls held at once per scope per node and
+      per node."""
 
     enabled: bool = True
     fresh_seconds: int = 7 * 86_400
@@ -126,6 +132,10 @@ class SpaceMediaOnDemandConfig:
     scope_max_streams: int = 4
     scope_stream_bytes_per_hour: int = 512 * 1024**2
     prefix_wanted_per_hour: int = 240
+    member_fallback: bool = True
+    member_pull_hold_seconds: int = 25
+    member_pullers_per_scope: int = 2
+    member_pullers_max: int = 256
 
     @classmethod
     def parse(
@@ -145,12 +155,9 @@ class SpaceMediaOnDemandConfig:
             else:
                 continue
             values[key] = _on_demand_int(key, raw, lo, hi)
-        enabled = out.enabled
-        if env is not None and "GFS_SPACE_MEDIA_ON_DEMAND" in env:
-            enabled = _on_demand_bool(env["GFS_SPACE_MEDIA_ON_DEMAND"])
-        elif env is None and "on_demand" in table:
-            enabled = _on_demand_bool(table["on_demand"])
-        return replace(out, enabled=enabled, **values)
+        enabled = _on_demand_switch(table, env, "on_demand", out.enabled)
+        member = _on_demand_switch(table, env, "member_fallback", out.member_fallback)
+        return replace(out, enabled=enabled, member_fallback=member, **values)
 
 
 #: The integer on-demand keys and their inclusive bounds.
@@ -165,7 +172,22 @@ _ON_DEMAND_BOUNDS: dict[str, tuple[int, int]] = {
     "scope_max_streams": (1, 64),
     "scope_stream_bytes_per_hour": (1, 1 << 40),
     "prefix_wanted_per_hour": (1, 1_000_000),
+    "member_pull_hold_seconds": (5, 55),
+    "member_pullers_per_scope": (1, 16),
+    "member_pullers_max": (1, 4096),
 }
+
+
+def _on_demand_switch(
+    table: dict, env: dict[str, str] | None, key: str, current: bool
+) -> bool:
+    """A boolean ``[space_media]`` key, or its ``GFS_SPACE_MEDIA_<KEY>``."""
+    env_key = f"GFS_SPACE_MEDIA_{key.upper()}"
+    if env is not None and env_key in env:
+        return _on_demand_bool(env[env_key], key)
+    if env is None and key in table:
+        return _on_demand_bool(table[key], key)
+    return current
 
 
 def _on_demand_int(key: str, raw: object, lo: int, hi: int) -> int:
@@ -181,14 +203,14 @@ def _on_demand_int(key: str, raw: object, lo: int, hi: int) -> int:
     return value
 
 
-def _on_demand_bool(raw: object) -> bool:
+def _on_demand_bool(raw: object, key: str = "on_demand") -> bool:
     if isinstance(raw, bool):
         return raw
     if isinstance(raw, str) and raw.strip().lower() in {"1", "true", "yes", "on"}:
         return True
     if isinstance(raw, str) and raw.strip().lower() in {"0", "false", "no", "off"}:
         return False
-    raise ValueError(f"[space_media] on_demand must be true or false, got {raw!r}")
+    raise ValueError(f"[space_media] {key} must be true or false, got {raw!r}")
 
 
 #: Peer networks whose ``X-Forwarded-For`` header the GFS believes by default:
@@ -1000,6 +1022,16 @@ max_streams                 = 16
 scope_max_streams           = 4
 scope_stream_bytes_per_hour = 536870912   # 512 MiB
 prefix_wanted_per_hour      = 240
+# Member fallback: for a LISTED space whose host household is offline, too
+# slow or over its budget, the want is offered to the space's members, who
+# pull it anonymously (signed with the space's writer group key — this server
+# never learns which household) and serve it. member_pull_hold_seconds
+# (5 – 55) is how long one pull is held open; each node holds at most
+# member_pullers_per_scope pulls per space and member_pullers_max in all.
+member_fallback             = true
+member_pull_hold_seconds    = 25
+member_pullers_per_scope    = 2
+member_pullers_max          = 256
 """
 
 

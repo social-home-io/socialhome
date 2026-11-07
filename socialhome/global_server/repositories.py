@@ -43,6 +43,7 @@ from .domain import (
     GfsSpaceEpoch,
     GfsSpaceMedia,
     GfsSpaceMediaDemand,
+    GfsSpaceMediaMemberWant,
     GfsSpaceStrictState,
     GfsSubscriber,
     GfsSubscriberWithKeys,
@@ -2426,6 +2427,144 @@ class SqliteGfsSpaceMediaDemandRepo:
     async def prune(self, *, before: int) -> int:
         return await self._db.enqueue_rowcount(
             "DELETE FROM gfs_space_media_demand WHERE touched_at < ?", (before,)
+        )
+
+
+@runtime_checkable
+class AbstractGfsSpaceMediaMemberWantRepo(Protocol):
+    """Space media wants offered to a listed space's members (GFS 0027, the
+    member fallback): shared by the cluster, claimed atomically, never
+    naming a puller."""
+
+    async def post(self, want: GfsSpaceMediaMemberWant) -> None: ...
+    async def claim_next(
+        self,
+        scope_kind: str,
+        scope_id: str,
+        *,
+        now: int,
+        hold_s: int,
+        max_attempts: int,
+    ) -> GfsSpaceMediaMemberWant | None: ...
+    async def release(self, ticket: str) -> None: ...
+    async def claimed(self, ticket: str, *, now: int) -> bool: ...
+    async def remove(self, ticket: str) -> None: ...
+    async def open_scopes(self, *, now: int) -> set[tuple[str, str]]: ...
+    async def prune(self, *, now: int) -> int: ...
+
+
+_MEMBER_WANT_COLS = (
+    "ticket, scope_kind, scope_id, blob_id, mode, hints, expires_at,"
+    " created_at, claimed_until, attempts"
+)
+
+
+def _member_want(row: Any) -> GfsSpaceMediaMemberWant:
+    return GfsSpaceMediaMemberWant(
+        ticket=str(row[0]),
+        scope_kind=str(row[1]),
+        scope_id=str(row[2]),
+        blob_id=str(row[3]),
+        mode=str(row[4]),
+        hints=str(row[5]),
+        expires_at=int(row[6]),
+        created_at=int(row[7]),
+        claimed_until=int(row[8]),
+        attempts=int(row[9]),
+    )
+
+
+class SqliteGfsSpaceMediaMemberWantRepo:
+    """Space media member wants (GFS 0027) in the shared database: a pull on
+    any node sees a want another node's session posted, and one conditional
+    update hands it to exactly one member."""
+
+    __slots__ = ("_db",)
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def post(self, want: GfsSpaceMediaMemberWant) -> None:
+        await self._db.enqueue(
+            f"INSERT INTO gfs_space_media_member_wants({_MEMBER_WANT_COLS})"
+            " VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(ticket) DO NOTHING",
+            (
+                want.ticket,
+                want.scope_kind,
+                want.scope_id,
+                want.blob_id,
+                want.mode,
+                want.hints,
+                want.expires_at,
+                want.created_at,
+                want.claimed_until,
+                want.attempts,
+            ),
+        )
+
+    async def claim_next(
+        self,
+        scope_kind: str,
+        scope_id: str,
+        *,
+        now: int,
+        hold_s: int,
+        max_attempts: int,
+    ) -> GfsSpaceMediaMemberWant | None:
+        """Claim the oldest want of the scope that is still offered (not
+        expired, not claimed or its claim ran out, fewer than *max_attempts*
+        declines) for *hold_s* seconds — one statement on the single writer,
+        so two pulls never get the same want."""
+
+        def _run(conn: Any) -> GfsSpaceMediaMemberWant | None:
+            row = conn.execute(
+                "UPDATE gfs_space_media_member_wants SET claimed_until = ?"
+                " WHERE ticket = (SELECT ticket FROM gfs_space_media_member_wants"
+                "  WHERE scope_kind = ? AND scope_id = ? AND expires_at > ?"
+                "  AND claimed_until <= ? AND attempts < ?"
+                "  ORDER BY created_at, ticket LIMIT 1)"
+                f" RETURNING {_MEMBER_WANT_COLS}",
+                (now + hold_s, scope_kind, scope_id, now, now, max_attempts),
+            ).fetchone()
+            return _member_want(row) if row is not None else None
+
+        return await self._db.transact(_run)
+
+    async def release(self, ticket: str) -> None:
+        """The member that claimed it declined: offer it again (one attempt
+        more)."""
+        await self._db.enqueue(
+            "UPDATE gfs_space_media_member_wants"
+            " SET claimed_until = 0, attempts = attempts + 1 WHERE ticket = ?",
+            (ticket,),
+        )
+
+    async def claimed(self, ticket: str, *, now: int) -> bool:
+        """Whether a member holds a live claim on *ticket*."""
+        row = await self._db.fetchone(
+            "SELECT claimed_until FROM gfs_space_media_member_wants WHERE ticket = ?",
+            (ticket,),
+        )
+        return row is not None and int(row["claimed_until"]) > now
+
+    async def remove(self, ticket: str) -> None:
+        await self._db.enqueue(
+            "DELETE FROM gfs_space_media_member_wants WHERE ticket = ?", (ticket,)
+        )
+
+    async def open_scopes(self, *, now: int) -> set[tuple[str, str]]:
+        """The scopes with a want a pull could claim right now."""
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT scope_kind, scope_id FROM gfs_space_media_member_wants"
+            " WHERE expires_at > ? AND claimed_until <= ?",
+            (now, now),
+        )
+        return {(str(r["scope_kind"]), str(r["scope_id"])) for r in rows}
+
+    async def prune(self, *, now: int) -> int:
+        """Drop wants whose session is over (a node that died mid-session)."""
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM gfs_space_media_member_wants WHERE expires_at <= ?", (now,)
         )
 
 

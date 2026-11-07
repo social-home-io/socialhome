@@ -112,6 +112,10 @@ async def test_overview_counts_the_space_media_cache(client, tmp_dir):
         "declined": 0,
         "on_demand_misses": 0,
         "live_sessions": 0,
+        "member_fallback": True,
+        "member_wants": 0,
+        "member_serves": 0,
+        "member_pullers": 0,
     }
 
 

@@ -385,6 +385,25 @@ class GfsSpaceMediaDemand:
 
 
 @dataclass(slots=True, frozen=True)
+class GfsSpaceMediaMemberWant:
+    """A space media want offered to a listed space's members (GFS migration
+    0027, the member fallback): the session's ticket, the blob, the readers'
+    sealed hints (``hints``: a JSON list, verbatim) and until when it is
+    offered. Never names the member that pulls or serves it."""
+
+    ticket: str
+    scope_kind: str
+    scope_id: str
+    blob_id: str
+    mode: str
+    hints: str
+    expires_at: int
+    created_at: int
+    claimed_until: int = 0
+    attempts: int = 0
+
+
+@dataclass(slots=True, frozen=True)
 class GfsPendingDeleteCert:
     """One signed moment delete certificate still owed to a follower
     household (v_66), as the reconnect push reads it.

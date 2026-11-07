@@ -22,10 +22,15 @@ from socialhome.global_server.blob_store import (
     MediaRefused,
 )
 from socialhome.global_server.config import GfsConfig
-from socialhome.global_server.domain import ClientInstance, GlobalSpace
+from socialhome.global_server.domain import (
+    ClientInstance,
+    GfsSpaceMediaMemberWant,
+    GlobalSpace,
+)
 from socialhome.global_server.repositories import (
     SqliteGfsFederationRepo,
     SqliteGfsSpaceMediaDemandRepo,
+    SqliteGfsSpaceMediaMemberWantRepo,
     SqliteGfsSpaceMediaRepo,
 )
 from socialhome.global_server.space_media import (
@@ -995,3 +1000,28 @@ async def test_the_sweep_prunes_old_demand(repo, gfs_db, tmp_dir):
             "b" * 64, "space", "s1", now=NOW + 40 * 86_400, window_s=10**9
         )
     ).requests == 2
+
+
+async def test_the_sweep_prunes_expired_member_wants(repo, gfs_db, tmp_dir):
+    """A member want a node left behind (it died mid-session) goes with the
+    sweep once its session's wait is over."""
+    wants = SqliteGfsSpaceMediaMemberWantRepo(gfs_db)
+    store = GfsSpaceMediaStore(
+        repo, FsBlobFiles(tmp_dir / "spaces"), _limits(), member_wants=wants
+    )
+    for ticket, expires in (("t-old", NOW - 1), ("t-live", NOW + 30)):
+        await wants.post(
+            GfsSpaceMediaMemberWant(
+                ticket=ticket,
+                scope_kind="space",
+                scope_id="s1",
+                blob_id="a" * 64,
+                mode="stream",
+                hints="[]",
+                expires_at=expires,
+                created_at=NOW - 10,
+            )
+        )
+    await store.sweep(NOW)
+    rows = await gfs_db.fetchall("SELECT ticket FROM gfs_space_media_member_wants")
+    assert [r["ticket"] for r in rows] == ["t-live"]

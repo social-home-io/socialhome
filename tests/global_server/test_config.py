@@ -894,8 +894,62 @@ def test_space_media_on_demand_out_of_range(tmp_dir, body):
         GfsConfig.from_toml(_space_media_toml(tmp_dir, body))
 
 
+def test_space_media_member_fallback_defaults_toml_and_env(tmp_dir, monkeypatch):
+    """The member fallback of on demand: on by default, bounded hold and
+    puller slots, from ``[space_media]`` or ``GFS_SPACE_MEDIA_*``."""
+    od = SpaceMediaOnDemandConfig()
+    assert od.member_fallback is True
+    assert od.member_pull_hold_seconds == 25
+    assert od.member_pullers_per_scope == 2
+    assert od.member_pullers_max == 256
+    p = _space_media_toml(
+        tmp_dir,
+        "member_fallback = false\nmember_pull_hold_seconds = 10\n"
+        "member_pullers_per_scope = 4\nmember_pullers_max = 64\n",
+    )
+    od = GfsConfig.from_toml(p).space_media_on_demand
+    assert (
+        od.member_fallback,
+        od.member_pull_hold_seconds,
+        od.member_pullers_per_scope,
+        od.member_pullers_max,
+    ) == (False, 10, 4, 64)
+    monkeypatch.setenv("GFS_SPACE_MEDIA_MEMBER_FALLBACK", "on")
+    monkeypatch.setenv("GFS_SPACE_MEDIA_MEMBER_PULL_HOLD_SECONDS", "55")
+    od = GfsConfig.load(p).space_media_on_demand
+    assert (od.member_fallback, od.member_pull_hold_seconds) == (True, 55)
+    # The on-demand switch is its own key.
+    assert od.enabled is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "member_pull_hold_seconds = 4\n",
+        "member_pull_hold_seconds = 56\n",
+        "member_pullers_per_scope = 0\n",
+        "member_pullers_per_scope = 17\n",
+        "member_pullers_max = 0\n",
+        "member_pullers_max = 4097\n",
+        'member_fallback = "maybe"\n',
+    ],
+)
+def test_space_media_member_fallback_out_of_range(tmp_dir, body):
+    with pytest.raises(ValueError, match="space_media"):
+        GfsConfig.from_toml(_space_media_toml(tmp_dir, body))
+
+
 def test_example_toml_documents_on_demand(tmp_dir):
-    for key in ("on_demand", "fresh_seconds", "cache_after_requests", "full_percent"):
+    for key in (
+        "on_demand",
+        "fresh_seconds",
+        "cache_after_requests",
+        "full_percent",
+        "member_fallback",
+        "member_pull_hold_seconds",
+        "member_pullers_per_scope",
+        "member_pullers_max",
+    ):
         assert key in EXAMPLE_TOML
     p = tmp_dir / "example.toml"
     write_example_config(p)

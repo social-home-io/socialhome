@@ -143,9 +143,11 @@ from .space_media import (
 )
 from .space_media_on_demand import (
     SPACE_MEDIA_DECLINE_ROUTE,
+    SPACE_MEDIA_MEMBER_PULL_ROUTE,
     SPACE_MEDIA_SERVE_ROUTE,
     SPACE_MEDIA_WANTED_ROUTE,
     GfsMediaDeclineView,
+    GfsMediaMemberPullView,
     GfsMediaServeView,
     GfsMediaWantedView,
 )
@@ -220,6 +222,7 @@ def register_routes(
     app.router.add_view(SPACE_MEDIA_WANTED_ROUTE, GfsMediaWantedView)
     app.router.add_view(SPACE_MEDIA_SERVE_ROUTE, GfsMediaServeView)
     app.router.add_view(SPACE_MEDIA_DECLINE_ROUTE, GfsMediaDeclineView)
+    app.router.add_view(SPACE_MEDIA_MEMBER_PULL_ROUTE, GfsMediaMemberPullView)
     # Opaque channels for private spaces (v_51) — every id in the body.
     app.router.add_view(CHANNEL_REGISTER_ROUTE, ChannelRegisterView)
     app.router.add_view(CHANNEL_EPOCH_ROUTE, ChannelEpochView)
