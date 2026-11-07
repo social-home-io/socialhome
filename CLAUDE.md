@@ -175,6 +175,15 @@ PR-only and verify-before-claiming gates still hold for anything that lands.
   Privacy is signalled by package boundaries + `__init__.py` re-exports, not
   filenames. Existing `_`-prefixed modules (`repositories/_spec.py`) are
   grandfathered; rename only on mechanical touch.
+- **Media is always the protocol format** (owner decision 2026-11-07):
+  pictures **WebP**, video **VP9/Opus WebM**, voice **Opus** (OGG/WebM
+  container). Every upload, received file and bundled asset is converted
+  — `media/image_processor.py`, `media/video_processor.py`,
+  `media/audio_processor.py` are the converters; never store, ship or
+  bundle a PNG / JPEG / HEIC / MP4 as-is. The one standing exception is
+  the app install icons (`client/public/assets/icon-*.png` — iOS and the
+  install prompt need PNG). Any other format needs the owner's sign-off,
+  stated in the PR.
 
 ### Frontend (SPA) & ingress
 
