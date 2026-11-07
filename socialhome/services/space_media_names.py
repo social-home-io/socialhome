@@ -121,7 +121,7 @@ async def space_own_files(
 ) -> list[str]:
     """The files of *urls* that are *space_id*'s own content here — no row
     outside the space names them (``confined_to_space``). A space page's
-    names are its host's (v_81): what the host ships must never be a
+    names are its host's (v_82): what the host ships must never be a
     household file, a DM's or another space's. No repo: none (fail
     closed)."""
     if media_refs is None:

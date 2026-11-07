@@ -60,7 +60,7 @@ class _Fed:
     def __init__(self) -> None:
         self.sent: list[tuple[str, FederationEventType, dict]] = []
         self.result = DeliveryResult(instance_id=HOST, ok=True)
-        self.version = 81
+        self.version = 82
 
     async def peer_supports(self, instance_id, *, min_version):
         return instance_id == HOST and self.version >= min_version
@@ -282,7 +282,7 @@ async def test_a_draft_on_the_host_is_only_warned_about(env, caplog):
     assert env.fed.sent == []
 
 
-# ── v_81: a draft's new files go to the host ────────────────────────────
+# ── v_82: a draft's new files go to the host ────────────────────────────
 
 
 class _Media:
@@ -335,7 +335,7 @@ async def test_no_files_for_a_host_below_v81_or_a_draft_without_new_ones(env, me
     env.fed.version = 80
     env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
     assert await env.fwd.kick(SID, "pg")
-    env.fed.version = 81
+    env.fed.version = 82
     env.pages_bases["pg2"] = DraftBase(
         title="T", content="![a](api/media/a.webp)", seq=3, by="u1"
     )

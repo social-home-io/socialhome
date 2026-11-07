@@ -898,7 +898,7 @@ async def test_has_item_refs(tmp_path):
     assert await f.has_item_refs(SPACE, "post-9") is False
 
 
-# ── v_81: a page's files keep the names the page shows ──────────────────
+# ── v_82: a page's files keep the names the page shows ──────────────────
 
 PAGE = "pg-1"
 SHOWN = "sd-" + "1" * 40 + ".webp"

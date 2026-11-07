@@ -2186,7 +2186,7 @@ class PageCreated(DomainEvent):
     #: see its host as v_48 still says it is a create (``base_seq: 0``), so
     #: a v_48 host sequences it as one.
     base: dict | None = None
-    #: v_81, the host only: the files (``api/media/…``) the page showed
+    #: v_82, the host only: the files (``api/media/…``) the page showed
     #: before this version — the outbound ships only the new ones. Never on
     #: the wire.
     shown_before: tuple[str, ...] = ()
@@ -2215,7 +2215,7 @@ class PageUpdated(DomainEvent):
     #: (``base_seq`` / ``base_hash``), so a v_48 host merges it instead of
     #: letting a delayed copy overwrite newer edits.
     base: dict | None = None
-    #: v_81, the host only: the files (``api/media/…``) the page showed
+    #: v_82, the host only: the files (``api/media/…``) the page showed
     #: before this version — the outbound ships only the new ones. Never on
     #: the wire.
     shown_before: tuple[str, ...] = ()

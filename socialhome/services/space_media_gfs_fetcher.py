@@ -26,7 +26,7 @@ This service:
   ``GET /api/media/{filename}`` for a missing file): concurrent requests for
   one file share one fetch, bounded by a timeout.
 
-A space page's files (v_81) are the exception to the reader name: every
+A space page's files (v_82) are the exception to the reader name: every
 household keeps the host's version of a page byte for byte (its hash is
 the version's identity), so a page's file keeps the name the page shows
 (:meth:`SpaceMediaGfsFetcher.localize_as_shown`, only for the host's
@@ -198,14 +198,14 @@ class SpaceMediaGfsFetcher:
         self._misses: OrderedDict[str, float] = OrderedDict()
         #: space → prefetches in a row that found their blob nowhere.
         self._space_misses: OrderedDict[str, int] = OrderedDict()
-        #: v_81 — a page file kept under the name its page shows.
+        #: v_82 — a page file kept under the name its page shows.
         self._pages: AbstractPageRepo | None = None
         self._page_media_refs: AbstractMediaReferenceRepo | None = None
 
     def attach_pages(
         self, page_repo: AbstractPageRepo, *, media_refs: AbstractMediaReferenceRepo
     ) -> None:
-        """Wire the space pages (v_81): a page's file keeps the name the
+        """Wire the space pages (v_82): a page's file keeps the name the
         page shows, and is fetched only while that page shows it and no row
         outside its space names it (the host chooses a page's names)."""
         self._pages = page_repo
@@ -296,7 +296,7 @@ class SpaceMediaGfsFetcher:
         item_id: str,
         origin: str,
     ) -> SpaceMediaLocalization:
-        """v_81 — the rows for a space page's files, each kept under the
+        """v_82 — the rows for a space page's files, each kept under the
         name the page shows (``local_name`` = the file name; the page is
         never rewritten). Only for the host's version of page *item_id*:
         the CALLER authenticated *origin* as the space's host. A reserved
@@ -398,7 +398,7 @@ class SpaceMediaGfsFetcher:
         ):
             # A file another household pushes (or a local one) that is not
             # here yet: routine for a viewer, never a GFS fetch — unless a
-            # page's row names it (v_81, checked in :meth:`_fetch`).
+            # page's row names it (v_82, checked in :meth:`_fetch`).
             return False
         if self._misses.get(filename, 0.0) > _monotonic():
             return False  # no GFS held it a moment ago: don't ask them all again

@@ -691,7 +691,7 @@ async def test_the_hosts_catch_up_fills_a_file_the_authors_push_never_delivered(
     assert await _shown(db, root, "post-f") == GOOD
 
 
-# ── Page files: the host's names, filled by the host (v_81) ─────────────
+# ── Page files: the host's names, filled by the host (v_82) ─────────────
 #
 # Pages are host-sequenced: every household keeps the host's version byte
 # for byte (its hash is the version's identity), so a page's files keep the

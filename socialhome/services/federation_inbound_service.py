@@ -330,7 +330,7 @@ def _mime_to_ext(mime_type: str) -> str:
 def _page_scope(
     page: Page, space_id: str, filename: str, sent: str, known_only: bool
 ) -> str | None:
-    """A space page's file (v_81): the page keeps the names its host's
+    """A space page's file (v_82): the page keeps the names its host's
     version shows. One it shows lands (``None``); the name a sender pushes
     that the page shows under a name not bound to the sender is
     :data:`_NOT_ITS_FILE` (only the host fills it, :meth:`_host_fills`).
@@ -618,10 +618,10 @@ class FederationInboundService(ProtectionGateMixin):
         #: Where an approved announce card's linked event must live (v_43):
         #: without it such a card is refused.
         self._space_calendar_repo = space_calendar_repo
-        #: SPACE_MEDIA_BLOB scope (v_81): a space page's cover and body
+        #: SPACE_MEDIA_BLOB scope (v_82): a space page's cover and body
         #: pictures.
         self._page_repo = page_repo
-        #: v_81: a page name the host fills must be this space's file only
+        #: v_82: a page name the host fills must be this space's file only
         #: (no row of another space or of the household names it).
         self._media_refs = media_reference_repo
         #: Group-conversation authority (v_37) — a deprovisioned member of a
@@ -2337,7 +2337,7 @@ class FederationInboundService(ProtectionGateMixin):
     async def _page_fill_confined(
         self, correlation_id: str, filename: str, space_id: str
     ) -> bool:
-        """For a page's file (v_81): a page keeps the names its host's
+        """For a page's file (v_82): a page keeps the names its host's
         version shows, so the host chooses them — it must never fill a
         name some row outside this space shows here (another space's
         ``sd-`` file, a household file). Any other row: ``True``."""

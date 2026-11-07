@@ -484,7 +484,7 @@ async def test_p4_a_cover_change_converges_live_and_by_sync(mesh):
     await _sync_from_host(mesh, a, await _host_chunk(mesh, pid))
     assert await _cover(a, pid) == "/api/media/new.webp"
     # A member's cover change goes through the host too. Its new file takes
-    # the member household's name on the host (v_81: only that household,
+    # the member household's name on the host (v_82: only that household,
     # or the host, can fill it) and every household converges on it.
     r = await a.tc.patch(
         f"/api/spaces/{SID}/pages/{pid}",

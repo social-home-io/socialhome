@@ -2724,8 +2724,8 @@ class SpaceSyncReceiver:
                 return True
             await engine.mirror(space_id=space_id, page_id=page.id, version=version)
             if self._gfs_media is not None and version.has_state:
-                # v_81: a link-joined requester keeps the page's files
-                # under the names the page shows (sync line 81).
+                # v_82: a link-joined requester keeps the page's files
+                # under the names the page shows (sync line 82).
                 await self._keep_media(
                     self._gfs_media.localize_as_shown(
                         space_id,

@@ -638,7 +638,7 @@ async def test_a_reviewed_cover_naming_another_spaces_file_never_reaches_it(mesh
     assert shipped == []
 
 
-# ── A reviewed page's pictures (v_81) ───────────────────────────────────
+# ── A reviewed page's pictures (v_82) ───────────────────────────────────
 
 PAGE_FILES = {"c.webp": b"cover bytes", "p1.webp": b"one", "p2.webp": b"two"}
 

@@ -1199,12 +1199,12 @@ class _HostSpaceRepo(_FakeSpaceRepo):
 
 @pytest.mark.parametrize(
     ("host", "version", "shipped"),
-    [("us", 81, True), ("us", 80, False), ("the-host", 81, False)],
+    [("us", 82, True), ("us", 80, False), ("the-host", 82, False)],
 )
 async def test_the_hosts_page_replay_ships_its_files_to_v81(host, version, shipped):
-    """v_81: a replayed page's files (cover, body pictures) ship with it —
+    """v_82: a replayed page's files (cover, body pictures) ship with it —
     only from the space's host (on a receiver only it fills the names the
-    page shows), only to a household at v_81."""
+    page shows), only to a household at v_82."""
     base = datetime(2026, 4, 1, tzinfo=UTC)
     at = (base + timedelta(minutes=1)).isoformat()
     page = replace(

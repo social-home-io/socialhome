@@ -80,7 +80,13 @@ sequenceDiagram
   Alice->>Bob: DM_MESSAGE (v_3, encrypted)<br/>{ media_blob_id, file_name, mime_type, preview_bytes_b64 }
   Bob-->>Bob: Save preview to local cache;<br/>bubble renders immediately with media_sync_status='pending'
   Note over Alice,Bob: ─── background ───
-  Alice->>Bob: DM_MEDIA_BLOB chunks (1..N, base64; final flag on last)
+  alt fed-media-v1 channel open
+    Alice->>Bob: DM_MEDIA_BLOB chunks as binary frames on the channel
+  else v_81 peer, no channel
+    Alice->>Bob: POST its inbox URL, one binary body per chunk<br/>(magic + suite byte + signed header + sealed chunk, no base64)
+  else older peer, or a POST that failed
+    Alice->>Bob: DM_MEDIA_BLOB chunks as JSON (bytes_b64)
+  end
   Bob-->>Bob: Each chunk → part file under media_dir;<br/>once all N landed (any order), concat in order + rename to dm-<sha256(from_instance, msg_id)>.<ext>;<br/>update conversation_messages.media_url +<br/>media_sync_status=NULL
   Bob-->>Bob: WS push dm.media_ready → SPA<br/>swaps preview src for full media
 ```
@@ -115,11 +121,14 @@ that be as large as possible — few messages per file. The size is chosen
   older one keeps, is 256 KiB. Chunk = negotiated limit − 16 KiB frame
   overhead, at most 512 KiB: **512 KiB** between two upgraded
   households, **240 KiB** with an older one.
-- **HTTPS inbox** (no open channel) — the chunk is base64'ed into the
-  payload, then encrypted and base64'ed again (~1.8×), under the inbox's
-  1 MiB body cap: **512 KiB** (≈ 930 KB on the wire). Never more than
-  this on any tier, so a chunk built for the channel still fits the inbox
-  if the channel drops mid-transfer.
+- **HTTPS inbox** (no open channel) — **512 KiB**. To a v_81 household
+  the chunk is one binary body on the inbox ([below](#binary-media-on-the-https-inbox-v_81)):
+  **525 323 B** on the wire for a 512 KiB chunk (1.002×). To an older one
+  — and when that POST fails — it is base64'ed into the JSON payload,
+  then encrypted and base64'ed again (1.78×, **932 911 B**), under the
+  inbox's 1 MiB body cap. Never more than 512 KiB on any tier, so a chunk
+  built for the channel still fits the inbox (either shape) if the
+  channel drops mid-transfer.
 - **Floor** — a channel is used for media only when its chunk is at
   least **64 KiB** (`MIN_CHANNEL_CHUNK_BYTES`, i.e. a negotiated limit
   of ≥ 80 KiB) *and* large enough to send the file in at most 4096
@@ -155,6 +164,83 @@ built lazily and sent by at most 4 workers (`PIPELINE_WINDOW`,
 `services/media_chunk_pipeline.py`), so a sender holds only the chunks
 in flight; the first failed chunk stops the rest, and the outbox resends
 the whole file later.
+
+### Binary media on the HTTPS inbox (v_81)
+
+`FederationService.send_media_chunk` tries three legs per chunk, each
+falling through to the next: the `fed-media-v1` channel (v_14, open and
+big enough), then **one binary body POSTed to the peer's own inbox URL**
+(v_81: a CONFIRMED direct peer with an inbox URL — not a household
+seated from an invite link — and a chunk of at most 512 KiB), then the
+JSON chunk. Mesh-routed (`SPACE_ROUTED`) and GFS-relay targets stay
+JSON: the sealed inner event rides inside a JSON routing envelope, so
+there is no frame to send.
+
+```
+[ "\0SHM" ][ u8 suite = 0x01 ][ fed-media-v1 frame:
+    u8 frame_type = 1 | u32 header_len | header | u32 payload_len | payload ]
+```
+
+- **header** — the signed federation envelope JSON, byte for byte what
+  was signed: the field set and canonical order of `send_event`. Only
+  routing fields are cleartext (`msg_id`, `event_type`, `from_instance`,
+  `to_instance`, `timestamp`, `space_id`, `proto_version`, `sig_suite`,
+  `signatures`); `encrypted_payload` holds everything else — the
+  correlation ids, filename, mime, sizes, chunk sequencing — plus
+  `chunk_sha256` (b64url SHA-256 of the plaintext chunk),
+  `media_aead_suite` (`aesgcm-256`) and `media_frame_suite`
+  (`fed-media-v1`).
+- **payload** — the chunk sealed with AES-256-GCM under the directional
+  session key, raw `nonce ‖ ciphertext ‖ tag`. No base64 anywhere.
+- **The signature covers the body** through `chunk_sha256`: it sits in
+  the signed, encrypted metadata, and the receiver checks it against the
+  decrypted chunk (constant time). Swap the chunk → hash mismatch; touch
+  the hash → signature and GCM fail. The suite byte is not signed; the
+  signed `media_frame_suite` must equal it.
+- **Same URL as JSON.** `"\0"` never starts a JSON text, so the inbox
+  tells the two shapes apart from the body alone — never from
+  `Content-Type` or a header. In ha / haos a household advertises Home
+  Assistant's `/api/socialhome/inbox/{inbox_id}`, whose relay (the
+  companion integration through socialhome-client
+  `forward_inbox_envelope`) forwards the raw body to the app's
+  `POST /federation/inbox/{inbox_id}` as `application/octet-stream` and
+  drops custom headers; the binary body passes through unchanged, so
+  neither needs a change, and the peer's `proto_version` is all the
+  sender has to know.
+- **Same §24.11 chain.** The header runs the JSON inbox pipeline
+  (`_build_media_https_pipeline` = the shared steps + an event-type gate
+  that admits only `SPACE_MEDIA_BLOB` / `DM_MEDIA_BLOB`): parse →
+  event type → instance lookup by inbox id → peer class → relay opt-in →
+  timestamp → signature → unpair tombstone → replay → decrypt →
+  idempotency → ban → persist replay → post-decrypt gates. The chunk
+  then takes the channel's tail (`_finish_media_frame`: frame suite,
+  AEAD suite, decrypt, `chunk_sha256`) and dispatches to the same
+  handlers with `media_bytes` set. One replay cache across all three
+  legs.
+- **Refusals** — the inbox's generic bodies: a body without the magic
+  is read as JSON; an unknown suite byte, trailing bytes, another frame
+  type, a non-media event, a bad tag or hash → 400; bad signature → 403;
+  unknown inbox → 404; replay / stale timestamp → 410; a body over
+  `HTTPS_MEDIA_MAX_BODY_BYTES` (512 KiB + 16 KiB) → 413, from
+  `Content-Length` once the 4 magic bytes are read, else while streaming;
+  its own per-IP bucket (600 / min) → 429. A sender that gets anything
+  but 2xx sends the JSON chunk instead, which the outbox redelivers.
+- **Per-peer backoff** (`federation/media_https_backoff.py`, in memory,
+  ≤ 1024 peers) — so an inbox that keeps refusing binary bodies (a proxy
+  that blocks them, a bug, the shared bucket behind Home Assistant's relay)
+  doesn't cost a wasted POST before every JSON chunk: a 429 skips the leg
+  for its `Retry-After` (else 30 s, at most 5 min); any other 4xx (413,
+  415, …) for 10 min at once; 5xx / no answer for 10 min after 3 in a
+  row. Then one chunk probes again; a failed probe means another 10 min.
+  A 2xx clears it. A peer already marked unreachable skips the leg too.
+- **Cost** — per chunk, per receiving household: 932 911 B → 525 323 B
+  for 512 KiB (−44 %). A 200 MiB video is 400 chunks: 373.2 MB →
+  210.1 MB per receiving household; the recipient set and chunk count
+  are unchanged (still one send per member household). **Worst case** —
+  an inbox that refuses every binary body: at most 3 wasted bodies
+  (≤ 1.58 MB) and then one probe per 10 minutes on top of the JSON
+  chunks, ≈ 374.7 MB for the 200 MiB video (+0.4 % over JSON alone),
+  instead of ~1.55× (583.3 MB) without the backoff.
 
 **Size cap.** The receiver refuses a file bigger than the sender's own
 upload limits allow (`inbound_media_store.dm_media_max_bytes`, from
@@ -383,6 +469,13 @@ URL and the modifier is removed.
   transforms. New compat tree introduced in this feature; see the
   package docstring + `dm_media_v3.py` for the canonical shape.
 - `socialhome/domain/federation.py` — `DM_MEDIA_BLOB` enum entry.
+- `socialhome/federation/media_envelope.py` — the signed header + sealed
+  chunk both binary legs send; `media_framing.encode_body` /
+  `decode_body` / `is_media_body` — the HTTPS body (magic + suite byte).
+- `socialhome/federation/federation_service.py` — `send_media_chunk`
+  (the three legs), `handle_inbound_media_https`, `_finish_media_frame`.
+- `socialhome/routes/federation.py` — `FederationInboxView` sniffs the
+  body and hands a binary one to `handle_inbound_media_https`.
 - `socialhome/services/dm_media_sync_service.py` — preview
   builder, ``dm_media_outbox`` enqueue, and scheduler loop
   (asyncio.Event lifecycle per CLAUDE.md template).

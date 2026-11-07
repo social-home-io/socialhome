@@ -431,7 +431,7 @@ class Proposal:
     resolves: tuple[str, ...] = ()
     #: For a proposed create: the creator.
     created_by: str = ""
-    #: v_81, the host only: the hash of the proposal AS SENT, when the host
+    #: v_82, the host only: the hash of the proposal AS SENT, when the host
     #: renamed its new files to the proposer's names (``SpaceMediaNamer``)
     #: — the answer names it, so the proposer settles its draft.
     answers: str = ""
@@ -620,7 +620,7 @@ class SequenceResult:
     #: the page lock, so version N ships with N's sides).
     sides: tuple[PageConflictSide, ...] = ()
     #: The page as it was before this version (``None`` for a create): the
-    #: outbound ships only the files the new version adds (v_81).
+    #: outbound ships only the files the new version adds (v_82).
     previous: Page | None = None
 
 

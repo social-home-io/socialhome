@@ -27,11 +27,11 @@ household's own drafts are ``proposal`` events this bridge never sends —
 :class:`~.page_proposal_forwarder.PageProposalForwarder` proposes them to
 the host alone.
 
-A page's files (v_81) — its cover and the pictures its body shows — ride
+A page's files (v_82) — its cover and the pictures its body shows — ride
 the host's versions: each version's NEW files (``shown_before`` names the
 ones the replaced version showed) are queued on the space media outbox for
-every other member household at v_81 (paired or mesh; correlated by the
-page), and a link-joined v_81 member gets them as a ``media_refs``
+every other member household at v_82 (paired or mesh; correlated by the
+page), and a link-joined v_82 member gets them as a ``media_refs``
 descriptor in its own copy (:class:`SpaceMediaRefsMixin`). The page keeps
 the names the host's page shows: a receiver lets only the host fill them.
 
@@ -103,8 +103,8 @@ class PageFederationOutbound(SpaceMediaRefsMixin):
         space_repo: AbstractSpaceRepo,
         media_refs: AbstractMediaReferenceRepo,
     ) -> None:
-        """Wire the space media outbox (v_81: a version's new files — only
-        the space's own: a row stored before v_81 may name a household
+        """Wire the space media outbox (v_82: a version's new files — only
+        the space's own: a row stored before v_82 may name a household
         file)."""
         self._media_sync = media_sync
         self._spaces = space_repo
@@ -189,7 +189,7 @@ class PageFederationOutbound(SpaceMediaRefsMixin):
         conflict list to v_48 members, and the plain fields to older ones
         (``legacy_payload``: their release check refuses unknown keys).
         Anything else — a write under a pre-v_48 host — goes out as before.
-        A canonical version's new files follow it (v_81)."""
+        A canonical version's new files follow it (v_82)."""
         if canonical is None:
             await self._fan_out(space_id, event_type, payload())
             return
@@ -226,7 +226,7 @@ class PageFederationOutbound(SpaceMediaRefsMixin):
     def _page_refs_per_peer(
         self, plan: SpaceMediaPlan | None
     ) -> Callable[[str, dict], Awaitable[dict]] | None:
-        """The descriptor for a link-joined member at v_81 only — an older
+        """The descriptor for a link-joined member at v_82 only — an older
         one would keep it under a reader name the page never shows."""
         if plan is None or self._media_gfs is None:
             return None
@@ -249,7 +249,7 @@ class PageFederationOutbound(SpaceMediaRefsMixin):
         self, space_id: str, page_id: str, media_urls: list[str]
     ) -> None:
         """Queue a version's new files for every other member household at
-        v_81 — paired or mesh-only (the outbox reaches both; a link-joined
+        v_82 — paired or mesh-only (the outbox reaches both; a link-joined
         member is left out by the outbox itself). One outbox row per (file,
         household). Fail-soft: the version has gone out already."""
         if not media_urls or self._media_sync is None or self._spaces is None:

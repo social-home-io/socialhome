@@ -269,7 +269,7 @@ async def test_a_legacy_write_goes_out_as_before(env):
     assert fed.kwargs == [{}, {}, {}]
 
 
-# ── v_81: a host version's new files reach every member household ──────
+# ── v_82: a host version's new files reach every member household ──────
 
 
 class _Media:
@@ -293,7 +293,7 @@ class _VersionedFed(_FakeFed):
 
     def __init__(self) -> None:
         super().__init__()
-        self.versions = {"peer-new": 81, "peer-old": 80, "reader": 81}
+        self.versions = {"peer-new": 82, "peer-old": 80, "reader": 82}
 
     async def space_member_supports(self, instance_id, *, min_version):
         return self.versions.get(instance_id, 0) >= min_version
@@ -347,7 +347,7 @@ def media_env():
 
 async def test_a_host_version_ships_its_files_to_every_v81_member(media_env):
     """A new page's cover and body pictures go to every other member
-    household at v_81 (paired or mesh — the outbox reaches both), never to
+    household at v_82 (paired or mesh — the outbox reaches both), never to
     an older one, correlated by the page."""
     bus, _fed, media, gfs = media_env
     await bus.publish(
@@ -457,7 +457,7 @@ async def test_a_failed_file_queue_never_stops_the_page(media_env):
 
 
 async def test_a_file_named_outside_the_space_never_ships(media_env, monkeypatch):
-    """A page stored before v_81 may name a household file (a member that
+    """A page stored before v_82 may name a household file (a member that
     learned its name): the host never ships, nor seals, a file some row
     outside the space names."""
     bus, _fed, media, gfs = media_env

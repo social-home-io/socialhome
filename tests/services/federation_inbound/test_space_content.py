@@ -1140,7 +1140,7 @@ async def test_the_host_sequences_a_members_proposal(bus, repos):
 
 
 async def test_the_host_names_a_proposals_new_files_after_its_household(bus, repos):
-    """v_81: a file a proposal adds takes the proposer household's name
+    """v_82: a file a proposal adds takes the proposer household's name
     (only it, or the host, can fill that name — never a file of ours it
     learned); the page's own files — current, an open side, a version in
     its history — keep theirs; a reserved name is dropped. The answer names
@@ -6956,7 +6956,7 @@ _V80_REFS = {"c.webp": {"blob_id": "c" * 64, "suite": "s", "epoch": 0, "size": 9
 
 
 async def test_a_hosts_page_version_keeps_its_files_under_the_pages_names(bus, repos):
-    """v_81: the page is the host's version byte for byte — its descriptor
+    """v_82: the page is the host's version byte for byte — its descriptor
     is kept under the names the page shows, the version never rewritten."""
     engine = _FakeConflicts("member", host="peer-a")
     h = _page_handlers(bus, repos, engine)

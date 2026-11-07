@@ -2180,7 +2180,7 @@ _SYNC_REFS = {"a.webp": {"blob_id": "a" * 64, "suite": "s", "epoch": 0, "size": 
 
 
 async def test_the_hosts_page_record_keeps_its_files_under_the_pages_names(setup):
-    """v_81 (sync line 81): a page record from the host is its version
+    """v_82 (sync line 82): a page record from the host is its version
     byte for byte — the descriptor is kept under the names the page shows."""
     r, _c, kp = setup
     conflicts = _FakeConflicts()

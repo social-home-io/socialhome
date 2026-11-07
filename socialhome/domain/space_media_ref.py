@@ -47,7 +47,7 @@ MAX_DESCRIPTOR_ENTRIES: int = 16
 
 #: The resources (§25.6 names) whose items carry ``media_refs``: posts
 #: (pictures, file, link card), calendar events (the cover), gallery
-#: items (thumbnail + full file) and pages (v_81: the cover and the
+#: items (thumbnail + full file) and pages (v_82: the cover and the
 #: pictures the body shows).
 MEDIA_REF_RESOURCES: frozenset[str] = frozenset(
     {"posts", "calendar", "gallery", "pages"}

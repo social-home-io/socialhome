@@ -2160,7 +2160,7 @@ async def test_no_catchup_byte_push_to_a_link_joined_requester(encoder):
         assert media_sync.enqueue_for_blob.await_count == (1 if pushed else 0)
 
 
-# ── v_81 — a space page's files in the catch-up ─────────────────────────
+# ── v_82 — a space page's files in the catch-up ─────────────────────────
 
 
 @dataclass
@@ -2217,7 +2217,7 @@ def _page_provider(encoder, *, hosting=True, versions=None, exporters=None):
         sig_suite="ed25519",
         media_sync=media_sync,
     )
-    svc._federation = _VersionFed(versions or {"peer-new": 81, "peer-old": 80})
+    svc._federation = _VersionFed(versions or {"peer-new": 82, "peer-old": 80})
 
     async def _hosts(space_id):
         return hosting
@@ -2243,7 +2243,7 @@ async def test_the_hosts_catchup_ships_every_pages_files(encoder):
 )
 async def test_page_files_come_only_from_the_host_to_v81(encoder, hosting, requester):
     """Only the host fills a page's names on the receiver; a household below
-    v_81 would keep them under names its page never shows."""
+    v_82 would keep them under names its page never shows."""
     svc, media_sync = _page_provider(encoder, hosting=hosting)
     await svc.stream_initial(_FakeSession(requester=requester))
     assert media_sync.enqueue_for_blob.call_args_list == []
@@ -2265,7 +2265,7 @@ async def test_a_link_joined_v81_requesters_page_records_carry_media_refs(encode
         )
     }
     svc, _media = _page_provider(
-        encoder, versions={"peer-e": 81, "peer-e80": 80}, exporters=exporters
+        encoder, versions={"peer-e": 82, "peer-e80": 80}, exporters=exporters
     )
     svc.attach_media_gfs(uploader)
     session = _FakeSession(requester="peer-e")

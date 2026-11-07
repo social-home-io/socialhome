@@ -489,7 +489,7 @@ class SpaceSyncService:
         #: Space calendar events — their cover files ride the catch-up
         #: media too (the record carries only the reference).
         self._space_calendar_repo = space_calendar_repo
-        #: v_81 — space pages, whose files (cover, body pictures) ride the
+        #: v_82 — space pages, whose files (cover, body pictures) ride the
         #: catch-up media of the space's host (:meth:`attach_pages`).
         self._page_repo = None
         self._page_media_refs = None
@@ -528,20 +528,20 @@ class SpaceSyncService:
     def attach_pages(
         self, page_repo, *, hosts: Callable[[str], Awaitable[bool]], media_refs
     ) -> None:
-        """Wire the space pages (v_81): the host's catch-up ships each
-        page's files to a requester at v_81 — a page keeps the names the
+        """Wire the space pages (v_82): the host's catch-up ships each
+        page's files to a requester at v_82 — a page keeps the names the
         host's version shows, which only the host fills on a receiver — and
         a link-joined one gets them as the ``pages`` records' descriptor.
         ``hosts(space_id)``: whether this household is the space's host.
         Only the space's own files ship (``media_refs.confined_to_space``):
-        a page stored before v_81 may name a household file."""
+        a page stored before v_82 may name a household file."""
         self._page_repo = page_repo
         self._pages_hosted = hosts
         self._page_media_refs = media_refs
 
     async def _takes_page_media(self, space_id: str, requester: str) -> bool:
         """Whether *requester* gets the files of *space_id*'s pages from us:
-        we host the space, and it is at v_81 (unknown without federation)."""
+        we host the space, and it is at v_82 (unknown without federation)."""
         if self._pages_hosted is None or not await self._pages_hosted(space_id):
             return False
         if self._federation is None:
@@ -1153,11 +1153,11 @@ class SpaceSyncService:
                     "sync-catchup-media: list calendar events failed for space=%s",
                     space_id,
                 )
-        # Page files — the host's catch-up only (v_81).
+        # Page files — the host's catch-up only (v_82).
         await self._enqueue_page_media(space_id, target_instance_id)
 
     async def _enqueue_page_media(self, space_id: str, target_instance_id: str) -> None:
-        """v_81 — every live page's files, from the space's host only."""
+        """v_82 — every live page's files, from the space's host only."""
         if self._page_repo is None or not await self._takes_page_media(
             space_id, target_instance_id
         ):

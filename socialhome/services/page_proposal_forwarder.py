@@ -13,7 +13,7 @@ pile up); drafts flush when it answers again (:class:`ConnectionReachable`),
 at startup and on a 30-minute tick — the host recognises a resent
 proposal by its hash and simply acknowledges it.
 
-A draft's new files (v_81) — the cover and body pictures it adds to the
+A draft's new files (v_82) — the cover and body pictures it adds to the
 version it was made from — go to the host with it over the space media
 outbox (correlated by the page): the host renames them to this household's
 names and ships them on with its version.
@@ -93,7 +93,7 @@ class PageProposalForwarder:
         self._stop = asyncio.Event()
 
     def attach_media_sync(self, media_sync: SpaceMediaSyncService) -> None:
-        """Wire the space media outbox (v_81: a draft's new files)."""
+        """Wire the space media outbox (v_82: a draft's new files)."""
         self._media_sync = media_sync
 
     def wire(self) -> None:
@@ -255,7 +255,7 @@ class PageProposalForwarder:
         self, space_id: str, page_id: str, proposal: Proposal, host: str
     ) -> None:
         """Queue the files *proposal* adds to the version it was made from
-        for the host at v_81 (a create: all of them). Fail-soft: the draft
+        for the host at v_82 (a create: all of them). Fail-soft: the draft
         is on its way regardless."""
         if self._media_sync is None:
             return

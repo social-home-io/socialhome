@@ -1167,7 +1167,7 @@ class SpaceContentInboundHandlers:
         """The host: *proposal* with each file it adds renamed to the name
         it takes here as the proposer delivers it (:class:`SpaceMediaNamer`
         — the proposer ships the bytes, and nobody else can fill that
-        name), the page's own files kept as they are (v_81). A file is the
+        name), the page's own files kept as they are (v_82). A file is the
         page's own when its current version, an open side or a version in
         its history shows it — a resolution or a revert repeats those. The
         answer names the proposal as SENT (``answers``), so the proposer
@@ -1290,7 +1290,7 @@ class SpaceContentInboundHandlers:
         page_id: str,
         version: CanonicalVersion,
     ) -> None:
-        """v_81 — a link-joined household: the host's version describes the
+        """v_82 — a link-joined household: the host's version describes the
         files it shows (``media_refs``); they are kept under the names the
         page shows (never rewritten: the page is the host's byte for byte).
         Only the host's version reaches here (the caller checked)."""

@@ -1287,7 +1287,24 @@ from __future__ import annotations
 #:   files, and its catch-up gets no pictures — its people see posts without
 #:   the pictures that did not fit. Labelled "Pictures in a space for members
 #:   who joined by link".
-#: * **v_81** (2026-11-07) — **Pictures in a space's pages reach every
+#: * **v_81** (2026-11-07) — **Binary media over HTTPS**. A media chunk
+#:   (``SPACE_MEDIA_BLOB`` / ``DM_MEDIA_BLOB``) to a CONFIRMED direct peer
+#:   with an inbox URL and no open ``fed-media-v1`` channel is POSTed to
+#:   the SAME inbox URL as one binary body — ``\x00SHM`` magic, a frame
+#:   suite byte, then the ``fed-media-v1`` frame — instead of the
+#:   base64-in-JSON envelope: the signed envelope header (routing fields
+#:   only in plaintext) + the AES-256-GCM-sealed chunk as raw bytes, bound by
+#:   ``chunk_sha256`` in the signed, encrypted metadata, which also carries
+#:   ``media_frame_suite`` (``fed-media-v1``, required over HTTPS and equal
+#:   to the suite byte). The receiver tells it from JSON by the body alone,
+#:   so Home Assistant's inbox relay (which rewrites ``Content-Type`` and
+#:   drops custom headers) carries it unchanged. A 512 KiB chunk is
+#:   ~513 KiB on the wire instead of ~933 KB. Same §24.11 inbox pipeline,
+#:   same replay cache, same media handlers. **Fallback**: a peer below
+#:   v_81 — and any failed POST — gets the JSON chunk as before; mesh
+#:   (``SPACE_ROUTED``) and GFS-relay targets stay JSON. Not space-scoped,
+#:   no sync stream change. Labelled "Lighter photo and file transfers".
+#: * **v_82** (2026-11-07) — **Pictures in a space's pages reach every
 #:   member**. A page's files are its cover and the ``api/media/`` pictures
 #:   its body shows (``page_media_urls``). Pages are host-sequenced (v_48)
 #:   and every household keeps the host's version byte for byte (its hash is
@@ -1297,17 +1314,17 @@ from __future__ import annotations
 #:   body rewritten to it), and the proposer ships it to the host
 #:   (``SPACE_MEDIA_BLOB`` correlated to the page or the queue item). The
 #:   host ships each canonical version's NEW files to every other member
-#:   household at or above v_81 (``SPACE_MEDIA_BLOB`` correlated to the
+#:   household at or above v_82 (``SPACE_MEDIA_BLOB`` correlated to the
 #:   page; a receiver lets only the space's host fill a name the page shows,
 #:   or the household the name is bound to) and describes them to a
-#:   link-joined v_81 member in ``media_refs`` (kept under the name the page
+#:   link-joined v_82 member in ``media_refs`` (kept under the name the page
 #:   shows, not an ``sg-`` name). The §25.6 ``pages`` records carry the same
 #:   descriptor to a link-joined requester and the host's catch-up ships the
-#:   page files (sync line 81). **Fallback**: a member household below v_81
+#:   page files (sync line 82). **Fallback**: a member household below v_82
 #:   is sent no page file (as before: its people see the page without the
-#:   pictures it does not hold); a host below v_81 is shipped no proposal
+#:   pictures it does not hold); a host below v_82 is shipped no proposal
 #:   files. Labelled "Pictures in a space's pages".
-OURS: int = 81
+OURS: int = 82
 
 
 class FederationCapability:
@@ -1921,11 +1938,16 @@ class FederationCapability:
     #: it: no descriptor (live, the old ``SPACE_MEDIA_BLOB`` push; a catch-up
     #: never pushes bytes to any link-joined requester).
     MIN_FOR_SPACE_MEDIA_REFS = 80
-    #: v_81 — a page's files (cover + body pictures) ship with the host's
+    #: v_81 — media chunks to a CONFIRMED direct peer ride
+    #: the peer's inbox URL as one binary ``fed-media-v1`` body when no
+    #: media channel is open (:meth:`FederationService.send_media_chunk`).
+    #: Below it: the JSON (base64) chunk on the inbox, as before.
+    MIN_FOR_MEDIA_HTTPS = 81
+    #: v_82 — a page's files (cover + body pictures) ship with the host's
     #: versions to member households at or above it (``SPACE_MEDIA_BLOB``,
     #: and ``media_refs`` toward a link-joined member), and a proposer ships
     #: a draft's new files to a host at or above it. Below it: no page file.
-    MIN_FOR_PAGE_MEDIA = 81
+    MIN_FOR_PAGE_MEDIA = 82
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2233,6 +2255,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         "Pictures in a space for members who joined by link",
     ),
     (
+        FederationCapability.MIN_FOR_MEDIA_HTTPS,
+        "Lighter photo and file transfers",
+    ),
+    (
         FederationCapability.MIN_FOR_PAGE_MEDIA,
         "Pictures in a space's pages",
     ),
@@ -2327,6 +2353,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_APP_ENGINES: "app_engines",
     FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT: "space_gallery_item_edits",
     FederationCapability.MIN_FOR_SPACE_MEDIA_REFS: "space_media_refs",
+    FederationCapability.MIN_FOR_MEDIA_HTTPS: "lighter_media_transfers",
     FederationCapability.MIN_FOR_PAGE_MEDIA: "space_page_media",
 }
 

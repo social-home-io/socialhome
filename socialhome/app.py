@@ -1841,7 +1841,7 @@ def _wire_federation_stack(
             and space.owner_instance_id == federation_service.own_instance_id
         )
 
-    # v_81: the host's catch-up ships its pages' files.
+    # v_82: the host's catch-up ships its pages' files.
     space_sync_service.attach_pages(
         page_repo, hosts=_hosts_space, media_refs=media_reference_repo
     )
@@ -1887,7 +1887,7 @@ def _wire_federation_stack(
         bus=bus,
         federation_service=federation_service,
     )
-    # v_81: a host version's new files (cover, body pictures) follow it to
+    # v_82: a host version's new files (cover, body pictures) follow it to
     # the other member households over the space media outbox.
     page_federation_outbound.attach_media(
         media_sync=space_media_sync_service,
@@ -1910,7 +1910,7 @@ def _wire_federation_stack(
         federation_repo=federation_repo,
         bus=bus,
     )
-    # v_81: a draft's new files go to the host with it.
+    # v_82: a draft's new files go to the host with it.
     page_proposal_forwarder.attach_media_sync(space_media_sync_service)
     page_proposal_forwarder.wire()
     app[K.page_proposal_forwarder_key] = page_proposal_forwarder
@@ -2168,7 +2168,7 @@ def _wire_federation_stack(
         # bounded per request by the files' sizes here.
         media_sync=space_media_sync_service,
         media_dir=pathlib.Path(config.media_path),
-        # v_81: only a replayed page's own files ship.
+        # v_82: only a replayed page's own files ship.
         media_refs=media_reference_repo,
     )
 
@@ -5038,7 +5038,7 @@ def create_app(config: Config | None = None) -> web.Application:
         # …and no SPACE_MEDIA_BLOB push to them: the relay refuses the bytes.
         space_media_sync_service.attach_relay_readers(space_media_uploader)
         fed.inbound_service.attach_gfs_media(space_media_fetcher)
-        # v_81: a page's files keep the names the host's page shows.
+        # v_82: a page's files keep the names the host's page shows.
         space_media_fetcher.attach_pages(page_repo, media_refs=repos.media_reference)
         fed.content_inbound.attach_gfs_media(space_media_fetcher)
         if space_public_inbound is not None:

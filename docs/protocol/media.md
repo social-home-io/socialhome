@@ -3,7 +3,7 @@
 ## Summary
 
 Cross-household media (DM attachments and space-post / gallery images)
-is delivered as **chunks**. Two transports carry those chunks:
+is delivered as **chunks**. Three transports carry those chunks:
 
 1. **JSON over `fed-v1`** (the original path) — each chunk is a
    base64 string inside the `DM_MEDIA_BLOB` / `SPACE_MEDIA_BLOB`
@@ -14,6 +14,11 @@ is delivered as **chunks**. Two transports carry those chunks:
    DataChannel multiplexed on the *same* federation `PeerConnection`
    carries each chunk as a length-prefixed binary frame with the raw
    bytes encrypted directly (no base64).
+3. **Binary over the HTTPS inbox** (capability **v_81**) — when no
+   channel is open, the same frame is POSTed to the peer's own inbox URL
+   behind a 4-byte magic and a suite byte; the inbox tells it from a
+   JSON envelope by the body alone (see
+   [Binary frames on the HTTPS inbox](#binary-frames-on-the-https-inbox-v_81)).
 
 The binary path exists because the JSON path inflates media ~1.77× on
 the wire (base64 of the chunk, then base64 of the ciphertext) **and**
@@ -32,6 +37,11 @@ handshake.
   member keeps receiving the JSON `SPACE_MEDIA_BLOB` over the mesh,
   in smaller 384 KiB chunks so the routed envelope fits the first hop's
   inbox (see [DM media → Chunking](dm-media.md#chunking)).
+- **The HTTPS leg (v_81)** follows the same rule: a CONFIRMED direct
+  peer with an inbox URL (never a household seated from an invite link,
+  which has none) advertising `proto_version ≥ 81`
+  (`FederationCapability.MIN_FOR_MEDIA_HTTPS`). Mesh (`SPACE_ROUTED`) and
+  GFS-relay targets stay JSON.
 - **Capability-gated.** The sender uses the binary channel only when
   the peer advertises `proto_version ≥ 14`
   (`FederationCapability.MIN_FOR_MEDIA_CHANNEL`) **and** is CONFIRMED
@@ -74,6 +84,47 @@ metadata** (the same fields the JSON `*_MEDIA_BLOB` payload carries —
   default fallback (the project-wide crypto-suite rule).
 - `chunk_sha256` — b64url SHA-256 of the **plaintext** chunk. This is
   the binding (see Security).
+- `media_frame_suite` — `"fed-media-v1"` (v_81 on; a channel frame from
+  an older sender has none and reads as v1), validated against
+  `SUPPORTED_MEDIA_FRAME_SUITES`. Required on the HTTPS inbox, where it
+  must equal the body's suite byte.
+
+## Binary frames on the HTTPS inbox (v_81)
+
+With no media channel open, a v_81 peer gets each chunk as one POST to
+the inbox URL it advertised — `…/federation/inbox/{inbox_id}`, or Home
+Assistant's `/api/socialhome/inbox/{inbox_id}` in ha / haos — instead
+of the base64 JSON chunk:
+
+```
+[ "\0SHM" ][ u8 frame suite (0x01 = fed-media-v1) ][ one fed-media-v1 frame ]
+```
+
+The frame is exactly the channel's (`frame_type` 1, signed header,
+sealed chunk); the body carries everything §24.11 needs, nothing rides in
+a header. `"\0"` never starts a JSON text, so the inbox decides from the
+body alone (`media_framing.is_media_body`) — Home Assistant's inbox
+relay (the companion integration through socialhome-client
+`forward_inbox_envelope`) forwards every body raw as
+`application/octet-stream` and drops custom headers, so it carries both
+shapes unchanged and needs no update; the peer's `proto_version` is all
+a sender needs. An unknown suite byte is refused
+(`UnsupportedMediaFrameSuite`, no default), as are trailing bytes, any
+other frame type and any event but `SPACE_MEDIA_BLOB` /
+`DM_MEDIA_BLOB` (an extra pipeline step, before any crypto). The header
+runs the JSON inbox's §24.11 chain (lookup by inbox id), then the
+channel's tail (suites, decrypt, `chunk_sha256`). The body cap is one
+512 KiB chunk + 16 KiB (`HTTPS_MEDIA_MAX_BODY_BYTES`), checked against
+`Content-Length` once the magic is read and while streaming; binary
+bodies have their own per-IP bucket (600 / min). Any non-2xx answer
+sends the JSON chunk instead, and the sender remembers it per peer
+(`MediaHttpsBackoff`): a 429 skips the leg for its `Retry-After`, another
+4xx for 10 min at once, 5xx / no answer for 10 min after 3 in a row, then
+one chunk probes again — see [DM media](dm-media.md#binary-media-on-the-https-inbox-v_81).
+
+Wire cost for a 512 KiB chunk: **525 323 B** binary vs **932 911 B**
+JSON (−44 %); a 200 MiB video (400 chunks) 210.1 MB vs 373.2 MB per
+receiving household.
 
 ## Security model
 
@@ -126,7 +177,13 @@ sequenceDiagram
         B->>B: check media_aead_suite + decrypt payload
         B->>B: verify sha256(plaintext) == chunk_sha256
         B->>B: dispatch event(media_bytes=raw) → assemble chunk
-    else sub-v14 / non-CONFIRMED / channel down
+    else peer CONFIRMED & v≥81 & has an inbox URL (channel down)
+        A-->>B: POST remote_inbox_url (direct or via HA's inbox relay):<br/>["\0SHM"][0x01][frame_type][header][payload]
+        B->>B: is_media_body → decode_body (suite byte)
+        B->>B: media HTTPS pipeline(header)  (§24.11 + event-type gate)
+        B->>B: frame suite == byte, media_aead_suite, decrypt, sha256
+        B->>B: dispatch event(media_bytes=raw) → assemble chunk
+    else sub-v81 / non-CONFIRMED / mesh / POST failed
         A-->>B: fed-v1 / HTTPS / SPACE_ROUTED:<br/>JSON *_MEDIA_BLOB { bytes_b64 }
         B->>B: §24.11 dispatch → base64-decode → assemble chunk
     end
@@ -192,7 +249,7 @@ sending household was sent it for. Both blob types share
     file, link-preview image), a bazaar listing's photos, a gallery item,
     a calendar cover, a held moderation submission, and the §25.6 records
     of the same kinds.
-  - **Space pages are the exception (v_81).** Every household keeps the
+  - **Space pages are the exception (v_82).** Every household keeps the
     host's version of a page byte for byte (its hash is the version's
     identity), so a page's files — its cover and every `api/media/`
     picture its body shows — keep the names the **host's** page shows. The
@@ -200,12 +257,12 @@ sending household was sent it for. Both blob types share
     page proposal, a reviewed create / edit) takes that household's
     `sd-` name there, the body rewritten to it, and the member ships the
     bytes to the host. The host ships each version's new files to every
-    other v_81 member household (correlated by the page); a receiver lets a
+    other v_82 member household (correlated by the page); a receiver lets a
     name the page shows be filled only by the space's host
     (`_host_fills`) or by the household the name is bound to, and takes a
     sender-bound file the page does not show yet (a proposer's file can
     overtake the version that shows it). See
-    [`pages.md`](./pages.md#files-v_81).
+    [`pages.md`](./pages.md#files-v_82).
 
   So a file name is never first come, first served. A member household
   that learned `F` from someone else's post and pushes bytes for it,
@@ -424,8 +481,8 @@ It rides:
 | Space post | `SPACE_POST_CREATED` (per link-joined v_80 member), the `public_relay` inner (followers, through a seed holder's relay) and the v_49 member-publish inner — the last two **under the author's own signature** (`media_refs_sig`, suite `media_refs_sig_suite: "ed25519"`, domain `space-post-media-refs:v1:`, bound to the post, space and author; `services/space_public_author.py`). It is a separate signature, like the link card's, so a follower on an older build still verifies the post and shows it without GFS pictures. The signature also binds `item_type` and `edited_at`, so an older descriptor can't ride a newer edit. A follower takes the descriptor ONLY when that signature verifies: an unsigned one, or one a re-publisher swapped, is dropped. A copy stripped of its descriptor that wins the race heals add-only: a later copy or edit of the same author's post carrying a signed descriptor renames the stored post's files, but only while the post has no rows. Anyone holding the content key (a member with the writer group key) can re-wrap the author's inner, and the AAD's household proves nothing to a key holder. The post stands without those pictures; an unknown suite is refused. A post edit that can overtake its create carries the signed descriptor too |
 | Calendar event | `SPACE_CALENDAR_EVENT_CREATED` / `_UPDATED`, only when the cover is new or changed |
 | Gallery item | `SPACE_GALLERY_ITEM_CREATED` (thumbnail + full file) |
-| Space page (v_81) | the host's `SPACE_PAGE_CREATED` / `_UPDATED`, only the files the version adds (cover, body pictures; ≤ 16), to a link-joined **v_81** member. Kept under the names the page shows (never an `sg-` name: the page is the host's version byte for byte), and fetched only while a page of that space, the row's item, still shows the file (`localize_as_shown`) |
-| §25.6 records | `posts` / `calendar` / `gallery` records streamed to a link-joined v_80 requester ([`sync.md`](./sync.md), sync line 80); `pages` records from the host to a link-joined v_81 one (sync line 81) |
+| Space page (v_82) | the host's `SPACE_PAGE_CREATED` / `_UPDATED`, only the files the version adds (cover, body pictures; ≤ 16), to a link-joined **v_82** member. Kept under the names the page shows (never an `sg-` name: the page is the host's version byte for byte), and fetched only while a page of that space, the row's item, still shows the file (`localize_as_shown`) |
+| §25.6 records | `posts` / `calendar` / `gallery` records streamed to a link-joined v_80 requester ([`sync.md`](./sync.md), sync line 80); `pages` records from the host to a link-joined v_82 one (sync line 82) |
 
 Post edits carry no media, so no descriptor. Toward members the descriptor
 is added per peer (the `per_peer` hook of `broadcast_to_space_members`),
@@ -575,14 +632,16 @@ scope only while the space is listed on that GFS.
 
 ## Implementation pointers
 
-- Framing: [`socialhome/federation/media_framing.py`](../../socialhome/federation/media_framing.py)
+- Framing: [`socialhome/federation/media_framing.py`](../../socialhome/federation/media_framing.py) (`encode` / `decode` for the channel; `encode_body` / `decode_body` / `is_media_body` for the inbox)
+- Signed header + sealed chunk (both binary legs): [`socialhome/federation/media_envelope.py`](../../socialhome/federation/media_envelope.py)
+- Inbox body sniffing: [`socialhome/routes/federation.py`](../../socialhome/routes/federation.py) (`FederationInboxView`); `FederationService.handle_inbound_media_https`, `FederationTransport.send_media_https`
 - Channel lifecycle + `send_media`: [`socialhome/federation/transport.py`](../../socialhome/federation/transport.py) (`_RtcPeer`, `FederationTransport.send_media`)
 - Send + receive + per-chunk crypto: [`socialhome/federation/federation_service.py`](../../socialhome/federation/federation_service.py) (`send_media_chunk`, `handle_inbound_media_frame`, `validate_inbound_rtc`)
 - Raw-bytes AEAD: [`socialhome/federation/encoder.py`](../../socialhome/federation/encoder.py) (`encrypt_bytes` / `decrypt_bytes`)
 - Senders: [`dm_media_sync_service.py`](../../socialhome/services/dm_media_sync_service.py), [`space_media_sync_service.py`](../../socialhome/services/space_media_sync_service.py)
 - Receiver assembly: [`federation_inbound_service.py`](../../socialhome/services/federation_inbound_service.py)
 - Capability: [`socialhome/domain/federation_capabilities.py`](../../socialhome/domain/federation_capabilities.py) (`MIN_FOR_MEDIA_CHANNEL`, `MIN_FOR_SPACE_MEDIA_REFS`, `MIN_FOR_PAGE_MEDIA`)
-- Page files (v_81): [`page_federation_outbound.py`](../../socialhome/services/page_federation_outbound.py) (`_ship_files`), [`page_proposal_forwarder.py`](../../socialhome/services/page_proposal_forwarder.py) (`_ship_files`), [`federation_inbound/space_content.py`](../../socialhome/services/federation_inbound/space_content.py) (`_localized_proposal`, `_keep_page_media`), [`space_media_names.py`](../../socialhome/services/space_media_names.py) (`pages`)
+- Page files (v_82): [`page_federation_outbound.py`](../../socialhome/services/page_federation_outbound.py) (`_ship_files`), [`page_proposal_forwarder.py`](../../socialhome/services/page_proposal_forwarder.py) (`_ship_files`), [`federation_inbound/space_content.py`](../../socialhome/services/federation_inbound/space_content.py) (`_localized_proposal`, `_keep_page_media`), [`space_media_names.py`](../../socialhome/services/space_media_names.py) (`pages`)
 - GFS media cache (v_80): [`space_media_seal.py`](../../socialhome/space_media_seal.py), [`domain/space_media_ref.py`](../../socialhome/domain/space_media_ref.py), [`space_media_gfs_uploader.py`](../../socialhome/services/space_media_gfs_uploader.py), [`space_media_gfs_fetcher.py`](../../socialhome/services/space_media_gfs_fetcher.py), [`space_media_refs.py`](../../socialhome/services/space_media_refs.py), [`sync/space/media_refs.py`](../../socialhome/federation/sync/space/media_refs.py)
 
 ## Spec refs

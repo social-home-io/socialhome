@@ -175,7 +175,7 @@ class SpaceSyncResumeProvider:
         media_refs: AbstractMediaReferenceRepo | None = None,
     ) -> None:
         self._federation = federation_service
-        #: v_81: only a page's files that are the space's own ship.
+        #: v_82: only a page's files that are the space's own ship.
         self._media_refs = media_refs
         #: Where the replayed files live — their sizes bound a request.
         self._media_dir = media_dir
@@ -635,7 +635,7 @@ class SpaceSyncResumeProvider:
             payloads[page.id] = payload
             replayed.append(page)
         pages = replayed
-        # v_81: the host's replay ships the pages' files too — on a
+        # v_82: the host's replay ships the pages' files too — on a
         # receiver only the host fills the names a page shows.
         ships_files = (
             media is not None

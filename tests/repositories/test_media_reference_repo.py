@@ -695,7 +695,7 @@ async def test_a_file_only_other_spaces_cards_name_is_not_this_spaces(db):
     assert not await repo.confined_to_space("card.webp", "sp1")
 
 
-# ─── A page's body pictures (v_81) ──────────────────────────────────────
+# ─── A page's body pictures (v_82) ──────────────────────────────────────
 
 _BODY = (
     "![a](api/media/body.webp) ![b](/api/media/body2.webp?exp=1&sig=x) "
