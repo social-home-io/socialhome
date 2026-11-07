@@ -59,3 +59,14 @@ def test_unknown_suites_and_shapes_are_refused():
     assert parse_join_contact({**good, "instance_id": 1}) is None
     assert parse_join_contact("nope") is None
     assert not verify_join_contact(good, space_id="sp-1", space_public_key_hex="zz")
+
+
+def test_issued_at_is_signed_and_must_be_tz_aware():
+    space = generate_identity_keypair()
+    good = _contact(space.private_key)
+    pk = space.public_key.hex()
+    assert verify_join_contact(good, space_id="sp-1", space_public_key_hex=pk)
+    later = {**good, "issued_at": "2099-01-01T00:00:00+00:00"}
+    assert not verify_join_contact(later, space_id="sp-1", space_public_key_hex=pk)
+    assert parse_join_contact({**good, "issued_at": "2026-01-01T00:00:00"}) is None
+    assert parse_join_contact({**good, "issued_at": "soon"}) is None

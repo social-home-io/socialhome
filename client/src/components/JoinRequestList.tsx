@@ -14,6 +14,7 @@ import { ws } from '@/ws'
 import { Avatar } from './Avatar'
 import { Button } from './Button'
 import { showToast } from './Toast'
+import { confirmDialog } from './confirm'
 import { loadHouseholdUsers } from '@/store/householdUsers'
 import { resolveDisplayName } from '@/utils/avatar'
 import { relativeDocsTime } from '@/utils/relativeTime'
@@ -109,11 +110,41 @@ export function JoinRequestList({ spaceId }: { spaceId: string }) {
     }
   }
 
+  // Anyone on a GFS can ask (v_84): a flood is declined in one go.
+  const viaGfs = rows.filter(r => r.via_gfs)
+  const declineAllGfs = async () => {
+    const n = String(viaGfs.length)
+    const ok = await confirmDialog(t('join_requests.decline_all_gfs_confirm', { n }), {
+      confirmLabel: t('join_requests.decline_all_gfs', { n }),
+      destructive: true,
+    })
+    if (!ok) return
+    try {
+      const r = await api.post(
+        `/api/spaces/${spaceId}/gfs-join-requests/decline`, {},
+      ) as { declined?: number }
+      showToast(t('join_requests.declined_gfs', { n: String(r?.declined ?? viaGfs.length) }), 'info')
+      requestsBySpace.value = {
+        ...requestsBySpace.value,
+        [spaceId]: rows.filter(x => !x.via_gfs),
+      }
+    } catch (e: unknown) {
+      showToast((e as Error).message || t('join_requests.failed'), 'error')
+    }
+  }
+
   if (rows.length === 0) return null
 
   return (
     <div class="sh-join-requests sh-card" aria-label={t('join_requests.aria')}>
       <h4>{t('join_requests.title', { n: String(rows.length) })}</h4>
+      {viaGfs.length >= 2 && (
+        <div class="sh-join-requests__bulk">
+          <Button variant="secondary" onClick={() => void declineAllGfs()}>
+            {t('join_requests.decline_all_gfs', { n: String(viaGfs.length) })}
+          </Button>
+        </div>
+      )}
       {rows.map(r => {
         // The server resolves a remote applicant's name when it can; else a
         // member of this household, else "Someone" — never the raw id.

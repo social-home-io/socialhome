@@ -1,9 +1,12 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, waitFor } from '@testing-library/preact'
+import { fireEvent, render, waitFor } from '@testing-library/preact'
 
-const { get } = vi.hoisted(() => ({ get: vi.fn() }))
-vi.mock('@/api', () => ({ api: { get, post: vi.fn() } }))
+const { get, post, confirm } = vi.hoisted(() => ({
+  get: vi.fn(), post: vi.fn(), confirm: vi.fn(),
+}))
+vi.mock('@/api', () => ({ api: { get, post } }))
 vi.mock('@/ws', () => ({ ws: { on: () => () => {} } }))
+vi.mock('./confirm', () => ({ confirmDialog: confirm }))
 
 import { householdUsers } from '@/store/householdUsers'
 import { JoinRequestList } from './JoinRequestList'
@@ -83,5 +86,44 @@ describe('JoinRequestList — asked through the GFS (v_84)', () => {
     expect(chips).toHaveLength(1)
     expect(chips[0].textContent).toBe('Via the GFS · says “Zürich flat” · not verified')
     expect(chips[0].getAttribute('title')).toMatch(/nobody checked/)
+  })
+})
+
+describe('JoinRequestList — declining a flood from the GFS', () => {
+  const rows = [
+    { id: 'g1', space_id: 's5', user_id: 'u1', requested_at: '', via_gfs: true, unverified_name: 'A' },
+    { id: 'g2', space_id: 's5', user_id: 'u2', requested_at: '', via_gfs: true, unverified_name: 'B' },
+    { id: 'p1', space_id: 's5', user_id: 'u3', requested_at: '', display_name: 'Ben' },
+  ]
+
+  it('one button declines every request from the GFS, after a confirm', async () => {
+    householdUsers.value = new Map() as never
+    get.mockImplementation(async (url: string) => (url.endsWith('/join-requests') ? rows : []))
+    post.mockResolvedValue({ declined: 2 })
+    confirm.mockResolvedValue(true)
+    const view = render(<JoinRequestList spaceId="s5" />)
+    const button = await view.findByRole('button', { name: 'Decline all 2 from the GFS' })
+    fireEvent.click(button)
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/api/spaces/s5/gfs-join-requests/decline', {}))
+    expect(confirm).toHaveBeenCalled()
+    await waitFor(() => expect(view.queryByText('A')).toBeNull())
+    expect(view.getByText('Ben')).toBeTruthy()
+  })
+
+  it('cancelled, nothing is declined; with one request there is no bulk button', async () => {
+    householdUsers.value = new Map() as never
+    post.mockReset()
+    get.mockImplementation(async (url: string) => (url.endsWith('/join-requests') ? rows : []))
+    confirm.mockResolvedValue(false)
+    const view = render(<JoinRequestList spaceId="s6" />)
+    fireEvent.click(await view.findByRole('button', { name: 'Decline all 2 from the GFS' }))
+    await waitFor(() => expect(confirm).toHaveBeenCalled())
+    expect(post).not.toHaveBeenCalled()
+    view.unmount()
+
+    get.mockImplementation(async (url: string) => (url.endsWith('/join-requests') ? rows.slice(1) : []))
+    const one = render(<JoinRequestList spaceId="s7" />)
+    await waitFor(() => expect(one.container.textContent).toContain('B'))
+    expect(one.container.querySelector('.sh-join-requests__bulk')).toBeNull()
   })
 })

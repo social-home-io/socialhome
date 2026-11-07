@@ -1076,16 +1076,26 @@ other's address; a request's bytes never name the applicant outside the
 seal.
 
 **The first-contact trust that remains, stated plainly.** The space
-authority key a household pins comes from the first GFS that listed the
-space to it — trust on first use, as for a follower's first pin of that
-key. A GFS that lies on that first contact can list an authority and a
-contact of its own, and the household's request is then sealed to that
-GFS's key: it would learn that request (the person's id, names and message
-— not a password, a location or any space content). It cannot swap the keys
-of a space a household already pinned (that breaks a signature it cannot
-make), and two GFSs listing a space under different authorities make the
+authority key — and, through the contact it signed, the owner household's
+identity key — a household pins come from the first GFS that listed the
+space to it: trust on first use, as for a follower's first pin of that key.
+A GFS that lies on that first contact can list an authority and a contact
+of its own, and the household's request is then sealed to that GFS's key:
+it would learn that request (the person's id, names and message — not a
+password, a location or any space content). Once a household pinned them,
+no GFS can swap the keys: a new authority key is taken only with a v_44
+cert signed by the pinned owner key at a higher epoch (the GFS's own
+counters move nothing), a new contact must be signed by the pinned
+authority key and be newer than the one held, and the pin lives apart
+from the display cache, so withholding a listing until it is purged does
+not reset it. Two GFSs listing a space under different authorities make the
 space unaskable from that household rather than picking one. A household
 that wants no first-contact trust asks with an invite link instead.
+
+**A known denial lever.** Because a conflict fails closed and stays, any
+one GFS a household uses can make a space unaskable for it (list another
+authority, or drop the contact). It can stop a request, never read or
+redirect one; the space's people still join by invite link.
 
 The GFS can still try to tell which household sent a sealed blob by its
 network address and timing, as for every envelope it relays (see the

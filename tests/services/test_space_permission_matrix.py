@@ -85,6 +85,7 @@ GATED_METHODS: frozenset[str] = frozenset(
         "remove_remote_member",
         "approve_join_request",
         "deny_join_request",
+        "decline_gfs_join_requests",
         "list_pending_join_requests",
         "create_post",
         "edit_post",
@@ -154,6 +155,7 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         "list_subscriptions",
         "list_pending_join_request_space_ids",  # caller's own pending requests
         "list_joining_space_ids",  # caller's own approved-and-joining GFS requests
+        "expire_due_join_requests",  # system sweep, no actor
         "is_subscribed",
         # Self-service joins / leaves — gate is on the *invite* / *request*,
         # not the join action itself.

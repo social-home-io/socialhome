@@ -52,9 +52,7 @@ def test_existing_rows_keep_null(tmp_path):
         "SELECT bound_instance_id, bound_user_id FROM space_invite_tokens"
     ).fetchone()
     assert tuple(tok) == (None, None)
-    assert (
-        c.execute("SELECT join_contact FROM public_space_cache").fetchone()[0] is None
-    )
+    assert c.execute("SELECT count(*) FROM public_space_join_pins").fetchone()[0] == 0
 
 
 def test_columns_round_trip(tmp_path):
@@ -65,7 +63,12 @@ def test_columns_round_trip(tmp_path):
     c.execute(
         "UPDATE space_invite_tokens SET bound_instance_id='hh', bound_user_id='u'"
     )
-    c.execute("UPDATE public_space_cache SET join_contact='{}'")
+    c.execute(
+        "INSERT INTO public_space_join_pins(space_id, pin) VALUES('sp-far', '{}')"
+    )
+    # The pin is not the cache row: dropping the listing leaves it.
+    c.execute("DELETE FROM public_space_cache")
+    assert c.execute("SELECT pin FROM public_space_join_pins").fetchone()[0] == "{}"
     assert c.execute("SELECT gfs_relay FROM space_join_requests").fetchone()[0] == (
         '{"a": 1}'
     )

@@ -34,10 +34,9 @@ class PublicSpaceListing:
     #: offer Subscribe. Fail-closed default so a directory that reports none
     #: never widens access.
     allow_subscribers: bool = False
-    #: The host's join contact as this household verified and pinned it
-    #: (JSON, migration 0143, v_84): ``{"contact": {...} | null,
-    #: "authority_pk": hex, "seq": int, "gfs": url, "conflict": bool}`` — the
-    #: keys an "Ask to join" through the GFS is sealed to, the space
-    #: authority key that signed them (pinned on first sight), and the GFS it
-    #: was pinned from. ``None`` when no listing carried an authority key.
+    #: Transient (never stored with the listing, v_84): what this directory
+    #: row offers for the host's join contact — the candidate the poll folds
+    #: into the durable pin (``public_space_join_pins``,
+    #: :mod:`socialhome.federation.join_contact_pin`). ``None`` when the row
+    #: names no authority key.
     join_contact: str | None = None

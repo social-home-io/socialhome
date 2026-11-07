@@ -180,8 +180,7 @@ class GfsJoinRequestCoordinator:
     async def host_of_listing(self, space_id: str) -> str | None:
         """The host a GFS listing names in its verified join contact, or
         ``None`` (not listed, no contact, or a conflicting authority)."""
-        listing = await self._public_spaces.get(space_id)
-        found = usable_contact(listing.join_contact) if listing is not None else None
+        found = usable_contact(await self._public_spaces.get_pin(space_id))
         return found[0]["instance_id"] if found is not None else None
 
     async def request_join(
@@ -200,8 +199,7 @@ class GfsJoinRequestCoordinator:
         relay took it the request stands: the GFS queues it while the host
         is offline.
         """
-        listing = await self._public_spaces.get(space_id)
-        found = usable_contact(listing.join_contact) if listing is not None else None
+        found = usable_contact(await self._public_spaces.get_pin(space_id))
         if found is None or found[0]["instance_id"] != host_instance_id:
             log.warning(
                 "gfs join request: no usable join contact for space %s (host %s)",
@@ -294,8 +292,15 @@ class GfsJoinRequestCoordinator:
         GFS reconnect, a fresh answer). Returns how many seated."""
         seated = 0
         for row in await self._spaces.list_pending_gfs_join_requests():
-            if _load(row.get("gfs_relay")).get("approval") and await self._seat(row):
-                seated += 1
+            if not _load(row.get("gfs_relay")).get("approval"):
+                continue
+            try:
+                if await self._seat(row):
+                    seated += 1
+            except Exception:
+                # One bad row (corrupt approval, a store fault) never stops
+                # the others; it is retried next time.
+                log.exception("gfs join request %s: resume failed", row.get("id"))
         return seated
 
     def resume_soon(self) -> None:
@@ -311,7 +316,8 @@ class GfsJoinRequestCoordinator:
             return False
         approval = _load(row.get("gfs_relay")).get("approval") or {}
         expires = _parse_ts(approval.get("expires_at"))
-        if expires is not None and expires <= datetime.now(UTC):
+        # No (readable) expiry reads as expired — never a retry forever.
+        if expires is None or expires <= datetime.now(UTC):
             await self._spaces.answer_join_request(request_id, "expired")
             log.info(
                 "gfs join request %s: approval expired before it seated", request_id
@@ -412,14 +418,6 @@ class GfsJoinRequestCoordinator:
             raise ValueError("gfs join request missing space_id / user_id / id")
         if not _ID_RE.match(user_id) or not _ID_RE.match(request_id):
             raise ValueError("gfs join request user_id / request_id malformed")
-        if not self._allowed(
-            f"gfs-join:space:{space_id}", PER_SPACE_LIMIT, PER_SPACE_WINDOW_S
-        ):
-            log.warning(
-                "gfs join request for space %s refused: the space's budget is spent",
-                space_id,
-            )
-            return {"ok": True, "filed": False}
         space = await self._spaces.get(space_id)
         if (
             space is None
@@ -465,6 +463,17 @@ class GfsJoinRequestCoordinator:
             # An id that names another request already: never two rows
             # under one id (the answer would reach the wrong household).
             raise ValueError("gfs join request id already in use")
+        # The per-space budget is spent only by a request that passed every
+        # cheap check above — junk (a space that takes none, a banned person,
+        # a repeat) cannot use it up for real applicants.
+        if not self._allowed(
+            f"gfs-join:space:{space_id}", PER_SPACE_LIMIT, PER_SPACE_WINDOW_S
+        ):
+            log.warning(
+                "gfs join request for space %s refused: the space's budget is spent",
+                space_id,
+            )
+            return {"ok": True, "filed": False}
         message = body.get("message")
         user_pk = body.get("user_public_key")
         rid = await file_remote_join_request(

@@ -32,6 +32,8 @@ class AbstractPublicSpaceRepo(Protocol):
     ) -> None: ...
     async def is_instance_blocked(self, instance_id: str) -> bool: ...
     async def purge_older_than(self, cutoff_iso: str) -> int: ...
+    async def get_pin(self, space_id: str) -> str | None: ...
+    async def set_pin(self, space_id: str, pin: str) -> None: ...
 
 
 class SqlitePublicSpaceRepo:
@@ -47,9 +49,8 @@ class SqlitePublicSpaceRepo:
             INSERT INTO public_space_cache(
                 space_id, instance_id, name, description, emoji,
                 lat, lon, radius_km, member_count,
-                min_age, category, join_mode, allow_subscribers, cached_at,
-                join_contact
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                min_age, category, join_mode, allow_subscribers, cached_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(space_id) DO UPDATE SET
                 instance_id=excluded.instance_id,
                 name=excluded.name,
@@ -63,8 +64,7 @@ class SqlitePublicSpaceRepo:
                 category=excluded.category,
                 join_mode=excluded.join_mode,
                 allow_subscribers=excluded.allow_subscribers,
-                cached_at=excluded.cached_at,
-                join_contact=excluded.join_contact
+                cached_at=excluded.cached_at
             """,
             (
                 listing.space_id,
@@ -81,7 +81,6 @@ class SqlitePublicSpaceRepo:
                 normalize_join_mode(listing.join_mode),
                 1 if listing.allow_subscribers else 0,
                 cached,
-                listing.join_contact,
             ),
         )
 
@@ -184,6 +183,22 @@ class SqlitePublicSpaceRepo:
             )
         return n
 
+    async def get_pin(self, space_id: str) -> str | None:
+        """The join-contact pin of *space_id* (JSON), or ``None``. Kept in
+        its own table so it outlives the listing's cache row (v_84)."""
+        row = await self._db.fetchone(
+            "SELECT pin FROM public_space_join_pins WHERE space_id=?", (space_id,)
+        )
+        return str(row["pin"]) if row is not None else None
+
+    async def set_pin(self, space_id: str, pin: str) -> None:
+        await self._db.enqueue(
+            "INSERT INTO public_space_join_pins(space_id, pin) VALUES(?, ?)"
+            " ON CONFLICT(space_id) DO UPDATE SET pin=excluded.pin,"
+            " updated_at=datetime('now')",
+            (space_id, pin),
+        )
+
 
 def _row(r) -> PublicSpaceListing:
     return PublicSpaceListing(
@@ -201,7 +216,6 @@ def _row(r) -> PublicSpaceListing:
         category=(_get(r, "category") or "general"),
         join_mode=normalize_join_mode(_get(r, "join_mode")),
         allow_subscribers=bool(_get(r, "allow_subscribers") or 0),
-        join_contact=_get(r, "join_contact"),
     )
 
 

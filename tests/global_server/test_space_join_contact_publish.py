@@ -14,6 +14,7 @@ from socialhome.crypto import generate_identity_keypair
 from socialhome.global_server import create_gfs_app
 from socialhome.global_server.app_keys import gfs_fed_repo_key
 from socialhome.global_server.cluster import _space_to_wire, _wire_to_space
+from socialhome.global_server.domain import GlobalSpace
 from socialhome.space_join_contact import sign_join_contact
 from tests.global_server.test_space_publish_routes import (
     _register_owner,
@@ -142,3 +143,37 @@ async def test_the_server_says_it_serves_join_contacts(gfs_client):
     caps = info.get("capabilities") or {}
     if caps:  # only when a signing key is wired
         assert caps["join_contact"] is True
+
+
+async def test_the_owners_rotation_cert_travels_with_a_contact_only(gfs_client):
+    """A household moves its pin only along the owner's v_44 chain, so a
+    listing with a contact carries the owner's cert for the current key. A
+    listing without a contact keeps the cert inside, as before."""
+    app = gfs_client.server.app
+    await _register_owner(app, instance_id="owner.home")
+    repo = app[gfs_fed_repo_key]
+    cert = {"space_id": "sp-c", "key_epoch": 1, "cert_sig": "x"}
+    contact = _contact(generate_identity_keypair().private_key, "sp-c", "owner.home")
+    for space_id, with_contact in (("sp-c", True), ("sp-n", False)):
+        await repo.upsert_space(
+            GlobalSpace(
+                space_id=space_id,
+                owning_instance="owner.home",
+                name=space_id,
+                join_mode="request",
+                status="active",
+                identity_public_key="aa" * 32,
+                join_contact=contact if with_contact else None,
+            )
+        )
+        assert await repo.set_space_authority(
+            space_id,
+            expected_pk="aa" * 32,
+            expected_cert=None,
+            new_pk="cc" * 32,
+            cert=cert,
+        )
+    with_c = await _listed(gfs_client, "sp-c")
+    without = await _listed(gfs_client, "sp-n")
+    assert with_c["authority_cert"] == cert
+    assert "authority_cert" not in without

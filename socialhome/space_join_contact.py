@@ -17,11 +17,17 @@ Wire shape (one object, ``join_contact`` on the listing)::
 
     {"instance_id": "...", "identity_pk": "<hex>", "keywrap_pk": "<hex>",
      "kem_suite": "x25519", "keywrap_sig": "<b64url>",
+     "issued_at": "<tz-aware ISO 8601>",
      "authority_sig": "<b64url>", "authority_sig_suite": "ed25519"}
+
+``issued_at`` is signed with the rest: a reader keeps the newest contact it
+saw for a space and never goes back to an older one, so a GFS cannot replay
+a contact from before the owner changed its key-wrap key.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from .authority_sig import (
@@ -48,6 +54,7 @@ CONTACT_FIELDS: tuple[str, ...] = (
     "keywrap_pk",
     "kem_suite",
     "keywrap_sig",
+    "issued_at",
 )
 
 #: Upper bound on any one field (hex keys are 64, a signature ~86).
@@ -63,6 +70,7 @@ def sign_join_contact(
     keywrap_sig: str,
     space_seed: bytes,
     kem_suite: str = JOIN_CONTACT_KEM_SUITE_X25519,
+    issued_at: str | None = None,
 ) -> dict[str, str]:
     """The owner's contact for *space_id*, signed with the space seed."""
     payload = {
@@ -71,6 +79,7 @@ def sign_join_contact(
         "keywrap_pk": keywrap_pk,
         "kem_suite": kem_suite,
         "keywrap_sig": keywrap_sig,
+        "issued_at": issued_at or datetime.now(UTC).isoformat(),
     }
     sig = sign_authority_event(
         event_type=AUTHORITY_EVENT_SPACE_JOIN_CONTACT,
@@ -97,7 +106,18 @@ def parse_join_contact(raw: object) -> dict[str, str] | None:
         out[key] = value
     if out["kem_suite"] not in SUPPORTED_JOIN_CONTACT_KEM_SUITES:
         return None
+    if contact_issued_at(out) is None:
+        return None
     return out
+
+
+def contact_issued_at(contact: dict[str, str]) -> datetime | None:
+    """The contact's signed ``issued_at`` (tz-aware), or ``None``."""
+    try:
+        ts = datetime.fromisoformat(contact.get("issued_at", ""))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo is not None else None
 
 
 def verify_join_contact(
@@ -128,6 +148,7 @@ __all__ = [
     "CONTACT_FIELDS",
     "JOIN_CONTACT_KEM_SUITE_X25519",
     "SUPPORTED_JOIN_CONTACT_KEM_SUITES",
+    "contact_issued_at",
     "parse_join_contact",
     "sign_join_contact",
     "verify_join_contact",

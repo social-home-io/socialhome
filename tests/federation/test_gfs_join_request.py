@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import aiohttp
+import orjson
 import pytest
 from aiohttp.test_utils import TestServer
 
@@ -141,19 +142,20 @@ async def _listing_item(b, space) -> dict:
 
 async def _cache(a, item: dict, gfs_url: str) -> None:
     """What a's directory poll does with one listing row."""
-    existing = await a.gfsjoin.public_spaces.get(item["space_id"])
+    held = await a.gfsjoin.public_spaces.get_pin(item["space_id"])
     pin = merge_pin(
-        existing.join_contact if existing is not None else None,
+        held,
         candidate_from_listing(item, gfs_url=gfs_url),
         space_id=item["space_id"],
     )
+    if pin is not None:
+        await a.gfsjoin.public_spaces.set_pin(item["space_id"], pin)
     await a.gfsjoin.public_spaces.upsert(
         PublicSpaceListing(
             space_id=item["space_id"],
             instance_id=str(item["owning_instance"]),
             name=str(item["name"]),
             join_mode=str(item["join_mode"]),
-            join_contact=pin,
         )
     )
 
@@ -401,7 +403,11 @@ async def test_a_listing_under_another_authority_is_refused_for_good(households,
         await _ask(a, b, space)
 
 
-async def test_a_rotation_through_the_pinning_gfs_moves_the_pin(households, gfs):
+async def test_the_pinning_gfs_cannot_move_the_key_with_its_own_counter(
+    households, gfs
+):
+    """A higher ``authority_rotation_seq`` from the very GFS that gave the
+    pin is that GFS's own word: without the owner's cert it is a conflict."""
     a, b = households
     space = await _global_space(b, gfs, a)
     other = await b.space_service.create_space(
@@ -413,11 +419,9 @@ async def test_a_rotation_through_the_pinning_gfs_moves_the_pin(households, gfs)
     rotated = await _listing_item(b, other)
     rotated["space_id"] = space.id
     rotated["authority_rotation_seq"] = 1
-    pin_before = (await a.gfsjoin.public_spaces.get(space.id)).join_contact
     await _cache(a, rotated, gfs.url)
-    pin_after = (await a.gfsjoin.public_spaces.get(space.id)).join_contact
-    assert pin_after != pin_before
-    assert '"conflict":false' in pin_after
+    with pytest.raises(HostNotPairedError):
+        await _ask(a, b, space)
 
 
 async def test_a_space_the_gfs_does_not_list_under_that_host_still_needs_pairing(
@@ -785,6 +789,149 @@ async def test_an_answer_without_a_host_contact_is_not_sent(households, gfs):
     )
     assert sent is False
     assert gfs.mailbox == []
+
+
+# ─── Re-review round ─────────────────────────────────────────────────────
+
+
+async def test_junk_that_fails_the_cheap_checks_spends_no_budget(households, gfs):
+    """Requests for a space that takes none, from a banned person, or
+    repeats are dropped BEFORE the per-space budget is touched — so they
+    cannot use it up for real applicants."""
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    await b.space_repo.ban_member(space.id, "banned-u", banned_by=b.user_id)
+    closed = await b.space_service.create_space(
+        owner_username=b.username,
+        name="Closed",
+        space_type=SpaceType.GLOBAL,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    b.gfsjoin.join._rate_limiter = RateLimiter()
+    with (
+        patch.object(gfs_join_module, "PER_SPACE_LIMIT", 2),
+        patch.object(gfs_join_module, "PER_SENDER_LIMIT", 100),
+    ):
+        for n in range(4):
+            await b.gfsjoin.join.handle_body(
+                _signed(a, space_id=space.id, user_id="banned-u", request_id=f"b{n}")
+            )
+            await b.gfsjoin.join.handle_body(
+                _signed(a, space_id=closed.id, user_id=f"c{n}", request_id=f"c{n}")
+            )
+        first = await b.gfsjoin.join.handle_body(
+            _signed(a, space_id=space.id, user_id="real-1", request_id="real-1")
+        )
+        for n in range(3):
+            await b.gfsjoin.join.handle_body(
+                _signed(a, space_id=space.id, user_id="real-1", request_id=f"dup{n}")
+            )
+        second = await b.gfsjoin.join.handle_body(
+            _signed(a, space_id=space.id, user_id="real-2", request_id="real-2")
+        )
+    assert first["filed"] is True
+    assert second["filed"] is True
+
+
+async def test_expired_requests_free_the_cap(households, gfs):
+    """A request nobody answered expires (REQUEST_TTL_DAYS) and its slot
+    under the cap is free again."""
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    with patch.object(gfs_join_module, "MAX_PENDING_PER_SPACE", 2):
+        for n in range(2):
+            await b.gfsjoin.join.handle_body(
+                _signed(a, space_id=space.id, user_id=f"u{n}", request_id=f"r{n}")
+            )
+        await b.db.enqueue(
+            "UPDATE space_join_requests SET expires_at='2020-01-01T00:00:00+00:00'"
+        )
+        assert await b.space_service.expire_due_join_requests() == 2
+        out = await b.gfsjoin.join.handle_body(
+            _signed(a, space_id=space.id, user_id="u9", request_id="r9")
+        )
+    assert out["filed"] is True
+    assert [
+        r["id"] for r in await b.space_repo.list_pending_join_requests(space.id)
+    ] == ["r9"]
+
+
+async def test_admins_can_decline_every_gfs_request_at_once(households, gfs):
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    rid = await _ask(a, b, space)
+    await _settle(gfs, a, b)
+    for n in range(3):
+        await b.gfsjoin.join.handle_body(
+            _signed(a, space_id=space.id, user_id=f"x{n}", request_id=f"x{n}")
+        )
+    # A local request is left alone.
+    local = await b.space_repo.save_join_request(space.id, "local-u")
+    n = await b.space_service.decline_gfs_join_requests(
+        space.id, actor_username=b.username
+    )
+    await _settle(gfs, a, b)
+    assert n == 4
+    assert [
+        r["id"] for r in await b.space_repo.list_pending_join_requests(space.id)
+    ] == [local]
+    assert (await a.space_repo.get_join_request(rid))["status"] == "denied"
+
+
+async def test_an_approval_without_an_expiry_is_treated_as_expired(households, gfs):
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    rid = await _ask(a, b, space)
+    await _settle(gfs, a, b)
+
+    async def _host_offline(*_args, **_kwargs):
+        raise TimeoutError("issuer did not respond")
+
+    a.gfsjoin.join.attach_redeem(_host_offline)
+    await b.space_service.approve_join_request(
+        rid, actor_username=b.username, space_id=space.id
+    )
+    await _settle(gfs, a, b)
+    row = await a.space_repo.get_join_request(rid)
+    relay = orjson.loads(row["gfs_relay"])
+    relay["approval"]["expires_at"] = ""
+    await a.space_repo.set_join_request_gfs_relay(rid, orjson.dumps(relay).decode())
+    assert await a.gfsjoin.join.resume_approvals() == 0
+    assert (await a.space_repo.get_join_request(rid))["status"] == "expired"
+
+
+async def test_one_bad_row_does_not_stop_the_resume(households, gfs):
+    a, b = households
+    first = await _global_space(b, gfs, a)
+    second = await _global_space(b, gfs, a)
+    r1 = await _ask(a, b, first)
+    r2 = await _ask(a, b, second)
+    await _settle(gfs, a, b)
+    real = a.space_service.redeem_invite_token
+
+    async def _hold(*_args, **_kwargs):
+        raise TimeoutError("not now")
+
+    a.gfsjoin.join.attach_redeem(_hold)
+    for rid, sp in ((r1, first), (r2, second)):
+        await b.space_service.approve_join_request(
+            rid, actor_username=b.username, space_id=sp.id
+        )
+    await _settle(gfs, a, b)
+
+    async def _breaks_on_first(token, *, user_id, issuer_instance_id, bootstrap):
+        if bootstrap.space_id == first.id:
+            raise RuntimeError("corrupt row")
+        return await real(
+            token,
+            user_id=user_id,
+            issuer_instance_id=issuer_instance_id,
+            bootstrap=bootstrap,
+        )
+
+    a.gfsjoin.join.attach_redeem(_breaks_on_first)
+    assert await a.gfsjoin.join.resume_approvals() == 1
+    assert await a.space_repo.get_member(second.id, a.user_id) is not None
 
 
 def test_a_version_that_is_no_number_reads_as_one():

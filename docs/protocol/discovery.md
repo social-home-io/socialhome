@@ -4049,18 +4049,31 @@ it:
    anything up**: the household reads the contact from the directory it
    already polls, so the GFS keeps no record of who wants which space.
 2. **Checked and pinned on the reader's side**
-   (`federation/join_contact_pin.py`, `public_space_cache.join_contact`,
+   (`federation/join_contact_pin.py`, table `public_space_join_pins`,
    migration 0143). The household verifies the contact under the listing's
    authority key, checks it names the listed owner and that the key-wrap
    key is bound to the identity key (`verify_keywrap_binding`), and **pins
-   the authority key on first sight** with the GFS it came from. A later
-   listing with the same key refreshes the contact (from any GFS). Another
-   key is taken only from the pinning GFS with a higher
-   `authority_rotation_seq` (the owner-certified rotation, v_44); anything
-   else — two GFSs listing the space under different authorities, a swap —
-   is a lasting **conflict**: the contact is dropped and the space is not
-   asked through the GFS (its people use an invite link). The SPA offers
-   "Ask to join" only for a listing with a usable contact (`gfs_askable`).
+   on first sight** two keys: the space authority key and — through the
+   contact it signed — the **owner household's identity key**. After that:
+   - the authority key moves **only along the owner's v_44 chain**: with a
+     contact the listing also carries the owner's `authority_cert` for the
+     current key, and the household accepts a new key only when that cert
+     is signed by the **pinned owner key** for exactly that key at a higher
+     `key_epoch` (`verify_authority_cert`). The GFS's own
+     `authority_rotation_seq` moves nothing — a GFS, even the one that gave
+     the pin, cannot swap the key;
+   - under the same key a contact must name the same owner key, and only a
+     **newer** one replaces the one held — the contact's signed `issued_at`
+     is kept, so an older key-wrap key cannot be replayed;
+   - anything else — another authority without that chain, another owner,
+     two GFSs that disagree — is a lasting **conflict**: the contact is
+     dropped and the space is not asked through the GFS (its people use an
+     invite link).
+   The pin lives in **its own table**, not in the display cache: a listing
+   not seen for a day is purged from the cache, but its pin (and a
+   conflict) stays, so a GFS that withholds a listing and relists it under
+   its own key meets the old pin. The SPA offers "Ask to join" only for a
+   listing with a usable contact (`gfs_askable`).
 3. **The request, sealed.** `SPACE_JOIN_REQUEST_BOOTSTRAP` (`kind` inside
    the sealed body) carries the person (`user_id`, name, public key), the
    household's name, the optional message, the household's identity +
@@ -4078,8 +4091,14 @@ it:
    keypairs, so the host budgets **per space** (30 / hour) on top of per
    sender (10 / hour), and keeps at most **50** pending requests from the
    GFS per space — past it new ones are **refused** (dropped, logged; the
-   earlier applicants and the admins' queue stay as they are). Ids are
-   checked (`[A-Za-z0-9_-]{1,64}`). A live global space it hosts that
+   earlier applicants and the admins' queue stay as they are, nothing is
+   evicted). The per-space budget is spent only by a request that passed
+   every cheap check (the space takes requests, the person is not banned,
+   not a repeat, id unused), so junk cannot use it up. A request nobody
+   answers **expires** after 7 days (`JoinRequestExpiryScheduler`, hourly),
+   freeing its slot. Admins can **decline every request from the GFS at
+   once** (`POST /api/spaces/{id}/gfs-join-requests/decline`; each
+   applicant is told). Ids are checked (`[A-Za-z0-9_-]{1,64}`). A live global space it hosts that
    takes requests files an ordinary pending request under the applicant's
    id, keeping the applicant's relay contact and the names it sent
    (`space_join_requests.gfs_relay`). A banned person, a repeat, a space
@@ -4109,12 +4128,20 @@ of each sealed blob and its recipient. It is not asked for anyone's keys,
 so it cannot record who looked up which space; it could still try to
 correlate a blob's sender by network address and timing, as for any relayed
 envelope (`docs/principles.md`). **First-contact trust:** the space
-authority key a household pins comes from the first GFS that listed the
-space to it — the same trust-on-first-use a follower places in that GFS. A
-GFS that lies on first contact could list its own authority and contact;
-the request would then be sealed to that GFS's key. It cannot swap the
-keys of a space a household already pinned, and two GFSs that disagree
-make the space unaskable rather than picking one.
+authority key and the owner key a household pins come from the first GFS
+that listed the space to it — the same trust-on-first-use a follower
+places in that GFS. A GFS that lies on first contact could list its own
+authority and contact; the request would then be sealed to that GFS's key.
+Once pinned it cannot swap the keys: a new authority key needs a cert from
+the pinned owner key, a new contact needs the pinned authority key, an
+older contact is refused, and a purged listing keeps its pin.
+
+**A known lever, accepted.** Fail-closed has a cost: any one GFS a
+household uses can make a space unaskable for that household — by listing
+it under another authority (a conflict) or by dropping its contact. It
+cannot read or redirect a request, only stop one; the conflict is not
+cleared by a purge (that would re-open the TOFU it guards). The space's
+people still join with an invite link.
 
 **Cost.** Per request: zero lookups, two sealed envelopes (request,
 answer, ~1–2 KB each), then the §D2b redeem (the space snapshot, bounded

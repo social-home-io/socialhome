@@ -46,6 +46,13 @@ class PublicSpaceCollectionView(BaseView):
             limit=limit,
             max_min_age=max_min_age,
         )
+        # v_84 — the pinned join contact (its own table, outlives the row).
+        askable = {
+            lst.space_id: usable_contact(await discovery._repo.get_pin(lst.space_id))
+            is not None
+            for lst in listings
+            if lst.join_mode == "request"
+        }
         federation_repo = self.svc(K.federation_repo_key)
         unique_instances = {lst.instance_id for lst in listings}
         # The host's name is only ever the one a pairing told us: a GFS
@@ -93,7 +100,7 @@ class PublicSpaceCollectionView(BaseView):
                     # v_84 — the listing carries a verified, pinned join
                     # contact for its host: an "Ask to join" can go through
                     # the GFS without a pairing.
-                    "gfs_askable": usable_contact(lst.join_contact) is not None,
+                    "gfs_askable": askable.get(lst.space_id, False),
                 }
                 for lst in listings
             ]

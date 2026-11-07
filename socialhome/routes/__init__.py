@@ -420,6 +420,7 @@ from .spaces import (
     SpaceDetailView,
     SpaceFeedReadView,
     SpaceFeedView,
+    SpaceGfsJoinRequestsDeclineView,
     SpaceIconView,
     SpaceInviteTokenItemView,
     SpaceInviteTokenView,
@@ -795,6 +796,10 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view(
         "/api/spaces/{id}/join-requests/{request_id}/{action}",
         SpaceJoinRequestDetailView,
+    )
+    app.router.add_view(
+        "/api/spaces/{id}/gfs-join-requests/decline",
+        SpaceGfsJoinRequestsDeclineView,
     )
     # Space-post reactions + comments.
     app.router.add_view(

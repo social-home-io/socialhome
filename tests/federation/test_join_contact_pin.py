@@ -1,9 +1,19 @@
-"""Pinning a global space's join contact from GFS listings (v_84)."""
+"""Pinning a global space's join contact from GFS listings (v_84).
+
+The first listing pins the space authority key and, through the contact it
+signed, the OWNER household's identity key. After that the authority key
+moves only along the owner's own v_44 rotation chain: a cert signed by the
+pinned owner key for the new key at a higher epoch. Nothing a GFS controls
+(its own ``authority_rotation_seq``, which GFS lists it) moves a pin.
+"""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import orjson
 
+from socialhome.authority_cert import sign_authority_cert
 from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
@@ -21,126 +31,163 @@ from socialhome.space_join_contact import sign_join_contact
 
 GFS_A = "https://gfs-a.example"
 GFS_B = "https://gfs-b.example"
+T0 = datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
 
 
-def _host():
-    ident = generate_identity_keypair()
-    keywrap = generate_x25519_keypair()
-    return {
-        "instance_id": derive_instance_id(ident.public_key),
-        "identity_pk": ident.public_key.hex(),
-        "keywrap_pk": keywrap.public_key.hex(),
-        "keywrap_sig": b64url_encode(
-            sign_ed25519(ident.private_key, keywrap.public_key)
-        ),
-    }
+class _Host:
+    def __init__(self) -> None:
+        self.ident = generate_identity_keypair()
+        self.keywrap = generate_x25519_keypair()
+        self.instance_id = derive_instance_id(self.ident.public_key)
+
+    def fields(self, keywrap=None) -> dict:
+        kw = keywrap or self.keywrap
+        return {
+            "instance_id": self.instance_id,
+            "identity_pk": self.ident.public_key.hex(),
+            "keywrap_pk": kw.public_key.hex(),
+            "keywrap_sig": b64url_encode(
+                sign_ed25519(self.ident.private_key, kw.public_key)
+            ),
+        }
+
+    def cert(self, space_kp, epoch: int, space_id: str = "sp-1") -> dict:
+        return sign_authority_cert(
+            space_id=space_id,
+            owner_instance_id=self.instance_id,
+            owner_seed=self.ident.private_key,
+            owner_pk_hex=self.ident.public_key.hex(),
+            authority_pk_hex=space_kp.public_key.hex(),
+            key_epoch=epoch,
+        )
 
 
-def _item(host, space_kp, *, space_id="sp-1", seq=0, **over) -> dict:
+def _item(host, space_kp, *, at=T0, keywrap=None, cert=None, **over) -> dict:
     contact = sign_join_contact(
-        space_id=space_id, space_seed=space_kp.private_key, **host
+        space_id="sp-1",
+        space_seed=space_kp.private_key,
+        issued_at=at.isoformat(),
+        **host.fields(keywrap),
     )
-    return {
-        "space_id": space_id,
-        "owning_instance": host["instance_id"],
+    item = {
+        "space_id": "sp-1",
+        "owning_instance": host.instance_id,
         "identity_public_key": space_kp.public_key.hex(),
-        "authority_rotation_seq": seq,
+        "authority_rotation_seq": 0,
         "join_contact": contact,
         **over,
     }
+    if cert is not None:
+        item["authority_cert"] = cert
+    return item
+
+
+def _see(pin, item, gfs=GFS_A):
+    return merge_pin(pin, candidate_from_listing(item, gfs_url=gfs), space_id="sp-1")
 
 
 def test_a_valid_listing_offers_a_usable_contact():
-    host, space = _host(), generate_identity_keypair()
-    pin = merge_pin(
-        None, candidate_from_listing(_item(host, space), gfs_url=GFS_A), space_id="sp-1"
-    )
+    host, space = _Host(), generate_identity_keypair()
+    pin = _see(None, _item(host, space))
     contact, gfs = usable_contact(pin)
-    assert contact["instance_id"] == host["instance_id"]
+    assert contact["instance_id"] == host.instance_id
     assert gfs == GFS_A
 
 
 def test_a_contact_that_does_not_hold_is_not_offered():
-    host, space = _host(), generate_identity_keypair()
-    # Names another household than the listed owner.
-    item = _item(host, space, owning_instance="someone-else")
-    assert usable_contact(candidate_from_listing(item, gfs_url=GFS_A)) is None
-    # A key-wrap key not bound to the identity (signed by the space key, but
-    # the binding signature is someone else's).
-    other = _host()
-    bad = {**host, "keywrap_sig": other["keywrap_sig"]}
-    assert (
-        usable_contact(candidate_from_listing(_item(bad, space), gfs_url=GFS_A)) is None
-    )
-    # No authority key at all: nothing to pin.
+    host, space = _Host(), generate_identity_keypair()
+    assert usable_contact(_see(None, _item(host, space, owning_instance="x"))) is None
+    other = _Host()
+    bad = _item(host, space)
+    bad["join_contact"]["keywrap_sig"] = other.fields()["keywrap_sig"]
+    assert usable_contact(_see(None, bad)) is None
     assert candidate_from_listing({"space_id": "sp-1"}, gfs_url=GFS_A) is None
+
+
+def test_the_pinning_gfs_cannot_move_the_key_with_its_own_counter():
+    """``authority_rotation_seq`` is the GFS's own counter: a higher one
+    from the very GFS that gave the pin, with no owner cert, is a conflict."""
+    host, space, forged = (
+        _Host(),
+        generate_identity_keypair(),
+        generate_identity_keypair(),
+    )
+    pin = _see(None, _item(host, space))
+    pin = _see(pin, _item(host, forged, authority_rotation_seq=7))
+    assert usable_contact(pin) is None
+    assert load_pin(pin)["conflict"] is True
+
+
+def test_the_owners_rotation_cert_moves_the_pin_from_any_gfs():
+    """The v_44 chain: a cert signed by the OWNER key pinned with the first
+    contact, for the new key, at a higher epoch."""
+    host, space, rotated = (
+        _Host(),
+        generate_identity_keypair(),
+        generate_identity_keypair(),
+    )
+    pin = _see(None, _item(host, space))
+    moved = _see(
+        pin,
+        _item(host, rotated, at=T0 + timedelta(hours=1), cert=host.cert(rotated, 1)),
+        GFS_B,
+    )
+    assert load_pin(moved)["authority_pk"] == rotated.public_key.hex()
+    assert load_pin(moved)["key_epoch"] == 1
+    assert usable_contact(moved) is not None
+    # The same cert again cannot move it anywhere else (epoch must rise).
+    again = _see(moved, _item(host, space, cert=host.cert(space, 1)))
+    assert load_pin(again)["conflict"] is True
+
+
+def test_a_cert_from_anyone_but_the_pinned_owner_is_a_conflict():
+    host, space, rotated = (
+        _Host(),
+        generate_identity_keypair(),
+        generate_identity_keypair(),
+    )
+    impostor = _Host()
+    pin = _see(None, _item(host, space))
+    # A cert for the right owner id cannot be made by another key; one for
+    # the impostor's own id names another owner.
+    forged = _see(pin, _item(host, rotated, cert=impostor.cert(rotated, 5)))
+    assert load_pin(forged)["conflict"] is True
+
+
+def test_a_contact_naming_another_owner_key_is_a_conflict():
+    """Same authority key, but its contact now names another household key:
+    the owner the pin vouches for changed — refused."""
+    host, space, other = _Host(), generate_identity_keypair(), _Host()
+    pin = _see(None, _item(host, space))
+    # A valid contact for another household under the SAME authority key
+    # (whoever holds the space seed could sign one).
+    pin2 = _see(pin, _item(other, space, at=T0 + timedelta(hours=1)))
+    assert usable_contact(pin2) is None
+    assert load_pin(pin2)["conflict"] is True
+
+
+def test_an_older_contact_is_not_taken_back():
+    """No replay of a pre-rotation key-wrap key: the newest ``issued_at``
+    wins, an older one is ignored."""
+    host, space = _Host(), generate_identity_keypair()
+    old_kw, new_kw = generate_x25519_keypair(), generate_x25519_keypair()
+    pin = _see(None, _item(host, space, at=T0, keywrap=old_kw))
+    pin = _see(pin, _item(host, space, at=T0 + timedelta(days=1), keywrap=new_kw))
+    pin = _see(pin, _item(host, space, at=T0, keywrap=old_kw), GFS_B)
+    assert usable_contact(pin)[0]["keywrap_pk"] == new_kw.public_key.hex()
 
 
 def test_another_authority_from_another_gfs_is_a_lasting_conflict():
     host, space, forged = (
-        _host(),
+        _Host(),
         generate_identity_keypair(),
         generate_identity_keypair(),
     )
-    pin = merge_pin(
-        None, candidate_from_listing(_item(host, space), gfs_url=GFS_A), space_id="sp-1"
-    )
-    pin = merge_pin(
-        pin, candidate_from_listing(_item(host, forged), gfs_url=GFS_B), space_id="sp-1"
-    )
+    pin = _see(None, _item(host, space))
+    pin = _see(pin, _item(host, forged), GFS_B)
     assert usable_contact(pin) is None
-    assert load_pin(pin)["conflict"] is True
-    # The good listing coming back does not re-open it.
-    pin = merge_pin(
-        pin, candidate_from_listing(_item(host, space), gfs_url=GFS_A), space_id="sp-1"
-    )
+    pin = _see(pin, _item(host, space))
     assert usable_contact(pin) is None
-
-
-def test_a_rotation_is_taken_only_from_the_pinning_gfs_with_a_higher_seq():
-    host, space, rotated = (
-        _host(),
-        generate_identity_keypair(),
-        generate_identity_keypair(),
-    )
-    first = merge_pin(
-        None, candidate_from_listing(_item(host, space), gfs_url=GFS_A), space_id="sp-1"
-    )
-    # Same GFS, same seq: refused.
-    same = merge_pin(
-        first,
-        candidate_from_listing(_item(host, rotated), gfs_url=GFS_A),
-        space_id="sp-1",
-    )
-    assert load_pin(same)["conflict"] is True
-    # Same GFS, higher seq (an owner-certified re-pin there): taken.
-    moved = merge_pin(
-        first,
-        candidate_from_listing(_item(host, rotated, seq=1), gfs_url=GFS_A),
-        space_id="sp-1",
-    )
-    assert load_pin(moved)["authority_pk"] == rotated.public_key.hex()
-    assert usable_contact(moved) is not None
-
-
-def test_the_same_key_refreshes_the_contact_from_any_gfs_but_keeps_the_pin():
-    host, space = _host(), generate_identity_keypair()
-    first = merge_pin(
-        None, candidate_from_listing(_item(host, space), gfs_url=GFS_A), space_id="sp-1"
-    )
-    no_contact = _item(host, space)
-    no_contact.pop("join_contact")
-    after = merge_pin(
-        first, candidate_from_listing(no_contact, gfs_url=GFS_B), space_id="sp-1"
-    )
-    assert usable_contact(after) is None  # the owner stopped listing one
-    assert load_pin(after)["gfs"] == GFS_A
-    again = merge_pin(
-        after,
-        candidate_from_listing(_item(host, space), gfs_url=GFS_B),
-        space_id="sp-1",
-    )
-    assert usable_contact(again) == (usable_contact(first)[0], GFS_A)
 
 
 def test_garbage_reads_as_nothing():

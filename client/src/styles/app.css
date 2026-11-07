@@ -10988,6 +10988,13 @@ hr {
   flex-direction: column;
   gap: var(--sh-space-sm);
 }
+/* "Decline all N from the GFS" (v_84): above the list, never pushed off a
+   narrow phone. */
+.sh-join-requests__bulk {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 .sh-join-request {
   padding: var(--sh-space-md);
   background: var(--sh-bg);

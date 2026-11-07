@@ -164,16 +164,11 @@ class PublicSpaceDiscoveryService:
                 # v_84 — the host's join contact is pinned on first sight and
                 # refused when a listing later shows another authority key
                 # (``federation/join_contact_pin.py``).
-                existing = await self._repo.get(listing.space_id)
-                listing = replace(
-                    listing,
-                    join_contact=merge_pin(
-                        existing.join_contact if existing is not None else None,
-                        listing.join_contact,
-                        space_id=listing.space_id,
-                    ),
-                )
-                await self._repo.upsert(listing)
+                held = await self._repo.get_pin(listing.space_id)
+                pin = merge_pin(held, listing.join_contact, space_id=listing.space_id)
+                if pin is not None and pin != held:
+                    await self._repo.set_pin(listing.space_id, pin)
+                await self._repo.upsert(replace(listing, join_contact=None))
             total += len(listings)
 
         # Purge stale cache rows.

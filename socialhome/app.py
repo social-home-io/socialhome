@@ -169,6 +169,7 @@ from .infrastructure.gfs_reconcile_retry import GfsReconcileRetry
 from .infrastructure.gfs_route_discovery_scheduler import GfsRouteDiscoveryScheduler
 from .infrastructure.gfs_ws_supervisor import GfsWebSocketSupervisor
 from .infrastructure.highlight_retention_scheduler import HighlightRetentionScheduler
+from .infrastructure.join_request_expiry_scheduler import JoinRequestExpiryScheduler
 from .infrastructure.media_orphan_sweep_scheduler import MediaOrphanSweepScheduler
 from .infrastructure.moderation_expiry_scheduler import ModerationExpiryScheduler
 from .infrastructure.moment_retention_scheduler import MomentRetentionScheduler
@@ -3961,6 +3962,7 @@ def create_app(config: Config | None = None) -> web.Application:
     replay_cache_scheduler: ReplayCachePruneScheduler | None = None
     gfs_route_discovery_scheduler: GfsRouteDiscoveryScheduler | None = None
     moderation_expiry_scheduler: ModerationExpiryScheduler | None = None
+    join_request_expiry_scheduler: JoinRequestExpiryScheduler | None = None
     app_pending_session_scheduler: AppPendingSessionPruneScheduler | None = None
     audio_transcript_scheduler: AudioTranscriptScheduler | None = None
     dm_relay_seen_scheduler: DmRelaySeenPruneScheduler | None = None
@@ -4801,6 +4803,11 @@ def create_app(config: Config | None = None) -> web.Application:
         nonlocal moderation_expiry_scheduler
         moderation_expiry_scheduler = ModerationExpiryScheduler(space_moderation)
         await moderation_expiry_scheduler.start()
+        # Join requests nobody answered expire (their ``expires_at``), which
+        # frees a slot under the cap of requests from the GFS (v_84).
+        nonlocal join_request_expiry_scheduler
+        join_request_expiry_scheduler = JoinRequestExpiryScheduler(real_space_service)
+        await join_request_expiry_scheduler.start()
         # #114 phase 2 — the SPACE_REMOTE_ADMIN_KICK inbound handler
         # was constructed inside ``_wire_federation_stack`` before
         # ``real_space_service`` existed; wire it now so the host
@@ -6025,6 +6032,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await page_forwarder.stop()
         if moderation_expiry_scheduler is not None:
             await moderation_expiry_scheduler.stop()
+        if join_request_expiry_scheduler is not None:
+            await join_request_expiry_scheduler.stop()
         if app_pending_session_scheduler is not None:
             await app_pending_session_scheduler.stop()
         space_app_table_service = app.get(K.space_app_table_service_key)

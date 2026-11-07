@@ -2,13 +2,15 @@
 -- ``socialhome/federation/gfs_join_request.py``). Three NULL-defaulted
 -- columns, nothing rewritten, no backfill:
 --
--- * ``public_space_cache.join_contact`` — the host's contact keys a GFS
---   directory listing carried (identity + key-wrap key, signed by the
---   SPACE AUTHORITY key), as the applicant verified it, plus the authority
---   key it pinned on first sight and the GFS it pinned it from (JSON). A
---   listing that later shows another authority key for the space is
---   refused (``conflict``), so no GFS can swap the keys a request is sealed
---   to without breaking the pinned signature.
+-- * ``public_space_join_pins`` (new table) — per global space, the host's
+--   join contact a GFS listing carried (identity + key-wrap key, signed by
+--   the SPACE AUTHORITY key) as the applicant verified it, the authority key
+--   and the OWNER key pinned on first sight, the rotation epoch and the GFS
+--   it was pinned from, and a lasting conflict flag (JSON). Its own table,
+--   NOT a column of ``public_space_cache``: the cache row is purged when a
+--   listing is not seen for a day, and a pin purged with it would let a GFS
+--   withhold the listing, relist the space under its own key and be trusted
+--   afresh. A pin outlives the listing.
 -- * ``space_join_requests.gfs_relay`` — for a request that crossed the GFS:
 --   on the HOST, the applicant household's identity + key-wrap keys, the
 --   GFS it came through and the names it sent ("not verified"), so the
@@ -30,11 +32,15 @@
 -- 2. Rejected: a ``space_session`` row at request time (opens the relay's
 --    inbound allow-list to a non-member); memory for the approval or the
 --    host's answer contact (lost on restart — the reviewed bug); asking the
---    GFS for keys by id (a "who wants what" record on the GFS); a separate
---    pin table (the cache row is the one place a listing lives).
--- 3. Smallest: four nullable TEXT columns, no index (each is read through
---    its table's primary key).
-ALTER TABLE public_space_cache ADD COLUMN join_contact TEXT;
+--    GFS for keys by id (a "who wants what" record on the GFS); the pin as
+--    a cache column (purged with the listing — the reviewed TOFU reset).
+-- 3. Smallest: three nullable TEXT columns and one small key/value table,
+--    no index (each is read through its primary key).
+CREATE TABLE IF NOT EXISTS public_space_join_pins (
+    space_id   TEXT PRIMARY KEY,
+    pin        TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 ALTER TABLE space_join_requests ADD COLUMN gfs_relay TEXT;
 ALTER TABLE space_invite_tokens ADD COLUMN bound_instance_id TEXT;
 ALTER TABLE space_invite_tokens ADD COLUMN bound_user_id TEXT;

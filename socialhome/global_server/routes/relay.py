@@ -60,9 +60,15 @@ def public_space_dict(space) -> dict:
     ``join_contact`` (v_84) is the one place the owner's identity key is
     served: the owner itself chose to put it there, signed by the space
     authority key, for a space that takes requests (``None`` otherwise).
+    With a contact the listing ALSO carries the owner's ``authority_cert``
+    for the current key (``None`` before any rotation): a household moves
+    the authority key it pinned only along that owner-signed chain, never on
+    this server's word. The contact already names the owner's identity key,
+    so the cert adds only that a rotation happened, and when.
     """
     body = asdict(space)
-    body.pop("authority_cert", None)
+    if space.join_contact is None:
+        body.pop("authority_cert", None)
     # The owner's place pin, as the ``{lat, lon, radius_km?}`` it was
     # published as (or null) — for sorting by distance and the reader's
     # "within the area" hint, both on the reader's side only.

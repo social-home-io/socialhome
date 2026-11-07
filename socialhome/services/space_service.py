@@ -7689,6 +7689,37 @@ class SpaceService(
             )
         )
 
+    async def decline_gfs_join_requests(
+        self, space_id: str, *, actor_username: str
+    ) -> int:
+        """Decline every pending request to *space_id* that came through
+        the GFS (v_84) — anyone on a GFS can ask, so an admin clears a flood
+        in one go. Each is declined like one by one (the applicant is told).
+        Requests of this household's people or of a paired household are
+        left alone. Admin / owner only. Returns how many."""
+        space = await self._require_space(space_id)
+        await self._require_admin_or_owner(space, actor_username)
+        declined = 0
+        for row in await self._spaces.list_pending_gfs_join_requests(space_id=space_id):
+            try:
+                await self.deny_join_request(
+                    str(row["id"]), actor_username=actor_username, space_id=space_id
+                )
+            except JoinRequestHandledError:
+                continue  # answered meanwhile (another admin)
+            declined += 1
+        return declined
+
+    async def expire_due_join_requests(self) -> int:
+        """Mark pending join requests past ``expires_at`` expired (both the
+        host's and our own outgoing ones). Frees their slot under the cap of
+        requests from the GFS (v_84). Returns how many."""
+        expired = 0
+        for row in await self._spaces.list_expired_join_requests():
+            if await self._spaces.answer_join_request(str(row["id"]), "expired"):
+                expired += 1
+        return expired
+
     async def request_join_remote(
         self,
         space_id: str,
