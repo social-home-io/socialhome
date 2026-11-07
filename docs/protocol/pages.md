@@ -313,6 +313,57 @@ plain link, so opening a page never fetches from a host its author picked
 (`client/src/utils/markdown.ts`, `docs/principles.md` → "No third-party
 fetches from user content").
 
+## Files (v_81)
+
+A page's files are its cover and every `api/media/<file>` picture its body
+shows (`page_media_urls`; never the same path inside another URL). Every
+household keeps the host's version byte for byte, so a page's files keep the
+names the **host's** page shows, on every household — they are never renamed
+on arrival the way a post's are.
+
+- **A member adds a file.** Its own upload `F` would collide with names
+  other households use, so the host renames it to the proposer household's
+  name, `sd-<sha256(space, proposer, F)>` (`SpaceMediaNamer`), before it
+  sequences the version: a page proposal in `_on_page_proposal`
+  (`_localized_proposal`), a reviewed create / edit / resolution at
+  admission (`SpaceModerationFederation._admit_submission`). The body
+  references are rewritten in place. A file the page already shows (its
+  current version, an open side, a version in its history) keeps its name;
+  a reserved name (`dm-` / `gm-` / `sg-`) is dropped. A renamed proposal's
+  answer names it **as sent** (`Proposal.answers`), so the proposer settles
+  its draft and then mirrors the host's version.
+- **The proposer ships `F`** to the host (`SPACE_MEDIA_BLOB`, correlated by
+  the page id, or by the queue item for a reviewed one —
+  `PageProposalForwarder._ship_files` / `_send_media`) — only the files
+  the draft adds to its base, only to a v_81 host. The host stores it under
+  the proposer's name, the one the page shows.
+- **The host ships each version's new files** (`shown_before` names what
+  the replaced version showed) to every other member household at v_81,
+  paired or mesh (`PageFederationOutbound._ship_files`, correlated by the
+  page), and describes them in `media_refs` to a link-joined v_81 member
+  (kept there under the page's names, not `sg-` names). A receiver lets a
+  name the page shows be filled only by the space's host (`_host_fills`) or
+  by the household the name is bound to; a proposer's file that overtakes
+  the version that will show it lands under the proposer's own name.
+- **Catch-up.** The host's §25.6 stream ships every live page's files to a
+  v_81 requester and the `pages` records carry the descriptor for a
+  link-joined one (sync line 81).
+- **References.** A page body's pictures (and its history's, and an open
+  side's) count as references, so the media sweep keeps them and the GFS
+  uploader may seal them for the space (`MediaReferenceRepo`). An edit's
+  media check covers only the files it adds (`SpacePageService.update`).
+
+Cost per version: new files × other v_81 member households, each file once
+(≤ the picture cap), plus one GFS upload per file per GFS with link-joined
+readers. A page edit that adds no file ships nothing. A page with more than
+16 pictures describes its first 16 to a link-joined member (the descriptor
+cap); paired and mesh members get all of them.
+
+Known limit: a member that keeps editing while a proposal that added a file
+is in flight bases its next draft on what it sent; the host never held that
+exact version (it renamed the file), so that next draft may land as a
+conflict side instead of merging.
+
 ## Mixed fleets
 
 - **Host below v_48**: last write wins everywhere, exactly as before.
@@ -326,6 +377,10 @@ fetches from user content").
   taken by the host as a proposal based on the current version (last
   write wins at the host) and then sequenced. v_48 members ignore the old
   member's direct copy and receive the host's version instead.
+- **Page files below v_81**: a member household below v_81 is sent no
+  page file (its people see the page without the pictures it doesn't
+  hold); a host below v_81 is shipped no proposal file and renames
+  nothing, as before.
 
 ## Edge cases
 

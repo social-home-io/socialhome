@@ -267,3 +267,181 @@ async def test_a_legacy_write_goes_out_as_before(env):
     await bus.publish(PageDeleted(page_id="p1", space_id="sp-A"))
     assert all("seq" not in p for _s, _e, p in fed.broadcasts)
     assert fed.kwargs == [{}, {}, {}]
+
+
+# ── v_81: a host version's new files reach every member household ──────
+
+
+class _Media:
+    def __init__(self, *, boom: bool = False) -> None:
+        self.calls: list[dict] = []
+        self.boom = boom
+
+    async def enqueue_for_blob(self, **kw) -> None:
+        if self.boom:
+            raise OSError("disk")
+        self.calls.append(kw)
+
+
+class _Spaces:
+    async def list_member_instances(self, space_id):
+        return ["us", "peer-new", "peer-old", "reader", ""]
+
+
+class _VersionedFed(_FakeFed):
+    own_instance_id = "us"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.versions = {"peer-new": 81, "peer-old": 80, "reader": 81}
+
+    async def space_member_supports(self, instance_id, *, min_version):
+        return self.versions.get(instance_id, 0) >= min_version
+
+
+class _Plan:
+    def wire(self):
+        return {"x": {"blob_id": "b" * 64}}
+
+
+class _Gfs:
+    def __init__(self) -> None:
+        self.plans: list[tuple[str, list[str], str]] = []
+        self.uploaded: list = []
+
+    async def plan(self, space_id, urls, *, item_id, followers):
+        self.plans.append((space_id, list(urls), item_id))
+        return _Plan()
+
+    async def is_relay_reader(self, iid):
+        return iid in ("reader", "old-reader")
+
+    def upload(self, plan):
+        self.uploaded.append(plan)
+
+
+BODY = "![a](api/media/a.webp) ![b](/api/media/b.webp?exp=1)"
+
+
+@pytest.fixture
+def media_env():
+    bus = EventBus()
+    fed = _VersionedFed()
+    media = _Media()
+    gfs = _Gfs()
+    out = PageFederationOutbound(bus=bus, federation_service=fed)
+    out.attach_media(media_sync=media, space_repo=_Spaces())
+    out.attach_media_gfs(gfs)
+    out.wire()
+    return bus, fed, media, gfs
+
+
+async def test_a_host_version_ships_its_files_to_every_v81_member(media_env):
+    """A new page's cover and body pictures go to every other member
+    household at v_81 (paired or mesh — the outbox reaches both), never to
+    an older one, correlated by the page."""
+    bus, _fed, media, gfs = media_env
+    await bus.publish(
+        PageCreated(
+            page_id="p1",
+            space_id="sp-A",
+            title="N",
+            content=BODY,
+            canonical={**_CANON, "seq": 1, "cover_image_url": "api/media/c.webp"},
+        )
+    )
+    assert media.calls == [
+        {
+            "space_id": "sp-A",
+            "correlation_id": "p1",
+            "target_instance_ids": ["peer-new", "reader"],
+            "media_urls": [
+                "api/media/c.webp",
+                "api/media/a.webp",
+                "/api/media/b.webp",
+            ],
+        }
+    ]
+    assert gfs.plans == [("sp-A", media.calls[0]["media_urls"], "p1")]
+    assert len(gfs.uploaded) == 1
+
+
+async def test_a_host_edit_ships_only_the_files_it_adds(media_env):
+    bus, _fed, media, gfs = media_env
+    await bus.publish(
+        PageUpdated(
+            page_id="p1",
+            space_id="sp-A",
+            title="N",
+            content=BODY + " ![n](api/media/n.webp)",
+            canonical=dict(_CANON),
+            shown_before=("api/media/a.webp", "api/media/b.webp"),
+        )
+    )
+    assert [c["media_urls"] for c in media.calls] == [["api/media/n.webp"]]
+    assert [p[1] for p in gfs.plans] == [["api/media/n.webp"]]
+    media.calls.clear()
+    await bus.publish(
+        PageUpdated(
+            page_id="p1",
+            space_id="sp-A",
+            title="Renamed",
+            content=BODY,
+            canonical=dict(_CANON),
+            shown_before=("api/media/a.webp", "/api/media/b.webp"),
+        )
+    )
+    assert media.calls == []
+
+
+async def test_only_a_v81_link_joined_member_gets_the_page_descriptor(media_env):
+    bus, fed, _media, _gfs = media_env
+    fed.versions["old-reader"] = 80
+    await bus.publish(
+        PageCreated(
+            page_id="p1",
+            space_id="sp-A",
+            title="N",
+            content=BODY,
+            canonical={**_CANON, "seq": 1},
+        )
+    )
+    per_peer = fed.kwargs[0]["per_peer"]
+    shared = fed.broadcasts[0][2]
+    assert (await per_peer("reader", shared))["media_refs"] == _Plan().wire()
+    assert "media_refs" not in await per_peer("old-reader", shared)
+    assert "media_refs" not in await per_peer("peer-new", shared)
+    assert "media_refs" not in shared
+
+
+async def test_no_files_and_member_drafts_ship_nothing(media_env):
+    bus, fed, media, gfs = media_env
+    await bus.publish(
+        PageCreated(
+            page_id="p1",
+            space_id="sp-A",
+            title="N",
+            content="no pictures",
+            canonical={**_CANON, "seq": 1},
+        )
+    )
+    await bus.publish(
+        PageUpdated(page_id="p1", space_id="sp-A", title="N", content=BODY)
+    )
+    assert media.calls == [] and gfs.plans == []
+    assert "per_peer" not in fed.kwargs[0]
+
+
+async def test_a_failed_file_queue_never_stops_the_page(media_env):
+    bus, fed, media, _gfs = media_env
+    media.boom = True
+    await bus.publish(
+        PageCreated(
+            page_id="p1",
+            space_id="sp-A",
+            title="N",
+            content=BODY,
+            canonical={**_CANON, "seq": 1},
+        )
+    )
+    assert len(fed.broadcasts) == 1

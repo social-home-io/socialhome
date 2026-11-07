@@ -1571,6 +1571,8 @@ def _wire_federation_stack(
         space_icon_repo=space_icon_repo,
         # An approved announce card must link an event of its own space.
         space_calendar_repo=space_calendar_repo,
+        # SPACE_MEDIA_BLOB scope: a space page's cover and body pictures.
+        page_repo=page_repo,
     )
     inbound_service.attach_to(federation_service)
     inbound_service.attach_groups(dm_service.groups)
@@ -1829,6 +1831,16 @@ def _wire_federation_stack(
     space_sync_service.attach_roster_authority(
         _roster_authority, own_members=_own_members
     )
+
+    async def _hosts_space(space_id: str) -> bool:
+        space = await space_repo.get(space_id)
+        return (
+            space is not None
+            and space.owner_instance_id == federation_service.own_instance_id
+        )
+
+    # v_81: the host's catch-up ships its pages' files.
+    space_sync_service.attach_pages(page_repo, hosts=_hosts_space)
     app[K.space_sync_service_key] = space_sync_service
     app[K.space_sync_receiver_key] = space_sync_receiver
 
@@ -1871,6 +1883,11 @@ def _wire_federation_stack(
         bus=bus,
         federation_service=federation_service,
     )
+    # v_81: a host version's new files (cover, body pictures) follow it to
+    # the other member households over the space media outbox.
+    page_federation_outbound.attach_media(
+        media_sync=space_media_sync_service, space_repo=space_repo
+    )
     page_federation_outbound.wire()
     # v_48 host-sequenced pages: the conflict service sequences pages this
     # household hosts and mirrors the host's versions of the others; the
@@ -1887,6 +1904,8 @@ def _wire_federation_stack(
         federation_repo=federation_repo,
         bus=bus,
     )
+    # v_81: a draft's new files go to the host with it.
+    page_proposal_forwarder.attach_media_sync(space_media_sync_service)
     page_proposal_forwarder.wire()
     app[K.page_proposal_forwarder_key] = page_proposal_forwarder
 
@@ -2212,6 +2231,7 @@ def _wire_federation_stack(
         moment_reaction_counts=moment_reaction_counts,
         content_inbound=content_inbound,
         gallery_federation_outbound=gallery_federation_outbound,
+        page_federation_outbound=page_federation_outbound,
     )
 
 
@@ -5006,9 +5026,12 @@ def create_app(config: Config | None = None) -> web.Application:
             space_public_outbound.attach_media_gfs(space_media_uploader)
         space_cal_service.attach_media_gfs(space_media_uploader)
         fed.gallery_federation_outbound.attach_media_gfs(space_media_uploader)
+        fed.page_federation_outbound.attach_media_gfs(space_media_uploader)
         # …and no SPACE_MEDIA_BLOB push to them: the relay refuses the bytes.
         space_media_sync_service.attach_relay_readers(space_media_uploader)
         fed.inbound_service.attach_gfs_media(space_media_fetcher)
+        # v_81: a page's files keep the names the host's page shows.
+        space_media_fetcher.attach_pages(page_repo)
         fed.content_inbound.attach_gfs_media(space_media_fetcher)
         if space_public_inbound is not None:
             space_public_inbound.attach_gfs_media(space_media_fetcher)

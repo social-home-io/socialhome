@@ -34,6 +34,7 @@ from ....domain.federation_capabilities import FederationCapability
 from ....domain.space_media_ref import (
     MEDIA_REF_RESOURCES,
     MEDIA_REFS_FIELD,
+    page_media_urls,
     record_media_urls,
 )
 from .exporter import (
@@ -411,6 +412,8 @@ class SpaceSyncService:
         "_member_gate",
         "_own_members",
         "_owner_statement_for",
+        "_page_repo",
+        "_pages_hosted",
         "_roster_authority",
         "_roster_sent",
         "_sig_suite",
@@ -484,6 +487,10 @@ class SpaceSyncService:
         #: Space calendar events — their cover files ride the catch-up
         #: media too (the record carries only the reference).
         self._space_calendar_repo = space_calendar_repo
+        #: v_81 — space pages, whose files (cover, body pictures) ride the
+        #: catch-up media of the space's host (:meth:`attach_pages`).
+        self._page_repo = None
+        self._pages_hosted: Callable[[str], Awaitable[bool]] | None = None
         #: Set by :meth:`attach_federation` after the federation
         #: service is constructed (resolves the chicken/egg between
         #: ``FederationService`` and ``SpaceSyncService``). Required
@@ -514,6 +521,30 @@ class SpaceSyncService:
         ``FederationCapability.MIN_FOR_SPACE_MEDIA_REFS`` (sync line 80)
         carry ``media_refs``."""
         self._media_gfs = media_gfs
+
+    def attach_pages(
+        self, page_repo, *, hosts: Callable[[str], Awaitable[bool]]
+    ) -> None:
+        """Wire the space pages (v_81): the host's catch-up ships each
+        page's files to a requester at v_81 — a page keeps the names the
+        host's version shows, which only the host fills on a receiver — and
+        a link-joined one gets them as the ``pages`` records' descriptor.
+        ``hosts(space_id)``: whether this household is the space's host."""
+        self._page_repo = page_repo
+        self._pages_hosted = hosts
+
+    async def _takes_page_media(self, space_id: str, requester: str) -> bool:
+        """Whether *requester* gets the files of *space_id*'s pages from us:
+        we host the space, and it is at v_81 (unknown without federation)."""
+        if self._pages_hosted is None or not await self._pages_hosted(space_id):
+            return False
+        if self._federation is None:
+            return True
+        return bool(
+            await self._federation.space_member_supports(
+                requester, min_version=FederationCapability.MIN_FOR_PAGE_MEDIA
+            )
+        )
 
     def attach_roster_authority(
         self,
@@ -556,6 +587,12 @@ class SpaceSyncService:
             and resource in MEDIA_REF_RESOURCES
             and self._media_gfs is not None
             and await self._media_gfs.is_relay_reader(session.requester_instance_id)
+            and (
+                resource != "pages"
+                or await self._takes_page_media(
+                    session.space_id, session.requester_instance_id
+                )
+            )
         ):
             exporter = _WithMediaRefs(
                 exporter, self._media_gfs, session.requester_instance_id
@@ -1110,6 +1147,29 @@ class SpaceSyncService:
                     "sync-catchup-media: list calendar events failed for space=%s",
                     space_id,
                 )
+        # Page files — the host's catch-up only (v_81).
+        await self._enqueue_page_media(space_id, target_instance_id)
+
+    async def _enqueue_page_media(self, space_id: str, target_instance_id: str) -> None:
+        """v_81 — every live page's files, from the space's host only."""
+        if self._page_repo is None or not await self._takes_page_media(
+            space_id, target_instance_id
+        ):
+            return
+        try:
+            pages = await self._page_repo.list(space_id=space_id)
+        except sqlite3.Error:
+            log.exception(
+                "sync-catchup-media: list pages failed for space=%s", space_id
+            )
+            return
+        for page in pages:
+            await self._enqueue_media(
+                space_id,
+                target_instance_id,
+                page.id,
+                page_media_urls(page.cover_image_url, page.content),
+            )
 
     def _calendar_pages(self, space_id: str):
         repo = self._space_calendar_repo

@@ -1287,7 +1287,27 @@ from __future__ import annotations
 #:   files, and its catch-up gets no pictures — its people see posts without
 #:   the pictures that did not fit. Labelled "Pictures in a space for members
 #:   who joined by link".
-OURS: int = 80
+#: * **v_81** (2026-11-07) — **Pictures in a space's pages reach every
+#:   member**. A page's files are its cover and the ``api/media/`` pictures
+#:   its body shows (``page_media_urls``). Pages are host-sequenced (v_48)
+#:   and every household keeps the host's version byte for byte (its hash is
+#:   the version's identity), so a page's files keep the names the host's
+#:   page shows: a file a member household proposes — in a reviewed item or
+#:   a page proposal — takes that household's ``sd-`` name on the host (the
+#:   body rewritten to it), and the proposer ships it to the host
+#:   (``SPACE_MEDIA_BLOB`` correlated to the page or the queue item). The
+#:   host ships each canonical version's NEW files to every other member
+#:   household at or above v_81 (``SPACE_MEDIA_BLOB`` correlated to the
+#:   page; a receiver lets only the space's host fill a name the page shows,
+#:   or the household the name is bound to) and describes them to a
+#:   link-joined v_81 member in ``media_refs`` (kept under the name the page
+#:   shows, not an ``sg-`` name). The §25.6 ``pages`` records carry the same
+#:   descriptor to a link-joined requester and the host's catch-up ships the
+#:   page files (sync line 81). **Fallback**: a member household below v_81
+#:   is sent no page file (as before: its people see the page without the
+#:   pictures it does not hold); a host below v_81 is shipped no proposal
+#:   files. Labelled "Pictures in a space's pages".
+OURS: int = 81
 
 
 class FederationCapability:
@@ -1901,6 +1921,11 @@ class FederationCapability:
     #: it: no descriptor (live, the old ``SPACE_MEDIA_BLOB`` push; a catch-up
     #: never pushes bytes to any link-joined requester).
     MIN_FOR_SPACE_MEDIA_REFS = 80
+    #: v_81 — a page's files (cover + body pictures) ship with the host's
+    #: versions to member households at or above it (``SPACE_MEDIA_BLOB``,
+    #: and ``media_refs`` toward a link-joined member), and a proposer ships
+    #: a draft's new files to a host at or above it. Below it: no page file.
+    MIN_FOR_PAGE_MEDIA = 81
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2207,6 +2232,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_MEDIA_REFS,
         "Pictures in a space for members who joined by link",
     ),
+    (
+        FederationCapability.MIN_FOR_PAGE_MEDIA,
+        "Pictures in a space's pages",
+    ),
 ]
 
 
@@ -2298,6 +2327,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_APP_ENGINES: "app_engines",
     FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT: "space_gallery_item_edits",
     FederationCapability.MIN_FOR_SPACE_MEDIA_REFS: "space_media_refs",
+    FederationCapability.MIN_FOR_PAGE_MEDIA: "space_page_media",
 }
 
 
@@ -2406,6 +2436,9 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # A behind link-joined member household gets no pictures through
         # the GFS media cache.
         FederationCapability.MIN_FOR_SPACE_MEDIA_REFS,
+        # A behind member household's people see the space's pages without
+        # the pictures another household added.
+        FederationCapability.MIN_FOR_PAGE_MEDIA,
     }
 )
 

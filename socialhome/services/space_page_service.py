@@ -52,6 +52,7 @@ from ..domain.space import (
     SpaceModerationItem,
     SpacePermissionError,
 )
+from ..domain.space_media_ref import page_media_urls
 from ..media_signer import (
     media_refs_in_markdown,
     strip_signature_query,
@@ -60,7 +61,7 @@ from ..media_signer import (
 from ..repositories.page_repo import mint_page_id, new_page
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
-from .inbound_media_store import optional_local_media_ref
+from .inbound_media_store import media_basename, optional_local_media_ref
 from .media_ref_guard import MediaRefGuardedMixin
 from .page_conflict_service import (
     RESOLUTIONS,
@@ -312,10 +313,21 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         patch = _page_patch(
             title=title, content=content, cover_image_url=cover_image_url
         )
+        # The files the page shows already are the page's own, re-published
+        # to the same space (a body patch repeats them all): only a file the
+        # edit adds is checked for its writer.
+        shown = {
+            media_basename(u)
+            for u in page_media_urls(page.cover_image_url, page.content)
+        }
         await self._require_openable_media(
             (
-                patch.get("cover_image_url"),
-                *media_refs_in_markdown(patch.get("content")),
+                ref
+                for ref in (
+                    patch.get("cover_image_url"),
+                    *media_refs_in_markdown(patch.get("content")),
+                )
+                if ref and media_basename(ref) not in shown
             ),
             user_id=actor_user_id,
             field="cover_image_url",

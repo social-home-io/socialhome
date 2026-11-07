@@ -62,7 +62,7 @@ from ....domain.federation_capabilities import FederationCapability
 from ....domain.link_preview import link_preview_to_dict
 from ....domain.page import page_tombstone_to_wire_dict
 from ....domain.page_version import version_hash
-from ....domain.space_media_ref import post_media_urls
+from ....domain.space_media_ref import page_media_urls, post_media_urls
 from ....domain.task import (
     task_list_to_wire_dict,
     task_list_tombstone_to_wire_dict,
@@ -313,7 +313,7 @@ class SpaceSyncResumeProvider:
         sent += await self._replay_task_deletes(space_id, since, to=instance_id)
         sent += await self._replay_tasks(space_id, since, to=instance_id)
         sent += await self._replay_page_deletes(space_id, since, to=instance_id)
-        sent += await self._replay_pages(space_id, since, to=instance_id)
+        sent += await self._replay_pages(space_id, since, to=instance_id, media=media)
         sent += await self._replay_stickies(space_id, since, to=instance_id)
         sent += await self._replay_calendar(
             space_id, since, to=instance_id, media=media
@@ -573,6 +573,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        media: list[tuple[str, list[str]]] | None = None,
     ) -> int:
         if self._page_repo is None:
             return 0
@@ -628,12 +629,29 @@ class SpaceSyncResumeProvider:
             payloads[page.id] = payload
             replayed.append(page)
         pages = replayed
+        # v_81: the host's replay ships the pages' files too — on a
+        # receiver only the host fills the names a page shows.
+        ships_files = (
+            media is not None
+            and self._media_sync is not None
+            and space is not None
+            and space.owner_instance_id == self._federation.own_instance_id
+            and await self._federation.peer_supports(
+                to, min_version=FederationCapability.MIN_FOR_PAGE_MEDIA
+            )
+        )
         return await self._send_each(
             pages,
             FederationEventType.SPACE_PAGE_CREATED,
             lambda page: payloads[page.id],
             space_id=space_id,
             to=to,
+            media_of=(
+                (lambda page: page_media_urls(page.cover_image_url, page.content))
+                if ships_files
+                else None
+            ),
+            media=media,
         )
 
     async def _replay_stickies(

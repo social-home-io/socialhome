@@ -24,7 +24,8 @@ Pure: no I/O.
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection, Iterable, Mapping
+import re
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -45,9 +46,20 @@ MEDIA_REFS_FIELD: str = "media_refs"
 MAX_DESCRIPTOR_ENTRIES: int = 16
 
 #: The resources (§25.6 names) whose items carry ``media_refs``: posts
-#: (pictures, file, link card), calendar events (the cover) and gallery
-#: items (thumbnail + full file).
-MEDIA_REF_RESOURCES: frozenset[str] = frozenset({"posts", "calendar", "gallery"})
+#: (pictures, file, link card), calendar events (the cover), gallery
+#: items (thumbnail + full file) and pages (v_81: the cover and the
+#: pictures the body shows).
+MEDIA_REF_RESOURCES: frozenset[str] = frozenset(
+    {"posts", "calendar", "gallery", "pages"}
+)
+
+#: A local file a page's markdown body shows: ``api/media/<file>`` — an
+#: optional leading ``/`` and a ``?query`` belong to the match — never the
+#: same path inside another URL or path (``https://host/api/media/x`` links
+#: to someone else's server; the SPA never loads it as a picture here).
+_PAGE_BODY_MEDIA_RE = re.compile(
+    r"(?<![\w.~:/%-])/?api/media/[A-Za-z0-9._-]+(?:\?[^)\s\"'<>]*)?"
+)
 
 _ENTRY_KEYS: frozenset[str] = frozenset(
     {"blob_id", "suite", "epoch", "size", "scope", "addr_suite"}
@@ -155,6 +167,46 @@ def _str(value: object) -> list[str]:
     return [value] if isinstance(value, str) and value else []
 
 
+def page_body_media_refs(text: object) -> list[str]:
+    """Every local file reference in a page's markdown body, as written
+    (query included), in order — repeats included."""
+    if not isinstance(text, str) or not text:
+        return []
+    return [m.group(0) for m in _PAGE_BODY_MEDIA_RE.finditer(text)]
+
+
+def rewrite_page_body_media(text: str, rename: Callable[[str], str]) -> str:
+    """*text* with every :func:`page_body_media_refs` reference replaced by
+    ``rename(reference)``; nothing else is touched."""
+    return _PAGE_BODY_MEDIA_RE.sub(lambda m: rename(m.group(0)), text)
+
+
+def page_media_urls(cover: object, content: object) -> list[str]:
+    """A page's files: its cover, then each picture its body shows
+    (without a query), each reference once."""
+    urls = _str(cover)
+    for ref in page_body_media_refs(content):
+        url = ref.split("?", 1)[0]
+        if url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _distinct_files(urls: list[str], limit: int) -> list[str]:
+    """The first *limit* files of *urls*, each once however it is spelled."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        name = url.rsplit("/", 1)[-1].split("?", 1)[0]
+        if name in seen:
+            continue
+        if len(out) == limit:
+            break
+        seen.add(name)
+        out.append(url)
+    return out
+
+
 def record_media_urls(resource: str, record: dict[str, Any]) -> list[str]:
     """The local file references an item of *resource* shows, in order —
     THE one rule for which files an item has: the sender describes exactly
@@ -176,6 +228,13 @@ def record_media_urls(resource: str, record: dict[str, Any]) -> list[str]:
         return _str(record.get("cover_url"))
     if resource == "gallery" and record.get("kind", "item") == "item":
         return _str(record.get("thumbnail_url")) + _str(record.get("url"))
+    if resource == "pages":
+        # A page may show more pictures than one descriptor carries: its
+        # first ones are described (a receiver refuses a longer one whole).
+        return _distinct_files(
+            page_media_urls(record.get("cover_image_url"), record.get("content")),
+            MAX_DESCRIPTOR_ENTRIES,
+        )
     return []
 
 

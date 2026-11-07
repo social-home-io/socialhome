@@ -1187,6 +1187,49 @@ async def test_a_replayed_rows_files_ship_from_the_replaying_household():
     ]
 
 
+class _HostSpaceRepo(_FakeSpaceRepo):
+    async def get(self, space_id: str):
+        return SimpleNamespace(id=space_id, owner_instance_id="us")
+
+
+@pytest.mark.parametrize(
+    ("host", "version", "shipped"),
+    [("us", 81, True), ("us", 80, False), ("the-host", 81, False)],
+)
+async def test_the_hosts_page_replay_ships_its_files_to_v81(host, version, shipped):
+    """v_81: a replayed page's files (cover, body pictures) ship with it —
+    only from the space's host (on a receiver only it fills the names the
+    page shows), only to a household at v_81."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    at = (base + timedelta(minutes=1)).isoformat()
+    page = replace(
+        _page(0, at),
+        content="![a](api/media/a.webp)",
+        cover_image_url="api/media/c.webp",
+        seq=2,
+    )
+    fed = _FakeFederation()
+    fed.own_instance_id = "us"
+    fed.versions["peer-a"] = version
+    outbox = _FakeMediaOutbox()
+    spaces = (_HostSpaceRepo if host == "us" else _FakeSpaceRepo)(["peer-a"])
+    provider = SpaceSyncResumeProvider(
+        federation_service=fed,
+        space_repo=spaces,
+        space_post_repo=_FakePostRepo(),
+        page_repo=_FakeListSinceRepo([page]),
+        media_sync=outbox,
+    )
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    assert [s["type"] for s in fed.sent] == [FederationEventType.SPACE_PAGE_CREATED]
+    expected = [
+        ("sp-1", page.id, ("peer-a",), ("api/media/c.webp", "api/media/a.webp"))
+    ]
+    assert outbox.rows == (expected if shipped else [])
+
+
 def _image_post(i: int, at: datetime, *names: str) -> Post:
     return replace(
         _post(i, at),

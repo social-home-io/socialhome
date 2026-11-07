@@ -10210,6 +10210,19 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_79 space photo edit gate in place ✓")
+    # v_81 — a space page's files (cover, body pictures) ship with the
+    # host's versions to member households at >= v_81 (the round-trip of
+    # OURS above proves every peer advertises it; the file rules are
+    # ``tests/protocol/test_space_moderation_federated.py`` and
+    # ``tests/protocol/test_media_blob_scope.py``).
+    if int(_Cap.MIN_FOR_PAGE_MEDIA) != 81 or _OURS < 81:
+        failures.append(
+            "MIN_FOR_PAGE_MEDIA moved off v_81 (or OURS fell below it) — a "
+            "page's files would reach households that keep them under names "
+            "their page never shows"
+        )
+    else:
+        print("  v_81 page files gate in place ✓")
     gedit = state.get("space_gallery_edit")
     if gedit:
         cap = _rows(

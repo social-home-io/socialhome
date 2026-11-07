@@ -689,3 +689,86 @@ async def test_the_hosts_catch_up_fills_a_file_the_authors_push_never_delivered(
     # Write-once: a later host push never replaces it.
     await _push(app, "post-f", shown, EVIL, sender=HOST)
     assert await _shown(db, root, "post-f") == GOOD
+
+
+# ── Page files: the host's names, filled by the host (v_81) ─────────────
+#
+# Pages are host-sequenced: every household keeps the host's version byte
+# for byte (its hash is the version's identity), so a page's files keep the
+# names the host's page shows, and only the host (or the household whose
+# name the file carries) fills them.
+
+
+async def _page(db, page_id: str, space_id: str, cover: str, body: str) -> None:
+    await db.enqueue(
+        "INSERT INTO space_pages(id, space_id, title, content, cover_image_url,"
+        " created_by) VALUES(?, ?, 'Rules', ?, ?, 'u-rem')",
+        (page_id, space_id, body, f"api/media/{cover}"),
+    )
+
+
+def _bytes(root, name: str) -> bytes | None:
+    path = root / "media" / name
+    return path.read_bytes() if path.is_file() else None
+
+
+async def test_the_host_fills_a_pages_cover_and_body_pictures_by_their_names(env):
+    """A reviewed page from member A shows A's files under A's names (the
+    host's copy) and the host's own picture under its plain name. Another
+    member's push fills none of them; the host's fills all three, once."""
+    app, db, root = env
+    await _members(db)
+    cover = space_direct_media_name(GATED, SENDER, "c.webp")
+    pic = space_direct_media_name(GATED, SENDER, "p.webp")
+    body = f"![p](api/media/{pic}) and ![h](/api/media/h.webp)"
+    await _page(db, "pg-1", GATED, cover, body)
+    for name in (cover, pic, "h.webp"):
+        await _push(app, "pg-1", name, EVIL, sender=MALLORY)
+        assert _bytes(root, name) is None, name
+    for name in (cover, pic, "h.webp"):
+        await _push(app, "pg-1", name, GOOD, sender=HOST)
+        assert _bytes(root, name) == GOOD, name
+        await _push(app, "pg-1", name, EVIL, sender=HOST)
+        assert _bytes(root, name) == GOOD, name
+
+
+async def test_the_submitters_household_delivers_its_own_page_files(env):
+    """A's own push for its file lands under A's name — the one the page
+    shows (names are bound to the delivering household, not the item)."""
+    app, db, root = env
+    await _members(db)
+    cover = space_direct_media_name(GATED, SENDER, "c.webp")
+    await _page(db, "pg-1", GATED, cover, "")
+    await _push(app, "pg-1", "c.webp", GOOD)
+    assert _bytes(root, cover) == GOOD
+
+
+async def test_a_proposers_file_that_overtakes_its_edit_lands_under_its_name(env):
+    """A page proposal's new file may reach the host before the edit that
+    shows it is sequenced: it lands under the proposer's own name (which
+    nobody else can fill), ready for the version that will show it."""
+    app, db, root = env
+    await _members(db)
+    await _page(db, "pg-1", GATED, "c.webp", "")
+    await _push(app, "pg-1", "n.webp", GOOD)
+    assert _bytes(root, space_direct_media_name(GATED, SENDER, "n.webp")) == GOOD
+    assert _bytes(root, "n.webp") is None
+
+
+async def test_a_page_of_another_space_takes_no_file(env):
+    """The host's push correlated to a page of another space fills nothing,
+    nor a file a page of this space does not show."""
+    app, db, root = env
+    await _members(db)
+    await _page(db, "pg-b", VICTIM, "vb.webp", "![x](api/media/vbody.webp)")
+    await _page(db, "pg-a", GATED, "va.webp", "")
+    before = _tree(root)
+    await _push(app, "pg-b", "vb.webp", GOOD, sender=HOST)
+    await _push(app, "pg-b", "vbody.webp", GOOD, sender=HOST)
+    await _push(app, "pg-a", "other.webp", GOOD, sender=HOST)
+    after = _tree(root)
+    assert {k: v for k, v in after.items() if k in before} == before
+    assert _bytes(root, "vb.webp") is None
+    assert _bytes(root, "vbody.webp") is None
+    assert _bytes(root, "other.webp") is None
+    assert _bytes(root, space_direct_media_name(GATED, HOST, "vb.webp")) is None

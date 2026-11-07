@@ -15,6 +15,7 @@ from socialhome.domain.events import (
     PageUpdated,
 )
 from socialhome.domain.federation import DeliveryResult, FederationEventType
+from socialhome.domain.page_version import DraftBase
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.page_conflict_service import PageMode, Proposal
 from socialhome.services.page_proposal_forwarder import PageProposalForwarder
@@ -46,15 +47,23 @@ class _Conflicts:
 class _Pages:
     def __init__(self, conflicts: _Conflicts) -> None:
         self._c = conflicts
+        self.bases: dict[str, DraftBase] = {}
 
     async def list_pending_drafts(self, *, space_id=None):
         return [(SID, pid) for pid in self._c.drafts]
+
+    async def get_draft_base(self, page_id, *, space_id):
+        return self.bases.get(page_id)
 
 
 class _Fed:
     def __init__(self) -> None:
         self.sent: list[tuple[str, FederationEventType, dict]] = []
         self.result = DeliveryResult(instance_id=HOST, ok=True)
+        self.version = 81
+
+    async def peer_supports(self, instance_id, *, min_version):
+        return instance_id == HOST and self.version >= min_version
 
     async def send_with_mesh_fallback(
         self, *, to_instance_id, event_type, payload, space_id=None
@@ -77,8 +86,9 @@ def env():
     conflicts = _Conflicts()
     fed = _Fed()
     repo = _FedRepo()
+    pages = _Pages(conflicts)
     fwd = PageProposalForwarder(
-        page_repo=_Pages(conflicts),
+        page_repo=pages,
         conflicts=conflicts,
         federation_service=fed,
         federation_repo=repo,
@@ -86,7 +96,14 @@ def env():
         interval_seconds=3600,
     )
     fwd.wire()
-    return SimpleNamespace(bus=bus, conflicts=conflicts, fed=fed, repo=repo, fwd=fwd)
+    return SimpleNamespace(
+        bus=bus,
+        conflicts=conflicts,
+        fed=fed,
+        repo=repo,
+        fwd=fwd,
+        pages_bases=pages.bases,
+    )
 
 
 def _draft(content: str, *, base_seq: int = 3, **kw) -> Proposal:
@@ -263,3 +280,72 @@ async def test_a_draft_on_the_host_is_only_warned_about(env, caplog):
         assert not await env.fwd.kick(SID, "pg")
     assert "pending draft on the space's host" in caplog.text
     assert env.fed.sent == []
+
+
+# ── v_81: a draft's new files go to the host ────────────────────────────
+
+
+class _Media:
+    def __init__(self, *, boom: bool = False) -> None:
+        self.calls: list[dict] = []
+        self.boom = boom
+
+    async def enqueue_for_blob(self, **kw) -> None:
+        if self.boom:
+            raise OSError("disk")
+        self.calls.append(kw)
+
+
+@pytest.fixture
+def media(env):
+    media = _Media()
+    env.fwd.attach_media_sync(media)
+    return media
+
+
+async def test_a_drafts_new_files_go_to_the_host(env, media):
+    """Only the files the draft adds to the version it was made from: the
+    host renames them to our names and lets only us (or itself) fill
+    them; the page's own pictures are on the host already."""
+    env.pages_bases["pg"] = DraftBase(
+        title="T", content="![k](api/media/k.webp)", seq=3, by="u1"
+    )
+    env.conflicts.drafts["pg"] = _draft(
+        "![k](api/media/k.webp) ![n](/api/media/n.webp?exp=1)",
+        cover_image_url="api/media/c.webp",
+    )
+    assert await env.fwd.kick(SID, "pg")
+    assert media.calls == [
+        {
+            "space_id": SID,
+            "correlation_id": "pg",
+            "target_instance_ids": [HOST],
+            "media_urls": ["api/media/c.webp", "/api/media/n.webp"],
+        }
+    ]
+
+
+async def test_a_proposed_create_ships_all_its_files(env, media):
+    env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    assert await env.fwd.kick(SID, "pg")
+    assert [c["media_urls"] for c in media.calls] == [["api/media/a.webp"]]
+
+
+async def test_no_files_for_a_host_below_v81_or_a_draft_without_new_ones(env, media):
+    env.fed.version = 80
+    env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    assert await env.fwd.kick(SID, "pg")
+    env.fed.version = 81
+    env.pages_bases["pg2"] = DraftBase(
+        title="T", content="![a](api/media/a.webp)", seq=3, by="u1"
+    )
+    env.conflicts.drafts["pg2"] = _draft("words ![a](api/media/a.webp)")
+    assert await env.fwd.kick(SID, "pg2")
+    assert media.calls == []
+
+
+async def test_a_failed_file_queue_never_holds_the_draft_back(env, media):
+    media.boom = True
+    env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    assert await env.fwd.kick(SID, "pg")
+    assert len(env.fed.sent) == 1

@@ -28,7 +28,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 
-from ..domain.space_media_ref import SpaceMediaLocalization
+from ..domain.space_media_ref import (
+    SpaceMediaLocalization,
+    page_media_urls,
+    rewrite_page_body_media,
+)
 from .inbound_media_store import (
     is_reserved_media_name,
     media_basename,
@@ -115,6 +119,8 @@ def feature_media_urls(feature: str, payload: dict) -> list[str]:
             return _post_media_urls(payload)
         case "calendar":
             return _calendar_cover_urls(payload)
+        case "pages":
+            return _page_media_urls(payload)
         case _:
             return []
 
@@ -158,7 +164,48 @@ def renamed_media(
                     out["patch"] = {**patch, "cover_url": one(patch["cover_url"])}
             elif "cover_url" in out:
                 out["cover_url"] = one(out["cover_url"])
+        case "pages":
+            patch = out.get("patch")
+            if isinstance(patch, dict):
+                out["patch"] = _renamed_page_fields(patch, rename)
+            else:
+                out = _renamed_page_fields(out, rename)
     return out
+
+
+def _renamed_page_fields(
+    fields: dict, rename: Callable[[str | None], str | None]
+) -> dict:
+    """*fields* (a page create, an edit's patch, a resolution, the wire
+    event) with its cover and every body picture renamed — a body
+    reference renamed to nothing is emptied (a new dict)."""
+    out = dict(fields)
+    cover = out.get("cover_image_url")
+    if isinstance(cover, str) and cover:
+        out["cover_image_url"] = rename(cover)
+    for key in _PAGE_BODY_KEYS:
+        text = out.get(key)
+        if isinstance(text, str) and text:
+            out[key] = rewrite_page_body_media(text, lambda u: rename(u) or "")
+    return out
+
+
+#: The markdown bodies a page payload carries: a create's / edit's
+#: ``content``, a merged conflict resolution's ``merged_content``.
+_PAGE_BODY_KEYS: tuple[str, ...] = ("content", "merged_content")
+
+
+def _page_media_urls(payload: dict) -> list[str]:
+    """The files a queued page create (or its wire event / held row), an
+    edit's ``patch`` or a merged resolution shows: the cover, then each
+    body picture."""
+    patch = payload.get("patch")
+    fields = patch if isinstance(patch, dict) else payload
+    urls = page_media_urls(fields.get("cover_image_url"), fields.get("content"))
+    for url in page_media_urls(None, fields.get("merged_content")):
+        if url not in urls:
+            urls.append(url)
+    return urls
 
 
 def _calendar_cover_urls(payload: dict) -> list[str]:

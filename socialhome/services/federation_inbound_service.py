@@ -103,6 +103,7 @@ from ..domain.space_item import item_stamp, stamp_to_db
 from ..domain.space_media_ref import (
     MEDIA_REFS_FIELD,
     SpaceMediaLocalization,
+    page_media_urls,
     post_media_urls,
 )
 from ..domain.user import (
@@ -188,6 +189,7 @@ from .space_service import (
 
 if TYPE_CHECKING:
     from ..domain.federation import FederationEvent
+    from ..domain.page import Page
     from ..federation.pending_seat_buffer import PendingSeatBuffer
     from ..repositories.bazaar_repo import AbstractBazaarRepo
     from ..repositories.calendar_repo import AbstractSpaceCalendarRepo
@@ -196,6 +198,7 @@ if TYPE_CHECKING:
     from ..repositories.gallery_repo import AbstractGalleryRepo
     from ..repositories.highlight_repo import AbstractHighlightRepo
     from ..repositories.moment_repo import AbstractMomentRepo
+    from ..repositories.page_repo import AbstractPageRepo
     from ..repositories.space_cover_repo import AbstractSpaceCoverRepo
     from ..repositories.space_icon_repo import AbstractSpaceIconRepo
     from ..repositories.space_post_repo import AbstractSpacePostRepo
@@ -321,6 +324,28 @@ _MEDIA_MIME_EXT: dict[str, str] = {
 
 def _mime_to_ext(mime_type: str) -> str:
     return _MEDIA_MIME_EXT.get(mime_type.lower(), ".bin")
+
+
+def _page_scope(
+    page: Page, space_id: str, filename: str, sent: str, known_only: bool
+) -> str | None:
+    """A space page's file (v_81): the page keeps the names its host's
+    version shows. One it shows lands (``None``); the name a sender pushes
+    that the page shows under a name not bound to the sender is
+    :data:`_NOT_ITS_FILE` (only the host fills it, :meth:`_host_fills`).
+    Any other sender-bound file is taken (``None``, unless ``known_only``):
+    a proposer's new file can overtake the edit that shows it, and a name
+    bound to its sender is filled by nobody else."""
+    if page.space_id != space_id:
+        return _ROW_ELSEWHERE
+    shown = {
+        media_basename(u) for u in page_media_urls(page.cover_image_url, page.content)
+    }
+    if filename in shown:
+        return None
+    if known_only or sent in shown:
+        return _NOT_ITS_FILE
+    return None
 
 
 def _declared_size(payload: dict, raw: bytes, chunk_count: int) -> int:
@@ -463,6 +488,7 @@ class FederationInboundService(ProtectionGateMixin):
         "_moment_outbound",
         "_moment_reaction_router",
         "_moment_repo",
+        "_page_repo",
         "_pending",
         "_pending_parents",
         "_profile_picture_repo",
@@ -504,6 +530,7 @@ class FederationInboundService(ProtectionGateMixin):
         space_cover_repo: AbstractSpaceCoverRepo | None = None,
         space_icon_repo: AbstractSpaceIconRepo | None = None,
         space_calendar_repo: AbstractSpaceCalendarRepo | None = None,
+        page_repo: AbstractPageRepo | None = None,
     ) -> None:
         self._bus = bus
         self._conversation_repo = conversation_repo
@@ -588,6 +615,9 @@ class FederationInboundService(ProtectionGateMixin):
         #: Where an approved announce card's linked event must live (v_43):
         #: without it such a card is refused.
         self._space_calendar_repo = space_calendar_repo
+        #: SPACE_MEDIA_BLOB scope (v_81): a space page's cover and body
+        #: pictures.
+        self._page_repo = page_repo
         #: Group-conversation authority (v_37) — a deprovisioned member of a
         #: cross-household group leaves it instead of taking it down.
         self._groups: DmGroupService | None = None
@@ -2203,6 +2233,7 @@ class FederationInboundService(ProtectionGateMixin):
             space_id=space_id,
             correlation_id=correlation_id,
             filename=local,
+            sent=filename,
         )
         if scope == _NOT_ITS_FILE and await self._host_fills(
             event, space_id=space_id, correlation_id=correlation_id, filename=filename
@@ -2294,9 +2325,12 @@ class FederationInboundService(ProtectionGateMixin):
         correlation_id: str,
         filename: str,
         known_only: bool = False,
+        sent: str = "",
     ) -> str | None:
         """Why a blob stored as ``filename`` (this household's name for it)
         for ``correlation_id`` may not land in ``space_id``, or ``None``.
+        ``sent`` is the name the blob came under (``filename`` is bound to
+        its sender).
 
         Refused only on positive evidence: the correlated row (a post,
         gallery item, calendar event, or held moderation item) is known
@@ -2352,6 +2386,10 @@ class FederationInboundService(ProtectionGateMixin):
                 if event_space != space_id:
                     return _ROW_ELSEWHERE
                 return _scoped(filename == media_basename(event.cover_url))
+        if self._page_repo is not None:
+            page = await self._page_repo.get(correlation_id)
+            if page is not None:
+                return _page_scope(page, space_id, filename, sent, known_only)
         # A held submission's files (a new event's cover, an edit's new
         # cover or picture) — correlated by its moderation queue item.
         held = await self._space_repo.get_moderation_item(correlation_id)

@@ -8,7 +8,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 80
+    assert fc.OURS == 81
 
 
 def test_local_community_area_capability_threshold():
@@ -43,6 +43,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(59) == [
         "Names for a space's followers",
@@ -66,6 +67,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(60) == [
         "Names for new followers right away",
@@ -88,6 +90,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(61) == [
         "Public moments encrypted from the GFS",
@@ -109,6 +112,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(62) == [
         "Photos and videos in public moments",
@@ -129,6 +133,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(63) == [
         "Time-stamped public moments",
@@ -148,6 +153,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(64) == [
         "Choose how long followers keep your moments",
@@ -166,6 +172,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(65) == [
         "Deletes reach every copy of a moment",
@@ -183,6 +190,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(66) == [
         "Reactions reach authors further away",
@@ -199,6 +207,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(67) == [
         "Reactions reach authors you follow through a GFS",
@@ -214,6 +223,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(68) == [
         "Everyone sees the full reaction count",
@@ -228,6 +238,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(69) == [
         "A highlight taken away stays away",
@@ -241,6 +252,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(70) == [
         "Reporters in other households hear their report was reviewed",
@@ -253,6 +265,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(71) == [
         "Games end cleanly when the other household removes the app",
@@ -264,6 +277,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(72) == [
         "Offers reach sellers in other households",
@@ -274,6 +288,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(73) == [
         "Ask the seller about a listing",
@@ -283,6 +298,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(74) == [
         "Questions and answers on listings",
@@ -291,6 +307,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[59] == "local_communities"
 
@@ -329,6 +346,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(58) == [
         "Local communities",
@@ -353,6 +371,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[58] == "synced_picture_resets"
 
@@ -391,6 +410,7 @@ def test_multi_gfs_publish_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert "Posting to every GFS a space is listed on" not in (
         fc.features_missing_below(57)
@@ -433,6 +453,7 @@ def test_sync_series_rows_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[56] == "synced_recurring_events"
 
@@ -470,6 +491,7 @@ def test_space_chat_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(55) == [
         "Recurring events in space catch-up",
@@ -497,6 +519,7 @@ def test_space_chat_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.space_features_missing_below(54) == [
         "Chat in spaces",
@@ -506,6 +529,7 @@ def test_space_chat_capability_threshold():
         "Games in a space",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.space_feature_keys_missing_below(54) == [
         "space_chat",
@@ -515,6 +539,7 @@ def test_space_chat_capability_threshold():
         "space_app_tables",
         "space_gallery_item_edits",
         "space_media_refs",
+        "space_page_media",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[55] == "space_chat"
 
@@ -555,6 +580,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(54) == [
         "Chat in spaces",
@@ -583,6 +609,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
 
 
@@ -623,6 +650,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(53) == [
         "Turning on the GFS fallback for an existing connection",
@@ -652,6 +680,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
 
 
@@ -691,6 +720,7 @@ def test_forwarded_invite_link_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
 
 
@@ -717,6 +747,7 @@ def test_space_authority_rotation_capability_threshold():
         "Games in a space",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(45) == [
         "Catching up on missed security updates",
@@ -754,6 +785,7 @@ def test_space_authority_rotation_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -790,6 +822,7 @@ def test_space_authority_rotation_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
 
 
@@ -813,6 +846,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Games in a space",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -849,6 +883,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
 
 
@@ -871,6 +906,7 @@ def test_space_report_scope_capability_threshold():
         "Games in a space",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
 
 
@@ -897,6 +933,7 @@ def test_federated_moderation_capability_threshold():
         "Games in a space",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert "Reviewing posts from other households" not in fc.features_missing_below(43)
 
@@ -925,6 +962,7 @@ def test_content_access_enforcement_capability_threshold():
         "Games in a space",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert "Admin-only space features" not in fc.features_missing_below(42)
 
@@ -954,6 +992,7 @@ def test_space_moderator_role_capability_threshold():
         "Games in a space",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert "Space moderators" not in fc.features_missing_below(41)
 
@@ -984,6 +1023,7 @@ def test_task_priority_labels_capability_threshold():
         "Games in a space",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert "Task priority and labels" not in fc.features_missing_below(40)
 
@@ -1054,6 +1094,7 @@ def test_owner_bound_content_id_capability_threshold():
         "Games in a space",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
 
 
@@ -1086,6 +1127,7 @@ def test_moment_origin_signature_capability_threshold():
         "Games in a space",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
 
 
@@ -1394,6 +1436,7 @@ def test_forwarded_role_change_capability_threshold():
         "Games in a space",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(47) == [
         "Shared pages without lost edits",
@@ -1429,6 +1472,7 @@ def test_forwarded_role_change_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
 
 
@@ -1449,6 +1493,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Games in a space",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(48) == [
         "Members can post without the host",
@@ -1483,6 +1528,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
 
 
@@ -1526,6 +1572,7 @@ def test_member_gfs_publish_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
 
 
@@ -1568,6 +1615,7 @@ def test_strict_member_publish_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
 
 
@@ -1610,6 +1658,7 @@ def test_private_channels_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
 
 
@@ -1695,6 +1744,7 @@ _PINNED_FEATURE_KEYS = {
     78: "app_engines",
     79: "space_gallery_item_edits",
     80: "space_media_refs",
+    81: "space_page_media",
 }
 
 
@@ -1761,6 +1811,7 @@ def test_space_author_profile_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.space_feature_keys_missing_below(59) == [
         "follower_author_names",
@@ -1769,6 +1820,7 @@ def test_space_author_profile_capability_threshold():
         "space_app_tables",
         "space_gallery_item_edits",
         "space_media_refs",
+        "space_page_media",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[60] == "follower_author_names"
 
@@ -1803,6 +1855,7 @@ def test_follower_profile_bundle_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[61] == "follower_names_on_join"
 
@@ -1836,6 +1889,7 @@ def test_encrypted_public_moments_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[62] == "encrypted_public_moments"
 
@@ -1867,6 +1921,7 @@ def test_encrypted_moment_media_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[63] == "public_moment_media"
 
@@ -1908,6 +1963,7 @@ def test_long_lived_moments_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[65] == "follower_moment_retention"
 
@@ -1976,6 +2032,7 @@ def test_moment_reaction_counts_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[69] == "moment_reaction_counts"
 
@@ -2002,6 +2059,7 @@ def test_highlight_audience_change_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[70] == "highlight_audience_change"
 
@@ -2026,6 +2084,7 @@ def test_remote_report_answer_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(71) == [
         "Games end cleanly when the other household removes the app",
@@ -2037,6 +2096,7 @@ def test_remote_report_answer_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(72) == [
         "Offers reach sellers in other households",
@@ -2047,6 +2107,7 @@ def test_remote_report_answer_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(73) == [
         "Ask the seller about a listing",
@@ -2056,6 +2117,7 @@ def test_remote_report_answer_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(74) == [
         "Questions and answers on listings",
@@ -2064,6 +2126,7 @@ def test_remote_report_answer_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[71] == "remote_report_answers"
 
@@ -2082,6 +2145,7 @@ def test_app_session_ended_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[72] == "app_games_end_on_uninstall"
     assert 72 not in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -2102,6 +2166,7 @@ def test_bazaar_offers_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[73] == "bazaar_offers"
     assert 73 in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -2111,6 +2176,7 @@ def test_bazaar_offers_capability_threshold():
         "space_app_tables",
         "space_gallery_item_edits",
         "space_media_refs",
+        "space_page_media",
     ]
 
 
@@ -2128,6 +2194,7 @@ def test_bazaar_thread_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(74) == [
         "Questions and answers on listings",
@@ -2136,6 +2203,7 @@ def test_bazaar_thread_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[74] == "bazaar_ask_the_seller"
     assert 74 not in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -2154,6 +2222,7 @@ def test_bazaar_faq_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(75) == [
         "Games for groups of players",
@@ -2161,6 +2230,7 @@ def test_bazaar_faq_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[75] == "bazaar_listing_faq"
     assert 75 in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -2169,6 +2239,7 @@ def test_bazaar_faq_capability_threshold():
         "space_app_tables",
         "space_gallery_item_edits",
         "space_media_refs",
+        "space_page_media",
     ]
 
 
@@ -2184,12 +2255,14 @@ def test_app_groups_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(76) == [
         "Games in a space",
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[76] == "app_groups"
     assert 76 not in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -2206,11 +2279,13 @@ def test_space_app_tables_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(77) == [
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.FederationCapability.MIN_FOR_SPACE_APP_TABLES in (
         fc.SPACE_SCOPED_MIN_VERSIONS
@@ -2219,6 +2294,7 @@ def test_space_app_tables_capability_threshold():
         "space_app_tables",
         "space_gallery_item_edits",
         "space_media_refs",
+        "space_page_media",
     ]
 
 
@@ -2232,16 +2308,19 @@ def test_app_draw_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.features_missing_below(78) == [
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[78] == "app_engines"
     assert 78 not in fc.SPACE_SCOPED_MIN_VERSIONS
     assert fc.space_feature_keys_missing_below(77) == [
         "space_gallery_item_edits",
         "space_media_refs",
+        "space_page_media",
     ]
 
 
@@ -2253,16 +2332,22 @@ def test_space_gallery_item_edit_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT == 79
     assert fc.OURS >= fc.FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT
     assert fc.features_missing_below(79) == [
-        "Pictures in a space for members who joined by link"
+        "Pictures in a space for members who joined by link",
+        "Pictures in a space's pages",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[79] == "space_gallery_item_edits"
     assert 79 in fc.SPACE_SCOPED_MIN_VERSIONS
     assert fc.space_feature_keys_missing_below(78) == [
         "space_gallery_item_edits",
         "space_media_refs",
+        "space_page_media",
     ]
-    assert fc.space_feature_keys_missing_below(79) == ["space_media_refs"]
-    assert fc.space_feature_keys_missing_below(80) == []
+    assert fc.space_feature_keys_missing_below(79) == [
+        "space_media_refs",
+        "space_page_media",
+    ]
+    assert fc.space_feature_keys_missing_below(80) == ["space_page_media"]
+    assert fc.space_feature_keys_missing_below(81) == []
 
 
 def test_space_media_refs_capability_threshold():
@@ -2280,3 +2365,18 @@ def test_space_media_refs_capability_threshold():
     assert label in fc.features_missing_below(79)
     assert label not in fc.features_missing_below(80)
     assert fc.CAPABILITY_FEATURE_KEYS[80] == "space_media_refs"
+
+
+def test_page_media_capability_threshold():
+    """v_81 — a space page's files (cover, body pictures) ship with the
+    host's versions to v_81 member households (and as ``media_refs`` to a
+    link-joined one), a proposer ships a draft's new files to a v_81 host,
+    and the host's catch-up ships them (sync line 81). Space-scoped: a
+    behind member household sees the pages without those pictures."""
+    assert fc.FederationCapability.MIN_FOR_PAGE_MEDIA == 81
+    assert fc.FederationCapability.MIN_FOR_PAGE_MEDIA <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_PAGE_MEDIA in fc.SPACE_SCOPED_MIN_VERSIONS
+    label = "Pictures in a space's pages"
+    assert label in fc.features_missing_below(80)
+    assert label not in fc.features_missing_below(81)
+    assert fc.CAPABILITY_FEATURE_KEYS[81] == "space_page_media"

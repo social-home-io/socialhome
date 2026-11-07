@@ -56,6 +56,7 @@ from socialhome.federation.inbound_validator import (
 )
 from socialhome.federation.sync.space.exporters.pages import PagesExporter
 from socialhome.services import page_conflict_service
+from socialhome.services.inbound_media_store import space_direct_media_name
 
 pytestmark = pytest.mark.security
 
@@ -482,7 +483,9 @@ async def test_p4_a_cover_change_converges_live_and_by_sync(mesh):
     assert await _cover(b, pid) == "/api/media/new.webp"
     await _sync_from_host(mesh, a, await _host_chunk(mesh, pid))
     assert await _cover(a, pid) == "/api/media/new.webp"
-    # A member's cover change goes through the host too.
+    # A member's cover change goes through the host too. Its new file takes
+    # the member household's name on the host (v_81: only that household,
+    # or the host, can fill it) and every household converges on it.
     r = await a.tc.patch(
         f"/api/spaces/{SID}/pages/{pid}",
         json={"cover_image_url": "/api/media/anna.webp"},
@@ -490,8 +493,9 @@ async def test_p4_a_cover_change_converges_live_and_by_sync(mesh):
     )
     assert r.status == 200, await r.text()
     await _pump(mesh)
+    anna = space_direct_media_name(SID, a.iid, "anna.webp")
     for house in mesh.values():
-        assert await _cover(house, pid) == "/api/media/anna.webp", house.name
+        assert await _cover(house, pid) == f"/api/media/{anna}", house.name
 
 
 # ── P5: one side per user; the host's edit merges; one resolution ────────

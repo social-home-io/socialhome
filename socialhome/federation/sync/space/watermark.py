@@ -113,7 +113,13 @@ SYNC_VERSION_HISTORY_THROUGH: int = 64
 #:   (where its pictures live in a GFS media cache), which a v_80 receiver
 #:   stores and fetches. A household crossing it gets one full stream, so
 #:   the pictures of content it was sent while older reach it.
-SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80)
+#: * 81 — the host's catch-up ships its pages' files (cover, body pictures)
+#:   to a v_81 requester, and a ``pages`` record streamed to a link-joined
+#:   v_81 member carries ``media_refs`` (kept under the names the page
+#:   shows) — a gate in ``provider._exporter_for``. A household crossing it
+#:   gets one full stream, so the pictures of pages it was sent while older
+#:   reach it.
+SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 81)
 
 
 def sync_version_bucket(peer_version: int) -> int:

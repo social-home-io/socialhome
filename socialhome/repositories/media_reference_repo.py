@@ -29,6 +29,9 @@ noted:
   * ``moments.media_url``
   * ``calendar_events.cover_url`` / ``space_calendar_events.cover_url``
   * ``pages`` / ``space_pages`` / ``page_edit_history`` ``.cover_image_url``
+    and every picture their markdown ``content`` shows (``api/media/<file>``,
+    never the same path inside another URL); an open conflict side's
+    ``space_page_snapshots.body``
   * ``task_attachments.url``
   * ``post_drafts.media_url``
   * ``feed_posts`` / ``space_posts`` ``.link_preview_json`` → ``$.thumbnail_url``
@@ -57,6 +60,7 @@ import orjson
 
 from ..db import AsyncDatabase
 from ..domain.media_constraints import SPACE_DIRECT_MEDIA_PREFIX
+from ..domain.space_media_ref import page_body_media_refs
 from ..media.cleanup import media_basename
 from .base import rows_to_dicts
 
@@ -111,6 +115,16 @@ _HELD_LIVE = (
 #: ``api/media/<file>`` inside a free-form JSON payload.
 _PAYLOAD_SCANS: tuple[tuple[str, str, str], ...] = (
     ("space_moderation_queue", "payload_json", _HELD_LIVE),
+    # An open conflict side of a space page (its body, JSON-encoded).
+    ("space_page_snapshots", "body", ""),
+)
+
+#: ``(table, markdown column)`` whose pictures (:func:`page_body_media_refs`)
+#: are references: a page's body, and each version in its history.
+_MARKDOWN_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("pages", "content"),
+    ("space_pages", "content"),
+    ("page_edit_history", "content"),
 )
 _MEDIA_REF_RE = re.compile(r"api/media/([A-Za-z0-9._-]+)")
 
@@ -181,11 +195,21 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ("calendar_events", "cover_url", "one", _HOUSEHOLD),
     ("space_calendar_events", "cover_url", "one", _SEAT.format(col="t.space_id")),
     ("pages", "cover_image_url", "one", _HOUSEHOLD),
+    ("pages", "content", "markdown", _HOUSEHOLD),
     ("space_pages", "cover_image_url", "one", _SEAT.format(col="t.space_id")),
+    ("space_pages", "content", "markdown", _SEAT.format(col="t.space_id")),
     (
         "page_edit_history",
         "cover_image_url",
         "one",
+        f"((t.space_id IS NULL AND {_HOUSEHOLD}) OR "
+        + _SEAT.format(col="t.space_id")
+        + ")",
+    ),
+    (
+        "page_edit_history",
+        "content",
+        "markdown",
         f"((t.space_id IS NULL AND {_HOUSEHOLD}) OR "
         + _SEAT.format(col="t.space_id")
         + ")",
@@ -252,6 +276,26 @@ def _names_in_payload(raw: object) -> set[str]:
     if not isinstance(raw, str) or not raw:
         return set()
     return {name for name in _MEDIA_REF_RE.findall(raw) if name not in (".", "..")}
+
+
+def _names_in_markdown(raw: object) -> set[str]:
+    """The files a page body shows (:func:`page_body_media_refs`)."""
+    return {
+        name
+        for name in (media_basename(ref) for ref in page_body_media_refs(raw))
+        if name and name not in (".", "..")
+    }
+
+
+def _hit(shape: str, raw: object, basename: str) -> bool:
+    """Does the value *raw* of a column of *shape* reference *basename*?"""
+    if shape == "list":
+        return basename in _names_in_list(raw)
+    if shape == "payload":
+        return basename in _names_in_payload(raw)
+    if shape == "markdown":
+        return basename in _names_in_markdown(raw)
+    return media_basename(raw if isinstance(raw, str) else None) == basename
 
 
 def _like_escape(value: str) -> str:
@@ -332,11 +376,18 @@ class SqliteMediaReferenceRepo:
                 if name:
                     out.add(name)
         for table, col, live in _PAYLOAD_SCANS:
+            where = f"{col} IS NOT NULL" + (f" AND {live}" if live else "")
             rows = await self._db.fetchall(
-                f"SELECT {col} AS v FROM {table} WHERE {col} IS NOT NULL AND {live}"
+                f"SELECT {col} AS v FROM {table} WHERE {where}"
             )
             for r in rows_to_dicts(rows):
                 out.update(_names_in_payload(r.get("v")))
+        for table, col in _MARKDOWN_COLUMNS:
+            rows = await self._db.fetchall(
+                f"SELECT {col} AS v FROM {table} WHERE {col} LIKE '%api/media/%'"
+            )
+            for r in rows_to_dicts(rows):
+                out.update(_names_in_markdown(r.get("v")))
         return out
 
     async def may_reference(self, basename: str, user_id: str) -> bool:
@@ -371,14 +422,7 @@ class SqliteMediaReferenceRepo:
                 (*me, pattern),
             )
             for r in rows_to_dicts(rows):
-                raw = r.get("v")
-                if shape == "list":
-                    hit = basename in _names_in_list(raw)
-                elif shape == "payload":
-                    hit = basename in _names_in_payload(raw)
-                else:
-                    hit = media_basename(raw) == basename
-                if hit:
+                if _hit(shape, r.get("v"), basename):
                     referenced = True
                     allowed = allowed or bool(r.get("ok"))
             if allowed:
@@ -444,14 +488,7 @@ class SqliteMediaReferenceRepo:
                 (pattern,),
             )
             for r in rows_to_dicts(rows):
-                raw = r.get("v")
-                if shape == "list":
-                    hit = basename in _names_in_list(raw)
-                elif shape == "payload":
-                    hit = basename in _names_in_payload(raw)
-                else:
-                    hit = media_basename(raw) == basename
-                if not hit:
+                if not _hit(shape, r.get("v"), basename):
                     continue
                 if r.get("s") != space_id:
                     if col == "link_preview_json":
@@ -499,11 +536,17 @@ class SqliteMediaReferenceRepo:
             if any(media_basename(r["v"]) == basename for r in rows):
                 return True
         for table, col, live in _PAYLOAD_SCANS:
+            where = f"{col} LIKE ? ESCAPE '\\'" + (f" AND {live}" if live else "")
             rows = await self._db.fetchall(
-                f"SELECT {col} AS v FROM {table} "
-                f"WHERE {col} LIKE ? ESCAPE '\\' AND {live}",
-                (pattern,),
+                f"SELECT {col} AS v FROM {table} WHERE {where}", (pattern,)
             )
             if any(basename in _names_in_payload(r["v"]) for r in rows):
+                return True
+        for table, col in _MARKDOWN_COLUMNS:
+            rows = await self._db.fetchall(
+                f"SELECT {col} AS v FROM {table} WHERE {col} LIKE ? ESCAPE '\\'",
+                (pattern,),
+            )
+            if any(basename in _names_in_markdown(r["v"]) for r in rows):
                 return True
         return False

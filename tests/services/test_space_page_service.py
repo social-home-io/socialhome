@@ -320,6 +320,62 @@ async def test_a_reviewed_pages_cover_and_pictures_are_released(env):
     assert "api/media/in-page.webp" in page.content
 
 
+async def test_an_edit_rechecks_only_the_files_the_page_does_not_show(env):
+    """An edit repeats the pictures the page shows already (a body patch
+    carries the whole body): those are the page's own, re-published to the
+    same space — only a file the edit adds is checked for its writer. A
+    remote member's reviewed edit keeping another member's picture is
+    released (a held item naming it is someone else's)."""
+    mod = await _moderated(env)
+    guard = MediaRefGuard(SqliteMediaReferenceRepo(env.db))
+    page = await env.svc.create(
+        "sp-a",
+        actor_user_id="u-owner",
+        title="T",
+        content="![k](api/media/kept.webp)",
+        cover_image_url="api/media/cover.webp",
+    )
+    env.svc.attach_media_guard(guard)
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?, ?, ?)",
+        ("mia", "u-member", "Mia"),
+    )
+    # Another submitter's held item names the page's picture too.
+    await env.db.enqueue(
+        "INSERT INTO space_moderation_queue(id, space_id, feature, action,"
+        " submitted_by, payload_json, submitted_at, expires_at, status)"
+        " VALUES('other', 'sp-a', 'posts', 'create', 'u-x',"
+        " '{\"media_url\": \"api/media/kept.webp\"}', datetime('now'),"
+        " datetime('now', '+1 day'), 'pending')"
+    )
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await env.svc.update(
+            "sp-a",
+            page.id,
+            actor_user_id="u-member",
+            content="![k](api/media/kept.webp) ![n](api/media/new.webp)",
+            cover_image_url="api/media/cover.webp",
+        )
+    await mod.approve("sp-a", exc.value.item.id, actor_user_id="u-mod")
+    got = await env.svc.get("sp-a", page.id)
+    assert "api/media/new.webp" in got.content
+    # A file another row shows that the page does not is still refused.
+    await env.db.enqueue(
+        "INSERT INTO space_moderation_queue(id, space_id, feature, action,"
+        " submitted_by, payload_json, submitted_at, expires_at, status)"
+        " VALUES('other2', 'sp-a', 'posts', 'create', 'u-x',"
+        " '{\"media_url\": \"api/media/theirs.webp\"}', datetime('now'),"
+        " datetime('now', '+1 day'), 'pending')"
+    )
+    with pytest.raises(InvalidMediaRefError):
+        await env.svc.update(
+            "sp-a",
+            page.id,
+            actor_user_id="u-owner",
+            content="![t](api/media/theirs.webp)",
+        )
+
+
 async def test_moderated_own_edit_proceeds_others_queues(env):
 
     mod = await _moderated(env)

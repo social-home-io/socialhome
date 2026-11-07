@@ -550,3 +550,101 @@ async def test_a_held_post_edit_sends_only_the_pictures_it_changes():
     )
     await out.send_submitted(SPACE, item, ["host"])
     assert [c["media_urls"] for c in media.calls] == [["api/media/new.webp"]]
+
+
+@pytest.mark.parametrize("reserved", ["dm-x.webp", "gm-x.webp", "sg-x.webp"])
+def test_a_page_submission_never_keeps_a_reserved_file(reserved):
+    """A page cover or body picture naming a file another receiving path owns
+    (a DM attachment, GFS moment media, a GFS reader copy) is dropped from a
+    remote submission — it would show, and re-publish, someone else's file."""
+    body = f"keep ![a](api/media/ok.webp) drop ![r](api/media/{reserved}) end"
+    out = sanitize_remote_payload(
+        "pages",
+        {
+            "title": "T",
+            "content": body,
+            "cover_image_url": f"api/media/{reserved}",
+        },
+    )
+    assert out["cover_image_url"] is None
+    assert out["content"] == "keep ![a](api/media/ok.webp) drop ![r]() end"
+    edit = sanitize_remote_payload(
+        "pages",
+        {
+            "patch": {
+                "cover_image_url": f"/api/media/{reserved}",
+                "content": f"![r](/api/media/{reserved}?exp=1)",
+            }
+        },
+    )
+    assert edit["patch"] == {"cover_image_url": None, "content": "![r]()"}
+    merged = sanitize_remote_payload(
+        "pages",
+        {"op": "resolve_conflict", "merged_content": f"![r](api/media/{reserved})"},
+    )
+    assert merged["merged_content"] == "![r]()"
+    # A space file a household delivered (``sd-``) is a space file: kept,
+    # and renamed to the submitting household's copy at admission.
+    sd = sanitize_remote_payload("pages", {"cover_image_url": "api/media/sd-x.webp"})
+    assert sd["cover_image_url"] == "api/media/sd-x.webp"
+
+
+@pytest.mark.parametrize("reserved", ["dm-x.webp", "gm-x.webp", "sg-x.webp"])
+def test_a_post_or_event_submission_never_keeps_a_reserved_file(reserved):
+    """The same rule for a post's files and an event's cover (kept byte for
+    byte otherwise: an author's signed copy covers them)."""
+    ref = f"api/media/{reserved}"
+    post = sanitize_remote_payload(
+        "posts",
+        {
+            "media_url": ref,
+            "image_urls": [ref, "/api/media/ok.webp"],
+            "file_meta": {"url": ref},
+            "link_preview": {"url": "https://x.example", "thumbnail_url": ref},
+            "attachments": {"bazaar": {"image_urls": [ref]}},
+        },
+    )
+    assert post["media_url"] is None
+    assert post["image_urls"] == ["/api/media/ok.webp"]
+    assert post["file_meta"] is None
+    assert post["link_preview"]["thumbnail_url"] is None
+    assert post["attachments"]["bazaar"]["image_urls"] == []
+    event = sanitize_remote_payload("calendar", {"cover_url": ref})
+    assert event["cover_url"] is None
+    edit = sanitize_remote_payload("calendar", {"patch": {"cover_url": ref}})
+    assert edit["patch"]["cover_url"] is None
+
+
+async def test_a_held_pages_cover_and_body_pictures_go_to_the_reviewers():
+    """A held page brings its cover and body pictures to the reviewer
+    households; an edit only the files the page does not show yet."""
+    media = _Media()
+    out, _ = _fed(media=media)
+    create = _item(
+        "pages",
+        {
+            "entity": "page",
+            "target_id": "pg-1",
+            "title": "T",
+            "content": "![a](api/media/a.webp) ![b](api/media/b.webp)",
+            "cover_image_url": "api/media/c.webp",
+        },
+    )
+    await out.send_submitted(SPACE, create, ["host"])
+    edit = dataclasses.replace(
+        _item(
+            "pages",
+            {
+                "entity": "page",
+                "target_id": "pg-1",
+                "patch": {"content": "![a](api/media/a.webp) ![n](api/media/n.webp)"},
+            },
+        ),
+        action="edit",
+        current_snapshot='{"content": "![a](api/media/a.webp)"}',
+    )
+    await out.send_submitted(SPACE, edit, ["host"])
+    assert [c["media_urls"] for c in media.calls] == [
+        ["api/media/c.webp", "api/media/a.webp", "api/media/b.webp"],
+        ["api/media/n.webp"],
+    ]

@@ -2158,3 +2158,114 @@ async def test_no_catchup_byte_push_to_a_link_joined_requester(encoder):
         svc._federation = fed
         await svc.stream_initial(_FakeSession(requester=requester))
         assert media_sync.enqueue_for_blob.await_count == (1 if pushed else 0)
+
+
+# ── v_81 — a space page's files in the catch-up ─────────────────────────
+
+
+@dataclass
+class _Page:
+    id: str
+    content: str = ""
+    cover_image_url: str | None = None
+
+
+class _PageRepo:
+    def __init__(self, pages):
+        self.pages = pages
+
+    async def list(self, *, space_id=None, since_seq=None):
+        return list(self.pages) if space_id == "sp-1" else []
+
+
+class _VersionFed:
+    def __init__(self, versions):
+        self.versions = versions
+
+    async def is_space_session_peer(self, iid):
+        return False
+
+    async def space_member_supports(self, iid, *, min_version):
+        return self.versions.get(iid, 0) >= min_version
+
+    async def space_member_version(self, iid):
+        return self.versions.get(iid, 0)
+
+    async def peer_supports(self, iid, *, min_version):
+        return self.versions.get(iid, 0) >= min_version
+
+
+_PAGES = [
+    _Page("pg-1", "![a](api/media/a.webp) ![b](/api/media/b.webp)", "api/media/c.webp"),
+    _Page("pg-2", "no pictures"),
+]
+
+
+def _page_provider(encoder, *, hosting=True, versions=None, exporters=None):
+    media_sync = AsyncMock()
+    media_sync.enqueue_for_blob = AsyncMock()
+    svc = SpaceSyncService(
+        builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
+        exporters=exporters or {},
+        sig_suite="ed25519",
+        media_sync=media_sync,
+    )
+    svc._federation = _VersionFed(versions or {"peer-new": 81, "peer-old": 80})
+
+    async def _hosts(space_id):
+        return hosting
+
+    svc.attach_pages(_PageRepo(_PAGES), hosts=_hosts)
+    return svc, media_sync
+
+
+async def test_the_hosts_catchup_ships_every_pages_files(encoder):
+    """A newcomer catching up from the host gets each page's cover and body
+    pictures — the page records carry only their references."""
+    svc, media_sync = _page_provider(encoder)
+    await svc.stream_initial(_FakeSession(requester="peer-new"))
+    calls = [c.kwargs for c in media_sync.enqueue_for_blob.call_args_list]
+    assert [(c["correlation_id"], c["media_urls"]) for c in calls] == [
+        ("pg-1", ["api/media/c.webp", "api/media/a.webp", "/api/media/b.webp"])
+    ]
+    assert calls[0]["target_instance_ids"] == ["peer-new"]
+
+
+@pytest.mark.parametrize(
+    ("hosting", "requester"), [(False, "peer-new"), (True, "peer-old")]
+)
+async def test_page_files_come_only_from_the_host_to_v81(encoder, hosting, requester):
+    """Only the host fills a page's names on the receiver; a household below
+    v_81 would keep them under names its page never shows."""
+    svc, media_sync = _page_provider(encoder, hosting=hosting)
+    await svc.stream_initial(_FakeSession(requester=requester))
+    assert media_sync.enqueue_for_blob.call_args_list == []
+
+
+async def test_a_link_joined_v81_requesters_page_records_carry_media_refs(encoder):
+    uploader = _ReaderUploader(readers=("peer-e", "peer-e80"))
+    exporters = {
+        "pages": _FakeExporter(
+            "pages",
+            [
+                {
+                    "id": "pg-1",
+                    "title": "T",
+                    "content": "![a](api/media/a.webp)",
+                    "cover_image_url": "api/media/c.webp",
+                }
+            ],
+        )
+    }
+    svc, _media = _page_provider(
+        encoder, versions={"peer-e": 81, "peer-e80": 80}, exporters=exporters
+    )
+    svc.attach_media_gfs(uploader)
+    session = _FakeSession(requester="peer-e")
+    await svc.stream_initial(session)
+    (page,) = _streamed_records(session, "pages")
+    assert set(page["media_refs"]) == {"c.webp", "a.webp"}
+    assert uploader.items == ["pg-1"]
+    old = _FakeSession(requester="peer-e80")
+    await svc.stream_initial(old)
+    assert all("media_refs" not in r for r in _streamed_records(old, "pages"))

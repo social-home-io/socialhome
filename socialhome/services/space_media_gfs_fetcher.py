@@ -26,6 +26,13 @@ This service:
   ``GET /api/media/{filename}`` for a missing file): concurrent requests for
   one file share one fetch, bounded by a timeout.
 
+A space page's files (v_81) are the exception to the reader name: every
+household keeps the host's version of a page byte for byte (its hash is
+the version's identity), so a page's file keeps the name the page shows
+(:meth:`SpaceMediaGfsFetcher.localize_as_shown`, only for the host's
+version) and is fetched under it only while a page of that space, the item
+the row is bound to, still shows it (:meth:`attach_pages`).
+
 A fetch reads ``GET /gfs/media/{blob_id}`` (anonymous) from the GFS
 this household reaches the space through — the link-joined pair's
 ``relay_via`` first, then its own GFS connections — checks that the blob
@@ -59,6 +66,7 @@ from ..domain.gfs_space_media import SCOPE_CHANNEL, SCOPE_SPACE, space_media_add
 from ..domain.space_media_ref import (
     SpaceMediaLocalization,
     SpaceMediaRef,
+    page_media_urls,
     parse_media_refs,
 )
 from ..space_media_seal import (
@@ -79,6 +87,7 @@ if TYPE_CHECKING:
     from ..domain.federation import GfsConnection
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
+    from ..repositories.page_repo import AbstractPageRepo
     from ..repositories.space_media_ref_repo import AbstractSpaceMediaRefRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from .gfs_connection_service import GfsConnectionService
@@ -145,6 +154,7 @@ class SpaceMediaGfsFetcher:
         "_gfs_repo",
         "_inflight",
         "_misses",
+        "_pages",
         "_prefetch_by_space",
         "_prefetch_pending",
         "_prefetch_sem",
@@ -186,6 +196,13 @@ class SpaceMediaGfsFetcher:
         self._misses: OrderedDict[str, float] = OrderedDict()
         #: space → prefetches in a row that found their blob nowhere.
         self._space_misses: OrderedDict[str, int] = OrderedDict()
+        #: v_81 — a page file kept under the name its page shows.
+        self._pages: AbstractPageRepo | None = None
+
+    def attach_pages(self, page_repo: AbstractPageRepo) -> None:
+        """Wire the space pages (v_81): a page's file keeps the name the
+        page shows, and is fetched only while that page shows it."""
+        self._pages = page_repo
 
     # ── Descriptors ──────────────────────────────────────────────────────
 
@@ -263,6 +280,61 @@ class SpaceMediaGfsFetcher:
             return empty
         return SpaceMediaLocalization(names=names, refs=tuple(refs))
 
+    def localize_as_shown(
+        self,
+        space_id: str,
+        raw_refs: object,
+        media_urls: Iterable[str | None],
+        *,
+        item_id: str,
+        origin: str,
+    ) -> SpaceMediaLocalization:
+        """v_81 — the rows for a space page's files, each kept under the
+        name the page shows (``local_name`` = the file name; the page is
+        never rewritten). Only for the host's version of page *item_id*:
+        the CALLER authenticated *origin* as the space's host. A reserved
+        name is never kept; a row is bound to the page (write-once, like
+        any row). Never raises."""
+        if not item_id or not origin or self._pages is None:
+            return SpaceMediaLocalization()
+        allowed = {
+            name for name in media_names(media_urls) if not is_reserved_media_name(name)
+        }
+        if not allowed:
+            return SpaceMediaLocalization()
+        try:
+            refs = tuple(
+                replace(ref, local_name=ref.filename)
+                for ref in parse_media_refs(
+                    raw_refs,
+                    space_id=space_id,
+                    allowed=allowed,
+                    item_id=item_id,
+                    origin=origin,
+                )
+            )
+        except Exception:
+            log.warning(
+                "space media refs of page %s in space %s not read",
+                item_id,
+                space_id,
+                exc_info=True,
+            )
+            return SpaceMediaLocalization()
+        return SpaceMediaLocalization(refs=refs)
+
+    async def _shown_by_its_page(self, ref: SpaceMediaRef) -> bool:
+        """Whether *ref* (a row kept under its own file name) belongs to a
+        live page of its space that shows that file."""
+        if self._pages is None or ref.local_name != ref.filename:
+            return False
+        page = await self._pages.get_space_page(ref.item_id, space_id=ref.space_id)
+        if page is None:
+            return False
+        return ref.filename in media_names(
+            page_media_urls(page.cover_image_url, page.content)
+        )
+
     async def has_item_refs(self, space_id: str, item_id: str) -> bool:
         """Whether item *item_id* of *space_id* has any ``space_media_refs``
         row here (the follower heal is add-only: it never touches an item
@@ -305,9 +377,14 @@ class SpaceMediaGfsFetcher:
             return False
         if await aiofiles.os.path.isfile(path):
             return True
-        if not is_gfs_space_media_name(filename):
+        if not is_gfs_space_media_name(filename) and (
+            self._pages is None
+            or is_reserved_media_name(filename)
+            or await self._refs.get(filename) is None
+        ):
             # A file another household pushes (or a local one) that is not
-            # here yet: routine for a viewer, never a GFS fetch.
+            # here yet: routine for a viewer, never a GFS fetch — unless a
+            # page's row names it (v_81, checked in :meth:`_fetch`).
             return False
         if self._misses.get(filename, 0.0) > _monotonic():
             return False  # no GFS held it a moment ago: don't ask them all again
@@ -405,14 +482,18 @@ class SpaceMediaGfsFetcher:
         """One fetch: ``stored`` (the file is here now), ``miss`` (no GFS
         holds the blob — yet) or ``refused`` (anything else: unknown
         suite, no key, wrong hash, failed decrypt — not worth retrying)."""
-        if not is_gfs_space_media_name(filename):
-            log.warning(
-                "space media %s: not a GFS space media name — never fetched", filename
-            )
-            return _REFUSED
         ref = await self._refs.get(filename)
         path = media_file_path(self._dir, filename)
         if ref is None or path is None:
+            return _REFUSED
+        if not is_gfs_space_media_name(filename) and (
+            is_reserved_media_name(filename) or not await self._shown_by_its_page(ref)
+        ):
+            log.warning(
+                "space media %s: neither a GFS space media name nor a file its "
+                "page shows — never fetched",
+                filename,
+            )
             return _REFUSED
         if await aiofiles.os.path.isfile(path):
             return _STORED

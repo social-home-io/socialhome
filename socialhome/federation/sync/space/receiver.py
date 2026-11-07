@@ -85,6 +85,7 @@ from ....domain.space import (
 from ....domain.space_media_ref import (
     MEDIA_REFS_FIELD,
     SpaceMediaLocalization,
+    page_media_urls,
     post_media_urls,
 )
 from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
@@ -478,6 +479,16 @@ class _GfsMediaSink(Protocol):
     fetcher: names the record's files for this household, keeps the rows."""
 
     async def localize(
+        self,
+        space_id: str,
+        raw_refs: object,
+        media_urls: list[str],
+        *,
+        item_id: str,
+        origin: str,
+    ) -> SpaceMediaLocalization: ...
+
+    def localize_as_shown(
         self,
         space_id: str,
         raw_refs: object,
@@ -2712,6 +2723,18 @@ class SpaceSyncReceiver:
                 )
                 return True
             await engine.mirror(space_id=space_id, page_id=page.id, version=version)
+            if self._gfs_media is not None and version.has_state:
+                # v_81: a link-joined requester keeps the page's files
+                # under the names the page shows (sync line 81).
+                await self._keep_media(
+                    self._gfs_media.localize_as_shown(
+                        space_id,
+                        r.get(MEDIA_REFS_FIELD),
+                        page_media_urls(version.cover_image_url, version.content),
+                        item_id=page.id,
+                        origin=provider,
+                    )
+                )
             return True
         if mode is PageMode.LEGACY:
             return False

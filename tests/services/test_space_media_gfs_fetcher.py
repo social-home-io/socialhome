@@ -896,3 +896,95 @@ async def test_has_item_refs(tmp_path):
     await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
     assert await f.has_item_refs(SPACE, ITEM) is True
     assert await f.has_item_refs(SPACE, "post-9") is False
+
+
+# ── v_81: a page's files keep the names the page shows ──────────────────
+
+PAGE = "pg-1"
+SHOWN = "sd-" + "1" * 40 + ".webp"
+
+
+@dataclass
+class _Page:
+    content: str
+    cover_image_url: str | None = None
+
+
+class _Pages:
+    def __init__(self) -> None:
+        self.pages: dict[tuple[str, str], _Page] = {}
+
+    async def get_space_page(self, page_id, *, space_id):
+        return self.pages.get((space_id, page_id))
+
+
+def _page_fetcher(tmp_path, gfs):
+    f = _fetcher(tmp_path, gfs)
+    pages = _Pages()
+    f.attach_pages(pages)
+    return f, pages
+
+
+async def _keep_page(f, raw, urls):
+    loc = f.localize_as_shown(SPACE, raw, urls, item_id=PAGE, origin=ORIGIN)
+    return await f.keep(loc, prefetch=False)
+
+
+async def test_a_pages_file_is_kept_and_fetched_under_the_name_it_shows(tmp_path):
+    """The page is the host's version byte for byte: its files keep their
+    names (no ``sg-`` rewrite) and are fetched under them while the page
+    shows them — a cover and a body picture alike."""
+    data = b"page picture"
+    blob = _blob(SHOWN, data, item_id=PAGE)
+    host_pic = _blob("h.webp", b"host's own", item_id=PAGE)
+    gfs = _Gfs({_addr(blob): blob, _addr(host_pic): host_pic})
+    f, pages = _page_fetcher(tmp_path, gfs)
+    pages.pages[(SPACE, PAGE)] = _Page(
+        content="![h](api/media/h.webp)", cover_image_url=f"api/media/{SHOWN}"
+    )
+    rows = await _keep_page(
+        f,
+        {**_wire(SHOWN, blob), **_wire("h.webp", host_pic)},
+        [f"api/media/{SHOWN}", "api/media/h.webp"],
+    )
+    assert {(r.local_name, r.filename, r.item_id) for r in rows} == {
+        (SHOWN, SHOWN, PAGE),
+        ("h.webp", "h.webp", PAGE),
+    }
+    assert await f.ensure_local(SHOWN) is True
+    assert await f.ensure_local("h.webp") is True
+    assert (tmp_path / SHOWN).read_bytes() == data
+    assert (tmp_path / "h.webp").read_bytes() == b"host's own"
+
+
+async def test_a_page_file_its_page_no_longer_shows_is_never_fetched(tmp_path):
+    blob = _blob(SHOWN, b"x", item_id=PAGE)
+    gfs = _Gfs({_addr(blob): blob})
+    f, pages = _page_fetcher(tmp_path, gfs)
+    await _keep_page(f, _wire(SHOWN, blob), [f"api/media/{SHOWN}"])
+    # No page at all, then a page that shows something else.
+    assert await f.ensure_local(SHOWN) is False
+    pages.pages[(SPACE, PAGE)] = _Page(content="no pictures")
+    assert await f.ensure_local(SHOWN) is False
+    assert gfs.fetches == []
+
+
+async def test_a_page_descriptor_never_names_a_reserved_or_unshown_file(tmp_path):
+    blob = _blob("dm-x.webp", b"x", item_id=PAGE)
+    f, _pages = _page_fetcher(tmp_path, _Gfs({_addr(blob): blob}))
+    rows = await _keep_page(
+        f,
+        {**_wire("dm-x.webp", blob), **_wire("other.webp", blob)},
+        ["api/media/dm-x.webp"],
+    )
+    assert rows == []
+    assert await f.ensure_local("dm-x.webp") is False
+
+
+async def test_without_pages_attached_a_page_row_is_never_kept(tmp_path):
+    blob = _blob(SHOWN, b"x", item_id=PAGE)
+    f = _fetcher(tmp_path, _Gfs({_addr(blob): blob}))
+    loc = f.localize_as_shown(
+        SPACE, _wire(SHOWN, blob), [f"api/media/{SHOWN}"], item_id=PAGE, origin=ORIGIN
+    )
+    assert loc.refs == ()

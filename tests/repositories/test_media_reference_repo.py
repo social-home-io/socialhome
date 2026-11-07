@@ -693,3 +693,77 @@ async def test_a_file_only_other_spaces_cards_name_is_not_this_spaces(db):
     )
     repo = SqliteMediaReferenceRepo(db)
     assert not await repo.confined_to_space("card.webp", "sp1")
+
+
+# ─── A page's body pictures (v_81) ──────────────────────────────────────
+
+_BODY = (
+    "![a](api/media/body.webp) ![b](/api/media/body2.webp?exp=1&sig=x) "
+    "[link](https://elsewhere.example/api/media/notours.webp)"
+)
+
+
+async def _page_rows(db) -> None:
+    await _seed_parents(db)
+    await db.enqueue(
+        "INSERT INTO space_pages(id, space_id, title, content, created_by)"
+        " VALUES('pg', 'sp1', 'P', ?, 'u1')",
+        (_BODY,),
+    )
+    await db.enqueue(
+        "INSERT INTO pages(id, title, content, created_by)"
+        " VALUES('hp', 'H', '![h](api/media/house.webp)', 'u1')"
+    )
+    await db.enqueue(
+        "INSERT INTO page_edit_history(id, page_id, space_id, title, content,"
+        " edited_by, version) VALUES('h1', 'pg', 'sp1', 'P',"
+        " '![o](api/media/older.webp)', 'u1', 1)"
+    )
+    await db.enqueue(
+        "INSERT INTO space_page_snapshots(page_id, space_id, snapshot_at, body,"
+        " snapshot_by, side, conflict) VALUES('pg', 'sp1', '2026-01-01', ?,"
+        " 'u1', 'theirs', 1)",
+        ('{"content": "![s](api/media/side.webp)"}',),
+    )
+
+
+async def test_a_pages_body_pictures_are_never_swept(db):
+    """Regression: only a page's cover counted as a reference, so the sweep
+    deleted every picture a page body showed a day after it was posted —
+    a space page, a household page, a version in its history, an open
+    conflict side. A path inside another URL is not a file here."""
+    await _page_rows(db)
+    repo = SqliteMediaReferenceRepo(db)
+    names = await repo.referenced_basenames()
+    for name in ("body.webp", "body2.webp", "house.webp", "older.webp", "side.webp"):
+        assert name in names, name
+        assert await repo.is_referenced(name), name
+    assert "notours.webp" not in names
+    assert not await repo.is_referenced("notours.webp")
+
+
+async def test_a_space_pages_picture_is_its_seats_and_confined_to_it(db):
+    await _page_rows(db)
+    await db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role)"
+        " VALUES('sp1', 'u-seat', 'member')"
+    )
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username, "
+        "identity_public_key) VALUES('sp2', 'T', 'self', 'u1', 'k')",
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.may_reference("body.webp", "u-seat")
+    assert not await repo.may_reference("body.webp", "u-stranger")
+    assert await repo.may_reference("house.webp", "u1")
+    assert not await repo.may_reference("house.webp", "u-seat")
+    assert await repo.confined_to_space("body2.webp", "sp1")
+    assert await repo.confined_to_space("older.webp", "sp1")
+    assert not await repo.confined_to_space("body.webp", "sp2")
+    assert not await repo.confined_to_space("house.webp", "sp1")
+    # A file another space's row names too is no longer this space's.
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, media_url)"
+        " VALUES('p2', 'sp2', 'u1', 'image', 'api/media/body.webp')"
+    )
+    assert not await repo.confined_to_space("body.webp", "sp1")
