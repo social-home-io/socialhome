@@ -7,15 +7,21 @@ selector ``U+FE0F`` unless the emoji is a zero-width-joiner sequence
 (Twemoji's own file naming) — and serves it as a PNG from
 ``GET /api/display/v1/emoji/{code}?size=N``.
 
-The PNGs are Twemoji 72 × 72 (github.com/jdecked/twemoji v17.0.3,
-graphics CC-BY 4.0 — see ``static/emoji/LICENSE.md``), bundled under
-:data:`EMOJI_DIR`: only the subset the dashboard can actually show
+The bundle is Twemoji 72 × 72 (github.com/jdecked/twemoji v17.0.3,
+graphics CC-BY 4.0 — see ``static/emoji/LICENSE.md``), stored as
+lossless WebP (the protocol's picture format) under :data:`EMOJI_DIR`:
+only the subset the dashboard can actually show
 (``scripts/fetch_twemoji.py``). Anything else falls back to 📍
 (:data:`FALLBACK_CODE`). Nothing is fetched at runtime.
 
+What a panel gets stays PNG: the ESPHome firmware decodes PNG only
+(pngle), so the WebP is a storage format and PNG the wire format of
+this one route — the compatibility exception. The browser dashboard
+never loads these files (it draws emoji as text).
+
 :class:`EmojiImages` reads a file with ``aiofiles`` on first use,
-scales it with Pillow in a worker thread and keeps a small LRU of the
-results.
+decodes, scales and encodes it as PNG with Pillow in a worker thread and
+keeps a small LRU of the results.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ __all__ = [
     "CODE_PATTERN",
     "EMOJI_DIR",
     "EMOJI_SIZES",
+    "EMOJI_SUFFIX",
     "FALLBACK_CODE",
     "SOURCE_SIZE",
     "EmojiImages",
@@ -44,9 +51,11 @@ __all__ = [
     "scale_png",
 ]
 
-#: The bundled Twemoji PNGs (``<code>.png``).
+#: The bundled Twemoji, lossless WebP (``<code>.webp``).
 EMOJI_DIR: Final = Path(__file__).parent / "static" / "emoji"
-#: The bundled PNGs' edge length (pixels).
+#: A bundled file's suffix.
+EMOJI_SUFFIX: Final = ".webp"
+#: The bundled pictures' edge length (pixels).
 SOURCE_SIZE: Final = 72
 #: Sizes a panel may ask for (``?size=N``).
 EMOJI_SIZES: Final = frozenset({24, 32, 48, 64, 72, 96, 128})
@@ -99,7 +108,7 @@ def scale_png(body: bytes, size: int) -> bytes:
 
 
 class EmojiImages:
-    """The bundled emoji PNGs at the sizes panels ask for."""
+    """The bundled emoji as PNGs at the sizes panels ask for."""
 
     __slots__ = ("_cache", "_dir", "_max")
 
@@ -118,7 +127,7 @@ class EmojiImages:
         if bare and bare != code:
             candidates.append(bare)
         for candidate in candidates:
-            if await aiofiles.os.path.isfile(self._dir / f"{candidate}.png"):
+            if await aiofiles.os.path.isfile(self._dir / f"{candidate}{EMOJI_SUFFIX}"):
                 return candidate
         return FALLBACK_CODE
 
@@ -129,10 +138,9 @@ class EmojiImages:
         if cached is not None:
             self._cache.move_to_end(key)
             return cached
-        async with aiofiles.open(self._dir / f"{code}.png", "rb") as fh:
-            body = await fh.read()
-        if size != SOURCE_SIZE:
-            body = await asyncio.to_thread(scale_png, body, size)
+        async with aiofiles.open(self._dir / f"{code}{EMOJI_SUFFIX}", "rb") as fh:
+            source = await fh.read()
+        body = await asyncio.to_thread(scale_png, source, size)
         self._cache[key] = body
         while len(self._cache) > self._max:
             self._cache.popitem(last=False)

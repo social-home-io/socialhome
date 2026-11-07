@@ -126,7 +126,7 @@ DISPLAYS_KEY: web.AppKey[DashboardDisplayService] = web.AppKey("dashboard_displa
 DISPLAY_KEY: web.RequestKey[DashboardDisplay] = web.RequestKey("dashboard_display")
 #: Transcoded avatars for wall panels (``/api/display/v1/avatar/…``).
 AVATARS_KEY: web.AppKey[AvatarImages] = web.AppKey("dashboard_display_avatars")
-#: The bundled emoji PNGs for wall panels (``/api/display/v1/emoji/…``).
+#: The bundled emoji, as PNGs for wall panels (``/api/display/v1/emoji/…``).
 EMOJI_KEY: web.AppKey[EmojiImages] = web.AppKey("dashboard_display_emoji")
 #: The wall-panel map pictures (``/api/display/v1/map.png``); absent when
 #: no tile source is wired.
