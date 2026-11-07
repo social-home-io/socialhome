@@ -2241,6 +2241,25 @@ def _wire_federation_stack(
     )
 
 
+def _build_page_files_reach_host(
+    page_conflicts: PageConflictService, uploader: SpaceMediaGfsUploader
+) -> Callable[[str], Awaitable[bool]]:
+    """``check(space_id)``: whether a page's new files can reach the space's
+    host from here (v_82). A household seated from an invite link hands
+    them over only through its GFS media cache, which it needs an upload
+    authorization for; any other member uses the outbox."""
+
+    async def _reach(space_id: str) -> bool:
+        mode, host = await page_conflicts.mode(space_id)
+        if mode is not PageMode.MEMBER or not host:
+            return True
+        if not await uploader.is_relay_reader(host):
+            return True
+        return await uploader.can_upload(space_id)
+
+    return _reach
+
+
 def _build_space_media_gfs(
     *,
     app: web.Application,
@@ -5048,18 +5067,9 @@ def create_app(config: Config | None = None) -> web.Application:
         # cache, described inside its (envelope-signed) proposal.
         app[K.page_proposal_forwarder_key].attach_media_gfs(space_media_uploader)
 
-        async def _page_files_reach_host(space_id: str) -> bool:
-            # A household seated from an invite link hands a page's new
-            # files to the host only through its GFS media cache — which it
-            # needs an upload authorization for (v_82).
-            mode, host = await page_conflict_service.mode(space_id)
-            if mode is not PageMode.MEMBER or not host:
-                return True
-            if not await space_media_uploader.is_relay_reader(host):
-                return True
-            return await space_media_uploader.can_upload(space_id)
-
-        space_page_service.attach_files_reach_host(_page_files_reach_host)
+        space_page_service.attach_files_reach_host(
+            _build_page_files_reach_host(page_conflict_service, space_media_uploader)
+        )
         if space_public_inbound is not None:
             space_public_inbound.attach_gfs_media(space_media_fetcher)
         # §25.6: a stream to a link-joined member carries the records'

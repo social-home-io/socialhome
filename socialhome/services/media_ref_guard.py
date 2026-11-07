@@ -63,6 +63,12 @@ class MediaRefGuard:
             ):
                 raise InvalidMediaRefError(field)
 
+    async def may_open(self, name: str, user_id: str) -> bool:
+        """Whether *user_id* may open the stored file *name* (a bearer or
+        ingress viewer, not a signed URL): the same rule as naming it — a
+        row they can see references it, or nothing does."""
+        return await self._refs.may_reference(name, user_id)
+
 
 class MediaRefGuardedMixin:
     """Behaviour-only mixin for a service that writes media references:

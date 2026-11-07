@@ -223,16 +223,16 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         """*page* as this household shows it. On a member household every
         file the page names is shown as its page-scoped copy — the host
         chose the names, so none may resolve to the shared store here —
-        except a file this household uploaded itself into a page one of its
-        own people wrote (a draft not yet sequenced, a page from before
-        v_82): that keeps its name while no page-scoped copy exists. A
-        reserved name (DM / moment / GFS / page-scoped) is never shown."""
+        except a file OUR OWN DRAFT of this page adds (:meth:`_draft_adds`
+        — local state only): it keeps its name while no page-scoped copy
+        exists. A reserved name (DM / moment / GFS / page-scoped) is never
+        shown."""
         if page.space_id is None or not await self._page_scoped(page.space_id):
             return page
         view = await self._viewer(
             page.space_id,
             page_media_urls(page.cover_image_url, page.content),
-            own=await self._written_here(page),
+            own=await self._draft_adds(page),
         )
         return replace(
             page,
@@ -252,26 +252,40 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         """A conflict side's or a history version's body as shown here."""
         if not content or not await self._page_scoped(space_id):
             return content
-        view = await self._viewer(space_id, page_media_urls(None, content), own=False)
+        view = await self._viewer(space_id, page_media_urls(None, content), own=set())
         return rewrite_page_body_media(content, view)
 
     async def media_view_cover(self, space_id: str, cover: str | None) -> str | None:
         """A conflict side's or a history version's cover as shown here."""
         if not cover or not await self._page_scoped(space_id):
             return cover
-        view = await self._viewer(space_id, [cover], own=False)
+        view = await self._viewer(space_id, [cover], own=set())
         return view(cover) or None
 
-    async def _written_here(self, page: Page) -> bool:
-        """Whether one of this household's own people wrote *page* (its
-        creator or its last editor) — only then may a plain-named file of
-        ours keep its name in it."""
-        if page.space_id is None:
-            return False
-        local = set(await self._spaces.list_local_member_user_ids(page.space_id))
-        return bool(local & {page.created_by, page.last_editor_user_id or ""})
+    async def _draft_adds(self, page: Page) -> set[str]:
+        """The files OUR OWN draft of *page* adds to the version it was made
+        from — decided from local state only: ``pending_base_seq`` and the
+        draft's base are written only by this household's own edit (a host
+        version can't set either), and the write guard checked each added
+        file for its writer. Anything the host chose — its creator, its
+        editor, the base's names — never counts. Empty for no draft."""
+        if page.space_id is None or page.pending_base_seq is None:
+            return set()
+        base = await self._pages.get_draft_base(page.id, space_id=page.space_id)
+        had = (
+            {
+                media_basename(u)
+                for u in page_media_urls(base.cover_image_url, base.content)
+            }
+            if base is not None
+            else set()
+        )
+        return {
+            media_basename(u)
+            for u in page_media_urls(page.cover_image_url, page.content)
+        } - had
 
-    async def _viewer(self, space_id: str, urls: builtins.list[str], *, own: bool):
+    async def _viewer(self, space_id: str, urls: builtins.list[str], *, own: set[str]):
         """``ref → shown ref`` for a member household's page view."""
         scoped: set[str] = set()
         mine: set[str] = set()
@@ -284,7 +298,7 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
                 if await aiofiles.os.path.isfile(self._media_dir / local):
                     scoped.add(local)
                 elif (
-                    own
+                    name in own
                     and _plain_media_name(name)
                     and await aiofiles.os.path.isfile(self._media_dir / name)
                 ):

@@ -69,28 +69,21 @@ from .base import rows_to_dicts
 
 log = logging.getLogger(__name__)
 
-#: A space page row whose raw names count here (v_82): its space is hosted
-#: here (the names are our own files), or one of our own people wrote it (a
-#: draft, a page from before v_82). On a member household a host-written
-#: page's names are the host's choice — they keep only the page-scoped
-#: ``sp-`` copies alive (:meth:`SqliteMediaReferenceRepo._page_scoped_names`),
-#: never a shared file.
+#: A space page row whose raw names count here (v_82), decided from LOCAL
+#: state only: its space is hosted here (the names are our own files), or
+#: the row is our own draft (``pending_base_seq`` — only this household's
+#: own edit sets it). Every other column of a member's copy is the host's
+#: (creator, editor …), so on a member household a page's names keep only
+#: their page-scoped ``sp-`` copies alive
+#: (:meth:`SqliteMediaReferenceRepo._page_scoped_names`), never a shared
+#: file.
 _HOSTED_SPACE = (
     "space_id IN (SELECT hs.id FROM spaces hs, instance_identity ii"
     " WHERE hs.owner_instance_id = ii.instance_id)"
 )
-_SPACE_PAGE_HERE = (
-    f"({_HOSTED_SPACE} OR EXISTS (SELECT 1 FROM users lu WHERE lu.user_id IN"
-    " (space_pages.created_by, space_pages.last_editor_user_id)))"
-)
-_HISTORY_HERE = (
-    f"(space_id IS NULL OR {_HOSTED_SPACE} OR EXISTS (SELECT 1 FROM users lu"
-    " WHERE lu.user_id = page_edit_history.edited_by))"
-)
-_SNAPSHOT_HERE = (
-    f"({_HOSTED_SPACE} OR EXISTS (SELECT 1 FROM users lu"
-    " WHERE lu.user_id = space_page_snapshots.snapshot_by))"
-)
+_SPACE_PAGE_HERE = f"({_HOSTED_SPACE} OR pending_base_seq IS NOT NULL)"
+_HISTORY_HERE = f"(space_id IS NULL OR {_HOSTED_SPACE})"
+_SNAPSHOT_HERE = _HOSTED_SPACE
 
 #: ``(table, column, live-row filter)`` for single-reference columns.
 _SINGLE_COLUMNS: tuple[tuple[str, str, str], ...] = (

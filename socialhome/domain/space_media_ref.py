@@ -61,10 +61,9 @@ MEDIA_REF_RESOURCES: frozenset[str] = frozenset(
 MAX_PAGE_FILES: int = 16
 
 #: A page's history files a household is shipped up front (its catch-up)
-#: — the newest ones, distinct and not shown by the page itself — and the
-#: history the host counts as "already shipped" when a version reuses one
-#: (``shown_before``). An older history file that a revert brings back is
-#: new again, so it ships with that version.
+#: — the newest ones, distinct and not shown by the page itself. A file a
+#: version brings back from history ships again with that version (the
+#: host's ``shown_before`` is the replaced version only).
 PAGE_HISTORY_FILES: int = 32
 
 #: History files one §25.6 catch-up stream ships at most across every page

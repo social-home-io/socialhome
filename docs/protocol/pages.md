@@ -333,10 +333,14 @@ household they never address the shared store.
   link the signer would sign in a page is one the page maps; a path inside
   another URL or path (`./api/media/x`, `x/api/media/x`, `%2Fapi/media/x`)
   is never signed, and a reserved name (`dm-` / `gm-` / `sg-` / `sp-`) is
-  stripped. The only name kept as is: a plain-named file this household
-  uploaded itself, in a page one of its own people wrote (its draft, a page
-  from before v_82), while no page-scoped copy exists — never a received
-  (`sd-`) or host-chosen name.
+  stripped. The only name kept as is: a plain-named file **our own draft**
+  of the page adds (decided from local state only — `pending_base_seq` and
+  the draft's base are written by this household's own edit; the host's
+  creator / editor fields never count), while no page-scoped copy exists.
+  A page from before v_82 shows its files page-scoped like any other: no
+  local record says which of its files this household uploaded, and those
+  pictures never reached the other households either — re-adding them in
+  an edit ships them to everyone.
   The media guard refuses any write naming an `sp-` file, and a page grants
   a seat access to a shared file only on the space's host
   (`MediaReferenceRepo`, review finding 6). So a host that names another
@@ -378,9 +382,11 @@ household they never address the shared store.
   its version and open sides, and its newest history files (at most
   `PAGE_HISTORY_FILES` = 32 per page and `STREAM_HISTORY_FILES` = 200 per
   stream, the catch-up bound's spirit) — to a v_82 requester. The host's
-  "already shipped" for a new version is the replaced version plus that
-  same bounded history, so an older file a revert brings back ships again
-  with that version; the `pages` records
+  "already shipped" for a new version is the replaced version only: a
+  household that joined later got just the history its catch-up had room
+  for, and no per-household record says which, so a file a version brings
+  back from history ships again (≤ 16 per version; receivers keep the
+  first copy, write-once); the `pages` records
   carry the descriptor for a link-joined one (sync line 82); a resume replay
   ships the replayed pages' files.
 - **Cap.** A page version shows at most `MAX_PAGE_FILES` = **16** files (its
@@ -391,8 +397,8 @@ household they never address the shared store.
   pictures is better split.
 - **References.** A page's body, its history and open sides count as media
   references: their `sp-` copies everywhere, their raw names only on the
-  space's host or for a row one of this household's people wrote (a host
-  can't keep a shared file alive on a member). A page grants a seat access
+  space's host or for our own draft row (local state; a host can't keep a
+  shared file alive on a member). A page grants a seat access
   to a shared file only on the host. An edit's media check covers only the
   files it adds (the page, its history and sides are its own).
 - **No upload rights, no new pictures.** A household seated from an invite
@@ -404,7 +410,7 @@ household they never address the shared store.
 Cost per version: new files (≤ 16, plus its sides') × other v_82 member
 households, each file once; one GFS upload per file per GFS with
 link-joined readers (an already-held blob is a no-op). An edit that adds no
-file ships nothing; toggling a file off and on ships nothing. Worst
+file ships nothing; bringing a file back from history ships it again. Worst
 realistic case: a 200-member space and an edit adding 2 pictures is 2 × 199
 outbox rows plus 2 GFS uploads. **Catch-up / upgrade burst** (v_82, sync
 line 82): each member household crossing v_82 takes one full §25.6 stream,

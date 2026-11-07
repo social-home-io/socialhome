@@ -93,6 +93,7 @@ async def test_collects_the_remaining_media_sources(db):
     """Comments, bazaar listings, calendar / page covers, task attachments
     and drafts reference media too — none of them may be swept."""
     await _seed_parents(db)
+    await _host_here(db)  # a space page's own names count on its host
     stmts = [
         (
             "INSERT INTO post_comments(id, post_id, author, media_url) "
@@ -734,8 +735,10 @@ async def test_a_pages_body_pictures_are_never_swept(db):
     """Regression: only a page's cover counted as a reference, so the sweep
     deleted every picture a page body showed a day after it was posted —
     a space page, a household page, a version in its history, an open
-    conflict side. A path inside another URL is not a file here."""
+    conflict side (on the space's host, where they are its own files). A
+    path inside another URL is not a file here."""
     await _page_rows(db)
+    await _host_here(db)
     repo = SqliteMediaReferenceRepo(db)
     names = await repo.referenced_basenames()
     for name in ("body.webp", "body2.webp", "house.webp", "older.webp", "side.webp"):
@@ -846,10 +849,18 @@ async def test_a_host_written_page_keeps_no_shared_file_alive_on_a_member(db):
         assert raw not in names, raw
         assert not await repo.is_referenced(raw), raw
         assert space_page_media_name("sp1", raw) in names, raw
-    # Our own person's page counts its own files.
+    # A row naming one of our users as its writer is still the host's copy.
     await db.enqueue(
-        "INSERT INTO space_pages(id, space_id, title, content, created_by)"
-        " VALUES('pg-o', 'sp1', 'P', '![m](api/media/mine.webp)', 'u1')"
+        "INSERT INTO space_pages(id, space_id, title, content, created_by,"
+        " last_editor_user_id) VALUES('pg-f', 'sp1', 'P',"
+        " '![f](api/media/forged.webp)', 'u1', 'u1')"
+    )
+    assert not await repo.is_referenced("forged.webp")
+    # Our own draft (local state only) counts its own files.
+    await db.enqueue(
+        "INSERT INTO space_pages(id, space_id, title, content, created_by,"
+        " pending_base_seq) VALUES('pg-o', 'sp1', 'P',"
+        " '![m](api/media/mine.webp)', 'u1', 0)"
     )
     assert await repo.is_referenced("mine.webp")
     # A space we host: its pages' names are our files.

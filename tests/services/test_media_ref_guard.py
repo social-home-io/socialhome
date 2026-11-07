@@ -60,3 +60,10 @@ async def test_the_mixin_checks_once_attached():
     svc.attach_media_guard(MediaRefGuard(_Refs(set())))  # type: ignore[arg-type]
     with pytest.raises(InvalidMediaRefError):
         await svc._require_openable_media(["api/media/x.webp"], user_id="u1")
+
+
+async def test_may_open_is_the_naming_rule():
+    refs = _Refs({("a.webp", "u1")})
+    guard = MediaRefGuard(refs)  # type: ignore[arg-type]
+    assert await guard.may_open("a.webp", "u1")
+    assert not await guard.may_open("a.webp", "u2")

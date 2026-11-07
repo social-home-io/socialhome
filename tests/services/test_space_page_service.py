@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from socialhome.db.database import AsyncDatabase
@@ -765,37 +767,52 @@ async def test_a_member_never_signs_a_shared_file_inside_a_page(
         assert f"{name}?exp=" not in signed, signed
 
 
-async def test_an_old_page_keeps_its_own_households_pictures(
+async def test_only_our_own_drafts_new_files_keep_their_names(
     env, monkeypatch, tmp_path
 ):
-    """Review finding 3: a page from before v_82 (or our own draft) written
-    by one of our people shows the files we uploaded ourselves under their
-    own names while no page-scoped copy exists. A host-written page naming
-    the very same file of ours never resolves it, nor does a received
-    (``sd-``) name."""
-    _as_member(env, monkeypatch)
-    env.svc._media_dir = tmp_path
+    """Final review finding 1: "our own file" is decided from LOCAL state
+    only — a file our own draft of this page ADDS (``pending_base_seq`` and
+    the draft's base are written only by this household) keeps its name
+    while no page-scoped copy exists. Fields the host's version carries
+    (creator, last editor) never count: a host naming one of our users as
+    editor and linking a plain shared file gets it neither resolved nor
+    signed. A file the draft's base (the host's version) shows maps too."""
+    from socialhome.domain.page_version import DraftBase
+    from socialhome.media_signer import MediaUrlSigner, sign_media_urls_in_markdown
+
     await env.db.enqueue(
         "INSERT INTO users(username, user_id, display_name) VALUES('o', 'u-owner', 'O')"
     )
-    (tmp_path / "mine.webp").write_bytes(b"ours")
-    sd = "sd-" + "1" * 40 + ".webp"
-    (tmp_path / sd).write_bytes(b"received")
-    ours = await _page_by(
-        env, "u-owner", f"![m](api/media/mine.webp) ![s](api/media/{sd})"
+    # The host claims our user wrote it, and links a plain file of ours.
+    forged = await _page_by(env, "u-owner", "![p](api/media/private.webp)")
+    assert forged.pending_base_seq is None
+    _as_member(env, monkeypatch)
+    env.svc._media_dir = tmp_path
+    for name in ("mine.webp", "private.webp"):
+        (tmp_path / name).write_bytes(b"a file of ours")
+    shown = await env.svc.media_view(forged)
+    sp_private = space_page_media_name("sp-a", "private.webp")
+    assert shown.content == f"![p](api/media/{sp_private})"
+    signed = sign_media_urls_in_markdown(shown.content, MediaUrlSigner(b"k" * 32))
+    assert "private.webp?exp=" not in signed
+    # Our own draft: the file it adds keeps its name; the base's doesn't.
+    draft = replace(
+        forged,
+        content="![p](api/media/private.webp) ![m](api/media/mine.webp)",
+        pending_base_seq=forged.seq,
     )
-    shown = await env.svc.media_view(ours)
-    assert shown.content == (
-        f"![m](api/media/mine.webp) ![s](api/media/{space_page_media_name('sp-a', sd)})"
+    await env.pages.set_draft_base(
+        forged.id,
+        space_id="sp-a",
+        base=DraftBase(
+            title="T", content="![p](api/media/private.webp)", seq=forged.seq, by="u"
+        ),
     )
-    theirs = await _page_by(env, "u-remote", "![m](api/media/mine.webp)")
-    shown = await env.svc.media_view(theirs)
-    assert shown.content == (
-        f"![m](api/media/{space_page_media_name('sp-a', 'mine.webp')})"
-    )
+    shown = await env.svc.media_view(draft)
+    assert shown.content == (f"![p](api/media/{sp_private}) ![m](api/media/mine.webp)")
     # Once the host's copy arrived, the page-scoped copy wins.
     (tmp_path / space_page_media_name("sp-a", "mine.webp")).write_bytes(b"host")
-    shown = await env.svc.media_view(ours)
+    shown = await env.svc.media_view(draft)
     assert "api/media/mine.webp" not in shown.content
 
 
@@ -859,16 +876,28 @@ async def test_a_page_shows_at_most_its_file_cap(env):
     )
 
 
-async def test_a_file_toggled_off_and_on_again_is_not_shipped_twice(env):
-    """Review finding 5: what the host already shipped is everything the
-    page's history showed, not only the replaced version — a picture
-    removed and put back is never re-queued for every member."""
+async def test_a_file_a_version_brings_back_from_history_ships_again(env):
+    """Final review finding 3: a household that joined later got only the
+    newest history files its catch-up had room for (per page and per
+    stream), and the host keeps no per-household record of which. So a
+    version that brings a file back from history (a revert, a picture put
+    back) ships it again — what counts as shipped is the replaced version
+    alone. Receivers keep the first copy (write-once); the cost is at most
+    MAX_PAGE_FILES files per such version. Unchanged files never re-ship."""
     page = await env.svc.create(
         "sp-a", actor_user_id="u-owner", title="T", content="![a](api/media/a.webp)"
     )
     await env.svc.update("sp-a", page.id, actor_user_id="u-owner", content="gone")
     await env.svc.update(
         "sp-a", page.id, actor_user_id="u-owner", content="![a](api/media/a.webp) back"
+    )
+    last = [e for e in env.events if isinstance(e, PageUpdated)][-1]
+    assert "api/media/a.webp" not in last.shown_before
+    await env.svc.update(
+        "sp-a",
+        page.id,
+        actor_user_id="u-owner",
+        content="![a](api/media/a.webp) back again",
     )
     last = [e for e in env.events if isinstance(e, PageUpdated)][-1]
     assert "api/media/a.webp" in last.shown_before
