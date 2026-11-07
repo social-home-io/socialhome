@@ -20,6 +20,7 @@ from socialhome.app_keys import (
 )
 from socialhome.csp import MEDIA_CSP, PLAYABLE_MEDIA_CSP
 from socialhome.domain.gfs_space_media import space_media_address
+from socialhome.services.inbound_media_store import gfs_space_media_name
 from socialhome.services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 from socialhome.space_media_seal import (
     SPACE_MEDIA_SUITE_AESGCM256_PADDED,
@@ -578,10 +579,16 @@ async def _gfs_held_picture(client, monkeypatch, *, name: str, data: bytes):
     await crypto.initialise_for_space("sp-gfs")
     epoch, key = await crypto.media_key("sp-gfs")
     blob = seal_space_media(
-        media_key=key, space_id="sp-gfs", epoch=epoch, filename=name, data=data
+        media_key=key,
+        space_id="sp-gfs",
+        epoch=epoch,
+        item_id="post-gfs",
+        origin="host",
+        filename=name,
+        data=data,
     )
     fetcher = app[space_media_gfs_fetcher_key]
-    await fetcher.receive(
+    loc = await fetcher.localize(
         "sp-gfs",
         {
             name: {
@@ -596,8 +603,8 @@ async def _gfs_held_picture(client, monkeypatch, *, name: str, data: bytes):
         [f"api/media/{name}"],
         item_id="post-gfs",
         origin="host",
-        prefetch=False,
     )
+    await fetcher.keep(loc, prefetch=False)
     gfs = _OneBlobGfs(blob)
 
     async def _sources(self, space_id):
@@ -605,21 +612,28 @@ async def _gfs_held_picture(client, monkeypatch, *, name: str, data: bytes):
 
     monkeypatch.setattr(SpaceMediaGfsFetcher, "_sources", _sources)
     monkeypatch.setattr(fetcher, "_gfs", gfs, raising=False)
-    return gfs
+    # This household's own name for the file (what the stored item shows).
+    return gfs, gfs_space_media_name("sp-gfs", "host", name)
 
 
 async def test_a_missing_space_file_is_fetched_from_the_gfs_on_view(
     client, monkeypatch
 ):
     data = b"a picture only the GFS cache holds" * 10
-    gfs = await _gfs_held_picture(client, monkeypatch, name="gfs1.webp", data=data)
-    r = await client.get("/api/media/gfs1.webp", headers=_auth(client._tok))
+    gfs, local = await _gfs_held_picture(
+        client, monkeypatch, name="gfs1.webp", data=data
+    )
+    r = await client.get(f"/api/media/{local}", headers=_auth(client._tok))
     assert r.status == 200
     assert await r.read() == data
     media_dir = pathlib.Path(client.app[config_key].media_path)
-    assert (media_dir / "gfs1.webp").read_bytes() == data
-    # Served from disk from now on.
+    assert (media_dir / local).read_bytes() == data
+    assert not (media_dir / "gfs1.webp").exists()
+    # The author's name is never served from the GFS.
     r = await client.get("/api/media/gfs1.webp", headers=_auth(client._tok))
+    assert r.status == 404
+    # Served from disk from now on.
+    r = await client.get(f"/api/media/{local}", headers=_auth(client._tok))
     assert r.status == 200
     assert gfs.fetches == 1
 
@@ -632,7 +646,7 @@ async def test_a_missing_file_without_a_ref_stays_404(client):
 async def test_a_file_the_viewer_may_not_open_is_never_fetched(client, monkeypatch):
     """#1309 review H: the access check runs before a fetch-on-view — a
     viewer who may not open the file never makes the household fetch it."""
-    gfs = await _gfs_held_picture(
+    gfs, local = await _gfs_held_picture(
         client, monkeypatch, name="gfs-hidden.webp", data=b"hidden picture"
     )
     gallery = client.app[gallery_service_key]
@@ -641,6 +655,6 @@ async def test_a_file_the_viewer_may_not_open_is_never_fetched(client, monkeypat
         return False
 
     monkeypatch.setattr(type(gallery), "may_open_file", _deny)
-    r = await client.get("/api/media/gfs-hidden.webp", headers=_auth(client._tok))
+    r = await client.get(f"/api/media/{local}", headers=_auth(client._tok))
     assert r.status == 404
     assert gfs.fetches == 0

@@ -100,7 +100,11 @@ from ..domain.space import (
     role_change_event_type,
 )
 from ..domain.space_item import item_stamp, stamp_to_db
-from ..domain.space_media_ref import MEDIA_REFS_FIELD, post_media_urls
+from ..domain.space_media_ref import (
+    MEDIA_REFS_FIELD,
+    SpaceMediaLocalization,
+    post_media_urls,
+)
 from ..domain.user import (
     RemoteUser,
     UserIdentityAssertion,
@@ -582,6 +586,26 @@ class FederationInboundService(ProtectionGateMixin):
     def attach_moment_reaction_router(self, router: MomentReactionRouter) -> None:
         """v_67: keep the reaction route a relayed ``MOMENT_CREATED`` carries."""
         self._moment_reaction_router = router
+
+    async def _localize_space_media(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        item_id: str,
+        urls: list[str],
+    ) -> SpaceMediaLocalization:
+        """v_80 — this household's names for item *item_id*'s files kept
+        in a GFS media cache, as delivered by the envelope's (authenticated)
+        sender. Empty when no fetcher is wired."""
+        if self._gfs_media is None:
+            return SpaceMediaLocalization()
+        return await self._gfs_media.localize(
+            space_id,
+            event.payload.get(MEDIA_REFS_FIELD),
+            urls,
+            item_id=item_id,
+            origin=event.from_instance,
+        )
 
     def attach_gfs_media(self, fetcher: SpaceMediaGfsFetcher) -> None:
         """Wire the v_80 GFS media fetcher (``media_refs`` on space posts)."""
@@ -1965,6 +1989,14 @@ class FederationInboundService(ProtectionGateMixin):
             return
         raw_relay = event.payload.get("public_relay")
         public_relay = raw_relay if isinstance(raw_relay, dict) else None
+        # v_80 — a post that reached us through a GFS relay without its
+        # bytes: its files take THIS household's names for the copies in
+        # the GFS media cache (bound to the envelope's sender), so another
+        # member's item naming the same file can never swap them.
+        media = await self._localize_space_media(
+            event, space_id, post.id, post_media_urls(post)
+        )
+        post = media.post(post)
         if await self._space_post_repo.save(space_id, post) is None:
             # The id already exists in another space — the sender was
             # gated for this one, so refuse rather than hijack the row.
@@ -1975,16 +2007,8 @@ class FederationInboundService(ProtectionGateMixin):
                 row_id=post.id,
             )
             return
-        if self._gfs_media is not None and MEDIA_REFS_FIELD in event.payload:
-            # v_80 — the post reached us through a GFS relay without its
-            # bytes: keep where its pictures live (only the post's own files).
-            await self._gfs_media.receive(
-                space_id,
-                event.payload.get(MEDIA_REFS_FIELD),
-                post_media_urls(post),
-                item_id=post.id,
-                origin=event.from_instance,
-            )
+        if self._gfs_media is not None:
+            await self._gfs_media.keep(media)
         if existing is not None:
             await self._bus.publish(
                 PostEdited(

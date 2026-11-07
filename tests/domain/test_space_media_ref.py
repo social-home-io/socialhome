@@ -12,6 +12,7 @@ from socialhome.domain.space_media_ref import (
     MAX_DESCRIPTOR_ENTRIES,
     MEDIA_REF_RESOURCES,
     MEDIA_REFS_FIELD,
+    SpaceMediaLocalization,
     SpaceMediaRef,
     media_refs_to_wire,
     parse_media_refs,
@@ -231,3 +232,56 @@ def test_an_oversized_descriptor_is_refused_whole() -> None:
         for i in range(MAX_DESCRIPTOR_ENTRIES + 1)
     }
     assert parse_media_refs(wire, space_id="sp", allowed=set(wire)) == []
+
+
+# ── #1309 re-review: an item's files are renamed to the reader's names ──
+
+
+def test_localization_rewrites_only_the_named_files() -> None:
+    loc = SpaceMediaLocalization(names={"a.webp": "sg-1.webp"})
+    assert loc.url("api/media/a.webp") == "api/media/sg-1.webp"
+    assert loc.url("/api/media/a.webp?v=2") == "/api/media/sg-1.webp?v=2"
+    assert loc.url("api/media/b.webp") == "api/media/b.webp"
+    assert loc.url(None) is None
+    assert loc.url("") == ""
+
+
+def test_localization_rewrites_every_file_of_a_post() -> None:
+    post = Post(
+        id="p",
+        author="u",
+        type=PostType.IMAGE,
+        content="look",
+        created_at=None,
+        media_url="api/media/m.webp",
+        image_urls=("api/media/a.webp", "api/media/keep.webp"),
+        link_preview=LinkPreview(
+            url="https://example.org", title="t", thumbnail_url="api/media/card.webp"
+        ),
+        file_meta=FileMeta(
+            url="api/media/doc.pdf",
+            mime_type="application/pdf",
+            original_name="d.pdf",
+            size_bytes=3,
+        ),
+    )
+    loc = SpaceMediaLocalization(
+        names={
+            "m.webp": "sg-m.webp",
+            "a.webp": "sg-a.webp",
+            "card.webp": "sg-c.webp",
+            "doc.pdf": "sg-d.pdf",
+        }
+    )
+    out = loc.post(post)
+    assert post_media_urls(out) == [
+        "api/media/sg-m.webp",
+        "api/media/sg-a.webp",
+        "api/media/keep.webp",
+        "api/media/sg-d.pdf",
+        "api/media/sg-c.webp",
+    ]
+    assert out.link_preview.title == "t"
+    assert out.file_meta.original_name == "d.pdf"
+    # Nothing to rename: the very same object.
+    assert SpaceMediaLocalization(names={}).post(post) is post

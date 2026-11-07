@@ -2530,7 +2530,9 @@ class SpaceCalendarService(
         if self._federation is None:
             return
         media_plan = (
-            await self._plan_media_refs(space_id, [event.cover_url], followers=False)
+            await self._plan_media_refs(
+                space_id, [event.cover_url], item_id=event.id, followers=False
+            )
             if event.cover_url and event.cover_url != previous_cover
             else None
         )

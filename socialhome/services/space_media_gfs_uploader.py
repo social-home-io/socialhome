@@ -143,13 +143,21 @@ _STATUS_RETRY = frozenset({408, 429})
 
 
 def seal_file_sync(
-    media_key: bytes, space_id: str, epoch: int, filename: str, data: bytes
+    media_key: bytes,
+    space_id: str,
+    epoch: int,
+    item_id: str,
+    origin: str,
+    filename: str,
+    data: bytes,
 ) -> bytes:
     """:func:`seal_space_media` positionally — the worker-thread body."""
     return seal_space_media(
         media_key=media_key,
         space_id=space_id,
         epoch=epoch,
+        item_id=item_id,
+        origin=origin,
         filename=filename,
         data=data,
     )
@@ -163,6 +171,8 @@ def seal_and_address_sync(
     media_key: bytes,
     space_id: str,
     epoch: int,
+    item_id: str,
+    origin: str,
     filename: str,
     data: bytes,
     scope: str,
@@ -171,7 +181,7 @@ def seal_and_address_sync(
     """The sealed blob and its scope-bound GFS address
     (:func:`~socialhome.domain.gfs_space_media.space_media_address`, suite
     ``sm1``) — both CPU work, run together in a worker thread."""
-    blob = seal_file_sync(media_key, space_id, epoch, filename, data)
+    blob = seal_file_sync(media_key, space_id, epoch, item_id, origin, filename, data)
     return blob, space_media_address(scope, scope_id, blob)
 
 
@@ -345,22 +355,32 @@ class SpaceMediaGfsUploader:
     # ── Planning ─────────────────────────────────────────────────────────
 
     async def plan(
-        self, space_id: str, media_urls: Iterable[str | None], *, followers: bool
+        self,
+        space_id: str,
+        media_urls: Iterable[str | None],
+        *,
+        item_id: str,
+        followers: bool,
     ) -> SpaceMediaPlan | None:
-        """The plan for an item of *space_id* referencing *media_urls*:
-        link-joined v_80 members' GFSs, plus (``followers``) the GFSs the
-        space is relayed to. ``None`` when no capable GFS needs it or no
-        file can be described — nothing is sealed then."""
+        """The plan for item *item_id* of *space_id* referencing
+        *media_urls*: link-joined v_80 members' GFSs, plus (``followers``)
+        the GFSs the space is relayed to. ``None`` when no capable GFS needs
+        it or no file can be described — nothing is sealed then."""
         names = media_names(media_urls)
         if not names:
             return None
         conns = await self._relay_reader_conns(space_id)
         if followers:
             conns.extend(await self._gfs.space_media_follower_targets(space_id))
-        return await self._plan(space_id, names, conns)
+        return await self._plan(space_id, names, conns, item_id)
 
     async def plan_for_reader(
-        self, space_id: str, media_urls: Iterable[str | None], instance_id: str
+        self,
+        space_id: str,
+        media_urls: Iterable[str | None],
+        instance_id: str,
+        *,
+        item_id: str,
     ) -> SpaceMediaPlan | None:
         """The plan for ONE link-joined reader (a catch-up stream): only its
         GFS. ``None`` when it is no v_80 link-joined member."""
@@ -368,16 +388,20 @@ class SpaceMediaGfsUploader:
         conn = await self._reader_conn(instance_id) if names else None
         if conn is None:
             return None
-        return await self._plan(space_id, names, [conn])
+        return await self._plan(space_id, names, [conn], item_id)
 
     async def _plan(
-        self, space_id: str, names: list[str], conns: list[GfsConnection]
+        self,
+        space_id: str,
+        names: list[str],
+        conns: list[GfsConnection],
+        item_id: str,
     ) -> SpaceMediaPlan | None:
         scope, _scope_id = await self.scope_of(space_id)
         targets = await self._capable(conns, scope)
         if not targets:
             return None
-        refs = await self._describe_names(space_id, names)
+        refs = await self._describe_names(space_id, names, item_id)
         if not refs:
             return None
         return SpaceMediaPlan(
@@ -385,8 +409,15 @@ class SpaceMediaGfsUploader:
         )
 
     async def _describe_names(
-        self, space_id: str, names: list[str]
+        self, space_id: str, names: list[str], item_id: str
     ) -> list[SpaceMediaRef]:
+        """Each file's descriptor entry, sealed for item *item_id* by this
+        household — the household a reader authenticates as delivering the
+        item, so both are in the blob's AAD (:mod:`~socialhome.space_media_seal`).
+        Nothing before this household knows its own id."""
+        origin = self._federation.own_instance_id if self._federation else ""
+        if not origin or not item_id:
+            return []
         current = await self._crypto.media_key(space_id)
         if current is None:
             return []
@@ -399,7 +430,7 @@ class SpaceMediaGfsUploader:
             stamp = await self._stamp(name)
             if stamp is None:
                 continue
-            cache_key = (space_id, epoch, scope, scope_id, name, *stamp)
+            cache_key = (space_id, epoch, scope, scope_id, item_id, name, *stamp)
             cached = self._described.get(cache_key)
             if cached is not None:
                 self._described.move_to_end(cache_key)
@@ -409,7 +440,16 @@ class SpaceMediaGfsUploader:
             if data is None:
                 continue
             blob, address = await asyncio.to_thread(
-                seal_and_address_sync, key, space_id, epoch, name, data, scope, scope_id
+                seal_and_address_sync,
+                key,
+                space_id,
+                epoch,
+                item_id,
+                origin,
+                name,
+                data,
+                scope,
+                scope_id,
             )
             ref = SpaceMediaRef(
                 filename=name,
@@ -420,6 +460,8 @@ class SpaceMediaGfsUploader:
                 size=len(blob),
                 scope=scope,
                 addr_suite=ADDR_SUITE_SM1,
+                item_id=item_id,
+                origin=origin,
             )
             self._described[cache_key] = ref
             while len(self._described) > MAX_DESCRIBED:
@@ -641,6 +683,8 @@ class SpaceMediaGfsUploader:
             current[1],
             ref.space_id,
             ref.epoch,
+            ref.item_id,
+            ref.origin,
             ref.filename,
             data,
             scope,

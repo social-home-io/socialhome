@@ -2024,14 +2024,16 @@ class _ReaderUploader:
     def __init__(self, readers=("peer-e",)):
         self.readers = set(readers)
         self.planned: list = []
+        self.items: list = []
         self.uploaded: list = []
 
     async def is_relay_reader(self, iid):
         return iid in self.readers
 
-    async def plan_for_reader(self, space_id, urls, iid):
+    async def plan_for_reader(self, space_id, urls, iid, *, item_id):
         urls = list(urls)
         self.planned.append((space_id, urls, iid))
+        self.items.append(item_id)
         return _ReaderPlan(urls) if urls else None
 
     def upload(self, plan):
@@ -2082,6 +2084,8 @@ async def test_a_link_joined_v80_requesters_records_carry_media_refs(encoder):
     assert "media_refs" not in posts["p-2"]
     (event,) = _streamed_records(session, "calendar")
     assert set(event["media_refs"]) == {"c.webp"}
+    # Each blob is sealed for the record's own item (in its AAD).
+    assert sorted(uploader.items) == ["e-1", "p-1"]
     assert all("media_refs" not in r for r in _streamed_records(session, "members"))
     # The blobs go to the requester's GFS (once per file).
     assert len(uploader.uploaded) == 2

@@ -40,15 +40,23 @@ class SpaceMediaRefsMixin:
         self._media_gfs = media_gfs  # type: ignore[misc]
 
     async def _plan_media_refs(
-        self, space_id: str, media_urls: Iterable[str | None], *, followers: bool
+        self,
+        space_id: str,
+        media_urls: Iterable[str | None],
+        *,
+        item_id: str,
+        followers: bool,
     ) -> SpaceMediaPlan | None:
-        """The upload plan for an item's *media_urls*, or ``None`` (nothing
-        to send, nobody reading through a GFS, not wired, or an error)."""
+        """The upload plan for item *item_id*'s *media_urls* (each blob is
+        sealed for that item), or ``None`` (nothing to send, nobody reading
+        through a GFS, not wired, or an error)."""
         urls = [u for u in media_urls if u]
         if self._media_gfs is None or not urls:
             return None
         try:
-            return await self._media_gfs.plan(space_id, urls, followers=followers)
+            return await self._media_gfs.plan(
+                space_id, urls, item_id=item_id, followers=followers
+            )
         except Exception:
             log.warning(
                 "space media for GFS readers of space %s could not be prepared",

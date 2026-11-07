@@ -19,12 +19,14 @@ class _Gfs:
         self.readers = set(readers)
         self.boom = boom
         self.calls = []
+        self.items = []
         self.uploaded = []
 
-    async def plan(self, space_id, urls, *, followers):
+    async def plan(self, space_id, urls, *, item_id, followers):
         if self.boom:
             raise OSError("disk")
         self.calls.append((space_id, list(urls), followers))
+        self.items.append(item_id)
         return self._plan
 
     async def is_relay_reader(self, iid):
@@ -43,7 +45,12 @@ class _Sender(SpaceMediaRefsMixin):
 
 async def test_unwired_is_a_no_op():
     s = _Sender()
-    assert await s._plan_media_refs("sp", ["api/media/a.webp"], followers=True) is None
+    assert (
+        await s._plan_media_refs(
+            "sp", ["api/media/a.webp"], item_id="item-1", followers=True
+        )
+        is None
+    )
     assert s._media_refs_per_peer(None) is None
     s._upload_media(None)
 
@@ -52,7 +59,10 @@ async def test_no_urls_plans_nothing():
     s = _Sender()
     gfs = _Gfs(plan=_Plan())
     s.attach_media_gfs(gfs)
-    assert await s._plan_media_refs("sp", [None, ""], followers=False) is None
+    assert (
+        await s._plan_media_refs("sp", [None, ""], item_id="item-1", followers=False)
+        is None
+    )
     assert gfs.calls == []
 
 
@@ -60,8 +70,11 @@ async def test_plan_per_peer_and_upload():
     s = _Sender()
     gfs = _Gfs(plan=_Plan(), readers={"e"})
     s.attach_media_gfs(gfs)
-    plan = await s._plan_media_refs("sp", ["api/media/a.webp"], followers=True)
+    plan = await s._plan_media_refs(
+        "sp", ["api/media/a.webp"], item_id="item-1", followers=True
+    )
     assert gfs.calls == [("sp", ["api/media/a.webp"], True)]
+    assert gfs.items == ["item-1"]
     per_peer = s._media_refs_per_peer(plan)
     base = {"x": 1}
     assert (await per_peer("e", base))["media_refs"] == plan.wire()
@@ -76,7 +89,9 @@ async def test_a_failure_is_logged_and_swallowed(caplog):
     s.attach_media_gfs(_Gfs(boom=True))
     with caplog.at_level(logging.WARNING):
         assert (
-            await s._plan_media_refs("sp", ["api/media/a.webp"], followers=False)
+            await s._plan_media_refs(
+                "sp", ["api/media/a.webp"], item_id="item-1", followers=False
+            )
             is None
         )
     assert "media" in caplog.text

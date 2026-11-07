@@ -20,6 +20,7 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.post import Post, PostType
+from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.domain.task import Task, TaskPriority, TaskStatus
 from socialhome.domain.timetable import (
     Timetable,
@@ -2089,19 +2090,34 @@ async def test_chat_records_are_dropped_without_a_sink(setup):
 
 
 class _GfsMediaSink:
+    """Renames each described file ``sg-<name>`` (the reader's own name);
+    records what was localized and what was kept."""
+
     def __init__(self):
         self.received: list[tuple] = []
+        self.kept: list[dict] = []
 
-    async def receive(
-        self, space_id, raw_refs, media_urls, *, item_id, origin="", prefetch=True
-    ):
-        self.received.append((space_id, raw_refs, list(media_urls), item_id, origin))
+    async def localize(self, space_id, raw_refs, media_urls, *, item_id, origin):
+        urls = [u for u in media_urls if u]
+        if isinstance(raw_refs, dict):
+            self.received.append((space_id, raw_refs, urls, item_id, origin))
+        described = raw_refs if isinstance(raw_refs, dict) else {}
+        names = {
+            u.rsplit("/", 1)[-1]: "sg-" + u.rsplit("/", 1)[-1]
+            for u in urls
+            if u.rsplit("/", 1)[-1] in described
+        }
+        return SpaceMediaLocalization(names=names, refs=(object(),) if names else ())
+
+    async def keep(self, loc, *, prefetch=True):
+        if loc.refs:
+            self.kept.append(dict(loc.names))
         return []
 
 
 class _SavingPostRepo(_PostRepoStub):
     """Reads back what the receiver stored (the base stub reads only the
-    pre-held posts) — what ``_keep_media_refs`` checks a record against."""
+    pre-held posts)."""
 
     async def get(self, post_id):
         for space_id, post in reversed(self._c.posts):
@@ -2146,6 +2162,10 @@ async def test_streamed_post_media_refs_are_kept(setup):
     assert sink.received == [
         ("sp-1", _SYNC_REFS, ["api/media/a.webp"], "p-m", "peer-a")
     ]
+    # #1309 re-review 1: the stored post shows the reader's own name.
+    stored = {post.id: post for _s, post in c.posts}
+    assert stored["p-m"].image_urls == ("api/media/sg-a.webp",)
+    assert sink.kept == [{"a.webp": "sg-a.webp"}]
 
 
 async def test_streamed_records_without_a_fetcher_store_nothing(setup):
@@ -2197,7 +2217,7 @@ async def test_media_refs_of_a_record_persist_refused_are_not_kept(setup):
         ],
     )
     assert c.posts == []
-    assert sink.received == []
+    assert sink.kept == []
 
 
 async def test_media_refs_are_checked_against_the_stored_row(setup):
@@ -2225,3 +2245,46 @@ async def test_media_refs_are_checked_against_the_stored_row(setup):
     assert sink.received == [
         ("sp-1", _SYNC_REFS, ["api/media/a.webp"], "p-r", "peer-a")
     ]
+
+
+async def test_a_non_host_stream_cannot_attach_refs_to_a_held_post(setup, monkeypatch):
+    """#1309 re-review 2: a member household streaming a post this
+    household already holds (A's) can't attach ITS descriptor to it — the
+    post's files keep what they are here. Only a record that creates the
+    item here, or the host's stream, brings a descriptor."""
+    r, c, kp = setup
+    r._space_post_repo = _SavingPostRepo(c)
+    c.held_posts["p-a"] = Post(
+        id="p-a",
+        author="u-1",
+        type=PostType.IMAGE,
+        content="A's picture",
+        created_at=None,
+        image_urls=("api/media/a.webp",),
+    )
+
+    async def _not_host(self, space_id, provider):
+        return False
+
+    monkeypatch.setattr(type(r), "_is_host", _not_host)
+    sink = _GfsMediaSink()
+    r.attach_gfs_media(sink)
+    await _send(
+        r,
+        kp,
+        "posts",
+        [
+            {
+                "id": "p-a",
+                "author": "u-1",
+                "type": "image",
+                "content": "A's picture",
+                "image_urls": ["api/media/a.webp"],
+                "media_refs": _SYNC_REFS,
+            }
+        ],
+    )
+    assert sink.received == []
+    assert sink.kept == []
+    (_space, stored) = c.posts[-1]
+    assert stored.image_urls == ("api/media/a.webp",)

@@ -83,10 +83,20 @@ MEDIA_REF_PREFIX: str = "api/media/"
 #: Prefix of a received DM attachment's file name (:func:`dm_media_name`).
 DM_MEDIA_PREFIX: str = "dm-"
 
+#: Prefix of a space file fetched from a GFS media cache
+#: (:func:`gfs_space_media_name`).
+GFS_SPACE_MEDIA_PREFIX: str = "sg-"
+
 #: Name prefixes owned by one receiving path each — a ``SPACE_MEDIA_BLOB``
-#: never writes them: ``dm-`` received DM attachments, ``gm-`` moment media
-#: fetched from a GFS (``moment_public_media_inbound``).
-RESERVED_MEDIA_PREFIXES: tuple[str, ...] = (DM_MEDIA_PREFIX, "gm-")
+#: never writes them, and a received space item never names them: ``dm-``
+#: received DM attachments, ``gm-`` moment media fetched from a GFS
+#: (``moment_public_media_inbound``), ``sg-`` space files fetched from a GFS
+#: (``space_media_gfs_fetcher``).
+RESERVED_MEDIA_PREFIXES: tuple[str, ...] = (
+    DM_MEDIA_PREFIX,
+    "gm-",
+    GFS_SPACE_MEDIA_PREFIX,
+)
 
 #: DM transients (``<msg>.preview.webp`` and the legacy ``.part<N>`` /
 #: ``.assembled`` names). No ``media_url`` column holds them, so the media
@@ -130,6 +140,32 @@ def dm_media_name(from_instance: str, message_id: str, ext: str) -> str:
         f"dm-media\0{from_instance}\0{message_id}".encode()
     ).hexdigest()
     return f"{DM_MEDIA_PREFIX}{digest[:40]}{ext}"
+
+
+def gfs_space_media_name(space_id: str, origin: str, filename: str) -> str:
+    """Local name of the space file *filename* fetched from a GFS media
+    cache, as described by household *origin* — the household this one
+    AUTHENTICATED as delivering the item (its envelope, its signed inner,
+    the §25.6 stream it rode), never a field of the descriptor.
+
+    The item's reference is rewritten to this name on arrival, so a member
+    naming another item's file in its own item only ever gets ITS file:
+    the name is the reader's, and two households describing one ``filename``
+    land on two names (the ``dm_media_name`` rule). Fixed length, keeps the
+    extension, always :func:`is_safe_media_name`.
+    """
+    digest = hashlib.sha256(
+        f"space-media\0{space_id}\0{origin}\0{filename}".encode()
+    ).hexdigest()
+    dot = filename.rfind(".")
+    ext = filename[dot:] if 0 < dot and len(filename) - dot <= 10 else ""
+    return f"{GFS_SPACE_MEDIA_PREFIX}{digest[:40]}{ext}"
+
+
+def is_gfs_space_media_name(name: str) -> bool:
+    """``True`` for a :func:`gfs_space_media_name` (the only names the GFS
+    space media fetcher writes)."""
+    return name.startswith(GFS_SPACE_MEDIA_PREFIX) and is_safe_media_name(name)
 
 
 def dm_media_max_bytes(mime_type: str) -> int:

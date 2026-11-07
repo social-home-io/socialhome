@@ -168,7 +168,9 @@ class GalleryFederationOutbound(SpaceMediaRefsMixin):
         files = [item.thumbnail_url]
         if item.url and item.url != item.thumbnail_url:
             files.append(item.url)
-        media_plan = await self._plan_media_refs(space_id, files, followers=False)
+        media_plan = await self._plan_media_refs(
+            space_id, files, item_id=item.id, followers=False
+        )
         await self._fan_out(
             space_id,
             FederationEventType.SPACE_GALLERY_ITEM_CREATED,

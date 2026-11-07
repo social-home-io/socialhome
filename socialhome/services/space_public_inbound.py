@@ -548,6 +548,23 @@ class SpacePublicInbound:
             return
 
         post = self._post_from_inner(post_id, author_user_id, inner)
+        # v_80 — the pictures live in the GFS media cache: the post shows
+        # THIS household's names for them, bound to the author household the
+        # signed inner proves (``origin_instance_id``) — never a name another
+        # member's item could claim first.
+        media = (
+            await self._gfs_media.localize(
+                space_id,
+                inner.get(MEDIA_REFS_FIELD),
+                post_media_urls(post),
+                item_id=post.id,
+                origin=origin_instance_id,
+            )
+            if self._gfs_media is not None
+            else None
+        )
+        if media is not None:
+            post = media.post(post)
         if await self._posts.save(space_id, post) is None:
             log.warning(
                 "space_public.inbound: post %s already exists in another space "
@@ -555,16 +572,8 @@ class SpacePublicInbound:
                 post_id,
             )
             return
-        if self._gfs_media is not None and MEDIA_REFS_FIELD in inner:
-            # v_80 — the pictures live in the GFS media cache; keep where
-            # (the post's own files only) and prefetch them.
-            await self._gfs_media.receive(
-                space_id,
-                inner.get(MEDIA_REFS_FIELD),
-                post_media_urls(post),
-                item_id=post.id,
-                origin=origin_instance_id,
-            )
+        if self._gfs_media is not None and media is not None:
+            await self._gfs_media.keep(media)
         await self._bus.publish(
             SpacePostCreated(
                 post=post,

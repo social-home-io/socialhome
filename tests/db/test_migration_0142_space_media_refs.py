@@ -39,6 +39,7 @@ def test_table_shape(tmp_path):
     apply_through(c, _VERSION)
     cols = {r["name"] for r in c.execute("PRAGMA table_info(space_media_refs)")}
     assert cols == {
+        "local_name",
         "filename",
         "space_id",
         "blob_id",
@@ -58,25 +59,26 @@ def test_row_round_trip_and_cascade(tmp_path):
     apply_through(c, _VERSION)
     _space(c)
     c.execute(
-        "INSERT INTO space_media_refs(filename, space_id, blob_id, suite, epoch,"
-        " size, scope, addr_suite, item_id) VALUES('a.webp', 'sp-1', ?,"
+        "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id, suite, epoch,"
+        " size, scope, addr_suite, item_id) VALUES('sg-a.webp', 'a.webp', 'sp-1', ?,"
         " 'aesgcm-256-pad-det', 3, 65564, 'space', 'sm1', 'post-1')",
         ("a" * 64,),
     )
     row = c.execute("SELECT * FROM space_media_refs").fetchone()
-    assert row["filename"] == "a.webp"
+    assert (row["local_name"], row["filename"]) == ("sg-a.webp", "a.webp")
+    assert row["origin"] == ""
     assert row["created_at"]
     c.execute("DELETE FROM spaces WHERE id = 'sp-1'")
     assert c.execute("SELECT COUNT(*) FROM space_media_refs").fetchone()[0] == 0
 
 
-def test_filename_is_the_key(tmp_path):
+def test_the_local_name_is_the_key(tmp_path):
     c = _fresh(tmp_path)
     apply_through(c, _VERSION)
     _space(c)
     ins = (
-        "INSERT INTO space_media_refs(filename, space_id, blob_id, suite, epoch,"
-        " size, scope, addr_suite, item_id) VALUES('a.webp', 'sp-1', ?, 's', 0, 1,"
+        "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id, suite, epoch,"
+        " size, scope, addr_suite, item_id) VALUES('sg-a.webp', 'a.webp', 'sp-1', ?, 's', 0, 1,"
         " 'space', 'sm1', 'post-1')"
     )
     c.execute(ins, ("a" * 64,))
@@ -90,15 +92,15 @@ def test_size_and_epoch_checks(tmp_path):
     _space(c)
     with pytest.raises(sqlite3.IntegrityError):
         c.execute(
-            "INSERT INTO space_media_refs(filename, space_id, blob_id, suite,"
-            " epoch, size, scope, addr_suite, item_id) VALUES('a.webp', 'sp-1', ?, 's',"
+            "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id, suite,"
+            " epoch, size, scope, addr_suite, item_id) VALUES('sg-a.webp', 'a.webp', 'sp-1', ?, 's',"
             " -1, 1, 'space', 'sm1', 'post-1')",
             ("a" * 64,),
         )
     with pytest.raises(sqlite3.IntegrityError):
         c.execute(
-            "INSERT INTO space_media_refs(filename, space_id, blob_id, suite,"
-            " epoch, size, scope, addr_suite, item_id) VALUES('a.webp', 'sp-1', ?, 's',"
+            "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id, suite,"
+            " epoch, size, scope, addr_suite, item_id) VALUES('sg-a.webp', 'a.webp', 'sp-1', ?, 's',"
             " 0, 0, 'space', 'sm1', 'post-1')",
             ("a" * 64,),
         )
@@ -110,8 +112,23 @@ def test_the_scope_is_space_or_channel(tmp_path):
     _space(c)
     with pytest.raises(sqlite3.IntegrityError):
         c.execute(
-            "INSERT INTO space_media_refs(filename, space_id, blob_id, suite,"
-            " epoch, size, scope, addr_suite, item_id) VALUES('a.webp', 'sp-1', ?, 's',"
+            "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id, suite,"
+            " epoch, size, scope, addr_suite, item_id) VALUES('sg-a.webp', 'a.webp', 'sp-1', ?, 's',"
             " 0, 1, 'galaxy', 'sm1', 'post-1')",
             ("a" * 64,),
         )
+
+
+def test_rows_are_looked_up_by_item(tmp_path):
+    """The fetcher maps an item's files through its own rows (an edit that
+    carries no descriptor keeps the names the item already has)."""
+    c = _fresh(tmp_path)
+    apply_through(c, _VERSION)
+    plan = " ".join(
+        str(r[3])
+        for r in c.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM space_media_refs"
+            " WHERE space_id = 'sp-1' AND item_id = 'post-1'"
+        )
+    )
+    assert "idx_space_media_refs_item" in plan

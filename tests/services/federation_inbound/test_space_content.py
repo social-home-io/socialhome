@@ -45,6 +45,7 @@ from socialhome.domain.post import (
     BazaarOffer,
     BazaarStatus,
 )
+from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
 from socialhome.domain.task import Task, TaskList, TaskPriority, TaskStatus
 from socialhome.domain.timetable import Timetable, TimetableEntry, to_wire_dict
@@ -6776,15 +6777,29 @@ async def test_a_lost_race_on_a_bid_withdrawal_publishes_nothing(bus, open_aucti
 
 
 class _GfsMediaSink:
+    """Renames each described file ``sg-<name>``; records what it kept."""
+
     def __init__(self):
         self.received: list[tuple] = []
         self.items: list[tuple] = []
+        self.kept: list[dict] = []
 
-    async def receive(
-        self, space_id, raw_refs, media_urls, *, item_id, origin="", prefetch=True
-    ):
-        self.received.append((space_id, raw_refs, list(media_urls)))
+    async def localize(self, space_id, raw_refs, media_urls, *, item_id, origin):
+        urls = [u for u in media_urls if u]
+        if isinstance(raw_refs, dict):
+            self.received.append((space_id, raw_refs, urls))
         self.items.append((item_id, origin))
+        described = raw_refs if isinstance(raw_refs, dict) else {}
+        names = {
+            u.rsplit("/", 1)[-1]: "sg-" + u.rsplit("/", 1)[-1]
+            for u in urls
+            if u.rsplit("/", 1)[-1] in described
+        }
+        return SpaceMediaLocalization(names=names, refs=(object(),) if names else ())
+
+    async def keep(self, loc, *, prefetch=True):
+        if loc.refs:
+            self.kept.append(dict(loc.names))
         return []
 
 
@@ -6811,6 +6826,10 @@ async def test_calendar_cover_media_refs_are_kept(repos, handlers):
         )
     )
     assert sink.received == [("sp-1", _V80_REFS, ["api/media/c.webp"])]
+    assert sink.kept == [{"c.webp": "sg-c.webp"}]
+    # #1309 re-review 1: the event shows the reader's own name for its cover.
+    _space, held = await handlers._calendar_repo.get_event("e-c")
+    assert held.cover_url == "api/media/sg-c.webp"
 
 
 async def test_calendar_without_media_refs_keeps_nothing(repos, handlers):
@@ -6832,6 +6851,7 @@ async def test_calendar_without_media_refs_keeps_nothing(repos, handlers):
         )
     )
     assert sink.received == []
+    assert sink.kept == []
 
 
 async def test_gallery_item_media_refs_are_kept(gallery_handlers):
@@ -6859,3 +6879,35 @@ async def test_gallery_item_media_refs_are_kept(gallery_handlers):
     assert sink.received == [
         ("sp-1", _V80_REFS, ["api/media/t.jpg", "api/media/f.jpg"])
     ]
+
+
+async def test_a_gallery_items_files_take_the_readers_names(gallery_handlers):
+    """#1309 re-review 1: the stored item names the reader's own copies."""
+    handlers, gallery = gallery_handlers
+    sink = _GfsMediaSink()
+    handlers.attach_gfs_media(sink)
+    entry = {"blob_id": "c" * 64, "suite": "s", "epoch": 0, "size": 9}
+    await handlers._on_gallery_item_saved(
+        _event(
+            FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+            {
+                "id": "gi-r",
+                "album_id": "alb-1",
+                "uploaded_by": "alice",
+                "item_type": "photo",
+                "url": "/api/media/f.jpg",
+                "thumbnail_url": "/api/media/t.jpg",
+                "width": 800,
+                "height": 600,
+                "occurred_at": "2026-04-10T12:00:00+00:00",
+                "media_refs": {"f.jpg": entry, "t.jpg": entry},
+            },
+            space_id="sp-1",
+        ),
+    )
+    item = await gallery.get_item("gi-r")
+    assert (item.url, item.thumbnail_url) == (
+        "api/media/sg-f.jpg",
+        "api/media/sg-t.jpg",
+    )
+    assert sink.kept == [{"t.jpg": "sg-t.jpg", "f.jpg": "sg-f.jpg"}]

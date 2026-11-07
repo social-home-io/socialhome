@@ -329,7 +329,7 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
         )
         # v_80 — the pictures, for followers reading through a GFS.
         media_plan = await self._plan_media_refs(
-            event.space_id, post_media_urls(post), followers=True
+            event.space_id, post_media_urls(post), item_id=post.id, followers=True
         )
         if media_plan is not None:
             inner[MEDIA_REFS_FIELD] = media_plan.wire()

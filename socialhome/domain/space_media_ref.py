@@ -24,8 +24,8 @@ Pure: no I/O.
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection, Iterable
-from dataclasses import dataclass
+from collections.abc import Collection, Iterable, Mapping
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from ..moment_public_media import MAX_BLOB_BYTES, is_blob_id
@@ -57,8 +57,11 @@ _MAX_EPOCH: int = 2**53
 
 @dataclass(slots=True, frozen=True)
 class SpaceMediaRef:
-    """One ``space_media_refs`` row: the local file *filename* of
-    *space_id* is the blob *blob_id* in a GFS media cache."""
+    """One descriptor entry: the file *filename* of an item of *space_id*
+    (the name the item's author gave it — what the blob's AAD names) is the
+    blob *blob_id* in a GFS media cache. As a ``space_media_refs`` row, it is
+    stored here as *local_name*
+    (:func:`~socialhome.services.inbound_media_store.gfs_space_media_name`)."""
 
     filename: str
     space_id: str
@@ -76,6 +79,8 @@ class SpaceMediaRef:
     #: space is refused (write-once). Never on the wire.
     item_id: str = ""
     origin: str = ""
+    #: The reader's own name for the file (a row only; never on the wire).
+    local_name: str = ""
     created_at: str | None = None
 
     def to_wire(self) -> dict:
@@ -87,6 +92,52 @@ class SpaceMediaRef:
             "scope": self.scope,
             "addr_suite": self.addr_suite,
         }
+
+
+@dataclass(slots=True, frozen=True)
+class SpaceMediaLocalization:
+    """What a received item's files are called here: the author's file name
+    → this household's name for the copy fetched from a GFS (*names*), and
+    the descriptor rows to keep once the item is stored (*refs*). A file not
+    in *names* keeps its reference (its bytes come another way, or not at
+    all). Pure — the rewrite is applied to the item before it is saved."""
+
+    names: Mapping[str, str] = field(default_factory=dict)
+    refs: tuple[SpaceMediaRef, ...] = ()
+
+    def url(self, value: str | None) -> str | None:
+        """*value* with its file renamed when *names* has it (path prefix
+        and query kept), else unchanged."""
+        if not value or not self.names:
+            return value
+        path, sep, query = value.partition("?")
+        head, slash, base = path.rpartition("/")
+        local = self.names.get(base)
+        if local is None:
+            return value
+        return f"{head}{slash}{local}{sep}{query}"
+
+    def post(self, post: Post) -> Post:
+        """*post* with every file :func:`post_media_urls` lists renamed."""
+        if not self.names:
+            return post
+        preview = post.link_preview
+        file_meta = post.file_meta
+        return replace(
+            post,
+            media_url=self.url(post.media_url),
+            image_urls=tuple(self.url(u) or u for u in post.image_urls or ()),
+            link_preview=(
+                replace(preview, thumbnail_url=self.url(preview.thumbnail_url))
+                if preview is not None
+                else None
+            ),
+            file_meta=(
+                replace(file_meta, url=self.url(file_meta.url) or file_meta.url)
+                if file_meta is not None
+                else None
+            ),
+        )
 
 
 def media_refs_to_wire(refs: Iterable[SpaceMediaRef]) -> dict[str, dict]:
@@ -218,6 +269,7 @@ __all__ = [
     "MAX_DESCRIPTOR_ENTRIES",
     "MEDIA_REFS_FIELD",
     "MEDIA_REF_RESOURCES",
+    "SpaceMediaLocalization",
     "SpaceMediaRef",
     "media_refs_to_wire",
     "parse_media_refs",

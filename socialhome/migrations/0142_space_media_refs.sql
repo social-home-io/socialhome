@@ -7,9 +7,12 @@
 -- bytes: ``{"<local filename>": {blob_id, suite, epoch, size, scope,
 -- addr_suite}}`` (``blob_id`` the GFS's scope-bound address). The file
 -- is fetched from the household's GFS on arrival (prefetch) or when first
--- viewed (``GET /api/media/{filename}``), decrypted with the epoch's space
--- key and written under the same local filename — so this row is what the
--- media route reads to know where a missing file lives.
+-- viewed (``GET /api/media/{local_name}``), decrypted with the epoch's space
+-- key and written under the READER's own name for it (``local_name``, an
+-- ``sg-`` hash of the space, the household that delivered the item and the
+-- author's file name — the item's reference is rewritten to it), so a member
+-- naming another item's file in its own item only ever gets its own copy.
+-- This row is what the media route reads to know where a missing file lives.
 --
 -- CLAUDE.md "audit before a migration":
 --
@@ -24,13 +27,17 @@
 --    migrations, and the media route would have to search three tables by
 --    filename); keeping descriptors in memory (a file first viewed after a
 --    restart could never be fetched); re-deriving them on view (needs the
---    sender's file). The filename is already unique per household
---    (``<uuid-hex>.<ext>``), so it is the natural key.
+--    sender's file). The reader's own name is unique per household and
+--    binds the delivering household, so it is the natural key.
 -- 3. Smallest change: one new table, additive; no existing row touched; the
 --    rows go with their space (``ON DELETE CASCADE``).
 
 CREATE TABLE IF NOT EXISTS space_media_refs (
-    filename    TEXT PRIMARY KEY,
+    -- This household's name for the file (``sg-…``) — what the item's
+    -- rewritten reference and the media route name.
+    local_name  TEXT PRIMARY KEY,
+    -- The author's name for it: what the blob's AAD names.
+    filename    TEXT NOT NULL,
     space_id    TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
     blob_id     TEXT NOT NULL,
     suite       TEXT NOT NULL,
@@ -41,13 +48,12 @@ CREATE TABLE IF NOT EXISTS space_media_refs (
     -- knows itself — the space id, or its own channel id.
     scope       TEXT NOT NULL CHECK (scope IN ('space', 'channel')),
     addr_suite  TEXT NOT NULL,
-    -- The item that introduced the file here (post / calendar event /
-    -- gallery item id) and the household that delivered it: the row is
-    -- bound to them and written once — a descriptor of the same file from
-    -- another item or space never re-points it.
+    -- The item that shows the file (post / calendar event / gallery item
+    -- id) and the household that delivered it — both in the blob's AAD. A
+    -- row is written once; only the same item moves it to a newer epoch.
     item_id     TEXT NOT NULL,
     origin      TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_space_media_refs_space
-    ON space_media_refs(space_id);
+CREATE INDEX IF NOT EXISTS idx_space_media_refs_item
+    ON space_media_refs(space_id, item_id);

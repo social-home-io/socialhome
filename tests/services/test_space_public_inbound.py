@@ -54,6 +54,7 @@ from socialhome.domain.space_item import (
     pad_json_object,
     zlib_item_plaintext,
 )
+from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
@@ -2228,15 +2229,29 @@ async def test_an_early_comment_is_held_and_replayed_with_its_post(item_env):
 
 
 class _GfsMediaSink:
+    """Renames each described file ``sg-<name>``; records what it kept."""
+
     def __init__(self):
         self.received: list[tuple] = []
         self.items: list[tuple] = []
+        self.kept: list[dict] = []
 
-    async def receive(
-        self, space_id, raw_refs, media_urls, *, item_id, origin="", prefetch=True
-    ):
-        self.received.append((space_id, raw_refs, list(media_urls)))
+    async def localize(self, space_id, raw_refs, media_urls, *, item_id, origin):
+        urls = [u for u in media_urls if u]
+        if isinstance(raw_refs, dict):
+            self.received.append((space_id, raw_refs, urls))
         self.items.append((item_id, origin))
+        described = raw_refs if isinstance(raw_refs, dict) else {}
+        names = {
+            u.rsplit("/", 1)[-1]: "sg-" + u.rsplit("/", 1)[-1]
+            for u in urls
+            if u.rsplit("/", 1)[-1] in described
+        }
+        return SpaceMediaLocalization(names=names, refs=(object(),) if names else ())
+
+    async def keep(self, loc, *, prefetch=True):
+        if loc.refs:
+            self.kept.append(dict(loc.names))
         return []
 
 
@@ -2250,8 +2265,15 @@ async def test_a_followers_relayed_post_keeps_its_media_refs(env):
         unsigned_extra={"media_refs": refs},
     )
     await env["inbound"].handle(_frame(envelope), gfs_id="g1")
-    assert await env["post_repo"].get("post-1") is not None
+    held = await env["post_repo"].get("post-1")
+    assert held is not None
     assert sink.received == [("sp-1", refs, ["api/media/p.webp"])]
+    # Named for the post and its author household (the signed inner's
+    # origin) — the follower's own name for the file is what it shows.
+    assert sink.items[0][0] == "post-1" and sink.items[0][1]
+    assert sink.kept == [{"p.webp": "sg-p.webp"}]
+    post = held[1] if isinstance(held, tuple) else held
+    assert post.image_urls == ("api/media/sg-p.webp",)
 
 
 async def test_a_relayed_post_without_media_refs_keeps_nothing(env):
@@ -2260,3 +2282,4 @@ async def test_a_relayed_post_without_media_refs_keeps_nothing(env):
     envelope = await _make_envelope(env)
     await env["inbound"].handle(_frame(envelope), gfs_id="g1")
     assert sink.received == []
+    assert sink.kept == []

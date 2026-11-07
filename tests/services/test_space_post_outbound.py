@@ -1442,10 +1442,12 @@ class _FakeMediaGfs:
         self._plan = plan
         self.readers = set(readers)
         self.planned: list[tuple[str, list, bool]] = []
+        self.items: list = []
         self.uploaded: list = []
 
-    async def plan(self, space_id, media_urls, *, followers):
+    async def plan(self, space_id, media_urls, *, item_id, followers):
         self.planned.append((space_id, list(media_urls), followers))
+        self.items.append(item_id)
         return self._plan
 
     async def is_relay_reader(self, instance_id):
@@ -1480,6 +1482,7 @@ async def test_media_refs_go_only_to_link_joined_readers():
     await bus.publish(SpacePostCreated(post=_picture_post(), space_id="sp-1"))
 
     assert media_gfs.planned == [("sp-1", ["api/media/a.webp"], False)]
+    assert media_gfs.items == [_picture_post().id]  # sealed for the post
     call = federation.broadcast_to_space_members.call_args
     payload = call.args[2]
     assert "media_refs" not in payload  # never on the shared payload

@@ -28,14 +28,20 @@ NAME = "0123abcd.webp"
 
 def _seal(data: bytes, **kw) -> bytes:
     args = {"media_key": KEY, "space_id": SPACE, "epoch": 3, "filename": NAME}
+    args |= {"item_id": "post-1", "origin": "inst-a"}
     args.update(kw)
     return seal_space_media(data=data, **args)
 
 
 def _open(blob: bytes, **kw) -> bytes:
     args = {"media_key": KEY, "space_id": SPACE, "epoch": 3, "filename": NAME}
+    args |= {"item_id": "post-1", "origin": "inst-a"}
     args.update(kw)
     return open_space_media(blob=blob, **args)
+
+
+def _nonce(name: str, data: bytes, *, item_id="post-1", origin="inst-a") -> bytes:
+    return space_media_nonce(KEY, name, data, item_id=item_id, origin=origin)
 
 
 def test_round_trip() -> None:
@@ -71,16 +77,24 @@ def test_deterministic_same_file_same_blob() -> None:
 
 def test_different_content_same_name_different_nonce() -> None:
     a, b = os.urandom(100), os.urandom(100)
-    assert space_media_nonce(KEY, NAME, a) != space_media_nonce(KEY, NAME, b)
-    assert len(space_media_nonce(KEY, NAME, a)) == 12
+    assert _nonce(NAME, a) != _nonce(NAME, b)
+    assert len(_nonce(NAME, a)) == 12
     assert _seal(a)[:12] != _seal(b)[:12]
 
 
 def test_nonce_depends_on_name() -> None:
     data = b"x" * 10
-    assert space_media_nonce(KEY, "a.webp", data) != space_media_nonce(
-        KEY, "b.webp", data
-    )
+    assert _nonce("a.webp", data) != _nonce("b.webp", data)
+
+
+def test_nonce_depends_on_the_item_and_the_sealing_household() -> None:
+    """#1309 re-review: the AAD names the item and the household that sealed
+    it, so the nonce must too — one nonce under one key with two AADs would
+    be GCM nonce reuse."""
+    data = b"x" * 10
+    base = _nonce(NAME, data)
+    assert _nonce(NAME, data, item_id="post-2") != base
+    assert _nonce(NAME, data, origin="inst-m") != base
 
 
 @pytest.mark.parametrize(
@@ -89,6 +103,8 @@ def test_nonce_depends_on_name() -> None:
         {"space_id": "sp-2"},
         {"epoch": 4},
         {"filename": "other.webp"},
+        {"item_id": "post-2"},
+        {"origin": "inst-m"},
         {"media_key": derive_space_media_key(bytes(32))},
     ],
 )

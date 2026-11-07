@@ -194,7 +194,7 @@ class _MediaPlanner(Protocol):
     async def is_relay_reader(self, instance_id: str) -> bool: ...
 
     async def plan_for_reader(
-        self, space_id: str, media_urls: list[str], instance_id: str
+        self, space_id: str, media_urls: list[str], instance_id: str, *, item_id: str
     ) -> Any: ...
 
     def upload(self, plan: Any) -> None: ...
@@ -229,8 +229,13 @@ class _WithMediaRefs:
             if urls and self._budget > 0:
                 self._budget -= 1
                 try:
+                    # Sealed for the record's own item — the id the
+                    # reader keeps the descriptor (and opens the blob) under.
                     plan = await self._media.plan_for_reader(
-                        space_id, urls, self._requester
+                        space_id,
+                        urls,
+                        self._requester,
+                        item_id=str(row.get("id") or ""),
                     )
                 except Exception:
                     log.warning(

@@ -5,11 +5,23 @@ invite link, a follower of a global space) carries a ``media_refs``
 descriptor instead of the bytes (:mod:`socialhome.domain.space_media_ref`).
 This service:
 
-* **keeps** each entry for a file the item itself shows as a
-  ``space_media_refs`` row (:meth:`SpaceMediaGfsFetcher.receive`);
+* **localizes** the item before it is saved
+  (:meth:`SpaceMediaGfsFetcher.localize`): each file the item shows and
+  describes is renamed to THIS household's name for it,
+  :func:`~.inbound_media_store.gfs_space_media_name` of the space, the
+  household that delivered the item (authenticated by the caller — the
+  envelope, the signed inner, the §25.6 stream) and the author's file name.
+  So a member naming another item's file in its own item only ever gets
+  its own copy; it can never take over the name another item shows. A file
+  the same item already has here keeps the name it has (an update without
+  a descriptor, a second household re-describing it);
+* **keeps** the new entries as ``space_media_refs`` rows once the item is
+  stored (:meth:`SpaceMediaGfsFetcher.keep`);
 * **prefetches** the pictures on arrival, at most
-  :data:`PREFETCH_CONCURRENCY` at a time and :data:`MAX_PREFETCH_PENDING`
-  waiting (the rest are fetched when viewed);
+  :data:`PREFETCH_CONCURRENCY` at a time, :data:`MAX_PREFETCH_PENDING`
+  waiting and :data:`MAX_PREFETCH_PER_SPACE` of one space (the rest are
+  fetched when viewed); a space whose last :data:`MAX_SPACE_PREFETCH_MISSES`
+  prefetches found nothing tries once, without retries;
 * **fetches on view** (:meth:`SpaceMediaGfsFetcher.ensure_local`, called by
   ``GET /api/media/{filename}`` for a missing file): concurrent requests for
   one file share one fetch, bounded by a timeout.
@@ -19,9 +31,9 @@ this household reaches the space through — the link-joined pair's
 ``relay_via`` first, then its own GFS connections — checks that the blob
 sits at its **scope-bound address** (``space_media_address`` with the scope
 id THIS household knows: the space id, or its own channel id for a private
-space; the descriptor names only the scope kind), decrypts with the epoch's media key
-(:mod:`socialhome.space_media_seal`) and writes the file write-once under its
-local name (the ``SPACE_MEDIA_BLOB`` rules, :mod:`.inbound_media_store`). An
+space; the descriptor names only the scope kind), decrypts with the epoch's media key — the AAD names the item and the
+delivering household (:mod:`socialhome.space_media_seal`) — and writes the
+file write-once under its local name (:mod:`.inbound_media_store`). An
 unknown suite, a wrong hash or a failed decrypt is refused with a WARNING and
 writes nothing.
 """
@@ -35,6 +47,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import aiofiles
@@ -43,13 +56,19 @@ from cryptography.exceptions import InvalidTag
 
 from ..domain.federation import InstanceSource
 from ..domain.gfs_space_media import SCOPE_CHANNEL, SCOPE_SPACE, space_media_address
-from ..domain.space_media_ref import SpaceMediaRef, parse_media_refs
+from ..domain.space_media_ref import (
+    SpaceMediaLocalization,
+    SpaceMediaRef,
+    parse_media_refs,
+)
 from ..space_media_seal import (
     UnsupportedSpaceMediaSuite,
     open_space_media,
     require_space_media_suite,
 )
 from .inbound_media_store import (
+    gfs_space_media_name,
+    is_gfs_space_media_name,
     is_reserved_media_name,
     media_file_path,
     write_once,
@@ -71,7 +90,13 @@ log = logging.getLogger(__name__)
 #: space (so one member's items can't fill the queue for every space).
 PREFETCH_CONCURRENCY: int = 3
 MAX_PREFETCH_PENDING: int = 200
-MAX_PREFETCH_PER_SPACE: int = 50
+MAX_PREFETCH_PER_SPACE: int = 20
+
+#: After this many prefetches of one space in a row found their blob on no
+#: GFS, that space's prefetches try once without retries — a member's items
+#: naming blobs nobody uploads cost one request each, not three — until one
+#: lands. Views fetch as always.
+MAX_SPACE_PREFETCH_MISSES: int = 5
 
 #: GFS fetches running at once, views and prefetches together.
 MAX_CONCURRENT_FETCHES: int = 6
@@ -124,6 +149,7 @@ class SpaceMediaGfsFetcher:
         "_prefetch_pending",
         "_prefetch_sem",
         "_refs",
+        "_space_misses",
         "_spaces",
         "_tasks",
     )
@@ -156,65 +182,105 @@ class SpaceMediaGfsFetcher:
         self._prefetch_by_space: dict[str, int] = {}
         #: Every GFS fetch, views and prefetches alike.
         self._fetch_sem = asyncio.Semaphore(MAX_CONCURRENT_FETCHES)
-        #: filename → monotonic time until which a view doesn't ask again.
+        #: local name → monotonic time until which a view doesn't ask again.
         self._misses: OrderedDict[str, float] = OrderedDict()
+        #: space → prefetches in a row that found their blob nowhere.
+        self._space_misses: OrderedDict[str, int] = OrderedDict()
 
     # ── Descriptors ──────────────────────────────────────────────────────
 
-    async def receive(
+    async def localize(
         self,
         space_id: str,
         raw_refs: object,
         media_urls: Iterable[str | None],
         *,
         item_id: str,
-        origin: str = "",
-        prefetch: bool = True,
-    ) -> list[SpaceMediaRef]:
-        """Keep the descriptor entries of item *item_id* of *space_id*
-        (delivered by household *origin*) for the files it shows
-        (*media_urls*); prefetch its pictures. Never raises.
+        origin: str,
+    ) -> SpaceMediaLocalization:
+        """This household's names for the files item *item_id* of
+        *space_id* shows (*media_urls*), as delivered by household *origin*
+        — which the CALLER authenticated (the envelope's sender, the signed
+        inner's origin, the §25.6 provider), never a descriptor field.
 
-        A file's row is bound to the item that introduced it and written
-        once: a descriptor of an already described file from another item
-        or space is refused with a WARNING (never re-points it), a
-        redelivery of the same item is a no-op."""
-        # Never a name another receiving path owns (DM / moment media).
+        * A described file the item has no row for yet → its reader name
+          (:func:`gfs_space_media_name` of space, *origin*, file name) and a
+          row to :meth:`keep` once the item is saved.
+        * A file the item already has a row for → the name it has (the
+          first household to describe it for this item keeps it; the same
+          household's newer epoch moves the row in :meth:`keep`).
+        * Anything else keeps its reference.
+
+        Call it BEFORE saving the item, apply :meth:`SpaceMediaLocalization
+        .url` / ``.post`` to it, and :meth:`keep` only when the item was
+        stored. Never raises (an empty localization on failure)."""
+        empty = SpaceMediaLocalization()
+        if not item_id or not origin:
+            return empty
+        # Never a name another receiving path owns (DM / moment / GFS media).
         allowed = {
             name for name in media_names(media_urls) if not is_reserved_media_name(name)
         }
-        parsed = parse_media_refs(
-            raw_refs,
-            space_id=space_id,
-            allowed=allowed,
-            item_id=item_id,
-            origin=origin,
-        )
-        refs: list[SpaceMediaRef] = []
+        if not allowed:
+            return empty
         try:
-            for ref in parsed:
-                held = await self._refs.get(ref.filename)
-                if held is None:
-                    refs.append(ref)
-                elif (held.space_id, held.item_id) != (space_id, item_id):
-                    log.warning(
-                        "space media %s: described by another item or space "
-                        "already — descriptor from %s refused",
+            held: dict[str, SpaceMediaRef] = {}
+            for row in await self._refs.list_for_item(space_id, item_id):
+                held.setdefault(row.filename, row)
+            names: dict[str, str] = {}
+            refs: list[SpaceMediaRef] = []
+            for ref in parse_media_refs(
+                raw_refs,
+                space_id=space_id,
+                allowed=allowed,
+                item_id=item_id,
+                origin=origin,
+            ):
+                local = gfs_space_media_name(space_id, origin, ref.filename)
+                first = held.get(ref.filename)
+                if first is not None and first.local_name != local:
+                    log.info(
+                        "space media %s of %s: described by %s already — "
+                        "the descriptor from %s keeps that",
                         ref.filename,
-                        origin or "a relay",
+                        item_id,
+                        first.origin,
+                        origin,
                     )
-            if refs:
-                await self._refs.save_many(refs)
+                    continue
+                names[ref.filename] = local
+                refs.append(replace(ref, local_name=local))
+            for name, row in held.items():
+                if name in allowed:
+                    names.setdefault(name, row.local_name)
         except Exception:
             log.warning(
-                "space media refs of space %s not stored", space_id, exc_info=True
+                "space media refs of item %s in space %s not read",
+                item_id,
+                space_id,
+                exc_info=True,
             )
+            return empty
+        return SpaceMediaLocalization(names=names, refs=tuple(refs))
+
+    async def keep(
+        self, loc: SpaceMediaLocalization, *, prefetch: bool = True
+    ) -> list[SpaceMediaRef]:
+        """Keep *loc*'s new rows — call it once the item is stored — and
+        prefetch their pictures. Never raises."""
+        if not loc.refs:
             return []
-        if prefetch:
-            for ref in refs:
-                if _is_picture(ref.filename):
-                    self._prefetch(ref.filename, space_id)
-        return refs
+        try:
+            await self._refs.save_many(loc.refs)
+        except Exception:
+            log.warning("space media refs not stored", exc_info=True)
+            return []
+        for ref in loc.refs:
+            # A newer epoch may have moved the row: ask the GFS again.
+            self._misses.pop(ref.local_name, None)
+            if prefetch and _is_picture(ref.local_name):
+                self._prefetch(ref.local_name, ref.space_id)
+        return list(loc.refs)
 
     # ── Fetching ─────────────────────────────────────────────────────────
 
@@ -281,12 +347,14 @@ class SpaceMediaGfsFetcher:
         try:
             async with self._prefetch_sem:
                 outcome = await self._fetch_task(filename)
-            for delay in PREFETCH_RETRY_DELAYS_S:
-                if outcome != _MISS:
-                    break
-                await asyncio.sleep(delay)
-                async with self._prefetch_sem:
-                    outcome = await self._fetch_task(filename)
+            if self._space_misses.get(space_id, 0) < MAX_SPACE_PREFETCH_MISSES:
+                for delay in PREFETCH_RETRY_DELAYS_S:
+                    if outcome != _MISS:
+                        break
+                    await asyncio.sleep(delay)
+                    async with self._prefetch_sem:
+                        outcome = await self._fetch_task(filename)
+            self._count_space_miss(space_id, outcome)
         except Exception:  # pragma: no cover - defensive
             log.warning("space media prefetch of %s failed", filename, exc_info=True)
         finally:
@@ -296,6 +364,15 @@ class SpaceMediaGfsFetcher:
                 self._prefetch_by_space[space_id] = left
             else:
                 self._prefetch_by_space.pop(space_id, None)
+
+    def _count_space_miss(self, space_id: str, outcome: str) -> None:
+        if outcome == _STORED:
+            self._space_misses.pop(space_id, None)
+        elif outcome == _MISS:
+            self._space_misses[space_id] = self._space_misses.get(space_id, 0) + 1
+            self._space_misses.move_to_end(space_id)
+            while len(self._space_misses) > MAX_MISSES_REMEMBERED:
+                self._space_misses.popitem(last=False)
 
     async def drain(self) -> None:
         """Wait for every prefetch and fetch running now (tests, the demo)."""
@@ -314,8 +391,10 @@ class SpaceMediaGfsFetcher:
         """One fetch: ``stored`` (the file is here now), ``miss`` (no GFS
         holds the blob — yet) or ``refused`` (anything else: unknown
         suite, no key, wrong hash, failed decrypt — not worth retrying)."""
-        if is_reserved_media_name(filename):
-            log.warning("space media %s: a reserved name — never fetched", filename)
+        if not is_gfs_space_media_name(filename):
+            log.warning(
+                "space media %s: not a GFS space media name — never fetched", filename
+            )
             return _REFUSED
         ref = await self._refs.get(filename)
         path = media_file_path(self._dir, filename)
@@ -374,9 +453,7 @@ class SpaceMediaGfsFetcher:
                 outcome = _REFUSED
                 continue
             try:
-                data = await asyncio.to_thread(
-                    _open_sync, blob, current[1], ref.space_id, ref.epoch, filename
-                )
+                data = await asyncio.to_thread(_open_sync, blob, current[1], ref)
             except ValueError, InvalidTag:
                 log.warning(
                     "space media %s: cannot decrypt the blob — refused", filename
@@ -384,8 +461,10 @@ class SpaceMediaGfsFetcher:
                 return _REFUSED
             await self._write(path, data)
             log.info(
-                "space media %s: fetched blob %s (%d bytes) from GFS %s",
+                "space media %s (%s of %s): fetched blob %s (%d bytes) from GFS %s",
                 filename,
+                ref.filename,
+                ref.item_id,
                 ref.blob_id[:12],
                 len(blob),
                 base_url,
@@ -444,9 +523,13 @@ def _is_picture(filename: str) -> bool:
     return filename.rpartition(".")[2].lower() in PREFETCH_EXTENSIONS
 
 
-def _open_sync(
-    blob: bytes, key: bytes, space_id: str, epoch: int, filename: str
-) -> bytes:
+def _open_sync(blob: bytes, key: bytes, ref: SpaceMediaRef) -> bytes:
     return open_space_media(
-        blob=blob, media_key=key, space_id=space_id, epoch=epoch, filename=filename
+        blob=blob,
+        media_key=key,
+        space_id=ref.space_id,
+        epoch=ref.epoch,
+        item_id=ref.item_id,
+        origin=ref.origin,
+        filename=ref.filename,
     )

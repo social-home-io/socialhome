@@ -44,6 +44,7 @@ from socialhome.domain.post import (
     PostType,
 )
 from socialhome.domain.space import JoinMode, SpaceMember, SpaceType
+from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.domain.user import UserStatus
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.repositories import (
@@ -5384,17 +5385,30 @@ async def test_a_failing_placement_never_costs_the_upsert(db, bus):
 
 
 class _GfsMediaSink:
-    """Stand-in for :class:`SpaceMediaGfsFetcher` — records descriptors."""
+    """Stand-in for :class:`SpaceMediaGfsFetcher`: each described file is
+    renamed ``sg-<name>`` (the reader's name); records what was localized
+    and what was kept (only after the item was stored)."""
 
     def __init__(self):
         self.received: list[tuple] = []
         self.items: list[tuple] = []
+        self.kept: list[dict] = []
 
-    async def receive(
-        self, space_id, raw_refs, media_urls, *, item_id, origin="", prefetch=True
-    ):
-        self.received.append((space_id, raw_refs, list(media_urls)))
+    async def localize(self, space_id, raw_refs, media_urls, *, item_id, origin):
+        urls = [u for u in media_urls if u]
+        if isinstance(raw_refs, dict):
+            self.received.append((space_id, raw_refs, urls))
         self.items.append((item_id, origin))
+        described = raw_refs if isinstance(raw_refs, dict) else {}
+        names = {
+            u.rsplit("/", 1)[-1]: "sg-" + u.rsplit("/", 1)[-1]
+            for u in urls
+            if u.rsplit("/", 1)[-1] in described
+        }
+        return SpaceMediaLocalization(names=names, refs=(object(),) if names else ())
+
+    async def keep(self, loc, *, prefetch=True):
+        self.kept.append(dict(loc.names))
         return []
 
 
@@ -5426,8 +5440,17 @@ async def test_space_post_media_refs_are_kept_for_a_gfs_fetch(db, bus, inbound):
         )
     )
     assert sink.received == [("sp-g", refs, ["api/media/a.webp"])]
-    # Bound to the post and the household that delivered it (review C).
+    # Named for the post and the household that delivered it (the
+    # envelope's authenticated sender), and kept once the post is stored.
     assert sink.items == [("post-g", "peer-a")]
+    assert sink.kept == [{"a.webp": "sg-a.webp"}]
+    # #1309 re-review 1: the stored post shows the READER's name for the
+    # file, so another member's item naming a.webp can never swap it.
+    row = await db.fetchone(
+        "SELECT image_urls_json FROM space_posts WHERE id = 'post-g'"
+    )
+    assert "api/media/sg-a.webp" in row["image_urls_json"]
+    assert "api/media/a.webp" not in row["image_urls_json"]
 
 
 async def test_a_picture_plus_link_card_post_keeps_its_media_refs(db, bus, inbound):

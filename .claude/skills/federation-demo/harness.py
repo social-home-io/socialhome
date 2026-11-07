@@ -6197,26 +6197,43 @@ def _picture_via_gfs_media_cache(
     post = _must(f"{step}: {author} posts the photo", s, post, ok=(201,))
     _await_space_post(state, reader, space_id, post["id"])
     src = _instance_dir(author) / "media" / filename
-    dst = _instance_dir(reader) / "media" / filename
+    # The reader keeps the file under ITS OWN name (``sg-…``, bound to the
+    # household that delivered the post) and the stored post names that —
+    # a member naming the same file in another item gets another name.
     deadline = time.time() + timeout
+    refs: list = []
+    while time.time() < deadline and not refs:
+        refs = _rows(
+            reader,
+            "SELECT blob_id, suite, epoch, size, local_name FROM space_media_refs"
+            " WHERE filename = ? AND item_id = ?",
+            (filename, post["id"]),
+        )
+        if not refs:
+            time.sleep(0.5)
+    if not refs:
+        raise SystemExit(f"{step}: {reader} holds no space_media_refs row for {filename}")
+    blob_id, suite, _epoch, blob_size, local_name = refs[0]
+    if not local_name.startswith("sg-"):
+        raise SystemExit(f"{step}: {reader} keeps {filename} as {local_name!r}, not its own sg- name")
+    shown = _rows(
+        reader,
+        "SELECT 1 FROM space_posts WHERE id = ? AND image_urls_json LIKE ?",
+        (post["id"], f"%{local_name}%"),
+    )
+    if not shown:
+        raise SystemExit(f"{step}: {reader}'s post {post['id']} does not show {local_name}")
+    dst = _instance_dir(reader) / "media" / local_name
     while time.time() < deadline and not dst.is_file():
         time.sleep(0.5)
     if not dst.is_file():
         raise SystemExit(
-            f"{step}: {filename} never reached {reader}'s media dir within "
-            f"{timeout:.0f} s — no picture through the GFS media cache.",
+            f"{step}: {filename} never reached {reader}'s media dir (as {local_name}) "
+            f"within {timeout:.0f} s — no picture through the GFS media cache.",
         )
     if dst.read_bytes() != src.read_bytes():
         raise SystemExit(f"{step}: {reader}'s copy of {filename} differs from {author}'s")
     size = len(src.read_bytes())
-    refs = _rows(
-        reader,
-        "SELECT blob_id, suite, epoch, size FROM space_media_refs WHERE filename = ?",
-        (filename,),
-    )
-    if not refs:
-        raise SystemExit(f"{step}: {reader} holds no space_media_refs row for {filename}")
-    blob_id, suite, _epoch, blob_size = refs[0]
     held = _gfs_rows(
         # The address is scope-bound: one blob, one owning scope.
         "SELECT scope_id, size FROM gfs_space_media"
@@ -6245,8 +6262,8 @@ def _picture_via_gfs_media_cache(
         f"holds it for the space ✓"
     )
     print(
-        f"  {reader} fetched it from the GFS media cache, byte-identical "
-        f"({size} bytes) ✓"
+        f"  {reader} fetched it from the GFS media cache as its own "
+        f"{local_name[:15]}…, byte-identical ({size} bytes) ✓"
     )
     return filename
 

@@ -460,7 +460,10 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
         # inner (outside the author signature, like the writer cert).
         media_urls = post_media_urls(post)
         media_plan = await self._plan_media_refs(
-            event.space_id, media_urls, followers="public_relay" in payload
+            event.space_id,
+            media_urls,
+            item_id=post.id,
+            followers="public_relay" in payload,
         )
         if media_plan is not None and "public_relay" in payload:
             payload["public_relay"][MEDIA_REFS_FIELD] = media_plan.wire()

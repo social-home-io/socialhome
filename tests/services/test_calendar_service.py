@@ -3490,10 +3490,12 @@ class _CoverMediaGfs:
     def __init__(self, readers=("peer-e",)):
         self.readers = set(readers)
         self.planned: list = []
+        self.items: list = []
         self.uploaded: list = []
 
-    async def plan(self, space_id, urls, *, followers):
+    async def plan(self, space_id, urls, *, item_id, followers):
         self.planned.append((space_id, list(urls), followers))
+        self.items.append(item_id)
         return _CoverPlan()
 
     async def is_relay_reader(self, iid):
@@ -3519,7 +3521,7 @@ async def test_a_new_cover_carries_media_refs_for_link_joined_members(space_cal_
     env.space_cal_svc.attach_federation(fed)
     media = _CoverMediaGfs()
     env.space_cal_svc.attach_media_gfs(media)
-    await env.space_cal_svc.create_event(
+    created_event = await env.space_cal_svc.create_event(
         space_id="sp-cal",
         summary="Picnic",
         start=_SEED.isoformat(),
@@ -3528,6 +3530,7 @@ async def test_a_new_cover_carries_media_refs_for_link_joined_members(space_cal_
         cover_url="api/media/cover.webp",
     )
     assert media.planned == [("sp-cal", ["api/media/cover.webp"], False)]
+    assert media.items == [created_event.id]  # sealed for the event itself
     created = [c for c in fed.calls if c[0].value == "space_calendar_event_created"]
     _evt, payload, kw = created[0]
     assert "media_refs" not in payload

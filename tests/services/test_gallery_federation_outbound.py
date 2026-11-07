@@ -529,10 +529,12 @@ class _GalleryPlan:
 class _GalleryMediaGfs:
     def __init__(self):
         self.planned: list = []
+        self.items: list = []
         self.uploaded: list = []
 
-    async def plan(self, space_id, urls, *, followers):
+    async def plan(self, space_id, urls, *, item_id, followers):
         self.planned.append((space_id, list(urls), followers))
+        self.items.append(item_id)
         return _GalleryPlan()
 
     async def is_relay_reader(self, iid):
@@ -567,6 +569,7 @@ async def test_a_space_photo_carries_media_refs_for_link_joined_members():
     assert media.planned == [
         ("sp-A", ["/api/media/it-1-thumb.jpg", "/api/media/it-1.jpg"], False)
     ]
+    assert media.items == ["it-1"]  # sealed for the item itself
     by_target = {t: p for t, _e, p, _s in fed.sent}
     assert by_target["peer-2"]["media_refs"] == _GalleryPlan().wire()
     assert "media_refs" not in by_target["peer-1"]

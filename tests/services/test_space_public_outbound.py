@@ -1512,10 +1512,12 @@ class _MediaPlan:
 class _MediaGfs:
     def __init__(self):
         self.planned = []
+        self.items = []
         self.uploaded = []
 
-    async def plan(self, space_id, urls, *, followers):
+    async def plan(self, space_id, urls, *, item_id, followers):
         self.planned.append((space_id, list(urls), followers))
+        self.items.append(item_id)
         return _MediaPlan()
 
     async def is_relay_reader(self, iid):  # pragma: no cover - unused here
@@ -1544,6 +1546,7 @@ async def test_a_seed_holders_picture_post_carries_media_refs_for_followers(env)
     assert inner["media_refs"] == _MediaPlan().wire()
     assert verify_signed_author_inner(_unpadded(inner))
     assert media.planned == [("sp-pub", ["api/media/a.webp"], True)]
+    assert media.items == [post.id]  # sealed for the post
     assert len(media.uploaded) == 1
 
 

@@ -559,3 +559,31 @@ async def test_write_once_publishes_and_never_replaces(tmp_path):
     assert not await store.write_once(target, b"two", tmp_path / ".partial" / "t2")
     assert target.read_bytes() == b"one"
     assert list((tmp_path / ".partial").iterdir()) == []
+
+
+# ── #1309 re-review: a GFS-fetched space file's name is the reader's ─────
+
+
+def test_gfs_space_media_name_is_bound_to_space_household_and_file():
+    name = store.gfs_space_media_name("sp-1", "inst-a", "abc.webp")
+    assert name == store.gfs_space_media_name("sp-1", "inst-a", "abc.webp")
+    assert name.startswith(store.GFS_SPACE_MEDIA_PREFIX)
+    assert name.endswith(".webp")
+    assert store.is_safe_media_name(name)
+    assert store.is_gfs_space_media_name(name)
+    others = {
+        store.gfs_space_media_name("sp-2", "inst-a", "abc.webp"),
+        store.gfs_space_media_name("sp-1", "inst-m", "abc.webp"),
+        store.gfs_space_media_name("sp-1", "inst-a", "abd.webp"),
+    }
+    assert name not in others and len(others) == 3
+
+
+def test_a_gfs_space_media_name_is_reserved():
+    """Only the GFS fetcher writes these: a space item naming one, or a
+    SPACE_MEDIA_BLOB for one, is refused like a DM or moment name."""
+    name = store.gfs_space_media_name("sp-1", "inst-a", "abc.webp")
+    assert store.is_reserved_media_name(name)
+    assert store.space_media_ref("api/media/" + name) is None
+    assert not store.is_gfs_space_media_name("abc.webp")
+    assert not store.is_gfs_space_media_name("dm-" + "0" * 40 + ".webp")

@@ -681,11 +681,18 @@ async def test_space_file_at_the_cap_is_accepted(env):
 
 @pytest.mark.parametrize(
     "name",
-    ["dm-" + "0" * 40 + ".webp", "gm-" + "a" * 40 + ".webp", "m-1.preview.webp"],
+    [
+        "dm-" + "0" * 40 + ".webp",
+        "gm-" + "a" * 40 + ".webp",
+        "sg-" + "b" * 40 + ".webp",
+        "m-1.preview.webp",
+    ],
 )
 async def test_reserved_name_is_refused_even_for_an_unknown_row(env, caplog, name):
-    """``dm-`` (received DM attachments), ``gm-`` (GFS moment media) and DM
-    transients belong to other paths: never written as a space file."""
+    """``dm-`` (received DM attachments), ``gm-`` (GFS moment media), ``sg-``
+    (a space file this household fetched from a GFS under its own name —
+    #1309 re-review 1: a paired member can't plant bytes there first) and
+    DM transients belong to other paths: never written as a space file."""
     svc, media = env
     with caplog.at_level("WARNING"):
         await svc._on_space_media_blob(

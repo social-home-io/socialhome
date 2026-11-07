@@ -83,10 +83,9 @@ from ....domain.space import (
     validate_zone_radius,
 )
 from ....domain.space_media_ref import (
-    MEDIA_REF_RESOURCES,
     MEDIA_REFS_FIELD,
+    SpaceMediaLocalization,
     post_media_urls,
-    record_media_urls,
 )
 from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ....domain.task import task_from_wire_dict, task_list_from_wire_dict
@@ -476,18 +475,19 @@ class ChatSyncSink(Protocol):
 
 class _GfsMediaSink(Protocol):
     """Where a streamed record's ``media_refs`` go (v_80) — the GFS media
-    fetcher, which keeps them for the record's own files."""
+    fetcher: names the record's files for this household, keeps the rows."""
 
-    async def receive(
+    async def localize(
         self,
         space_id: str,
         raw_refs: object,
         media_urls: list[str],
         *,
         item_id: str,
-        origin: str = "",
-        prefetch: bool = True,
-    ) -> Any: ...
+        origin: str,
+    ) -> SpaceMediaLocalization: ...
+
+    async def keep(self, loc: SpaceMediaLocalization) -> Any: ...
 
 
 def _parse_iso(value: Any) -> datetime:
@@ -645,60 +645,38 @@ class SpaceSyncReceiver:
         the pictures."""
         self._gfs_media = fetcher
 
-    async def _keep_media_refs(
+    async def _localize_record(
         self,
-        resource: str,
         space_id: str,
-        records: list[dict[str, Any]],
+        record: dict[str, Any],
+        item_id: str,
+        urls: list[str],
+        *,
         provider: str,
-    ) -> None:
-        """Keep the ``media_refs`` of the records ``_persist`` actually
-        stored here — checked against the STORED row's files (what this
-        household shows), never the record's own claim — bound to the
-        record's item and the household that streamed it."""
-        if self._gfs_media is None or resource not in MEDIA_REF_RESOURCES:
-            return
-        for r in records:
-            if MEDIA_REFS_FIELD not in r:
-                continue
-            item_id = str(r.get("id") or "")
-            urls = await self._stored_media_urls(resource, space_id, item_id)
-            if not urls:
-                continue
-            await self._gfs_media.receive(
-                space_id,
-                r[MEDIA_REFS_FIELD],
-                urls,
-                item_id=item_id,
-                origin=provider,
-            )
+        takes_descriptor: bool,
+    ) -> SpaceMediaLocalization:
+        """v_80 — this household's names for a streamed item's files kept
+        in a GFS media cache, bound to the household that streamed it.
 
-    async def _stored_media_urls(
-        self, resource: str, space_id: str, item_id: str
-    ) -> list[str]:
-        """The files of item *item_id* as stored here in *space_id* (live,
-        not deleted), or ``[]`` when it isn't stored there."""
-        if not item_id:
-            return []
-        if resource == "posts":
-            held = await self._space_post_repo.get(item_id)
-            if held is None or held[0] != space_id or held[1].deleted:
-                return []
-            return post_media_urls(held[1])
-        if resource == "calendar":
-            held_event = await self._space_calendar_repo.get_event(item_id)
-            if held_event is None or held_event[0] != space_id:
-                return []
-            return record_media_urls("calendar", {"cover_url": held_event[1].cover_url})
-        if resource == "gallery":
-            item = await self._gallery_repo.get_item(item_id)
-            album = await self._gallery_repo.get_album(item.album_id) if item else None
-            if item is None or album is None or album.space_id != space_id:
-                return []
-            return record_media_urls(
-                "gallery", {"thumbnail_url": item.thumbnail_url, "url": item.url}
-            )
-        return []
+        The record's descriptor counts only when *takes_descriptor*: the
+        record creates the item here, or it is the host's stream. A member
+        household streaming an item this household already holds can't
+        attach its own blobs to it (#1309 re-review 2) — the item keeps the
+        names it has here. Apply before the item is saved; keep the rows
+        (:meth:`_keep_media`) only once it was."""
+        if self._gfs_media is None:
+            return SpaceMediaLocalization()
+        return await self._gfs_media.localize(
+            space_id,
+            record.get(MEDIA_REFS_FIELD) if takes_descriptor else None,
+            urls,
+            item_id=item_id,
+            origin=provider,
+        )
+
+    async def _keep_media(self, media: SpaceMediaLocalization) -> None:
+        if self._gfs_media is not None:
+            await self._gfs_media.keep(media)
 
     def attach_chat_sink(self, sink: ChatSyncSink) -> None:
         """Wire where streamed space-chat messages (v_55) are applied."""
@@ -1118,7 +1096,6 @@ class SpaceSyncReceiver:
             await self._persist(
                 resource, space_id, records, provider=provider, held_back=held_back
             )
-            await self._keep_media_refs(resource, space_id, records, provider)
         return held_back
 
     async def _apply_picture_resets(
@@ -1390,6 +1367,7 @@ class SpaceSyncReceiver:
                         )
                     )
         elif resource == "posts":
+            from_host = await self._is_host(space_id, provider)
             for r in records:
                 post = _post_from_record(r)
                 if post is None:
@@ -1413,6 +1391,15 @@ class SpaceSyncReceiver:
                         reactions=held_post[1].reactions,
                         comment_count=held_post[1].comment_count,
                     )
+                media = await self._localize_record(
+                    space_id,
+                    r,
+                    post.id,
+                    post_media_urls(post),
+                    provider=provider,
+                    takes_descriptor=held_post is None or from_host,
+                )
+                post = media.post(post)
                 if await self._space_post_repo.save(space_id, post) is None:
                     log.warning(
                         "space sync: post %s already exists in another space "
@@ -1421,6 +1408,7 @@ class SpaceSyncReceiver:
                         space_id,
                     )
                     continue
+                await self._keep_media(media)
                 # Derived local state only (the system album's mirror of its
                 # media) — no notification, no fan-out.
                 await self._bus.publish(SpacePostSynced(post=post, space_id=space_id))
@@ -1560,6 +1548,7 @@ class SpaceSyncReceiver:
                 records, space_id, provider=provider
             )
         elif resource == "calendar":
+            from_host = await self._is_host(space_id, provider)
             for r in records:
                 event = _calendar_from_record(r, provider=provider)
                 if event is None:
@@ -1569,10 +1558,26 @@ class SpaceSyncReceiver:
                 ):
                     log.debug("sync: event %s was deleted here — skipped", event.id)
                     continue
+                held_event = (
+                    await self._space_calendar_repo.get_event(event.id)
+                    if self._gfs_media is not None
+                    else None
+                )
+                media = await self._localize_record(
+                    space_id,
+                    r,
+                    event.id,
+                    [event.cover_url] if event.cover_url else [],
+                    provider=provider,
+                    takes_descriptor=held_event is None or from_host,
+                )
+                event = replace(event, cover_url=media.url(event.cover_url))
                 if not await self._space_calendar_repo.save_event(
                     event, space_id=space_id
                 ):
                     _log_sync_refusal("calendar event", event.id, space_id)
+                    continue
+                await self._keep_media(media)
         elif resource == "gallery_albums_deleted":
             await self._persist_album_tombstones(records, space_id, provider=provider)
         elif resource == "gallery_items_deleted":
@@ -1591,7 +1596,7 @@ class SpaceSyncReceiver:
                     ):
                         recount.add(str(r["id"]))
                 elif kind == "item" and await self._persist_gallery_item(
-                    r, space_id, held_back, from_host=from_host
+                    r, space_id, held_back, from_host=from_host, provider=provider
                 ):
                     recount.add(str(r.get("album_id") or ""))
             # The album's count is what this household holds — the provider's
@@ -3321,6 +3326,7 @@ class SpaceSyncReceiver:
         held_back: HeldBack,
         *,
         from_host: bool = False,
+        provider: str = "",
     ) -> bool:
         """Store a streamed item — or, held here already in this space, take
         the **host's** caption, day taken and album (v_79: a space photo is
@@ -3353,7 +3359,18 @@ class SpaceSyncReceiver:
             sort_order=int(record.get("sort_order") or 0),
             created_at=record.get("created_at"),
         )
-        held = await self._gallery_repo.get_item(item.id) if from_host else None
+        held = (
+            await self._gallery_repo.get_item(item.id)
+            if from_host or self._gfs_media is not None
+            else None
+        )
+        if held is not None and not from_host:
+            # Held here already: a member's stream adds nothing to it (the
+            # insert below is a no-op) — and never its own media_refs.
+            held_elsewhere = held
+            held = None
+        else:
+            held_elsewhere = None
         if held is not None:
             held_album = await self._gallery_repo.get_album(held.album_id)
             if held_album is None or held_album.space_id != space_id:
@@ -3370,12 +3387,29 @@ class SpaceSyncReceiver:
             if _item_edited(held, item):
                 await self._take_host_item_edit(held, item, space_id)
             return True
+        # v_80 — a NEW item's files take this household's names for the
+        # copies in the GFS media cache (bound to the streaming household).
+        media = await self._localize_record(
+            space_id,
+            record,
+            item.id,
+            [u for u in (item.thumbnail_url, item.url) if u],
+            provider=provider,
+            takes_descriptor=held_elsewhere is None,
+        )
+        item = replace(
+            item,
+            url=media.url(item.url) or "",
+            thumbnail_url=media.url(item.thumbnail_url) or "",
+        )
         try:
             # ``bump_count=False``: the caller recounts the album once the
             # chunk is in. The album must belong to this sync's space.
             if await self._gallery_repo.create_item_in_space(
                 item, space_id=space_id, bump_count=False
             ):
+                if held_elsewhere is None:
+                    await self._keep_media(media)
                 return True
             if (
                 await self._gallery_repo.get_album(album_id) is None
