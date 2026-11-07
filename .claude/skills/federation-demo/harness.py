@@ -4961,18 +4961,25 @@ def _check_binary_media_https(state: dict, failures: list[str]) -> None:
     )[0]
     encoder = FederationEncoder(kek.decrypt(seed_wire))
     raw = _os.urandom(200_000)
-    header, sealed = build_media_envelope(
-        encoder=encoder,
-        session_key=kek.decrypt(wrapped_key),
-        from_instance=a_iid,
-        to_instance=c_iid,
-        sig_suite=sig_suite or "ed25519",
-        event_type=FederationEventType.DM_MEDIA_BLOB,
-        payload={"harness_probe": "binary-media-https"},
-        raw_chunk=raw,
-        space_id=None,
-    )
-    body = encode_media_body(header, sealed)
+    session_key = kek.decrypt(wrapped_key)
+
+    def _body() -> bytes:
+        """A fresh chunk body — its own ``msg_id``, so each refusal below is
+        judged on its own merits, not by the replay cache."""
+        header, sealed = build_media_envelope(
+            encoder=encoder,
+            session_key=session_key,
+            from_instance=a_iid,
+            to_instance=c_iid,
+            sig_suite=sig_suite or "ed25519",
+            event_type=FederationEventType.DM_MEDIA_BLOB,
+            payload={"harness_probe": "binary-media-https"},
+            raw_chunk=raw,
+            space_id=None,
+        )
+        return encode_media_body(header, sealed)
+
+    body = _body()
 
     def _post(data: bytes) -> int:
         req = urllib.request.Request(
@@ -4987,16 +4994,28 @@ def _check_binary_media_https(state: dict, failures: list[str]) -> None:
         except urllib.error.HTTPError as exc:
             return exc.code
 
-    flipped = bytearray(body)
-    flipped[-1] ^= 0x01
-    other_suite = bytearray(body)
+    flipped = bytearray(_body())
+    flipped[-1] ^= 0x01  # the sealed chunk's GCM tag
+    other_suite = bytearray(_body())
     other_suite[len(mf.MEDIA_BODY_MAGIC)] = 0x7F
-    got = {
-        "round trip": _post(body),
-        "replay": _post(body),
-        "tampered chunk": _post(bytes(flipped)),
-        "unknown suite byte": _post(bytes(other_suite)),
-    }
+    # c refuses three of these on purpose, each with a WARNING naming the
+    # inbox id a posts to — expected, for exactly these posts.
+    refusals = _open_noise_window(
+        about="a",
+        reason="binary media HTTPS: deliberate replay / tamper / suite probes",
+        witnesses=("c",),
+        named=("federation inbox: rejected",),
+        names=[f"inbox_id={inbox_url.rstrip('/').rsplit('/', 1)[-1]} "],
+    )
+    try:
+        got = {
+            "round trip": _post(body),
+            "replay": _post(body),
+            "tampered chunk": _post(bytes(flipped)),
+            "unknown suite byte": _post(bytes(other_suite)),
+        }
+    finally:
+        _close_noise_windows(refusals)
     want = {
         "round trip": 200,
         "replay": 410,
