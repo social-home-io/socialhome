@@ -32,6 +32,8 @@ import {
 } from '@/store/follows'
 import { PrivacyPersonRow, privacyPersonName } from './PrivacyPersonRow'
 import { userPreferences } from '@/store/userPreferences'
+import { spaceIconUrl } from '@/store/spaces'
+import { SpaceInlineGlyph } from '@/features/spaces/SpaceGlyph'
 import { isHomeAssistant } from '@/platform'
 import { loadNotifSettings } from '@/store/notifSettings'
 import { DeviceBlock, KindsBlock, MutedAndChanged } from './NotificationSettings'
@@ -473,7 +475,9 @@ function SpaceLocationSharingPanel() {
             checked={row.location_share_enabled}
             onChange={() => void toggle(row.space_id, row.location_share_enabled)}
           />
-          {row.space_emoji ? `${row.space_emoji} ` : ''}{row.space_name}
+          <SpaceInlineGlyph iconUrl={spaceIconUrl(row.space_id)} emoji={row.space_emoji}
+            name={row.space_name} />
+          {row.space_name}
         </label>
       ))}
     </div>

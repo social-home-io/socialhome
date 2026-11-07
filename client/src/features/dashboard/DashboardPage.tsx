@@ -18,6 +18,8 @@ import { ws } from '@/ws'
 import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { currentUser } from '@/store/auth'
+import { spaceIconUrl } from '@/store/spaces'
+import { SpaceGlyph } from '@/features/spaces/SpaceGlyph'
 import { Avatar } from '@/components/Avatar'
 import { Button } from '@/components/Button'
 import { CardSkeleton } from '@/components/SkeletonScreen'
@@ -384,7 +386,8 @@ function SpacesCard({
             <li key={p.post_id}>
               <a class="sh-welcome-catchup-row" href={addBase(`/spaces/${p.space_id}`)}>
                 <span class="sh-welcome-catchup-emoji" aria-hidden="true">
-                  {p.space_emoji || '🪐'}
+                  <SpaceGlyph iconUrl={spaceIconUrl(p.space_id)} emoji={p.space_emoji || '🪐'}
+                    name={p.space_name} />
                 </span>
                 <span class="sh-welcome-catchup-body">
                   <span class="sh-welcome-catchup-meta">

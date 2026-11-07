@@ -115,6 +115,19 @@ deterministic across receivers). Toggling
 `delegated_admin_authority` itself stays **owner-only**. See "Authority
 signing" below.
 
+**Space icon**
+
+A space is drawn by its uploaded picture (`icon_hash`, the `ICON_UPDATED`
+config event) when it has one, else by its `emoji`, else by its name's
+initial. `emoji` travels unchanged in `space_meta` / `SPACE_CONFIG_CHANGED`
+and the paired directory (a GFS listing carries no emoji). The SPA's "Home Assistant" icon is
+the value `🏠` + U+FE0E (house, text presentation): a household that knows it
+draws the Home Assistant logomark, while an older one or a text-only spot
+(an `<option>`) shows a house; the page title leaves it out. The server
+stores `emoji` as sent and nothing on the path normalises U+FE0E away, so no
+new field, event or protocol version is needed and every receiver renders it
+safely.
+
 **Gallery (§23.119)**
 
 `SPACE_GALLERY_ALBUM_CREATED` / `SPACE_GALLERY_ALBUM_UPDATED` /

@@ -18,6 +18,8 @@ import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { currentUser } from '@/store/auth'
+import { spaceIconUrl } from '@/store/spaces'
+import { SpaceInlineGlyph } from '@/features/spaces/SpaceGlyph'
 import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { FormError } from '@/components/FormError'
@@ -474,7 +476,10 @@ function SpacesTab() {
         <tbody>
           {spaceRows.value.map(s => (
             <tr key={s.id}>
-              <td>{s.emoji} {s.name}</td>
+              <td>
+                <SpaceInlineGlyph iconUrl={spaceIconUrl(s.id)} emoji={s.emoji} name={s.name} />
+                {s.name}
+              </td>
               <td><span class="sh-muted">{s.space_type}</span></td>
               <td>
                 @{s.owner_username}
@@ -530,7 +535,9 @@ function SpacesTab() {
             {publications.value.map((p) => (
               <tr key={`${p.space_id}-${p.gfs_id}`}>
                 <td>
-                  {p.space_emoji || ''} {p.space_name || t('remote_invite.a_space')}
+                  <SpaceInlineGlyph iconUrl={spaceIconUrl(p.space_id)} emoji={p.space_emoji}
+                    name={p.space_name} />
+                  {p.space_name || t('remote_invite.a_space')}
                 </td>
                 <td>
                   {p.gfs_display_name}

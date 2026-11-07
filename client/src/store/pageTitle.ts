@@ -39,6 +39,16 @@ export interface PageAvatar {
 }
 export const pageTitleAvatar = signal<PageAvatar | null>(null)
 
+/** A space's symbol drawn as a small tile before the page title (the
+ *  space pages set it): its picture, else the Home Assistant logo /
+ *  emoji, else its name's initial (``SpaceGlyph``). ``null`` = none. */
+export interface PageGlyph {
+  iconUrl: string | null
+  emoji: string | null
+  name: string
+}
+export const pageTitleGlyph = signal<PageGlyph | null>(null)
+
 /** Suffix appended to ``document.title`` so a glance at the browser
  *  tab still says "Social Home" — the per-page label tells the user
  *  *which* page they're on. */
@@ -70,13 +80,18 @@ function setDocTitle(label: string): void {
 // check it blanked the TopBar.
 let titleOwner: object | null = null
 let avatarOwner: object | null = null
+let glyphOwner: object | null = null
 
-export function useTitle(title: string): void {
+export function useTitle(title: string, docTitle?: string): void {
+  // ``docTitle``: the browser tab's label when it differs from the
+  // heading (a space's name with its emoji — the TopBar draws the
+  // symbol as a tile instead).
+  const tabTitle = docTitle ?? title
   useEffect(() => {
     const owner = {}
     titleOwner = owner
     pageTitle.value = title
-    setDocTitle(title)
+    setDocTitle(tabTitle)
     return () => {
       if (titleOwner !== owner) return
       titleOwner = null
@@ -86,7 +101,7 @@ export function useTitle(title: string): void {
       pageTitle.value = ''
       setDocTitle('')
     }
-  }, [title])
+  }, [title, tabTitle])
 }
 
 /** Set an avatar next to the page title (and clear it on unmount).
@@ -105,4 +120,23 @@ export function useTitleAvatar(avatar: PageAvatar | null): void {
       pageTitleAvatar.value = null
     }
   }, [src, name, personId])
+}
+
+/** Set a space's symbol before the page title (and clear it on
+ *  unmount). Pair with :func:`useTitle` for the name. */
+export function useTitleGlyph(glyph: PageGlyph | null): void {
+  const iconUrl = glyph?.iconUrl ?? null
+  const emoji = glyph?.emoji ?? null
+  const name = glyph?.name ?? ''
+  const on = glyph !== null
+  useEffect(() => {
+    const owner = {}
+    glyphOwner = owner
+    pageTitleGlyph.value = on ? { iconUrl, emoji, name } : null
+    return () => {
+      if (glyphOwner !== owner) return
+      glyphOwner = null
+      pageTitleGlyph.value = null
+    }
+  }, [on, iconUrl, emoji, name])
 }

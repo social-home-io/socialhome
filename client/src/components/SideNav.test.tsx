@@ -17,6 +17,8 @@ import { SideNav } from './SideNav'
 import { setLocale } from '@/i18n/i18n'
 import { api } from '@/api'
 import { _resetAppsForTest } from '@/store/apps'
+import { spaces as spacesStore } from '@/store/spaces'
+import { HA_SPACE_SYMBOL } from '@/features/spaces/spaceGlyph'
 
 const ALL_FEATURES_ON = {
   feat_feed: true, feat_pages: true, feat_tasks: true,
@@ -493,6 +495,37 @@ describe('SideNav — the open space', () => {
     expect(row.querySelector('.sh-sidenav-subitem__emoji')?.textContent).toBe('B')
     expect(row.textContent).not.toContain('🌐')
     spaces.value = []
+    vi.mocked(api.get).mockReset()
+  })
+
+  // The static SideNav import reads the module-level store / api (an
+  // earlier block resets modules, so a dynamic import would be another
+  // instance).
+  it("the space's picture wins over its emoji", async () => {
+    setUser()
+    const book = { id: 'sp-book', name: 'Book club', emoji: '📚', icon_url: '/api/media/ic.webp?sig=x' }
+    vi.mocked(api.get).mockResolvedValue([book])
+    spacesStore.value = [book as never]
+    const { container, findByText } = renderAt('/spaces/sp-book')
+    await findByText('Book club')
+    const tile = container.querySelector('.sh-sidenav-subitem--active .sh-sidenav-subitem__emoji') as HTMLElement
+    expect(tile.querySelector('img')?.getAttribute('src')).toBe('/api/media/ic.webp?sig=x')
+    expect(tile.textContent).not.toContain('📚')
+    spacesStore.value = []
+    vi.mocked(api.get).mockReset()
+  })
+
+  it('the Home Assistant symbol draws the logo, not a house', async () => {
+    setUser()
+    const home = { id: 'sp-ha', name: 'Smart home', emoji: HA_SPACE_SYMBOL, icon_url: null }
+    vi.mocked(api.get).mockResolvedValue([home])
+    spacesStore.value = [home as never]
+    const { container, findByText } = renderAt('/spaces/sp-ha')
+    await findByText('Smart home')
+    const tile = container.querySelector('.sh-sidenav-subitem--active .sh-sidenav-subitem__emoji') as HTMLElement
+    expect(tile.querySelector('svg.sh-ha-logo')).not.toBeNull()
+    expect(tile.textContent).not.toContain('\u{1F3E0}')
+    spacesStore.value = []
     vi.mocked(api.get).mockReset()
   })
 })
