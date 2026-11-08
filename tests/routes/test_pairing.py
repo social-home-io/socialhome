@@ -1825,6 +1825,10 @@ class _CaptureTransport:
         self._repo = repo
         self._hang = hang
         self.sent: list[tuple[dict, bool]] = []
+        self.closed: list[str] = []
+
+    async def close_peer(self, instance_id: str) -> None:
+        self.closed.append(instance_id)
 
     async def send(self, *, instance, envelope_dict):
         present = await self._repo.get_instance(instance.id) is not None
@@ -1887,6 +1891,8 @@ async def test_unpair_sends_signed_unpair_before_deleting_the_row(client):
 
     assert await fed_repo.get_instance("peer-u1") is None
     assert await client.app[outbox_repo_key].count_pending_for("peer-u1") == 0
+    # The pairing ended: its WebRTC connection closes too, after the UNPAIR.
+    assert transport.closed == ["peer-u1"]
 
 
 async def test_unpair_unreachable_peer_still_succeeds_promptly(client):
