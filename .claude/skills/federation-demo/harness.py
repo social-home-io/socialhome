@@ -7733,14 +7733,25 @@ def cmd_gfs_relay_media() -> None:
                 f"(as {local!r}, {len(got)} bytes) within 120 s — no media through "
                 "the relay."
             )
+        # v_88 — e reaches this space only through the GFS, so the frames
+        # go to e's per-space MAILBOX: the GFS logs ``<mailbox>`` and must
+        # name e's instance id on none of them.
         pushed = _gfs_log_lines_matching(
-            f"media delivered to live socket {e_iid}", offset=gfs_off
+            "media delivered to live socket <mailbox>", offset=gfs_off
         )
-        drained = _gfs_log_lines_matching(f"to {e_iid}", offset=gfs_off)
+        drained = _gfs_log_lines_matching("to <mailbox>", offset=gfs_off)
         if not pushed and not any("drained" in line for line in drained):
             raise SystemExit(
-                f"{step}: the GFS logged no binary media frame for e — the bytes "
-                "did not ride the relay"
+                f"{step}: the GFS logged no binary media frame for e's mailbox — "
+                "the bytes did not ride the relay"
+            )
+        named = _gfs_log_lines_matching(
+            f"media delivered to live socket {e_iid}", offset=gfs_off
+        )
+        if named:
+            raise SystemExit(
+                f"{step}: the GFS logged media frames addressed to e's instance "
+                f"id — they should go to e's mailbox: {named[:2]!r}"
             )
         refused = [
             line
