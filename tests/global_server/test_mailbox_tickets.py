@@ -228,6 +228,22 @@ async def test_a_refused_spend_gives_the_address_count_back(tmp_dir):
         assert (await _register(tc, fresh)).status == 200
 
 
+async def test_the_address_backstop_still_binds_and_keeps_the_ticket(tmp_dir):
+    """Tickets replace the server-wide cap, not the per-address one: past
+    it a ticketed register is refused 429 and the ticket is NOT spent."""
+    app = create_gfs_app(
+        _cfg(tmp_dir, envelope_mailbox=EnvelopeMailboxConfig(mailbox_max_per_ip=1))
+    )
+    async with TestClient(TestServer(app)) as tc:
+        await _home(app)
+        first, second = await _tokens(tc, 2)
+        assert (await _register(tc, first)).status == 200
+        capped = await _register(tc, second)
+        assert (capped.status, (await capped.json())["error"]) == (429, "mailbox_cap")
+        spent = await app[gfs_db_key].fetchall("SELECT nonce FROM gfs_spent_tickets")
+        assert len(spent) == 1  # only the first ticket
+
+
 async def test_a_forged_token_is_refused(gfs):
     (token,) = await _tokens(gfs, 1)
     raw = bytearray(b64url_decode(token))
