@@ -291,6 +291,8 @@ class MailboxTicketService:
     async def check(self, suite: object, ticket: object) -> tuple[bytes, int]:
         """Verify a ticket without spending it: ``(nonce, expires_at)`` for
         :meth:`spend`. Raises :class:`MailboxRefused`."""
+        if suite is None and ticket is None:
+            raise MailboxRefused(403, "ticket_required")
         try:
             pp.validate_ticket_suite(suite)
         except pp.UnsupportedTicketSuite as exc:

@@ -994,7 +994,7 @@ def test_envelope_mailbox_queue_and_socket_caps(tmp_dir, monkeypatch):
     )
     assert m.mailbox_queue_max_total_bytes == 256 * 1024**2
     assert m.mailbox_media_queue_bytes_per_recipient == 8 * 1024**2
-    assert m.mailbox_max_new_per_day == 20_000
+    assert (m.mailbox_tickets_per_day, m.mailbox_ticket_epoch_days) == (50, 30)
     assert m.mailbox_max_sockets_per_ip == 512
     p = tmp_dir / "global_server.toml"
     p.write_text(
@@ -1002,5 +1002,5 @@ def test_envelope_mailbox_queue_and_socket_caps(tmp_dir, monkeypatch):
         "[envelope_relay]\nmailbox_max_sockets_per_ip = 3\n"
     )
     assert GfsConfig.from_toml(p).envelope_mailbox.mailbox_max_sockets_per_ip == 3
-    monkeypatch.setenv("GFS_ENVELOPE_RELAY_MAILBOX_MAX_NEW_PER_DAY", "7")
-    assert GfsConfig.load(p).envelope_mailbox.mailbox_max_new_per_day == 7
+    monkeypatch.setenv("GFS_ENVELOPE_RELAY_MAILBOX_TICKETS_PER_DAY", "7")
+    assert GfsConfig.load(p).envelope_mailbox.mailbox_tickets_per_day == 7

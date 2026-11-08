@@ -10,7 +10,15 @@ import aiohttp
 import pytest
 from aiohttp.test_utils import TestServer
 
-from socialhome.crypto import INSTANCE_ID_RE, x25519_exchange
+from socialhome import privacy_pass as pp
+from socialhome.capabilities_sig import verify_capabilities
+from socialhome.crypto import (
+    INSTANCE_ID_RE,
+    b64url_encode,
+    derive_instance_id,
+    ed25519_public_key,
+    x25519_exchange,
+)
 from socialhome.domain.gfs_mailbox import derive_mailbox_id
 from socialhome.domain.relay_media_frame import (
     VALID_SEALED_LENGTHS,
@@ -20,20 +28,31 @@ from socialhome.federation.gfs_mailbox import (
     MailboxClaim,
     MailboxClaimError,
     MailboxRegisterError,
+    MailboxTicketCache,
+    MailboxTicketError,
+    TicketIssuer,
     build_register_body,
     derive_mailbox_keys,
+    fetch_tickets,
     new_mailbox_root,
     register_mailbox,
 )
 from socialhome.global_server.app_keys import (
+    gfs_db_key,
     gfs_envelope_relay_key,
+    gfs_fed_repo_key,
     gfs_mailbox_repo_key,
+    gfs_mailbox_tickets_key,
 )
-from socialhome.global_server.config import GfsConfig
+from socialhome.global_server.config import EnvelopeMailboxConfig, GfsConfig
+from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
 
 ROOT = bytes(range(32))
 GFS_ID = "gfs-node-a"
+#: The household's identity key (registered and active on the test GFS).
+HOME_SEED = bytes([5]) * 32
+HOME_ID = derive_instance_id(ed25519_public_key(HOME_SEED))
 SEALED = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "Y2lwaGVy"}
 
 
@@ -118,8 +137,45 @@ async def gfs(tmp_dir):
     server = TestServer(create_gfs_app(cfg))
     await server.start_server()
     async with aiohttp.ClientSession() as session:
-        yield server, session, str(server.make_url("")).rstrip("/")
+        url = str(server.make_url("")).rstrip("/")
+        yield server, session, url, await _ticket_cache(server.app, session, url)
     await server.close()
+
+
+async def _issuer(session, url) -> TicketIssuer:
+    """The issuer from the GFS's SIGNED ``/gfs/info`` (as a household reads
+    it: the capability block's signature verified first)."""
+    async with session.get(url + "/gfs/info") as resp:
+        info = await resp.json()
+    assert verify_capabilities(
+        info["public_key"],
+        info["gfs_instance_id"],
+        info["capabilities"],
+        info["capabilities_sig"],
+        info["capabilities_sig_suite"],
+    )
+    return TicketIssuer.from_capability(info["capabilities"]["mailbox_tickets"])
+
+
+async def _ticket_cache(app, session, url, *, batch: int = 4) -> MailboxTicketCache:
+    """A household registered and active on the GFS, with a ticket cache
+    that fetches over its signed channel."""
+    await app[gfs_fed_repo_key].upsert_instance(
+        ClientInstance(
+            instance_id=HOME_ID,
+            display_name="Home",
+            public_key=ed25519_public_key(HOME_SEED).hex(),
+            status="active",
+        )
+    )
+    issuer = await _issuer(session, url)
+
+    async def fetch(count: int) -> list[bytes]:
+        return await fetch_tickets(
+            session, url, issuer, count, instance_id=HOME_ID, signing_key=HOME_SEED
+        )
+
+    return MailboxTicketCache(fetch, batch=batch)
 
 
 async def _settle(app) -> None:
@@ -131,11 +187,17 @@ async def _settle(app) -> None:
 
 
 async def test_register_claim_and_receive_queued_and_live_frames(gfs):
-    server, session, url = gfs
+    server, session, url, tickets = gfs
     keys = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
-    assert await register_mailbox(session, url, keys, GFS_ID) == keys.mailbox_id
+    assert (
+        await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
+        == keys.mailbox_id
+    )
     # Idempotent — a household may re-register at every start.
-    assert await register_mailbox(session, url, keys, GFS_ID) == keys.mailbox_id
+    assert (
+        await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
+        == keys.mailbox_id
+    )
 
     size = min(VALID_SEALED_LENGTHS)
     media = build_relay_media_body(keys.mailbox_id, bytes([7]) * size)
@@ -159,7 +221,7 @@ async def test_register_claim_and_receive_queued_and_live_frames(gfs):
 
 
 async def test_claim_of_an_unregistered_mailbox_is_refused(gfs):
-    _server, session, url = gfs
+    _server, session, url, _tickets = gfs
     keys = derive_mailbox_keys(ROOT, GFS_ID, "never-registered", 0)
     with pytest.raises(MailboxClaimError, match="4401"):
         async with MailboxClaim(session, url, keys, GFS_ID):
@@ -170,26 +232,26 @@ async def test_a_claim_signed_for_another_gfs_id_is_refused(gfs):
     """The claim is bound to the GFS id the household pinned; a server that
     does not answer to it refuses (4401) — the id the challenge names is
     never what gets signed."""
-    _server, session, url = gfs
+    _server, session, url, tickets = gfs
     keys = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
-    await register_mailbox(session, url, keys, GFS_ID)
+    await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
     with pytest.raises(MailboxClaimError, match="4401"):
         async with MailboxClaim(session, url, keys, "some-other-gfs"):
             pass
 
 
 async def test_register_refusal_raises_with_the_error_code(gfs):
-    _server, session, url = gfs
+    _server, session, url, tickets = gfs
     keys = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
     with pytest.raises(MailboxRegisterError) as err:
-        await register_mailbox(session, url, keys, "some-other-gfs")
+        await register_mailbox(session, url, keys, "some-other-gfs", tickets=tickets)
     assert (err.value.status, err.value.error) == (403, "wrong_gfs")
 
 
 async def test_iterating_a_claim_ends_when_the_server_closes(gfs):
-    server, session, url = gfs
+    server, session, url, tickets = gfs
     keys = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
-    await register_mailbox(session, url, keys, GFS_ID)
+    await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
     async with session.post(
         url + "/gfs/envelope", json={"to_instance": keys.mailbox_id, "sealed": SEALED}
     ) as resp:
@@ -225,8 +287,9 @@ async def test_a_household_pinned_to_an_alias_registers_and_claims(tmp_dir):
     try:
         async with aiohttp.ClientSession() as session:
             url = str(server.make_url("")).rstrip("/")
+            tickets = await _ticket_cache(server.app, session, url)
             keys = derive_mailbox_keys(ROOT, GFS_ID, "space-9", 0)
-            await register_mailbox(session, url, keys, GFS_ID)
+            await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
             async with MailboxClaim(session, url, keys, GFS_ID) as claim:
                 assert claim is not None
     finally:
@@ -234,11 +297,138 @@ async def test_a_household_pinned_to_an_alias_registers_and_claims(tmp_dir):
 
 
 async def test_a_claim_entered_by_hand_closes_with_aclosing(gfs):
-    _server, session, url = gfs
+    _server, session, url, tickets = gfs
     keys = derive_mailbox_keys(ROOT, GFS_ID, "space-a", 0)
-    await register_mailbox(session, url, keys, GFS_ID)
+    await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
     claim = MailboxClaim(session, url, keys, GFS_ID)
     await claim.__aenter__()
     async with contextlib.aclosing(claim):
         assert claim._ws is not None
     assert claim._ws is None
+
+
+# ── Registration tickets (Privacy Pass) ─────────────────────────────────
+
+
+async def test_tickets_are_fetched_once_and_one_is_spent_per_new_mailbox(gfs):
+    _server, session, url, tickets = gfs
+    assert await tickets.refill() == 4
+    for space in ("s-1", "s-2"):
+        keys = derive_mailbox_keys(ROOT, GFS_ID, space, 0)
+        await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
+    assert len(tickets) == 2  # one each; no fetch in between
+    assert "<2 tickets>" in repr(tickets)
+
+
+async def test_a_new_mailbox_without_a_ticket_is_refused(gfs):
+    _server, session, url, _tickets = gfs
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "no-ticket", 0)
+    with pytest.raises(MailboxRegisterError) as err:
+        await register_mailbox(session, url, keys, GFS_ID)
+    assert (err.value.status, err.value.error) == (403, "ticket_required")
+
+
+async def test_a_spent_ticket_is_replaced_once(gfs):
+    """A cached ticket that was spent already (here: by hand) is dropped and
+    the register retried with the next one."""
+    _server, session, url, tickets = gfs
+    await tickets.refill()
+    spent = tickets._tickets[-1]
+    first = derive_mailbox_keys(ROOT, GFS_ID, "a", 0)
+    await register_mailbox(session, url, first, GFS_ID, tickets=tickets)
+    tickets._tickets.append(spent)
+    second = derive_mailbox_keys(ROOT, GFS_ID, "b", 0)
+    assert await register_mailbox(session, url, second, GFS_ID, tickets=tickets)
+    assert len(tickets) == 2
+
+
+async def test_tickets_under_a_retired_key_are_dropped_and_refetched(gfs):
+    server, session, url, tickets = gfs
+    await tickets.refill()
+    svc = server.app[gfs_mailbox_tickets_key]
+    # The GFS forgets every key it accepted (as after two epochs).
+    svc._keys.clear()
+    svc._current = None
+    await server.app[gfs_db_key].enqueue("DELETE FROM gfs_ticket_issuer_keys")
+    svc._miss_at = -1e9
+    # The cache still blinds under the old issuer: the refetch is refused
+    # as stale, so the household must re-read /gfs/info.
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "after-rotation", 0)
+    with pytest.raises(MailboxTicketError) as err:
+        await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
+    assert (err.value.status, err.value.error) == (409, "stale_issuer_key")
+    assert len(tickets) == 0
+    fresh = await _ticket_cache(server.app, session, url)
+    assert await register_mailbox(session, url, keys, GFS_ID, tickets=fresh)
+
+
+async def test_the_daily_batch_is_bounded_per_household(tmp_dir):
+    cfg = GfsConfig(
+        host="127.0.0.1",
+        port=0,
+        base_url="http://gfs.test",
+        data_dir=str(tmp_dir),
+        instance_id=GFS_ID,
+        cluster_enabled=False,
+        cluster_node_id=GFS_ID,
+        cluster_peers=(),
+        envelope_mailbox=EnvelopeMailboxConfig(mailbox_tickets_per_day=3),
+    )
+    server = TestServer(create_gfs_app(cfg))
+    await server.start_server()
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = str(server.make_url("")).rstrip("/")
+            tickets = await _ticket_cache(server.app, session, url, batch=8)
+            assert await tickets.refill() == 3  # granted what is left
+            tickets.clear()
+            with pytest.raises(MailboxTicketError) as err:
+                await tickets.refill()
+            assert (err.value.status, err.value.error) == (429, "ticket_quota")
+    finally:
+        await server.close()
+
+
+async def test_an_unregistered_household_gets_no_tickets(gfs):
+    _server, session, url, _tickets = gfs
+    issuer = await _issuer(session, url)
+    stranger = bytes([9]) * 32
+    with pytest.raises(MailboxTicketError) as err:
+        await fetch_tickets(
+            session,
+            url,
+            issuer,
+            1,
+            instance_id=derive_instance_id(ed25519_public_key(stranger)),
+            signing_key=stranger,
+        )
+    assert err.value.status == 403
+
+
+def test_the_issuer_capability_is_checked():
+    key = pp.generate_issuer_key().public_key()
+    good = {
+        "suite": pp.TICKET_SUITE_PP_BLINDRSA,
+        "issuer_key_id": b64url_encode(pp.token_key_id(key)),
+        "public_key": b64url_encode(pp.encode_public_key(key)),
+        "per_day": 50,
+    }
+    assert TicketIssuer.from_capability(good).per_day == 50
+    for bad in (
+        None,
+        {**good, "suite": "privacypass-blindrsa4096"},
+        {k: v for k, v in good.items() if k != "suite"},
+        {**good, "issuer_key_id": b64url_encode(bytes(32))},
+        {**good, "public_key": "AAAA"},
+        {**good, "per_day": "50"},
+    ):
+        with pytest.raises(MailboxTicketError):
+            TicketIssuer.from_capability(bad)
+
+
+def test_a_register_body_carries_the_ticket_and_its_suite():
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "s", 0)
+    body = build_register_body(keys, GFS_ID, ticket=b"t" * 354)
+    assert body["ticket_suite"] == pp.TICKET_SUITE_PP_BLINDRSA
+    assert body["ticket"] == b64url_encode(b"t" * 354)
+    assert "ticket" not in build_register_body(keys, GFS_ID)

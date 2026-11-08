@@ -45,10 +45,12 @@ from tests.global_server.test_mailboxes import (
     GFS_ID,
     SEALED,
     Box,
+    FreeTickets,
     _cfg,
     _claim,
     _register,
     _settle,
+    ticketed,
 )
 
 
@@ -264,17 +266,18 @@ async def test_a_mailbox_gets_its_own_small_per_recipient_caps(tmp_dir):
         await tc.close()
 
 
-async def test_a_server_wide_cap_on_new_mailboxes_per_day(tmp_dir):
-    tc = await _client(
-        tmp_dir, envelope_mailbox=EnvelopeMailboxConfig(mailbox_max_new_per_day=1)
-    )
+async def test_a_new_mailbox_needs_a_ticket_an_existing_one_does_not(tmp_dir):
+    """The server-wide daily cap is gone: a NEW mailbox spends a ticket,
+    re-registering an existing one is free."""
+    tc = await _client(tmp_dir)
     try:
         first = Box()
         assert (await _register(tc, first)).status == 200
-        resp = await _register(tc, Box())
-        assert resp.status == 429
-        assert (await resp.json())["error"] == "server_mailbox_cap"
-        assert (await _register(tc, first)).status == 200  # existing: free
+        bare = await tc.post("/gfs/mailbox/register", json=Box().register_body())
+        assert bare.status == 403
+        assert (await bare.json())["error"] == "ticket_required"
+        again = await tc.post("/gfs/mailbox/register", json=first.register_body())
+        assert again.status == 200  # existing: free
     finally:
         await tc.close()
 
@@ -334,6 +337,7 @@ def _svc(**cfg) -> GfsMailboxService:
         repo=None,  # type: ignore[arg-type]
         gfs_instance_id=GFS_ID,
         config=EnvelopeMailboxConfig(**cfg),
+        tickets=FreeTickets(),  # type: ignore[arg-type]
     )
 
 
@@ -458,6 +462,7 @@ async def test_ids_served_by_shared_key_siblings_are_accepted(gfs_db):
         repo=SqliteGfsMailboxRepo(gfs_db),
         gfs_instance_id="gfs-1",
         config=EnvelopeMailboxConfig(),
+        tickets=FreeTickets(),  # type: ignore[arg-type]
         aliases=("gfs-legacy",),
         sibling_ids=lambda: {"gfs-0", ""},
     )
@@ -486,7 +491,7 @@ async def test_nodes_with_different_ids_register_on_one_claim_on_the_other(
         async with aiohttp.ClientSession() as http:
             async with http.post(
                 _url(a) + "/gfs/mailbox/register",
-                json=box.register_body(gfs_id="gfs-shared"),
+                json=await ticketed(b_app, box.register_body(gfs_id="gfs-shared")),
             ) as r:
                 assert r.status == 200
             ws = await http.ws_connect(_url(b) + "/gfs/mailbox/ws")
