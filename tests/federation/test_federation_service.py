@@ -1117,6 +1117,24 @@ async def test_send_event_prefers_attached_transport():
     failing_http.post.assert_not_called()
 
 
+async def test_close_rtc_peer_closes_through_the_attached_transport():
+    """The unpair purge closes the ex-peer's PeerConnection via the
+    transport; without one attached it is a no-op."""
+    svc, _ = _make_service()
+    await svc.close_rtc_peer("peer-x")  # no transport: nothing to close
+
+    closed: list[str] = []
+
+    class _FakeTransport:
+        async def close_peer(self, instance_id):
+            closed.append(instance_id)
+
+    svc.attach_transport(_FakeTransport())
+    await svc.close_rtc_peer("peer-x")
+
+    assert closed == ["peer-x"]
+
+
 # ─── Inbound inbox ──────────────────────────────────────────────────────
 
 

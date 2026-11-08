@@ -189,6 +189,30 @@ async def test_close_peer_unknown_is_noop():
     assert t.peer_count() == 0
 
 
+async def test_repair_after_close_builds_a_working_connection():
+    """Unpair closes the peer; a later re-pair's first send dials a fresh
+    PeerConnection whose DataChannel opens and carries the frame."""
+    signals = _Signals()
+    t = _transport(signals=signals)
+    old = await _open_peer(t)
+    await t.close_peer(PEER)
+    offers_before = signals.offers
+
+    await t.send(instance=_instance(), envelope_dict={"msg_id": "re-paired"})
+    fresh = t._peers[PEER]
+    for _ in range(50):
+        if fresh.is_ready:
+            break
+        await asyncio.sleep(0)
+
+    assert fresh is not old
+    assert fresh.is_ready
+    assert signals.offers == offers_before + 1
+    sent = await t.send(instance=_instance(), envelope_dict={"msg_id": "over-rtc"})
+    assert sent.ok and sent.via == "rtc"
+    assert fresh._channel.sent[-1] == orjson.dumps({"msg_id": "over-rtc"})
+
+
 async def test_peer_whose_channel_ended_is_rebuilt_on_next_send():
     """The other side closed the connection (its unpair) — our peer saw its
     channel end and set ``_closed``. A later re-pair must not leave us on

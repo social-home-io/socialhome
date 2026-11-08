@@ -158,6 +158,10 @@ def test_block_splitter_keeps_traceback_frames_attached(harness):
         # ICE candidate dropped after 30 s buffer window because the
         # remote SDP never arrived (glare aborted one side).
         "WARNING:socialhome.federation.transport:fed RTC: ICE candidate for peer-abc dropped — remote description not applied within 30s",
+        # libjuice's poll thread saw POLLNVAL on a socket a concurrent
+        # PeerConnection close freed and a new PeerConnection reused in
+        # the same registry slot; it skips one poll round, fails nothing.
+        "WARNING:aiolibdatachannel:rtc::impl::IceTransport::LogCallback@391: juice: Invalid socket",
     ],
 )
 def test_known_benign_lines_are_in_allowlist(harness, line):
