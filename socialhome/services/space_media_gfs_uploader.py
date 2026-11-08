@@ -751,11 +751,12 @@ class SpaceMediaGfsUploader:
     async def authorize_anonymous(
         self, claim: SpaceMediaClaim
     ) -> SpaceMediaUploadAuth | None:
-        """An ANONYMOUS upload authorization for *claim* of a listed space
-        (the member fallback's re-upload): the writer group key, else the
-        space authority — never the writer cert, which names this
-        household's key. ``None`` for a channel scope or when this household
-        holds neither (the serve then streams only)."""
+        """An ANONYMOUS upload authorization for *claim* of a listed space,
+        for a re-upload that must not name this household: the writer group
+        key, else the space authority — never the writer cert, which names
+        this household's key. ``None`` for a channel scope or when this
+        household holds neither. No caller yet: kept for the space media
+        relay-sync design."""
         if claim.scope == SCOPE_CHANNEL:
             return None
         # The writer key first: every writer member holds it, while the
