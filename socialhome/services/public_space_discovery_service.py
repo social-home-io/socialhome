@@ -249,9 +249,18 @@ class PublicSpaceDiscoveryService:
                 )
                 if body is None:
                     return []
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            # Fail-soft: a down or slow GFS is expected now and then. One
+            # line naming the URL, no traceback; the next tick retries.
+            log.info(
+                "public_space_discovery: fetch failed for %s: %r",
+                url,
+                exc,
+            )
+            return []
         except Exception as exc:
-            # Fail-soft: a down GFS must not break the poll loop — but stay
-            # visible so a persistent outage isn't silent.
+            # Anything else is a bug: still fail-soft, but keep the
+            # traceback visible.
             log.info(
                 "public_space_discovery: fetch failed for %s: %s",
                 url,

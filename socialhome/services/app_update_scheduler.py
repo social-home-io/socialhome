@@ -21,6 +21,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from ..domain.apps import AppCatalogUnreachableError
 from .app_catalog_service import CATALOG_TTL_S
 
 if TYPE_CHECKING:
@@ -85,8 +86,15 @@ class AppUpdateScheduler:
                     )
                 else:
                     log.debug("app-update check: all apps are up to date")
-            except Exception as exc:
-                log.warning("app-update check failed: %s", exc, exc_info=True)
+            except AppCatalogUnreachableError:
+                # A slow or down catalog host (a GitHub 504, a timeout) is
+                # expected now and then: AppCatalogService already logged
+                # the one WARNING naming the URL and why. The next tick
+                # tries again.
+                log.debug("app-update check: catalog unreachable, retrying next tick")
+            except Exception:
+                # Anything else is a bug: keep its traceback visible.
+                log.exception("app-update check failed")
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),

@@ -72,6 +72,15 @@ def catalog_source_host(url: str) -> str | None:
 _DOWNLOAD_CHUNK_BYTES = 64 * 1024
 
 
+def _describe_fetch_error(exc: BaseException) -> str:
+    """One short line for a failed catalog fetch: ``HTTP 504 Gateway
+    Time-out`` for an HTTP status, else the exception's repr — never the
+    full request/headers dump a ``ClientResponseError`` repr carries."""
+    if isinstance(exc, aiohttp.ClientResponseError):
+        return f"HTTP {exc.status} {exc.message}".rstrip()
+    return repr(exc)
+
+
 def release_session() -> aiohttp.ClientSession:
     """A short-lived session for the app catalog and bundle downloads, with
     room for the release host's long response headers
@@ -249,9 +258,9 @@ class AppCatalogService:
             # orjson.JSONDecodeError is a ValueError.
             self._failed_ts = time.monotonic()
             log.warning(
-                "app catalog %s unreachable (%r); %s",
+                "app catalog %s unreachable (%s); %s",
                 self._catalog_url,
-                exc,
+                _describe_fetch_error(exc),
                 "serving the copy from " + self._checked_at
                 if self._cache is not None and self._checked_at
                 else "nothing held to serve",
