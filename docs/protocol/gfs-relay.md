@@ -700,9 +700,10 @@ day, each wait jittered ±50 % (`MailboxTicketCache.start`), and a slot
 within an hour after a register is skipped — and a register spends from the
 cache. A failed refill or anonymous read (a GFS outage included) logs a
 WARNING and the loop tries again at the next slot. On a GFS connect, a cache
-that is empty is refilled once, unless a register took a ticket within the
-quiet window (`MailboxTicketCache.refill_if_quiet`), so a fresh household is
-not without tickets until its first daily slot. A register never fetches: an empty cache fails a register
+that is empty gets the anonymous key read at once and one identified refill
+30–300 s later (jittered, never next to the anonymous read, and not within
+the quiet window after a register — `MailboxTicketCache.refill_if_quiet`),
+so a fresh household is not without tickets until its first daily slot. A register never fetches: an empty cache fails a register
 with `no_ticket`, and a `stale_ticket_key` refusal drops that key's tickets
 and fails — so a GFS that refuses a register on purpose cannot make the
 household fetch right next to it. Only `ticket_spent` is retried, once,
@@ -768,9 +769,11 @@ The signature lets the entry be passed on to other members later (v_89)
 and still prove who minted it. The receiver checks it under the identity
 key it already trusts for that household (the one in the sealed redeem, or
 the invite / approval hint): that key must derive to `instance_id`,
-`keywrap_sig` must bind the key-wrap key to it, and `space` must be the
-space being joined (`federation/space_mailbox_entry.verify_entry`). A bad
-entry is ignored; the pair keeps today's relay toward that household.
+`keywrap_sig` must bind the key-wrap key to it, `space` must be the space
+being joined (`federation/space_mailbox_entry.verify_entry`), and `gfs` must
+be the GFS the sealed body came through — a peer cannot steer our frames to
+another GFS. A bad entry is ignored; the pair keeps today's relay toward
+that household.
 
 **The seat flow.**
 
@@ -784,10 +787,14 @@ entry is ignored; the pair keeps today's relay toward that household.
    at the same GFS. A host keeps **one mailbox per space per GFS**, shared
    by all its GFS-only members of that space. It registers and claims it
    **before** the ACK leaves, so the joiner's first envelopes land, and puts
-   its entry in the sealed ACK.
+   its entry in the sealed ACK. The host's mint is bounded to 3 s
+   (`HOST_MINT_TIMEOUT_S`), well inside the joiner's redeem timeout: a slow
+   GFS costs the pair its mailbox toward the host, never the join.
 3. **Both** store `{peer: <the other's entry>, own: {gen, gfs_id, gfs}}` in
-   the pair's `space_instances.mailbox` (migration 0144). A failed redeem
-   drops the joiner's fresh mailbox again.
+   the pair's `space_instances.mailbox` (migration 0144). A mailbox minted
+   for a redeem that fails stays pending for 30 min (`PENDING_TTL_S`): a
+   retry — or a second household redeeming into the same space at the same
+   time — reuses it and its ticket; then the sweep drops it.
 
 If the GFS takes no mailboxes, or no ticket can be had, that side mints
 none and the pair keeps the instance-addressed relay toward it.
@@ -805,8 +812,9 @@ frame). Then:
   buckets and sealed whole to the mailbox `kem_pk` (ephemeral X25519 ECIES,
   `kem_suite: "x25519"`, the same seal as the relay);
 - it goes out as `POST /gfs/envelope {to_instance: <mailbox id>, sealed}`
-  over the household's cookie-less anonymous session, never the
-  identified one;
+  over the mailbox session — cookie-less and without keep-alive
+  (`force_close`), so no pooled connection carries two mailboxes' traffic —
+  never the identified one (register, claim and unregister ride it too);
 - a v_87 binary media frame goes the same way: its recipient field is the
   mailbox id and it is sealed to `kem_pk`.
 
@@ -819,13 +827,19 @@ are refused. The envelope enters the unchanged §24.11 pipeline with
 transport `TRANSPORT_GFS_MAILBOX` (`"gfs_mailbox"`), which gets the relay's
 timestamp window and relay opt-in gate (`RELAY_TRANSPORTS`). One extra step
 runs right after the parse, `check_mailbox_space`: the envelope's
-`space_id` must be the mailbox's space or absent. Anything else is refused.
+`space_id` must be the mailbox's space or absent; it runs again after the
+decrypt on the payload's `space_id`. Anything else is refused. Mailbox
+frames spend their own inbound budget (`gfs-mailbox:*`), so whoever learns
+a mailbox id cannot drain the instance relay's.
 
 **Rotation and release.** A mailbox changes only when the household leaves
-or is removed. When a `space_session` seat ends (leave, kick, ban,
-dissolve), every own mailbox that no `space_instances` row refers to any
-more is closed and unregistered (`POST /gfs/mailbox/unregister`, see
-above). A GFS without that route lets its idle sweep drop the mailbox. A
+or is removed. A mailbox is in use while a `space_instances` row refers to
+it AND a person of this household still sits in the space. Every other one
+(not pending) is closed and unregistered (`POST /gfs/mailbox/unregister`,
+see above) — at once when a `space_session` seat is revoked, and by a
+jittered sweep every ~10 min for every other path that ends a seat (leave,
+dissolve, a stub purge). The rows of a left space forget their mailbox
+state, and a left space's mailbox is not reopened on start. A GFS without that route lets its idle sweep drop the mailbox. A
 re-join picks a fresh random `gen`, so the GFS cannot tie the old and the
 new mailbox.
 
@@ -840,7 +854,15 @@ Residuals:
 - The joiner→host direction stays instance-addressed when the host sent no
   entry (an older host, or no ticket).
 - IP / timing correlation with the household's identified `/gfs/ws`, as for
-  every relayed frame.
+  every relayed frame. **Open for the owner:** a mailbox is minted at seat
+  time, right next to the identified redeem / ACK, so a GFS that watches
+  timing can tie each NEW mailbox to the household that registered it the
+  moment it appears. A pre-registered pool of unassigned mailboxes (taken
+  at seat time with no network call) would close that, but it changes the
+  derivation (a pool slot instead of the space) — left for a follow-up.
+- A household that later pairs with a `space_session` peer keeps the
+  pair's mailboxes until the space seat ends (the transport stops using
+  the entry once the row is no longer `space_session`).
 
 **Mixed versions.** No entry, an entry below v_88, or a GFS without
 `envelope_mailbox` → today's path. An older host ignores the `mailbox`
@@ -886,7 +908,7 @@ Implementation: `socialhome/domain/space_mailbox.py` (entry and stored
 shape, suites), `socialhome/federation/space_mailbox_entry.py`
 (`build_entry`, `verify_entry`),
 `socialhome/services/space_mailbox_service.py` (`SpaceMailboxService`:
-root, tickets, `mint`, `remember`, `abandon`, `target_for`,
+root, tickets, `mint`, `remember`, `target_for`, the sweep,
 `release_unused`, claim sockets),
 `socialhome/federation/invite_token_redeem.py` (the entry in the sealed
 redeem / ACK), `FederationTransport._mailbox_target`,
