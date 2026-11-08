@@ -309,6 +309,28 @@ def record_media_urls(resource: str, record: dict[str, Any]) -> list[str]:
     return []
 
 
+#: The §25.6 resources whose records carry the ``files`` hash map (v_85):
+#: the :data:`MEDIA_REF_RESOURCES` plus a comment's picture and a bazaar
+#: listing's photos.
+FILE_HASH_RESOURCES: frozenset[str] = MEDIA_REF_RESOURCES | {"comments", "bazaar"}
+
+
+def record_file_urls(resource: str, record: dict[str, Any]) -> list[str]:
+    """Every local file an item of *resource* shows — what its ``files``
+    hash map (v_85) describes: :func:`record_media_urls`, plus a comment's
+    ``media_url`` and a bazaar listing's ``image_urls``."""
+    if resource == "comments":
+        return _str(record.get("media_url"))
+    if resource == "bazaar":
+        images = record.get("image_urls")
+        urls: list[str] = []
+        if isinstance(images, (list, tuple)):
+            for url in images:
+                urls.extend(_str(url))
+        return urls
+    return record_media_urls(resource, record)
+
+
 def post_media_urls(post: Post) -> list[str]:
     """:func:`record_media_urls` for a :class:`~.post.Post`."""
     preview = post.link_preview

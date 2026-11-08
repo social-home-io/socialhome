@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
@@ -15,6 +16,7 @@ from socialhome.crypto import (
     verify_ed25519,
 )
 from socialhome.domain.events import (
+    CommentAdded,
     CommentUpdated,
     PostDeleted,
     PostEdited,
@@ -22,9 +24,10 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.link_preview import LinkPreview
-from socialhome.domain.post import Post, PostType
+from socialhome.domain.post import Comment, CommentType, FileMeta, Post, PostType
 from socialhome.domain.space import JoinMode, SpaceType
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.media_file_hasher import MediaFileHasher
 from socialhome.services.moderation_release import release_scope
 from socialhome.services.space_post_outbound import SpacePostOutbound
 from socialhome.services.space_public_author import (
@@ -1606,3 +1609,81 @@ async def test_an_own_post_edit_carries_its_signed_media_refs():
     assert verify_signed_author_inner(edit)
     assert signed_media_refs(edit) == _REFS
     assert media.planned[0][2] is True  # for followers
+
+
+# ── v_85: every file of a post / comment rides with its hash ─────────────
+
+
+async def test_a_posts_files_ride_with_their_hashes(tmp_path):
+    (tmp_path / "pic.webp").write_bytes(b"pic")
+    (tmp_path / "doc.pdf").write_bytes(b"doc")
+    (tmp_path / "thumb.webp").write_bytes(b"thumb")
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    outbound = _make_outbound(bus=bus, federation=federation)
+    outbound.attach_file_hasher(MediaFileHasher(tmp_path))
+    post = Post(
+        id="p-h",
+        author="uid-alice",
+        type=PostType.IMAGE,
+        content="",
+        image_urls=("api/media/pic.webp", "api/media/missing.webp"),
+        file_meta=FileMeta(
+            url="api/media/doc.pdf",
+            mime_type="application/pdf",
+            original_name="d.pdf",
+            size_bytes=3,
+        ),
+        link_preview=LinkPreview(
+            url="https://example.com",
+            title="t",
+            thumbnail_url="api/media/thumb.webp",
+        ),
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=UTC),
+    )
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    payload = federation.broadcast_to_space_members.call_args.args[2]
+    assert payload["files_suite"] == "sha256"
+    assert payload["files"] == {
+        name: {"h": hashlib.sha256(data).hexdigest(), "size": len(data)}
+        for name, data in (
+            ("pic.webp", b"pic"),
+            ("doc.pdf", b"doc"),
+            ("thumb.webp", b"thumb"),
+        )
+    }
+
+
+async def test_a_comments_picture_rides_with_its_hash_and_its_bytes(tmp_path):
+    (tmp_path / "c.webp").write_bytes(b"cpic")
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    federation._own_instance_id = "us"
+    media_sync = AsyncMock()
+    fed_repo = AsyncMock()
+    fed_repo.list_member_instance_ids = AsyncMock(return_value=["us", "peer-b"])
+    outbound = _make_outbound(
+        bus=bus, federation=federation, media_sync=media_sync, federation_repo=fed_repo
+    )
+    outbound.attach_file_hasher(MediaFileHasher(tmp_path))
+    comment = Comment(
+        id="c-1",
+        post_id="p-1",
+        author="uid-alice",
+        type=CommentType.IMAGE,
+        content="",
+        media_url="api/media/c.webp",
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=UTC),
+    )
+    await bus.publish(CommentAdded(post_id="p-1", comment=comment, space_id="sp-1"))
+    payload = federation.broadcast_to_space_members.call_args.args[2]
+    assert payload["files"] == {
+        "c.webp": {"h": hashlib.sha256(b"cpic").hexdigest(), "size": 4}
+    }
+    media_sync.enqueue_for_blob.assert_awaited_once()
+    kwargs = media_sync.enqueue_for_blob.call_args.kwargs
+    assert kwargs["correlation_id"] == "c-1"
+    assert kwargs["target_instance_ids"] == ["peer-b"]
+    assert kwargs["media_urls"] == ["api/media/c.webp"]

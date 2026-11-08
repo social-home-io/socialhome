@@ -65,6 +65,7 @@ from typing import TYPE_CHECKING
 
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.file_hashes import parse_file_hashes
 from ..domain.post import BAZAAR_MAX_IMAGES, FEED_POST_MAX_IMAGES
 from ..domain.presence import truncate_coord
 from ..domain.space import (
@@ -93,6 +94,7 @@ from ..federation.owner_bound_id import (
 from ..federation.space_scope import resolve_space_id
 from ..repositories.base import dump_json, load_json
 from ..utils.datetime import parse_iso8601_optional
+from .file_hashes_sender import FileHashesMixin
 from .inbound_media_store import media_basename, space_media_ref
 from .space_media_names import SpaceMediaNamer, feature_media_urls, renamed_media
 from .space_moderation_service import (
@@ -154,12 +156,13 @@ _CREATE_KINDS: dict[tuple[str, str], str] = {
 }
 
 
-class SpaceModerationFederation:
+class SpaceModerationFederation(FileHashesMixin):
     """Send and receive moderation items and decisions (v_43)."""
 
     __slots__ = (
         "_authorship",
         "_federation",
+        "_file_hasher",
         "_media_names",
         "_media_sync",
         "_moderation",
@@ -185,6 +188,8 @@ class SpaceModerationFederation:
         self._seats = remote_member_repo
         self._authorship = authorship
         self._media_sync = media_sync
+        #: v_85 — a submission's files ride with their SHA-256.
+        self._file_hasher = None
         #: The files a held submission proposes take this household's
         #: names, bound to the submitting household (which ships them).
         self._media_names = SpaceMediaNamer()
@@ -292,11 +297,31 @@ class SpaceModerationFederation:
         }
         if relay is not None:
             payload["public_relay"] = relay
+        # v_85 — the proposed files with their hashes, to a v_85 reviewer
+        # household only. A page's files stay page-scoped (``sp-``) on
+        # every household, so a page submission carries none; nor does a
+        # post with an author-signed copy for followers: the host matches
+        # that copy's file names against the files it holds by their
+        # sender-bound names (``approved_relay_for``). Its release from the
+        # host carries the hashes of the host's own copies either way.
+        hashed = (
+            await self._with_file_hashes(payload, _changed_media_urls(item))
+            if item.feature != "pages" and relay is None
+            else payload
+        )
         for iid in targets:
             result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=iid,
                 event_type=FET.SPACE_MODERATION_SUBMITTED,
-                payload=payload,
+                payload=(
+                    hashed
+                    if hashed is not payload
+                    and await self._federation.peer_supports(
+                        iid,
+                        min_version=FederationCapability.MIN_FOR_CONTENT_FILE_HASHES,
+                    )
+                    else payload
+                ),
                 space_id=space.id,
             )
             if not result.ok:
@@ -607,6 +632,9 @@ class SpaceModerationFederation:
             str(event.from_instance or ""),
             feature_media_urls(feature, clean),
             held=held_urls,
+            # v_85 — hashed files take their content names (never a page's:
+            # page files stay page-scoped).
+            hashes=parse_file_hashes(p) if feature != "pages" else None,
         )
         clean = renamed_media(feature, clean, names.url)
         if relay is not None:

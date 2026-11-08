@@ -383,7 +383,11 @@ class SpaceMediaGfsResponder:
             return None, DECLINE_BAD_HINT
         held_any = False
         addresses: set[str] = set()
-        for name in self._candidates(space_id, loc):
+        # v_85 — a hashed file is held under its content name, which says
+        # nothing of the author's file name: the item's content-addressed
+        # files are candidates too (the sealed address picks the one).
+        content_names = await self._media_refs.content_names_of_item(loc.item_id)
+        for name in [*self._candidates(space_id, loc), *content_names]:
             if not await self._media_refs.confined_to_space(
                 name, space_id
             ) or not await self._media_refs.live_in_space(name, space_id):

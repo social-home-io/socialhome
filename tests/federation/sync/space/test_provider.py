@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC
@@ -18,6 +19,7 @@ from socialhome.domain.federation import (
     DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
 )
+from socialhome.domain.file_hashes import FileHash
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.sync.space import provider as provider_mod
 from socialhome.federation.sync.space.exporter import (
@@ -2334,3 +2336,77 @@ async def test_a_pages_history_in_the_catchup_is_bounded(encoder, monkeypatch):
     }
     assert calls["pg-1"] == [f"api/media/pg-1-h{i}.webp" for i in (9, 8, 7)]
     assert calls["pg-2"] == ["api/media/pg-2-h9.webp"]  # the stream budget
+
+
+# ── v_85: the host's catch-up vouches for its files' hashes ─────────────
+
+
+class _Hasher:
+    def __init__(self) -> None:
+        self.asked: list[list] = []
+
+    async def hashes_for(self, urls):
+        self.asked.append(list(urls))
+        return {
+            u.rsplit("/", 1)[-1]: FileHash(hashlib.sha256(u.encode()).hexdigest(), 7)
+            for u in urls
+        }
+
+
+def _hash_provider(encoder, *, authority: bool):
+    svc = _content_provider(encoder)
+    # Pre-v_85 content: the rows carry no hashes of their own.
+    svc._exporters["posts"] = _FakeExporter(
+        "posts",
+        [
+            {"id": "p-1", "author": "u-ours", "image_urls": ["api/media/a.webp"]},
+            {"id": "p-2", "author": "u-hosts"},
+        ],
+    )
+    svc._exporters["comments"] = _FakeExporter(
+        "comments", [{"id": "c-1", "author": "u-ours", "media_url": "api/media/c.webp"}]
+    )
+
+    async def _authority(_space_id: str) -> bool:
+        return authority
+
+    async def _ours(_space_id: str) -> set[str]:
+        return {"u-ours"}
+
+    svc.attach_roster_authority(_authority, own_members=_ours)
+    hasher = _Hasher()
+    svc.attach_file_hasher(hasher)
+    return svc, hasher
+
+
+async def test_the_host_attaches_hashes_to_pre_hash_content(encoder):
+    svc, _hasher = _hash_provider(encoder, authority=True)
+    session = _FakeSession()
+    session.peer_version = 85
+    await svc.stream_initial(session)
+    posts = {r["id"]: r for r in _streamed_records(session, "posts")}
+    want = hashlib.sha256(b"api/media/a.webp").hexdigest()
+    assert posts["p-1"]["files"] == {"a.webp": {"h": want, "size": 7}}
+    assert posts["p-1"]["files_suite"] == "sha256"
+    assert "files" not in posts["p-2"]  # no files, nothing to vouch for
+    (comment,) = _streamed_records(session, "comments")
+    assert set(comment["files"]) == {"c.webp"}
+
+
+async def test_a_non_host_provider_attaches_no_hashes(encoder):
+    svc, hasher = _hash_provider(encoder, authority=False)
+    session = _FakeSession()
+    session.peer_version = 85
+    await svc.stream_initial(session)
+    for resource in ("posts", "comments"):
+        assert all("files" not in r for r in _streamed_records(session, resource))
+    assert hasher.asked == []
+
+
+async def test_an_older_requester_gets_no_hashes(encoder):
+    svc, hasher = _hash_provider(encoder, authority=True)
+    session = _FakeSession()
+    session.peer_version = 84
+    await svc.stream_initial(session)
+    assert all("files" not in r for r in _streamed_records(session, "posts"))
+    assert hasher.asked == []

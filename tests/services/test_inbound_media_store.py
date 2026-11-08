@@ -602,3 +602,14 @@ def test_a_page_scoped_name_is_reserved():
     assert store.is_reserved_media_name(name)
     assert store.space_media_ref("api/media/" + name) is None
     assert not store.is_space_page_media_name("abc.webp")
+
+
+async def test_link_once_never_replaces_a_file(tmp_path):
+    """v_85 — a hashed file's second name is a hard link, write-once."""
+    src = tmp_path / "sc-a.webp"
+    src.write_bytes(b"verified")
+    assert await store.link_once(src, tmp_path / "sd-a.webp") is True
+    assert (tmp_path / "sd-a.webp").read_bytes() == b"verified"
+    (tmp_path / "sd-b.webp").write_bytes(b"other")
+    assert await store.link_once(src, tmp_path / "sd-b.webp") is False
+    assert (tmp_path / "sd-b.webp").read_bytes() == b"other"

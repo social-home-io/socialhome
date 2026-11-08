@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
 
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.space import SpaceModerationItem
 from socialhome.repositories import (
     SqliteConversationRepo,
@@ -856,3 +858,150 @@ async def test_a_moderator_or_admin_household_never_fills(env, db, role):
         _blob({"post_id": "post-a", "filename": "a1.webp"})  # A's own push
     )
     assert (media / L("a1.webp")).read_bytes() == b"NEW-BYTES"
+
+
+# ── v_85: hashed blobs land content-addressed, verified ─────────────────
+
+
+def _h(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def SC(data: bytes, name: str = "x.webp", space_id: str = "sp-a") -> str:
+    return space_content_media_name(space_id, _h(data), name)
+
+
+def _hashed(correlation: str, filename: str, data: bytes, **extra) -> dict:
+    return {
+        "correlation_id": correlation,
+        "filename": filename,
+        "h": _h(data),
+        "h_suite": "sha256",
+        **extra,
+    }
+
+
+async def test_a_hashed_blob_for_an_unknown_row_lands_under_its_content_name(env):
+    svc, media = env
+    await svc._on_space_media_blob(_blob(_hashed("post-new", "x.webp", b"NEW-BYTES")))
+    assert (media / SC(b"NEW-BYTES")).read_bytes() == b"NEW-BYTES"
+    # The row may still arrive unhashed (a page, an older provider): the
+    # verified bytes take the sender's name too — the unused one is swept.
+    assert (media / L("x.webp")).read_bytes() == b"NEW-BYTES"
+
+
+async def test_tampered_bytes_are_refused(env, caplog):
+    svc, media = env
+    payload = _hashed("post-new", "x.webp", b"NEW-BYTES")
+    await svc._on_space_media_blob(_blob(payload, body=b"BAD-BYTES"))
+    assert not (media / SC(b"NEW-BYTES")).exists()
+    assert not (media / SC(b"BAD-BYTES")).exists()
+    assert list(media.glob("sc-*")) == []
+    assert "do not hash" in caplog.text
+
+
+async def test_tampered_chunks_are_refused_and_dropped(env):
+    svc, media = env
+    full = b"".join(bytes([i]) * 256 for i in range(8))
+    bad = full[:-1] + b"\xff"
+    chunks = [bad[i * 512 : (i + 1) * 512] for i in range(4)]
+    for i, part in enumerate(chunks):
+        await svc._on_space_media_blob(
+            _blob(
+                _hashed(
+                    "post-new",
+                    "x.webp",
+                    full,
+                    chunk_index=i,
+                    chunk_count=4,
+                    file_size_bytes=len(full),
+                ),
+                body=part,
+            )
+        )
+    assert list(media.glob("sc-*")) == []
+    assert list((media / ".partial").glob("*")) == []
+
+
+async def test_good_chunks_assemble_verified(env):
+    svc, media = env
+    full = b"".join(bytes([i]) * 256 for i in range(8))
+    for i in (3, 0, 2, 1):
+        await svc._on_space_media_blob(
+            _blob(
+                _hashed(
+                    "post-new",
+                    "x.webp",
+                    full,
+                    chunk_index=i,
+                    chunk_count=4,
+                    file_size_bytes=len(full),
+                ),
+                body=full[i * 512 : (i + 1) * 512],
+            )
+        )
+    assert (media / SC(full)).read_bytes() == full
+
+
+async def test_a_row_showing_the_content_name_takes_the_hashed_blob(env, db):
+    svc, media = env
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content, media_url)"
+        " VALUES(?,?,?,?,?,?)",
+        ("post-sc", "sp-a", "u-a", "image", "", f"api/media/{SC(b'NEW-BYTES')}"),
+    )
+    await svc._on_space_media_blob(
+        _blob(_hashed("post-sc", "x.webp", b"NEW-BYTES"), from_instance="anyone")
+    )
+    assert (media / SC(b"NEW-BYTES")).read_bytes() == b"NEW-BYTES"
+    # The row is here and shows the content name: no second name.
+    assert not (media / L("x.webp", sender="anyone")).exists()
+
+
+async def test_a_legacy_row_keeps_its_sender_name_but_the_bytes_are_checked(env):
+    svc, media = env
+    # post-a shows L("a1.webp") — an unhashed row from peer-a.
+    await svc._on_space_media_blob(
+        _blob(_hashed("post-a", "a1.webp", b"OTHER"), body=b"NEW-BYTES")
+    )
+    assert not (media / L("a1.webp")).exists()
+    await svc._on_space_media_blob(_blob(_hashed("post-a", "a1.webp", b"NEW-BYTES")))
+    assert (media / L("a1.webp")).read_bytes() == b"NEW-BYTES"
+    assert list(media.glob("sc-*")) == []
+
+
+async def test_a_hashed_blob_for_a_row_of_another_space_is_refused(env):
+    svc, media = env
+    await svc._on_space_media_blob(_blob(_hashed("post-b", "b1.webp", b"NEW-BYTES")))
+    assert list(media.glob("sc-*")) == []
+
+
+async def test_a_hashed_blob_a_known_row_does_not_show_is_refused(env):
+    svc, media = env
+    await svc._on_space_media_blob(_blob(_hashed("post-a", "zz.webp", b"NEW-BYTES")))
+    assert list(media.glob("sc-*")) == []
+
+
+async def test_a_raw_content_name_is_reserved(env, caplog):
+    svc, media = env
+    raw = SC(b"NEW-BYTES")
+    # No hash: refused — nobody writes an sc- name by naming it.
+    await svc._on_space_media_blob(
+        _blob({"correlation_id": "post-new", "filename": raw})
+    )
+    assert not (media / raw).exists()
+    assert not (media / L(raw)).exists()
+    # With the hash: the name is derived from the hash, never the raw one.
+    other = SC(b"NEW-BYTES", space_id="sp-b")
+    await svc._on_space_media_blob(_blob(_hashed("post-new", other, b"NEW-BYTES")))
+    assert not (media / other).exists()
+    assert (media / raw).read_bytes() == b"NEW-BYTES"
+
+
+async def test_an_unknown_hash_suite_is_a_legacy_blob(env):
+    svc, media = env
+    payload = _hashed("post-new", "x.webp", b"NEW-BYTES")
+    payload["h_suite"] = "blake3"
+    await svc._on_space_media_blob(_blob(payload))
+    assert (media / L("x.webp")).read_bytes() == b"NEW-BYTES"
+    assert list(media.glob("sc-*")) == []

@@ -45,6 +45,7 @@ import aiofiles.os
 
 from ..domain.errors import PageFilesNotShareableError
 from ..domain.events import PageCreated, PageDeleted, PageUpdated
+from ..domain.file_hashes import is_space_content_media_name
 from ..domain.page import MAX_PAGE_TITLE_LENGTH, Page, PageVersion
 from ..domain.page_version import PageConflictSide, is_version_hash, version_hash
 from ..domain.space import (
@@ -833,8 +834,12 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
 def _plain_media_name(name: str) -> bool:
     """A name this household's upload pipeline gives (no prefix another
     receiving path owns: received space files, DM / moment / GFS / page
-    copies)."""
-    return not (is_space_direct_media_name(name) or is_reserved_media_name(name))
+    copies, v_85 content-addressed files)."""
+    return not (
+        is_space_direct_media_name(name)
+        or is_space_content_media_name(name)
+        or is_reserved_media_name(name)
+    )
 
 
 def _require_page_file_cap(cover: object, content: object) -> None:

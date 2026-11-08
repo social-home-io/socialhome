@@ -52,6 +52,7 @@ removed without being followed (:func:`drop_parts`), never descended.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import pathlib
@@ -410,6 +411,19 @@ async def remove_quietly(path: pathlib.Path) -> None:
         pass
 
 
+async def link_once(source: pathlib.Path, target: pathlib.Path) -> bool:
+    """Give the stored file *source* the second name *target* (a hard
+    link) unless *target* exists — write-once. ``False`` when *target* was
+    there already or the filesystem has no hard links (then nothing is
+    written: the second name stays missing, never a copy that could
+    diverge). Never raises."""
+    try:
+        await aiofiles.os.link(source, target)
+    except OSError:
+        return False
+    return True
+
+
 async def publish_once(tmp: pathlib.Path, target: pathlib.Path) -> bool:
     """Move the finished ``tmp`` to ``target`` unless ``target`` exists.
 
@@ -533,6 +547,7 @@ async def store_chunk(
     data: bytes,
     target: pathlib.Path,
     expected_size: int,
+    expected_sha256: str | None = None,
 ) -> bool | None:
     """Land one chunk and assemble ``target`` once every chunk is here.
 
@@ -542,8 +557,9 @@ async def store_chunk(
     by :func:`partial_key`, which binds ``chunk_count``). Returns
 
     * ``None`` — still waiting for a chunk, or the assembled bytes did not
-      come to ``expected_size`` (``-1`` = not declared): nothing published,
-      and on a mismatch the parts are dropped (a resend starts clean).
+      come to ``expected_size`` (``-1`` = not declared) or do not hash to
+      ``expected_sha256`` (v_85, when given): nothing published, and on a
+      mismatch the parts are dropped (a resend starts clean).
     * ``True`` — this call assembled and published ``target``.
     * ``False`` — ``target`` already exists (another chunk completed the
       set first, or a re-delivery); it is never replaced.
@@ -583,12 +599,15 @@ async def store_chunk(
         return None
     tmp = part_dir / f"assembling-{uuid.uuid4().hex}"
     written = 0
+    digest = hashlib.sha256() if expected_sha256 is not None else None
     try:
         async with aiofiles.open(tmp, "wb") as out:
             for name in names:
                 async with aiofiles.open(part_dir / name, "rb") as inp:
                     chunk = await inp.read()
                 written += len(chunk)
+                if digest is not None:
+                    await asyncio.to_thread(digest.update, chunk)
                 await out.write(chunk)
     except FileNotFoundError:
         # A concurrent assembly published and removed the parts mid-read.
@@ -603,6 +622,15 @@ async def store_chunk(
             target.name,
             written,
             expected_size,
+        )
+        await remove_quietly(tmp)
+        await drop_parts(part_dir)
+        return None
+    if digest is not None and digest.hexdigest() != expected_sha256:
+        log.warning(
+            "%s: assembled bytes do not hash to the declared %s — discarding",
+            target.name,
+            expected_sha256,
         )
         await remove_quietly(tmp)
         await drop_parts(part_dir)

@@ -430,6 +430,69 @@ swept after 3 days, but there is no per-sender quota on how many message
 ids / transfers a household may open at once (each a part set, or a
 never-adopted `dm-` file swept as an orphan) — candidate follow-up issue.
 
+## File hashes and content-addressed names (v_85)
+
+Every space item that shows files carries their SHA-256, inside its
+encrypted payload (live events) and in each §25.6 record:
+
+```json
+"files": {"<author file name>": {"h": "<64 hex>", "size": 12345}},
+"files_suite": "sha256"
+```
+
+* **Items:** posts (`media_url`, `image_urls`, `file_meta.url`, the
+  link-card thumbnail), comments (`media_url` — a comment's picture now
+  ships as a `SPACE_MEDIA_BLOB` too), calendar covers, gallery items
+  (thumbnail + file), bazaar listings, pages (cover + body, ≤ 16 per
+  version) and moderation submissions. At most 16 entries.
+* **Suite:** `FILE_HASH_SUITE_SHA256` / `SUPPORTED_FILE_HASH_SUITES` in
+  `domain/file_hashes.py`. An unknown or missing suite, a map that is not a
+  mapping, more than 16 entries or any bad entry rejects the map **whole**
+  (`UnsupportedFileHashSuite`); the item then takes the legacy names.
+* **Who vouches:** a live event — the author household's envelope
+  signature (the authorship rule binds sender and author); a §25.6 record —
+  only the host or a delegated admin (`_acts_as_host`), which attaches
+  hashes computed from **its own copy**, content from before v_85 included
+  (owner decision B). Another provider's map is ignored.
+* **Names:** a hashed file is stored and referenced as
+  `sc-` + `sha256("space-content" ‖ space ‖ h)[:40]` + the extension.
+  Whatever is stored under it hashes to `h` — every write path checks
+  (`SPACE_MEDIA_BLOB` assembly, `store_chunk(expected_sha256=…)`); a local
+  upload never mints an `sc-` name. So nothing is first-come: a member's
+  item that names another item's file name with its own bytes (a decoy
+  row) resolves to ITS OWN content name, and the space id in the name keeps
+  two spaces' copies apart. A raw `sc-` name is never taken from the wire:
+  it is re-derived from the hash the item claims, or — unhashed — rebound
+  to its sender (`sd-`) like any name; a `SPACE_MEDIA_BLOB` naming an
+  `sc-` file without `h` is refused.
+* **Rows held here keep their names:** a file the stored row already shows
+  (by its own name, or under the sender's `sd-` name) is not re-pointed by
+  an edit or a stream that now carries hashes — no re-download at upgrade.
+* **`SPACE_MEDIA_BLOB`** carries `h` + `h_suite` (the sender hashes the
+  file it ships). The receiver stores it under the content name when the
+  correlated row shows that name or is not here yet, under the sender's
+  `sd-` name when a legacy row shows that one — and in either case only
+  bytes that hash to `h`.
+* **Cleanup:** an `sc-` file may back several items of its space. Per-row
+  delete paths remove a file only once no row references it
+  (`unlink_unreferenced`), and the orphan sweep drops an unreferenced one
+  after its 24 h grace — both read `media_reference_repo`, which already
+  covers every column an `sc-` name lives in.
+* **Pages** keep their page-scoped `sp-` names and host-only fill (v_82):
+  a page body keeps its host's names byte for byte, so a content name
+  would need the hash at read time. Their map and blob hash let the bytes
+  be checked in transit.
+* **GFS media cache (v_80 / v_83):** a file a household reads from a GFS
+  keeps its reader-derived `sg-` name — the sealed blob already binds the
+  item and its origin (AAD), the descriptor is author-signed for
+  followers, and the cache's re-upload / streaming address files by those
+  names. The descriptor's names take precedence over content names
+  (`SpaceMediaNamer.combine`). A holder asked to re-upload a file it
+  stores content-addressed tries the item's `sc-` files; the sealed
+  address picks the right one.
+* **Older households (below v_85)** are sent no map (a moderation release
+  check refuses keys it does not classify) and keep the sender-bound names.
+
 ## Space media via the GFS cache (v_80)
 
 **Who.** Two kinds of household read a space only through a GFS and so

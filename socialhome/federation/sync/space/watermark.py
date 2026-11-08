@@ -119,7 +119,14 @@ SYNC_VERSION_HISTORY_THROUGH: int = 64
 #:   shows) — a gate in ``provider._exporter_for``. A household crossing it
 #:   gets one full stream, so the pictures of pages it was sent while older
 #:   reach it.
-SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 82)
+#: * 85 — a record with files streamed by the host (or a delegated admin)
+#:   to a v_85 requester carries ``files`` (each file's SHA-256, computed
+#:   from the provider's own copy — pre-v_85 content included): a v_85
+#:   receiver stores a new item's files content-addressed and checks the
+#:   bytes; an item it already holds keeps its names. A gate in
+#:   ``provider._exporter_for``. A household crossing it gets one full
+#:   stream.
+SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 82, 85)
 
 
 def sync_version_bucket(peer_version: int) -> int:

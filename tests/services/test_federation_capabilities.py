@@ -22,7 +22,8 @@ def test_ours_is_v31_with_routed_origin_signature_capability():
     v_23 peer-replicated space roster gossip, v_22 the delegated-admin
     signing-seed share, v_21 authenticated mesh route discovery, v_20
     SPACE_SYNC_REJECTED)."""
-    assert OURS == 84
+    assert OURS == 85
+    assert FederationCapability.MIN_FOR_CONTENT_FILE_HASHES == 85
     assert FederationCapability.MIN_FOR_GFS_JOIN_REQUEST == 84
     assert FederationCapability.MIN_FOR_MEDIA_HTTPS == 81
     assert FederationCapability.MIN_FOR_PAGE_MEDIA == 82
@@ -193,6 +194,7 @@ def test_space_features_missing_below_v13():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
 
 
@@ -231,6 +233,7 @@ def test_space_features_missing_below_v16():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
 
 
@@ -266,6 +269,7 @@ def test_space_features_missing_below_v22():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
 
 
@@ -299,6 +303,7 @@ def test_space_features_missing_below_v23():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
 
 
@@ -333,6 +338,7 @@ def test_space_features_missing_below_v24():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(27) == [
         "Noticing when a path through other households breaks",
@@ -361,6 +367,7 @@ def test_space_features_missing_below_v24():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
 
 
@@ -397,6 +404,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(29) == [
         "Followers from other households",
@@ -423,6 +431,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(30) == [
         "Checking who sent a passed-on message",
@@ -448,6 +457,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(31) == [
         "Up-to-date member lists for every household",
@@ -472,6 +482,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(32) == [
         "Shared gallery albums",
@@ -495,6 +506,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(33) == [
         "Albums tied to their creator",
@@ -517,6 +529,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(34) == [
         "Posts tied to their creator",
@@ -538,6 +551,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(35) == [
         "Posts tied to their creator",
@@ -559,6 +573,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(36) == [
         "Space timetables",
@@ -579,6 +594,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(38) == [
         "Space timetables",
@@ -599,6 +615,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(39) == [
         "Task priority and labels",
@@ -618,6 +635,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(40) == [
         "Space moderators",
@@ -636,6 +654,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(41) == [
         "Admin-only space features",
@@ -653,6 +672,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(42) == [
         "Reviewing posts from other households",
@@ -669,6 +689,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(43) == [
         "Locking out removed admins",
@@ -684,6 +705,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(44) == [
         "Space reports for moderators",
@@ -698,6 +720,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(45) == [
         "Catching up on missed security updates",
@@ -711,6 +734,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
     assert space_features_missing_below(46) == [
         "Role changes from member households",
@@ -723,6 +747,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
         "Pictures in a space's pages",
+        "Space pictures and files checked against their hash",
     ]
 
 

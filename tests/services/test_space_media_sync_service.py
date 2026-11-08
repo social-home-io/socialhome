@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -140,6 +141,9 @@ async def test_flush_once_ships_small_file_as_single_chunk(
     assert payload["final"] is True
     assert payload["correlation_id"] == "p-1"
     assert payload["space_id"] == "sp-1"
+    # v_85 — the whole file's hash, so the receiver checks the bytes.
+    assert payload["h"] == hashlib.sha256(body).hexdigest()
+    assert payload["h_suite"] == "sha256"
     # Bytes ride the dedicated ``raw_chunk`` arg now (binary channel, or
     # base64 on the JSON/SPACE_ROUTED fallback), not a ``bytes_b64``
     # field in the metadata.

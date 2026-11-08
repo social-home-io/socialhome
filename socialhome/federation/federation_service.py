@@ -82,6 +82,7 @@ from ..domain.federation import (
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.federation_retention import moment_delete_key, supersede_key
+from ..domain.file_hashes import FILES_FIELD, FILES_SUITE_FIELD
 from ..domain.media_chunking import (
     HTTPS_CHUNK_BYTES,
     fits_channel,
@@ -2882,6 +2883,17 @@ class FederationService:
                     and instance.source is InstanceSource.SPACE_SESSION
                 ):
                     peer_payload = relay_payload
+            if FILES_FIELD in peer_payload and not await self.space_member_supports(
+                iid, min_version=FederationCapability.MIN_FOR_CONTENT_FILE_HASHES
+            ):
+                # v_85 — the files' hash map only to a household that reads
+                # it: an older one's moderation release check refuses a key
+                # it does not classify.
+                peer_payload = {
+                    k: v
+                    for k, v in peer_payload.items()
+                    if k not in (FILES_FIELD, FILES_SUITE_FIELD)
+                }
             if per_peer is not None:
                 peer_payload = await per_peer(iid, peer_payload)
             if iid in self._deferred_mesh_queues:
