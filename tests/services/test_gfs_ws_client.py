@@ -1396,3 +1396,27 @@ async def test_a_relay_media_frame_without_a_handler_is_dropped_loudly(caplog):
     with caplog.at_level(logging.WARNING):
         await client._on_binary(b"\x00SHR\x01" + b"b" * 32 + b"x")
     assert "no handler is attached" in caplog.text
+
+
+async def test_refused_media_frames_warn_once_a_minute_without_a_traceback(caplog):
+    seed, _pub = _gen_keypair()
+
+    async def _refuse(frame: dict) -> None:
+        raise ValueError("relay media frame does not open")
+
+    client = GfsWebSocketClient(
+        gfs_url="https://gfs.test",
+        instance_id="sh-x",
+        signing_key=seed,
+        session_factory=lambda: None,
+        on_relay=None,
+        on_envelope=_refuse,
+    )
+    data = b"\x00SHR\x01" + b"b" * 32 + b"x"
+    with caplog.at_level(logging.WARNING):
+        for _ in range(5):
+            await client._on_binary(data)
+    warnings = [r for r in caplog.records if "media frame" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "Traceback" not in caplog.text
+    assert all(r.exc_info is None for r in warnings)

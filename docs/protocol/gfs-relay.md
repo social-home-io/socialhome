@@ -328,13 +328,22 @@ bucket plus the 61-byte seal overhead (`VALID_SEALED_LENGTHS`).
   drops later (saturation, a full media queue, the 1 h TTL) or the
   receiver refuses (its media budget) is gone while the sender's outbox
   counts it sent. The receiver heals it on the next VIEW: a missed
-  content-addressed file (`sc-…`) makes `RelayMediaRefill` ask the space's
-  relay-seated host for `SPACE_SYNC_RESUME` since a minute before the live
-  row that shows it (`MediaReferenceRepo.space_rows_of`); the host replays
-  the space from then (rows deduped by id) and re-pushes their files. One
-  request per space per 30 min (the host throttles the same pair). The
-  generic one-file request comes with the GFS redesign
-  (`SPACE_MEDIA_WANTED`).
+  content-addressed file (`sc-…`) shown by a live row created within the
+  last 3 days makes `RelayMediaRefill` ask the space's relay-seated host for
+  `SPACE_SYNC_RESUME` with `refill: "posts" | "calendar" | "gallery"` — the
+  one resource whose row shows it (`MediaReferenceRepo.space_rows_of`) —
+  since a minute before that row. A v_87 host replays at most 20 rows of
+  that resource (deduped by id on arrival) and re-ships at most 16 files /
+  16 MiB of theirs, under its own (household, space, resource) window, so a
+  refill never uses up the reconnect resume's window. One request per
+  (space, resource) per 30 min on each side. Comment and listing pictures
+  are not refilled (their replay ships no files). **Cost per trigger:** 1
+  recipient × ≤ 20 rows (~2–10 KiB each through the relay) + ≤ 16 files ≤
+  16 MiB; worst case a reader viewing missing files in S spaces ≤ 3 S
+  refills per 30 min, ≤ 48 S MiB. A bridge: the generic one-file
+  `SPACE_MEDIA_WANTED` of the GFS redesign replaces it. Since timestamps
+  are compared as times on the host (`datetime()` on both sides in every
+  `list_since` the replay uses), a same-day row stamped naive is found.
 - **GFS:** identity-free and content-blind as for every relayed body — it
   reads the magic, the version and the recipient id, never a sender, and
   pushes the body unchanged as a BINARY WebSocket message to a socket whose
@@ -347,8 +356,16 @@ bucket plus the 61-byte seal overhead (`VALID_SEALED_LENGTHS`).
   drain the control envelopes go first, under their lock; the media frames
   follow in one background task per recipient, under their own, so a
   household's control link never waits behind up to 16 MiB of media. A
-  media push that stalls (`WS_MEDIA_SEND_TIMEOUT_S`, 30 s) is dropped and
-  retried later — it never evicts the socket. Across a cluster the frame
+  media frame is pushed only while the socket's transport holds at most
+  1 MiB unsent (`WS_MEDIA_MAX_BUFFERED_BYTES`), so control frames never
+  queue behind media bytes. A media push that stalls
+  (`WS_MEDIA_SEND_TIMEOUT_S`, 30 s) or finds the socket backed up is
+  dropped — never the socket — and the drain backs off (2 s doubling to
+  30 s, five tries; the rows stay queued for the next hello / hint) instead
+  of re-pushing at once. On a very slow link (< ~1 Mbit/s) one frame can
+  still delay a control frame by seconds and the 30 s WebSocket heartbeat
+  may close the socket for a missed pong; the household reconnects and the
+  queue drains again. Across a cluster the frame
   rides the shared queue and the `NODE_DRAIN_HINT` like any queued
   envelope.
 - **Receiver:** the WebSocket client hands the bytes to
@@ -356,6 +373,10 @@ bucket plus the 61-byte seal overhead (`VALID_SEALED_LENGTHS`).
   1200 / min — about ten senders at their GFS cap), checked before and never
   charged to the process-wide bucket the relayed control, pairing and
   invite envelopes share, and charged only for a frame that went through.
+  Frames that fail to open or fail their checks are charged to a junk bucket
+  (`RELAY_MEDIA_JUNK_LIMIT`, 120 / min); while it is full, media frames are
+  dropped before any AES-GCM open. Refusals are logged as one WARNING a
+  minute with a count, never a traceback.
   It checks the recipient id and the kem-suite byte
   (unknown → refused, no default), opens the seal and runs
   `FederationService.handle_inbound_media_relay`: the §24.11 chain on the

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable
 
@@ -43,6 +44,11 @@ log = logging.getLogger(__name__)
 #: The in-process frame type a binary relay media frame (v_87) is handed to
 #: the envelope handler under. Never on a wire: the GFS sends the raw bytes.
 ENVELOPE_MEDIA_FRAME: str = "envelope_media"
+
+#: Seconds between two "refused media frames" WARNINGs (each reports how
+#: many were refused since the last one). A refused media frame is an
+#: expected outcome — replayed, tampered, over a budget — never a traceback.
+MEDIA_REFUSED_WARN_INTERVAL_S: float = 60.0
 
 
 RECONNECT_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 30.0)
@@ -91,6 +97,8 @@ class GfsWebSocketClient:
         "_connected_event",
         "_gfs_url",
         "_instance_id",
+        "_media_refused",
+        "_media_warned_at",
         "_on_connected",
         "_on_envelope",
         "_on_follow_changed",
@@ -136,6 +144,9 @@ class GfsWebSocketClient:
         self._on_new_subscriber = on_new_subscriber
         self._on_envelope = on_envelope
         self._on_connected = on_connected
+        #: v_87 — media frames refused since the last WARNING, and when it was.
+        self._media_refused = 0
+        self._media_warned_at = -math.inf
         #: v_83 — a GFS asks this household for a space blob a reader missed.
         self._on_space_media_request = on_space_media_request
         self._reconnect_delays = reconnect_delays
@@ -445,6 +456,23 @@ class GfsWebSocketClient:
             return
         await self._on_frame(frame, size=len(data), kind="bytes")
 
+    def _note_media_refused(self, exc: Exception) -> None:
+        """Count a refused relay media frame; WARN at most once a minute,
+        with the count and the last reason, never a traceback."""
+        self._media_refused += 1
+        now = time.monotonic()
+        if now - self._media_warned_at < MEDIA_REFUSED_WARN_INTERVAL_S:
+            return
+        log.warning(
+            "gfs.ws.client: %d relayed media frame(s) refused from %s in the "
+            "last minute (last: %s)",
+            self._media_refused,
+            self._gfs_url,
+            exc,
+        )
+        self._media_refused = 0
+        self._media_warned_at = now
+
     async def _on_frame(self, frame: dict, *, size: int, kind: str) -> None:
         frame_type = frame.get("type")
         # Received frame size, for measuring what each GFS frame costs a
@@ -549,6 +577,16 @@ class GfsWebSocketClient:
                 return
             try:
                 await self._on_envelope(frame)
+            except ValueError as exc:
+                if frame_type != ENVELOPE_MEDIA_FRAME:
+                    log.warning(
+                        "gfs.ws.client: on_envelope handler raised for %s: %s",
+                        self._gfs_url,
+                        exc,
+                        exc_info=True,
+                    )
+                    return
+                self._note_media_refused(exc)
             except Exception as exc:  # defensive
                 # The message names the rejection ("replay detected",
                 # "signature verification failed"), never the blob.

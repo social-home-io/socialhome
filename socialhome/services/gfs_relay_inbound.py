@@ -125,6 +125,13 @@ _ENVELOPES_KEY = "invite-bootstrap:envelopes"
 _PAIRING_KEY = "invite-bootstrap:pairing"
 #: v_87 — binary relay media frames, their own bucket.
 _MEDIA_KEY = "gfs-relay:media"
+#: v_87 — media frames that failed to open or failed their checks.
+_MEDIA_JUNK_KEY = "gfs-relay:media-junk"
+
+#: Failed media frames per window. Charged on every failure; while it is
+#: full, media frames are dropped BEFORE any AES-GCM open, so a junk flood
+#: costs a dict lookup per frame, not an open.
+RELAY_MEDIA_JUNK_LIMIT: int = 120
 
 #: Binary relay media frames this household takes per window (v_87). Its
 #: OWN bucket, never the process-wide one: media must not starve relayed
@@ -236,21 +243,33 @@ class GfsRelayInbound:
         logs the reason, never the bytes)."""
         if not isinstance(raw, bytes | bytearray):
             raise TypeError("relayed media frame carries no body")
-        if self._rate_limiter is not None and not self._rate_limiter.has_room(
+        limiter = self._rate_limiter
+        if limiter is not None and not limiter.has_room(
+            _MEDIA_JUNK_KEY,
+            limit=RELAY_MEDIA_JUNK_LIMIT,
+            window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+        ):
+            raise ValueError("relayed media junk budget exhausted — frame dropped")
+        if limiter is not None and not limiter.has_room(
             _MEDIA_KEY,
             limit=RELAY_MEDIA_INBOUND_LIMIT,
             window_s=BOOTSTRAP_INBOUND_WINDOW_S,
         ):
             raise ValueError("relayed media rate limit exceeded")
-        media_body = open_relay_media(
-            bytes(raw),
-            own_instance_id=self._federation.own_instance_id,
-            keywrap_private_key=self._keywrap_private_key,
-        )
         try:
+            media_body = open_relay_media(
+                bytes(raw),
+                own_instance_id=self._federation.own_instance_id,
+                keywrap_private_key=self._keywrap_private_key,
+            )
             result = await self._federation.handle_inbound_media_relay(media_body)
-        except ValueError as exc:
-            log.info("gfs_relay: rejected a relayed media frame: %s", exc)
+        except ValueError:
+            if limiter is not None:
+                limiter.is_allowed(
+                    _MEDIA_JUNK_KEY,
+                    limit=RELAY_MEDIA_JUNK_LIMIT,
+                    window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+                )
             raise
         if self._rate_limiter is not None:
             # Charged only now: a frame that went through.
@@ -350,4 +369,9 @@ class GfsRelayInbound:
         return None
 
 
-__all__ = ["RELAY_DELIVERED_VIA", "RELAY_MEDIA_INBOUND_LIMIT", "GfsRelayInbound"]
+__all__ = [
+    "RELAY_DELIVERED_VIA",
+    "RELAY_MEDIA_INBOUND_LIMIT",
+    "RELAY_MEDIA_JUNK_LIMIT",
+    "GfsRelayInbound",
+]

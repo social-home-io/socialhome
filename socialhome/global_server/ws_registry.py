@@ -81,6 +81,26 @@ WS_SEND_TIMEOUT_S: float = 10.0
 #: next control push (:data:`WS_SEND_TIMEOUT_S`) and is evicted there.
 WS_MEDIA_SEND_TIMEOUT_S: float = 30.0
 
+#: v_87 — a media push goes only onto a socket with at most this many bytes
+#: still unsent in its transport: past it the push is skipped (the row stays
+#: queued), so control frames never queue behind media. A dropped (timed
+#: out) media push may still sit in that buffer, which is why the check
+#: comes first. On a very slow link (< ~1 Mbit/s) one frame can still delay
+#: the next control frame by several seconds, and aiohttp's 30 s heartbeat
+#: may then close the socket for a missed pong; the household reconnects and
+#: the queued rows drain again — media never makes that worse than one frame.
+WS_MEDIA_MAX_BUFFERED_BYTES: int = 1024 * 1024
+
+
+def _write_buffer_size(ws: web.WebSocketResponse) -> int:
+    """Bytes *ws*'s transport has not sent yet (``0`` when unknown)."""
+    transport = getattr(getattr(ws, "_writer", None), "transport", None)
+    size = getattr(transport, "get_write_buffer_size", None)
+    try:
+        return int(size()) if callable(size) else 0
+    except RuntimeError, OSError, TypeError, ValueError:  # a closing transport
+        return 0
+
 
 def _dumps(payload: Any) -> bytes:
     """The JSON of every pushed frame (text frames and binary headers)."""
@@ -289,6 +309,11 @@ class GfsWebSocketRegistry:
         then evicted), never raises."""
         ws = self._by_instance.get(instance_id)
         if ws is None or ws.closed or instance_id not in self._envelope_media:
+            return False
+        if _write_buffer_size(ws) > WS_MEDIA_MAX_BUFFERED_BYTES:
+            log.debug(
+                "gfs.ws.send_media: %s is backed up — media deferred", instance_id
+            )
             return False
         return await self._push(
             instance_id,

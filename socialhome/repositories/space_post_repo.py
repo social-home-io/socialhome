@@ -450,7 +450,7 @@ class SqliteSpacePostRepo:
         """
         rows = await self._db.fetchall(
             "SELECT * FROM space_posts "
-            "WHERE space_id=? AND deleted=0 AND created_at > ? "
+            "WHERE space_id=? AND deleted=0 AND datetime(created_at) > datetime(?) "
             "ORDER BY created_at ASC LIMIT ?",
             (space_id, since, int(limit)),
         )
@@ -827,7 +827,8 @@ class SqliteSpacePostRepo:
         rows = await self._db.fetchall(
             "SELECT c.* FROM space_post_comments c "
             "JOIN space_posts p ON p.id = c.post_id "
-            "WHERE p.space_id=? AND c.deleted=0 AND c.created_at > ? "
+            "WHERE p.space_id=? AND c.deleted=0"
+            " AND datetime(c.created_at) > datetime(?) "
             "ORDER BY c.created_at ASC LIMIT ?",
             (space_id, since, int(limit)),
         )

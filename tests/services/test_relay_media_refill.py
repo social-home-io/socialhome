@@ -6,6 +6,7 @@ asks the space's host to replay the space since the row showing it
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,8 @@ from socialhome.services.relay_media_refill import (
 )
 
 HOST = "h" * 32
+NOW = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
+RECENT = "2026-11-08 10:00:00"
 
 
 class _Refs:
@@ -56,12 +59,13 @@ def _refill(*, rows=None, fed=None, clock=None):
     fed = fed or _Fed()
     resume = _Resume()
     r = RelayMediaRefill(
-        media_refs=_Refs(rows or {"sc-a.webp": [("sp1", "2026-11-01 10:00:00")]}),
+        media_refs=_Refs(rows or {"sc-a.webp": [("sp1", RECENT, "posts")]}),
         space_repo=_Spaces(),
         federation_repo=fed,
         federation=fed,
         resume=resume,
         clock=clock or (lambda: 1000.0),
+        now=lambda: NOW,
     )
     return r, resume
 
@@ -71,8 +75,10 @@ async def test_a_missing_relay_file_asks_the_host_to_replay_since_its_row():
     assert await r.request("sc-a.webp") == 1
     [req] = resume.sent
     assert req["space_id"] == "sp1" and req["instance_id"] == HOST
-    # A minute before the row, as an ISO-8601 timestamp the host parses.
-    assert req["since"] == "2026-11-01T09:59:00+00:00"
+    # A minute before the row, as an ISO-8601 timestamp the host parses,
+    # scoped to the one resource that shows the file.
+    assert req["since"] == "2026-11-08T09:59:00+00:00"
+    assert req["refill"] == "posts"
 
 
 async def test_one_request_per_space_per_cooldown():
@@ -106,3 +112,20 @@ async def test_schedule_never_raises_and_runs_in_the_background():
     r.schedule("sc-a.webp")
     await r.drain()
     assert len(resume.sent) == 1
+
+
+async def test_an_old_row_is_never_refilled():
+    r, resume = _refill(rows={"sc-a.webp": [("sp1", "2026-11-01 10:00:00", "posts")]})
+    assert await r.request("sc-a.webp") == 0
+    assert resume.sent == []
+
+
+async def test_each_resource_has_its_own_cooldown():
+    rows = {
+        "sc-a.webp": [("sp1", RECENT, "posts")],
+        "sc-c.webp": [("sp1", RECENT, "calendar")],
+    }
+    r, resume = _refill(rows=rows)
+    await r.request("sc-a.webp")
+    await r.request("sc-c.webp")
+    assert [q["refill"] for q in resume.sent] == ["posts", "calendar"]

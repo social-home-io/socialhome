@@ -10,6 +10,7 @@ import time
 import pytest
 
 from socialhome.domain.relay_media_frame import build_relay_media_body
+from socialhome.global_server import envelope_relay as envelope_relay_mod
 from socialhome.global_server.config import EnvelopeMediaConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.envelope_relay import (
@@ -321,3 +322,52 @@ async def test_an_enqueue_sweeps_expired_media_rows_first(seeded):
     )
     rows = await seeded.fetchall("SELECT COUNT(*) AS n FROM gfs_media_queue")
     assert rows[0]["n"] == 1
+
+
+class _FlakyMediaRegistry(_Registry):
+    """Refuses the first *fail* media pushes (a busy / stalled socket)."""
+
+    def __init__(self, fail: int, **kw) -> None:
+        super().__init__(**kw)
+        self.fail = fail
+        self.attempts: list[float] = []
+
+    async def send_media(self, instance_id, body) -> bool:
+        if not self.takes_media(instance_id):
+            return False
+        self.attempts.append(time.monotonic())
+        if self.fail > 0:
+            self.fail -= 1
+            return False
+        return await super().send_media(instance_id, body)
+
+
+async def test_a_refused_media_push_backs_off_before_the_next_try(seeded, monkeypatch):
+    monkeypatch.setattr(envelope_relay_mod, "MEDIA_RETRY_BASE_S", 0.2)
+    reg = _FlakyMediaRegistry(1)
+    relay = _relay(seeded, reg)
+    await relay.accept_media(RECIPIENT, _media())
+    reg.online.add(RECIPIENT)
+    reg.media.add(RECIPIENT)
+    await relay.drain(RECIPIENT)
+    await relay.drain(RECIPIENT)  # a re-kick while backing off: no extra push
+    await relay.settle_media()
+    assert len(reg.attempts) == 2
+    assert reg.attempts[1] - reg.attempts[0] >= 0.2
+    assert len(reg.sent_media) == 1
+
+
+async def test_a_socket_that_keeps_refusing_media_is_left_for_the_next_trigger(
+    seeded, monkeypatch
+):
+    monkeypatch.setattr(envelope_relay_mod, "MEDIA_RETRY_BASE_S", 0.01)
+    reg = _FlakyMediaRegistry(1000)
+    relay = _relay(seeded, reg)
+    await relay.accept_media(RECIPIENT, _media())
+    reg.online.add(RECIPIENT)
+    reg.media.add(RECIPIENT)
+    await relay.drain(RECIPIENT)
+    await relay.settle_media()
+    assert len(reg.attempts) == envelope_relay_mod.MEDIA_RETRY_ATTEMPTS
+    queue = SqliteGfsEnvelopeQueueRepo(seeded)
+    assert await queue.media_bytes_for(RECIPIENT, now=0) > 0  # still queued

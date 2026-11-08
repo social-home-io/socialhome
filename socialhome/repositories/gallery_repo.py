@@ -1138,7 +1138,7 @@ class SqliteGalleryRepo:
         rows = await self._db.fetchall(
             "SELECT i.* FROM gallery_items i "
             "JOIN gallery_albums a ON a.id = i.album_id "
-            "WHERE a.space_id=? AND i.created_at > ? "
+            "WHERE a.space_id=? AND datetime(i.created_at) > datetime(?) "
             "AND i.deleted_at IS NULL AND a.deleted_at IS NULL "
             "ORDER BY i.created_at ASC LIMIT ?",
             (space_id, since, int(limit)),

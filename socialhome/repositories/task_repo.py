@@ -861,7 +861,8 @@ class SqliteSpaceTaskRepo:
         (:meth:`list_task_tombstones`)."""
         rows = await self._db.fetchall(
             "SELECT * FROM space_tasks "
-            "WHERE space_id=? AND deleted_at IS NULL AND updated_at > ? "
+            "WHERE space_id=? AND deleted_at IS NULL"
+            " AND datetime(updated_at) > datetime(?) "
             "ORDER BY updated_at ASC LIMIT ?",
             (space_id, since, int(limit)),
         )

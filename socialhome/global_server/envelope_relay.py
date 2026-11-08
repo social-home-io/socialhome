@@ -259,6 +259,16 @@ QUEUE_KIND_RELAY: str = RELAY_FRAME_TYPE
 QUEUED_TYPED_FRAME_TYPES: frozenset[str] = MOMENT_FRAME_TYPES | {FRAME_MOMENT_REACTION}
 
 
+#: v_87 — after a media push the socket refused (backed up, stalled), the
+#: background media drain waits this long before the next try, doubling up
+#: to :data:`MEDIA_RETRY_MAX_S`, and gives up after
+#: :data:`MEDIA_RETRY_ATTEMPTS` tries (the rows stay queued for the next
+#: hello / hint / enqueue). Never an immediate re-push of the same row.
+MEDIA_RETRY_BASE_S: float = 2.0
+MEDIA_RETRY_MAX_S: float = 30.0
+MEDIA_RETRY_ATTEMPTS: int = 5
+
+
 def queued_relay_push(row: dict) -> dict:
     """The socket frame a queued RELAY *row* goes out as (see
     :data:`QUEUED_TYPED_FRAME_TYPES`)."""
@@ -998,12 +1008,23 @@ class GfsEnvelopeRelay:
         task.add_done_callback(_done)
 
     async def _media_drain_loop(self, to_instance: str) -> None:
+        backoff = MEDIA_RETRY_BASE_S
+        attempts = 0
         try:
             while True:
                 self._media_drain_again.discard(to_instance)
-                await self._drain_media(to_instance)
-                if to_instance not in self._media_drain_again:
+                if await self._drain_media(to_instance):
+                    if to_instance not in self._media_drain_again:
+                        return
+                    continue
+                # A push was refused: back off, never re-push at once.
+                attempts += 1
+                if attempts >= MEDIA_RETRY_ATTEMPTS or not (
+                    self._ws_registry.takes_media(to_instance)
+                ):
                     return
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, MEDIA_RETRY_MAX_S)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1048,10 +1069,12 @@ class GfsEnvelopeRelay:
             )
         return delivered
 
-    async def _drain_media(self, to_instance: str) -> int:
+    async def _drain_media(self, to_instance: str) -> bool:
+        """Push *to_instance*'s queued media frames, one row at a time.
+        ``True`` when the queue is done (empty, or nothing to push to);
+        ``False`` when a push was refused (the caller backs off)."""
         if not self._ws_registry.takes_media(to_instance):
-            return 0
-        delivered = 0
+            return True
         after = 0
         while True:
             try:
@@ -1065,14 +1088,13 @@ class GfsEnvelopeRelay:
                     exc,
                     exc_info=True,
                 )
-                return delivered
+                return True
             if row is None:
-                return delivered
+                return True
             if not await self._ws_registry.send_media(to_instance, row.body):
-                return delivered
+                return False
             await self._queue_repo.delete_media(row.id)
             after = row.id
-            delivered += 1
 
 
 def build_envelope_rate_limit(resolver: ClientIpResolver):

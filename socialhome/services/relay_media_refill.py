@@ -16,16 +16,22 @@ content-addressed file (``sc-…``, the only names a v_85+ push lands under),
 relay-seated peer this household takes binary relay media from
 (:meth:`~socialhome.federation.federation_service.FederationService
 .relay_media_ok`), asks it for ``SPACE_SYNC_RESUME`` since a minute before
-that row. The host replays the space's rows from then (the receiver
-dedups them by id) and re-pushes their files through the relay; the missing
-one lands under the same content name, checked against its hash.
+that row, scoped to the ONE resource that shows it (``refill``:
+``posts`` / ``calendar`` / ``gallery``). The host replays at most
+``REFILL_MAX_ROWS`` rows of that resource from then (the receiver dedups them
+by id) and re-ships their files (≤ ``REFILL_MAX_FILES`` /
+``REFILL_MAX_BYTES``) through the relay, under its own (household, space,
+resource) window — never the reconnect resume's. The missing file lands
+under the same content name, checked against its hash.
 
-Bounded: one request per space per :data:`REFILL_COOLDOWN_S` (the host
-throttles the same (household, space) pair on its side too), at most
+Bounded: only rows created within :data:`REFILL_MAX_AGE_S` (a relay frame
+lives an hour on the GFS; older misses are the catch-up's business), one
+request per (space, resource) per :data:`REFILL_COOLDOWN_S`, at most
 :data:`MAX_REFILL_TASKS` lookups in flight, never on a paired host (direct
-delivery is confirmed) and never for a legacy name. The generic "send me
-this one file" request (``SPACE_MEDIA_WANTED``) comes with the GFS redesign;
-this is the minimal recovery until then.
+delivery is confirmed) and never for a legacy name.
+
+**A bridge.** The generic one-file request ``SPACE_MEDIA_WANTED`` of the GFS
+redesign replaces this; until then it is the minimal recovery.
 """
 
 from __future__ import annotations
@@ -55,6 +61,9 @@ REFILL_COOLDOWN_S: float = 30 * 60.0
 #: skew between the two households.
 REFILL_LOOKBACK_S: int = 60
 
+#: Only rows created this recently are refilled (3 days).
+REFILL_MAX_AGE_S: int = 3 * 86_400
+
 #: Background lookups in flight at once; past it a view schedules nothing.
 MAX_REFILL_TASKS: int = 8
 
@@ -63,12 +72,12 @@ MAX_TRACKED_SPACES: int = 1024
 
 
 class _Refs(Protocol):
-    async def space_rows_of(self, basename: str) -> list[tuple[str, str]]: ...
+    async def space_rows_of(self, basename: str) -> list[tuple[str, str, str]]: ...
 
 
 class _Resume(Protocol):
     async def send_request(
-        self, *, space_id: str, instance_id: str, since: str
+        self, *, space_id: str, instance_id: str, since: str, refill: str | None = None
     ) -> None: ...
 
 
@@ -76,16 +85,14 @@ class _RelayMediaPath(Protocol):
     async def relay_media_ok(self, instance: Any) -> bool: ...
 
 
-def _since(created_at: str) -> str | None:
-    """*created_at* (naive UTC ``YYYY-MM-DD HH:MM:SS`` or ISO-8601) minus
-    :data:`REFILL_LOOKBACK_S`, as tz-aware ISO-8601, or ``None``."""
+def _created(created_at: str) -> datetime | None:
+    """*created_at* (naive UTC ``YYYY-MM-DD HH:MM:SS`` or ISO-8601) as a
+    tz-aware time, or ``None``."""
     try:
         at = datetime.fromisoformat(created_at)
     except ValueError:
         return None
-    if at.tzinfo is None:
-        at = at.replace(tzinfo=UTC)
-    return (at - timedelta(seconds=REFILL_LOOKBACK_S)).isoformat()
+    return at.replace(tzinfo=UTC) if at.tzinfo is None else at
 
 
 class RelayMediaRefill:
@@ -96,6 +103,7 @@ class RelayMediaRefill:
         "_federation",
         "_federation_repo",
         "_last",
+        "_now",
         "_refs",
         "_resume",
         "_spaces",
@@ -111,6 +119,7 @@ class RelayMediaRefill:
         federation: _RelayMediaPath,
         resume: _Resume,
         clock: Callable[[], float] = time.monotonic,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._refs = media_refs
         self._spaces = space_repo
@@ -118,7 +127,8 @@ class RelayMediaRefill:
         self._federation = federation
         self._resume = resume
         self._clock = clock
-        self._last: OrderedDict[str, float] = OrderedDict()
+        self._now = now
+        self._last: OrderedDict[tuple[str, str], float] = OrderedDict()
         self._tasks: set[asyncio.Task[int]] = set()
 
     def schedule(self, basename: str) -> None:
@@ -153,14 +163,20 @@ class RelayMediaRefill:
         if not basename.startswith(SPACE_CONTENT_MEDIA_PREFIX):
             return 0
         sent = 0
-        for space_id, created_at in await self._refs.space_rows_of(basename):
+        for space_id, created_at, resource in await self._refs.space_rows_of(basename):
             now = self._clock()
-            last = self._last.get(space_id)
+            key = (space_id, resource)
+            last = self._last.get(key)
             if last is not None and now - last < REFILL_COOLDOWN_S:
                 continue
-            since = _since(created_at)
+            created = _created(created_at)
+            if created is None or (self._now() - created).total_seconds() > (
+                REFILL_MAX_AGE_S
+            ):
+                continue
+            since = (created - timedelta(seconds=REFILL_LOOKBACK_S)).isoformat()
             space = await self._spaces.get(space_id)
-            if since is None or space is None:
+            if space is None:
                 continue
             host = await self._federation_repo.get_instance(space.owner_instance_id)
             if host is None or host.source is not InstanceSource.SPACE_SESSION:
@@ -168,17 +184,18 @@ class RelayMediaRefill:
             if not await self._federation.relay_media_ok(host):
                 continue
             await self._resume.send_request(
-                space_id=space_id, instance_id=host.id, since=since
+                space_id=space_id, instance_id=host.id, since=since, refill=resource
             )
             log.info(
-                "relay media refill: asked %s to replay space %s since %s "
+                "relay media refill: asked %s to replay %s of space %s since %s "
                 "(a pushed file never arrived)",
                 host.id,
+                resource,
                 space_id,
                 since,
             )
-            self._last[space_id] = now
-            self._last.move_to_end(space_id)
+            self._last[key] = now
+            self._last.move_to_end(key)
             while len(self._last) > MAX_TRACKED_SPACES:
                 self._last.popitem(last=False)
             sent += 1
@@ -189,5 +206,6 @@ __all__ = [
     "MAX_REFILL_TASKS",
     "REFILL_COOLDOWN_S",
     "REFILL_LOOKBACK_S",
+    "REFILL_MAX_AGE_S",
     "RelayMediaRefill",
 ]

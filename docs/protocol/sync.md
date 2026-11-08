@@ -101,12 +101,18 @@ incremental session with no confirmed watermark streams in full.
 `SPACE_SYNC_RESUME` is a second, narrower replay that answers with a
 **burst of individual federation events** — `SPACE_POST_CREATED`,
 `SPACE_TASK_CREATED`, etc. — that the receiver's existing inbound handlers
-apply by primary key (re-deliveries are idempotent). Nothing sends it
-automatically today: `SpaceSyncResumeProvider.send_request` has no caller,
-and the replay is reached only through an operator's
-`INSTANCE_RESYNC_REQUEST` (scope `space` / `calendar`, from the admin
-federation route), whose handler runs `replay_space_to` /
-`replay_calendar_to`.
+apply by primary key (re-deliveries are idempotent). The full replay is
+reached through an operator's `INSTANCE_RESYNC_REQUEST` (scope `space` /
+`calendar`, from the admin federation route), whose handler runs
+`replay_space_to` / `replay_calendar_to`. Since v_87 one automatic sender
+exists: the relay media refill (`RelayMediaRefill`) sends it with an
+optional `refill: "posts" | "calendar" | "gallery"` field when a file pushed
+through the GFS relay never arrived; a v_87 provider then replays only that
+resource — ≤ 20 rows, ≤ 16 files / 16 MiB — under its own (household,
+space, resource) window, never the reconnect resume's (see
+[gfs-relay.md](./gfs-relay.md#binary-media-frames-v_87)). Every `since`
+comparison runs through `datetime()` on both sides, so a naive stored stamp
+and a tz-aware `since` compare as times.
 
 ```mermaid
 sequenceDiagram

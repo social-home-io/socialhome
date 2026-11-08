@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import orjson
@@ -485,3 +486,28 @@ async def test_a_slow_media_push_is_dropped_but_never_evicts_the_socket(
     assert ws.closed_with is None
     # Control frames still go out on the same socket.
     assert await registry.send("x", {"type": "envelope", "sealed": {}})
+
+
+class _BufferedWS(_FakeWS):
+    """A socket whose transport still holds *buffered* unsent bytes."""
+
+    def __init__(self, buffered: int) -> None:
+        super().__init__()
+        self._writer = SimpleNamespace(
+            transport=SimpleNamespace(get_write_buffer_size=lambda: buffered)
+        )
+
+
+async def test_media_is_not_pushed_onto_a_backed_up_socket(registry):
+    """Control frames must never queue behind media bytes: with more than
+    ``WS_MEDIA_MAX_BUFFERED_BYTES`` still unsent, the media push is skipped
+    (the row stays queued) and the socket is kept."""
+    busy = _BufferedWS(ws_registry_mod.WS_MEDIA_MAX_BUFFERED_BYTES + 1)
+    await registry.register("x", busy, envelope_media=True)
+    assert not await registry.send_media("x", b"\x00SHR-1")
+    assert busy.sent_bytes == []
+    assert registry.is_connected("x")
+    idle = _BufferedWS(0)
+    await registry.register("y", idle, envelope_media=True)
+    assert await registry.send_media("y", b"\x00SHR-2")
+    assert idle.sent_bytes == [b"\x00SHR-2"]

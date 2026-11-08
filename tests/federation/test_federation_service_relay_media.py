@@ -373,3 +373,33 @@ async def test_a_full_chunk_when_the_relay_lost_envelope_media_asks_for_a_resize
     assert await p.svc_a.mesh_media_chunk_bytes(p.b_id, file_size_bytes=10**6) == (
         RELAY_JSON_CHUNK_BYTES
     )
+
+
+async def test_junk_media_frames_are_shed_once_their_bucket_is_full(monkeypatch):
+    """Every frame that fails to open (or fails its checks) is charged to
+    ``gfs-relay:media-junk``; once that is full, media frames are dropped
+    BEFORE any AES-GCM open until the window slides."""
+    p = _relay_paired()
+    limiter = _limited(p, monkeypatch, media_limit=100)
+    monkeypatch.setattr(gri, "RELAY_MEDIA_JUNK_LIMIT", 2)
+    opened: list[int] = []
+    real_open = gri.open_relay_media
+
+    def _counting_open(*a, **kw):
+        opened.append(1)
+        return real_open(*a, **kw)
+
+    monkeypatch.setattr(gri, "open_relay_media", _counting_open)
+    header, sealed = _frame(p)
+    frame = _relay_frame(p, header, sealed)
+    bad = bytearray(frame["body"])
+    bad[-1] ^= 1
+    for _ in range(2):
+        with pytest.raises(ValueError, match="does not open"):
+            await p.inbound.handle_frame({**frame, "body": bytes(bad)})
+    with pytest.raises(ValueError, match="junk"):
+        await p.inbound.handle_frame({**frame, "body": bytes(bad)})
+    assert len(opened) == 2  # the third was never opened
+    assert not limiter.has_room(
+        gri._MEDIA_JUNK_KEY, limit=2, window_s=BOOTSTRAP_INBOUND_WINDOW_S
+    )

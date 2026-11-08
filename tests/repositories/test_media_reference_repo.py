@@ -1033,6 +1033,17 @@ async def test_space_rows_of_names_the_live_rows_and_their_time(db):
         " 1, '2026-11-02 10:00:00')",
     )
     repo = SqliteMediaReferenceRepo(db)
-    assert await repo.space_rows_of("sc-abc.webp") == [("sp1", "2026-11-01 10:00:00")]
+    assert await repo.space_rows_of("sc-abc.webp") == [
+        ("sp1", "2026-11-01 10:00:00", "posts")
+    ]
+    await db.enqueue(
+        "INSERT INTO space_calendar_events(id, space_id, summary, start_dt, end_dt,"
+        " created_by, cover_url, created_at) VALUES('e1', 'sp2', 'S',"
+        " '2026-01-01T00:00:00+00:00', '2026-01-01T01:00:00+00:00', 'u1',"
+        " 'api/media/sc-cal.webp', '2026-11-03 09:00:00')"
+    )
+    assert await repo.space_rows_of("sc-cal.webp") == [
+        ("sp2", "2026-11-03 09:00:00", "calendar")
+    ]
     assert await repo.space_rows_of("sc-none.webp") == []
     assert await repo.space_rows_of("") == []
