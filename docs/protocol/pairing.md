@@ -843,7 +843,10 @@ DataChannel finishes handling it even though its purge closes the very
 connection it arrived on. A tombstone keeps its connection until it is
 purged. If the pair later re-pairs, either side builds a fresh connection:
 a peer whose channel the other side closed counts as spent and is rebuilt
-on the next send or inbound OFFER.
+on the next send or inbound OFFER — at most once a minute for inbound
+OFFERs, so a peer that keeps closing and re-dialling cannot make us build a
+connection per OFFER. An old connection that fails while it drains never
+evicts the new one a quick re-pair built.
 
 ### A peer that is offline at unpair time
 

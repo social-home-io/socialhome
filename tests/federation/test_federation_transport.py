@@ -123,7 +123,7 @@ async def test_evict_suppresses_rtc_rebuild_after_first_failure():
         signaling=t._signaling_factory(inst.id),
         inbound=t._inbound_factory(inst.id),
     )
-    await t._evict_peer(inst.id)
+    await t._evict_peer(inst.id, t._peers[inst.id])
     # The peer is gone, but suppression is recorded.
     assert inst.id not in t._peers
     assert t._rtc_suppressed(inst.id) is True
@@ -201,7 +201,7 @@ async def test_set_ice_servers_clears_failure_count():
         signaling=t._signaling_factory(inst.id),
         inbound=t._inbound_factory(inst.id),
     )
-    await t._evict_peer(inst.id)
+    await t._evict_peer(inst.id, t._peers[inst.id])
     delay = t._rtc_suppressed_until[inst.id] - time.monotonic()
     assert abs(delay - RTC_RETRY_BACKOFF_BASE_S) < 1.0
 
@@ -216,7 +216,7 @@ async def _evict_once(t: FederationTransport, iid: str) -> float:
         signaling=t._signaling_factory(iid),
         inbound=t._inbound_factory(iid),
     )
-    await t._evict_peer(iid)
+    await t._evict_peer(iid, t._peers[iid])
     return t._rtc_suppressed_until[iid] - time.monotonic()
 
 
@@ -382,7 +382,7 @@ async def test_suppression_expires_after_backoff_window():
         signaling=t._signaling_factory(inst.id),
         inbound=t._inbound_factory(inst.id),
     )
-    await t._evict_peer(inst.id)
+    await t._evict_peer(inst.id, t._peers[inst.id])
 
     # With backoff=0 the suppression window is already past — the
     # check method should report not-suppressed AND prune the

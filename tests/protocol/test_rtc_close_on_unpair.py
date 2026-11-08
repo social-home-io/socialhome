@@ -285,3 +285,100 @@ async def test_failed_peer_is_left_to_its_eviction():
     peer._failed = True
 
     assert not peer.needs_rehandshake(t._ice_generation)
+
+
+class _Bus:
+    def __init__(self) -> None:
+        self.events: list = []
+
+    async def publish(self, event) -> None:
+        self.events.append(event)
+
+
+async def test_close_all_cancels_in_flight_shielded_handlers():
+    """A handler shielded from its receive task's cancellation is still the
+    transport's: ``close_all`` (app cleanup, before the DB closes) cancels
+    and awaits it instead of leaving it to write afterwards."""
+    started = asyncio.Event()
+    outcome: list[str] = []
+
+    async def _handler(instance_id: str, raw: bytes) -> dict:
+        started.set()
+        try:
+            await asyncio.Event().wait()  # a DB write that never ends
+        except asyncio.CancelledError:
+            outcome.append("cancelled")
+            raise
+        outcome.append("finished")
+        return {}
+
+    t = _transport(inbound_handler=_handler)
+    peer = await _open_peer(t)
+    await peer._channel._inbox.put(orjson.dumps({"event_type": "post"}))
+    await asyncio.wait_for(started.wait(), 2)
+
+    await asyncio.wait_for(t.close_all(), 2)
+
+    assert outcome == ["cancelled"]
+
+
+async def test_old_peer_failing_during_the_flush_leaves_the_new_peer_alone():
+    """Re-paired while the old connection still drains its UNPAIR: the old
+    PeerConnection's FAILED must neither evict the NEW peer (nor stamp a
+    backoff), nor announce ``https`` after the new one announced ``rtc``."""
+    bus = _Bus()
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_Inbox(),  # type: ignore[arg-type]
+        signaling_send=_Signals(),
+        bus=bus,  # type: ignore[arg-type]
+    )
+    t.mark_ice_primed()
+    old = await _open_peer(t)
+    old._channel.buffered_amount = 512  # the UNPAIR still draining
+    closing = asyncio.create_task(t.close_peer(PEER))
+    await asyncio.sleep(0.1)
+
+    new = await _open_peer(t)  # the re-pair dials a fresh connection
+    assert new is not old
+
+    old._closed = old._failed = True  # the old PC reaches FAILED
+    await old._on_failed(PEER, old)
+    await asyncio.wait_for(closing, 3)
+    await asyncio.sleep(0)
+
+    assert t._peers[PEER] is new and new.is_ready
+    assert PEER not in t._rtc_suppressed_until
+    transports = [e.transport for e in bus.events]
+    assert transports[-1] == "rtc", transports
+
+
+async def _spend(peer) -> None:
+    peer._channel.close()
+    for _ in range(50):
+        if peer._closed:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("channel never ended")
+
+
+async def test_spent_peer_rebuild_by_offer_is_rate_limited():
+    """A remote that keeps opening, closing and re-offering gets at most one
+    rebuilt PeerConnection per floor window — even though each rebuilt
+    connection opened in between."""
+    t = _transport()
+    peer = await _open_peer(t)
+    await _spend(peer)
+
+    await t.on_rtc_offer(from_instance=PEER, payload={"sdp": "v=0\r\n"})
+    first = t._peers[PEER]
+    assert first is not peer
+    await t._on_peer_open(PEER)  # it connected …
+    first._closed = True  # … and the remote closed it again
+
+    await t.on_rtc_offer(from_instance=PEER, payload={"sdp": "v=0\r\n"})
+    assert t._peers[PEER] is first, "rebuilt again inside the floor"
+
+    t._last_spent_rebuild_at[PEER] -= t._rtc_retry_backoff_base_s + 1
+    await t.on_rtc_offer(from_instance=PEER, payload={"sdp": "v=0\r\n"})
+    assert t._peers[PEER] is not first
