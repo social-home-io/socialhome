@@ -25,6 +25,7 @@ from socialhome.domain.federation import (
 from socialhome.federation.gfs_relay_transport import (
     RELAY_STATUS_THROTTLED,
     RELAY_STATUS_TOO_LARGE,
+    MailboxTarget,
 )
 from socialhome.federation.transport import (
     TRANSPORT_ERROR_GFS_RELAY_NOT_ENABLED,
@@ -571,3 +572,123 @@ async def test_no_relay_tier_means_no_relay_media():
     assert await t.send_media_relay(
         instance=_paired(), header_dict={}, payload_bytes=b""
     ) == (False, None)
+
+
+# ── v_88: per-space mailboxes for link-joined households ──────────────────
+
+
+class _MailboxRelay(_MediaRelay):
+    def __init__(self, *, mailbox_ready: bool = True) -> None:
+        super().__init__()
+        self.mailbox_ready_answer = mailbox_ready
+        self.mailbox_calls: list[tuple[MailboxTarget, dict]] = []
+        self.mailbox_media: list[tuple[MailboxTarget, bytes]] = []
+
+    async def mailbox_ready(self, target, *, media=False) -> bool:
+        return self.mailbox_ready_answer
+
+    async def send_mailbox(self, *, instance, target, envelope_dict):
+        self.mailbox_calls.append((target, envelope_dict))
+        return True, None
+
+    async def send_media_mailbox(self, *, instance, target, media_body):
+        self.mailbox_media.append((target, media_body))
+        return True, None
+
+
+_TARGET = MailboxTarget(mailbox_id="m" * 32, kem_pk=b"k" * 32, gfs_url=ROUTE_A)
+
+
+def _seat() -> RemoteInstance:
+    return dataclasses.replace(
+        _paired(inbox="", gfs_relay=False),
+        source=InstanceSource.SPACE_SESSION,
+        relay_via=ROUTE_A,
+    )
+
+
+def _mailbox_transport(relay, lookups, *, targets=None):
+    async def _resolve(instance_id, space_id):
+        lookups.append((instance_id, space_id))
+        return (targets or {}).get(space_id)
+
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_Https(),
+        gfs_relay=relay,
+        gfs_routes=_routes(),
+        mailbox_targets=_resolve,
+        signaling_send=_Signaler(),
+    )
+    t.mark_ice_primed()
+    return t
+
+
+async def test_a_seat_with_a_mailbox_for_the_space_is_addressed_to_it():
+    relay, lookups = _MailboxRelay(), []
+    t = _mailbox_transport(relay, lookups, targets={"sp-1": _TARGET})
+    env = {"msg_id": "m", "space_id": "sp-1"}
+    result = await t.send(instance=_seat(), envelope_dict=env)
+    assert result.ok
+    assert relay.mailbox_calls == [(_TARGET, env)]
+    assert relay.calls == []  # never instance-addressed
+    assert lookups == [("peer-1", "sp-1")]
+
+
+async def test_no_entry_or_a_gfs_without_mailboxes_keeps_todays_relay():
+    relay, lookups = _MailboxRelay(), []
+    t = _mailbox_transport(relay, lookups, targets={"sp-1": _TARGET})
+    await t.send(instance=_seat(), envelope_dict={"msg_id": "m", "space_id": "sp-2"})
+    assert relay.mailbox_calls == [] and len(relay.calls) == 1
+    relay2 = _MailboxRelay(mailbox_ready=False)
+    t2 = _mailbox_transport(relay2, [], targets={"sp-1": _TARGET})
+    await t2.send(instance=_seat(), envelope_dict={"msg_id": "m", "space_id": "sp-1"})
+    assert relay2.mailbox_calls == [] and len(relay2.calls) == 1
+
+
+async def test_a_space_less_envelope_asks_for_any_shared_space():
+    relay, lookups = _MailboxRelay(), []
+    t = _mailbox_transport(relay, lookups, targets={None: _TARGET})
+    await t.send(instance=_seat(), envelope_dict={"msg_id": "m", "space_id": None})
+    assert lookups == [("peer-1", None)]
+    assert len(relay.mailbox_calls) == 1
+
+
+async def test_a_paired_peer_never_asks_for_a_mailbox():
+    relay, lookups = _MailboxRelay(), []
+    t = _mailbox_transport(relay, lookups, targets={"sp-1": _TARGET})
+    await t.send(instance=_paired(), envelope_dict={"msg_id": "m", "space_id": "sp-1"})
+    assert lookups == [] and relay.mailbox_calls == []
+
+
+async def test_relay_media_to_a_seat_goes_to_its_mailbox():
+    relay, lookups = _MailboxRelay(), []
+    t = _mailbox_transport(relay, lookups, targets={"sp-1": _TARGET})
+    ok = await t.send_media_relay(
+        instance=_seat(),
+        header_dict={"msg_id": "m", "space_id": "sp-1"},
+        payload_bytes=b"x",
+    )
+    assert ok == (True, None)
+    [(target, body)] = relay.mailbox_media
+    assert target is _TARGET and body.startswith(b"\x00SHM")
+    assert relay.media == []
+
+
+async def test_a_failing_mailbox_lookup_falls_back_and_never_raises():
+    relay = _MailboxRelay()
+
+    async def _boom(instance_id, space_id):
+        raise RuntimeError("db gone")
+
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_Https(),
+        gfs_relay=relay,
+        mailbox_targets=_boom,
+        signaling_send=_Signaler(),
+    )
+    result = await t.send(
+        instance=_seat(), envelope_dict={"msg_id": "m", "space_id": "sp-1"}
+    )
+    assert result.ok and len(relay.calls) == 1

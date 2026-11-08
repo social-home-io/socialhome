@@ -74,7 +74,7 @@ from .media_https_backoff import MediaPostResult
 
 if TYPE_CHECKING:
     from ..infrastructure.event_bus import EventBus
-    from .gfs_relay_transport import GfsRelayTransport
+    from .gfs_relay_transport import GfsRelayTransport, MailboxTarget
 
 log = logging.getLogger(__name__)
 
@@ -1625,6 +1625,7 @@ class FederationTransport:
         "_inbound_handler",
         "_last_retire_at",
         "_lock",
+        "_mailbox_targets",
         "_media_inbound_handler",
         "_own_instance_id",
         "_peers",
@@ -1644,6 +1645,8 @@ class FederationTransport:
         https_inbox: HttpsInboxTransport,
         gfs_relay: GfsRelayTransport | None = None,
         gfs_routes: Callable[[str], Awaitable[list[str]]] | None = None,
+        mailbox_targets: Callable[[str, str | None], Awaitable[MailboxTarget | None]]
+        | None = None,
         signaling_send: Callable[
             [str, FederationEventType, dict], Awaitable[DeliveryResult]
         ],
@@ -1674,6 +1677,13 @@ class FederationTransport:
         #: honoured at once. ``None`` disables the relay fallback for
         #: paired peers (tests, builds with no connection server).
         self._gfs_routes = gfs_routes
+        #: v_88 — ``(instance_id, space_id | None)`` → the household's
+        #: per-space GFS mailbox for that space (its signed directory entry),
+        #: or ``None``. Asked per relay send to a ``space_session`` seat; a
+        #: target is used only when our connection to its GFS proved
+        #: ``envelope_mailbox`` (:meth:`_mailbox_target`). ``None`` → every
+        #: relay send stays instance-addressed (tests, older wiring).
+        self._mailbox_targets = mailbox_targets
         #: ``instance_id`` → next route index for the round-robin over
         #: that peer's routes. In memory only: a restart starts at the
         #: first route again, which is harmless.
@@ -2002,6 +2012,21 @@ class FederationTransport:
                     via="gfs_relay",
                     error="gfs_relay_unavailable",
                 )
+            target = await self._mailbox_target(
+                instance, envelope_dict.get("space_id"), media=False
+            )
+            if target is not None:
+                # v_88 — addressed to the household's mailbox for this space:
+                # the GFS sees the mailbox id, never ``instance.id``.
+                ok, status = await self._gfs_relay.send_mailbox(
+                    instance=instance, target=target, envelope_dict=envelope_dict
+                )
+                return _TransportSendResult(
+                    ok=ok,
+                    via="gfs_relay",
+                    status_code=status,
+                    error=None if ok else _relay_failure_reason(status),
+                )
             ok, status = await self._gfs_relay.send(
                 instance=instance,
                 envelope_dict=envelope_dict,
@@ -2220,10 +2245,41 @@ class FederationTransport:
         the status follows :meth:`GfsRelayTransport.send`."""
         if self._gfs_relay is None:
             return False, None
+        media_body = encode_media_body(header_dict, payload_bytes)
+        if instance.source is InstanceSource.SPACE_SESSION:
+            target = await self._mailbox_target(
+                instance, header_dict.get("space_id"), media=True
+            )
+            if target is not None:
+                return await self._gfs_relay.send_media_mailbox(
+                    instance=instance, target=target, media_body=media_body
+                )
         return await self._gfs_relay.send_media(
             instance=instance,
-            media_body=encode_media_body(header_dict, payload_bytes),
+            media_body=media_body,
         )
+
+    async def _mailbox_target(
+        self, instance: RemoteInstance, space_id: object, *, media: bool
+    ) -> MailboxTarget | None:
+        """The mailbox an envelope of *space_id* (``None`` = space-less: any
+        shared space's) goes to for *instance* (v_88), or ``None`` — no
+        resolver, no entry, an entry below v_88, or a GFS of ours that did
+        not prove ``envelope_mailbox`` (and ``envelope_media`` for *media*).
+        ``None`` means today's instance-addressed relay. Never raises."""
+        if self._mailbox_targets is None or self._gfs_relay is None:
+            return None
+        space = space_id if isinstance(space_id, str) and space_id else None
+        try:
+            target = await self._mailbox_targets(instance.id, space)
+        except Exception:
+            log.warning("fed send: mailbox lookup failed", exc_info=True)
+            return None
+        if target is None:
+            return None
+        if not await self._gfs_relay.mailbox_ready(target, media=media):
+            return None
+        return target
 
     def is_media_ready(self, instance_id: str) -> bool:
         peer = self._peers.get(instance_id)

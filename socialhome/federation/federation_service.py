@@ -116,6 +116,7 @@ from .inbound_validator import (
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_event_types,
+    make_check_mailbox_space,
     make_check_peer_class,
     make_check_relay_opt_in,
     make_check_replay,
@@ -643,6 +644,9 @@ class FederationService:
         """Return the shared step list for both inbox and RTC pipelines."""
         steps = [
             make_parse_json(loads=_loads),
+            # v_88: a frame on one of our per-space mailboxes carries only
+            # that space's envelopes (or space-less ones). No-op elsewhere.
+            make_check_mailbox_space(),
             lookup_step,
             # §D2b peer-class gate: a household seated from an invite link
             # may only speak the space vocabulary. Straight after the
@@ -3506,6 +3510,7 @@ class FederationService:
         raw_body: bytes,
         *,
         transport: str = "",
+        mailbox_space_id: str | None = None,
     ) -> InboundContext:
         """Run the §24.11 RTC validation pipeline WITHOUT dispatching.
 
@@ -3530,6 +3535,7 @@ class FederationService:
             raw_body=raw_body,
             instance_id=instance_id,
             transport=transport,
+            mailbox_space_id=mailbox_space_id,
         )
         await pipeline.run(ctx)
         return ctx
@@ -3540,6 +3546,7 @@ class FederationService:
         raw_body: bytes,
         *,
         transport: str = "",
+        mailbox_space_id: str | None = None,
     ) -> dict:
         """§24.11 validation pipeline for a WebRTC DataChannel frame.
 
@@ -3556,6 +3563,7 @@ class FederationService:
             instance_id,
             raw_body,
             transport=transport,
+            mailbox_space_id=mailbox_space_id,
         )
 
         if ctx.early_response is not None:
@@ -3644,7 +3652,13 @@ class FederationService:
             ctx, frame.payload, wire_frame_suite=wire_suite
         )
 
-    async def handle_inbound_media_relay(self, media_body: bytes) -> dict:
+    async def handle_inbound_media_relay(
+        self,
+        media_body: bytes,
+        *,
+        transport: str = TRANSPORT_GFS_RELAY,
+        mailbox_space_id: str | None = None,
+    ) -> dict:
         """Validate + decrypt one binary media body that the GFS relay
         delivered (v_87), then dispatch.
 
@@ -3677,7 +3691,8 @@ class FederationService:
         ctx = InboundContext(
             raw_body=frame.header,
             instance_id=claimed,
-            transport=TRANSPORT_GFS_RELAY,
+            transport=transport,
+            mailbox_space_id=mailbox_space_id,
         )
         await pipeline.run(ctx)
         return await self._finish_media_frame(

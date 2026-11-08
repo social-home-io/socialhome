@@ -13,9 +13,18 @@ import logging
 import pytest
 
 from socialhome.crypto import generate_x25519_keypair
-from socialhome.domain.federation import GfsConnection
-from socialhome.federation.gfs_relay_transport import seal_relay_envelope
-from socialhome.federation.inbound_validator import TRANSPORT_GFS_RELAY
+from socialhome.domain.federation import GfsConnection, RemoteInstance
+from socialhome.federation.gfs_mailbox import derive_mailbox_keys
+from socialhome.federation.gfs_relay_media import seal_relay_media
+from socialhome.federation.gfs_relay_transport import (
+    GfsRelayTransport,
+    MailboxTarget,
+    seal_relay_envelope,
+)
+from socialhome.federation.inbound_validator import (
+    TRANSPORT_GFS_MAILBOX,
+    TRANSPORT_GFS_RELAY,
+)
 from socialhome.federation.invite_bootstrap import KIND_REDEEM
 from socialhome.federation.invite_token_redeem import (
     BOOTSTRAP_BODY_INBOUND_LIMIT,
@@ -457,3 +466,131 @@ async def test_relayed_pairing_bodies_have_their_own_bucket(keys):
     # A full pairing bucket never starves an invite redeem.
     await inbound.handle_frame(_bootstrap_frame(keys))
     assert len(invite.bodies) == 1
+
+
+# ── v_88: frames on our per-space mailboxes ──────────────────────────────
+
+
+class _MailboxFederation:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, bytes, str, str | None]] = []
+        self.media: list[tuple[bytes, str, str | None]] = []
+
+    async def handle_inbound_rtc(
+        self, instance_id, raw_body, *, transport="", mailbox_space_id=None
+    ):
+        self.calls.append((instance_id, raw_body, transport, mailbox_space_id))
+        return {"status": "ok"}
+
+    async def handle_inbound_media_relay(
+        self, body, *, transport="", mailbox_space_id=None
+    ):
+        self.media.append((body, transport, mailbox_space_id))
+        return {"status": "ok"}
+
+    own_instance_id = "c" * 32
+
+
+class _MailboxSender:
+    """Captures what the GFS would see for a mailbox frame."""
+
+    def __init__(self) -> None:
+        self.posts: list[dict] = []
+
+    async def mailbox_connection(self, gfs_url):
+        return object()
+
+    async def media_connection(self, gfs_url):
+        return object()
+
+    async def send_to_mailbox(
+        self, *, mailbox_id, gfs_url, sealed=None, media_body=None
+    ):
+        self.posts.append(
+            {"mailbox_id": mailbox_id, "sealed": sealed, "media_body": media_body}
+        )
+        return True
+
+
+def _mailbox_keys(space="sp-1"):
+    return derive_mailbox_keys(b"\x05" * 32, "g" * 32, space, 0)
+
+
+async def test_mailbox_round_trip_goes_through_the_pipeline_with_its_space(keys):
+    mkeys = _mailbox_keys()
+    sender = _MailboxSender()
+    transport = GfsRelayTransport(relay_sender=sender)
+    target = MailboxTarget(
+        mailbox_id=mkeys.mailbox_id, kem_pk=mkeys.kem_public, gfs_url="https://g"
+    )
+    peer = RemoteInstance(
+        id="b" * 32,
+        display_name="b",
+        remote_identity_pk="00",
+        key_self_to_remote="k",
+        key_remote_to_self="k",
+        remote_inbox_url="",
+        local_inbox_id="l",
+    )
+    envelope = {**ENVELOPE, "space_id": "sp-1"}
+    ok, _ = await transport.send_mailbox(
+        instance=peer, target=target, envelope_dict=envelope
+    )
+    assert ok
+    [post] = sender.posts
+    # What the GFS sees names the mailbox only — never an instance id.
+    wire = json.dumps(post)
+    assert post["mailbox_id"] == mkeys.mailbox_id
+    assert "a" * 32 not in wire and "b" * 32 not in wire and "sp-1" not in wire
+    federation = _MailboxFederation()
+    inbound = _inbound(keys, federation=federation)
+    await inbound.handle_mailbox_frame(
+        {"type": "envelope", "sealed": post["sealed"]}, keys=mkeys
+    )
+    [(sender_id, raw, label, space)] = federation.calls
+    assert sender_id == "a" * 32
+    assert json.loads(raw) == envelope  # byte-for-byte the same envelope
+    assert label == TRANSPORT_GFS_MAILBOX and space == "sp-1"
+
+
+async def test_mailbox_frame_sealed_to_the_keywrap_key_does_not_open(keys):
+    """A mailbox frame opens only under the mailbox key — the household's
+    key-wrap key (instance-addressed traffic) never doubles for it."""
+    federation = _MailboxFederation()
+    inbound = _inbound(keys, federation=federation)
+    with pytest.raises(ValueError):
+        await inbound.handle_mailbox_frame(_envelope_frame(keys), keys=_mailbox_keys())
+    assert federation.calls == []
+
+
+async def test_mailbox_carries_no_bootstrap_bodies(keys):
+    mkeys = _mailbox_keys()
+    frame = {
+        "type": "envelope",
+        "sealed": seal_to_keywrap(
+            recipient_keywrap_pub=mkeys.kem_public,
+            plaintext=json.dumps({"kind": KIND_REDEEM}).encode(),
+        ),
+    }
+    invite = _Invite()
+    inbound = _inbound(keys, invite=invite, federation=_MailboxFederation())
+    with pytest.raises(ValueError, match="relayed envelopes only"):
+        await inbound.handle_mailbox_frame(frame, keys=mkeys)
+    assert invite.bodies == []
+
+
+async def test_mailbox_media_frame_opens_under_the_mailbox_id(keys):
+    mkeys = _mailbox_keys()
+    body = b"\x00SHM" + b"\x01" + b"x" * 100
+    frame = seal_relay_media(
+        to_instance=mkeys.mailbox_id,
+        media_body=body,
+        recipient_keywrap_pub=mkeys.kem_public,
+    )
+    federation = _MailboxFederation()
+    inbound = _inbound(keys, federation=federation)
+    await inbound.handle_mailbox_frame(frame, keys=mkeys)
+    assert federation.media == [(body, TRANSPORT_GFS_MAILBOX, "sp-1")]
+    # Addressed to another mailbox: refused.
+    with pytest.raises(ValueError):
+        await inbound.handle_mailbox_frame(frame, keys=_mailbox_keys("sp-2"))

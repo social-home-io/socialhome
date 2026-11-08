@@ -84,6 +84,17 @@ TIMESTAMP_SKEW_SECONDS = 300
 #: Set on :attr:`InboundContext.transport` by the relay dispatch seam.
 TRANSPORT_GFS_RELAY = "gfs_relay"
 
+#: Transport label for an envelope that arrived on one of OUR per-space GFS
+#: mailboxes (v_88, GFS redesign PR 2). The same relay, addressed to an
+#: anonymous mailbox instead of our instance id: it gets the relay's
+#: timestamp window and gates, plus :func:`make_check_mailbox_space`.
+TRANSPORT_GFS_MAILBOX = "gfs_mailbox"
+
+#: Every transport that is the GFS relay (queued, so up to a day old).
+RELAY_TRANSPORTS: frozenset[str] = frozenset(
+    {TRANSPORT_GFS_RELAY, TRANSPORT_GFS_MAILBOX}
+)
+
 #: How long the relay may hold an undelivered envelope. Mirrors
 #: :data:`socialhome.global_server.envelope_relay.ENVELOPE_QUEUE_TTL_SECONDS`
 #: — duplicated rather than imported because the household half must not
@@ -175,6 +186,11 @@ class InboundContext:
     #: connection-server relay carried them, which is the one case where
     #: the bytes may legitimately be up to a day old.
     transport: str = ""
+
+    #: v_88 — the space of the mailbox that delivered these bytes (only
+    #: with :data:`TRANSPORT_GFS_MAILBOX`). A frame on that mailbox may
+    #: carry that space's envelopes or space-less ones, nothing else.
+    mailbox_space_id: str | None = None
 
 
 #: Middleware shape: async callable that takes context + raises or returns.
@@ -425,7 +441,7 @@ def make_check_timestamp() -> InboundStep:
             raise ValueError(f"Unparseable timestamp: {timestamp_str!r}") from exc
         max_skew = (
             RELAY_TIMESTAMP_SKEW_SECONDS
-            if ctx.transport == TRANSPORT_GFS_RELAY
+            if ctx.transport in RELAY_TRANSPORTS
             else TIMESTAMP_SKEW_SECONDS
         )
         skew = abs((datetime.now(UTC) - envelope_ts).total_seconds())
@@ -501,7 +517,7 @@ def make_check_relay_opt_in() -> InboundStep:
     """
 
     async def check_relay_opt_in(ctx: InboundContext) -> None:
-        if ctx.transport != TRANSPORT_GFS_RELAY:
+        if ctx.transport not in RELAY_TRANSPORTS:
             return
         # Fail closed: only a link-joined row (relay-only by construction)
         # is exempt; every other source — today ``manual``, tomorrow
@@ -520,6 +536,35 @@ def make_check_relay_opt_in() -> InboundStep:
         raise ValueError("GFS relay is not enabled for this peer")
 
     return check_relay_opt_in
+
+
+def make_check_mailbox_space() -> InboundStep:
+    """Step 1b (v_88): a frame that arrived on one of our per-space GFS
+    mailboxes (:data:`TRANSPORT_GFS_MAILBOX`) may carry an envelope of THAT
+    mailbox's space, or a space-less one — nothing else.
+
+    A mailbox is handed to one household for one space; an envelope of
+    another space on it is either a bug or someone using the address to
+    reach us about something it was not given for. Runs straight after the
+    parse (``space_id`` is a signed routing field — the signature step later
+    proves the sender wrote it), before any lookup or crypto. Fails closed:
+    a mailbox frame with no recorded space is refused."""
+
+    async def check_mailbox_space(ctx: InboundContext) -> None:
+        if ctx.transport != TRANSPORT_GFS_MAILBOX:
+            return
+        space_id = ctx.envelope.get("space_id")
+        if space_id in (None, ""):
+            return
+        if not ctx.mailbox_space_id or space_id != ctx.mailbox_space_id:
+            # Type only — never the space ids or the mailbox.
+            log.info(
+                "inbound: refusing a %r envelope of another space on a mailbox",
+                ctx.envelope.get("event_type"),
+            )
+            raise ValueError("envelope is not for this mailbox's space")
+
+    return check_mailbox_space
 
 
 def make_check_unpairing(
