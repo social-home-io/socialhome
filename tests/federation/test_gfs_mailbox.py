@@ -82,6 +82,9 @@ def test_keys_are_deterministic_per_space_and_gen():
         derive_mailbox_keys(ROOT, GFS_ID, "space-2", 0),
         derive_mailbox_keys(ROOT, GFS_ID, "space-1", 1),
         derive_mailbox_keys(b"\x09" * 32, GFS_ID, "space-1", 0),
+        # The same space at another GFS: unrelated, so two GFSs can't match
+        # ids to link a household (v_88 privacy invariant).
+        derive_mailbox_keys(ROOT, "gfs-node-b", "space-1", 0),
     ]
     for other in others:
         assert other.mailbox_id != a.mailbox_id

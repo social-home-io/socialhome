@@ -344,3 +344,57 @@ async def test_no_mailbox_id_in_logs_at_info_or_above(gfs, caplog):
     for rec in caplog.records:
         if rec.levelno >= logging.INFO:
             assert entry.mailbox_id not in rec.getMessage()
+
+
+def _recording_session(paths: list[str]) -> aiohttp.ClientSession:
+    trace = aiohttp.TraceConfig()
+
+    async def _on_start(_session, _ctx, params):
+        paths.append(params.url.path)
+
+    trace.on_request_start.append(_on_start)
+    return aiohttp.ClientSession(trace_configs=[trace])
+
+
+async def test_the_identified_session_never_carries_mailbox_traffic(gfs):
+    """The household's identified session (its cookies, its signed calls)
+    only fetches tickets; every register, claim and unregister rides the
+    anonymous one — so neither the GFS nor a sticky cookie can tie a mailbox
+    to the household's identified socket."""
+    _server, _session, url, conn = gfs
+    identified_paths: list[str] = []
+    anon_paths: list[str] = []
+    identified = _recording_session(identified_paths)
+    anon = _recording_session(anon_paths)
+    spaces = _Spaces()
+    spaces.rows[("space-1", "peer-iid")] = None
+    gfs_double = _Gfs(anon)
+    gfs_double.client = lambda: identified  # type: ignore[method-assign]
+    svc = SpaceMailboxService(
+        space_repo=spaces,
+        instance_config=_Config(),
+        key_manager=KeyManager(KEK),
+        gfs_repo=_GfsRepo(conn),
+        gfs_service=gfs_double,
+        instance_id=HOME_ID,
+        identity_seed=HOME_SEED,
+        keywrap_public_key=KW_PUB,
+        keywrap_sig=KW_SIG,
+    )
+    try:
+        await _ready(svc, conn)
+        _entry, own = await svc.mint("space-1", url)
+        assert await svc.wait_claimed(5)
+        await svc.remember("space-1", "peer-iid", peer=None, own=own)
+        del spaces.rows[("space-1", "peer-iid")]
+        await svc.release_unused()
+    finally:
+        await svc.stop()
+        await identified.close()
+        await anon.close()
+    assert set(identified_paths) <= {"/gfs/info", "/gfs/mailbox/tickets"}
+    assert "/gfs/mailbox/tickets" in identified_paths
+    for path in ("/gfs/mailbox/register", "/gfs/mailbox/ws", "/gfs/mailbox/unregister"):
+        assert path in anon_paths
+    assert "/gfs/mailbox/tickets" not in anon_paths
+    assert "/gfs/ws" not in anon_paths + identified_paths
