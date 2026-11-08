@@ -435,9 +435,10 @@ class GfsApp:
         mailbox_ws_registry = GfsWebSocketRegistry(log_ids=False)
         mailboxes = GfsMailboxService(
             repo=repos.mailboxes,
-            fed_repo=repos.federation,
             gfs_instance_id=config.instance_id,
             config=config.envelope_mailbox,
+            aliases=config.instance_id_aliases,
+            sibling_ids=cluster.sibling_instance_ids,
             nodes=cluster.live_node_count,
         )
         # Opaque household-to-household envelope relay (§D2b): pushes a
@@ -452,6 +453,7 @@ class GfsApp:
             media=config.envelope_media,
             mailbox_repo=repos.mailboxes,
             mailbox_ws_registry=mailbox_ws_registry,
+            mailbox_config=config.envelope_mailbox,
         )
         # Broadcast items (``/gfs/publish``, member publishes, channel items,
         # public moments) ride the coalesced drain hint ONCE per peer node;

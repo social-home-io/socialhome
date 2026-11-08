@@ -253,12 +253,34 @@ class EnvelopeMailboxConfig:
     * ``mailbox_max_per_ip`` — NEW mailboxes one client address may register
       per 24 h (per node). Counted in memory only: the address is never
       stored with, or next to, a mailbox.
-    * ``mailbox_idle_days`` — a mailbox not claimed (since its first registration) for
-      this long is dropped by the maintenance loop, with its queued frames."""
+    * ``mailbox_idle_days`` — a mailbox whose last claim (or, never
+      claimed, its registration) is this many days old is dropped by the
+      maintenance loop, with its queued frames. Counted in whole days; a
+      claim socket held open refreshes it once a day.
+    * ``mailbox_max_new_per_day`` — NEW mailboxes the whole server takes per
+      UTC day (cluster-wide: counted in the shared table).
+    * ``mailbox_max_sockets_per_ip`` — claim sockets one client address may
+      hold open at once (per node share; ×4 per /56, ×16 per /48).
+    * ``mailbox_queue_max_per_recipient`` / ``mailbox_queue_bytes_per_recipient``
+      — queued envelopes for ONE offline mailbox (rows / bytes, tail-drop);
+      far below a household's (2000 / 64 MiB): ids are free to mint.
+    * ``mailbox_queue_max_total_bytes`` — envelope bytes queued for ALL
+      mailboxes (fair-share eviction among mailboxes only; never a
+      household's envelopes).
+    * ``mailbox_media_queue_bytes_per_recipient`` /
+      ``mailbox_media_queue_max_total_bytes`` — the same for binary media
+      frames (tail-drop), apart from households' media room."""
 
     enabled: bool = True
     mailbox_max_per_ip: int = 200
     mailbox_idle_days: int = 30
+    mailbox_max_new_per_day: int = 20_000
+    mailbox_max_sockets_per_ip: int = 512
+    mailbox_queue_max_per_recipient: int = 200
+    mailbox_queue_bytes_per_recipient: int = 4 * 1024**2
+    mailbox_queue_max_total_bytes: int = 256 * 1024**2
+    mailbox_media_queue_bytes_per_recipient: int = 8 * 1024**2
+    mailbox_media_queue_max_total_bytes: int = 256 * 1024**2
 
     @classmethod
     def parse(
@@ -292,6 +314,13 @@ class EnvelopeMailboxConfig:
 _ENVELOPE_MAILBOX_BOUNDS: dict[str, tuple[int, int]] = {
     "mailbox_max_per_ip": (1, 1_000_000),
     "mailbox_idle_days": (1, 3650),
+    "mailbox_max_new_per_day": (1, 100_000_000),
+    "mailbox_max_sockets_per_ip": (1, 1_000_000),
+    "mailbox_queue_max_per_recipient": (1, 100_000),
+    "mailbox_queue_bytes_per_recipient": (320 * 1024, 1 << 30),
+    "mailbox_queue_max_total_bytes": (320 * 1024, 1 << 40),
+    "mailbox_media_queue_bytes_per_recipient": (528 * 1024, 1 << 30),
+    "mailbox_media_queue_max_total_bytes": (528 * 1024, 1 << 40),
 }
 
 

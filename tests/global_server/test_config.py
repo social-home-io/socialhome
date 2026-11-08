@@ -984,3 +984,23 @@ def test_envelope_mailbox_bad_values_are_refused(tmp_dir, line):
     )
     with pytest.raises(ValueError, match="envelope_relay"):
         GfsConfig.from_toml(p)
+
+
+def test_envelope_mailbox_queue_and_socket_caps(tmp_dir, monkeypatch):
+    m = GfsConfig().envelope_mailbox
+    assert (m.mailbox_queue_max_per_recipient, m.mailbox_queue_bytes_per_recipient) == (
+        200,
+        4 * 1024**2,
+    )
+    assert m.mailbox_queue_max_total_bytes == 256 * 1024**2
+    assert m.mailbox_media_queue_bytes_per_recipient == 8 * 1024**2
+    assert m.mailbox_max_new_per_day == 20_000
+    assert m.mailbox_max_sockets_per_ip == 512
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        '[server]\nbase_url = "https://g.example"\n'
+        "[envelope_relay]\nmailbox_max_sockets_per_ip = 3\n"
+    )
+    assert GfsConfig.from_toml(p).envelope_mailbox.mailbox_max_sockets_per_ip == 3
+    monkeypatch.setenv("GFS_ENVELOPE_RELAY_MAILBOX_MAX_NEW_PER_DAY", "7")
+    assert GfsConfig.load(p).envelope_mailbox.mailbox_max_new_per_day == 7

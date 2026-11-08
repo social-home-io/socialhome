@@ -3,15 +3,21 @@
 A household reached through a GFS gets one anonymous mailbox per (space,
 generation) there. This module holds what the household needs to own one:
 
-* :func:`derive_mailbox_keys` — the mailbox's X25519 sealing key and Ed25519
-  claim key, both derived with HKDF-SHA256 from the household's key-wrap
-  seed, the space id and the generation. Nothing but ``gen`` needs storing:
-  the keys come back from the seed, and the id from the claim key
+* :func:`new_mailbox_root` / :func:`derive_mailbox_keys` — the mailbox's
+  X25519 sealing key and Ed25519 claim key, both derived with HKDF-SHA256
+  from the household's **mailbox root**: a dedicated 32-byte secret
+  generated once (:func:`new_mailbox_root`) and stored under the household
+  KEK beside its other secrets (wired in redesign PR 2). It is NOT the
+  key-wrap seed: that key has its own job (sealing to the household) and
+  its own rotation, and a mailbox key must never be able to reveal or
+  depend on it. Besides the root, only ``gen`` needs storing: the keys come
+  back from the root, the id from the claim key
   (:func:`socialhome.domain.gfs_mailbox.derive_mailbox_id`). Different
   spaces / generations give unrelated keys and ids, so the GFS cannot link
   them.
 * :func:`register_mailbox` — the anonymous ``POST /gfs/mailbox/register``
-  with proof of possession.
+  with proof of possession, bound to the GFS id the household pinned (a
+  cluster node answers to its siblings' and its former ids too).
 * :class:`MailboxClaim` — the anonymous claim socket (``/gfs/mailbox/ws``,
   one mailbox per socket): answers the challenge, then yields the queued
   and live frames — ``dict`` for a JSON envelope frame, ``bytes`` for a
@@ -53,6 +59,8 @@ from ..domain.subscriber_accepts import ACCEPTS_ENVELOPE_MEDIA
 
 log = logging.getLogger(__name__)
 
+#: Length of the mailbox root secret.
+MAILBOX_ROOT_BYTES: int = 32
 #: HKDF salt of every mailbox key (versions the derivation).
 MAILBOX_KDF_SALT: bytes = b"sh-mbx-v1"
 #: HKDF info labels: one per key, so the two never share output.
@@ -104,18 +112,23 @@ def _hkdf(seed: bytes, info: bytes) -> bytes:
     ).derive(seed)
 
 
-def derive_mailbox_keys(keywrap_seed: bytes, space_id: str, gen: int) -> MailboxKeys:
+def new_mailbox_root() -> bytes:
+    """A fresh mailbox root secret (generated once per household)."""
+    return secrets.token_bytes(MAILBOX_ROOT_BYTES)
+
+
+def derive_mailbox_keys(mailbox_root: bytes, space_id: str, gen: int) -> MailboxKeys:
     """The mailbox keys of (*space_id*, *gen*) under the household's
-    key-wrap seed (its 32-byte X25519 private key)."""
-    if len(keywrap_seed) != 32:
-        raise ValueError("key-wrap seed must be 32 bytes")
+    dedicated *mailbox_root* secret (:func:`new_mailbox_root`)."""
+    if len(mailbox_root) != MAILBOX_ROOT_BYTES:
+        raise ValueError("mailbox root must be 32 bytes")
     if not space_id or "|" in space_id:
         raise ValueError("invalid space id")
     if isinstance(gen, bool) or not isinstance(gen, int) or gen < 0:
         raise ValueError("gen must be a non-negative integer")
     scope = b"|" + space_id.encode() + b"|" + str(gen).encode()
-    kem_private = _hkdf(keywrap_seed, _KEM_INFO + scope)
-    sign_seed = _hkdf(keywrap_seed, _SIGN_INFO + scope)
+    kem_private = _hkdf(mailbox_root, _KEM_INFO + scope)
+    sign_seed = _hkdf(mailbox_root, _SIGN_INFO + scope)
     kem_public = (
         X25519PrivateKey.from_private_bytes(kem_private)
         .public_key()
@@ -149,6 +162,7 @@ def build_register_body(
         "sig_suite": MAILBOX_SIG_SUITE_ED25519,
         "sign_pk": b64url_encode(keys.sign_public),
         "mailbox_id": keys.mailbox_id,
+        "gfs_instance_id": gfs_instance_id,
         "ts": ts,
         "nonce": nonce,
         "sig": b64url_encode(sign_ed25519(keys.sign_seed, signed)),
@@ -194,6 +208,7 @@ def build_claim(
     return {
         "type": FRAME_MAILBOX_CLAIM,
         "mailbox_id": keys.mailbox_id,
+        "gfs_instance_id": gfs_instance_id,
         "sig_suite": MAILBOX_SIG_SUITE_ED25519,
         "sig": b64url_encode(sign_ed25519(keys.sign_seed, signed)),
         "accepts": list(accepts),
@@ -254,10 +269,10 @@ class MailboxClaim:
         challenge = await self._json(ws)
         if challenge.get("type") != FRAME_MAILBOX_CHALLENGE:
             raise MailboxClaimError("no challenge")
-        if challenge.get("gfs_instance_id") != self._gfs_instance_id:
-            # Signing for an id we did not pin would make the claim valid at
-            # a server we never meant to trust.
-            raise MailboxClaimError("challenge from an unexpected GFS")
+        # The claim is signed over the GFS id WE pinned, never the one the
+        # challenge names: a node of the same cluster may still serve another
+        # (per-node or former) id and accepts ours; a server that does not
+        # answer to our pinned id refuses the claim (4401).
         suites = challenge.get("sig_suites")
         if not isinstance(suites, list) or MAILBOX_SIG_SUITE_ED25519 not in suites:
             raise MailboxClaimError("no common mailbox sig suite")

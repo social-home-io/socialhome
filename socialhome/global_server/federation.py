@@ -50,7 +50,7 @@ from ..authority_sig import (
     verify_authority_event,
 )
 from ..canonical_json import canonical_bytes
-from ..crypto import b64url_decode, verify_ed25519
+from ..crypto import b64url_decode, derive_instance_id, verify_ed25519
 from ..domain.media_constraints import SPACE_IMAGE_DATA_URI_MAX_CHARS
 from ..domain.space import (
     normalize_category,
@@ -421,6 +421,15 @@ class SeenPayloadCache:
         return len(self._seen)
 
 
+class InstanceRegistrationRefused(Exception):
+    """``/gfs/register`` refused: ``status`` + a stable ``error`` code."""
+
+    def __init__(self, status: int, error: str) -> None:
+        super().__init__(error)
+        self.status = status
+        self.error = error
+
+
 class GfsFederationService:
     """Lightweight federation relay for the GFS process.
 
@@ -508,6 +517,63 @@ class GfsFederationService:
         """The active subscribers a forwarded space item reaches (the cluster
         audience resolver, :mod:`.cluster_relay`)."""
         return [s.instance_id for s in await self._repo.list_subscribers(space_id)]
+
+    async def check_client_identity(self, instance_id: str, public_key: str) -> None:
+        """Before a ``/gfs/register`` spends its pairing token: the id must
+        be the one the key derives (``derive_instance_id``) — so nobody can
+        register an id they do not hold the key of, such as another
+        household's or an anonymous mailbox's. A row that already exists
+        under exactly this (id, key) pair is let through as is
+        (grandfathered; every household has derived its id since the first
+        release, so none is expected). Raises
+        :class:`InstanceRegistrationRefused`."""
+        try:
+            raw = bytes.fromhex(public_key)
+        except ValueError, TypeError:
+            raise InstanceRegistrationRefused(400, "invalid_public_key") from None
+        if len(raw) != 32:
+            raise InstanceRegistrationRefused(400, "invalid_public_key")
+        if derive_instance_id(raw) == instance_id:
+            return
+        existing = await self._repo.get_instance(instance_id)
+        if existing is not None and existing.public_key.lower() == public_key.lower():
+            return
+        raise InstanceRegistrationRefused(400, "instance_id_mismatch")
+
+    async def register_client(
+        self,
+        instance_id: str,
+        public_key: str,
+        *,
+        display_name: str = "",
+        auto_accept: bool = False,
+        keywrap_public_key: str = "",
+        kem_suite: str = "",
+        keywrap_sig: str = "",
+    ) -> None:
+        """A household's own ``/gfs/register`` (after
+        :meth:`check_client_identity`): written in one statement that never
+        lets a DIFFERENT key take an existing row over and never inserts an
+        id a mailbox holds. Raises :class:`InstanceRegistrationRefused`."""
+        written = await self._repo.register_instance_pinned(
+            ClientInstance(
+                instance_id=instance_id,
+                display_name=display_name,
+                public_key=public_key,
+                status="active" if auto_accept else "pending",
+                auto_accept=auto_accept,
+                keywrap_public_key=keywrap_public_key,
+                kem_suite=kem_suite,
+                keywrap_sig=keywrap_sig,
+            )
+        )
+        if written:
+            log.debug("GFS: registered instance %s", instance_id)
+            return
+        existing = await self._repo.get_instance(instance_id)
+        if existing is not None:
+            raise InstanceRegistrationRefused(409, "instance_key_mismatch")
+        raise InstanceRegistrationRefused(409, "id_in_use")
 
     async def register_instance(
         self,

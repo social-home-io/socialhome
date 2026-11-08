@@ -19,8 +19,8 @@ async def repo(gfs_db):
 
 
 async def test_register_pins_the_key_on_first_use(repo):
-    assert await repo.register(MID, PK, now=100) is True
-    assert await repo.register(MID, PK, now=200) is False  # already there
+    assert await repo.register(MID, PK, now=100) == "created"
+    assert await repo.register(MID, PK, now=200) == "exists"
     box = await repo.get(MID)
     assert box is not None
     assert box.sign_pk == PK

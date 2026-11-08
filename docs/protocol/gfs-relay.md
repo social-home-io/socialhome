@@ -426,24 +426,33 @@ signed `/gfs/info` as `envelope_mailbox: {"sig_suites": ["ed25519"],
 "idle_days": 30}`.
 
 **Keys and id.** The household derives the mailbox's X25519 sealing key and
-Ed25519 claim key with HKDF-SHA256 from its key-wrap seed (salt
-`sh-mbx-v1`, info `sh-mbx-kem:v1|<space>|<gen>` / `sh-mbx-sign:v1|<space>|<gen>`),
-so only `gen` needs storing. `mailbox_id = base32(SHA-256("sh-mbx-v1" ‖
+Ed25519 claim key with HKDF-SHA256 from its **mailbox root** — a dedicated
+32-byte secret generated once and stored under the household KEK (wired in
+PR 2), not the key-wrap seed (salt `sh-mbx-v1`, info
+`sh-mbx-kem:v1|<space>|<gen>` / `sh-mbx-sign:v1|<space>|<gen>`), so beside
+the root only `gen` needs storing. `mailbox_id = base32(SHA-256("sh-mbx-v1" ‖
 sign_pk))[:32]` — the shape of an instance id, so a JSON envelope's
 `to_instance` and a binary `\x00SHR` frame's recipient field carry it
 unchanged, and the prefix keeps it apart from the instance id of the same
 key.
 
 **Register** — `POST /gfs/mailbox/register`, anonymous, `{sig_suite:
-"ed25519", sign_pk, mailbox_id, ts, nonce, sig}`. `sig` is the proof of
+"ed25519", sign_pk, mailbox_id, gfs_instance_id, ts, nonce, sig}`. `sig` is the proof of
 possession over `"sh-mbx-register:v1" \n gfs_instance_id \n mailbox_id \n ts
-\n nonce` — bound to this GFS's public id, so a registration made for one GFS
-proves nothing at another. The GFS rejects an unknown `sig_suite` (no
+\n nonce` — bound to the GFS id the household pinned, so a registration made
+for one GFS proves nothing at another. A server accepts its own id, its
+`instance_id_aliases` and the ids its shared-key cluster siblings serve (a
+cluster whose allocs still serve per-node ids: register on one, claim on
+another). The GFS rejects an unknown `sig_suite` (no
 default), recomputes the id from the key, checks `ts` (±300 s) and the
 signature, spends the nonce (a replay is `409`), refuses an id an instance
-holds (`409 id_in_use`) and pins the key on first use; registering again is
-a no-op. Limits per client address — 30 / min and `mailbox_max_per_ip` (200)
-new mailboxes per 24 h — are counted in memory only.
+holds (`409 id_in_use`, atomically with the insert — and `/gfs/register`
+in turn only takes an instance id derived from its key, never a mailbox's,
+never moving a row to another key) and pins the key on first use;
+registering again is a no-op. Limits: 30 / min per address, then
+`mailbox_max_per_ip` (200) new mailboxes per UTC day per /64 (×4 per /56,
+×16 per /48) in salted count-min sketches (no address kept, nothing to
+evict), and `mailbox_max_new_per_day` (20 000) server-wide.
 
 **Claim** — `GET /gfs/mailbox/ws`, a socket of its own, never the identified
 `/gfs/ws`, and **one mailbox per socket** (owner decision: a shared socket
@@ -465,9 +474,27 @@ one and a household are indistinguishable. In a cluster the enqueue hints
 the sibling nodes (`NODE_DRAIN_HINT` carries the mailbox id like an instance
 id) and the node holding the claim socket drains it.
 
-**Idle sweep.** A mailbox not claimed (since its first registration) for
-`mailbox_idle_days` (30) is dropped with its queued frames by the
-maintenance loop.
+**Idle sweep.** Both stored timestamps are rounded down to the UTC day — a
+household reclaiming all its mailboxes at once would otherwise stamp them
+with the same second. A mailbox whose last claim (or, never claimed, its
+registration) is `mailbox_idle_days` (30) days old is dropped with its
+queued frames by the maintenance loop; a claim socket held open re-stamps
+its day once a day, so it is never swept while connected.
+
+**Queues: a pool of their own.** Mailbox ids are free to mint, so their
+frames never share room with households'. Per mailbox: 200 envelopes /
+4 MiB and 8 MiB of media (households: 2 000 / 64 MiB and 16 MiB);
+server-wide: 256 MiB of mailbox envelopes (room made by evicting the
+oldest envelope of the biggest OTHER mailbox, never a household's) and
+256 MiB of mailbox media (tail-drop); households' envelopes have their own
+1 GiB total (fair-share eviction among households) beside their 1 GiB
+media total. Worst-case disk for queued relay frames is therefore bounded
+at 1 GiB + 1 GiB (households) + 0.25 + 0.25 GiB (mailboxes) + 256 MiB
+(member relay items) ≈ 2.75 GiB, whatever the number of ids. A flood needs
+valid mailboxes (≤ 20 000 new a day server-wide, ≤ 200 per address) and
+only ever pushes out other mailboxes' bytes, biggest holder first. Cost of
+the cap itself: one `SUM(size_bytes)` over the pool's rows per queued
+envelope (only when the recipient is offline).
 
 ```mermaid
 sequenceDiagram
@@ -475,8 +502,8 @@ sequenceDiagram
     participant A as GFS node A
     participant B as GFS node B
     participant S as Sender household
-    H->>H: keys = HKDF(key-wrap seed, space, gen); id = b32(SHA-256("sh-mbx-v1"‖sign_pk))[:32]
-    H->>A: POST /gfs/mailbox/register {sign_pk, id, ts, nonce, sig}
+    H->>H: keys = HKDF(mailbox root, space, gen); id = b32(SHA-256("sh-mbx-v1"‖sign_pk))[:32]
+    H->>A: POST /gfs/mailbox/register {sign_pk, id, gfs_instance_id, ts, nonce, sig}
     A->>A: verify PoP, nonce, id ≠ instance → pin key (gfs_mailboxes)
     A-->>H: 200 registered
     S->>A: POST /gfs/envelope {to_instance: id, sealed}
@@ -484,7 +511,7 @@ sequenceDiagram
     A->>A: no claim socket here → gfs_envelope_queue + NODE_DRAIN_HINT [id]
     H->>B: GET /gfs/mailbox/ws
     B->>H: mailbox_challenge {challenge, gfs_instance_id, sig_suites}
-    H->>B: mailbox_claim {id, sig_suite, sig, accepts}
+    H->>B: mailbox_claim {id, gfs_instance_id, sig_suite, sig, accepts}
     B->>B: verify under the pinned key, last_claim_at = now
     B->>H: mailbox_claimed, then queued frames in order
     S->>A: POST /gfs/envelope (binary \x00SHR to id)
@@ -494,9 +521,10 @@ sequenceDiagram
 ```
 
 **What the GFS stores and learns.** `gfs_mailboxes` holds the id, the
-pinned key and two timestamps — no instance id, no address, no space id.
-No log line names a mailbox id (the claim-socket registry and the relay
-print `<mailbox>`), so no application log sits next to an access-log
+pinned key and two day-granular timestamps — no instance id, no address,
+no space id. No log line names a mailbox id on any path (the claim-socket
+registry prints `<mailbox>`, the relay and the cluster drain print a
+recipient id only for a household socket on the same node), so no application log sits next to an access-log
 address for it. The GFS still sees, per envelope, the mailbox, the time,
 the size and the sender's address, and per claim socket its address and
 online time; within one space it can cluster mailboxes that the same

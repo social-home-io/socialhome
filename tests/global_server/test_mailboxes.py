@@ -96,6 +96,7 @@ class Box:
             "sig_suite": "ed25519",
             "sign_pk": b64url_encode(self.pk),
             "mailbox_id": self.id,
+            "gfs_instance_id": gfs_id,
             "ts": ts,
             "nonce": nonce,
             "sig": b64url_encode(
@@ -107,13 +108,21 @@ class Box:
         body.update(override)
         return body
 
-    def claim(self, challenge: str, *, accepts=("envelope_media",), **override) -> dict:
+    def claim(
+        self,
+        challenge: str,
+        *,
+        accepts=("envelope_media",),
+        gfs_id: str = GFS_ID,
+        **override,
+    ) -> dict:
         body = {
             "type": "mailbox_claim",
             "sig_suite": "ed25519",
             "mailbox_id": self.id,
+            "gfs_instance_id": gfs_id,
             "sig": b64url_encode(
-                sign_ed25519(self.seed, claim_signed_bytes(GFS_ID, self.id, challenge))
+                sign_ed25519(self.seed, claim_signed_bytes(gfs_id, self.id, challenge))
             ),
             "accepts": list(accepts),
         }
@@ -214,6 +223,7 @@ async def test_a_proof_made_for_another_gfs_is_refused(gfs):
     box = Box()
     resp = await _register(gfs, box, gfs_id="gfs-elsewhere")
     assert resp.status == 403
+    assert (await resp.json())["error"] == "wrong_gfs"
 
 
 @pytest.mark.security
@@ -538,29 +548,19 @@ async def test_rate_limit_on_register(gfs, monkeypatch):
 def _svc(**cfg) -> GfsMailboxService:
     return GfsMailboxService(
         repo=None,  # type: ignore[arg-type]
-        fed_repo=None,  # type: ignore[arg-type]
         gfs_instance_id=GFS_ID,
         config=EnvelopeMailboxConfig(**cfg),
     )
 
 
-def test_the_per_address_cap_resets_with_the_next_window():
+def test_the_per_address_cap_resets_with_the_next_day():
     svc = _svc(mailbox_max_per_ip=2)
     day = 86_400.0
-    assert svc._count_new("ip", 2, 10.0)
-    assert svc._count_new("ip", 2, 20.0)
-    assert not svc._count_new("ip", 2, 30.0)
-    assert svc._count_new("other", 2, 30.0)
-    assert svc._count_new("ip", 2, day + 1)
-
-
-def test_the_per_address_cap_holds_a_bounded_number_of_buckets(monkeypatch):
-    monkeypatch.setattr("socialhome.global_server.mailboxes.MAILBOX_CAP_MAX_KEYS", 3)
-    svc = _svc()
-    for n in range(10):
-        svc._count_new(f"ip-{n}", 5, 1.0)
-    assert len(svc._new_per_bucket) == 3
-    assert list(svc._new_per_bucket) == ["ip-7", "ip-8", "ip-9"]
+    assert svc._count_new("ip", 10.0)
+    assert svc._count_new("ip", 20.0)
+    assert not svc._count_new("ip", 30.0)
+    assert svc._count_new("other", 30.0)
+    assert svc._count_new("ip", day + 1)
 
 
 def test_spent_nonces_expire_and_are_bounded(monkeypatch):

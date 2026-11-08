@@ -1734,12 +1734,8 @@ class ClusterService:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                log.warning(
-                    "cluster: hint drain failed for %s: %r",
-                    instance_id,
-                    exc,
-                    exc_info=True,
-                )
+                # No recipient id: it may be an anonymous mailbox.
+                log.warning("cluster: hint drain failed: %r", exc, exc_info=True)
             if instance_id not in self._hint_rerun or self._stop.is_set():
                 return
 
@@ -2459,6 +2455,20 @@ class ClusterService:
                 self._live(self._identity_mismatches).items()
             )
         ]
+
+    def sibling_instance_ids(self) -> set[str]:
+        """The public ids live siblings that share OUR identity key report
+        when they differ from ours (a rolling id change, or a cluster whose
+        nodes still serve per-node ids). Those nodes are this GFS to every
+        household, so a signature bound to one of their ids is bound to us
+        (``GfsMailboxService.accepted_gfs_ids``)."""
+        return {
+            reported
+            for reported, _at in (
+                *self._live(self._identity_mismatches).values(),
+                *self._live(self._identity_transitional).values(),
+            )
+        }
 
     def identity_transitional(self) -> list[dict]:
         """Siblings whose differing ``instance_id`` is linked to ours through

@@ -24,6 +24,7 @@ from ...domain.subscriber_accepts import parse_accepts
 from ...gfs_proof import PROOF_CAPABILITY, bindable_base_url, parse_proof_nonce
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
+from ..federation import InstanceRegistrationRefused
 from ..public import (
     PAIR_TOKEN_TTL_SECONDS,
     PUBLISH_MAX_BODY_BYTES,
@@ -447,6 +448,13 @@ class RegisterView(GfsBaseView):
         token = str(body.get("token") or "")
         if not token:
             raise web.HTTPBadRequest(reason="Missing field: token")
+        if not isinstance(instance_id, str) or not isinstance(public_key, str):
+            raise web.HTTPBadRequest(reason="instance_id and public_key are strings")
+        # Before the token is spent: a typo must not burn the QR.
+        try:
+            await svc.check_client_identity(instance_id, public_key)
+        except InstanceRegistrationRefused as exc:
+            return web.json_response({"error": exc.error}, status=exc.status)
         if not await token_svc.consume(token):
             return web.json_response(
                 {"error": "invalid_or_expired_token"},
@@ -457,15 +465,18 @@ class RegisterView(GfsBaseView):
         kem_suite = str(body.get("kem_suite") or "")
         keywrap_sig = str(body.get("keywrap_sig") or "")
         auto_accept = (await admin_repo.get_config("auto_accept_clients")) == "1"
-        await svc.register_instance(
-            instance_id,
-            public_key,
-            display_name=display_name,
-            auto_accept=auto_accept,
-            keywrap_public_key=keywrap_public_key,
-            kem_suite=kem_suite,
-            keywrap_sig=keywrap_sig,
-        )
+        try:
+            await svc.register_client(
+                instance_id,
+                public_key,
+                display_name=display_name,
+                auto_accept=auto_accept,
+                keywrap_public_key=keywrap_public_key,
+                kem_suite=kem_suite,
+                keywrap_sig=keywrap_sig,
+            )
+        except InstanceRegistrationRefused as exc:
+            return web.json_response({"error": exc.error}, status=exc.status)
         return web.json_response(
             {
                 "status": "registered" if auto_accept else "pending",

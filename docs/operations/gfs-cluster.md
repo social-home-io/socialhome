@@ -243,14 +243,36 @@ env override:
 ```toml
 [envelope_relay]
 mailboxes = true            # serve them; false drops the routes (404) and the capability
-mailbox_max_per_ip = 200    # NEW mailboxes one client address may register per 24 h (per node share)
-mailbox_idle_days = 30      # unclaimed this long → dropped with its queued frames
+mailbox_max_per_ip = 200            # NEW mailboxes per address per UTC day (/64; ×4 per /56, ×16 per /48)
+mailbox_max_new_per_day = 20000     # NEW mailboxes server-wide per UTC day (shared table)
+mailbox_max_sockets_per_ip = 512    # open claim sockets per address (/64; ×4 /56, ×16 /48)
+mailbox_idle_days = 30              # last claim (or registration) this many days ago → dropped
+mailbox_queue_max_per_recipient = 200         # queued envelopes for one offline mailbox
+mailbox_queue_bytes_per_recipient = 4194304   # 4 MiB
+mailbox_queue_max_total_bytes = 268435456     # 256 MiB for ALL mailboxes (evicts biggest other mailbox)
+mailbox_media_queue_bytes_per_recipient = 8388608   # 8 MiB of media for one mailbox
+mailbox_media_queue_max_total_bytes = 268435456     # 256 MiB of media for ALL mailboxes (tail-drop)
 ```
 
-The cap and the 30 / min register limit (120 / min claim sockets) count in
-each node's memory under the coarsened client bucket and are divided over the
-live nodes like the other anonymous limits (below). The address is never
-written to the database or logged next to a mailbox id.
+Mailbox frames live in a pool of their own: they never count against, and
+never evict, households' queued envelopes (1 GiB total, fair-share) or media
+(`media_queue_max_total_bytes`). Worst-case queue disk ≈ 2.75 GiB whatever
+the number of minted ids (see
+[gfs-relay.md](../protocol/gfs-relay.md#anonymous-per-space-mailboxes-gfs-redesign-pr-1)).
+
+The per-address caps and the 30 / min register limit (120 / min claim
+sockets) count in each node's memory — the caps in salted count-min sketches
+that keep no address at all — and are divided over the live nodes like the
+other anonymous limits (below). The address is never written to the
+database or logged next to a mailbox id.
+
+**Per-alloc public ids.** A registration and a claim are bound to the GFS id
+the household pinned. A node accepts its own id, its `instance_id_aliases`
+and the ids its shared-key siblings report in their HELLO / heartbeat, so
+a cluster whose allocs still serve `gfs-N` ids works (register via one
+alloc, claim on another) — the gfs-cluster demo checks it (step 3k). Still
+move every alloc to one `instance_id` (the cluster logs an ERROR until
+then).
 
 **No sticky routing needed.** The registrations (`gfs_mailboxes`) and the
 queued frames (`gfs_envelope_queue` / `gfs_media_queue`, keyed by the

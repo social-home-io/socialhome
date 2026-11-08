@@ -73,6 +73,24 @@ CLAIM_MAX_MSG_BYTES: int = 4096
 REGISTER_MAX_BODY_BYTES: int = 2048
 #: Protocol-level ping interval — inside Cloudflare's 100 s WS idle timeout.
 MAILBOX_WS_HEARTBEAT_S: float = 30.0
+#: How often a held claim socket checks whether the UTC day changed (the
+#: stamp itself is written at most once a day).
+MAILBOX_CLAIM_REFRESH_S: float = 3600.0
+
+
+async def _keep_claimed(
+    svc, mailbox_id: str, ws: web.WebSocketResponse, day: int
+) -> None:
+    """Re-stamp ``last_claim_at`` once a day while *ws* stays open; a failed
+    write is logged (without the id) and retried at the next tick."""
+    while not ws.closed:
+        await asyncio.sleep(MAILBOX_CLAIM_REFRESH_S)
+        if ws.closed:
+            return
+        try:
+            day = await svc.refresh_claim(mailbox_id, day)
+        except Exception as exc:
+            log.warning("gfs.mailbox.ws: claim refresh failed: %r", exc, exc_info=True)
 
 
 class MailboxRegisterView(GfsBaseView):
@@ -108,6 +126,19 @@ class MailboxWebSocketView(web.View):
         svc = app[K.gfs_mailbox_service_key]
         if not svc.enabled:
             raise web.HTTPNotFound()
+        # Reserve the address's socket slot BEFORE the upgrade (an
+        # unclaimed socket holds one for at most the claim timeout).
+        slot = svc.acquire_socket(app[K.gfs_client_ip_key].bucket(self.request))
+        if slot is None:
+            resp = web.json_response({"error": "too_many_sockets"}, status=429)
+            resp.headers["Retry-After"] = "60"
+            return resp
+        try:
+            return await self._serve(app, svc)
+        finally:
+            svc.release_socket(slot)
+
+    async def _serve(self, app: web.Application, svc) -> web.StreamResponse:
         ws = web.WebSocketResponse(
             heartbeat=MAILBOX_WS_HEARTBEAT_S, max_msg_size=CLAIM_MAX_MSG_BYTES
         )
@@ -117,6 +148,9 @@ class MailboxWebSocketView(web.View):
             return ws
         mailbox_id, accepts = claimed
         registry = app[K.gfs_mailbox_ws_registry_key]
+        # Stamped before the client hears "claimed", so the idle sweep can
+        # never race a fresh claim.
+        day = await svc.note_claimed(mailbox_id)
         await ws.send_json({"type": FRAME_MAILBOX_CLAIMED})
         await registry.register(
             mailbox_id,
@@ -124,8 +158,13 @@ class MailboxWebSocketView(web.View):
             binary=ACCEPTS_WS_BINARY1 in accepts,
             envelope_media=ACCEPTS_ENVELOPE_MEDIA in accepts,
         )
+        keeper: asyncio.Task[None] | None = None
         try:
-            await svc.note_claimed(mailbox_id)
+            # A socket held for weeks must not be swept while connected:
+            # re-stamp the claim once a day while it stays open.
+            keeper = asyncio.create_task(
+                _keep_claimed(svc, mailbox_id, ws, day), name="gfs-mailbox-keep"
+            )
             # Queued envelopes first (awaited, in order), then media in its
             # own background task — the relay's drain does both.
             await app[K.gfs_envelope_relay_key].drain(mailbox_id)
@@ -140,6 +179,8 @@ class MailboxWebSocketView(web.View):
         except Exception:
             log.warning("gfs.mailbox.ws: socket loop failed", exc_info=True)
         finally:
+            if keeper is not None:
+                keeper.cancel()
             await registry.unregister(mailbox_id, ws)
         return ws
 

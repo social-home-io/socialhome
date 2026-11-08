@@ -21,6 +21,7 @@ from socialhome.federation.gfs_mailbox import (
     MailboxRegisterError,
     build_register_body,
     derive_mailbox_keys,
+    new_mailbox_root,
     register_mailbox,
 )
 from socialhome.global_server.app_keys import (
@@ -30,7 +31,7 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.server import create_gfs_app
 
-SEED = bytes(range(32))
+ROOT = bytes(range(32))
 GFS_ID = "gfs-node-a"
 SEALED = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "Y2lwaGVy"}
 
@@ -39,13 +40,13 @@ SEALED = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "Y2lwaGVy"}
 
 
 def test_keys_are_deterministic_per_space_and_gen():
-    a = derive_mailbox_keys(SEED, "space-1", 0)
-    assert a == derive_mailbox_keys(SEED, "space-1", 0)
+    a = derive_mailbox_keys(ROOT, "space-1", 0)
+    assert a == derive_mailbox_keys(ROOT, "space-1", 0)
     assert a.mailbox_id == derive_mailbox_id(a.sign_public)
     assert INSTANCE_ID_RE.fullmatch(a.mailbox_id)
     others = [
-        derive_mailbox_keys(SEED, "space-2", 0),
-        derive_mailbox_keys(SEED, "space-1", 1),
+        derive_mailbox_keys(ROOT, "space-2", 0),
+        derive_mailbox_keys(ROOT, "space-1", 1),
         derive_mailbox_keys(b"\x09" * 32, "space-1", 0),
     ]
     for other in others:
@@ -55,16 +56,22 @@ def test_keys_are_deterministic_per_space_and_gen():
     assert a.kem_private != a.sign_seed
 
 
+def test_a_mailbox_root_is_a_fresh_32_byte_secret():
+    one, two = new_mailbox_root(), new_mailbox_root()
+    assert len(one) == len(two) == 32 and one != two
+    assert derive_mailbox_keys(one, "s", 0) != derive_mailbox_keys(two, "s", 0)
+
+
 def test_kem_key_is_a_working_x25519_pair():
-    a = derive_mailbox_keys(SEED, "space-1", 0)
-    b = derive_mailbox_keys(SEED, "space-2", 0)
+    a = derive_mailbox_keys(ROOT, "space-1", 0)
+    b = derive_mailbox_keys(ROOT, "space-2", 0)
     assert x25519_exchange(a.kem_private, b.kem_public) == x25519_exchange(
         b.kem_private, a.kem_public
     )
 
 
 def test_repr_never_shows_the_secrets():
-    keys = derive_mailbox_keys(SEED, "space-1", 0)
+    keys = derive_mailbox_keys(ROOT, "space-1", 0)
     text = repr(keys)
     assert keys.sign_seed.hex() not in text and str(keys.sign_seed) not in text
     assert keys.mailbox_id not in text
@@ -74,10 +81,10 @@ def test_repr_never_shows_the_secrets():
     ("seed", "space", "gen"),
     [
         (b"short", "s", 0),
-        (SEED, "", 0),
-        (SEED, "a|b", 0),
-        (SEED, "s", -1),
-        (SEED, "s", True),
+        (ROOT, "", 0),
+        (ROOT, "a|b", 0),
+        (ROOT, "s", -1),
+        (ROOT, "s", True),
     ],
 )
 def test_derivation_refuses_bad_input(seed, space, gen):
@@ -86,7 +93,7 @@ def test_derivation_refuses_bad_input(seed, space, gen):
 
 
 def test_register_body_carries_the_suite_tag():
-    body = build_register_body(derive_mailbox_keys(SEED, "s", 0), GFS_ID)
+    body = build_register_body(derive_mailbox_keys(ROOT, "s", 0), GFS_ID)
     assert body["sig_suite"] == "ed25519"
 
 
@@ -122,7 +129,7 @@ async def _settle(app) -> None:
 
 async def test_register_claim_and_receive_queued_and_live_frames(gfs):
     server, session, url = gfs
-    keys = derive_mailbox_keys(SEED, "space-1", 0)
+    keys = derive_mailbox_keys(ROOT, "space-1", 0)
     assert await register_mailbox(session, url, keys, GFS_ID) == keys.mailbox_id
     # Idempotent — a household may re-register at every start.
     assert await register_mailbox(session, url, keys, GFS_ID) == keys.mailbox_id
@@ -150,32 +157,35 @@ async def test_register_claim_and_receive_queued_and_live_frames(gfs):
 
 async def test_claim_of_an_unregistered_mailbox_is_refused(gfs):
     _server, session, url = gfs
-    keys = derive_mailbox_keys(SEED, "never-registered", 0)
+    keys = derive_mailbox_keys(ROOT, "never-registered", 0)
     with pytest.raises(MailboxClaimError, match="4401"):
         async with MailboxClaim(session, url, keys, GFS_ID):
             pass
 
 
-async def test_claim_refuses_a_challenge_from_another_gfs(gfs):
+async def test_a_claim_signed_for_another_gfs_id_is_refused(gfs):
+    """The claim is bound to the GFS id the household pinned; a server that
+    does not answer to it refuses (4401) — the id the challenge names is
+    never what gets signed."""
     _server, session, url = gfs
-    keys = derive_mailbox_keys(SEED, "space-1", 0)
+    keys = derive_mailbox_keys(ROOT, "space-1", 0)
     await register_mailbox(session, url, keys, GFS_ID)
-    with pytest.raises(MailboxClaimError, match="unexpected GFS"):
+    with pytest.raises(MailboxClaimError, match="4401"):
         async with MailboxClaim(session, url, keys, "some-other-gfs"):
             pass
 
 
 async def test_register_refusal_raises_with_the_error_code(gfs):
     _server, session, url = gfs
-    keys = derive_mailbox_keys(SEED, "space-1", 0)
+    keys = derive_mailbox_keys(ROOT, "space-1", 0)
     with pytest.raises(MailboxRegisterError) as err:
         await register_mailbox(session, url, keys, "some-other-gfs")
-    assert (err.value.status, err.value.error) == (403, "bad_signature")
+    assert (err.value.status, err.value.error) == (403, "wrong_gfs")
 
 
 async def test_iterating_a_claim_ends_when_the_server_closes(gfs):
     server, session, url = gfs
-    keys = derive_mailbox_keys(SEED, "space-1", 0)
+    keys = derive_mailbox_keys(ROOT, "space-1", 0)
     await register_mailbox(session, url, keys, GFS_ID)
     async with session.post(
         url + "/gfs/envelope", json={"to_instance": keys.mailbox_id, "sealed": SEALED}
@@ -191,3 +201,30 @@ async def test_iterating_a_claim_ends_when_the_server_closes(gfs):
             async for frame in claim:
                 frames.append(frame)
     assert frames == [{"type": "envelope", "sealed": SEALED}]
+
+
+async def test_a_household_pinned_to_an_alias_registers_and_claims(tmp_dir):
+    """A GFS whose id changed keeps answering to the id a household pinned
+    (``instance_id_aliases``): register + claim stay bound to it."""
+    cfg = GfsConfig(
+        host="127.0.0.1",
+        port=0,
+        base_url="http://gfs.test",
+        data_dir=str(tmp_dir),
+        instance_id="gfs-new",
+        instance_id_aliases=(GFS_ID,),
+        cluster_enabled=False,
+        cluster_node_id="gfs-new",
+        cluster_peers=(),
+    )
+    server = TestServer(create_gfs_app(cfg))
+    await server.start_server()
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = str(server.make_url("")).rstrip("/")
+            keys = derive_mailbox_keys(ROOT, "space-9", 0)
+            await register_mailbox(session, url, keys, GFS_ID)
+            async with MailboxClaim(session, url, keys, GFS_ID) as claim:
+                assert claim is not None
+    finally:
+        await server.close()

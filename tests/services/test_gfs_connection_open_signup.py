@@ -24,7 +24,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.capabilities_sig import CAPS_SIG_SUITE_ED25519, sign_capabilities
-from socialhome.crypto import generate_identity_keypair
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.global_server.app_keys import gfs_admin_repo_key, gfs_fed_repo_key
 from socialhome.global_server.config import GfsConfig
@@ -35,8 +35,11 @@ from socialhome.services.gfs_connection_service import (
     GfsSignupError,
 )
 
+#: The id the household key derives (the GFS refuses any other).
+ALPHA_ID = derive_instance_id(bytes.fromhex("aa" * 32))
+
 OWN = {
-    "own_instance_id": "alpha.home",
+    "own_instance_id": ALPHA_ID,
     "own_public_key_hex": "aa" * 32,
     "own_display_name": "Alpha House",
     "own_keywrap_public_key_hex": "cc" * 32,
@@ -142,7 +145,7 @@ async def test_open_signup_pairs_with_the_real_gfs(tmp_dir, repo):
         assert set(rec.calls[3][2]) == QR_REGISTER_FIELDS  # type: ignore[arg-type]
         assert "inbox_url" not in rec.calls[3][2]  # type: ignore[operator]
 
-        registered = await tc.server.app[gfs_fed_repo_key].get_instance("alpha.home")
+        registered = await tc.server.app[gfs_fed_repo_key].get_instance(ALPHA_ID)
         assert registered is not None
         assert registered.display_name == "Alpha House"
 
@@ -165,9 +168,7 @@ async def test_open_signup_refused_when_the_gfs_does_not_offer_it(tmp_dir, repo)
         # Never asked for a token, never registered, nothing saved.
         assert [m for m, _u, _b in rec.calls] == ["GET"]
         assert await repo.list_all() == []
-        assert (
-            await tc.server.app[gfs_fed_repo_key].get_instance("alpha.home")
-        ) is None
+        assert (await tc.server.app[gfs_fed_repo_key].get_instance(ALPHA_ID)) is None
 
 
 async def test_open_signup_refused_when_already_connected(tmp_dir, repo):
