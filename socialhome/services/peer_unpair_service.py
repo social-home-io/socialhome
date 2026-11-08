@@ -300,6 +300,13 @@ class PeerUnpairService:
         still arrive after the row is gone; the federation service is told
         first (:meth:`FederationService.note_unpaired`) so it refuses them
         as an unpaired peer, not as a stranger.
+
+        The WebRTC connection closes last
+        (:meth:`FederationService.close_rtc_peer`): by then nothing can
+        queue for the household any more, and the close lets an ``UNPAIR``
+        still in the DataChannel's send buffer leave first. A tombstone
+        keeps its connection — its queued ``UNPAIR`` may still ride it —
+        until it is purged here.
         """
         self._federation.note_unpaired(instance_id)
         await self._federation_repo.delete_instance(instance_id)
@@ -308,6 +315,7 @@ class PeerUnpairService:
         await self._space_media_outbox_repo.delete_for_instance(instance_id)
         await self._routing_repo.forget_discovered_via(instance_id)
         await self._drop_saved_moments(instance_id)
+        await self._federation.close_rtc_peer(instance_id)
 
     async def _drop_saved_moments(self, instance_id: str) -> None:
         """Drop the saves of moments that came from *instance_id* (sign-off

@@ -100,6 +100,12 @@ PING_INTERVAL_S: float = 30.0
 #: default libdatachannel message size ceiling.
 SEND_HWM_BYTES: int = 1 << 20
 
+#: How long :meth:`FederationTransport.close_peer` lets a DataChannel's
+#: send buffer drain before it closes the PeerConnection. The frame left in
+#: it when a pairing ends is our own ``UNPAIR``; closing at once could drop
+#: it. Bounded, because an ex-peer that went away never drains it.
+RTC_CLOSE_FLUSH_TIMEOUT_S: float = 2.0
+
 #: What an HTTPS-inbox POST raises when the PEER is the problem — refused,
 #: reset, DNS, TLS, timed out. Logged as one line with no traceback: an
 #: offline household is ordinary operation, retried by the outbox.
@@ -368,6 +374,7 @@ class _RtcPeer:
         "_closed",
         "_dropped_candidates",
         "_expected_answer_from",
+        "_failed",
         "_ice_provider",
         "_inbound",
         "_is_offerer",
@@ -423,6 +430,10 @@ class _RtcPeer:
         self._channel: Any | None = None
         self._open = asyncio.Event()
         self._closed = False
+        #: The PeerConnection reached FAILED: :meth:`FederationTransport._evict_peer`
+        #: is on its way to drop this peer with a backoff, so it is not
+        #: :attr:`is_spent` (a rebuild must not jump that backoff).
+        self._failed = False
         # Second DataChannel — ``fed-media-v1`` — carries bulk media as
         # binary frames (no base64) so it doesn't head-of-line-block the
         # latency-sensitive control traffic on ``fed-v1``. Both channels
@@ -947,6 +958,8 @@ class _RtcPeer:
                             continue
                         self._closed = True
                         self._open.clear()
+                        if ev.state == rtc.RTCState.FAILED:
+                            self._failed = True
                         if (
                             ev.state == rtc.RTCState.FAILED
                             and self._on_failed is not None
@@ -1121,7 +1134,12 @@ class _RtcPeer:
                         exc,
                     )
                     continue
-                await self._inbound(data)
+                # Shielded: closing the PeerConnection cancels this
+                # receive task, and the frame that closes it is typically
+                # the peer's UNPAIR — whose handler ends the pairing
+                # (:meth:`FederationTransport.close_peer`) and must still
+                # run to the end. Frames not yet read are dropped.
+                await asyncio.shield(self._inbound(data))
         except asyncio.CancelledError:
             raise
         except rtc.ConnectionClosedError:
@@ -1327,17 +1345,11 @@ class _RtcPeer:
         A peer that is already open is never rebuilt: it works, and
         renegotiating a live DataChannel buys nothing.
 
-        Known gap — a peer with ``_closed=True`` is never rebuilt from
-        here, and only the FAILED path removes it from ``_peers``.
-        ``_closed`` is also set when the PC reaches CLOSED and when
-        :meth:`_drain_channel`'s recv loop simply ends on a normal
-        channel close; neither evicts. Such a peer stays in ``_peers``
-        with ``_closed=True``, so this predicate (which requires ``not
-        self._closed``) stays False and the transport's ``peer is None``
-        rebuild branch cannot fire either — permanent HTTPS fallback for
-        the life of the process. Pre-dates the ICE-generation work; a
-        fix belongs in its own change.
+        A peer that :attr:`is_spent` is always rebuilt: nothing else
+        would ever remove it, and it can never carry a frame again.
         """
+        if self.is_spent:
+            return True
         return (
             not self.is_ready
             and not self._closed
@@ -1345,6 +1357,34 @@ class _RtcPeer:
                 self.ice_generation < current_generation or self._starved_awaiting_offer
             )
         )
+
+    @property
+    def is_spent(self) -> bool:
+        """Closed for good with no eviction coming.
+
+        ``_closed`` is set when the PeerConnection reaches CLOSED and when
+        :meth:`_drain_channel`'s recv loop ends because the other side
+        closed the channel — for instance its pairing with us ended and
+        it closed the connection. Only FAILED evicts the peer, so such a
+        peer used to stay in the registry for the life of the process:
+        never ready, never rebuilt, every send on HTTPS — and a re-pair
+        could not bring the DataChannel back. Whoever finds a spent peer
+        replaces it.
+        """
+        return self._closed and not self._failed
+
+    async def flush(self, timeout: float) -> None:
+        """Wait until the DataChannel's send buffer is empty, the channel
+        is gone, or *timeout* seconds have passed."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while (
+            self._channel is not None
+            and not self._closed
+            and self._channel.buffered_amount > 0
+            and loop.time() < deadline
+        ):
+            await asyncio.sleep(0.05)
 
     @property
     def is_media_ready(self) -> bool:
@@ -2411,23 +2451,7 @@ class FederationTransport:
         payload: dict,
     ) -> None:
         """Handle a ``FEDERATION_RTC_OFFER`` from a paired peer."""
-        async with self._lock:
-            peer = self._peers.get(from_instance)
-            if peer is None:
-                peer = _RtcPeer(
-                    instance_id=from_instance,
-                    ice_provider=self._current_ice_servers,
-                    ice_generation=self._ice_generation,
-                    signaling=self._signaling_factory(from_instance),
-                    inbound=self._inbound_factory(from_instance),
-                    bus=self._bus,
-                    polite=self._own_instance_id > from_instance,
-                    on_failed=self._evict_peer,
-                    on_open=self._on_peer_open,
-                    media_inbound=self._media_inbound_handler,
-                    app_inbound=self._app_inbound_handler,
-                )
-                self._peers[from_instance] = peer
+        peer = await self._answering_peer(from_instance)
         sdp = str(payload.get("sdp") or "")
         if not sdp:
             return
@@ -2473,27 +2497,38 @@ class FederationTransport:
         already authenticated the sender by signature, so the stub
         peer can't be a DoS vector against unpaired instance_ids.
         """
-        async with self._lock:
-            peer = self._peers.get(from_instance)
-            if peer is None:
-                peer = _RtcPeer(
-                    instance_id=from_instance,
-                    ice_provider=self._current_ice_servers,
-                    ice_generation=self._ice_generation,
-                    signaling=self._signaling_factory(from_instance),
-                    inbound=self._inbound_factory(from_instance),
-                    bus=self._bus,
-                    polite=self._own_instance_id > from_instance,
-                    on_failed=self._evict_peer,
-                    on_open=self._on_peer_open,
-                    media_inbound=self._media_inbound_handler,
-                    app_inbound=self._app_inbound_handler,
-                )
-                self._peers[from_instance] = peer
+        peer = await self._answering_peer(from_instance)
         await peer.add_ice_candidate(
             candidate=str(payload.get("candidate") or ""),
             sdp_mid=str(payload.get("sdp_mid") or "0"),
         )
+
+    async def _answering_peer(self, from_instance: str) -> _RtcPeer:
+        """The peer an inbound OFFER / ICE candidate from *from_instance*
+        lands on: the registered one, or a fresh one when there is none or
+        the registered one :attr:`~_RtcPeer.is_spent` (the remote closed it
+        — e.g. after an unpair — and is now dialling again)."""
+        async with self._lock:
+            peer = self._peers.get(from_instance)
+            if peer is not None and not peer.is_spent:
+                return peer
+            if peer is not None:
+                peer.close()
+            peer = _RtcPeer(
+                instance_id=from_instance,
+                ice_provider=self._current_ice_servers,
+                ice_generation=self._ice_generation,
+                signaling=self._signaling_factory(from_instance),
+                inbound=self._inbound_factory(from_instance),
+                bus=self._bus,
+                polite=self._own_instance_id > from_instance,
+                on_failed=self._evict_peer,
+                on_open=self._on_peer_open,
+                media_inbound=self._media_inbound_handler,
+                app_inbound=self._app_inbound_handler,
+            )
+            self._peers[from_instance] = peer
+            return peer
 
     async def _evict_peer(self, instance_id: str) -> None:
         """Drop a ``_RtcPeer`` after its underlying PC entered FAILED.
@@ -2683,9 +2718,23 @@ class FederationTransport:
         return len(self._peers)
 
     async def close_peer(self, instance_id: str) -> None:
-        peer = self._peers.pop(instance_id, None)
-        if peer is not None:
-            peer.close()
+        """The pairing with *instance_id* ended: close its PeerConnection.
+
+        The peer leaves the registry at once, so no send picks it up again
+        and a later re-pair dials a fresh connection. The close itself
+        waits (up to :data:`RTC_CLOSE_FLUSH_TIMEOUT_S`) for the
+        DataChannel's send buffer to drain, so an ``UNPAIR`` the channel
+        accepted a moment ago still leaves. Safe to call from the peer's
+        own receive task (an inbound ``UNPAIR``): see
+        :meth:`_RtcPeer._drain_channel`. A second call finds no peer.
+        """
+        async with self._lock:
+            peer = self._peers.pop(instance_id, None)
+        if peer is None:
+            return
+        await peer.flush(RTC_CLOSE_FLUSH_TIMEOUT_S)
+        log.info("fed RTC peer %s closed: pairing ended", instance_id)
+        peer.close()
 
     async def close_all(self) -> None:
         """Close every peer and latch the transport shut.
