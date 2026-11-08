@@ -616,3 +616,15 @@ async def test_a_member_never_serves_its_own_file_a_hostile_page_names(db, tmp_p
     )
     assert [x[2] for x in gfs.serves] == [None]
     assert gfs.reasons == ["not_held"]
+
+
+async def test_the_owner_over_its_budget_declines_busy(tmp_path, monkeypatch):
+    """Busy (not "not held"): the GFS may then ask the space's members."""
+    data = _file(tmp_path, "a.webp", 70_000)
+    blob, bid = _blob(data)
+    monkeypatch.setattr(mod, "HOLDER_BYTES_PER_HOUR_PER_GFS", len(blob) + 1)
+    gfs = _Gfs()
+    r = _responder(tmp_path, gfs=gfs)
+    await _ask(r, _frame(bid))
+    await _ask(r, _frame(bid))
+    assert gfs.reasons == ["busy"]
