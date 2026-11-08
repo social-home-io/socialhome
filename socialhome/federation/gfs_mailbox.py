@@ -112,7 +112,44 @@ TICKET_REFILL_PERIOD_S: float = 86_400.0
 #: A refill slot this close after a register (a ticket taken) is skipped:
 #: an identified fetch next to an anonymous register would tie them.
 TICKET_REFILL_QUIET_S: float = 3600.0
+#: Mean time between two anonymous ``/gfs/info`` reads; jittered ±50 %.
+TICKET_ANON_VIEW_PERIOD_S: float = 6 * 3600.0
 _DAY_S: int = 86_400
+
+
+async def _jittered_loop(
+    stop: asyncio.Event,
+    period: float,
+    rng: random.Random,
+    step: Callable[[], Awaitable[None]],
+    what: str,
+) -> None:
+    """Run *step* about once per *period* (each wait jittered ±50 %) until
+    *stop* is set. A failing step logs a WARNING (the error type only — no
+    id, no key) and the loop goes on: one GFS outage never ends it."""
+    while not stop.is_set():
+        wait = rng.uniform(0.5 * period, 1.5 * period)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=wait)
+            return
+        except TimeoutError:
+            pass
+        try:
+            await step()
+        except MailboxTicketError as exc:
+            log.warning("gfs.mailbox.tickets: %s failed (%s)", what, exc.error)
+        except (aiohttp.ClientError, TimeoutError, OSError) as exc:
+            # A network fault the fetch did not wrap: keep going.
+            log.warning("gfs.mailbox.tickets: %s failed (%s)", what, type(exc).__name__)
+
+
+async def _stop_task(stop: asyncio.Event, task: asyncio.Task | None) -> None:
+    stop.set()
+    if task is not None:
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except TimeoutError, asyncio.CancelledError:
+            task.cancel()
 
 
 class MailboxRegisterError(Exception):
@@ -293,14 +330,17 @@ async def read_ticket_issuer(
 class TicketKeyGuard:
     """Issuer-key consistency for ONE GFS (the Privacy Pass consistency
     problem): a GFS that showed each household its own key would read the
-    household off every ticket's ``token_key_id``. Two checks, both before
-    blinding (:meth:`confirm_issuer`) and before redeeming
-    (:meth:`confirm_ticket`):
+    household off every ticket's ``token_key_id``. Two checks:
 
     * the key must be the one an ANONYMOUS read of ``/gfs/info`` shows —
       *anon_view*, over the cookie-less session mailbox registration uses
-      (:func:`read_ticket_issuer`) — so the GFS can't tell this household
-      apart when it answers;
+      (:func:`read_ticket_issuer`) — so the GFS can't single the household
+      out through its identified session. That read runs on its own
+      jittered schedule (:meth:`start`, :meth:`refresh`) and is cached:
+      :meth:`confirm_issuer` (before blinding) compares against the cache,
+      so no anonymous read sits milliseconds before the identified fetch.
+      :meth:`confirm_ticket` (before redeeming, itself anonymous) reads
+      afresh.
     * one new key per epoch at most (:class:`TicketKeyPin`): a key seen
       first in epoch *e* is replaced only once the clock is in a later
       epoch (``epoch_days`` from the capability, at least
@@ -308,12 +348,25 @@ class TicketKeyGuard:
       one overlap epoch. Epochs are aligned to the Unix epoch, as the GFS
       aligns them.
 
-    A failed check raises :class:`MailboxTicketError`
-    ``ticket_key_inconsistent`` and logs a WARNING with no key and no id.
-    The pin is in memory; :attr:`pin` / ``pin=`` let the caller keep it
-    across restarts."""
+    A GFS that recognises the household's ADDRESS can still show it its own
+    key in both views from first contact (the stated IP limit). Failures
+    raise :class:`MailboxTicketError` — ``ticket_key_unconfirmed`` (no
+    anonymous read yet), ``ticket_key_inconsistent`` (the views differ, or a
+    second new key inside one epoch) or ``ticket_key_not_admitted`` (a
+    ticket under a key no longer admitted) — and log a WARNING with no key
+    and no id. The pin is in memory; :attr:`pin` / ``pin=`` let the caller
+    keep it across restarts."""
 
-    __slots__ = ("_anon_view", "_clock", "_pin")
+    __slots__ = (
+        "_anon",
+        "_anon_view",
+        "_clock",
+        "_period",
+        "_pin",
+        "_rng",
+        "_stop",
+        "_task",
+    )
 
     def __init__(
         self,
@@ -321,18 +374,25 @@ class TicketKeyGuard:
         *,
         pin: TicketKeyPin | None = None,
         clock: Callable[[], float] = time.time,
+        period: float = TICKET_ANON_VIEW_PERIOD_S,
+        rng: random.Random | None = None,
     ) -> None:
         self._anon_view = anon_view
+        self._anon: TicketIssuer | None = None
         self._pin = pin
         self._clock = clock
+        self._period = period
+        self._rng = rng if rng is not None else random.SystemRandom()
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task | None = None
 
     @property
     def pin(self) -> TicketKeyPin | None:
         return self._pin
 
-    def _refuse(self, why: str) -> MailboxTicketError:
+    def _refuse(self, why: str, error: str = "ticket_key_inconsistent"):
         log.warning("gfs.mailbox.tickets: issuer key not consistent (%s)", why)
-        return MailboxTicketError(0, "ticket_key_inconsistent")
+        return MailboxTicketError(0, error)
 
     def _admit(self, issuer: TicketIssuer) -> None:
         now = int(self._clock())
@@ -347,23 +407,52 @@ class TicketKeyGuard:
             raise self._refuse("a second new key inside one epoch")
         self._pin = TicketKeyPin(issuer.key_id, now, issuer.epoch_days, pin.key_id)
 
+    async def refresh(self) -> None:
+        """Read the anonymous view now, admit it and cache it. Raises
+        :class:`MailboxTicketError` (the cache keeps the last good view)."""
+        issuer = await self._anon_view()
+        self._admit(issuer)
+        self._anon = issuer
+
+    async def start(self) -> None:
+        """Start the jittered anonymous-read loop. Idempotent."""
+        if self._task is not None and not self._task.done():
+            return
+        self._stop.clear()
+        self._task = asyncio.create_task(
+            _jittered_loop(
+                self._stop, self._period, self._rng, self.refresh, "anonymous read"
+            )
+        )
+
+    async def stop(self) -> None:
+        """Stop the anonymous-read loop and wait for it to exit."""
+        await _stop_task(self._stop, self._task)
+        self._task = None
+
     async def confirm_issuer(self, issuer: TicketIssuer) -> None:
-        """Check *issuer* (the household's own read) before blinding."""
-        anon = await self._anon_view()
+        """Check *issuer* (the household's own read) before blinding,
+        against the CACHED anonymous view (no read here)."""
+        anon = self._anon
+        if anon is None:
+            raise self._refuse("no anonymous view yet", "ticket_key_unconfirmed")
         if anon.key_id != issuer.key_id:
             raise self._refuse("the anonymous view shows another key")
         self._admit(issuer)
 
     async def confirm_ticket(self, ticket: bytes) -> None:
-        """Check, before redeeming *ticket*, that the anonymous view still
-        shows an admitted key and that the ticket is under one."""
-        self._admit(await self._anon_view())
+        """Check, before redeeming *ticket*, that the anonymous view (read
+        now, over the anonymous session) shows an admitted key and that the
+        ticket is under one."""
+        await self.refresh()
         pin = self._pin
         if pin is None or _ticket_key_id(ticket) not in (
             pin.key_id,
             pin.previous_key_id,
         ):
-            raise self._refuse("the ticket's key is not an admitted one")
+            raise self._refuse(
+                "the ticket's key is not an admitted one", "ticket_key_not_admitted"
+            )
 
 
 def build_ticket_request(
@@ -420,16 +509,18 @@ async def fetch_tickets(
         instance_id=instance_id,
         signing_key=signing_key,
     )
-    async with session.post(
-        gfs_url.rstrip("/") + MAILBOX_TICKETS_ROUTE,
-        json=body,
-        timeout=aiohttp.ClientTimeout(total=MAILBOX_REGISTER_TIMEOUT_S),
-    ) as resp:
-        data = await _json_body(resp)
-        if resp.status != 200:
-            raise MailboxTicketError(
-                resp.status, str(data.get("error") or "unexpected")
-            )
+    try:
+        async with session.post(
+            gfs_url.rstrip("/") + MAILBOX_TICKETS_ROUTE,
+            json=body,
+            timeout=aiohttp.ClientTimeout(total=MAILBOX_REGISTER_TIMEOUT_S),
+        ) as resp:
+            data = await _json_body(resp)
+            status = resp.status
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        raise MailboxTicketError(0, "gfs_unreachable") from exc
+    if status != 200:
+        raise MailboxTicketError(status, str(data.get("error") or "unexpected"))
     responses = data.get("responses")
     if (
         data.get("suite") != pp.TICKET_SUITE_PP_BLINDRSA
@@ -524,36 +615,19 @@ class MailboxTicketCache:
         if self._task is not None and not self._task.done():
             return
         self._stop.clear()
-        self._task = asyncio.create_task(self._loop())
+        self._task = asyncio.create_task(
+            _jittered_loop(self._stop, self._period, self._rng, self._slot, "refill")
+        )
 
     async def stop(self) -> None:
         """Stop the refill loop and wait for it to exit."""
-        self._stop.set()
-        if self._task is not None:
-            try:
-                await asyncio.wait_for(self._task, timeout=5.0)
-            except TimeoutError, asyncio.CancelledError:
-                self._task.cancel()
-            self._task = None
+        await _stop_task(self._stop, self._task)
+        self._task = None
 
-    async def _loop(self) -> None:
-        while not self._stop.is_set():
-            wait = self._rng.uniform(0.5 * self._period, 1.5 * self._period)
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=wait)
-                return
-            except TimeoutError:
-                pass
-            if time.monotonic() - self._last_take < self._quiet:
-                continue  # right after a register: wait for another slot
-            try:
-                await self.refill()
-            except MailboxTicketError as exc:
-                log.warning(
-                    "gfs.mailbox.tickets: refill failed (%s %s)",
-                    exc.status,
-                    exc.error,
-                )
+    async def _slot(self) -> None:
+        if time.monotonic() - self._last_take < self._quiet:
+            return  # right after a register: wait for another slot
+        await self.refill()
 
     def take(self) -> bytes:
         """One unspent ticket (it leaves the cache: a ticket is never
@@ -595,6 +669,8 @@ def _ticket_key_id(ticket: bytes) -> bytes:
 _TICKET_SPENT: str = "ticket_spent"
 #: The GFS no longer accepts the ticket's key: drop every ticket under it.
 _TICKET_STALE_KEY: str = "stale_ticket_key"
+#: The guard no longer admits the ticket's key: drop every ticket under it.
+_TICKET_KEY_NOT_ADMITTED: str = "ticket_key_not_admitted"
 #: A NEW mailbox: the GFS wants a ticket.
 _TICKET_REQUIRED: str = "ticket_required"
 
@@ -661,8 +737,10 @@ async def register_mailbox(
     The first try carries no ticket: an existing mailbox (or a GFS that
     takes no tickets) answers 200 and no ticket is ever shown. Only on
     ``403 ticket_required`` — a NEW mailbox — is one taken from *tickets*,
-    checked against the key guard (:meth:`MailboxTicketCache.confirm`; a
-    refused one goes back untouched) and sent. A spent ticket is replaced
+    checked against the key guard (:meth:`MailboxTicketCache.confirm`; one
+    the guard refuses for an inconsistent view goes back untouched, one
+    under a key no longer admitted is dropped with its key's tickets) and
+    sent. A spent ticket is replaced
     once from the cache; a ticket under a retired key drops that key's
     tickets and fails — the caller registers again after the cache's own
     scheduled refill, never right after a fetch. A ticket whose request
@@ -683,8 +761,13 @@ async def register_mailbox(
             ticket = tickets.take()
             try:
                 await tickets.confirm(ticket)
-            except MailboxTicketError:
-                tickets.put_back(ticket)
+            except MailboxTicketError as exc:
+                if exc.error == _TICKET_KEY_NOT_ADMITTED:
+                    # Its key aged out: put back, it would be taken again
+                    # next time and block every register.
+                    tickets.drop_key(_ticket_key_id(ticket))
+                else:
+                    tickets.put_back(ticket)  # never shown to the GFS
                 raise
             try:
                 status, body = await _post_register(

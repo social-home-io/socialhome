@@ -1133,7 +1133,11 @@ not a leak in the design. What grows it: a longer epoch (30 days by
 default; households refuse anything under 7) and more households on the
 GFS. What keeps the set honest: the household takes a key only when an
 anonymous read of `/gfs/info` shows the same one, and at most one new key
-per epoch, so a GFS can't give one household a key of its own.
+per epoch. So a GFS can't single a household out through its identified
+session. A GFS that recognises the household's **address** still can: it
+can show that address its own key in both views from first contact and
+keep it (the stated IP limit). A cross-check outside the GFS — a key id
+compared among paired households — is planned.
 
 ## No third-party fetches from user content
 

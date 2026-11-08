@@ -1376,6 +1376,7 @@ async def _gfs_cluster_ticket_cache(
             )
 
     guard = TicketKeyGuard(anon_view)
+    await guard.refresh()  # a household runs this on its own schedule
 
     async def fetch(count: int) -> list[bytes]:
         return await fetch_tickets(

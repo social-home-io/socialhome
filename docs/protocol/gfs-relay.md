@@ -642,7 +642,11 @@ its own issuer key could read the household off every redeemed ticket's
 
 - the key must equal the one an **anonymous** read of `/gfs/info` shows
   (a second, cookie-less session — the one mailbox registration uses),
-  so the GFS can't single the household out by its identified session;
+  so the GFS can't single the household out by its identified session.
+  That read runs on its own jittered schedule (about every 6 h, ±50 %) and
+  is cached; the identified ticket fetch compares against the cache, so no
+  anonymous read sits milliseconds before it from the same address. Before
+  redeeming (itself anonymous) the household reads afresh;
 - **one new key per epoch** at most: the household pins `(key_id,
   first_seen)` and takes a different key only once its clock is in a later
   epoch (epochs aligned to the Unix epoch, as the GFS aligns them; one hour
@@ -652,10 +656,14 @@ its own issuer key could read the household off every redeemed ticket's
   epoch lets the GFS rotate keys to tag households and shrinks the set
   they hide in.
 
-A failed check raises `ticket_key_inconsistent`, logs a WARNING with no
-key and no id, and leaves the tickets unused. What remains: a GFS that
-gives one *address* its own key in BOTH views from its first contact — the
-same IP / timing limit as below.
+A failed check raises `ticket_key_inconsistent` (or
+`ticket_key_unconfirmed` before the first anonymous read), logs a WARNING
+with no key and no id, and leaves the tickets unused. A ticket under a key
+the household no longer admits (`ticket_key_not_admitted`) is dropped with
+every ticket under that key. What remains: a GFS that recognises the
+household's *address* can show it its own key in BOTH views from first
+contact and keep it — the same IP / timing limit as below. A cross-check
+outside the GFS (a key id compared among paired households) is planned.
 
 **Anonymity set.** A redeemed ticket hides its household among the
 households that fetched tickets under the **same key in that epoch** —
@@ -669,7 +677,8 @@ which mailbox spent one. A fetch right before a register would let the GFS
 line the two up, so the cache refills on its own schedule — about once a
 day, each wait jittered ±50 % (`MailboxTicketCache.start`), and a slot
 within an hour after a register is skipped — and a register spends from the
-cache. The cache never fetches on its own: an empty cache fails a register
+cache. A failed refill or anonymous read (a GFS outage included) logs a
+WARNING and the loop tries again at the next slot. The cache never fetches on its own: an empty cache fails a register
 with `no_ticket`, and a `stale_ticket_key` refusal drops that key's tickets
 and fails — so a GFS that refuses a register on purpose cannot make the
 household fetch right next to it. Only `ticket_spent` is retried, once,

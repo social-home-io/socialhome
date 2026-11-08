@@ -191,6 +191,7 @@ async def _ticket_cache(
     )
     issuer = await _issuer(session, url)
     guard = _guard(session, url, await _gfs_pk(session, url))
+    await guard.refresh()  # the anonymous read, on its own schedule
 
     async def fetch(count: int) -> list[bytes]:
         if calls is not None:
@@ -469,6 +470,8 @@ async def test_an_unregistered_household_gets_no_tickets(gfs):
     _server, session, url, _tickets = gfs
     issuer = await _issuer(session, url)
     stranger = bytes([9]) * 32
+    guard = _guard(session, url, await _gfs_pk(session, url))
+    await guard.refresh()
     with pytest.raises(MailboxTicketError) as err:
         await fetch_tickets(
             session,
@@ -477,7 +480,7 @@ async def test_an_unregistered_household_gets_no_tickets(gfs):
             1,
             instance_id=derive_instance_id(ed25519_public_key(stranger)),
             signing_key=stranger,
-            guard=_guard(session, url, await _gfs_pk(session, url)),
+            guard=guard,
         )
     assert err.value.status == 403
 
@@ -569,21 +572,25 @@ async def test_the_key_pin_refuses_an_early_rotation():
         return views[0]
 
     guard = TicketKeyGuard(anon_view, clock=lambda: now[0])
+    await guard.refresh()
     await guard.confirm_issuer(a)
     assert guard.pin == TicketKeyPin(a.key_id, int(now[0]), 30, None)
     now[0] += 5 * DAY  # same epoch: a new key is refused
     views[0] = b
     with pytest.raises(MailboxTicketError) as err:
-        await guard.confirm_issuer(b)
+        await guard.refresh()
     assert err.value.error == "ticket_key_inconsistent"
+    with pytest.raises(MailboxTicketError):  # the cached view is still a
+        await guard.confirm_issuer(b)
     now[0] += 25 * DAY  # the next epoch: the rotation is taken
+    await guard.refresh()
     await guard.confirm_issuer(b)
     assert guard.pin is not None and guard.pin.previous_key_id == a.key_id
     views[0] = c  # …but only one per epoch
     with pytest.raises(MailboxTicketError):
-        await guard.confirm_issuer(c)
+        await guard.refresh()
     views[0] = a  # the previous key (a node behind at the boundary) is fine
-    await guard.confirm_issuer(a)
+    await guard.refresh()
     assert guard.pin.key_id == b.key_id
 
 
@@ -599,7 +606,7 @@ async def test_a_restored_pin_is_kept(tmp_dir):
         anon_view, pin=TicketKeyPin(a.key_id, now, 30, None), clock=lambda: now
     )
     with pytest.raises(MailboxTicketError):
-        await guard.confirm_issuer(b)
+        await guard.refresh()
 
 
 async def test_per_household_keys_are_refused(gfs, caplog):
@@ -614,6 +621,8 @@ async def test_per_household_keys_are_refused(gfs, caplog):
         return everyone
 
     caplog.set_level(logging.DEBUG)
+    guard = TicketKeyGuard(anon_view)
+    await guard.refresh()
     with pytest.raises(MailboxTicketError) as err:
         await fetch_tickets(
             session,
@@ -622,7 +631,7 @@ async def test_per_household_keys_are_refused(gfs, caplog):
             2,
             instance_id=HOME_ID,
             signing_key=HOME_SEED,
-            guard=TicketKeyGuard(anon_view),
+            guard=guard,
         )
     assert err.value.error == "ticket_key_inconsistent"
     issued = await server.app[gfs_db_key].fetchall(
@@ -704,7 +713,7 @@ async def test_a_ticket_that_never_reached_the_gfs_is_put_back():
         return issuer
 
     guard = TicketKeyGuard(anon_view)
-    await guard.confirm_issuer(issuer)
+    await guard.refresh()
     cache = MailboxTicketCache(None, batch=4, guard=guard)  # type: ignore[arg-type]
     cache._tickets = [_local_ticket(issuer, key)]
     session = _FlakySession()
@@ -780,5 +789,117 @@ async def test_a_ticket_under_an_unadmitted_key_is_refused():
     guard = TicketKeyGuard(anon_view)
     with pytest.raises(MailboxTicketError) as err:
         await guard.confirm_ticket(_local_ticket(stranger, skey))
-    assert err.value.error == "ticket_key_inconsistent"
+    assert err.value.error == "ticket_key_not_admitted"
     await guard.confirm_ticket(_local_ticket(issuer, key))
+
+
+async def test_the_identified_fetch_never_reads_the_anonymous_view(gfs):
+    """The anonymous ``/gfs/info`` read runs on its own schedule and is
+    cached: the identified ticket fetch compares against the cache and does
+    not read anonymously right before it (same address, ms apart)."""
+    _server, session, url, _tickets = gfs
+    issuer = await _issuer(session, url)
+    reads: list[int] = []
+
+    async def anon_view() -> TicketIssuer:
+        reads.append(1)
+        return issuer
+
+    guard = TicketKeyGuard(anon_view)
+    with pytest.raises(MailboxTicketError) as err:  # nothing read yet
+        await guard.confirm_issuer(issuer)
+    assert err.value.error == "ticket_key_unconfirmed"
+    assert reads == []
+    await guard.refresh()
+    assert reads == [1]
+    got = await fetch_tickets(
+        session, url, issuer, 1, instance_id=HOME_ID, signing_key=HOME_SEED, guard=guard
+    )
+    assert len(got) == 1 and reads == [1]  # no anonymous read next to the fetch
+
+
+async def test_the_anonymous_view_refreshes_on_a_jittered_schedule():
+    issuer, _key = _local_issuer()
+    reads: list[int] = []
+
+    async def anon_view() -> TicketIssuer:
+        reads.append(1)
+        if len(reads) == 1:
+            raise aiohttp.ClientConnectionError("down")
+        return issuer
+
+    class _Rng:
+        def uniform(self, lo: float, hi: float) -> float:
+            assert lo < hi
+            return lo
+
+    guard = TicketKeyGuard(anon_view, period=0.05, rng=_Rng())
+    await guard.start()
+    await asyncio.sleep(0.25)
+    await guard.stop()
+    assert len(reads) >= 2  # an outage does not end the loop
+    await guard.confirm_issuer(issuer)  # the later read was cached
+
+
+async def test_a_network_error_while_fetching_is_a_ticket_error():
+    issuer, _key = _local_issuer()
+
+    async def anon_view() -> TicketIssuer:
+        return issuer
+
+    guard = TicketKeyGuard(anon_view)
+    await guard.refresh()
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(MailboxTicketError) as err:
+            await fetch_tickets(
+                session,
+                "http://127.0.0.1:1",
+                issuer,
+                1,
+                instance_id=HOME_ID,
+                signing_key=HOME_SEED,
+                guard=guard,
+            )
+    assert err.value.error == "gfs_unreachable"
+
+
+async def test_the_refill_loop_survives_an_outage():
+    """One GFS outage must not end the refill task for good."""
+    issuer, key = _local_issuer()
+    calls: list[int] = []
+
+    async def fetch(count: int) -> list[bytes]:
+        calls.append(count)
+        if len(calls) == 1:
+            raise aiohttp.ClientConnectionError("down")
+        if len(calls) == 2:
+            raise TimeoutError
+        return [_local_ticket(issuer, key)] * count
+
+    class _Rng:
+        def uniform(self, lo: float, hi: float) -> float:
+            return lo
+
+    cache = MailboxTicketCache(
+        fetch, batch=2, guard=None, period=0.05, quiet=0.0, rng=_Rng()
+    )  # type: ignore[arg-type]
+    await cache.start()
+    await asyncio.sleep(0.3)
+    await cache.stop()
+    assert len(calls) >= 3 and len(cache) == 2
+
+
+async def test_a_ticket_under_a_retired_key_is_dropped_not_put_back(gfs):
+    """A ticket whose key the household no longer admits is dropped (with
+    every ticket under that key) — put back, it would come out of the cache
+    again next time and block every register."""
+    _server, session, url, tickets = gfs
+    stranger, skey = _local_issuer()
+    tickets._tickets.append(_local_ticket(stranger, skey))  # taken first
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "dead-ticket", 0)
+    with pytest.raises(MailboxTicketError) as err:
+        await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
+    assert err.value.error == "ticket_key_not_admitted"
+    assert len(tickets) == 4  # only the dead one went
+    assert await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
+    assert len(tickets) == 3
