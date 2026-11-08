@@ -7247,7 +7247,7 @@ def cmd_gfs_relay_media() -> None:
             f"{base}/api/media/upload",
             token=a["token"],
             filename="relay-photo.png",
-            content=_make_noisy_png(1000, 700),
+            content=_make_noisy_png(1400, 900),  # > 512 KiB: two frames
             content_type="image/png",
             timeout=60.0,
         )
@@ -7311,7 +7311,9 @@ def cmd_gfs_relay_media() -> None:
             f"({len(pushed)} live push(es) logged by the GFS), no JSON chunk refused ✓"
         )
     finally:
-        _restart(None)
+        # Default config again; ``{}`` (not ``None``) keeps the log appended,
+        # so the reconnect offsets stay valid.
+        _restart({})
     print("gfs-relay-media: ok")
 
 
