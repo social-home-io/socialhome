@@ -3166,6 +3166,13 @@ class SqliteGfsUserPictureRepo:
 
 # ─── Envelope relay queue ────────────────────────────────────────────────
 
+#: ``pool`` of a queued frame (GFS migration 0029): households vs mailboxes.
+POOL_HOUSEHOLD: str = "household"
+POOL_MAILBOX: str = "mailbox"
+#: What every mailbox keeps however full its pool is (never evicted).
+MAILBOX_QUEUE_FLOOR_ROWS: int = 20
+MAILBOX_QUEUE_FLOOR_BYTES: int = 64 * 1024
+
 
 @runtime_checkable
 class AbstractGfsEnvelopeQueueRepo(Protocol):
@@ -3195,6 +3202,8 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
     async def delete(self, envelope_id: int) -> int: ...
 
     async def prune_expired(self, now: int) -> int: ...
+
+    async def pool_bytes(self, queue: str, pool: str) -> int: ...
 
     async def relay_bytes(self, now: int) -> int: ...
 
@@ -3267,14 +3276,12 @@ class SqliteGfsEnvelopeQueueRepo:
         """Append one envelope unless this recipient is at cap.
 
         With *max_total_bytes*, the envelope rows of the recipient's POOL —
-        registered mailboxes (*mailbox_pool*) or everything else (instances)
-        — are also held to that server-wide total. Room is made by evicting
-        the oldest envelope of whichever OTHER recipient in the same pool
-        holds the most bytes (never this recipient's own rows, never a row
-        of the other pool), so a flood of minted mailboxes can never push
-        out a household's control envelopes, and within a pool a recipient
-        at or under a fair share is the last to lose anything. When no other
-        holder is bigger, the new envelope is tail-dropped.
+        registered mailboxes (*mailbox_pool*) or households — are also held
+        to that server-wide total, read from the running counter
+        (``gfs_queue_totals``): the household pool tail-drops, the mailbox
+        pool makes room by ranked eviction above a per-mailbox floor
+        (:meth:`_make_pool_room`). A row of one pool never touches the
+        other.
 
         ``frame_type`` (migration 0014) is ``"envelope"`` or ``"relay"``; the
         two ceilings apply per frame type, so member-published relay items
@@ -3325,7 +3332,7 @@ class SqliteGfsEnvelopeQueueRepo:
             conn.execute(
                 "INSERT INTO gfs_envelope_queue("
                 "to_instance, sealed_json, created_at, expires_at, frame_type,"
-                " size_bytes) VALUES(?,?,?,?,?,?)",
+                " size_bytes, pool) VALUES(?,?,?,?,?,?,?)",
                 (
                     to_instance,
                     sealed_json,
@@ -3333,6 +3340,7 @@ class SqliteGfsEnvelopeQueueRepo:
                     expires_at,
                     frame_type,
                     len(sealed_json),
+                    POOL_MAILBOX if mailbox_pool else POOL_HOUSEHOLD,
                 ),
             )
             return True
@@ -3340,7 +3348,26 @@ class SqliteGfsEnvelopeQueueRepo:
         return await self._db.transact(_run)
 
     @staticmethod
+    def _pool_total(conn, queue: str, pool: str) -> int:
+        row = conn.execute(
+            "SELECT bytes FROM gfs_queue_totals WHERE queue=? AND pool=?",
+            (queue, pool),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    async def pool_bytes(self, queue: str, pool: str) -> int:
+        """The running byte total of one (queue, pool) — ``gfs_queue_totals``,
+        kept by triggers on every insert and delete (GFS migration 0029)."""
+        row = await self._db.fetchone(
+            "SELECT bytes FROM gfs_queue_totals WHERE queue=? AND pool=?",
+            (queue, pool),
+        )
+        d = _as_dict(row)
+        return int(d["bytes"]) if d else 0
+
+    @classmethod
     def _make_pool_room(
+        cls,
         conn,
         to_instance: str,
         size: int,
@@ -3349,43 +3376,77 @@ class SqliteGfsEnvelopeQueueRepo:
         max_total_bytes: int,
         mailbox_pool: bool,
     ) -> bool:
-        """Evict fairly inside one pool until *size* more bytes fit (see
-        :meth:`enqueue`). Runs inside the caller's transaction."""
+        """Room for *size* more bytes in the recipient's pool (see
+        :meth:`enqueue`). Runs inside the caller's transaction; the pool
+        total is the running counter, never a scan.
+
+        **Household pool: tail-drop.** Eviction there would be an anonymous
+        delete primitive — anyone posting to a small offline id would push
+        out the biggest OTHER household's oldest envelopes (the reason the
+        per-recipient caps are tail-drop too).
+
+        **Mailbox pool: ranked eviction above a floor.** Mailbox ids are
+        free to mint, so a full pool must not refuse every real mailbox for
+        a day either. A victim is picked by rank — never claimed (0), first
+        registered today (1), established (2) — and only from a rank no
+        better than the writer's own, so sybils minted today can never evict
+        an established mailbox. Within the writer's rank only a holder
+        bigger than the writer (after the insert) gives up a row. Every
+        mailbox keeps a non-evictable floor
+        (:data:`MAILBOX_QUEUE_FLOOR_ROWS` rows /
+        :data:`MAILBOX_QUEUE_FLOOR_BYTES`). No victim → tail-drop."""
         if size > max_total_bytes:
             return False
-        member = "IN" if mailbox_pool else "NOT IN"
-        pool = (
-            "frame_type='envelope' AND expires_at > ? AND to_instance"
-            f" {member} (SELECT mailbox_id FROM gfs_mailboxes)"
+        if not mailbox_pool:
+            return (
+                cls._pool_total(conn, "envelope", POOL_HOUSEHOLD) + size
+                <= max_total_bytes
+            )
+        today = now // 86_400 * 86_400
+        rank = (
+            "CASE WHEN m.last_claim_at IS NULL THEN 0"
+            " WHEN m.created_at >= ? THEN 1 ELSE 2 END"
         )
-        while True:
-            total = conn.execute(
-                f"SELECT COALESCE(SUM(size_bytes), 0) FROM gfs_envelope_queue WHERE {pool}",
-                (now,),
-            ).fetchone()[0]
-            if int(total) + size <= max_total_bytes:
-                return True
+        writer = conn.execute(
+            f"SELECT {rank} FROM gfs_mailboxes m WHERE m.mailbox_id = ?",
+            (today, to_instance),
+        ).fetchone()
+        writer_rank = int(writer[0]) if writer else 0
+        while cls._pool_total(conn, "envelope", POOL_MAILBOX) + size > max_total_bytes:
             mine = conn.execute(
                 "SELECT COALESCE(SUM(size_bytes), 0) FROM gfs_envelope_queue"
-                f" WHERE {pool} AND to_instance=?",
-                (now, to_instance),
+                " WHERE to_instance=? AND frame_type='envelope'",
+                (to_instance,),
             ).fetchone()[0]
-            biggest = conn.execute(
-                "SELECT to_instance, SUM(size_bytes) FROM gfs_envelope_queue"
-                f" WHERE {pool} AND to_instance != ? GROUP BY to_instance"
-                " ORDER BY SUM(size_bytes) DESC LIMIT 1",
-                (now, to_instance),
+            victim = conn.execute(
+                f"SELECT q.to_instance, SUM(q.size_bytes), MIN({rank}) AS r"
+                " FROM gfs_envelope_queue q"
+                " JOIN gfs_mailboxes m ON m.mailbox_id = q.to_instance"
+                " WHERE q.frame_type='envelope' AND q.pool='mailbox'"
+                " AND q.to_instance != ?"
+                " GROUP BY q.to_instance"
+                " HAVING (COUNT(*) > ? OR SUM(q.size_bytes) > ?) AND r <= ?"
+                "  AND (r < ? OR SUM(q.size_bytes) > ?)"
+                " ORDER BY r ASC, SUM(q.size_bytes) DESC LIMIT 1",
+                (
+                    today,
+                    to_instance,
+                    MAILBOX_QUEUE_FLOOR_ROWS,
+                    MAILBOX_QUEUE_FLOOR_BYTES,
+                    writer_rank,
+                    writer_rank,
+                    int(mine) + size,
+                ),
             ).fetchone()
-            # Only a holder bigger than this recipient (after the insert)
-            # gives up a row; otherwise the new envelope is the one dropped.
-            if biggest is None or int(biggest[1]) <= int(mine) + size:
+            if victim is None:
                 return False
             conn.execute(
                 "DELETE FROM gfs_envelope_queue WHERE id = (SELECT id FROM"
-                f" gfs_envelope_queue WHERE {pool} AND to_instance=?"
+                " gfs_envelope_queue WHERE to_instance=? AND frame_type='envelope'"
                 " ORDER BY created_at ASC, id ASC LIMIT 1)",
-                (now, biggest[0]),
+                (victim[0],),
             )
+        return True
 
     async def list_for(
         self,
@@ -3481,14 +3542,13 @@ class SqliteGfsEnvelopeQueueRepo:
             conn.execute(
                 "DELETE FROM gfs_media_queue WHERE expires_at <= ?", (created_at,)
             )
-            member = "IN" if mailbox_pool else "NOT IN"
-            mine, total = conn.execute(
-                "SELECT COALESCE(SUM(CASE WHEN to_instance=? THEN size_bytes"
-                " ELSE 0 END), 0), COALESCE(SUM(size_bytes), 0)"
-                " FROM gfs_media_queue WHERE expires_at > ? AND to_instance"
-                f" {member} (SELECT mailbox_id FROM gfs_mailboxes)",
+            pool = POOL_MAILBOX if mailbox_pool else POOL_HOUSEHOLD
+            mine = conn.execute(
+                "SELECT COALESCE(SUM(size_bytes), 0) FROM gfs_media_queue"
+                " WHERE to_instance=? AND expires_at > ?",
                 (to_instance, created_at),
-            ).fetchone()
+            ).fetchone()[0]
+            total = self._pool_total(conn, "media", pool)
             size = len(body)
             if int(mine) + size > max_bytes_per_recipient:
                 return False
@@ -3496,8 +3556,8 @@ class SqliteGfsEnvelopeQueueRepo:
                 return False
             conn.execute(
                 "INSERT INTO gfs_media_queue(to_instance, body, size_bytes,"
-                " created_at, expires_at) VALUES(?,?,?,?,?)",
-                (to_instance, body, size, created_at, expires_at),
+                " created_at, expires_at, pool) VALUES(?,?,?,?,?,?)",
+                (to_instance, body, size, created_at, expires_at, pool),
             )
             return True
 
@@ -3711,9 +3771,20 @@ class AbstractGfsMailboxRepo(Protocol):
 
     async def is_mailbox(self, mailbox_id: str) -> bool: ...
 
-    async def register(self, mailbox_id: str, sign_pk: bytes, *, now: int) -> str: ...
+    async def register(
+        self,
+        mailbox_id: str,
+        sign_pk: bytes,
+        *,
+        now: int,
+        max_new_today: int | None = None,
+    ) -> str: ...
 
     async def count_created_since(self, since: int) -> int: ...
+
+    async def remember_gfs_ids(self, ids: set[str], *, day: int) -> None: ...
+
+    async def known_gfs_ids(self, *, since_day: int) -> set[str]: ...
 
     async def touch_claim(self, mailbox_id: str, *, now: int) -> None: ...
 
@@ -3751,19 +3822,40 @@ class SqliteGfsMailboxRepo:
         )
         return row is not None
 
-    async def register(self, mailbox_id: str, sign_pk: bytes, *, now: int) -> str:
+    async def register(
+        self,
+        mailbox_id: str,
+        sign_pk: bytes,
+        *,
+        now: int,
+        max_new_today: int | None = None,
+    ) -> str:
         """Pin *sign_pk* for *mailbox_id* (trust on first use: an existing
         row is never rewritten), in ONE transaction with the check that no
         instance holds the id. ``"created"``, ``"exists"`` (registered
         before — the caller compares the key) or ``"collision"`` (an
-        instance holds the id). *now* is stored as given (the caller
-        rounds it to the day)."""
+        instance holds the id) or ``"server_cap"`` (*max_new_today* new
+        mailboxes were created on *now*'s day — counted in this same
+        transaction, so concurrent registrations on every node can't
+        overshoot). *now* is stored as given (the caller rounds it to the
+        day)."""
 
         def _run(conn) -> str:
             if conn.execute(
                 "SELECT 1 FROM client_instances WHERE instance_id=?", (mailbox_id,)
             ).fetchone():
                 return "collision"
+            if conn.execute(
+                "SELECT 1 FROM gfs_mailboxes WHERE mailbox_id=?", (mailbox_id,)
+            ).fetchone():
+                return "exists"
+            if max_new_today is not None:
+                day = now // 86_400 * 86_400
+                made = conn.execute(
+                    "SELECT COUNT(*) FROM gfs_mailboxes WHERE created_at >= ?", (day,)
+                ).fetchone()[0]
+                if int(made) >= max_new_today:
+                    return "server_cap"
             cur = conn.execute(
                 "INSERT OR IGNORE INTO gfs_mailboxes(mailbox_id, sign_pk, created_at)"
                 " VALUES(?,?,?)",
@@ -3781,6 +3873,24 @@ class SqliteGfsMailboxRepo:
         )
         d = _as_dict(row)
         return int(d["n"]) if d else 0
+
+    async def remember_gfs_ids(self, ids: set[str], *, day: int) -> None:
+        """Note that this cluster serves (or served) *ids* on *day*."""
+        for gfs_id in sorted(ids):
+            await self._db.enqueue(
+                "INSERT INTO gfs_known_gfs_ids(gfs_instance_id, last_seen_day)"
+                " VALUES(?, ?) ON CONFLICT(gfs_instance_id) DO UPDATE SET"
+                " last_seen_day = MAX(last_seen_day, excluded.last_seen_day)",
+                (gfs_id, day),
+            )
+
+    async def known_gfs_ids(self, *, since_day: int) -> set[str]:
+        """The ids this cluster served on or after *since_day*."""
+        rows = await self._db.fetchall(
+            "SELECT gfs_instance_id FROM gfs_known_gfs_ids WHERE last_seen_day >= ?",
+            (since_day,),
+        )
+        return {str(_as_dict(r)["gfs_instance_id"]) for r in rows}
 
     async def touch_claim(self, mailbox_id: str, *, now: int) -> None:
         await self._db.enqueue(

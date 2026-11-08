@@ -6,7 +6,8 @@ generation) there. This module holds what the household needs to own one:
 * :func:`new_mailbox_root` / :func:`derive_mailbox_keys` — the mailbox's
   X25519 sealing key and Ed25519 claim key, both derived with HKDF-SHA256
   from the household's **mailbox root**: a dedicated 32-byte secret
-  generated once (:func:`new_mailbox_root`) and stored under the household
+  generated once (:func:`new_mailbox_root`), the GFS id, the space id and
+  the generation. The root is stored under the household
   KEK beside its other secrets (wired in redesign PR 2). It is NOT the
   key-wrap seed: that key has its own job (sealing to the household) and
   its own rotation, and a mailbox key must never be able to reveal or
@@ -117,16 +118,32 @@ def new_mailbox_root() -> bytes:
     return secrets.token_bytes(MAILBOX_ROOT_BYTES)
 
 
-def derive_mailbox_keys(mailbox_root: bytes, space_id: str, gen: int) -> MailboxKeys:
-    """The mailbox keys of (*space_id*, *gen*) under the household's
-    dedicated *mailbox_root* secret (:func:`new_mailbox_root`)."""
+def derive_mailbox_keys(
+    mailbox_root: bytes, gfs_instance_id: str, space_id: str, gen: int
+) -> MailboxKeys:
+    """The mailbox keys of (*space_id*, *gen*) at the GFS
+    *gfs_instance_id* under the household's dedicated *mailbox_root*
+    secret (:func:`new_mailbox_root`). The GFS id is in the derivation, so
+    two GFSs serving the same (global) space get unrelated mailboxes — they
+    can't match ids to link a household across servers. Pass the id the
+    household PINNED when it minted the mailbox (and keep using it: a GFS
+    that changes its id keeps answering to the old one as an alias)."""
+    if not gfs_instance_id or "|" in gfs_instance_id:
+        raise ValueError("invalid GFS instance id")
     if len(mailbox_root) != MAILBOX_ROOT_BYTES:
         raise ValueError("mailbox root must be 32 bytes")
     if not space_id or "|" in space_id:
         raise ValueError("invalid space id")
     if isinstance(gen, bool) or not isinstance(gen, int) or gen < 0:
         raise ValueError("gen must be a non-negative integer")
-    scope = b"|" + space_id.encode() + b"|" + str(gen).encode()
+    scope = (
+        b"|"
+        + gfs_instance_id.encode()
+        + b"|"
+        + space_id.encode()
+        + b"|"
+        + str(gen).encode()
+    )
     kem_private = _hkdf(mailbox_root, _KEM_INFO + scope)
     sign_seed = _hkdf(mailbox_root, _SIGN_INFO + scope)
     kem_public = (

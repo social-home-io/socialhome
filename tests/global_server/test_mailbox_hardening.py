@@ -209,26 +209,26 @@ async def test_the_mailbox_pool_never_evicts_household_envelopes(gfs_db):
     a, b = "a" * 32, "b" * 32
     q = await _queue(gfs_db, a, b)
     household = "h" * 32
+    row = 70 * 1024  # above the per-mailbox floor
+    total = 4 * row
     assert await _put(q, household, 900, mailbox=False)
-    assert await _put(q, a, 600, mailbox=True)
-    assert await _put(q, a, 300, mailbox=True)
-    # b needs room: the biggest OTHER mailbox (a) gives its oldest row.
-    assert await _put(q, b, 200, mailbox=True)
-    assert await q.count_for(a) == 1
+    for _ in range(4):
+        assert await _put(q, a, row, mailbox=True, total=total)
+    # b needs room: a (same rank, bigger, above its floor) gives its oldest.
+    assert await _put(q, b, row, mailbox=True, total=total)
+    assert await q.count_for(a) == 3
     assert await q.count_for(household) == 1
-    # b is now the writer AND not smaller than every other holder → tail-drop.
-    assert not await _put(q, b, 600, mailbox=True)
 
 
-async def test_the_household_pool_has_its_own_total(gfs_db):
+async def test_the_household_pool_has_its_own_total_and_tail_drops(gfs_db):
     a = "a" * 32
     q = await _queue(gfs_db, a)
     assert await _put(q, a, 900, mailbox=True)
     h1, h2 = "h" * 32, "k" * 32
     assert await _put(q, h1, 900, mailbox=False)
-    # The household pool is full on its own; h1 is bigger → it gives room.
-    assert await _put(q, h2, 500, mailbox=False)
-    assert await q.count_for(h1) == 0
+    # The household pool is full on its own: the NEW envelope is dropped.
+    assert not await _put(q, h2, 500, mailbox=False)
+    assert await q.count_for(h1) == 1
     assert await q.count_for(a) == 1
 
 
@@ -321,8 +321,8 @@ def test_an_ipv6_bucket_counts_against_its_56_and_48():
     scopes = address_scopes("2001:db8:1:2::/64")
     assert scopes == [
         ("2001:db8:1:2::/64", 1),
-        ("2001:db8:1::/56", 4),
-        ("2001:db8:1::/48", 16),
+        ("2001:db8:1::/56", 16),
+        ("2001:db8:1::/48", 256),
     ]
     assert address_scopes("192.0.2.7") == [("192.0.2.7", 1)]
     assert address_scopes("unknown") == [("unknown", 1)]
@@ -338,8 +338,8 @@ def _svc(**cfg) -> GfsMailboxService:
 
 def test_registrations_from_many_64s_hit_the_56_cap():
     svc = _svc(mailbox_max_per_ip=1)
-    ok = [svc._count_new(f"2001:db8:1:{i:x}::/64", 1.0) for i in range(6)]
-    assert ok == [True, True, True, True, False, False]
+    ok = [svc._count_new(f"2001:db8:1:{i:x}::/64", 1.0) for i in range(18)]
+    assert [bool(x) for x in ok] == [True] * 16 + [False, False]
 
 
 def test_flooding_other_buckets_cannot_reset_a_count():
@@ -452,15 +452,15 @@ async def test_a_claim_bound_to_an_unknown_gfs_id_fails_like_a_wrong_key(gfs):
     assert (ws.close_code, closed.extra) == (4401, "auth-failed")
 
 
-def test_ids_served_by_shared_key_siblings_are_accepted():
+async def test_ids_served_by_shared_key_siblings_are_accepted(gfs_db):
     svc = GfsMailboxService(
-        repo=None,  # type: ignore[arg-type]
+        repo=SqliteGfsMailboxRepo(gfs_db),
         gfs_instance_id="gfs-1",
         config=EnvelopeMailboxConfig(),
         aliases=("gfs-legacy",),
         sibling_ids=lambda: {"gfs-0", ""},
     )
-    assert svc.accepted_gfs_ids() == {"gfs-1", "gfs-legacy", "gfs-0"}
+    assert await svc.accepted_gfs_ids() == {"gfs-1", "gfs-legacy", "gfs-0"}
 
 
 async def test_nodes_with_different_ids_register_on_one_claim_on_the_other(

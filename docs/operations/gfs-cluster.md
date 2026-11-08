@@ -243,19 +243,19 @@ env override:
 ```toml
 [envelope_relay]
 mailboxes = true            # serve them; false drops the routes (404) and the capability
-mailbox_max_per_ip = 200            # NEW mailboxes per address per UTC day (/64; ×4 per /56, ×16 per /48)
+mailbox_max_per_ip = 200            # NEW mailboxes per address per UTC day (/64; ×16 per /56, ×256 per /48)
 mailbox_max_new_per_day = 20000     # NEW mailboxes server-wide per UTC day (shared table)
-mailbox_max_sockets_per_ip = 512    # open claim sockets per address (/64; ×4 /56, ×16 /48)
+mailbox_max_sockets_per_ip = 512    # open claim sockets per address (/64; ×16 /56, ×256 /48)
 mailbox_idle_days = 30              # last claim (or registration) this many days ago → dropped
 mailbox_queue_max_per_recipient = 200         # queued envelopes for one offline mailbox
 mailbox_queue_bytes_per_recipient = 4194304   # 4 MiB
-mailbox_queue_max_total_bytes = 268435456     # 256 MiB for ALL mailboxes (evicts biggest other mailbox)
+mailbox_queue_max_total_bytes = 268435456     # 256 MiB for ALL mailboxes (ranked eviction above a 20-row / 64 KiB floor)
 mailbox_media_queue_bytes_per_recipient = 8388608   # 8 MiB of media for one mailbox
 mailbox_media_queue_max_total_bytes = 268435456     # 256 MiB of media for ALL mailboxes (tail-drop)
 ```
 
 Mailbox frames live in a pool of their own: they never count against, and
-never evict, households' queued envelopes (1 GiB total, fair-share) or media
+never evict, households' queued envelopes (1 GiB total, tail-drop) or media
 (`media_queue_max_total_bytes`). Worst-case queue disk ≈ 2.75 GiB whatever
 the number of minted ids (see
 [gfs-relay.md](../protocol/gfs-relay.md#anonymous-per-space-mailboxes-gfs-redesign-pr-1)).
@@ -270,7 +270,13 @@ database or logged next to a mailbox id.
 the household pinned. A node accepts its own id, its `instance_id_aliases`
 and the ids its shared-key siblings report in their HELLO / heartbeat, so
 a cluster whose allocs still serve `gfs-N` ids works (register via one
-alloc, claim on another) — the gfs-cluster demo checks it (step 3k). A
+alloc, claim on another). Every node also writes its own id and its
+siblings' ids to the shared `gfs_known_gfs_ids` table and accepts any id
+seen there in the last 400 days, so a household pinned to an alloc that
+has since gone keeps claiming. **Retiring a node or changing an id still
+needs `instance_id_aliases`** on the remaining nodes: the table only knows
+ids that were live while this release ran, and `/gfs/info` / the rest of
+the protocol rely on the aliases — the gfs-cluster demo checks it (step 3k). A
 freshly started alloc learns a sibling's id from that sibling's first
 HELLO / heartbeat (≤ 30 s); until then a claim bound to it is refused like a
 wrong key and the household retries. Still

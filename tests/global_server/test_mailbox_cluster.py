@@ -99,7 +99,7 @@ async def _wait(predicate, timeout: float = 5.0) -> None:
 
 async def test_register_on_a_claim_on_b_live_frames_posted_on_a(nodes):
     a, b, session = nodes
-    keys = derive_mailbox_keys(b"\x05" * 32, "space-x", 0)
+    keys = derive_mailbox_keys(b"\x05" * 32, GFS_ID, "space-x", 0)
     await register_mailbox(session, _url(a), keys, GFS_ID)
     async with MailboxClaim(session, _url(b), keys, GFS_ID) as claim:
         assert b.app[gfs_mailbox_ws_registry_key].is_connected(keys.mailbox_id)
@@ -119,7 +119,7 @@ async def test_register_on_a_claim_on_b_live_frames_posted_on_a(nodes):
 
 async def test_queued_while_offline_then_drained_on_a_claim_on_b(nodes):
     a, b, session = nodes
-    keys = derive_mailbox_keys(b"\x06" * 32, "space-y", 2)
+    keys = derive_mailbox_keys(b"\x06" * 32, GFS_ID, "space-y", 2)
     await register_mailbox(session, _url(a), keys, GFS_ID)
     media = _media(keys.mailbox_id, 4)
     await _post(session, a, json={"to_instance": keys.mailbox_id, "sealed": SEALED})

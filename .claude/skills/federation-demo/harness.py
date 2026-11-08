@@ -1373,7 +1373,7 @@ def _gfs_cluster_mailboxes(urls: list[str]) -> None:
     if code != 200 or "envelope_mailbox" not in caps:
         raise SystemExit(f"gfs-cluster: /gfs/info has no envelope_mailbox → {code}")
     gfs_id = info["gfs_instance_id"]
-    keys = derive_mailbox_keys(new_mailbox_root(), "demo-space", 0)
+    keys = derive_mailbox_keys(new_mailbox_root(), gfs_id, "demo-space", 0)
     sealed = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "bWFpbGJveA"}
 
     async def _post(http: aiohttp.ClientSession, *, json=None, data=None) -> None:
@@ -1494,7 +1494,7 @@ def _gfs_cluster_mailbox_other_id(all_urls: list[str]) -> None:
         else:
             raise SystemExit("gfs-cluster: the extra node never joined the cluster")
         time.sleep(2.0)
-        keys = derive_mailbox_keys(new_mailbox_root(), "demo-space-x", 0)
+        keys = derive_mailbox_keys(new_mailbox_root(), id_0, "demo-space-x", 0)
         sealed = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "b3RoZXItaWQ"}
 
         async def _claim_when_known(http):

@@ -260,7 +260,7 @@ class EnvelopeMailboxConfig:
     * ``mailbox_max_new_per_day`` — NEW mailboxes the whole server takes per
       UTC day (cluster-wide: counted in the shared table).
     * ``mailbox_max_sockets_per_ip`` — claim sockets one client address may
-      hold open at once (per node share; ×4 per /56, ×16 per /48).
+      hold open at once (per node share; ×16 per /56, ×256 per /48).
     * ``mailbox_queue_max_per_recipient`` / ``mailbox_queue_bytes_per_recipient``
       — queued envelopes for ONE offline mailbox (rows / bytes, tail-drop);
       far below a household's (2000 / 64 MiB): ids are free to mint.

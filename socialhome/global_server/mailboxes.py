@@ -80,7 +80,17 @@ MAILBOX_NONCE_MAX: int = 100_000
 #: One UTC day — the stored timestamp granularity and the cap window.
 DAY_SECONDS: int = 86_400
 #: How much more a /56 and a /48 may hold than one /64.
-PREFIX_MULTIPLIERS: tuple[tuple[int, int], ...] = ((64, 1), (56, 4), (48, 16))
+#: Wide on purpose (a home gets a /56, an organisation a /48): the
+#: supernet caps stop one network from minting through many /64s, without
+#: letting a noisy neighbour in the same /48 exhaust everybody else's room.
+#: With the defaults a /56 may register 3 200 and a /48 51 200 a day — the
+#: server-wide ``mailbox_max_new_per_day`` binds first.
+PREFIX_MULTIPLIERS: tuple[tuple[int, int], ...] = ((64, 1), (56, 16), (48, 256))
+#: How long a GFS id this cluster once served stays accepted for a
+#: registration / claim bound to it (``gfs_known_gfs_ids``).
+KNOWN_GFS_ID_TTL_DAYS: int = 400
+#: How often the accepted ids are re-read from (and written to) the table.
+KNOWN_GFS_ID_REFRESH_S: float = 60.0
 #: Count-min sketch shape: 4 rows × 65 536 counters (1 MiB as uint32).
 SKETCH_DEPTH: int = 4
 SKETCH_WIDTH: int = 1 << 16
@@ -155,6 +165,9 @@ class GfsMailboxService:
         "_cfg",
         "_clock",
         "_gfs_instance_id",
+        "_ids_at",
+        "_ids_cache",
+        "_ids_written",
         "_new_day",
         "_new_sketch",
         "_nodes",
@@ -182,6 +195,11 @@ class GfsMailboxService:
         #: they ARE this GFS, so a mailbox key bound to one of their ids is
         #: bound to us (a cluster whose nodes still serve different ids).
         self._siblings = sibling_ids
+        #: Accepted ids as last read from ``gfs_known_gfs_ids``, and when.
+        self._ids_cache: frozenset[str] = frozenset()
+        self._ids_at = -KNOWN_GFS_ID_REFRESH_S - 1.0
+        #: id → the day this node last wrote it (one write per id per day).
+        self._ids_written: dict[str, int] = {}
         self._cfg = config
         self._nodes = nodes
         self._clock = clock
@@ -204,13 +222,30 @@ class GfsMailboxService:
         """This server's public instance id (sent in the challenge)."""
         return self._gfs_instance_id
 
-    def accepted_gfs_ids(self) -> frozenset[str]:
+    async def accepted_gfs_ids(self) -> frozenset[str]:
         """Every GFS id a signed registration / claim may name: ours, our
-        ``instance_id_aliases`` and the ids our shared-key siblings serve."""
-        ids = {self._gfs_instance_id, *self._aliases}
+        ``instance_id_aliases``, the ids our shared-key siblings serve now —
+        and every id this cluster served in the last
+        :data:`KNOWN_GFS_ID_TTL_DAYS` days (``gfs_known_gfs_ids`` in the
+        shared DB), so a household pinned to a retired alloc's id can still
+        claim. Each node writes its own id and its live siblings' (verified
+        under our identity key) at most once a day per id."""
+        live = {self._gfs_instance_id, *self._aliases}
         if self._siblings is not None:
-            ids.update(i for i in self._siblings() if isinstance(i, str) and i)
-        return frozenset(ids)
+            live.update(i for i in self._siblings() if isinstance(i, str) and i)
+        now = self._clock()
+        if now - self._ids_at >= KNOWN_GFS_ID_REFRESH_S or not live <= self._ids_cache:
+            today = day_floor(now)
+            fresh = {i for i in live if self._ids_written.get(i) != today}
+            if fresh:
+                await self._repo.remember_gfs_ids(fresh, day=today)
+                for i in fresh:
+                    self._ids_written[i] = today
+            since = today - KNOWN_GFS_ID_TTL_DAYS * DAY_SECONDS
+            known = await self._repo.known_gfs_ids(since_day=since)
+            self._ids_cache = frozenset(known | live)
+            self._ids_at = now
+        return self._ids_cache | live
 
     def capability(self) -> dict | None:
         """The signed ``/gfs/info`` ``envelope_mailbox`` entry, ``None`` off."""
@@ -246,7 +281,7 @@ class GfsMailboxService:
         if body.get("mailbox_id") != mailbox_id:
             raise MailboxRefused(400, "mailbox_id_mismatch")
         gfs_id = body.get("gfs_instance_id")
-        if not isinstance(gfs_id, str) or gfs_id not in self.accepted_gfs_ids():
+        if not isinstance(gfs_id, str) or gfs_id not in await self.accepted_gfs_ids():
             raise MailboxRefused(403, "wrong_gfs")
         ts = body.get("ts")
         nonce = body.get("nonce")
@@ -273,21 +308,30 @@ class GfsMailboxService:
                 raise MailboxRefused(409, "id_in_use")
             return mailbox_id
         today = day_floor(now)
-        if (
-            await self._repo.count_created_since(today)
-            >= self._cfg.mailbox_max_new_per_day
-        ):
-            raise MailboxRefused(429, "server_mailbox_cap")
-        if not self._count_new(client_bucket, now):
+        scopes = self._count_new(client_bucket, now)
+        if scopes is None:
             raise MailboxRefused(429, "mailbox_cap")
-        outcome = await self._repo.register(mailbox_id, sign_pk, now=today)
+        # The server-wide daily cap is counted in the insert transaction,
+        # so concurrent registrations on every node can't overshoot it.
+        outcome = await self._repo.register(
+            mailbox_id,
+            sign_pk,
+            now=today,
+            max_new_today=self._cfg.mailbox_max_new_per_day,
+        )
+        if outcome in ("collision", "server_cap"):
+            for key in scopes:  # nothing was created: give the count back
+                self._new_sketch.add(key, -1)
         if outcome == "collision":
             raise MailboxRefused(409, "id_in_use")
+        if outcome == "server_cap":
+            raise MailboxRefused(429, "server_mailbox_cap")
         return mailbox_id
 
-    def _count_new(self, bucket: str, now: float) -> bool:
-        """Count one new mailbox against every scope of *bucket*; ``False``
-        (nothing counted) when any scope is at its share for today."""
+    def _count_new(self, bucket: str, now: float) -> list[str] | None:
+        """Count one new mailbox against every scope of *bucket*: the scope
+        keys counted, or ``None`` (nothing counted) when any scope is at its
+        share for today."""
         day = day_floor(now)
         if day != self._new_day:
             self._new_sketch.clear()
@@ -296,10 +340,11 @@ class GfsMailboxService:
         base = self._cfg.mailbox_max_per_ip
         for key, mult in scopes:
             if self._new_sketch.estimate(key) >= self._share(base * mult):
-                return False
-        for key, _mult in scopes:
+                return None
+        keys = [key for key, _mult in scopes]
+        for key in keys:
             self._new_sketch.add(key)
-        return True
+        return keys
 
     def _spend_nonce(self, key: str, now: float) -> bool:
         """Record *key*; ``False`` when it was already spent."""
@@ -352,7 +397,7 @@ class GfsMailboxService:
         except InvalidMailboxField:
             return None
         box = await self._repo.get(mailbox_id)
-        ours = gfs_id in self.accepted_gfs_ids()
+        ours = gfs_id in await self.accepted_gfs_ids()
         key = box.sign_pk if box is not None and ours else _DUMMY_KEY
         verified = sig is not None and crypto.verify_ed25519(key, signed, sig)
         if box is None or not ours or not verified:

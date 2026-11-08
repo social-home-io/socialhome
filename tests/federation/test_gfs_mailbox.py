@@ -41,14 +41,14 @@ SEALED = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "Y2lwaGVy"}
 
 
 def test_keys_are_deterministic_per_space_and_gen():
-    a = derive_mailbox_keys(ROOT, "space-1", 0)
-    assert a == derive_mailbox_keys(ROOT, "space-1", 0)
+    a = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
+    assert a == derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
     assert a.mailbox_id == derive_mailbox_id(a.sign_public)
     assert INSTANCE_ID_RE.fullmatch(a.mailbox_id)
     others = [
-        derive_mailbox_keys(ROOT, "space-2", 0),
-        derive_mailbox_keys(ROOT, "space-1", 1),
-        derive_mailbox_keys(b"\x09" * 32, "space-1", 0),
+        derive_mailbox_keys(ROOT, GFS_ID, "space-2", 0),
+        derive_mailbox_keys(ROOT, GFS_ID, "space-1", 1),
+        derive_mailbox_keys(b"\x09" * 32, GFS_ID, "space-1", 0),
     ]
     for other in others:
         assert other.mailbox_id != a.mailbox_id
@@ -60,19 +60,21 @@ def test_keys_are_deterministic_per_space_and_gen():
 def test_a_mailbox_root_is_a_fresh_32_byte_secret():
     one, two = new_mailbox_root(), new_mailbox_root()
     assert len(one) == len(two) == 32 and one != two
-    assert derive_mailbox_keys(one, "s", 0) != derive_mailbox_keys(two, "s", 0)
+    assert derive_mailbox_keys(one, GFS_ID, "s", 0) != derive_mailbox_keys(
+        two, GFS_ID, "s", 0
+    )
 
 
 def test_kem_key_is_a_working_x25519_pair():
-    a = derive_mailbox_keys(ROOT, "space-1", 0)
-    b = derive_mailbox_keys(ROOT, "space-2", 0)
+    a = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
+    b = derive_mailbox_keys(ROOT, GFS_ID, "space-2", 0)
     assert x25519_exchange(a.kem_private, b.kem_public) == x25519_exchange(
         b.kem_private, a.kem_public
     )
 
 
 def test_repr_never_shows_the_secrets():
-    keys = derive_mailbox_keys(ROOT, "space-1", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
     text = repr(keys)
     assert keys.sign_seed.hex() not in text and str(keys.sign_seed) not in text
     assert keys.mailbox_id not in text
@@ -90,11 +92,11 @@ def test_repr_never_shows_the_secrets():
 )
 def test_derivation_refuses_bad_input(seed, space, gen):
     with pytest.raises(ValueError):
-        derive_mailbox_keys(seed, space, gen)
+        derive_mailbox_keys(seed, GFS_ID, space, gen)
 
 
 def test_register_body_carries_the_suite_tag():
-    body = build_register_body(derive_mailbox_keys(ROOT, "s", 0), GFS_ID)
+    body = build_register_body(derive_mailbox_keys(ROOT, GFS_ID, "s", 0), GFS_ID)
     assert body["sig_suite"] == "ed25519"
 
 
@@ -130,7 +132,7 @@ async def _settle(app) -> None:
 
 async def test_register_claim_and_receive_queued_and_live_frames(gfs):
     server, session, url = gfs
-    keys = derive_mailbox_keys(ROOT, "space-1", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
     assert await register_mailbox(session, url, keys, GFS_ID) == keys.mailbox_id
     # Idempotent — a household may re-register at every start.
     assert await register_mailbox(session, url, keys, GFS_ID) == keys.mailbox_id
@@ -158,7 +160,7 @@ async def test_register_claim_and_receive_queued_and_live_frames(gfs):
 
 async def test_claim_of_an_unregistered_mailbox_is_refused(gfs):
     _server, session, url = gfs
-    keys = derive_mailbox_keys(ROOT, "never-registered", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "never-registered", 0)
     with pytest.raises(MailboxClaimError, match="4401"):
         async with MailboxClaim(session, url, keys, GFS_ID):
             pass
@@ -169,7 +171,7 @@ async def test_a_claim_signed_for_another_gfs_id_is_refused(gfs):
     does not answer to it refuses (4401) — the id the challenge names is
     never what gets signed."""
     _server, session, url = gfs
-    keys = derive_mailbox_keys(ROOT, "space-1", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
     await register_mailbox(session, url, keys, GFS_ID)
     with pytest.raises(MailboxClaimError, match="4401"):
         async with MailboxClaim(session, url, keys, "some-other-gfs"):
@@ -178,7 +180,7 @@ async def test_a_claim_signed_for_another_gfs_id_is_refused(gfs):
 
 async def test_register_refusal_raises_with_the_error_code(gfs):
     _server, session, url = gfs
-    keys = derive_mailbox_keys(ROOT, "space-1", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
     with pytest.raises(MailboxRegisterError) as err:
         await register_mailbox(session, url, keys, "some-other-gfs")
     assert (err.value.status, err.value.error) == (403, "wrong_gfs")
@@ -186,7 +188,7 @@ async def test_register_refusal_raises_with_the_error_code(gfs):
 
 async def test_iterating_a_claim_ends_when_the_server_closes(gfs):
     server, session, url = gfs
-    keys = derive_mailbox_keys(ROOT, "space-1", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
     await register_mailbox(session, url, keys, GFS_ID)
     async with session.post(
         url + "/gfs/envelope", json={"to_instance": keys.mailbox_id, "sealed": SEALED}
@@ -223,7 +225,7 @@ async def test_a_household_pinned_to_an_alias_registers_and_claims(tmp_dir):
     try:
         async with aiohttp.ClientSession() as session:
             url = str(server.make_url("")).rstrip("/")
-            keys = derive_mailbox_keys(ROOT, "space-9", 0)
+            keys = derive_mailbox_keys(ROOT, GFS_ID, "space-9", 0)
             await register_mailbox(session, url, keys, GFS_ID)
             async with MailboxClaim(session, url, keys, GFS_ID) as claim:
                 assert claim is not None
@@ -233,7 +235,7 @@ async def test_a_household_pinned_to_an_alias_registers_and_claims(tmp_dir):
 
 async def test_a_claim_entered_by_hand_closes_with_aclosing(gfs):
     _server, session, url = gfs
-    keys = derive_mailbox_keys(ROOT, "space-a", 0)
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "space-a", 0)
     await register_mailbox(session, url, keys, GFS_ID)
     claim = MailboxClaim(session, url, keys, GFS_ID)
     await claim.__aenter__()

@@ -1046,17 +1046,16 @@ class GfsEnvelopeRelay:
             **kind,
         )
         if not queued and reaction:
+            # No target id: a subscriber may be an anonymous mailbox (PR 2).
             log.info(
-                "gfs.envelope: no room for a queued reaction for %s beside its "
-                "moments and space items — dropped",
-                target,
+                "gfs.envelope: no room for a queued reaction beside a recipient's "
+                "moments and space items — dropped"
             )
             return False
         if not queued:
             log.warning(
-                "gfs.envelope: a relay frame for %s exceeds the relay queue "
-                "caps on its own — not queued",
-                target,
+                "gfs.envelope: a relay frame exceeds the relay queue caps on "
+                "its own — not queued"
             )
             return False
         await self._after_enqueue(target)

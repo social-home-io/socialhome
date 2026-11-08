@@ -429,8 +429,10 @@ signed `/gfs/info` as `envelope_mailbox: {"sig_suites": ["ed25519"],
 Ed25519 claim key with HKDF-SHA256 from its **mailbox root** — a dedicated
 32-byte secret generated once and stored under the household KEK (wired in
 PR 2), not the key-wrap seed (salt `sh-mbx-v1`, info
-`sh-mbx-kem:v1|<space>|<gen>` / `sh-mbx-sign:v1|<space>|<gen>`), so beside
-the root only `gen` needs storing. `mailbox_id = base32(SHA-256("sh-mbx-v1" ‖
+`sh-mbx-kem:v1|<gfs id>|<space>|<gen>` / `sh-mbx-sign:v1|<gfs id>|<space>|<gen>`),
+so beside the root only `gen` (and the GFS id pinned at mint time) needs
+storing. With the GFS id in the derivation, two GFSs serving the same
+global space get unrelated mailbox ids for the same household. `mailbox_id = base32(SHA-256("sh-mbx-v1" ‖
 sign_pk))[:32]` — the shape of an instance id, so a JSON envelope's
 `to_instance` and a binary `\x00SHR` frame's recipient field carry it
 unchanged, and the prefix keeps it apart from the instance id of the same
@@ -450,8 +452,8 @@ holds (`409 id_in_use`, atomically with the insert — and `/gfs/register`
 in turn only takes an instance id derived from its key, never a mailbox's,
 never moving a row to another key) and pins the key on first use;
 registering again is a no-op. Limits: 30 / min per address, then
-`mailbox_max_per_ip` (200) new mailboxes per UTC day per /64 (×4 per /56,
-×16 per /48) in salted count-min sketches (no address kept, nothing to
+`mailbox_max_per_ip` (200) new mailboxes per UTC day per /64 (×16 per /56,
+×256 per /48) in salted count-min sketches (no address kept, nothing to
 evict), and `mailbox_max_new_per_day` (20 000) server-wide.
 
 **Claim** — `GET /gfs/mailbox/ws`, a socket of its own, never the identified
@@ -482,19 +484,38 @@ queued frames by the maintenance loop; a claim socket held open re-stamps
 its day once a day, so it is never swept while connected.
 
 **Queues: a pool of their own.** Mailbox ids are free to mint, so their
-frames never share room with households'. Per mailbox: 200 envelopes /
-4 MiB and 8 MiB of media (households: 2 000 / 64 MiB and 16 MiB);
-server-wide: 256 MiB of mailbox envelopes (room made by evicting the
-oldest envelope of the biggest OTHER mailbox, never a household's) and
-256 MiB of mailbox media (tail-drop); households' envelopes have their own
-1 GiB total (fair-share eviction among households) beside their 1 GiB
-media total. Worst-case disk for queued relay frames is therefore bounded
-at 1 GiB + 1 GiB (households) + 0.25 + 0.25 GiB (mailboxes) + 256 MiB
-(member relay items) ≈ 2.75 GiB, whatever the number of ids. A flood needs
-valid mailboxes (≤ 20 000 new a day server-wide, ≤ 200 per address) and
-only ever pushes out other mailboxes' bytes, biggest holder first. Cost of
-the cap itself: one `SUM(size_bytes)` over the pool's rows per queued
-envelope (only when the recipient is offline).
+frames never share room with households' (each queued row carries its
+`pool`). Per mailbox: 200 envelopes / 4 MiB and 8 MiB of media
+(households: 2 000 / 64 MiB and 16 MiB). Server-wide:
+
+- **households' envelopes: 1 GiB, tail-drop.** No eviction: anyone can post
+  to an offline id, so evicting another household's envelopes to make room
+  would be an anonymous delete primitive (the reason the per-recipient caps
+  tail-drop too).
+- **mailboxes' envelopes: 256 MiB, ranked eviction above a floor.** A
+  victim is picked by rank — never claimed, then first registered today,
+  then established — and only from a rank no better than the writer's, so
+  sybils minted today never evict an established mailbox; within the
+  writer's rank only a holder bigger than the writer gives up its oldest
+  envelope. Every mailbox keeps a non-evictable floor (20 envelopes /
+  64 KiB). No victim → tail-drop.
+- media: households 1 GiB, mailboxes 256 MiB, both tail-drop.
+
+Worst-case disk for queued relay frames is therefore bounded at 1 + 1 GiB
+(households) + 0.25 + 0.25 GiB (mailboxes) + 256 MiB (member relay items)
+≈ 2.75 GiB, whatever the number of ids. The pool totals are running
+counters (`gfs_queue_totals`, kept by triggers on every insert and delete),
+so a cap check reads one row, never scans the pool under the write lock;
+only a full mailbox pool runs the victim pick (a grouped read of the
+mailbox pool).
+
+**Interim backstop — anonymous tickets follow.** Today a flood of mailboxes
+is bounded by the per-address caps and the server-wide
+`mailbox_max_new_per_day` (20 000, counted in the insert transaction). The
+owner decided on anonymous, blind-signed registration tickets (a daily
+batch per registered household over its `/gfs/ws`, Privacy Pass style,
+unlinkable; a registration spends one) — a separate follow-up PR that lands
+before redesign PR 2.
 
 ```mermaid
 sequenceDiagram
@@ -502,7 +523,7 @@ sequenceDiagram
     participant A as GFS node A
     participant B as GFS node B
     participant S as Sender household
-    H->>H: keys = HKDF(mailbox root, space, gen); id = b32(SHA-256("sh-mbx-v1"‖sign_pk))[:32]
+    H->>H: keys = HKDF(mailbox root, gfs id, space, gen); id = b32(SHA-256("sh-mbx-v1"‖sign_pk))[:32]
     H->>A: POST /gfs/mailbox/register {sign_pk, id, gfs_instance_id, ts, nonce, sig}
     A->>A: verify PoP, nonce, id ≠ instance → pin key (gfs_mailboxes)
     A-->>H: 200 registered
