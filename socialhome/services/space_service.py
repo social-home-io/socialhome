@@ -58,6 +58,7 @@ from ..domain.errors import (
     TierChangeRequiredError,
     WrongTypeError,
 )
+from ..federation.gfs_join_request import APPROVAL_TOKEN_TTL, unverified_names
 from ..federation.host_equivalence import acts_as_host
 from ..federation.invite_code import (
     build_invite_code,
@@ -83,6 +84,7 @@ from ..space_owner_statement import (
 if TYPE_CHECKING:
     import pathlib
 
+    from ..federation.gfs_join_request import GfsJoinRequestCoordinator
     from ..federation.invite_bootstrap import InviteBootstrapHint
     from ..federation.route_discovery import RouteDiscoveryService
     from ..federation.routed_envelope import SpaceRoutedHandler
@@ -450,6 +452,7 @@ class SpaceService(
         "_federation_repo",
         "_gallery",
         "_gfs",
+        "_gfs_join",
         "_gfs_mirror",
         "_gfs_selection",
         "_icons",
@@ -542,6 +545,9 @@ class SpaceService(
         self._federation = None
         self._remote_members = None
         self._redeem_coordinator = None
+        #: "Ask to join" through the GFS (v_84) — both ends; unwired, an
+        #: unpaired host answers ``NOT_PAIRED`` as before.
+        self._gfs_join: GfsJoinRequestCoordinator | None = None
         self._invite_forwarder = None
         self._space_crypto = None
         # Optional: lets ``dissolve_space`` unlink native gallery uploads
@@ -759,6 +765,21 @@ class SpaceService(
         .InviteLinkForwardCoordinator`). Without it a member household's
         admin cannot mint links for a space hosted elsewhere."""
         self._invite_forwarder = forwarder
+
+    def attach_gfs_join_requests(self, coordinator: GfsJoinRequestCoordinator) -> None:
+        """Wire "Ask to join" through the GFS (v_84): a request to a global
+        space whose host we never paired with rides the GFS relay sealed,
+        and our answer to such a request goes back the same way. The
+        coordinator seats an approved person through our redeem."""
+        self._gfs_join = coordinator
+        coordinator.attach_redeem(self.redeem_invite_token)
+
+    async def list_joining_space_ids(self, user_id: str) -> list[str]:
+        """Spaces *user_id* asked to join through the GFS whose host
+        approved and whose seat is still being made ("approved, joining…")."""
+        if self._gfs_join is None:
+            return []
+        return await self._gfs_join.joining_space_ids(user_id)
 
     def attach_redeem_coordinator(self, coordinator) -> None:
         """Wire the §D2 cross-instance invite-token redeem driver.
@@ -7365,6 +7386,13 @@ class SpaceService(
                 if user is not None:
                     name = user.display_name
             enriched["display_name"] = name
+            # Asked through the GFS (v_84): the names the applicant sent,
+            # marked as such — nobody vouched for them.
+            names = unverified_names(row)
+            enriched.pop("gfs_relay", None)
+            enriched["via_gfs"] = names is not None
+            if names is not None:
+                enriched["unverified_name"], enriched["unverified_household"] = names
             out.append(enriched)
         return out
 
@@ -7551,26 +7579,44 @@ class SpaceService(
             # federate it back; the applicant's household consumes via
             # the existing POST /api/spaces/join path.
             assert self._federation is not None
-            expires = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+            # Asked through the GFS (v_84): the answer may wait in the GFS
+            # queue while the applicant is offline, and the applicant then
+            # retries its redeem — so its token lives as long as both.
+            via_gfs = bool(row.get("gfs_relay")) and self._gfs_join is not None
+            ttl = APPROVAL_TOKEN_TTL if via_gfs else timedelta(minutes=5)
+            expires = (datetime.now(UTC) + ttl).isoformat()
             token = await self._spaces.create_invite_token(
                 row["space_id"],
                 created_by=actor.user_id,
                 uses=1,
                 expires_at=expires,
+                # Redeemable by the approved household and person only — an
+                # approval is not a link to pass on.
+                bound_instance_id=str(remote_instance),
+                bound_user_id=str(row["user_id"]),
             )
-            # Direct when paired, else over the mesh (sealed end to end): an
-            # applicant whose request came from a link redeem or an invite
-            # accept may not be paired with us.
-            await self._federation.send_with_mesh_fallback(
-                to_instance_id=remote_instance,
-                event_type=FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
-                payload={
-                    "request_id": request_id,
-                    "space_id": row["space_id"],
-                    "invite_token": token,
-                    "reviewed_by": actor.user_id,
-                },
-            )
+            if via_gfs:
+                assert self._gfs_join is not None
+                await self._gfs_join.send_answer(
+                    row,
+                    answer="approved",
+                    invite_token=token,
+                    token_expires_at=expires,
+                )
+            else:
+                # Direct when paired, else over the mesh (sealed end to end):
+                # an applicant whose request came from a link redeem or an
+                # invite accept may not be paired with us.
+                await self._federation.send_with_mesh_fallback(
+                    to_instance_id=remote_instance,
+                    event_type=FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
+                    payload={
+                        "request_id": request_id,
+                        "space_id": row["space_id"],
+                        "invite_token": token,
+                        "reviewed_by": actor.user_id,
+                    },
+                )
             await self._bus.publish(
                 SpaceJoinApproved(
                     space_id=row["space_id"],
@@ -7621,7 +7667,10 @@ class SpaceService(
         )
         await self._answer_join_request(request_id, "denied", reviewed_by=actor.user_id)
         remote_instance = r.get("remote_applicant_instance_id")
-        if remote_instance and self._federation is not None:
+        if remote_instance and r.get("gfs_relay") and self._gfs_join is not None:
+            # Asked through the GFS (v_84): answered the same way.
+            await self._gfs_join.send_answer(r, answer="denied")
+        elif remote_instance and self._federation is not None:
             await self._federation.send_with_mesh_fallback(
                 to_instance_id=remote_instance,
                 event_type=FederationEventType.SPACE_JOIN_REQUEST_DENIED,
@@ -7639,6 +7688,37 @@ class SpaceService(
                 denied_by=actor.user_id,
             )
         )
+
+    async def decline_gfs_join_requests(
+        self, space_id: str, *, actor_username: str
+    ) -> int:
+        """Decline every pending request to *space_id* that came through
+        the GFS (v_84) — anyone on a GFS can ask, so an admin clears a flood
+        in one go. Each is declined like one by one (the applicant is told).
+        Requests of this household's people or of a paired household are
+        left alone. Admin / owner only. Returns how many."""
+        space = await self._require_space(space_id)
+        await self._require_admin_or_owner(space, actor_username)
+        declined = 0
+        for row in await self._spaces.list_pending_gfs_join_requests(space_id=space_id):
+            try:
+                await self.deny_join_request(
+                    str(row["id"]), actor_username=actor_username, space_id=space_id
+                )
+            except JoinRequestHandledError:
+                continue  # answered meanwhile (another admin)
+            declined += 1
+        return declined
+
+    async def expire_due_join_requests(self) -> int:
+        """Mark pending join requests past ``expires_at`` expired (both the
+        host's and our own outgoing ones). Frees their slot under the cap of
+        requests from the GFS (v_84). Returns how many."""
+        expired = 0
+        for row in await self._spaces.list_expired_join_requests():
+            if await self._spaces.answer_join_request(str(row["id"]), "expired"):
+                expired += 1
+        return expired
 
     async def request_join_remote(
         self,
@@ -7663,7 +7743,27 @@ class SpaceService(
         if self._federation is None or self._federation_repo is None:
             raise RuntimeError("federation not attached")
         peer = await self._federation_repo.get_instance(host_instance_id)
-        if peer is None or peer.status is not PairingStatus.CONFIRMED:
+        if (
+            peer is None
+            or peer.status is not PairingStatus.CONFIRMED
+            # A space-session seat (another space of this host, joined by
+            # link or through the GFS) is no pairing: the host refuses a
+            # SPACE_JOIN_REQUEST from it.
+            or peer.source is InstanceSource.SPACE_SESSION
+        ):
+            # Not paired: a global space a GFS of ours lists under this very
+            # host is asked through that GFS, sealed (v_84). Anything else
+            # still needs a pairing.
+            if (
+                self._gfs_join is not None
+                and await self._gfs_join.host_of_listing(space_id) == host_instance_id
+            ):
+                return await self._gfs_join.request_join(
+                    space_id,
+                    applicant_user_id=applicant_user_id,
+                    host_instance_id=host_instance_id,
+                    message=message,
+                )
             raise HostNotPairedError()
         location = await join_location_for(
             self._federation_repo, share_location=share_location
@@ -7717,6 +7817,10 @@ class SpaceService(
         # seats locally). For a LOCAL approval (host None/self),
         # redeem_invite_token falls back to accept_invite_token.
         host = r.get("remote_applicant_instance_id")
+        if r.get("gfs_relay"):
+            # Asked through the GFS (v_84): its coordinator seats the person
+            # (and retries until the token expires) — not this handler.
+            return
         try:
             await self.redeem_invite_token(
                 invite_token,

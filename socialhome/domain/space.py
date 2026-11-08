@@ -1325,6 +1325,16 @@ class HostNotPairedError(CodedError, SpacePermissionError):
     detail = "host household is not a CONFIRMED peer — pair first"
 
 
+class HostNotReachableError(CodedError, SpacePermissionError):
+    """An "Ask to join" through the GFS could not reach the space's host:
+    no GFS of ours has its keys, they don't belong to the listed host, or
+    the relay refused the request."""
+
+    status = 503
+    code = "HOST_NOT_REACHABLE"
+    detail = "couldn't reach this space's household through the GFS — try again later"
+
+
 class AgeRestrictedError(CodedError, SpacePermissionError):
     """§CP.F1: a protected account below the space's minimum age."""
 
@@ -1367,7 +1377,9 @@ class JoinRequestHandledError(CodedError):
 #: is not paired with, an admin grant (only the owner decides), or a space
 #: with an age limit. Such a request is decided on the review page, which
 #: shows what the list can't (:func:`join_request_flags`).
-JOIN_REQUEST_FLAGS: frozenset[str] = frozenset({"edge", "unpaired", "admin", "age"})
+JOIN_REQUEST_FLAGS: frozenset[str] = frozenset(
+    {"edge", "unpaired", "gfs", "admin", "age"}
+)
 
 #: Where an approval of a join request came from: the one-tap button of
 #: the "Needs you" list, or the review page (the default).
@@ -1398,7 +1410,12 @@ def join_request_flags(
         flags.add("admin")
     if min_age:
         flags.add("age")
-    if request.get("remote_applicant_instance_id") and not household_paired:
+    if request.get("gfs_relay"):
+        # Asked through the GFS (v_84): the names it carries are the
+        # applicant's own word — decided on the review page, where they are
+        # marked "not verified".
+        flags.add("gfs")
+    elif request.get("remote_applicant_instance_id") and not household_paired:
         flags.add("unpaired")
     return tuple(sorted(flags))
 

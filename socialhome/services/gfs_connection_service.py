@@ -85,19 +85,12 @@ from ..domain.gfs_space_media import (
     SPACE_MEDIA_CAPABILITY,
 )
 from ..domain.gfs_space_media_on_demand import (
-    MEMBER_CLAIM_HEADER,
-    MEMBER_PULL_CAPABILITY_KEY,
-    MEMBER_PULL_ROUTE,
-    MEMBER_WRITER_EPOCH_HEADER,
-    MEMBER_WRITER_SIG_HEADER,
-    MEMBER_WRITER_SIG_SUITE_HEADER,
     ON_DEMAND_CAPABILITY_KEY,
     SERVE_INSTANCE_HEADER,
     SERVE_OP_DECLINE,
     SERVE_OP_SERVE,
     SERVE_SIG_HEADER,
     SERVE_TS_HEADER,
-    member_serve_signing_bytes,
     serve_signing_body,
 )
 from ..domain.media_constraints import (
@@ -113,7 +106,6 @@ from ..domain.space import (
 from ..domain.space_item import COMPRESSED_PAYLOAD_SUITES, PAYLOAD_SUITE_ZLIB_DICT1
 from ..domain.space_place import place_pin_of, place_pin_wire
 from ..domain.subscriber_accepts import OUR_ACCEPTS
-from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
 from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..gfs_proof import (
     PROOF_CAPABILITY,
@@ -128,7 +120,7 @@ from ..outbound_fetch import OutboundFetchRefused, open_pinned_session
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
-from ..writer_key import sign_with_writer_key
+from ..space_join_contact import sign_join_contact
 from .gfs_http import gfs_server_address
 from .gfs_publish_retry import (
     GfsPublish,
@@ -150,26 +142,14 @@ SPACE_MEDIA_PUT_TIMEOUT_S: float = 120.0
 #: larger (or malformed) value reads as "no on-demand support".
 MAX_ON_DEMAND_WAIT_S: int = 60
 
-#: Longest member pull hold a GFS may advertise (its ``on_demand
-#: .member_pull.hold_s``); a larger (or malformed) value reads as "no member
-#: fallback".
-MAX_MEMBER_PULL_HOLD_S: int = 60
 
-#: ``(max_blob_bytes, scopes, ttl_s, on_demand_wait_s, member_pull_hold_s)``.
-_SpaceMediaCap = tuple[int, frozenset[str], int | None, int | None, int | None]
-
-
-def _bounded_int(value: object, hi: int) -> int | None:
-    if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= hi:
-        return value
-    return None
-
-
-def _space_media_limit(caps: dict) -> _SpaceMediaCap | None:
-    """``(max_blob_bytes, scopes, ttl_s, on_demand_wait_s,
-    member_pull_hold_s)`` of a verified ``space_media`` capability entry
-    (the last three ``None`` when absent or malformed; the member pull only
-    with on demand), or ``None`` when the entry is absent / malformed."""
+def _space_media_limit(
+    caps: dict,
+) -> tuple[int, frozenset[str], int | None, int | None] | None:
+    """``(max_blob_bytes, scopes, ttl_s, on_demand_wait_s)`` of a verified
+    ``space_media`` capability entry (``ttl_s`` / ``on_demand_wait_s``
+    ``None`` when absent or malformed), or ``None`` when the entry is
+    absent / malformed."""
     entry = caps.get(SPACE_MEDIA_CAPABILITY)
     if not isinstance(entry, dict):
         return None
@@ -184,19 +164,15 @@ def _space_media_limit(caps: dict) -> _SpaceMediaCap | None:
         ttl if isinstance(ttl, int) and not isinstance(ttl, bool) and ttl > 0 else None
     )
     od = entry.get(ON_DEMAND_CAPABILITY_KEY)
-    wait_s = _bounded_int(
-        od.get("wait_s") if isinstance(od, dict) else None, MAX_ON_DEMAND_WAIT_S
-    )
-    member = od.get(MEMBER_PULL_CAPABILITY_KEY) if isinstance(od, dict) else None
-    hold_s = (
-        _bounded_int(
-            member.get("hold_s") if isinstance(member, dict) else None,
-            MAX_MEMBER_PULL_HOLD_S,
-        )
-        if wait_s is not None
+    wait = od.get("wait_s") if isinstance(od, dict) else None
+    wait_s = (
+        wait
+        if isinstance(wait, int)
+        and not isinstance(wait, bool)
+        and 0 < wait <= MAX_ON_DEMAND_WAIT_S
         else None
     )
-    return limit, frozenset(scopes) & MEDIA_SCOPES, ttl_s, wait_s, hold_s
+    return limit, frozenset(scopes) & MEDIA_SCOPES, ttl_s, wait_s
 
 
 #: Characters of a *remote-authored* error body that may be interpolated
@@ -447,11 +423,12 @@ class GfsConnectionService:
         "_icon_repo",
         "_info_failed_at",
         "_invite_links",
+        "_join_contact",
+        "_join_contact_keys",
         "_listing_failed_at",
         "_listing_proven_at",
         "_listing_seen",
         "_listing_sessions",
-        "_member_client",
         "_member_publish_strict",
         "_member_publish_trusted",
         "_member_servers",
@@ -510,11 +487,6 @@ class GfsConnectionService:
         # anonymous publish and link it back. No fallback to the shared
         # session: without it, nothing is published.
         self._publish_client = publish_client
-        # The member fallback's pulls and serves ride a session of their own
-        # with keep-alive OFF and no cookies: a fresh connection per request,
-        # so the GFS can't group one household's pulls for different spaces
-        # by connection, nor link them to other traffic of this household.
-        self._member_client: aiohttp.ClientSession | None = None
         # Attached lazily after construction (the space repo + identity
         # aren't available at the same wiring step as the GFS-connection
         # repo). When unset, ``publish_space`` falls back to a metadata-
@@ -589,7 +561,9 @@ class GfsConnectionService:
         # the server proved it takes, by connection. Uploads go only to a
         # server that proved it; absent = not proven (re-probed, never a
         # sticky no).
-        self._space_media: dict[str, _SpaceMediaCap] = {}
+        self._space_media: dict[
+            str, tuple[int, frozenset[str], int | None, int | None]
+        ] = {}
         # …and ``moment_reactions`` (v_68): the GFS takes a follower's sealed
         # reaction and pushes it to the author's household only.
         self._moment_reactions: dict[str, bool] = {}
@@ -600,6 +574,13 @@ class GfsConnectionService:
         # …and ``space_key_pull`` (#5b): the GFS takes a follower's
         # ``/gfs/spaces/{id}/key_request``. Asked only once proved.
         self._space_key_pull: dict[str, bool] = {}
+        # …and ``join_contact`` (v_84): the GFS serves a listing's
+        # authority-signed join contact. Sent only to a server that proved it.
+        self._join_contact: dict[str, bool] = {}
+        #: Our own published key-wrap key (hex) + its self-signature, for the
+        #: join contact a global space's listing carries
+        #: (:meth:`attach_join_contact_keys`). Empty: no contact is sent.
+        self._join_contact_keys: tuple[str, str] = ("", "")
         # …and ``space_item_followers`` (step 12): the GFS counts the
         # followers that cannot read a member's own item.
         self._space_item_followers: dict[str, bool] = {}
@@ -840,6 +821,7 @@ class GfsConnectionService:
             self._moment_reactions,
             self._moment_counts,
             self._space_key_pull,
+            self._join_contact,
             self._space_item_followers,
             self._payload_zlib1,
             self._payload_zlib1_dict1,
@@ -991,6 +973,14 @@ class GfsConnectionService:
         """Stop the GFS publish retry loop (app ``on_cleanup``)."""
         await self._publish_retry.stop()
 
+    def attach_join_contact_keys(
+        self, keywrap_public_key_hex: str, keywrap_sig: str
+    ) -> None:
+        """This household's published key-wrap key + its self-signature (the
+        same pair ``/gfs/register`` publishes), for the join contact a
+        global space's listing carries (v_84)."""
+        self._join_contact_keys = (keywrap_public_key_hex, keywrap_sig)
+
     def attach_publish_context(
         self,
         *,
@@ -1031,16 +1021,6 @@ class GfsConnectionService:
         """Provide the cookie-less publish session (``app._on_startup``)."""
         if self._publish_client is None:
             self._publish_client = session
-
-    def attach_member_session(self, session: aiohttp.ClientSession) -> None:
-        """Provide the member fallback's no-keep-alive, cookie-less session
-        (``app._on_startup``)."""
-        if self._member_client is None:
-            self._member_client = session
-
-    def member_client(self) -> aiohttp.ClientSession | None:
-        """The member fallback's session (app cleanup closes it)."""
-        return self._member_client
 
     def publish_client(self) -> aiohttp.ClientSession | None:
         """The cookie-less session ``/gfs/publish`` rides (app cleanup closes it)."""
@@ -2523,7 +2503,18 @@ class GfsConnectionService:
         ) and await self._signed_capability_supported(
             conn, "place_pin", self._place_pin
         )
-        body = await self._build_publish_body(space_id, with_place=with_place)
+        # v_84 — the owner's join contact goes only to a server that proved
+        # it folds the field into the signed bytes and serves it. Probed only
+        # for a space that would carry one, so an invite-only publish costs no
+        # extra ``/gfs/info`` round-trip.
+        with_contact = await self._wants_join_contact(
+            space_id
+        ) and await self._signed_capability_supported(
+            conn, "join_contact", self._join_contact
+        )
+        body = await self._build_publish_body(
+            space_id, with_place=with_place, with_contact=with_contact
+        )
         if "authority_cert" in body and not await self._signed_capability_supported(
             conn, "authority_rotation", self._authority_rotation
         ):
@@ -2533,7 +2524,10 @@ class GfsConnectionService:
             # the cert: it keeps the old pin, and we say so.
             self._warn_no_authority_rotation(conn)
             body = await self._build_publish_body(
-                space_id, with_cert=False, with_place=with_place
+                space_id,
+                with_cert=False,
+                with_place=with_place,
+                with_contact=with_contact,
             )
         client = self._client()
         publish_url = f"{conn.inbox_url}/gfs/spaces/{space_id}/publish"
@@ -2605,7 +2599,12 @@ class GfsConnectionService:
         return space is not None and place_pin_of(space) is not None
 
     async def _build_publish_body(
-        self, space_id: str, *, with_cert: bool = True, with_place: bool = False
+        self,
+        space_id: str,
+        *,
+        with_cert: bool = True,
+        with_place: bool = False,
+        with_contact: bool = False,
     ) -> dict:
         """Compose + sign the publish body.
 
@@ -2702,11 +2701,51 @@ class GfsConnectionService:
         pin = place_pin_of(space) if with_place else None
         if pin is not None:
             body["place"] = place_pin_wire(pin)
+        # v_84 — a space that takes requests lists the keys an "Ask to join"
+        # is sealed to, signed with the space authority key (the one the GFS
+        # pins), inside the signed body. A GFS cannot swap them.
+        contact = await self._join_contact_for(space) if with_contact else None
+        if contact is not None:
+            body["join_contact"] = contact
         canonical = canonical_bytes(body)
         body["signature"] = b64url_encode(
             sign_ed25519(self._own_signing_key, canonical),
         )
         return body
+
+    async def _wants_join_contact(self, space_id: str) -> bool:
+        """Would *space_id*'s listing carry a join contact? (Keys wired, a
+        space that takes requests.)"""
+        if not all(self._join_contact_keys) or self._space_repo is None:
+            return False
+        space = await self._space_repo.get(space_id)
+        return (
+            space is not None
+            and normalize_join_mode(getattr(space, "join_mode", None)) != "invite_only"
+        )
+
+    async def _join_contact_for(self, space) -> dict | None:
+        """The authority-signed join contact for *space*, or ``None`` (an
+        invite-only space, no key-wrap key wired, no space seed here)."""
+        keywrap_pk, keywrap_sig = self._join_contact_keys
+        if (
+            not keywrap_pk
+            or not keywrap_sig
+            or self._space_repo is None
+            or normalize_join_mode(getattr(space, "join_mode", None)) == "invite_only"
+        ):
+            return None
+        seed = await self._space_repo.get_space_seed(space.id)
+        if not seed:
+            return None
+        return sign_join_contact(
+            space_id=space.id,
+            instance_id=self._own_instance_id,
+            identity_pk=ed25519_public_key(self._own_signing_key).hex(),
+            keywrap_pk=keywrap_pk,
+            keywrap_sig=keywrap_sig,
+            space_seed=seed,
+        )
 
     async def _brand_colors(self, space_id: str) -> tuple[str, str]:
         """The space's (primary, accent) theme colours, or the defaults."""
@@ -3370,119 +3409,6 @@ class GfsConnectionService:
             await self.space_media_max_blob(conn)  # one probe on a cold miss
         cached = self._space_media.get(conn.id)
         return cached[3] if cached is not None else None
-
-    async def space_media_member_pull_hold(self, conn: GfsConnection) -> int | None:
-        """How long *conn*'s GFS holds a member pull open (its signed
-        ``space_media.on_demand.member_pull.hold_s``), or ``None`` when it
-        proved no member fallback — then this household never pulls there."""
-        if conn.id not in self._space_media:
-            await self.space_media_max_blob(conn)  # one probe on a cold miss
-        cached = self._space_media.get(conn.id)
-        return cached[4] if cached is not None else None
-
-    async def pull_space_media_wants(
-        self, conn: GfsConnection, body: dict, *, timeout_s: float
-    ) -> tuple[int, list]:
-        """``POST /gfs/media/member-pull`` — a member's anonymous pull for a
-        want of a listed space (*body*: the writer-key-signed
-        :class:`~socialhome.domain.gfs_space_media_on_demand
-        .MemberPullRequest` wire). Over the member session (no cookies, no
-        keep-alive: a fresh connection each time), only to a server this
-        household is registered on; nothing names this household.
-        ``(status, raw wants)`` — ``0`` when nothing was sent or on a
-        transport error; the wants (unparsed, the caller
-        validates) only on a 200."""
-        client = self._member_client
-        if client is None or not conn.inbox_url or not conn.registered:
-            return 0, []
-        url = f"{conn.inbox_url.rstrip('/')}{MEMBER_PULL_ROUTE}"
-        try:
-            async with client.post(
-                url,
-                json=body,
-                allow_redirects=False,
-                timeout=aiohttp.ClientTimeout(total=timeout_s),
-            ) as resp:
-                status = int(resp.status)
-                if status != 200:
-                    return status, []
-                data = await resp.json()
-        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
-            log.info("space media member pull from %s failed: %s", conn.inbox_url, exc)
-            return 0, []
-        wants = data.get("wants") if isinstance(data, dict) else None
-        return 200, wants if isinstance(wants, list) else []
-
-    async def serve_space_media_as_member(
-        self,
-        conn: GfsConnection,
-        ticket: str,
-        blob: bytes | None,
-        *,
-        space_id: str,
-        epoch: int,
-        writer_seed: bytes,
-        claim: str,
-        upload_auth: str | None = None,
-        decline_reason: str = "not_held",
-    ) -> int | None:
-        """Serve (``PUT /gfs/media/serve/{ticket}``) or decline (*blob*
-        ``None``) a want this household PULLED as a member of listed space
-        *space_id* — anonymously: signed by the space's writer group key of
-        *epoch* over the ticket, the operation, the scope and the pull's
-        *claim* secret, never by this household's key and never with
-        ``X-SH-Instance``; over the member session like the pull. The
-        same return contract as :meth:`serve_space_media`."""
-        client = self._member_client
-        if client is None or not conn.inbox_url or not conn.registered:
-            return None
-        base = f"{conn.inbox_url.rstrip('/')}/gfs/media/serve/{ticket}"
-        ts = int(time.time())
-        op = SERVE_OP_DECLINE if blob is None else SERVE_OP_SERVE
-        sig = sign_with_writer_key(
-            writer_seed,
-            member_serve_signing_bytes(
-                ticket, op, SCOPE_SPACE, space_id, epoch, ts, claim
-            ),
-        )
-        headers = {
-            MEMBER_WRITER_EPOCH_HEADER: str(epoch),
-            SERVE_TS_HEADER: str(ts),
-            MEMBER_WRITER_SIG_HEADER: sig,
-            MEMBER_WRITER_SIG_SUITE_HEADER: WRITER_KEY_SUITE_ED25519,
-            MEMBER_CLAIM_HEADER: claim,
-        }
-        try:
-            if blob is None:
-                async with client.post(
-                    f"{base}/decline",
-                    json={"reason": decline_reason},
-                    headers=headers,
-                    allow_redirects=False,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    return int(resp.status)
-            headers["Content-Type"] = "application/octet-stream"
-            if upload_auth:
-                headers[SPACE_MEDIA_AUTH_HEADER] = upload_auth
-            async with client.put(
-                base,
-                data=blob,
-                headers=headers,
-                allow_redirects=False,
-                timeout=aiohttp.ClientTimeout(total=SPACE_MEDIA_PUT_TIMEOUT_S),
-            ) as resp:
-                return int(resp.status)
-        except aiohttp.ClientConnectorError as exc:
-            log.warning(
-                "space media member serve to %s: no connection: %s", conn.inbox_url, exc
-            )
-            return None
-        except (aiohttp.ClientError, TimeoutError) as exc:
-            log.warning(
-                "space media member serve to %s failed: %s", conn.inbox_url, exc
-            )
-            return 0
 
     async def want_space_media(
         self,

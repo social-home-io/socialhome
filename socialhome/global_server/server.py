@@ -100,7 +100,6 @@ from .repositories import (
     SqliteGfsMomentMediaRepo,
     SqliteGfsSpaceEpochRepo,
     SqliteGfsSpaceMediaDemandRepo,
-    SqliteGfsSpaceMediaMemberWantRepo,
     SqliteGfsSpaceMediaRepo,
     SqliteGfsUserPictureRepo,
     SqliteGfsUserRegistrationRepo,
@@ -111,7 +110,6 @@ from .space_media import GfsSpaceMediaStore, SpaceMediaLimits
 from .space_media_auth import GfsSpaceMediaAuth, build_space_media_rate_limit
 from .space_media_on_demand import (
     GfsSpaceMediaOnDemand,
-    build_space_media_member_pull_rate_limit,
     build_space_media_wanted_rate_limit,
 )
 from .viewer_cors import install_viewer_cors
@@ -330,7 +328,6 @@ class GfsApp:
             moment_media=SqliteGfsMomentMediaRepo(db),
             space_media=SqliteGfsSpaceMediaRepo(db),
             space_media_demand=SqliteGfsSpaceMediaDemandRepo(db),
-            space_media_member_wants=SqliteGfsSpaceMediaMemberWantRepo(db),
             moment_delete_log=SqliteGfsMomentDeleteLogRepo(db),
             moment_public_pictures=SqliteGfsUserPictureRepo(db),
             envelope_queue=SqliteGfsEnvelopeQueueRepo(db),
@@ -380,9 +377,6 @@ class GfsApp:
             # v_83 — what leaves the cache is remembered for the on-demand
             # cache-vs-stream decision.
             demand=repos.space_media_demand,
-            # The member fallback's wants left by a node that died
-            # mid-session are pruned by the same sweep.
-            member_wants=repos.space_media_member_wants,
         )
         admin = GfsAdminService(
             fed_repo=repos.federation,
@@ -554,11 +548,6 @@ class GfsApp:
             fan_out=cluster_fan_out,
             ws_registry=ws_registry,
             route_tag=config.cluster_route_tag,
-            # The member fallback: wants shared by the cluster, offered to
-            # members who prove only the space's writer group key.
-            member_wants=repos.space_media_member_wants,
-            member_publish=member_publish,
-            addressee=addressee,
         )
         admin.attach_space_media_on_demand(space_media_on_demand)
         maintenance = GfsMaintenanceScheduler(
@@ -621,7 +610,6 @@ class GfsApp:
             build_channel_rate_limit(self.client_ip),
             build_space_media_rate_limit(self.client_ip, nodes=live_nodes),
             build_space_media_wanted_rate_limit(self.client_ip, nodes=live_nodes),
-            build_space_media_member_pull_rate_limit(self.client_ip, nodes=live_nodes),
         ]
         app = web.Application(middlewares=middlewares)
         # ``nosniff``, ``X-Frame-Options: SAMEORIGIN``, ``Referrer-Policy``

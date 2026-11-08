@@ -10988,6 +10988,13 @@ hr {
   flex-direction: column;
   gap: var(--sh-space-sm);
 }
+/* "Decline all N from the GFS" (v_84): above the list, never pushed off a
+   narrow phone. */
+.sh-join-requests__bulk {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 .sh-join-request {
   padding: var(--sh-space-md);
   background: var(--sh-bg);
@@ -14133,6 +14140,21 @@ a.sh-space-hero-members:focus-visible,
   line-height: 1.4;
   vertical-align: middle;
   white-space: nowrap;
+}
+/* "Via the GFS, not verified" (v_84): the name is the applicant's own word.
+   Muted, wraps on a narrow phone rather than pushing the buttons off. */
+.sh-join-gfs-chip {
+  display: inline-flex; align-items: center;
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: var(--sh-radius-full);
+  background: color-mix(in srgb, var(--sh-text-muted) 14%, transparent);
+  color: var(--sh-text);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 500;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 /* The consent line a join to another household's local community shows
    before it carries the household's approximate location. */

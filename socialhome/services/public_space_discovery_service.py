@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import aiohttp
@@ -24,6 +25,7 @@ from ..domain.space import (
     normalize_min_age,
 )
 from ..domain.space_place import parse_place_pin_wire
+from ..federation.join_contact_pin import candidate_from_listing, merge_pin
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.public_space_repo import (
     AbstractPublicSpaceRepo,
@@ -159,7 +161,14 @@ class PublicSpaceDiscoveryService:
             for listing in listings:
                 if await self._repo.is_instance_blocked(listing.instance_id):
                     continue
-                await self._repo.upsert(listing)
+                # v_84 — the host's join contact is pinned on first sight and
+                # refused when a listing later shows another authority key
+                # (``federation/join_contact_pin.py``).
+                held = await self._repo.get_pin(listing.space_id)
+                pin = merge_pin(held, listing.join_contact, space_id=listing.space_id)
+                if pin is not None and pin != held:
+                    await self._repo.set_pin(listing.space_id, pin)
+                await self._repo.upsert(replace(listing, join_contact=None))
             total += len(listings)
 
         # Purge stale cache rows.
@@ -313,6 +322,10 @@ class PublicSpaceDiscoveryService:
                         # publicly readable, so the SPA never offers a
                         # Subscribe button for a space nobody may read.
                         allow_subscribers=item.get("allow_subscribers") is True,
+                        # Unmerged: ``poll_once`` folds it into the pin.
+                        join_contact=candidate_from_listing(
+                            item, gfs_url=gfs_url.rstrip("/")
+                        ),
                     )
                 )
             except KeyError, TypeError, ValueError:

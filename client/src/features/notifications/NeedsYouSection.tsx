@@ -215,6 +215,7 @@ function JoinActions({ row, describedBy, onNavigate }: {
 const FLAG_KEYS: Record<string, string> = {
   edge: 'notifications.needs_you.flag.edge',
   unpaired: 'notifications.needs_you.flag.unpaired',
+  gfs: 'notifications.needs_you.flag.gfs',
   admin: 'notifications.needs_you.flag.admin',
   age: 'notifications.needs_you.flag.age',
 }

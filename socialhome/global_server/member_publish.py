@@ -644,28 +644,6 @@ class GfsMemberPublishService:
         ):
             raise PermissionError("writer key epoch is not open here")
 
-    async def writer_key_open(self, space_id: str) -> bool:
-        """Whether *space_id* has a writer group key pinned for an epoch
-        that is open here — i.e. whether its members can prove themselves
-        anonymously at all (the space media member fallback asks only
-        then)."""
-        strict = await self._epoch_repo.get_strict(space_id)
-        if strict is None:
-            return False
-        epochs = [
-            e
-            for e in (strict.writer_key_epoch, strict.writer_key_prev_epoch)
-            if e is not None and strict.writer_pk_for(e)
-        ]
-        if not epochs:
-            return False
-        state = await self._epoch_repo.get(space_id)
-        now = int(self._clock())
-        return state is not None and any(
-            state.admits(e, now=now, grace_s=MEMBER_PUBLISH_EPOCH_GRACE_S)
-            for e in epochs
-        )
-
     def _check_anon_ts(self, ts: str) -> None:
         try:
             parsed = datetime.fromisoformat(ts)

@@ -22,7 +22,7 @@
  * asks to join or follows, by the space's rules. The chosen chip lives in
  * the URL (``/spaces?discover=paired``), so Back and a shared link keep it.
  */
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { addBase } from '@/baseUrl'
@@ -44,7 +44,7 @@ import {
 import type { DirectoryEntry, GfsConnection, HouseholdSpaceRow } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
 import {
-  buildHouseholdEntries, discoverAction, discoverable, entryAreaVerdict, entryRadiusKm, hostLabel, requestSentToast,
+  approvalSeatsUs, buildHouseholdEntries, discoverAction, discoverable, entryAreaVerdict, entryRadiusKm, hostLabel, requestSentToast,
   joinCarriesLocation, joinModeWord, matchesTerm, withMembership, DISCOVER_SOURCES, type DiscoverAction,
   type DiscoverSource,
 } from './discover'
@@ -55,6 +55,10 @@ interface Props {
   seatedIds: Set<string>
   /** The chip in the URL (``?discover=…``). */
   source: DiscoverSource
+  /** The URL named the chip. Otherwise Discover lands on the first source
+   *  that lists something once loaded (Your household is often empty while
+   *  Global has spaces — the owner thought a listed space was missing). */
+  explicit?: boolean
   term: string
   /** The caller joined or followed something — re-read their spaces. */
   onChanged: () => void
@@ -75,14 +79,17 @@ async function loadDiscover(): Promise<{ lists: Lists; failed: Set<DiscoverSourc
     soft<DirectoryEntry[]>('paired', api.get('/api/peer_spaces'), []),
     soft<DirectoryEntry[]>('global', api.get('/api/public_spaces'), []),
     soft(null, api.get('/api/me/subscriptions'), { subscriptions: [] as MySubscription[] }),
-    soft(null, api.get('/api/me/join-requests'), { pending_space_ids: [] as string[] }),
+    soft(null, api.get('/api/me/join-requests'), {
+      pending_space_ids: [] as string[], joining_space_ids: [] as string[],
+    }),
     soft<GfsConnection[] | null>(null, api.get('/api/gfs/connections'), null),
   ])
   const subIds = new Set(((rawSubs as { subscriptions?: MySubscription[] }).subscriptions ?? []).map((s) => s.space_id))
   const pendingIds = new Set((rawPending as { pending_space_ids?: string[] }).pending_space_ids ?? [])
+  const joiningIds = new Set((rawPending as { joining_space_ids?: string[] }).joining_space_ids ?? [])
   const household = buildHouseholdEntries(Array.isArray(rawHome) ? rawHome : [], { subIds, pendingIds })
   const homeIds = new Set(household.map((e) => e.space_id))
-  const mine = { memberIds: new Set<string>(), subIds, pendingIds }
+  const mine = { memberIds: new Set<string>(), subIds, pendingIds, joiningIds }
   // A space this household hosts is listed under Your household only.
   const remote = (rows: DirectoryEntry[]) => (Array.isArray(rows) ? rows : []).filter((e) => !homeIds.has(e.space_id))
   const lists: Lists = {
@@ -108,6 +115,7 @@ function actionLabel(a: Exclude<DiscoverAction, null>): string {
     case 'request': return t('spaces.discover.ask')
     case 'follow': return t('spaces.discover.follow')
     case 'pending': return t('spaces.discover.requested')
+    case 'joining': return t('spaces.discover.joining')
   }
 }
 
@@ -128,7 +136,7 @@ function entryMeta(e: DirectoryEntry, source: DiscoverSource, home: Home | null 
   return parts.join(' · ')
 }
 
-export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
+export function SpaceDiscover({ seatedIds, source, term, onChanged, explicit = true }: Props) {
   const loc = useLocation()
   const isAdmin = currentUser.value?.is_admin === true
   const [lists, setLists] = useState<Lists>(EMPTY)
@@ -253,6 +261,16 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
   // "Near me" only means something with our home and a hinted space.
   const canNearMe = home != null && hasHint(shown.global)
   if (nearMeOnly && canNearMe) shown.global = nearMe(shown.global, home)
+  // Land on a source that lists something, once, when the URL named no
+  // chip: Your household is often empty while Global has spaces.
+  const landed = useRef(false)
+  useEffect(() => {
+    if (explicit || landed.current || !loaded) return
+    landed.current = true
+    if (shown[source].length > 0) return
+    const first = DISCOVER_SOURCES.find((s) => shown[s].length > 0)
+    if (first) pick(first)
+  }, [loaded])
   const rows = shown[source]
   const searching = term.trim() !== ''
 
@@ -379,7 +397,7 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
                 action={a && (
                   <Button
                     variant="secondary"
-                    disabled={a === 'pending' || busy === e.space_id}
+                    disabled={a === 'pending' || a === 'joining' || busy === e.space_id}
                     loading={busy === e.space_id}
                     aria-label={`${actionLabel(a)}: ${e.name}`}
                     onClick={() => { void act(e, a) }}
@@ -401,7 +419,7 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
           onClose={() => setAsking(null)}
           spaceName={asking.name}
           hostDisplayName={hostLabel(asking)}
-          hostIsPaired={asking.host_is_paired}
+          hostIsPaired={approvalSeatsUs(asking)}
           locationNote={joinCarriesLocation(asking) && !isLocal(asking)
             ? locationConsentText(hostLabel(asking)) : null}
           locationBlocked={joinCarriesLocation(asking) && !isLocal(asking) && home === null

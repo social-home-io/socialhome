@@ -64,7 +64,7 @@ import orjson
 from ..domain.errors import WrongTypeError
 from ..federation.gfs_relay_transport import is_relay_envelope_body
 from ..federation.inbound_validator import TRANSPORT_GFS_RELAY
-from ..federation.invite_bootstrap import unseal_envelope_body
+from ..federation.invite_bootstrap import JOIN_REQUEST_KINDS, unseal_envelope_body
 from ..federation.invite_token_redeem import (
     BOOTSTRAP_BODY_INBOUND_LIMIT,
     BOOTSTRAP_INBOUND_LIMIT,
@@ -81,6 +81,7 @@ from .gfs_envelope_sender import normalize_gfs_base
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
+    from ..federation.gfs_join_request import GfsJoinRequestCoordinator
     from ..federation.invite_token_redeem import SpaceInviteTokenRedeemCoordinator
     from ..rate_limiter import RateLimiter
 
@@ -121,6 +122,7 @@ class GfsRelayInbound:
         "_federation",
         "_gfs_repo",
         "_invite",
+        "_join",
         "_keywrap_private_key",
         "_rate_limiter",
     )
@@ -139,6 +141,12 @@ class GfsRelayInbound:
         self._invite = invite_coordinator
         self._gfs_repo = gfs_connection_repo
         self._rate_limiter = rate_limiter
+        self._join: GfsJoinRequestCoordinator | None = None
+
+    def attach_join_requests(self, coordinator: GfsJoinRequestCoordinator) -> None:
+        """Route "Ask to join" bodies (v_84) to *coordinator*. Unwired, they
+        are dropped like any unknown body."""
+        self._join = coordinator
 
     async def handle_frame(self, frame: dict, *, gfs_url: str = "") -> dict:
         """Inbound entry point for one relayed ``envelope`` frame.
@@ -186,6 +194,15 @@ class GfsRelayInbound:
             ):
                 raise ValueError("relayed pairing rate limit exceeded")
             return await self._dispatch_pairing(body, gfs_url=gfs_url)
+        if body.get("kind") in JOIN_REQUEST_KINDS:
+            # "Ask to join" a global space (v_84). No household-wide bucket
+            # here: a flood at one space would starve every other one. The
+            # coordinator budgets per sender and PER SPACE once the
+            # signature proved who sent it (the process-wide throttle above
+            # still sheds a raw flood before any unseal).
+            if self._join is None:
+                raise ValueError("gfs join requests are not wired on this household")
+            return await self._join.handle_body(body, gfs_url=gfs_url)
         return await self._invite.handle_bootstrap_body(body, gfs_url=gfs_url)
 
     async def _dispatch_pairing(self, body: dict[str, Any], *, gfs_url: str) -> dict:

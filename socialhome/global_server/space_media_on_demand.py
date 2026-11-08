@@ -30,27 +30,9 @@ this server already knows as seats), those connected to this node first.
 At most :data:`MAX_HOLDERS_ASKED` per request, one after another, each
 given :data:`HOLDER_START_TIMEOUT_S` to start (a decline moves on at once),
 all within ``stream_wait_seconds``. Other member households of a listed
-space are never asked by name: this server does not know them, and asking
-would tell it who they are (the GFS-must-not-see-data rule).
-
-**Member fallback** (listed spaces, ``member_fallback``). When the space has
-a writer group key pinned here for an open epoch, the owner gets
-:data:`MEMBER_FALLBACK_OWNER_WINDOW_S` to start; if it is connected nowhere,
-does not start in time or declines :data:`DECLINE_BUSY`, the want is posted
-to the shared ``gfs_space_media_member_wants`` table (a session's
-:data:`MEMBER_TARGET` phase). The space's members long-poll
-``POST /gfs/media/member-pull`` signed by the writer GROUP key — anonymous,
-the same proof as ``/gfs/member-publish-anon`` — and one of them claims the
-want atomically (:data:`MEMBER_START_TIMEOUT_S`, then re-offered), serving
-or declining the ticket with a writer-key signature; at most
-:data:`MAX_MEMBER_ATTEMPTS` declines. An owner ``not_held`` is
-authoritative: members are not asked. Nothing about a puller is stored.
-Pulls wait on a per-scope event, woken at once by a want posted on this node
-and, for wants another node posted, by ONE ticker per node that looks at the
-open scopes once a second while anyone waits. Bounded per scope per node
-(``member_pullers_per_scope``), per node (``member_pullers_max``) and per
-network prefix (:data:`MAX_PULLS_PER_PREFIX`); every refusal is one uniform
-answer that costs the verifications a success does.
+space are NOT asked: this server does not know them, and asking would tell
+it who they are (the GFS-must-not-see-data rule). A privacy-safe member
+fallback is planned as a follow-up.
 
 **Coalescing.** One live session per (blob, scope) per node: every reader
 of that blob joins it, and a session that delivered stays joinable in memory
@@ -80,58 +62,35 @@ only once the whole blob sits at the address the reader asked for.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
-import math
 import random
-import secrets
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-import orjson
 from aiohttp import web
 
-from ..crypto import counting_ed25519_verifies
 from ..domain.gfs_space_media import SCOPE_CHANNEL, SCOPE_SPACE, space_media_address
 from ..domain.gfs_space_media_on_demand import (
-    DECLINE_BAD_HINT,
-    DECLINE_BUSY,
-    MAX_MEMBER_WANT_HINTS,
-    MEMBER_PULL_CAPABILITY_KEY,
-    MEMBER_PULL_ROUTE,
     MODE_CACHE,
     MODE_STREAM,
     SPACE_MEDIA_REQUEST_FRAME,
-    InvalidOnDemandWire,
     MediaRequestFrame,
-    MemberPullRequest,
-    MemberWant,
     WantedRequest,
-    member_serve_signing_bytes,
-    valid_claim,
 )
 from ..moment_public_media import is_blob_id
 from ..space_media_hint import SpaceMediaHint
-from .domain import GfsSpaceMediaMemberWant
-from .federation import SeenPayloadCache
 from .node_route import scoped_id
 from .public import ClientIpResolver, SlidingWindowCounter, node_share
 from .space_media import BodyReadGate
-from .space_media_auth import burn_verifies
 
 if TYPE_CHECKING:
-    from .addressee import GfsAddressee
     from .channels import GfsChannelService
     from .cluster_relay import ClusterRelayFanOut
     from .config import SpaceMediaOnDemandConfig
     from .federation import GfsFederationService
-    from .member_publish import GfsMemberPublishService
-    from .repositories import (
-        AbstractGfsSpaceMediaDemandRepo,
-        AbstractGfsSpaceMediaMemberWantRepo,
-    )
+    from .repositories import AbstractGfsSpaceMediaDemandRepo
     from .space_media import GfsSpaceMediaStore
     from .ws_registry import GfsWebSocketRegistry
 
@@ -174,42 +133,9 @@ SERVE_BODY_DEADLINE_S: float = 120.0
 #: (each pinned until its copy is written).
 MAX_PINNED_PER_PREFIX: int = 2
 
-#: A session's own note that the asked holder did not answer (connected
-#: nowhere, or silent past its window) — never on the wire.
-_UNANSWERED = "unanswered"
-
-#: With the member fallback, how long the owner has to start before the
-#: want goes to the members.
-MEMBER_FALLBACK_OWNER_WINDOW_S: float = 5.0
-
-#: How long a member's claim on a want lasts before it is offered again
-#: (it must have started sending by then).
-MEMBER_START_TIMEOUT_S: int = 10
-
-#: Member declines a session takes before it gives up.
-MAX_MEMBER_ATTEMPTS: int = 3
-
-#: Pulls one network prefix may hold open at once on a node.
-MAX_PULLS_PER_PREFIX: int = 4
-
-#: Member pulls per client address per minute, shed before any work
-#: (cluster-wide: each node allows its share).
-MEMBER_PULL_MAX_PER_MINUTE_PER_IP: int = 12
-
-#: How often the node's ticker looks for wants other nodes posted.
-MEMBER_TICK_S: float = 1.0
-
-#: How far a member's ``ts`` may be from this server's clock.
-MEMBER_TS_SKEW_S: int = 300
-
-#: A session's target while the want is with the members — never an
-#: instance id (ids carry no ``*``), so no household-signed serve matches.
-MEMBER_TARGET: str = "*member"
-
-#: Outcomes of :meth:`GfsSpaceMediaOnDemand.member_pull` that are not a want.
-PULL_NONE = "none"
-PULL_FULL = "full"
-PULL_FORBIDDEN = "forbidden"
+#: Why a holder declined (``POST …/decline`` body ``{"reason": …}``).
+DECLINE_BAD_HINT = "bad_hint"
+DECLINE_NOT_HELD = "not_held"
 
 #: The keyed hourly budgets' labels (the cache's ``ip_bytes`` table).
 _STREAM_BUDGET = "od-stream:"
@@ -253,11 +179,8 @@ class MediaSession:
     #: the blob is not marked missing on this node.
     only_bad_hints: bool = True
     decline_reason: str = ""
-    #: The household asked right now; only it may serve or decline
-    #: (:data:`MEMBER_TARGET` while the want is with the members).
+    #: The household asked right now; only it may serve or decline.
     target: str = ""
-    #: The want went to the members (the member fallback).
-    member: bool = False
     size: int = 0
     buf: bytearray = field(default_factory=bytearray)
     claimed: bool = False
@@ -327,8 +250,6 @@ class _Counters:
     __slots__ = (
         "declined",
         "holder_requests",
-        "member_serves",
-        "member_wants",
         "misses",
         "reuploads",
         "streamed_bytes",
@@ -342,8 +263,6 @@ class _Counters:
         self.reuploads = 0
         self.declined = 0
         self.misses = 0
-        self.member_wants = 0
-        self.member_serves = 0
 
 
 class GfsSpaceMediaOnDemand:
@@ -351,7 +270,6 @@ class GfsSpaceMediaOnDemand:
     holder session, or miss cleanly."""
 
     __slots__ = (
-        "_addressee",
         "_by_key",
         "_cfg",
         "_channels",
@@ -361,22 +279,13 @@ class GfsSpaceMediaOnDemand:
         "_drivers",
         "_fan_out",
         "_federation",
-        "_member_publish",
-        "_member_wants",
         "_pending",
         "_pinned",
         "_polls",
-        "_prefix_pulls",
-        "_pull_events",
-        "_pull_seen",
-        "_pullers",
-        "_pullers_total",
         "_recent",
         "_route_tag",
         "_sessions",
-        "_stop",
         "_store",
-        "_ticker",
         "_ws",
         "wait_gate",
     )
@@ -393,26 +302,7 @@ class GfsSpaceMediaOnDemand:
         ws_registry: GfsWebSocketRegistry | None = None,
         route_tag: str = "",
         clock: Callable[[], float] = time.monotonic,
-        member_wants: AbstractGfsSpaceMediaMemberWantRepo | None = None,
-        member_publish: GfsMemberPublishService | None = None,
-        addressee: GfsAddressee | None = None,
     ) -> None:
-        #: The member fallback (all three, or it is off): the shared wants,
-        #: the writer-key checks, and this server's addressee id.
-        self._member_wants = member_wants
-        self._member_publish = member_publish
-        self._addressee = addressee
-        #: Pulls waiting per scope / per network prefix / in all (this node).
-        self._pullers: dict[tuple[str, str], int] = {}
-        self._prefix_pulls: dict[str, int] = {}
-        self._pullers_total = 0
-        #: scope → the event its waiting pulls wake on (replaced per wake).
-        self._pull_events: dict[tuple[str, str], asyncio.Event] = {}
-        #: Pulls already taken (their signed body's digest), for the skew
-        #: window on both sides.
-        self._pull_seen = SeenPayloadCache(ttl_s=float(2 * MEMBER_TS_SKEW_S))
-        self._stop = asyncio.Event()
-        self._ticker: asyncio.Task | None = None
         self._store = store
         self._demand = demand
         self._federation = federation
@@ -453,29 +343,12 @@ class GfsSpaceMediaOnDemand:
     def enabled(self) -> bool:
         return self._cfg.enabled and self._store.limits.enabled
 
-    @property
-    def member_fallback(self) -> bool:
-        """Whether wants of a listed space may go to its members."""
-        return (
-            self.enabled
-            and self._cfg.member_fallback
-            and self._member_wants is not None
-            and self._member_publish is not None
-            and self._addressee is not None
-        )
-
-    def capability(self) -> dict[str, object] | None:
+    def capability(self) -> dict[str, int] | None:
         """The ``on_demand`` entry inside the signed ``space_media``
-        capability, or ``None`` when off. ``member_pull`` is present iff
-        the member fallback is on."""
+        capability, or ``None`` when off."""
         if not self.enabled:
             return None
-        entry: dict[str, object] = {"wait_s": self._cfg.stream_wait_seconds}
-        if self.member_fallback:
-            entry[MEMBER_PULL_CAPABILITY_KEY] = {
-                "hold_s": self._cfg.member_pull_hold_seconds
-            }
-        return entry
+        return {"wait_s": self._cfg.stream_wait_seconds}
 
     # ── Readers ──────────────────────────────────────────────────────────
 
@@ -607,108 +480,10 @@ class GfsSpaceMediaOnDemand:
 
     def decline(self, session: MediaSession, reason: str) -> None:
         """The asked holder can't serve: :data:`DECLINE_BAD_HINT` (the hint
-        did not open, or named nothing at this address),
-        :data:`DECLINE_BUSY` (over its budget — the members may be asked)
-        or anything else (it doesn't hold the file)."""
+        did not open, or named nothing at this address) or anything else
+        (it doesn't hold the file, its budget)."""
         session.decline_reason = reason
         session.declined.set()
-
-    async def member_decline(
-        self, session: MediaSession, reason: str, claim: str
-    ) -> bool:
-        """The member holding *claim* on *session*'s want can't serve: the
-        want is offered again (one attempt more) and the session counts it.
-        ``False`` (nothing changes) when *claim* is no longer the want's
-        claim — a stale claimer can't undo a newer member's claim."""
-        if self._member_wants is None or not await self._member_wants.release(
-            session.ticket, claim_hash=claim_digest(claim)
-        ):
-            return False
-        self.decline(session, reason)
-        return True
-
-    async def authorize_member(
-        self,
-        session: MediaSession,
-        *,
-        op: str,
-        epoch: str,
-        ts: str,
-        sig: str,
-        suite: str,
-        claim: str,
-    ) -> bool:
-        """Whether a writer-key holder may serve or decline *session* now:
-        the session is with the members, the signature (writer group key of
-        *epoch*, pinned here, epoch open) binds the ticket, *op*, the scope,
-        a fresh *ts* and *claim*, and *claim* is the secret of the want's
-        live claim in the shared table (only the puller that claimed it can
-        feed it — and the GFS still can't tell who that is). Every refusal
-        costs the one verification a success makes."""
-        with counting_ed25519_verifies() as done:
-            try:
-                await self._check_member(
-                    session,
-                    op=op,
-                    epoch=epoch,
-                    ts=ts,
-                    sig=sig,
-                    suite=suite,
-                    claim=claim,
-                )
-                return True
-            except PermissionError as exc:
-                log.debug("space media member serve refused: %s", exc)
-                burn_verifies(1 - done[0])
-                return False
-
-    async def _check_member(
-        self,
-        session: MediaSession,
-        *,
-        op: str,
-        epoch: str,
-        ts: str,
-        sig: str,
-        suite: str,
-        claim: str,
-    ) -> None:
-        if not valid_claim(claim):
-            raise PermissionError("malformed claim")
-        if (
-            self._member_publish is None
-            or self._member_wants is None
-            or not session.member
-            or session.target != MEMBER_TARGET
-        ):
-            raise PermissionError("not a member-phase session")
-        try:
-            epoch_int = int(epoch)
-            ts_int = int(ts)
-        except ValueError as exc:
-            raise PermissionError("malformed epoch or ts") from exc
-        if abs(ts_int - time.time()) > MEMBER_TS_SKEW_S:
-            raise PermissionError("stale or future ts")
-        await self._member_publish.verify_writer_key_sig(
-            session.scope_id,
-            epoch=epoch_int,
-            message=member_serve_signing_bytes(
-                session.ticket,
-                op,
-                session.scope_kind,
-                session.scope_id,
-                epoch_int,
-                ts_int,
-                claim,
-            ),
-            writer_sig=sig,
-            suite=suite,
-        )
-        await self._member_publish.require_writer_key_epoch(session.scope_id, epoch_int)
-        if not await self._member_wants.claimed(
-            session.ticket, now=int(time.time()), claim_hash=claim_digest(claim)
-        ):
-            raise PermissionError("no live claim on this want")
 
     def cached_deadline(self, size: int) -> float:
         """Seconds a reader may take to receive a cached blob of *size*."""
@@ -765,8 +540,6 @@ class GfsSpaceMediaOnDemand:
         self._counters.streamed_bytes += session.size
         if stored:
             self._counters.reuploads += 1
-        if session.member:
-            self._counters.member_serves += 1
 
     async def stats(self) -> dict[str, int | bool]:
         c = self._counters
@@ -779,193 +552,15 @@ class GfsSpaceMediaOnDemand:
             "declined": c.declined,
             "on_demand_misses": c.misses,
             "live_sessions": len(self._sessions),
-            "member_fallback": self.member_fallback,
-            "member_wants": c.member_wants,
-            "member_serves": c.member_serves,
-            "member_pullers": self._pullers_total,
         }
 
     async def close(self) -> None:
-        self._stop.set()
-        for event in list(self._pull_events.values()):
-            event.set()
-        self._pull_events.clear()
         for session in list(self._sessions.values()):
             session.finish(ok=False)
         for task in list(self._drivers) + list(self._polls.values()):
             task.cancel()
         if self._drivers:
             await asyncio.gather(*self._drivers, return_exceptions=True)
-        ticker = self._ticker
-        if ticker is not None:
-            await asyncio.gather(ticker, return_exceptions=True)
-
-    # ── Members (the member fallback) ────────────────────────────────────
-
-    async def member_pull(
-        self, req: MemberPullRequest, *, prefix_key: str
-    ) -> MemberWant | str:
-        """One writer-key holder's pull: a :class:`MemberWant` it claimed,
-        or :data:`PULL_NONE` (nothing within the hold), :data:`PULL_FULL`
-        (no slot) or :data:`PULL_FORBIDDEN` (any refusal, uniform)."""
-        scope = (req.scope, req.scope_id)
-        if not self._node_room(prefix_key):
-            # A cheap shed before any signature work — node and prefix only:
-            # whether a SPACE has pullers here is told only to a writer-key
-            # holder of it.
-            return PULL_FULL
-        if not await self._authorize_pull(req):
-            return PULL_FORBIDDEN
-        if not self._pull_room(scope, prefix_key):
-            return PULL_FULL
-        self._pullers[scope] = self._pullers.get(scope, 0) + 1
-        self._prefix_pulls[prefix_key] = self._prefix_pulls.get(prefix_key, 0) + 1
-        self._pullers_total += 1
-        try:
-            self._ensure_ticker()
-            deadline = self._clock() + self._cfg.member_pull_hold_seconds
-            while not self._stop.is_set():
-                # The event first: a want posted while the claim below runs
-                # wakes it.
-                event = self._pull_events.setdefault(scope, asyncio.Event())
-                want = await self._claim(scope)
-                if want is not None:
-                    return want
-                left = deadline - self._clock()
-                if left <= 0:
-                    break
-                try:
-                    await asyncio.wait_for(event.wait(), left)
-                except TimeoutError:
-                    break
-            return PULL_NONE
-        finally:
-            self._leave_pull(scope, prefix_key)
-
-    def _node_room(self, prefix_key: str) -> bool:
-        return (
-            self._pullers_total < self._cfg.member_pullers_max
-            and self._prefix_pulls.get(prefix_key, 0) < MAX_PULLS_PER_PREFIX
-        )
-
-    def _pull_room(self, scope: tuple[str, str], prefix_key: str) -> bool:
-        return (
-            self._node_room(prefix_key)
-            and self._pullers.get(scope, 0) < self._cfg.member_pullers_per_scope
-        )
-
-    def _leave_pull(self, scope: tuple[str, str], prefix_key: str) -> None:
-        self._pullers_total -= 1
-        left = self._pullers.get(scope, 0) - 1
-        if left > 0:
-            self._pullers[scope] = left
-        else:
-            self._pullers.pop(scope, None)
-            self._pull_events.pop(scope, None)
-        left = self._prefix_pulls.get(prefix_key, 0) - 1
-        if left > 0:
-            self._prefix_pulls[prefix_key] = left
-        else:
-            self._prefix_pulls.pop(prefix_key, None)
-
-    async def _authorize_pull(self, req: MemberPullRequest) -> bool:
-        """Every check of a pull; a refusal costs the one verification a
-        success makes, whatever failed."""
-        with counting_ed25519_verifies() as done:
-            try:
-                await self._check_pull(req)
-                return True
-            except PermissionError as exc:
-                log.debug("space media member pull refused: %s", exc)
-                burn_verifies(1 - done[0])
-                return False
-
-    async def _check_pull(self, req: MemberPullRequest) -> None:
-        if self._addressee is None or self._member_publish is None:
-            raise PermissionError("member fallback off")
-        if not self._addressee.accepts(req.gfs_instance_id, req.gfs_key):
-            raise PermissionError("pull is addressed to another server")
-        if abs(req.ts - time.time()) > MEMBER_TS_SKEW_S:
-            raise PermissionError("stale or future ts")
-        space = await self._federation.listed_space(req.scope_id)
-        if space.status != "active":
-            raise PermissionError("space is not active")
-        await self._member_publish.verify_writer_key_sig(
-            req.scope_id,
-            epoch=req.epoch,
-            message=req.signing_bytes(),
-            writer_sig=req.sig,
-            suite=req.sig_suite,
-        )
-        await self._member_publish.require_writer_key_epoch(req.scope_id, req.epoch)
-        # After the signature, so a replay costs what a success does and an
-        # unverified body can't fill the cache. Keyed on the signed body.
-        digest = SeenPayloadCache.digest(req.signing_body())
-        if self._pull_seen.seen(digest):
-            raise PermissionError("replayed pull")
-        self._pull_seen.record(digest)
-
-    async def _claim(self, scope: tuple[str, str]) -> MemberWant | None:
-        if self._member_wants is None:  # pragma: no cover - checked by callers
-            return None
-        # A fresh secret per claim: only its hash is kept, so the serve can
-        # prove "I am the puller that claimed this" without saying who.
-        claim = secrets.token_hex(16)
-        row = await self._member_wants.claim_next(
-            scope[0],
-            scope[1],
-            now=int(time.time()),
-            hold_s=MEMBER_START_TIMEOUT_S,
-            max_attempts=MAX_MEMBER_ATTEMPTS,
-            claim_hash=claim_digest(claim),
-        )
-        if row is None:
-            return None
-        try:
-            return MemberWant.from_wire(
-                {
-                    "ticket": row.ticket,
-                    "blob_id": row.blob_id,
-                    "mode": row.mode,
-                    "hints": orjson.loads(row.hints),
-                    "claim": claim,
-                }
-            )
-        except InvalidOnDemandWire, orjson.JSONDecodeError:  # pragma: no cover
-            log.warning("space media member want unreadable: %s", row.ticket)
-            return None
-
-    def _wake(self, scope: tuple[str, str]) -> None:
-        event = self._pull_events.pop(scope, None)
-        if event is not None:
-            event.set()
-
-    def _ensure_ticker(self) -> None:
-        if self._ticker is None or self._ticker.done():
-            self._ticker = asyncio.create_task(self._tick())
-
-    async def _tick(self) -> None:
-        """While anyone pulls on this node: once a second, wake the pulls of
-        every scope with a want open in the shared table (posted on any
-        node) — one indexed query per node, however many pulls wait."""
-        while not self._stop.is_set() and self._pullers_total > 0:
-            try:
-                await asyncio.wait_for(self._stop.wait(), MEMBER_TICK_S)
-            except TimeoutError:
-                pass
-            if self._stop.is_set() or not self._pull_events:
-                continue
-            if self._member_wants is None:  # pragma: no cover - never started
-                return
-            try:
-                scopes = await self._member_wants.open_scopes(
-                    now=int(time.time()), max_attempts=MAX_MEMBER_ATTEMPTS
-                )
-            except Exception:  # pragma: no cover - defensive
-                log.warning("space media member wants: lookup failed", exc_info=True)
-                continue
-            for scope in scopes:
-                self._wake(scope)
 
     # ── Internals ────────────────────────────────────────────────────────
 
@@ -1123,11 +718,7 @@ class GfsSpaceMediaOnDemand:
 
     async def _ask_holders(self, session: MediaSession) -> None:
         """Each holder in turn, each with the session's hints in turn (a
-        hint the holder can't use is no reason to give up on the blob);
-        then, for a listed space whose owner did not answer or is busy, its
-        members (module docstring)."""
-        members = await self._member_applies(session)
-        window = MEMBER_FALLBACK_OWNER_WINDOW_S if members else HOLDER_START_TIMEOUT_S
+        hint the holder can't use is no reason to give up on the blob)."""
         for target in await self._holders(session.scope_kind, session.scope_id):
             tried = 0
             while tried < len(session.hints):
@@ -1135,117 +726,17 @@ class GfsSpaceMediaOnDemand:
                     return
                 hint = session.hints[tried]
                 tried += 1
-                if await self._ask(session, hint, target, window=window):
+                if await self._ask(session, hint, target):
                     return
                 if session.decline_reason != DECLINE_BAD_HINT:
                     session.only_bad_hints = False
                     break
-        if (
-            members
-            and not session.claimed
-            and self.remaining(session) > 0
-            # An owner's "not held" is authoritative (it deleted the item,
-            # or it is not this space's); unusable hints are unusable for
-            # the members too.
-            and session.decline_reason in (DECLINE_BUSY, _UNANSWERED, "")
-        ):
-            await self._member_phase(session)
-
-    async def _member_applies(self, session: MediaSession) -> bool:
-        """Whether the member fallback may take over this session: a listed
-        space whose members can prove themselves anonymously here."""
-        if session.scope_kind != SCOPE_SPACE or not self.member_fallback:
-            return False
-        if self._member_publish is None:  # pragma: no cover - member_fallback
-            return False
-        try:
-            return await self._member_publish.writer_key_open(session.scope_id)
-        except Exception:  # pragma: no cover - defensive
-            log.warning("space media member fallback: lookup failed", exc_info=True)
-            return False
-
-    async def _member_phase(self, session: MediaSession) -> None:
-        """Offer the want to the space's members (the shared table) and
-        wait, within the session's deadline, for one to start — at most
-        :data:`MAX_MEMBER_ATTEMPTS` declines. The row is always removed when
-        this ends."""
-        wants = self._member_wants
-        if wants is None:  # pragma: no cover - member_fallback checked it
-            return
-        now = int(time.time())
-        hints = [h.to_wire() for h in session.hints[:MAX_MEMBER_WANT_HINTS]]
-        try:
-            await wants.post(
-                GfsSpaceMediaMemberWant(
-                    ticket=session.ticket,
-                    scope_kind=session.scope_kind,
-                    scope_id=session.scope_id,
-                    blob_id=session.blob_id,
-                    mode=session.mode,
-                    hints=orjson.dumps(hints).decode(),
-                    expires_at=now + max(1, math.ceil(self.remaining(session))),
-                    created_at=now,
-                )
-            )
-        except Exception:  # pragma: no cover - defensive
-            log.warning("space media member fallback: post failed", exc_info=True)
-            return
-        scope = (session.scope_kind, session.scope_id)
-        session.member = True
-        session.target = MEMBER_TARGET
-        self._counters.member_wants += 1
-        self._wake(scope)
-        declines = 0
-        try:
-            while not session.claimed and self.remaining(session) > 0:
-                session.declined.clear()
-                session.decline_reason = ""
-                await self._started_or_declined(session, self.remaining(session))
-                if session.claimed:
-                    return
-                if not session.declined.is_set():
-                    session.decline_reason = _UNANSWERED
-                    return
-                declines += 1
-                self._counters.declined += 1
-                if declines >= MAX_MEMBER_ATTEMPTS:
-                    return
-                # Released by the decline: the next pull may take it.
-                self._wake(scope)
-        finally:
-            if not session.claimed:
-                # Late bytes from any member are refused from now on.
-                session.target = ""
-            try:
-                await wants.remove(session.ticket)
-            except Exception:  # pragma: no cover - defensive
-                log.warning("space media member fallback: remove failed", exc_info=True)
-
-    @staticmethod
-    async def _started_or_declined(session: MediaSession, timeout: float) -> None:
-        waits = [
-            asyncio.ensure_future(session.started.wait()),
-            asyncio.ensure_future(session.declined.wait()),
-        ]
-        try:
-            await asyncio.wait(
-                waits, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
-            )
-        finally:
-            for w in waits:
-                w.cancel()
 
     async def _ask(
-        self,
-        session: MediaSession,
-        hint: SpaceMediaHint,
-        target: str,
-        *,
-        window: float = HOLDER_START_TIMEOUT_S,
+        self, session: MediaSession, hint: SpaceMediaHint, target: str
     ) -> bool:
         """Ask *target* with *hint*; ``True`` once it started sending."""
         if self._fan_out is None:
-            session.decline_reason = _UNANSWERED
             return False
         session.target = target
         session.declined.clear()
@@ -1263,19 +754,27 @@ class GfsSpaceMediaOnDemand:
             target, frame.to_push(), timeout=min(8.0, self.remaining(session))
         )
         if not delivered:
-            # Connected nowhere (or an older node that can't reach it).
-            session.decline_reason = _UNANSWERED
+            session.decline_reason = DECLINE_NOT_HELD
             return False
-        await self._started_or_declined(
-            session,
-            min(window, HOLDER_START_TIMEOUT_S, self.remaining(session)),
-        )
+        waits = [
+            asyncio.ensure_future(session.started.wait()),
+            asyncio.ensure_future(session.declined.wait()),
+        ]
+        try:
+            await asyncio.wait(
+                waits,
+                timeout=min(HOLDER_START_TIMEOUT_S, self.remaining(session)),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for w in waits:
+                w.cancel()
         if session.claimed:
             return True
         if session.declined.is_set():
             self._counters.declined += 1
         else:
-            session.decline_reason = _UNANSWERED  # no answer in time
+            session.decline_reason = DECLINE_NOT_HELD  # no answer in time
         # Late bytes from this household are refused from now on.
         session.target = ""
         return False
@@ -1340,35 +839,3 @@ def build_space_media_wanted_rate_limit(
 
 #: The reader route as aiohttp names it (for the limiter).
 SPACE_MEDIA_WANTED_ROUTE_CANONICAL: str = "/gfs/media/{blob_id}/wanted"
-
-
-def claim_digest(claim: str) -> str:
-    """What the shared table keeps of a member claim's secret."""
-    return hashlib.sha256(b"space-media-member-claim:" + claim.encode()).hexdigest()
-
-
-def build_space_media_member_pull_rate_limit(
-    resolver: ClientIpResolver, *, nodes: Callable[[], int] | None = None
-):
-    """Per-IP limiter for ``POST /gfs/media/member-pull`` (matched on the
-    route it resolved to), shed before any signature work; cluster-wide
-    with *nodes* (each node allows its share)."""
-    counter = SlidingWindowCounter(MEMBER_PULL_MAX_PER_MINUTE_PER_IP)
-
-    @web.middleware
-    async def _rate_limit(request: web.Request, handler):
-        route = request.match_info.route
-        resource = route.resource if route is not None else None
-        canonical = resource.canonical if resource is not None else None
-        if request.method != "POST" or canonical != MEMBER_PULL_ROUTE:
-            return await handler(request)
-        limit = MEMBER_PULL_MAX_PER_MINUTE_PER_IP
-        share = limit if nodes is None else node_share(limit, nodes())
-        if not counter.allow(resolver.bucket(request), limit=share):
-            resp = web.json_response({"error": "rate_limited"}, status=429)
-            resp.headers["Retry-After"] = "60"
-            resp.headers["Cache-Control"] = "no-store"
-            return resp
-        return await handler(request)
-
-    return _rate_limit

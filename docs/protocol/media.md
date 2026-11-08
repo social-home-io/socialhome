@@ -665,8 +665,8 @@ that GFS; for a private channel a household holding a seat on that GFS.
 Every other request — a space it doesn't own, didn't list there, or a
 private space — is declined `not_held` before any key or crypto is touched,
 so a GFS can't probe who is a member or which spaces a household owns.
-(Other members answer only a want they pulled anonymously — the
-[member fallback](#member-fallback-listed-spaces).) Otherwise it opens the hint (a stale or
+(Member fallback for listed spaces is planned as a follow-up; it needs a
+design that doesn't tell the GFS who the members are.) Otherwise it opens the hint (a stale or
 unopenable one: `bad_hint`), finds the file under its own name for it (the
 author's name, the `sd-` / `sg-` name it got the file under, or for a
 page's file (v_82) its page-scoped `sp-` copy — never a
@@ -721,10 +721,9 @@ within `fresh_seconds` (7 days) while the cache is below 95 % full, is
 re-uploaded into the cache; anything else — old content, a one-off view, a
 full cache — is streamed to the waiting reader(s) and not stored
 (`Cache-Control: no-store`). Only one household is asked at a time: the
-space's owner household for a listed space (then, if it is offline, slow or
-busy, one anonymous member — the member fallback below), a seated member
-household for a private space's channel (at most 3 in turn). Readers of one
-blob arriving together share one decision and one session.
+space's owner household for a listed space, a seated member household for a
+private space's channel (at most 3 in turn). Readers of one blob arriving
+together share one decision and one session.
 
 **Wanted → one re-upload** (a cluster: the reader's request lands on node B,
 the owner's socket is on node A):
@@ -775,112 +774,11 @@ sequenceDiagram
     else hint stale or unusable
         H->>G: POST /gfs/media/serve/{ticket}/decline {reason: bad_hint}
         G->>H: same request with the next waiting reader's hint (≤ 4 kept)
-    else not the owner, no live file
+    else not the owner, no live file, over its budget
         H->>G: POST /gfs/media/serve/{ticket}/decline {reason: not_held}
         G-->>R: 404 no-store (after the next holder, if any)
-    else over its hourly budget
-        H->>G: POST /gfs/media/serve/{ticket}/decline {reason: busy}
-        Note over G: a listed space → the member fallback
     end
 ```
-
-### Member fallback (listed spaces)
-
-The owner household is the only household the GFS may ask **by name** for a
-listed space — asking members by name would tell the GFS who they are. So
-when the owner is **connected nowhere**, does not start within **5 s**
-(`MEMBER_FALLBACK_OWNER_WINDOW_S`, instead of 10 s) or declines **`busy`**,
-a GFS whose signed `on_demand` entry carries `member_pull` offers the want
-to the space's members **anonymously**:
-
-- The want goes into the shared table `gfs_space_media_member_wants` (GFS
-  migration 0027): ticket, blob, mode, the readers' sealed hints verbatim,
-  expiry. Nothing about any member — ever.
-- Members long-poll `POST /gfs/media/member-pull`, signed by the space's
-  per-epoch **writer GROUP key** — the key the GFS already pins for
-  anonymous member publish (v_50 strict, v_57 trusted + public). Never the
-  household key, never the writer cert, never `X-SH-Instance`; over the
-  cookie-less session. Followers never hold the writer key, so they can't
-  pull (and can't learn which pictures are read).
-- One pull **claims** the oldest open want of the space with one
-  conditional update on the shared database (exactly one member per want,
-  whichever node the pull landed on) and gets `{ticket, blob_id, mode,
-  hints, claim}` — `claim` is a fresh random secret; the GFS keeps only its
-  hash. The claim lasts 10 s, then the want is offered again.
-- The member opens a hint with the epoch's space media key, finds its OWN
-  copy under the names it computes (`sd-` / `sg-` / `sp-`, its own name only
-  when it sealed the file), with the owner path's rules — confined to the
-  space, live in it, never a reserved name, on a member only a page's `sp-`
-  copy — and re-seals it. Sealing is deterministic over (epoch key, space,
-  epoch, item, origin, filename, plaintext) with the origin from the hint,
-  so a byte-identical copy reproduces the owner's `sm1` address; any other
-  copy fails the address check and the member declines.
-- It serves (`PUT /gfs/media/serve/{ticket}`) or declines (`…/decline`)
-  with the writer key over `space-media-member-serve:v1:{media_ticket,
-  claim, op, scope, scope_id, epoch, ts}` in `X-SH-Writer-Epoch` /
-  `X-SH-Timestamp` / `X-SH-Writer-Sig` / `X-SH-Writer-Sig-Suite` +
-  `X-SH-Member-Claim`. Only the claim's secret feeds the ticket — another
-  writer-key holder that learnt the ticket can't. A re-upload (cache mode)
-  is stored only under an anonymous authorization (space authority or
-  writer key); a writer cert would name the household, so it is streamed
-  only.
-- An owner `not_held` is final (the host deleted it, or it is not the
-  space's): members are not asked. At most 3 member declines per want.
-
-A space without a writer key pinned for an open epoch (a trusted space
-nobody may follow) has no member fallback: owner only, as before. A removed
-member keeps pulling only while its writer key's epoch is still open (the
-same grace as anonymous member publish); hints of later epochs don't open
-for it. A member's re-upload uses the writer key before the space authority
-(the larger anonymity set).
-
-```mermaid
-sequenceDiagram
-    participant R as Reader
-    participant B as GFS node B (session)
-    participant DB as Shared gfs.db
-    participant C as GFS node C
-    participant M as Member household
-    R->>B: POST /gfs/media/{blob_id}/wanted
-    Note over B: owner connected nowhere / silent 5 s / busy
-    B->>DB: INSERT member want (ticket, blob, mode, hints)
-    M->>C: POST /gfs/media/member-pull (writer-key signed, held ≤ hold_s)
-    Note over C: ticker: open scopes once a second
-    C->>DB: UPDATE … RETURNING — claim the oldest want (claim hash)
-    C-->>M: 200 {wants: [{ticket, blob_id, mode, hints, claim}]}
-    Note over M: open hint, own sd-/sg-/sp- copy, confined + live,<br/>re-seal, exact address
-    M->>C: PUT /gfs/media/serve/{tag}.{rand} (writer-key sig + claim)
-    Note over C: balancer routes by the ticket's tag → B
-    B->>DB: claim live and its secret matches?
-    B-->>R: piped blob (no-store unless re-uploaded)
-    B->>DB: DELETE the want (session over)
-```
-
-**What the GFS learns.** "A writer-key holder of space S pulled at this
-time from this address" and "a writer-key holder served blob B". No
-household id, no key, nothing stored about pullers (the claim hash is a
-random value). Pulls and serves ride a session of their own — no
-cookies, no keep-alive (a fresh connection per request) — so the GFS can't
-group one household's pulls for different spaces by connection, nor link
-them to its publishes. **Residual (open, needs an owner decision):** the
-pulls are standing (≤ 4 per household, ~2 a minute each) and name the space
-in clear; from the same source address as the household's authenticated
-socket, a GFS that joins addresses can learn "the household at this address
-is a writer member of these spaces" over time — including members who never
-post. The 30–120 s start jitter does not hide the address. Anonymous member
-publish has the same address link, but only when someone posts. Members learn
-which blob is wanted right now and its locator (they hold the descriptors
-anyway) — never who reads it.
-
-**Cost.** Idle: per space per node ≤ 2 held pulls (`member_pullers_per_scope`),
-one request per 25 s hold each → ≤ 4.8 requests/min per space per node;
-a node holds ≤ 256 pulls (≤ ~10 requests/s at the cap, each one Ed25519
-verify) and runs one indexed query a second while anyone waits. A
-household runs ≤ 4 pull loops (~2.4 small requests/min each). With the
-owner offline, the 10 000-follower example above costs the same
-≤ 360 MB, spread over the pulling members instead of the owner (each still
-capped at 512 MiB/h per GFS, 1 GiB/h in all); one serve per want (atomic
-claim). Refused pulls (no slot) back off 10–20 min.
 
 **Cost.** Per trigger: the holder sends one blob (≤ 8 MiB; a typical
 picture is a 64 KiB–1 MiB bucket) to the GFS; the GFS sends each waiting
@@ -916,9 +814,7 @@ unchanged (an immutable `GET`, served by the CDN).
 stays missing for it, as before). A holder below v_83 never listed
 `space_media_serve` and is never asked. A link-joined reader below v_83
 keeps eager video uploads; a follower below v_83 gets no lazy video (the
-follower subset above). A GFS without `on_demand` is never asked. A GFS without `member_pull` never
-offers wants to members (owner only); an older GFS reads an unknown decline
-reason (`busy`) as `not_held`.
+follower subset above). A GFS without `on_demand` is never asked.
 
 ## Implementation pointers
 
@@ -933,7 +829,7 @@ reason (`busy`) as `not_held`.
 - Capability: [`socialhome/domain/federation_capabilities.py`](../../socialhome/domain/federation_capabilities.py) (`MIN_FOR_MEDIA_CHANNEL`, `MIN_FOR_SPACE_MEDIA_REFS`, `MIN_FOR_PAGE_MEDIA`, `MIN_FOR_SPACE_MEDIA_ON_DEMAND`)
 - Page files (v_82): [`page_federation_outbound.py`](../../socialhome/services/page_federation_outbound.py) (`_ship_files`), [`page_proposal_forwarder.py`](../../socialhome/services/page_proposal_forwarder.py) (`_ship_files`), [`federation_inbound/space_content.py`](../../socialhome/services/federation_inbound/space_content.py) (`_localized_proposal`, `_keep_page_media`), [`space_media_names.py`](../../socialhome/services/space_media_names.py) (`pages`)
 - GFS media cache (v_80): [`space_media_seal.py`](../../socialhome/space_media_seal.py), [`domain/space_media_ref.py`](../../socialhome/domain/space_media_ref.py), [`space_media_gfs_uploader.py`](../../socialhome/services/space_media_gfs_uploader.py), [`space_media_gfs_fetcher.py`](../../socialhome/services/space_media_gfs_fetcher.py), [`space_media_refs.py`](../../socialhome/services/space_media_refs.py), [`sync/space/media_refs.py`](../../socialhome/federation/sync/space/media_refs.py)
-- Space media on demand (v_83): [`space_media_hint.py`](../../socialhome/space_media_hint.py), [`domain/gfs_space_media_on_demand.py`](../../socialhome/domain/gfs_space_media_on_demand.py), [`space_media_gfs_responder.py`](../../socialhome/services/space_media_gfs_responder.py), [`space_media_gfs_fetcher.py`](../../socialhome/services/space_media_gfs_fetcher.py) (`_want`), [`gfs_connection_service.py`](../../socialhome/services/gfs_connection_service.py) (`want_space_media`, `serve_space_media`, `space_media_on_demand_wait`, `space_media_member_pull_hold`, `pull_space_media_wants`, `serve_space_media_as_member`), member fallback [`space_media_gfs_member_puller.py`](../../socialhome/services/space_media_gfs_member_puller.py), GFS [`space_media_on_demand.py`](../../socialhome/global_server/space_media_on_demand.py) + [`routes/space_media_on_demand.py`](../../socialhome/global_server/routes/space_media_on_demand.py)
+- Space media on demand (v_83): [`space_media_hint.py`](../../socialhome/space_media_hint.py), [`domain/gfs_space_media_on_demand.py`](../../socialhome/domain/gfs_space_media_on_demand.py), [`space_media_gfs_responder.py`](../../socialhome/services/space_media_gfs_responder.py), [`space_media_gfs_fetcher.py`](../../socialhome/services/space_media_gfs_fetcher.py) (`_want`), [`gfs_connection_service.py`](../../socialhome/services/gfs_connection_service.py) (`want_space_media`, `serve_space_media`, `space_media_on_demand_wait`), GFS [`space_media_on_demand.py`](../../socialhome/global_server/space_media_on_demand.py) + [`routes/space_media_on_demand.py`](../../socialhome/global_server/routes/space_media_on_demand.py)
 
 ## Spec refs
 

@@ -22,23 +22,7 @@
   asked; ``409`` already being served; ``422`` wrong size or address;
   ``429`` the scope's stream budget.
 * ``POST /gfs/media/serve/{ticket}/decline`` — the holder can't serve it
-  (``{"reason": "not_held" | "bad_hint" | "busy"}``): the GFS asks the next
-  holder at once (``busy``: the space's members, for a listed space).
-* ``POST /gfs/media/member-pull`` — the member fallback: a writer-key holder
-  of a listed space asks for a want (body :class:`~socialhome.domain
-  .gfs_space_media_on_demand.MemberPullRequest`). ``200 {"wants": [want]}``
-  (at most one, claimed for this puller), ``204`` nothing within the hold,
-  ``403`` one uniform refusal, ``404`` the fallback is off, ``422`` a
-  malformed body, ``429`` the address pulled too often, ``503`` no slot
-  (``Retry-After``). A member then serves / declines the want's ticket on
-  the two routes above WITHOUT ``X-SH-Instance``: signed by the writer group
-  key in ``X-SH-Writer-Epoch`` / ``X-SH-Timestamp`` / ``X-SH-Writer-Sig`` /
-  ``X-SH-Writer-Sig-Suite`` + the want's claim secret in
-  ``X-SH-Member-Claim`` over :func:`~socialhome.domain
-  .gfs_space_media_on_demand.member_serve_signing_bytes`; refused with one
-  uniform ``403`` unless the claim secret is the want's live claim's. Its re-upload is
-  kept only under an anonymous upload authorization (space authority or
-  writer key), never an identified writer cert.
+  (no such file, its budget): the GFS asks the next holder at once.
 """
 
 from __future__ import annotations
@@ -50,23 +34,12 @@ import time
 from aiohttp import web
 
 from ...domain.gfs_space_media import (
-    AUTH_AUTHORITY,
-    AUTH_WRITER_KEY,
     SPACE_MEDIA_AUTH_HEADER,
     InvalidSpaceMediaAuth,
     SpaceMediaUploadAuth,
 )
 from ...domain.gfs_space_media_on_demand import (
-    DECLINE_BAD_HINT,
-    DECLINE_BUSY,
-    DECLINE_NOT_HELD,
-    MAX_MEMBER_PULL_BODY_BYTES,
     MAX_WANTED_BODY_BYTES,
-    MEMBER_CLAIM_HEADER,
-    MEMBER_PULL_ROUTE,
-    MEMBER_WRITER_EPOCH_HEADER,
-    MEMBER_WRITER_SIG_HEADER,
-    MEMBER_WRITER_SIG_SUITE_HEADER,
     MODE_CACHE,
     SERVE_INSTANCE_HEADER,
     SERVE_OP_DECLINE,
@@ -74,8 +47,6 @@ from ...domain.gfs_space_media_on_demand import (
     SERVE_SIG_HEADER,
     SERVE_TS_HEADER,
     InvalidOnDemandWire,
-    MemberPullRequest,
-    MemberWant,
     WantedRequest,
     serve_signing_body,
 )
@@ -85,9 +56,9 @@ from ..admin_service import verify_report_signature
 from ..blob_store import MediaRefused, check_size
 from ..space_media_on_demand import (
     BUSY,
+    DECLINE_BAD_HINT,
+    DECLINE_NOT_HELD,
     LIMITED,
-    PULL_FORBIDDEN,
-    PULL_FULL,
     SERVE_BODY_DEADLINE_S,
     Cached,
     MediaSession,
@@ -101,11 +72,6 @@ log = logging.getLogger(__name__)
 SPACE_MEDIA_WANTED_ROUTE: str = "/gfs/media/{blob_id:[0-9a-f]{64}}/wanted"
 SPACE_MEDIA_SERVE_ROUTE: str = "/gfs/media/serve/{ticket}"
 SPACE_MEDIA_DECLINE_ROUTE: str = "/gfs/media/serve/{ticket}/decline"
-SPACE_MEDIA_MEMBER_PULL_ROUTE: str = MEMBER_PULL_ROUTE
-
-#: The re-upload authorizations a member's serve may be stored under: the
-#: anonymous ones only (a writer cert names the household's key).
-_MEMBER_STORE_KINDS: frozenset[str] = frozenset({AUTH_AUTHORITY, AUTH_WRITER_KEY})
 
 #: How far a holder's ``ts`` may be from this server's clock.
 SERVE_MAX_SKEW_S: int = 300
@@ -267,8 +233,11 @@ class GfsMediaServeView(GfsBaseView):
 
     async def put(self) -> web.Response:
         ticket = self.match("ticket")
+        who = await _holder(self, ticket, SERVE_OP_SERVE)
+        if isinstance(who, web.Response):
+            return who
         svc = self.svc(K.gfs_space_media_on_demand_key)
-        session = await _serving_session(self, svc, ticket, SERVE_OP_SERVE)
+        session = _asked(svc, ticket, who)
         if isinstance(session, web.Response):
             return session
         if session.claimed or session.done.is_set():
@@ -318,10 +287,6 @@ class GfsMediaServeView(GfsBaseView):
             return False
         try:
             auth = SpaceMediaUploadAuth.from_header(raw)
-            if session.member and auth.kind not in _MEMBER_STORE_KINDS:
-                # A member serves anonymously: never under an identified
-                # authorization (streamed only).
-                raise PermissionError("identified authorization on a member serve")
             household = await self.svc(K.gfs_space_media_auth_key).authorize_upload(
                 auth,
                 scope_kind=session.scope_kind,
@@ -357,79 +322,20 @@ class GfsMediaDeclineView(GfsBaseView):
 
     async def post(self) -> web.Response:
         ticket = self.match("ticket")
+        who = await _holder(self, ticket, SERVE_OP_DECLINE)
+        if isinstance(who, web.Response):
+            return who
         svc = self.svc(K.gfs_space_media_on_demand_key)
-        session = await _serving_session(self, svc, ticket, SERVE_OP_DECLINE)
+        session = _asked(svc, ticket, who)
         if isinstance(session, web.Response):
             return session
         body = await self.bounded_json(256) if self.request.can_read_body else {}
-        raw = body.get("reason")
-        reason = raw if raw in (DECLINE_BAD_HINT, DECLINE_BUSY) else DECLINE_NOT_HELD
-        if session.member:
-            claim = self.request.headers.get(MEMBER_CLAIM_HEADER, "")
-            if not await svc.member_decline(session, reason, claim):
-                # Its claim ran out and another member holds the want now.
-                return web.json_response({"error": "forbidden"}, status=403)
-        else:
-            svc.decline(session, reason)
-        return web.json_response({"declined": True})
-
-
-class GfsMediaMemberPullView(GfsBaseView):
-    """``POST /gfs/media/member-pull`` — a writer-key holder of a listed
-    space asks for a want (module docstring)."""
-
-    async def post(self) -> web.Response:
-        svc = self.svc(K.gfs_space_media_on_demand_key)
-        if not svc.member_fallback:
-            return _status(404)
-        body = await self.bounded_json(MAX_MEMBER_PULL_BODY_BYTES)
-        try:
-            req = MemberPullRequest.from_wire(body)
-        except InvalidOnDemandWire as exc:
-            log.debug("space media member pull refused: %s", exc)
-            return _status(422, "bad_request")
-        store = self.svc(K.gfs_space_media_store_key)
-        outcome = await svc.member_pull(
-            req, prefix_key=store.prefix_key(self.client_ip())
+        reason = body.get("reason")
+        svc.decline(
+            session,
+            DECLINE_BAD_HINT if reason == DECLINE_BAD_HINT else DECLINE_NOT_HELD,
         )
-        if isinstance(outcome, MemberWant):
-            return web.json_response({"wants": [outcome.to_wire()]}, headers=_NO_STORE)
-        if outcome == PULL_FORBIDDEN:
-            return _status(403, "forbidden")
-        if outcome == PULL_FULL:
-            resp = _status(503, "busy")
-            resp.headers["Retry-After"] = "600"
-            return resp
-        return _status(204)
-
-
-async def _serving_session(
-    view: GfsBaseView, svc, ticket: str, op: str
-) -> MediaSession | web.Response:
-    """The session a serve / decline of *ticket* may act on: the owner's
-    (household-signed, ``X-SH-Instance``) or a member's (writer-key-signed,
-    naming no household) — or the refusal."""
-    headers = view.request.headers
-    if SERVE_INSTANCE_HEADER in headers:
-        who = await _holder(view, ticket, op)
-        if isinstance(who, web.Response):
-            return who
-        return _asked(svc, ticket, who)
-    epoch = headers.get(MEMBER_WRITER_EPOCH_HEADER, "")
-    ts = headers.get(SERVE_TS_HEADER, "")
-    sig = headers.get(MEMBER_WRITER_SIG_HEADER, "")
-    suite = headers.get(MEMBER_WRITER_SIG_SUITE_HEADER, "")
-    claim = headers.get(MEMBER_CLAIM_HEADER, "")
-    if not epoch or not ts or not sig or not suite or not claim:
-        return web.json_response({"error": "missing_auth_headers"}, status=422)
-    session = svc.session(ticket)
-    if session is None:
-        return web.json_response({"error": "unknown_ticket"}, status=404)
-    if not await svc.authorize_member(
-        session, op=op, epoch=epoch, ts=ts, sig=sig, suite=suite, claim=claim
-    ):
-        return web.json_response({"error": "forbidden"}, status=403)
-    return session
+        return web.json_response({"declined": True})
 
 
 async def _feed_with_progress(request: web.Request, session: MediaSession) -> None:

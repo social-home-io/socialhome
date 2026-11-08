@@ -3293,13 +3293,30 @@ class MySubscriptionsView(BaseView):
         )
 
 
+class SpaceGfsJoinRequestsDeclineView(BaseView):
+    """``POST /api/spaces/{id}/gfs-join-requests/decline`` — admin / owner:
+    decline every pending request that came through the GFS (v_84). Anyone
+    on a GFS can ask, so a flood is cleared in one go; each applicant is
+    told, as for a single decline. Returns ``{"declined": N}``."""
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(space_service_key)
+        declined = await svc.decline_gfs_join_requests(
+            self.match("id"), actor_username=ctx.username
+        )
+        return web.json_response({"declined": declined})
+
+
 class MyJoinRequestsView(BaseView):
     """``GET /api/me/join-requests`` — the caller's own outstanding
     (``pending``) join-requests, as a list of space ids.
 
-    Returns ``{"pending_space_ids": [...]}``. The SPA merges these into
-    its directory entries so a "Request pending" card survives a reload
-    (the optimistic in-memory flag is otherwise lost on the next mount).
+    Returns ``{"pending_space_ids": [...], "joining_space_ids": [...]}``.
+    The SPA merges these into its directory entries so a "Request pending"
+    card survives a reload (the optimistic in-memory flag is otherwise lost
+    on the next mount). ``joining_space_ids`` (v_84): asked through the GFS,
+    approved, the seat still being made — "approved, joining…".
     """
 
     async def get(self) -> web.Response:
@@ -3310,6 +3327,7 @@ class MyJoinRequestsView(BaseView):
                 "pending_space_ids": await svc.list_pending_join_request_space_ids(
                     ctx.user_id
                 ),
+                "joining_space_ids": await svc.list_joining_space_ids(ctx.user_id),
             },
         )
 

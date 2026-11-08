@@ -18,7 +18,6 @@ from socialhome.global_server.space_media_on_demand import (
     GfsSpaceMediaOnDemand,
     MediaSession,
     StreamFailed,
-    build_space_media_member_pull_rate_limit,
     build_space_media_wanted_rate_limit,
 )
 
@@ -72,76 +71,9 @@ async def test_cache_or_stream(requests, stored_ago, total, expected):
 
 
 def test_capability_follows_the_switch():
-    # Without the member-wants store wired, no member fallback is offered.
     assert _svc(_Store()).capability() == {"wait_s": 25}
     assert _svc(_Store(), enabled=False).capability() is None
     assert _svc(_Store(max_bytes=0)).capability() is None
-
-
-def _member_svc(**cfg) -> GfsSpaceMediaOnDemand:
-    return GfsSpaceMediaOnDemand(
-        store=_Store(),  # type: ignore[arg-type]
-        demand=None,  # type: ignore[arg-type]
-        federation=None,  # type: ignore[arg-type]
-        channels=None,  # type: ignore[arg-type]
-        config=SpaceMediaOnDemandConfig(**cfg),
-        member_wants=object(),  # type: ignore[arg-type]
-        member_publish=object(),  # type: ignore[arg-type]
-        addressee=object(),  # type: ignore[arg-type]
-    )
-
-
-def test_capability_carries_member_pull_only_when_on():
-    assert _member_svc().capability() == {
-        "wait_s": 25,
-        "member_pull": {"hold_s": 25},
-    }
-    assert _member_svc(member_pull_hold_seconds=40).capability() == {
-        "wait_s": 25,
-        "member_pull": {"hold_s": 40},
-    }
-    assert _member_svc(member_fallback=False).capability() == {"wait_s": 25}
-    assert _member_svc(enabled=False).capability() is None
-
-
-async def test_the_member_pull_limiter_sheds_per_client():
-    resolver = ClientIpResolver(trusted_proxies=())
-    app = web.Application(
-        middlewares=[
-            build_space_media_member_pull_rate_limit(resolver, nodes=lambda: 1)
-        ]
-    )
-
-    async def ok(_request):
-        return web.Response(text="ok")
-
-    app.router.add_post("/gfs/media/member-pull", ok)
-    app.router.add_post("/other", ok)
-    async with TestClient(TestServer(app)) as tc:
-        limit = mod.MEMBER_PULL_MAX_PER_MINUTE_PER_IP
-        codes = [
-            (await tc.post("/gfs/media/member-pull")).status for _ in range(limit + 1)
-        ]
-        assert codes[:-1] == [200] * limit
-        assert codes[-1] == 429
-        assert (await tc.post("/other")).status == 200
-
-
-async def test_the_member_pull_limiter_shares_the_budget_across_nodes():
-    resolver = ClientIpResolver(trusted_proxies=())
-    app = web.Application(
-        middlewares=[
-            build_space_media_member_pull_rate_limit(resolver, nodes=lambda: 4)
-        ]
-    )
-
-    async def ok(_request):
-        return web.Response(text="ok")
-
-    app.router.add_post("/gfs/media/member-pull", ok)
-    async with TestClient(TestServer(app)) as tc:
-        codes = [(await tc.post("/gfs/media/member-pull")).status for _ in range(4)]
-        assert codes == [200, 200, 200, 429]
 
 
 def _session(size: int) -> MediaSession:

@@ -68,6 +68,7 @@ from ..domain.subscriber_accepts import (
     seat_bits,
 )
 from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH
+from ..space_join_contact import parse_join_contact, verify_join_contact
 from .domain import (
     MIN_EPOCH_STEP_INTERVAL_S,
     ClientInstance,
@@ -231,6 +232,41 @@ def _bounded_image_uri(uri: str | None, *, space_id: str, kind: str) -> str | No
         )
         return ""
     return uri
+
+
+def _served_join_contact(
+    raw: object,
+    *,
+    space_id: str,
+    owning_instance: str,
+    join_mode: str,
+    space_public_key_hex: str,
+) -> dict | None:
+    """The join contact this listing serves (v_84), or ``None``.
+
+    Applied AFTER the publish signature verified over the value as sent.
+    Served only for a space that takes requests, when it names the owning
+    instance and its space-authority signature verifies against the key this
+    server pinned for the space — so a listing never carries a contact a
+    reader would refuse anyway. A dropped one is logged at WARNING.
+    """
+    if raw is None or join_mode not in ("request", "open"):
+        return None
+    contact = parse_join_contact(raw)
+    if (
+        contact is None
+        or contact["instance_id"] != owning_instance
+        or not space_public_key_hex
+        or not verify_join_contact(
+            contact, space_id=space_id, space_public_key_hex=space_public_key_hex
+        )
+    ):
+        log.warning(
+            "GFS: space %s published a join contact that does not verify; dropped",
+            space_id,
+        )
+        return None
+    return contact
 
 
 def _burn_dummy_verify(event_type: str, space_id: str, payload: object) -> None:
@@ -1688,6 +1724,7 @@ class GfsFederationService:
         ts: str = "",
         authority_cert: dict | None = None,
         place: object = None,
+        join_contact: object = None,
     ) -> GlobalSpace:
         """Register / refresh a space row from the owning instance.
 
@@ -1781,6 +1818,10 @@ class GfsFederationService:
         # who removed it sends none either).
         if place is not None:
             signed["place"] = place
+        # v_84 — the owner's join contact rides inside the signed bytes too
+        # (an older household sends none and signs a body without it).
+        if join_contact is not None:
+            signed["join_contact"] = join_contact
         # The signed ``ts`` is OPTIONAL, for backward compatibility: unlike
         # subscribe/unsubscribe, ``publish_space`` has shipped production
         # callers, so hard-requiring ``ts`` would 403 every older household
@@ -1895,6 +1936,13 @@ class GfsFederationService:
         pin = parse_place_pin_wire(place)
         if place is not None and pin is None:
             log.warning("GFS: space %s published a malformed place; ignored", space_id)
+        contact = _served_join_contact(
+            join_contact,
+            space_id=space_id,
+            owning_instance=owning_instance,
+            join_mode=normalized_join_mode,
+            space_public_key_hex=pinned_pubkey,
+        )
         space = GlobalSpace(
             space_id=space_id,
             owning_instance=owning_instance,
@@ -1926,6 +1974,7 @@ class GfsFederationService:
             place_lon=pin.lon if pin is not None else None,
             # The hint is inside the same signed ``place`` object.
             place_radius_km=pin.radius_km if pin is not None else None,
+            join_contact=contact,
         )
         if existing is not None and existing.withdrawn and not has_ts:
             log.info(

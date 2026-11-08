@@ -161,7 +161,7 @@ class GfsSpaceMediaAuth:
                     auth, scope_kind=scope_kind, scope_id=scope_id, blob_id=blob_id
                 )
             except PermissionError:
-                burn_verifies(_VERIFIES_BY_KIND.get(auth.kind, 1) - done[0])
+                _burn_verifies(_VERIFIES_BY_KIND.get(auth.kind, 1) - done[0])
                 raise
 
     async def authorize_delete(
@@ -184,7 +184,7 @@ class GfsSpaceMediaAuth:
                     scope_kind, scope_id, blob_id, ts=ts, sig=sig, sig_suite=sig_suite
                 )
             except PermissionError:
-                burn_verifies(1 - done[0])
+                _burn_verifies(1 - done[0])
                 raise
 
     async def _authorize_upload(
@@ -345,7 +345,7 @@ def _active(space: GlobalSpace) -> GlobalSpace:
     return space
 
 
-def burn_verifies(n: int) -> None:
+def _burn_verifies(n: int) -> None:
     """Make *n* throw-away Ed25519 verifications against the fixed dummy key
     the other early-refusal paths use; the result is discarded."""
     key = bytes.fromhex(TIMING_UNIFORM_DUMMY_KEY_HEX)

@@ -12,12 +12,8 @@ import aiohttp
 from socialhome.canonical_json import canonical_bytes
 from socialhome.crypto import b64url_decode, ed25519_public_key, verify_ed25519
 from socialhome.domain.gfs_space_media import SPACE_MEDIA_AUTH_HEADER
-from socialhome.domain.gfs_space_media_on_demand import (
-    member_serve_signing_bytes,
-    serve_signing_body,
-)
+from socialhome.domain.gfs_space_media_on_demand import serve_signing_body
 from socialhome.services.gfs_connection_service import GfsConnectionService
-from socialhome.writer_key import verify_writer_sig
 
 from . import test_gfs_connection_service as _base
 
@@ -132,7 +128,7 @@ async def test_a_warm_info_fetch_records_it_and_forgetting_drops_it(env):
     svc._record_capabilities(
         conn, _info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["space"]})
     )
-    assert svc._space_media["g1"] == (4096, frozenset({"space"}), 600, None, None)
+    assert svc._space_media["g1"] == (4096, frozenset({"space"}), 600, None)
     svc._forget_listing("g1")
     assert "g1" not in svc._space_media
 
@@ -513,170 +509,3 @@ async def test_a_serve_that_never_left_is_none(env):
     svc._own_signing_key = b"s" * 32
     conn = await repo.get("g1")
     assert await svc.serve_space_media(conn, "a" * 32, b"cipher") is None
-
-
-# ── Member fallback (anonymous member pulls and serves) ─────────────────
-
-
-async def test_the_member_pull_hold_comes_from_the_signed_capability(env):
-    entry = {
-        "max_blob_bytes": 4096,
-        "scopes": ["space"],
-        "on_demand": {"wait_s": 25, "member_pull": {"hold_s": 30}},
-    }
-    svc = await _svc(env, _MediaSession(info=_info(entry)))
-    conn = await env[1].get("g1")
-    assert await svc.space_media_member_pull_hold(conn) == 30
-    # Still the same wait for readers.
-    assert await svc.space_media_on_demand_wait(conn) == 25
-    for bad in (None, True, {"hold_s": 0}, {"hold_s": "x"}, {"hold_s": 999}, {}):
-        od: dict = {"wait_s": 25}
-        if bad is not None:
-            od["member_pull"] = bad
-        entry = {"max_blob_bytes": 4096, "scopes": ["space"], "on_demand": od}
-        svc = await _svc(env, _MediaSession(info=_info(entry)))
-        assert await svc.space_media_member_pull_hold(await env[1].get("g1")) is None
-    # No on-demand at all: no member pull either.
-    entry = {"max_blob_bytes": 4096, "scopes": ["space"]}
-    svc = await _svc(env, _MediaSession(info=_info(entry)))
-    assert await svc.space_media_member_pull_hold(await env[1].get("g1")) is None
-
-
-class _PullSession(_MediaSession):
-    def __init__(self, *, status=200, body=None, **kw):
-        super().__init__(**kw)
-        self.pull_status = status
-        self.pull_body = body
-
-    def post(self, url, *, json=None, data=None, headers=None, **_kw):
-        if self.raise_on == "POST":
-            raise aiohttp.ClientError("down")
-        self.posts.append(
-            (url, json if json is not None else data, dict(headers or {}))
-        )
-        return _base._StubResp(self.pull_status, self.pull_body)
-
-
-async def test_a_member_pull_is_anonymous_and_returns_the_wants(env):
-    want = {"ticket": "a" * 32}
-    authed = _PullSession()
-    anon = _PullSession(body={"wants": [want]})
-    _db, repo = env
-    await repo.save(
-        _base._make_conn(
-            "g1",
-            inbox_url="https://g1.example",
-            public_key=_base._GFS_KP.public_key.hex(),
-        )
-    )
-    pub = _PullSession()
-    svc = GfsConnectionService(repo, http_client=authed, publish_client=pub)
-    svc.attach_member_session(anon)
-    svc._own_instance_id = "me"
-    svc._own_signing_key = b"s" * 32
-    conn = await repo.get("g1")
-    body = {"scope": "space", "scope_id": "sp"}
-    assert await svc.pull_space_media_wants(conn, body, timeout_s=40) == (
-        200,
-        [want],
-    )
-    url, sent, headers = anon.posts[0]
-    assert url == "https://g1.example/gfs/media/member-pull"
-    assert sent == body
-    # The member session only (no keep-alive, no cookies — never shared with
-    # the publish or the authenticated session), and nothing names us.
-    assert authed.posts == [] and pub.posts == []
-    assert not any(h.lower().startswith("x-sh") for h in headers)
-
-
-async def test_member_pull_outcomes(env):
-    for kw, want in (
-        ({"status": 204}, (204, [])),
-        ({"status": 403, "body": {"error": "forbidden"}}, (403, [])),
-        ({"status": 503}, (503, [])),
-        ({"status": 200, "body": {"wants": "x"}}, (200, [])),
-        ({"status": 200, "body": {}}, (200, [])),
-        ({"raise_on": "POST"}, (0, [])),
-    ):
-        session = _PullSession(**kw)
-        svc = await _svc(env, session)
-        svc.attach_member_session(session)
-        got = await svc.pull_space_media_wants(await env[1].get("g1"), {}, timeout_s=5)
-        assert got == want, kw
-    # No member session, or a server this household is not registered on:
-    # nothing is sent.
-    svc = GfsConnectionService(env[1], http_client=None, publish_client=None)
-    conn = await env[1].get("g1")
-    assert await svc.pull_space_media_wants(conn, {}, timeout_s=5) == (0, [])
-    session = _PullSession(status=200, body={"wants": []})
-    svc.attach_member_session(session)
-    unregistered = replace(conn, registered=False)
-    assert await svc.pull_space_media_wants(unregistered, {}, timeout_s=5) == (0, [])
-    kw = {"space_id": "s", "epoch": 1, "writer_seed": b"w" * 32, "claim": "c" * 32}
-    assert await svc.serve_space_media_as_member(unregistered, "t", b"x", **kw) is None
-    assert session.posts == [] and session.puts == []
-
-
-async def test_a_member_serve_is_signed_by_the_writer_key_never_the_household(env):
-    writer = b"w" * 32
-    claim = "c" * 32
-    authed, anon = _MediaSession(put_status=200), _MediaSession(put_status=200)
-    pub = _MediaSession(put_status=200)
-    _db, repo = env
-    await repo.save(
-        _base._make_conn(
-            "g1",
-            inbox_url="https://g1.example",
-            public_key=_base._GFS_KP.public_key.hex(),
-        )
-    )
-    svc = GfsConnectionService(repo, http_client=authed, publish_client=pub)
-    svc.attach_member_session(anon)
-    svc._own_instance_id = "me"
-    svc._own_signing_key = b"s" * 32
-    conn = await repo.get("g1")
-    ticket = "node-1." + "a" * 32
-    kw = {"space_id": "sp-1", "epoch": 7, "writer_seed": writer, "claim": claim}
-    status = await svc.serve_space_media_as_member(
-        conn, ticket, b"cipher", upload_auth="auth", **kw
-    )
-    assert status == 200
-    url, data, headers = anon.puts[0]
-    assert url == f"https://g1.example/gfs/media/serve/{ticket}"
-    assert data == b"cipher"
-    assert headers[SPACE_MEDIA_AUTH_HEADER] == "auth"
-    assert "X-SH-Instance" not in headers and "X-SH-Signature" not in headers
-    assert headers["X-SH-Writer-Epoch"] == "7"
-    assert headers["X-SH-Member-Claim"] == claim
-    msg = member_serve_signing_bytes(
-        ticket, "serve", "space", "sp-1", 7, int(headers["X-SH-Timestamp"]), claim
-    )
-    assert verify_writer_sig(
-        writer_pk=ed25519_public_key(writer),
-        message=msg,
-        writer_sig=headers["X-SH-Writer-Sig"],
-        suite=headers["X-SH-Writer-Sig-Suite"],
-    )
-    assert (
-        await svc.serve_space_media_as_member(
-            conn, ticket, None, decline_reason="busy", **kw
-        )
-        == 200
-    )
-    url, body, headers = anon.posts[-1]
-    assert url == f"https://g1.example/gfs/media/serve/{ticket}/decline"
-    assert body == {"reason": "busy"}
-    msg = member_serve_signing_bytes(
-        ticket, "decline", "space", "sp-1", 7, int(headers["X-SH-Timestamp"]), claim
-    )
-    assert verify_writer_sig(
-        writer_pk=ed25519_public_key(writer),
-        message=msg,
-        writer_sig=headers["X-SH-Writer-Sig"],
-        suite="ed25519",
-    )
-    # Never the authenticated (identified) session, nor the publish one.
-    assert authed.puts == [] and authed.posts == []
-    assert pub.puts == [] and pub.posts == []
-    anon.raise_on = "PUT"
-    assert await svc.serve_space_media_as_member(conn, ticket, b"c", **kw) == 0

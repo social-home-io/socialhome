@@ -401,6 +401,21 @@ async def test_list_never_names_an_unknown_host_by_its_instance_id(client):
     assert entry["host_instance_id"] == "x7qk2m9vbe4wt5ny8hc3rj6dpa"
 
 
+async def test_a_space_session_seat_with_the_host_is_no_pairing(client):
+    """We joined ANOTHER space of this host by link or through the GFS: that
+    seat is no pairing (an "Ask to join" goes through the GFS, v_83), and
+    its stand-in name is not one a pairing told us."""
+    await _remote_instance(client, "hh-seat", "hh-seat"[:8])
+    await client._db.enqueue(
+        "UPDATE remote_instances SET source='space_session' WHERE id='hh-seat'"
+    )
+    await _seed(client, space_id="sp-seat", instance_id="hh-seat")
+    r = await client.get("/api/public_spaces", headers=_auth(client._tok))
+    entry = next(s for s in await r.json() if s["space_id"] == "sp-seat")
+    assert entry["host_is_paired"] is False
+    assert entry["host_display_name"] is None
+
+
 async def test_list_names_a_paired_host_and_never_an_unnamed_one_by_id(client):
     await _remote_instance(client, "hh-keller", "Keller household")
     await _remote_instance(client, "hh-blank", "")

@@ -32,6 +32,8 @@ class AbstractPublicSpaceRepo(Protocol):
     ) -> None: ...
     async def is_instance_blocked(self, instance_id: str) -> bool: ...
     async def purge_older_than(self, cutoff_iso: str) -> int: ...
+    async def get_pin(self, space_id: str) -> str | None: ...
+    async def set_pin(self, space_id: str, pin: str) -> None: ...
 
 
 class SqlitePublicSpaceRepo:
@@ -180,6 +182,22 @@ class SqlitePublicSpaceRepo:
                 (cutoff_iso,),
             )
         return n
+
+    async def get_pin(self, space_id: str) -> str | None:
+        """The join-contact pin of *space_id* (JSON), or ``None``. Kept in
+        its own table so it outlives the listing's cache row (v_84)."""
+        row = await self._db.fetchone(
+            "SELECT pin FROM public_space_join_pins WHERE space_id=?", (space_id,)
+        )
+        return str(row["pin"]) if row is not None else None
+
+    async def set_pin(self, space_id: str, pin: str) -> None:
+        await self._db.enqueue(
+            "INSERT INTO public_space_join_pins(space_id, pin) VALUES(?, ?)"
+            " ON CONFLICT(space_id) DO UPDATE SET pin=excluded.pin,"
+            " updated_at=datetime('now')",
+            (space_id, pin),
+        )
 
 
 def _row(r) -> PublicSpaceListing:

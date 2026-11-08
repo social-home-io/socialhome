@@ -56,9 +56,19 @@ def public_space_dict(space) -> dict:
     wall-clock based. Readers get what they need to heal a pin: the current
     ``identity_public_key`` (re-pinned here only after the cert verified)
     and ``authority_rotation_seq``, this server's own +1-per-re-pin counter.
+
+    ``join_contact`` (v_84) is the one place the owner's identity key is
+    served: the owner itself chose to put it there, signed by the space
+    authority key, for a space that takes requests (``None`` otherwise).
+    With a contact the listing ALSO carries the owner's ``authority_cert``
+    for the current key (``None`` before any rotation): a household moves
+    the authority key it pinned only along that owner-signed chain, never on
+    this server's word. The contact already names the owner's identity key,
+    so the cert adds only that a rotation happened, and when.
     """
     body = asdict(space)
-    body.pop("authority_cert", None)
+    if space.join_contact is None:
+        body.pop("authority_cert", None)
     # The owner's place pin, as the ``{lat, lon, radius_km?}`` it was
     # published as (or null) — for sorting by distance and the reader's
     # "within the area" hint, both on the reader's side only.
@@ -231,6 +241,13 @@ class GfsInfoView(GfsBaseView):
             # gets no key repair on every reconnect. A household asks only
             # a server that proved this.
             "space_key_pull": True,
+            # v_84 — a listing carries the owner's ``join_contact`` (its keys,
+            # signed by the space authority key this server pins) when the
+            # owner sends one, so a household that never paired with the
+            # owner can seal an "Ask to join" to it with no lookup here. An
+            # owner sends the field only to a server that proved this (an
+            # older one would fold an unknown field out of the signed bytes).
+            "join_contact": True,
             # Step 12 — keeps each seat's ``space_item`` label and answers
             # ``GET /gfs/spaces/{id}/subscribers?summary=1`` (counts, under the
             # authority signature). A seed holder skips its relay copy of a
@@ -831,6 +848,7 @@ class SpacePublishView(GfsBaseView):
                 # Optional: the owner's pin, inside the signed bytes when
                 # present; a malformed one is stored as no pin.
                 place=body.get("place"),
+                join_contact=body.get("join_contact"),
             )
         except PermissionError as exc:
             return web.json_response(

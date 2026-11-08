@@ -97,6 +97,7 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   SPACE_ARCHIVED: () => t('error.space_archived'),
   INVALID_LINK: () => t('error.invalid_link'),
   NOT_PAIRED: () => t('error.not_paired'),
+  HOST_NOT_REACHABLE: () => t('error.host_not_reachable'),
   AGE_RESTRICTED: (_b, p) => t('error.age_restricted', { min_age: str(p, 'min_age') }),
   // Conversations.
   DM_SELF: () => t('error.dm_self'),

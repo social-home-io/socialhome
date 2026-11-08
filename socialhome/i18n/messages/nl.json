@@ -278,6 +278,8 @@
   "notification.calendar.reminder": "Herinnering: {summary}",
   "notification.calendar.updated": "Evenement gewijzigd: {summary}",
   "notification.space.join.requested": "{name} wil lid worden van {space_name}",
+  "notification.space.join.requested_gfs": "{count} mensen willen via de GFS lid worden van {space_name}",
+  "notification.space.join.requested_gfs_one": "Iemand wil via de GFS lid worden van {space_name}",
   "notification.space.member.joined": "{name} is lid geworden van {space_name}",
   "notification.task.completed": "{name} heeft afgerond: {title}",
   "notification.comment.added": "{author} heeft gereageerd op een bericht",

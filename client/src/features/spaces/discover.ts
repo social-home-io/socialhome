@@ -78,7 +78,10 @@ export function buildHouseholdEntries(
 export function withMembership(
   entries: DirectoryEntry[],
   scope: 'public' | 'global',
-  mine: { memberIds: Set<string>; subIds: Set<string>; pendingIds: Set<string> },
+  mine: {
+    memberIds: Set<string>; subIds: Set<string>; pendingIds: Set<string>
+    joiningIds?: Set<string>
+  },
 ): DirectoryEntry[] {
   return entries.map((e) => ({
     ...e,
@@ -90,6 +93,7 @@ export function withMembership(
     already_member:     mine.memberIds.has(e.space_id),
     already_subscribed: mine.subIds.has(e.space_id),
     request_pending:    mine.pendingIds.has(e.space_id),
+    request_joining:    mine.joiningIds?.has(e.space_id) ?? false,
   }))
 }
 
@@ -114,7 +118,7 @@ export function matchesTerm(
     || (description ?? '').toLocaleLowerCase().includes(q)
 }
 
-export type DiscoverAction = 'join' | 'request' | 'follow' | 'pending' | null
+export type DiscoverAction = 'join' | 'request' | 'follow' | 'pending' | 'joining' | null
 
 function hostedHere(entry: DirectoryEntry): boolean {
   return entry.host_instance_id === 'local' || entry.scope === 'household'
@@ -152,6 +156,23 @@ function reachable(e: DirectoryEntry): boolean {
 }
 
 /**
+ * A global space found on a GFS in "ask to join" mode takes the request
+ * through that GFS, sealed to its host, even when we never paired with the
+ * host (v_84) — the GFS shields both households, and an approval seats us
+ * like any member. Only when the listing carries a verified join contact
+ * (``gfs_askable``): an older host's listing has none.
+ */
+function askableThroughGfs(e: DirectoryEntry): boolean {
+  return e.scope === 'global' && e.join_mode === 'request' && e.gfs_askable === true
+}
+
+/** Will an approval of a request to ``entry`` reach us and seat us on its
+ *  own? (Paired, our own household, or asked through the GFS.) */
+export function approvalSeatsUs(e: DirectoryEntry): boolean {
+  return reachable(e) || askableThroughGfs(e)
+}
+
+/**
  * Whether Follow is offered: a public / global space this household hosts,
  * or a global space found on a GFS (the GFS relays it, no pairing needed)
  * — and only when its owner explicitly takes followers. A paired
@@ -168,16 +189,20 @@ export function canFollow(e: DirectoryEntry): boolean {
  * The one row action — Join (open), Ask to join (approval), Follow (when
  * you can't join from here but may read along), "Requested" while a
  * request is out. Never "pair first": a household met through a GFS never
- * talks to us directly, so a space whose host we aren't paired with offers
- * Follow when it takes followers and nothing otherwise — members can still
- * invite you with a link (its row opens the About page, which says so).
+ * talks to us directly. A global space in "ask to join" mode is asked
+ * through the GFS that lists it; any other space whose host we aren't
+ * paired with offers Follow when it takes followers and nothing otherwise —
+ * members can still invite you with a link (its row opens the About page,
+ * which says so).
  */
 export function discoverAction(e: DirectoryEntry): DiscoverAction {
+  if (e.request_joining) return 'joining'
   if (e.request_pending) return 'pending'
   if (reachable(e)) {
     if (e.join_mode === 'open') return 'join'
     if (e.join_mode === 'request') return 'request'
   }
+  if (askableThroughGfs(e)) return 'request'
   if (canFollow(e)) return 'follow'
   return null
 }

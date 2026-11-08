@@ -2479,215 +2479,6 @@ def _gfs_admin_space_media(base_url: str) -> dict:
     raise SystemExit(f"GFS admin login at {base_url} failed")
 
 
-def _gfs_cluster_media_member_claim(urls: list[str], tags: list[str]) -> None:
-    """Step 3k of ``gfs-cluster``: the space media member fallback across
-    nodes.
-
-    A listed space whose owner household holds NO socket (offline) and whose
-    writer group key is pinned for an open epoch (the shared DB, as the
-    owner's epoch notice leaves it). A reader asks node 1 for a blob; node 1
-    finds the owner connected nowhere and posts the want to the shared
-    ``gfs_space_media_member_wants`` table. Two anonymous member pulls —
-    signed by the writer key only — wait on node 0 and node 2 at once: each
-    node's ticker sees the cross-node want within ~1 s and exactly ONE pull
-    claims it (one conditional update on the shared DB); the other is held
-    to its end (204). The winner serves the ticket through the BALANCER
-    (``/gfs/media/serve/<tag>.*``: the same routing rule as the owner's
-    serve — no new balancer rule) with its claim secret; the reader gets the
-    blob byte-identical; node 1 counts one member want / one member serve;
-    the table is empty afterwards. Pulls at a 5 s hold would be faster; the
-    demo GFS keeps the default, so this step waits one hold (~25 s)."""
-    import asyncio
-
-    import aiohttp
-
-    from socialhome.crypto import b64url_encode, ed25519_public_key
-    from socialhome.domain.gfs_space_media import space_media_address
-    from socialhome.domain.gfs_space_media_on_demand import (
-        MemberPullRequest,
-        member_serve_signing_bytes,
-    )
-    from socialhome.moment_public_media import PAD_BUCKETS
-    from socialhome.space_media_hint import SpaceMediaLocator, seal_space_media_hint
-    from socialhome.writer_key import sign_with_writer_key
-
-    lb = f"http://127.0.0.1:{GFS_CLUSTER_LB_PORT}"
-    owner_id, owner_seed = _gfs_cluster_register(urls[0], "member-owner")
-    space_id, _authority = _gfs_cluster_publish_media_space(
-        urls[0], (owner_id, owner_seed)
-    )
-    epoch = 1
-    writer_seed = secrets.token_bytes(32)
-    now = int(time.time())
-    db = sqlite3.connect(GFS_CLUSTER_DIR / "gfs.db")
-    try:
-        # What the owner's confirmed epoch notice + writer key cert leave.
-        db.execute(
-            "UPDATE global_spaces SET content_epoch_prev=0,"
-            " content_epoch_confirmed=?, content_epoch=?, content_epoch_seen_at=?,"
-            " content_epoch_raised_at=?, writer_key_epoch=?, writer_key_pk=?"
-            " WHERE space_id=?",
-            (
-                epoch,
-                epoch,
-                now,
-                now,
-                epoch,
-                b64url_encode(ed25519_public_key(writer_seed)),
-                space_id,
-            ),
-        )
-        db.commit()
-    finally:
-        db.close()
-    blob = secrets.token_bytes(PAD_BUCKETS[1] + 28)
-    blob_id = space_media_address("space", space_id, blob)
-    hint = seal_space_media_hint(
-        media_key=secrets.token_bytes(32),
-        scope="space",
-        scope_id=space_id,
-        blob_id=blob_id,
-        epoch=0,
-        locator=SpaceMediaLocator(
-            item_id="post-1", origin=owner_id, filename="photo.webp"
-        ),
-    )
-    gfs_ids = {}
-    for url in urls:
-        _code, info = _request(f"{url}/gfs/info")
-        gfs_ids[url] = (info or {}).get("gfs_instance_id") or ""
-
-    def _pull_body(url: str) -> dict:
-        unsigned = MemberPullRequest(
-            scope="space",
-            scope_id=space_id,
-            epoch=epoch,
-            gfs_instance_id=gfs_ids[url],
-            ts=int(time.time()),
-            nonce=secrets.token_hex(16),
-            sig="-",
-            sig_suite="ed25519",
-        )
-        return {
-            **unsigned.to_wire(),
-            "sig": sign_with_writer_key(writer_seed, unsigned.signing_bytes()),
-        }
-
-    async def _pull(http, url: str, n: int):
-        async with http.post(
-            f"{url}/gfs/media/member-pull",
-            json=_pull_body(url),
-            headers={"X-Forwarded-For": f"10.{60 + n}.0.9"},
-        ) as r:
-            body = await r.json(content_type=None) if r.status == 200 else None
-            return url, r.status, body
-
-    async def _run() -> dict:
-        out: dict = {}
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90)) as http:
-
-            async def _want():
-                async with http.post(
-                    f"{urls[1]}/gfs/media/{blob_id}/wanted",
-                    json={"scope": "space", "scope_id": space_id, "hint": hint},
-                    headers={"X-Forwarded-For": "10.70.0.7"},
-                ) as r:
-                    return r.status, await r.read()
-
-            pulls = [
-                asyncio.create_task(_pull(http, urls[0], 0)),
-                asyncio.create_task(_pull(http, urls[2], 1)),
-            ]
-            await asyncio.sleep(0.5)  # both pulls held first
-            reader = asyncio.create_task(_want())
-            winner = None
-            for fut in asyncio.as_completed(pulls):
-                url, status, body = await fut
-                out.setdefault("pulls", []).append((url, status))
-                if status == 200 and winner is None:
-                    winner = body["wants"][0]
-                    ticket, claim = winner["ticket"], winner["claim"]
-                    ts = int(time.time())
-                    sig = sign_with_writer_key(
-                        writer_seed,
-                        member_serve_signing_bytes(
-                            ticket, "serve", "space", space_id, epoch, ts, claim
-                        ),
-                    )
-                    async with http.put(
-                        f"{lb}/gfs/media/serve/{ticket}",
-                        data=blob,
-                        headers={
-                            "X-SH-Writer-Epoch": str(epoch),
-                            "X-SH-Timestamp": str(ts),
-                            "X-SH-Writer-Sig": sig,
-                            "X-SH-Writer-Sig-Suite": "ed25519",
-                            "X-SH-Member-Claim": claim,
-                            "Content-Type": "application/octet-stream",
-                        },
-                    ) as r:
-                        out["serve"] = (r.status, await r.json(content_type=None))
-                    out["reader"] = await reader
-            out["winner"] = winner
-            if "reader" not in out:
-                out["reader"] = await reader
-        return out
-
-    before = _gfs_admin_space_media(urls[1])
-    start_lb, stop_lb = _python_balancer(urls, tags)
-
-    async def _with_lb() -> dict:
-        await start_lb()
-        try:
-            return await _run()
-        finally:
-            await stop_lb()
-
-    out = asyncio.run(_with_lb())
-    statuses = sorted(st for _u, st in out.get("pulls", []))
-    winner = out.get("winner")
-    if statuses != [200, 204] or winner is None:
-        raise SystemExit(
-            f"gfs-cluster: two member pulls on nodes 0 and 2 → {out.get('pulls')!r}; "
-            "want exactly one 200 (the claim) and one 204"
-        )
-    if winner.get("blob_id") != blob_id or winner["ticket"].partition(".")[0] != tags[1]:
-        raise SystemExit(f"gfs-cluster: wrong member want {winner!r}")
-    if out.get("serve") != (200, {"stored": False}):
-        raise SystemExit(
-            f"gfs-cluster: the member's serve via the balancer → {out.get('serve')!r}; "
-            "want 200 stored=false (routed by the ticket's tag to node 1)"
-        )
-    code, data = out["reader"]
-    if code != 200 or data != blob:
-        raise SystemExit(
-            f"gfs-cluster: the reader on node 1 got {code} / {len(data)} bytes; "
-            "want the member-served blob"
-        )
-    after = _gfs_admin_space_media(urls[1])
-    delta = {
-        k: int(after.get(k, 0)) - int(before.get(k, 0))
-        for k in ("member_wants", "member_serves")
-    }
-    if delta != {"member_wants": 1, "member_serves": 1}:
-        raise SystemExit(f"gfs-cluster: node 1's member counts moved by {delta!r}")
-    db = sqlite3.connect(GFS_CLUSTER_DIR / "gfs.db")
-    try:
-        left = db.execute(
-            "SELECT COUNT(*) FROM gfs_space_media_member_wants"
-        ).fetchone()[0]
-    finally:
-        db.close()
-    if left:
-        raise SystemExit(f"gfs-cluster: {left} member want(s) left after the session")
-    print(
-        "  member fallback: owner offline → the want on node 1 went to the "
-        "shared table; pulls on nodes 0 and 2 raced and exactly ONE claimed it; "
-        "its anonymous serve via the balancer reached node 1; the reader got "
-        "the blob byte-identical; nothing left in the table ✓"
-    )
-
-
 def _gfs_cluster_media_on_demand(urls: list[str], tags: list[str]) -> None:
     """Step 3j of ``gfs-cluster``: space media on demand (v_83) across nodes.
 
@@ -3351,9 +3142,6 @@ def cmd_gfs_cluster() -> None:
         # 3j. Space media on demand (v_83): readers on one node, the holder's
         # socket on another, its serve routed by the ticket's tag.
         _gfs_cluster_media_on_demand(urls, node_ids)
-        # 3k. The member fallback: the want lives in the shared DB; pulls on
-        # two OTHER nodes race for it and exactly one claims it.
-        _gfs_cluster_media_member_claim(urls, node_ids)
     except BaseException:
         _gfs_cluster_down(preserve_logs=True)
         raise
@@ -3487,6 +3275,263 @@ def cmd_gfs_pair() -> None:
             )
     _save(state)
     print("gfs-pair: ok (a + d + e connected to GFS, possession proven)")
+
+
+def cmd_gfs_join_request() -> None:
+    """v_84 — e asks to join a's global "ask to join" space through the GFS.
+
+    The owner's report: a household connected to the same GFS as the host
+    but NOT paired with it (and holding no invite link) found the space in
+    Discover › Global and had no way to ask in — ``POST
+    /api/public_spaces/{id}/join-request`` answered ``403 NOT_PAIRED``.
+    e is that household (paired with nobody but the GFS).
+
+    1. a creates a global space in ``request`` mode, listed on the GFS.
+    2. e refreshes its directory and lists it (``GET /api/public_spaces``).
+    3. e asks to join → ``202 {request_id}``; e shows it pending.
+    4. a has the request in its queue (with e's message) and approves it.
+    5. e is seated (``GET /api/spaces``) and sees a's post in the space.
+    6. e is still not a paired connection of a — only a space-session seat.
+
+    Prereq: ``gfs-up`` + ``gfs-pair``.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    a, e = state["instances"]["a"], state["instances"]["e"]
+    a_url, e_url = f"http://127.0.0.1:{a['port']}", f"http://127.0.0.1:{e['port']}"
+    # Both sockets up, so the request and the answer are pushed at once
+    # (the GFS queues them for an offline household, but the step would
+    # then wait out a reconnect).
+    _wait_for_gfs_ws(a["instance_id"], timeout=90.0)
+    _wait_for_gfs_ws(e["instance_id"], timeout=90.0)
+
+    s, sp = _request(
+        f"{a_url}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={
+            "name": "Ask through the GFS",
+            "description": "global, ask to join, members only",
+            "space_type": "global",
+            "gfs_ids": _active_gfs_ids(state, "a"),
+            "join_mode": "request",
+        },
+    )
+    space_id = _must("gfs-join-request: a creates the space", s, sp, ok=(201,))["id"]
+    state.setdefault("gfs", {})["join_request_space_id"] = space_id
+    _save(state)
+    print(f"  a: global ask-to-join space {space_id[:8]}…")
+
+    entry: dict | None = None
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and entry is None:
+        _request(f"{e_url}/api/public_spaces/refresh", token=e["token"], method="POST")
+        time.sleep(1.0)
+        s, rows = _request(f"{e_url}/api/public_spaces", token=e["token"])
+        if s == 200 and isinstance(rows, list):
+            entry = next((r for r in rows if r.get("space_id") == space_id), None)
+    if entry is None:
+        raise SystemExit(
+            "gfs-join-request: e never listed the space in Discover › Global"
+        )
+    if entry.get("join_mode") != "request" or not entry.get("gfs_askable"):
+        raise SystemExit(f"gfs-join-request: unexpected listing on e: {entry!r}")
+    print("  e lists it under Global (ask to join, verified join contact) ✓")
+
+    message = f"e would like to join {time.time_ns()}"
+    s, body = _request(
+        f"{e_url}/api/public_spaces/{space_id}/join-request",
+        token=e["token"],
+        method="POST",
+        body={"host_instance_id": entry["host_instance_id"], "message": message},
+        timeout=30.0,
+    )
+    request_id = _must("gfs-join-request: e asks", s, body, ok=(202,))["request_id"]
+    s, mine = _request(f"{e_url}/api/me/join-requests", token=e["token"])
+    if space_id not in (mine or {}).get("pending_space_ids", []):
+        raise SystemExit(f"gfs-join-request: e does not show it pending: {mine!r}")
+    print(f"  e asked through the GFS → request {request_id[:8]}…, pending ✓")
+
+    queue: list[dict] = []
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        s, queue = _request(
+            f"{a_url}/api/spaces/{space_id}/join-requests", token=a["token"]
+        )
+        if s == 200 and any(r.get("id") == request_id for r in queue):
+            break
+        time.sleep(1.0)
+    row = next((r for r in queue if r.get("id") == request_id), None)
+    if row is None or row.get("message") != message:
+        raise SystemExit(f"gfs-join-request: a's queue lacks the request: {queue!r}")
+    print("  a has the request, with e's message ✓")
+    s, body = _request(
+        f"{a_url}/api/spaces/{space_id}/join-requests/{request_id}/approve",
+        token=a["token"],
+        method="POST",
+        body={},
+    )
+    _must("gfs-join-request: a approves", s, body)
+
+    seated = False
+    deadline = time.monotonic() + 45.0
+    while time.monotonic() < deadline and not seated:
+        time.sleep(1.5)
+        s, spaces = _request(f"{e_url}/api/spaces", token=e["token"])
+        seated = s == 200 and any(x.get("id") == space_id for x in spaces or [])
+    if not seated:
+        raise SystemExit("gfs-join-request: e was never seated after the approval")
+    print("  approved → e is a member ✓")
+
+    content = f"Welcome over the GFS {time.time_ns()}"
+    s, post = _request(
+        f"{a_url}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    post_id = _must("gfs-join-request: a posts", s, post, ok=(201,))["id"]
+    seen = _await_space_post(state, "e", space_id, post_id)
+    if seen.get("content") != content:
+        raise SystemExit(f"gfs-join-request: e read {seen.get('content')!r}")
+    print("  e reads a's post in the space ✓")
+
+    # e holds a space-scoped seat for a (``source: space_session``, the same
+    # row an invite-link join makes) — never a pairing.
+    s, conns = _request(f"{e_url}/api/connections", token=e["token"])
+    rows = [c for c in conns or [] if c.get("instance_id") == a["instance_id"]]
+    if s != 200 or [c.get("source") for c in rows] != ["space_session"]:
+        raise SystemExit(f"gfs-join-request: e's row for a is not a space seat: {rows!r}")
+    print("  e and a are not paired — e holds only a space-session seat ✓")
+    print("gfs-join-request: ok (unpaired household asked, was approved, reads)")
+
+
+#: How long a household stays down in ``gfs-join-request-offline`` — past
+#: the ±300 s live window, so a body judged against it would be dropped.
+JOIN_OFFLINE_WAIT_S = 330
+
+
+def _respawn(state: dict, label: str) -> None:
+    """Start a killed household again and wait for its GFS socket."""
+    info = state["instances"][label]
+    offset = _gfs_log_size()
+    info["pid"] = _spawn(label, info["port"])
+    _save(state)
+    _wait_ready(info["port"])
+    _wait_for_gfs_ws_since(info["instance_id"], offset=offset, timeout=120.0)
+    print(f"  {label} back: pid={info['pid']}, socket up")
+
+
+@_offline_step
+def cmd_gfs_join_request_offline() -> None:
+    """v_84 — the same ask while each side is down for > 5 minutes.
+
+    1. a (the host) is DOWN; e asks — the GFS queues the sealed request.
+    2. > 5 min later a comes back and drains it: filed with e's message
+       (its ``ts`` is judged against the relay queue's TTL, not ±300 s).
+    3. e is DOWN; a approves — the GFS queues the sealed answer.
+    4. > 5 min later e comes back, drains it and is seated (the approval is
+       kept with the request; the redeem runs on the reconnect).
+    5. e reads a's post.
+
+    Not in ``all`` (it sleeps twice past the live window). Prereq:
+    ``gfs-up`` + ``gfs-pair``.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    a, e = state["instances"]["a"], state["instances"]["e"]
+    a_url, e_url = f"http://127.0.0.1:{a['port']}", f"http://127.0.0.1:{e['port']}"
+    _wait_for_gfs_ws(a["instance_id"], timeout=90.0)
+    _wait_for_gfs_ws(e["instance_id"], timeout=90.0)
+
+    s, sp = _request(
+        f"{a_url}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={
+            "name": "Ask while offline",
+            "space_type": "global",
+            "gfs_ids": _active_gfs_ids(state, "a"),
+            "join_mode": "request",
+        },
+    )
+    space_id = _must("offline: a creates the space", s, sp, ok=(201,))["id"]
+    entry = None
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and entry is None:
+        _request(f"{e_url}/api/public_spaces/refresh", token=e["token"], method="POST")
+        time.sleep(1.0)
+        s, rows = _request(f"{e_url}/api/public_spaces", token=e["token"])
+        if s == 200 and isinstance(rows, list):
+            entry = next((r for r in rows if r.get("space_id") == space_id), None)
+    if entry is None or not entry.get("gfs_askable"):
+        raise SystemExit(f"offline: e cannot ask through the GFS: {entry!r}")
+    print("  e lists it with a verified join contact ✓")
+
+    _kill_household("a", a)
+    message = f"asked while a was down {time.time_ns()}"
+    s, body = _request(
+        f"{e_url}/api/public_spaces/{space_id}/join-request",
+        token=e["token"],
+        method="POST",
+        body={"host_instance_id": entry["host_instance_id"], "message": message},
+        timeout=30.0,
+    )
+    request_id = _must("offline: e asks", s, body, ok=(202,))["request_id"]
+    print(f"  a down; e asked → {request_id[:8]}… (queued on the GFS)")
+    print(f"  waiting {JOIN_OFFLINE_WAIT_S} s (past the ±300 s live window)…")
+    time.sleep(JOIN_OFFLINE_WAIT_S)
+    _respawn(state, "a")
+
+    row = None
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline and row is None:
+        s, queue = _request(f"{a_url}/api/spaces/{space_id}/join-requests", token=a["token"])
+        if s == 200:
+            row = next((r for r in queue if r.get("id") == request_id), None)
+        time.sleep(1.0)
+    if row is None or row.get("message") != message:
+        raise SystemExit("offline: a never filed the request it drained")
+    if not row.get("via_gfs") or not row.get("unverified_name"):
+        raise SystemExit(f"offline: the request is not marked as from the GFS: {row!r}")
+    print(f"  a filed it after {JOIN_OFFLINE_WAIT_S} s, named '{row['unverified_name']}' (unverified) ✓")
+
+    _kill_household("e", e)
+    s, body = _request(
+        f"{a_url}/api/spaces/{space_id}/join-requests/{request_id}/approve",
+        token=a["token"],
+        method="POST",
+        body={},
+    )
+    _must("offline: a approves", s, body)
+    print(f"  e down; a approved — waiting {JOIN_OFFLINE_WAIT_S} s…")
+    time.sleep(JOIN_OFFLINE_WAIT_S)
+    _respawn(state, "e")
+
+    seated = False
+    deadline = time.monotonic() + 90.0
+    while time.monotonic() < deadline and not seated:
+        time.sleep(1.5)
+        s, spaces = _request(f"{e_url}/api/spaces", token=e["token"])
+        seated = s == 200 and any(x.get("id") == space_id for x in spaces or [])
+    if not seated:
+        raise SystemExit("offline: e was never seated after draining the approval")
+    print("  e drained the approval and is a member ✓")
+
+    content = f"Welcome back {time.time_ns()}"
+    s, post = _request(
+        f"{a_url}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    post_id = _must("offline: a posts", s, post, ok=(201,))["id"]
+    seen = _await_space_post(state, "e", space_id, post_id)
+    if seen.get("content") != content:
+        raise SystemExit(f"offline: e read {seen.get('content')!r}")
+    print("gfs-join-request-offline: ok (queued > 5 min both ways, filed, seated, reads)")
 
 
 def cmd_gfs_open_signup() -> None:
@@ -8194,197 +8239,6 @@ def _ensure_gfs_client(state: dict, label: str) -> None:
         _save(state)
         print(f"  {label}: paired with the GFS for this step")
     _wait_for_gfs_ws(info["instance_id"])
-
-
-@_offline_step
-def cmd_gfs_media_member_fallback() -> None:
-    """Member fallback: a space picture that left the GFS cache comes back
-    on a view while the HOST is offline — served by another MEMBER that
-    pulled the want anonymously (writer group key, cookie-less session).
-
-    Prereqs: ``gfs-member-publish-strict`` (a is back up, e holds a writer
-    seat — and the writer group key — in a's global space, d follows it).
-
-    Sequence:
-    1. a posts a fresh photo in its global space; e (link-joined member) and
-       d (follower) both get it through the GFS media cache.
-    2. Respawn e so its member puller picks (GFS, space) pairs now (it waits
-       30–120 s after boot, then re-picks every 10 min); wait for its
-       ``pull loop(s)`` line.
-    3. Stop **a** (the owner — the only household the GFS may ask by name).
-    4. Expire the blob as OLD (stream, nothing stored), delete d's copy, and
-       let d view it: the GFS finds the owner connected nowhere, posts the
-       want for the members, e's held pull claims it, e re-seals its own
-       ``sg-`` copy (origin a, from the reader's hint) and serves the ticket
-       signed by the writer key.
-    5. d gets the photo BYTE-IDENTICAL; e logged ``streamed on demand as a
-       member``; the GFS counts +1 member want / +1 member serve; the GFS's
-       wants table is empty again and holds nothing naming e; the GFS
-       access log has no ``X-SH-Instance``-signed serve of e (the serve is
-       not tied to e's instance id anywhere in the GFS log).
-    6. Respawn a.
-    """
-    state = _load()
-    if not state or not _gfs_alive(state):
-        raise SystemExit("run the gfs chain through 'gfs-member-publish-strict' first")
-    space_id = (state.get("gfs") or {}).get("global_space_id")
-    if not space_id or state.get("gfs_invite_space_id") != space_id:
-        raise SystemExit("run 'gfs-space-subscribe' and 'gfs-invite-link' first")
-    step = "gfs-media-member-fallback"
-    gfs = f"http://127.0.0.1:{GFS_PORT}"
-    a = state["instances"]["a"]
-    d = state["instances"]["d"]
-    e = state["instances"]["e"]
-
-    def _counts() -> dict[str, int]:
-        card = _gfs_admin_space_media(gfs)
-        if not card.get("member_fallback"):
-            raise SystemExit(f"{step}: the GFS admin card says member_fallback is off")
-        return {
-            k: int(card.get(k, 0))
-            for k in ("member_wants", "member_serves", "holder_requests")
-        }
-
-    def _wait(pred, what: str, timeout: float = 30.0):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            got = pred()
-            if got:
-                return got
-            time.sleep(0.5)
-        raise SystemExit(f"{step}: {what} within {timeout:.0f} s")
-
-    # 1. A fresh photo both GFS readers hold.
-    filename = _picture_via_gfs_media_cache(
-        state,
-        author="a",
-        author_token=a["token"],
-        reader="d",
-        space_id=space_id,
-        step=step,
-    )
-
-    def _ref(label: str):
-        rows = _rows(
-            label,
-            "SELECT blob_id, local_name FROM space_media_refs WHERE filename = ?",
-            (filename,),
-        )
-        return rows[0] if rows else None
-
-    e_ref = _wait(lambda: _ref("e"), "e never got a's photo through the GFS", 90.0)
-    blob_id, d_local = _ref("d")
-    if e_ref[0] != blob_id:
-        raise SystemExit(f"{step}: d and e hold different blobs for one photo")
-    _wait(
-        lambda: (_instance_dir("e") / "media" / e_ref[1]).is_file(),
-        "e never stored a's photo",
-        90.0,
-    )
-    original = (_instance_dir("a") / "media" / filename).read_bytes()
-    print(f"  a's photo {filename[:12]}… reached e (member) and d (follower) ✓")
-
-    # 2. e picks its pull loops now.
-    _kill_household("e", e)
-    new_pid = _spawn("e", e["port"])
-    state["instances"]["e"]["pid"] = new_pid
-    _save(state)
-    _wait_ready(e["port"])
-    loops = _wait(
-        lambda: _log_lines_matching("e", "space media member pull:"),
-        "e's member puller picked no pull loop",
-        180.0,
-    )
-    if loops[-1].rstrip().endswith(": 0 pull loop(s)"):
-        raise SystemExit(
-            f"{step}: e picked no (GFS, space) pair — does it hold the space's "
-            f"writer key? Line: {loops[-1]!r}"
-        )
-    print(f"  e (respawned) is pulling: {loops[-1].split('member pull: ', 1)[-1]}")
-
-    # 3. The owner goes offline.
-    _kill_household("a", a)
-    time.sleep(2.0)
-
-    # 4. The blob leaves the cache (old: streamed, nothing stored).
-    held = _gfs_rows(
-        "SELECT scope_kind, scope_id FROM gfs_space_media WHERE blob_id = ?",
-        (blob_id,),
-    )
-    if not held:
-        raise SystemExit(f"{step}: the GFS holds no blob {blob_id[:12]} to expire")
-    scope_kind, scope_id = held[0]
-    now = int(time.time())
-    _gfs_write("DELETE FROM gfs_space_media WHERE blob_id = ?", (blob_id,))
-    (GFS_DIR / "space_media" / blob_id).unlink(missing_ok=True)
-    _gfs_write(
-        "INSERT INTO gfs_space_media_demand(blob_id, scope_kind, scope_id,"
-        " stored_at, touched_at) VALUES(?,?,?,?,?)"
-        " ON CONFLICT(blob_id, scope_kind, scope_id) DO UPDATE SET"
-        " stored_at = excluded.stored_at, touched_at = excluded.touched_at,"
-        " requests = 0, window_start = 0",
-        (blob_id, scope_kind, scope_id, now - 30 * 86_400, now),
-    )
-    before = _counts()
-    e_off = _log_size("e")
-    gfs_off = _gfs_log_size()
-    local = _instance_dir("d") / "media" / d_local
-    local.unlink(missing_ok=True)
-    s, body = _http_get_bytes(
-        f"http://127.0.0.1:{d['port']}/api/media/{d_local}",
-        token=d["token"],
-        timeout=90.0,
-    )
-    # 5. Byte-identical, served by e as a member.
-    if s != 200 or body != original:
-        raise SystemExit(
-            f"{step}: d's view with the host offline → HTTP {s}, "
-            f"{len(body or b'')} bytes (want the {len(original)}-byte original). "
-            f"Check {_log_path('e')} and {GFS_DIR / 'log.txt'}."
-        )
-    served = _wait(
-        lambda: _log_lines_matching(
-            "e",
-            f"space media {blob_id[:12]}: streamed on demand as a member",
-            offset=e_off,
-        ),
-        "e logged no member serve",
-    )
-    after = _counts()
-    if (
-        after["member_wants"] - before["member_wants"] != 1
-        or after["member_serves"] - before["member_serves"] != 1
-        or len(served) != 1
-    ):
-        raise SystemExit(
-            f"{step}: counts {before!r} → {after!r}, {len(served)} serve line(s) "
-            "on e; want exactly one member want and one member serve"
-        )
-    print(
-        "  a offline → d's view got the photo byte-identical, streamed by e as "
-        "an anonymous member (one want, one serve) ✓"
-    )
-    _wait(
-        lambda: not _gfs_rows("SELECT 1 FROM gfs_space_media_member_wants"),
-        "the GFS kept the member want after the session",
-    )
-    if _gfs_rows("SELECT 1 FROM gfs_space_media WHERE blob_id = ?", (blob_id,)):
-        raise SystemExit(f"{step}: an old blob was stored again (want stream only)")
-    e_id = e.get("instance_id") or ""
-    if e_id and _gfs_log_lines_matching(e_id, offset=gfs_off):
-        raise SystemExit(
-            f"{step}: a GFS log line after the view names e's instance id — the "
-            "member serve must not be tied to e"
-        )
-    print("  the GFS kept no want and logged nothing naming e ✓")
-
-    # 6. The owner comes back.
-    new_pid = _spawn("a", a["port"])
-    state["instances"]["a"]["pid"] = new_pid
-    state["gfs_media_member_fallback"] = {"blob_id": blob_id}
-    _save(state)
-    _wait_ready(a["port"])
-    print(f"  a respawned: pid={new_pid}")
 
 
 @_offline_step
@@ -22233,6 +22087,11 @@ def main() -> None:
         # ``gfs-moment-late-delete`` (v_66): a public reply's delete leaves its
         # signed certificate on the GFS (no content) and e drops the reply.
         cmd_gfs_moment_late_delete()
+        # ``gfs-join-request`` (v_84): e — on the GFS, paired with nobody,
+        # no link — asks to join a's global "ask to join" space through the
+        # GFS, a approves, e reads. Last: it gives e a space-session seat
+        # with a, which the bootstrap-only steps above must not see.
+        cmd_gfs_join_request()
         # The closing check: every step's state still holds, and the log
         # audit is clean — offline steps' lines only inside their windows.
         cmd_verify()

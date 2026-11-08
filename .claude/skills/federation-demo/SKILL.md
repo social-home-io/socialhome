@@ -716,7 +716,7 @@ space-report → forwarded-role-change → page-concurrent-edit →
 admin-revoke-rotation → rotation-offline-catchup → space-chat → replay →
 unpair → unpair-offline → gfs-up → gfs-pair → local-community →
 gfs-moment-profile → gfs-highlight-link → gfs-public-pages →
-gfs-moment-late-delete → verify``
+gfs-moment-late-delete → gfs-join-request → verify``
 in that order. The tail brings the GFS up because ``local-community``'s
 last case (a GFS-only joiner), ``gfs-moment-profile`` and
 ``gfs-highlight-link`` need it; the closing ``verify`` runs the log
@@ -968,7 +968,6 @@ python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py gfs-media-on-demand
 python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
-python .claude/skills/federation-demo/harness.py gfs-media-member-fallback
 python .claude/skills/federation-demo/harness.py gfs-private-channel
 python .claude/skills/federation-demo/harness.py gfs-b-up
 python .claude/skills/federation-demo/harness.py gfs-multi-listing
@@ -1827,21 +1826,6 @@ token-free 404, and e's link-admin seat still without a signing seed.
 ``verify``'s capability block additionally asserts **v_29** round-trips
 on the one wire that cannot fall back to a peer row — see below.
 
-### ``gfs-media-member-fallback`` — the host is offline, a member serves the picture
-
-Runs after ``gfs-member-publish-strict`` (e holds the writer group key). a
-posts a fresh photo that e (link-joined member) and d (follower) both get
-through the GFS cache; e is respawned so its member puller picks its pull
-loops now (30–120 s after boot); a is stopped; the blob is expired as old
-content and d views it: the GFS finds the owner connected nowhere, posts the
-want to the shared table, e's anonymous pull (writer-key signed, no
-household id) claims it, e re-seals its own ``sg-`` copy and serves it. d
-gets the photo byte-identical; e logs ``streamed on demand as a member``;
-the GFS counts one member want and one member serve, keeps no want and logs
-nothing naming e. a is respawned at the end. ``gfs-cluster`` step 3k proves
-the cross-node claim: two pulls on nodes 0 and 2 race for a want posted on
-node 1, exactly one claims it and its serve via the balancer reaches node 1.
-
 ### ``gfs-media-on-demand`` — a picture that left the GFS cache comes back on a view (v_83)
 
 Prereqs: the chain through ``gfs-invite-link-content`` (the two photos
@@ -2025,6 +2009,29 @@ through, which pushes ``moment_reaction`` to a only. a's
 first post must not contain either emoji, e's user id or the moment id,
 ``gfs.db`` / ``gfs.db-wal`` neither emoji, and e and a must still be
 unpaired.
+
+### ``gfs-join-request`` — ask to join a global space through the GFS, unpaired (v_84)
+
+Part of ``all`` (last before ``verify``: it gives e a space-session seat
+with a, which the bootstrap-only steps must not see). Prereqs on its own:
+``gfs-up`` + ``gfs-pair``. a creates a global space in ``request`` mode
+listed on the GFS; e (paired with nobody, no link) refreshes and lists it
+(``host_is_paired: false``), asks to join (``202``, pending on e), a finds
+the request with e's message and approves, e is seated and reads a's post,
+and e is still no paired connection of a. Before v_84 the ask answered
+``403 NOT_PAIRED``. The host's keys come off the GFS listing (``join_contact``,
+signed by the space authority key) — the GFS is asked for nothing.
+
+### ``gfs-join-request-offline`` — the same ask with each side down > 5 min (v_84)
+
+Not in ``all`` (two 330 s waits). Prereqs: ``gfs-up`` + ``gfs-pair``. a is
+killed; e asks (the GFS queues the sealed request); 330 s later a comes back,
+drains it and files it (``via_gfs``, the name unverified). Then e is killed;
+a approves (the GFS queues the answer); 330 s later e comes back, drains the
+answer, keeps the approval with its request and is seated on the reconnect;
+e reads a's post. Proves a body that waited in the relay queue past the
+±300 s live window is still taken (its ``ts`` is judged against the queue's
+TTL, its nonce's replay entry outlives it).
 
 ### ``gfs-moment-late-delete`` — a public delete leaves its signed certificate on the GFS (v_66)
 

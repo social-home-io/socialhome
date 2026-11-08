@@ -119,7 +119,6 @@ if TYPE_CHECKING:
     from .config import GfsConfig
     from .repositories import (
         AbstractGfsSpaceMediaDemandRepo,
-        AbstractGfsSpaceMediaMemberWantRepo,
         AbstractGfsSpaceMediaRepo,
     )
 
@@ -342,7 +341,6 @@ class GfsSpaceMediaStore:
         "_ip_key_secret",
         "_limits",
         "_lock",
-        "_member_wants",
         "_node_id",
         "_repo",
         "body_gate",
@@ -357,15 +355,11 @@ class GfsSpaceMediaStore:
         node_id: str = "gfs",
         ip_key_secret: bytes | None = None,
         demand: AbstractGfsSpaceMediaDemandRepo | None = None,
-        member_wants: AbstractGfsSpaceMediaMemberWantRepo | None = None,
     ) -> None:
         self._repo = repo
         #: v_83 — when a blob leaves (TTL, eviction), when it was stored is
         #: remembered here, so a later request knows fresh from old.
         self._demand = demand
-        #: The on-demand member fallback's wants: the sweep drops those a
-        #: node left behind once their session's wait is over.
-        self._member_wants = member_wants
         self._files = files
         self._limits = limits
         self._counters = _Counters()
@@ -637,8 +631,6 @@ class GfsSpaceMediaStore:
         await self._repo.prune_ip_bytes(before_bucket=now // _HOUR - 1)
         if self._demand is not None:
             await self._demand.prune(before=now - DEMAND_KEEP_S)
-        if self._member_wants is not None:
-            await self._member_wants.prune(now=now)
         if await self._repo.acquire_sweep_lease(
             self._node_id, now=now, ttl=ORPHAN_LEASE_S
         ):

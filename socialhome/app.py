@@ -72,6 +72,7 @@ from .domain.space import ContentAction
 from .exception_text import describe_exception
 from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import FederationService
+from .federation.gfs_join_request import GfsJoinRequestCoordinator
 from .federation.gfs_relay_transport import GfsRelayTransport
 from .federation.invite_link_forward import InviteLinkForwardCoordinator
 from .federation.invite_token_redeem import SpaceInviteTokenRedeemCoordinator
@@ -168,6 +169,7 @@ from .infrastructure.gfs_reconcile_retry import GfsReconcileRetry
 from .infrastructure.gfs_route_discovery_scheduler import GfsRouteDiscoveryScheduler
 from .infrastructure.gfs_ws_supervisor import GfsWebSocketSupervisor
 from .infrastructure.highlight_retention_scheduler import HighlightRetentionScheduler
+from .infrastructure.join_request_expiry_scheduler import JoinRequestExpiryScheduler
 from .infrastructure.media_orphan_sweep_scheduler import MediaOrphanSweepScheduler
 from .infrastructure.moderation_expiry_scheduler import ModerationExpiryScheduler
 from .infrastructure.moment_retention_scheduler import MomentRetentionScheduler
@@ -441,7 +443,6 @@ from .services.space_crypto_service import (
 )
 from .services.space_location_outbound import SpaceLocationOutbound
 from .services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
-from .services.space_media_gfs_member_puller import SpaceMediaGfsMemberPuller
 from .services.space_media_gfs_responder import SpaceMediaGfsResponder
 from .services.space_media_gfs_uploader import SpaceMediaGfsUploader
 from .services.space_media_names import SpaceMediaNamer
@@ -957,6 +958,32 @@ def _build_gfs_relay_inbound(
         keywrap_private_key=keywrap_private_key,
         invite_coordinator=invite_coordinator,
         gfs_connection_repo=gfs_connection_repo,
+        rate_limiter=rate_limiter,
+    )
+
+
+def _build_gfs_join_requests(
+    *,
+    federation_service: FederationService,
+    repos: SimpleNamespace,
+    bus: EventBus,
+    relay_sender: GfsEnvelopeSender,
+    identity,
+    rate_limiter: RateLimiter,
+) -> GfsJoinRequestCoordinator:
+    """ "Ask to join" through the GFS (v_84): our own published key-wrap
+    key + binding signature (never a fresh key) and the relay sender; the
+    host's keys come off the GFS listing (authority-signed, pinned)."""
+    return GfsJoinRequestCoordinator(
+        federation=federation_service,
+        federation_repo=repos.federation,
+        space_repo=repos.space,
+        public_space_repo=repos.public_space,
+        user_repo=repos.user,
+        bus=bus,
+        relay_sender=relay_sender,
+        keywrap_public_key=identity.keywrap_public_key,
+        keywrap_sig=identity.keywrap_sig,
         rate_limiter=rate_limiter,
     )
 
@@ -2314,21 +2341,9 @@ def _build_space_media_gfs(
         media_dir=media_dir,
     )
     responder.attach_federation(federation_service)
-    # The member fallback: when a listed space's owner is offline, slow or
-    # busy, its members pull the want anonymously (writer group key) and
-    # answer it with the responder's rules.
-    member_puller = SpaceMediaGfsMemberPuller(
-        space_repo=space_repo,
-        gfs_service=gfs_connection_service,
-        writer_certs=writer_certs,
-        space_crypto=space_crypto,
-        responder=responder,
-    )
-    member_puller.attach_federation(federation_service)
     app[K.space_media_gfs_uploader_key] = uploader
     app[K.space_media_gfs_fetcher_key] = fetcher
     app[K.space_media_gfs_responder_key] = responder
-    app[K.space_media_gfs_member_puller_key] = member_puller
     return uploader, fetcher
 
 
@@ -3947,6 +3962,7 @@ def create_app(config: Config | None = None) -> web.Application:
     replay_cache_scheduler: ReplayCachePruneScheduler | None = None
     gfs_route_discovery_scheduler: GfsRouteDiscoveryScheduler | None = None
     moderation_expiry_scheduler: ModerationExpiryScheduler | None = None
+    join_request_expiry_scheduler: JoinRequestExpiryScheduler | None = None
     app_pending_session_scheduler: AppPendingSessionPruneScheduler | None = None
     audio_transcript_scheduler: AudioTranscriptScheduler | None = None
     dm_relay_seen_scheduler: DmRelaySeenPruneScheduler | None = None
@@ -4170,17 +4186,6 @@ def create_app(config: Config | None = None) -> web.Application:
                 cookie_jar=aiohttp.DummyCookieJar(),
             )
         )
-        # The space media member fallback's anonymous pulls and serves: no
-        # cookies AND no keep-alive — a fresh connection per request, so the
-        # GFS can't group one household's pulls (or link them to its other
-        # anonymous traffic) by connection. Closed in _on_cleanup.
-        gfs_connection_service.attach_member_session(
-            aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=60),
-                cookie_jar=aiohttp.DummyCookieJar(),
-                connector=aiohttp.TCPConnector(force_close=True),
-            )
-        )
         gfs_space_mirror.attach_session(http_session)
         # Seats on a server never re-paired are dropped after 90 days of
         # matching no connection (local only, no request).
@@ -4249,6 +4254,12 @@ def create_app(config: Config | None = None) -> web.Application:
             theme_repo=repos.theme,
             cover_repo=repos.space_cover,
             icon_repo=repos.space_icon,
+        )
+        # v_84 — a global space that takes requests lists the keys an "Ask to
+        # join" is sealed to: our own published key-wrap key + its binding
+        # signature (never a fresh key), signed with the space authority key.
+        gfs_connection_service.attach_join_contact_keys(
+            identity.keywrap_public_key.hex(), identity.keywrap_sig
         )
         # The owner's GFS list is signed with the household identity key.
         gfs_server_selection.attach_identity(
@@ -4792,6 +4803,11 @@ def create_app(config: Config | None = None) -> web.Application:
         nonlocal moderation_expiry_scheduler
         moderation_expiry_scheduler = ModerationExpiryScheduler(space_moderation)
         await moderation_expiry_scheduler.start()
+        # Join requests nobody answered expire (their ``expires_at``), which
+        # frees a slot under the cap of requests from the GFS (v_84).
+        nonlocal join_request_expiry_scheduler
+        join_request_expiry_scheduler = JoinRequestExpiryScheduler(real_space_service)
+        await join_request_expiry_scheduler.start()
         # #114 phase 2 — the SPACE_REMOTE_ADMIN_KICK inbound handler
         # was constructed inside ``_wire_federation_stack`` before
         # ``real_space_service`` existed; wire it now so the host
@@ -4971,6 +4987,22 @@ def create_app(config: Config | None = None) -> web.Application:
             gfs_connection_repo=repos.gfs_connection,
             rate_limiter=limiter,
         )
+        # v_84 — "Ask to join" a global space found in a GFS directory from
+        # a household its host never paired with: sealed both ways over the
+        # same relay, keys from the GFS that listed it.
+        gfs_join_requests = _build_gfs_join_requests(
+            federation_service=federation_service,
+            repos=repos,
+            bus=bus,
+            relay_sender=gfs_envelope_sender,
+            identity=identity,
+            rate_limiter=limiter,
+        )
+        gfs_relay_inbound.attach_join_requests(gfs_join_requests)
+        real_space_service.attach_gfs_join_requests(gfs_join_requests)
+        # An approval whose redeem did not seat its person yet (the host was
+        # offline, we restarted): retried now, and on every GFS reconnect.
+        gfs_join_requests.resume_soon()
         # v_53 — which connection servers we share with each opted-in
         # paired peer, found by probing through each of our own servers
         # (``docs/protocol/gfs-relay.md``). Started with the other
@@ -5118,7 +5150,6 @@ def create_app(config: Config | None = None) -> web.Application:
         app[K.space_sync_service_key].attach_media_gfs(space_media_uploader)
         app[K.space_sync_receiver_key].attach_gfs_media(space_media_fetcher)
         await space_media_uploader.start()
-        await app[K.space_media_gfs_member_puller_key].start()
         # Late-bind realtime into the federation inbound — the
         # DM_MEDIA_BLOB handler uses it to fan ``dm.media_ready``
         # frames to local participants when the full bytes for a
@@ -5377,6 +5408,9 @@ def create_app(config: Config | None = None) -> web.Application:
             # so a reconnect storm or a flapping socket costs one round.
             if gfs_route_discovery_scheduler is not None:
                 gfs_route_discovery_scheduler.trigger()
+            # v_84 — a connection came up: retry approvals of "Ask to join"
+            # that have not seated their person yet (own task, non-blocking).
+            gfs_join_requests.resume_soon()
             await gfs_connection_service.refresh_connection_metadata(gfs_id)
             # Proof of possession: once this connection's server has proved
             # it holds the pinned key (the persisted ratchet), the bulk
@@ -5984,9 +6018,6 @@ def create_app(config: Config | None = None) -> web.Application:
         gfs_publish_session = gfs_connection_service.publish_client()
         if gfs_publish_session is not None:
             await gfs_publish_session.close()
-        gfs_member_session = gfs_connection_service.member_client()
-        if gfs_member_session is not None:
-            await gfs_member_session.close()
         # Wind down any in-flight public-viewer sessions before
         # closing the shared aiohttp client below.
         await highlight_signaling_handler.stop()
@@ -6001,6 +6032,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await page_forwarder.stop()
         if moderation_expiry_scheduler is not None:
             await moderation_expiry_scheduler.stop()
+        if join_request_expiry_scheduler is not None:
+            await join_request_expiry_scheduler.stop()
         if app_pending_session_scheduler is not None:
             await app_pending_session_scheduler.stop()
         space_app_table_service = app.get(K.space_app_table_service_key)
@@ -6025,8 +6058,6 @@ def create_app(config: Config | None = None) -> web.Application:
             await uploader.stop()
         if (fetcher := app.get(K.space_media_gfs_fetcher_key)) is not None:
             await fetcher.stop()
-        if (puller := app.get(K.space_media_gfs_member_puller_key)) is not None:
-            await puller.stop()
         if (responder := app.get(K.space_media_gfs_responder_key)) is not None:
             await responder.stop()
         await media_transcode_service.stop()

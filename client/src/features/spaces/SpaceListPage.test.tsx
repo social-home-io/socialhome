@@ -397,7 +397,7 @@ describe('SpaceListPage — Discover', () => {
       gfs: [{ id: 'g1', status: 'active' }],
       global: [{
         space_id: 'gArt', host_instance_id: 'iid-far', host_display_name: 'iid-far', host_is_paired: false,
-        name: 'Global art', description: null, emoji: '🖼', member_count: 90, join_mode: 'request',
+        name: 'Global art', description: null, emoji: '🖼', member_count: 90, join_mode: 'open',
         min_age: 0, allow_subscribers: true,
       }],
     })
@@ -406,7 +406,7 @@ describe('SpaceListPage — Discover', () => {
     // An unpaired host has no name we know — the row leaves the host out
     // rather than showing its instance id.
     const meta = (await r.findByText('Global art')).closest('li')!.querySelector('.sh-spaces-row__m')!
-    expect(meta.textContent).toBe('90 members · ask to join')
+    expect(meta.textContent).toBe('90 members · open')
     expect(r.getByRole('button', { name: 'Follow: Global art' })).toBeTruthy()
     r.fireEvent.click(r.getByRole('button', { name: 'Follow: Global art' }))
     await r.waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/spaces/gArt/subscribe', {}))
@@ -502,12 +502,74 @@ describe('SpaceListPage — Discover', () => {
     await r.findByRole('button', { name: 'Requested: Hottingen Community Choir' })
   })
 
+  it('an "ask to join" global space of a household we never paired with: Ask to join, through the GFS', async () => {
+    // The owner's report: a household on the same GFS as the host, not
+    // paired with it, must be able to ask (v_84). Members-only content is
+    // no reason to hide the request.
+    wire({
+      gfs: [{ id: 'g1', status: 'active' }],
+      global: [{
+        space_id: 'gAsk', host_instance_id: 'iid-far', host_display_name: null, host_is_paired: false,
+        name: 'HA Schweiz', description: null, emoji: null, member_count: 0, join_mode: 'request',
+        min_age: 0, allow_subscribers: false, gfs_askable: true,
+      }],
+    })
+    const r = await renderPage('/spaces?discover=global')
+    const row = (await r.findByText('HA Schweiz')).closest('li')!
+    expect(row.textContent).not.toContain('members can invite you with a link')
+    r.fireEvent.click(r.getByRole('button', { name: 'Ask to join: HA Schweiz' }))
+    await r.findByText(/added automatically once they approve/)
+    r.fireEvent.click(r.getByRole('button', { name: 'Send request' }))
+    await r.waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/public_spaces/gAsk/join-request', { host_instance_id: 'iid-far', message: '' },
+    ))
+    await r.findByRole('button', { name: 'Requested: HA Schweiz' })
+  })
+
+  it('opened without a chip, Discover lands on Global when that is where the spaces are', async () => {
+    // The owner's report: Discover opened on an empty "Your household" and
+    // the listed space looked missing.
+    wire({
+      gfs: [{ id: 'g1', status: 'active' }],
+      global: [{
+        space_id: 'gOnly', host_instance_id: 'iid-far', host_display_name: null, host_is_paired: false,
+        name: 'Only on the GFS', description: null, emoji: null, member_count: 0, join_mode: 'request',
+        min_age: 0, allow_subscribers: false, gfs_askable: true,
+      }],
+    })
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => (
+      url === '/api/household/spaces' || url === '/api/peer_spaces' ? [] : base(url)))
+    const r = await renderPage('/spaces')
+    await r.findByText('Only on the GFS')
+    expect(r.getByRole('button', { name: /^Global/ }).getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('an approved request still being seated reads "Approved, joining…"', async () => {
+    wire({
+      gfs: [{ id: 'g1', status: 'active' }],
+      global: [{
+        space_id: 'gJoin', host_instance_id: 'iid-far', host_display_name: null, host_is_paired: false,
+        name: 'Joining now', description: null, emoji: null, member_count: 0, join_mode: 'request',
+        min_age: 0, allow_subscribers: false, gfs_askable: true,
+      }],
+    })
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => (
+      url === '/api/me/join-requests'
+        ? { pending_space_ids: ['gJoin'], joining_space_ids: ['gJoin'] }
+        : base(url)))
+    const r = await renderPage('/spaces?discover=global')
+    const button = await r.findByRole('button', { name: 'Approved, joining…: Joining now' })
+    expect((button as HTMLButtonElement).disabled).toBe(true)
+  })
+
   it('a global space you can neither join nor follow: no button, never "pair"', async () => {
     wire({
       gfs: [{ id: 'g1', status: 'active' }],
       global: [{
         space_id: 'gClosed', host_instance_id: 'iid-far', host_display_name: 'iid-far', host_is_paired: false,
-        name: 'Closed circle', description: null, emoji: null, member_count: 4, join_mode: 'request',
+        name: 'Closed circle', description: null, emoji: null, member_count: 4, join_mode: 'open',
         min_age: 0, allow_subscribers: false,
       }],
     })
