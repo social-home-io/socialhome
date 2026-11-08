@@ -102,6 +102,7 @@ from ..domain.presence import truncate_coord
 from ..domain.space import (
     MODERATION_BLOCK_KEY,
     ContentAction,
+    ModerationStatus,
     SpaceRole,
     role_change_event_type,
 )
@@ -235,8 +236,14 @@ _DM_HOLD_SCOPE = DM_HOLD_SCOPE
 #: Why a ``SPACE_MEDIA_BLOB`` is refused (:meth:`FederationInboundService
 #: ._space_media_in_scope`): its row lives in another space…
 _ROW_ELSEWHERE = "row of another space"
-#: …or its row here does not show the sender's file.
+#: …or its row here does not show the sender's file…
 _NOT_ITS_FILE = "not a file of the row as held here"
+#: …or (v_86) the row here lists the file's hash, but the sender is neither
+#: the row's author household nor a trusted one, or the row is deleted.
+_NOT_A_FILLER = "not the author's or a trusted household, or the row is deleted"
+#: A held submission's files are filled while it is pending or approved —
+#: never once rejected or expired (its payload is purged).
+_FILLABLE_HELD = frozenset({ModerationStatus.PENDING, ModerationStatus.APPROVED})
 
 
 def _scoped(shows_file: bool) -> str | None:
@@ -2290,6 +2297,12 @@ class FederationInboundService(ProtectionGateMixin):
                         # verified bytes take both — the unreferenced one
                         # goes with the orphan sweep.
                         alias = local
+                    elif scope is None and not await self._fills_content(
+                        event, space_id=space_id, correlation_id=correlation_id
+                    ):
+                        # v_86 — the row is here and lists h: only its
+                        # author's household or a trusted one fills it.
+                        scope = _NOT_A_FILLER
                     local = content
             if h is None or scope == _NOT_ITS_FILE:
                 scope = await self._space_media_in_scope(
@@ -2338,6 +2351,54 @@ class FederationInboundService(ProtectionGateMixin):
             total_size=_declared_size(p, raw, chunk_count),
             expected_sha256=h,
         )
+
+    async def _fills_content(
+        self, event: FederationEvent, *, space_id: str, correlation_id: str
+    ) -> bool:
+        """v_86 — whether the sender may deliver a hashed file of the live
+        row ``correlation_id`` held here (its hash map lists the file, so
+        the bytes are checked against it): the row's AUTHOR household
+        (:meth:`SpaceAuthorship.acts_for`), or a TRUSTED one — the host, a
+        delegated admin, a live ``admin`` or ``moderator`` seat
+        (:meth:`SpaceAuthorship.has_content_authority`). Nobody fills a
+        deleted row's file. Only files: rows still come from the host or a
+        delegated admin alone (§25.6 ``receiver._acts_as_host``)."""
+        authorship = self._space_authorship(event)
+        if authorship is None:
+            return False
+        author = await self._live_row_author(correlation_id)
+        if author is None:
+            return False
+        if await authorship.has_content_authority(event, space_id):
+            return True
+        return await authorship.acts_for(event, space_id, author, any_role=True)
+
+    async def _live_row_author(self, correlation_id: str) -> str | None:
+        """The author of the live row ``correlation_id`` held here — a post
+        (a bazaar wrapper's seller), a comment, a gallery item, a calendar
+        event or a held moderation item, in :meth:`_space_media_in_scope`'s
+        order — or ``None`` (not held, deleted, or a rejected / expired
+        submission). Its space is checked
+        by the scope check before this runs."""
+        found = await self._space_post_repo.get(correlation_id)
+        if found is not None:
+            post = found[1]
+            return None if post.deleted else post.author
+        comment = await self._space_post_repo.get_comment(correlation_id)
+        if comment is not None:
+            return None if comment.deleted else comment.author
+        if self._gallery_repo is not None:
+            item = await self._gallery_repo.get_item(correlation_id)
+            if item is not None:
+                return item.uploaded_by
+        if self._space_calendar_repo is not None:
+            found_event = await self._space_calendar_repo.get_event(correlation_id)
+            if found_event is not None:
+                return found_event[1].created_by
+        held = await self._space_repo.get_moderation_item(correlation_id)
+        if held is not None and held.status in _FILLABLE_HELD:
+            return held.submitted_by
+        return None
 
     async def _host_fills(
         self,
