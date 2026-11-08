@@ -572,7 +572,7 @@ changes between households.
 
 **Issuer key.** The signed `/gfs/info` capability `mailbox_tickets` is
 `{suite: "privacypass-blindrsa2048-sha384-pss", issuer_key_id, public_key,
-per_day}` — `issuer_key_id` the b64url SHA-256 of the RSASSA-PSS SPKI,
+per_day, epoch_days}` — `issuer_key_id` the b64url SHA-256 of the RSASSA-PSS SPKI,
 `public_key` that SPKI. A household rejects an unknown suite (no fallback)
 and a key whose id does not match. One RSA-2048 key per epoch
 (`mailbox_ticket_epoch_days`, 30), made by the first node that needs it and
@@ -611,7 +611,7 @@ sequenceDiagram
     participant A as GFS node A
     participant B as GFS node B
     H->>A: GET /gfs/info
-    A-->>H: capabilities (signed) incl. mailbox_tickets {suite, issuer_key_id, public_key, per_day}
+    A-->>H: capabilities (signed) incl. mailbox_tickets {suite, issuer_key_id, public_key, per_day, epoch_days}
     H->>H: check suite + key id; blind N TokenRequests (RFC 9474)
     H->>A: POST /gfs/mailbox/tickets {action, instance_id, suite, issuer_key_id, requests, ts, signature}
     A->>A: verify identity signature, active, quota (gfs_ticket_issuance)
@@ -629,7 +629,13 @@ sequenceDiagram
 **Residuals.** The issuer learns "household H took N tickets today", never
 which mailbox spent one. A fetch right before a register lets the GFS line
 the two up by time, so a household fetches ahead (e.g. on connect, once a
-day) and spends from its cache (`MailboxTicketCache`). IP / timing
+day) and spends from its cache (`MailboxTicketCache`). The cache never
+fetches on its own: an empty cache fails a register with `no_ticket`, and a
+`stale_ticket_key` refusal drops that key's tickets and fails — so a GFS
+that refuses a register on purpose cannot make the household fetch right
+next to it. Only `ticket_spent` is retried, once, from the cache. The
+capability's `epoch_days` lets a household notice a key that changes faster
+than an epoch (pinning one key per epoch is wired with redesign PR 2). IP / timing
 correlation with the household's identified `/gfs/ws` stays the accepted,
 stated limit (as for claims above). Household side:
 `TicketIssuer.from_capability`, `build_ticket_request`, `fetch_tickets`,

@@ -198,7 +198,7 @@ def blind_sign(private_key: rsa.RSAPrivateKey, blinded_msg: bytes) -> bytes:
     the result is checked with RSAVP1 before it leaves (a fault never
     leaks the key)."""
     priv = private_key.private_numbers()
-    n, e, d = priv.public_numbers.n, priv.public_numbers.e, priv.d
+    n, e = priv.public_numbers.n, priv.public_numbers.e
     k_len = (n.bit_length() + 7) // 8
     if len(blinded_msg) != k_len:
         raise InvalidToken("unexpected input size")
@@ -209,7 +209,13 @@ def blind_sign(private_key: rsa.RSAPrivateKey, blinded_msg: bytes) -> bytes:
         b = secrets.randbelow(n - 1) + 1
         if math.gcd(b, n) == 1:
             break
-    s = (pow((m * pow(b, e, n)) % n, d, n) * pow(b, -1, n)) % n
+    base = (m * pow(b, e, n)) % n
+    # RSASP1 by CRT (RFC 8017 §5.2.1 2.b) — ~3-4x faster than pow(·, d, n).
+    p, q = priv.p, priv.q
+    s1 = pow(base % p, priv.dmp1, p)
+    s2 = pow(base % q, priv.dmq1, q)
+    s = (s2 + q * ((priv.iqmp * (s1 - s2)) % p)) % n
+    s = (s * pow(b, -1, n)) % n
     if pow(s, e, n) != m:
         raise InvalidToken("signing failure")
     return s.to_bytes(k_len, "big")

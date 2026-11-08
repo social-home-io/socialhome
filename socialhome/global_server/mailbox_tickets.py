@@ -76,7 +76,7 @@ DAY_SECONDS: int = 86_400
 KEYS_REFRESH_S: float = 60.0
 #: An unknown ``token_key_id`` re-reads the table at most this often (a
 #: sibling may have just made the epoch's key; junk ids can't force reads).
-KEYS_MISS_REFRESH_S: float = 10.0
+KEYS_MISS_REFRESH_S: float = 1.0
 #: SHA-256 of the fixed challenge — what every mailbox ticket carries.
 CHALLENGE_DIGEST: bytes = hashlib.sha256(MAILBOX_TICKET_CHALLENGE).digest()
 
@@ -217,6 +217,9 @@ class MailboxTicketService:
             "issuer_key_id": crypto.b64url_encode(live.row.key_id),
             "public_key": crypto.b64url_encode(pp.encode_public_key(live.public)),
             "per_day": self._cfg.mailbox_tickets_per_day,
+            # How long one key signs: a household that sees the key change
+            # faster than this can tell it is being handed its own key.
+            "epoch_days": self._cfg.mailbox_ticket_epoch_days,
         }
 
     # ── Issuance ─────────────────────────────────────────────────────────
@@ -322,8 +325,10 @@ class MailboxTicketService:
     async def prune(self, *, now: int) -> None:
         """Forget spent nonces of retired keys, past days' counts and keys
         no longer accepted."""
+        # One day of margin: a node whose clock runs ahead must never forget
+        # a nonce while a sibling still accepts its key.
         await self._repo.prune(
-            now=now,
+            now=now - DAY_SECONDS,
             day=now // DAY_SECONDS * DAY_SECONDS,
             keys_before=self._accept_after(now) - DAY_SECONDS,
         )

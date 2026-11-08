@@ -126,8 +126,8 @@ async def test_the_capability_is_signed_and_carries_the_suite(gfs):
     info = await (await gfs.get("/gfs/info")).json()
     cap = info["capabilities"]["mailbox_tickets"]
     assert cap["suite"] == pp.TICKET_SUITE_PP_BLINDRSA
-    assert cap["per_day"] == 50
-    assert set(cap) == {"suite", "issuer_key_id", "public_key", "per_day"}
+    assert (cap["per_day"], cap["epoch_days"]) == (50, 30)
+    assert set(cap) == {"suite", "issuer_key_id", "public_key", "per_day", "epoch_days"}
 
 
 @pytest.mark.parametrize(
@@ -429,3 +429,26 @@ async def test_a_ticket_issued_on_node_a_is_redeemed_on_node_b_once(nodes):  # n
         json=build_register_body(other, "gfs-shared", ticket=ticket),
     ) as resp:
         assert (resp.status, (await resp.json())["error"]) == (409, "ticket_spent")
+
+
+async def test_a_spent_nonce_outlives_its_key_by_a_day(gfs_db):
+    """Prune keeps a day of margin past the key's last accepted second, so a
+    node whose clock runs ahead never forgets a nonce a sibling would still
+    accept."""
+    clock = _Clock(float(30 * DAY_SECONDS * 50))
+    svc = MailboxTicketService(
+        repo=SqliteGfsMailboxTicketRepo(gfs_db),
+        config=EnvelopeMailboxConfig(),
+        federation=None,  # type: ignore[arg-type]
+        clock=clock,
+    )
+    live = await svc.current_key()
+    nonce, expires_at = await svc.check(
+        pp.TICKET_SUITE_PP_BLINDRSA, b64url_encode(_local_token(live))
+    )
+    await svc.spend(nonce, expires_at)
+    for now in (expires_at, expires_at + DAY_SECONDS - 1):
+        await svc.prune(now=now)
+        assert len(await gfs_db.fetchall("SELECT 1 FROM gfs_spent_tickets")) == 1
+    await svc.prune(now=expires_at + DAY_SECONDS + 1)
+    assert await gfs_db.fetchall("SELECT 1 FROM gfs_spent_tickets") == []

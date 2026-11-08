@@ -157,9 +157,12 @@ async def _issuer(session, url) -> TicketIssuer:
     return TicketIssuer.from_capability(info["capabilities"]["mailbox_tickets"])
 
 
-async def _ticket_cache(app, session, url, *, batch: int = 4) -> MailboxTicketCache:
+async def _ticket_cache(
+    app, session, url, *, batch: int = 4, prefetch: bool = True, calls=None
+) -> MailboxTicketCache:
     """A household registered and active on the GFS, with a ticket cache
-    that fetches over its signed channel."""
+    that fetches over its signed channel — filled ahead of use (*prefetch*),
+    as a household does on connect. *calls* counts the fetches."""
     await app[gfs_fed_repo_key].upsert_instance(
         ClientInstance(
             instance_id=HOME_ID,
@@ -171,11 +174,16 @@ async def _ticket_cache(app, session, url, *, batch: int = 4) -> MailboxTicketCa
     issuer = await _issuer(session, url)
 
     async def fetch(count: int) -> list[bytes]:
+        if calls is not None:
+            calls.append(count)
         return await fetch_tickets(
             session, url, issuer, count, instance_id=HOME_ID, signing_key=HOME_SEED
         )
 
-    return MailboxTicketCache(fetch, batch=batch)
+    cache = MailboxTicketCache(fetch, batch=batch)
+    if prefetch:
+        await cache.refill()
+    return cache
 
 
 async def _settle(app) -> None:
@@ -342,24 +350,62 @@ async def test_a_spent_ticket_is_replaced_once(gfs):
     assert len(tickets) == 2
 
 
-async def test_tickets_under_a_retired_key_are_dropped_and_refetched(gfs):
-    server, session, url, tickets = gfs
-    await tickets.refill()
-    svc = server.app[gfs_mailbox_tickets_key]
-    # The GFS forgets every key it accepted (as after two epochs).
-    svc._keys.clear()
-    svc._current = None
-    await server.app[gfs_db_key].enqueue("DELETE FROM gfs_ticket_issuer_keys")
-    svc._miss_at = -1e9
-    # The cache still blinds under the old issuer: the refetch is refused
-    # as stale, so the household must re-read /gfs/info.
-    keys = derive_mailbox_keys(ROOT, GFS_ID, "after-rotation", 0)
-    with pytest.raises(MailboxTicketError) as err:
-        await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
-    assert (err.value.status, err.value.error) == (409, "stale_issuer_key")
-    assert len(tickets) == 0
-    fresh = await _ticket_cache(server.app, session, url)
-    assert await register_mailbox(session, url, keys, GFS_ID, tickets=fresh)
+async def test_tickets_under_a_retired_key_are_dropped_without_a_fetch(tmp_dir):
+    """The GFS refuses a ticket's key: the household drops that key's
+    tickets and fails — it never fetches right away (an identified fetch
+    right after an anonymous register would tie the two together)."""
+    calls: list[int] = []
+    server = TestServer(create_gfs_app(_gfs_config(tmp_dir)))
+    await server.start_server()
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = str(server.make_url("")).rstrip("/")
+            tickets = await _ticket_cache(server.app, session, url, calls=calls)
+            assert calls == [4]
+            svc = server.app[gfs_mailbox_tickets_key]
+            # The GFS forgets every key it accepted (as after two epochs).
+            svc._keys.clear()
+            svc._current = None
+            await server.app[gfs_db_key].enqueue("DELETE FROM gfs_ticket_issuer_keys")
+            svc._miss_at = -1e9
+            keys = derive_mailbox_keys(ROOT, GFS_ID, "after-rotation", 0)
+            with pytest.raises(MailboxRegisterError) as err:
+                await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
+            assert (err.value.status, err.value.error) == (403, "stale_ticket_key")
+            assert len(tickets) == 0
+            assert calls == [4]  # no fetch next to the refused register
+            with pytest.raises(MailboxTicketError) as empty:
+                await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
+            assert empty.value.error == "no_ticket"
+            assert calls == [4]
+            # Later, on its own schedule, the household re-reads /gfs/info.
+            fresh = await _ticket_cache(server.app, session, url)
+            assert await register_mailbox(session, url, keys, GFS_ID, tickets=fresh)
+    finally:
+        await server.close()
+
+
+async def test_drop_key_keeps_tickets_under_other_keys():
+    cache = MailboxTicketCache(None, batch=4)  # type: ignore[arg-type]
+    old = b"\x00\x02" + bytes(64) + b"o" * 32 + bytes(256)
+    new = b"\x00\x02" + bytes(64) + b"n" * 32 + bytes(256)
+    cache._tickets = [old, new, old]
+    cache.drop_key(b"o" * 32)
+    assert cache._tickets == [new]
+
+
+def _gfs_config(tmp_dir, **kw) -> GfsConfig:
+    return GfsConfig(
+        host="127.0.0.1",
+        port=0,
+        base_url="http://gfs.test",
+        data_dir=str(tmp_dir),
+        instance_id=GFS_ID,
+        cluster_enabled=False,
+        cluster_node_id=GFS_ID,
+        cluster_peers=(),
+        **kw,
+    )
 
 
 async def test_the_daily_batch_is_bounded_per_household(tmp_dir):
@@ -379,7 +425,9 @@ async def test_the_daily_batch_is_bounded_per_household(tmp_dir):
     try:
         async with aiohttp.ClientSession() as session:
             url = str(server.make_url("")).rstrip("/")
-            tickets = await _ticket_cache(server.app, session, url, batch=8)
+            tickets = await _ticket_cache(
+                server.app, session, url, batch=8, prefetch=False
+            )
             assert await tickets.refill() == 3  # granted what is left
             tickets.clear()
             with pytest.raises(MailboxTicketError) as err:

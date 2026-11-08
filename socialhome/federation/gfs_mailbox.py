@@ -315,9 +315,10 @@ class MailboxTicketCache:
     mailbox and the batch is refilled daily, so losing it on restart costs
     nothing that matters.
 
-    Call :meth:`refill` ahead of use (on connect, once a day): :meth:`take`
-    fetches only when the cache is empty, and a fetch right before a
-    register lets the GFS pair the two by time."""
+    :meth:`refill` runs on its own schedule (on connect, once a day) and
+    :meth:`take` never fetches: an identified fetch right before an
+    anonymous register would let the GFS pair the two by time — and a GFS
+    that refused a register on purpose could force exactly that."""
 
     __slots__ = ("_batch", "_fetch", "_lock", "_tickets")
 
@@ -345,24 +346,34 @@ class MailboxTicketCache:
                 self._tickets.extend(await self._fetch(want))
             return len(self._tickets)
 
-    async def take(self) -> bytes:
+    def take(self) -> bytes:
         """One unspent ticket (it leaves the cache: a ticket is never
-        offered twice)."""
+        offered twice). Raises :class:`MailboxTicketError` ``no_ticket``
+        when empty — never fetches (see the class docstring)."""
         if not self._tickets:
-            await self.refill()
-        if not self._tickets:  # pragma: no cover — fetch grants ≥ 1 or raises
             raise MailboxTicketError(0, "no_ticket")
         return self._tickets.pop()
 
+    def drop_key(self, key_id: bytes) -> None:
+        """Drop the tickets issued under *key_id* (the GFS no longer
+        accepts it); tickets under other keys stay."""
+        self._tickets = [t for t in self._tickets if _ticket_key_id(t) != key_id]
+
     def clear(self) -> None:
-        """Drop every ticket (the GFS no longer accepts their key)."""
+        """Drop every ticket."""
         self._tickets.clear()
 
 
-#: Register refusals after which the ticket — or every cached one — is
-#: useless, and one retry with a fresh ticket makes sense.
+def _ticket_key_id(ticket: bytes) -> bytes:
+    """The ``token_key_id`` of an encoded RFC 9577 token."""
+    return ticket[2 + 32 + 32 : 2 + 32 + 32 + 32]
+
+
+#: A register refused for this ticket: it is gone (the cached ones are
+#: still good), so one retry with the next cached ticket makes sense.
 _TICKET_SPENT: str = "ticket_spent"
-_TICKET_STALE: frozenset[str] = frozenset({"stale_ticket_key", "invalid_ticket"})
+#: The GFS no longer accepts the ticket's key: drop every ticket under it.
+_TICKET_STALE_KEY: str = "stale_ticket_key"
 
 
 def build_register_body(
@@ -413,12 +424,15 @@ async def register_mailbox(
 ) -> str:
     """Register *keys*' mailbox at *gfs_url*, spending one ticket from
     *tickets* (a GFS that requires them refuses a new mailbox without).
-    A spent or stale ticket is replaced once. Returns the mailbox id the GFS
-    confirmed; raises :class:`MailboxRegisterError` on a refusal (and
-    :class:`MailboxTicketError` when no ticket can be had)."""
+    A spent ticket is replaced once from the cache; a ticket under a retired
+    key drops that key's tickets and fails — the caller registers again
+    after the cache's own scheduled refill, never right after a fetch.
+    Returns the mailbox id the GFS confirmed; raises
+    :class:`MailboxRegisterError` on a refusal (and
+    :class:`MailboxTicketError` ``no_ticket`` when the cache is empty)."""
     url = gfs_url.rstrip("/") + MAILBOX_REGISTER_ROUTE
     for attempt in range(2):
-        ticket = await tickets.take() if tickets is not None else None
+        ticket = tickets.take() if tickets is not None else None
         async with session.post(
             url,
             json=build_register_body(keys, gfs_instance_id, ticket=ticket),
@@ -429,11 +443,10 @@ async def register_mailbox(
         if status == 200:
             break
         error = str(body.get("error") or "unexpected")
-        if tickets is not None and attempt == 0:
-            if error in _TICKET_STALE:
-                tickets.clear()  # the GFS moved on from their key
-                continue
-            if error == _TICKET_SPENT:
+        if tickets is not None and ticket is not None:
+            if error == _TICKET_STALE_KEY:
+                tickets.drop_key(_ticket_key_id(ticket))
+            elif error == _TICKET_SPENT and attempt == 0 and len(tickets):
                 continue
         raise MailboxRegisterError(status, error)
     if body.get("mailbox_id") != keys.mailbox_id:
