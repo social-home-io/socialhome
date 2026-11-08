@@ -77,6 +77,11 @@ class InvalidMailboxEntry(ValueError):
     """A directory entry is malformed (or names an unknown suite)."""
 
 
+class UnsupportedMailboxEntrySuite(InvalidMailboxEntry):
+    """An entry names a ``sig_suite`` / ``kem_suite`` this build does not
+    support — refused, never defaulted."""
+
+
 @dataclass(slots=True, frozen=True)
 class SpaceMailboxEntry:
     """A household's signed mailbox for one space (see the module doc)."""
@@ -177,10 +182,10 @@ def parse_entry(raw: object) -> SpaceMailboxEntry:
         raise InvalidMailboxEntry("entry fields do not match")
     sig_suite = raw.get("sig_suite")
     if sig_suite not in SUPPORTED_ENTRY_SIG_SUITES:
-        raise InvalidMailboxEntry(f"unsupported entry sig_suite {sig_suite!r}")
+        raise UnsupportedMailboxEntrySuite(f"unsupported entry sig_suite {sig_suite!r}")
     kem_suite = raw.get("kem_suite")
     if kem_suite not in SUPPORTED_ENTRY_KEM_SUITES:
-        raise InvalidMailboxEntry(f"unsupported entry kem_suite {kem_suite!r}")
+        raise UnsupportedMailboxEntrySuite(f"unsupported entry kem_suite {kem_suite!r}")
     space = raw.get("space")
     if not isinstance(space, str) or not _SPACE_ID_RE.fullmatch(space):
         raise InvalidMailboxEntry("invalid space id")
@@ -268,6 +273,7 @@ __all__ = [
     "OwnMailbox",
     "SpaceInstanceMailbox",
     "SpaceMailboxEntry",
+    "UnsupportedMailboxEntrySuite",
     "entry_signed_bytes",
     "own_to_wire",
     "parse_entry",

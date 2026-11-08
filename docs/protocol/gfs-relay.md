@@ -420,15 +420,15 @@ Every relay above addresses a household by its **instance id**, so the GFS
 sees one household id across all the spaces it reaches that household for.
 The redesign addresses a member reached through a GFS by a **mailbox** per
 (household, space, generation) instead. PR 1 ships the GFS side and the
-household library only — no household sends to or claims a mailbox until
-redesign PR 2 (v_88); there is no `OURS` bump. The GFS advertises it in its
+household library, with no `OURS` bump; redesign PR 2 (v_88) wires it into
+the space seat flow — see [Per-space mailboxes (v_88)](#per-space-mailboxes-v_88). The GFS advertises it in its
 signed `/gfs/info` as `envelope_mailbox: {"sig_suites": ["ed25519"],
 "idle_days": 30}`.
 
 **Keys and id.** The household derives the mailbox's X25519 sealing key and
 Ed25519 claim key with HKDF-SHA256 from its **mailbox root** — a dedicated
-32-byte secret generated once and stored under the household KEK (wired in
-PR 2), not the key-wrap seed (salt `sh-mbx-v1`, info
+32-byte secret generated once and stored under the household KEK
+(`instance_config` key `gfs_mailbox_root`, v_88), not the key-wrap seed (salt `sh-mbx-v1`, info
 `sh-mbx-kem:v1|<gfs id>|<space>|<gen>` / `sh-mbx-sign:v1|<gfs id>|<space>|<gen>`),
 so beside the root only `gen` (and the GFS id pinned at mint time) needs
 storing. With the GFS id in the derivation, two GFSs serving the same
@@ -675,8 +675,16 @@ with no key and no id, and leaves the tickets unused. A ticket under a key
 the household no longer admits (`ticket_key_not_admitted`) is dropped with
 every ticket under that key. What remains: a GFS that recognises the
 household's *address* can show it its own key in BOTH views from first
-contact and keep it — the same IP / timing limit as below. A cross-check
-outside the GFS (a key id compared among paired households) is planned.
+contact and keep it — the same IP / timing limit as below.
+
+**No cross-check outside the GFS (decision, v_88).** Comparing key ids among
+paired households was considered and not built. It would add a federation
+field and a version bump for a residual only a GFS that recognises the
+household's address can use. Key consistency stays the anonymous cross-read
+above plus the one-key-per-epoch pin, which v_88 persists per GFS
+(`instance_config` key `gfs_mailbox_ticket_pin:<gfs id>`), so a restart
+cannot reset it. The stated limit stands: a GFS that recognises the
+household's IP can show it its own key from first contact.
 
 **Anonymity set.** A redeemed ticket hides its household among the
 households that fetched tickets under the **same key in that epoch** —
@@ -691,7 +699,10 @@ line the two up, so the cache refills on its own schedule — about once a
 day, each wait jittered ±50 % (`MailboxTicketCache.start`), and a slot
 within an hour after a register is skipped — and a register spends from the
 cache. A failed refill or anonymous read (a GFS outage included) logs a
-WARNING and the loop tries again at the next slot. The cache never fetches on its own: an empty cache fails a register
+WARNING and the loop tries again at the next slot. On a GFS connect, a cache
+that is empty is refilled once, unless a register took a ticket within the
+quiet window (`MailboxTicketCache.refill_if_quiet`), so a fresh household is
+not without tickets until its first daily slot. A register never fetches: an empty cache fails a register
 with `no_ticket`, and a `stale_ticket_key` refusal drops that key's tickets
 and fails — so a GFS that refuses a register on purpose cannot make the
 household fetch right next to it. Only `ticket_spent` is retried, once,
@@ -708,10 +719,181 @@ IP / timing correlation with the household's identified `/gfs/ws` stays the
 accepted, stated limit (as for claims above). Household side:
 `TicketIssuer.from_capability`, `read_ticket_issuer`, `TicketKeyGuard`,
 `build_ticket_request`, `fetch_tickets`, `MailboxTicketCache`,
-`register_mailbox(tickets=…)` in `socialhome/federation/gfs_mailbox.py` —
-not wired into space flows until redesign PR 2 (which also persists the
-`TicketKeyPin`). GFS side: `socialhome/privacy_pass.py`,
+`register_mailbox(tickets=…)` in `socialhome/federation/gfs_mailbox.py`,
+wired by `SpaceMailboxService` (v_88: one guard and cache per GFS
+connection, the `TicketKeyPin` persisted). GFS side: `socialhome/privacy_pass.py`,
 `socialhome/global_server/mailbox_tickets.py`, GFS migration 0030.
+
+## Per-space mailboxes (v_88)
+
+GFS redesign PR 2 puts the mailboxes above to use. A household that reaches
+a space **only** through a GFS is addressed there by a mailbox for that
+space, not by its instance id. So the recipient field no longer lets the
+GFS tie the household's spaces to each other or to its identity.
+
+**Who gets one.** Only a `space_session` seat: a household seated from an
+invite link, or from an approved GFS "Ask to join" (which redeems over the
+same sealed bootstrap leg, see
+[discovery.md](./discovery.md#ask-to-join-through-the-gfs-v_84)). Paired
+and mesh members never get a mailbox; they redeem over the direct or routed
+path. Gated on `FederationCapability.MIN_FOR_SPACE_MAILBOX` (v_88), slug
+`space_mailboxes`. Not space-scoped, no sync-stream change.
+
+**The mailbox root.** One 32-byte secret, generated once and stored
+KEK-wrapped in `instance_config` (`gfs_mailbox_root`). Every mailbox key is
+derived from it (see above), so per mailbox only the generation and the GFS
+it lives on are stored. No migration for the root.
+
+**The directory entry.** What a household hands its counterpart inside the
+sealed redeem or ACK, as `mailbox`
+(`domain/space_mailbox.SpaceMailboxEntry`). Exactly these fields; any other
+set is refused:
+
+| Field | Meaning |
+|---|---|
+| `space` | The space this mailbox is for. |
+| `instance_id` | The household that minted it. |
+| `mailbox_id` | `base32(SHA-256("sh-mbx-v1" ‖ sign_pk))[:32]`; never equal to `instance_id`. |
+| `kem_pk` | The mailbox's X25519 key (b64url, 32 bytes). Frames for the mailbox are sealed to it. |
+| `kem_suite` | `"x25519"`. Unknown → refused, no fallback. |
+| `sign_pk` | The mailbox's Ed25519 claim key (b64url, 32 bytes). |
+| `gfs` | Base URL of the GFS the mailbox lives on. |
+| `gen` | The mailbox generation (random, below 2³¹). |
+| `proto_version` | The minting household's `OURS`. A sender uses the entry only at ≥ 88. |
+| `keywrap_pk` / `keywrap_sig` | The household's key-wrap key and its self-signature under the identity key. |
+| `sig_suite` | `"ed25519"`. Unknown → refused, no fallback. |
+| `sig` | The household identity key over `"sh-mbx-entry:v1\n"` + canonical JSON of every other field. |
+
+The signature lets the entry be passed on to other members later (v_89)
+and still prove who minted it. The receiver checks it under the identity
+key it already trusts for that household (the one in the sealed redeem, or
+the invite / approval hint): that key must derive to `instance_id`,
+`keywrap_sig` must bind the key-wrap key to it, and `space` must be the
+space being joined (`federation/space_mailbox_entry.verify_entry`). A bad
+entry is ignored; the pair keeps today's relay toward that household.
+
+**The seat flow.**
+
+1. **Joiner.** When the host's version (from the invite blob or the
+   approval) is ≥ 88, the joiner mints its mailbox for (space, random
+   `gen`) at the invite's GFS before it sends the redeem: derive the keys,
+   register (spending a ticket only when the mailbox is new), open its own
+   claim socket `/gfs/mailbox/ws`. Its signed entry rides in the sealed
+   redeem.
+2. **Host.** It verifies the entry, then mints its own mailbox for the space
+   at the same GFS. A host keeps **one mailbox per space per GFS**, shared
+   by all its GFS-only members of that space. It registers and claims it
+   **before** the ACK leaves, so the joiner's first envelopes land, and puts
+   its entry in the sealed ACK.
+3. **Both** store `{peer: <the other's entry>, own: {gen, gfs_id, gfs}}` in
+   the pair's `space_instances.mailbox` (migration 0144). A failed redeem
+   drops the joiner's fresh mailbox again.
+
+If the GFS takes no mailboxes, or no ticket can be had, that side mints
+none and the pair keeps the instance-addressed relay toward it.
+
+**Sending.** For each relay send to a `space_session` seat,
+`FederationTransport` asks `SpaceMailboxService.target_for` for the
+target's mailbox for the envelope's `space_id` (a space-less envelope uses
+any shared space's mailbox). The target is used only when the entry is at
+v_88 or above and our connection to the entry's GFS proved the signed
+`envelope_mailbox` capability (and `envelope_media` for a binary media
+frame). Then:
+
+- the unchanged §24.11 envelope (signed by the household identity key,
+  encrypted under the pair session key) is padded to the relay size
+  buckets and sealed whole to the mailbox `kem_pk` (ephemeral X25519 ECIES,
+  `kem_suite: "x25519"`, the same seal as the relay);
+- it goes out as `POST /gfs/envelope {to_instance: <mailbox id>, sealed}`
+  over the household's cookie-less anonymous session, never the
+  identified one;
+- a v_87 binary media frame goes the same way: its recipient field is the
+  mailbox id and it is sealed to `kem_pk`.
+
+Otherwise the send is today's instance-addressed relay.
+
+**Receiving.** Frames on a mailbox's claim socket are opened with that
+mailbox's own X25519 key (never the key-wrap key). A mailbox carries only
+relayed §24.11 envelopes and media frames; invite, pairing and join bodies
+are refused. The envelope enters the unchanged §24.11 pipeline with
+transport `TRANSPORT_GFS_MAILBOX` (`"gfs_mailbox"`), which gets the relay's
+timestamp window and relay opt-in gate (`RELAY_TRANSPORTS`). One extra step
+runs right after the parse, `check_mailbox_space`: the envelope's
+`space_id` must be the mailbox's space or absent. Anything else is refused.
+
+**Rotation and release.** A mailbox changes only when the household leaves
+or is removed. When a `space_session` seat ends (leave, kick, ban,
+dissolve), every own mailbox that no `space_instances` row refers to any
+more is closed and unregistered (`POST /gfs/mailbox/unregister`, see
+above). A GFS without that route lets its idle sweep drop the mailbox. A
+re-join picks a fresh random `gen`, so the GFS cannot tie the old and the
+new mailbox.
+
+**What the GFS sees.** Per mailbox frame: the mailbox id, the time, the size
+bucket and the sender's IP. Per claim socket: its IP and online time. Never
+an instance id, space id, event type or sender id for mailbox traffic.
+Residuals:
+
+- The `SPACE_SESSION_CLEANUP` sent at teardown is space-less and goes after
+  the rows are gone, so it rides the instance-addressed relay — one frame
+  per teardown.
+- The joiner→host direction stays instance-addressed when the host sent no
+  entry (an older host, or no ticket).
+- IP / timing correlation with the household's identified `/gfs/ws`, as for
+  every relayed frame.
+
+**Mixed versions.** No entry, an entry below v_88, or a GFS without
+`envelope_mailbox` → today's path. An older host ignores the `mailbox`
+field in the redeem and sends no entry back.
+
+**Cost.** Per envelope: the same bytes as today (the same buckets). Per
+join: two registers (≤ ~1 KiB each, one ticket each when new), one ~1 KiB
+entry in the sealed redeem and one in the sealed ACK. Sockets: +1 anonymous
+WS per (household, space) reached only through a GFS, +1 per hosted space
+with at least one GFS-only member — N GFS-only members cost the host one
+socket. Worst realistic case, a global space with 200 GFS-only members:
+201 extra sockets at the GFS; the host's fan-out is still 200 sealed
+envelopes per item, as before.
+
+**Not in this step (PR 3+).** Passing entries to all members (v_89),
+member-to-member mesh, a host `SPACE_ROUTED` hop, a generic
+`SPACE_MEDIA_WANTED`, collapsing paths, a media-field registry, the key
+handoff for a GFS-only admin, and a parity check.
+
+```mermaid
+sequenceDiagram
+    participant E as Joiner E (GFS only)
+    participant G as GFS
+    participant A as Host A
+    E->>E: mint (space, gen): keys from the mailbox root
+    E->>G: POST /gfs/mailbox/register {…, ticket} (anonymous)
+    E->>G: GET /gfs/mailbox/ws — claim mailbox E
+    E->>G: POST /gfs/envelope {to_instance: A, sealed redeem + entry E}
+    G->>A: envelope (A's /gfs/ws)
+    A->>A: verify entry E (identity sig, key-wrap binding, space)
+    A->>G: POST /gfs/mailbox/register (one per space per GFS)
+    A->>G: GET /gfs/mailbox/ws — claim mailbox A
+    A->>G: POST /gfs/envelope {to_instance: E, sealed ACK + entry A}
+    G->>E: envelope (E's /gfs/ws)
+    E->>E: seat; space_instances.mailbox = {peer: entry A, own}
+    Note over A,E: later, a space post
+    A->>G: POST /gfs/envelope {to_instance: mailbox E, sealed to kem_pk E} (anonymous session)
+    G->>E: frame on E's mailbox claim socket
+    E->>E: open with the mailbox key → §24.11 (gfs_mailbox, check_mailbox_space)
+```
+
+Implementation: `socialhome/domain/space_mailbox.py` (entry and stored
+shape, suites), `socialhome/federation/space_mailbox_entry.py`
+(`build_entry`, `verify_entry`),
+`socialhome/services/space_mailbox_service.py` (`SpaceMailboxService`:
+root, tickets, `mint`, `remember`, `abandon`, `target_for`,
+`release_unused`, claim sockets),
+`socialhome/federation/invite_token_redeem.py` (the entry in the sealed
+redeem / ACK), `FederationTransport._mailbox_target`,
+`GfsRelayTransport.send_mailbox` / `send_media_mailbox` (`MailboxTarget`),
+`GfsEnvelopeSender.send_to_mailbox`, `GfsRelayInbound.handle_mailbox_frame`,
+`inbound_validator.TRANSPORT_GFS_MAILBOX` / `make_check_mailbox_space`,
+`SpaceService.revoke_space_session_if_orphaned` (release), migration 0144.
 
 ## Privacy — who learns what
 

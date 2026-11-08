@@ -11,7 +11,10 @@ from socialhome.crypto import (
     generate_x25519_keypair,
     sign_ed25519,
 )
-from socialhome.domain.space_mailbox import InvalidMailboxEntry
+from socialhome.domain.space_mailbox import (
+    InvalidMailboxEntry,
+    UnsupportedMailboxEntrySuite,
+)
 from socialhome.federation.gfs_mailbox import derive_mailbox_keys, new_mailbox_root
 from socialhome.federation.space_mailbox_entry import build_entry, verify_entry
 
@@ -104,5 +107,5 @@ def test_unbound_keywrap_key_fails():
 def test_unknown_suite_is_refused_never_defaulted(field, value):
     h = _household()
     _, entry = _entry(h)
-    with pytest.raises(InvalidMailboxEntry, match="unsupported"):
+    with pytest.raises(UnsupportedMailboxEntrySuite):
         _verify({**entry.to_wire(), field: value}, h)
