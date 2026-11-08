@@ -1444,6 +1444,7 @@ def _gfs_cluster_mailbox_other_id(all_urls: list[str]) -> None:
     reach it byte-identical: the node accepts the ids its shared-key
     siblings serve. The extra node is stopped at the end."""
     import asyncio
+    import contextlib
     import os as _os
 
     import aiohttp
@@ -1454,6 +1455,7 @@ def _gfs_cluster_mailbox_other_id(all_urls: list[str]) -> None:
     )
     from socialhome.federation.gfs_mailbox import (
         MailboxClaim,
+        MailboxClaimError,
         derive_mailbox_keys,
         new_mailbox_root,
         register_mailbox,
@@ -1495,10 +1497,24 @@ def _gfs_cluster_mailbox_other_id(all_urls: list[str]) -> None:
         keys = derive_mailbox_keys(new_mailbox_root(), "demo-space-x", 0)
         sealed = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "b3RoZXItaWQ"}
 
+        async def _claim_when_known(http):
+            # Node x accepts node 0's id once a frame from node 0 (its
+            # heartbeat, every 30 s) told it which id that shared-key sibling
+            # serves — until then the claim is refused like any wrong key.
+            deadline = time.monotonic() + 75.0
+            while True:
+                claim = MailboxClaim(http, url, keys, id_0)
+                try:
+                    return await claim.__aenter__()
+                except MailboxClaimError:
+                    if time.monotonic() > deadline:
+                        raise
+                    await asyncio.sleep(2.0)
+
         async def _run() -> None:
             async with aiohttp.ClientSession() as http:
                 await register_mailbox(http, all_urls[0], keys, id_0)
-                async with MailboxClaim(http, url, keys, id_0) as claim:
+                async with contextlib.aclosing(await _claim_when_known(http)) as claim:
                     async with http.post(
                         f"{all_urls[0]}/gfs/envelope",
                         json={"to_instance": keys.mailbox_id, "sealed": sealed},

@@ -4,6 +4,7 @@ end against the real GFS app (real SQLite, real aiohttp server)."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import aiohttp
 import pytest
@@ -228,3 +229,14 @@ async def test_a_household_pinned_to_an_alias_registers_and_claims(tmp_dir):
                 assert claim is not None
     finally:
         await server.close()
+
+
+async def test_a_claim_entered_by_hand_closes_with_aclosing(gfs):
+    _server, session, url = gfs
+    keys = derive_mailbox_keys(ROOT, "space-a", 0)
+    await register_mailbox(session, url, keys, GFS_ID)
+    claim = MailboxClaim(session, url, keys, GFS_ID)
+    await claim.__aenter__()
+    async with contextlib.aclosing(claim):
+        assert claim._ws is not None
+    assert claim._ws is None

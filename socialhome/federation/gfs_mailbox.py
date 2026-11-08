@@ -265,6 +265,11 @@ class MailboxClaim:
             await self._ws.close()
             self._ws = None
 
+    async def aclose(self) -> None:
+        """:meth:`close` under the name ``contextlib.aclosing`` calls — for a
+        claim entered by hand (e.g. retried until the GFS accepts it)."""
+        await self.close()
+
     async def _handshake(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         challenge = await self._json(ws)
         if challenge.get("type") != FRAME_MAILBOX_CHALLENGE:

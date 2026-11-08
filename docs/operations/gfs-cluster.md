@@ -270,7 +270,10 @@ database or logged next to a mailbox id.
 the household pinned. A node accepts its own id, its `instance_id_aliases`
 and the ids its shared-key siblings report in their HELLO / heartbeat, so
 a cluster whose allocs still serve `gfs-N` ids works (register via one
-alloc, claim on another) — the gfs-cluster demo checks it (step 3k). Still
+alloc, claim on another) — the gfs-cluster demo checks it (step 3k). A
+freshly started alloc learns a sibling's id from that sibling's first
+HELLO / heartbeat (≤ 30 s); until then a claim bound to it is refused like a
+wrong key and the household retries. Still
 move every alloc to one `instance_id` (the cluster logs an ERROR until
 then).
 
