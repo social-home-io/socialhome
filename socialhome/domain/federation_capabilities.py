@@ -1378,7 +1378,22 @@ from __future__ import annotations
 #:   ``sd-`` names, as an unhashed item does here. Space-sync relevant
 #:   (records carry ``files``): a line in ``SYNC_RECORD_LINES``. Labelled
 #:   "Space pictures and files checked against their hash".
-OURS: int = 85
+#: * **v_86** (2026-11-08) — **trusted file fills**. A household that holds
+#:   a live space row whose hash map lists ``h`` takes the missing file
+#:   ``sc(S, h)`` (bytes checked against ``h``, never replacing a file) from
+#:   the row's author household or a TRUSTED one — the host, a delegated
+#:   admin, a live ``admin`` or ``moderator`` seat (content authority) —
+#:   and from nobody else; never for a deleted row. Unhashed files keep the
+#:   owner-only fill (#1311); rows still come only from the host / a
+#:   delegated admin. A trusted non-host household's §25.6 catch-up and
+#:   ``SPACE_SYNC_RESUME`` ship the hashed files of other people's rows to
+#:   a v_86 requester (bounded like a resume); a plain member household
+#:   ships only its own people's files. **Fallback**: a requester below v_86
+#:   gets no helper fills (the host still fills; a v_85 receiver would take
+#:   them, an older one stores them under a name no row shows); a helper
+#:   below v_86 ships none. No sync-stream record change. Labelled
+#:   "Admins and moderators fill in missing space pictures".
+OURS: int = 86
 
 
 class FederationCapability:
@@ -2019,6 +2034,11 @@ class FederationCapability:
     #: receiver stores hashed files content-addressed and checks the bytes.
     #: Only a household at or above it is sent the map.
     MIN_FOR_CONTENT_FILE_HASHES = 85
+    #: v_86 — a household at or above it takes a hashed file of a row it
+    #: holds from a trusted household (host, delegated admin, admin or
+    #: moderator seat) as well as from the row's author: a trusted non-host
+    #: provider ships other people's hashed files only to it.
+    MIN_FOR_TRUSTED_FILE_FILLS = 86
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2345,6 +2365,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_CONTENT_FILE_HASHES,
         "Space pictures and files checked against their hash",
     ),
+    (
+        FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS,
+        "Admins and moderators fill in missing space pictures",
+    ),
 ]
 
 
@@ -2441,6 +2465,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND: "space_media_on_demand",
     FederationCapability.MIN_FOR_GFS_JOIN_REQUEST: "gfs_join_requests",
     FederationCapability.MIN_FOR_CONTENT_FILE_HASHES: "content_file_hashes",
+    FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS: "trusted_file_fills",
 }
 
 
@@ -2555,6 +2580,9 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # A behind member household keeps sender-bound names: its people
         # see every picture, but the bytes are not checked against a hash.
         FederationCapability.MIN_FOR_CONTENT_FILE_HASHES,
+        # A behind member household gets a missing picture filled only by
+        # the host, not by the space's admins and moderators.
+        FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS,
     }
 )
 

@@ -19,6 +19,7 @@ Entry point: ``python -m socialhome.app`` (or via ``socialhome/__main__.py``).
 
 from __future__ import annotations
 
+import functools
 import logging
 import pathlib
 from collections.abc import Awaitable, Callable
@@ -125,6 +126,7 @@ from .federation.sync.dm_history import (
     DmHistoryReceiver,
     DmHistoryScheduler,
 )
+from .federation.sync.space.file_gate import CatchUpFileGates, local_file_size
 from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .federation.sync.space.watermark import SyncWatermarks
 from .federation.sync_manager import SyncSessionManager, make_sync_reject_reason
@@ -2200,6 +2202,15 @@ def _wire_federation_stack(
         media_refs=media_reference_repo,
     )
 
+    # v_86 — which files of a row we ship on catch-up / resume: as a
+    # non-host household, our own people's files and (holding an admin /
+    # moderator seat) other people's hashed files to a v_86 requester.
+    file_gates = _build_catch_up_file_gates(
+        space_repo, _roster_authority, federation_service, config
+    )
+    space_sync_service.attach_file_gates(file_gates)
+    space_sync_resume_provider.attach_file_gates(file_gates)
+
     async def _space_sync_resume(event) -> None:
         await space_sync_resume_provider.handle_request(event)
 
@@ -2268,6 +2279,22 @@ def _wire_federation_stack(
         content_inbound=content_inbound,
         gallery_federation_outbound=gallery_federation_outbound,
         page_federation_outbound=page_federation_outbound,
+    )
+
+
+def _build_catch_up_file_gates(
+    space_repo: SqliteSpaceRepo,
+    roster_authority: Callable[[str], Awaitable[bool]],
+    federation_service: FederationService,
+    config: Config,
+) -> CatchUpFileGates:
+    """v_86 — the catch-up / resume file gate (:mod:`.federation.sync.space
+    .file_gate`), sizing files from this household's media dir."""
+    return CatchUpFileGates(
+        space_repo=space_repo,
+        roster_authority=roster_authority,
+        supports=federation_service.space_member_supports,
+        size=functools.partial(local_file_size, pathlib.Path(config.media_path)),
     )
 
 

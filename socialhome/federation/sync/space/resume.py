@@ -132,6 +132,28 @@ RESUME_COOLDOWN_S: float = 30 * 60.0
 RESUME_COOLDOWN_TRACKED: int = 4096
 
 
+#: The replayed rows' files: ``(row id, the row's author, file urls)``.
+_Media = list[tuple[str, str | None, list[str]]]
+
+
+def _owner_of(row: Any) -> str | None:
+    """The person a replayed row belongs to (a post's / sticky's author, an
+    event's or page's creator, a gallery item's uploader)."""
+    for field in ("author", "created_by", "uploaded_by"):
+        value = getattr(row, field, None)
+        if value:
+            return str(value)
+    return None
+
+
+class _FileGates(Protocol):
+    async def for_requester(self, space_id: str, requester: str) -> _FileGate: ...
+
+
+class _FileGate(Protocol):
+    async def ship(self, owner: str | None, urls: list[str]) -> list[str]: ...
+
+
 class SpaceSyncResumeProvider:
     """Receiver- and provider-side helper for ``SPACE_SYNC_RESUME``.
 
@@ -145,6 +167,7 @@ class SpaceSyncResumeProvider:
     __slots__ = (
         "_clock",
         "_federation",
+        "_file_gates",
         "_gallery_repo",
         "_last_resume",
         "_media_dir",
@@ -193,6 +216,15 @@ class SpaceSyncResumeProvider:
         self._sticky_repo = sticky_repo
         self._space_calendar_repo = space_calendar_repo
         self._gallery_repo = gallery_repo
+        #: v_86 — which replayed files we ship (``None``: all of them).
+        self._file_gates: _FileGates | None = None
+
+    def attach_file_gates(self, gates: _FileGates) -> None:
+        """Wire the v_86 file gate (:mod:`.file_gate`): a non-host household
+        ships its own people's files and, holding an admin / moderator
+        seat, the hashed files of other people's rows to a v_86 requester —
+        never another person's unhashed file (the receiver refuses it)."""
+        self._file_gates = gates
 
     # ── Outbound (requester side) ─────────────────────────────────────
 
@@ -309,7 +341,7 @@ class SpaceSyncResumeProvider:
             return 0
         if not self._claim_window(instance_id, space_id):
             return 0
-        media: list[tuple[str, list[str]]] = []
+        media: _Media = []
         sent = 0
         sent += await self._replay_posts(space_id, since, to=instance_id, media=media)
         sent += await self._replay_comments(space_id, since, to=instance_id)
@@ -347,24 +379,29 @@ class SpaceSyncResumeProvider:
             return 0
         if not self._claim_window(instance_id, space_id):
             return 0
-        media: list[tuple[str, list[str]]] = []
+        media: _Media = []
         sent = await self._replay_calendar(space_id, since, to=instance_id, media=media)
         await self._ship_media(space_id, instance_id, media)
         return sent
 
-    async def _ship_media(
-        self, space_id: str, to: str, media: list[tuple[str, list[str]]]
-    ) -> None:
+    async def _ship_media(self, space_id: str, to: str, media: _Media) -> None:
         """Queue the replayed rows' files for ``to``: a receiver binds a
         file to the household that delivered its row, so the bytes must
         come from us. Bounded per request (:data:`RESUME_MEDIA_MAX_FILES`,
         :data:`RESUME_MEDIA_MAX_BYTES`); a file over the budget is skipped."""
         if self._media_sync is None or not media:
             return
+        gate = (
+            await self._file_gates.for_requester(space_id, to)
+            if self._file_gates is not None
+            else None
+        )
         files = 0
         used = 0
         skipped = 0
-        for correlation_id, urls in media:
+        for correlation_id, owner, urls in media:
+            if gate is not None:
+                urls = await gate.ship(owner, urls)
             kept: list[str] = []
             for url in urls:
                 size = await self._size(url)
@@ -415,7 +452,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
-        media: list[tuple[str, list[str]]] | None = None,
+        media: _Media | None = None,
     ) -> int:
         posts = await self._space_post_repo.list_since(
             space_id,
@@ -579,7 +616,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
-        media: list[tuple[str, list[str]]] | None = None,
+        media: _Media | None = None,
     ) -> int:
         if self._page_repo is None:
             return 0
@@ -661,7 +698,7 @@ class SpaceSyncResumeProvider:
                     page_media_urls(page.cover_image_url, page.content),
                 )
                 if urls:
-                    media.append((page.id, urls))
+                    media.append((page.id, getattr(page, "created_by", None), urls))
         return sent
 
     async def _replay_stickies(
@@ -692,7 +729,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
-        media: list[tuple[str, list[str]]] | None = None,
+        media: _Media | None = None,
     ) -> int:
         if self._space_calendar_repo is None:
             return 0
@@ -717,7 +754,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
-        media: list[tuple[str, list[str]]] | None = None,
+        media: _Media | None = None,
     ) -> int:
         """Replay the space's gallery: albums first, then missed items.
 
@@ -800,7 +837,7 @@ class SpaceSyncResumeProvider:
         space_id: str,
         to: str,
         media_of: Callable[[Any], list[str]] | None = None,
-        media: list[tuple[str, list[str]]] | None = None,
+        media: _Media | None = None,
     ) -> int:
         sent = 0
         for row in rows:
@@ -815,7 +852,7 @@ class SpaceSyncResumeProvider:
                 if media_of is not None and media is not None:
                     urls = media_of(row)
                     if urls:
-                        media.append((row.id, list(urls)))
+                        media.append((row.id, _owner_of(row), list(urls)))
             except Exception as exc:  # pragma: no cover — defensive
                 log.debug(
                     "SPACE_SYNC_RESUME %s replay to %s failed: %s",

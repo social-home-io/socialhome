@@ -19,7 +19,8 @@ from socialhome.domain.federation import (
     DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
 )
-from socialhome.domain.file_hashes import FileHash
+from socialhome.domain.file_hashes import FileHash, space_content_media_name
+from socialhome.domain.space import SpaceMember
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.sync.space import provider as provider_mod
 from socialhome.federation.sync.space.exporter import (
@@ -27,6 +28,7 @@ from socialhome.federation.sync.space.exporter import (
     ChunkBuilder,
     parse_chunk,
 )
+from socialhome.federation.sync.space.file_gate import CatchUpFileGates
 from socialhome.federation.sync.space.provider import (
     SpaceSyncService,
 )
@@ -2443,3 +2445,93 @@ async def test_a_sync_line_crossing_ships_no_catchup_media(encoder, crossed, wal
     session = _FakeSession(sync_mode="initial", have_seq=12)
     await svc.stream_initial(session)
     assert (walked == ["sp-1"]) is walks
+
+
+# ─── v_86: a trusted non-host provider fills hashed files, not rows ───────
+
+
+async def test_a_trusted_non_host_catch_up_ships_hashed_files_but_no_foreign_rows(
+    encoder,
+):
+    """A moderator household (not the host) streams only its own people's
+    rows; its catch-up media ships its own people's files and the HASHED
+    files of other people's rows (a v_86 receiver holding those rows fills
+    them, bytes checked) — never another person's unhashed file."""
+    sc = f"api/media/{space_content_media_name('sp-1', 'a' * 64, 'x.webp')}"
+    legacy = "api/media/sd-0123.webp"
+
+    @dataclass
+    class _Post:
+        id: str
+        author: str
+        image_urls: tuple = ()
+        media_url: str | None = None
+        file_meta: object = None
+        link_preview: object = None
+
+    class _PostRepo:
+        async def list_sync_page(self, space_id, **kw):
+            return [
+                _Post("p-ours", "u-ours", (sc, legacy)),
+                _Post("p-theirs", "u-theirs", (sc, legacy)),
+            ], None
+
+    class _Spaces:
+        async def list_members(self, space_id):
+            return [
+                SpaceMember(
+                    space_id=space_id, user_id="u-ours", role="moderator", joined_at=""
+                ),
+                SpaceMember(
+                    space_id=space_id, user_id="u-theirs", role="member", joined_at=""
+                ),
+            ]
+
+        async def list_local_member_user_ids(self, space_id):
+            return ["u-ours"]
+
+    async def _no(_space_id: str) -> bool:
+        return False
+
+    async def _ours(_space_id: str) -> set[str]:
+        return {"u-ours"}
+
+    async def _supports(_instance_id: str, *, min_version: int) -> bool:
+        return True
+
+    async def _size(_url: str) -> int:
+        return 1
+
+    media_sync = AsyncMock()
+    svc = SpaceSyncService(
+        builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
+        exporters={
+            "posts": _FakeExporter(
+                "posts",
+                [
+                    {"id": "p-ours", "author": "u-ours"},
+                    {"id": "p-theirs", "author": "u-theirs"},
+                ],
+            )
+        },
+        sig_suite="ed25519",
+        media_sync=media_sync,
+        space_post_repo=_PostRepo(),
+    )
+    svc.attach_roster_authority(_no, own_members=_ours)
+    svc.attach_file_gates(
+        CatchUpFileGates(
+            space_repo=_Spaces(),
+            roster_authority=_no,
+            supports=_supports,
+            size=_size,
+        )
+    )
+    session = _FakeSession()
+    await svc.stream_initial(session)
+    assert [r["id"] for r in _records(session)["posts"]] == ["p-ours"]
+    shipped = {
+        c.kwargs["correlation_id"]: list(c.kwargs["media_urls"])
+        for c in media_sync.enqueue_for_blob.call_args_list
+    }
+    assert shipped == {"p-ours": [sc, legacy], "p-theirs": [sc]}

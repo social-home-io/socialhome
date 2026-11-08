@@ -57,6 +57,7 @@ from .exporter import (
 from .exporters.calendar import CalendarExporter
 from .exporters.members import PreModeratorMembersExporter
 from .exporters.posts import iter_post_pages
+from .file_gate import CatchUpFileGates
 from .watermark import session_shape
 from .window import KEEP_FOREVER, SYNC_PAGE_SIZE, SyncWindow, SyncWindows, iter_pages
 
@@ -482,6 +483,7 @@ class SpaceSyncService:
         "_builder",
         "_exporters",
         "_federation",
+        "_file_gates",
         "_file_hasher",
         "_gallery_repo",
         "_inviter_proof_for",
@@ -597,6 +599,16 @@ class SpaceSyncService:
         #: v_85 — hashes the files of the records the host streams
         #: (``None``: no ``files`` maps).
         self._file_hasher: _FileHasher | None = None
+        #: v_86 — which files of a row this household ships on catch-up
+        #: (``None``: every file of every row, as before).
+        self._file_gates: CatchUpFileGates | None = None
+
+    def attach_file_gates(self, gates: CatchUpFileGates) -> None:
+        """Wire the v_86 catch-up file gate: a non-host household ships its
+        own people's files and — when it holds an admin / moderator seat —
+        the hashed files of other people's rows to a v_86 requester; never
+        another person's unhashed file (:mod:`.file_gate`)."""
+        self._file_gates = gates
 
     def attach_file_hasher(self, hasher: _FileHasher) -> None:
         """Wire the household's file hasher (v_85): records with files that
@@ -1178,6 +1190,15 @@ class SpaceSyncService:
             if self._windows is not None
             else KEEP_FOREVER
         )
+        gate = (
+            await self._file_gates.for_requester(space_id, target_instance_id)
+            if self._file_gates is not None
+            else None
+        )
+
+        async def _ship(owner: str | None, urls: list[str]) -> list[str]:
+            return urls if gate is None else await gate.ship(owner, urls)
+
         # Posts — the same ones the ``posts`` resource streamed: live,
         # inside the retention window, page by page.
         if self._space_post_repo is not None:
@@ -1190,7 +1211,10 @@ class SpaceSyncService:
                             space_id,
                             target_instance_id,
                             post.id,
-                            self._post_media_urls(post),
+                            await _ship(
+                                getattr(post, "author", None),
+                                self._post_media_urls(post),
+                            ),
                         )
             except sqlite3.Error:
                 log.exception(
@@ -1213,7 +1237,12 @@ class SpaceSyncService:
                         ):
                             gallery_urls.append(item.url)
                         await self._enqueue_media(
-                            space_id, target_instance_id, item.id, gallery_urls
+                            space_id,
+                            target_instance_id,
+                            item.id,
+                            await _ship(
+                                getattr(item, "uploaded_by", None), gallery_urls
+                            ),
                         )
             except sqlite3.Error:
                 log.exception(
@@ -1236,7 +1265,10 @@ class SpaceSyncService:
                             space_id,
                             target_instance_id,
                             listing.post_id,
-                            list(listing.image_urls),
+                            await _ship(
+                                getattr(listing, "seller_user_id", None),
+                                list(listing.image_urls),
+                            ),
                         )
             except sqlite3.Error:
                 log.exception(
@@ -1255,7 +1287,10 @@ class SpaceSyncService:
                                 space_id,
                                 target_instance_id,
                                 event.id,
-                                [event.cover_url],
+                                await _ship(
+                                    getattr(event, "created_by", None),
+                                    [event.cover_url],
+                                ),
                             )
             except sqlite3.Error:
                 log.exception(
