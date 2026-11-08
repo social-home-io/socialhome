@@ -571,6 +571,16 @@ class GfsFederationService:
             log.debug("GFS: registered instance %s", instance_id)
             return
         existing = await self._repo.get_instance(instance_id)
+        if (
+            existing is not None
+            and existing.status == "banned"
+            and existing.public_key.lower() == public_key.lower()
+        ):
+            # Banned: nothing changed and only an operator lifts it. The
+            # caller answers exactly as for any registration, so
+            # ``/gfs/register`` is no way to learn whether one is banned
+            # (every other route already refuses a banned household).
+            return
         if existing is not None:
             raise InstanceRegistrationRefused(409, "instance_key_mismatch")
         raise InstanceRegistrationRefused(409, "id_in_use")

@@ -218,7 +218,10 @@ class SqliteGfsFederationRepo:
             ON CONFLICT(instance_id) DO UPDATE SET
                 display_name = excluded.display_name,
                 public_key   = excluded.public_key,
-                status       = excluded.status,
+                -- A ban is lifted only by an operator (``set_instance_status``):
+                -- no upsert turns ``banned`` back into active / pending.
+                status       = CASE WHEN client_instances.status = 'banned'
+                                    THEN 'banned' ELSE excluded.status END,
                 auto_accept  = excluded.auto_accept,
                 keywrap_public_key = excluded.keywrap_public_key,
                 kem_suite          = excluded.kem_suite,
@@ -242,7 +245,9 @@ class SqliteGfsFederationRepo:
         in ONE statement: a new id is inserted unless a mailbox holds it
         (``gfs_mailboxes``), and an existing row is updated ONLY when the
         request carries the key the row was registered with — a different
-        key never takes a row over. ``False`` when nothing was written."""
+        key never takes a row over — and is not banned (a banned row is left
+        exactly as it is; an active one is never demoted). ``False`` when
+        nothing was written."""
         changed = await self._db.enqueue_rowcount(
             """
             INSERT INTO client_instances(
@@ -254,12 +259,19 @@ class SqliteGfsFederationRepo:
             WHERE NOT EXISTS (SELECT 1 FROM gfs_mailboxes WHERE mailbox_id = ?)
             ON CONFLICT(instance_id) DO UPDATE SET
                 display_name = excluded.display_name,
-                status       = excluded.status,
+                -- An operator-accepted household is never demoted to
+                -- pending by its own re-register; pending follows the
+                -- auto-accept policy as before.
+                status       = CASE WHEN client_instances.status = 'active'
+                                    THEN 'active' ELSE excluded.status END,
                 auto_accept  = excluded.auto_accept,
                 keywrap_public_key = excluded.keywrap_public_key,
                 kem_suite          = excluded.kem_suite,
                 keywrap_sig        = excluded.keywrap_sig
             WHERE client_instances.public_key = excluded.public_key
+              -- A banned row is not touched at all: only an operator
+              -- (``set_instance_status``) lifts a ban.
+              AND client_instances.status != 'banned'
             """,
             (
                 instance.instance_id,
