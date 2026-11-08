@@ -1190,6 +1190,36 @@ checks it at every local write sink (`services/media_ref_guard.py`); a
 refusal answers like a malformed reference, so it tells nobody that a
 file exists.
 
+### Sign-off needed: trusted households fill in a space's hashed files (v_86)
+
+Until v_86 a household took a space file only from the household that
+delivered its row, or — to fill a file that never arrived — from the
+space's owner household alone (#1311). v_86 lets more households
+**fill a missing file**: the row's author household, and any **trusted**
+household — the host, a delegated admin, or a household holding a live
+`admin` or `moderator` seat (content authority).
+
+Why this is safe: the file must be one whose SHA-256 the receiver's own
+row already lists (v_85), it is stored under the content name derived from
+that hash and that space, and the bytes are checked against it before they
+land; an existing file is never replaced. A helper can therefore deliver a
+picture, never change, plant or hide one. Nothing else moves:
+
+- **Rows** of other people still come only from the host or a delegated
+  admin; a trusted helper sends files only.
+- **Unhashed (legacy) files** keep the owner-only fill.
+- **Non-members never get space bytes:** helpers send only to member
+  households (`list_member_instances`), sealed like every space envelope.
+- A plain member household fills nobody else's file.
+
+What it relaxes: an admin or moderator household now sends a member's
+space files to other member households on catch-up / resume — it already
+holds them as a member and could show them to its own people; the
+receiving household is a member that may see them too. Who is trusted is
+read from the receiver's own roster mirror, the same one every other
+content-authority rule uses (members are equal on every path). See
+[media](protocol/media.md#who-fills-a-hashed-file-v_86).
+
 ## Plaintext locally, encrypted on the wire
 
 Local SQLite stores plaintext rows — that is your data, on your disk,

@@ -324,7 +324,13 @@ sending household was sent it for. Both blob types share
   bytes under that name (`_host_fills`). It writes once and never
   replaces a file.
 
-  No other household may fill a name, not even one with content
+  This is the rule for **unhashed** (legacy `sd-`) names. A **hashed**
+  file of a row held here is filled more widely — by the row's author
+  household or any trusted household — because its bytes are checked
+  against the hash (v_86,
+  [Who fills a hashed file](#who-fills-a-hashed-file-v_86)).
+
+  No other household may fill an unhashed name, not even one with content
   authority. An admin or moderator household, or a delegated admin
   acting for an offline owner, that learned a member's name could
   otherwise plant its bytes while that member's push to us is still
@@ -404,8 +410,9 @@ sending household was sent it for. Both blob types share
 Residuals, by design:
 
 - Bytes for a row come from the household that delivered that row
-  here. The exception is content authority filling a missing file
-  (above). A plain member's copy never fills it.
+  here. The exceptions: the host filling a missing file (above), and — for
+  a hashed file — the author's or a trusted household (v_86, below). A
+  plain member's copy never fills another person's file.
 - A household reaching a member's post first through the GFS relay
   shows only its described files. A file without a descriptor (over
   8 MiB) is not shown there; the row's reference to it is dropped.
@@ -511,6 +518,81 @@ encrypted payload (live events) and in each §25.6 record:
   newcomer or a reset gets the space's files again.
 * **Older households (below v_85)** are sent no map (a moderation release
   check refuses keys it does not classify) and keep the sender-bound names.
+
+### Who fills a hashed file (v_86)
+
+A household that holds a row whose hash map lists `h` takes the missing
+file `sc(S, h)` from more households than the one that delivered the row —
+the bytes are checked against `h`, so a helper can deliver a picture but
+never change it (owner decision A, 2026-11-08). A `SPACE_MEDIA_BLOB` with
+`h` for a row held here lands **only when all of these hold**
+(`FederationInboundService._fills_content`):
+
+1. **The row is held here and live** — a post, comment, gallery item,
+   calendar event, bazaar listing or held submission of space `S`
+   (`_space_media_in_scope`); not a deleted post or comment, not a
+   rejected or expired submission.
+2. **The row shows `sc(S, h)`** — its map listed `h` when it arrived
+   (an `h` the row does not list is refused).
+3. **The target is `sc(S, h)`** of the envelope's space — derived from
+   `h`, never from the wire name; a blob naming another space for a row
+   of `S` is a row of another space and refused.
+4. **The sender is the row's author household or a trusted one:**
+   `SpaceAuthorship.acts_for(row author)` (any seat, the author's own
+   row), or `has_content_authority` — the host, a delegated admin, a live
+   `admin` or `moderator` seat as this household's roster mirror records
+   it. A plain member household that is not the author, and a household
+   with no seat, are refused.
+5. **The bytes hash to `h`** (`store_chunk`, `content_name_binds`).
+6. **The file is absent** — write-once: an existing file is never
+   replaced.
+
+Unchanged:
+
+- **Unhashed files** (`sd-` / `sg-` / `sp-`) keep the owner-only fill
+  (#1311, above). A moderator's push for a legacy row is refused.
+- **Rows** of other people still come only from the host or a delegated
+  admin (`receiver._acts_as_host`, `may_author`); a helper sends files
+  only.
+- **A row not held here:** a blob that overtakes its row still lands
+  (verified, under the content name and the sender's `sd-` name); the
+  receiver cannot tell an author's early push from anything else before
+  the row arrives. It is not a fill — no row shows it, and the orphan
+  sweep removes an unreferenced copy after 24 h. Bounded by the existing
+  per-sender inbound limits.
+- **Members are equal on every path:** the rule reads only the roster
+  mirror (`space_remote_members`), so a paired, mesh-reached or
+  relay-seated admin / moderator household is trusted the same way, and a
+  receiver applies it the same way whichever transport delivered the blob.
+  (The GFS relay does not carry these blobs yet: its envelope cap is below
+  a media chunk — relay-sync PR 3.)
+
+**Sending side.** No "file wanted" request exists yet (a later, generic
+PR), so a helper ships fills only on catch-up: the catch-up file gate
+(`federation/sync/space/file_gate.py`) decides which files of a row a
+household ships on a §25.6 catch-up and a `SPACE_SYNC_RESUME`:
+
+| Provider | Ships |
+|---|---|
+| Host / delegated admin | every file of every row (as before) |
+| Admin / moderator household (v_86 requester) | its own people's files + the hashed (`sc-`) files of other people's rows, at most 50 files / 32 MiB per stream (`FILL_MAX_FILES` / `FILL_MAX_BYTES`) |
+| Any other household | its own people's files only |
+
+Rows are unchanged (`_OwnPeopleOnly`): a helper never streams other
+people's rows. A requester below v_86 gets no helper fills (a v_85
+receiver would take them, an older one would store them under a name no
+row shows). Relay-seated requesters still get no catch-up blobs (their GFS
+media cache serves them).
+
+**Cost per trigger:** a newcomer's full stream from each trusted non-host
+household costs at most 50 files / 32 MiB on top of today's (a plain
+member household now ships *less* than before: only its own people's
+files). Worst realistic case — a space with 5 moderator households, a
+newcomer pairing with all of them: 5 × 32 MiB = 160 MiB once, bounded by
+the provider's 5 sessions / h per requester; a resume is already capped
+at 32 MiB per (household, space) per 30 min. Duplicates of what the host
+ships are dropped write-once at the receiver (bytes still cross once per
+helper — the later "file wanted" request replaces this push).
 
 ## Space media via the GFS cache (v_80)
 
