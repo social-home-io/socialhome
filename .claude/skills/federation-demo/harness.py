@@ -10961,6 +10961,16 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_53 shared-GFS route discovery gate in place ✓")
+    # v_86 — trusted file fills: a moderator / admin household ships other
+    # people's hashed files on catch-up only to a peer at >= v_86, so the
+    # OURS round-trip above is what proves every inner-ring pair takes them.
+    if int(_Cap.MIN_FOR_TRUSTED_FILE_FILLS) != 86 or _OURS < 86:
+        failures.append(
+            "MIN_FOR_TRUSTED_FILE_FILLS moved off v_86 (or OURS fell below "
+            "it) — trusted households would never fill a missing file"
+        )
+    else:
+        print("  v_86 trusted file fills gate in place ✓")
     # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
     # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
     # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key

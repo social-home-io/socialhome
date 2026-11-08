@@ -102,6 +102,7 @@ from ..domain.presence import truncate_coord
 from ..domain.space import (
     MODERATION_BLOCK_KEY,
     ContentAction,
+    ModerationStatus,
     SpaceRole,
     role_change_event_type,
 )
@@ -205,6 +206,7 @@ if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.gallery_repo import AbstractGalleryRepo
     from ..repositories.highlight_repo import AbstractHighlightRepo
+    from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ..repositories.moment_repo import AbstractMomentRepo
     from ..repositories.page_repo import AbstractPageRepo
     from ..repositories.space_cover_repo import AbstractSpaceCoverRepo
@@ -235,8 +237,14 @@ _DM_HOLD_SCOPE = DM_HOLD_SCOPE
 #: Why a ``SPACE_MEDIA_BLOB`` is refused (:meth:`FederationInboundService
 #: ._space_media_in_scope`): its row lives in another space…
 _ROW_ELSEWHERE = "row of another space"
-#: …or its row here does not show the sender's file.
+#: …or its row here does not show the sender's file…
 _NOT_ITS_FILE = "not a file of the row as held here"
+#: …or (v_86) the row here lists the file's hash, but the sender is neither
+#: the row's author household nor a trusted one, or the row is deleted.
+_NOT_A_FILLER = "not the author's or a trusted household, or the row is deleted"
+#: A held submission's files are filled while it is pending or approved —
+#: never once rejected or expired (its payload is purged).
+_FILLABLE_HELD = frozenset({ModerationStatus.PENDING, ModerationStatus.APPROVED})
 
 
 def _scoped(shows_file: bool) -> str | None:
@@ -492,6 +500,7 @@ class FederationInboundService(ProtectionGateMixin):
         "_highlight_repo",
         "_media_dir",
         "_media_names",
+        "_media_refs",
         "_mentions",
         "_moment_outbound",
         "_moment_reaction_router",
@@ -635,6 +644,9 @@ class FederationInboundService(ProtectionGateMixin):
         self._gfs_media: SpaceMediaGfsFetcher | None = None
         #: Received space files take this household's names (sender-bound).
         self._media_names = SpaceMediaNamer()
+        #: v_86 — whether a row here already shows a content name
+        #: (:meth:`attach_media_references`; ``None``: not checked).
+        self._media_refs: AbstractMediaReferenceRepo | None = None
 
     def attach_moment_reaction_router(self, router: MomentReactionRouter) -> None:
         """v_67: keep the reaction route a relayed ``MOMENT_CREATED`` carries."""
@@ -681,6 +693,12 @@ class FederationInboundService(ProtectionGateMixin):
         self._media_names = namer
         if self._authorship is not None:
             self._authorship.attach_media_names(namer)
+
+    def attach_media_references(self, refs: AbstractMediaReferenceRepo) -> None:
+        """Wire the media reference index (v_86): a hashed blob naming a
+        row id not held here may not fill a content name a held row
+        already shows unless its sender is trusted."""
+        self._media_refs = refs
 
     def attach_gfs_media(self, fetcher: SpaceMediaGfsFetcher) -> None:
         """Wire the v_80 GFS media fetcher (``media_refs`` on space posts)."""
@@ -2290,6 +2308,20 @@ class FederationInboundService(ProtectionGateMixin):
                         # verified bytes take both — the unreferenced one
                         # goes with the orphan sweep.
                         alias = local
+                        if await self._fill_by_another_id(
+                            event, space_id=space_id, content=content
+                        ):
+                            # v_86 — a row held here already shows the
+                            # content name: a blob naming a row id we don't
+                            # hold must not fill it past the fill rule. The
+                            # sender's bytes keep their sender-bound name.
+                            content, alias = local, None
+                    elif scope is None and not await self._fills_content(
+                        event, space_id=space_id, correlation_id=correlation_id
+                    ):
+                        # v_86 — the row is here and lists h: only its
+                        # author's household or a trusted one fills it.
+                        scope = _NOT_A_FILLER
                     local = content
             if h is None or scope == _NOT_ITS_FILE:
                 scope = await self._space_media_in_scope(
@@ -2338,6 +2370,75 @@ class FederationInboundService(ProtectionGateMixin):
             total_size=_declared_size(p, raw, chunk_count),
             expected_sha256=h,
         )
+
+    async def _fills_content(
+        self, event: FederationEvent, *, space_id: str, correlation_id: str
+    ) -> bool:
+        """v_86 — whether the sender may deliver a hashed file of the live
+        row ``correlation_id`` held here (its hash map lists the file, so
+        the bytes are checked against it): the row's AUTHOR household
+        (:meth:`SpaceAuthorship.acts_for`), or a TRUSTED one — the host, a
+        delegated admin, a live ``admin`` or ``moderator`` seat
+        (:meth:`SpaceAuthorship.has_content_authority`). Nobody fills a
+        deleted row's file. Only files: rows still come from the host or a
+        delegated admin alone (§25.6 ``receiver._acts_as_host``)."""
+        authorship = self._space_authorship(event)
+        if authorship is None:
+            return False
+        author = await self._live_row_author(correlation_id)
+        if author is None:
+            return False
+        if await authorship.has_content_authority(event, space_id):
+            return True
+        if await self._space_repo.is_banned(space_id, author):
+            return False
+        return await authorship.acts_for(event, space_id, author, any_role=True)
+
+    async def _fill_by_another_id(
+        self, event: FederationEvent, *, space_id: str, content: str
+    ) -> bool:
+        """v_86 — a blob for a row id NOT held here whose content name a row
+        held here already shows, from a sender that is not trusted
+        (:meth:`SpaceAuthorship.has_content_authority`). The content name
+        depends only on (space, h), so without this a member could fill
+        any hashed file by naming a made-up row; the row's author fills it
+        under the row's own id (:meth:`_fills_content`)."""
+        if self._media_refs is None or not await self._media_refs.is_referenced(
+            content
+        ):
+            return False
+        authorship = self._space_authorship(event)
+        return authorship is None or not await authorship.has_content_authority(
+            event, space_id
+        )
+
+    async def _live_row_author(self, correlation_id: str) -> str | None:
+        """The author of the live row ``correlation_id`` held here — a post
+        (a bazaar wrapper's seller), a comment, a gallery item, a calendar
+        event or a held moderation item, in :meth:`_space_media_in_scope`'s
+        order (pages carry no hash map: their files are the host's alone,
+        :meth:`_page_file_name`) — or ``None`` (not held, deleted, or a rejected / expired
+        submission). Its space is checked
+        by the scope check before this runs."""
+        found = await self._space_post_repo.get(correlation_id)
+        if found is not None:
+            post = found[1]
+            return None if post.deleted else post.author
+        comment = await self._space_post_repo.get_comment(correlation_id)
+        if comment is not None:
+            return None if comment.deleted else comment.author
+        if self._gallery_repo is not None:
+            item = await self._gallery_repo.get_item(correlation_id)
+            if item is not None:
+                return item.uploaded_by
+        if self._space_calendar_repo is not None:
+            found_event = await self._space_calendar_repo.get_event(correlation_id)
+            if found_event is not None:
+                return found_event[1].created_by
+        held = await self._space_repo.get_moderation_item(correlation_id)
+        if held is not None and held.status in _FILLABLE_HELD:
+            return held.submitted_by
+        return None
 
     async def _host_fills(
         self,
