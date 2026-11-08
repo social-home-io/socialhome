@@ -91,6 +91,7 @@ if TYPE_CHECKING:
     from .link_preview_service import LinkPreviewService
     from .peer_unpair_service import InstancePurger
     from .space_authority_rotation_service import SpaceAuthorityRotationService
+    from .space_mailbox_service import SpaceMailboxService
     from .space_moderation_service import ModerationSubmitter
     from .space_writer_cert_service import SpaceWriterCertService
 from ..domain.child_protection import (
@@ -463,6 +464,7 @@ class SpaceService(
         "_join_approvals",
         "_link_previews",
         "_local_area_budget",
+        "_mailboxes",
         "_media_dir",
         "_media_guard",
         "_media_refs",
@@ -548,6 +550,8 @@ class SpaceService(
         #: "Ask to join" through the GFS (v_84) — both ends; unwired, an
         #: unpaired host answers ``NOT_PAIRED`` as before.
         self._gfs_join: GfsJoinRequestCoordinator | None = None
+        #: v_88 — our per-space GFS mailboxes, released with the seats.
+        self._mailboxes: SpaceMailboxService | None = None
         self._invite_forwarder = None
         self._space_crypto = None
         # Optional: lets ``dissolve_space`` unlink native gallery uploads
@@ -765,6 +769,12 @@ class SpaceService(
         .InviteLinkForwardCoordinator`). Without it a member household's
         admin cannot mint links for a space hosted elsewhere."""
         self._invite_forwarder = forwarder
+
+    def attach_space_mailboxes(self, mailboxes: SpaceMailboxService) -> None:
+        """Wire the v_88 per-space GFS mailboxes: a ``space_session`` seat
+        that ends (leave, kick, ban, dissolve) drops the mailboxes no seat
+        uses any more (:meth:`revoke_space_session_if_orphaned`)."""
+        self._mailboxes = mailboxes
 
     def attach_gfs_join_requests(self, coordinator: GfsJoinRequestCoordinator) -> None:
         """Wire "Ask to join" through the GFS (v_84): a request to a global
@@ -1361,6 +1371,14 @@ class SpaceService(
         instance = await self._federation_repo.get_instance(instance_id)
         if instance is None or instance.source is not InstanceSource.SPACE_SESSION:
             return False
+        # v_88 — one of this household's spaces with *instance_id* ended:
+        # the mailboxes of that space no seat refers to any more are closed
+        # and unregistered (even when the pair still shares another space).
+        if self._mailboxes is not None:
+            try:
+                await self._mailboxes.release_unused()
+            except Exception:
+                log.warning("space session: releasing mailboxes failed", exc_info=True)
         if await self._spaces.instance_in_any_space(instance_id):
             return False
         # Tell the other side first — the send needs the row we are about

@@ -76,6 +76,7 @@ from ..domain.space import (
     SpaceRole,
     SpaceType,
 )
+from ..domain.space_mailbox import InvalidMailboxEntry, OwnMailbox, SpaceMailboxEntry
 from ..services.local_community import (
     APPROVAL_HONOURED_DAYS,
     LocalAreaBudget,
@@ -108,6 +109,7 @@ from .invite_bootstrap import (
     verify_peer_keywrap,
 )
 from .mesh_member_claim import mesh_member_claim, parse_mesh_member_claim
+from .space_mailbox_entry import verify_entry
 
 if TYPE_CHECKING:
     from ..domain.federation import FederationEvent
@@ -121,6 +123,7 @@ if TYPE_CHECKING:
     )
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
+    from ..services.space_mailbox_service import SpaceMailboxService
     from ..services.space_writer_cert_service import SpaceWriterCertService
     from .federation_service import FederationService
     from .invite_bootstrap import RelayEnvelopeSender
@@ -355,6 +358,7 @@ class SpaceInviteTokenRedeemCoordinator:
         "_keywrap_public_key",
         "_keywrap_sig",
         "_local_area_budget",
+        "_mailboxes",
         "_pending",
         "_pending_issuer",
         "_rate_limiter",
@@ -465,6 +469,73 @@ class SpaceInviteTokenRedeemCoordinator:
         #: v_49 writer certs: the issuer puts the redeemer's own cert in the
         #: ACK ``space_meta``; the redeemer stores it. ``None`` → no cert.
         self._writer_certs: SpaceWriterCertService | None = None
+        #: v_88 — this household's per-space GFS mailboxes. ``None`` → a
+        #: §D2b seat keeps the instance-addressed relay both ways.
+        self._mailboxes: SpaceMailboxService | None = None
+
+    def attach_mailboxes(self, mailboxes: SpaceMailboxService) -> None:
+        """Wire the v_88 per-space mailboxes into the §D2b seat paths."""
+        self._mailboxes = mailboxes
+
+    async def _mint_mailbox(
+        self, space_id: str, gfs_url: str
+    ) -> tuple[SpaceMailboxEntry, OwnMailbox] | None:
+        """Our mailbox for *space_id* at *gfs_url* (v_88), or ``None`` —
+        never raises: a seat without a mailbox keeps today's relay."""
+        if self._mailboxes is None or not space_id or not gfs_url:
+            return None
+        try:
+            return await self._mailboxes.mint(space_id, gfs_url)
+        except Exception:
+            log.warning("invite bootstrap: minting a mailbox failed", exc_info=True)
+            return None
+
+    async def _remember_mailbox(
+        self,
+        space_id: str,
+        instance_id: str,
+        *,
+        peer: SpaceMailboxEntry | None,
+        own: OwnMailbox | None,
+    ) -> None:
+        if self._mailboxes is None:
+            return
+        try:
+            await self._mailboxes.remember(space_id, instance_id, peer=peer, own=own)
+        except Exception:
+            log.warning("invite bootstrap: storing a mailbox failed", exc_info=True)
+
+    async def _abandon_mailbox(self, space_id: str, own: OwnMailbox | None) -> None:
+        if self._mailboxes is None or own is None:
+            return
+        try:
+            await self._mailboxes.abandon(space_id, own)
+        except Exception:
+            log.warning("invite bootstrap: dropping a mailbox failed", exc_info=True)
+
+    @staticmethod
+    def _peer_entry(
+        raw: object, *, identity_pk: str, instance_id: str, space_id: str
+    ) -> SpaceMailboxEntry | None:
+        """The counterpart's directory entry from a sealed redeem / ACK,
+        verified under its identity key — or ``None`` (absent, or refused:
+        the pair then keeps today's relay toward it)."""
+        if raw is None:
+            return None
+        try:
+            return verify_entry(
+                raw,
+                identity_pk_hex=identity_pk,
+                expected_instance_id=instance_id,
+                expected_space_id=space_id,
+            )
+        except InvalidMailboxEntry as exc:
+            log.info(
+                "invite bootstrap: ignoring a mailbox entry from %s: %s",
+                instance_id,
+                exc,
+            )
+            return None
 
     def _redeem_lock(self, instance_id: str) -> asyncio.Lock:
         lock = self._redeem_locks.get(instance_id)
@@ -709,25 +780,38 @@ class SpaceInviteTokenRedeemCoordinator:
         use_bootstrap = not direct_peer and route_path is None
         if use_bootstrap:
             assert bootstrap is not None
-            try:
-                result = await self._request_redeem_bootstrap(
-                    token,
-                    viewer_user_id=viewer_user_id,
-                    user=user,
-                    hint=bootstrap,
-                    join_location=join_location,
-                )
-            except JoinRequestSentError as exc:
-                await self._record_review_request(
-                    exc, viewer_user_id=viewer_user_id, issuer=issuer_instance_id
-                )
-                raise
-            return await self._seat_local_after_ack(
-                result,
-                viewer_user_id=viewer_user_id,
-                issuer_instance_id=issuer_instance_id,
-                bootstrap=bootstrap,
+            # v_88 — our mailbox for this space, registered and claimed
+            # BEFORE the redeem leaves, so the host's first envelopes land.
+            minted = (
+                await self._mint_mailbox(bootstrap.space_id, bootstrap.gfs_url)
+                if bootstrap.proto_version >= FederationCapability.MIN_FOR_SPACE_MAILBOX
+                else None
             )
+            own = minted[1] if minted is not None else None
+            try:
+                try:
+                    result = await self._request_redeem_bootstrap(
+                        token,
+                        viewer_user_id=viewer_user_id,
+                        user=user,
+                        hint=bootstrap,
+                        join_location=join_location,
+                        mailbox=minted[0] if minted is not None else None,
+                    )
+                except JoinRequestSentError as exc:
+                    await self._record_review_request(
+                        exc, viewer_user_id=viewer_user_id, issuer=issuer_instance_id
+                    )
+                    raise
+                return await self._seat_local_after_ack(
+                    {**result, "_own_mailbox": own},
+                    viewer_user_id=viewer_user_id,
+                    issuer_instance_id=issuer_instance_id,
+                    bootstrap=bootstrap,
+                )
+            except BaseException:
+                await self._abandon_mailbox(bootstrap.space_id, own)
+                raise
 
         nonce = uuid.uuid4().hex
         loop = asyncio.get_event_loop()
@@ -963,6 +1047,26 @@ class SpaceInviteTokenRedeemCoordinator:
                 space_id,
                 issuer_instance_id,
             )
+            if bootstrap is not None:
+                # v_88 — the pair's mailboxes: the host's (if it sent one)
+                # and ours (minted for this space before the redeem).
+                own = result.get("_own_mailbox")
+                await self._remember_mailbox(
+                    space_id,
+                    issuer_instance_id,
+                    peer=self._peer_entry(
+                        result.get("mailbox"),
+                        identity_pk=bootstrap.identity_pk,
+                        instance_id=issuer_instance_id,
+                        space_id=space_id,
+                    ),
+                    own=(
+                        own
+                        if isinstance(own, OwnMailbox)
+                        and bootstrap.space_id == space_id
+                        else None
+                    ),
+                )
             # §D1b — seat a local stub + membership so the redeemer's
             # /api/spaces actually shows the joined space. The ACK
             # carries the host's metadata snapshot; older issuers that
@@ -1887,6 +1991,7 @@ class SpaceInviteTokenRedeemCoordinator:
         user: Any,
         hint: InviteBootstrapHint,
         join_location: dict[str, float] | None = None,
+        mailbox: SpaceMailboxEntry | None = None,
     ) -> dict:
         """Seal a redeem request to the issuer and await the sealed reply.
 
@@ -1936,6 +2041,9 @@ class SpaceInviteTokenRedeemCoordinator:
         if join_location is not None:
             # Inside the sealed body: the relay routes it, never reads it.
             body["join_location"] = join_location
+        if mailbox is not None:
+            # v_88 — our signed mailbox for this space, sealed to the host.
+            body["mailbox"] = mailbox.to_wire()
         try:
             envelope = seal_bootstrap_envelope(
                 body=body,
@@ -2179,6 +2287,24 @@ class SpaceInviteTokenRedeemCoordinator:
                 await self._rollback_redeem(reservation, space_session=True)
             raise
         await self._add_writer_cert(ack_body, redeemer_instance_id)
+        # v_88 — the joiner reaches this space only through the GFS: if it
+        # sent its signed mailbox, address it there from now on and answer
+        # with ours (registered and claimed BEFORE the ACK leaves, so the
+        # joiner's first envelopes land). Paired / mesh joiners never get
+        # here (they redeem over the direct or routed path).
+        space_id = str(ack_body["space_id"])
+        peer_entry = self._peer_entry(
+            body.get("mailbox"),
+            identity_pk=str(body["identity_pk"]),
+            instance_id=redeemer_instance_id,
+            space_id=space_id,
+        )
+        own: OwnMailbox | None = None
+        if peer_entry is not None:
+            minted = await self._mint_mailbox(space_id, gfs_url)
+            if minted is not None:
+                ack_body["mailbox"] = minted[0].to_wire()
+                own = minted[1]
         if not await self._send_bootstrap_ack(
             body,
             nonce,
@@ -2189,10 +2315,18 @@ class SpaceInviteTokenRedeemCoordinator:
             # has nothing to undo: that seat was committed earlier.
             if reservation is not None:
                 await self._rollback_redeem(reservation, space_session=True)
+            await self._abandon_mailbox(space_id, own)
             return {"ok": True, "denied": True}
         if reservation is None:
+            await self._remember_mailbox(
+                space_id, redeemer_instance_id, peer=peer_entry, own=own
+            )
             return {"ok": True, "space_id": ack_body["space_id"]}
         await self._commit_redeem(reservation)
+        # After the commit: its ``space_instances`` row now exists.
+        await self._remember_mailbox(
+            space_id, redeemer_instance_id, peer=peer_entry, own=own
+        )
         # The ONE operator-visible record that a stranger joined through a
         # public link. Every other outcome on this path is already
         # observable (a DENY, a rejected relay envelope, a failed seal),
@@ -2341,6 +2475,9 @@ class SpaceInviteTokenRedeemCoordinator:
                 "role": role,
                 "pending_role": body.get("pending_role"),
                 "space_meta": body.get("space_meta"),
+                # v_88 — the host's mailbox for this space (verified when
+                # the seat is written, against the hint's identity key).
+                "mailbox": body.get("mailbox"),
             }
         )
         return {"ok": True}

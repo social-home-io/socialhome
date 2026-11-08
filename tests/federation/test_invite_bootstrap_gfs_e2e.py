@@ -54,6 +54,7 @@ from socialhome.domain.space import JoinMode, SpacePermissionError, SpaceType
 from socialhome.domain.user import User
 from socialhome.federation import invite_token_redeem as redeem_module
 from socialhome.federation.federation_service import FederationService
+from socialhome.federation.gfs_mailbox import derive_mailbox_keys
 from socialhome.federation.gfs_relay_transport import (
     RELAY_SIZE_BUCKETS,
     GfsRelayTransport,
@@ -84,6 +85,7 @@ from socialhome.repositories.dm_media_outbox_repo import SqliteDmMediaOutboxRepo
 from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
 from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 from socialhome.repositories.outbox_repo import SqliteOutboxRepo
 from socialhome.repositories.space_cover_repo import SqliteSpaceCoverRepo
 from socialhome.repositories.space_icon_repo import SqliteSpaceIconRepo
@@ -101,6 +103,10 @@ from socialhome.services.gfs_relay_inbound import (
     GfsRelayInbound,
 )
 from socialhome.services.peer_unpair_service import PeerUnpairService
+from socialhome.services.space_mailbox_service import (
+    SpaceMailboxService,
+    _Claim,
+)
 from socialhome.services.space_service import SpaceService
 
 try:
@@ -144,6 +150,11 @@ class _FakeGfs:
         #: One push leg at a time per recipient, in POST order — see
         #: :meth:`_push`.
         self._push_locks = KeyedLocks()
+        #: v_88 — whether ``/gfs/info`` proves ``envelope_mailbox``, and the
+        #: registered mailboxes: id → (the owner's inbound leg, its keys).
+        self.mailboxes_on = False
+        self.mailboxes: dict[str, tuple[object, object]] = {}
+        self.unregistered: list[str] = []
 
     def app(self) -> web.Application:
         app = web.Application()
@@ -152,7 +163,12 @@ class _FakeGfs:
         return app
 
     async def _info(self, _request: web.Request) -> web.Response:
-        capabilities = {"envelope_relay": True, "anonymous_publish": True}
+        capabilities: dict = {"envelope_relay": True, "anonymous_publish": True}
+        if self.mailboxes_on:
+            capabilities["envelope_mailbox"] = {
+                "sig_suites": ["ed25519"],
+                "idle_days": 30,
+            }
         sig, suite = sign_capabilities(self.seed, GFS_INSTANCE_ID, capabilities)
         return web.json_response(
             {
@@ -177,6 +193,14 @@ class _FakeGfs:
         body = json.loads(raw)
         to_instance = str(body.get("to_instance") or "")
         self.mailbox.append((to_instance, body))
+        box = self.mailboxes.get(to_instance)
+        if box is not None:
+            task = asyncio.create_task(
+                self._push_mailbox(to_instance, box, body.get("sealed")),
+            )
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+            return web.json_response({"status": "accepted"}, status=202)
         target = self.sockets.get(to_instance)
         if target is not None:
             # The push leg: a real GFS writes the frame to the household's
@@ -204,6 +228,13 @@ class _FakeGfs:
         async with self._push_locks.hold(to_instance):
             await target.handle_frame({"sealed": sealed}, gfs_url=self.url)
 
+    async def _push_mailbox(self, mailbox_id: str, box, sealed) -> None:
+        inbound, keys = box
+        async with self._push_locks.hold(mailbox_id):
+            await inbound.handle_mailbox_frame(
+                {"type": "envelope", "sealed": sealed}, keys=keys
+            )
+
     async def drain(self) -> None:
         """Await every push-leg task, including ones spawned while draining.
 
@@ -229,7 +260,36 @@ class _FakeGfs:
             await asyncio.gather(*batch, return_exceptions=True)
 
 
-async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
+class _FakeGfsMailboxes(SpaceMailboxService):
+    """The real mailbox service, registered and claimed at the fake GFS
+    (no tickets, no sockets): the claim is a route in the fake."""
+
+    __slots__ = ("fake", "inbound")
+
+    async def _register(self, conn, keys) -> bool:
+        return True
+
+    async def _open_claim(self, space_id, own, *, keys=None) -> None:
+        if keys is None:
+            keys = derive_mailbox_keys(
+                await self._load_root(), own.gfs_instance_id, space_id, own.gen
+            )
+        claim_key = (space_id, own.gfs_instance_id, own.gen)
+        if claim_key in self._claims:
+            return
+        self._claims[claim_key] = _Claim(keys=keys, own=own)
+        self.fake.mailboxes[keys.mailbox_id] = (self.inbound, keys)
+
+    async def _close_claim(self, claim) -> None:
+        self.fake.mailboxes.pop(claim.keys.mailbox_id, None)
+
+    async def _unregister(self, claim) -> None:
+        self.fake.unregistered.append(claim.keys.mailbox_id)
+
+
+async def _household(
+    tmp_path, name: str, gfs: _FakeGfs, http_session, *, mailboxes: bool = False
+):
     """One fully-wired household on its own SQLite file."""
     db = AsyncDatabase(tmp_path / f"{name}.db", batch_timeout_ms=10)
     await db.startup()
@@ -284,7 +344,9 @@ async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
             paired_at="2026-01-01T00:00:00+00:00",
         ),
     )
-    gfs_service = GfsConnectionService(gfs_repo, http_client=http_session)
+    gfs_service = GfsConnectionService(
+        gfs_repo, http_client=http_session, publish_client=http_session
+    )
 
     space_service = SpaceService(
         space_repo,
@@ -387,6 +449,25 @@ async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
         gfs_connection_repo=gfs_repo,
     )
     gfs.sockets[instance_id] = relay_inbound
+    mailbox_service = None
+    if mailboxes:
+        mailbox_service = _FakeGfsMailboxes(
+            space_repo=space_repo,
+            instance_config=SqliteInstanceConfigRepo(db),
+            key_manager=key_manager,
+            gfs_repo=gfs_repo,
+            gfs_service=gfs_service,
+            instance_id=instance_id,
+            identity_seed=ident.private_key,
+            keywrap_public_key=keywrap.public_key,
+            keywrap_sig=keywrap_sig,
+        )
+        mailbox_service.fake = gfs
+        mailbox_service.inbound = relay_inbound
+        await mailbox_service.start()
+        coordinator.attach_mailboxes(mailbox_service)
+        space_service.attach_space_mailboxes(mailbox_service)
+        fed_transport._mailbox_targets = mailbox_service.target_for
 
     user_id = f"{name}-user-id"
     await user_repo.save(
@@ -418,6 +499,7 @@ async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
         space_service=space_service,
         coordinator=coordinator,
         relay_inbound=relay_inbound,
+        mailboxes=mailbox_service,
         user_id=user_id,
         username=f"{name}user",
     )
@@ -1833,3 +1915,167 @@ async def test_without_a_confirmed_route_a_paired_peer_is_not_relayed(households
     assert result.ok is False
     assert gfs.mailbox == []
     assert a.received == []
+
+
+# ── v_88: per-space GFS mailboxes ────────────────────────────────────────
+
+
+@pytest.fixture
+async def mailbox_households(tmp_path, gfs, http_session):
+    gfs.mailboxes_on = True
+    a = await _household(tmp_path, "ma", gfs, http_session, mailboxes=True)
+    b = await _household(tmp_path, "mb", gfs, http_session, mailboxes=True)
+    yield a, b
+    await gfs.drain()
+    await a.db.shutdown()
+    await b.db.shutdown()
+
+
+async def _rows(h):
+    return {
+        (sp, iid): orjson.loads(raw)
+        for sp, iid, raw in await h.space_repo.list_space_instance_mailboxes()
+    }
+
+
+async def test_a_link_join_gives_both_sides_a_mailbox_for_the_space(
+    mailbox_households, gfs
+):
+    a, b = mailbox_households
+    space = await _join(a, b, gfs)
+    a_rows, b_rows = await _rows(a), await _rows(b)
+    a_row = a_rows[(space.id, b.instance_id)]
+    b_row = b_rows[(space.id, a.instance_id)]
+    # Each holds the other's signed entry and its own generation.
+    assert a_row["peer"]["instance_id"] == b.instance_id
+    assert b_row["peer"]["instance_id"] == a.instance_id
+    assert a_row["own"] and b_row["own"]
+    assert a_row["peer"]["mailbox_id"] != b_row["peer"]["mailbox_id"]
+    assert set(gfs.mailboxes) == {
+        a_row["peer"]["mailbox_id"],
+        b_row["peer"]["mailbox_id"],
+    }
+
+
+async def test_space_content_rides_the_mailbox_and_the_gfs_sees_no_instance_id(
+    mailbox_households, gfs
+):
+    a, b = mailbox_households
+    space = await _join(a, b, gfs)
+    a_mailbox = (await _rows(b))[(space.id, a.instance_id)]["peer"]["mailbox_id"]
+    b_mailbox = (await _rows(a))[(space.id, b.instance_id)]["peer"]["mailbox_id"]
+
+    result = await b.federation.broadcast_to_space_members(
+        space.id, FederationEventType.SPACE_POST_CREATED, _post_payload()
+    )
+    await gfs.drain()
+    assert result.succeeded == 1
+    assert [e.payload["content"] for e in a.received] == [POST_MARKER]
+    assert a.received[0].from_instance == b.instance_id
+
+    await a.federation.broadcast_to_space_members(
+        space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("reply")
+    )
+    await gfs.drain()
+    assert [e.payload["content"] for e in b.received] == ["reply"]
+
+    # Everything the GFS saw for this traffic: mailbox ids and ciphertext.
+    assert [to for to, _ in gfs.mailbox] == [a_mailbox, b_mailbox]
+    wire = json.dumps([body for _, body in gfs.mailbox])
+    for leak in (a.instance_id, b.instance_id, space.id, POST_MARKER):
+        assert leak not in wire
+
+
+async def test_an_envelope_of_another_space_on_a_mailbox_is_refused(
+    mailbox_households, gfs
+):
+    """A mailbox is for one space: a genuine, signed envelope of the same
+    pair but for another space is refused on it."""
+    a, b = mailbox_households
+    await _join(a, b, gfs)
+    keys = next(k for (inb, k) in gfs.mailboxes.values() if inb is a.relay_inbound)
+    row = await b.federation_repo.get_instance(a.instance_id)
+    session_key = b.key_manager.decrypt(row.key_self_to_remote)
+    envelope = {
+        "msg_id": "m-other-space",
+        "event_type": FederationEventType.SPACE_POST_CREATED.value,
+        "from_instance": b.instance_id,
+        "to_instance": a.instance_id,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "encrypted_payload": b.federation._encrypt_payload(
+            orjson.dumps(_post_payload("wrong-space")).decode(), session_key
+        ),
+        "space_id": "some-other-space",
+        "proto_version": 1,
+        "sig_suite": "ed25519",
+    }
+    envelope["signatures"] = b.federation._encoder.sign_envelope_all(
+        orjson.dumps(envelope), suite="ed25519"
+    )
+    frame = {
+        "type": "envelope",
+        "sealed": seal_relay_envelope(
+            envelope_dict=envelope, peer_keywrap_pub=keys.kem_public
+        ),
+    }
+    with pytest.raises(ValueError, match="mailbox's space"):
+        await a.relay_inbound.handle_mailbox_frame(frame, keys=keys)
+    assert a.received == []
+
+
+async def test_a_host_without_mailboxes_keeps_the_instance_addressed_relay(
+    tmp_path, gfs, http_session
+):
+    """Mixed versions: the joiner sends its entry; a host that does not
+    mint one (no mailbox service) never answers with one, and the joiner
+    keeps addressing the host by instance id."""
+    gfs.mailboxes_on = True
+    a = await _household(tmp_path, "xa", gfs, http_session, mailboxes=True)
+    b = await _household(tmp_path, "xb", gfs, http_session, mailboxes=False)
+    try:
+        space = await _join(a, b, gfs)
+        row = (await _rows(a))[(space.id, b.instance_id)]
+        assert row["peer"] is None and row["own"]
+        await a.federation.broadcast_to_space_members(
+            space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("x")
+        )
+        await gfs.drain()
+        assert [to for to, _ in gfs.mailbox] == [b.instance_id]
+        assert [e.payload["content"] for e in b.received] == ["x"]
+    finally:
+        await gfs.drain()
+        await a.db.shutdown()
+        await b.db.shutdown()
+
+
+async def test_a_gfs_without_mailboxes_keeps_todays_relay(tmp_path, gfs, http_session):
+    a = await _household(tmp_path, "ya", gfs, http_session, mailboxes=True)
+    b = await _household(tmp_path, "yb", gfs, http_session, mailboxes=True)
+    try:
+        space = await _join(a, b, gfs)
+        assert await _rows(a) == {} and await _rows(b) == {}
+        await b.federation.broadcast_to_space_members(
+            space.id, FederationEventType.SPACE_POST_CREATED, _post_payload()
+        )
+        await gfs.drain()
+        assert [to for to, _ in gfs.mailbox] == [a.instance_id]
+    finally:
+        await gfs.drain()
+        await a.db.shutdown()
+        await b.db.shutdown()
+
+
+async def test_a_kick_drops_and_unregisters_both_mailboxes(mailbox_households, gfs):
+    a, b = mailbox_households
+    space = await _join(a, b, gfs)
+    boxes = set(gfs.mailboxes)
+    assert len(boxes) == 2
+    await b.space_service.remove_remote_member(
+        space.id,
+        actor_username=b.username,
+        instance_id=a.instance_id,
+        user_id=a.user_id,
+    )
+    await gfs.drain()
+    assert gfs.mailboxes == {}
+    assert set(gfs.unregistered) == boxes
