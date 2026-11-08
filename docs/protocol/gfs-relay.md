@@ -365,7 +365,14 @@ bucket plus the 61-byte seal overhead (`VALID_SEALED_LENGTHS`).
   of re-pushing at once. On a very slow link (< ~1 Mbit/s) one frame can
   still delay a control frame by seconds and the 30 s WebSocket heartbeat
   may close the socket for a missed pong; the household reconnects and the
-  queue drains again. Across a cluster the frame
+  queue drains again. Any push (control or media) that fails outright — a
+  reset, a closing transport — and a control push that stalls
+  (`WS_SEND_TIMEOUT_S`, 10 s) evict the socket AND close it with `1013`
+  (try again later), on `/gfs/ws` and `/gfs/mailbox/ws` alike: the frame is
+  queued (or, for a member item, handled as for an offline recipient), and
+  the household reconnects and drains it. The GFS never just forgets a
+  socket that is still open — that left the household connected but
+  receiving nothing, with no reason to reconnect. Across a cluster the frame
   rides the shared queue and the `NODE_DRAIN_HINT` like any queued
   envelope.
 - **Receiver:** the WebSocket client hands the bytes to
