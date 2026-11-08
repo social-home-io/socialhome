@@ -7336,15 +7336,19 @@ def cmd_gfs_invite_link_content() -> None:
             "gfs-invite-link-content: the GFS logged e's instance id for "
             f"space traffic — it should see only a mailbox: {to_e!r}",
         )
+    # (A global space's id is public on the GFS — its posts are published
+    # there — so only the relay's envelope lines must not carry it.)
     leaked = [
         line
         for line in _gfs_log_lines_matching("", offset=gfs_off)
-        if e_mailbox in line or a_mailbox in line or space_id in line
+        if e_mailbox in line
+        or a_mailbox in line
+        or ("gfs.envelope" in line and space_id in line)
     ]
     if leaked:
         raise SystemExit(
-            "gfs-invite-link-content: a GFS log line names a mailbox id or "
-            f"the space: {leaked!r}",
+            "gfs-invite-link-content: a GFS log line names a mailbox id, or a "
+            f"relay line names the space: {leaked!r}",
         )
     print(
         f"  the GFS carried {len(to_mailbox)} envelope(s) to e's mailbox and "
