@@ -5,7 +5,6 @@ target id in relay-queue logs, the GFS id in the mailbox key derivation."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 import pytest
@@ -26,6 +25,7 @@ from socialhome.global_server.repositories import (
     SqliteGfsMailboxRepo,
 )
 from socialhome.global_server.ws_registry import GfsWebSocketRegistry
+from tests.global_server.test_mailboxes import FreeTickets
 
 TODAY = 100 * DAY_SECONDS
 YESTERDAY = TODAY - DAY_SECONDS
@@ -47,8 +47,14 @@ async def _put(q, to, n, *, mailbox, total, ceiling=None, now=TODAY + 10, ttl=10
 
 async def _boxes(gfs_db, *ids: str):
     repo = SqliteGfsMailboxRepo(gfs_db)
-    for mid in ids:
-        await repo.register(mid, b"\x01" * 32, now=TODAY)
+    for i, mid in enumerate(ids):
+        await repo.register(
+            mid,
+            b"\x01" * 32,
+            now=TODAY,
+            ticket_nonce=(i + 1).to_bytes(32, "big"),
+            ticket_expires_at=10**10,
+        )
     return SqliteGfsEnvelopeQueueRepo(gfs_db)
 
 
@@ -161,18 +167,6 @@ async def test_count_created_since_has_an_index(gfs_db):
     assert "idx_gfs_mailboxes_created" in names
 
 
-async def test_the_daily_cap_is_checked_in_the_insert_transaction(gfs_db):
-    repo = SqliteGfsMailboxRepo(gfs_db)
-    outcomes = await asyncio.gather(
-        *(
-            repo.register(f"{i:032d}", b"\x01" * 32, now=TODAY, max_new_today=3)
-            for i in range(8)
-        )
-    )
-    assert sorted(outcomes).count("created") == 3
-    assert outcomes.count("server_cap") == 5
-
-
 # ── 5. Supernet multipliers ────────────────────────────────────────────
 
 
@@ -189,6 +183,7 @@ async def test_a_dead_siblings_id_is_still_accepted(gfs_db):
         repo=SqliteGfsMailboxRepo(gfs_db),
         gfs_instance_id="gfs-1",
         config=EnvelopeMailboxConfig(),
+        tickets=FreeTickets(),  # type: ignore[arg-type]
         sibling_ids=lambda: set(seen),
         clock=lambda: float(TODAY),
     )
@@ -199,6 +194,7 @@ async def test_a_dead_siblings_id_is_still_accepted(gfs_db):
         repo=SqliteGfsMailboxRepo(gfs_db),
         gfs_instance_id="gfs-2",
         config=EnvelopeMailboxConfig(),
+        tickets=FreeTickets(),  # type: ignore[arg-type]
         sibling_ids=lambda: set(),
         clock=lambda: float(TODAY + 30 * DAY_SECONDS),
     )

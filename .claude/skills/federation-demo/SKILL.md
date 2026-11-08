@@ -1296,6 +1296,13 @@ WS pushes across allocs. The step:
    and the mailbox id must appear in no GFS log line. Without the
    mailbox-aware drain hint the step fails with "no JSON envelope on the
    mailbox socket held by node 1".
+   Every new mailbox spends an anonymous **registration ticket** (Privacy
+   Pass, RFC 9578 type 0x0002): a household registered on the cluster
+   fetches a batch from node 0 over its signed ``POST
+   /gfs/mailbox/tickets``; one ticket registers a mailbox on node 1, the
+   same ticket again on node 0 must get ``409 ticket_spent`` (issuer keys and
+   the spent set live in the shared DB), a mailbox with no ticket ``403
+   ticket_required``, and no ticket may appear in a GFS log line.
    At the very end (step 3k) the step boots an extra node on 18773 that
    shares the key and the DB but serves its OWN public id (``gfs-node-x``,
    like an alloc still on a per-alloc ``gfs-N`` id): a mailbox registered

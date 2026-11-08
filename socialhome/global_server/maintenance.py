@@ -24,6 +24,7 @@ from .domain import CHANNEL_IDLE_TTL_SECONDS, CHANNEL_UNUSED_TTL_SECONDS
 from .repositories import PAIR_TOKEN_RETENTION_SECONDS
 
 if TYPE_CHECKING:
+    from .mailbox_tickets import MailboxTicketService
     from .mailboxes import GfsMailboxService
     from .moment_delete_log import MomentDeleteLog
     from .moment_media import GfsMomentMediaStore
@@ -49,6 +50,7 @@ class GfsMaintenanceScheduler:
         "_highlight_repo",
         "_interval",
         "_invite_repo",
+        "_mailbox_tickets",
         "_mailboxes",
         "_moment_delete_log",
         "_moment_media",
@@ -69,10 +71,13 @@ class GfsMaintenanceScheduler:
         moment_delete_log: MomentDeleteLog | None = None,
         space_media: GfsSpaceMediaStore | None = None,
         mailboxes: GfsMailboxService | None = None,
+        mailbox_tickets: MailboxTicketService | None = None,
         interval_seconds: float = 3600.0,  # once per hour
     ) -> None:
         #: Anonymous mailboxes: dropped after ``mailbox_idle_days`` idle.
         self._mailboxes = mailboxes
+        #: Mailbox tickets: spent nonces / issuer keys past their life.
+        self._mailbox_tickets = mailbox_tickets
         #: The space media cache: blobs past their (short) TTL.
         self._space_media = space_media
         #: Moment delete certificates (v_66): pruned 30 days after written.
@@ -184,6 +189,15 @@ class GfsMaintenanceScheduler:
             except Exception as exc:
                 log.warning(
                     "gfs maintenance: mailbox idle sweep failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+        if self._mailbox_tickets is not None:
+            try:
+                await self._mailbox_tickets.prune(now=now)
+            except Exception as exc:
+                log.warning(
+                    "gfs maintenance: mailbox ticket prune failed: %s",
                     exc,
                     exc_info=True,
                 )

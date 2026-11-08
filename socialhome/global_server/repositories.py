@@ -24,7 +24,7 @@ import orjson
 
 from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
 from ..db import AsyncDatabase
-from ..domain.gfs_mailbox import GfsMailbox
+from ..domain.gfs_mailbox import GfsMailbox, TicketIssuerKey
 from ..domain.space import normalize_join_mode
 from .domain import (
     AdminSession,
@@ -3764,10 +3764,9 @@ class AbstractGfsMailboxRepo(Protocol):
         sign_pk: bytes,
         *,
         now: int,
-        max_new_today: int | None = None,
+        ticket_nonce: bytes,
+        ticket_expires_at: int,
     ) -> str: ...
-
-    async def count_created_since(self, since: int) -> int: ...
 
     async def remember_gfs_ids(self, ids: set[str], *, day: int) -> None: ...
 
@@ -3815,17 +3814,19 @@ class SqliteGfsMailboxRepo:
         sign_pk: bytes,
         *,
         now: int,
-        max_new_today: int | None = None,
+        ticket_nonce: bytes,
+        ticket_expires_at: int,
     ) -> str:
         """Pin *sign_pk* for *mailbox_id* (trust on first use: an existing
-        row is never rewritten), in ONE transaction with the check that no
-        instance holds the id. ``"created"``, ``"exists"`` (registered
-        before — the caller compares the key) or ``"collision"`` (an
-        instance holds the id) or ``"server_cap"`` (*max_new_today* new
-        mailboxes were created on *now*'s day — counted in this same
-        transaction, so concurrent registrations on every node can't
-        overshoot). *now* is stored as given (the caller rounds it to the
-        day)."""
+        row is never rewritten) and spend the registration ticket
+        *ticket_nonce* (``gfs_spent_tickets``, kept until
+        *ticket_expires_at*) — in ONE transaction with the check that no
+        instance holds the id, so a ticket is spent exactly when a mailbox
+        is created. ``"created"``, ``"exists"`` (registered before — the
+        caller compares the key; no ticket spent), ``"collision"`` (an
+        instance holds the id; no ticket spent) or ``"ticket_spent"`` (the
+        nonce was spent before; nothing created). *now* is stored as given
+        (the caller rounds it to the day)."""
 
         def _run(conn) -> str:
             if conn.execute(
@@ -3836,30 +3837,21 @@ class SqliteGfsMailboxRepo:
                 "SELECT 1 FROM gfs_mailboxes WHERE mailbox_id=?", (mailbox_id,)
             ).fetchone():
                 return "exists"
-            if max_new_today is not None:
-                day = now // 86_400 * 86_400
-                made = conn.execute(
-                    "SELECT COUNT(*) FROM gfs_mailboxes WHERE created_at >= ?", (day,)
-                ).fetchone()[0]
-                if int(made) >= max_new_today:
-                    return "server_cap"
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO gfs_mailboxes(mailbox_id, sign_pk, created_at)"
+            spent = conn.execute(
+                "INSERT OR IGNORE INTO gfs_spent_tickets(nonce, expires_at)"
+                " VALUES(?,?)",
+                (ticket_nonce, ticket_expires_at),
+            )
+            if not spent.rowcount:
+                return "ticket_spent"
+            conn.execute(
+                "INSERT INTO gfs_mailboxes(mailbox_id, sign_pk, created_at)"
                 " VALUES(?,?,?)",
                 (mailbox_id, sign_pk, now),
             )
-            return "created" if cur.rowcount else "exists"
+            return "created"
 
         return await self._db.transact(_run)
-
-    async def count_created_since(self, since: int) -> int:
-        """Mailboxes first registered at or after *since* (the global daily
-        cap — cluster-wide, it reads the shared table)."""
-        row = await self._db.fetchone(
-            "SELECT COUNT(*) AS n FROM gfs_mailboxes WHERE created_at >= ?", (since,)
-        )
-        d = _as_dict(row)
-        return int(d["n"]) if d else 0
 
     async def remember_gfs_ids(self, ids: set[str], *, day: int) -> None:
         """Note that this cluster serves (or served) *ids* on *day*."""
@@ -3911,6 +3903,111 @@ class SqliteGfsMailboxRepo:
             return int(cur.rowcount or 0)
 
         return await self._db.transact(_run)
+
+
+# ─── Mailbox registration tickets (Privacy Pass, migration 0030) ────────
+
+
+@runtime_checkable
+class AbstractGfsMailboxTicketRepo(Protocol):
+    """Issuer keys, per-household daily issuance and spent token nonces —
+    nothing that ties an issuance to a redemption."""
+
+    async def key_for_epoch(self, epoch: int) -> TicketIssuerKey | None: ...
+
+    async def add_key(self, key: TicketIssuerKey) -> None: ...
+
+    async def keys_since(self, created_after: int) -> list[TicketIssuerKey]: ...
+
+    async def take_issuance(
+        self, instance_id: str, *, day: int, want: int, per_day: int
+    ) -> int: ...
+
+    async def prune(self, *, now: int, day: int, keys_before: int) -> None: ...
+
+
+class SqliteGfsMailboxTicketRepo:
+    """SQLite-backed :class:`AbstractGfsMailboxTicketRepo` (the shared DB, so
+    every node of a cluster issues under and redeems against the same keys
+    and spent set)."""
+
+    __slots__ = ("_db",)
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    @staticmethod
+    def _key(d: dict) -> TicketIssuerKey:
+        return TicketIssuerKey(
+            epoch=int(d["epoch"]),
+            key_id=bytes(d["key_id"]),
+            private_key_der=bytes(d["private_key"]),
+            created_at=int(d["created_at"]),
+        )
+
+    async def key_for_epoch(self, epoch: int) -> TicketIssuerKey | None:
+        d = _as_dict(
+            await self._db.fetchone(
+                "SELECT epoch, key_id, private_key, created_at"
+                " FROM gfs_ticket_issuer_keys WHERE epoch=?",
+                (epoch,),
+            )
+        )
+        return self._key(d) if d else None
+
+    async def add_key(self, key: TicketIssuerKey) -> None:
+        """Store *key* unless the epoch has one already (another node won
+        the race — the caller re-reads and uses that one)."""
+        await self._db.enqueue(
+            "INSERT OR IGNORE INTO gfs_ticket_issuer_keys"
+            "(epoch, key_id, private_key, created_at) VALUES(?,?,?,?)",
+            (key.epoch, key.key_id, key.private_key_der, key.created_at),
+        )
+
+    async def keys_since(self, created_after: int) -> list[TicketIssuerKey]:
+        rows = await self._db.fetchall(
+            "SELECT epoch, key_id, private_key, created_at"
+            " FROM gfs_ticket_issuer_keys WHERE created_at > ? ORDER BY epoch",
+            (created_after,),
+        )
+        return [self._key(_as_dict(r)) for r in rows]
+
+    async def take_issuance(
+        self, instance_id: str, *, day: int, want: int, per_day: int
+    ) -> int:
+        """Grant up to *want* of *instance_id*'s *per_day* tickets for *day*
+        in one transaction (concurrent requests on every node can't
+        overshoot). Returns how many were granted (0 when the day is used
+        up). Only today's count is kept — one row per household."""
+
+        def _run(conn) -> int:
+            row = conn.execute(
+                "SELECT day, issued FROM gfs_ticket_issuance WHERE instance_id=?",
+                (instance_id,),
+            ).fetchone()
+            used = int(row[1]) if row is not None and int(row[0]) == day else 0
+            grant = max(0, min(want, per_day - used))
+            if grant:
+                conn.execute(
+                    "INSERT INTO gfs_ticket_issuance(instance_id, day, issued)"
+                    " VALUES(?,?,?) ON CONFLICT(instance_id) DO UPDATE SET"
+                    " day=excluded.day, issued=excluded.issued",
+                    (instance_id, day, used + grant),
+                )
+            return grant
+
+        return await self._db.transact(_run)
+
+    async def prune(self, *, now: int, day: int, keys_before: int) -> None:
+        """Drop spent nonces whose key is no longer accepted, issuance rows
+        of past days and keys made before *keys_before*."""
+        await self._db.enqueue(
+            "DELETE FROM gfs_spent_tickets WHERE expires_at < ?", (now,)
+        )
+        await self._db.enqueue("DELETE FROM gfs_ticket_issuance WHERE day < ?", (day,))
+        await self._db.enqueue(
+            "DELETE FROM gfs_ticket_issuer_keys WHERE created_at < ?", (keys_before,)
+        )
 
 
 # ─── Space content epochs (member publish, v_49) ─────────────────────────

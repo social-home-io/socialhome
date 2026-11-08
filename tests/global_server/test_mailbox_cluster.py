@@ -30,6 +30,7 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClusterNode
 from socialhome.global_server.server import create_gfs_app
+from tests.federation.test_gfs_mailbox import _ticket_cache
 
 GFS_ID = "gfs-shared"
 SEALED = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "Y2lwaGVy"}
@@ -100,7 +101,8 @@ async def _wait(predicate, timeout: float = 5.0) -> None:
 async def test_register_on_a_claim_on_b_live_frames_posted_on_a(nodes):
     a, b, session = nodes
     keys = derive_mailbox_keys(b"\x05" * 32, GFS_ID, "space-x", 0)
-    await register_mailbox(session, _url(a), keys, GFS_ID)
+    tickets = await _ticket_cache(a.app, session, _url(a), batch=1)
+    await register_mailbox(session, _url(a), keys, GFS_ID, tickets=tickets)
     async with MailboxClaim(session, _url(b), keys, GFS_ID) as claim:
         assert b.app[gfs_mailbox_ws_registry_key].is_connected(keys.mailbox_id)
         assert not a.app[gfs_mailbox_ws_registry_key].is_connected(keys.mailbox_id)
@@ -120,7 +122,8 @@ async def test_register_on_a_claim_on_b_live_frames_posted_on_a(nodes):
 async def test_queued_while_offline_then_drained_on_a_claim_on_b(nodes):
     a, b, session = nodes
     keys = derive_mailbox_keys(b"\x06" * 32, GFS_ID, "space-y", 2)
-    await register_mailbox(session, _url(a), keys, GFS_ID)
+    tickets = await _ticket_cache(a.app, session, _url(a), batch=1)
+    await register_mailbox(session, _url(a), keys, GFS_ID, tickets=tickets)
     media = _media(keys.mailbox_id, 4)
     await _post(session, a, json={"to_instance": keys.mailbox_id, "sealed": SEALED})
     await _post(session, a, data=media)

@@ -70,6 +70,7 @@ addresses. See the last section of this document.
 | Symmetric AEAD (public moment media, v_63) | AES-256-GCM over a padded plaintext | 256-bit | A public moment's photo / video, sealed once under `HKDF(item_key, "sh-moment-media:v1|" + role)`; plaintext `u32 length ‖ file ‖ zeros` up to a 64 KB…8 MB bucket; AAD binds suite, author, moment id and role; the blob is addressed by its SHA-256 (suite `media_suite: "aesgcm-256-pad"`, unknown refused — `UnsupportedMediaSuite`). Role `share` is a moment's **share copy** (text, timestamps, author name, media descriptor; 4 KB bucket) that a per-moment share link opens; the link's fragment carries the moment's item key — never the generation or step key — so it opens that one moment | `socialhome/moment_public_media.py`, `client/gfs/moment_seal.ts` |
 | Symmetric AEAD (space media in a GFS cache, v_80) | AES-256-GCM over a padded plaintext, deterministic nonce | 256-bit | A space file (post picture, calendar cover, gallery item) for households that read the space through a GFS, sealed once under `HKDF(epoch content key, "sh-space-media:v1")`; nonce derived from the file name and the file's SHA-256 (a re-seal is the byte-identical blob); same padding buckets as moment media; AAD binds suite, space id, epoch and file name; addressed by its scope-bound `sm1` hash (suite `aesgcm-256-pad-det`, unknown refused — `UnsupportedSpaceMediaSuite`). See [Space media in a GFS cache](#space-media-in-a-gfs-cache-aesgcm-256-pad-det) | `socialhome/space_media_seal.py` |
 | Symmetric AEAD (public moments, v_62) | AES-256-GCM, 96-bit random nonce; HKDF-SHA256 ratchet + item keys | 256-bit | A public moment sealed before it reaches a GFS under its **item key** `HKDF(step key, "sh-moment-item:v1|" + moment_id)`; the step key ratchets daily `K(g, s+1) = HKDF(K(g, s), "sh-moment-ratchet:v1")` from a random per-author generation root (holders keep only the newest step). Suite `seal_suite: "aesgcm-256"`, AAD `socialhome/moment-public/v2\|suite\|author\|key_gen\|key_step\|moment_id`; the author's household signs the envelope (ciphertext + key id + moment id). The step key reaches each follower household through the static key-wrap seal (`kem_suite: "x25519"`) with `key_suite: "aesgcm-256"` (the space content-key tag). Unknown suites refused (`UnsupportedMomentSealSuite`) | `socialhome/moment_public_seal.py`, `socialhome/services/moment_public_key_outbound.py`, `socialhome/services/moment_public_key_inbound.py` |
+| Blind signature (Privacy Pass) | RSA blind signatures, RFC 9474 `RSABSSA-SHA384-PSS-Deterministic` (Privacy Pass token type 0x0002, RFC 9578 §6) | 2048-bit modulus | Anonymous GFS mailbox registration tickets (suite `privacypass-blindrsa2048-sha384-pss`): a registered household fetches blind-signed tokens, a new mailbox spends one. See [Mailbox registration tickets](#mailbox-registration-tickets-privacypass-blindrsa2048-sha384-pss) | `socialhome/privacy_pass.py`, `socialhome/global_server/mailbox_tickets.py` |
 | KDF | HKDF-SHA256 | 32-byte output | Session-key derivation, KEK derivation | `cryptography.hazmat.primitives.kdf.hkdf` |
 | File hash (space content, v_85) | SHA-256 | 128-bit collision (PQ: Grover-bounded preimage) | Every space item with files carries `files: {name: {h}}` + `files_suite: "sha256"` inside its encrypted payload / §25.6 record; `SPACE_MEDIA_BLOB` carries `h` + `h_suite`. Receivers store a hashed file as `sc-` + `sha256("space-content" ‖ space ‖ h)[:40]` and refuse bytes that do not hash to `h`; an unknown or missing suite rejects the map whole (`UnsupportedFileHashSuite`) and the item keeps the legacy sender-bound names. A new hash ships as a sibling suite | `socialhome/domain/file_hashes.py`, `socialhome/services/media_file_hasher.py` |
 | Hash | SHA-256 | 256-bit | Instance/space/user ID derivation, token hashing, space-page version hashes (`sha256:` suite-prefixed over title + content + cover — they recognise versions, never order them; receivers reject any other prefix, v_48) | `hashlib.sha256`, `socialhome/domain/page_version.py` |
@@ -106,7 +107,9 @@ under one still needs the prime-order part's private key.
 - **Quantum-safe today:** AES-256-GCM (Grover ⇒ effective 128-bit),
   SHA-256, HKDF-SHA256, HMAC-SHA256, scrypt.
 - **Vulnerable to Shor's algorithm:** Ed25519 (signatures), X25519
-  (key agreement), P-256 ECDSA (VAPID).
+  (key agreement), P-256 ECDSA (VAPID), RSA-2048 blind signatures (GFS
+  mailbox tickets — a forger mints mailboxes, nothing is decrypted; the
+  unlinkability of issued tickets is information-theoretic and survives).
 
 ### Canonical JSON
 
@@ -1426,6 +1429,62 @@ not reveal anything about the file. Post-quantum: AES-256 is
 Grover-resistant (~128-bit); the key travels over the space content key's
 existing delivery channel (`KEY_SUITE_AESGCM_256`), which is where the PQ
 migration happens.
+
+### Mailbox registration tickets (`privacypass-blindrsa2048-sha384-pss`)
+
+`POST /gfs/mailbox/register` is anonymous, so every NEW mailbox spends one
+ticket a registered household fetched earlier
+([`protocol/gfs-relay.md`](protocol/gfs-relay.md#mailbox-registration-tickets)).
+The ticket is standard **Privacy Pass**, no home-made scheme: RFC 9576
+architecture, RFC 9577 `TokenChallenge` / `Token` encodings, RFC 9578 §6
+publicly verifiable issuance (token type `0x0002`), blind RSA RFC 9474
+variant `RSABSSA-SHA384-PSS-Deterministic` (SHA-384, MGF1-SHA-384, 48-byte
+salt, identity message preparation) on a 2048-bit key.
+
+- **Suite.** `TICKET_SUITE_PP_BLINDRSA = "privacypass-blindrsa2048-sha384-pss"`
+  in `SUPPORTED_TICKET_SUITES` (`socialhome/privacy_pass.py`); it rides as
+  `suite` in the signed `/gfs/info` capability `mailbox_tickets` and the
+  ticket request / response, and as `ticket_suite` on register. Unknown →
+  `UnsupportedTicketSuite` (GFS: `400 unsupported_ticket_suite`), never a
+  fallback.
+- **Key id.** `issuer_key_id` = SHA-256 of the key's RSASSA-PSS
+  SubjectPublicKeyInfo (RFC 9578 §6.5), b64url in the capability; the
+  household recomputes it from `public_key` and refuses a mismatch.
+- **Challenge.** One fixed `TokenChallenge`: issuer `gfs.social-home.io`,
+  origin_info `mailbox-register`, empty redemption context (tickets are
+  fetched in batches ahead of use). The GFS checks its SHA-256 in every
+  token, so a token minted for another purpose never registers a mailbox.
+- **Unlinkability.** The GFS signs only blinded messages and keeps none; the
+  blinded message it saw is statistically independent of the token it
+  later verifies, so no issuance can be matched to a redemption.
+- **Key consistency.** Against key partitioning (a key per household to tag
+  tickets) the household's `TicketKeyGuard` requires, before blinding and
+  before redeeming, the same key in an anonymous read of `/gfs/info`, at
+  most one new key per epoch (pinned `(key_id, first_seen)`), and
+  `epoch_days` ≥ 7. The anonymity set is the households that fetched under
+  the same key in that epoch.
+- **Keys.** One per epoch (`mailbox_ticket_epoch_days`, 30), generated by the
+  first GFS node that needs it and stored as unencrypted PKCS#8 in the GFS
+  database (`gfs_ticket_issuer_keys`) so every cluster node signs and
+  verifies with it; accepted for redemption until two epochs after it was
+  made. Protect and back up the GFS database like the identity seed.
+
+**Why RSA.** There is no standardised post-quantum blind signature yet;
+blind RSA is the one Privacy Pass publicly verifiable issuance defines and
+deploys. A quantum forger could mint tickets (= mailboxes, the sybil bound
+this replaces), not read anything. Phase 2: a PQ (or hybrid) issuance ships
+as a sibling suite on the same `suite` tag, the GFS advertising whichever
+it issues.
+
+**Library.** No maintained, MPL-compatible Python implementation of RFC
+9474 exists on PyPI, so `socialhome/privacy_pass.py` builds it on the
+`cryptography` package. RSASSA-PSS verification — of a redeemed token and
+of the unblinded signature inside `finalize` — is OpenSSL's; only
+EMSA-PSS-ENCODE, the blinding arithmetic and the raw RSASP1 are written
+here. `blind_sign` re-blinds the base with a fresh random factor before
+RSASP1 (its timing does not follow the message) and checks the result with
+RSAVP1 before it leaves (a fault never leaks the key). The RFC 9474 A.3 and
+RFC 9578 A.2 test vectors are mandatory tests (`tests/test_privacy_pass.py`).
 
 ## Key storage
 

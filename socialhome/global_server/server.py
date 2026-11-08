@@ -69,6 +69,7 @@ from .envelope_relay import (
 from .federation import GfsFederationService
 from .highlight_publications import HighlightPublicationRegistry
 from .invites import INVITE_MINT_MAX_PER_MINUTE, GfsInviteService
+from .mailbox_tickets import MailboxTicketService
 from .mailboxes import GfsMailboxService
 from .maintenance import GfsMaintenanceScheduler
 from .member_publish import GfsMemberPublishService, build_member_publish_rate_limit
@@ -100,6 +101,7 @@ from .repositories import (
     SqliteGfsHighlightTokenRepo,
     SqliteGfsInviteRepo,
     SqliteGfsMailboxRepo,
+    SqliteGfsMailboxTicketRepo,
     SqliteGfsMomentDeleteLogRepo,
     SqliteGfsMomentFollowRepo,
     SqliteGfsMomentKeyMailboxRepo,
@@ -338,6 +340,7 @@ class GfsApp:
             moment_public_pictures=SqliteGfsUserPictureRepo(db),
             envelope_queue=SqliteGfsEnvelopeQueueRepo(db),
             mailboxes=SqliteGfsMailboxRepo(db),
+            mailbox_tickets=SqliteGfsMailboxTicketRepo(db),
             space_epochs=SqliteGfsSpaceEpochRepo(db),
             channels=SqliteGfsChannelRepo(db),
             invites=SqliteGfsInviteRepo(db),
@@ -433,10 +436,18 @@ class GfsApp:
         # Anonymous per-space mailboxes (GFS redesign PR 1): their claim
         # sockets live in a registry of their own that never logs the id.
         mailbox_ws_registry = GfsWebSocketRegistry(log_ids=False)
+        # Every NEW mailbox spends one anonymous Privacy Pass ticket, issued
+        # to registered households in daily batches (keys in the shared DB).
+        mailbox_tickets = MailboxTicketService(
+            repo=repos.mailbox_tickets,
+            config=config.envelope_mailbox,
+            federation=federation,
+        )
         mailboxes = GfsMailboxService(
             repo=repos.mailboxes,
             gfs_instance_id=config.instance_id,
             config=config.envelope_mailbox,
+            tickets=mailbox_tickets,
             aliases=config.instance_id_aliases,
             sibling_ids=cluster.sibling_instance_ids,
             nodes=cluster.live_node_count,
@@ -585,6 +596,7 @@ class GfsApp:
             highlight_repo=repos.highlight_pubs,
             envelope_queue_repo=repos.envelope_queue,
             mailboxes=mailboxes,
+            mailbox_tickets=mailbox_tickets,
             invite_repo=repos.invites,
             channel_repo=repos.channels,
         )
@@ -610,6 +622,7 @@ class GfsApp:
             moment_public=moment_public,
             envelope_relay=envelope_relay,
             mailboxes=mailboxes,
+            mailbox_tickets=mailbox_tickets,
             mailbox_ws_registry=mailbox_ws_registry,
             cluster_fan_out=cluster_fan_out,
             member_publish=member_publish,
@@ -691,6 +704,7 @@ class GfsApp:
         a[K.gfs_envelope_relay_key] = self.services.envelope_relay
         a[K.gfs_mailbox_repo_key] = self.repos.mailboxes
         a[K.gfs_mailbox_service_key] = self.services.mailboxes
+        a[K.gfs_mailbox_tickets_key] = self.services.mailbox_tickets
         a[K.gfs_mailbox_ws_registry_key] = self.services.mailbox_ws_registry
         a[K.gfs_space_epoch_repo_key] = self.repos.space_epochs
         a[K.gfs_member_publish_key] = self.services.member_publish

@@ -14,9 +14,11 @@ import pytest
 from aiohttp import WSMsgType
 from aiohttp.test_utils import TestClient, TestServer
 
+from socialhome import privacy_pass as pp
 from socialhome.capabilities_sig import verify_capabilities
 from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
 from socialhome.domain.gfs_mailbox import (
+    MAILBOX_TICKET_CHALLENGE,
     claim_signed_bytes,
     derive_mailbox_id,
     register_signed_bytes,
@@ -32,6 +34,7 @@ from socialhome.global_server.app_keys import (
     gfs_fed_repo_key,
     gfs_mailbox_repo_key,
     gfs_mailbox_service_key,
+    gfs_mailbox_tickets_key,
     gfs_mailbox_ws_registry_key,
 )
 from socialhome.global_server.config import EnvelopeMailboxConfig, GfsConfig
@@ -130,8 +133,40 @@ class Box:
         return body
 
 
+class FreeTickets:
+    """A ticket service stub for unit tests of the per-address limits:
+    every ticket checks."""
+
+    async def check(self, suite, ticket):
+        return b"\x00" * 32, 0
+
+
+async def mint_ticket(app) -> str:
+    """One valid registration ticket under *app*'s current issuer key — the
+    blind issuance run locally (the HTTP issuance has its own tests)."""
+    live = await app[gfs_mailbox_tickets_key].current_key()
+    request, pending = pp.token_request(live.public, MAILBOX_TICKET_CHALLENGE)
+    _truncated, blinded = pp.parse_token_request(request)
+    token = pp.finalize_token(
+        live.public, pending, pp.blind_sign(live.private, blinded)
+    )
+    return b64url_encode(token.encode())
+
+
+async def ticketed(app, body: dict) -> dict:
+    """*body* with a fresh ticket attached."""
+    return {
+        **body,
+        "ticket_suite": pp.TICKET_SUITE_PP_BLINDRSA,
+        "ticket": await mint_ticket(app),
+    }
+
+
 async def _register(gfs, box: Box, **kw):
-    return await gfs.post("/gfs/mailbox/register", json=box.register_body(**kw))
+    body = box.register_body(**kw)
+    if "ticket" not in kw:
+        body = await ticketed(gfs.server.app, body)
+    return await gfs.post("/gfs/mailbox/register", json=body)
 
 
 async def _claim(gfs, box: Box, **kw):
@@ -203,7 +238,7 @@ async def test_register_refuses_an_unknown_sig_suite(gfs):
 async def test_register_replay_is_refused(gfs):
     """The same signed registration twice: the nonce is spent."""
     box = Box()
-    body = box.register_body()
+    body = await ticketed(gfs.server.app, box.register_body())
     assert (await gfs.post("/gfs/mailbox/register", json=body)).status == 200
     replay = await gfs.post("/gfs/mailbox/register", json=body)
     assert replay.status == 409
@@ -550,6 +585,7 @@ def _svc(**cfg) -> GfsMailboxService:
         repo=None,  # type: ignore[arg-type]
         gfs_instance_id=GFS_ID,
         config=EnvelopeMailboxConfig(**cfg),
+        tickets=FreeTickets(),  # type: ignore[arg-type]
     )
 
 
