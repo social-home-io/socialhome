@@ -399,6 +399,11 @@ truth; the panel follows it.
   relay-seated members.
   Only **followers** (subscribers) may get a subset, decided per feature
   and written down there — never a member role.
+  **One temporary exception** (owner decision 2026-11-08): an admin whose
+  household is reached only through the GFS does not receive the space
+  seed, so it cannot act as a delegated admin (e.g. serve catch-up). It is
+  to be revisited — a safe key handoff designed and this exception removed —
+  once the GFS redesign's per-space mailboxes and pinned keys exist.
 - GPS coordinates: truncate to 4 decimal places before any storage or
   transmission — `round(float(lat), 4)`, never raw device precision.
 - **People's locations are never shared by design.** A person's or a
