@@ -42,6 +42,8 @@ MAILBOX_ID_CHARS: int = 32
 MAILBOX_REGISTER_CONTEXT: str = "sh-mbx-register:v1"
 #: Domain separation for the answer to a claim challenge.
 MAILBOX_CLAIM_CONTEXT: str = "sh-mbx-claim:v1"
+#: Domain separation for the proof of possession in an unregistration.
+MAILBOX_UNREGISTER_CONTEXT: str = "sh-mbx-unregister:v1"
 
 #: The mailbox signature suite. Phase 2 adds ``"ed25519+mldsa65"`` beside it.
 MAILBOX_SIG_SUITE_ED25519: str = "ed25519"
@@ -54,6 +56,7 @@ ENVELOPE_MAILBOX_CAPABILITY: str = "envelope_mailbox"
 MAILBOX_REGISTER_ROUTE: str = "/gfs/mailbox/register"
 MAILBOX_WS_ROUTE: str = "/gfs/mailbox/ws"
 MAILBOX_TICKETS_ROUTE: str = "/gfs/mailbox/tickets"
+MAILBOX_UNREGISTER_ROUTE: str = "/gfs/mailbox/unregister"
 
 #: The signed ``/gfs/info`` capability carrying the ticket issuer key
 #: (``{suite, issuer_key_id, public_key, per_day}``).
@@ -173,6 +176,16 @@ def register_signed_bytes(
     )
 
 
+def unregister_signed_bytes(
+    gfs_instance_id: str, mailbox_id: str, ts: int, nonce: str
+) -> bytes:
+    """What the mailbox key signs to drop *mailbox_id* at the GFS
+    *gfs_instance_id* (the household left the space, redesign PR 2)."""
+    return _signed(
+        MAILBOX_UNREGISTER_CONTEXT, gfs_instance_id, mailbox_id, str(int(ts)), nonce
+    )
+
+
 def claim_signed_bytes(gfs_instance_id: str, mailbox_id: str, challenge: str) -> bytes:
     """What the mailbox key signs to claim *mailbox_id* on a socket that was
     sent *challenge*."""
@@ -190,6 +203,8 @@ __all__ = [
     "MAILBOX_REGISTER_CONTEXT",
     "MAILBOX_REGISTER_ROUTE",
     "MAILBOX_SIG_SUITE_ED25519",
+    "MAILBOX_UNREGISTER_CONTEXT",
+    "MAILBOX_UNREGISTER_ROUTE",
     "MAILBOX_WS_ROUTE",
     "SUPPORTED_MAILBOX_SIG_SUITES",
     "GfsMailbox",
@@ -199,5 +214,6 @@ __all__ = [
     "derive_mailbox_id",
     "is_mailbox_nonce",
     "register_signed_bytes",
+    "unregister_signed_bytes",
     "validate_mailbox_sig_suite",
 ]

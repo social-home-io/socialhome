@@ -2013,6 +2013,30 @@ async def test_space_instance_identity_pk_is_per_space_and_update_only(env):
     assert await env.repo.get_space_instance_identity_pk("sp-a", "hh-1") == "ab" * 32
 
 
+async def test_space_instance_mailbox_is_per_pair_update_only_and_goes_with_the_seat(
+    env,
+):
+    await env.repo.save(_space("sp-a"))
+    # No row → nothing is created.
+    await env.repo.set_space_instance_mailbox("sp-a", "hh-1", '{"own": null}')
+    assert await env.repo.list_space_instance_mailboxes() == []
+    await env.repo.add_space_instance("sp-a", "hh-1")
+    await env.repo.add_space_instance("sp-a", "hh-2")
+    await env.repo.set_space_instance_mailbox("sp-a", "hh-1", '{"peer": null}')
+    assert await env.repo.list_space_instance_mailboxes() == [
+        ("sp-a", "hh-1", '{"peer": null}')
+    ]
+    # A seat refresh keeps it; the seat's removal drops it.
+    await env.repo.add_space_instance("sp-a", "hh-1")
+    assert len(await env.repo.list_space_instance_mailboxes()) == 1
+    await env.repo.remove_space_instance("sp-a", "hh-1")
+    assert await env.repo.list_space_instance_mailboxes() == []
+    # NULL clears it.
+    await env.repo.set_space_instance_mailbox("sp-a", "hh-2", "{}")
+    await env.repo.set_space_instance_mailbox("sp-a", "hh-2", None)
+    assert await env.repo.list_space_instance_mailboxes() == []
+
+
 async def test_invited_by_round_trips_and_save_never_touches_it(env):
     await env.repo.save(_space("sp-i"))
     assert await env.repo.get_invited_by("sp-i") is None

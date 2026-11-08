@@ -571,3 +571,41 @@ async def test_an_older_gfs_without_envelope_media_is_not_ready(env):
     conn = await env[1].get("g1")
     assert not await svc.envelope_media_supported(conn)
     assert not svc.space_media_cache_off(conn)
+
+
+# ── v_88: envelope_mailbox from the signed block ─────────────────────────
+
+
+def _mailbox_info(mailbox) -> dict:
+    caps: dict = {"anonymous_publish": True}
+    if mailbox is not None:
+        caps["envelope_mailbox"] = mailbox
+    return _base._signed_info(capabilities=caps, gfs_instance_id="inst-g1")
+
+
+async def test_envelope_mailbox_comes_from_the_signed_block_only(env):
+    session = _MediaSession(
+        info=_mailbox_info({"sig_suites": ["ed25519"], "idle_days": 30})
+    )
+    svc = await _svc(env, session)
+    conn = await env[1].get("g1")
+    assert await svc.envelope_mailbox_supported(conn)
+    probes = len(session.gets)
+    assert await svc.envelope_mailbox_supported(conn)  # cached
+    assert len(session.gets) == probes
+    # The operator switches mailboxes off: the next verified block says so.
+    svc._record_capabilities(conn, _mailbox_info(None))
+    assert not await svc.envelope_mailbox_supported(conn)
+    # A bare ``true`` is not the capability's shape.
+    svc._record_capabilities(conn, _mailbox_info(True))
+    assert not await svc.envelope_mailbox_supported(conn)
+
+
+async def test_envelope_mailbox_unsigned_or_unreachable_is_off(env):
+    svc = await _svc(env, _MediaSession(raise_on="GET"))
+    conn = await env[1].get("g1")
+    assert not await svc.envelope_mailbox_supported(conn)
+    info = _mailbox_info({"sig_suites": ["ed25519"], "idle_days": 30})
+    info["capabilities_sig"] = "AAAA"  # forged
+    svc2 = await _svc(env, _MediaSession(info=info))
+    assert not await svc2.envelope_mailbox_supported(conn)

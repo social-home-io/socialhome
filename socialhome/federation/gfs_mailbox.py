@@ -32,6 +32,11 @@ generation) there. This module holds what the household needs to own one:
   cluster node answers to its siblings' and its former ids too). It tries
   without a ticket first and shows one only when the GFS answers
   ``ticket_required`` (a NEW mailbox), so re-registering never shows one.
+* :func:`unregister_mailbox` — the anonymous ``POST /gfs/mailbox/unregister``
+  signed by the mailbox key when the household leaves the space. The GFS
+  answers 200 whatever happened (no oracle); ``False`` means the request did
+  not get that answer (an older GFS without the route, a network fault) and
+  the mailbox simply ages out in the idle sweep.
 * :class:`MailboxClaim` — the anonymous claim socket (``/gfs/mailbox/ws``,
   one mailbox per socket): answers the challenge, then yields the queued
   and live frames — ``dict`` for a JSON envelope frame, ``bytes`` for a
@@ -72,6 +77,7 @@ from ..domain.gfs_mailbox import (
     MAILBOX_SIG_SUITE_ED25519,
     MAILBOX_TICKET_CHALLENGE,
     MAILBOX_TICKETS_ROUTE,
+    MAILBOX_UNREGISTER_ROUTE,
     MAILBOX_WS_ROUTE,
     MAX_TICKETS_PER_REQUEST,
     TICKETS_ACTION,
@@ -80,6 +86,7 @@ from ..domain.gfs_mailbox import (
     derive_mailbox_id,
     is_mailbox_nonce,
     register_signed_bytes,
+    unregister_signed_bytes,
 )
 from ..domain.subscriber_accepts import ACCEPTS_ENVELOPE_MEDIA
 
@@ -791,6 +798,51 @@ async def register_mailbox(
     if body.get("mailbox_id") != keys.mailbox_id:
         raise MailboxRegisterError(status, "mailbox_id_mismatch")
     return keys.mailbox_id
+
+
+def build_unregister_body(
+    keys: MailboxKeys,
+    gfs_instance_id: str,
+    *,
+    now: int | None = None,
+    nonce: str | None = None,
+) -> dict:
+    """The ``POST /gfs/mailbox/unregister`` body dropping *keys*' mailbox at
+    the GFS whose public instance id is *gfs_instance_id*."""
+    ts = int(time.time()) if now is None else now
+    nonce = nonce if nonce is not None else b64url_encode(secrets.token_bytes(16))
+    signed = unregister_signed_bytes(gfs_instance_id, keys.mailbox_id, ts, nonce)
+    return {
+        "sig_suite": MAILBOX_SIG_SUITE_ED25519,
+        "mailbox_id": keys.mailbox_id,
+        "gfs_instance_id": gfs_instance_id,
+        "ts": ts,
+        "nonce": nonce,
+        "sig": b64url_encode(sign_ed25519(keys.sign_seed, signed)),
+    }
+
+
+async def unregister_mailbox(
+    session: aiohttp.ClientSession,
+    gfs_url: str,
+    keys: MailboxKeys,
+    gfs_instance_id: str,
+) -> bool:
+    """Drop *keys*' mailbox at *gfs_url*. ``True`` on the GFS's 200;
+    ``False`` on any other status (an older GFS answers 404) or a network
+    fault — never raises for those (the idle sweep drops it eventually)."""
+    url = gfs_url.rstrip("/") + MAILBOX_UNREGISTER_ROUTE
+    try:
+        status, _body = await _post_register(
+            session, url, build_unregister_body(keys, gfs_instance_id)
+        )
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        log.warning("gfs.mailbox: unregister did not reach the GFS: %r", exc)
+        return False
+    if status != 200:
+        log.warning("gfs.mailbox: unregister answered HTTP %d", status)
+        return False
+    return True
 
 
 def build_claim(

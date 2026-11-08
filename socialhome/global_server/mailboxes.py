@@ -31,6 +31,13 @@ it signed for and a signature over ``sh-mbx-claim:v1`` bytes. An unknown
 mailbox runs the same verify against a fixed dummy key, so "no such mailbox"
 and "wrong key" are one answer after the same work.
 
+**Unregister** (``POST /gfs/mailbox/unregister``, anonymous) — the
+household left the space: a signature by the mailbox key over the
+``sh-mbx-unregister:v1`` bytes (GFS id, mailbox id, ``ts``, nonce) drops the
+mailbox with whatever still waits for it. An unknown mailbox verifies
+against the dummy key, and an unknown mailbox, a wrong signature and a
+replay all answer like a success — only a malformed body is refused.
+
 **Day granularity.** ``created_at`` and ``last_claim_at`` are stored as the
 start of the UTC day: a household reclaiming all its mailboxes at once
 would otherwise stamp them with the same second and link them. A claim
@@ -61,6 +68,7 @@ from ..domain.gfs_mailbox import (
     derive_mailbox_id,
     is_mailbox_nonce,
     register_signed_bytes,
+    unregister_signed_bytes,
     validate_mailbox_sig_suite,
 )
 from .config import EnvelopeMailboxConfig
@@ -346,6 +354,56 @@ class GfsMailboxService:
             if raced is None or raced.sign_pk != sign_pk:
                 raise MailboxRefused(409, "id_in_use")
         return mailbox_id
+
+    # ── Unregister ───────────────────────────────────────────────────────
+
+    async def unregister(self, body: object) -> bool:
+        """Drop a mailbox on a request signed by its key (the household
+        left the space). Raises :class:`MailboxRefused` only for a malformed
+        body; an unknown mailbox, a wrong signature and a replay return
+        normally, so the caller answers all of them like a success (no
+        oracle for which mailboxes exist). Returns whether a mailbox was
+        deleted — for the route to close its claim socket, never for the
+        answer. An unknown mailbox verifies against a dummy key, so it costs
+        what a wrong signature costs."""
+        if not isinstance(body, dict):
+            raise MailboxRefused(400, "invalid_body")
+        try:
+            validate_mailbox_sig_suite(body.get("sig_suite"))
+        except UnsupportedMailboxSigSuite as exc:
+            raise MailboxRefused(400, "unsupported_sig_suite") from exc
+        mailbox_id = body.get("mailbox_id")
+        if not isinstance(mailbox_id, str) or not crypto.is_instance_id(mailbox_id):
+            raise MailboxRefused(400, "invalid_body")
+        sig = _b64(body.get("sig"))
+        if sig is None:
+            raise MailboxRefused(400, "invalid_body")
+        gfs_id = body.get("gfs_instance_id")
+        if not isinstance(gfs_id, str) or gfs_id not in await self.accepted_gfs_ids():
+            raise MailboxRefused(403, "wrong_gfs")
+        ts = body.get("ts")
+        nonce = body.get("nonce")
+        if not isinstance(ts, int) or isinstance(ts, bool):
+            raise MailboxRefused(400, "invalid_ts")
+        now = self._clock()
+        if abs(now - ts) > MAILBOX_TS_WINDOW_SECONDS:
+            raise MailboxRefused(400, "stale_ts")
+        if not isinstance(nonce, str) or not is_mailbox_nonce(nonce):
+            raise MailboxRefused(400, "invalid_nonce")
+        try:
+            signed = unregister_signed_bytes(gfs_id, mailbox_id, ts, nonce)
+        except InvalidMailboxField as exc:
+            raise MailboxRefused(400, "invalid_body") from exc
+        box = await self._repo.get(mailbox_id)
+        key = box.sign_pk if box is not None else _DUMMY_KEY
+        verified = crypto.verify_ed25519(key, signed, sig)
+        if box is None or not verified:
+            return False
+        # Only a signed request on a known mailbox spends its nonce, so junk
+        # can never fill the replay cache; a replay has nothing left to do.
+        if not self._spend_nonce(f"unreg|{mailbox_id}|{nonce}", now):
+            return False
+        return await self._repo.unregister(mailbox_id)
 
     def _count_new(self, bucket: str, now: float) -> list[str] | None:
         """Count one new mailbox against every scope of *bucket*: the scope

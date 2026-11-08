@@ -219,6 +219,23 @@ class GfsWebSocketRegistry:
             self.connection_count(),
         )
 
+    async def close_one(self, instance_id: str, *, code: int, message: bytes) -> bool:
+        """Drop and close the socket tracked for *instance_id*, if any.
+        Returns whether one was closed. Never raises."""
+        async with self._lock:
+            ws = self._by_instance.get(instance_id)
+        if ws is None:
+            return False
+        await self.unregister(instance_id, ws)
+        if ws.closed:
+            return False
+        try:
+            await ws.close(code=code, message=message)
+        except (ConnectionError, RuntimeError) as exc:
+            log.debug("gfs.ws: closing one socket failed: %r", exc)
+            return False
+        return True
+
     async def close_all(self) -> None:
         """Close every tracked socket — called from the GFS cleanup hook."""
         async with self._lock:

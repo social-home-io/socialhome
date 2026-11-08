@@ -9,6 +9,13 @@
   ``ticket_suite`` + ``ticket`` (one RFC 9577 token, base64url): ``400``
   unknown suite, ``403`` ``invalid_ticket`` / ``stale_ticket_key``, ``409``
   ``ticket_spent``.
+* ``POST /gfs/mailbox/unregister`` — drop a mailbox, signed by its key
+  (:meth:`GfsMailboxService.unregister`; redesign PR 2, the household left
+  the space): ``{sig_suite, mailbox_id, gfs_instance_id, ts, nonce, sig}``.
+  ``200 {"status": "unregistered"}`` for a deleted mailbox, an unknown one,
+  a wrong signature and a replay alike (no oracle); ``400`` malformed /
+  unknown ``sig_suite`` / stale ``ts``, ``403`` ``wrong_gfs``. A claim
+  socket this node holds for a deleted mailbox is closed (``4410``).
 * ``POST /gfs/mailbox/tickets`` — a registered household's signed request
   for blind-signed tickets (:meth:`MailboxTicketService.issue`): ``200
   {"suite", "issuer_key_id", "responses"}``; ``403`` unknown / unsigned /
@@ -33,7 +40,7 @@
   mailbox replaces the older socket (``4409``). aiohttp pings every 30 s,
   inside Cloudflare's 100 s idle timeout.
 
-Neither route logs the mailbox id: an application log line next to the
+No route logs the mailbox id: an application log line next to the
 access log's address would tie the two together.
 """
 
@@ -78,6 +85,8 @@ CLAIM_TIMEOUT_SECONDS: float = 5.0
 CLAIM_MAX_MSG_BYTES: int = 4096
 #: Largest registration body (a ticket is ~470 base64 characters).
 REGISTER_MAX_BODY_BYTES: int = 2048
+#: Close code of a claim socket whose mailbox was unregistered ("gone").
+WS_CLOSE_MAILBOX_UNREGISTERED: int = 4410
 #: Largest ticket request body (64 blinded requests of ~350 characters).
 TICKETS_MAX_BODY_BYTES: int = 32 * 1024
 #: Protocol-level ping interval — inside Cloudflare's 100 s WS idle timeout.
@@ -125,6 +134,38 @@ class MailboxRegisterView(GfsBaseView):
                 resp.headers["Retry-After"] = "3600"
             return resp
         return web.json_response({"status": "registered", "mailbox_id": mailbox_id})
+
+
+class MailboxUnregisterView(GfsBaseView):
+    """``POST /gfs/mailbox/unregister``."""
+
+    async def post(self) -> web.Response:
+        svc = self.svc(K.gfs_mailbox_service_key)
+        if not svc.enabled:
+            raise web.HTTPNotFound()
+        raw = await self.bounded_raw(REGISTER_MAX_BODY_BYTES)
+        try:
+            body = orjson.loads(raw)
+        except ValueError:
+            return web.json_response({"error": "invalid_json"}, status=400)
+        try:
+            deleted = await svc.unregister(body)
+        except MailboxRefused as exc:
+            return web.json_response({"error": exc.error}, status=exc.status)
+        if deleted:
+            await _close_claim_socket(
+                self.svc(K.gfs_mailbox_ws_registry_key), body["mailbox_id"]
+            )
+        # The same answer whether anything was deleted (no oracle).
+        return web.json_response({"status": "unregistered"})
+
+
+async def _close_claim_socket(registry, mailbox_id: str) -> None:
+    """Close the claim socket this node holds for an unregistered mailbox
+    (its serve loop then unregisters it); never raises, never logs the id."""
+    await registry.close_one(
+        mailbox_id, code=WS_CLOSE_MAILBOX_UNREGISTERED, message=b"unregistered"
+    )
 
 
 class MailboxWebSocketView(web.View):

@@ -115,6 +115,7 @@ server). Anything else keeps the JSON path, with chunks small enough for
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import orjson
@@ -230,6 +231,73 @@ def is_relay_envelope_body(body: Any) -> bool:
     return isinstance(body, dict) and body.get("kind") == RELAY_KIND_ENVELOPE
 
 
+def _seal_for_relay(
+    envelope_dict: dict, *, recipient_pub: bytes, who: str
+) -> tuple[dict[str, str] | None, int | None]:
+    """Pad and seal *envelope_dict* to *recipient_pub* (a peer's key-wrap
+    key, or a mailbox's ``kem_pk``). ``(sealed, None)``, or ``(None,
+    status)`` — :data:`RELAY_STATUS_TOO_LARGE` for a frame no relay carries
+    (permanent), ``None`` for a seal failure. *who* names the household in
+    the log line (never a mailbox id)."""
+    raw_len = len(orjson.dumps(envelope_dict))
+    if raw_len > RELAY_MAX_ENVELOPE_BYTES:
+        # Refused HERE, not by the relay: shipping it would burn a seal + a
+        # request to earn a 413, and the failure would read as "the
+        # connection server is unhappy" rather than "this frame is
+        # structurally too big for this transport".
+        log.warning(
+            "gfs relay: refusing a %d-byte %r envelope for %s — the relay "
+            "body cap is %d bytes (media does not flow over the "
+            "connection-server relay)",
+            raw_len,
+            envelope_dict.get("event_type"),
+            who,
+            RELAY_MAX_BODY_BYTES,
+        )
+        return None, RELAY_STATUS_TOO_LARGE
+    plaintext = build_relay_plaintext(envelope_dict)
+    if len(plaintext) > RELAY_SIZE_BUCKETS[-1]:
+        # Within the cheap bound but not once wrapped: a seal no receiver
+        # would open. Same permanent status, same reason.
+        log.warning(
+            "gfs relay: refusing a %d-byte %r envelope for %s — over the "
+            "relay body cap once wrapped (largest size bucket %d)",
+            raw_len,
+            envelope_dict.get("event_type"),
+            who,
+            RELAY_SIZE_BUCKETS[-1],
+        )
+        return None, RELAY_STATUS_TOO_LARGE
+    try:
+        sealed = seal_to_keywrap(
+            recipient_keywrap_pub=recipient_pub, plaintext=plaintext
+        )
+    except Exception as exc:
+        log.warning(
+            "gfs relay: could not seal an envelope for %s: %s",
+            who,
+            exc,
+            exc_info=True,
+        )
+        return None, None
+    return sealed, None
+
+
+@dataclass(slots=True, frozen=True)
+class MailboxTarget:
+    """Where an envelope of one space goes for a household reached only
+    through a GFS (v_88): its mailbox there, the key the frame is sealed to
+    and the GFS's base URL. Built from the household's signed directory
+    entry; never logged (the mailbox id must not reach a log line)."""
+
+    mailbox_id: str
+    kem_pk: bytes
+    gfs_url: str
+
+    def __repr__(self) -> str:
+        return "MailboxTarget(<mailbox>)"
+
+
 class GfsRelayTransport:
     """:class:`TransportStrategy` over the connection server's envelope relay.
 
@@ -295,50 +363,11 @@ class GfsRelayTransport:
             )
             return False, None
 
-        raw_len = len(orjson.dumps(envelope_dict))
-        if raw_len > RELAY_MAX_ENVELOPE_BYTES:
-            # Refused HERE, not by the relay: shipping it would burn a
-            # seal + a request to earn a 413, and the failure would read
-            # as "the connection server is unhappy" rather than "this
-            # frame is structurally too big for this transport".
-            log.warning(
-                "gfs relay: refusing a %d-byte %r envelope for %s — the "
-                "relay body cap is %d bytes (media does not flow over the "
-                "connection-server relay)",
-                raw_len,
-                envelope_dict.get("event_type"),
-                instance.id,
-                RELAY_MAX_BODY_BYTES,
-            )
-            return False, RELAY_STATUS_TOO_LARGE
-
-        plaintext = build_relay_plaintext(envelope_dict)
-        if len(plaintext) > RELAY_SIZE_BUCKETS[-1]:
-            # Within the cheap bound but not once wrapped: a seal no
-            # receiver would open. Same permanent status, same reason.
-            log.warning(
-                "gfs relay: refusing a %d-byte %r envelope for %s — over "
-                "the relay body cap once wrapped (largest size bucket %d)",
-                raw_len,
-                envelope_dict.get("event_type"),
-                instance.id,
-                RELAY_SIZE_BUCKETS[-1],
-            )
-            return False, RELAY_STATUS_TOO_LARGE
-
-        try:
-            sealed = seal_to_keywrap(
-                recipient_keywrap_pub=peer_keywrap_pub,
-                plaintext=plaintext,
-            )
-        except Exception as exc:
-            log.warning(
-                "gfs relay: could not seal an envelope for %s: %s",
-                instance.id,
-                exc,
-                exc_info=True,
-            )
-            return False, None
+        sealed, status = _seal_for_relay(
+            envelope_dict, recipient_pub=peer_keywrap_pub, who=instance.id
+        )
+        if sealed is None:
+            return False, status
 
         body_len = len(orjson.dumps({"to_instance": instance.id, "sealed": sealed}))
         if body_len > RELAY_MAX_BODY_BYTES:  # pragma: no cover — guarded above
@@ -461,6 +490,105 @@ class GfsRelayTransport:
             return False, None
         return bool(ok), None
 
+    # ── Per-space mailboxes (v_88) ──────────────────────────────────────
+
+    async def mailbox_ready(
+        self, target: MailboxTarget, *, media: bool = False
+    ) -> bool:
+        """Whether one of our connections reaches *target*'s GFS and that
+        server proved ``envelope_mailbox`` (and ``envelope_media`` when
+        *media*). Never raises."""
+        try:
+            if await self._sender.mailbox_connection(target.gfs_url) is None:
+                return False
+            if media:
+                return await self._sender.media_connection(target.gfs_url) is not None
+            return True
+        except Exception as exc:  # a capability probe must never raise here
+            log.info(
+                "gfs relay: mailbox capability check failed: %s", exc, exc_info=True
+            )
+            return False
+
+    async def send_mailbox(
+        self,
+        *,
+        instance: RemoteInstance,
+        target: MailboxTarget,
+        envelope_dict: dict,
+    ) -> tuple[bool, int | None]:
+        """Seal ``envelope_dict`` — the unchanged §24.11 envelope — to the
+        mailbox's ``kem_pk`` and hand it to the GFS addressed to the mailbox
+        id (v_88). The GFS sees ``{to_instance: <mailbox id>, sealed}`` and
+        nothing that names *instance*. Same contract as :meth:`send`."""
+        sealed, status = _seal_for_relay(
+            envelope_dict, recipient_pub=target.kem_pk, who=instance.id
+        )
+        if sealed is None:
+            return False, status
+        return await self._deliver_mailbox(instance, target, sealed=sealed)
+
+    async def send_media_mailbox(
+        self,
+        *,
+        instance: RemoteInstance,
+        target: MailboxTarget,
+        media_body: bytes,
+    ) -> tuple[bool, int | None]:
+        """:meth:`send_media` toward a mailbox: the binary ``\\x00SHR`` frame
+        is addressed to the mailbox id and sealed to its ``kem_pk``."""
+        try:
+            body = seal_relay_media(
+                to_instance=target.mailbox_id,
+                media_body=media_body,
+                recipient_keywrap_pub=target.kem_pk,
+            )
+        except ValueError as exc:
+            log.warning(
+                "gfs relay: cannot seal a %d-byte media frame for %s's mailbox: %s",
+                len(media_body),
+                instance.id,
+                exc,
+            )
+            too_big = "does not fit" in str(exc)
+            return False, RELAY_STATUS_TOO_LARGE if too_big else None
+        return await self._deliver_mailbox(instance, target, media_body=body)
+
+    async def _deliver_mailbox(
+        self,
+        instance: RemoteInstance,
+        target: MailboxTarget,
+        *,
+        sealed: dict | None = None,
+        media_body: bytes | None = None,
+    ) -> tuple[bool, int | None]:
+        try:
+            ok = await self._sender.send_to_mailbox(
+                mailbox_id=target.mailbox_id,
+                gfs_url=target.gfs_url,
+                sealed=sealed,
+                media_body=media_body,
+            )
+        except EnvelopeRelayThrottled:
+            log.info("gfs relay: a frame for %s's mailbox was throttled", instance.id)
+            return False, RELAY_STATUS_THROTTLED
+        except SpacePermissionError as exc:
+            log.info(
+                "gfs relay: no GFS could carry a frame for %s's mailbox: %s",
+                instance.id,
+                exc,
+            )
+            return False, None
+        except Exception as exc:
+            log.warning(
+                "gfs relay: sending a frame for %s's mailbox failed: %s",
+                instance.id,
+                exc,
+                exc_info=True,
+            )
+            return False, None
+        return bool(ok), None
+
 
 __all__ = [
     "RELAY_KIND_ENVELOPE",
@@ -470,6 +598,7 @@ __all__ = [
     "RELAY_STATUS_THROTTLED",
     "RELAY_STATUS_TOO_LARGE",
     "GfsRelayTransport",
+    "MailboxTarget",
     "build_relay_plaintext",
     "is_relay_envelope_body",
     "seal_relay_envelope",

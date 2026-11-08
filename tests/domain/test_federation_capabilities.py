@@ -8,7 +8,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 87
+    assert fc.OURS == 88
 
 
 def test_local_community_area_capability_threshold():
@@ -50,6 +50,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(59) == [
         "Names for a space's followers",
@@ -80,6 +81,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(60) == [
         "Names for new followers right away",
@@ -109,6 +111,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(61) == [
         "Public moments encrypted from the GFS",
@@ -137,6 +140,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(62) == [
         "Photos and videos in public moments",
@@ -164,6 +168,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(63) == [
         "Time-stamped public moments",
@@ -190,6 +195,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(64) == [
         "Choose how long followers keep your moments",
@@ -215,6 +221,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(65) == [
         "Deletes reach every copy of a moment",
@@ -239,6 +246,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(66) == [
         "Reactions reach authors further away",
@@ -262,6 +270,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(67) == [
         "Reactions reach authors you follow through a GFS",
@@ -284,6 +293,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(68) == [
         "Everyone sees the full reaction count",
@@ -305,6 +315,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(69) == [
         "A highlight taken away stays away",
@@ -325,6 +336,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(70) == [
         "Reporters in other households hear their report was reviewed",
@@ -344,6 +356,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(71) == [
         "Games end cleanly when the other household removes the app",
@@ -362,6 +375,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(72) == [
         "Offers reach sellers in other households",
@@ -379,6 +393,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(73) == [
         "Ask the seller about a listing",
@@ -395,6 +410,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(74) == [
         "Questions and answers on listings",
@@ -410,6 +426,7 @@ def test_local_community_area_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[59] == "local_communities"
 
@@ -455,6 +472,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(58) == [
         "Local communities",
@@ -486,6 +504,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[58] == "synced_picture_resets"
 
@@ -531,6 +550,7 @@ def test_multi_gfs_publish_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert "Posting to every GFS a space is listed on" not in (
         fc.features_missing_below(57)
@@ -580,6 +600,7 @@ def test_sync_series_rows_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[56] == "synced_recurring_events"
 
@@ -624,6 +645,7 @@ def test_space_chat_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(55) == [
         "Recurring events in space catch-up",
@@ -658,6 +680,7 @@ def test_space_chat_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.space_features_missing_below(54) == [
         "Chat in spaces",
@@ -729,6 +752,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(54) == [
         "Chat in spaces",
@@ -764,6 +788,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
 
 
@@ -811,6 +836,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(53) == [
         "Turning on the GFS fallback for an existing connection",
@@ -847,6 +873,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
 
 
@@ -893,6 +920,7 @@ def test_forwarded_invite_link_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
 
 
@@ -966,6 +994,7 @@ def test_space_authority_rotation_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -1009,6 +1038,7 @@ def test_space_authority_rotation_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
 
 
@@ -1078,6 +1108,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
 
 
@@ -1689,6 +1720,7 @@ def test_forwarded_role_change_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
 
 
@@ -1753,6 +1785,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
 
 
@@ -1803,6 +1836,7 @@ def test_member_gfs_publish_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
 
 
@@ -1852,6 +1886,7 @@ def test_strict_member_publish_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
 
 
@@ -1901,6 +1936,7 @@ def test_private_channels_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
 
 
@@ -1993,6 +2029,7 @@ _PINNED_FEATURE_KEYS = {
     85: "content_file_hashes",
     86: "trusted_file_fills",
     87: "relay_media",
+    88: "space_mailboxes",
 }
 
 
@@ -2066,6 +2103,7 @@ def test_space_author_profile_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.space_feature_keys_missing_below(59) == [
         "follower_author_names",
@@ -2118,6 +2156,7 @@ def test_follower_profile_bundle_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[61] == "follower_names_on_join"
 
@@ -2158,6 +2197,7 @@ def test_encrypted_public_moments_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[62] == "encrypted_public_moments"
 
@@ -2196,6 +2236,7 @@ def test_encrypted_moment_media_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[63] == "public_moment_media"
 
@@ -2244,6 +2285,7 @@ def test_long_lived_moments_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[65] == "follower_moment_retention"
 
@@ -2319,6 +2361,7 @@ def test_moment_reaction_counts_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[69] == "moment_reaction_counts"
 
@@ -2352,6 +2395,7 @@ def test_highlight_audience_change_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[70] == "highlight_audience_change"
 
@@ -2383,6 +2427,7 @@ def test_remote_report_answer_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(71) == [
         "Games end cleanly when the other household removes the app",
@@ -2401,6 +2446,7 @@ def test_remote_report_answer_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(72) == [
         "Offers reach sellers in other households",
@@ -2418,6 +2464,7 @@ def test_remote_report_answer_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(73) == [
         "Ask the seller about a listing",
@@ -2434,6 +2481,7 @@ def test_remote_report_answer_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(74) == [
         "Questions and answers on listings",
@@ -2449,6 +2497,7 @@ def test_remote_report_answer_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[71] == "remote_report_answers"
 
@@ -2474,6 +2523,7 @@ def test_app_session_ended_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[72] == "app_games_end_on_uninstall"
     assert 72 not in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -2501,6 +2551,7 @@ def test_bazaar_offers_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[73] == "bazaar_offers"
     assert 73 in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -2537,6 +2588,7 @@ def test_bazaar_thread_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(74) == [
         "Questions and answers on listings",
@@ -2552,6 +2604,7 @@ def test_bazaar_thread_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[74] == "bazaar_ask_the_seller"
     assert 74 not in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -2577,6 +2630,7 @@ def test_bazaar_faq_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(75) == [
         "Games for groups of players",
@@ -2591,6 +2645,7 @@ def test_bazaar_faq_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[75] == "bazaar_listing_faq"
     assert 75 in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -2624,6 +2679,7 @@ def test_app_groups_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(76) == [
         "Games in a space",
@@ -2637,6 +2693,7 @@ def test_app_groups_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[76] == "app_groups"
     assert 76 not in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -2660,6 +2717,7 @@ def test_space_app_tables_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(77) == [
         "Gift draws",
@@ -2672,6 +2730,7 @@ def test_space_app_tables_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.FederationCapability.MIN_FOR_SPACE_APP_TABLES in (
         fc.SPACE_SCOPED_MIN_VERSIONS
@@ -2703,6 +2762,7 @@ def test_app_draw_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(78) == [
         "Edit photos in a space",
@@ -2714,6 +2774,7 @@ def test_app_draw_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[78] == "app_engines"
     assert 78 not in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -2742,6 +2803,7 @@ def test_space_gallery_item_edit_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[79] == "space_gallery_item_edits"
     assert 79 in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -2809,6 +2871,7 @@ def test_media_https_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.features_missing_below(81) == [
         "Pictures in a space's pages",
@@ -2817,6 +2880,7 @@ def test_media_https_capability_threshold():
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
+        "Members reached through a GFS get an anonymous mailbox per space",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[81] == "lighter_media_transfers"
 
@@ -2881,8 +2945,9 @@ def test_content_file_hashes_capability_threshold():
     label = "Space pictures and files checked against their hash"
     fills = "Admins and moderators fill in missing space pictures"
     relay = "Members reached through a GFS get pictures in full-size pieces"
-    assert fc.features_missing_below(84) == [label, fills, relay]
-    assert fc.features_missing_below(85) == [fills, relay]
+    mailbox = "Members reached through a GFS get an anonymous mailbox per space"
+    assert fc.features_missing_below(84) == [label, fills, relay, mailbox]
+    assert fc.features_missing_below(85) == [fills, relay, mailbox]
     assert fc.space_features_missing_below(84) == [label, fills]
     assert fc.CAPABILITY_FEATURE_KEYS[85] == "content_file_hashes"
 
@@ -2913,6 +2978,22 @@ def test_relay_media_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     label = "Members reached through a GFS get pictures in full-size pieces"
-    assert fc.features_missing_below(86) == [label]
-    assert fc.features_missing_below(87) == []
+    assert fc.features_missing_below(86)[0] == label
+    assert label not in fc.features_missing_below(87)
     assert fc.CAPABILITY_FEATURE_KEYS[87] == "relay_media"
+
+
+def test_space_mailbox_capability_threshold():
+    """v_88 — per-space GFS mailboxes for households reached only through a
+    GFS. Gated on the signed directory entry (only a v_88 household mints
+    one), not space-scoped (the fallback is today's relay), no sync line,
+    labelled."""
+    assert fc.FederationCapability.MIN_FOR_SPACE_MAILBOX == 88
+    assert fc.FederationCapability.MIN_FOR_SPACE_MAILBOX <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_SPACE_MAILBOX not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    label = "Members reached through a GFS get an anonymous mailbox per space"
+    assert fc.features_missing_below(87) == [label]
+    assert fc.features_missing_below(88) == []
+    assert fc.CAPABILITY_FEATURE_KEYS[88] == "space_mailboxes"

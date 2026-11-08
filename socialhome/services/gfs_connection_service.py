@@ -77,6 +77,7 @@ from ..capabilities_sig import UnsupportedCapsSigSuite, verify_capabilities
 from ..crypto import b64url_encode, ed25519_public_key, sign_ed25519
 from ..domain.errors import SpaceNotPublishableError, TierChangeRequiredError
 from ..domain.federation import GfsConnection, GfsSpacePublication
+from ..domain.gfs_mailbox import ENVELOPE_MAILBOX_CAPABILITY
 from ..domain.gfs_server import GfsServer
 from ..domain.gfs_space_media import (
     MEDIA_SCOPES,
@@ -419,6 +420,7 @@ class GfsConnectionService:
         "_cover_repo",
         "_encrypted_moment_media",
         "_encrypted_moments",
+        "_envelope_mailbox",
         "_envelope_media",
         "_envelope_relay",
         "_http_client",
@@ -534,6 +536,10 @@ class GfsConnectionService:
         # (it then also tells :meth:`space_media_cache_off` the block was
         # read); a missing entry is unknown, re-probed.
         self._envelope_media: dict[str, bool] = {}
+        # …and ``envelope_mailbox`` (GFS redesign PR 2, v_88): the relay
+        # delivers to anonymous per-space mailboxes. Same rule as
+        # ``_envelope_media`` — recorded only from a VERIFIED block.
+        self._envelope_mailbox: dict[str, bool] = {}
         # Same discipline again, for the ``invite_links`` capability
         # (``POST /gfs/spaces/{id}/invite`` + the public ``/join`` page).
         self._invite_links: dict[str, bool] = {}
@@ -817,6 +823,7 @@ class GfsConnectionService:
             self._anon_publish,
             self._envelope_relay,
             self._envelope_media,
+            self._envelope_mailbox,
             self._invite_links,
             self._place_pin,
             self._targeted_publish,
@@ -1958,6 +1965,11 @@ class GfsConnectionService:
             # v_87 — what this verified block says about media over the
             # relay, and (with it) whether it carries a space media cache.
             self._envelope_media[conn.id] = caps.get(ENVELOPE_MEDIA_CAPABILITY) is True
+            # v_88 — the server delivers to anonymous mailboxes (the entry
+            # is a dict of its limits; absent while the operator has it off).
+            self._envelope_mailbox[conn.id] = isinstance(
+                caps.get(ENVELOPE_MAILBOX_CAPABILITY), dict
+            )
             if _space_media_limit(caps) is None:
                 self._space_media.pop(conn.id, None)
         if caps is not None and caps.get("addressee_key") is True:
@@ -2199,6 +2211,20 @@ class GfsConnectionService:
             ):
                 await self._fetch_gfs_info(conn)
         return self._envelope_media.get(conn.id, False)
+
+    async def envelope_mailbox_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``envelope_mailbox`` (v_88) under a
+        valid signature: it takes mailbox registrations and delivers
+        ``POST /gfs/envelope`` to a mailbox id. Probed once on a cold miss."""
+        if self._listing_failed(conn):
+            return False
+        if conn.id not in self._envelope_mailbox:
+            failed_at = self._info_failed_at.get(conn.id)
+            if failed_at is None or time.monotonic() - failed_at >= (
+                GFS_INFO_NEGATIVE_TTL_S
+            ):
+                await self._fetch_gfs_info(conn)
+        return self._envelope_mailbox.get(conn.id, False)
 
     def space_media_cache_off(self, conn: GfsConnection) -> bool:
         """Whether the last VERIFIED capability block of *conn*'s GFS proved

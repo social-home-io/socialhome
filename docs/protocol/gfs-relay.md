@@ -459,6 +459,19 @@ count-min sketches (no address kept, nothing to evict). There is no
 server-wide daily cap any more: ~100 addresses could burn the old 20 000
 and block every new space join for the rest of the day.
 
+**Unregister** — `POST /gfs/mailbox/unregister`, anonymous, `{sig_suite,
+mailbox_id, gfs_instance_id, ts, nonce, sig}` (redesign PR 2): when the
+household leaves the space it signs `"sh-mbx-unregister:v1" \n
+gfs_instance_id \n mailbox_id \n ts \n nonce` with the mailbox key. The GFS
+checks the GFS id, `ts` and nonce shape as for a registration, verifies
+against the pinned key (an unknown mailbox against a dummy key — the same
+work) and only then spends the nonce; a verified request drops the mailbox
+with its queued envelopes and media in one transaction and closes its claim
+socket on that node. An unknown mailbox, a wrong signature and a replay all
+get the same `200 {status: "unregistered"}` — no oracle for which mailboxes
+exist. An older GFS answers `404`; the mailbox then ages out in the idle
+sweep. 30 / min per address.
+
 **Claim** — `GET /gfs/mailbox/ws`, a socket of its own, never the identified
 `/gfs/ws`, and **one mailbox per socket** (owner decision: a shared socket
 would link a household's spaces live). The GFS sends a random challenge; the
