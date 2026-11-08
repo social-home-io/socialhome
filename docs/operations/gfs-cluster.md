@@ -202,8 +202,26 @@ media_max_inflight_bytes = 67108864         # 64 MiB held in memory between answ
 The queue is the shared `gfs_media_queue` table (GFS migration 0028), so a
 frame posted to one node for a household connected to another is drained by
 that node on the `NODE_DRAIN_HINT` (ids only — the bytes never cross the
-cluster link, so the 768 KiB `relays` cap does not apply). The byte budget
-counts per node like the other per-IP limits.
+cluster link, so the 768 KiB `relays` cap does not apply).
+
+**Per-node budgets multiply.** The byte budget and the in-flight bound are
+counted in each node's memory. Behind the round-robin balancer one client
+address spreads over every node, so with 4 allocs it gets about
+**4 × 64 MiB ≈ 256 MiB of media a minute**, and the cluster can hold about
+**4 × 64 MiB ≈ 256 MiB of media in flight** (each node its own 64 MiB). The
+queue caps (16 MiB per recipient, 1 GiB total) are in the shared database
+and hold cluster-wide. Size `media_ip_bytes_per_minute` and
+`media_max_inflight_bytes` per node with that in mind.
+
+**Residual (documented, accepted):** the 1 GiB server-wide media queue is
+shared by every offline recipient, so an anonymous sender that knows many
+instance ids can fill it (tail-drop) and further media for OFFLINE
+households is dropped until rows expire (1 h, swept on every insert). Live
+recipients are unaffected — a frame for a connected household is pushed,
+never queued — and so are the control envelopes (their own table and caps).
+No per-sender share: the queue would have to store a sender address next to
+the recipient, which the GFS must never keep. A dropped frame heals on the
+reader's next view (see [gfs-relay.md](../protocol/gfs-relay.md#binary-media-frames-v_87)).
 
 **Proxy body limits.** Every front end must let a 528 KiB request body
 through on `/gfs/envelope`. HAProxy has no request body limit by default and

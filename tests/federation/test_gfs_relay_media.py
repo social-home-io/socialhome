@@ -134,7 +134,20 @@ def test_malformed_outer_body_is_refused(keys):
 
 def test_short_seal_is_refused(keys):
     out = _seal(keys, b"m")[: RELAY_MEDIA_PREFIX_BYTES + 10]
-    with pytest.raises(ValueError, match="too short"):
+    with pytest.raises(ValueError, match="invalid relay media body"):
         grm.open_relay_media(
             out, own_instance_id=ME, keywrap_private_key=keys.private_key
+        )
+
+
+def test_the_kem_suite_byte_is_bound_into_the_aad(keys, monkeypatch):
+    """A relay that rewrites the suite byte to another KNOWN id breaks the
+    tag (wire v1 binds the suite, so a future second suite can't be swapped
+    in on the way)."""
+    out = bytearray(_seal(keys, b"m" * 500))
+    monkeypatch.setitem(grm.KEM_SUITE_IDS, 0x02, grm.KEM_SUITE_IDS[0x01])
+    out[RELAY_MEDIA_PREFIX_BYTES] = 0x02
+    with pytest.raises(ValueError, match="does not open"):
+        grm.open_relay_media(
+            bytes(out), own_instance_id=ME, keywrap_private_key=keys.private_key
         )

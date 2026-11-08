@@ -64,6 +64,7 @@ from ..domain.federation import (
     DELIVERY_ERROR_MESH_DEFERRED,
     DELIVERY_ERROR_NO_ROUTE,
     DELIVERY_ERROR_QUEUED,
+    DELIVERY_ERROR_RELAY_CHUNK_RESIZE,
     DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_RELAY_TOO_LARGE,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
@@ -85,6 +86,7 @@ from ..domain.federation_retention import moment_delete_key, supersede_key
 from ..domain.file_hashes import FILES_FIELD, FILES_SUITE_FIELD
 from ..domain.media_chunking import (
     HTTPS_CHUNK_BYTES,
+    RELAY_JSON_CHUNK_BYTES,
     fits_channel,
     media_chunk_bytes,
     relay_json_chunk_bytes,
@@ -2448,6 +2450,27 @@ class FederationService:
             if result is not None:
                 return result
 
+        if (
+            instance is not None
+            and instance.source is InstanceSource.SPACE_SESSION
+            and len(raw_chunk) > RELAY_JSON_CHUNK_BYTES
+        ):
+            # Cut for a binary relay frame, but the relay path no longer
+            # carries them: never a JSON envelope the relay 413s for good.
+            # The outbox retries and re-cuts the file at the size the path
+            # takes now (:meth:`mesh_media_chunk_bytes`).
+            log.info(
+                "send_media_chunk: %d-byte chunk for %s no longer fits its relay "
+                "path — the transfer is re-cut on its next attempt",
+                len(raw_chunk),
+                to_instance_id,
+            )
+            return DeliveryResult(
+                instance_id=to_instance_id,
+                ok=False,
+                error=DELIVERY_ERROR_RELAY_CHUNK_RESIZE,
+                via="gfs_relay",
+            )
         json_payload = {
             **payload,
             "bytes_b64": base64.b64encode(raw_chunk).decode("ascii"),

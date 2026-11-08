@@ -1225,8 +1225,10 @@ suite the JSON relay seal tags as `kem_suite`) and must be in
 byte. Key: HKDF-SHA256 over the ephemeral DH output with its own `info`
 (`socialhome/relay-media:v1`, distinct from the JSON seal's
 `space-keywrap:v1`). AAD: `socialhome/relay_media/v1|` + the outer prefix
-(magic, version, recipient id) + `eph_pk`, so a relay that re-addresses a
-frame or swaps the ephemeral key breaks the tag. The plaintext is
+(magic, version, recipient id) + the kem-suite byte + `eph_pk`, so a relay
+that re-addresses a frame, rewrites its suite byte or swaps the ephemeral
+key breaks the tag. Only `sealed` lengths of exactly one bucket + 61 bytes
+are accepted, on the GFS and on the household. The plaintext is
 `u32 length | body | zero padding` to a size bucket (64 / 128 / 256 /
 516 KiB / the 528 KiB cap) so the GFS sees a bucket, not a size. The outer
 version byte names the layout the GFS reads (`SUPPORTED_RELAY_MEDIA_VERSIONS`,

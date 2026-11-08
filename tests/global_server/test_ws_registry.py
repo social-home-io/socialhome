@@ -466,3 +466,22 @@ async def test_a_dead_media_socket_is_evicted(registry):
     await registry.register("x", ws, envelope_media=True)
     assert not await registry.send_media("x", b"\x00SHR")
     assert not registry.is_connected("x")
+
+
+class _SlowBytesWS(_FakeWS):
+    async def send_bytes(self, data: bytes) -> None:
+        await asyncio.sleep(1.0)
+        self.sent_bytes.append(data)
+
+
+async def test_a_slow_media_push_is_dropped_but_never_evicts_the_socket(
+    registry, monkeypatch
+):
+    monkeypatch.setattr(ws_registry_mod, "WS_MEDIA_SEND_TIMEOUT_S", 0.05)
+    ws = _SlowBytesWS()
+    await registry.register("x", ws, envelope_media=True)
+    assert not await registry.send_media("x", b"\x00SHR-slow")
+    assert registry.is_connected("x")
+    assert ws.closed_with is None
+    # Control frames still go out on the same socket.
+    assert await registry.send("x", {"type": "envelope", "sealed": {}})

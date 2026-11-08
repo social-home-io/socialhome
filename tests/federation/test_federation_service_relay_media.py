@@ -12,6 +12,7 @@ import pytest
 
 from socialhome.crypto import generate_x25519_keypair
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_RELAY_CHUNK_RESIZE,
     DELIVERY_ERROR_RELAY_THROTTLED,
     FederationEventType,
     InstanceSource,
@@ -28,11 +29,14 @@ from socialhome.federation.gfs_relay_transport import (
     RELAY_STATUS_THROTTLED,
     build_relay_plaintext,
 )
+from socialhome.federation.invite_token_redeem import BOOTSTRAP_INBOUND_WINDOW_S
 from socialhome.federation.keywrap_seal import UnsupportedKemSuite
 from socialhome.federation.media_envelope import (
     build_media_envelope,
     encode_media_body,
 )
+from socialhome.rate_limiter import RateLimiter
+from socialhome.services import gfs_relay_inbound as gri
 from socialhome.services.gfs_relay_inbound import GfsRelayInbound
 from tests.federation.test_federation_service import (
     _CaptureMediaTransport,
@@ -290,3 +294,82 @@ async def test_relay_frame_header_carries_no_plaintext_for_the_gfs():
     for leak in (p.a_id, "space_media_blob", "sp1"):
         assert leak.encode() not in body
     assert orjson.dumps(header)[:20] not in body
+
+
+# ── Budgets: media never spends the household's control bucket ──────────
+
+
+def _limited(p, monkeypatch, *, media_limit: int) -> RateLimiter:
+    limiter = RateLimiter()
+    monkeypatch.setattr(gri, "RELAY_MEDIA_INBOUND_LIMIT", media_limit)
+    p.inbound = GfsRelayInbound(
+        federation=p.svc_b,
+        keywrap_private_key=p.kw.private_key,
+        invite_coordinator=None,  # type: ignore[arg-type]
+        gfs_connection_repo=None,  # type: ignore[arg-type]
+        rate_limiter=limiter,
+    )
+    return limiter
+
+
+async def test_saturated_media_leaves_the_control_bucket_untouched(monkeypatch):
+    p = _relay_paired()
+    limiter = _limited(p, monkeypatch, media_limit=2)
+    for i in range(2):
+        header, sealed = _frame(p, raw=f"chunk-{i}".encode())
+        await p.inbound.handle_frame(_relay_frame(p, header, sealed))
+    header, sealed = _frame(p, raw=b"one too many")
+    with pytest.raises(ValueError, match="relayed media rate limit"):
+        await p.inbound.handle_frame(_relay_frame(p, header, sealed))
+    # The process-wide bucket every control / pairing / invite envelope
+    # draws on was never charged by media.
+    assert limiter.has_room(
+        gri._PROCESS_WIDE_KEY, limit=1, window_s=BOOTSTRAP_INBOUND_WINDOW_S
+    )
+    # …so a relayed control envelope still passes its pre-unseal throttle
+    # (it fails later only because this stub sealed nothing real).
+    with pytest.raises(Exception) as exc:
+        await p.inbound.handle_frame({"type": "envelope", "sealed": {}})
+    assert "rate limit" not in str(exc.value)
+
+
+async def test_a_refused_media_frame_spends_no_media_budget(monkeypatch):
+    p = _relay_paired()
+    _limited(p, monkeypatch, media_limit=1)
+    header, sealed = _frame(p)
+    frame = _relay_frame(p, header, sealed)
+    bad = bytearray(frame["body"])
+    bad[-1] ^= 1
+    for _ in range(3):
+        with pytest.raises(ValueError, match="does not open"):
+            await p.inbound.handle_frame({**frame, "body": bytes(bad)})
+    # The one budgeted slot is still there for a real frame.
+    assert await p.inbound.handle_frame(frame) == {"status": "ok"}
+
+
+def test_the_media_bucket_fits_several_senders_at_their_gfs_cap():
+    # One sender is held to 64 MiB/min per GFS node (~124 full frames);
+    # the bucket takes several of them at once.
+    per_sender = (64 * 1024 * 1024) // (517 * 1024)
+    assert gri.RELAY_MEDIA_INBOUND_LIMIT >= 8 * per_sender
+
+
+# ── The path changed under a transfer: never a stuck chunk size ──────────
+
+
+async def test_a_full_chunk_when_the_relay_lost_envelope_media_asks_for_a_resize():
+    """512 KiB chunks were cut for binary relay frames; the GFS then stopped
+    proving ``envelope_media``. The chunk is NOT shipped as a JSON envelope
+    the relay would 413 for good: the send fails with a retryable
+    ``relay_chunk_resize`` and the outbox's next attempt re-cuts the file —
+    the size is re-derived (96 KiB JSON chunks, a new ``chunk_count`` and so
+    a fresh partial set on the receiver)."""
+    p = _relay_paired()
+    p.cap.relay_ready = False
+    result = await _send(p, os.urandom(HTTPS_CHUNK_BYTES))
+    assert not result.ok
+    assert result.error == DELIVERY_ERROR_RELAY_CHUNK_RESIZE
+    assert p.cap.json_envelopes == [] and p.cap.relay_media == []
+    assert await p.svc_a.mesh_media_chunk_bytes(p.b_id, file_size_bytes=10**6) == (
+        RELAY_JSON_CHUNK_BYTES
+    )

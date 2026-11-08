@@ -1249,7 +1249,10 @@ def _gfs_cluster_cross_node_media(urls: list[str]) -> None:
         generate_identity_keypair,
         sign_ed25519,
     )
-    from socialhome.domain.relay_media_frame import build_relay_media_body
+    from socialhome.domain.relay_media_frame import (
+        RELAY_MEDIA_SEAL_OVERHEAD_BYTES as _SEAL,
+        build_relay_media_body,
+    )
 
     kp = generate_identity_keypair()
     iid = derive_instance_id(kp.public_key)
@@ -1307,7 +1310,7 @@ def _gfs_cluster_cross_node_media(urls: list[str]) -> None:
             ws = await http.ws_connect(f"{urls[1]}/gfs/ws", max_msg_size=4 << 20)
             await ws.send_json(_hello())
             await asyncio.sleep(0.5)
-            live = build_relay_media_body(iid, _os.urandom(514 * 1024))
+            live = build_relay_media_body(iid, _os.urandom(516 * 1024 + _SEAL))
             await _post(http, live)
             if await _binary(ws) != live:
                 raise SystemExit("gfs-cluster: the cross-node media frame changed")
@@ -1317,7 +1320,7 @@ def _gfs_cluster_cross_node_media(urls: list[str]) -> None:
             )
             await ws.close()
             await asyncio.sleep(0.5)
-            queued = build_relay_media_body(iid, _os.urandom(300 * 1024))
+            queued = build_relay_media_body(iid, _os.urandom(256 * 1024 + _SEAL))
             await _post(http, queued)
             await asyncio.sleep(1.0)
             ws = await http.ws_connect(f"{urls[1]}/gfs/ws", max_msg_size=4 << 20)

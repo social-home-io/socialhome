@@ -51,6 +51,36 @@ RELAY_MEDIA_PREFIX_BYTES: int = len(RELAY_MEDIA_MAGIC) + 1 + RELAY_MEDIA_TO_CHAR
 #: envelope keeps its 320 KiB cap.
 RELAY_MEDIA_MAX_BODY_BYTES: int = 528 * 1024
 
+#: Bytes the household's seal adds around the padded plaintext: kem-suite
+#: byte, ephemeral X25519 key, AES-GCM nonce and tag
+#: (:mod:`socialhome.federation.gfs_relay_media`).
+RELAY_MEDIA_SEAL_OVERHEAD_BYTES: int = 1 + 32 + 12 + 16
+
+#: The largest padded plaintext an outer body can carry.
+RELAY_MEDIA_MAX_PLAINTEXT_BYTES: int = (
+    RELAY_MEDIA_MAX_BODY_BYTES
+    - RELAY_MEDIA_PREFIX_BYTES
+    - RELAY_MEDIA_SEAL_OVERHEAD_BYTES
+)
+
+#: Padded-plaintext sizes a frame is padded up to, so the GFS sees a bucket,
+#: not a size. A full 512 KiB chunk's media body (~514 KiB) lands in 516 KiB;
+#: the top rung is the cap itself.
+RELAY_MEDIA_SIZE_BUCKETS: tuple[int, ...] = (
+    64 * 1024,
+    128 * 1024,
+    256 * 1024,
+    516 * 1024,
+    RELAY_MEDIA_MAX_PLAINTEXT_BYTES,
+)
+
+#: The only ``sealed`` lengths a body may have: one bucket plus the seal
+#: overhead. Both the GFS and the household refuse any other length, so no
+#: off-bucket size ever crosses the relay.
+VALID_SEALED_LENGTHS: frozenset[int] = frozenset(
+    b + RELAY_MEDIA_SEAL_OVERHEAD_BYTES for b in RELAY_MEDIA_SIZE_BUCKETS
+)
+
 #: The GFS capability (signed ``/gfs/info`` block) that says it carries these
 #: bodies, and the hello ``accepts`` label a household lists so the GFS
 #: pushes them to its socket (an older household's socket would drop them).
@@ -77,8 +107,8 @@ def build_relay_media_body(to_instance: str, sealed: bytes) -> bytes:
 def parse_relay_media_body(buf: bytes) -> tuple[str, memoryview]:
     """``(to_instance, sealed)`` of an outer body, or
     :class:`InvalidRelayMediaBody`: no magic, an unknown version, a
-    recipient that is not an instance id, an empty seal, or over
-    :data:`RELAY_MEDIA_MAX_BODY_BYTES`. ``sealed`` is a view into *buf*
+    recipient that is not an instance id, a ``sealed`` length that is not one
+    of :data:`VALID_SEALED_LENGTHS`, or over :data:`RELAY_MEDIA_MAX_BODY_BYTES`. ``sealed`` is a view into *buf*
     (nothing is copied)."""
     if not is_relay_media_body(buf):
         raise InvalidRelayMediaBody("not a relay media body")
@@ -92,6 +122,8 @@ def parse_relay_media_body(buf: bytes) -> tuple[str, memoryview]:
     to_raw = bytes(buf[len(RELAY_MEDIA_MAGIC) + 1 : RELAY_MEDIA_PREFIX_BYTES])
     if not _INSTANCE_ID_RE.fullmatch(to_raw):
         raise InvalidRelayMediaBody("invalid recipient id")
+    if len(buf) - RELAY_MEDIA_PREFIX_BYTES not in VALID_SEALED_LENGTHS:
+        raise InvalidRelayMediaBody("invalid sealed length")
     return to_raw.decode("ascii"), memoryview(buf)[RELAY_MEDIA_PREFIX_BYTES:]
 
 
@@ -99,10 +131,14 @@ __all__ = [
     "ENVELOPE_MEDIA_CAPABILITY",
     "RELAY_MEDIA_MAGIC",
     "RELAY_MEDIA_MAX_BODY_BYTES",
+    "RELAY_MEDIA_MAX_PLAINTEXT_BYTES",
     "RELAY_MEDIA_PREFIX_BYTES",
+    "RELAY_MEDIA_SEAL_OVERHEAD_BYTES",
+    "RELAY_MEDIA_SIZE_BUCKETS",
     "RELAY_MEDIA_TO_CHARS",
     "RELAY_MEDIA_VERSION_1",
     "SUPPORTED_RELAY_MEDIA_VERSIONS",
+    "VALID_SEALED_LENGTHS",
     "InvalidRelayMediaBody",
     "build_relay_media_body",
     "is_relay_media_body",

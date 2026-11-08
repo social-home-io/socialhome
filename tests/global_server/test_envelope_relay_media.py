@@ -4,6 +4,9 @@ the shared queue."""
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 
 from socialhome.domain.relay_media_frame import build_relay_media_body
@@ -103,10 +106,14 @@ async def test_socket_without_the_label_keeps_it_queued(seeded):
     queue = SqliteGfsEnvelopeQueueRepo(seeded)
     assert await queue.media_bytes_for(RECIPIENT, now=0) > 0
     # Draining to a socket that never listed the label sends nothing.
-    assert await relay.drain(RECIPIENT) == 0
+    await relay.drain(RECIPIENT)
+    await relay.settle_media()
+    assert reg.sent_media == []
     # Once the household reconnects with it, the frame goes out.
     reg.media.add(RECIPIENT)
-    assert await relay.drain(RECIPIENT) == 1
+    await relay.drain(RECIPIENT)
+    await relay.settle_media()
+    assert len(reg.sent_media) == 1
     assert await queue.media_bytes_for(RECIPIENT, now=0) == 0
 
 
@@ -127,7 +134,8 @@ async def test_offline_media_drains_after_the_envelopes_in_order(seeded):
     await relay.accept_media(RECIPIENT, second)
     reg.online.add(RECIPIENT)
     reg.media.add(RECIPIENT)
-    assert await relay.drain(RECIPIENT) == 3
+    assert await relay.drain(RECIPIENT) == 1  # control first
+    await relay.settle_media()
     assert [p["type"] for _i, p in reg.sent] == ["envelope"]
     assert [b for _i, b in reg.sent_media] == [first, second]
 
@@ -185,9 +193,12 @@ async def test_cross_node_media_arrives_through_the_shared_queue(seeded):
     body = _media(300 * KIB)
     await node_a.accept_media(RECIPIENT, body)
     assert cluster.hinted == [RECIPIENT]
-    assert await node_b.drain(RECIPIENT) == 1
+    await node_b.drain(RECIPIENT)
+    await node_b.settle_media()
     assert reg_b.sent_media == [(RECIPIENT, body)]
-    assert await node_b.drain(RECIPIENT) == 0
+    await node_b.drain(RECIPIENT)
+    await node_b.settle_media()
+    assert reg_b.sent_media == [(RECIPIENT, body)]  # never twice
 
 
 async def test_submit_media_runs_in_the_background_and_bounds_bytes(seeded):
@@ -241,3 +252,72 @@ async def test_media_queue_expires_and_is_pruned(seeded):
     assert await queue.next_media_for(RECIPIENT, now=250) is None
     assert await queue.prune_expired_media(250) == 1
     assert await queue.media_bytes_for(RECIPIENT, now=0) == 0
+
+
+# ── Control first: the media drain never holds up envelopes ──────────────
+
+
+class _SlowMediaRegistry(_Registry):
+    def __init__(self, delay: float, **kw) -> None:
+        super().__init__(**kw)
+        self.delay = delay
+
+    async def send_media(self, instance_id, body) -> bool:
+        await asyncio.sleep(self.delay)
+        return await super().send_media(instance_id, body)
+
+
+async def test_control_drains_promptly_while_media_is_queued(seeded):
+    reg = _SlowMediaRegistry(1.0)
+    relay = _relay(seeded, reg)
+    for _ in range(3):
+        await relay.accept_media(RECIPIENT, _media())
+    await relay.accept(RECIPIENT, SEALED)
+    reg.online.add(RECIPIENT)
+    reg.media.add(RECIPIENT)
+    started = time.monotonic()
+    assert await relay.drain(RECIPIENT) == 1  # the envelope, at once
+    assert time.monotonic() - started < 0.5
+    assert [p["type"] for _i, p in reg.sent] == ["envelope"]
+    assert reg.sent_media == []  # media follows in the background
+    await relay.settle_media()
+    assert len(reg.sent_media) == 3
+
+
+async def test_one_media_drain_per_recipient_at_a_time(seeded):
+    reg = _SlowMediaRegistry(0.05, online={RECIPIENT}, media={RECIPIENT})
+    relay = _relay(seeded, reg)
+    reg.online.discard(RECIPIENT)
+    bodies = [_media(fill=bytes([i])) for i in range(1, 4)]
+    for body in bodies:
+        await relay.accept_media(RECIPIENT, body)
+    reg.online.add(RECIPIENT)
+    for _ in range(4):
+        await relay.drain(RECIPIENT)
+    await relay.settle_media()
+    assert [b for _i, b in reg.sent_media] == bodies  # in order, never twice
+
+
+async def test_an_enqueue_sweeps_expired_media_rows_first(seeded):
+    """Expired rows go in the enqueue's own transaction, not only at the
+    hourly sweep, so they never hold disk or the server-wide cap."""
+    queue = SqliteGfsEnvelopeQueueRepo(seeded)
+    for _ in range(3):
+        assert await queue.enqueue_media(
+            RECIPIENT,
+            b"x" * 100,
+            created_at=10,
+            expires_at=20,
+            max_bytes_per_recipient=1000,
+            max_total_bytes=300,
+        )
+    assert await queue.enqueue_media(
+        "other2home22222222222222222222ab",
+        b"y" * 300,
+        created_at=30,
+        expires_at=90,
+        max_bytes_per_recipient=1000,
+        max_total_bytes=300,
+    )
+    rows = await seeded.fetchall("SELECT COUNT(*) AS n FROM gfs_media_queue")
+    assert rows[0]["n"] == 1

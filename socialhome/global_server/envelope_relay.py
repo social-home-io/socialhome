@@ -82,7 +82,11 @@ on top of the per-IP request limit (:meth:`GfsEnvelopeRelay.media_budget_allows`
 its own in-flight bound counted in bytes, its own per-recipient pending cap
 and lock, and its own queue table (``gfs_media_queue``, GFS migration 0028)
 with a per-recipient and a server-wide byte cap, both tail-drop, and a short
-TTL. Across a cluster it rides the same shared queue + ``NODE_DRAIN_HINT`` as
+TTL (expired rows swept on every insert). A drain pushes the control
+envelopes first, under their lock; the media frames follow in one background
+task per recipient under their own, so control never waits behind media, and
+a stalled media push is dropped without evicting the socket
+(``ws_registry.WS_MEDIA_SEND_TIMEOUT_S``). Across a cluster it rides the same shared queue + ``NODE_DRAIN_HINT`` as
 an envelope: the node holding the socket drains it (the hint carries the
 recipient id only, never the bytes). Caps: ``[envelope_relay]`` in the GFS
 TOML (:class:`~socialhome.global_server.config.EnvelopeMediaConfig`).
@@ -474,6 +478,8 @@ class GfsEnvelopeRelay:
         "_max_queued",
         "_media",
         "_media_budget",
+        "_media_drain_again",
+        "_media_drains",
         "_media_inflight",
         "_media_inflight_bytes",
         "_media_pending",
@@ -526,6 +532,11 @@ class GfsEnvelopeRelay:
         self._media_inflight: set[asyncio.Task[None]] = set()
         self._media_inflight_bytes = 0
         self._media_pending: dict[str, int] = {}
+        #: recipient → its one background media drain (control first: a
+        #: media drain never runs under, or holds up, the envelope drain).
+        self._media_drains: dict[str, asyncio.Task[None]] = {}
+        #: recipients whose media drain was asked for again while running.
+        self._media_drain_again: set[str] = set()
 
     def attach_cluster(self, cluster: ClusterService) -> None:
         """Hint *cluster* after every enqueue, so a sibling node holding the
@@ -738,7 +749,11 @@ class GfsEnvelopeRelay:
         """Let in-flight ``accept`` tasks finish, cancelling any still running
         after *timeout* (default :data:`ENVELOPE_CLOSE_TIMEOUT_S`). Called from
         the server's cleanup hook BEFORE the database shuts down."""
-        pending = set(self._inflight) | set(self._media_inflight)
+        pending = (
+            set(self._inflight)
+            | set(self._media_inflight)
+            | set(self._media_drains.values())
+        )
         if not pending:
             return
         _done, still = await asyncio.wait(
@@ -955,7 +970,53 @@ class GfsEnvelopeRelay:
         number delivered.
         """
         async with self._drain_locks.hold(to_instance):
-            return await self._drain_locked(to_instance)
+            delivered = await self._drain_locked(to_instance)
+        # Media AFTER the envelope lock is released, in its own background
+        # task: control frames never wait behind up to 16 MiB of media.
+        self._kick_media_drain(to_instance)
+        return delivered
+
+    def _kick_media_drain(self, to_instance: str) -> None:
+        """Start *to_instance*'s background media drain, or — when one is
+        already running — have it go round once more (one per recipient, so
+        a frame is never pushed twice by two drains)."""
+        if not self._ws_registry.takes_media(to_instance):
+            return
+        running = self._media_drains.get(to_instance)
+        if running is not None and not running.done():
+            self._media_drain_again.add(to_instance)
+            return
+        task = asyncio.get_running_loop().create_task(
+            self._media_drain_loop(to_instance), name="gfs-envelope-media-drain"
+        )
+        self._media_drains[to_instance] = task
+
+        def _done(t: asyncio.Task[None], to: str = to_instance) -> None:
+            if self._media_drains.get(to) is t:
+                del self._media_drains[to]
+
+        task.add_done_callback(_done)
+
+    async def _media_drain_loop(self, to_instance: str) -> None:
+        try:
+            while True:
+                self._media_drain_again.discard(to_instance)
+                await self._drain_media(to_instance)
+                if to_instance not in self._media_drain_again:
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.warning(
+                "gfs.envelope: media drain failed for %s", to_instance, exc_info=True
+            )
+
+    async def settle_media(self) -> None:
+        """Wait for every running background media drain (tests, shutdown)."""
+        while self._media_drains:
+            await asyncio.gather(
+                *list(self._media_drains.values()), return_exceptions=True
+            )
 
     async def _drain_locked(self, to_instance: str) -> int:
         try:
@@ -979,11 +1040,6 @@ class GfsEnvelopeRelay:
                 break
             await self._queue_repo.delete(envelope.id)
             delivered += 1
-        else:
-            # Every envelope went out: now the media frames, one row at a
-            # time (a household's media queue is up to 16 MiB). Only to a
-            # socket that opens them — anything else leaves them queued.
-            delivered += await self._drain_media(to_instance)
         if delivered:
             log.debug(
                 "gfs.envelope: drained %d queued envelope(s) to %s",

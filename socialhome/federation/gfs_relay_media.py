@@ -22,13 +22,13 @@ the recipient's static key-wrap key and wraps it in the outer relay body
   :class:`~socialhome.federation.keywrap_seal.UnsupportedKemSuite`, never a
   default. The phase-2 hybrid takes a new byte.
 * **Binding.** The AEAD's associated data is the outer prefix (magic,
-  version, recipient id) plus ``eph_pk``: a GFS that re-addresses a frame to
+  version, recipient id), the kem-suite byte and ``eph_pk``: a GFS that re-addresses a frame to
   another household, or swaps the ephemeral key, breaks the tag. The key is
   HKDF'd under its own ``info`` (:data:`_HKDF_INFO`), so it never equals a
   JSON-relay seal key even for the same DH output.
 * **Padding.** The plaintext is padded to one of
   :data:`RELAY_MEDIA_SIZE_BUCKETS`, so the GFS sees a bucket, not a file
-  size: every full 512 KiB chunk lands in the 516 KiB rung, a file's last
+  size (both sides refuse any other sealed length): every full 512 KiB chunk lands in the 516 KiB rung, a file's last
   chunk in a smaller one.
 
 After the open, the media body goes through the **same** tail as the inbox
@@ -52,7 +52,10 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from ..crypto import generate_x25519_keypair, x25519_exchange
 from ..domain.relay_media_frame import (
     RELAY_MEDIA_MAX_BODY_BYTES,
+    RELAY_MEDIA_MAX_PLAINTEXT_BYTES,
     RELAY_MEDIA_PREFIX_BYTES,
+    RELAY_MEDIA_SEAL_OVERHEAD_BYTES,
+    RELAY_MEDIA_SIZE_BUCKETS,
     InvalidRelayMediaBody,
     build_relay_media_body,
     parse_relay_media_body,
@@ -72,24 +75,7 @@ _TAG_BYTES: int = 16
 _LEN = struct.Struct(">I")
 
 #: Bytes ``sealed`` adds around the plaintext: suite byte, eph_pk, nonce, tag.
-SEAL_OVERHEAD_BYTES: int = 1 + _EPH_PK_BYTES + _NONCE_BYTES + _TAG_BYTES
-
-#: The largest sealed plaintext an outer body can carry under
-#: :data:`~socialhome.domain.relay_media_frame.RELAY_MEDIA_MAX_BODY_BYTES`.
-RELAY_MEDIA_MAX_PLAINTEXT_BYTES: int = (
-    RELAY_MEDIA_MAX_BODY_BYTES - RELAY_MEDIA_PREFIX_BYTES - SEAL_OVERHEAD_BYTES
-)
-
-#: Sealed-plaintext sizes a frame is padded up to. A full 512 KiB chunk's
-#: media body is ~514 KiB (chunk + GCM tag + ~1.5 KiB signed header + 14 B of
-#: framing) and lands in the 516 KiB rung; the top rung is the cap itself.
-RELAY_MEDIA_SIZE_BUCKETS: tuple[int, ...] = (
-    64 * 1024,
-    128 * 1024,
-    256 * 1024,
-    516 * 1024,
-    RELAY_MEDIA_MAX_PLAINTEXT_BYTES,
-)
+SEAL_OVERHEAD_BYTES: int = RELAY_MEDIA_SEAL_OVERHEAD_BYTES
 
 #: The largest media body that fits one relay frame.
 RELAY_MEDIA_MAX_MEDIA_BODY_BYTES: int = RELAY_MEDIA_MAX_PLAINTEXT_BYTES - _LEN.size
@@ -101,8 +87,8 @@ def _derive_key(shared: bytes) -> bytes:
     ).derive(shared)
 
 
-def _aad(prefix: bytes, eph_pk: bytes) -> bytes:
-    return _AAD_TAG + bytes(prefix) + eph_pk
+def _aad(prefix: bytes, suite_id: int, eph_pk: bytes) -> bytes:
+    return _AAD_TAG + bytes(prefix) + bytes([suite_id]) + eph_pk
 
 
 def _padded(media_body: bytes) -> bytes:
@@ -137,7 +123,7 @@ def seal_relay_media(
     eph = generate_x25519_keypair()
     key = _derive_key(x25519_exchange(eph.private_key, recipient_keywrap_pub))
     nonce = os.urandom(_NONCE_BYTES)
-    ct = AESGCM(key).encrypt(nonce, plaintext, _aad(prefix, eph.public_key))
+    ct = AESGCM(key).encrypt(nonce, plaintext, _aad(prefix, suite_id, eph.public_key))
     return prefix + bytes([suite_id]) + eph.public_key + nonce + ct
 
 
@@ -173,7 +159,7 @@ def open_relay_media(
     try:
         key = _derive_key(x25519_exchange(keywrap_private_key, eph_pk))
         plaintext = AESGCM(key).decrypt(
-            nonce, bytes(sealed[nonce_end:]), _aad(prefix, eph_pk)
+            nonce, bytes(sealed[nonce_end:]), _aad(prefix, sealed[0], eph_pk)
         )
     except Exception as exc:
         raise ValueError("relay media frame does not open") from exc
@@ -185,6 +171,7 @@ def open_relay_media(
 
 __all__ = [
     "KEM_SUITE_IDS",
+    "RELAY_MEDIA_MAX_BODY_BYTES",
     "RELAY_MEDIA_MAX_MEDIA_BODY_BYTES",
     "RELAY_MEDIA_MAX_PLAINTEXT_BYTES",
     "RELAY_MEDIA_SIZE_BUCKETS",

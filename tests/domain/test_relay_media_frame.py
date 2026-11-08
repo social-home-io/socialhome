@@ -10,13 +10,16 @@ from socialhome.federation.media_framing import HTTPS_MEDIA_MAX_BODY_BYTES
 TO = "a" * 32
 
 
+VALID = b"\x01" * (64 * 1024 + rf.RELAY_MEDIA_SEAL_OVERHEAD_BYTES)
+
+
 def test_round_trip_outer_body():
-    body = rf.build_relay_media_body(TO, b"sealed-bytes")
+    body = rf.build_relay_media_body(TO, VALID)
     assert body.startswith(rf.RELAY_MEDIA_MAGIC)
     assert rf.is_relay_media_body(body)
     to, sealed = rf.parse_relay_media_body(body)
     assert to == TO
-    assert bytes(sealed) == b"sealed-bytes"
+    assert bytes(sealed) == VALID
 
 
 def test_json_is_never_a_relay_media_body():
@@ -59,3 +62,21 @@ def test_build_refuses_a_bad_recipient():
 
 def test_cap_matches_the_inbox_media_cap():
     assert rf.RELAY_MEDIA_MAX_BODY_BYTES == HTTPS_MEDIA_MAX_BODY_BYTES
+
+
+# ── Only valid sealed lengths (a bucket plus the fixed seal overhead) ────
+
+
+@pytest.mark.parametrize("bucket", rf.RELAY_MEDIA_SIZE_BUCKETS)
+def test_every_bucket_length_is_accepted(bucket):
+    sealed = b"\x01" * (bucket + rf.RELAY_MEDIA_SEAL_OVERHEAD_BYTES)
+    _to, got = rf.parse_relay_media_body(rf.build_relay_media_body(TO, sealed))
+    assert len(got) == len(sealed)
+    assert len(rf.build_relay_media_body(TO, sealed)) <= rf.RELAY_MEDIA_MAX_BODY_BYTES
+
+
+@pytest.mark.parametrize("delta", [-1, 1, 100])
+def test_a_sealed_length_off_the_buckets_is_refused(delta):
+    sealed = b"\x01" * (64 * 1024 + rf.RELAY_MEDIA_SEAL_OVERHEAD_BYTES + delta)
+    with pytest.raises(rf.InvalidRelayMediaBody, match="sealed length"):
+        rf.parse_relay_media_body(rf.build_relay_media_body(TO, sealed))

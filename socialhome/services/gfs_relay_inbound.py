@@ -38,7 +38,8 @@ Two families ride the one socket, told apart by the sealed plaintext's
   run through the inbox's §24.11 media tail
   (:meth:`~socialhome.federation.federation_service.FederationService
   .handle_inbound_media_relay`). Their own bucket
-  (:data:`RELAY_MEDIA_INBOUND_LIMIT`) under the process-wide one.
+  (:data:`RELAY_MEDIA_INBOUND_LIMIT`), checked BEFORE and never charged to
+  the process-wide one, and only for a frame that went through.
 * **Invite bootstrap bodies** (``KIND_REDEEM*``) — delegated to the
   :class:`~socialhome.federation.invite_token_redeem
   .SpaceInviteTokenRedeemCoordinator`, which owns their validation.
@@ -125,10 +126,13 @@ _PAIRING_KEY = "invite-bootstrap:pairing"
 #: v_87 — binary relay media frames, their own bucket.
 _MEDIA_KEY = "gfs-relay:media"
 
-#: Binary relay media frames opened per window (v_87): 240 a minute is
-#: ~2 MiB/s of 512 KiB chunks — above what one GFS's per-IP byte budget lets
-#: a sender push (64 MiB/min ≈ 128 frames), so it sheds only a flood.
-RELAY_MEDIA_INBOUND_LIMIT: int = 240
+#: Binary relay media frames this household takes per window (v_87). Its
+#: OWN bucket, never the process-wide one: media must not starve relayed
+#: control, pairing and invite envelopes. One sender is held to 64 MiB/min
+#: per GFS node (~124 full frames), so 1200 a minute (~10 MiB/s) takes about
+#: ten senders at their cap at once. Charged only for a frame that went
+#: through (a refused frame spends nothing — it cannot crowd real ones out).
+RELAY_MEDIA_INBOUND_LIMIT: int = 1200
 
 
 class GfsRelayInbound:
@@ -175,6 +179,10 @@ class GfsRelayInbound:
         """
         if not self._keywrap_private_key:
             raise ValueError("no key-wrap key — cannot open relayed envelopes")
+        if isinstance(frame, dict) and frame.get("type") == ENVELOPE_MEDIA_FRAME:
+            # v_87 media rides its own bucket, ahead of (and never charged
+            # to) the process-wide one the control envelopes share.
+            return await self._handle_media(frame.get("body"))
         # Process-wide throttle BEFORE the unseal — the cheapest place to
         # shed a flood, and the only one available before we know which
         # family the blob belongs to.
@@ -184,8 +192,6 @@ class GfsRelayInbound:
             window_s=BOOTSTRAP_INBOUND_WINDOW_S,
         ):
             raise ValueError("invite bootstrap inbound rate limit exceeded")
-        if isinstance(frame, dict) and frame.get("type") == ENVELOPE_MEDIA_FRAME:
-            return await self._handle_media(frame.get("body"))
         body = unseal_envelope_body(
             envelope={
                 "sealed": frame.get("sealed") if isinstance(frame, dict) else None
@@ -230,7 +236,7 @@ class GfsRelayInbound:
         logs the reason, never the bytes)."""
         if not isinstance(raw, bytes | bytearray):
             raise TypeError("relayed media frame carries no body")
-        if self._rate_limiter is not None and not self._rate_limiter.is_allowed(
+        if self._rate_limiter is not None and not self._rate_limiter.has_room(
             _MEDIA_KEY,
             limit=RELAY_MEDIA_INBOUND_LIMIT,
             window_s=BOOTSTRAP_INBOUND_WINDOW_S,
@@ -242,10 +248,18 @@ class GfsRelayInbound:
             keywrap_private_key=self._keywrap_private_key,
         )
         try:
-            return await self._federation.handle_inbound_media_relay(media_body)
+            result = await self._federation.handle_inbound_media_relay(media_body)
         except ValueError as exc:
             log.info("gfs_relay: rejected a relayed media frame: %s", exc)
             raise
+        if self._rate_limiter is not None:
+            # Charged only now: a frame that went through.
+            self._rate_limiter.is_allowed(
+                _MEDIA_KEY,
+                limit=RELAY_MEDIA_INBOUND_LIMIT,
+                window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+            )
+        return result
 
     async def _dispatch_pairing(self, body: dict[str, Any], *, gfs_url: str) -> dict:
         """Hand one relayed §11 pairing body to the inbox path's handler.

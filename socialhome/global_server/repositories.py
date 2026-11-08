@@ -3344,10 +3344,15 @@ class SqliteGfsEnvelopeQueueRepo:
         recipient's media bytes or every recipient's — **tail-drop**, for
         the reason :meth:`enqueue` gives (the endpoint is anonymous; eviction
         would be a delete primitive). Its own table: it never counts against,
-        and never touches, the envelope queue. One transaction for the check
-        and the insert; expired rows do not count."""
+        and never touches, the envelope queue. One transaction for the sweep
+        of expired rows, the check and the insert."""
 
         def _run(conn) -> bool:
+            # Expired rows go first, in this same transaction: they hold no
+            # one's budget and no disk for longer than their TTL.
+            conn.execute(
+                "DELETE FROM gfs_media_queue WHERE expires_at <= ?", (created_at,)
+            )
             mine, total = conn.execute(
                 "SELECT COALESCE(SUM(CASE WHEN to_instance=? THEN size_bytes"
                 " ELSE 0 END), 0), COALESCE(SUM(size_bytes), 0)"

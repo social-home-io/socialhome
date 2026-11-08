@@ -74,6 +74,13 @@ _EVICT_STALLED_CODE = 1013
 #: per-recipient in-flight cap, not by this timeout.
 WS_SEND_TIMEOUT_S: float = 10.0
 
+#: v_87 — the budget for ONE binary relay media push (≤ 528 KiB). Past it
+#: the media push is dropped (the frame stays queued and is retried) but the
+#: socket is NOT evicted: a slow uplink must not lose the household its
+#: control link over a picture. A socket that is really dead still fails its
+#: next control push (:data:`WS_SEND_TIMEOUT_S`) and is evicted there.
+WS_MEDIA_SEND_TIMEOUT_S: float = 30.0
+
 
 def _dumps(payload: Any) -> bytes:
     """The JSON of every pushed frame (text frames and binary headers)."""
@@ -289,6 +296,8 @@ class GfsWebSocketRegistry:
             ws.send_bytes(body),
             {"type": ENVELOPE_MEDIA_FRAME_KIND},
             len(body),
+            timeout_s=WS_MEDIA_SEND_TIMEOUT_S,
+            evict_on_stall=False,
         )
 
     def _for_socket(self, instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -321,15 +330,27 @@ class GfsWebSocketRegistry:
         send: Awaitable[None],
         payload: dict[str, Any],
         size: int,
+        *,
+        timeout_s: float | None = None,
+        evict_on_stall: bool = True,
     ) -> bool:
         """Await one ``send_str`` / ``send_bytes`` under the stall timeout;
-        count it, or evict a dead / stalled socket."""
+        count it, or evict a dead / stalled socket (a stalled media push,
+        ``evict_on_stall=False``, is only dropped)."""
         try:
-            async with asyncio.timeout(WS_SEND_TIMEOUT_S):
+            async with asyncio.timeout(
+                WS_SEND_TIMEOUT_S if timeout_s is None else timeout_s
+            ):
                 await send
             self.fanout_stats.record(frame_kind(payload), size)
             return True
         except TimeoutError:
+            if not evict_on_stall:
+                log.debug(
+                    "gfs.ws.send_media stalled instance=%s — dropped, socket kept",
+                    instance_id,
+                )
+                return False
             log.debug("gfs.ws.send stalled instance=%s — evicting", instance_id)
             await self._drop_dead(instance_id, ws)
             task = asyncio.get_running_loop().create_task(

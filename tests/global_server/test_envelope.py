@@ -23,6 +23,7 @@ from socialhome.capabilities_sig import verify_capabilities
 from socialhome.crypto import b64url_encode, sign_ed25519
 from socialhome.domain.relay_media_frame import (
     RELAY_MEDIA_MAGIC,
+    VALID_SEALED_LENGTHS,
     build_relay_media_body,
 )
 from socialhome.global_server import envelope_relay as envelope_relay_mod
@@ -457,11 +458,13 @@ RECIPIENT = "recipient2home2222222222222222aa"
 
 
 def _media_body(n: int = 200 * 1024, to: str = RECIPIENT) -> bytes:
-    return build_relay_media_body(to, os.urandom(n))
+    """A frame whose sealed part is the smallest valid length >= *n*."""
+    size = min(v for v in VALID_SEALED_LENGTHS if v >= n)
+    return build_relay_media_body(to, os.urandom(size))
 
 
 async def test_media_frame_reaches_a_labelled_socket_byte_identical(gfs):
-    body = _media_body(514 * 1024)
+    body = _media_body(516 * 1024)
     async with gfs.ws_connect("/gfs/ws") as ws:
         await ws.send_json(
             {**_hello(RECIPIENT, gfs._seed), "accepts": ["envelope_media"]}

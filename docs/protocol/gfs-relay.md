@@ -301,10 +301,12 @@ The **media body** is the chunk's binary inbox body from v_81
 (`\x00SHM`, the frame-suite byte, the signed §24.11 header, the AES-GCM
 sealed chunk — `federation/media_framing.py`). The seal hides the header's
 `from_instance`, `event_type` and `space_id` from the GFS; the AEAD's
-associated data binds the outer prefix (recipient id included) and
-`eph_pk`, so a re-addressed frame does not open. Padding buckets are 64,
-128, 256, 516 KiB and the cap; a full 512 KiB chunk lands in 516 KiB
-(~517 KiB on the wire, cap 528 KiB).
+associated data binds the outer prefix (recipient id included), the
+kem-suite byte and `eph_pk`, so a re-addressed or re-suited frame does not
+open. Padding buckets are 64, 128, 256, 516 KiB and the cap; a full 512 KiB
+chunk lands in 516 KiB (~517 KiB on the wire, cap 528 KiB). The GFS and the
+household both refuse a `sealed` part whose length is not exactly one
+bucket plus the 61-byte seal overhead (`VALID_SEALED_LENGTHS`).
 
 - **Scope:** a household seated from an invite link (`space_session`) at
   v_87, whose `relay_via` GFS proved the signed `envelope_media` capability.
@@ -316,19 +318,45 @@ associated data binds the outer prefix (recipient id included) and
 - **Fallback:** a peer below v_87, or a GFS without `envelope_media`, gets
   JSON chunks of at most 96 KiB (`RELAY_JSON_CHUNK_BYTES`), which fit the
   JSON relay. A binary frame that the relay throttles (429) is waited out;
-  it never falls back to JSON (the chunk is too large for it).
+  it never falls back to JSON (the chunk is too large for it). When the
+  path changes under a transfer (the GFS stops proving `envelope_media`), a
+  512 KiB chunk is not sent at all: the send answers
+  `relay_chunk_resize` and the media outbox's next attempt re-cuts the
+  file at the size the path takes then (a new `chunk_count`, so a fresh
+  partial set on the receiver) — a transfer never sticks on a size.
+- **Loss after a 202:** the relay answers before it delivers, so a frame it
+  drops later (saturation, a full media queue, the 1 h TTL) or the
+  receiver refuses (its media budget) is gone while the sender's outbox
+  counts it sent. The receiver heals it on the next VIEW: a missed
+  content-addressed file (`sc-…`) makes `RelayMediaRefill` ask the space's
+  relay-seated host for `SPACE_SYNC_RESUME` since a minute before the live
+  row that shows it (`MediaReferenceRepo.space_rows_of`); the host replays
+  the space from then (rows deduped by id) and re-pushes their files. One
+  request per space per 30 min (the host throttles the same pair). The
+  generic one-file request comes with the GFS redesign
+  (`SPACE_MEDIA_WANTED`).
 - **GFS:** identity-free and content-blind as for every relayed body — it
   reads the magic, the version and the recipient id, never a sender, and
   pushes the body unchanged as a BINARY WebSocket message to a socket whose
   hello listed `envelope_media`. Its budgets are separate from the JSON
   envelopes' (per-IP bytes, in-flight bytes, its own queue table with
-  per-recipient and server-wide byte caps and a 1 h TTL — see
+  per-recipient and server-wide byte caps and a 1 h TTL, expired rows swept
+  on every insert — see
   [`docs/operations/gfs-cluster.md`](../operations/gfs-cluster.md#envelope-relay-media-frames-v_87)),
-  so media can never crowd a household's control envelopes out. Across a
-  cluster the frame rides the shared queue and the `NODE_DRAIN_HINT` like
-  any queued envelope.
+  so media can never crowd a household's control envelopes out. On a
+  drain the control envelopes go first, under their lock; the media frames
+  follow in one background task per recipient, under their own, so a
+  household's control link never waits behind up to 16 MiB of media. A
+  media push that stalls (`WS_MEDIA_SEND_TIMEOUT_S`, 30 s) is dropped and
+  retried later — it never evicts the socket. Across a cluster the frame
+  rides the shared queue and the `NODE_DRAIN_HINT` like any queued
+  envelope.
 - **Receiver:** the WebSocket client hands the bytes to
-  `GfsRelayInbound`, which checks the recipient id and the kem-suite byte
+  `GfsRelayInbound`. Media has its own budget (`RELAY_MEDIA_INBOUND_LIMIT`,
+  1200 / min — about ten senders at their GFS cap), checked before and never
+  charged to the process-wide bucket the relayed control, pairing and
+  invite envelopes share, and charged only for a frame that went through.
+  It checks the recipient id and the kem-suite byte
   (unknown → refused, no default), opens the seal and runs
   `FederationService.handle_inbound_media_relay`: the §24.11 chain on the
   signed header (lookup by its `from_instance`, a media-only event-type
