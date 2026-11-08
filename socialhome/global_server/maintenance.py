@@ -168,6 +168,16 @@ class GfsMaintenanceScheduler:
                     exc,
                     exc_info=True,
                 )
+            try:
+                # Drift repair for the per-pool running totals (GFS 0029):
+                # the triggers keep them exact; this proves it hourly.
+                await self._envelope_queue_repo.recompute_pool_totals()
+            except Exception as exc:
+                log.warning(
+                    "gfs maintenance: queue total repair failed: %s",
+                    exc,
+                    exc_info=True,
+                )
         if self._mailboxes is not None:
             try:
                 await self._mailboxes.sweep(now=now)

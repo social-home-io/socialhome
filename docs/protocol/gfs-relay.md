@@ -486,28 +486,30 @@ its day once a day, so it is never swept while connected.
 **Queues: a pool of their own.** Mailbox ids are free to mint, so their
 frames never share room with households' (each queued row carries its
 `pool`). Per mailbox: 200 envelopes / 4 MiB and 8 MiB of media
-(households: 2 000 / 64 MiB and 16 MiB). Server-wide:
+(households: 2 000 / 64 MiB and 16 MiB). Both envelope pools follow ONE
+model — **tail-drop plus a per-recipient reserve, nothing is ever
+evicted**:
 
-- **households' envelopes: 1 GiB, tail-drop.** No eviction: anyone can post
-  to an offline id, so evicting another household's envelopes to make room
-  would be an anonymous delete primitive (the reason the per-recipient caps
-  tail-drop too).
-- **mailboxes' envelopes: 256 MiB, ranked eviction above a floor.** A
-  victim is picked by rank — never claimed, then first registered today,
-  then established — and only from a rank no better than the writer's, so
-  sybils minted today never evict an established mailbox; within the
-  writer's rank only a holder bigger than the writer gives up its oldest
-  envelope. Every mailbox keeps a non-evictable floor (20 envelopes /
-  64 KiB). No victim → tail-drop.
-- media: households 1 GiB, mailboxes 256 MiB, both tail-drop.
+- past the pool's total (households 1 GiB, mailboxes 256 MiB) a new
+  envelope is dropped — anyone can post to any id, so evicting someone's
+  envelopes to make room would be an anonymous delete primitive;
+- except for a recipient still under its **reserve** (fewer than 20 queued
+  envelopes and less than 64 KiB): it is admitted up to the pool's
+  **ceiling** (households 2 GiB, mailboxes 1 GiB), so a flood of other ids
+  can fill the pool but never block anybody's first envelopes. Headroom
+  math: a reserve holds < 64 KiB plus one envelope (≤ 320 KiB), so the
+  1 GiB / 768 MiB headroom fits ≥ 2 700 / 2 000 recipients at a worst-case
+  reserve, ~16 000 / 12 000 at a typical few-KiB envelope;
+- media: households 1 GiB, mailboxes 256 MiB, tail-drop.
 
-Worst-case disk for queued relay frames is therefore bounded at 1 + 1 GiB
-(households) + 0.25 + 0.25 GiB (mailboxes) + 256 MiB (member relay items)
-≈ 2.75 GiB, whatever the number of ids. The pool totals are running
-counters (`gfs_queue_totals`, kept by triggers on every insert and delete),
-so a cap check reads one row, never scans the pool under the write lock;
-only a full mailbox pool runs the victim pick (a grouped read of the
-mailbox pool).
+Worst-case disk for queued relay frames is therefore 2 + 1 GiB of
+envelopes + 1 + 0.25 GiB of media + 256 MiB of member relay items ≈ 4.5 GiB,
+whatever the number of ids. The pool totals are running counters
+(`gfs_queue_totals`, kept by triggers on every insert and delete, recomputed
+hourly by maintenance as drift repair), so a cap check reads one row;
+expired rows of a pool are swept (an index range) before an insert is
+refused, so they never hold room. (Round 3's ranked mailbox eviction was
+removed in favour of this: one model, no scans, nothing to game.)
 
 **Interim backstop — anonymous tickets follow.** Today a flood of mailboxes
 is bounded by the per-address caps and the server-wide

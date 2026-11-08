@@ -88,7 +88,7 @@ DAY_SECONDS: int = 86_400
 PREFIX_MULTIPLIERS: tuple[tuple[int, int], ...] = ((64, 1), (56, 16), (48, 256))
 #: How long a GFS id this cluster once served stays accepted for a
 #: registration / claim bound to it (``gfs_known_gfs_ids``).
-KNOWN_GFS_ID_TTL_DAYS: int = 400
+KNOWN_GFS_ID_TTL_DAYS: int = 90
 #: How often the accepted ids are re-read from (and written to) the table.
 KNOWN_GFS_ID_REFRESH_S: float = 60.0
 #: Count-min sketch shape: 4 rows × 65 536 counters (1 MiB as uint32).

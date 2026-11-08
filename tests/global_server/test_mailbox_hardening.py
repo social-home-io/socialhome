@@ -209,14 +209,15 @@ async def test_the_mailbox_pool_never_evicts_household_envelopes(gfs_db):
     a, b = "a" * 32, "b" * 32
     q = await _queue(gfs_db, a, b)
     household = "h" * 32
-    row = 70 * 1024  # above the per-mailbox floor
+    row = 70 * 1024
     total = 4 * row
     assert await _put(q, household, 900, mailbox=False)
     for _ in range(4):
         assert await _put(q, a, row, mailbox=True, total=total)
-    # b needs room: a (same rank, bigger, above its floor) gives its oldest.
-    assert await _put(q, b, row, mailbox=True, total=total)
-    assert await q.count_for(a) == 3
+    # The mailbox pool is full: b's envelope is admitted only within its
+    # reserve (no ceiling given → none), never by removing anyone's rows.
+    assert not await _put(q, b, row, mailbox=True, total=total)
+    assert await q.count_for(a) == 4
     assert await q.count_for(household) == 1
 
 

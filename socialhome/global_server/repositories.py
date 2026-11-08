@@ -3169,9 +3169,12 @@ class SqliteGfsUserPictureRepo:
 #: ``pool`` of a queued frame (GFS migration 0029): households vs mailboxes.
 POOL_HOUSEHOLD: str = "household"
 POOL_MAILBOX: str = "mailbox"
-#: What every mailbox keeps however full its pool is (never evicted).
-MAILBOX_QUEUE_FLOOR_ROWS: int = 20
-MAILBOX_QUEUE_FLOOR_BYTES: int = 64 * 1024
+#: Every recipient's RESERVE: one holding fewer than this many queued
+#: envelopes AND fewer than this many bytes is admitted even when its pool
+#: is past its total — up to the pool's ceiling — so a flood of other ids
+#: can never block a recipient's first envelopes.
+QUEUE_RESERVE_ROWS: int = 20
+QUEUE_RESERVE_BYTES: int = 64 * 1024
 
 
 @runtime_checkable
@@ -3189,6 +3192,7 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
         max_bytes_per_recipient: int,
         frame_type: str = "envelope",
         max_total_bytes: int | None = None,
+        ceiling_bytes: int | None = None,
         mailbox_pool: bool = False,
     ) -> bool: ...
 
@@ -3204,6 +3208,8 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
     async def prune_expired(self, now: int) -> int: ...
 
     async def pool_bytes(self, queue: str, pool: str) -> int: ...
+
+    async def recompute_pool_totals(self) -> None: ...
 
     async def relay_bytes(self, now: int) -> int: ...
 
@@ -3271,17 +3277,18 @@ class SqliteGfsEnvelopeQueueRepo:
         max_bytes_per_recipient: int,
         frame_type: str = "envelope",
         max_total_bytes: int | None = None,
+        ceiling_bytes: int | None = None,
         mailbox_pool: bool = False,
     ) -> bool:
         """Append one envelope unless this recipient is at cap.
 
         With *max_total_bytes*, the envelope rows of the recipient's POOL —
         registered mailboxes (*mailbox_pool*) or households — are also held
-        to that server-wide total, read from the running counter
-        (``gfs_queue_totals``): the household pool tail-drops, the mailbox
-        pool makes room by ranked eviction above a per-mailbox floor
-        (:meth:`_make_pool_room`). A row of one pool never touches the
-        other.
+        to that server-wide total (the running counter, ``gfs_queue_totals``):
+        past it the new envelope is tail-dropped unless the recipient is
+        under its reserve, admitted up to *ceiling_bytes*
+        (:meth:`_pool_admits`). Nothing is ever evicted, and a row of one
+        pool never touches the other.
 
         ``frame_type`` (migration 0014) is ``"envelope"`` or ``"relay"``; the
         two ceilings apply per frame type, so member-published relay items
@@ -3320,12 +3327,14 @@ class SqliteGfsEnvelopeQueueRepo:
                 return False
             if total_bytes + len(sealed_json) > max_bytes_per_recipient:
                 return False
-            if max_total_bytes is not None and not self._make_pool_room(
+            if max_total_bytes is not None and not self._pool_admits(
                 conn,
-                to_instance,
                 len(sealed_json),
+                held_rows=count,
+                held_bytes=total_bytes,
                 now=created_at,
                 max_total_bytes=max_total_bytes,
+                ceiling_bytes=ceiling_bytes,
                 mailbox_pool=mailbox_pool,
             ):
                 return False
@@ -3355,6 +3364,26 @@ class SqliteGfsEnvelopeQueueRepo:
         ).fetchone()
         return int(row[0]) if row else 0
 
+    async def recompute_pool_totals(self) -> None:
+        """Drift repair (hourly maintenance): set every running total to the
+        sum of its unexpired-or-not rows, exactly what the triggers keep."""
+
+        def _run(conn) -> None:
+            conn.execute(
+                "UPDATE gfs_queue_totals SET bytes = (SELECT COALESCE(SUM("
+                "CASE WHEN q.size_bytes > 0 THEN q.size_bytes"
+                " ELSE LENGTH(q.sealed_json) END), 0) FROM gfs_envelope_queue q"
+                " WHERE q.frame_type='envelope' AND q.pool = gfs_queue_totals.pool)"
+                " WHERE queue='envelope'"
+            )
+            conn.execute(
+                "UPDATE gfs_queue_totals SET bytes = (SELECT COALESCE(SUM("
+                "m.size_bytes), 0) FROM gfs_media_queue m"
+                " WHERE m.pool = gfs_queue_totals.pool) WHERE queue='media'"
+            )
+
+        await self._db.transact(_run)
+
     async def pool_bytes(self, queue: str, pool: str) -> int:
         """The running byte total of one (queue, pool) — ``gfs_queue_totals``,
         kept by triggers on every insert and delete (GFS migration 0029)."""
@@ -3366,87 +3395,45 @@ class SqliteGfsEnvelopeQueueRepo:
         return int(d["bytes"]) if d else 0
 
     @classmethod
-    def _make_pool_room(
+    def _pool_admits(
         cls,
         conn,
-        to_instance: str,
         size: int,
         *,
+        held_rows: int,
+        held_bytes: int,
         now: int,
         max_total_bytes: int,
+        ceiling_bytes: int | None,
         mailbox_pool: bool,
     ) -> bool:
-        """Room for *size* more bytes in the recipient's pool (see
-        :meth:`enqueue`). Runs inside the caller's transaction; the pool
-        total is the running counter, never a scan.
-
-        **Household pool: tail-drop.** Eviction there would be an anonymous
-        delete primitive — anyone posting to a small offline id would push
-        out the biggest OTHER household's oldest envelopes (the reason the
-        per-recipient caps are tail-drop too).
-
-        **Mailbox pool: ranked eviction above a floor.** Mailbox ids are
-        free to mint, so a full pool must not refuse every real mailbox for
-        a day either. A victim is picked by rank — never claimed (0), first
-        registered today (1), established (2) — and only from a rank no
-        better than the writer's own, so sybils minted today can never evict
-        an established mailbox. Within the writer's rank only a holder
-        bigger than the writer (after the insert) gives up a row. Every
-        mailbox keeps a non-evictable floor
-        (:data:`MAILBOX_QUEUE_FLOOR_ROWS` rows /
-        :data:`MAILBOX_QUEUE_FLOOR_BYTES`). No victim → tail-drop."""
-        if size > max_total_bytes:
-            return False
-        if not mailbox_pool:
-            return (
-                cls._pool_total(conn, "envelope", POOL_HOUSEHOLD) + size
-                <= max_total_bytes
-            )
-        today = now // 86_400 * 86_400
-        rank = (
-            "CASE WHEN m.last_claim_at IS NULL THEN 0"
-            " WHEN m.created_at >= ? THEN 1 ELSE 2 END"
+        """Whether *size* more bytes fit the recipient's pool (see
+        :meth:`enqueue`). Runs inside the caller's transaction and NEVER
+        deletes a live row: past the total the new envelope is dropped
+        (tail-drop — eviction would hand an anonymous sender a delete
+        primitive), unless the recipient is still under its RESERVE
+        (:data:`QUEUE_RESERVE_ROWS` envelopes and :data:`QUEUE_RESERVE_BYTES`),
+        which is admitted up to *ceiling_bytes*. The pool total is the
+        running counter; expired rows of the pool are swept first (an index
+        range, only when the total is reached) so they never hold room."""
+        pool = POOL_MAILBOX if mailbox_pool else POOL_HOUSEHOLD
+        total = cls._pool_total(conn, "envelope", pool)
+        if total + size <= max_total_bytes:
+            return True
+        conn.execute(
+            "DELETE FROM gfs_envelope_queue WHERE pool=? AND expires_at <= ?"
+            " AND frame_type='envelope'",
+            (pool, now),
         )
-        writer = conn.execute(
-            f"SELECT {rank} FROM gfs_mailboxes m WHERE m.mailbox_id = ?",
-            (today, to_instance),
-        ).fetchone()
-        writer_rank = int(writer[0]) if writer else 0
-        while cls._pool_total(conn, "envelope", POOL_MAILBOX) + size > max_total_bytes:
-            mine = conn.execute(
-                "SELECT COALESCE(SUM(size_bytes), 0) FROM gfs_envelope_queue"
-                " WHERE to_instance=? AND frame_type='envelope'",
-                (to_instance,),
-            ).fetchone()[0]
-            victim = conn.execute(
-                f"SELECT q.to_instance, SUM(q.size_bytes), MIN({rank}) AS r"
-                " FROM gfs_envelope_queue q"
-                " JOIN gfs_mailboxes m ON m.mailbox_id = q.to_instance"
-                " WHERE q.frame_type='envelope' AND q.pool='mailbox'"
-                " AND q.to_instance != ?"
-                " GROUP BY q.to_instance"
-                " HAVING (COUNT(*) > ? OR SUM(q.size_bytes) > ?) AND r <= ?"
-                "  AND (r < ? OR SUM(q.size_bytes) > ?)"
-                " ORDER BY r ASC, SUM(q.size_bytes) DESC LIMIT 1",
-                (
-                    today,
-                    to_instance,
-                    MAILBOX_QUEUE_FLOOR_ROWS,
-                    MAILBOX_QUEUE_FLOOR_BYTES,
-                    writer_rank,
-                    writer_rank,
-                    int(mine) + size,
-                ),
-            ).fetchone()
-            if victim is None:
-                return False
-            conn.execute(
-                "DELETE FROM gfs_envelope_queue WHERE id = (SELECT id FROM"
-                " gfs_envelope_queue WHERE to_instance=? AND frame_type='envelope'"
-                " ORDER BY created_at ASC, id ASC LIMIT 1)",
-                (victim[0],),
-            )
-        return True
+        total = cls._pool_total(conn, "envelope", pool)
+        if total + size <= max_total_bytes:
+            return True
+        ceiling = max_total_bytes if ceiling_bytes is None else ceiling_bytes
+        return (
+            held_rows < QUEUE_RESERVE_ROWS
+            and held_bytes < QUEUE_RESERVE_BYTES
+            and total + size <= ceiling
+        )
 
     async def list_for(
         self,

@@ -265,8 +265,10 @@ class EnvelopeMailboxConfig:
       — queued envelopes for ONE offline mailbox (rows / bytes, tail-drop);
       far below a household's (2000 / 64 MiB): ids are free to mint.
     * ``mailbox_queue_max_total_bytes`` — envelope bytes queued for ALL
-      mailboxes (fair-share eviction among mailboxes only; never a
-      household's envelopes).
+      mailboxes; past it a new envelope is dropped (never anything evicted)
+      unless its mailbox is under its reserve (20 envelopes / 64 KiB), which
+      is admitted up to ``mailbox_queue_ceiling_bytes``. Households' own
+      pool (1 GiB, ceiling 2 GiB) is never touched.
     * ``mailbox_media_queue_bytes_per_recipient`` /
       ``mailbox_media_queue_max_total_bytes`` — the same for binary media
       frames (tail-drop), apart from households' media room."""
@@ -279,6 +281,7 @@ class EnvelopeMailboxConfig:
     mailbox_queue_max_per_recipient: int = 200
     mailbox_queue_bytes_per_recipient: int = 4 * 1024**2
     mailbox_queue_max_total_bytes: int = 256 * 1024**2
+    mailbox_queue_ceiling_bytes: int = 1024**3
     mailbox_media_queue_bytes_per_recipient: int = 8 * 1024**2
     mailbox_media_queue_max_total_bytes: int = 256 * 1024**2
 
@@ -319,6 +322,7 @@ _ENVELOPE_MAILBOX_BOUNDS: dict[str, tuple[int, int]] = {
     "mailbox_queue_max_per_recipient": (1, 100_000),
     "mailbox_queue_bytes_per_recipient": (320 * 1024, 1 << 30),
     "mailbox_queue_max_total_bytes": (320 * 1024, 1 << 40),
+    "mailbox_queue_ceiling_bytes": (320 * 1024, 1 << 40),
     "mailbox_media_queue_bytes_per_recipient": (528 * 1024, 1 << 30),
     "mailbox_media_queue_max_total_bytes": (528 * 1024, 1 << 40),
 }

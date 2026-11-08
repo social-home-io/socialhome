@@ -85,6 +85,9 @@ class _StubEnvelopeQueueRepo:
         self.prune_calls.append(now)
         return 4
 
+    async def recompute_pool_totals(self) -> None:
+        self.recomputed = getattr(self, "recomputed", 0) + 1
+
 
 async def test_maintain_once_sweeps_expired_relay_envelopes():
     admin = _StubAdminRepo()
@@ -331,3 +334,15 @@ async def test_a_mailbox_sweep_failure_is_contained():
     )
     await sched._maintain_once()
     assert len(admin.purge_calls) == 1
+
+
+async def test_maintain_once_repairs_the_queue_pool_totals():
+    """GFS 0029: the running pool totals are recomputed hourly (drift repair)."""
+    queue = _StubEnvelopeQueueRepo()
+    sched = GfsMaintenanceScheduler(
+        admin_repo=_StubAdminRepo(),
+        highlight_repo=_StubHighlightRepo(),
+        envelope_queue_repo=queue,  # type: ignore[arg-type]
+    )
+    await sched._maintain_once()
+    assert getattr(queue, "recomputed", 0) == 1

@@ -1,5 +1,5 @@
-"""GFS mailboxes — review round 3 (#1326): no anonymous delete primitive
-in the household pool, sybil-resistant mailbox eviction with a floor,
+"""GFS mailboxes — review rounds 3/4 (#1326): no pool ever evicts (tail-drop
+plus a per-recipient reserve),
 running per-pool totals, an atomic daily cap, persisted sibling ids, no
 target id in relay-queue logs, the GFS id in the mailbox key derivation."""
 
@@ -19,8 +19,8 @@ from socialhome.global_server.mailboxes import (
     address_scopes,
 )
 from socialhome.global_server.repositories import (
-    MAILBOX_QUEUE_FLOOR_BYTES,
-    MAILBOX_QUEUE_FLOOR_ROWS,
+    QUEUE_RESERVE_BYTES,
+    QUEUE_RESERVE_ROWS,
     SqliteGfsEnvelopeQueueRepo,
     SqliteGfsFederationRepo,
     SqliteGfsMailboxRepo,
@@ -31,97 +31,108 @@ TODAY = 100 * DAY_SECONDS
 YESTERDAY = TODAY - DAY_SECONDS
 
 
-async def _put(q, to, n, *, mailbox, total, now=TODAY + 10):
+async def _put(q, to, n, *, mailbox, total, ceiling=None, now=TODAY + 10, ttl=10**6):
     return await q.enqueue(
         to,
         '{"x":"' + "x" * (n - 8) + '"}',  # n bytes of a JSON object
         created_at=now,
-        expires_at=now + 10**6,
+        expires_at=now + ttl,
         max_per_recipient=1000,
         max_bytes_per_recipient=10**8,
         max_total_bytes=total,
+        ceiling_bytes=ceiling,
         mailbox_pool=mailbox,
     )
 
 
-# ── 1. Household pool: tail-drop, never a delete primitive ──────────────
-
-
-@pytest.mark.security
-async def test_posting_to_your_own_id_never_removes_a_households_envelopes(gfs_db):
-    q = SqliteGfsEnvelopeQueueRepo(gfs_db)
-    victim, attacker = "v" * 32, "a" * 32
-    for _ in range(3):
-        assert await _put(q, victim, 300, mailbox=False, total=1000)
-    # The pool is (nearly) full: the attacker's envelope is the one dropped.
-    assert not await _put(q, attacker, 200, mailbox=False, total=1000)
-    assert await q.count_for(victim) == 3
-
-
-# ── 2. Mailbox pool: sybils can't starve an established mailbox ─────────
-
-
-async def _boxes(gfs_db, **created):
+async def _boxes(gfs_db, *ids: str):
     repo = SqliteGfsMailboxRepo(gfs_db)
-    for mid, (day, claimed) in created.items():
-        await repo.register(mid * 32 if len(mid) == 1 else mid, b"\x01" * 32, now=day)
-        if claimed:
-            await repo.touch_claim(mid * 32 if len(mid) == 1 else mid, now=claimed)
+    for mid in ids:
+        await repo.register(mid, b"\x01" * 32, now=TODAY)
     return SqliteGfsEnvelopeQueueRepo(gfs_db)
 
 
+# ── 1 + 2. Both pools: tail-drop plus a per-recipient reserve ───────────
+#
+# (Round 3's ranked mailbox eviction was removed — keep it simple: no pool
+# ever deletes a live row to make room.)
+
+
 @pytest.mark.security
-async def test_sybils_created_today_cannot_starve_an_established_mailbox(gfs_db):
-    sybils = {chr(ord("a") + i): (TODAY, TODAY) for i in range(9)}
-    q = await _boxes(gfs_db, z=(YESTERDAY, TODAY), **sybils)
-    legit = "z" * 32
+@pytest.mark.parametrize("mailbox", [False, True])
+async def test_nobody_can_delete_anyones_rows_by_filling_the_pool(gfs_db, mailbox):
+    victim = "v" * 32
+    flood = [f"{i:032d}" for i in range(30)]
+    q = await _boxes(gfs_db, victim, *flood)
     row = 4 * 1024
-    total = 60 * row
-    for _ in range(9):
-        assert await _put(q, legit, row, mailbox=True, total=total)
-    for _ in range(20):
-        for s in sybils:
-            await _put(q, s * 32, row, mailbox=True, total=total)
-    assert await q.count_for(legit) == 9
-
-
-async def test_never_claimed_mailboxes_are_evicted_first(gfs_db):
-    q = await _boxes(
-        gfs_db,
-        w=(YESTERDAY, TODAY),  # writer
-        c=(YESTERDAY, TODAY),  # claimed, big
-        n=(YESTERDAY, None),  # never claimed, smaller
-    )
-    row = 8 * 1024
-    floor = MAILBOX_QUEUE_FLOOR_ROWS + 5
-    total = (2 * floor + 10) * row
-    for _ in range(floor + 10):
-        assert await _put(q, "c" * 32, row, mailbox=True, total=total)
-    for _ in range(floor):
-        assert await _put(q, "n" * 32, row, mailbox=True, total=total)
-    before_c = await q.count_for("c" * 32)
-    assert await _put(q, "w" * 32, row, mailbox=True, total=total)
-    assert await q.count_for("c" * 32) == before_c
-    assert await q.count_for("n" * 32) == floor - 1
-
-
-async def test_every_mailbox_keeps_a_floor(gfs_db):
-    q = await _boxes(gfs_db, w=(YESTERDAY, TODAY), v=(YESTERDAY, TODAY))
-    small = 1024
-    total = 25 * small
     for _ in range(25):
-        assert await _put(q, "v" * 32, small, mailbox=True, total=total)
+        assert await _put(
+            q, victim, row, mailbox=mailbox, total=40 * row, ceiling=80 * row
+        )
+    for _ in range(5):
+        for f in flood:
+            await _put(q, f, row, mailbox=mailbox, total=40 * row, ceiling=80 * row)
+    assert await q.count_for(victim) == 25
+
+
+@pytest.mark.parametrize("mailbox", [False, True])
+async def test_a_full_pool_still_admits_a_recipient_under_its_reserve(gfs_db, mailbox):
+    big, late = "b" * 32, "l" * 32
+    q = await _boxes(gfs_db, big, late)
+    row = 2 * 1024
+    total = 30 * row
     for _ in range(30):
-        await _put(q, "w" * 32, small, mailbox=True, total=total)
-    assert await q.count_for("v" * 32) >= MAILBOX_QUEUE_FLOOR_ROWS
-    assert MAILBOX_QUEUE_FLOOR_BYTES == 64 * 1024
+        assert await _put(q, big, row, mailbox=mailbox, total=total, ceiling=100 * row)
+    # The pool is full; ``big`` is over its reserve → tail-dropped …
+    assert not await _put(q, big, row, mailbox=mailbox, total=total, ceiling=100 * row)
+    # … while a recipient under its reserve still gets its envelopes in,
+    # up to QUEUE_RESERVE_ROWS of them.
+    admitted = [
+        await _put(q, late, row, mailbox=mailbox, total=total, ceiling=100 * row)
+        for _ in range(QUEUE_RESERVE_ROWS + 3)
+    ]
+    assert admitted == [True] * QUEUE_RESERVE_ROWS + [False] * 3
+
+
+async def test_a_reserve_counts_bytes_too_and_stops_at_the_ceiling(gfs_db):
+    a, b = "a" * 32, "b" * 32
+    q = await _boxes(gfs_db, a, b)
+    big = QUEUE_RESERVE_BYTES  # one envelope reaches the byte reserve
+    assert await _put(q, a, 10, mailbox=True, total=10, ceiling=10**6)
+    assert await _put(q, b, big, mailbox=True, total=10, ceiling=10**6)
+    assert not await _put(q, b, 100, mailbox=True, total=10, ceiling=10**6)
+    # The ceiling bounds the reserves themselves.
+    c = "c" * 32
+    await _boxes(gfs_db, c)
+    assert not await _put(q, c, 100, mailbox=True, total=10, ceiling=big + 50)
+
+
+async def test_expired_rows_never_hold_room(gfs_db):
+    a, b = "a" * 32, "b" * 32
+    q = await _boxes(gfs_db, a, b)
+    for _ in range(30):
+        await _put(q, a, 1000, mailbox=False, total=30_000, ttl=5)
+    # Later, a's rows have expired: the pool sweeps them before refusing.
+    assert await _put(q, b, 25_000, mailbox=False, total=30_000, now=TODAY + 100)
+    assert await q.pool_bytes("envelope", "household") == 25_000
+
+
+async def test_drift_repair_recomputes_the_totals(gfs_db):
+    q = await _boxes(gfs_db, "m" * 32)
+    await _put(q, "h" * 32, 100, mailbox=False, total=10**6)
+    await _put(q, "m" * 32, 70, mailbox=True, total=10**6)
+    await gfs_db.enqueue("UPDATE gfs_queue_totals SET bytes = 999999")
+    await q.recompute_pool_totals()
+    assert await q.pool_bytes("envelope", "household") == 100
+    assert await q.pool_bytes("envelope", "mailbox") == 70
+    assert await q.pool_bytes("media", "mailbox") == 0
 
 
 # ── 4. Running totals, index, atomic daily cap ─────────────────────────
 
 
 async def test_pool_totals_track_every_insert_and_delete(gfs_db):
-    q = await _boxes(gfs_db, m=(TODAY, None))
+    q = await _boxes(gfs_db, "m" * 32)
     await _put(q, "h" * 32, 100, mailbox=False, total=10**6)
     await _put(q, "m" * 32, 70, mailbox=True, total=10**6)
     await q.enqueue_media(

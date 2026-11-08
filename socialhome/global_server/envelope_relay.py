@@ -247,9 +247,14 @@ ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT: int = 64 * 1024 * 1024
 #: Server-wide ceiling on queued ENVELOPE bytes for households (instances).
 #: Mailboxes have their own, far smaller pool
 #: (:attr:`EnvelopeMailboxConfig.mailbox_queue_max_total_bytes`), so ids
-#: anyone can mint never crowd a household's control envelopes out. Room is
-#: made by fair-share eviction inside the pool (``enqueue``).
+#: anyone can mint never crowd a household's control envelopes out. Past
+#: it: tail-drop, except a household under its reserve (``enqueue``).
 ENVELOPE_QUEUE_MAX_TOTAL_BYTES: int = 1024 * 1024 * 1024
+#: Past that total a household still under its reserve (20 envelopes and
+#: 64 KiB, ``QUEUE_RESERVE_*``) is admitted, up to this ceiling: 1 GiB of
+#: headroom = 1 GiB / (64 KiB + one ≤ 320 KiB envelope) ≈ 2 700 households
+#: at their full reserve, ≈ 16 000 at a typical few-KiB envelope each.
+ENVELOPE_QUEUE_RESERVE_CEILING_BYTES: int = 2 * 1024 * 1024 * 1024
 
 
 #: WebSocket frame type of a queued member-published space item (migration
@@ -791,12 +796,14 @@ class GfsEnvelopeRelay:
                 "max_per_recipient": cfg.mailbox_queue_max_per_recipient,
                 "max_bytes_per_recipient": cfg.mailbox_queue_bytes_per_recipient,
                 "max_total_bytes": cfg.mailbox_queue_max_total_bytes,
+                "ceiling_bytes": cfg.mailbox_queue_ceiling_bytes,
                 "mailbox_pool": True,
             }
         return {
             "max_per_recipient": self._max_queued,
             "max_bytes_per_recipient": self._max_bytes,
             "max_total_bytes": ENVELOPE_QUEUE_MAX_TOTAL_BYTES,
+            "ceiling_bytes": ENVELOPE_QUEUE_RESERVE_CEILING_BYTES,
             "mailbox_pool": False,
         }
 
