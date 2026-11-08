@@ -632,9 +632,17 @@ class MailboxTicketCache:
         self._task = None
 
     async def _slot(self) -> None:
+        await self.refill_if_quiet()
+
+    async def refill_if_quiet(self) -> bool:
+        """:meth:`refill`, unless a ticket was taken within the quiet window
+        (an identified fetch right after an anonymous register would tie
+        them) — e.g. on a (re)connect, so a fresh household is not without
+        tickets until the first daily slot. Returns whether it refilled."""
         if time.monotonic() - self._last_take < self._quiet:
-            return  # right after a register: wait for another slot
+            return False  # right after a register: wait for another slot
         await self.refill()
+        return True
 
     def take(self) -> bytes:
         """One unspent ticket (it leaves the cache: a ticket is never
