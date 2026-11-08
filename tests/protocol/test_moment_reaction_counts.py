@@ -28,6 +28,7 @@ the real application registry, SQLite and the GFS app:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from datetime import UTC, datetime, timedelta
@@ -45,6 +46,7 @@ from socialhome.app_keys import (
     moment_public_outbound_key,
     moment_reaction_counts_key,
     moment_service_key,
+    startup_announcer_key,
 )
 from socialhome.config import Config
 from socialhome.crypto import (
@@ -82,6 +84,7 @@ from socialhome.moment_public_seal import (
     sign_wire,
 )
 from socialhome.rate_limiter import RateLimiter
+from socialhome.services import recovery_reconnect_service
 from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.moment_public_key_inbound import MomentPublicKeyInbound
 from socialhome.services.moment_reaction_counts import (
@@ -171,6 +174,14 @@ async def _react(db, mid: str, who: str, emoji: str) -> None:
 async def env(aiohttp_client, tmp_dir, monkeypatch):
     app = create_app(_config(tmp_dir))
     client = await aiohttp_client(app)
+    # The startup announcer (a background task ``on_startup`` starts) sends
+    # our capabilities, and after an upgrade a re-sync request, to every
+    # CONFIRMED peer. Under load it ran after the peers below were seeded
+    # and those sends landed in ``sent``. Let it finish first; it must be
+    # wired, so a rewiring fails here instead of turning this into a no-op.
+    announcer = app.get(startup_announcer_key)
+    assert announcer is not None, "the startup announcer is not wired"
+    await announcer.wait()
     db = app[db_key]
     own = app[federation_service_key].own_instance_id
     anna = derive_user_id(app[instance_public_key_key], "anna-anchor")
@@ -345,6 +356,38 @@ async def test_receiver_keeps_genuine_totals_and_relays_them(env):
     # Relayed one hop on, to the other v_69 peer only.
     assert [(s[0], s[2]["hop_count"]) for s in sent] == [(OTHER, 2)]
     assert sent[0][3]["outbox_key"] == "moment-counts:m-noor"
+
+
+@pytest.fixture
+def slow_first_startup_step(monkeypatch):
+    """Make the startup announcer's first step outlast the app's startup,
+    as on a busy CI runner: its capabilities announcement then runs after
+    ``env`` seeded the peers and swapped in the recording ``send_event``."""
+    original = recovery_reconnect_service.RecoveryReconnectService.maybe_reconnect
+
+    async def slow(self, *args, **kwargs):
+        await asyncio.sleep(0.3)
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        recovery_reconnect_service.RecoveryReconnectService, "maybe_reconnect", slow
+    )
+
+
+async def test_a_late_startup_announcement_never_lands_in_the_recorded_sends(
+    slow_first_startup_step, env
+):
+    """Only the relay is recorded however late the startup announcement
+    runs. Before, a slow runner let the announcer's
+    ``INSTANCE_CAPABILITIES_UPDATED`` to the seeded peers land in ``sent``
+    — and the hop-count read of the relay test failed with ``KeyError``."""
+    app, db, sent, *_ = env
+    await _moment(db, "m-noor", NOOR, ORIGIN, "household")
+    await _dispatch(app, _signed(rev=_now_ms()))
+    # Wait for the announcer whatever the fixture did, so a late
+    # announcement has had its chance to land.
+    await app[startup_announcer_key].wait()
+    assert [(s[0], s[1]) for s in sent] == [(OTHER, FET.MOMENT_REACTIONS_COUNTED)]
 
 
 def _forged_key():
