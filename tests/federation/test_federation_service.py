@@ -3178,13 +3178,15 @@ async def test_app_binary_frame_seals_the_turn_flag():
         app_id="chess",
         session_id="sess-bin",
         payload={"move": "g1f3"},
-        to_user=_TO_USER,
-        from_user=_FROM_USER,
+        to_user="bob",
+        from_user="alice",
         turn=True,
     )
     assert p.cap.json_envelopes == []
     header, payload_bytes = p.cap.app
-    assert "turn" not in orjson.dumps(header).decode()
+    # The clear header's keys, not its text: its values hold random base64
+    # (signature, nonce) that can spell "turn" by chance.
+    assert "turn" not in _all_keys(header)
     meta = orjson.loads(
         p.svc_b._encoder.decrypt_payload(header["encrypted_payload"], p.session)
     )
@@ -3271,6 +3273,19 @@ _TO_USER = "bob@binary-frame-test"
 _FROM_USER = "alice@binary-frame-test"
 
 
+def _all_keys(obj: object) -> set[str]:
+    """Every dict key in *obj*, recursively — for "this field is not in the
+    clear" checks that must not match random base64 in the values."""
+    if isinstance(obj, dict):
+        out = set(obj)
+        for v in obj.values():
+            out |= _all_keys(v)
+        return out
+    if isinstance(obj, list):
+        return set().union(*(_all_keys(v) for v in obj)) if obj else set()
+    return set()
+
+
 @pytest.mark.asyncio
 async def test_app_binary_frame_carries_the_people_it_is_between():
     """to_user / from_user ride the binary frame's sealed metadata.
@@ -3295,20 +3310,23 @@ async def test_app_binary_frame_carries_the_people_it_is_between():
         app_id="chess",
         session_id="sess-bin",
         payload={"move": "g1f3"},
-        to_user="bob",
-        from_user="alice",
+        to_user=_TO_USER,
+        from_user=_FROM_USER,
     )
     assert p.cap.app is not None
     assert p.cap.json_envelopes == []  # the binary path carried it
     header, payload_bytes = p.cap.app
-    assert "bob" not in orjson.dumps(header).decode()
+    clear = orjson.dumps(header).decode()
+    # The names carry "@", which base64 never holds, so the random signature
+    # and nonce bytes in the clear header can never spell them by chance.
+    assert _TO_USER not in clear and _FROM_USER not in clear
     meta = orjson.loads(
         p.svc_b._encoder.decrypt_payload(header["encrypted_payload"], p.session)
     )
-    assert (meta["to_user"], meta["from_user"]) == ("bob", "alice")
+    assert (meta["to_user"], meta["from_user"]) == (_TO_USER, _FROM_USER)
 
     await p.svc_b._app_inbound_handler(p.a_id, orjson.dumps(header), payload_bytes)
-    assert routings == [{"to_user": "bob", "from_user": "alice", "turn": False}]
+    assert routings == [{"to_user": _TO_USER, "from_user": _FROM_USER, "turn": False}]
 
 
 @pytest.mark.asyncio
