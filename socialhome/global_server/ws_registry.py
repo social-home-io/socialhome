@@ -116,13 +116,18 @@ class GfsWebSocketRegistry:
         "_closing",
         "_envelope_media",
         "_lock",
+        "_log_ids",
         "_media_serve",
         "_no_frame_cert",
         "fanout_stats",
     )
 
-    def __init__(self) -> None:
+    def __init__(self, *, log_ids: bool = True) -> None:
         self._by_instance: dict[str, web.WebSocketResponse] = {}
+        #: ``False`` for the anonymous mailbox sockets: no log line names the
+        #: id a socket serves (a line next to an access-log entry would tie
+        #: the mailbox to the client address).
+        self._log_ids = log_ids
         #: The instances whose CURRENT socket asked for binary frames
         #: (``ws_binary1`` in its hello) — per connection, so a re-register
         #: without the label drops it.
@@ -182,11 +187,14 @@ class GfsWebSocketRegistry:
                 )
             except Exception as exc:  # defensive — never block new registration
                 log.debug(
-                    "ws.evict failed instance=%s: %s", instance_id, exc, exc_info=True
+                    "ws.evict failed instance=%s: %s",
+                    self._who(instance_id),
+                    exc,
+                    exc_info=True,
                 )
         log.info(
             "gfs.ws.register: instance=%s total=%d binary=%s",
-            instance_id,
+            self._who(instance_id),
             self.connection_count(),
             binary,
         )
@@ -207,7 +215,7 @@ class GfsWebSocketRegistry:
                 self._envelope_media.discard(instance_id)
         log.info(
             "gfs.ws.unregister: instance=%s total=%d",
-            instance_id,
+            self._who(instance_id),
             self.connection_count(),
         )
 
@@ -231,6 +239,10 @@ class GfsWebSocketRegistry:
                 )
         if self._closing:
             await asyncio.gather(*self._closing, return_exceptions=True)
+
+    def _who(self, instance_id: str) -> str:
+        """*instance_id* as log lines may show it."""
+        return instance_id if self._log_ids else "<mailbox>"
 
     # ─── Inspection ───────────────────────────────────────────────────────
 
@@ -290,7 +302,7 @@ class GfsWebSocketRegistry:
             # The socket is healthy — this is a payload bug, so do NOT evict it.
             log.warning(
                 "gfs.ws.send: unserialisable frame for instance=%s: %s",
-                instance_id,
+                self._who(instance_id),
                 exc,
             )
             return False
@@ -312,7 +324,8 @@ class GfsWebSocketRegistry:
             return False
         if _write_buffer_size(ws) > WS_MEDIA_MAX_BUFFERED_BYTES:
             log.debug(
-                "gfs.ws.send_media: %s is backed up — media deferred", instance_id
+                "gfs.ws.send_media: %s is backed up — media deferred",
+                self._who(instance_id),
             )
             return False
         return await self._push(
@@ -373,10 +386,12 @@ class GfsWebSocketRegistry:
             if not evict_on_stall:
                 log.debug(
                     "gfs.ws.send_media stalled instance=%s — dropped, socket kept",
-                    instance_id,
+                    self._who(instance_id),
                 )
                 return False
-            log.debug("gfs.ws.send stalled instance=%s — evicting", instance_id)
+            log.debug(
+                "gfs.ws.send stalled instance=%s — evicting", self._who(instance_id)
+            )
             await self._drop_dead(instance_id, ws)
             task = asyncio.get_running_loop().create_task(
                 self._close_stalled(instance_id, ws),
@@ -390,7 +405,10 @@ class GfsWebSocketRegistry:
             return False
         except Exception as exc:  # defensive
             log.debug(
-                "gfs.ws.send failed instance=%s: %s", instance_id, exc, exc_info=True
+                "gfs.ws.send failed instance=%s: %s",
+                self._who(instance_id),
+                exc,
+                exc_info=True,
             )
             await self._drop_dead(instance_id, ws)
             return False
@@ -420,7 +438,7 @@ class GfsWebSocketRegistry:
         except Exception as exc:
             log.debug(
                 "gfs.ws: closing stalled socket %s failed: %s",
-                instance_id,
+                self._who(instance_id),
                 exc,
                 exc_info=True,
             )

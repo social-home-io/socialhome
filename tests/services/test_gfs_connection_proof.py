@@ -28,7 +28,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.capabilities_sig import sign_capabilities
-from socialhome.crypto import generate_identity_keypair
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection
 from socialhome.gfs_proof import PROOF_CAPABILITY, PROOF_ROUTE, sign_possession_proof
@@ -42,8 +42,11 @@ from socialhome.services.gfs_connection_service import (
     GfsSignupError,
 )
 
+#: The id the household key derives (the GFS refuses any other).
+ALPHA_ID = derive_instance_id(bytes.fromhex("aa" * 32))
+
 OWN = {
-    "own_instance_id": "alpha.home",
+    "own_instance_id": ALPHA_ID,
     "own_public_key_hex": "aa" * 32,
     "own_display_name": "Alpha House",
 }
@@ -167,7 +170,7 @@ async def test_impostor_replaying_info_at_another_url_is_refused(
     # Refused BEFORE registering: no token spent, no household identity sent.
     assert seen == ["GET /gfs/info", f"POST {PROOF_ROUTE}"]
     assert await repo.list_all() == []
-    assert await gfs.server.app[gfs_fed_repo_key].get_instance("alpha.home") is None
+    assert await gfs.server.app[gfs_fed_repo_key].get_instance(ALPHA_ID) is None
 
 
 async def test_unknown_proof_suite_is_refused(gfs, repo, session, aiohttp_server):

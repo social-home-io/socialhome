@@ -10,6 +10,7 @@ token is the same short-lived, single-use one the landing-page QR carries.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from dataclasses import replace
 
@@ -17,6 +18,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.capabilities_sig import verify_capabilities
+from socialhome.crypto import derive_instance_id, ed25519_public_key
 from socialhome.global_server import public
 from socialhome.global_server.app_keys import gfs_admin_repo_key, gfs_db_key
 from socialhome.global_server.config import EXAMPLE_TOML, GfsConfig
@@ -53,11 +55,14 @@ def _ip(n: int) -> dict[str, str]:
     return {"X-Forwarded-For": f"198.51.100.{n}"}
 
 
-def _register_body(token: str, instance_id: str = "inst-signup") -> dict:
+def _register_body(token: str, label: str = "inst-signup") -> dict:
+    """A registration for a household whose key is derived from *label*
+    (its id is the one that key derives — the GFS refuses any other)."""
+    pk = ed25519_public_key(hashlib.sha256(label.encode()).digest())
     return {
         "token": token,
-        "instance_id": instance_id,
-        "public_key": "aa" * 32,
+        "instance_id": derive_instance_id(pk),
+        "public_key": pk.hex(),
         "display_name": "Home",
     }
 

@@ -599,6 +599,7 @@ class ClusterService:
         "_drain_cb",
         "_drain_hint_pending",
         "_drain_hint_task",
+        "_drain_holds",
         "_dup_url_warned",
         "_duplicate_node_urls",
         "_enabled",
@@ -764,6 +765,9 @@ class ClusterService:
         self._drain_hint_task: asyncio.Task | None = None
         #: ``GfsEnvelopeRelay.drain``, set by :meth:`attach_drain`.
         self._drain_cb: Callable[[str], Awaitable[int]] | None = None
+        #: Whether a recipient id has a socket on THIS node — an instance's
+        #: ``/gfs/ws`` or a mailbox's claim socket (``attach_drain``).
+        self._drain_holds: Callable[[str], bool] | None = None
         #: Running hint-started drain per household, awaited / cancelled in
         #: ``stop``. At most one per household: further hints coalesce.
         self._hint_drains: dict[str, asyncio.Task] = {}
@@ -1312,11 +1316,22 @@ class ClusterService:
 
     # ─── Cross-node envelope-queue drain (NODE_DRAIN_HINT) ────────────
 
-    def attach_drain(self, drain: Callable[[str], Awaitable[int]]) -> None:
+    def attach_drain(
+        self,
+        drain: Callable[[str], Awaitable[int]],
+        *,
+        holds: Callable[[str], bool] | None = None,
+    ) -> None:
         """Register the callback an inbound ``NODE_DRAIN_HINT`` runs per
-        locally-connected household (``GfsEnvelopeRelay.drain``). A setter,
-        not a constructor argument: the relay hints this service too."""
+        locally-connected recipient (``GfsEnvelopeRelay.drain``). A setter,
+        not a constructor argument: the relay hints this service too.
+
+        *holds* (``GfsEnvelopeRelay.holds``) says whether a recipient id has
+        a socket here — a household's ``/gfs/ws`` OR an anonymous mailbox's
+        claim socket, so a hint for a mailbox id reaches the node holding
+        its claim. Without it only the instance registry is asked."""
         self._drain_cb = drain
+        self._drain_holds = holds
 
     def hint_drain(self, instance_id: str) -> None:
         """Note that a row for *instance_id* just landed in the shared queue.
@@ -1624,7 +1639,10 @@ class ClusterService:
             seen.add(raw)
             if not ENVELOPE_INSTANCE_ID_RE.fullmatch(raw):
                 continue
-            if not self._ws_registry.is_connected(raw):
+            holds = self._drain_holds
+            if not (
+                holds(raw) if holds is not None else self._ws_registry.is_connected(raw)
+            ):
                 continue
             if raw in self._hint_drains:
                 # A drain for it is already running and may have listed the
@@ -1716,12 +1734,8 @@ class ClusterService:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                log.warning(
-                    "cluster: hint drain failed for %s: %r",
-                    instance_id,
-                    exc,
-                    exc_info=True,
-                )
+                # No recipient id: it may be an anonymous mailbox.
+                log.warning("cluster: hint drain failed: %r", exc, exc_info=True)
             if instance_id not in self._hint_rerun or self._stop.is_set():
                 return
 
@@ -2441,6 +2455,20 @@ class ClusterService:
                 self._live(self._identity_mismatches).items()
             )
         ]
+
+    def sibling_instance_ids(self) -> set[str]:
+        """The public ids live siblings that share OUR identity key report
+        when they differ from ours (a rolling id change, or a cluster whose
+        nodes still serve per-node ids). Those nodes are this GFS to every
+        household, so a signature bound to one of their ids is bound to us
+        (``GfsMailboxService.accepted_gfs_ids``)."""
+        return {
+            reported
+            for reported, _at in (
+                *self._live(self._identity_mismatches).values(),
+                *self._live(self._identity_transitional).values(),
+            )
+        }
 
     def identity_transitional(self) -> list[dict]:
         """Siblings whose differing ``instance_id`` is linked to ours through

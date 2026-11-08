@@ -61,10 +61,15 @@ from .config import (
     set_password_in_toml,
     write_example_config,
 )
-from .envelope_relay import GfsEnvelopeRelay, build_envelope_rate_limit
+from .envelope_relay import (
+    GfsEnvelopeRelay,
+    build_envelope_rate_limit,
+    build_mailbox_rate_limits,
+)
 from .federation import GfsFederationService
 from .highlight_publications import HighlightPublicationRegistry
 from .invites import INVITE_MINT_MAX_PER_MINUTE, GfsInviteService
+from .mailboxes import GfsMailboxService
 from .maintenance import GfsMaintenanceScheduler
 from .member_publish import GfsMemberPublishService, build_member_publish_rate_limit
 from .moment_delete_log import MomentDeleteLog
@@ -94,6 +99,7 @@ from .repositories import (
     SqliteGfsHighlightPublicationRepo,
     SqliteGfsHighlightTokenRepo,
     SqliteGfsInviteRepo,
+    SqliteGfsMailboxRepo,
     SqliteGfsMomentDeleteLogRepo,
     SqliteGfsMomentFollowRepo,
     SqliteGfsMomentKeyMailboxRepo,
@@ -331,6 +337,7 @@ class GfsApp:
             moment_delete_log=SqliteGfsMomentDeleteLogRepo(db),
             moment_public_pictures=SqliteGfsUserPictureRepo(db),
             envelope_queue=SqliteGfsEnvelopeQueueRepo(db),
+            mailboxes=SqliteGfsMailboxRepo(db),
             space_epochs=SqliteGfsSpaceEpochRepo(db),
             channels=SqliteGfsChannelRepo(db),
             invites=SqliteGfsInviteRepo(db),
@@ -423,15 +430,30 @@ class GfsApp:
             repos.highlight_tokens,
             base_url=config.base_url,
         )
+        # Anonymous per-space mailboxes (GFS redesign PR 1): their claim
+        # sockets live in a registry of their own that never logs the id.
+        mailbox_ws_registry = GfsWebSocketRegistry(log_ids=False)
+        mailboxes = GfsMailboxService(
+            repo=repos.mailboxes,
+            gfs_instance_id=config.instance_id,
+            config=config.envelope_mailbox,
+            aliases=config.instance_id_aliases,
+            sibling_ids=cluster.sibling_instance_ids,
+            nodes=cluster.live_node_count,
+        )
         # Opaque household-to-household envelope relay (§D2b): pushes a
-        # sealed blob to the addressed household's live socket, or queues it
-        # until its next hello. Content-blind — it never opens the box.
+        # sealed blob to the addressed household's (or mailbox's) live
+        # socket, or queues it until its next hello / claim. Content-blind —
+        # it never opens the box.
         envelope_relay = GfsEnvelopeRelay(
             fed_repo=repos.federation,
             queue_repo=repos.envelope_queue,
             ws_registry=ws_registry,
             # v_87 — binary relay media frames and their own budgets.
             media=config.envelope_media,
+            mailbox_repo=repos.mailboxes,
+            mailbox_ws_registry=mailbox_ws_registry,
+            mailbox_config=config.envelope_mailbox,
         )
         # Broadcast items (``/gfs/publish``, member publishes, channel items,
         # public moments) ride the coalesced drain hint ONCE per peer node;
@@ -453,15 +475,18 @@ class GfsApp:
         async def _drain_hinted(instance_id: str) -> int:
             # What a NODE_DRAIN_HINT runs for a household whose socket is
             # HERE: its queued rows, then the sealed moment keys another node
-            # kept for it in the shared mailbox.
+            # kept for it in the shared mailbox. A mailbox's claim socket
+            # takes only its queued rows.
             drained = await envelope_relay.drain(instance_id)
+            if mailbox_ws_registry.is_connected(instance_id):
+                return drained
             return drained + await moment_public.on_follower_connected(instance_id)
 
         # Cross-node drain: after an enqueue the relay hints the cluster, and
         # an inbound NODE_DRAIN_HINT drains through the relay. Wired by
         # setters because each needs the other.
         envelope_relay.attach_cluster(cluster)
-        cluster.attach_drain(_drain_hinted)
+        cluster.attach_drain(_drain_hinted, holds=envelope_relay.holds)
         # The same for the two single-recipient pushes of the federation
         # service: an owner's ``new_subscriber`` notice rides the drain hint
         # to the node holding the owner's socket, and a targeted ``to`` relay
@@ -559,6 +584,7 @@ class GfsApp:
             admin_repo=repos.admin,
             highlight_repo=repos.highlight_pubs,
             envelope_queue_repo=repos.envelope_queue,
+            mailboxes=mailboxes,
             invite_repo=repos.invites,
             channel_repo=repos.channels,
         )
@@ -583,6 +609,8 @@ class GfsApp:
             highlight_pubs=highlight_pubs,
             moment_public=moment_public,
             envelope_relay=envelope_relay,
+            mailboxes=mailboxes,
+            mailbox_ws_registry=mailbox_ws_registry,
             cluster_fan_out=cluster_fan_out,
             member_publish=member_publish,
             channels=channels,
@@ -608,6 +636,7 @@ class GfsApp:
             build_register_rate_limit(self.client_ip),
             build_proof_rate_limit(self.client_ip),
             build_envelope_rate_limit(self.client_ip),
+            *build_mailbox_rate_limits(self.client_ip, nodes=live_nodes),
             build_member_publish_rate_limit(self.client_ip),
             build_channel_rate_limit(self.client_ip),
             build_space_media_rate_limit(self.client_ip, nodes=live_nodes),
@@ -660,6 +689,9 @@ class GfsApp:
         a[K.gfs_space_media_on_demand_key] = self.services.space_media_on_demand
         a[K.gfs_envelope_queue_repo_key] = self.repos.envelope_queue
         a[K.gfs_envelope_relay_key] = self.services.envelope_relay
+        a[K.gfs_mailbox_repo_key] = self.repos.mailboxes
+        a[K.gfs_mailbox_service_key] = self.services.mailboxes
+        a[K.gfs_mailbox_ws_registry_key] = self.services.mailbox_ws_registry
         a[K.gfs_space_epoch_repo_key] = self.repos.space_epochs
         a[K.gfs_member_publish_key] = self.services.member_publish
         a[K.gfs_channel_repo_key] = self.repos.channels
@@ -730,6 +762,7 @@ class GfsApp:
         await self.services.cluster_fan_out.close()
         await self.services.space_media_on_demand.close()
         await self.services.ws_registry.close_all()
+        await self.services.mailbox_ws_registry.close_all()
         session = app.get(K.gfs_http_session_key)
         if session is not None:
             await session.close()

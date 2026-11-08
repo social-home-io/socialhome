@@ -2959,10 +2959,12 @@ async def test_e2e_pair_learns_anonymous_publish_from_a_real_signed_block(
             svc = GfsConnectionService(
                 conn_repo, http_client=session, publish_client=session
             )
+            own_kp = generate_identity_keypair()
             conn = await svc.pair(
                 {"gfs_url": gfs_base, "token": token},
-                own_instance_id=_E2E_OWN_INSTANCE,
-                own_public_key_hex=generate_identity_keypair().public_key.hex(),
+                # The GFS takes only the id the key derives.
+                own_instance_id=derive_instance_id(own_kp.public_key),
+                own_public_key_hex=own_kp.public_key.hex(),
                 own_display_name="Alpha House",
             )
             # Learned from the signed block, not the bare flag: the pinned key

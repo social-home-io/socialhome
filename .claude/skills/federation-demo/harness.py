@@ -922,6 +922,8 @@ GFS_DIR = ROOT / "gfs"
 #: the SAME ``signing_seed_hex`` so they present one GFS identity, and the
 #: SAME ``data_dir`` so they share ``gfs.db``.
 GFS_CLUSTER_PORTS: tuple[int, ...] = (18770, 18771, 18772)
+#: Step 3k's extra node (its own public id), started and stopped by the step.
+GFS_CLUSTER_EXTRA_PORT: int = 18773
 GFS_CLUSTER_DIR = ROOT / "gfs-cluster"
 GFS_CLUSTER_SEED_HEX = "b7" * 32
 
@@ -1088,6 +1090,7 @@ def _spawn_gfs_node(
     node_id: str,
     peers: list[str],
     seed_hex: str,
+    instance_id: str = "",
 ) -> "subprocess.Popen":
     """Boot one cluster GFS node on *port*, sharing *data_dir* (hence the
     one ``gfs.db``) with its siblings, cluster-enabled with *peers* and a
@@ -1114,6 +1117,12 @@ def _spawn_gfs_node(
     text = text.replace('signing_seed_hex = ""', f'signing_seed_hex = "{seed_hex}"')
     text = text.replace("enabled = false", "enabled = true")
     text = text.replace('node_id = ""', f'node_id = "{node_id}"')
+    if instance_id:
+        # A node still on its own per-alloc public id (gfs-deployment's
+        # ``gfs-N``) beside siblings that share the key and the DB.
+        text = text.replace(
+            'instance_id = "gfs-node-0"', f'instance_id = "{instance_id}"', 1
+        )
     # Session-sticky routing: this node's ids start with "<node_id>." and the
     # demo's balancer routes them back here (see _gfs_cluster_highlight_link).
     text = text.replace('route_tag = ""', f'route_tag = "{node_id}"')
@@ -1334,6 +1343,212 @@ def _gfs_cluster_cross_node_media(urls: list[str]) -> None:
             await ws.close()
 
     asyncio.run(_run())
+
+
+def _gfs_cluster_mailboxes(urls: list[str]) -> None:
+    """Step 3d'' of ``gfs-cluster`` (GFS redesign PR 1): an anonymous
+    mailbox registered via node 0 and claimed on node 1 gets a JSON envelope
+    and a binary media frame posted via node 0, byte-identical — live
+    (shared queue + ``NODE_DRAIN_HINT`` addressed to the mailbox id) and
+    queued while its claim socket was closed, drained on the next claim on
+    node 1. Then the mailbox id must appear in no node's log."""
+    import asyncio
+    import os as _os
+
+    import aiohttp
+
+    from socialhome.domain.relay_media_frame import (
+        RELAY_MEDIA_SEAL_OVERHEAD_BYTES as _SEAL,
+        build_relay_media_body,
+    )
+    from socialhome.federation.gfs_mailbox import (
+        MailboxClaim,
+        derive_mailbox_keys,
+        new_mailbox_root,
+        register_mailbox,
+    )
+
+    code, info = _request(f"{urls[0]}/gfs/info", timeout=10.0)
+    caps = (info or {}).get("capabilities") or {}
+    if code != 200 or "envelope_mailbox" not in caps:
+        raise SystemExit(f"gfs-cluster: /gfs/info has no envelope_mailbox → {code}")
+    gfs_id = info["gfs_instance_id"]
+    keys = derive_mailbox_keys(new_mailbox_root(), gfs_id, "demo-space", 0)
+    sealed = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "bWFpbGJveA"}
+
+    async def _post(http: aiohttp.ClientSession, *, json=None, data=None) -> None:
+        async with http.post(f"{urls[0]}/gfs/envelope", json=json, data=data) as r:
+            if r.status != 202:
+                raise SystemExit(f"gfs-cluster: envelope via node 0 → {r.status}")
+
+    async def _next(claim: MailboxClaim, what: str):
+        frame = await claim.receive(timeout=15.0)
+        if frame is None:
+            raise SystemExit(
+                f"gfs-cluster: no {what} on the mailbox socket held by node 1 — "
+                "cross-node mailbox delivery is broken"
+            )
+        return frame
+
+    async def _run() -> None:
+        async with aiohttp.ClientSession() as http:
+            await register_mailbox(http, urls[0], keys, gfs_id)
+            print(f"  mailbox registered via node 0 (gfs {gfs_id}) ✓")
+            async with MailboxClaim(http, urls[1], keys, gfs_id) as claim:
+                await _post(http, json={"to_instance": keys.mailbox_id, "sealed": sealed})
+                got = await _next(claim, "JSON envelope")
+                if got != {"type": "envelope", "sealed": sealed}:
+                    raise SystemExit(f"gfs-cluster: mailbox envelope changed: {got!r}")
+                live = build_relay_media_body(
+                    keys.mailbox_id, _os.urandom(516 * 1024 + _SEAL)
+                )
+                await _post(http, data=live)
+                if await _next(claim, "binary media frame") != live:
+                    raise SystemExit("gfs-cluster: the mailbox media frame changed")
+            print(
+                f"  claimed on node 1: JSON envelope + {len(live) // 1024} KiB media "
+                "frame via node 0, byte-identical ✓"
+            )
+            queued = build_relay_media_body(
+                keys.mailbox_id, _os.urandom(256 * 1024 + _SEAL)
+            )
+            await _post(http, json={"to_instance": keys.mailbox_id, "sealed": sealed})
+            await _post(http, data=queued)
+            await asyncio.sleep(1.0)
+            async with MailboxClaim(http, urls[1], keys, gfs_id) as claim:
+                got = await _next(claim, "queued JSON envelope")
+                if got != {"type": "envelope", "sealed": sealed}:
+                    raise SystemExit(f"gfs-cluster: queued envelope changed: {got!r}")
+                if await _next(claim, "queued media frame") != queued:
+                    raise SystemExit("gfs-cluster: the queued mailbox media changed")
+            print(
+                "  queued via node 0 while offline → drained on the claim on "
+                "node 1, JSON + media byte-identical ✓"
+            )
+
+    asyncio.run(_run())
+    leaked = _gfs_cluster_log_matches(keys.mailbox_id)
+    if leaked:
+        raise SystemExit(
+            "gfs-cluster: a GFS log line names the mailbox id:\n  "
+            + "\n  ".join(leaked[:5])
+        )
+    print("  the mailbox id appears in no GFS log line ✓")
+
+
+def _gfs_cluster_mailbox_other_id(all_urls: list[str]) -> None:
+    """Step 3k of ``gfs-cluster`` (review of #1326): a node that serves a
+    DIFFERENT public id (a cluster still on per-alloc ids) but shares the
+    key and the DB. A mailbox registered via node 0 — bound to node 0's id —
+    is claimed on that node, and an envelope + media frame posted via node 0
+    reach it byte-identical: the node accepts the ids its shared-key
+    siblings serve. The extra node is stopped at the end."""
+    import asyncio
+    import contextlib
+    import os as _os
+
+    import aiohttp
+
+    from socialhome.domain.relay_media_frame import (
+        RELAY_MEDIA_SEAL_OVERHEAD_BYTES as _SEAL,
+        build_relay_media_body,
+    )
+    from socialhome.federation.gfs_mailbox import (
+        MailboxClaim,
+        MailboxClaimError,
+        derive_mailbox_keys,
+        new_mailbox_root,
+        register_mailbox,
+    )
+
+    port = GFS_CLUSTER_EXTRA_PORT
+    url = f"http://127.0.0.1:{port}"
+    proc = _spawn_gfs_node(
+        port,
+        GFS_CLUSTER_DIR,
+        "gfs-x",
+        [*all_urls, url],
+        GFS_CLUSTER_SEED_HEX,
+        instance_id="gfs-node-x",
+    )
+    state = _load() or {}
+    state.setdefault("gfs_cluster", {}).setdefault("pids", []).append(proc.pid)
+    _save(state)
+    try:
+        _c, info_x = _request(f"{url}/gfs/info", timeout=10.0)
+        _c, info_0 = _request(f"{all_urls[0]}/gfs/info", timeout=10.0)
+        id_x, id_0 = info_x["gfs_instance_id"], info_0["gfs_instance_id"]
+        if id_x == id_0:
+            raise SystemExit("gfs-cluster: the extra node did not take its own id")
+        # Wait until node x heard node 0 (its HELLO / heartbeat records the
+        # id a shared-key sibling serves) and node 0 lists node x.
+        deadline = time.monotonic() + 40.0
+        while time.monotonic() < deadline:
+            _c, h0 = _request(f"{all_urls[0]}/cluster/health", timeout=2.0)
+            _c, hx = _request(f"{url}/cluster/health", timeout=2.0)
+            ids0 = {pr.get("node_id") for pr in (h0 or {}).get("peers", [])}
+            idsx = {pr.get("node_id") for pr in (hx or {}).get("peers", [])}
+            if "gfs-x" in ids0 and "gfs-0" in idsx:
+                break
+            time.sleep(1.0)
+        else:
+            raise SystemExit("gfs-cluster: the extra node never joined the cluster")
+        time.sleep(2.0)
+        keys = derive_mailbox_keys(new_mailbox_root(), id_0, "demo-space-x", 0)
+        sealed = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "b3RoZXItaWQ"}
+
+        async def _claim_when_known(http):
+            # Node x accepts node 0's id once a frame from node 0 (its
+            # heartbeat, every 30 s) told it which id that shared-key sibling
+            # serves — until then the claim is refused like any wrong key.
+            deadline = time.monotonic() + 75.0
+            while True:
+                claim = MailboxClaim(http, url, keys, id_0)
+                try:
+                    return await claim.__aenter__()
+                except MailboxClaimError:
+                    if time.monotonic() > deadline:
+                        raise
+                    await asyncio.sleep(2.0)
+
+        async def _run() -> None:
+            async with aiohttp.ClientSession() as http:
+                await register_mailbox(http, all_urls[0], keys, id_0)
+                async with contextlib.aclosing(await _claim_when_known(http)) as claim:
+                    async with http.post(
+                        f"{all_urls[0]}/gfs/envelope",
+                        json={"to_instance": keys.mailbox_id, "sealed": sealed},
+                    ) as r:
+                        assert r.status == 202
+                    got = await claim.receive(timeout=15.0)
+                    if got != {"type": "envelope", "sealed": sealed}:
+                        raise SystemExit(f"gfs-cluster: other-id envelope: {got!r}")
+                    media = build_relay_media_body(
+                        keys.mailbox_id, _os.urandom(256 * 1024 + _SEAL)
+                    )
+                    async with http.post(
+                        f"{all_urls[0]}/gfs/envelope", data=media
+                    ) as r:
+                        assert r.status == 202
+                    if await claim.receive(timeout=15.0) != media:
+                        raise SystemExit("gfs-cluster: other-id media frame changed")
+
+        asyncio.run(_run())
+        print(
+            f"  register via node 0 ({id_0}), claim on a node serving {id_x}: "
+            "JSON envelope + media frame via node 0, byte-identical ✓"
+        )
+        leaked = _gfs_cluster_log_matches(keys.mailbox_id)
+        if leaked:
+            raise SystemExit(
+                "gfs-cluster: a GFS log line names the mailbox id:\n  "
+                + "\n  ".join(leaked[:5])
+            )
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError, PermissionError:
+            pass
 
 
 def _gfs_cluster_cross_node_push(urls: list[str]) -> None:
@@ -3273,6 +3488,8 @@ def cmd_gfs_cluster() -> None:
         _gfs_cluster_cross_node_push(urls)
         # 3d'. v_87 — a binary media frame crosses nodes byte-identical.
         _gfs_cluster_cross_node_media(urls)
+        # 3d''. Anonymous mailboxes: register via node 0, claim on node 1.
+        _gfs_cluster_mailboxes(urls)
         _gfs_cluster_cross_node_broadcast(urls)
         _gfs_cluster_cross_node_moment(urls)
         # 3g. A public-highlight link through a round-robin balancer: every
@@ -3286,6 +3503,9 @@ def cmd_gfs_cluster() -> None:
         # 3j. Space media on demand (v_83): readers on one node, the holder's
         # socket on another, its serve routed by the ticket's tag.
         _gfs_cluster_media_on_demand(urls, node_ids)
+        # 3k. A node on another public id accepts a mailbox bound to its
+        # shared-key sibling's id (register via node 0, claim there).
+        _gfs_cluster_mailbox_other_id(all_urls)
     except BaseException:
         _gfs_cluster_down(preserve_logs=True)
         raise

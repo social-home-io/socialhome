@@ -24,6 +24,7 @@ import orjson
 
 from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
 from ..db import AsyncDatabase
+from ..domain.gfs_mailbox import GfsMailbox
 from ..domain.space import normalize_join_mode
 from .domain import (
     AdminSession,
@@ -83,6 +84,7 @@ PAIR_TOKEN_TTL_SECONDS = 600
 class AbstractGfsFederationRepo(Protocol):
     # Instances
     async def upsert_instance(self, instance: ClientInstance) -> None: ...
+    async def register_instance_pinned(self, instance: ClientInstance) -> bool: ...
     async def get_instance(self, instance_id: str) -> ClientInstance | None: ...
     async def list_instances(
         self,
@@ -216,7 +218,10 @@ class SqliteGfsFederationRepo:
             ON CONFLICT(instance_id) DO UPDATE SET
                 display_name = excluded.display_name,
                 public_key   = excluded.public_key,
-                status       = excluded.status,
+                -- A ban is lifted only by an operator (``set_instance_status``):
+                -- no upsert turns ``banned`` back into active / pending.
+                status       = CASE WHEN client_instances.status = 'banned'
+                                    THEN 'banned' ELSE excluded.status END,
                 auto_accept  = excluded.auto_accept,
                 keywrap_public_key = excluded.keywrap_public_key,
                 kem_suite          = excluded.kem_suite,
@@ -234,6 +239,53 @@ class SqliteGfsFederationRepo:
                 instance.keywrap_sig or None,
             ),
         )
+
+    async def register_instance_pinned(self, instance: ClientInstance) -> bool:
+        """:meth:`upsert_instance` for a household's own ``/gfs/register``,
+        in ONE statement: a new id is inserted unless a mailbox holds it
+        (``gfs_mailboxes``), and an existing row is updated ONLY when the
+        request carries the key the row was registered with — a different
+        key never takes a row over — and is not banned (a banned row is left
+        exactly as it is; an active one is never demoted). ``False`` when
+        nothing was written."""
+        changed = await self._db.enqueue_rowcount(
+            """
+            INSERT INTO client_instances(
+                instance_id, display_name, public_key,
+                status, auto_accept, connected_at,
+                keywrap_public_key, kem_suite, keywrap_sig
+            )
+            SELECT ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM gfs_mailboxes WHERE mailbox_id = ?)
+            ON CONFLICT(instance_id) DO UPDATE SET
+                display_name = excluded.display_name,
+                -- An operator-accepted household is never demoted to
+                -- pending by its own re-register; pending follows the
+                -- auto-accept policy as before.
+                status       = CASE WHEN client_instances.status = 'active'
+                                    THEN 'active' ELSE excluded.status END,
+                auto_accept  = excluded.auto_accept,
+                keywrap_public_key = excluded.keywrap_public_key,
+                kem_suite          = excluded.kem_suite,
+                keywrap_sig        = excluded.keywrap_sig
+            WHERE client_instances.public_key = excluded.public_key
+              -- A banned row is not touched at all: only an operator
+              -- (``set_instance_status``) lifts a ban.
+              AND client_instances.status != 'banned'
+            """,
+            (
+                instance.instance_id,
+                instance.display_name,
+                instance.public_key,
+                instance.status,
+                int(instance.auto_accept),
+                instance.keywrap_public_key or None,
+                instance.kem_suite or None,
+                instance.keywrap_sig or None,
+                instance.instance_id,
+            ),
+        )
+        return changed > 0
 
     async def get_instance(self, instance_id: str) -> ClientInstance | None:
         row = await self._db.fetchone(
@@ -3114,6 +3166,16 @@ class SqliteGfsUserPictureRepo:
 
 # ─── Envelope relay queue ────────────────────────────────────────────────
 
+#: ``pool`` of a queued frame (GFS migration 0029): households vs mailboxes.
+POOL_HOUSEHOLD: str = "household"
+POOL_MAILBOX: str = "mailbox"
+#: Every recipient's RESERVE: one holding fewer than this many queued
+#: envelopes AND fewer than this many bytes is admitted even when its pool
+#: is past its total — up to the pool's ceiling — so a flood of other ids
+#: can never block a recipient's first envelopes.
+QUEUE_RESERVE_ROWS: int = 20
+QUEUE_RESERVE_BYTES: int = 64 * 1024
+
 
 @runtime_checkable
 class AbstractGfsEnvelopeQueueRepo(Protocol):
@@ -3129,6 +3191,9 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
         max_per_recipient: int,
         max_bytes_per_recipient: int,
         frame_type: str = "envelope",
+        max_total_bytes: int | None = None,
+        ceiling_bytes: int | None = None,
+        mailbox_pool: bool = False,
     ) -> bool: ...
 
     async def list_for(
@@ -3141,6 +3206,10 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
     async def delete(self, envelope_id: int) -> int: ...
 
     async def prune_expired(self, now: int) -> int: ...
+
+    async def pool_bytes(self, queue: str, pool: str) -> int: ...
+
+    async def recompute_pool_totals(self) -> None: ...
 
     async def relay_bytes(self, now: int) -> int: ...
 
@@ -3170,6 +3239,7 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
         expires_at: int,
         max_bytes_per_recipient: int,
         max_total_bytes: int,
+        mailbox_pool: bool = False,
     ) -> bool: ...
 
     async def next_media_for(
@@ -3206,8 +3276,19 @@ class SqliteGfsEnvelopeQueueRepo:
         max_per_recipient: int,
         max_bytes_per_recipient: int,
         frame_type: str = "envelope",
+        max_total_bytes: int | None = None,
+        ceiling_bytes: int | None = None,
+        mailbox_pool: bool = False,
     ) -> bool:
         """Append one envelope unless this recipient is at cap.
+
+        With *max_total_bytes*, the envelope rows of the recipient's POOL —
+        registered mailboxes (*mailbox_pool*) or households — are also held
+        to that server-wide total (the running counter, ``gfs_queue_totals``):
+        past it the new envelope is tail-dropped unless the recipient is
+        under its reserve, admitted up to *ceiling_bytes*
+        (:meth:`_pool_admits`). Nothing is ever evicted, and a row of one
+        pool never touches the other.
 
         ``frame_type`` (migration 0014) is ``"envelope"`` or ``"relay"``; the
         two ceilings apply per frame type, so member-published relay items
@@ -3246,10 +3327,21 @@ class SqliteGfsEnvelopeQueueRepo:
                 return False
             if total_bytes + len(sealed_json) > max_bytes_per_recipient:
                 return False
+            if max_total_bytes is not None and not self._pool_admits(
+                conn,
+                len(sealed_json),
+                held_rows=count,
+                held_bytes=total_bytes,
+                now=created_at,
+                max_total_bytes=max_total_bytes,
+                ceiling_bytes=ceiling_bytes,
+                mailbox_pool=mailbox_pool,
+            ):
+                return False
             conn.execute(
                 "INSERT INTO gfs_envelope_queue("
                 "to_instance, sealed_json, created_at, expires_at, frame_type,"
-                " size_bytes) VALUES(?,?,?,?,?,?)",
+                " size_bytes, pool) VALUES(?,?,?,?,?,?,?)",
                 (
                     to_instance,
                     sealed_json,
@@ -3257,11 +3349,91 @@ class SqliteGfsEnvelopeQueueRepo:
                     expires_at,
                     frame_type,
                     len(sealed_json),
+                    POOL_MAILBOX if mailbox_pool else POOL_HOUSEHOLD,
                 ),
             )
             return True
 
         return await self._db.transact(_run)
+
+    @staticmethod
+    def _pool_total(conn, queue: str, pool: str) -> int:
+        row = conn.execute(
+            "SELECT bytes FROM gfs_queue_totals WHERE queue=? AND pool=?",
+            (queue, pool),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    async def recompute_pool_totals(self) -> None:
+        """Drift repair (hourly maintenance): set every running total to the
+        sum of its unexpired-or-not rows, exactly what the triggers keep."""
+
+        def _run(conn) -> None:
+            conn.execute(
+                "UPDATE gfs_queue_totals SET bytes = (SELECT COALESCE(SUM("
+                "CASE WHEN q.size_bytes > 0 THEN q.size_bytes"
+                " ELSE LENGTH(q.sealed_json) END), 0) FROM gfs_envelope_queue q"
+                " WHERE q.frame_type='envelope' AND q.pool = gfs_queue_totals.pool)"
+                " WHERE queue='envelope'"
+            )
+            conn.execute(
+                "UPDATE gfs_queue_totals SET bytes = (SELECT COALESCE(SUM("
+                "m.size_bytes), 0) FROM gfs_media_queue m"
+                " WHERE m.pool = gfs_queue_totals.pool) WHERE queue='media'"
+            )
+
+        await self._db.transact(_run)
+
+    async def pool_bytes(self, queue: str, pool: str) -> int:
+        """The running byte total of one (queue, pool) — ``gfs_queue_totals``,
+        kept by triggers on every insert and delete (GFS migration 0029)."""
+        row = await self._db.fetchone(
+            "SELECT bytes FROM gfs_queue_totals WHERE queue=? AND pool=?",
+            (queue, pool),
+        )
+        d = _as_dict(row)
+        return int(d["bytes"]) if d else 0
+
+    @classmethod
+    def _pool_admits(
+        cls,
+        conn,
+        size: int,
+        *,
+        held_rows: int,
+        held_bytes: int,
+        now: int,
+        max_total_bytes: int,
+        ceiling_bytes: int | None,
+        mailbox_pool: bool,
+    ) -> bool:
+        """Whether *size* more bytes fit the recipient's pool (see
+        :meth:`enqueue`). Runs inside the caller's transaction and NEVER
+        deletes a live row: past the total the new envelope is dropped
+        (tail-drop — eviction would hand an anonymous sender a delete
+        primitive), unless the recipient is still under its RESERVE
+        (:data:`QUEUE_RESERVE_ROWS` envelopes and :data:`QUEUE_RESERVE_BYTES`),
+        which is admitted up to *ceiling_bytes*. The pool total is the
+        running counter; expired rows of the pool are swept first (an index
+        range, only when the total is reached) so they never hold room."""
+        pool = POOL_MAILBOX if mailbox_pool else POOL_HOUSEHOLD
+        total = cls._pool_total(conn, "envelope", pool)
+        if total + size <= max_total_bytes:
+            return True
+        conn.execute(
+            "DELETE FROM gfs_envelope_queue WHERE pool=? AND expires_at <= ?"
+            " AND frame_type='envelope'",
+            (pool, now),
+        )
+        total = cls._pool_total(conn, "envelope", pool)
+        if total + size <= max_total_bytes:
+            return True
+        ceiling = max_total_bytes if ceiling_bytes is None else ceiling_bytes
+        return (
+            held_rows < QUEUE_RESERVE_ROWS
+            and held_bytes < QUEUE_RESERVE_BYTES
+            and total + size <= ceiling
+        )
 
     async def list_for(
         self,
@@ -3339,9 +3511,13 @@ class SqliteGfsEnvelopeQueueRepo:
         expires_at: int,
         max_bytes_per_recipient: int,
         max_total_bytes: int,
+        mailbox_pool: bool = False,
     ) -> bool:
         """Queue one binary relay media frame unless that would pass this
-        recipient's media bytes or every recipient's — **tail-drop**, for
+        recipient's media bytes or its POOL's total — registered mailboxes
+        (*mailbox_pool*) or everything else, each with its own total, so
+        minted mailboxes can never fill the room households' media needs —
+        **tail-drop**, for
         the reason :meth:`enqueue` gives (the endpoint is anonymous; eviction
         would be a delete primitive). Its own table: it never counts against,
         and never touches, the envelope queue. One transaction for the sweep
@@ -3353,12 +3529,13 @@ class SqliteGfsEnvelopeQueueRepo:
             conn.execute(
                 "DELETE FROM gfs_media_queue WHERE expires_at <= ?", (created_at,)
             )
-            mine, total = conn.execute(
-                "SELECT COALESCE(SUM(CASE WHEN to_instance=? THEN size_bytes"
-                " ELSE 0 END), 0), COALESCE(SUM(size_bytes), 0)"
-                " FROM gfs_media_queue WHERE expires_at > ?",
+            pool = POOL_MAILBOX if mailbox_pool else POOL_HOUSEHOLD
+            mine = conn.execute(
+                "SELECT COALESCE(SUM(size_bytes), 0) FROM gfs_media_queue"
+                " WHERE to_instance=? AND expires_at > ?",
                 (to_instance, created_at),
-            ).fetchone()
+            ).fetchone()[0]
+            total = self._pool_total(conn, "media", pool)
             size = len(body)
             if int(mine) + size > max_bytes_per_recipient:
                 return False
@@ -3366,8 +3543,8 @@ class SqliteGfsEnvelopeQueueRepo:
                 return False
             conn.execute(
                 "INSERT INTO gfs_media_queue(to_instance, body, size_bytes,"
-                " created_at, expires_at) VALUES(?,?,?,?,?)",
-                (to_instance, body, size, created_at, expires_at),
+                " created_at, expires_at, pool) VALUES(?,?,?,?,?,?)",
+                (to_instance, body, size, created_at, expires_at, pool),
             )
             return True
 
@@ -3567,6 +3744,173 @@ class SqliteGfsEnvelopeQueueRepo:
         )
         d = _as_dict(row)
         return int(d["n"]) if d else 0
+
+
+# ─── Anonymous mailboxes (GFS redesign PR 1, migration 0029) ───────────
+
+
+@runtime_checkable
+class AbstractGfsMailboxRepo(Protocol):
+    """Registered GFS mailboxes: the pinned key and two timestamps, nothing
+    about the owner (:mod:`socialhome.domain.gfs_mailbox`)."""
+
+    async def get(self, mailbox_id: str) -> GfsMailbox | None: ...
+
+    async def is_mailbox(self, mailbox_id: str) -> bool: ...
+
+    async def register(
+        self,
+        mailbox_id: str,
+        sign_pk: bytes,
+        *,
+        now: int,
+        max_new_today: int | None = None,
+    ) -> str: ...
+
+    async def count_created_since(self, since: int) -> int: ...
+
+    async def remember_gfs_ids(self, ids: set[str], *, day: int) -> None: ...
+
+    async def known_gfs_ids(self, *, since_day: int) -> set[str]: ...
+
+    async def touch_claim(self, mailbox_id: str, *, now: int) -> None: ...
+
+    async def prune_idle(self, *, older_than: int) -> int: ...
+
+
+class SqliteGfsMailboxRepo:
+    """SQLite-backed :class:`AbstractGfsMailboxRepo`."""
+
+    __slots__ = ("_db",)
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def get(self, mailbox_id: str) -> GfsMailbox | None:
+        row = await self._db.fetchone(
+            "SELECT mailbox_id, sign_pk, created_at, last_claim_at "
+            "FROM gfs_mailboxes WHERE mailbox_id=?",
+            (mailbox_id,),
+        )
+        d = _as_dict(row)
+        if not d:
+            return None
+        last = d.get("last_claim_at")
+        return GfsMailbox(
+            mailbox_id=str(d["mailbox_id"]),
+            sign_pk=bytes(d["sign_pk"]),
+            created_at=int(d["created_at"]),
+            last_claim_at=int(last) if last is not None else None,
+        )
+
+    async def is_mailbox(self, mailbox_id: str) -> bool:
+        row = await self._db.fetchone(
+            "SELECT 1 FROM gfs_mailboxes WHERE mailbox_id=?", (mailbox_id,)
+        )
+        return row is not None
+
+    async def register(
+        self,
+        mailbox_id: str,
+        sign_pk: bytes,
+        *,
+        now: int,
+        max_new_today: int | None = None,
+    ) -> str:
+        """Pin *sign_pk* for *mailbox_id* (trust on first use: an existing
+        row is never rewritten), in ONE transaction with the check that no
+        instance holds the id. ``"created"``, ``"exists"`` (registered
+        before — the caller compares the key) or ``"collision"`` (an
+        instance holds the id) or ``"server_cap"`` (*max_new_today* new
+        mailboxes were created on *now*'s day — counted in this same
+        transaction, so concurrent registrations on every node can't
+        overshoot). *now* is stored as given (the caller rounds it to the
+        day)."""
+
+        def _run(conn) -> str:
+            if conn.execute(
+                "SELECT 1 FROM client_instances WHERE instance_id=?", (mailbox_id,)
+            ).fetchone():
+                return "collision"
+            if conn.execute(
+                "SELECT 1 FROM gfs_mailboxes WHERE mailbox_id=?", (mailbox_id,)
+            ).fetchone():
+                return "exists"
+            if max_new_today is not None:
+                day = now // 86_400 * 86_400
+                made = conn.execute(
+                    "SELECT COUNT(*) FROM gfs_mailboxes WHERE created_at >= ?", (day,)
+                ).fetchone()[0]
+                if int(made) >= max_new_today:
+                    return "server_cap"
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO gfs_mailboxes(mailbox_id, sign_pk, created_at)"
+                " VALUES(?,?,?)",
+                (mailbox_id, sign_pk, now),
+            )
+            return "created" if cur.rowcount else "exists"
+
+        return await self._db.transact(_run)
+
+    async def count_created_since(self, since: int) -> int:
+        """Mailboxes first registered at or after *since* (the global daily
+        cap — cluster-wide, it reads the shared table)."""
+        row = await self._db.fetchone(
+            "SELECT COUNT(*) AS n FROM gfs_mailboxes WHERE created_at >= ?", (since,)
+        )
+        d = _as_dict(row)
+        return int(d["n"]) if d else 0
+
+    async def remember_gfs_ids(self, ids: set[str], *, day: int) -> None:
+        """Note that this cluster serves (or served) *ids* on *day*."""
+        for gfs_id in sorted(ids):
+            await self._db.enqueue(
+                "INSERT INTO gfs_known_gfs_ids(gfs_instance_id, last_seen_day)"
+                " VALUES(?, ?) ON CONFLICT(gfs_instance_id) DO UPDATE SET"
+                " last_seen_day = MAX(last_seen_day, excluded.last_seen_day)",
+                (gfs_id, day),
+            )
+
+    async def known_gfs_ids(self, *, since_day: int) -> set[str]:
+        """The ids this cluster served on or after *since_day*."""
+        rows = await self._db.fetchall(
+            "SELECT gfs_instance_id FROM gfs_known_gfs_ids WHERE last_seen_day >= ?",
+            (since_day,),
+        )
+        return {str(_as_dict(r)["gfs_instance_id"]) for r in rows}
+
+    async def touch_claim(self, mailbox_id: str, *, now: int) -> None:
+        await self._db.enqueue(
+            "UPDATE gfs_mailboxes SET last_claim_at=? WHERE mailbox_id=?",
+            (now, mailbox_id),
+        )
+
+    async def prune_idle(self, *, older_than: int) -> int:
+        """Drop every mailbox not claimed since
+        *older_than*, with whatever still waits for it in the two queues.
+        Returns how many mailboxes went."""
+
+        def _run(conn) -> int:
+            idle = (
+                "SELECT mailbox_id FROM gfs_mailboxes"
+                " WHERE COALESCE(last_claim_at, created_at) < ?"
+            )
+            conn.execute(
+                f"DELETE FROM gfs_envelope_queue WHERE to_instance IN ({idle})",
+                (older_than,),
+            )
+            conn.execute(
+                f"DELETE FROM gfs_media_queue WHERE to_instance IN ({idle})",
+                (older_than,),
+            )
+            cur = conn.execute(
+                "DELETE FROM gfs_mailboxes"
+                " WHERE COALESCE(last_claim_at, created_at) < ?",
+                (older_than,),
+            )
+            return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)
 
 
 # ─── Space content epochs (member publish, v_49) ─────────────────────────

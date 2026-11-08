@@ -106,18 +106,23 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
+from ..domain.gfs_mailbox import MAILBOX_REGISTER_ROUTE, MAILBOX_WS_ROUTE
 from ..moment_public_seal import (
     FRAME_MOMENT_REACTION,
     MAX_REACT_BODY_BYTES,
     MOMENT_FRAME_TYPES,
 )
-from .config import EnvelopeMediaConfig
+from .config import EnvelopeMailboxConfig, EnvelopeMediaConfig
 from .public import RATE_LIMIT_MAX_TRACKED_IPS, ClientIpResolver, build_window_limiter
 
 if TYPE_CHECKING:
     from .cluster import ClusterService
     from .cluster_relay import ClusterRelayFanOut
-    from .repositories import AbstractGfsEnvelopeQueueRepo, AbstractGfsFederationRepo
+    from .repositories import (
+        AbstractGfsEnvelopeQueueRepo,
+        AbstractGfsFederationRepo,
+        AbstractGfsMailboxRepo,
+    )
     from .ws_registry import GfsWebSocketRegistry
 
 log = logging.getLogger(__name__)
@@ -238,6 +243,18 @@ ENVELOPE_QUEUE_MAX_PER_RECIPIENT: int = 2000
 #: cap binds first in normal use) and small enough that a server with many
 #: registered households stays bounded.
 ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT: int = 64 * 1024 * 1024
+
+#: Server-wide ceiling on queued ENVELOPE bytes for households (instances).
+#: Mailboxes have their own, far smaller pool
+#: (:attr:`EnvelopeMailboxConfig.mailbox_queue_max_total_bytes`), so ids
+#: anyone can mint never crowd a household's control envelopes out. Past
+#: it: tail-drop, except a household under its reserve (``enqueue``).
+ENVELOPE_QUEUE_MAX_TOTAL_BYTES: int = 1024 * 1024 * 1024
+#: Past that total a household still under its reserve (20 envelopes and
+#: 64 KiB, ``QUEUE_RESERVE_*``) is admitted, up to this ceiling: 1 GiB of
+#: headroom = 1 GiB / (64 KiB + one ≤ 320 KiB envelope) ≈ 2 700 households
+#: at their full reserve, ≈ 16 000 at a typical few-KiB envelope each.
+ENVELOPE_QUEUE_RESERVE_CEILING_BYTES: int = 2 * 1024 * 1024 * 1024
 
 
 #: WebSocket frame type of a queued member-published space item (migration
@@ -482,6 +499,9 @@ class GfsEnvelopeRelay:
         "_fan_out",
         "_fed_repo",
         "_inflight",
+        "_mailbox_cfg",
+        "_mailbox_repo",
+        "_mailbox_ws",
         "_max_bytes",
         "_max_inflight",
         "_max_inflight_per_recipient",
@@ -514,8 +534,20 @@ class GfsEnvelopeRelay:
         max_inflight_per_recipient: int = ENVELOPE_MAX_INFLIGHT_PER_RECIPIENT,
         clock: Callable[[], float] = time.monotonic,
         media: EnvelopeMediaConfig | None = None,
+        mailbox_repo: AbstractGfsMailboxRepo | None = None,
+        mailbox_ws_registry: GfsWebSocketRegistry | None = None,
+        mailbox_config: EnvelopeMailboxConfig | None = None,
     ) -> None:
         self._fed_repo = fed_repo
+        #: Anonymous mailboxes (GFS redesign PR 1): a recipient id may name a
+        #: registered mailbox instead of an instance; its claim socket lives
+        #: in its own registry. ``None`` — instances only.
+        self._mailbox_repo = mailbox_repo
+        self._mailbox_ws = mailbox_ws_registry
+        #: The mailbox pool's (much smaller) queue caps.
+        self._mailbox_cfg = (
+            mailbox_config if mailbox_config is not None else EnvelopeMailboxConfig()
+        )
         self._queue_repo = queue_repo
         self._ws_registry = ws_registry
         self._ttl = ttl_seconds
@@ -571,6 +603,51 @@ class GfsEnvelopeRelay:
         """Per-recipient locks currently held or waited on."""
         return len(self._accept_locks) + len(self._drain_locks)
 
+    def _sockets(self, to: str) -> GfsWebSocketRegistry:
+        """The registry holding *to*'s socket on this node: its mailbox claim
+        socket when one is here, else the instance registry (which answers
+        "not connected" for an id it does not hold). Mailbox ids and
+        instance ids never collide — a registration of an id an instance
+        holds is refused — so at most one of the two holds *to*."""
+        mbx = self._mailbox_ws
+        if mbx is not None and mbx.is_connected(to):
+            return mbx
+        return self._ws_registry
+
+    def holds(self, to: str) -> bool:
+        """Whether *to* — an instance or a mailbox — has a socket here."""
+        return self._sockets(to).is_connected(to)
+
+    def _who(self, to: str) -> str:
+        """*to* as a log line may show it. Only an id whose household
+        socket is on THIS node is shown; anything else — a mailbox, or an
+        id this node cannot tell apart from one (offline, on another node)
+        — is ``<recipient>``. No log line may name a mailbox id: next to
+        an access-log entry it would tie the mailbox to an address."""
+        if self._ws_registry.is_connected(to):
+            return to
+        return "<recipient>"
+
+    async def _recipient(self, to: str) -> str | None:
+        """``"instance"`` for an active registered household, ``"mailbox"``
+        for a registered mailbox, else ``None`` (dropped — after the same
+        uniform answer). An id held by BOTH (only possible through rows
+        written around the registration checks) is refused: neither owner
+        can be told from the other."""
+        instance = await self._fed_repo.get_instance(to)
+        mailbox = (
+            self._mailbox_repo is not None and await self._mailbox_repo.is_mailbox(to)
+        )
+        if instance is not None and mailbox:
+            log.warning(
+                "gfs.envelope: a recipient id is registered both as an instance "
+                "and as a mailbox — delivery refused; remove one of the rows"
+            )
+            return None
+        if instance is not None:
+            return "instance" if instance.status == "active" else None
+        return "mailbox" if mailbox else None
+
     def submit(self, to_instance: str, sealed: dict[str, str]) -> None:
         """Hand *sealed* off to a background :meth:`accept` and return at once.
 
@@ -586,7 +663,7 @@ class GfsEnvelopeRelay:
             # its socket and is being flooded — must never use up the slots
             # every other recipient's envelopes need (that would also make
             # one envelope's fate depend on another household's load).
-            log.debug("gfs.envelope: backlog cap reached for %s", to_instance)
+            log.debug("gfs.envelope: backlog cap reached for a recipient")
             self._note_saturated()
             return
         if len(self._inflight) >= self._max_inflight:
@@ -661,26 +738,21 @@ class GfsEnvelopeRelay:
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.warning(
-                "gfs.envelope: background media accept failed for %s",
-                to_instance,
-                exc_info=True,
-            )
+            # No recipient id: it may be a mailbox (see ``_who``).
+            log.warning("gfs.envelope: background media accept failed", exc_info=True)
 
     async def accept_media(self, to_instance: str, body: bytes) -> None:
         """Push *body* to *to_instance*'s socket as a binary message, or
         queue it in the media queue (per-recipient + server-wide byte caps,
         tail-drop, :attr:`EnvelopeMediaConfig.media_queue_ttl_seconds`).
         Unknown / inactive recipients are dropped, as for envelopes."""
-        instance = await self._fed_repo.get_instance(to_instance)
-        if instance is None or instance.status != "active":
-            log.debug(
-                "gfs.envelope: dropping media for unknown/inactive recipient %s",
-                to_instance,
-            )
+        kind = await self._recipient(to_instance)
+        who = to_instance if kind == "instance" else "<mailbox>"
+        if kind is None:
+            log.debug("gfs.envelope: dropping media for an unknown/inactive recipient")
             return
-        if await self._ws_registry.send_media(to_instance, body):
-            log.debug("gfs.envelope: media delivered to live socket %s", to_instance)
+        if await self._sockets(to_instance).send_media(to_instance, body):
+            log.debug("gfs.envelope: media delivered to live socket %s", who)
             return
         now = int(time.time())
         queued = await self._queue_repo.enqueue_media(
@@ -688,19 +760,52 @@ class GfsEnvelopeRelay:
             body,
             created_at=now,
             expires_at=now + self._media.media_queue_ttl_seconds,
-            max_bytes_per_recipient=self._media.media_queue_bytes_per_recipient,
-            max_total_bytes=self._media.media_queue_max_total_bytes,
+            **self._media_caps(kind == "mailbox"),
         )
         if not queued:
             log.warning(
                 "gfs.envelope: media queue full for %s (%d bytes queued) — "
                 "dropping the new frame; the recipient is offline or being "
                 "flooded, or the server-wide media queue is full",
-                to_instance,
+                who,
                 await self._queue_repo.media_bytes_for(to_instance, now=now),
             )
             return
         await self._after_enqueue(to_instance)
+
+    def _media_caps(self, mailbox: bool) -> dict[str, Any]:
+        """The media queue caps of the recipient's pool."""
+        if mailbox:
+            cfg = self._mailbox_cfg
+            return {
+                "max_bytes_per_recipient": cfg.mailbox_media_queue_bytes_per_recipient,
+                "max_total_bytes": cfg.mailbox_media_queue_max_total_bytes,
+                "mailbox_pool": True,
+            }
+        return {
+            "max_bytes_per_recipient": self._media.media_queue_bytes_per_recipient,
+            "max_total_bytes": self._media.media_queue_max_total_bytes,
+            "mailbox_pool": False,
+        }
+
+    def _envelope_caps(self, mailbox: bool) -> dict[str, Any]:
+        """The envelope queue caps of the recipient's pool."""
+        if mailbox:
+            cfg = self._mailbox_cfg
+            return {
+                "max_per_recipient": cfg.mailbox_queue_max_per_recipient,
+                "max_bytes_per_recipient": cfg.mailbox_queue_bytes_per_recipient,
+                "max_total_bytes": cfg.mailbox_queue_max_total_bytes,
+                "ceiling_bytes": cfg.mailbox_queue_ceiling_bytes,
+                "mailbox_pool": True,
+            }
+        return {
+            "max_per_recipient": self._max_queued,
+            "max_bytes_per_recipient": self._max_bytes,
+            "max_total_bytes": ENVELOPE_QUEUE_MAX_TOTAL_BYTES,
+            "ceiling_bytes": ENVELOPE_QUEUE_RESERVE_CEILING_BYTES,
+            "mailbox_pool": False,
+        }
 
     def _release_pending(self, to_instance: str) -> None:
         left = self._pending_by_recipient.get(to_instance, 0) - 1
@@ -749,11 +854,8 @@ class GfsEnvelopeRelay:
         except Exception:
             # The traceback carries no frame locals, so the sealed blob is
             # never rendered; the recipient id is a validated instance id.
-            log.warning(
-                "gfs.envelope: background accept failed for %s",
-                to_instance,
-                exc_info=True,
-            )
+            # No recipient id: it may be a mailbox (see ``_who``).
+            log.warning("gfs.envelope: background accept failed", exc_info=True)
 
     async def close(self, timeout: float | None = None) -> None:
         """Let in-flight ``accept`` tasks finish, cancelling any still running
@@ -787,7 +889,7 @@ class GfsEnvelopeRelay:
         """
         if self._cluster is not None:
             self._cluster.hint_drain(to_instance)
-        if self._ws_registry.is_connected(to_instance):
+        if self.holds(to_instance):
             await self.drain(to_instance)
 
     async def accept(self, to_instance: str, sealed: dict[str, str]) -> None:
@@ -797,21 +899,20 @@ class GfsEnvelopeRelay:
         whatever happened here, so there is no outcome for it to branch on
         and nothing it could leak by accident.
         """
-        instance = await self._fed_repo.get_instance(to_instance)
-        if instance is None or instance.status != "active":
-            # Not a registered, active client of this server. Dropped — and
-            # the caller still gets the same 202, because "no such recipient"
-            # is precisely the fact an anonymous prober would be after.
-            log.debug(
-                "gfs.envelope: dropping envelope for unknown/inactive recipient %s",
-                to_instance,
-            )
+        kind = await self._recipient(to_instance)
+        who = to_instance if kind == "instance" else "<mailbox>"
+        if kind is None:
+            # Not a registered, active client of this server, nor a
+            # registered mailbox. Dropped — and the caller still gets the
+            # same 202, because "no such recipient" is precisely the fact an
+            # anonymous prober would be after.
+            log.debug("gfs.envelope: dropping envelope for an unknown recipient")
             return
-        if await self._ws_registry.send(
+        if await self._sockets(to_instance).send(
             to_instance,
             {"type": ENVELOPE_FRAME_TYPE, "sealed": sealed},
         ):
-            log.debug("gfs.envelope: delivered to live socket %s", to_instance)
+            log.debug("gfs.envelope: delivered to live socket %s", who)
             return
         now = int(time.time())
         queued = await self._queue_repo.enqueue(
@@ -819,9 +920,8 @@ class GfsEnvelopeRelay:
             orjson.dumps(sealed).decode(),
             created_at=now,
             expires_at=now + self._ttl,
-            max_per_recipient=self._max_queued,
-            max_bytes_per_recipient=self._max_bytes,
             frame_type=QUEUE_KIND_ENVELOPE,
+            **self._envelope_caps(kind == "mailbox"),
         )
         if not queued:
             # The caller still gets the same 202 — a different answer here
@@ -832,11 +932,11 @@ class GfsEnvelopeRelay:
             log.warning(
                 "gfs.envelope: queue full for %s (%d queued) — dropping the "
                 "new envelope; the recipient is offline or being flooded",
-                to_instance,
+                who,
                 await self._queue_repo.count_for(to_instance),
             )
             return
-        log.debug("gfs.envelope: queued for offline recipient %s", to_instance)
+        log.debug("gfs.envelope: queued for offline recipient %s", who)
         await self._after_enqueue(to_instance)
 
     async def fan_out_relay(
@@ -953,17 +1053,16 @@ class GfsEnvelopeRelay:
             **kind,
         )
         if not queued and reaction:
+            # No target id: a subscriber may be an anonymous mailbox (PR 2).
             log.info(
-                "gfs.envelope: no room for a queued reaction for %s beside its "
-                "moments and space items — dropped",
-                target,
+                "gfs.envelope: no room for a queued reaction beside a recipient's "
+                "moments and space items — dropped"
             )
             return False
         if not queued:
             log.warning(
-                "gfs.envelope: a relay frame for %s exceeds the relay queue "
-                "caps on its own — not queued",
-                target,
+                "gfs.envelope: a relay frame exceeds the relay queue caps on "
+                "its own — not queued"
             )
             return False
         await self._after_enqueue(target)
@@ -990,7 +1089,7 @@ class GfsEnvelopeRelay:
         """Start *to_instance*'s background media drain, or — when one is
         already running — have it go round once more (one per recipient, so
         a frame is never pushed twice by two drains)."""
-        if not self._ws_registry.takes_media(to_instance):
+        if not self._sockets(to_instance).takes_media(to_instance):
             return
         running = self._media_drains.get(to_instance)
         if running is not None and not running.done():
@@ -1020,7 +1119,7 @@ class GfsEnvelopeRelay:
                 # A push was refused: back off, never re-push at once.
                 attempts += 1
                 if attempts >= MEDIA_RETRY_ATTEMPTS or not (
-                    self._ws_registry.takes_media(to_instance)
+                    self._sockets(to_instance).takes_media(to_instance)
                 ):
                     return
                 await asyncio.sleep(backoff)
@@ -1029,7 +1128,9 @@ class GfsEnvelopeRelay:
             raise
         except Exception:
             log.warning(
-                "gfs.envelope: media drain failed for %s", to_instance, exc_info=True
+                "gfs.envelope: media drain failed for %s",
+                self._who(to_instance),
+                exc_info=True,
             )
 
     async def settle_media(self) -> None:
@@ -1045,7 +1146,7 @@ class GfsEnvelopeRelay:
         except Exception as exc:  # fail-soft: a drain must never kill the socket
             log.warning(
                 "gfs.envelope: drain lookup failed for %s: %s",
-                to_instance,
+                self._who(to_instance),
                 exc,
                 exc_info=True,
             )
@@ -1056,7 +1157,7 @@ class GfsEnvelopeRelay:
                 frame = queued_relay_push(envelope.sealed)
             else:
                 frame = {"type": ENVELOPE_FRAME_TYPE, "sealed": envelope.sealed}
-            sent = await self._ws_registry.send(to_instance, frame)
+            sent = await self._sockets(to_instance).send(to_instance, frame)
             if not sent:
                 break
             await self._queue_repo.delete(envelope.id)
@@ -1065,7 +1166,7 @@ class GfsEnvelopeRelay:
             log.debug(
                 "gfs.envelope: drained %d queued envelope(s) to %s",
                 delivered,
-                to_instance,
+                self._who(to_instance),
             )
         return delivered
 
@@ -1073,7 +1174,8 @@ class GfsEnvelopeRelay:
         """Push *to_instance*'s queued media frames, one row at a time.
         ``True`` when the queue is done (empty, or nothing to push to);
         ``False`` when a push was refused (the caller backs off)."""
-        if not self._ws_registry.takes_media(to_instance):
+        sockets = self._sockets(to_instance)
+        if not sockets.takes_media(to_instance):
             return True
         after = 0
         while True:
@@ -1084,17 +1186,47 @@ class GfsEnvelopeRelay:
             except Exception as exc:  # fail-soft, like the envelope lookup
                 log.warning(
                     "gfs.envelope: media drain lookup failed for %s: %s",
-                    to_instance,
+                    self._who(to_instance),
                     exc,
                     exc_info=True,
                 )
                 return True
             if row is None:
                 return True
-            if not await self._ws_registry.send_media(to_instance, row.body):
+            if not await sockets.send_media(to_instance, row.body):
                 return False
             await self._queue_repo.delete_media(row.id)
             after = row.id
+
+
+#: Mailbox registrations one client address may post a minute (per node
+#: share of a cluster-wide budget). A household registers one per space it
+#: joins over this server, plus rotations — a handful a day.
+MAILBOX_REGISTER_MAX_PER_MINUTE: int = 30
+#: Mailbox claim sockets one client address may open a minute (one per
+#: mailbox at startup and on every reconnect).
+MAILBOX_CLAIM_MAX_PER_MINUTE: int = 120
+
+
+def build_mailbox_rate_limits(
+    resolver: ClientIpResolver, *, nodes: Callable[[], int] | None = None
+) -> list:
+    """Per-address limiters for the two anonymous mailbox routes. The
+    address is held in memory by the limiter only — never stored."""
+    return [
+        build_window_limiter(
+            resolver,
+            MAILBOX_REGISTER_MAX_PER_MINUTE,
+            lambda path: path == MAILBOX_REGISTER_ROUTE,
+            nodes=nodes,
+        ),
+        build_window_limiter(
+            resolver,
+            MAILBOX_CLAIM_MAX_PER_MINUTE,
+            lambda path: path == MAILBOX_WS_ROUTE,
+            nodes=nodes,
+        ),
+    ]
 
 
 def build_envelope_rate_limit(resolver: ClientIpResolver):

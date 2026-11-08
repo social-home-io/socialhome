@@ -20,7 +20,11 @@ from socialhome.capabilities_sig import (
     UnsupportedCapsSigSuite,
     verify_capabilities,
 )
-from socialhome.crypto import generate_space_keypair
+from socialhome.crypto import (
+    derive_instance_id,
+    ed25519_public_key,
+    generate_space_keypair,
+)
 from socialhome.csp import build_public_page_csp, build_spa_csp
 from socialhome.global_server import create_gfs_app, server
 from socialhome.global_server.app_keys import (
@@ -33,6 +37,10 @@ from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.federation import GfsFederationService
 from socialhome.global_server.public import PUBLISH_MAX_PER_MINUTE
 from socialhome.moment_public_media import MAX_BLOB_BYTES
+
+#: A household whose id is the one its key derives (the GFS refuses others).
+_HOME_PK_HEX = ed25519_public_key(b"\x05" * 32).hex()
+_HOME_ID = derive_instance_id(bytes.fromhex(_HOME_PK_HEX))
 
 
 @pytest.fixture
@@ -130,14 +138,14 @@ async def test_register_instance_returns_registered(gfs_client):
         "/gfs/register",
         json={
             "token": token,
-            "instance_id": "inst-abc",
-            "public_key": "aa" * 32,
+            "instance_id": _HOME_ID,
+            "public_key": _HOME_PK_HEX,
         },
     )
     assert resp.status == 200
     body = await resp.json()
     assert body["status"] == "registered"
-    assert body["instance_id"] == "inst-abc"
+    assert body["instance_id"] == _HOME_ID
 
 
 async def test_register_missing_field_returns_400(gfs_client):
@@ -168,8 +176,8 @@ async def test_register_invalid_token_returns_401(gfs_client):
         "/gfs/register",
         json={
             "token": "this-was-never-minted",
-            "instance_id": "inst-bad-tok",
-            "public_key": "aa" * 32,
+            "instance_id": _HOME_ID,
+            "public_key": _HOME_PK_HEX,
         },
     )
     assert resp.status == 401
@@ -182,8 +190,8 @@ async def test_register_token_is_single_use(gfs_client):
     token = await _fresh_pair_token(gfs_client.server.app, "127.0.0.12")
     body = {
         "token": token,
-        "instance_id": "inst-replay",
-        "public_key": "aa" * 32,
+        "instance_id": _HOME_ID,
+        "public_key": _HOME_PK_HEX,
     }
     first = await gfs_client.post("/gfs/register", json=body)
     assert first.status == 200
@@ -202,8 +210,8 @@ async def test_register_returns_pending_when_auto_accept_off(gfs_client):
         "/gfs/register",
         json={
             "token": token,
-            "instance_id": "new-pending.home",
-            "public_key": "aa" * 32,
+            "instance_id": _HOME_ID,
+            "public_key": _HOME_PK_HEX,
         },
     )
     assert resp.status == 200
@@ -219,18 +227,20 @@ async def test_register_ignores_a_legacy_inbox_url(gfs_client, legacy_url):
     registration goes through like any other."""
     app = gfs_client.server.app
     token = await _fresh_pair_token(app, "127.0.0.14")
+    _seed, pk = _make_keypair()
+    legacy_id = derive_instance_id(pk)
     resp = await gfs_client.post(
         "/gfs/register",
         json={
             "token": token,
-            "instance_id": "inst-legacy",
-            "public_key": "aa" * 32,
+            "instance_id": legacy_id,
+            "public_key": pk.hex(),
             "inbox_url": legacy_url,
         },
     )
     assert resp.status == 200
     assert legacy_url not in await resp.text() or not legacy_url
-    stored = await app[gfs_fed_repo_key].get_instance("inst-legacy")
+    stored = await app[gfs_fed_repo_key].get_instance(legacy_id)
     assert stored is not None
     assert not hasattr(stored, "inbox_url")
     columns = {
@@ -338,6 +348,8 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         },
         # v_87 — ``POST /gfs/envelope`` takes binary media frames.
         "envelope_media": True,
+        # GFS redesign PR 1 — anonymous per-space mailboxes.
+        "envelope_mailbox": {"sig_suites": ["ed25519"], "idle_days": 30},
         # ``POST /gfs/proof`` needs a real base_url to bind; this fixture's
         # env fallback infers ``http://0.0.0.0:8765`` (a wildcard bind
         # address), so the GFS honestly does not offer it.
@@ -550,6 +562,13 @@ async def _register_and_publish(
     app = gfs_client.server.app
     await app[gfs_admin_repo_key].set_config("auto_accept_clients", "1")
     seed, pk = _make_keypair()
+    # These fixtures name their households (``inst-sub`` …) instead of using
+    # the id their key derives: seed the row first, as for a household that
+    # registered before the GFS checked the derivation — the route lets a
+    # re-register under the same (id, key) through (grandfathered).
+    await app[gfs_fed_repo_key].upsert_instance(
+        ClientInstance(instance_id=instance_id, display_name="", public_key=pk.hex())
+    )
     token = await _fresh_pair_token(app, client_ip)
     reg = await gfs_client.post(
         "/gfs/register",

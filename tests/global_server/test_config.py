@@ -946,3 +946,61 @@ def test_envelope_media_bad_values_are_refused(tmp_dir, line):
     )
     with pytest.raises(ValueError, match="envelope_relay"):
         GfsConfig.from_toml(p)
+
+
+# ── [envelope_relay] mailbox keys (GFS redesign PR 1) ────────────────────
+
+
+def test_envelope_mailbox_defaults():
+    m = GfsConfig().envelope_mailbox
+    assert m.enabled is True
+    assert m.mailbox_max_per_ip == 200
+    assert m.mailbox_idle_days == 30
+
+
+def test_envelope_mailbox_loads_from_toml_and_env_wins(tmp_dir, monkeypatch):
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        '[server]\nbase_url = "https://g.example"\n'
+        "[envelope_relay]\nmailboxes = false\nmailbox_max_per_ip = 5\n"
+        "mailbox_idle_days = 7\n"
+    )
+    m = GfsConfig.from_toml(p).envelope_mailbox
+    assert (m.enabled, m.mailbox_max_per_ip, m.mailbox_idle_days) == (False, 5, 7)
+    monkeypatch.setenv("GFS_ENVELOPE_RELAY_MAILBOXES", "on")
+    monkeypatch.setenv("GFS_ENVELOPE_RELAY_MAILBOX_IDLE_DAYS", "60")
+    m = GfsConfig.load(p).envelope_mailbox
+    assert (m.enabled, m.mailbox_max_per_ip, m.mailbox_idle_days) == (True, 5, 60)
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["mailbox_max_per_ip = 0", "mailbox_idle_days = 0", 'mailboxes = "maybe"'],
+)
+def test_envelope_mailbox_bad_values_are_refused(tmp_dir, line):
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        f'[server]\nbase_url = "https://g.example"\n[envelope_relay]\n{line}\n'
+    )
+    with pytest.raises(ValueError, match="envelope_relay"):
+        GfsConfig.from_toml(p)
+
+
+def test_envelope_mailbox_queue_and_socket_caps(tmp_dir, monkeypatch):
+    m = GfsConfig().envelope_mailbox
+    assert (m.mailbox_queue_max_per_recipient, m.mailbox_queue_bytes_per_recipient) == (
+        200,
+        4 * 1024**2,
+    )
+    assert m.mailbox_queue_max_total_bytes == 256 * 1024**2
+    assert m.mailbox_media_queue_bytes_per_recipient == 8 * 1024**2
+    assert m.mailbox_max_new_per_day == 20_000
+    assert m.mailbox_max_sockets_per_ip == 512
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        '[server]\nbase_url = "https://g.example"\n'
+        "[envelope_relay]\nmailbox_max_sockets_per_ip = 3\n"
+    )
+    assert GfsConfig.from_toml(p).envelope_mailbox.mailbox_max_sockets_per_ip == 3
+    monkeypatch.setenv("GFS_ENVELOPE_RELAY_MAILBOX_MAX_NEW_PER_DAY", "7")
+    assert GfsConfig.load(p).envelope_mailbox.mailbox_max_new_per_day == 7

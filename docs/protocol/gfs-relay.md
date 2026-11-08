@@ -414,6 +414,154 @@ household (the sender waits out each 429). That is why live pictures stay on
 the cache (one upload per GFS, not per member) and the relay carries only
 what the cache cannot.
 
+## Anonymous per-space mailboxes (GFS redesign PR 1)
+
+Every relay above addresses a household by its **instance id**, so the GFS
+sees one household id across all the spaces it reaches that household for.
+The redesign addresses a member reached through a GFS by a **mailbox** per
+(household, space, generation) instead. PR 1 ships the GFS side and the
+household library only — no household sends to or claims a mailbox until
+redesign PR 2 (v_88); there is no `OURS` bump. The GFS advertises it in its
+signed `/gfs/info` as `envelope_mailbox: {"sig_suites": ["ed25519"],
+"idle_days": 30}`.
+
+**Keys and id.** The household derives the mailbox's X25519 sealing key and
+Ed25519 claim key with HKDF-SHA256 from its **mailbox root** — a dedicated
+32-byte secret generated once and stored under the household KEK (wired in
+PR 2), not the key-wrap seed (salt `sh-mbx-v1`, info
+`sh-mbx-kem:v1|<gfs id>|<space>|<gen>` / `sh-mbx-sign:v1|<gfs id>|<space>|<gen>`),
+so beside the root only `gen` (and the GFS id pinned at mint time) needs
+storing. With the GFS id in the derivation, two GFSs serving the same
+global space get unrelated mailbox ids for the same household. `mailbox_id = base32(SHA-256("sh-mbx-v1" ‖
+sign_pk))[:32]` — the shape of an instance id, so a JSON envelope's
+`to_instance` and a binary `\x00SHR` frame's recipient field carry it
+unchanged, and the prefix keeps it apart from the instance id of the same
+key.
+
+**Register** — `POST /gfs/mailbox/register`, anonymous, `{sig_suite:
+"ed25519", sign_pk, mailbox_id, gfs_instance_id, ts, nonce, sig}`. `sig` is the proof of
+possession over `"sh-mbx-register:v1" \n gfs_instance_id \n mailbox_id \n ts
+\n nonce` — bound to the GFS id the household pinned, so a registration made
+for one GFS proves nothing at another. A server accepts its own id, its
+`instance_id_aliases` and the ids its shared-key cluster siblings serve (a
+cluster whose allocs still serve per-node ids: register on one, claim on
+another). The GFS rejects an unknown `sig_suite` (no
+default), recomputes the id from the key, checks `ts` (±300 s) and the
+signature, spends the nonce (a replay is `409`), refuses an id an instance
+holds (`409 id_in_use`, atomically with the insert — and `/gfs/register`
+in turn only takes an instance id derived from its key, never a mailbox's,
+never moving a row to another key) and pins the key on first use;
+registering again is a no-op. Limits: 30 / min per address, then
+`mailbox_max_per_ip` (200) new mailboxes per UTC day per /64 (×16 per /56,
+×256 per /48) in salted count-min sketches (no address kept, nothing to
+evict), and `mailbox_max_new_per_day` (20 000) server-wide.
+
+**Claim** — `GET /gfs/mailbox/ws`, a socket of its own, never the identified
+`/gfs/ws`, and **one mailbox per socket** (owner decision: a shared socket
+would link a household's spaces live). The GFS sends a random challenge; the
+client signs `"sh-mbx-claim:v1" \n gfs_instance_id \n mailbox_id \n challenge`
+with the mailbox key. Unknown mailbox and wrong key close alike (`4401
+auth-failed`, after the same dummy-key verify). Then the GFS delivers the
+mailbox's queued frames in order and its live ones: JSON envelopes as text,
+binary `\x00SHR` media frames unchanged when the claim's `accepts` lists
+`envelope_media`. aiohttp pings every 30 s (inside Cloudflare's 100 s idle
+timeout); a claim updates `last_claim_at`.
+
+**Routing.** `POST /gfs/envelope` (JSON and binary) to a mailbox id is
+pushed or queued exactly as to an instance id — the same
+`gfs_envelope_queue` / `gfs_media_queue` rows keyed by the id, the same
+per-recipient caps, TTLs and in-flight bounds — and answers the same uniform
+`202` before the recipient is even looked up, so a known mailbox, an unknown
+one and a household are indistinguishable. In a cluster the enqueue hints
+the sibling nodes (`NODE_DRAIN_HINT` carries the mailbox id like an instance
+id) and the node holding the claim socket drains it.
+
+**Idle sweep.** Both stored timestamps are rounded down to the UTC day — a
+household reclaiming all its mailboxes at once would otherwise stamp them
+with the same second. A mailbox whose last claim (or, never claimed, its
+registration) is `mailbox_idle_days` (30) days old is dropped with its
+queued frames by the maintenance loop; a claim socket held open re-stamps
+its day once a day, so it is never swept while connected.
+
+**Queues: a pool of their own.** Mailbox ids are free to mint, so their
+frames never share room with households' (each queued row carries its
+`pool`). Per mailbox: 200 envelopes / 4 MiB and 8 MiB of media
+(households: 2 000 / 64 MiB and 16 MiB). Both envelope pools follow ONE
+model — **tail-drop plus a per-recipient reserve, nothing is ever
+evicted**:
+
+- past the pool's total (households 1 GiB, mailboxes 256 MiB) a new
+  envelope is dropped — anyone can post to any id, so evicting someone's
+  envelopes to make room would be an anonymous delete primitive;
+- except for a recipient still under its **reserve** (fewer than 20 queued
+  envelopes and less than 64 KiB): it is admitted up to the pool's
+  **ceiling** (households 2 GiB, mailboxes 1 GiB), so a flood of other ids
+  can fill the pool but never block anybody's first envelopes. Headroom
+  math: a reserve holds < 64 KiB plus one envelope (≤ 320 KiB), so the
+  1 GiB / 768 MiB headroom fits ≥ 2 700 / 2 000 recipients at a worst-case
+  reserve, ~16 000 / 12 000 at a typical few-KiB envelope;
+- media: households 1 GiB, mailboxes 256 MiB, tail-drop.
+
+Worst-case disk for queued relay frames is therefore 2 + 1 GiB of
+envelopes + 1 + 0.25 GiB of media + 256 MiB of member relay items ≈ 4.5 GiB,
+whatever the number of ids. The pool totals are running counters
+(`gfs_queue_totals`, kept by triggers on every insert and delete, recomputed
+hourly by maintenance as drift repair), so a cap check reads one row;
+expired rows of a pool are swept (an index range) before an insert is
+refused, so they never hold room. (Round 3's ranked mailbox eviction was
+removed in favour of this: one model, no scans, nothing to game.)
+
+**Interim backstop — anonymous tickets follow.** Today a flood of mailboxes
+is bounded by the per-address caps and the server-wide
+`mailbox_max_new_per_day` (20 000, counted in the insert transaction). The
+owner decided on anonymous, blind-signed registration tickets (a daily
+batch per registered household over its `/gfs/ws`, Privacy Pass style,
+unlinkable; a registration spends one) — a separate follow-up PR that lands
+before redesign PR 2.
+
+```mermaid
+sequenceDiagram
+    participant H as Household (member over the GFS)
+    participant A as GFS node A
+    participant B as GFS node B
+    participant S as Sender household
+    H->>H: keys = HKDF(mailbox root, gfs id, space, gen); id = b32(SHA-256("sh-mbx-v1"‖sign_pk))[:32]
+    H->>A: POST /gfs/mailbox/register {sign_pk, id, gfs_instance_id, ts, nonce, sig}
+    A->>A: verify PoP, nonce, id ≠ instance → pin key (gfs_mailboxes)
+    A-->>H: 200 registered
+    S->>A: POST /gfs/envelope {to_instance: id, sealed}
+    A-->>S: 202 accepted (uniform)
+    A->>A: no claim socket here → gfs_envelope_queue + NODE_DRAIN_HINT [id]
+    H->>B: GET /gfs/mailbox/ws
+    B->>H: mailbox_challenge {challenge, gfs_instance_id, sig_suites}
+    H->>B: mailbox_claim {id, gfs_instance_id, sig_suite, sig, accepts}
+    B->>B: verify under the pinned key, last_claim_at = now
+    B->>H: mailbox_claimed, then queued frames in order
+    S->>A: POST /gfs/envelope (binary \x00SHR to id)
+    A->>A: queue + NODE_DRAIN_HINT [id]
+    A->>B: NODE_DRAIN_HINT
+    B->>H: binary WS message (the same bytes)
+```
+
+**What the GFS stores and learns.** `gfs_mailboxes` holds the id, the
+pinned key and two day-granular timestamps — no instance id, no address,
+no space id. No log line names a mailbox id on any path (the claim-socket
+registry prints `<mailbox>`, the relay and the cluster drain print a
+recipient id only for a household socket on the same node), so no application log sits next to an access-log
+address for it. The GFS still sees, per envelope, the mailbox, the time,
+the size and the sender's address, and per claim socket its address and
+online time; within one space it can cluster mailboxes that the same
+fan-out bursts hit. Across spaces nothing is stored or cryptographically
+linked — only IP / timing correlation with the household's identified
+socket, the residual named above.
+
+Implementation: `socialhome/domain/gfs_mailbox.py` (id, signed bytes, suite
+tag), `socialhome/federation/gfs_mailbox.py` (key derivation, register,
+`MailboxClaim`), `socialhome/global_server/mailboxes.py`
+(`GfsMailboxService`), `socialhome/global_server/routes/mailbox.py`,
+`GfsEnvelopeRelay._recipient` / `_sockets` / `holds`,
+`ClusterService.attach_drain(holds=…)`, GFS migration 0029.
+
 ## Privacy — who learns what
 
 | Party | Learns |

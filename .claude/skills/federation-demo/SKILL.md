@@ -1287,6 +1287,21 @@ WS pushes across allocs. The step:
    handoff via node 0 must reach it (shared relay queue + drain hint).
    Without the cross-node path the step fails with "no 'new_subscriber'
    frame within 10 s".
+   Then **anonymous mailboxes** (GFS redesign PR 1, step 3d''): a mailbox
+   (keys derived with ``federation/gfs_mailbox.py``) registered via node 0
+   and claimed on node 1 (``/gfs/mailbox/ws``) must get a JSON envelope and
+   a ~516 KiB binary media frame posted via node 0, byte-identical (shared
+   queue + ``NODE_DRAIN_HINT`` naming the mailbox id); then both posted
+   while the claim socket is closed must drain on the next claim on node 1;
+   and the mailbox id must appear in no GFS log line. Without the
+   mailbox-aware drain hint the step fails with "no JSON envelope on the
+   mailbox socket held by node 1".
+   At the very end (step 3k) the step boots an extra node on 18773 that
+   shares the key and the DB but serves its OWN public id (``gfs-node-x``,
+   like an alloc still on a per-alloc ``gfs-N`` id): a mailbox registered
+   via node 0 — bound to node 0's id — is claimed there and gets an envelope
+   and a media frame posted via node 0, byte-identical (a node accepts the
+   ids its shared-key siblings serve). The extra node is stopped after.
    Then a **broadcast**: one follower's socket on EACH node, a signed
    ``space_post_public`` published via node 0 — every follower must get
    exactly one ``relay`` frame (a further 2 s window must stay empty). The

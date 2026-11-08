@@ -231,11 +231,98 @@ signalling POSTs above), so the stock config is fine; nginx defaults to
 (Free / Pro) is far above it. A front end set below 528 KiB answers 413, and a
 household then cannot send media frames through that server.
 
+## Anonymous mailboxes (GFS redesign PR 1)
+
+A GFS with mailboxes on (the default) advertises `envelope_mailbox` in its
+signed `/gfs/info` and serves two anonymous routes (see
+[gfs-relay.md](../protocol/gfs-relay.md#anonymous-per-space-mailboxes-gfs-redesign-pr-1)):
+`POST /gfs/mailbox/register` and the claim socket `GET /gfs/mailbox/ws`.
+The keys live in `[envelope_relay]`, each with a `GFS_ENVELOPE_RELAY_<KEY>`
+env override:
+
+```toml
+[envelope_relay]
+mailboxes = true            # serve them; false drops the routes (404) and the capability
+mailbox_max_per_ip = 200            # NEW mailboxes per address per UTC day (/64; ×16 per /56, ×256 per /48)
+mailbox_max_new_per_day = 20000     # NEW mailboxes server-wide per UTC day (shared table)
+mailbox_max_sockets_per_ip = 512    # open claim sockets per address (/64; ×16 /56, ×256 /48)
+mailbox_idle_days = 30              # last claim (or registration) this many days ago → dropped
+mailbox_queue_max_per_recipient = 200         # queued envelopes for one offline mailbox
+mailbox_queue_bytes_per_recipient = 4194304   # 4 MiB
+mailbox_queue_max_total_bytes = 268435456     # 256 MiB for ALL mailboxes, then tail-drop …
+mailbox_queue_ceiling_bytes = 1073741824      # … except a mailbox under its reserve (< 20 envelopes, < 64 KiB), up to 1 GiB
+mailbox_media_queue_bytes_per_recipient = 8388608   # 8 MiB of media for one mailbox
+mailbox_media_queue_max_total_bytes = 268435456     # 256 MiB of media for ALL mailboxes (tail-drop)
+```
+
+Mailbox frames live in a pool of their own: they never count against, and
+never evict, households' queued envelopes (1 GiB total, tail-drop with the
+same reserve up to 2 GiB) or media
+(`media_queue_max_total_bytes`). Worst-case queue disk ≈ 2.75 GiB whatever
+the number of minted ids (see
+[gfs-relay.md](../protocol/gfs-relay.md#anonymous-per-space-mailboxes-gfs-redesign-pr-1)).
+
+The per-address caps and the 30 / min register limit (120 / min claim
+sockets) count in each node's memory — the caps in salted count-min sketches
+that keep no address at all — and are divided over the live nodes like the
+other anonymous limits (below). The address is never written to the
+database or logged next to a mailbox id.
+
+**Per-alloc public ids.** A registration and a claim are bound to the GFS id
+the household pinned. A node accepts its own id, its `instance_id_aliases`
+and the ids its shared-key siblings report in their HELLO / heartbeat, so
+a cluster whose allocs still serve `gfs-N` ids works (register via one
+alloc, claim on another). Every node also writes its own id and its
+siblings' ids to the shared `gfs_known_gfs_ids` table and accepts any id
+seen there in the last 90 days, so a household pinned to an alloc that
+has since gone keeps claiming. **Retiring a node or changing an id still
+needs `instance_id_aliases`** on the remaining nodes: the table only knows
+ids that were live while this release ran, and `/gfs/info` / the rest of
+the protocol rely on the aliases — the gfs-cluster demo checks it (step 3k). A
+freshly started alloc learns a sibling's id from that sibling's first
+HELLO / heartbeat (≤ 30 s); until then a claim bound to it is refused like a
+wrong key and the household retries. Still
+move every alloc to one `instance_id` (the cluster logs an ERROR until
+then).
+
+**No sticky routing needed.** The registrations (`gfs_mailboxes`) and the
+queued frames (`gfs_envelope_queue` / `gfs_media_queue`, keyed by the
+mailbox id) are in the shared database, and a frame posted to one node for a
+mailbox whose claim socket another node holds is drained by that node on the
+`NODE_DRAIN_HINT` (it carries mailbox ids like instance ids). So both routes
+can be round-robined like `/gfs/ws`.
+
+**What `gfs-deployment` needs** (no change in this repo; open it there):
+
+- **Routes.** Send `/gfs/mailbox/register` (POST, ≤ 2 KiB body) and
+  `/gfs/mailbox/ws` (GET + `Upgrade: websocket`) to the GFS backend like
+  `/gfs/envelope` and `/gfs/ws` — if the frontend lists paths explicitly,
+  add both. The WebSocket route needs the same `timeout tunnel` as `/gfs/ws`
+  (aiohttp pings every 30 s, inside Cloudflare's 100 s idle timeout, so an
+  idle claim socket stays up through both).
+- **Connections and file descriptors.** Every household reached through the
+  GFS holds one extra socket **per space** it is reached for (one mailbox per
+  socket, by design), on top of its `/gfs/ws`. Size HAProxy `maxconn`
+  (frontend and per-server) and each Nomad alloc's `nofile` ulimit for
+  `households × (1 + spaces reached via this GFS)`; e.g. 2 000 households in
+  5 such spaces each is ~12 000 sockets (~3 000 per alloc on 4 allocs, plus
+  the same again on HAProxy, which holds both sides). Raise
+  `ulimit -n` / Nomad `config { ulimit { nofile = "65536:65536" } }` and
+  `maxconn` accordingly.
+- **Cloudflare.** WebSockets on (already needed for `/gfs/ws`); no rule
+  change.
+
+**Rolling upgrade.** A node older than this release has no mailbox routes
+(`404`) and drops an envelope addressed to a mailbox id as "unknown
+recipient" (the same uniform `202`). Households use mailboxes only from
+redesign PR 2 on, and only where `/gfs/info` signs `envelope_mailbox`, so
+upgrade every node before rolling out a household release that uses them.
+
 ## Rate limits across nodes
 
 The anonymous per-IP limits on the public pages, the highlight offer /
 relay entry points, `/gfs/highlights/ice-servers` and the space media
-`wanted` requests (60 / min) count in each node's
+`wanted` requests (60 / min) and the mailbox register / claim limits count in each node's
 memory, so each node allows its share — the limit divided by the live
 nodes, rounded up (`public.node_share`). Behind round-robin, a client gets
 about one budget across the cluster. When a node goes away its peers mark
