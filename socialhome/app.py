@@ -1606,6 +1606,7 @@ def _wire_federation_stack(
         page_repo=page_repo,
     )
     inbound_service.attach_to(federation_service)
+    inbound_service.attach_media_references(media_reference_repo)
     inbound_service.attach_groups(dm_service.groups)
     inbound_service.attach_moment_reaction_router(moment_reaction_router)
 

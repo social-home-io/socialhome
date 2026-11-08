@@ -202,3 +202,36 @@ async def test_a_comments_file_is_filled_by_its_author_or_a_moderator(env, tmp_d
     assert not _sc(tmp_dir).exists()
     await _deliver(app, FET.SPACE_MEDIA_BLOB, _blob("c-fill"), sender=OTHER)
     assert _sc(tmp_dir).read_bytes() == PIC
+
+
+@pytest.mark.parametrize(
+    ("sender", "filled"),
+    [
+        pytest.param(OTHER, False, id="plain member"),
+        pytest.param(MOD, True, id="moderator"),
+    ],
+)
+async def test_a_made_up_row_id_does_not_bypass_the_fill_rule(
+    env, tmp_dir, sender, filled
+):
+    """Review (High): the content name depends only on (S, h), so a blob
+    naming a row id this household does not hold must not fill a file a
+    held row already shows. A plain member's bytes then keep only their
+    sender-bound name; a trusted household fills."""
+    app, _db = env
+    await _hashed_post(app)
+    await _deliver(app, FET.SPACE_MEDIA_BLOB, _blob("no-such-row"), sender=sender)
+    assert _sc(tmp_dir).exists() is filled
+
+
+async def test_a_banned_authors_household_no_longer_fills(env, tmp_dir):
+    app, db = env
+    await _hashed_post(app)
+    await db.enqueue(
+        "INSERT INTO space_bans(space_id, user_id, banned_by) VALUES(?, 'u-a', 'u-h')",
+        (SP,),
+    )
+    await _deliver(app, FET.SPACE_MEDIA_BLOB, _blob("p-fill"), sender=AUTHOR)
+    assert not _sc(tmp_dir).exists()
+    await _deliver(app, FET.SPACE_MEDIA_BLOB, _blob("p-fill"), sender=MOD)
+    assert _sc(tmp_dir).read_bytes() == PIC

@@ -541,8 +541,8 @@ never change it (owner decision A, 2026-11-08). A `SPACE_MEDIA_BLOB` with
    `SpaceAuthorship.acts_for(row author)` (any seat, the author's own
    row), or `has_content_authority` — the host, a delegated admin, a live
    `admin` or `moderator` seat as this household's roster mirror records
-   it. A plain member household that is not the author, and a household
-   with no seat, are refused.
+   it. A plain member household that is not the author, a household with
+   no seat, and a banned author's household are refused.
 5. **The bytes hash to `h`** (`store_chunk`, `content_name_binds`).
 6. **The file is absent** — write-once: an existing file is never
    replaced.
@@ -557,8 +557,16 @@ Unchanged:
 - **A row not held here:** a blob that overtakes its row still lands
   (verified, under the content name and the sender's `sd-` name); the
   receiver cannot tell an author's early push from anything else before
-  the row arrives. It is not a fill — no row shows it, and the orphan
-  sweep removes an unreferenced copy after 24 h. Bounded by the existing
+  the row arrives, and the orphan sweep removes an unreferenced copy after
+  24 h. **But** the content name depends only on `(S, h)`, so when a live
+  row held here already shows `sc(S, h)` (`media_reference_repo
+  .is_referenced`), a blob naming a row id we do not hold is a fill by
+  another id: only a trusted household's lands under the content name; any
+  other sender's bytes keep only their sender-bound `sd-` name
+  (`_fill_by_another_id`). The author fills under its row's own id.
+  Residual: a soft-deleted post still lists its pictures but no longer
+  counts as a reference, so such a blob may land under the deleted post's
+  name — nothing shows it, the sweep removes it. Bounded by the existing
   per-sender inbound limits.
 - **Members are equal on every path:** the rule reads only the roster
   mirror (`space_remote_members`), so a paired, mesh-reached or
@@ -584,13 +592,17 @@ receiver would take them, an older one would store them under a name no
 row shows). Relay-seated requesters still get no catch-up blobs (their GFS
 media cache serves them).
 
-**Cost per trigger:** a newcomer's full stream from each trusted non-host
-household costs at most 50 files / 32 MiB on top of today's (a plain
-member household now ships *less* than before: only its own people's
-files). Worst realistic case — a space with 5 moderator households, a
-newcomer pairing with all of them: 5 × 32 MiB = 160 MiB once, bounded by
-the provider's 5 sessions / h per requester; a resume is already capped
-at 32 MiB per (household, space) per 30 min. Duplicates of what the host
+**Cost per trigger:** a full stream from a trusted non-host household
+costs at most 50 files / 32 MiB on top of today's (a plain member
+household now ships *less* than before: only its own people's files).
+The budget is per stream: a provider serves a requester at most
+`SYNC_BEGIN_RATE_LIMIT_PER_HOUR` = 5 streams per (requester, space) per
+hour, so the ceiling is 5 × 32 MiB = 160 MiB per helper per requester per
+space per hour (an honest requester asks for one initial stream; the
+periodic `incremental` stream ships no catch-up media). Worst realistic
+case — a newcomer pairing with 5 moderator households: 5 × 32 MiB =
+160 MiB once. A resume is already capped at 32 MiB per (household, space)
+per 30 min. Duplicates of what the host
 ships are dropped write-once at the receiver (bytes still cross once per
 helper — the later "file wanted" request replaces this push).
 

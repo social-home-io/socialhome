@@ -206,6 +206,7 @@ if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.gallery_repo import AbstractGalleryRepo
     from ..repositories.highlight_repo import AbstractHighlightRepo
+    from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ..repositories.moment_repo import AbstractMomentRepo
     from ..repositories.page_repo import AbstractPageRepo
     from ..repositories.space_cover_repo import AbstractSpaceCoverRepo
@@ -499,6 +500,7 @@ class FederationInboundService(ProtectionGateMixin):
         "_highlight_repo",
         "_media_dir",
         "_media_names",
+        "_media_refs",
         "_mentions",
         "_moment_outbound",
         "_moment_reaction_router",
@@ -642,6 +644,9 @@ class FederationInboundService(ProtectionGateMixin):
         self._gfs_media: SpaceMediaGfsFetcher | None = None
         #: Received space files take this household's names (sender-bound).
         self._media_names = SpaceMediaNamer()
+        #: v_86 — whether a row here already shows a content name
+        #: (:meth:`attach_media_references`; ``None``: not checked).
+        self._media_refs: AbstractMediaReferenceRepo | None = None
 
     def attach_moment_reaction_router(self, router: MomentReactionRouter) -> None:
         """v_67: keep the reaction route a relayed ``MOMENT_CREATED`` carries."""
@@ -688,6 +693,12 @@ class FederationInboundService(ProtectionGateMixin):
         self._media_names = namer
         if self._authorship is not None:
             self._authorship.attach_media_names(namer)
+
+    def attach_media_references(self, refs: AbstractMediaReferenceRepo) -> None:
+        """Wire the media reference index (v_86): a hashed blob naming a
+        row id not held here may not fill a content name a held row
+        already shows unless its sender is trusted."""
+        self._media_refs = refs
 
     def attach_gfs_media(self, fetcher: SpaceMediaGfsFetcher) -> None:
         """Wire the v_80 GFS media fetcher (``media_refs`` on space posts)."""
@@ -2297,6 +2308,14 @@ class FederationInboundService(ProtectionGateMixin):
                         # verified bytes take both — the unreferenced one
                         # goes with the orphan sweep.
                         alias = local
+                        if await self._fill_by_another_id(
+                            event, space_id=space_id, content=content
+                        ):
+                            # v_86 — a row held here already shows the
+                            # content name: a blob naming a row id we don't
+                            # hold must not fill it past the fill rule. The
+                            # sender's bytes keep their sender-bound name.
+                            content, alias = local, None
                     elif scope is None and not await self._fills_content(
                         event, space_id=space_id, correlation_id=correlation_id
                     ):
@@ -2371,13 +2390,34 @@ class FederationInboundService(ProtectionGateMixin):
             return False
         if await authorship.has_content_authority(event, space_id):
             return True
+        if await self._space_repo.is_banned(space_id, author):
+            return False
         return await authorship.acts_for(event, space_id, author, any_role=True)
+
+    async def _fill_by_another_id(
+        self, event: FederationEvent, *, space_id: str, content: str
+    ) -> bool:
+        """v_86 — a blob for a row id NOT held here whose content name a row
+        held here already shows, from a sender that is not trusted
+        (:meth:`SpaceAuthorship.has_content_authority`). The content name
+        depends only on (space, h), so without this a member could fill
+        any hashed file by naming a made-up row; the row's author fills it
+        under the row's own id (:meth:`_fills_content`)."""
+        if self._media_refs is None or not await self._media_refs.is_referenced(
+            content
+        ):
+            return False
+        authorship = self._space_authorship(event)
+        return authorship is None or not await authorship.has_content_authority(
+            event, space_id
+        )
 
     async def _live_row_author(self, correlation_id: str) -> str | None:
         """The author of the live row ``correlation_id`` held here — a post
         (a bazaar wrapper's seller), a comment, a gallery item, a calendar
         event or a held moderation item, in :meth:`_space_media_in_scope`'s
-        order — or ``None`` (not held, deleted, or a rejected / expired
+        order (pages carry no hash map: their files are the host's alone,
+        :meth:`_page_file_name`) — or ``None`` (not held, deleted, or a rejected / expired
         submission). Its space is checked
         by the scope check before this runs."""
         found = await self._space_post_repo.get(correlation_id)
