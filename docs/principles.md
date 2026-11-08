@@ -1050,6 +1050,76 @@ Anything that sends who reacted, sends totals per reaction rather than at
 checkpoints, or lets the GFS read a count is a §2-principle change requiring
 a new sign-off.
 
+### Sign-off needed: a global space's listing carries its owner's public keys (v_84)
+
+A global space in "ask to join" (or open) mode can now be asked through
+the GFS that lists it, by a household that never paired with its host
+([discovery](protocol/discovery.md#ask-to-join-through-the-gfs-v_84)). To
+seal the request, that household needs the host's identity key and key-wrap
+key. The owner puts them **on its own public listing** (`join_contact`),
+signed with the space authority key, only for a space it lists on a GFS and
+that takes requests. The household reads them from the directory it already
+polls — nobody asks the GFS for anything, so the GFS keeps no record of who
+wants which space.
+
+What this relaxes: the owner household's **public** identity and key-wrap
+keys appear on the public listing of a space the owner chose to list (until
+now they reached a stranger only through an invite link the owner minted).
+They are public keys: they name no address, reveal no person and let nobody
+read anything; the owner's instance id, which the identity key derives, was
+already on the listing.
+
+What it does not relax: the GFS reads nothing it relays (the request is
+sealed to the host; the outer shape names only the recipient); the host
+decides every request; households met through a GFS still never learn each
+other's address; a request's bytes never name the applicant outside the
+seal.
+
+**The first-contact trust that remains, stated plainly.** The space
+authority key — and, through the contact it signed, the owner household's
+identity key — a household pins come from the first GFS that listed the
+space to it: trust on first use, as for a follower's first pin of that key.
+A GFS that lies on that first contact can list an authority and a contact
+of its own, and the household's request is then sealed to that GFS's key:
+it would learn that request (the person's id, names and message — not a
+password, a location or any space content). Once a household pinned them,
+no GFS can swap the keys: a new authority key is taken only with a v_44
+cert signed by the pinned owner key at a higher epoch (the GFS's own
+counters move nothing), a new contact must be signed by the pinned
+authority key and be newer than any contact the pin ever took (and not
+future-dated), and the pin lives apart
+from the display cache, so withholding a listing until it is purged does
+not reset it. Two GFSs listing a space under different authorities make the
+space unaskable from that household rather than picking one. A household
+that wants no first-contact trust asks with an invite link instead.
+
+**Known denial levers.** Any one GFS a household uses can stop that
+household asking a space through the GFS, two ways:
+
+- *Listing the space under another authority key* is a **conflict**: it
+  fails closed and stays — a purge of the listing does not clear it, since
+  that would re-open the first-contact trust it guards.
+- *Dropping the contact* from the listing just leaves nothing to ask
+  through **while** it is missing; the pin and the newest `issued_at` it
+  took stay, and the owner's next contact (newer than that) is taken again.
+
+Either way the GFS can stop a request, never read or redirect one. The way
+out does not depend on the GFS: once the household is paired with the
+space's owner household it asks over the pairing (the pin is not
+consulted), and the space's people can always invite it with a link.
+
+**What the pin cannot follow.** The owner household key is the root: the
+protocol has no way to change it today (an ownership transfer moves a
+space between people *of* the owner household; a household identity key is
+permanent), so a contact naming another owner key is a conflict, not a
+change to follow. Should owner-household changes ever exist, they need an
+owner-signed chain here first.
+
+The GFS can still try to tell which household sent a sealed blob by its
+network address and timing, as for every envelope it relays (see the
+link-joined pair sign-off above) — the lookup that would have told it
+directly is gone.
+
 ## No third-party fetches from user content
 
 Viewing content never makes the viewer's browser contact a host the

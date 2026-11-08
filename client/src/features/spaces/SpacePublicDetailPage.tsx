@@ -36,7 +36,7 @@ import { JoinRequestModal } from './JoinRequestModal'
 import { SpaceGlyph } from './SpaceGlyph'
 import { askLocationConsent, isApiCode, locationConsentText, noHomeText } from '@/components/localConsent'
 import {
-  contentIsGated, discoverAction, entryAreaVerdict, entryRadiusKm, GATED_CHIP, hostLabel, requestSentToast,
+  approvalSeatsUs, contentIsGated, discoverAction, entryAreaVerdict, entryRadiusKm, GATED_CHIP, hostLabel, requestSentToast,
   joinCarriesLocation, joinModeChip,
   sourceOf, type DiscoverAction,
 } from './discover'
@@ -53,6 +53,7 @@ const ABOUT_LABEL: Record<AboutAction, () => string> = {
   request: () => t('space.public.request_join'),
   follow: () => t('spaces.discover.follow'),
   pending: () => t('space.public.request_pending'),
+  joining: () => t('spaces.discover.joining'),
 }
 
 /** Shown when the space's owner has NOT opted into read-only followers
@@ -371,7 +372,10 @@ export default function SpacePublicDetailPage() {
 
       {action && primaryLabel && (
         <div class="sh-space-public__cta-row">
-          <Button onClick={() => void onPrimary(entry, action)} disabled={action === 'pending'}>
+          <Button
+            onClick={() => void onPrimary(entry, action)}
+            disabled={action === 'pending' || action === 'joining'}
+          >
             {primaryLabel}
           </Button>
         </div>
@@ -447,7 +451,7 @@ export default function SpacePublicDetailPage() {
           onClose={() => setActiveModal(null)}
           spaceName={activeModal.name}
           hostDisplayName={hostLabel(activeModal)}
-          hostIsPaired={activeModal.host_is_paired}
+          hostIsPaired={approvalSeatsUs(activeModal)}
           locationNote={joinCarriesLocation(activeModal)
             ? locationConsentText(hostLabel(activeModal)) : null}
           locationBlocked={joinCarriesLocation(activeModal) && householdHome.value === null

@@ -117,6 +117,13 @@ class GlobalSpace:
     #: The owner's optional radius hint beside the pin (GFS migration
     #: 0020), 0.5–50 km — "best for people within …", never enforced.
     place_radius_km: float | None = None
+    #: The owner household's join contact (GFS migration 0027, v_84): its
+    #: instance id, identity + key-wrap key, signed by the SPACE AUTHORITY key
+    #: pinned above (:mod:`socialhome.space_join_contact`). Served on the
+    #: listing so a household that never paired with the owner can seal an
+    #: "Ask to join" to it — no lookup, so this server learns nothing about
+    #: who asks. ``None`` for an invite-only space or an older owner.
+    join_contact: dict | None = None
 
 
 @dataclass(slots=True, frozen=True)

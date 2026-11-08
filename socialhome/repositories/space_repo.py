@@ -323,6 +323,8 @@ class AbstractSpaceRepo(Protocol):
         gfs_token: str | None = None,
         gfs_url: str | None = None,
         via: str = INVITE_VIA_GFS,
+        bound_instance_id: str | None = None,
+        bound_user_id: str | None = None,
     ) -> str: ...
     async def get_live_invite_token(self, token: str) -> dict | None: ...
     async def consume_invite_token(
@@ -330,6 +332,7 @@ class AbstractSpaceRepo(Protocol):
         token: str,
         *,
         redeemer_user_id: str | None = None,
+        redeemer_instance_id: str | None = None,
     ) -> dict | None: ...
     async def release_invite_token_use(self, token: str) -> None: ...
     async def get_invite_token_space_id(self, token: str) -> str | None: ...
@@ -410,6 +413,7 @@ class AbstractSpaceRepo(Protocol):
         request_id: str | None = None,
         requested_role: str | None = None,
         area_verdict: str | None = None,
+        gfs_relay: str | None = None,
     ) -> str: ...
     async def get_join_request(self, request_id: str) -> dict | None: ...
     async def list_pending_join_requests(self, space_id: str) -> list[dict]: ...
@@ -440,6 +444,12 @@ class AbstractSpaceRepo(Protocol):
         reviewed_by: str | None = None,
     ) -> bool: ...
     async def list_expired_join_requests(self) -> list[dict]: ...
+    async def set_join_request_gfs_relay(
+        self, request_id: str, gfs_relay: str
+    ) -> None: ...
+    async def list_pending_gfs_join_requests(
+        self, *, space_id: str | None = None
+    ) -> list[dict]: ...
 
     # ── Sidebar + aliases ──────────────────────────────────────────────
     async def pin_sidebar(
@@ -2292,6 +2302,8 @@ class SqliteSpaceRepo:
         gfs_token: str | None = None,
         gfs_url: str | None = None,
         via: str = INVITE_VIA_GFS,
+        bound_instance_id: str | None = None,
+        bound_user_id: str | None = None,
     ) -> str:
         """Mint one invite token and return it.
 
@@ -2314,6 +2326,10 @@ class SqliteSpaceRepo:
         on, so a later revoke can take it down. ``via`` is the link's type
         (migration 0079): ``gfs`` (redeemable through the connection-server
         relay) or ``internal`` (paired / mesh households only).
+        ``bound_instance_id`` / ``bound_user_id`` (migration 0143) make the
+        token redeemable by that household and person only — the token an
+        approval of an "Ask to join" through the GFS mints; an invite link
+        leaves both ``None`` (a bearer token).
         """
         if via not in INVITE_VIAS:
             raise ValueError(f"unknown invite link type {via!r}")
@@ -2322,8 +2338,9 @@ class SqliteSpaceRepo:
             """
             INSERT INTO space_invite_tokens(
                 token, space_id, created_by, uses_remaining, expires_at,
-                role, gfs_id, gfs_token, gfs_url, uses_total, via
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                role, gfs_id, gfs_token, gfs_url, uses_total, via,
+                bound_instance_id, bound_user_id
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 token,
@@ -2340,6 +2357,8 @@ class SqliteSpaceRepo:
                 # "3 of 10 left".
                 uses,
                 via,
+                bound_instance_id,
+                bound_user_id,
             ),
         )
         return token
@@ -2403,8 +2422,14 @@ class SqliteSpaceRepo:
         token: str,
         *,
         redeemer_user_id: str | None = None,
+        redeemer_instance_id: str | None = None,
     ) -> dict | None:
         """Decrement a token's remaining uses and return its metadata.
+
+        A token bound to a household / person (migration 0143 — the one an
+        approval of an "Ask to join" through the GFS mints) is consumed only
+        by that ``redeemer_instance_id`` and ``redeemer_user_id``; to anyone
+        else it reads as dead, in the same statement.
 
         Returns ``None`` if the token does not exist, has expired, has
         already been fully consumed, or — when ``redeemer_user_id`` is
@@ -2450,8 +2475,16 @@ class SqliteSpaceRepo:
                                AND space_bans.user_id = ?
                         )
                    )
+                   AND (bound_instance_id IS NULL OR bound_instance_id IS ?)
+                   AND (bound_user_id IS NULL OR bound_user_id IS ?)
                 """,
-                (token, redeemer_user_id, redeemer_user_id),
+                (
+                    token,
+                    redeemer_user_id,
+                    redeemer_user_id,
+                    redeemer_instance_id,
+                    redeemer_user_id,
+                ),
             )
             if cur.rowcount == 0:
                 return None
@@ -2899,6 +2932,7 @@ class SqliteSpaceRepo:
         request_id: str | None = None,
         requested_role: str | None = None,
         area_verdict: str | None = None,
+        gfs_relay: str | None = None,
     ) -> str:
         """Persist a pending join request. For cross-household (§D2)
         requests pass ``remote_applicant_instance_id`` and optionally
@@ -2909,6 +2943,9 @@ class SqliteSpaceRepo:
         ``area_verdict`` (``inside`` / ``edge``) — a local community's
         verdict on the location the join carried (migration 0111), so the
         admins see "near the edge"; the location itself is never stored.
+
+        ``gfs_relay`` — JSON relay contact of a household that asked
+        through a GFS (migration 0143): where the answer goes back sealed.
         """
         rid = request_id or uuid.uuid4().hex
         expires = (datetime.now(UTC) + timedelta(days=ttl_days)).isoformat()
@@ -2917,8 +2954,8 @@ class SqliteSpaceRepo:
             INSERT INTO space_join_requests(
                 id, space_id, user_id, message, expires_at,
                 remote_applicant_instance_id, remote_applicant_pk,
-                requested_role, area_verdict
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                requested_role, area_verdict, gfs_relay
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO NOTHING
             """,
             (
@@ -2931,6 +2968,7 @@ class SqliteSpaceRepo:
                 remote_applicant_pk,
                 requested_role,
                 area_verdict,
+                gfs_relay,
             ),
         )
         return rid
@@ -2972,6 +3010,36 @@ class SqliteSpaceRepo:
             "SELECT * FROM space_join_requests WHERE id=?", (request_id,)
         )
         return row_to_dict(row)
+
+    async def set_join_request_gfs_relay(self, request_id: str, gfs_relay: str) -> None:
+        """Replace a request's ``gfs_relay`` JSON (migration 0143) — the
+        applicant keeps the host's approval in it until the redeem seated
+        the person."""
+        await self._db.enqueue(
+            "UPDATE space_join_requests SET gfs_relay=? WHERE id=?",
+            (gfs_relay, request_id),
+        )
+
+    async def list_pending_gfs_join_requests(
+        self, *, space_id: str | None = None
+    ) -> list[dict]:
+        """Pending requests that crossed the GFS (``gfs_relay`` set), oldest
+        first — of one space (the host's cap) or all (the applicant's
+        resume of approved-but-unseated requests)."""
+        if space_id is None:
+            rows = await self._db.fetchall(
+                "SELECT * FROM space_join_requests"
+                " WHERE status='pending' AND gfs_relay IS NOT NULL"
+                " ORDER BY requested_at"
+            )
+        else:
+            rows = await self._db.fetchall(
+                "SELECT * FROM space_join_requests"
+                " WHERE status='pending' AND gfs_relay IS NOT NULL AND space_id=?"
+                " ORDER BY requested_at",
+                (space_id,),
+            )
+        return rows_to_dicts(rows)
 
     async def list_pending_join_requests(
         self,
@@ -3046,7 +3114,12 @@ class SqliteSpaceRepo:
             """
             SELECT * FROM space_join_requests
              WHERE status='pending'
-               AND datetime(expires_at) < datetime('now')
+               -- An empty or unreadable expiry (``datetime()`` → NULL) reads
+               -- as expired: a request is never pending forever.
+               AND (
+                    datetime(expires_at) IS NULL
+                    OR datetime(expires_at) < datetime('now')
+               )
             """,
         )
         return rows_to_dicts(rows)

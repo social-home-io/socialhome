@@ -9,11 +9,15 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from socialhome.crypto import (
+    b64url_encode,
     derive_instance_id,
     generate_identity_keypair,
+    generate_x25519_keypair,
+    sign_ed25519,
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection
+from socialhome.federation.join_contact_pin import usable_contact
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.public_space_repo import (
     PublicSpaceListing,
@@ -26,6 +30,7 @@ from socialhome.services.gfs_http import (
 from socialhome.services.public_space_discovery_service import (
     PublicSpaceDiscoveryService,
 )
+from socialhome.space_join_contact import sign_join_contact
 
 # ─── DB fixture ──────────────────────────────────────────────────────────
 
@@ -741,3 +746,106 @@ async def test_poll_once_ignores_an_unparsable_directory_body(env):
     )
 
     assert await svc.poll_once() == 0
+
+
+# ─── v_84: the host's join contact, pinned per listing ───────────────────
+
+
+def _contact_item(space_kp, host_ident, keywrap) -> dict:
+    instance_id = derive_instance_id(host_ident.public_key)
+    contact = sign_join_contact(
+        space_id="sp-ask",
+        instance_id=instance_id,
+        identity_pk=host_ident.public_key.hex(),
+        keywrap_pk=keywrap.public_key.hex(),
+        keywrap_sig=b64url_encode(
+            sign_ed25519(host_ident.private_key, keywrap.public_key)
+        ),
+        space_seed=space_kp.private_key,
+    )
+    return {
+        "space_id": "sp-ask",
+        "owning_instance": instance_id,
+        "name": "Ask",
+        "join_mode": "request",
+        "identity_public_key": space_kp.public_key.hex(),
+        "authority_rotation_seq": 0,
+        "join_contact": contact,
+    }
+
+
+class _PerUrlSession(_StubSession):
+    def __init__(self, bodies: dict[str, dict]):
+        super().__init__()
+        self._bodies = bodies
+
+    def get(self, url, **kw):
+        self.calls.append(url)
+        body = next(b for prefix, b in self._bodies.items() if url.startswith(prefix))
+        return _StubResp(200, body)
+
+
+async def test_poll_once_pins_the_contact_and_refuses_a_second_authority(env):
+    """The first GFS's listing pins the space authority key; a second GFS
+    listing the same space under another key makes it unaskable."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://gfs1.example.com"))
+    host, keywrap = generate_identity_keypair(), generate_x25519_keypair()
+    good = _contact_item(generate_identity_keypair(), host, keywrap)
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_PerUrlSession({"https://gfs1": {"spaces": [good]}}),
+    )
+    await svc.poll_once()
+    pinned = usable_contact(await repo.get_pin("sp-ask"))
+    assert pinned is not None and pinned[1] == "https://gfs1.example.com"
+
+    await gfs_repo.save(_gfs_conn("gfs-2", inbox_url="https://gfs2.example.com"))
+    forged = _contact_item(generate_identity_keypair(), host, keywrap)
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_PerUrlSession(
+            {"https://gfs1": {"spaces": [good]}, "https://gfs2": {"spaces": [forged]}}
+        ),
+    )
+    await svc.poll_once()
+    assert usable_contact(await repo.get_pin("sp-ask")) is None
+
+
+async def test_a_pin_outlives_the_listing_so_tofu_cannot_be_redone(env):
+    """A GFS withholds the listing past the cache TTL (the display row is
+    purged), then relists the space under its own key: the pin — and so
+    the refusal — is still there."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://gfs1.example.com"))
+    host, keywrap = generate_identity_keypair(), generate_x25519_keypair()
+    good = _contact_item(generate_identity_keypair(), host, keywrap)
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_PerUrlSession({"https://gfs1": {"spaces": [good]}}),
+    )
+    await svc.poll_once()
+    assert usable_contact(await repo.get_pin("sp-ask")) is not None
+
+    # 25 h without the listing: the display row goes.
+    withheld = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_PerUrlSession({"https://gfs1": {"spaces": []}}),
+        cache_ttl_hours=0,
+    )
+    await withheld.poll_once()
+    assert await repo.get("sp-ask") is None
+
+    forged = _contact_item(generate_identity_keypair(), host, keywrap)
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_PerUrlSession({"https://gfs1": {"spaces": [forged]}}),
+    )
+    await svc.poll_once()
+    assert await repo.get("sp-ask") is not None  # listed again…
+    assert usable_contact(await repo.get_pin("sp-ask")) is None  # …not trusted

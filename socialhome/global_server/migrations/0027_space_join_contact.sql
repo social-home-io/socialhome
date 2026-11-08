@@ -1,0 +1,11 @@
+-- GFS 0027 — a global space's join contact (v_84, "Ask to join" through the
+-- GFS). Follows 0026.
+--
+-- The owner household publishes, inside its signed listing, the keys a
+-- household that never paired with it needs to seal a join request to it
+-- (instance id, identity + key-wrap key), signed with the SPACE AUTHORITY
+-- key this server already pins for the space. Served on the public
+-- listing as ``join_contact``: a household reads it there, so nobody looks
+-- anything up and this server learns nothing about who asks. JSON, NULL for
+-- an invite-only space or an owner that sent none. One nullable column.
+ALTER TABLE global_spaces ADD COLUMN join_contact TEXT;

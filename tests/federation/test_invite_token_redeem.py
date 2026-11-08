@@ -195,7 +195,9 @@ class _FakeSpaceRepo:
             "role": row.get("role", SpaceRole.MEMBER.value),
         }
 
-    async def consume_invite_token(self, token, *, redeemer_user_id=None):
+    async def consume_invite_token(
+        self, token, *, redeemer_user_id=None, redeemer_instance_id=None
+    ):
         if self.consume_should_raise is not None:
             raise self.consume_should_raise
         row = self.tokens.get(token)

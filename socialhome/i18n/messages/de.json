@@ -278,6 +278,8 @@
   "notification.calendar.reminder": "Erinnerung: {summary}",
   "notification.calendar.updated": "Termin geändert: {summary}",
   "notification.space.join.requested": "{name} möchte {space_name} beitreten",
+  "notification.space.join.requested_gfs": "{count} Personen möchten über den GFS {space_name} beitreten",
+  "notification.space.join.requested_gfs_one": "Jemand möchte über den GFS {space_name} beitreten",
   "notification.space.member.joined": "{name} ist {space_name} beigetreten",
   "notification.task.completed": "{name} hat erledigt: {title}",
   "notification.comment.added": "{author} hat einen Beitrag kommentiert",

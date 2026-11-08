@@ -250,7 +250,13 @@ export default function SpaceListPage() {
         <p class="sh-spaces-note">{t('spaces.list.no_match', { term: term.trim() })}</p>
       )}
 
-      <SpaceDiscover seatedIds={seatedIds} source={discover} term={term} onChanged={reload} />
+      <SpaceDiscover
+        seatedIds={seatedIds}
+        source={discover}
+        explicit={parseDiscoverSource(loc.query?.discover) !== null}
+        term={term}
+        onChanged={reload}
+      />
 
       {archived.length > 0 && (
         <details class="sh-spaces-card sh-spaces-archived">

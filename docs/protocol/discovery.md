@@ -9,11 +9,12 @@ metadata, not content.
 - **HFS**: lists a **global** space on the GFSs its owner picks (a
   **public** space is never on a GFS — paired peers find it through
   `SPACE_DIRECTORY_SYNC`); subscribes to the GFS directory to browse
-  others; relays join requests through GFS to hosts it's not yet paired
-  with.
+  others; asks to join a global space through the GFS that lists it when
+  its host is not paired (v_84, "Ask to join through the GFS" below).
 - **GFS**: maintains the global registry of published spaces,
-  serves `GET /gfs/spaces`, and forwards opaque `_VIA` envelopes
-  between unpaired instances. It also keeps a short-lived, bounded cache
+  serves `GET /gfs/spaces` (for a global space that takes requests, with
+  the owner's authority-signed join contact on the listing), and relays
+  sealed blobs between unpaired instances (`POST /gfs/envelope`). It also keeps a short-lived, bounded cache
   of encrypted space media (see "Space media cache on a GFS").
 
 ## Event types
@@ -34,8 +35,12 @@ nothing sends them: a GFS listing is the owner's signed HTTPS
 `POST /gfs/spaces/{id}/publish` / `…/unpublish` (below), not a federation
 event.
 
-Join-request events belong to the [invites](./invites.md) flow but
-ride on the same `_VIA` relay pattern.
+Join-request events belong to the [invites](./invites.md) flow. From a
+household not paired with the host, an "ask to join" on a global space rides
+the sealed GFS relay: `SPACE_JOIN_REQUEST_BOOTSTRAP` and
+`SPACE_JOIN_REQUEST_BOOTSTRAP_ANSWER`
+(v_84, inner `kind`s of a sealed blob, never a §24.11 envelope; see "Ask to
+join through the GFS" below).
 
 GFS fan-out event types (connection-server wire, not
 `FederationEventType`): `space_post_public` and
@@ -3999,21 +4004,165 @@ sequenceDiagram
     Note over HA,G2: G2 is never contacted — not on publish,<br/>not on a settings edit, not on withdrawal
     HA->>M: SPACE_CONFIG_CHANGED<br/>(space_meta.gfs_servers: owner-signed [G1])
     UB->>HB: GET /api/public_spaces
-    HB->>G1: poll GET /gfs/spaces
-    G1-->>HB: space list
-    HB-->>UB: render list
-    UB->>HB: GET /api/public_spaces
-    HB->>G: poll GET /gfs/spaces
-    G-->>HB: space list
-    HB-->>UB: render list
+    HB->>G1: poll GET /gfs/spaces (hourly, or on refresh)
+    G1-->>HB: space list (owning_instance, join_mode,<br/>identity_public_key, join_contact)
+    Note over HB: verifies join_contact under the space<br/>authority key, pins that key on first sight
+    HB-->>UB: Discover › Global
     UB->>HB: POST /api/public_spaces/{id}/join-request
-    HB->>G1: SPACE_JOIN_REQUEST_VIA<br/>(opaque envelope)
-    G1->>HA: SPACE_JOIN_REQUEST
+    HB->>G1: POST /gfs/envelope {to_instance: HA, sealed}
+    G1->>HA: SPACE_JOIN_REQUEST_BOOTSTRAP (sealed)
+    Note over HB: keeps its request (its own id) → "Requested"
     Note over HA: admin reviews, approves
-    HA->>G1: SPACE_JOIN_REQUEST_REPLY_VIA
-    G1->>HB: SPACE_JOIN_REQUEST_APPROVED
-    Note over HA,HB: direct pairing established<br/>space sync begins
+    HA->>G1: POST /gfs/envelope (sealed)
+    G1->>HB: …_ANSWER (approved + single-use token)
+    HB->>G1: §D2b bootstrap redeem (sealed)
+    G1->>HA: redeem → space_session seat
+    HA-->>HB: ACK (space snapshot + key) via G1
 ```
+
+A paired household's request (`SPACE_JOIN_REQUEST`) goes straight to the
+host over the pairing; the GFS path below is for a host we never paired
+with.
+
+### Ask to join through the GFS (v_84)
+
+A global space is listed with its owner's instance id (`owning_instance`)
+and, until v_84, nothing that reaches it. A household connected to the same
+GFS but not paired with the host saw the space in Discover › Global with no
+way in: `POST /api/public_spaces/{id}/join-request` answered `403
+NOT_PAIRED`, and the SPA offered no button ("members can invite you with a
+link"). Only an invite link reached such a host.
+
+Now an **"ask to join"** global space is asked through the GFS that lists
+it:
+
+1. **The contact is on the listing.** The owner publishes, inside its
+   signed `POST /gfs/spaces/{id}/publish`, a `join_contact` — its instance
+   id, identity key, key-wrap key (`kem_suite: "x25519"`) and the key-wrap
+   key's self-signature — signed with the **space authority key**
+   (`authority_sig_suite: "ed25519"`, event type `space_join_contact`,
+   `socialhome/space_join_contact.py`), the key the GFS already pins for the
+   space and serves as `identity_public_key`. Only for a space in `request`
+   / `open` mode, only to a GFS whose signed capabilities prove
+   `join_contact` (GFS migration 0027). The GFS serves it only when it
+   verifies against its pin and names the owning instance. **Nobody looks
+   anything up**: the household reads the contact from the directory it
+   already polls, so the GFS keeps no record of who wants which space.
+2. **Checked and pinned on the reader's side**
+   (`federation/join_contact_pin.py`, table `public_space_join_pins`,
+   migration 0143). The household verifies the contact under the listing's
+   authority key, checks it names the listed owner and that the key-wrap
+   key is bound to the identity key (`verify_keywrap_binding`), and **pins
+   on first sight** two keys: the space authority key and — through the
+   contact it signed — the **owner household's identity key**. After that:
+   - the authority key moves **only along the owner's v_44 chain**: with a
+     contact the listing also carries the owner's `authority_cert` for the
+     current key, and the household accepts a new key only when that cert
+     is signed by the **pinned owner key** for exactly that key at a higher
+     `key_epoch` (`verify_authority_cert`). The GFS's own
+     `authority_rotation_seq` moves nothing — a GFS, even the one that gave
+     the pin, cannot swap the key;
+   - under the same key a contact must name the same owner key, and only a
+     **newer** one is taken: the pin keeps the newest signed `issued_at`
+     it ever took as a high-water mark that never goes down (also across a
+     listing that carries no contact), so an older key-wrap key cannot be
+     replayed; a contact dated more than 5 minutes in the future is no
+     contact (a seed-holding demoted admin or a clock jump cannot freeze a
+     binding);
+   - anything else — another authority without that chain, another owner,
+     two GFSs that disagree — is a lasting **conflict**: the contact is
+     dropped and the space is not asked through the GFS (its people use an
+     invite link).
+   The pin lives in **its own table**, not in the display cache: a listing
+   not seen for a day is purged from the cache, but its pin (and a
+   conflict) stays, so a GFS that withholds a listing and relists it under
+   its own key meets the old pin. The SPA offers "Ask to join" only for a
+   listing with a usable contact (`gfs_askable`).
+3. **The request, sealed.** `SPACE_JOIN_REQUEST_BOOTSTRAP` (`kind` inside
+   the sealed body) carries the person (`user_id`, name, public key), the
+   household's name, the optional message, the household's identity +
+   key-wrap keys, the `request_id` the applicant picked (as on the paired
+   path) and a `request_nonce`; signed with the household identity key
+   (`sig_suite: "ed25519"`), sealed to the host's key-wrap key, sent over
+   `POST /gfs/envelope` through the pinning GFS (outer shape: the recipient
+   only). The applicant keeps a pending row ("Requested") once the relay
+   took the blob; the GFS queues it while the host is offline.
+4. **What may wait in the queue.** A request (and an answer) can sit in the
+   relay's queue for its TTL (24 h). Its `ts` is therefore accepted up to
+   that TTL + 300 s old (future: ±300 s), and the `request_nonce` replay
+   entry lives at least as long (`REPLAY_CACHE_WINDOW`, 25 h, durable).
+5. **Filed like any request, within bounds.** Anyone on a GFS can make
+   keypairs, so the host budgets **per space** (30 / hour) on top of per
+   sender (10 / hour), and keeps at most **50** pending requests from the
+   GFS per space — past it new ones are **refused** (dropped, logged; the
+   earlier applicants and the admins' queue stay as they are, nothing is
+   evicted). The per-space budget is spent only by a request that passed
+   every cheap check (the space takes requests, the person is not banned,
+   not a repeat, id unused), so junk cannot use it up. A request nobody
+   answers **expires** after 7 days (`JoinRequestExpiryScheduler`, hourly),
+   freeing its slot. Admins can **decline every request from the GFS at
+   once** (`POST /api/spaces/{id}/gfs-join-requests/decline`; each
+   applicant is told). Ids are checked (`[A-Za-z0-9_-]{1,64}`). A live global space it hosts that
+   takes requests files an ordinary pending request under the applicant's
+   id, keeping the applicant's relay contact and the names it sent
+   (`space_join_requests.gfs_relay`). A banned person, a repeat, a space
+   that takes no requests: dropped without a word, as on the paired path.
+   The admins get **one grouped bell per space** ("3 people asked to join X
+   through the GFS"), not one per request. The review page shows the
+   applicant's name and household **marked "via the GFS · not verified"**;
+   such a request carries the `gfs` flag, so the "Needs you" list offers
+   Review (with that reason) rather than one tap.
+6. **The answer.** Approve or decline as for any remote request.
+   `SPACE_JOIN_REQUEST_BOOTSTRAP_ANSWER` goes back sealed. An approval
+   carries a single-use invite token **bound to the applicant household and
+   person** (`space_invite_tokens.bound_instance_id` / `bound_user_id`:
+   anyone else consuming it reads it as dead) and its expiry — 48 h, the
+   queue's TTL to deliver it plus as long again to redeem. The applicant
+   stores the approval with its request and redeems it over the §D2b
+   bootstrap leg ([invites](./invites.md)); a redeem that fails (host
+   offline) is retried at the next start and every GFS reconnect until it
+   seats the person or the token expires (then the request reads
+   `expired`). Meanwhile Discover says "Approved, joining…"
+   (`GET /api/me/join-requests` `joining_space_ids`). Seated, the person
+   is a `space_session` member: the same seat, content and rights as any
+   member reached through the relay.
+
+**What the GFS learns.** Nothing beyond what it relays: the size and time
+of each sealed blob and its recipient. It is not asked for anyone's keys,
+so it cannot record who looked up which space; it could still try to
+correlate a blob's sender by network address and timing, as for any relayed
+envelope (`docs/principles.md`). **First-contact trust:** the space
+authority key and the owner key a household pins come from the first GFS
+that listed the space to it — the same trust-on-first-use a follower
+places in that GFS. A GFS that lies on first contact could list its own
+authority and contact; the request would then be sealed to that GFS's key.
+Once pinned it cannot swap the keys: a new authority key needs a cert from
+the pinned owner key, a new contact needs the pinned authority key, an
+older contact is refused, and a purged listing keeps its pin.
+
+**Known levers, accepted.** Fail-closed has a cost: any one GFS a
+household uses can stop it asking a space through the GFS — by listing it
+under another authority (a **lasting** conflict, not cleared by a purge:
+that would re-open the TOFU it guards) or by dropping its contact (nothing
+to ask through while it is missing; the pin and its `issued_at` mark stay,
+and the owner's next, newer contact is taken again). It cannot read or
+redirect a request, only stop one. **The way out:** pair with the space's
+owner household — a confirmed pairing is asked over the pairing and the pin
+is not consulted — or join with an invite link.
+
+**Limits.** The owner household key is the root of the pin. The protocol
+has no owner-household change today — an ownership transfer moves a space
+between people of the owner household (`SpaceService.transfer_ownership`)
+and a household identity key is permanent — so a contact naming another
+owner key is a conflict. If such a change is ever added, it needs a chain
+signed by the old owner here first.
+
+**Cost.** Per request: zero lookups, two sealed envelopes (request,
+answer, ~1–2 KB each), then the §D2b redeem (the space snapshot, bounded
+by the relay cap), once per person — no fan-out. The listing grows by one
+contact (~0.5 KB) per global space that takes requests. Worst case for a
+host (a flood): 30 filed requests per space per hour and at most 50
+waiting, one bell per admin.
 
 ## Peer directory sync (§D1a)
 

@@ -1089,6 +1089,13 @@ export interface DirectoryEntry {
   /** Outgoing request pending (your request-to-join hasn't been decided
    *  yet). Surfaces as a disabled "Request pending" button. */
   request_pending?: boolean
+  /** Asked through the GFS, approved, the seat still being made (v_84):
+   *  "Approved, joining…" instead of "Requested". */
+  request_joining?: boolean
+  /** Global rows only (v_84): the GFS listing carries a verified join
+   *  contact for its host, so "Ask to join" goes through the GFS without a
+   *  pairing. */
+  gfs_askable?: boolean
   /** Caller has a read-only subscription (``role='subscriber'`` row in
    *  ``space_members``). Distinct from ``already_member``: a subscriber
    *  gets the content stream but can't post, comment, or react. */

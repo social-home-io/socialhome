@@ -716,7 +716,7 @@ space-report → forwarded-role-change → page-concurrent-edit →
 admin-revoke-rotation → rotation-offline-catchup → space-chat → replay →
 unpair → unpair-offline → gfs-up → gfs-pair → local-community →
 gfs-moment-profile → gfs-highlight-link → gfs-public-pages →
-gfs-moment-late-delete → verify``
+gfs-moment-late-delete → gfs-join-request → verify``
 in that order. The tail brings the GFS up because ``local-community``'s
 last case (a GFS-only joiner), ``gfs-moment-profile`` and
 ``gfs-highlight-link`` need it; the closing ``verify`` runs the log
@@ -2009,6 +2009,29 @@ through, which pushes ``moment_reaction`` to a only. a's
 first post must not contain either emoji, e's user id or the moment id,
 ``gfs.db`` / ``gfs.db-wal`` neither emoji, and e and a must still be
 unpaired.
+
+### ``gfs-join-request`` — ask to join a global space through the GFS, unpaired (v_84)
+
+Part of ``all`` (last before ``verify``: it gives e a space-session seat
+with a, which the bootstrap-only steps must not see). Prereqs on its own:
+``gfs-up`` + ``gfs-pair``. a creates a global space in ``request`` mode
+listed on the GFS; e (paired with nobody, no link) refreshes and lists it
+(``host_is_paired: false``), asks to join (``202``, pending on e), a finds
+the request with e's message and approves, e is seated and reads a's post,
+and e is still no paired connection of a. Before v_84 the ask answered
+``403 NOT_PAIRED``. The host's keys come off the GFS listing (``join_contact``,
+signed by the space authority key) — the GFS is asked for nothing.
+
+### ``gfs-join-request-offline`` — the same ask with each side down > 5 min (v_84)
+
+Not in ``all`` (two 330 s waits). Prereqs: ``gfs-up`` + ``gfs-pair``. a is
+killed; e asks (the GFS queues the sealed request); 330 s later a comes back,
+drains it and files it (``via_gfs``, the name unverified). Then e is killed;
+a approves (the GFS queues the answer); 330 s later e comes back, drains the
+answer, keeps the approval with its request and is seated on the reconnect;
+e reads a's post. Proves a body that waited in the relay queue past the
+±300 s live window is still taken (its ``ts`` is judged against the queue's
+TTL, its nonce's replay entry outlives it).
 
 ### ``gfs-moment-late-delete`` — a public delete leaves its signed certificate on the GFS (v_66)
 

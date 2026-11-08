@@ -1348,7 +1348,22 @@ from __future__ import annotations
 #:   listed the label and is never asked; a link-joined reader below v_83
 #:   keeps eager video uploads. No household-to-household event, no sync
 #:   stream change. Labelled "Older space pictures come back on view".
-OURS: int = 83
+#: * **v_84** (2026-11-07) — **Ask to join a global space through the GFS**.
+#:   A household that found a global space in a GFS directory and is not
+#:   paired with its host gets the host's sealing keys from that GFS
+#:   (``POST /gfs/spaces/{id}/contact``, signed, capability
+#:   ``space_contact``; bound to the listed ``owning_instance`` end to end)
+#:   and seals ``SPACE_JOIN_REQUEST_BOOTSTRAP`` (person, name, message) to it
+#:   over ``POST /gfs/envelope``. The host files an ordinary pending request
+#:   under the applicant's id (keeping the applicant's relay contact,
+#:   migration 0143); its admins' answer goes back sealed (``…_ANSWER``) —
+#:   an approval carries a single-use invite token the applicant redeems
+#:   over the §D2b bootstrap leg, seating it as a ``space_session`` member
+#:   like any member reached through the relay. **Fallback**: a host below
+#:   v_84 drops the body; the applicant's request stays "Requested" until it
+#:   expires (7 days), as an unanswered paired request does. Not space-sync
+#:   relevant. Labelled "Ask to join a global space through the GFS".
+OURS: int = 84
 
 
 class FederationCapability:
@@ -1978,6 +1993,12 @@ class FederationCapability:
     #: wanted) toward link-joined readers at or above it; any reader below
     #: it on that GFS keeps the eager upload.
     MIN_FOR_SPACE_MEDIA_ON_DEMAND = 83
+    #: v_84 — a host at or above it takes an "Ask to join" sealed to it over
+    #: the GFS relay from a household it never paired with
+    #: (``SPACE_JOIN_REQUEST_BOOTSTRAP``) and answers it the same way. No peer
+    #: row to gate on (the GFS directory carries no version): an older host
+    #: drops the body and the request expires unanswered.
+    MIN_FOR_GFS_JOIN_REQUEST = 84
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2296,6 +2317,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND,
         "Older space pictures come back on view",
     ),
+    (
+        FederationCapability.MIN_FOR_GFS_JOIN_REQUEST,
+        "Ask to join a global space through the GFS",
+    ),
 ]
 
 
@@ -2390,6 +2415,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_MEDIA_HTTPS: "lighter_media_transfers",
     FederationCapability.MIN_FOR_PAGE_MEDIA: "space_page_media",
     FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND: "space_media_on_demand",
+    FederationCapability.MIN_FOR_GFS_JOIN_REQUEST: "gfs_join_requests",
 }
 
 

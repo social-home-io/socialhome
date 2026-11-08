@@ -34,3 +34,9 @@ class PublicSpaceListing:
     #: offer Subscribe. Fail-closed default so a directory that reports none
     #: never widens access.
     allow_subscribers: bool = False
+    #: Transient (never stored with the listing, v_84): what this directory
+    #: row offers for the host's join contact — the candidate the poll folds
+    #: into the durable pin (``public_space_join_pins``,
+    #: :mod:`socialhome.federation.join_contact_pin`). ``None`` when the row
+    #: names no authority key.
+    join_contact: str | None = None

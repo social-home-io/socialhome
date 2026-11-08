@@ -3277,6 +3277,263 @@ def cmd_gfs_pair() -> None:
     print("gfs-pair: ok (a + d + e connected to GFS, possession proven)")
 
 
+def cmd_gfs_join_request() -> None:
+    """v_84 — e asks to join a's global "ask to join" space through the GFS.
+
+    The owner's report: a household connected to the same GFS as the host
+    but NOT paired with it (and holding no invite link) found the space in
+    Discover › Global and had no way to ask in — ``POST
+    /api/public_spaces/{id}/join-request`` answered ``403 NOT_PAIRED``.
+    e is that household (paired with nobody but the GFS).
+
+    1. a creates a global space in ``request`` mode, listed on the GFS.
+    2. e refreshes its directory and lists it (``GET /api/public_spaces``).
+    3. e asks to join → ``202 {request_id}``; e shows it pending.
+    4. a has the request in its queue (with e's message) and approves it.
+    5. e is seated (``GET /api/spaces``) and sees a's post in the space.
+    6. e is still not a paired connection of a — only a space-session seat.
+
+    Prereq: ``gfs-up`` + ``gfs-pair``.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    a, e = state["instances"]["a"], state["instances"]["e"]
+    a_url, e_url = f"http://127.0.0.1:{a['port']}", f"http://127.0.0.1:{e['port']}"
+    # Both sockets up, so the request and the answer are pushed at once
+    # (the GFS queues them for an offline household, but the step would
+    # then wait out a reconnect).
+    _wait_for_gfs_ws(a["instance_id"], timeout=90.0)
+    _wait_for_gfs_ws(e["instance_id"], timeout=90.0)
+
+    s, sp = _request(
+        f"{a_url}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={
+            "name": "Ask through the GFS",
+            "description": "global, ask to join, members only",
+            "space_type": "global",
+            "gfs_ids": _active_gfs_ids(state, "a"),
+            "join_mode": "request",
+        },
+    )
+    space_id = _must("gfs-join-request: a creates the space", s, sp, ok=(201,))["id"]
+    state.setdefault("gfs", {})["join_request_space_id"] = space_id
+    _save(state)
+    print(f"  a: global ask-to-join space {space_id[:8]}…")
+
+    entry: dict | None = None
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and entry is None:
+        _request(f"{e_url}/api/public_spaces/refresh", token=e["token"], method="POST")
+        time.sleep(1.0)
+        s, rows = _request(f"{e_url}/api/public_spaces", token=e["token"])
+        if s == 200 and isinstance(rows, list):
+            entry = next((r for r in rows if r.get("space_id") == space_id), None)
+    if entry is None:
+        raise SystemExit(
+            "gfs-join-request: e never listed the space in Discover › Global"
+        )
+    if entry.get("join_mode") != "request" or not entry.get("gfs_askable"):
+        raise SystemExit(f"gfs-join-request: unexpected listing on e: {entry!r}")
+    print("  e lists it under Global (ask to join, verified join contact) ✓")
+
+    message = f"e would like to join {time.time_ns()}"
+    s, body = _request(
+        f"{e_url}/api/public_spaces/{space_id}/join-request",
+        token=e["token"],
+        method="POST",
+        body={"host_instance_id": entry["host_instance_id"], "message": message},
+        timeout=30.0,
+    )
+    request_id = _must("gfs-join-request: e asks", s, body, ok=(202,))["request_id"]
+    s, mine = _request(f"{e_url}/api/me/join-requests", token=e["token"])
+    if space_id not in (mine or {}).get("pending_space_ids", []):
+        raise SystemExit(f"gfs-join-request: e does not show it pending: {mine!r}")
+    print(f"  e asked through the GFS → request {request_id[:8]}…, pending ✓")
+
+    queue: list[dict] = []
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        s, queue = _request(
+            f"{a_url}/api/spaces/{space_id}/join-requests", token=a["token"]
+        )
+        if s == 200 and any(r.get("id") == request_id for r in queue):
+            break
+        time.sleep(1.0)
+    row = next((r for r in queue if r.get("id") == request_id), None)
+    if row is None or row.get("message") != message:
+        raise SystemExit(f"gfs-join-request: a's queue lacks the request: {queue!r}")
+    print("  a has the request, with e's message ✓")
+    s, body = _request(
+        f"{a_url}/api/spaces/{space_id}/join-requests/{request_id}/approve",
+        token=a["token"],
+        method="POST",
+        body={},
+    )
+    _must("gfs-join-request: a approves", s, body)
+
+    seated = False
+    deadline = time.monotonic() + 45.0
+    while time.monotonic() < deadline and not seated:
+        time.sleep(1.5)
+        s, spaces = _request(f"{e_url}/api/spaces", token=e["token"])
+        seated = s == 200 and any(x.get("id") == space_id for x in spaces or [])
+    if not seated:
+        raise SystemExit("gfs-join-request: e was never seated after the approval")
+    print("  approved → e is a member ✓")
+
+    content = f"Welcome over the GFS {time.time_ns()}"
+    s, post = _request(
+        f"{a_url}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    post_id = _must("gfs-join-request: a posts", s, post, ok=(201,))["id"]
+    seen = _await_space_post(state, "e", space_id, post_id)
+    if seen.get("content") != content:
+        raise SystemExit(f"gfs-join-request: e read {seen.get('content')!r}")
+    print("  e reads a's post in the space ✓")
+
+    # e holds a space-scoped seat for a (``source: space_session``, the same
+    # row an invite-link join makes) — never a pairing.
+    s, conns = _request(f"{e_url}/api/connections", token=e["token"])
+    rows = [c for c in conns or [] if c.get("instance_id") == a["instance_id"]]
+    if s != 200 or [c.get("source") for c in rows] != ["space_session"]:
+        raise SystemExit(f"gfs-join-request: e's row for a is not a space seat: {rows!r}")
+    print("  e and a are not paired — e holds only a space-session seat ✓")
+    print("gfs-join-request: ok (unpaired household asked, was approved, reads)")
+
+
+#: How long a household stays down in ``gfs-join-request-offline`` — past
+#: the ±300 s live window, so a body judged against it would be dropped.
+JOIN_OFFLINE_WAIT_S = 330
+
+
+def _respawn(state: dict, label: str) -> None:
+    """Start a killed household again and wait for its GFS socket."""
+    info = state["instances"][label]
+    offset = _gfs_log_size()
+    info["pid"] = _spawn(label, info["port"])
+    _save(state)
+    _wait_ready(info["port"])
+    _wait_for_gfs_ws_since(info["instance_id"], offset=offset, timeout=120.0)
+    print(f"  {label} back: pid={info['pid']}, socket up")
+
+
+@_offline_step
+def cmd_gfs_join_request_offline() -> None:
+    """v_84 — the same ask while each side is down for > 5 minutes.
+
+    1. a (the host) is DOWN; e asks — the GFS queues the sealed request.
+    2. > 5 min later a comes back and drains it: filed with e's message
+       (its ``ts`` is judged against the relay queue's TTL, not ±300 s).
+    3. e is DOWN; a approves — the GFS queues the sealed answer.
+    4. > 5 min later e comes back, drains it and is seated (the approval is
+       kept with the request; the redeem runs on the reconnect).
+    5. e reads a's post.
+
+    Not in ``all`` (it sleeps twice past the live window). Prereq:
+    ``gfs-up`` + ``gfs-pair``.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    a, e = state["instances"]["a"], state["instances"]["e"]
+    a_url, e_url = f"http://127.0.0.1:{a['port']}", f"http://127.0.0.1:{e['port']}"
+    _wait_for_gfs_ws(a["instance_id"], timeout=90.0)
+    _wait_for_gfs_ws(e["instance_id"], timeout=90.0)
+
+    s, sp = _request(
+        f"{a_url}/api/spaces",
+        token=a["token"],
+        method="POST",
+        body={
+            "name": "Ask while offline",
+            "space_type": "global",
+            "gfs_ids": _active_gfs_ids(state, "a"),
+            "join_mode": "request",
+        },
+    )
+    space_id = _must("offline: a creates the space", s, sp, ok=(201,))["id"]
+    entry = None
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and entry is None:
+        _request(f"{e_url}/api/public_spaces/refresh", token=e["token"], method="POST")
+        time.sleep(1.0)
+        s, rows = _request(f"{e_url}/api/public_spaces", token=e["token"])
+        if s == 200 and isinstance(rows, list):
+            entry = next((r for r in rows if r.get("space_id") == space_id), None)
+    if entry is None or not entry.get("gfs_askable"):
+        raise SystemExit(f"offline: e cannot ask through the GFS: {entry!r}")
+    print("  e lists it with a verified join contact ✓")
+
+    _kill_household("a", a)
+    message = f"asked while a was down {time.time_ns()}"
+    s, body = _request(
+        f"{e_url}/api/public_spaces/{space_id}/join-request",
+        token=e["token"],
+        method="POST",
+        body={"host_instance_id": entry["host_instance_id"], "message": message},
+        timeout=30.0,
+    )
+    request_id = _must("offline: e asks", s, body, ok=(202,))["request_id"]
+    print(f"  a down; e asked → {request_id[:8]}… (queued on the GFS)")
+    print(f"  waiting {JOIN_OFFLINE_WAIT_S} s (past the ±300 s live window)…")
+    time.sleep(JOIN_OFFLINE_WAIT_S)
+    _respawn(state, "a")
+
+    row = None
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline and row is None:
+        s, queue = _request(f"{a_url}/api/spaces/{space_id}/join-requests", token=a["token"])
+        if s == 200:
+            row = next((r for r in queue if r.get("id") == request_id), None)
+        time.sleep(1.0)
+    if row is None or row.get("message") != message:
+        raise SystemExit("offline: a never filed the request it drained")
+    if not row.get("via_gfs") or not row.get("unverified_name"):
+        raise SystemExit(f"offline: the request is not marked as from the GFS: {row!r}")
+    print(f"  a filed it after {JOIN_OFFLINE_WAIT_S} s, named '{row['unverified_name']}' (unverified) ✓")
+
+    _kill_household("e", e)
+    s, body = _request(
+        f"{a_url}/api/spaces/{space_id}/join-requests/{request_id}/approve",
+        token=a["token"],
+        method="POST",
+        body={},
+    )
+    _must("offline: a approves", s, body)
+    print(f"  e down; a approved — waiting {JOIN_OFFLINE_WAIT_S} s…")
+    time.sleep(JOIN_OFFLINE_WAIT_S)
+    _respawn(state, "e")
+
+    seated = False
+    deadline = time.monotonic() + 90.0
+    while time.monotonic() < deadline and not seated:
+        time.sleep(1.5)
+        s, spaces = _request(f"{e_url}/api/spaces", token=e["token"])
+        seated = s == 200 and any(x.get("id") == space_id for x in spaces or [])
+    if not seated:
+        raise SystemExit("offline: e was never seated after draining the approval")
+    print("  e drained the approval and is a member ✓")
+
+    content = f"Welcome back {time.time_ns()}"
+    s, post = _request(
+        f"{a_url}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": content},
+    )
+    post_id = _must("offline: a posts", s, post, ok=(201,))["id"]
+    seen = _await_space_post(state, "e", space_id, post_id)
+    if seen.get("content") != content:
+        raise SystemExit(f"offline: e read {seen.get('content')!r}")
+    print("gfs-join-request-offline: ok (queued > 5 min both ways, filed, seated, reads)")
+
+
 def cmd_gfs_open_signup() -> None:
     """Household c connects to the demo GFS from its onboarding step.
 
@@ -21830,6 +22087,11 @@ def main() -> None:
         # ``gfs-moment-late-delete`` (v_66): a public reply's delete leaves its
         # signed certificate on the GFS (no content) and e drops the reply.
         cmd_gfs_moment_late_delete()
+        # ``gfs-join-request`` (v_84): e — on the GFS, paired with nobody,
+        # no link — asks to join a's global "ask to join" space through the
+        # GFS, a approves, e reads. Last: it gives e a space-session seat
+        # with a, which the bootstrap-only steps above must not see.
+        cmd_gfs_join_request()
         # The closing check: every step's state still holds, and the log
         # audit is clean — offline steps' lines only inside their windows.
         cmd_verify()

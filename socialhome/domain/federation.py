@@ -164,6 +164,14 @@ class FederationEventType(str, enum.Enum):
     SPACE_INVITE_BOOTSTRAP_REDEEM = "space_invite_bootstrap_redeem"
     SPACE_INVITE_BOOTSTRAP_REDEEM_ACK = "space_invite_bootstrap_redeem_ack"
     SPACE_INVITE_BOOTSTRAP_REDEEM_DENY = "space_invite_bootstrap_redeem_deny"
+    # The same sealed relay leg for an "Ask to join" on a global space found
+    # in a GFS directory, from a household not paired with its host (v_84,
+    # ``socialhome.federation.gfs_join_request``): the request (applicant →
+    # host) and, later, the host's answer (approved, carrying a single-use
+    # invite token the applicant redeems over the §D2b bootstrap leg; or
+    # denied).
+    SPACE_JOIN_REQUEST_BOOTSTRAP = "space_join_request_bootstrap"
+    SPACE_JOIN_REQUEST_BOOTSTRAP_ANSWER = "space_join_request_bootstrap_answer"
     # ── Federation mesh routing (v_6 PR 2) ──
     #
     # Generic source-routed envelope. Wraps **any** inner
@@ -1030,6 +1038,8 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_INVITE_BOOTSTRAP_REDEEM,
         FederationEventType.SPACE_INVITE_BOOTSTRAP_REDEEM_ACK,
         FederationEventType.SPACE_INVITE_BOOTSTRAP_REDEEM_DENY,
+        FederationEventType.SPACE_JOIN_REQUEST_BOOTSTRAP,
+        FederationEventType.SPACE_JOIN_REQUEST_BOOTSTRAP_ANSWER,
         FederationEventType.SPACE_PRIVATE_INVITE,
         FederationEventType.SPACE_PRIVATE_INVITE_ACCEPT,
         FederationEventType.SPACE_PRIVATE_INVITE_DECLINE,
