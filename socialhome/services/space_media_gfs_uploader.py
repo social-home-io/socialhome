@@ -748,44 +748,6 @@ class SpaceMediaGfsUploader:
             return await self._authorize_channel(claim, space_id)
         return await self._authorize(claim)
 
-    async def authorize_anonymous(
-        self, claim: SpaceMediaClaim
-    ) -> SpaceMediaUploadAuth | None:
-        """An ANONYMOUS upload authorization for *claim* of a listed space,
-        for a re-upload that must not name this household: the writer group
-        key, else the space authority — never the writer cert, which names
-        this household's key. ``None`` for a channel scope or when this
-        household holds neither. No caller yet: kept for the space media
-        relay-sync design."""
-        if claim.scope == SCOPE_CHANNEL:
-            return None
-        # The writer key first: every writer member holds it, while the
-        # space authority would narrow the set to its seed holders.
-        writer = await self._writer_key_auth(claim)
-        if writer is not None:
-            return writer
-        return await self._authorize(claim, identified=False)
-
-    async def _writer_key_auth(
-        self, claim: SpaceMediaClaim
-    ) -> SpaceMediaUploadAuth | None:
-        if self._certs is None:
-            return None
-        epoch = await self._crypto.get_current_epoch(claim.scope_id)
-        if epoch is None:
-            return None
-        writer_seed = await self._certs.own_writer_key(claim.scope_id, epoch)
-        if writer_seed is None:
-            return None
-        msg = claim.writer_signing_bytes(kind=AUTH_WRITER_KEY, epoch=epoch)
-        return SpaceMediaUploadAuth(
-            claim=claim,
-            kind=AUTH_WRITER_KEY,
-            sig=sign_with_writer_key(writer_seed, msg),
-            sig_suite=WRITER_KEY_SUITE_ED25519,
-            epoch=epoch,
-        )
-
     async def _remember(self, conn: GfsConnection, blob_id: str) -> None:
         """Remember *blob_id* as held by *conn* until min(:data:`KEEP_S`,
         its TTL) — an ``already_stored`` answer does not refresh a blob's
@@ -934,12 +896,10 @@ class SpaceMediaGfsUploader:
             channel_cert=grant.channel_cert,
         )
 
-    async def _authorize(
-        self, claim: SpaceMediaClaim, *, identified: bool = True
-    ) -> SpaceMediaUploadAuth | None:
+    async def _authorize(self, claim: SpaceMediaClaim) -> SpaceMediaUploadAuth | None:
         """The strongest anonymous authorization this household holds: the
-        space authority (seed holder), else the writer group key, else —
-        *identified* — our writer cert."""
+        space authority (seed holder), else the writer group key, else our
+        writer cert (identified)."""
         space_id = claim.scope_id
         try:
             seed = await self._spaces.get_space_seed(space_id)
@@ -968,8 +928,6 @@ class SpaceMediaGfsUploader:
                 sig_suite=WRITER_KEY_SUITE_ED25519,
                 epoch=epoch,
             )
-        if not identified:
-            return None
         cert = await self._certs.own_cert(space_id, epoch)
         if (
             cert is None
