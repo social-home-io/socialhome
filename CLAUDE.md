@@ -7,6 +7,16 @@ only this file so the agent surfaces can't drift.
 Read `spec_work.md` (the spec) before any change. The spec is the source of
 truth — if code and spec disagree, fix the code.
 
+**Keep it simple, make it smart** (owner rule, 2026-11-08). Before adding a
+mechanism — a new path, table, event, key, scheduler or special case — ask
+whether an existing one can carry it, and prefer the design with fewer moving
+parts that still meets every rule here (privacy, members equal on any path,
+efficiency). One general path beats several feature-specific ones: most
+security findings come from parallel special cases drifting apart. Use
+standard building blocks (e.g. Privacy Pass, HKDF, AES-GCM) over home-made
+ones, defer optional extras until they are shown to be needed, and say in the
+PR what you left out and why.
+
 ### Delivery workflow
 
 For any **non-trivial change** (a feature, refactor, multi-file change, a
@@ -389,6 +399,11 @@ truth; the panel follows it.
   relay-seated members.
   Only **followers** (subscribers) may get a subset, decided per feature
   and written down there — never a member role.
+  **One temporary exception** (owner decision 2026-11-08): an admin whose
+  household is reached only through the GFS does not receive the space
+  seed, so it cannot act as a delegated admin (e.g. serve catch-up). It is
+  to be revisited — a safe key handoff designed and this exception removed —
+  once the GFS redesign's per-space mailboxes and pinned keys exist.
 - GPS coordinates: truncate to 4 decimal places before any storage or
   transmission — `round(float(lat), 4)`, never raw device precision.
 - **People's locations are never shared by design.** A person's or a
