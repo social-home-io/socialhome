@@ -1357,3 +1357,50 @@ async def test_concurrent_resumes_are_served_once(tmp_path):
     sent = await asyncio.gather(*(provider.handle_request(request) for _ in range(5)))
     assert sorted(sent) == [0, 0, 0, 0, 1]
     assert len(outbox.rows) == 1
+
+
+class _Gate:
+    """A moderator household's gate: our people's files, others' sc- only."""
+
+    async def for_requester(self, space_id, requester):
+        assert (space_id, requester) == ("sp-1", "peer-a")
+        return self
+
+    async def ship(self, owner, urls):
+        if owner == "alice":
+            return list(urls)
+        return [u for u in urls if u.rsplit("/", 1)[-1].startswith("sc-")]
+
+
+async def test_a_trusted_non_host_resume_ships_others_hashed_files_only():
+    """v_86: a non-host resume ships every file of its own people's rows
+    and, through the file gate, only the hashed files of other people's
+    rows — the receiver refuses the rest from it."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    at = base + timedelta(minutes=1)
+    ours = replace(
+        _image_post(0, at, "sd-a.webp", "sc-a.webp"),
+    )
+    theirs = replace(
+        _image_post(1, at, "sd-b.webp", "sc-b.webp"),
+        author="bob",
+    )
+    event = replace(
+        _cal_event(0, at), cover_url="api/media/sd-c.webp", created_by="bob"
+    )
+    outbox = _FakeMediaOutbox()
+    provider = SpaceSyncResumeProvider(
+        federation_service=_FakeFederation(),
+        space_repo=_FakeSpaceRepo(["peer-a"]),
+        space_post_repo=_FakePostRepo(posts=[ours, theirs]),
+        space_calendar_repo=_FakeListSinceRepo([event]),
+        media_sync=outbox,
+    )
+    provider.attach_file_gates(_Gate())
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    assert outbox.rows == [
+        ("sp-1", "p-0", ("peer-a",), ("api/media/sd-a.webp", "api/media/sc-a.webp")),
+        ("sp-1", "p-1", ("peer-a",), ("api/media/sc-b.webp",)),
+    ]

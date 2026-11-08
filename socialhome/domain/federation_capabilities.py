@@ -1378,6 +1378,22 @@ from __future__ import annotations
 #:   ``sd-`` names, as an unhashed item does here. Space-sync relevant
 #:   (records carry ``files``): a line in ``SYNC_RECORD_LINES``. Labelled
 #:   "Space pictures and files checked against their hash".
+#: * **v_86** (2026-11-08) — **trusted file fills**. A household that holds
+#:   a live space row whose hash map lists ``h`` takes the missing file
+#:   ``sc(S, h)`` (bytes checked against ``h``, never replacing a file) from
+#:   the row's author household or a TRUSTED one — the host, a delegated
+#:   admin, a live ``admin`` or ``moderator`` seat (content authority) —
+#:   and from nobody else; never for a deleted row. Unhashed files keep the
+#:   owner-only fill (#1311); rows still come only from the host / a
+#:   delegated admin. A trusted non-host household's replay
+#:   (``SPACE_SYNC_RESUME`` / §319.6 resync) ships the hashed files of
+#:   other people's rows to a v_86 requester (≤ 50 files / 32 MiB); its
+#:   full §25.6 catch-up and a plain member household's ship only their
+#:   own people's files. **Fallback**: a requester below v_86
+#:   gets no helper fills (the host still fills; a v_85 receiver would take
+#:   them, an older one stores them under a name no row shows); a helper
+#:   below v_86 ships none. No sync-stream record change. Labelled
+#:   "Admins and moderators fill in missing space pictures".
 #: * **v_87** (2026-11-08) — **mesh-sized media through the GFS relay**.
 #:   A ``SPACE_MEDIA_BLOB`` / ``DM_MEDIA_BLOB`` chunk to a household seated
 #:   from an invite link (``space_session``) whose GFS proved the signed
@@ -2035,6 +2051,11 @@ class FederationCapability:
     #: receiver stores hashed files content-addressed and checks the bytes.
     #: Only a household at or above it is sent the map.
     MIN_FOR_CONTENT_FILE_HASHES = 85
+    #: v_86 — a household at or above it takes a hashed file of a row it
+    #: holds from a trusted household (host, delegated admin, admin or
+    #: moderator seat) as well as from the row's author: a trusted non-host
+    #: provider ships other people's hashed files only to it.
+    MIN_FOR_TRUSTED_FILE_FILLS = 86
     #: v_87 — a household at or above it opens binary media frames from the
     #: GFS relay (``\x00SHR``): a link-joined peer gets 512 KiB media
     #: chunks through a GFS proving ``envelope_media``.
@@ -2366,6 +2387,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         "Space pictures and files checked against their hash",
     ),
     (
+        FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS,
+        "Admins and moderators fill in missing space pictures",
+    ),
+    (
         FederationCapability.MIN_FOR_RELAY_MEDIA,
         "Members reached through a GFS get pictures in full-size pieces",
     ),
@@ -2465,6 +2490,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND: "space_media_on_demand",
     FederationCapability.MIN_FOR_GFS_JOIN_REQUEST: "gfs_join_requests",
     FederationCapability.MIN_FOR_CONTENT_FILE_HASHES: "content_file_hashes",
+    FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS: "trusted_file_fills",
     FederationCapability.MIN_FOR_RELAY_MEDIA: "relay_media",
 }
 
@@ -2580,6 +2606,9 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # A behind member household keeps sender-bound names: its people
         # see every picture, but the bytes are not checked against a hash.
         FederationCapability.MIN_FOR_CONTENT_FILE_HASHES,
+        # A behind member household gets a missing picture filled only by
+        # the host, not by the space's admins and moderators.
+        FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS,
     }
 )
 

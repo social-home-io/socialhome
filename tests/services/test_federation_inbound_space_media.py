@@ -23,7 +23,7 @@ import pytest
 
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.file_hashes import space_content_media_name
-from socialhome.domain.space import SpaceModerationItem
+from socialhome.domain.space import ModerationStatus, SpaceModerationItem
 from socialhome.repositories import (
     SqliteConversationRepo,
     SqliteSpacePostRepo,
@@ -943,19 +943,26 @@ async def test_good_chunks_assemble_verified(env):
     assert (media / SC(full)).read_bytes() == full
 
 
+async def _seat(db, instance_id: str, user_id: str, role: str = "member") -> None:
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES('sp-a', ?, ?, ?)",
+        (instance_id, user_id, role),
+    )
+
+
 async def test_a_row_showing_the_content_name_takes_the_hashed_blob(env, db):
     svc, media = env
+    await _seat(db, "peer-a", "u-a")
     await db.enqueue(
         "INSERT INTO space_posts(id, space_id, author, type, content, media_url)"
         " VALUES(?,?,?,?,?,?)",
         ("post-sc", "sp-a", "u-a", "image", "", f"api/media/{SC(b'NEW-BYTES')}"),
     )
-    await svc._on_space_media_blob(
-        _blob(_hashed("post-sc", "x.webp", b"NEW-BYTES"), from_instance="anyone")
-    )
+    await svc._on_space_media_blob(_blob(_hashed("post-sc", "x.webp", b"NEW-BYTES")))
     assert (media / SC(b"NEW-BYTES")).read_bytes() == b"NEW-BYTES"
     # The row is here and shows the content name: no second name.
-    assert not (media / L("x.webp", sender="anyone")).exists()
+    assert not (media / L("x.webp")).exists()
 
 
 async def test_a_legacy_row_keeps_its_sender_name_but_the_bytes_are_checked(env):
@@ -1049,6 +1056,7 @@ async def test_a_comments_picture_is_scoped_to_its_comment(env, db):
     """A known comment showing the content name takes the blob without a
     second name; a comment of another space refuses it."""
     svc, media = env
+    await _seat(db, "peer-a", "u-a")
     data = b"COMMENT-PICTURE"
     for cid, post in (("c-a", "post-a"), ("c-b", "post-b")):
         await db.enqueue(
@@ -1062,3 +1070,91 @@ async def test_a_comments_picture_is_scoped_to_its_comment(env, db):
     other = b"OTHER-COMMENT"
     await svc._on_space_media_blob(_blob(_hashed("c-b", "d.webp", other), body=other))
     assert list(media.glob(f"{SC(other, 'd.webp')}*")) == []
+
+
+# ── v_86: who fills a hashed file of a row held here ────────────────────
+
+
+async def test_a_gallery_items_file_is_filled_by_its_uploader_household(env, db):
+    """The author check reads the gallery item's uploader."""
+    svc, media = env
+    data = b"GALLERY-PICTURE"
+    await db.enqueue(
+        "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type,"
+        " filename, thumbnail_filename, width, height)"
+        " VALUES('gi-sc', 'album-a', 'u-g', 'photo', ?, ?, 1, 1)",
+        (SC(data), SC(data)),
+    )
+    await _seat(db, "peer-o", "u-o")
+    await _seat(db, "peer-g", "u-g")
+    await svc._on_space_media_blob(
+        _blob(_hashed("gi-sc", "x.webp", data), from_instance="peer-o", body=data)
+    )
+    assert not (media / SC(data)).exists()
+    await svc._on_space_media_blob(
+        _blob(_hashed("gi-sc", "x.webp", data), from_instance="peer-g", body=data)
+    )
+    assert (media / SC(data)).read_bytes() == data
+
+
+async def _held_hashed(svc, data: bytes, status) -> None:
+    await svc._space_repo.insert_moderation_item(
+        SpaceModerationItem(
+            id="item-sc",
+            space_id="sp-a",
+            feature="calendar",
+            action="edit",
+            submitted_by="u-a",
+            payload={
+                "entity": "event",
+                "target_id": "ev-1",
+                "patch": {"cover_url": f"/api/media/{SC(data)}"},
+            },
+            current_snapshot=None,
+            submitted_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(days=7),
+            status=status,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "filled"),
+    [
+        (ModerationStatus.PENDING, True),
+        (ModerationStatus.APPROVED, True),
+        (ModerationStatus.REJECTED, False),
+        (ModerationStatus.EXPIRED, False),
+    ],
+)
+async def test_a_held_submissions_file_is_filled_while_it_is_live(
+    env, db, status, filled
+):
+    """The submitter's household (or a trusted one) fills a held item's
+    hashed file — never once the item was rejected or expired."""
+    svc, media = env
+    data = b"HELD-COVER"
+    await _seat(db, "peer-a", "u-a")
+    await _held_hashed(svc, data, status)
+    await svc._on_space_media_blob(_blob(_hashed("item-sc", "x.webp", data), body=data))
+    assert (media / SC(data)).exists() is filled
+
+
+async def test_a_moderator_fills_but_a_plain_member_does_not(env, db):
+    svc, media = env
+    data = b"MODERATED-FILL"
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content, media_url)"
+        " VALUES(?,?,?,?,?,?)",
+        ("post-f", "sp-a", "u-a", "image", "", f"api/media/{SC(data)}"),
+    )
+    await _seat(db, "peer-o", "u-o")
+    await _seat(db, "peer-mod", "u-mod", role="moderator")
+    await svc._on_space_media_blob(
+        _blob(_hashed("post-f", "x.webp", data), from_instance="peer-o", body=data)
+    )
+    assert not (media / SC(data)).exists()
+    await svc._on_space_media_blob(
+        _blob(_hashed("post-f", "x.webp", data), from_instance="peer-mod", body=data)
+    )
+    assert (media / SC(data)).read_bytes() == data
