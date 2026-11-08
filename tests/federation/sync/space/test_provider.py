@@ -1438,6 +1438,11 @@ class _Marks:
         self.planned.append(kw)
         return self._since
 
+    async def shape_crossed(self, **kw) -> bool:
+        return self.crossed
+
+    crossed = False
+
     async def confirm(self, **kw) -> None:
         self.confirmed.append(kw)
 
@@ -2386,7 +2391,7 @@ async def test_the_host_attaches_hashes_to_pre_hash_content(encoder):
     await svc.stream_initial(session)
     posts = {r["id"]: r for r in _streamed_records(session, "posts")}
     want = hashlib.sha256(b"api/media/a.webp").hexdigest()
-    assert posts["p-1"]["files"] == {"a.webp": {"h": want, "size": 7}}
+    assert posts["p-1"]["files"] == {"a.webp": {"h": want}}
     assert posts["p-1"]["files_suite"] == "sha256"
     assert "files" not in posts["p-2"]  # no files, nothing to vouch for
     (comment,) = _streamed_records(session, "comments")
@@ -2410,3 +2415,31 @@ async def test_an_older_requester_gets_no_hashes(encoder):
     await svc.stream_initial(session)
     assert all("files" not in r for r in _streamed_records(session, "posts"))
     assert hasher.asked == []
+
+
+@pytest.mark.parametrize(("crossed", "walks"), [(True, False), (False, True)])
+async def test_a_sync_line_crossing_ships_no_catchup_media(encoder, crossed, walks):
+    """#1322 review: a household that already holds the space and only
+    crossed a sync line (its watermark's shape is older) gets the one full
+    stream of rows, not every file of the space again; a genuine newcomer
+    (or a reset) still gets the media."""
+    walked: list[str] = []
+
+    class _PostRepo:
+        async def list_sync_page(self, space_id, **_kw):
+            walked.append(space_id)
+            return [], None
+
+    marks = _Marks(since=None)
+    marks.crossed = crossed
+    svc = SpaceSyncService(
+        builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
+        exporters={"members": _FakeExporter("members", [{"user_id": "u-1"}])},
+        sig_suite="ed25519",
+        media_sync=AsyncMock(),
+        space_post_repo=_PostRepo(),
+        watermarks=marks,
+    )
+    session = _FakeSession(sync_mode="initial", have_seq=12)
+    await svc.stream_initial(session)
+    assert (walked == ["sp-1"]) is walks

@@ -9,6 +9,7 @@ import pytest
 from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import FileMeta, Post, PostType
 from socialhome.domain.space_media_ref import (
+    FILE_HASH_RESOURCES,
     MAX_DESCRIPTOR_ENTRIES,
     MAX_PAGE_DESCRIPTOR_ENTRIES,
     MAX_PAGE_FILES,
@@ -23,6 +24,7 @@ from socialhome.domain.space_media_ref import (
     parse_media_refs,
     post_media_urls,
     recent_history_files,
+    record_file_urls,
     record_media_urls,
     rewrite_page_body_media,
     space_page_media_name,
@@ -382,3 +384,16 @@ def test_a_pages_recent_history_files_are_the_newest_distinct_ones() -> None:
         "api/media/n1.webp",
     ]
     assert recent_history_files([], limit=3) == []
+
+
+def test_file_hash_resources_never_include_pages():
+    """#1322 review: no receiver reads a page's hash map (page files stay
+    page-scoped, host-filled), so none is sent."""
+    assert "pages" not in FILE_HASH_RESOURCES
+    assert record_file_urls("pages", {"cover_image_url": "api/media/c.webp"}) == []
+    assert record_file_urls("comments", {"media_url": "api/media/m.webp"}) == [
+        "api/media/m.webp"
+    ]
+    assert record_file_urls("bazaar", {"image_urls": ["api/media/b.webp", 3]}) == [
+        "api/media/b.webp"
+    ]

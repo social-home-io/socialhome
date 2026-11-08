@@ -1365,8 +1365,8 @@ from __future__ import annotations
 #:   relevant. Labelled "Ask to join a global space through the GFS".
 #: * **v_85** (2026-11-08) — **file hashes in space content**. Every space
 #:   item with files (posts, comments, calendar covers, gallery items, bazaar
-#:   listings, pages, moderation submissions) carries ``files`` (author file
-#:   name → ``{h, size}``, SHA-256) + ``files_suite: "sha256"`` inside its
+#:   listings, moderation submissions) carries ``files`` (author file
+#:   name → ``{h}``, SHA-256) + ``files_suite: "sha256"`` inside its
 #:   encrypted payload, and so does each §25.6 record the host (or a
 #:   delegated admin) streams — computed from its own copy, pre-v_85 content
 #:   included. ``SPACE_MEDIA_BLOB`` carries ``h`` + ``h_suite``. A receiver

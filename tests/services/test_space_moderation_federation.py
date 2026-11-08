@@ -667,7 +667,7 @@ async def test_a_submissions_files_ride_with_their_hashes_to_v85_only(tmp_path):
     await out.send_submitted(SPACE, create, ["host", "house-mod"])
     sent = {to: payload for to, _t, payload in fed.sent}
     assert sent["host"]["files"] == {
-        "c.webp": {"h": hashlib.sha256(b"cover").hexdigest(), "size": 5}
+        "c.webp": {"h": hashlib.sha256(b"cover").hexdigest()}
     }
     assert sent["host"]["files_suite"] == "sha256"
     assert "files" not in sent["house-mod"]

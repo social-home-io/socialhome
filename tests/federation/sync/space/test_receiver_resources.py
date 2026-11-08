@@ -2428,7 +2428,7 @@ async def test_a_non_host_stream_cannot_attach_refs_to_a_held_post(setup, monkey
 
 def _hashed(**names: str) -> dict:
     return {
-        "files": {n.replace("_", "."): {"h": h, "size": 1} for n, h in names.items()},
+        "files": {n.replace("_", "."): {"h": h} for n, h in names.items()},
         "files_suite": "sha256",
     }
 

@@ -785,3 +785,20 @@ async def test_record_shapes_are_pinned_to_the_shape_version(db):
         "household gets one full stream in the new shape, then update "
         "RECORD_KEYS_AT_SHAPE (and the version asserted here)."
     )
+
+
+@pytest.mark.parametrize(
+    ("wm", "have_seq", "crossed"),
+    [
+        (_wm(shape="OLD"), 100, True),  # a sync line crossed: no media again
+        (_wm(), 100, False),  # same shape
+        (None, 100, False),  # a newcomer
+        (_wm(shape="OLD"), None, False),  # a reset: no echo
+        (SpaceSyncWatermark(seq=7, shape="OLD", full_at=None), 100, False),
+    ],
+)
+async def test_a_shape_crossing_is_told_apart_from_a_newcomer(wm, have_seq, crossed):
+    got = await _marks(_Repo(wm=wm)).shape_crossed(
+        space_id="sp", instance_id="h", shape="S", have_seq=have_seq
+    )
+    assert got is crossed

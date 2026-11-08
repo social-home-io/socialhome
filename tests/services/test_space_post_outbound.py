@@ -1646,7 +1646,7 @@ async def test_a_posts_files_ride_with_their_hashes(tmp_path):
     payload = federation.broadcast_to_space_members.call_args.args[2]
     assert payload["files_suite"] == "sha256"
     assert payload["files"] == {
-        name: {"h": hashlib.sha256(data).hexdigest(), "size": len(data)}
+        name: {"h": hashlib.sha256(data).hexdigest()}
         for name, data in (
             ("pic.webp", b"pic"),
             ("doc.pdf", b"doc"),
@@ -1660,10 +1660,19 @@ async def test_a_comments_picture_rides_with_its_hash_and_its_bytes(tmp_path):
     bus = EventBus()
     federation = AsyncMock()
     federation.broadcast_to_space_members = AsyncMock()
-    federation._own_instance_id = "us"
+    federation.own_instance_id = "us"
+
+    async def _supports(iid, *, min_version):
+        # v_85 — only a household that reads the comment's hash map gets
+        # the picture's bytes (an older one shows the sender's name).
+        return {"peer-b": 85, "peer-old": 84}.get(iid, 0) >= min_version
+
+    federation.space_member_supports = _supports
     media_sync = AsyncMock()
     fed_repo = AsyncMock()
-    fed_repo.list_member_instance_ids = AsyncMock(return_value=["us", "peer-b"])
+    fed_repo.list_member_instance_ids = AsyncMock(
+        return_value=["us", "peer-b", "peer-old"]
+    )
     outbound = _make_outbound(
         bus=bus, federation=federation, media_sync=media_sync, federation_repo=fed_repo
     )
@@ -1679,9 +1688,7 @@ async def test_a_comments_picture_rides_with_its_hash_and_its_bytes(tmp_path):
     )
     await bus.publish(CommentAdded(post_id="p-1", comment=comment, space_id="sp-1"))
     payload = federation.broadcast_to_space_members.call_args.args[2]
-    assert payload["files"] == {
-        "c.webp": {"h": hashlib.sha256(b"cpic").hexdigest(), "size": 4}
-    }
+    assert payload["files"] == {"c.webp": {"h": hashlib.sha256(b"cpic").hexdigest()}}
     media_sync.enqueue_for_blob.assert_awaited_once()
     kwargs = media_sync.enqueue_for_blob.call_args.kwargs
     assert kwargs["correlation_id"] == "c-1"

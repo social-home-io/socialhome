@@ -50,7 +50,7 @@ H = hashlib.sha256(PIC).hexdigest()
 
 
 def _files(name: str, h: str = H) -> dict:
-    return {"files": {name: {"h": h, "size": len(PIC)}}, "files_suite": "sha256"}
+    return {"files": {name: {"h": h}}, "files_suite": "sha256"}
 
 
 async def _image_urls(db, post_id: str) -> str | None:

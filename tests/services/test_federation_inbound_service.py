@@ -5561,9 +5561,7 @@ def _sc_ref(space_id: str, h: str, name: str) -> str:
 
 def _files(**hashes: str) -> dict:
     return {
-        "files": {
-            name.replace("_", "."): {"h": h, "size": 1} for name, h in hashes.items()
-        },
+        "files": {name.replace("_", "."): {"h": h} for name, h in hashes.items()},
         "files_suite": "sha256",
     }
 

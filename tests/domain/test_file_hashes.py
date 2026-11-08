@@ -46,10 +46,11 @@ def test_suite_constants() -> None:
 def test_round_trip() -> None:
     hashes = {"a.webp": FileHash(H1, 3), "b.mp4": FileHash(H2, 3)}
     wire = file_hashes_to_wire(hashes)
-    assert wire == _wire(
-        {"a.webp": {"h": H1, "size": 3}, "b.mp4": {"h": H2, "size": 3}}
-    )
-    assert parse_file_hashes(wire) == hashes
+    assert wire == _wire({"a.webp": {"h": H1}, "b.mp4": {"h": H2}})
+    assert {n: fh.h for n, fh in parse_file_hashes(wire).items()} == {
+        "a.webp": H1,
+        "b.mp4": H2,
+    }
 
 
 def test_empty_map_puts_nothing_on_the_wire() -> None:
@@ -60,7 +61,7 @@ def test_empty_map_puts_nothing_on_the_wire() -> None:
 
 @pytest.mark.parametrize("suite", [None, "", "blake3", 1, "SHA256"])
 def test_unknown_or_missing_suite_rejects_the_whole_map(suite: object) -> None:
-    payload = _wire({"a.webp": {"h": H1, "size": 3}}, suite)
+    payload = _wire({"a.webp": {"h": H1}}, suite)
     if suite is None:
         payload.pop(FILES_SUITE_FIELD)
     assert parse_file_hashes(payload) == {}
@@ -69,24 +70,21 @@ def test_unknown_or_missing_suite_rejects_the_whole_map(suite: object) -> None:
 @pytest.mark.parametrize(
     "entry",
     [
-        {"h": H1.upper(), "size": 3},
-        {"h": H1[:-1], "size": 3},
-        {"h": "z" * 64, "size": 3},
-        {"h": H1, "size": -1},
-        {"h": H1, "size": True},
-        {"h": H1, "size": "3"},
-        {"h": H1},
+        {"h": H1.upper()},
+        {"h": H1[:-1]},
+        {"h": "z" * 64},
+        {"hash": H1},
         "nope",
     ],
 )
 def test_one_bad_entry_rejects_the_whole_map(entry: object) -> None:
-    payload = _wire({"a.webp": {"h": H2, "size": 3}, "b.webp": entry})
+    payload = _wire({"a.webp": {"h": H2}, "b.webp": entry})
     assert parse_file_hashes(payload) == {}
 
 
 @pytest.mark.parametrize("name", ["", "../x", "a/b", ".hidden", "a b", "x" * 201])
 def test_unsafe_names_reject_the_whole_map(name: str) -> None:
-    assert parse_file_hashes(_wire({name: {"h": H1, "size": 3}})) == {}
+    assert parse_file_hashes(_wire({name: {"h": H1}})) == {}
 
 
 def test_not_a_dict_is_rejected() -> None:
@@ -94,9 +92,7 @@ def test_not_a_dict_is_rejected() -> None:
 
 
 def test_more_than_the_cap_is_rejected_whole() -> None:
-    files = {
-        f"f{i}.webp": {"h": H1, "size": 1} for i in range(MAX_FILE_HASH_ENTRIES + 1)
-    }
+    files = {f"f{i}.webp": {"h": H1} for i in range(MAX_FILE_HASH_ENTRIES + 1)}
     assert parse_file_hashes(_wire(files)) == {}
     files.popitem()
     assert len(parse_file_hashes(_wire(files))) == MAX_FILE_HASH_ENTRIES
@@ -129,3 +125,12 @@ def test_sha256_hex_and_blob_hash() -> None:
     assert blob_hash({"h": H1, "h_suite": "md5"}) is None
     assert blob_hash({"h": "nothex", "h_suite": "sha256"}) is None
     assert blob_hash({}) is None
+
+
+def test_the_wire_carries_no_size_and_ignores_one():
+    """#1322 review: a size nobody can check against the bytes is not on the
+    wire (the hash refuses truncation); one sent anyway is ignored."""
+    wire = file_hashes_to_wire({"a.webp": FileHash(H1, 3)})
+    assert wire[FILES_FIELD] == {"a.webp": {"h": H1}}
+    parsed = parse_file_hashes(_wire({"a.webp": {"h": H1, "size": "junk"}}))
+    assert list(parsed) == ["a.webp"] and parsed["a.webp"].h == H1

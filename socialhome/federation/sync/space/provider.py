@@ -881,8 +881,10 @@ class SpaceSyncService:
             # tick): it ships no media — the live media outbox already
             # delivered every blob created since, and re-enqueueing every
             # blob of the space each tick re-shipped the whole space's bytes
-            # to every peer every 30 minutes.
-            if session.sync_mode == "incremental":
+            # to every peer every 30 minutes. Nor does a full stream that is
+            # full only because the requester crossed a sync line (v_85 and
+            # the others): it holds the files already.
+            if session.sync_mode == "incremental" or session.shape_crossed:
                 return
             # Catch-up media: enumerate every post + gallery item in
             # the space, collect their media URLs, and enqueue
@@ -930,6 +932,7 @@ class SpaceSyncService:
         session.snapshot_seq = None
         session.since_seq = None
         session.shape = ""
+        session.shape_crossed = False
         if self._watermarks is None:
             return exporters
         session.snapshot_seq = await self._watermarks.snapshot()
@@ -956,6 +959,14 @@ class SpaceSyncService:
                 self._roster_authority is None
                 or await self._roster_authority(session.space_id)
             ),
+        )
+        session.shape_crossed = session.since_seq is None and (
+            await self._watermarks.shape_crossed(
+                space_id=session.space_id,
+                instance_id=session.requester_instance_id,
+                shape=session.shape,
+                have_seq=getattr(session, "have_seq", None),
+            )
         )
         session.kept_full_digests = {}
         exporters = [

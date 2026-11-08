@@ -6,10 +6,13 @@ item's file and thumbnail, a bazaar listing's photos, a page's cover and
 body pictures, a held moderation item's files) carries, INSIDE its
 encrypted payload and in each §25.6 record::
 
-    "files": {"<author filename>": {"h": "<64 hex>", "size": n}},
+    "files": {"<author filename>": {"h": "<64 hex>"}},
     "files_suite": "sha256"
 
-the SHA-256 of each file's bytes as its sender stores them. Who vouches
+the SHA-256 of each file's bytes as its sender stores them — no size: a
+receiver could not check one against the bytes before they land, and the
+hash already refuses a truncated file (an older draft's ``size`` is
+ignored). Who vouches
 for it is who vouches for the item: the author household's envelope
 signature for a live event, the host (or a delegated admin) for a §25.6
 catch-up record — which may attach hashes to content from before v_85,
@@ -57,9 +60,6 @@ SUPPORTED_FILE_HASH_SUITES: frozenset[str] = frozenset({FILE_HASH_SUITE_SHA256})
 #: link card; a page version ≤ 16 files): past it the map is refused whole.
 MAX_FILE_HASH_ENTRIES: int = 16
 
-#: The largest size an entry may declare (JSON-safe integer).
-_MAX_SIZE: int = 2**53
-
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 #: The author's file name: one safe path component (the shape
 #: ``inbound_media_store.SAFE_MEDIA_NAME`` accepts).
@@ -72,10 +72,11 @@ class UnsupportedFileHashSuite(ValueError):
 
 @dataclass(slots=True, frozen=True)
 class FileHash:
-    """One file's SHA-256 (64 lowercase hex) and byte size."""
+    """One file's SHA-256 (64 lowercase hex) and — for this household's own
+    copy only, never on the wire — its byte size (``-1``: not known)."""
 
     h: str
-    size: int
+    size: int = -1
 
 
 def require_file_hash_suite(suite: object) -> str:
@@ -102,9 +103,7 @@ def file_hashes_to_wire(hashes: Mapping[str, FileHash]) -> dict:
     if not hashes:
         return {}
     return {
-        FILES_FIELD: {
-            name: {"h": fh.h, "size": fh.size} for name, fh in hashes.items()
-        },
+        FILES_FIELD: {name: {"h": fh.h} for name, fh in hashes.items()},
         FILES_SUITE_FIELD: FILE_HASH_SUITE_SHA256,
     }
 
@@ -114,8 +113,9 @@ def parse_file_hashes(payload: Mapping) -> dict[str, FileHash]:
     author's file names — ``{}`` when it carries none or the map is
     refused: an unknown / missing suite, not a mapping, more than
     :data:`MAX_FILE_HASH_ENTRIES` entries, or ANY bad entry (an unsafe
-    name, a hash not 64 lowercase hex, a bad size). Refused whole: the
-    item then takes the legacy names, never a partial map."""
+    name, a hash not 64 lowercase hex). Refused whole: the item then takes
+    the legacy names, never a partial map. Any other key of an entry is
+    ignored."""
     files = payload.get(FILES_FIELD)
     if files is None:
         return {}
@@ -139,15 +139,7 @@ def parse_file_hashes(payload: Mapping) -> dict[str, FileHash]:
         ):
             log.warning("file hashes refused: bad entry %r", name)
             return {}
-        size = entry.get("size")
-        if (
-            not isinstance(size, int)
-            or isinstance(size, bool)
-            or not 0 <= size <= _MAX_SIZE
-        ):
-            log.warning("file hashes refused: bad size for %r", name)
-            return {}
-        out[name] = FileHash(entry["h"], size)
+        out[name] = FileHash(entry["h"])
     return out
 
 

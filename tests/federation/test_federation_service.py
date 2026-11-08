@@ -6825,7 +6825,7 @@ async def test_the_files_hash_map_reaches_only_v85_households(monkeypatch):
         return MagicMock(ok=True)
 
     monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _send)
-    files = {"a.webp": {"h": "a" * 64, "size": 1}}
+    files = {"a.webp": {"h": "a" * 64}}
     await svc.broadcast_to_space_members(
         "sp-h",
         FederationEventType.SPACE_POST_CREATED,

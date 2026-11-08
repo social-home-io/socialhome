@@ -40,6 +40,7 @@ from ..domain.events import (
     SpacePostCreated,
 )
 from ..domain.federation import FederationEventType
+from ..domain.federation_capabilities import FederationCapability
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..domain.space_item import (
@@ -636,17 +637,26 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 post_id=event.post_id,
             )
 
-    async def _ship_media(
+    async def _ship_comment_media(
         self, space_id: str, correlation_id: str, media_urls: list[str]
     ) -> None:
-        """Queue *media_urls* for every other member household (one
-        ``SPACE_MEDIA_BLOB`` outbox row each). Fail-soft."""
+        """Queue a comment's picture for every other member household at
+        v_85 (one ``SPACE_MEDIA_BLOB`` outbox row each) — an older one keeps
+        the comment's name as sent and never looks the blob up. Fail-soft."""
         if self._media_sync is None or self._federation_repo is None or not media_urls:
             return
         try:
-            targets = await self._federation_repo.list_member_instance_ids(space_id)
-            own = getattr(self._federation, "_own_instance_id", "") or ""
-            targets = [t for t in targets if t and t != own]
+            members = await self._federation_repo.list_member_instance_ids(space_id)
+            own = str(self._federation.own_instance_id or "")
+            targets = [
+                t
+                for t in members
+                if t
+                and t != own
+                and await self._federation.space_member_supports(
+                    t, min_version=FederationCapability.MIN_FOR_CONTENT_FILE_HASHES
+                )
+            ]
             if targets:
                 await self._media_sync.enqueue_for_blob(
                     space_id=space_id,
@@ -698,7 +708,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         # v_85 — a comment's picture ships like a post's (it is stored
         # content-addressed on the receiver, so only bytes that hash to what
         # the comment carries ever back it).
-        await self._ship_media(event.space_id, c.id, media_urls)
+        await self._ship_comment_media(event.space_id, c.id, media_urls)
         if await self._member_publishable(event.space_id):
             await self._schedule_item(
                 event.space_id,

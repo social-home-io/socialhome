@@ -457,8 +457,11 @@ class SyncSessionRecord:
     #: … the watermark this session streams covered rows above (``None``:
     #: a full stream) …
     since_seq: int | None = None
-    #: … the shape it was planned under …
+    #: … the shape it was planned under (and whether it streams in full
+    #: only because the requester's watermark carries an older shape — a
+    #: sync line crossed: rows, but no catch-up media) …
     shape: str = ""
+    shape_crossed: bool = False
     #: … the requester's echo from its BEGIN (``have_seq``, migration 0087,
     #: parsed by :func:`~.sync.space.watermark.parse_have_seq`): our snapshot
     #: of the last stream it applied cleanly. ``None`` (absent / malformed):

@@ -420,12 +420,21 @@ class SpaceMediaSyncService:
             "file_size_bytes": size,
             # v_85 — the whole file's hash: the receiver stores a hashed
             # file content-addressed and checks the assembled bytes first.
-            **blob_hash_fields(await asyncio.to_thread(sha256_hex, data)),
+            **blob_hash_fields(await self._file_hash(entry.blob_id, data)),
         }
         return (
             ({**common, **seq}, raw)
             for seq, raw in split_into_chunks(data, chunk_bytes)
         )
+
+    async def _file_hash(self, name: str, data: bytes) -> str:
+        """The SHA-256 of *data*, read from the household hasher's cache
+        when it holds this very file (the same size) — a file shipped to
+        many households, or described then shipped, is hashed once."""
+        cached = await self.file_hasher.hash_name(name)
+        if cached is not None and cached.size == len(data):
+            return cached.h
+        return await asyncio.to_thread(sha256_hex, data)
 
     async def _reschedule_or_fail(
         self,

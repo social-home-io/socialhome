@@ -1005,3 +1005,60 @@ async def test_an_unknown_hash_suite_is_a_legacy_blob(env):
     await svc._on_space_media_blob(_blob(payload))
     assert (media / L("x.webp")).read_bytes() == b"NEW-BYTES"
     assert list(media.glob("sc-*")) == []
+
+
+# ── #1322 review: the content-name invariant holds on every write path ──
+
+
+async def test_the_host_never_fills_a_content_name_with_other_bytes(env, db):
+    """Review PoC 1: the row shows sc(S, h_real); the owner household names
+    that raw content name with a blob hashed h_evil. Nothing may land under
+    sc(S, h_real) unless it hashes to h_real."""
+    svc, media = env
+    real = b"AUTHORS-REAL-PICTURE"
+    name = SC(real)
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content, media_url)"
+        " VALUES(?,?,?,?,?,?)",
+        ("post-v", "sp-a", "u-a", "image", "", f"api/media/{name}"),
+    )
+    evil = b"HOSTS-OTHER-BYTES"
+    await svc._on_space_media_blob(
+        _blob(_hashed("post-v", name, evil), from_instance="host", body=evil)
+    )
+    assert not (media / name).exists()
+    # The real bytes, from anyone, still fill it.
+    await svc._on_space_media_blob(
+        _blob(_hashed("post-v", "x.webp", real), from_instance="host", body=real)
+    )
+    assert (media / name).read_bytes() == real
+
+
+async def test_a_blob_whose_content_file_is_here_still_takes_its_alias(env):
+    """Review PoC 2: the content file is already held (another item); a
+    blob for a row not here yet still gets the sender's name, in case that
+    row arrives unhashed."""
+    svc, media = env
+    data = b"SAME-PICTURE"
+    (media / SC(data)).write_bytes(data)
+    await svc._on_space_media_blob(_blob(_hashed("post-new2", "y.webp", data)))
+    assert (media / L("y.webp")).read_bytes() == data
+
+
+async def test_a_comments_picture_is_scoped_to_its_comment(env, db):
+    """A known comment showing the content name takes the blob without a
+    second name; a comment of another space refuses it."""
+    svc, media = env
+    data = b"COMMENT-PICTURE"
+    for cid, post in (("c-a", "post-a"), ("c-b", "post-b")):
+        await db.enqueue(
+            "INSERT INTO space_post_comments(id, post_id, author, type, media_url)"
+            " VALUES(?,?,?,?,?)",
+            (cid, post, "u-a", "image", f"api/media/{SC(data, 'c.webp')}"),
+        )
+    await svc._on_space_media_blob(_blob(_hashed("c-a", "c.webp", data), body=data))
+    assert (media / SC(data, "c.webp")).read_bytes() == data
+    assert not (media / L("c.webp")).exists()
+    other = b"OTHER-COMMENT"
+    await svc._on_space_media_blob(_blob(_hashed("c-b", "d.webp", other), body=other))
+    assert list(media.glob(f"{SC(other, 'd.webp')}*")) == []

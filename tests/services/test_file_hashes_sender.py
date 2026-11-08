@@ -28,7 +28,7 @@ async def test_a_wired_hasher_adds_the_map(tmp_path: pathlib.Path) -> None:
     out = await sender._with_file_hashes({"id": "p"}, ["api/media/x.webp"])
     assert out == {
         "id": "p",
-        "files": {"x.webp": {"h": hashlib.sha256(b"x").hexdigest(), "size": 1}},
+        "files": {"x.webp": {"h": hashlib.sha256(b"x").hexdigest()}},
         "files_suite": "sha256",
     }
 

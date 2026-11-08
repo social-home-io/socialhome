@@ -5064,7 +5064,6 @@ def create_app(config: Config | None = None) -> web.Application:
             space_post_outbound,
             space_cal_service,
             fed.gallery_federation_outbound,
-            fed.page_federation_outbound,
             moderation_federation,
         ):
             sender.attach_file_hasher(file_hasher)

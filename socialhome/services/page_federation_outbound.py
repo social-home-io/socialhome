@@ -51,13 +51,11 @@ from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.space_media_ref import (
     MAX_PAGE_DESCRIPTOR_ENTRIES,
-    MAX_PAGE_FILES,
     MEDIA_REFS_FIELD,
     distinct_media_files,
     page_media_urls,
 )
 from ..infrastructure.event_bus import EventBus
-from .file_hashes_sender import FileHashesMixin
 from .inbound_media_store import media_basename
 from .moderation_release import with_release
 from .space_media_names import space_own_files
@@ -73,13 +71,12 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class PageFederationOutbound(SpaceMediaRefsMixin, FileHashesMixin):
+class PageFederationOutbound(SpaceMediaRefsMixin):
     """Publish space-scoped page mutations to paired peer instances."""
 
     __slots__ = (
         "_bus",
         "_federation",
-        "_file_hasher",
         "_media_gfs",
         "_media_refs",
         "_media_sync",
@@ -98,8 +95,6 @@ class PageFederationOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         self._spaces: AbstractSpaceRepo | None = None
         self._media_refs: AbstractMediaReferenceRepo | None = None
         self._media_gfs = None
-        #: v_85 — a canonical version's files ride with their SHA-256.
-        self._file_hasher = None
 
     def attach_media(
         self,
@@ -221,24 +216,10 @@ class PageFederationOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             else None
         )
         base = payload()
-        # v_85 — the version's own files (cover + body, ≤ 16) with their
-        # hashes. Member households keep page files page-scoped (``sp-``,
-        # host-only fill); the map lets them check the bytes.
-        versioned = await self._with_file_hashes(
-            {**base, **canonical},
-            distinct_media_files(
-                await space_own_files(
-                    self._media_refs,
-                    space_id,
-                    page_media_urls(canonical.get("cover_image_url"), content),
-                ),
-                MAX_PAGE_FILES,
-            ),
-        )
         await self._fan_out(
             space_id,
             event_type,
-            versioned,
+            {**base, **canonical},
             legacy_payload=payload(),
             legacy_below=FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES,
             per_peer=self._page_refs_per_peer(plan),

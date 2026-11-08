@@ -207,6 +207,25 @@ class SyncWatermarks:
             return None
         return min(mark.seq, have_seq)
 
+    async def shape_crossed(
+        self,
+        *,
+        space_id: str,
+        instance_id: str,
+        shape: str,
+        have_seq: int | None,
+    ) -> bool:
+        """Whether this session streams in full only because the shape moved
+        (a sync line the requester crossed, a retention or gate change):
+        the requester echoes a stream it applied (``have_seq``) and we hold
+        a confirmed full stream for it under another shape. Such a household
+        already holds the space's files — the full stream re-sends rows, not
+        media. A newcomer, a reset (no echo) or a never-confirmed one: no."""
+        if have_seq is None:
+            return False
+        mark = await self._repo.get(space_id, instance_id)
+        return mark is not None and bool(mark.full_at) and mark.shape != shape
+
     async def confirm(
         self,
         *,

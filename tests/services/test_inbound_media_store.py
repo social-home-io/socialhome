@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from unittest.mock import patch
 
 import pytest
 
 from socialhome.domain.errors import InvalidMediaRefError
+from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.media_constraints import (
     AUDIO_MAX_UPLOAD_BYTES,
     FILE_MAX_UPLOAD_BYTES,
@@ -613,3 +615,58 @@ async def test_link_once_never_replaces_a_file(tmp_path):
     (tmp_path / "sd-b.webp").write_bytes(b"other")
     assert await store.link_once(src, tmp_path / "sd-b.webp") is False
     assert (tmp_path / "sd-b.webp").read_bytes() == b"other"
+
+
+async def test_store_chunk_refuses_a_content_name_its_hash_does_not_bind(tmp_path):
+    """#1322 review: nothing lands under an ``sc-`` name unless the name is
+    the content name of the declared hash in that space AND the bytes hash
+    to it — enforced in the one store helper."""
+    data = b"bytes"
+    h = hashlib.sha256(data).hexdigest()
+    other = hashlib.sha256(b"other").hexdigest()
+    right = space_content_media_name("sp", h, "a.webp")
+    wrong = space_content_media_name("sp", other, "a.webp")
+    for target, expected, space in (
+        (wrong, h, "sp"),  # the name binds another hash
+        (right, h, "sp-2"),  # the name binds another space
+        (right, None, "sp"),  # no hash at all
+    ):
+        got = await store.store_chunk(
+            tmp_path / ".partial" / "k",
+            chunk_index=0,
+            chunk_count=1,
+            data=data,
+            target=tmp_path / target,
+            expected_size=len(data),
+            expected_sha256=expected,
+            space_id=space,
+        )
+        assert got is None
+        assert not (tmp_path / target).exists()
+    assert (
+        await store.store_chunk(
+            tmp_path / ".partial" / "k",
+            chunk_index=0,
+            chunk_count=1,
+            data=data,
+            target=tmp_path / right,
+            expected_size=len(data),
+            expected_sha256=h,
+            space_id="sp",
+        )
+        is True
+    )
+
+
+async def test_link_once_never_writes_a_content_name(tmp_path):
+    src = tmp_path / "x.webp"
+    src.write_bytes(b"x")
+    target = space_content_media_name("sp", "a" * 64, "x.webp")
+    assert await store.link_once(src, tmp_path / target) is False
+    assert not (tmp_path / target).exists()
+
+
+async def test_write_once_never_writes_a_content_name(tmp_path):
+    target = tmp_path / space_content_media_name("sp", "a" * 64, "x.webp")
+    assert await store.write_once(target, b"x", tmp_path / "tmp" / "t") is False
+    assert not target.exists()

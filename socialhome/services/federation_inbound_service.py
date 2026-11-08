@@ -2326,6 +2326,7 @@ class FederationInboundService(ProtectionGateMixin):
             raw=raw,
             filename=local,
             alias=alias,
+            space_id=space_id,
             partial_dir=partial_key(
                 event.from_instance, transfer_id, chunk_count=chunk_count
             ),
@@ -2362,6 +2363,10 @@ class FederationInboundService(ProtectionGateMixin):
         delivers its rows and files under its own (matching) names.
         Write-once: an existing file is never replaced."""
         assert self._media_dir is not None
+        if is_space_content_media_name(filename):
+            # A content name is filled only by bytes of its own hash — the
+            # content-name path above, never under the name as sent.
+            return False
         if await aiofiles.os.path.exists(self._media_dir / filename):
             return False
         if (
@@ -2479,6 +2484,13 @@ class FederationInboundService(ProtectionGateMixin):
             if listing.space_id != space_id:
                 return _ROW_ELSEWHERE
             return _scoped(filename in {media_basename(u) for u in listing.image_urls})
+        # A space comment's picture (v_85 ships it).
+        comment = await self._space_post_repo.get_comment(correlation_id)
+        if comment is not None:
+            parent = await self._space_post_repo.get(comment.post_id)
+            if parent is None or parent[0] != space_id:
+                return _ROW_ELSEWHERE
+            return _scoped(filename == media_basename(comment.media_url))
         if self._gallery_repo is not None:
             item = await self._gallery_repo.get_item(correlation_id)
             if item is not None:
@@ -2526,6 +2538,7 @@ class FederationInboundService(ProtectionGateMixin):
         total_size: int,
         expected_sha256: str | None = None,
         alias: str | None = None,
+        space_id: str = "",
     ) -> None:
         """Write one space-media chunk; assemble once all have landed.
         *alias*: a second name the published file also takes (a hard link,
@@ -2565,6 +2578,11 @@ class FederationInboundService(ProtectionGateMixin):
                     what="SPACE_MEDIA_BLOB",
                     from_instance=from_instance,
                 )
+                if alias is not None:
+                    # The content file is here already (another item): it
+                    # holds exactly these bytes, so the sender's name may
+                    # point at it too.
+                    await link_once(target, self._media_dir / alias)
             await drop_parts(partial_root)
             return
         # The sender pipelines a file's chunks, so the ``final`` one may
@@ -2579,6 +2597,7 @@ class FederationInboundService(ProtectionGateMixin):
                 target=target,
                 expected_size=total_size,
                 expected_sha256=expected_sha256,
+                space_id=space_id,
             )
         except OSError as exc:
             log.warning(
@@ -2597,6 +2616,8 @@ class FederationInboundService(ProtectionGateMixin):
                 what="SPACE_MEDIA_BLOB",
                 from_instance=from_instance,
             )
+            if alias is not None:
+                await link_once(target, self._media_dir / alias)
             return
         log.info(
             "SPACE_MEDIA_BLOB: stored %s from %d chunk(s) for post=%s",

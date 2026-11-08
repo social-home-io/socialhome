@@ -71,9 +71,7 @@ async def test_with_hashes_adds_the_map_to_a_new_dict(tmp_path: pathlib.Path) ->
     out = await MediaFileHasher(tmp_path).with_hashes(payload, [a])
     assert payload == {"id": "p1", "media_url": a}
     assert out[FILES_SUITE_FIELD] == FILE_HASH_SUITE_SHA256
-    assert out[FILES_FIELD] == {
-        "a.webp": {"h": hashlib.sha256(b"aaa").hexdigest(), "size": 3}
-    }
+    assert out[FILES_FIELD] == {"a.webp": {"h": hashlib.sha256(b"aaa").hexdigest()}}
     # Nothing to hash: the payload unchanged.
     assert await MediaFileHasher(tmp_path).with_hashes(payload, []) == payload
 

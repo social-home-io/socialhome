@@ -436,15 +436,19 @@ Every space item that shows files carries their SHA-256, inside its
 encrypted payload (live events) and in each §25.6 record:
 
 ```json
-"files": {"<author file name>": {"h": "<64 hex>", "size": 12345}},
+"files": {"<author file name>": {"h": "<64 hex>"}},
 "files_suite": "sha256"
 ```
 
 * **Items:** posts (`media_url`, `image_urls`, `file_meta.url`, the
   link-card thumbnail), comments (`media_url` — a comment's picture now
-  ships as a `SPACE_MEDIA_BLOB` too), calendar covers, gallery items
-  (thumbnail + file), bazaar listings, pages (cover + body, ≤ 16 per
-  version) and moderation submissions. At most 16 entries.
+  ships as a `SPACE_MEDIA_BLOB` too, to v_85 member households), calendar
+  covers, gallery items (thumbnail + file), bazaar listings and moderation
+  submissions (not a page's, nor a post's with an author-signed follower
+  copy — see below). At most 16 entries.
+* **No size on the wire:** a receiver could not check it against the bytes
+  before they land, and the hash already refuses a truncated file; an
+  entry's other keys are ignored.
 * **Suite:** `FILE_HASH_SUITE_SHA256` / `SUPPORTED_FILE_HASH_SUITES` in
   `domain/file_hashes.py`. An unknown or missing suite, a map that is not a
   mapping, more than 16 entries or any bad entry rejects the map **whole**
@@ -456,32 +460,44 @@ encrypted payload (live events) and in each §25.6 record:
   (owner decision B). Another provider's map is ignored.
 * **Names:** a hashed file is stored and referenced as
   `sc-` + `sha256("space-content" ‖ space ‖ h)[:40]` + the extension.
-  Whatever is stored under it hashes to `h` — every write path checks
-  (`SPACE_MEDIA_BLOB` assembly, `store_chunk(expected_sha256=…)`); a local
-  upload never mints an `sc-` name. So nothing is first-come: a member's
-  item that names another item's file name with its own bytes (a decoy
-  row) resolves to ITS OWN content name, and the space id in the name keeps
-  two spaces' copies apart. A raw `sc-` name is never taken from the wire:
-  it is re-derived from the hash the item claims, or — unhashed — rebound
-  to its sender (`sd-`) like any name; a `SPACE_MEDIA_BLOB` naming an
-  `sc-` file without `h` is refused.
+  **Invariant:** nothing is stored under an `sc-` name unless it is
+  exactly the content name of the declared hash in that space AND the
+  bytes hash to it — enforced in one place, `inbound_media_store`
+  (`content_name_binds` in `store_chunk`; `link_once` and `write_once`
+  never write an `sc-` name; the owner's fill of a missing name never
+  takes one). A local upload never mints an `sc-` name (uuid hex). So
+  nothing is first-come: a member's item that names another item's file
+  name with its own bytes (a decoy row) resolves to ITS OWN content name,
+  and the space id in the name keeps two spaces' copies apart. A raw `sc-`
+  name is never taken from the wire: it is re-derived from the hash the
+  item claims, or — unhashed — rebound to its sender (`sd-`) like any
+  name; a comment's raw `sc-` reference is dropped.
 * **Rows held here keep their names:** a file the stored row already shows
   (by its own name, or under the sender's `sd-` name) is not re-pointed by
   an edit or a stream that now carries hashes — no re-download at upgrade.
-* **`SPACE_MEDIA_BLOB`** carries `h` + `h_suite` (the sender hashes the
-  file it ships). The receiver stores it under the content name when the
-  correlated row shows that name or is not here yet, under the sender's
-  `sd-` name when a legacy row shows that one — and in either case only
-  bytes that hash to `h`.
+* **`SPACE_MEDIA_BLOB`** carries `h` + `h_suite` (the sender reads it from
+  the household hasher's cache). The receiver stores it under the content
+  name when the correlated row (a post, listing, gallery item, calendar
+  event, comment or held submission) shows that name; under the sender's
+  `sd-` name when a legacy row shows that one; and when the row is not
+  here yet, under the content name **and**, as a hard link to the same
+  verified bytes, the sender's `sd-` name (the row may arrive unhashed — a
+  page, a non-host provider, a follower-copy post) — also when the content
+  file is already here. The unreferenced name goes with the orphan sweep.
+  Every case checks the bytes against `h`.
 * **Cleanup:** an `sc-` file may back several items of its space. Per-row
   delete paths remove a file only once no row references it
   (`unlink_unreferenced`), and the orphan sweep drops an unreferenced one
   after its 24 h grace — both read `media_reference_repo`, which already
   covers every column an `sc-` name lives in.
-* **Pages** keep their page-scoped `sp-` names and host-only fill (v_82):
-  a page body keeps its host's names byte for byte, so a content name
-  would need the hash at read time. Their map and blob hash let the bytes
-  be checked in transit.
+* **Pages carry no map.** A page body keeps its host's names byte for byte
+  (v_82) and a member's `sp-` name is derived at read time; only the host
+  fills a page's files. A content name would need the hash at read time,
+  so pages keep `sp-`; their blobs still carry `h`, checked on assembly.
+* **Moderated posts with an author-signed follower copy** are submitted
+  without a map: the host matches that copy's file names against the files
+  it holds by their sender-bound names (`approved_relay_for`). The host's
+  release carries the hashes of its own copies either way.
 * **GFS media cache (v_80 / v_83):** a file a household reads from a GFS
   keeps its reader-derived `sg-` name — the sealed blob already binds the
   item and its origin (AAD), the descriptor is author-signed for
@@ -490,6 +506,9 @@ encrypted payload (live events) and in each §25.6 record:
   (`SpaceMediaNamer.combine`). A holder asked to re-upload a file it
   stores content-addressed tries the item's `sc-` files; the sealed
   address picks the right one.
+* **Sync line 85:** a household crossing it gets one full stream of rows,
+  but no catch-up media (it holds the files; `shape_crossed`). Only a
+  newcomer or a reset gets the space's files again.
 * **Older households (below v_85)** are sent no map (a moderation release
   check refuses keys it does not classify) and keep the sender-bound names.
 
