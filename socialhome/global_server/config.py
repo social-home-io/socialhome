@@ -242,6 +242,59 @@ class EnvelopeMediaConfig:
         return replace(out, enabled=enabled, **values)
 
 
+@dataclass(slots=True, frozen=True)
+class EnvelopeMailboxConfig:
+    """``[envelope_relay]`` mailbox keys (GFS redesign PR 1,
+    :mod:`.mailboxes`): anonymous per-space mailboxes a household registers
+    with proof of possession and claims on ``/gfs/mailbox/ws``.
+
+    * ``mailboxes`` — offer mailboxes at all (and advertise
+      ``envelope_mailbox``).
+    * ``mailbox_max_per_ip`` — NEW mailboxes one client address may register
+      per 24 h (per node). Counted in memory only: the address is never
+      stored with, or next to, a mailbox.
+    * ``mailbox_idle_days`` — a mailbox not claimed (since its first registration) for
+      this long is dropped by the maintenance loop, with its queued frames."""
+
+    enabled: bool = True
+    mailbox_max_per_ip: int = 200
+    mailbox_idle_days: int = 30
+
+    @classmethod
+    def parse(
+        cls, table: dict, env: dict[str, str] | None = None, *, base=None
+    ) -> EnvelopeMailboxConfig:
+        """From an ``[envelope_relay]`` table (absent keys keep *base*'s
+        values, else the defaults), then the ``GFS_ENVELOPE_RELAY_<KEY>`` env
+        vars. :class:`ValueError` names the bad key."""
+        out = base if base is not None else cls()
+        values: dict[str, object] = {}
+        for key, (lo, hi) in _ENVELOPE_MAILBOX_BOUNDS.items():
+            env_key = f"GFS_ENVELOPE_RELAY_{key.upper()}"
+            if env is not None and env_key in env:
+                raw: object = env[env_key]
+            elif env is None and key in table:
+                raw = table[key]
+            else:
+                continue
+            values[key] = _bounded_int("envelope_relay", key, raw, lo, hi)
+        enabled = out.enabled
+        if env is not None and "GFS_ENVELOPE_RELAY_MAILBOXES" in env:
+            enabled = _bool(
+                "envelope_relay", "mailboxes", env["GFS_ENVELOPE_RELAY_MAILBOXES"]
+            )
+        elif env is None and "mailboxes" in table:
+            enabled = _bool("envelope_relay", "mailboxes", table["mailboxes"])
+        return replace(out, enabled=enabled, **values)
+
+
+#: The integer ``[envelope_relay]`` mailbox keys and their inclusive bounds.
+_ENVELOPE_MAILBOX_BOUNDS: dict[str, tuple[int, int]] = {
+    "mailbox_max_per_ip": (1, 1_000_000),
+    "mailbox_idle_days": (1, 3650),
+}
+
+
 #: The integer ``[envelope_relay]`` media keys and their inclusive bounds. The
 #: per-recipient queue holds at least one frame (528 KiB) and at most 1 GiB.
 _ENVELOPE_MEDIA_BOUNDS: dict[str, tuple[int, int]] = {
@@ -417,6 +470,8 @@ class GfsConfig:
 
     # [envelope_relay] — binary relay media frames (``GFS_ENVELOPE_RELAY_*``).
     envelope_media: EnvelopeMediaConfig = EnvelopeMediaConfig()
+    #: Anonymous per-space mailboxes (``GFS_ENVELOPE_RELAY_MAILBOX*``).
+    envelope_mailbox: EnvelopeMailboxConfig = EnvelopeMailboxConfig()
 
     # Loaded-from path, for audit + --set-password write-back.
     source_path: str = ""
@@ -526,6 +581,7 @@ class GfsConfig:
             ),
             space_media_on_demand=SpaceMediaOnDemandConfig.parse(space_media),
             envelope_media=EnvelopeMediaConfig.parse(envelope_relay),
+            envelope_mailbox=EnvelopeMailboxConfig.parse(envelope_relay),
             source_path=str(p),
         )
         if not cfg.base_url:
@@ -740,6 +796,9 @@ class GfsConfig:
             ),
             envelope_media=EnvelopeMediaConfig.parse(
                 {}, dict(env), base=self.envelope_media
+            ),
+            envelope_mailbox=EnvelopeMailboxConfig.parse(
+                {}, dict(env), base=self.envelope_mailbox
             ),
         )._with_clean_aliases()
 

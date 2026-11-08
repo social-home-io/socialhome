@@ -24,6 +24,7 @@ import orjson
 
 from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
 from ..db import AsyncDatabase
+from ..domain.gfs_mailbox import GfsMailbox
 from ..domain.space import normalize_join_mode
 from .domain import (
     AdminSession,
@@ -3567,6 +3568,101 @@ class SqliteGfsEnvelopeQueueRepo:
         )
         d = _as_dict(row)
         return int(d["n"]) if d else 0
+
+
+# ─── Anonymous mailboxes (GFS redesign PR 1, migration 0029) ───────────
+
+
+@runtime_checkable
+class AbstractGfsMailboxRepo(Protocol):
+    """Registered GFS mailboxes: the pinned key and two timestamps, nothing
+    about the owner (:mod:`socialhome.domain.gfs_mailbox`)."""
+
+    async def get(self, mailbox_id: str) -> GfsMailbox | None: ...
+
+    async def is_mailbox(self, mailbox_id: str) -> bool: ...
+
+    async def register(self, mailbox_id: str, sign_pk: bytes, *, now: int) -> bool: ...
+
+    async def touch_claim(self, mailbox_id: str, *, now: int) -> None: ...
+
+    async def prune_idle(self, *, older_than: int) -> int: ...
+
+
+class SqliteGfsMailboxRepo:
+    """SQLite-backed :class:`AbstractGfsMailboxRepo`."""
+
+    __slots__ = ("_db",)
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def get(self, mailbox_id: str) -> GfsMailbox | None:
+        row = await self._db.fetchone(
+            "SELECT mailbox_id, sign_pk, created_at, last_claim_at "
+            "FROM gfs_mailboxes WHERE mailbox_id=?",
+            (mailbox_id,),
+        )
+        d = _as_dict(row)
+        if not d:
+            return None
+        last = d.get("last_claim_at")
+        return GfsMailbox(
+            mailbox_id=str(d["mailbox_id"]),
+            sign_pk=bytes(d["sign_pk"]),
+            created_at=int(d["created_at"]),
+            last_claim_at=int(last) if last is not None else None,
+        )
+
+    async def is_mailbox(self, mailbox_id: str) -> bool:
+        row = await self._db.fetchone(
+            "SELECT 1 FROM gfs_mailboxes WHERE mailbox_id=?", (mailbox_id,)
+        )
+        return row is not None
+
+    async def register(self, mailbox_id: str, sign_pk: bytes, *, now: int) -> bool:
+        """Pin *sign_pk* for *mailbox_id* unless it is registered already
+        (trust on first use: an existing row is never rewritten). ``True``
+        when this call created the row."""
+        changed = await self._db.enqueue_rowcount(
+            "INSERT OR IGNORE INTO gfs_mailboxes(mailbox_id, sign_pk, created_at)"
+            " VALUES(?,?,?)",
+            (mailbox_id, sign_pk, now),
+        )
+        return changed > 0
+
+    async def touch_claim(self, mailbox_id: str, *, now: int) -> None:
+        await self._db.enqueue(
+            "UPDATE gfs_mailboxes SET last_claim_at=? WHERE mailbox_id=?",
+            (now, mailbox_id),
+        )
+
+    async def prune_idle(self, *, older_than: int) -> int:
+        """Drop every mailbox not claimed since
+        *older_than*, with whatever still waits for it in the two queues.
+        Returns how many mailboxes went."""
+
+        def _run(conn) -> int:
+            idle = (
+                "SELECT mailbox_id FROM gfs_mailboxes"
+                " WHERE COALESCE(last_claim_at, created_at) < ?"
+            )
+            conn.execute(
+                f"DELETE FROM gfs_envelope_queue WHERE to_instance IN ({idle})",
+                (older_than,),
+            )
+            conn.execute(
+                f"DELETE FROM gfs_media_queue WHERE to_instance IN ({idle})",
+                (older_than,),
+            )
+            cur = conn.execute(
+                "DELETE FROM gfs_mailboxes"
+                " WHERE COALESCE(last_claim_at, created_at) < ?",
+                (older_than,),
+            )
+            return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)
 
 
 # ─── Space content epochs (member publish, v_49) ─────────────────────────

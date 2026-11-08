@@ -8,6 +8,7 @@ from dataclasses import asdict
 import orjson
 from aiohttp import web
 
+from ...domain.gfs_mailbox import ENVELOPE_MAILBOX_CAPABILITY
 from ...domain.gfs_space_media import SPACE_MEDIA_CAPABILITY
 from ...domain.gfs_space_media_on_demand import ON_DEMAND_CAPABILITY_KEY
 from ...domain.relay_media_frame import ENVELOPE_MEDIA_CAPABILITY
@@ -291,6 +292,15 @@ class GfsInfoView(GfsBaseView):
         # it off (``[envelope_relay] media = false``).
         if cfg.envelope_media.enabled:
             capabilities[ENVELOPE_MEDIA_CAPABILITY] = True
+        # GFS redesign PR 1 — anonymous per-space mailboxes
+        # (``/gfs/mailbox/register`` + ``/gfs/mailbox/ws``): ``POST
+        # /gfs/envelope`` delivers to a registered mailbox id exactly as to an
+        # instance id. Signed: a household addresses a member by mailbox only
+        # through a server that proved it. Absent while the operator has it
+        # off (``[envelope_relay] mailboxes = false``).
+        mailbox = self.svc(K.gfs_mailbox_service_key).capability()
+        if mailbox is not None:
+            capabilities[ENVELOPE_MAILBOX_CAPABILITY] = mailbox
         if cfg.instance_id_aliases:
             # The former ids this server answers to (``instance_id_aliases``),
             # SIGNED: a household pinned to one of them adopts

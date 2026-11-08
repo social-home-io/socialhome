@@ -31,6 +31,7 @@ from ...domain.gfs_channel import (
     CHANNEL_UNREGISTER_ROUTE,
     CHANNEL_UNSUBSCRIBE_ROUTE,
 )
+from ...domain.gfs_mailbox import MAILBOX_REGISTER_ROUTE, MAILBOX_WS_ROUTE
 from ...gfs_proof import PROOF_ROUTE
 from .. import admin as admin_mod
 from ..link_preview import SPACE_IMAGE_ROUTE
@@ -90,6 +91,7 @@ from .highlights import (
     HighlightUnpublishView,
 )
 from .invites import SpaceInviteTokenView, SpaceInviteView
+from .mailbox import MailboxRegisterView, MailboxWebSocketView
 from .member_publish import (
     MemberPublishAnonView,
     MemberPublishView,
@@ -202,6 +204,10 @@ def register_routes(
     # by design: the body names only the recipient, the payload is sealed
     # end-to-end, and every well-formed request gets the same 202.
     app.router.add_view("/gfs/envelope", EnvelopeRelayView)
+    # Anonymous per-space mailboxes (GFS redesign PR 1): register a mailbox
+    # key with proof of possession, claim its frames on a socket of its own.
+    app.router.add_view(MAILBOX_REGISTER_ROUTE, MailboxRegisterView)
+    app.router.add_view(MAILBOX_WS_ROUTE, MailboxWebSocketView)
     # Trusted-mode member publish (v_49): identified by the household
     # signature, authorized by a space-authority-signed writer cert; plus the
     # authority-signed content-epoch notice the freshness check relies on.

@@ -296,3 +296,38 @@ async def test_a_space_media_sweep_failure_is_contained():
     )
     await sched._maintain_once()
     assert len(log_.prune_calls) == 1
+
+
+class _StubMailboxes:
+    def __init__(self, *, boom: bool = False) -> None:
+        self.boom = boom
+        self.sweeps: list[int] = []
+
+    async def sweep(self, *, now: int) -> int:
+        self.sweeps.append(now)
+        if self.boom:
+            raise RuntimeError("db gone")
+        return 2
+
+
+async def test_maintain_once_sweeps_idle_mailboxes():
+    """GFS redesign PR 1: idle anonymous mailboxes go after ``mailbox_idle_days``."""
+    boxes = _StubMailboxes()
+    sched = GfsMaintenanceScheduler(
+        admin_repo=_StubAdminRepo(),
+        highlight_repo=_StubHighlightRepo(),
+        mailboxes=boxes,  # type: ignore[arg-type]
+    )
+    await sched._maintain_once()
+    assert len(boxes.sweeps) == 1
+
+
+async def test_a_mailbox_sweep_failure_is_contained():
+    admin = _StubAdminRepo()
+    sched = GfsMaintenanceScheduler(
+        admin_repo=admin,
+        highlight_repo=_StubHighlightRepo(),
+        mailboxes=_StubMailboxes(boom=True),  # type: ignore[arg-type]
+    )
+    await sched._maintain_once()
+    assert len(admin.purge_calls) == 1

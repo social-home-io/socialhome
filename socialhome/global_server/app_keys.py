@@ -17,6 +17,7 @@ from .envelope_relay import GfsEnvelopeRelay
 from .federation import GfsFederationService
 from .highlight_publications import HighlightPublicationRegistry
 from .invites import GfsInviteService
+from .mailboxes import GfsMailboxService
 from .member_publish import GfsMemberPublishService
 from .moment_delete_log import MomentDeleteLog
 from .moment_media import GfsMomentMediaStore
@@ -33,6 +34,7 @@ from .repositories import (
     AbstractGfsHighlightPublicationRepo,
     AbstractGfsHighlightTokenRepo,
     AbstractGfsInviteRepo,
+    AbstractGfsMailboxRepo,
     AbstractGfsMomentFollowRepo,
     AbstractGfsSpaceEpochRepo,
     AbstractGfsUserPictureRepo,
@@ -111,6 +113,14 @@ gfs_envelope_queue_repo_key: AppKey[AbstractGfsEnvelopeQueueRepo] = AppKey(
 )
 #: Deliver-or-queue relay for opaque household-to-household envelopes.
 gfs_envelope_relay_key: AppKey[GfsEnvelopeRelay] = AppKey("gfs_envelope_relay")
+#: Anonymous per-space mailboxes (GFS redesign PR 1): the pinned keys, the
+#: register / claim service and the claim sockets (their own registry —
+#: never mixed into the identified ``/gfs/ws`` one).
+gfs_mailbox_repo_key: AppKey[AbstractGfsMailboxRepo] = AppKey("gfs_mailbox_repo")
+gfs_mailbox_service_key: AppKey[GfsMailboxService] = AppKey("gfs_mailbox_service")
+gfs_mailbox_ws_registry_key: AppKey[GfsWebSocketRegistry] = AppKey(
+    "gfs_mailbox_ws_registry"
+)
 
 #: Bulletin board of owner-minted invite links (§24.8.5).
 gfs_invite_repo_key: AppKey[AbstractGfsInviteRepo] = AppKey("gfs_invite_repo")
