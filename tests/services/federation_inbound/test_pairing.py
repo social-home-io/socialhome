@@ -186,6 +186,9 @@ class _NoSendFederation:
     def note_unpaired(self, instance_id):
         pass
 
+    async def close_rtc_peer(self, instance_id):
+        pass
+
 
 @pytest.fixture
 def outbox():

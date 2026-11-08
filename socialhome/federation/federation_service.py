@@ -571,6 +571,14 @@ class FederationService:
         }
         self._unpaired_at[instance_id] = now
 
+    async def close_rtc_peer(self, instance_id: str) -> None:
+        """The pairing with *instance_id* ended: close its WebRTC
+        PeerConnection (see :meth:`FederationTransport.close_peer`), so no
+        ICE/DTLS association lingers between ex-peers. No-op without a
+        transport or a connection."""
+        if self._transport is not None:
+            await self._transport.close_peer(instance_id)
+
     def _unpaired_recently(self, instance_id: str) -> bool:
         at = self._unpaired_at.get(instance_id)
         return at is not None and time.monotonic() - at < UNPAIR_SEND_RACE_S

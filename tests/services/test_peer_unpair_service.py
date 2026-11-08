@@ -122,6 +122,9 @@ class _FakeFederation:
     def note_unpaired(self, instance_id):
         self._log.append(("note_unpaired", instance_id))
 
+    async def close_rtc_peer(self, instance_id):
+        self._log.append(("close_rtc_peer", instance_id))
+
     async def queue_event(self, *, to_instance_id, event_type, payload, expires_at):
         inst = await self._repo.get_instance(to_instance_id, include_unpairing=True)
         self._log.append(("queue_event", to_instance_id))
@@ -227,6 +230,7 @@ async def test_unpair_sends_unpair_before_forgetting(env):
         "dm_media_purge",
         "space_media_purge",
         "forget_discovered_via",
+        "close_rtc_peer",
     ]
     assert "peer-a" not in env["repo"].instances
     assert env["outbox"].rows == {}
@@ -262,6 +266,9 @@ async def test_undeliverable_unpair_leaves_a_tombstone_that_retries(env, outcome
     assert calls.index("mark_unpairing") < calls.index("outbox_purge")
     assert calls.index("outbox_purge") < calls.index("queue_event")
     assert "delete_instance" not in calls
+    # The queued UNPAIR may still ride the DataChannel: the connection
+    # stays up until the tombstone is purged.
+    assert "close_rtc_peer" not in calls
 
     inst = env["repo"].instances["peer-b"]
     assert inst.status is PairingStatus.UNPAIRING
@@ -309,6 +316,8 @@ async def test_finish_purges_a_tombstone_once_unpair_is_delivered(env):
     await env["svc"].finish_unpair("peer-t")
 
     assert "peer-t" not in env["repo"].instances
+    # The UNPAIR is out: now the connection goes too.
+    assert ("close_rtc_peer", "peer-t") in env["log"]
     assert env["outbox"].rows == {}
     # Already announced when the tombstone was made — not twice.
     assert env["published"] == []
@@ -419,6 +428,7 @@ async def test_purge_drops_row_first_then_every_outbox_and_hint(env):
         "dm_media_purge",
         "space_media_purge",
         "forget_discovered_via",
+        "close_rtc_peer",
     ]
     assert "peer-p" not in env["repo"].instances
     assert env["outbox"].rows == {}

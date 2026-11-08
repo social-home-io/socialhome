@@ -100,6 +100,12 @@ PING_INTERVAL_S: float = 30.0
 #: default libdatachannel message size ceiling.
 SEND_HWM_BYTES: int = 1 << 20
 
+#: How long :meth:`FederationTransport.close_peer` lets a DataChannel's
+#: send buffer drain before it closes the PeerConnection. The frame left in
+#: it when a pairing ends is our own ``UNPAIR``; closing at once could drop
+#: it. Bounded, because an ex-peer that went away never drains it.
+RTC_CLOSE_FLUSH_TIMEOUT_S: float = 2.0
+
 #: What an HTTPS-inbox POST raises when the PEER is the problem — refused,
 #: reset, DNS, TLS, timed out. Logged as one line with no traceback: an
 #: offline household is ordinary operation, retried by the outbox.
@@ -368,6 +374,7 @@ class _RtcPeer:
         "_closed",
         "_dropped_candidates",
         "_expected_answer_from",
+        "_failed",
         "_ice_provider",
         "_inbound",
         "_is_offerer",
@@ -404,7 +411,7 @@ class _RtcPeer:
         send_hwm: int = SEND_HWM_BYTES,
         bus: EventBus | None = None,
         polite: bool = False,
-        on_failed: Callable[[str], Awaitable[None]] | None = None,
+        on_failed: Callable[[str, _RtcPeer], Awaitable[None]] | None = None,
         on_open: Callable[[str], Awaitable[None]] | None = None,
         media_inbound: _MediaInboundCallback | None = None,
         app_inbound: _AppInboundCallback | None = None,
@@ -423,6 +430,10 @@ class _RtcPeer:
         self._channel: Any | None = None
         self._open = asyncio.Event()
         self._closed = False
+        #: The PeerConnection reached FAILED: :meth:`FederationTransport._evict_peer`
+        #: is on its way to drop this peer with a backoff, so it is not
+        #: :attr:`is_spent` (a rebuild must not jump that backoff).
+        self._failed = False
         # Second DataChannel — ``fed-media-v1`` — carries bulk media as
         # binary frames (no base64) so it doesn't head-of-line-block the
         # latency-sensitive control traffic on ``fed-v1``. Both channels
@@ -947,6 +958,8 @@ class _RtcPeer:
                             continue
                         self._closed = True
                         self._open.clear()
+                        if ev.state == rtc.RTCState.FAILED:
+                            self._failed = True
                         if (
                             ev.state == rtc.RTCState.FAILED
                             and self._on_failed is not None
@@ -966,10 +979,11 @@ class _RtcPeer:
                             instance_id = self.instance_id
 
                             async def _evict_async(
-                                cb: Callable[[str], Awaitable[None]], iid: str
+                                cb: Callable[[str, _RtcPeer], Awaitable[None]],
+                                iid: str,
                             ) -> None:
                                 try:
-                                    await cb(iid)
+                                    await cb(iid, self)
                                 except Exception as exc:  # noqa: BLE001
                                     log.warning(
                                         "fed RTC on_failed handler raised for %s: %s",
@@ -1121,6 +1135,9 @@ class _RtcPeer:
                         exc,
                     )
                     continue
+                # The transport's callback shields the handler from this
+                # task's cancellation and tracks it — see
+                # :meth:`FederationTransport._inbound_factory`.
                 await self._inbound(data)
         except asyncio.CancelledError:
             raise
@@ -1327,17 +1344,11 @@ class _RtcPeer:
         A peer that is already open is never rebuilt: it works, and
         renegotiating a live DataChannel buys nothing.
 
-        Known gap — a peer with ``_closed=True`` is never rebuilt from
-        here, and only the FAILED path removes it from ``_peers``.
-        ``_closed`` is also set when the PC reaches CLOSED and when
-        :meth:`_drain_channel`'s recv loop simply ends on a normal
-        channel close; neither evicts. Such a peer stays in ``_peers``
-        with ``_closed=True``, so this predicate (which requires ``not
-        self._closed``) stays False and the transport's ``peer is None``
-        rebuild branch cannot fire either — permanent HTTPS fallback for
-        the life of the process. Pre-dates the ICE-generation work; a
-        fix belongs in its own change.
+        A peer that :attr:`is_spent` is always rebuilt: nothing else
+        would ever remove it, and it can never carry a frame again.
         """
+        if self.is_spent:
+            return True
         return (
             not self.is_ready
             and not self._closed
@@ -1345,6 +1356,34 @@ class _RtcPeer:
                 self.ice_generation < current_generation or self._starved_awaiting_offer
             )
         )
+
+    @property
+    def is_spent(self) -> bool:
+        """Closed for good with no eviction coming.
+
+        ``_closed`` is set when the PeerConnection reaches CLOSED and when
+        :meth:`_drain_channel`'s recv loop ends because the other side
+        closed the channel — for instance its pairing with us ended and
+        it closed the connection. Only FAILED evicts the peer, so such a
+        peer used to stay in the registry for the life of the process:
+        never ready, never rebuilt, every send on HTTPS — and a re-pair
+        could not bring the DataChannel back. Whoever finds a spent peer
+        replaces it.
+        """
+        return self._closed and not self._failed
+
+    async def flush(self, timeout: float) -> None:
+        """Wait until the DataChannel's send buffer is empty, the channel
+        is gone, or *timeout* seconds have passed."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while (
+            self._channel is not None
+            and not self._closed
+            and self._channel.buffered_amount > 0
+            and loop.time() < deadline
+        ):
+            await asyncio.sleep(0.05)
 
     @property
     def is_media_ready(self) -> bool:
@@ -1494,7 +1533,7 @@ class _RtcPeer:
         self._remote_description_applied.set()
         self._remote_description_applied = asyncio.Event()
 
-    def close(self) -> None:
+    def close(self, *, announce: bool = True) -> None:
         """Close the underlying connection and mark the peer closed.
 
         ``pc.close()`` tears down the PeerConnection; aiolibdatachannel
@@ -1505,7 +1544,9 @@ class _RtcPeer:
         ``PeerTransportChanged(transport='https')`` publication via the
         running event loop so listeners know the peer has fallen back to
         HTTPS inbox. No event is emitted if the channel never opened —
-        the transport never flipped away from HTTPS in the first place.
+        the transport never flipped away from HTTPS in the first place —
+        nor with ``announce=False``: a newer peer for the same household
+        already owns its transport state.
         """
         self._closed = True
         self._open.clear()
@@ -1526,7 +1567,12 @@ class _RtcPeer:
         self._app_channel = None
         self._app_open.clear()
         self._app_buf.clear()
-        if self._published_open and self._bus is not None and self._loop is not None:
+        if (
+            announce
+            and self._published_open
+            and self._bus is not None
+            and self._loop is not None
+        ):
             self._published_open = False
             # Stash the task on the instance so asyncio doesn't garbage-
             # collect it before the publish coro runs. ``create_task``
@@ -1623,7 +1669,9 @@ class FederationTransport:
         "_ice_primed",
         "_ice_servers",
         "_inbound_handler",
+        "_inbound_tasks",
         "_last_retire_at",
+        "_last_spent_rebuild_at",
         "_lock",
         "_mailbox_targets",
         "_media_inbound_handler",
@@ -1744,6 +1792,15 @@ class FederationTransport:
         #: rate FLOOR for :meth:`send`'s retire-and-rebuild — see
         #: :meth:`_retire_rate_limited`. Pruned by :meth:`_on_peer_open`.
         self._last_retire_at: dict[str, float] = {}
+        #: ``instance_id`` → monotonic time a spent peer was last replaced
+        #: for an inbound OFFER / ICE (:meth:`_answering_peer`). Same
+        #: floor as :attr:`_last_retire_at`, but NOT pruned on open: the
+        #: loop it caps (open → remote closes → re-OFFER) opens every time.
+        self._last_spent_rebuild_at: dict[str, float] = {}
+        #: Inbound DataChannel handlers in flight. Shielded from their
+        #: receive task (see :meth:`_inbound_factory`), so this set is what
+        #: holds them and lets :meth:`close_all` cancel and await them.
+        self._inbound_tasks: set[asyncio.Task] = set()
         #: Set once by :meth:`close_all`. Checked by
         #: :meth:`_ensure_handshake` so a ``send()`` parked on the
         #: ICE-primed gate across ``on_cleanup`` cannot resume after
@@ -2429,6 +2486,20 @@ class FederationTransport:
 
     def _inbound_factory(self, instance_id: str) -> _InboundCallback:
         async def _on_inbound(envelope: dict) -> None:
+            # Shielded: closing the PeerConnection cancels the channel's
+            # receive task awaiting this, and the frame that closes it is
+            # typically the peer's UNPAIR — whose handler ends the pairing
+            # (:meth:`close_peer`) and must still run to the end. Tracked,
+            # so the handler never outlives :meth:`close_all` (on_cleanup,
+            # before the database closes). Frames not yet read are dropped.
+            task = asyncio.create_task(
+                _handle(envelope), name=f"fed-rtc-inbound[{instance_id}]"
+            )
+            self._inbound_tasks.add(task)
+            task.add_done_callback(self._inbound_tasks.discard)
+            await asyncio.shield(task)
+
+        async def _handle(envelope: dict) -> None:
             log.debug(
                 "fed RTC frame received from %s (msg_id=%s, type=%s)",
                 instance_id,
@@ -2467,25 +2538,9 @@ class FederationTransport:
         payload: dict,
     ) -> None:
         """Handle a ``FEDERATION_RTC_OFFER`` from a paired peer."""
-        async with self._lock:
-            peer = self._peers.get(from_instance)
-            if peer is None:
-                peer = _RtcPeer(
-                    instance_id=from_instance,
-                    ice_provider=self._current_ice_servers,
-                    ice_generation=self._ice_generation,
-                    signaling=self._signaling_factory(from_instance),
-                    inbound=self._inbound_factory(from_instance),
-                    bus=self._bus,
-                    polite=self._own_instance_id > from_instance,
-                    on_failed=self._evict_peer,
-                    on_open=self._on_peer_open,
-                    media_inbound=self._media_inbound_handler,
-                    app_inbound=self._app_inbound_handler,
-                )
-                self._peers[from_instance] = peer
+        peer = await self._answering_peer(from_instance)
         sdp = str(payload.get("sdp") or "")
-        if not sdp:
+        if peer is None or not sdp:
             return
         await peer.accept_offer(sdp=sdp, from_instance=from_instance)
 
@@ -2529,29 +2584,58 @@ class FederationTransport:
         already authenticated the sender by signature, so the stub
         peer can't be a DoS vector against unpaired instance_ids.
         """
-        async with self._lock:
-            peer = self._peers.get(from_instance)
-            if peer is None:
-                peer = _RtcPeer(
-                    instance_id=from_instance,
-                    ice_provider=self._current_ice_servers,
-                    ice_generation=self._ice_generation,
-                    signaling=self._signaling_factory(from_instance),
-                    inbound=self._inbound_factory(from_instance),
-                    bus=self._bus,
-                    polite=self._own_instance_id > from_instance,
-                    on_failed=self._evict_peer,
-                    on_open=self._on_peer_open,
-                    media_inbound=self._media_inbound_handler,
-                    app_inbound=self._app_inbound_handler,
-                )
-                self._peers[from_instance] = peer
+        peer = await self._answering_peer(from_instance)
+        if peer is None:
+            return
         await peer.add_ice_candidate(
             candidate=str(payload.get("candidate") or ""),
             sdp_mid=str(payload.get("sdp_mid") or "0"),
         )
 
-    async def _evict_peer(self, instance_id: str) -> None:
+    async def _answering_peer(self, from_instance: str) -> _RtcPeer | None:
+        """The peer an inbound OFFER / ICE candidate from *from_instance*
+        lands on: the registered one, or a fresh one when there is none or
+        the registered one :attr:`~_RtcPeer.is_spent` (the remote closed it
+        — e.g. after an unpair — and is now dialling again).
+
+        Replacing a spent peer is capped at one per
+        :attr:`_rtc_retry_backoff_base_s` (the :meth:`_retire_rate_limited`
+        floor), so a remote that keeps opening, closing and re-offering
+        cannot make us mint a PeerConnection per OFFER. Inside the floor
+        this returns ``None`` and the caller drops the signal; the remote
+        dials again later."""
+        async with self._lock:
+            peer = self._peers.get(from_instance)
+            if peer is not None and not peer.is_spent:
+                return peer
+            if peer is not None:
+                if self._within_floor(self._last_spent_rebuild_at, from_instance):
+                    log.debug(
+                        "fed RTC peer %s re-dialled within %.0f s of its last "
+                        "rebuild — dropping the signal",
+                        from_instance,
+                        self._rtc_retry_backoff_base_s,
+                    )
+                    return None
+                self._last_spent_rebuild_at[from_instance] = time.monotonic()
+                peer.close()
+            peer = _RtcPeer(
+                instance_id=from_instance,
+                ice_provider=self._current_ice_servers,
+                ice_generation=self._ice_generation,
+                signaling=self._signaling_factory(from_instance),
+                inbound=self._inbound_factory(from_instance),
+                bus=self._bus,
+                polite=self._own_instance_id > from_instance,
+                on_failed=self._evict_peer,
+                on_open=self._on_peer_open,
+                media_inbound=self._media_inbound_handler,
+                app_inbound=self._app_inbound_handler,
+            )
+            self._peers[from_instance] = peer
+            return peer
+
+    async def _evict_peer(self, instance_id: str, peer: _RtcPeer) -> None:
         """Drop a ``_RtcPeer`` after its underlying PC entered FAILED.
 
         Without this hook a failed PC stayed in ``_peers`` forever and
@@ -2571,12 +2655,19 @@ class FederationTransport:
         The count is reset by :meth:`_on_peer_open` and by
         :meth:`set_ice_servers`.
 
+        Identity-scoped like :meth:`_retire_peer`: it acts only while the
+        registry still holds *peer*, the object whose PeerConnection
+        failed. An old peer can fail after it left the registry — still
+        draining its ``UNPAIR`` in :meth:`close_peer` while a re-pair
+        registered a fresh one — and must not evict or suppress that new
+        peer. Whoever removed it closes it.
+
         Bound to ``_RtcPeer(on_failed=...)`` at instantiation.
         """
         async with self._lock:
-            peer = self._peers.pop(instance_id, None)
-        if peer is None:
-            return
+            if self._peers.get(instance_id) is not peer:
+                return
+            del self._peers[instance_id]
         failures = self._rtc_failure_count.get(instance_id, 0) + 1
         self._rtc_failure_count[instance_id] = failures
         delay = self._retry_delay(failures)
@@ -2663,7 +2754,12 @@ class FederationTransport:
         once) still rebuilds immediately, while the pathological loop is
         capped at one rebuild per minute.
         """
-        last = self._last_retire_at.get(instance_id)
+        return self._within_floor(self._last_retire_at, instance_id)
+
+    def _within_floor(self, stamps: dict[str, float], instance_id: str) -> bool:
+        """Whether *instance_id*'s stamp in *stamps* is younger than the
+        rebuild floor (:attr:`_rtc_retry_backoff_base_s`)."""
+        last = stamps.get(instance_id)
         if last is None:
             return False
         return (time.monotonic() - last) < self._rtc_retry_backoff_base_s
@@ -2739,9 +2835,26 @@ class FederationTransport:
         return len(self._peers)
 
     async def close_peer(self, instance_id: str) -> None:
-        peer = self._peers.pop(instance_id, None)
-        if peer is not None:
-            peer.close()
+        """The pairing with *instance_id* ended: close its PeerConnection.
+
+        The peer leaves the registry at once, so no send picks it up again
+        and a later re-pair dials a fresh connection. The close itself
+        waits (up to :data:`RTC_CLOSE_FLUSH_TIMEOUT_S`) for the
+        DataChannel's send buffer to drain, so an ``UNPAIR`` the channel
+        accepted a moment ago still leaves. Safe to call from the peer's
+        own receive task (an inbound ``UNPAIR``): see
+        :meth:`_RtcPeer._drain_channel`. A second call finds no peer.
+        """
+        async with self._lock:
+            peer = self._peers.pop(instance_id, None)
+        if peer is None:
+            return
+        self._last_spent_rebuild_at.pop(instance_id, None)
+        await peer.flush(RTC_CLOSE_FLUSH_TIMEOUT_S)
+        log.info("fed RTC peer %s closed: pairing ended", instance_id)
+        # A re-pair during the flush may already have a new peer up and
+        # announced as ``rtc``: this old one must not announce ``https``.
+        peer.close(announce=instance_id not in self._peers)
 
     async def close_all(self) -> None:
         """Close every peer and latch the transport shut.
@@ -2754,3 +2867,7 @@ class FederationTransport:
         for peer in list(self._peers.values()):
             peer.close()
         self._peers.clear()
+        tasks = list(self._inbound_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
