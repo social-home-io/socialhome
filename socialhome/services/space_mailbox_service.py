@@ -40,10 +40,13 @@ No log line at INFO or above names a mailbox id or a key.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import random
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
+from typing import Any
 
 import aiohttp
 import orjson
@@ -96,6 +99,24 @@ TICKET_BATCH: int = 8
 #: Claim-socket reconnect backoff.
 CLAIM_BACKOFF_MIN_S: float = 2.0
 CLAIM_BACKOFF_MAX_S: float = 300.0
+#: A claim that stayed up this long resets the reconnect backoff (a GFS
+#: that accepts and closes at once must not get a reconnect every 2 s).
+CLAIM_STABLE_S: float = 60.0
+#: How long a mailbox minted for a seat not written yet is kept (the redeem
+#: is in flight, or will be retried): a retry reuses it — and its ticket —
+#: and two concurrent redeems for one space never release each other's.
+PENDING_TTL_S: float = 1800.0
+#: Mean time between two sweeps of mailboxes no seat uses (jittered ±50 %):
+#: the backstop for every path that ends a seat (leave, dissolve, a stub
+#: purge…), on top of the immediate release when a ``space_session`` seat
+#: is revoked.
+SWEEP_PERIOD_S: float = 600.0
+#: A fresh household's first ticket fetch waits this long (uniform) after
+#: the anonymous key read on connect, so the two do not sit next to each
+#: other on the GFS's clock.
+CONNECT_REFILL_DELAY_S: tuple[float, float] = (30.0, 300.0)
+#: Bound on closing every claim at shutdown.
+STOP_TIMEOUT_S: float = 8.0
 #: The largest generation a fresh mailbox picks (random, so a re-joined
 #: space gets an unrelated mailbox and the GFS cannot tie the two).
 _GEN_SPACE: int = 2**31
@@ -162,6 +183,7 @@ class SpaceMailboxService:
 
     __slots__ = (
         "_claims",
+        "_clock",
         "_config",
         "_gfs",
         "_gfs_repo",
@@ -176,8 +198,12 @@ class SpaceMailboxService:
         "_pending",
         "_rng",
         "_root",
+        "_session",
         "_spaces",
+        "_stop",
+        "_tasks",
         "_tickets",
+        "_tickets_lock",
     )
 
     def __init__(
@@ -192,7 +218,9 @@ class SpaceMailboxService:
         identity_seed: bytes,
         keywrap_public_key: bytes,
         keywrap_sig: str,
+        mailbox_session: aiohttp.ClientSession | None = None,
         rng: random.Random | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._spaces = space_repo
         self._config = instance_config
@@ -204,17 +232,44 @@ class SpaceMailboxService:
         self._keywrap_public_key = keywrap_public_key
         self._keywrap_sig = keywrap_sig
         self._rng = rng if rng is not None else random.SystemRandom()
+        self._clock = clock
+        #: The session every mailbox request rides (register, claim,
+        #: unregister, the anonymous key read): cookie-less and with no
+        #: keep-alive (``force_close``), so no pooled connection carries two
+        #: mailboxes' traffic. ``None`` → the connection service's anonymous
+        #: session (tests).
+        self._session = mailbox_session
         self._root: bytes | None = None
         self._inbound: InboundHandler | None = None
         #: GFS connection id → its ticket machinery.
         self._tickets: dict[str, _Tickets] = {}
         #: (space, gfs id, gen) → our open claim.
         self._claims: dict[tuple[str, str, int], _Claim] = {}
-        #: Claims minted for a seat not written yet (never released).
-        self._pending: set[tuple[str, str, int]] = set()
+        #: Claims minted for a seat not written yet → until when they are
+        #: kept (:data:`PENDING_TTL_S`).
+        self._pending: dict[tuple[str, str, int], float] = {}
         #: (space, instance) → the counterpart's entry (mirror of the rows).
         self._peers: dict[tuple[str, str], SpaceMailboxEntry] = {}
         self._lock = asyncio.Lock()
+        self._tickets_lock = asyncio.Lock()
+        self._stop = asyncio.Event()
+        #: Background tasks: the sweep, connect-time refills.
+        self._tasks: set[asyncio.Task] = set()
+
+    @contextlib.asynccontextmanager
+    async def _anon(
+        self, conn: GfsConnection
+    ) -> AsyncIterator[aiohttp.ClientSession | None]:
+        if self._session is not None:
+            yield self._session
+            return
+        async with self._gfs.anon_session(conn) as session:
+            yield session
+
+    def _spawn(self, coro: Coroutine[Any, Any, None], name: str) -> None:
+        task: asyncio.Task[None] = asyncio.create_task(coro, name=name)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     def attach_inbound(self, handler: InboundHandler) -> None:
         """Where frames on our mailboxes go (``GfsRelayInbound
@@ -225,23 +280,60 @@ class SpaceMailboxService:
 
     async def start(self) -> None:
         """Load (or make) the root, mirror the rows, reopen our claims."""
+        self._stop.clear()
         await self._load_root()
         rows = await self._load_rows()
         for space_id, _instance_id, own in rows:
-            if own is not None:
+            if own is not None and await self._space_in_use(space_id):
                 await self._open_claim(space_id, own)
+        self._spawn(self._sweep_loop(), "gfs-mailbox-sweep")
 
     async def stop(self) -> None:
-        """Close every claim socket and stop the ticket loops."""
+        """Close every claim socket (all at once, bounded) and stop the
+        ticket loops and background tasks."""
+        self._stop.set()
         claims = list(self._claims.values())
         self._claims.clear()
         for claim in claims:
-            await self._close_claim(claim)
+            claim.stop.set()
         tickets = list(self._tickets.values())
         self._tickets.clear()
-        for t in tickets:
-            await t.cache.stop()
-            await t.guard.stop()
+        closing = [self._close_claim(c) for c in claims]
+        closing += [t.cache.stop() for t in tickets]
+        closing += [t.guard.stop() for t in tickets]
+        try:
+            async with asyncio.timeout(STOP_TIMEOUT_S):
+                await asyncio.gather(*closing, return_exceptions=True)
+                if self._tasks:
+                    await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        except TimeoutError:
+            log.info("gfs.mailbox: shutdown cut short after %.0f s", STOP_TIMEOUT_S)
+            for task in list(self._tasks):
+                task.cancel()
+            for claim in claims:
+                if claim.task is not None:
+                    claim.task.cancel()
+        if self._session is not None:
+            await self._session.close()
+
+    async def _sweep_loop(self) -> None:
+        while not self._stop.is_set():
+            wait = self._rng.uniform(0.5 * SWEEP_PERIOD_S, 1.5 * SWEEP_PERIOD_S)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=wait)
+                return
+            except TimeoutError:
+                pass
+            try:
+                await self.release_unused()
+            except Exception:
+                log.warning("gfs.mailbox: sweep failed", exc_info=True)
+
+    async def _space_in_use(self, space_id: str) -> bool:
+        """Whether a person of this household still sits in *space_id* —
+        a mailbox of a space we left (or that was dissolved) is not used,
+        whatever row is left behind."""
+        return bool(await self._spaces.list_local_member_user_ids(space_id))
 
     async def _load_root(self) -> bytes:
         if self._root is not None:
@@ -292,6 +384,13 @@ class SpaceMailboxService:
         """A GFS socket came up: make sure its ticket machinery runs and a
         household with no tickets gets a batch now (outside the quiet window
         after a register) instead of at the first daily slot. Fail-soft."""
+        self._spawn(self._connected(conn_id), "gfs-mailbox-connect")
+
+    async def _connected(self, conn_id: str, *, delay: float | None = None) -> None:
+        """The anonymous issuer-key read now; the identified ticket fetch a
+        jittered while later (:data:`CONNECT_REFILL_DELAY_S`) — never next to
+        each other, where a GFS could serve a fresh household its own key in
+        both views. Runs off the connect hook (it never delays it)."""
         conn = await self._gfs_repo.get(conn_id)
         if conn is None or conn.status != "active":
             return
@@ -302,7 +401,18 @@ class SpaceMailboxService:
             if len(tickets.cache):
                 return
             await tickets.guard.refresh()
-            await tickets.cache.refill_if_quiet()
+            wait = (
+                delay
+                if delay is not None
+                else self._rng.uniform(*CONNECT_REFILL_DELAY_S)
+            )
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=wait)
+                return
+            except TimeoutError:
+                pass
+            if not len(tickets.cache):
+                await tickets.cache.refill_if_quiet()
         except MailboxTicketError as exc:
             log.info("gfs.mailbox: no tickets on connect (%s)", exc.error)
         except (aiohttp.ClientError, TimeoutError, OSError) as exc:
@@ -322,31 +432,41 @@ class SpaceMailboxService:
         state.cache.clear()
 
     async def _tickets_for(self, conn: GfsConnection) -> _Tickets:
-        existing = self._tickets.get(conn.id)
-        if existing is not None:
-            return existing
+        async with self._tickets_lock:
+            existing = self._tickets.get(conn.id)
+            if existing is not None:
+                return existing
+            return await self._new_tickets(conn)
+
+    async def _current(self, conn: GfsConnection) -> GfsConnection:
+        """*conn* as stored now (its URL or pinned key may have moved)."""
+        return await self._gfs_repo.get(conn.id) or conn
+
+    async def _new_tickets(self, conn: GfsConnection) -> _Tickets:
         pin = pin_from_json(
             await self._config.get(TICKET_PIN_CONFIG_PREFIX + conn.gfs_instance_id)
         )
         gfs = self._gfs
 
         async def _anon_view():
-            async with gfs.anon_session(conn) as session:
+            now = await self._current(conn)
+            async with self._anon(now) as session:
                 if session is None:
                     raise MailboxTicketError(0, "no_anonymous_session")
                 return await read_ticket_issuer(
-                    session, conn.inbox_url, gfs_public_key=conn.public_key
+                    session, now.inbox_url, gfs_public_key=now.public_key
                 )
 
         guard = TicketKeyGuard(_anon_view, pin=pin, rng=self._rng)
 
         async def _fetch(count: int) -> list[bytes]:
+            now = await self._current(conn)
             issuer = await read_ticket_issuer(
-                gfs.client(), conn.inbox_url, gfs_public_key=conn.public_key
+                gfs.client(), now.inbox_url, gfs_public_key=now.public_key
             )
             got = await fetch_tickets(
                 gfs.client(),
-                conn.inbox_url,
+                now.inbox_url,
                 issuer,
                 count,
                 instance_id=self._instance_id,
@@ -398,8 +518,8 @@ class SpaceMailboxService:
         mailboxes or no ticket could be had (the pair then keeps today's
         instance-addressed relay). Reuses the generation we already hold for
         the space there (a host with several GFS-only members has ONE
-        mailbox per space). The result stays pending until :meth:`remember`
-        or :meth:`abandon`."""
+        mailbox per space; a retried redeem gets the same one). Kept for
+        :data:`PENDING_TTL_S` even if no seat refers to it yet."""
         conn = await self._connection_at(gfs_url)
         if conn is None:
             return None
@@ -422,7 +542,9 @@ class SpaceMailboxService:
                 if not await self._register(conn, keys):
                     return None
                 await self._open_claim(space_id, own, keys=keys)
-            self._pending.add(key)
+            self._pending[key] = max(
+                self._pending.get(key, 0.0), self._clock() + PENDING_TTL_S
+            )
         entry = build_entry(
             keys,
             instance_id=self._instance_id,
@@ -448,7 +570,7 @@ class SpaceMailboxService:
     async def _register(self, conn: GfsConnection, keys: MailboxKeys) -> bool:
         try:
             tickets = await self._tickets_for(conn)
-            async with self._gfs.anon_session(conn) as session:
+            async with self._anon(conn) as session:
                 if session is None:
                     log.warning("gfs.mailbox: no anonymous session — not registering")
                     return False
@@ -496,7 +618,7 @@ class SpaceMailboxService:
         own: OwnMailbox | None,
     ) -> None:
         """Write the pair's mailbox state onto its ``space_instances`` row
-        (which must exist) and end the pending state of *own*."""
+        (which must exist). From then on the row keeps *own* in use."""
         if peer is None and own is None:
             return
         value = orjson.dumps(
@@ -509,15 +631,8 @@ class SpaceMailboxService:
         if peer is not None:
             self._peers[(space_id, instance_id)] = peer
         if own is not None:
-            self._pending.discard(_claim_key(space_id, own))
-
-    async def abandon(self, space_id: str, own: OwnMailbox | None) -> None:
-        """A mint whose seat never happened (the redeem failed): drop it
-        unless a row refers to it after all."""
-        if own is None:
-            return
-        self._pending.discard(_claim_key(space_id, own))
-        await self.release_unused()
+            # The row keeps it in use from now on.
+            self._pending.pop(_claim_key(space_id, own), None)
 
     # ── Targets ──────────────────────────────────────────────────────────
 
@@ -546,12 +661,28 @@ class SpaceMailboxService:
     # ── Release ──────────────────────────────────────────────────────────
 
     async def release_unused(self) -> int:
-        """Close and unregister every mailbox of ours no row refers to any
-        more (not pending). Returns how many went. Fail-soft."""
+        """Close and unregister every mailbox of ours no seat uses any
+        more: no row refers to it, or the space has no person of ours left
+        (we left, it was dissolved) — and it is not pending. A left space's
+        rows lose their mailbox state too, so a later join mints a fresh,
+        unrelated mailbox. Returns how many went. Fail-soft."""
         async with self._lock:
             rows = await self._load_rows()
+            now = self._clock()
+            self._pending = {k: t for k, t in self._pending.items() if t > now}
+            in_use: dict[str, bool] = {}
+            for space in {space for space, _i, _own in rows}:
+                in_use[space] = await self._space_in_use(space)
+            for space, instance_id, _own in rows:
+                if not in_use[space]:
+                    await self._spaces.set_space_instance_mailbox(
+                        space, instance_id, None
+                    )
+                    self._peers.pop((space, instance_id), None)
             used = {
-                _claim_key(space, own) for space, _i, own in rows if own is not None
+                _claim_key(space, own)
+                for space, _i, own in rows
+                if own is not None and in_use[space]
             }
             gone = [
                 (key, claim)
@@ -572,7 +703,7 @@ class SpaceMailboxService:
         if conn is None:
             return  # the GFS's idle sweep removes it
         try:
-            async with self._gfs.anon_session(conn) as session:
+            async with self._anon(conn) as session:
                 if session is None:
                     return
                 ok = await unregister_mailbox(
@@ -625,8 +756,8 @@ class SpaceMailboxService:
             await socket.close()
         if claim.task is not None:
             try:
-                await asyncio.wait_for(claim.task, timeout=5.0)
-            except TimeoutError, asyncio.CancelledError:
+                await asyncio.wait_for(asyncio.shield(claim.task), timeout=5.0)
+            except TimeoutError:
                 claim.task.cancel()
 
     async def _claim_loop(self, claim: _Claim) -> None:
@@ -634,10 +765,12 @@ class SpaceMailboxService:
         reregistered = False
         while not claim.stop.is_set():
             conn = await self._conn_for(claim.own)
+            started = self._clock()
             try:
                 if conn is not None:
                     await self._claim_once(conn, claim)
-                    backoff = CLAIM_BACKOFF_MIN_S
+                    if self._clock() - started >= CLAIM_STABLE_S:
+                        backoff = CLAIM_BACKOFF_MIN_S
                     reregistered = False
             except MailboxClaimError as exc:
                 log.info("gfs.mailbox: claim refused (%s)", exc)
@@ -664,7 +797,7 @@ class SpaceMailboxService:
             backoff = min(backoff * 2, CLAIM_BACKOFF_MAX_S)
 
     async def _claim_once(self, conn: GfsConnection, claim: _Claim) -> None:
-        async with self._gfs.anon_session(conn) as session:
+        async with self._anon(conn) as session:
             if session is None:
                 raise MailboxClaimError("no anonymous session")
             socket = MailboxClaim(

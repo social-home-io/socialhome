@@ -45,7 +45,9 @@ redeem immediately with a reason a human can act on.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import urlparse
 
@@ -108,7 +110,7 @@ class GfsEnvelopeSender:
     whole job is to learn as little as possible about it.
     """
 
-    __slots__ = ("_gfs", "_repo")
+    __slots__ = ("_gfs", "_mailbox_session", "_repo")
 
     def __init__(
         self,
@@ -118,6 +120,15 @@ class GfsEnvelopeSender:
     ) -> None:
         self._gfs = gfs_service
         self._repo = gfs_repo
+        #: v_88 — the cookie-less, no-keep-alive session mailbox frames
+        #: ride (shared with the mailbox service); ``None`` → the connection
+        #: service's anonymous session.
+        self._mailbox_session: aiohttp.ClientSession | None = None
+
+    def attach_mailbox_session(self, session: aiohttp.ClientSession) -> None:
+        """Send mailbox frames over *session* (no pooled connection may
+        carry two mailboxes' traffic)."""
+        self._mailbox_session = session
 
     async def send_sealed_envelope(
         self,
@@ -312,7 +323,7 @@ class GfsEnvelopeSender:
                 "timeout": aiohttp.ClientTimeout(total=GFS_ENVELOPE_TIMEOUT_S),
             }
         try:
-            async with self._gfs.anon_session(conn) as session:
+            async with self._mailbox_anon(conn) as session:
                 if session is None:
                     log.warning(
                         "gfs.envelope: no anonymous session — a mailbox frame "
@@ -341,6 +352,16 @@ class GfsEnvelopeSender:
                 exc,
             )
             return False
+
+    @contextlib.asynccontextmanager
+    async def _mailbox_anon(
+        self, conn: GfsConnection
+    ) -> AsyncIterator[aiohttp.ClientSession | None]:
+        if self._mailbox_session is not None:
+            yield self._mailbox_session
+            return
+        async with self._gfs.anon_session(conn) as session:
+            yield session
 
     async def _resolve_connection(self, gfs_url: str) -> GfsConnection:
         """The active connection that will carry the blob.

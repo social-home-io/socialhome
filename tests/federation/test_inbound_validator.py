@@ -791,6 +791,23 @@ def _mailbox_ctx(space_id, *, mailbox_space="sp-1"):
     )
 
 
+async def test_mailbox_payload_naming_another_space_is_refused_after_decrypt():
+    """A sender that leaves the routing ``space_id`` out cannot smuggle
+    another space in through the payload (handlers fall back to it)."""
+    step = make_check_mailbox_space()
+    ctx = _mailbox_ctx(None)
+    ctx.event = SimpleNamespace(payload={"space_id": "sp-other"})
+    with pytest.raises(ValueError):
+        await step(ctx)
+    ctx = _mailbox_ctx("sp-1")
+    ctx.event = SimpleNamespace(payload={"space_id": "sp-2"})
+    with pytest.raises(ValueError, match="different spaces"):
+        await step(ctx)
+    ctx = _mailbox_ctx(None)
+    ctx.event = SimpleNamespace(payload={"space_id": "sp-1"})
+    await step(ctx)
+
+
 async def test_mailbox_frame_of_its_own_space_or_space_less_passes():
     step = make_check_mailbox_space()
     await step(_mailbox_ctx("sp-1"))

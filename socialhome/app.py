@@ -974,10 +974,21 @@ def _build_space_mailboxes(
     identity: IdentityMaterial,
     instance_id: str,
     gfs_relay_inbound: GfsRelayInbound,
+    gfs_envelope_sender: GfsEnvelopeSender,
 ) -> SpaceMailboxService:
     """v_88 — this household's per-space GFS mailboxes (GFS redesign PR 2),
     with frames on them handed to the relay's inbound leg."""
+    # Every mailbox request rides its own cookie-less session with no
+    # keep-alive: no pooled connection carries two mailboxes' traffic, and no
+    # cookie of the identified session reaches a mailbox. Closed by stop().
+    mailbox_session = aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(force_close=True),
+        cookie_jar=aiohttp.DummyCookieJar(),
+        json_serialize=dumps_str,
+    )
+    gfs_envelope_sender.attach_mailbox_session(mailbox_session)
     svc = SpaceMailboxService(
+        mailbox_session=mailbox_session,
         space_repo=repos.space,
         instance_config=repos.instance_config,
         key_manager=key_manager,
@@ -5079,6 +5090,7 @@ def create_app(config: Config | None = None) -> web.Application:
             identity=identity,
             instance_id=real_instance_id,
             gfs_relay_inbound=gfs_relay_inbound,
+            gfs_envelope_sender=gfs_envelope_sender,
         )
         invite_redeem_coordinator.attach_mailboxes(space_mailboxes)
         real_space_service.attach_space_mailboxes(space_mailboxes)

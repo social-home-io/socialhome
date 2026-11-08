@@ -124,6 +124,10 @@ _PROCESS_WIDE_KEY = "invite-bootstrap:inbound"
 _ENVELOPES_KEY = "invite-bootstrap:envelopes"
 #: Relayed §11 pairing bodies — their own bucket, the bootstrap-body budget.
 _PAIRING_KEY = "invite-bootstrap:pairing"
+#: v_88 — frames on our anonymous mailboxes: their own buckets, so whoever
+#: learns a mailbox id cannot drain the instance relay's budget.
+_MAILBOX_KEY = "gfs-mailbox:inbound"
+_MAILBOX_ENVELOPES_KEY = "gfs-mailbox:envelopes"
 #: v_87 — binary relay media frames, their own bucket.
 _MEDIA_KEY = "gfs-relay:media"
 #: v_87 — media frames that failed to open or failed their checks.
@@ -258,11 +262,11 @@ class GfsRelayInbound:
         if not isinstance(frame, dict) or frame.get("type") != "envelope":
             raise ValueError("unexpected frame on a mailbox")
         if self._rate_limiter is not None and not self._rate_limiter.is_allowed(
-            _PROCESS_WIDE_KEY,
+            _MAILBOX_KEY,
             limit=BOOTSTRAP_INBOUND_LIMIT,
             window_s=BOOTSTRAP_INBOUND_WINDOW_S,
         ):
-            raise ValueError("relay inbound rate limit exceeded")
+            raise ValueError("mailbox inbound rate limit exceeded")
         body = unseal_envelope_body(
             envelope={"sealed": frame.get("sealed")},
             keywrap_private_key=keys.kem_private,
@@ -270,11 +274,11 @@ class GfsRelayInbound:
         if not is_relay_envelope_body(body):
             raise ValueError("a mailbox carries relayed envelopes only")
         if self._rate_limiter is not None and not self._rate_limiter.is_allowed(
-            _ENVELOPES_KEY,
+            _MAILBOX_ENVELOPES_KEY,
             limit=RELAY_ENVELOPE_INBOUND_LIMIT,
             window_s=BOOTSTRAP_INBOUND_WINDOW_S,
         ):
-            raise ValueError("relayed envelopes rate limit exceeded")
+            raise ValueError("mailbox envelopes rate limit exceeded")
         inner = body.get("envelope")
         if not isinstance(inner, dict):
             raise WrongTypeError("relayed federation envelope missing envelope body")

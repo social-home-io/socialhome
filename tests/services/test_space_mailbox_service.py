@@ -31,6 +31,7 @@ from socialhome.global_server.server import create_gfs_app
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services.space_mailbox_service import (
     MAILBOX_ROOT_CONFIG_KEY,
+    PENDING_TTL_S,
     TICKET_PIN_CONFIG_PREFIX,
     SpaceMailboxService,
     pin_from_json,
@@ -66,6 +67,11 @@ class _Config:
 class _Spaces:
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str], str | None] = {}
+        #: Spaces nobody of ours sits in any more (left / dissolved).
+        self.left: set[str] = set()
+
+    async def list_local_member_user_ids(self, space_id):
+        return [] if space_id in self.left else ["someone"]
 
     async def set_space_instance_mailbox(self, space_id, instance_id, value):
         if (space_id, instance_id) in self.rows:
@@ -162,7 +168,7 @@ def _service(session, conn, *, config=None, spaces=None, kek=None, mailbox=True)
 
 async def _ready(svc, conn):
     await svc.start()
-    await svc.on_connected(conn.id)
+    await svc._connected(conn.id, delay=0)
 
 
 async def test_the_root_is_generated_once_and_kept_under_the_kek(gfs):
@@ -330,15 +336,106 @@ async def test_leaving_releases_and_unregisters_the_mailbox(gfs):
     await svc.stop()
 
 
-async def test_a_pending_mint_survives_a_release_until_abandoned(gfs):
+async def test_a_pending_mint_is_reused_by_a_retry_then_expires(gfs):
+    """A redeem in flight (or failed, to be retried) keeps its mailbox: a
+    retry — or a second household's concurrent redeem for the same space —
+    gets the SAME one (no second ticket), and nothing releases it until the
+    pending time is up."""
     server, session, url, conn = gfs
-    svc = _service(session, conn)
+    now = [1000.0]
+    svc = SpaceMailboxService(
+        space_repo=_Spaces(),
+        instance_config=_Config(),
+        key_manager=KeyManager(KEK),
+        gfs_repo=_GfsRepo(conn),
+        gfs_service=_Gfs(session),
+        instance_id=HOME_ID,
+        identity_seed=HOME_SEED,
+        keywrap_public_key=KW_PUB,
+        keywrap_sig=KW_SIG,
+        clock=lambda: now[0],
+    )
     await _ready(svc, conn)
-    entry, own = await svc.mint("space-1", url)
-    assert await svc.release_unused() == 0  # the redeem is in flight
-    await svc.abandon("space-1", own)  # it failed
+    tickets_before = len(svc._tickets[conn.id].cache)
+    entry, _own = await svc.mint("space-1", url)
+    assert len(svc._tickets[conn.id].cache) == tickets_before - 1
+    assert await svc.release_unused() == 0  # in flight
+    again, _ = await svc.mint("space-1", url)  # the retry
+    assert again.mailbox_id == entry.mailbox_id
+    assert len(svc._tickets[conn.id].cache) == tickets_before - 1
+    now[0] += PENDING_TTL_S + 1
+    assert await svc.release_unused() == 1
     assert svc.open_claims() == 0
     assert await server.app[gfs_mailbox_repo_key].get(entry.mailbox_id) is None
+    await svc.stop()
+
+
+async def test_a_left_space_releases_its_mailbox_and_a_rejoin_gets_a_new_one(gfs):
+    """Leaving (or a dissolve) may leave the row behind: the mailbox goes
+    anyway, the row forgets it, and a later join mints an unrelated one."""
+    server, session, url, conn = gfs
+    now = [1000.0]
+    spaces = _Spaces()
+    spaces.rows[("space-1", "peer-iid")] = None
+    svc = SpaceMailboxService(
+        space_repo=spaces,
+        instance_config=_Config(),
+        key_manager=KeyManager(KEK),
+        gfs_repo=_GfsRepo(conn),
+        gfs_service=_Gfs(session),
+        instance_id=HOME_ID,
+        identity_seed=HOME_SEED,
+        keywrap_public_key=KW_PUB,
+        keywrap_sig=KW_SIG,
+        clock=lambda: now[0],
+    )
+    await _ready(svc, conn)
+    entry, own = await svc.mint("space-1", url)
+    await svc.remember("space-1", "peer-iid", peer=entry, own=own)
+    now[0] += PENDING_TTL_S + 1
+    assert await svc.release_unused() == 0  # still sitting in the space
+    spaces.left.add("space-1")  # the last person of ours left
+    assert await svc.release_unused() == 1
+    assert spaces.rows[("space-1", "peer-iid")] is None
+    assert await svc.target_for("peer-iid", "space-1") is None
+    assert await server.app[gfs_mailbox_repo_key].get(entry.mailbox_id) is None
+    spaces.left.discard("space-1")  # joined again later
+    rejoined, _ = await svc.mint("space-1", url)
+    assert rejoined.mailbox_id != entry.mailbox_id
+    await svc.stop()
+
+
+async def test_a_row_of_a_left_space_is_not_reopened_on_start(gfs):
+    _server, session, url, conn = gfs
+    spaces = _Spaces()
+    spaces.rows[("space-1", "peer-iid")] = None
+    svc = _service(session, conn, spaces=spaces)
+    await _ready(svc, conn)
+    _entry, own = await svc.mint("space-1", url)
+    await svc.remember("space-1", "peer-iid", peer=None, own=own)
+    await svc.stop()
+    spaces.left.add("space-1")
+    again = _service(session, conn, spaces=spaces, config=svc._config)
+    await again.start()
+    assert again.open_claims() == 0
+    await again.stop()
+
+
+async def test_on_connected_never_blocks_and_fetches_later(gfs):
+    """The connect hook returns at once; the anonymous read happens first
+    and the identified fetch only after the jittered delay."""
+    _server, session, _url, conn = gfs
+    svc = _service(session, conn)
+    await svc.start()
+    await svc.on_connected(conn.id)  # returns at once
+    for _ in range(200):
+        state = svc._tickets.get(conn.id)
+        if state is not None and state.guard._anon is not None:
+            break
+        await asyncio.sleep(0.02)
+    state = svc._tickets[conn.id]
+    assert state.guard._anon is not None  # anonymous view read
+    assert len(state.cache) == 0  # identified fetch not yet
     await svc.stop()
 
 

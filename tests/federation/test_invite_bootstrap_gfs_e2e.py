@@ -14,6 +14,7 @@ crossed it, never saw the token, the space, the users or who was asking.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import io
 import json
@@ -67,6 +68,8 @@ from socialhome.federation.invite_bootstrap import (
     seal_bootstrap_envelope,
 )
 from socialhome.federation.invite_token_redeem import (
+    BOOTSTRAP_INBOUND_LIMIT,
+    BOOTSTRAP_INBOUND_WINDOW_S,
     BOOTSTRAP_TOO_LARGE_CLIENT_MESSAGE,
     SpaceInviteTokenRedeemCoordinator,
 )
@@ -81,6 +84,7 @@ from socialhome.global_server.envelope_relay import (
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.rate_limiter import RateLimiter
 from socialhome.repositories.dm_media_outbox_repo import SqliteDmMediaOutboxRepo
 from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
 from socialhome.repositories.federation_repo import SqliteFederationRepo
@@ -2079,3 +2083,61 @@ async def test_a_kick_drops_and_unregisters_both_mailboxes(mailbox_households, g
     await gfs.drain()
     assert gfs.mailboxes == {}
     assert set(gfs.unregistered) == boxes
+
+
+async def test_an_entry_naming_another_gfs_than_its_leg_is_ignored(
+    mailbox_households, gfs
+):
+    """A peer cannot steer our anonymous frames to another GFS: the entry
+    must name the GFS the sealed body came through."""
+    a, b = mailbox_households
+    space = await _join(a, b, gfs)
+    wire = (await _rows(b))[(space.id, a.instance_id)]["peer"]
+    entry = SpaceInviteTokenRedeemCoordinator._peer_entry(
+        wire,
+        identity_pk=a.identity_pk.hex(),
+        instance_id=a.instance_id,
+        space_id=space.id,
+        gfs_url=gfs.url,
+    )
+    assert entry is not None
+    assert (
+        SpaceInviteTokenRedeemCoordinator._peer_entry(
+            wire,
+            identity_pk=a.identity_pk.hex(),
+            instance_id=a.instance_id,
+            space_id=space.id,
+            gfs_url="https://another-gfs.example.org",
+        )
+        is None
+    )
+
+
+async def test_mailbox_frames_have_their_own_inbound_budget(mailbox_households, gfs):
+    """Whoever learns a mailbox id can post to it anonymously: those frames
+    spend the mailbox buckets, never the instance relay's."""
+    a, b = mailbox_households
+    space = await _join(a, b, gfs)
+    limiter = RateLimiter()
+    a.relay_inbound._rate_limiter = limiter
+    keys = next(k for (inb, k) in gfs.mailboxes.values() if inb is a.relay_inbound)
+    junk = {
+        "type": "envelope",
+        "sealed": seal_relay_envelope(
+            envelope_dict={"msg_id": "x", "space_id": space.id},
+            peer_keywrap_pub=keys.kem_public,
+        ),
+    }
+    for _ in range(BOOTSTRAP_INBOUND_LIMIT + 1):
+        with contextlib.suppress(ValueError):
+            await a.relay_inbound.handle_mailbox_frame(junk, keys=keys)
+    assert not limiter.has_room(
+        "gfs-mailbox:inbound",
+        limit=BOOTSTRAP_INBOUND_LIMIT,
+        window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+    )
+    assert limiter.has_room(
+        "invite-bootstrap:inbound",
+        limit=BOOTSTRAP_INBOUND_LIMIT,
+        window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+    )
