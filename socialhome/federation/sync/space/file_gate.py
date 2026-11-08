@@ -13,9 +13,11 @@ A receiver takes a file only from a household it accepts it from
 
 Anything else the receiver refuses, so a plain member household ships
 only its own people's files, and a helper ships other people's hashed
-files only to a v_86 requester, at most :data:`FILL_MAX_FILES` files /
-:data:`FILL_MAX_BYTES` bytes per stream (newest rows first, in the order
-the caller walks them). Rows are not this module's concern: a non-host
+files only to a v_86 requester, only on a ``SPACE_SYNC_RESUME`` (a full
+§25.6 catch-up is the host's job: it ships every file, and k helpers
+re-sending the same bytes to a newcomer would only spend bandwidth), at
+most :data:`FILL_MAX_FILES` files / :data:`FILL_MAX_BYTES` bytes per
+resume (newest rows first, in the order the caller walks them). Rows are not this module's concern: a non-host
 provider still streams only its own people's rows (``_OwnPeopleOnly``).
 """
 
@@ -123,7 +125,13 @@ class CatchUpFileGates:
         self._supports = supports
         self._size = size
 
-    async def for_requester(self, space_id: str, requester: str) -> CatchUpFileGate:
+    async def for_requester(
+        self, space_id: str, requester: str, *, fills: bool = True
+    ) -> CatchUpFileGate:
+        """The gate for one stream to ``requester``. ``fills=False`` (a full
+        §25.6 catch-up — the host's job, which ships every file) leaves a
+        helper only its own people's files, so k helpers never re-send the
+        same bytes to a newcomer; helper fills ride the bounded resume."""
         if await self._authority(space_id):
             return CatchUpFileGate(
                 all_files=True, own=frozenset(), fills=False, size=self._size
@@ -133,7 +141,11 @@ class CatchUpFileGates:
             m.user_id in own and str(m.role) in _CONTENT_ROLES
             for m in await self._spaces.list_members(space_id)
         )
-        fills = trusted and await self._supports(
-            requester, min_version=FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS
+        fills = (
+            fills
+            and trusted
+            and await self._supports(
+                requester, min_version=FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS
+            )
         )
         return CatchUpFileGate(all_files=False, own=own, fills=fills, size=self._size)

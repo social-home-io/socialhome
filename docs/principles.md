@@ -1199,10 +1199,13 @@ space's owner household alone (#1311). v_86 lets more households
 household — the host, a delegated admin, or a household holding a live
 `admin` or `moderator` seat (content authority).
 
-Why this is safe: the file must be one whose SHA-256 the receiver's own
-row already lists (v_85), it is stored under the content name derived from
-that hash and that space, and the bytes are checked against it before they
-land; an existing file is never replaced. A helper can therefore deliver a
+Why this is safe: the bytes are stored only under the content name derived
+from their declared SHA-256 and the space, and checked against that hash
+before they land; an existing file is never replaced. A helper fills a file
+whose hash the receiver's own row already lists (v_85) — or, for a row not
+here (yet), the bytes land unshown under that hash's name and are swept
+after 24 h unless a row arrives that lists it (and a name a held row
+already shows is filled from such a blob only by a trusted household). A helper can therefore deliver a
 picture, never change, plant or hide one. Nothing else moves:
 
 - **Rows** of other people still come only from the host or a delegated
@@ -1213,7 +1216,7 @@ picture, never change, plant or hide one. Nothing else moves:
 - A plain member household fills nobody else's file.
 
 What it relaxes: an admin or moderator household now sends a member's
-space files to other member households on catch-up / resume — it already
+space files to another member household that asked it to replay the space — it already
 holds them as a member and could show them to its own people; the
 receiving household is a member that may see them too. Who is trusted is
 read from the receiver's own roster mirror, the same one every other

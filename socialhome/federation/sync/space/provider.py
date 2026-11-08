@@ -604,10 +604,9 @@ class SpaceSyncService:
         self._file_gates: CatchUpFileGates | None = None
 
     def attach_file_gates(self, gates: CatchUpFileGates) -> None:
-        """Wire the v_86 catch-up file gate: a non-host household ships its
-        own people's files and — when it holds an admin / moderator seat —
-        the hashed files of other people's rows to a v_86 requester; never
-        another person's unhashed file (:mod:`.file_gate`)."""
+        """Wire the v_86 catch-up file gate: on a full stream a non-host
+        household ships only its own people's files (helper fills ride the
+        bounded resume, :mod:`.file_gate`)."""
         self._file_gates = gates
 
     def attach_file_hasher(self, hasher: _FileHasher) -> None:
@@ -1191,7 +1190,12 @@ class SpaceSyncService:
             else KEEP_FOREVER
         )
         gate = (
-            await self._file_gates.for_requester(space_id, target_instance_id)
+            # A full stream is the host's job (it ships every file): a
+            # helper ships only its own people's here — helper fills ride
+            # the bounded resume, so k helpers never re-send one file.
+            await self._file_gates.for_requester(
+                space_id, target_instance_id, fills=False
+            )
             if self._file_gates is not None
             else None
         )

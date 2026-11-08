@@ -576,15 +576,23 @@ Unchanged:
   a media chunk — relay-sync PR 3.)
 
 **Sending side.** No "file wanted" request exists yet (a later, generic
-PR), so a helper ships fills only on catch-up: the catch-up file gate
+PR). Until then a helper fills only when one household explicitly asks
+it to replay a space: the catch-up file gate
 (`federation/sync/space/file_gate.py`) decides which files of a row a
-household ships on a §25.6 catch-up and a `SPACE_SYNC_RESUME`:
+household ships on a §25.6 catch-up and on a replay (`SPACE_SYNC_RESUME`
+or a §319.6 `space:` resync, `resume.replay_space_to`):
 
-| Provider | Ships |
-|---|---|
-| Host / delegated admin | every file of every row (as before) |
-| Admin / moderator household (v_86 requester) | its own people's files + the hashed (`sc-`) files of other people's rows, at most 50 files / 32 MiB per stream (`FILL_MAX_FILES` / `FILL_MAX_BYTES`) |
-| Any other household | its own people's files only |
+| Provider | Full §25.6 catch-up | Replay (resume / resync) |
+|---|---|---|
+| Host / delegated admin | every file of every row (as before) | every file (as before) |
+| Admin / moderator household | its own people's files only | its own people's files + the hashed (`sc-`) files of other people's rows to a v_86 requester, at most 50 files / 32 MiB (`FILL_MAX_FILES` / `FILL_MAX_BYTES`) |
+| Any other household | its own people's files only | its own people's files only |
+
+Why not on the full catch-up: a full stream is the host's job and the
+host already ships every file. A newcomer that pairs with k helper
+households would otherwise receive each picture up to k + 1 times — the
+copies are dropped write-once, but the bandwidth is spent. A replay is
+targeted: one household asked one provider.
 
 Rows are unchanged (`_OwnPeopleOnly`): a helper never streams other
 people's rows. A requester below v_86 gets no helper fills (a v_85
@@ -592,19 +600,20 @@ receiver would take them, an older one would store them under a name no
 row shows). Relay-seated requesters still get no catch-up blobs (their GFS
 media cache serves them).
 
-**Cost per trigger:** a full stream from a trusted non-host household
-costs at most 50 files / 32 MiB on top of today's (a plain member
-household now ships *less* than before: only its own people's files).
-The budget is per stream: a provider serves a requester at most
-`SYNC_BEGIN_RATE_LIMIT_PER_HOUR` = 5 streams per (requester, space) per
-hour, so the ceiling is 5 × 32 MiB = 160 MiB per helper per requester per
-space per hour (an honest requester asks for one initial stream; the
-periodic `incremental` stream ships no catch-up media). Worst realistic
-case — a newcomer pairing with 5 moderator households: 5 × 32 MiB =
-160 MiB once. A resume is already capped at 32 MiB per (household, space)
-per 30 min. Duplicates of what the host
-ships are dropped write-once at the receiver (bytes still cross once per
-helper — the later "file wanted" request replaces this push).
+**Cost (recipients × files × bytes per trigger):** a replay is asked by
+one household of one provider (`SPACE_SYNC_RESUME` after a long offline,
+or an admin's targeted `INSTANCE_RESYNC_REQUEST`; the upgrade resync asks
+for capabilities only), so one trigger costs **1 recipient × ≤ 50 files ×
+≤ 32 MiB total** per helper — the same bound every replay already had. A
+provider serves one replay per (household, space) per 30 min
+(`RESUME_COOLDOWN_S`), so the ceiling is 64 MiB per helper per requester
+per space per hour. Worst realistic case — a household that asks all 5
+moderator households of a space at once: 5 × 32 MiB = 160 MiB once (the
+host's replay is bounded the same way); duplicates are dropped
+write-once at the receiver, the bytes still cross once per asked helper.
+Full streams add nothing for helpers: a plain member household now ships
+*less* than before (only its own people's files). The later "file wanted"
+request (host first, helper as fallback) replaces the replay push.
 
 ## Space media via the GFS cache (v_80)
 

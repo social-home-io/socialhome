@@ -115,3 +115,12 @@ async def test_local_file_size_reads_the_media_dir_only(tmp_path):
     assert await local_file_size(tmp_path, "api/media/a.webp") == 5
     assert await local_file_size(tmp_path, "api/media/missing.webp") is None
     assert await local_file_size(tmp_path, "api/media/..") is None
+
+
+async def test_a_gate_without_fills_ships_only_our_own_peoples_files():
+    """A full catch-up asks for no helper fills (``fills=False``)."""
+    gate = await _gates(role="moderator").for_requester(SP, "peer-new", fills=False)
+    assert await gate.ship("u-x", [SC, LEGACY]) == []
+    assert await gate.ship("u-me", [SC, LEGACY]) == [SC, LEGACY]
+    host = await _gates(host=True).for_requester(SP, "peer-new", fills=False)
+    assert await host.ship("u-x", [SC, LEGACY]) == [SC, LEGACY]

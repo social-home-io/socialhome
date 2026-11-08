@@ -2450,13 +2450,14 @@ async def test_a_sync_line_crossing_ships_no_catchup_media(encoder, crossed, wal
 # ─── v_86: a trusted non-host provider fills hashed files, not rows ───────
 
 
-async def test_a_trusted_non_host_catch_up_ships_hashed_files_but_no_foreign_rows(
+async def test_a_trusted_non_host_full_catch_up_ships_only_its_own_peoples_files(
     encoder,
 ):
     """A moderator household (not the host) streams only its own people's
-    rows; its catch-up media ships its own people's files and the HASHED
-    files of other people's rows (a v_86 receiver holding those rows fills
-    them, bytes checked) — never another person's unhashed file."""
+    rows, and its full catch-up ships only its own people's files: a full
+    stream is the host's job (it ships every file), so k helpers never
+    re-send the same bytes to a newcomer. Helper fills ride the bounded
+    resume (``test_resume``)."""
     sc = f"api/media/{space_content_media_name('sp-1', 'a' * 64, 'x.webp')}"
     legacy = "api/media/sd-0123.webp"
 
@@ -2534,4 +2535,4 @@ async def test_a_trusted_non_host_catch_up_ships_hashed_files_but_no_foreign_row
         c.kwargs["correlation_id"]: list(c.kwargs["media_urls"])
         for c in media_sync.enqueue_for_blob.call_args_list
     }
-    assert shipped == {"p-ours": [sc, legacy], "p-theirs": [sc]}
+    assert shipped == {"p-ours": [sc, legacy]}

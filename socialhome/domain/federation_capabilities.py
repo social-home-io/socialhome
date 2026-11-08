@@ -1385,10 +1385,11 @@ from __future__ import annotations
 #:   admin, a live ``admin`` or ``moderator`` seat (content authority) —
 #:   and from nobody else; never for a deleted row. Unhashed files keep the
 #:   owner-only fill (#1311); rows still come only from the host / a
-#:   delegated admin. A trusted non-host household's §25.6 catch-up and
-#:   ``SPACE_SYNC_RESUME`` ship the hashed files of other people's rows to
-#:   a v_86 requester (bounded like a resume); a plain member household
-#:   ships only its own people's files. **Fallback**: a requester below v_86
+#:   delegated admin. A trusted non-host household's replay
+#:   (``SPACE_SYNC_RESUME`` / §319.6 resync) ships the hashed files of
+#:   other people's rows to a v_86 requester (≤ 50 files / 32 MiB); its
+#:   full §25.6 catch-up and a plain member household's ship only their
+#:   own people's files. **Fallback**: a requester below v_86
 #:   gets no helper fills (the host still fills; a v_85 receiver would take
 #:   them, an older one stores them under a name no row shows); a helper
 #:   below v_86 ships none. No sync-stream record change. Labelled
