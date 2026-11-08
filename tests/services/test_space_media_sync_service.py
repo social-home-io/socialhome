@@ -14,6 +14,7 @@ from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
     DeliveryResult,
     FederationEventType,
+    InstanceSource,
     PairingStatus,
 )
 from socialhome.domain.media_chunking import (
@@ -498,7 +499,9 @@ class _StatusFedRepo:
 
     async def get_instance(self, iid, *, include_unpairing=False):
         if iid == "peer-a":
-            return SimpleNamespace(status=PairingStatus.CONFIRMED)
+            return SimpleNamespace(
+                status=PairingStatus.CONFIRMED, source=InstanceSource.MANUAL
+            )
         return None
 
 

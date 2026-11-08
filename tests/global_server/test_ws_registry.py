@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import orjson
@@ -434,3 +435,79 @@ async def test_a_media_request_reaches_only_a_socket_that_serves_media(registry)
     await registry.register("new", again, media_serve=True)
     await registry.unregister("new", again)
     assert "new" not in registry._media_serve
+
+
+# ── Binary relay media frames (v_87) ───────────────────────────────────────
+
+
+async def test_media_goes_only_to_a_socket_that_listed_envelope_media(registry):
+    labelled, plain = _FakeWS(), _FakeWS()
+    await registry.register("lab", labelled, envelope_media=True)
+    await registry.register("old", plain)
+    assert registry.takes_media("lab") and not registry.takes_media("old")
+    assert await registry.send_media("lab", b"\x00SHR-body")
+    assert not await registry.send_media("old", b"\x00SHR-body")
+    assert not await registry.send_media("nobody", b"\x00SHR-body")
+    assert labelled.sent_bytes == [b"\x00SHR-body"] and plain.sent_bytes == []
+    stats = registry.fanout_stats.snapshot()["by_kind"]["envelope_media"]
+    assert stats["bytes"] == len(b"\x00SHR-body")
+
+
+async def test_the_media_label_follows_the_current_socket(registry):
+    first, second = _FakeWS(), _FakeWS()
+    await registry.register("x", first, envelope_media=True)
+    await registry.register("x", second)
+    assert not registry.takes_media("x")
+    await registry.unregister("x", second)
+    assert not registry.takes_media("x")
+
+
+async def test_a_dead_media_socket_is_evicted(registry):
+    ws = _FakeWS(broken=True)
+    await registry.register("x", ws, envelope_media=True)
+    assert not await registry.send_media("x", b"\x00SHR")
+    assert not registry.is_connected("x")
+
+
+class _SlowBytesWS(_FakeWS):
+    async def send_bytes(self, data: bytes) -> None:
+        await asyncio.sleep(1.0)
+        self.sent_bytes.append(data)
+
+
+async def test_a_slow_media_push_is_dropped_but_never_evicts_the_socket(
+    registry, monkeypatch
+):
+    monkeypatch.setattr(ws_registry_mod, "WS_MEDIA_SEND_TIMEOUT_S", 0.05)
+    ws = _SlowBytesWS()
+    await registry.register("x", ws, envelope_media=True)
+    assert not await registry.send_media("x", b"\x00SHR-slow")
+    assert registry.is_connected("x")
+    assert ws.closed_with is None
+    # Control frames still go out on the same socket.
+    assert await registry.send("x", {"type": "envelope", "sealed": {}})
+
+
+class _BufferedWS(_FakeWS):
+    """A socket whose transport still holds *buffered* unsent bytes."""
+
+    def __init__(self, buffered: int) -> None:
+        super().__init__()
+        self._writer = SimpleNamespace(
+            transport=SimpleNamespace(get_write_buffer_size=lambda: buffered)
+        )
+
+
+async def test_media_is_not_pushed_onto_a_backed_up_socket(registry):
+    """Control frames must never queue behind media bytes: with more than
+    ``WS_MEDIA_MAX_BUFFERED_BYTES`` still unsent, the media push is skipped
+    (the row stays queued) and the socket is kept."""
+    busy = _BufferedWS(ws_registry_mod.WS_MEDIA_MAX_BUFFERED_BYTES + 1)
+    await registry.register("x", busy, envelope_media=True)
+    assert not await registry.send_media("x", b"\x00SHR-1")
+    assert busy.sent_bytes == []
+    assert registry.is_connected("x")
+    idle = _BufferedWS(0)
+    await registry.register("y", idle, envelope_media=True)
+    assert await registry.send_media("y", b"\x00SHR-2")
+    assert idle.sent_bytes == [b"\x00SHR-2"]

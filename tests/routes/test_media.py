@@ -16,11 +16,13 @@ from socialhome.app_keys import (
     gallery_service_key,
     media_signer_key,
     profile_picture_repo_key,
+    relay_media_refill_key,
     space_crypto_service_key,
     space_media_gfs_fetcher_key,
 )
 from socialhome.csp import MEDIA_CSP, PLAYABLE_MEDIA_CSP
 from socialhome.domain.gfs_space_media import space_media_address
+from socialhome.routes.media import MediaServeView
 from socialhome.services.inbound_media_store import gfs_space_media_name
 from socialhome.services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 from socialhome.space_media_seal import (
@@ -697,3 +699,21 @@ async def test_a_dm_attachment_opens_only_for_someone_in_the_conversation(client
     )
     r = await client.get(f"/api/media/{name}", headers=_auth(client._tok))
     assert r.status == 404
+
+
+async def test_a_missing_content_file_asks_for_a_relay_refill(client, monkeypatch):
+    """v_87: a content-addressed space file this household may open but does
+    not hold (a relay push that never arrived) schedules a refill request;
+    the view itself still answers 404 at once."""
+
+    async def _may(self, filename):
+        return True
+
+    monkeypatch.setattr(MediaServeView, "_may_open", _may)
+    asked: list[str] = []
+    refill = client.app[relay_media_refill_key]
+    monkeypatch.setattr(type(refill), "schedule", lambda self, name: asked.append(name))
+    name = "sc-" + "a" * 40 + ".webp"
+    r = await client.get(f"/api/media/{name}", headers=_auth(client._tok))
+    assert r.status == 404
+    assert asked == [name]

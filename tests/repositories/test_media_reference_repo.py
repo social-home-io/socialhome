@@ -1014,3 +1014,36 @@ async def test_content_names_of_an_item(db):
     assert await repo.content_names_of_item("p-sc") == [a, b, t]
     assert await repo.content_names_of_item("sp0") == []
     assert await repo.content_names_of_item("nope") == []
+
+
+# ─── space_rows_of: which live space rows show a file, and when (v_87) ───
+
+
+async def test_space_rows_of_names_the_live_rows_and_their_time(db):
+    await _two_spaces(db)
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, image_urls_json,"
+        " created_at) VALUES('p1', 'sp1', 'u1', 'image', ?,"
+        " '2026-11-01 10:00:00')",
+        ('["api/media/sc-abc.webp"]',),
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, media_url, deleted,"
+        " created_at) VALUES('p2', 'sp2', 'u1', 'image', 'api/media/sc-abc.webp',"
+        " 1, '2026-11-02 10:00:00')",
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.space_rows_of("sc-abc.webp") == [
+        ("sp1", "2026-11-01 10:00:00", "posts")
+    ]
+    await db.enqueue(
+        "INSERT INTO space_calendar_events(id, space_id, summary, start_dt, end_dt,"
+        " created_by, cover_url, created_at) VALUES('e1', 'sp2', 'S',"
+        " '2026-01-01T00:00:00+00:00', '2026-01-01T01:00:00+00:00', 'u1',"
+        " 'api/media/sc-cal.webp', '2026-11-03 09:00:00')"
+    )
+    assert await repo.space_rows_of("sc-cal.webp") == [
+        ("sp2", "2026-11-03 09:00:00", "calendar")
+    ]
+    assert await repo.space_rows_of("sc-none.webp") == []
+    assert await repo.space_rows_of("") == []

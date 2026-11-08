@@ -924,7 +924,8 @@ class SqliteSpaceCalendarRepo:
         """
         rows = await self._db.fetchall(
             "SELECT * FROM space_calendar_events "
-            "WHERE space_id=? AND updated_at > ? AND deleted_at IS NULL "
+            "WHERE space_id=? AND datetime(updated_at) > datetime(?)"
+            " AND deleted_at IS NULL "
             "ORDER BY updated_at ASC LIMIT ?",
             (space_id, since, int(limit)),
         )

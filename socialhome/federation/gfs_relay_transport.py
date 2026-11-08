@@ -96,6 +96,20 @@ at most the top of :data:`RELAY_SIZE_BUCKETS` (~191 KiB). Media chunks
 are 512 KiB — 1 MiB before base64, so a chunk envelope is several times
 the cap and is refused here, loudly, rather than shipped to a 413. See
 the media note in ``docs/protocol/invites.md``.
+
+## Binary media frames (v_87)
+
+A media chunk to a link-joined household goes around that cap instead of
+through it: :meth:`GfsRelayTransport.send_media` seals the chunk's binary
+inbox body (``\\x00SHM`` …) to the peer's key-wrap key
+(:mod:`socialhome.federation.gfs_relay_media`) and POSTs it raw as a
+``\\x00SHR`` body, up to 528 KiB — a full 512 KiB chunk, no base64. Only
+through a server that proved ``envelope_media`` and only to a peer at
+:data:`~socialhome.domain.federation_capabilities.FederationCapability.MIN_FOR_RELAY_MEDIA`
+(the caller checks the version; :meth:`GfsRelayTransport.media_ready` the
+server). Anything else keeps the JSON path, with chunks small enough for
+:data:`RELAY_MAX_ENVELOPE_BYTES`
+(:data:`~socialhome.domain.media_chunking.RELAY_JSON_CHUNK_BYTES`).
 """
 
 from __future__ import annotations
@@ -108,6 +122,7 @@ import orjson
 from ..domain.federation import RemoteInstance
 from ..domain.space import SpacePermissionError
 from ..domain.space_item import ITEM_SIZE_BUCKETS, pad_json_object
+from .gfs_relay_media import seal_relay_media
 from .invite_bootstrap import EnvelopeRelayThrottled, RelayEnvelopeSender
 from .keywrap_seal import seal_to_keywrap
 
@@ -377,6 +392,68 @@ class GfsRelayTransport:
             # never raise — the contract in ``strategies.TransportStrategy``.
             log.warning(
                 "gfs relay: sending an envelope for %s failed: %s",
+                instance.id,
+                exc,
+                exc_info=True,
+            )
+            return False, None
+        return bool(ok), None
+
+    async def media_ready(self, instance: RemoteInstance) -> bool:
+        """Whether *instance*'s relay (its ``relay_via``) proved
+        ``envelope_media`` (v_87) and the row holds a key-wrap key to seal
+        to. The peer's protocol version is the caller's check."""
+        if not instance.remote_keywrap_pk or not instance.relay_via:
+            return False
+        try:
+            return await self._sender.media_connection(instance.relay_via) is not None
+        except Exception as exc:  # a capability probe must never raise here
+            log.info("gfs relay: media capability check failed: %s", exc, exc_info=True)
+            return False
+
+    async def send_media(
+        self, *, instance: RemoteInstance, media_body: bytes
+    ) -> tuple[bool, int | None]:
+        """Seal one binary inbox media body (``\\x00SHM`` …) to *instance*
+        and POST it to its relay as a ``\\x00SHR`` frame (v_87).
+
+        Same contract as :meth:`send`: never raises; ``(False,
+        RELAY_STATUS_THROTTLED)`` on a 429 (waitable), ``(False,
+        RELAY_STATUS_TOO_LARGE)`` for a body no frame can carry (permanent),
+        ``(False, None)`` otherwise."""
+        try:
+            body = seal_relay_media(
+                to_instance=instance.id,
+                media_body=media_body,
+                recipient_keywrap_pub=bytes.fromhex(instance.remote_keywrap_pk or ""),
+            )
+        except ValueError as exc:
+            # Too big for a frame, or no usable key-wrap key on the row.
+            log.warning(
+                "gfs relay: cannot seal a %d-byte media frame for %s: %s",
+                len(media_body),
+                instance.id,
+                exc,
+            )
+            too_big = "does not fit" in str(exc)
+            return False, RELAY_STATUS_TOO_LARGE if too_big else None
+        try:
+            ok = await self._sender.send_media_body(
+                body=body, gfs_url=instance.relay_via or ""
+            )
+        except EnvelopeRelayThrottled:
+            log.info("gfs relay: media frame for %s throttled", instance.id)
+            return False, RELAY_STATUS_THROTTLED
+        except SpacePermissionError as exc:
+            log.info(
+                "gfs relay: no GFS could carry a media frame for %s: %s",
+                instance.id,
+                exc,
+            )
+            return False, None
+        except Exception as exc:
+            log.warning(
+                "gfs relay: sending a media frame for %s failed: %s",
                 instance.id,
                 exc,
                 exc_info=True,

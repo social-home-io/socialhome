@@ -131,6 +131,20 @@ RESUME_COOLDOWN_S: float = 30 * 60.0
 #: How many (household, space) cooldowns are remembered (oldest dropped).
 RESUME_COOLDOWN_TRACKED: int = 4096
 
+#: v_87 — a relay media refill (``SPACE_SYNC_RESUME`` with ``refill``): the
+#: one resource whose row shows a file that never arrived through the GFS
+#: relay. A bridge until the generic ``SPACE_MEDIA_WANTED`` of the GFS
+#: redesign replaces it. Only these resources re-ship their files on replay.
+REFILL_RESOURCES: frozenset[str] = frozenset({"posts", "calendar", "gallery"})
+
+#: Rows one refill replays: the asker sends ``since`` a minute before the
+#: row that shows the file, so it is among the first; the rest is overlap.
+REFILL_MAX_ROWS: int = 20
+
+#: Files and bytes one refill re-ships (the replayed rows' files).
+REFILL_MAX_FILES: int = 16
+REFILL_MAX_BYTES: int = 16 * 1024 * 1024
+
 
 #: The replayed rows' files: ``(row id, the row's author, file urls)``.
 _Media = list[tuple[str, str | None, list[str]]]
@@ -204,7 +218,7 @@ class SpaceSyncResumeProvider:
         self._media_dir = media_dir
         self._clock = clock
         #: ``(household, space) -> when its last resume was served``.
-        self._last_resume: OrderedDict[tuple[str, str], float] = OrderedDict()
+        self._last_resume: OrderedDict[tuple[str, str, str], float] = OrderedDict()
         #: Ships the files of the replayed posts / covers / gallery items:
         #: the receiver names a file by the household that delivered its
         #: row, so a replayed row's pictures come from us, not its author.
@@ -234,8 +248,12 @@ class SpaceSyncResumeProvider:
         space_id: str,
         instance_id: str,
         since: str,
+        refill: str | None = None,
     ) -> None:
         """Ask ``instance_id`` to replay missed events since ``since``.
+
+        ``refill`` (v_87, one of :data:`REFILL_RESOURCES`) narrows it to the
+        relay media refill of one resource (:meth:`replay_refill_to`).
 
         ``since`` is an ISO-8601 timestamp — typically the receiver's
         local ``MAX(updated_at)`` for the space. Returns immediately;
@@ -244,10 +262,13 @@ class SpaceSyncResumeProvider:
         """
         if not space_id or not instance_id or not since:
             return
+        payload: dict[str, str] = {"space_id": space_id, "since": since}
+        if refill is not None:
+            payload["refill"] = refill
         await self._federation.send_event(
             to_instance_id=instance_id,
             event_type=FederationEventType.SPACE_SYNC_RESUME,
-            payload={"space_id": space_id, "since": since},
+            payload=payload,
             space_id=space_id,
         )
 
@@ -280,19 +301,73 @@ class SpaceSyncResumeProvider:
                 since,
             )
             return 0
+        refill = payload.get("refill")
+        if refill is not None:
+            # v_87 relay media refill: one resource, few rows, its own window.
+            if refill not in REFILL_RESOURCES:
+                return 0
+            return await self.replay_refill_to(
+                space_id=space_id,
+                instance_id=event.from_instance,
+                since=since,
+                resource=str(refill),
+            )
         return await self.replay_space_to(
             space_id=space_id,
             instance_id=event.from_instance,
             since=since,
         )
 
-    def _claim_window(self, instance_id: str, space_id: str) -> bool:
+    async def replay_refill_to(
+        self,
+        *,
+        space_id: str,
+        instance_id: str,
+        since: str,
+        resource: str,
+    ) -> int:
+        """v_87 relay media refill: replay ONE resource (``posts``,
+        ``calendar`` or ``gallery`` items) newer than ``since`` — at most
+        :data:`REFILL_MAX_ROWS` rows — and re-ship their files (at most
+        :data:`REFILL_MAX_FILES` / :data:`REFILL_MAX_BYTES`). Membership-gated
+        like every replay, under its OWN (household, space) window so a refill
+        never uses up the reconnect resume's. A bridge: the generic
+        ``SPACE_MEDIA_WANTED`` of the GFS redesign replaces it."""
+        if resource not in REFILL_RESOURCES:
+            return 0
+        if not await self._is_member(space_id, instance_id):
+            return 0
+        if not self._claim_window(instance_id, space_id, kind=f"refill:{resource}"):
+            return 0
+        media: _Media = []
+        if resource == "posts":
+            sent = await self._replay_posts(
+                space_id, since, to=instance_id, media=media, limit=REFILL_MAX_ROWS
+            )
+        elif resource == "calendar":
+            sent = await self._replay_calendar(
+                space_id, since, to=instance_id, media=media, limit=REFILL_MAX_ROWS
+            )
+        else:
+            sent = await self._replay_gallery_item_rows(
+                space_id, since, to=instance_id, media=media, limit=REFILL_MAX_ROWS
+            )
+        await self._ship_media(
+            space_id,
+            instance_id,
+            media,
+            max_files=REFILL_MAX_FILES,
+            max_bytes=REFILL_MAX_BYTES,
+        )
+        return sent
+
+    def _claim_window(self, instance_id: str, space_id: str, *, kind: str = "") -> bool:
         """Start the (household, space) replay window, or ``False`` (logged)
         when one is still open. Synchronous — taken before the replay awaits
         anything, so concurrent requests can't all pass. Shared by every
         entry point (``SPACE_SYNC_RESUME`` and the §319.6 resync scopes), so
         a household can't route around it."""
-        key = (str(instance_id or ""), space_id)
+        key = (str(instance_id or ""), space_id, kind)
         now = self._clock()
         last = self._last_resume.get(key)
         if last is not None and now - last < RESUME_COOLDOWN_S:
@@ -384,7 +459,15 @@ class SpaceSyncResumeProvider:
         await self._ship_media(space_id, instance_id, media)
         return sent
 
-    async def _ship_media(self, space_id: str, to: str, media: _Media) -> None:
+    async def _ship_media(
+        self,
+        space_id: str,
+        to: str,
+        media: _Media,
+        *,
+        max_files: int | None = None,
+        max_bytes: int | None = None,
+    ) -> None:
         """Queue the replayed rows' files for ``to``: a receiver binds a
         file to the household that delivered its row, so the bytes must
         come from us. Bounded per request (:data:`RESUME_MEDIA_MAX_FILES`,
@@ -407,8 +490,10 @@ class SpaceSyncResumeProvider:
                 size = await self._size(url)
                 if (
                     size is None
-                    or files >= RESUME_MEDIA_MAX_FILES
-                    or used + size > RESUME_MEDIA_MAX_BYTES
+                    or files
+                    >= (RESUME_MEDIA_MAX_FILES if max_files is None else max_files)
+                    or used + size
+                    > (RESUME_MEDIA_MAX_BYTES if max_bytes is None else max_bytes)
                 ):
                     skipped += 1
                     continue
@@ -453,11 +538,12 @@ class SpaceSyncResumeProvider:
         *,
         to: str,
         media: _Media | None = None,
+        limit: int = MAX_PER_RESOURCE,
     ) -> int:
         posts = await self._space_post_repo.list_since(
             space_id,
             since,
-            limit=MAX_PER_RESOURCE,
+            limit=limit,
         )
         return await self._send_each(
             posts,
@@ -730,13 +816,14 @@ class SpaceSyncResumeProvider:
         *,
         to: str,
         media: _Media | None = None,
+        limit: int = MAX_PER_RESOURCE,
     ) -> int:
         if self._space_calendar_repo is None:
             return 0
         events = await self._space_calendar_repo.list_events_since(
             space_id,
             since,
-            limit=MAX_PER_RESOURCE,
+            limit=limit,
         )
         return await self._send_each(
             events,
@@ -813,12 +900,24 @@ class SpaceSyncResumeProvider:
             space_id=space_id,
             to=to,
         )
-        items = await self._gallery_repo.list_items_since(
-            space_id,
-            since,
-            limit=MAX_PER_RESOURCE,
+        return sent + await self._replay_gallery_item_rows(
+            space_id, since, to=to, media=media
         )
-        return sent + await self._send_each(
+
+    async def _replay_gallery_item_rows(
+        self,
+        space_id: str,
+        since: str,
+        *,
+        to: str,
+        media: _Media | None = None,
+        limit: int = MAX_PER_RESOURCE,
+    ) -> int:
+        """The gallery items newer than ``since`` (no albums)."""
+        if self._gallery_repo is None:
+            return 0
+        items = await self._gallery_repo.list_items_since(space_id, since, limit=limit)
+        return await self._send_each(
             items,
             FederationEventType.SPACE_GALLERY_ITEM_CREATED,
             _gallery_item_to_payload,

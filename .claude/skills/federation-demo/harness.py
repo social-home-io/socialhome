@@ -942,7 +942,7 @@ def _gfs_alive(state: dict) -> bool:
     return bool(pid and _alive(pid))
 
 
-def cmd_gfs_up() -> None:
+def cmd_gfs_up(*, env_extra: dict[str, str] | None = None) -> None:
     """Start a Global Federation Server (GFS) on ``127.0.0.1:18765``.
 
     Uses ``socialhome-global-server`` (the ``socialhome[global-server]``
@@ -953,6 +953,10 @@ def cmd_gfs_up() -> None:
     the harness can boot the GFS in one shot.
 
     Prerequisite: ``cmd_up`` must have run so ``/tmp/sh-demo`` exists.
+
+    ``env_extra`` (a restart scoped to one step, e.g. ``gfs-relay-media``)
+    adds ``GFS_*`` overrides for this process only and APPENDS to the log, so
+    log offsets taken before the restart stay valid.
     """
     state = _load()
     if not state:
@@ -994,7 +998,7 @@ def cmd_gfs_up() -> None:
     config_path.write_text(text, encoding="utf-8")
     set_password_in_toml(config_path, hash_password("gfs-admin-pw"))
 
-    log = open(GFS_DIR / "log.txt", "wb")
+    log = open(GFS_DIR / "log.txt", "ab" if env_extra is not None else "wb")
     # ``socialhome.global_server.server`` has no ``__main__`` guard, so
     # ``python -m`` imports the module without calling ``main()``. Use
     # ``-c`` to invoke ``main()`` directly. ``sys.argv`` inside the
@@ -1024,6 +1028,7 @@ def cmd_gfs_up() -> None:
         # checkout under test, not whatever the venv has installed.
         cwd=str(REPO_ROOT),
         start_new_session=True,
+        env={**os.environ, **(env_extra or {})},
     )
     deadline = time.monotonic() + 30.0
     last_err: Any = None
@@ -1223,6 +1228,112 @@ def _gfs_cluster_post_frame(base_url: str, raw: bytes, sig: str) -> tuple[int, A
             return exc.code, json.loads(text)
         except Exception:
             return exc.code, {"_raw": text}
+
+
+def _gfs_cluster_cross_node_media(urls: list[str]) -> None:
+    """Step 3d' of ``gfs-cluster`` (v_87): a binary relay media frame posted
+    on node 0 reaches the recipient's socket on node 1 byte-identical — live
+    (the push finds no socket on node 0, so it is queued in the shared
+    ``gfs_media_queue`` and node 1 drains it on the ``NODE_DRAIN_HINT``) and
+    after a reconnect (queued while offline, drained on its labelled hello).
+    Only to a socket that listed ``envelope_media``.
+    """
+    import asyncio
+    import os as _os
+
+    import aiohttp
+
+    from socialhome.crypto import (
+        b64url_encode,
+        derive_instance_id,
+        generate_identity_keypair,
+        sign_ed25519,
+    )
+    from socialhome.domain.relay_media_frame import (
+        RELAY_MEDIA_SEAL_OVERHEAD_BYTES as _SEAL,
+        build_relay_media_body,
+    )
+
+    kp = generate_identity_keypair()
+    iid = derive_instance_id(kp.public_key)
+    code, resp = _request(
+        f"{urls[1]}/gfs/register",
+        method="POST",
+        body={
+            "token": _gfs_landing_token(urls[1]),
+            "instance_id": iid,
+            "public_key": kp.public_key.hex(),
+            "display_name": f"media-{iid[:6]}",
+        },
+        timeout=15.0,
+    )
+    if code not in (200, 201) or (resp or {}).get("status") != "registered":
+        raise SystemExit(f"gfs-cluster: media recipient register → {code} {resp!r}")
+
+    def _hello() -> dict:
+        ts = int(time.time())
+        return {
+            "type": "hello",
+            "instance_id": iid,
+            "ts": ts,
+            "sig": b64url_encode(sign_ed25519(kp.private_key, f"{iid}|{ts}".encode())),
+            "accepts": ["envelope_media"],
+        }
+
+    async def _post(http: aiohttp.ClientSession, body: bytes) -> None:
+        async with http.post(
+            f"{urls[0]}/gfs/envelope",
+            data=body,
+            headers={"Content-Type": "application/octet-stream"},
+        ) as r:
+            if r.status != 202:
+                raise SystemExit(f"gfs-cluster: media frame via node 0 → {r.status}")
+
+    async def _binary(ws, timeout: float = 15.0) -> bytes:
+        deadline = time.monotonic() + timeout
+        while (left := deadline - time.monotonic()) > 0:
+            try:
+                msg = await ws.receive(timeout=left)
+            except TimeoutError:
+                break
+            if msg.type == aiohttp.WSMsgType.BINARY:
+                return msg.data
+            if msg.type != aiohttp.WSMsgType.TEXT:
+                break
+        raise SystemExit(
+            "gfs-cluster: no binary media frame on the socket held by node 1 — "
+            "cross-node media delivery is broken (shared media queue / drain hint)"
+        )
+
+    async def _run() -> None:
+        async with aiohttp.ClientSession() as http:
+            ws = await http.ws_connect(f"{urls[1]}/gfs/ws", max_msg_size=4 << 20)
+            await ws.send_json(_hello())
+            await asyncio.sleep(0.5)
+            live = build_relay_media_body(iid, _os.urandom(516 * 1024 + _SEAL))
+            await _post(http, live)
+            if await _binary(ws) != live:
+                raise SystemExit("gfs-cluster: the cross-node media frame changed")
+            print(
+                f"  {len(live) // 1024} KiB media frame via node 0 → binary WS "
+                "message on node 1, byte-identical ✓"
+            )
+            await ws.close()
+            await asyncio.sleep(0.5)
+            queued = build_relay_media_body(iid, _os.urandom(256 * 1024 + _SEAL))
+            await _post(http, queued)
+            await asyncio.sleep(1.0)
+            ws = await http.ws_connect(f"{urls[1]}/gfs/ws", max_msg_size=4 << 20)
+            await ws.send_json(_hello())
+            if await _binary(ws) != queued:
+                raise SystemExit("gfs-cluster: the queued media frame changed")
+            print(
+                "  media frame queued via node 0 while offline → drained on the "
+                "labelled hello on node 1, byte-identical ✓"
+            )
+            await ws.close()
+
+    asyncio.run(_run())
 
 
 def _gfs_cluster_cross_node_push(urls: list[str]) -> None:
@@ -3160,6 +3271,8 @@ def cmd_gfs_cluster() -> None:
     # 3g. A public-highlight session sticks to the node that started it.
     try:
         _gfs_cluster_cross_node_push(urls)
+        # 3d'. v_87 — a binary media frame crosses nodes byte-identical.
+        _gfs_cluster_cross_node_media(urls)
         _gfs_cluster_cross_node_broadcast(urls)
         _gfs_cluster_cross_node_moment(urls)
         # 3g. A public-highlight link through a round-robin balancer: every
@@ -7071,6 +7184,140 @@ def _picture_via_gfs_media_cache(
         f"{local_name[:15]}…, byte-identical ({size} bytes) ✓"
     )
     return filename
+
+
+# ─── Step: gfs-relay-media ─────────────────────────────────────────────────
+
+
+def cmd_gfs_relay_media() -> None:
+    """v_87 — a picture reaches a link-joined member as binary relay frames.
+
+    Prereqs: the gfs chain through ``gfs-invite-link-content`` (e holds a
+    ``space_session`` seat in a's space, reached only through the GFS).
+
+    The GFS is restarted for THIS step only with its space media cache off
+    (``GFS_SPACE_MEDIA_MAX_BYTES=0`` — the operator's ``[space_media]
+    max_bytes = 0``), so its signed ``/gfs/info`` block carries
+    ``envelope_media`` and no ``space_media``. Then:
+
+    1. a posts a > 200 KiB photo in the space. e is at v_87 and its GFS keeps
+       no cache, so a pushes ``SPACE_MEDIA_BLOB`` to e in 512 KiB chunks,
+       each one ``\\x00SHR`` frame on ``POST /gfs/envelope`` — no media cache
+       upload (the GFS holds no ``gfs_space_media`` row) and no JSON chunk.
+    2. e holds the file byte-identical, under the name its copy of the post
+       shows.
+    3. The GFS pushed binary media frames to e (``media delivered to live
+       socket`` / drained from ``gfs_media_queue``), and a logged no relay
+       refusal (``413`` / ``refusing``) for e.
+
+    The GFS is restarted with its default config afterwards, whatever
+    happened.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run the gfs chain through 'gfs-invite-link-content' first")
+    space_id = state.get("gfs_invite_space_id")
+    if not space_id:
+        raise SystemExit("run 'gfs-invite-link' first")
+    step = "gfs-relay-media"
+    a = state["instances"]["a"]
+    e = state["instances"]["e"]
+    a_iid, e_iid = a["instance_id"], e["instance_id"]
+
+    def _restart(env_extra: dict[str, str] | None) -> None:
+        offset = _gfs_log_size()
+        cmd_gfs_down()
+        cmd_gfs_up(env_extra=env_extra)
+        _wait_for_gfs_ws_since(a_iid, offset=offset, timeout=90.0)
+        _wait_for_gfs_ws_since(e_iid, offset=offset, timeout=90.0)
+
+    _restart({"GFS_SPACE_MEDIA_MAX_BYTES": "0"})
+    try:
+        s, info = _request(f"http://127.0.0.1:{GFS_PORT}/gfs/info")
+        caps = (info or {}).get("capabilities") or {}
+        if s != 200 or caps.get("envelope_media") is not True or "space_media" in caps:
+            raise SystemExit(
+                f"{step}: the restarted GFS should prove envelope_media and no "
+                f"space_media cache; capabilities={sorted(caps)!r}"
+            )
+        print("  GFS restarted with its media cache off: envelope_media, no space_media ✓")
+        # a re-reads /gfs/info on its reconnect; give it a moment.
+        time.sleep(3.0)
+        gfs_off = _gfs_log_size()
+        a_off = _log_size("a")
+        base = f"http://127.0.0.1:{a['port']}"
+        s, up = _upload_file(
+            f"{base}/api/media/upload",
+            token=a["token"],
+            filename="relay-photo.png",
+            content=_make_noisy_png(1400, 900),  # > 512 KiB: two frames
+            content_type="image/png",
+            timeout=60.0,
+        )
+        up = _must(f"{step}: a uploads a photo", s, up, ok=(200, 201))
+        s, post = _request(
+            f"{base}/api/spaces/{space_id}/posts",
+            token=a["token"],
+            method="POST",
+            body={"type": "image", "image_urls": [up["url"]]},
+        )
+        post = _must(f"{step}: a posts the photo", s, post, ok=(201,))
+        _await_space_post(state, "e", space_id, post["id"])
+        src = (_instance_dir("a") / "media" / up["filename"]).read_bytes()
+        if len(src) <= 200 * 1024:
+            raise SystemExit(f"{step}: the photo is only {len(src)} bytes — want > 200 KiB")
+        deadline = time.time() + 120.0
+        local = ""
+        got = b""
+        while time.time() < deadline:
+            rows = _rows(
+                "e",
+                "SELECT image_urls_json FROM space_posts WHERE id = ?",
+                (post["id"],),
+            )
+            if rows and rows[0][0]:
+                urls = json.loads(rows[0][0]) or []
+                if urls:
+                    local = str(urls[0]).rsplit("/", 1)[-1].split("?", 1)[0]
+                    path = _instance_dir("e") / "media" / local
+                    if path.is_file():
+                        got = path.read_bytes()
+                        if got == src:
+                            break
+            time.sleep(1.0)
+        if got != src:
+            raise SystemExit(
+                f"{step}: e never held a's {len(src)}-byte photo byte-identical "
+                f"(as {local!r}, {len(got)} bytes) within 120 s — no media through "
+                "the relay."
+            )
+        pushed = _gfs_log_lines_matching(
+            f"media delivered to live socket {e_iid}", offset=gfs_off
+        )
+        drained = _gfs_log_lines_matching(f"to {e_iid}", offset=gfs_off)
+        if not pushed and not any("drained" in line for line in drained):
+            raise SystemExit(
+                f"{step}: the GFS logged no binary media frame for e — the bytes "
+                "did not ride the relay"
+            )
+        refused = [
+            line
+            for line in _log_lines_matching("a", "refusing a", offset=a_off)
+            if e_iid in line
+        ]
+        if refused:
+            raise SystemExit(f"{step}: a refused relay frames for e: {refused[:2]!r}")
+        chunks = -(-len(src) // (512 * 1024))
+        print(
+            f"  a's {len(src) // 1024} KiB photo reached e byte-identical as "
+            f"{local[:15]}… in {chunks} binary relay frame(s) "
+            f"({len(pushed)} live push(es) logged by the GFS), no JSON chunk refused ✓"
+        )
+    finally:
+        # Default config again; ``{}`` (not ``None``) keeps the log appended,
+        # so the reconnect offsets stay valid.
+        _restart({})
+    print("gfs-relay-media: ok")
 
 
 # ─── Step: gfs-media-on-demand ─────────────────────────────────────────────

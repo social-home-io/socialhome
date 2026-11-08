@@ -336,6 +336,8 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
             # v_83 — a reader may ask for a blob it missed, waiting this long.
             "on_demand": {"wait_s": 25},
         },
+        # v_87 — ``POST /gfs/envelope`` takes binary media frames.
+        "envelope_media": True,
         # ``POST /gfs/proof`` needs a real base_url to bind; this fixture's
         # env fallback infers ``http://0.0.0.0:8765`` (a wildcard bind
         # address), so the GFS honestly does not offer it.

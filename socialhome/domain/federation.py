@@ -1499,6 +1499,13 @@ DELIVERY_ERROR_RELAY_THROTTLED: str = "relay_throttled"
 #: then reports a transient-looking failure for a permanent condition.
 DELIVERY_ERROR_RELAY_TOO_LARGE: str = "relay_too_large"
 
+#: v_87 — a media chunk cut for a binary relay frame (512 KiB) whose relay
+#: path no longer carries them (the GFS stopped proving ``envelope_media``,
+#: or the peer's version fell). Not sent: a JSON envelope would 413 for good.
+#: RETRYABLE — the media outbox re-cuts the file on its next attempt, and
+#: the chunk size is derived again for the path as it is then.
+DELIVERY_ERROR_RELAY_CHUNK_RESIZE: str = "relay_chunk_resize"
+
 
 #: :attr:`DeliveryResult.error` value meaning "enqueued to the durable
 #: ``federation_outbox`` for retry" — NOT a loss. ``send_event`` emits it

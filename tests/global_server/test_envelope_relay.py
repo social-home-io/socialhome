@@ -69,6 +69,10 @@ class _FakeRegistry:
     def is_connected(self, instance_id: str) -> bool:
         return instance_id in self.online
 
+    def takes_media(self, instance_id: str) -> bool:
+        # v_87 media frames: none of these sockets listed ``envelope_media``.
+        return False
+
 
 @pytest.fixture
 async def wiring(gfs_db):

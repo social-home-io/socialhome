@@ -381,8 +381,12 @@ truth; the panel follows it.
   link and reached only through the GFS relay (`InstanceSource.SPACE_SESSION`).
   A new space surface (content, its pictures/files, edits, deletes)
   reaches all of them — `broadcast_to_space_members` covers every path;
-  bulky bytes respect the relay's tighter cap (`relay_payload`,
-  `RELAY_MAX_ENVELOPE_BYTES`) instead of skipping relay-seated members.
+  media chunks reach relay-seated members at mesh size as binary relay
+  frames (`\x00SHR`, 512 KiB chunks) when their GFS proves `envelope_media`
+  and they are at v_87 (`FederationService.relay_media_ok`); otherwise
+  bulky bytes respect the JSON relay's tighter cap (`relay_payload`,
+  `RELAY_MAX_ENVELOPE_BYTES`, `RELAY_JSON_CHUNK_BYTES`) instead of skipping
+  relay-seated members.
   Only **followers** (subscribers) may get a subset, decided per feature
   and written down there — never a member role.
 - GPS coordinates: truncate to 4 decimal places before any storage or

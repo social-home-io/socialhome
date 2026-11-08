@@ -1394,7 +1394,23 @@ from __future__ import annotations
 #:   them, an older one stores them under a name no row shows); a helper
 #:   below v_86 ships none. No sync-stream record change. Labelled
 #:   "Admins and moderators fill in missing space pictures".
-OURS: int = 86
+#: * **v_87** (2026-11-08) — **mesh-sized media through the GFS relay**.
+#:   A ``SPACE_MEDIA_BLOB`` / ``DM_MEDIA_BLOB`` chunk to a household seated
+#:   from an invite link (``space_session``) whose GFS proved the signed
+#:   ``envelope_media`` capability goes as ONE binary ``\x00SHR`` body to
+#:   ``POST /gfs/envelope``: the chunk's binary inbox body (``\x00SHM``, the
+#:   v_81 frame) sealed to the recipient's key-wrap key (kem-suite byte,
+#:   ``federation/gfs_relay_media.py``), padded to a size bucket, 512 KiB
+#:   chunks (~517 KiB on the wire). The GFS pushes it unchanged as a binary
+#:   WebSocket message to a socket whose hello listed ``envelope_media``; the
+#:   receiver opens it and runs the inbox's §24.11 media tail. A relay reader
+#:   whose GFS keeps no space media cache now gets the space's pictures this
+#:   way instead of none. **Fallback**: a peer below v_87, or a GFS without
+#:   ``envelope_media``, gets JSON chunks of ``RELAY_JSON_CHUNK_BYTES``
+#:   (96 KiB), which fit the JSON relay's envelope cap. Not space-scoped, no
+#:   sync-stream change. Labelled "Members reached through a GFS get pictures
+#:   in full-size pieces".
+OURS: int = 87
 
 
 class FederationCapability:
@@ -2040,6 +2056,10 @@ class FederationCapability:
     #: moderator seat) as well as from the row's author: a trusted non-host
     #: provider ships other people's hashed files only to it.
     MIN_FOR_TRUSTED_FILE_FILLS = 86
+    #: v_87 — a household at or above it opens binary media frames from the
+    #: GFS relay (``\x00SHR``): a link-joined peer gets 512 KiB media
+    #: chunks through a GFS proving ``envelope_media``.
+    MIN_FOR_RELAY_MEDIA = 87
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2370,6 +2390,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS,
         "Admins and moderators fill in missing space pictures",
     ),
+    (
+        FederationCapability.MIN_FOR_RELAY_MEDIA,
+        "Members reached through a GFS get pictures in full-size pieces",
+    ),
 ]
 
 
@@ -2467,6 +2491,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_GFS_JOIN_REQUEST: "gfs_join_requests",
     FederationCapability.MIN_FOR_CONTENT_FILE_HASHES: "content_file_hashes",
     FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS: "trusted_file_fills",
+    FederationCapability.MIN_FOR_RELAY_MEDIA: "relay_media",
 }
 
 

@@ -28,6 +28,8 @@ from socialhome.domain.tombstone import SpaceRowTombstone
 from socialhome.federation.sync.space import resume as resume_mod
 from socialhome.federation.sync.space.resume import (
     MAX_PER_RESOURCE,
+    REFILL_MAX_FILES,
+    REFILL_MAX_ROWS,
     SpaceSyncResumeProvider,
     _post_to_payload,
 )
@@ -1404,3 +1406,80 @@ async def test_a_trusted_non_host_resume_ships_others_hashed_files_only():
         ("sp-1", "p-0", ("peer-a",), ("api/media/sd-a.webp", "api/media/sc-a.webp")),
         ("sp-1", "p-1", ("peer-a",), ("api/media/sc-b.webp",)),
     ]
+
+
+# ── v_87 relay media refill: one resource, few rows, own window ──────────
+
+
+def _refill_event(resource: str, since: str):
+    return _event("peer-a", {"space_id": "sp-1", "since": since, "refill": resource})
+
+
+async def test_a_refill_replays_only_the_named_resource_and_few_rows():
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    at = base + timedelta(minutes=1)
+    posts = [_image_post(i, at, f"sc-{i}.webp") for i in range(40)]
+    event = replace(_cal_event(0, at), cover_url="api/media/cover.webp")
+    outbox = _FakeMediaOutbox()
+    fed = _FakeFederation()
+    provider = SpaceSyncResumeProvider(
+        federation_service=fed,
+        space_repo=_FakeSpaceRepo(["peer-a"]),
+        space_post_repo=_FakePostRepo(posts=posts),
+        space_calendar_repo=_FakeListSinceRepo([event]),
+        media_sync=outbox,
+    )
+    sent = await provider.handle_request(_refill_event("calendar", base.isoformat()))
+    assert sent == 1
+    assert [s["type"] for s in fed.sent] == [
+        FederationEventType.SPACE_CALENDAR_EVENT_CREATED
+    ]
+    assert outbox.rows == [("sp-1", "ev-0", ("peer-a",), ("api/media/cover.webp",))]
+    # Posts: at most REFILL_MAX_ROWS rows, files capped too.
+    fed.sent.clear()
+    outbox.rows.clear()
+    await provider.handle_request(_refill_event("posts", base.isoformat()))
+    assert len(fed.sent) == REFILL_MAX_ROWS
+    assert sum(len(r[3]) for r in outbox.rows) <= REFILL_MAX_FILES
+
+
+async def test_a_refill_has_its_own_window_beside_the_reconnect_resume():
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    at = base + timedelta(minutes=1)
+    fed = _FakeFederation()
+    provider = SpaceSyncResumeProvider(
+        federation_service=fed,
+        space_repo=_FakeSpaceRepo(["peer-a"]),
+        space_post_repo=_FakePostRepo(posts=[_post(0, at)]),
+    )
+    assert await provider.handle_request(_refill_event("posts", base.isoformat()))
+    # A second refill within the window is dropped…
+    assert not await provider.handle_request(_refill_event("posts", base.isoformat()))
+    # …but the real reconnect resume still runs.
+    assert await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    )
+
+
+async def test_an_unknown_refill_resource_replays_nothing():
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    fed = _FakeFederation()
+    provider = SpaceSyncResumeProvider(
+        federation_service=fed,
+        space_repo=_FakeSpaceRepo(["peer-a"]),
+        space_post_repo=_FakePostRepo(posts=[_post(0, base + timedelta(minutes=1))]),
+    )
+    assert await provider.handle_request(_refill_event("tasks", base.isoformat())) == 0
+    assert fed.sent == []
+
+
+async def test_a_refill_from_a_non_member_replays_nothing():
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    fed = _FakeFederation()
+    provider = SpaceSyncResumeProvider(
+        federation_service=fed,
+        space_repo=_FakeSpaceRepo(["someone-else"]),
+        space_post_repo=_FakePostRepo(posts=[_post(0, base + timedelta(minutes=1))]),
+    )
+    assert await provider.handle_request(_refill_event("posts", base.isoformat())) == 0
+    assert fed.sent == []

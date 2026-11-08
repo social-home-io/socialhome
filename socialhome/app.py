@@ -417,6 +417,7 @@ from .services.push_withdraw_service import PushWithdrawService
 from .services.realtime_service import RealtimeService
 from .services.recovery_kit_service import RecoveryKitService
 from .services.recovery_reconnect_service import RecoveryReconnectService
+from .services.relay_media_refill import RelayMediaRefill
 from .services.relay_policy import RelayPolicy
 from .services.report_scope import ReportScope
 from .services.report_service import ReportService
@@ -2211,6 +2212,15 @@ def _wire_federation_stack(
     )
     space_sync_service.attach_file_gates(file_gates)
     space_sync_resume_provider.attach_file_gates(file_gates)
+    # v_87 — a space file the GFS relay accepted but never delivered is
+    # asked for again from its relay-seated host on the next view.
+    app[K.relay_media_refill_key] = RelayMediaRefill(
+        media_refs=media_reference_repo,
+        space_repo=space_repo,
+        federation_repo=federation_repo,
+        federation=federation_service,
+        resume=space_sync_resume_provider,
+    )
 
     async def _space_sync_resume(event) -> None:
         await space_sync_resume_provider.handle_request(event)

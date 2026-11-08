@@ -966,6 +966,7 @@ python .claude/skills/federation-demo/harness.py gfs-space-no-subscribers
 python .claude/skills/federation-demo/harness.py gfs-invite-link
 python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py gfs-media-on-demand
+python .claude/skills/federation-demo/harness.py gfs-relay-media
 python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
 python .claude/skills/federation-demo/harness.py gfs-private-channel
@@ -1856,6 +1857,22 @@ re-runnable within ~10 min (a attaches its upload authorization once per
 (GFS, blob) per ``REUPLOAD_COALESCE_S``). ``verify`` asserts
 ``MIN_FOR_SPACE_MEDIA_ON_DEMAND`` is v_83 and covered by the ``OURS``
 round-trip.
+
+### ``gfs-relay-media`` — a picture reaches a link-joined member as binary relay frames (v_87)
+
+Prereqs: the chain through ``gfs-invite-link-content``. The step restarts the
+GFS **for itself only** with ``GFS_SPACE_MEDIA_MAX_BYTES=0`` (the operator's
+``[space_media] max_bytes = 0``) and checks that ``/gfs/info`` then signs
+``envelope_media`` and no ``space_media``. a posts a > 200 KiB photo in the
+link-joined space: e (v_87, its GFS keeps no cache) is no longer a "relay
+reader", so a pushes ``SPACE_MEDIA_BLOB`` in 512 KiB chunks, each one sealed
+``\x00SHR`` frame on ``POST /gfs/envelope``. Asserts: e holds the file
+byte-identical under the name its copy of the post shows; the GFS logged
+binary media frames for e (``media delivered to live socket`` or a drain);
+a refused no relay frame for e. The GFS is restarted with its default config
+afterwards, whatever happened. ``gfs-cluster`` covers the cross-node half
+(step 3d': a frame posted on node 0 arrives byte-identical on node 1's
+socket, live and after a reconnect).
 
 ### ``local-community`` — who gets into a local community, and what the join carries (#1057)
 

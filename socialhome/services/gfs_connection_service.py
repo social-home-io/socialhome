@@ -98,6 +98,7 @@ from ..domain.media_constraints import (
     SPACE_IMAGE_EMBED_MAX_BYTES,
 )
 from ..domain.moment_public import is_path_safe_id
+from ..domain.relay_media_frame import ENVELOPE_MEDIA_CAPABILITY
 from ..domain.space import (
     SpaceType,
     normalize_category,
@@ -418,6 +419,7 @@ class GfsConnectionService:
         "_cover_repo",
         "_encrypted_moment_media",
         "_encrypted_moments",
+        "_envelope_media",
         "_envelope_relay",
         "_http_client",
         "_icon_repo",
@@ -527,6 +529,11 @@ class GfsConnectionService:
         # unknown and is re-probed on the next attempt rather than
         # cached as a permanent "no".
         self._envelope_relay: dict[str, bool] = {}
+        # …and ``envelope_media`` (v_87): the relay carries binary media
+        # frames. ``False`` is recorded too, but only from a VERIFIED block
+        # (it then also tells :meth:`space_media_cache_off` the block was
+        # read); a missing entry is unknown, re-probed.
+        self._envelope_media: dict[str, bool] = {}
         # Same discipline again, for the ``invite_links`` capability
         # (``POST /gfs/spaces/{id}/invite`` + the public ``/join`` page).
         self._invite_links: dict[str, bool] = {}
@@ -809,6 +816,7 @@ class GfsConnectionService:
         for cache in (
             self._anon_publish,
             self._envelope_relay,
+            self._envelope_media,
             self._invite_links,
             self._place_pin,
             self._targeted_publish,
@@ -1946,6 +1954,12 @@ class GfsConnectionService:
         )
         if caps is not None and caps.get("envelope_relay") is True:
             self._envelope_relay[conn.id] = True
+        if caps is not None:
+            # v_87 — what this verified block says about media over the
+            # relay, and (with it) whether it carries a space media cache.
+            self._envelope_media[conn.id] = caps.get(ENVELOPE_MEDIA_CAPABILITY) is True
+            if _space_media_limit(caps) is None:
+                self._space_media.pop(conn.id, None)
         if caps is not None and caps.get("addressee_key") is True:
             self._addressee_key[conn.id] = True
         if caps is not None:
@@ -2170,6 +2184,31 @@ class GfsConnectionService:
             conn,
             "envelope_relay",
             self._envelope_relay,
+        )
+
+    async def envelope_media_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``envelope_media`` (v_87) under a
+        valid signature: ``POST /gfs/envelope`` takes a binary ``\\x00SHR``
+        media frame (one sealed 512 KiB chunk). Probed once on a cold miss."""
+        if self._listing_failed(conn):
+            return False
+        if conn.id not in self._envelope_media:
+            failed_at = self._info_failed_at.get(conn.id)
+            if failed_at is None or time.monotonic() - failed_at >= (
+                GFS_INFO_NEGATIVE_TTL_S
+            ):
+                await self._fetch_gfs_info(conn)
+        return self._envelope_media.get(conn.id, False)
+
+    def space_media_cache_off(self, conn: GfsConnection) -> bool:
+        """Whether the last VERIFIED capability block of *conn*'s GFS proved
+        ``envelope_media`` and carried no ``space_media`` cache (the operator
+        turned it off, ``[space_media] max_bytes = 0``). Never a guess: an
+        unread, unsigned or unreachable descriptor answers ``False`` — the
+        caller then keeps its cache path."""
+        return (
+            self._envelope_media.get(conn.id) is True
+            and conn.id not in self._space_media
         )
 
     async def invite_links_supported(self, conn: GfsConnection) -> bool:

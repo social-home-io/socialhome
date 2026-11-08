@@ -31,6 +31,15 @@ Two families ride the one socket, told apart by the sealed plaintext's
   the delivering connection, which the handler requires to be the one
   the pairing session was issued with. A frame from a server that is not
   one of our active connections is dropped before any handler runs.
+* **Binary media frames** (v_87, ``\\x00SHR``, handed over by the WS
+  client as ``{type: "envelope_media", body}``) — opened with our key-wrap
+  key (:func:`~socialhome.federation.gfs_relay_media.open_relay_media`:
+  addressed to us, kem-suite byte known, AEAD over the recipient id) and
+  run through the inbox's §24.11 media tail
+  (:meth:`~socialhome.federation.federation_service.FederationService
+  .handle_inbound_media_relay`). Their own bucket
+  (:data:`RELAY_MEDIA_INBOUND_LIMIT`), checked BEFORE and never charged to
+  the process-wide one, and only for a frame that went through.
 * **Invite bootstrap bodies** (``KIND_REDEEM*``) — delegated to the
   :class:`~socialhome.federation.invite_token_redeem
   .SpaceInviteTokenRedeemCoordinator`, which owns their validation.
@@ -62,6 +71,7 @@ from typing import TYPE_CHECKING, Any
 import orjson
 
 from ..domain.errors import WrongTypeError
+from ..federation.gfs_relay_media import open_relay_media
 from ..federation.gfs_relay_transport import is_relay_envelope_body
 from ..federation.inbound_validator import TRANSPORT_GFS_RELAY
 from ..federation.invite_bootstrap import JOIN_REQUEST_KINDS, unseal_envelope_body
@@ -78,6 +88,7 @@ from ..federation.peer_pairing_client import (
 )
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from .gfs_envelope_sender import normalize_gfs_base
+from .gfs_ws_client import ENVELOPE_MEDIA_FRAME
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -112,6 +123,23 @@ _PROCESS_WIDE_KEY = "invite-bootstrap:inbound"
 _ENVELOPES_KEY = "invite-bootstrap:envelopes"
 #: Relayed §11 pairing bodies — their own bucket, the bootstrap-body budget.
 _PAIRING_KEY = "invite-bootstrap:pairing"
+#: v_87 — binary relay media frames, their own bucket.
+_MEDIA_KEY = "gfs-relay:media"
+#: v_87 — media frames that failed to open or failed their checks.
+_MEDIA_JUNK_KEY = "gfs-relay:media-junk"
+
+#: Failed media frames per window. Charged on every failure; while it is
+#: full, media frames are dropped BEFORE any AES-GCM open, so a junk flood
+#: costs a dict lookup per frame, not an open.
+RELAY_MEDIA_JUNK_LIMIT: int = 120
+
+#: Binary relay media frames this household takes per window (v_87). Its
+#: OWN bucket, never the process-wide one: media must not starve relayed
+#: control, pairing and invite envelopes. One sender is held to 64 MiB/min
+#: per GFS node (~124 full frames), so 1200 a minute (~10 MiB/s) takes about
+#: ten senders at their cap at once. Charged only for a frame that went
+#: through (a refused frame spends nothing — it cannot crowd real ones out).
+RELAY_MEDIA_INBOUND_LIMIT: int = 1200
 
 
 class GfsRelayInbound:
@@ -158,6 +186,10 @@ class GfsRelayInbound:
         """
         if not self._keywrap_private_key:
             raise ValueError("no key-wrap key — cannot open relayed envelopes")
+        if isinstance(frame, dict) and frame.get("type") == ENVELOPE_MEDIA_FRAME:
+            # v_87 media rides its own bucket, ahead of (and never charged
+            # to) the process-wide one the control envelopes share.
+            return await self._handle_media(frame.get("body"))
         # Process-wide throttle BEFORE the unseal — the cheapest place to
         # shed a flood, and the only one available before we know which
         # family the blob belongs to.
@@ -204,6 +236,49 @@ class GfsRelayInbound:
                 raise ValueError("gfs join requests are not wired on this household")
             return await self._join.handle_body(body, gfs_url=gfs_url)
         return await self._invite.handle_bootstrap_body(body, gfs_url=gfs_url)
+
+    async def _handle_media(self, raw: object) -> dict:
+        """Open one binary relay media frame and run it through the §24.11
+        media tail. Raises :class:`ValueError` on any refusal (the WS client
+        logs the reason, never the bytes)."""
+        if not isinstance(raw, bytes | bytearray):
+            raise TypeError("relayed media frame carries no body")
+        limiter = self._rate_limiter
+        if limiter is not None and not limiter.has_room(
+            _MEDIA_JUNK_KEY,
+            limit=RELAY_MEDIA_JUNK_LIMIT,
+            window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+        ):
+            raise ValueError("relayed media junk budget exhausted — frame dropped")
+        if limiter is not None and not limiter.has_room(
+            _MEDIA_KEY,
+            limit=RELAY_MEDIA_INBOUND_LIMIT,
+            window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+        ):
+            raise ValueError("relayed media rate limit exceeded")
+        try:
+            media_body = open_relay_media(
+                bytes(raw),
+                own_instance_id=self._federation.own_instance_id,
+                keywrap_private_key=self._keywrap_private_key,
+            )
+            result = await self._federation.handle_inbound_media_relay(media_body)
+        except ValueError:
+            if limiter is not None:
+                limiter.is_allowed(
+                    _MEDIA_JUNK_KEY,
+                    limit=RELAY_MEDIA_JUNK_LIMIT,
+                    window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+                )
+            raise
+        if self._rate_limiter is not None:
+            # Charged only now: a frame that went through.
+            self._rate_limiter.is_allowed(
+                _MEDIA_KEY,
+                limit=RELAY_MEDIA_INBOUND_LIMIT,
+                window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+            )
+        return result
 
     async def _dispatch_pairing(self, body: dict[str, Any], *, gfs_url: str) -> dict:
         """Hand one relayed §11 pairing body to the inbox path's handler.
@@ -294,4 +369,9 @@ class GfsRelayInbound:
         return None
 
 
-__all__ = ["RELAY_DELIVERED_VIA", "GfsRelayInbound"]
+__all__ = [
+    "RELAY_DELIVERED_VIA",
+    "RELAY_MEDIA_INBOUND_LIMIT",
+    "RELAY_MEDIA_JUNK_LIMIT",
+    "GfsRelayInbound",
+]

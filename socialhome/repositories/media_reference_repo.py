@@ -331,6 +331,41 @@ _LIVE_SPACE_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ),
 )
 
+#: v_87 — the LIVE space rows a missing file may be refilled for, with their
+#: space, creation time and the replay resource that re-ships their files
+#: (:meth:`SqliteMediaReferenceRepo.space_rows_of`): ``(FROM clause, space
+#: expr, value expr, live condition, shape, resource)``. Only resources whose
+#: replay re-ships files: posts and calendar covers here, space-album items
+#: in the method. Comments, listings and pages are left out (their replay
+#: ships no files, or the host fills them, v_82).
+_REFILL_SOURCES: tuple[tuple[str, str, str, str, str, str], ...] = (
+    ("space_posts t", "t.space_id", "t.media_url", "t.deleted = 0", "one", "posts"),
+    (
+        "space_posts t",
+        "t.space_id",
+        "t.image_urls_json",
+        "t.deleted = 0",
+        "list",
+        "posts",
+    ),
+    (
+        "space_posts t",
+        "t.space_id",
+        "json_extract(t.link_preview_json, '$.thumbnail_url')",
+        "t.deleted = 0 AND json_valid(t.link_preview_json)",
+        "one",
+        "posts",
+    ),
+    (
+        "space_calendar_events t",
+        "t.space_id",
+        "t.cover_url",
+        "t.deleted_at IS NULL",
+        "one",
+        "calendar",
+    ),
+)
+
 #: Page tables whose RAW names make a file this space's only where the
 #: row's names are our own (the space's host; our own draft) — on a member
 #: household a hostile host could otherwise name one of our shared files in
@@ -470,6 +505,11 @@ class AbstractMediaReferenceRepo(Protocol):
         """Whether a LIVE row of *space_id* shows *basename* now (not
         deleted, not only held for review) — what a household sends on
         demand (v_83)."""
+        ...
+
+    async def space_rows_of(self, basename: str) -> list[tuple[str, str, str]]:
+        """``(space_id, created_at, resource)`` of every LIVE space row
+        showing *basename* (v_87 relay media refill)."""
         ...
 
     async def content_names_of_item(self, item_id: str) -> list[str]:
@@ -720,6 +760,37 @@ class SqliteMediaReferenceRepo:
                 if _hit(shape, r.get("v"), basename):
                     return True
         return False
+
+    async def space_rows_of(self, basename: str) -> list[tuple[str, str, str]]:
+        """``(space_id, created_at, resource)`` of every LIVE space row that
+        shows *basename* — a post, a calendar cover or a space-album item not
+        deleted — with the replay resource (``posts`` / ``calendar`` /
+        ``gallery``) that re-ships the row's files. Sorted, deduplicated.
+        What a household asks its host to replay when a file pushed to it
+        through the GFS relay never arrived (v_87)."""
+        if not basename:
+            return []
+        out: set[tuple[str, str, str]] = set()
+        rows = await self._db.fetchall(
+            "SELECT a.space_id AS s, i.created_at AS c FROM gallery_items i"
+            " JOIN gallery_albums a ON a.id = i.album_id"
+            " WHERE a.space_id IS NOT NULL AND i.deleted_at IS NULL"
+            " AND (i.filename = ? OR i.thumbnail_filename = ?)",
+            (basename, basename),
+        )
+        for r in rows_to_dicts(rows):
+            out.add((str(r["s"]), str(r["c"]), "gallery"))
+        pattern = f"%{_like_escape(basename)}%"
+        for source, space, value, live, shape, resource in _REFILL_SOURCES:
+            rows = await self._db.fetchall(
+                f"SELECT {space} AS s, t.created_at AS c, {value} AS v"
+                f" FROM {source} WHERE {live} AND {value} LIKE ? ESCAPE '\\'",
+                (pattern,),
+            )
+            for r in rows_to_dicts(rows):
+                if r.get("s") and _hit(shape, r.get("v"), basename):
+                    out.add((str(r["s"]), str(r["c"]), resource))
+        return sorted(out)
 
     async def _page_names_of(self, space_id: str, *, live: bool) -> set[str]:
         """The page-scoped ``sp-`` names of the files *space_id*'s pages

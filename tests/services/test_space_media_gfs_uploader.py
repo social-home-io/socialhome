@@ -1144,3 +1144,46 @@ async def test_a_members_large_video_still_goes_eagerly(tmp_path):
         u, await u.plan(SPACE, ["api/media/clip.mp4"], item_id=ITEM, followers=False)
     )
     assert len(gfs.puts) == 1
+
+
+# ── v_87: a GFS without a media cache pushes through the relay ───────────
+
+
+class _NoCacheGfs(_Gfs):
+    def __init__(self, conns, *, off: bool) -> None:
+        super().__init__(conns)
+        self.off = off
+
+    def space_media_cache_off(self, conn) -> bool:
+        return self.off
+
+
+@pytest.mark.parametrize(
+    ("version", "off", "reader"),
+    [
+        (FederationCapability.MIN_FOR_RELAY_MEDIA, True, False),  # push via relay
+        (FederationCapability.MIN_FOR_RELAY_MEDIA, False, True),  # cache
+        (FederationCapability.MIN_FOR_RELAY_MEDIA - 1, True, True),  # older reader
+    ],
+)
+async def test_a_reader_without_a_cache_gets_the_relay_push(
+    tmp_path, version, off, reader
+):
+    g1 = _Conn("g1", "https://g1.example")
+    u = _uploader(
+        tmp_path,
+        gfs=_NoCacheGfs([g1], off=off),
+        instances=[RELAY],
+        versions={"e": version},
+    )
+    assert await u.is_relay_reader("e") is reader
+
+
+async def test_a_reader_whose_gfs_we_are_not_connected_to_stays_a_reader(tmp_path):
+    u = _uploader(
+        tmp_path,
+        gfs=_NoCacheGfs([], off=True),
+        instances=[RELAY],
+        versions={"e": FederationCapability.MIN_FOR_RELAY_MEDIA},
+    )
+    assert await u.is_relay_reader("e") is True

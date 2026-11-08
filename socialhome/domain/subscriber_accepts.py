@@ -65,6 +65,13 @@ ACCEPTS_SPACE_ITEM_NO_CERT: str = "space_item_no_cert"
 #: reader waiting).
 ACCEPTS_SPACE_MEDIA_SERVE: str = "space_media_serve"
 
+#: The household opens binary relay media frames (v_87, ``\x00SHR`` —
+#: :mod:`socialhome.domain.relay_media_frame`) pushed as BINARY WebSocket
+#: messages. A HELLO-only label, per connection: the GFS pushes a queued
+#: media frame only to a socket that listed it (an older household would drop
+#: the unknown binary message after the GFS dequeued it).
+ACCEPTS_ENVELOPE_MEDIA: str = "envelope_media"
+
 #: What this household lists on every subscribe — follower and member seats
 #: alike, so the label never tells the GFS which seats are writers'.
 OUR_ACCEPTS: tuple[str, ...] = (
@@ -110,6 +117,7 @@ OUR_HELLO_ACCEPTS: tuple[str, ...] = (
     ACCEPTS_WS_BINARY1,
     ACCEPTS_SPACE_ITEM_NO_CERT,
     ACCEPTS_SPACE_MEDIA_SERVE,
+    ACCEPTS_ENVELOPE_MEDIA,
 )
 
 #: The most labels one subscribe may carry.

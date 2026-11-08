@@ -509,3 +509,65 @@ async def test_a_serve_that_never_left_is_none(env):
     svc._own_signing_key = b"s" * 32
     conn = await repo.get("g1")
     assert await svc.serve_space_media(conn, "a" * 32, b"cipher") is None
+
+
+# ── v_87: envelope_media + "no cache" from the signed block ──────────────
+
+
+def _media_info(*, envelope_media: bool, space_media) -> dict:
+    caps: dict = {"anonymous_publish": True}
+    if envelope_media:
+        caps["envelope_media"] = True
+    if space_media is not None:
+        caps["space_media"] = space_media
+    return _base._signed_info(capabilities=caps, gfs_instance_id="inst-g1")
+
+
+async def test_envelope_media_and_cache_off_come_from_the_signed_block(env):
+    session = _MediaSession(info=_media_info(envelope_media=True, space_media=None))
+    svc = await _svc(env, session)
+    conn = await env[1].get("g1")
+    assert await svc.envelope_media_supported(conn)
+    assert svc.space_media_cache_off(conn)
+    # Cached: no second probe.
+    probes = len(session.gets)
+    assert await svc.envelope_media_supported(conn)
+    assert len(session.gets) == probes
+
+
+async def test_a_cache_means_not_off(env):
+    session = _MediaSession(
+        info=_media_info(
+            envelope_media=True,
+            space_media={"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["space"]},
+        )
+    )
+    svc = await _svc(env, session)
+    conn = await env[1].get("g1")
+    assert await svc.envelope_media_supported(conn)
+    assert not svc.space_media_cache_off(conn)
+    # The operator turns the cache off: the next verified block says so.
+    svc._record_capabilities(conn, _media_info(envelope_media=True, space_media=None))
+    assert svc.space_media_cache_off(conn)
+
+
+async def test_unread_unsigned_or_unreachable_is_never_off(env):
+    session = _MediaSession(raise_on="GET")
+    svc = await _svc(env, session)
+    conn = await env[1].get("g1")
+    assert not svc.space_media_cache_off(conn)  # never read
+    assert not await svc.envelope_media_supported(conn)  # unreachable
+    assert not svc.space_media_cache_off(conn)
+    info = _media_info(envelope_media=True, space_media=None)
+    info["capabilities_sig"] = "AAAA"  # forged
+    svc2 = await _svc(env, _MediaSession(info=info))
+    assert not await svc2.envelope_media_supported(conn)
+    assert not svc2.space_media_cache_off(conn)
+
+
+async def test_an_older_gfs_without_envelope_media_is_not_ready(env):
+    session = _MediaSession(info=_media_info(envelope_media=False, space_media=None))
+    svc = await _svc(env, session)
+    conn = await env[1].get("g1")
+    assert not await svc.envelope_media_supported(conn)
+    assert not svc.space_media_cache_off(conn)

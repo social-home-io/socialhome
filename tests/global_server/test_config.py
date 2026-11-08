@@ -900,3 +900,49 @@ def test_example_toml_documents_on_demand(tmp_dir):
     p = tmp_dir / "example.toml"
     write_example_config(p)
     assert GfsConfig.from_toml(p).space_media_on_demand == SpaceMediaOnDemandConfig()
+
+
+# ── [envelope_relay] media keys (v_87) ───────────────────────────────────
+
+
+def test_envelope_media_defaults():
+    m = GfsConfig().envelope_media
+    assert m.enabled is True
+    assert m.media_ip_bytes_per_minute == 64 * 1024**2
+    assert m.media_queue_bytes_per_recipient == 16 * 1024**2
+    assert m.media_queue_ttl_seconds == 3600
+
+
+def test_envelope_media_loads_from_toml_and_env_wins(tmp_dir, monkeypatch):
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        '[server]\nbase_url = "https://g.example"\n'
+        "[envelope_relay]\nmedia = false\nmedia_queue_ttl_seconds = 600\n"
+        "media_ip_bytes_per_minute = 1048576\n"
+    )
+    m = GfsConfig.from_toml(p).envelope_media
+    assert (m.enabled, m.media_queue_ttl_seconds) == (False, 600)
+    assert m.media_ip_bytes_per_minute == 1048576
+    monkeypatch.setenv("GFS_ENVELOPE_RELAY_MEDIA", "on")
+    monkeypatch.setenv("GFS_ENVELOPE_RELAY_MEDIA_QUEUE_TTL_SECONDS", "120")
+    m = GfsConfig.load(p).envelope_media
+    assert (m.enabled, m.media_queue_ttl_seconds) == (True, 120)
+    assert m.media_ip_bytes_per_minute == 1048576
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "media_queue_ttl_seconds = 5",
+        'media_queue_bytes_per_recipient = "lots"',
+        'media = "maybe"',
+        "media_max_inflight_bytes = 1",
+    ],
+)
+def test_envelope_media_bad_values_are_refused(tmp_dir, line):
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        f'[server]\nbase_url = "https://g.example"\n[envelope_relay]\n{line}\n'
+    )
+    with pytest.raises(ValueError, match="envelope_relay"):
+        GfsConfig.from_toml(p)

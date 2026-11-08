@@ -358,15 +358,15 @@ class SqlitePageRepo:
         Shape trap: every write now stamps the tz-aware ISO shape, but a
         row last edited before that still holds SQLite's naive
         ``datetime('now')``. The only caller today passes the
-        ``1970-01-01T00:00:00+00:00`` epoch cursor, whose year digits
-        decide the comparison long before the separator does, so the raw
-        ``>`` is safe. A real (non-epoch) ``since`` must wrap both sides
-        in ``datetime()`` — "T" (0x54) sorts above " " (0x20) in a raw
-        TEXT compare, so same-day rows would be skipped on resume.
+        ``1970-01-01T00:00:00+00:00`` epoch cursor, but the v_87 relay
+        media refill sends a real one, so both sides go through
+        ``datetime()`` — "T" (0x54) sorts above " " (0x20) in a raw TEXT
+        compare, so same-day rows would be skipped on resume.
         """
         rows = await self._db.fetchall(
             "SELECT * FROM space_pages "
-            "WHERE space_id=? AND deleted_at IS NULL AND updated_at > ? "
+            "WHERE space_id=? AND deleted_at IS NULL"
+            " AND datetime(updated_at) > datetime(?) "
             "ORDER BY updated_at ASC LIMIT ?",
             (space_id, since, int(limit)),
         )

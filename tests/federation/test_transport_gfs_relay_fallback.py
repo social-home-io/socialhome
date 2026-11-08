@@ -529,3 +529,45 @@ async def test_send_via_gfs_url_needs_a_relay_tier_and_a_url():
     )
     assert result.ok is False and result.error == "gfs_relay_unavailable"
     assert relay.calls == []
+
+
+# ── v_87: binary media frames through the relay ──────────────────────────
+
+
+class _MediaRelay(_Relay):
+    def __init__(self, *, ready: bool = True) -> None:
+        super().__init__()
+        self.ready = ready
+        self.media: list[bytes] = []
+
+    async def media_ready(self, instance) -> bool:
+        return self.ready
+
+    async def send_media(self, *, instance, media_body):
+        self.media.append(media_body)
+        return True, None
+
+
+async def test_relay_media_goes_as_the_inbox_media_body():
+    relay = _MediaRelay()
+    t = _transport(relay=relay)
+    assert await t.relay_media_ready(_paired())
+    ok = await t.send_media_relay(
+        instance=_paired(), header_dict={"msg_id": "m"}, payload_bytes=b"sealed"
+    )
+    assert ok == (True, None)
+    [body] = relay.media
+    assert body.startswith(b"\x00SHM")
+
+
+async def test_no_relay_tier_means_no_relay_media():
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_Https(),
+        gfs_routes=_routes(),
+        signaling_send=_Signaler(),
+    )
+    assert not await t.relay_media_ready(_paired())
+    assert await t.send_media_relay(
+        instance=_paired(), header_dict={}, payload_bytes=b""
+    ) == (False, None)
