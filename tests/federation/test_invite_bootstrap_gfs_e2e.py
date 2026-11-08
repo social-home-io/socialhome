@@ -2132,7 +2132,7 @@ async def test_mailbox_frames_have_their_own_inbound_budget(mailbox_households, 
         with contextlib.suppress(ValueError):
             await a.relay_inbound.handle_mailbox_frame(junk, keys=keys)
     assert not limiter.has_room(
-        "gfs-mailbox:inbound",
+        f"gfs-mailbox:inbound:{keys.mailbox_id}",
         limit=BOOTSTRAP_INBOUND_LIMIT,
         window_s=BOOTSTRAP_INBOUND_WINDOW_S,
     )

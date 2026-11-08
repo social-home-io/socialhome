@@ -397,6 +397,12 @@ class TicketKeyGuard:
     def pin(self) -> TicketKeyPin | None:
         return self._pin
 
+    @property
+    def has_view(self) -> bool:
+        """Whether an anonymous view is cached (:meth:`confirm_issuer` needs
+        one)."""
+        return self._anon is not None
+
     def _refuse(self, why: str, error: str = "ticket_key_inconsistent"):
         log.warning("gfs.mailbox.tickets: issuer key not consistent (%s)", why)
         return MailboxTicketError(0, error)

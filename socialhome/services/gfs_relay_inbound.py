@@ -261,8 +261,10 @@ class GfsRelayInbound:
             return await self._handle_media(frame, keys=keys)
         if not isinstance(frame, dict) or frame.get("type") != "envelope":
             raise ValueError("unexpected frame on a mailbox")
+        # Per mailbox: every member of a space holds the host's mailbox id
+        # for it, so one of them must not drain the budget of the others.
         if self._rate_limiter is not None and not self._rate_limiter.is_allowed(
-            _MAILBOX_KEY,
+            f"{_MAILBOX_KEY}:{keys.mailbox_id}",
             limit=BOOTSTRAP_INBOUND_LIMIT,
             window_s=BOOTSTRAP_INBOUND_WINDOW_S,
         ):
@@ -274,7 +276,7 @@ class GfsRelayInbound:
         if not is_relay_envelope_body(body):
             raise ValueError("a mailbox carries relayed envelopes only")
         if self._rate_limiter is not None and not self._rate_limiter.is_allowed(
-            _MAILBOX_ENVELOPES_KEY,
+            f"{_MAILBOX_ENVELOPES_KEY}:{keys.mailbox_id}",
             limit=RELAY_ENVELOPE_INBOUND_LIMIT,
             window_s=BOOTSTRAP_INBOUND_WINDOW_S,
         ):

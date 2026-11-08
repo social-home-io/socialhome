@@ -494,11 +494,7 @@ class SpaceInviteTokenRedeemCoordinator:
         if self._mailboxes is None or not space_id or not gfs_url:
             return None
         try:
-            async with asyncio.timeout(timeout):
-                return await self._mailboxes.mint(space_id, gfs_url)
-        except TimeoutError:
-            log.info("invite bootstrap: minting a mailbox took too long — skipped")
-            return None
+            return await self._mailboxes.mint_within(space_id, gfs_url, timeout=timeout)
         except Exception:
             log.warning("invite bootstrap: minting a mailbox failed", exc_info=True)
             return None
@@ -1067,27 +1063,6 @@ class SpaceInviteTokenRedeemCoordinator:
                 space_id,
                 issuer_instance_id,
             )
-            if bootstrap is not None:
-                # v_88 — the pair's mailboxes: the host's (if it sent one)
-                # and ours (minted for this space before the redeem).
-                own = result.get("_own_mailbox")
-                await self._remember_mailbox(
-                    space_id,
-                    issuer_instance_id,
-                    peer=self._peer_entry(
-                        result.get("mailbox"),
-                        identity_pk=bootstrap.identity_pk,
-                        instance_id=issuer_instance_id,
-                        space_id=space_id,
-                        gfs_url=bootstrap.gfs_url,
-                    ),
-                    own=(
-                        own
-                        if isinstance(own, OwnMailbox)
-                        and bootstrap.space_id == space_id
-                        else None
-                    ),
-                )
             # §D1b — seat a local stub + membership so the redeemer's
             # /api/spaces actually shows the joined space. The ACK
             # carries the host's metadata snapshot; older issuers that
@@ -1149,6 +1124,29 @@ class SpaceInviteTokenRedeemCoordinator:
                 # this space can no longer be joined (migration 0093).
                 await expire_superseded_invitations(
                     self._spaces, space_id, join, issuer_instance_id
+                )
+            if bootstrap is not None:
+                # v_88 — the pair's mailboxes: the host's (if it sent one)
+                # and ours (minted for this space before the redeem).
+                # Written AFTER our person is seated: until then the
+                # mailbox is pending, never swept as "a space we left".
+                own = result.get("_own_mailbox")
+                await self._remember_mailbox(
+                    space_id,
+                    issuer_instance_id,
+                    peer=self._peer_entry(
+                        result.get("mailbox"),
+                        identity_pk=bootstrap.identity_pk,
+                        instance_id=issuer_instance_id,
+                        space_id=space_id,
+                        gfs_url=bootstrap.gfs_url,
+                    ),
+                    own=(
+                        own
+                        if isinstance(own, OwnMailbox)
+                        and bootstrap.space_id == space_id
+                        else None
+                    ),
                 )
         out: dict = {
             "space_id": space_id,

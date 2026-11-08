@@ -421,6 +421,37 @@ async def test_a_row_of_a_left_space_is_not_reopened_on_start(gfs):
     await again.stop()
 
 
+async def test_a_seat_right_after_connecting_still_gets_a_mailbox(gfs):
+    """Regression (demo): a household that redeems a link seconds after it
+    connected has no ticket yet — the mint fetches one rather than leaving
+    the seat instance-addressed."""
+    server, session, url, conn = gfs
+    svc = _service(session, conn)
+    await svc.start()  # no connect refill has run
+    minted = await svc.mint("space-1", url)
+    assert minted is not None
+    assert await server.app[gfs_mailbox_repo_key].get(minted[0].mailbox_id)
+    await svc.stop()
+
+
+async def test_a_mint_that_outlives_its_callers_wait_still_finishes(gfs):
+    """A bounded wait never cancels the register: the mailbox (and the ticket
+    the GFS saw) is kept pending and a retry gets the same one."""
+    server, session, url, conn = gfs
+    svc = _service(session, conn)
+    await _ready(svc, conn)
+    assert await svc.mint_within("space-1", url, timeout=0) is None
+    for _ in range(200):
+        if svc.open_claims():
+            break
+        await asyncio.sleep(0.02)
+    assert svc.open_claims() == 1
+    entry, _ = await svc.mint_within("space-1", url, timeout=5)
+    assert await server.app[gfs_mailbox_repo_key].get(entry.mailbox_id)
+    assert svc.open_claims() == 1
+    await svc.stop()
+
+
 async def test_on_connected_never_blocks_and_fetches_later(gfs):
     """The connect hook returns at once; the anonymous read happens first
     and the identified fetch only after the jittered delay."""
@@ -430,11 +461,11 @@ async def test_on_connected_never_blocks_and_fetches_later(gfs):
     await svc.on_connected(conn.id)  # returns at once
     for _ in range(200):
         state = svc._tickets.get(conn.id)
-        if state is not None and state.guard._anon is not None:
+        if state is not None and state.guard.has_view:
             break
         await asyncio.sleep(0.02)
     state = svc._tickets[conn.id]
-    assert state.guard._anon is not None  # anonymous view read
+    assert state.guard.has_view  # anonymous view read
     assert len(state.cache) == 0  # identified fetch not yet
     await svc.stop()
 
