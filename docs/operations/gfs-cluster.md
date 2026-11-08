@@ -268,16 +268,35 @@ who may register a household stays your gate (pairing tokens, open
 sign-up). Env form: `GFS_ENVELOPE_RELAY_MAILBOX_TICKETS_PER_DAY`,
 `GFS_ENVELOPE_RELAY_MAILBOX_TICKET_EPOCH_DAYS`.
 
+**Open sign-up multiplies it.** With `auto_accept_clients = true` (the
+default) every self-registered household is `active` at once and gets
+`mailbox_tickets_per_day` tickets a day, so sybil *households* — and their
+mailboxes — are limited only by the registration limits (pair tokens, the
+per-address `/gfs/register` and sign-up rate limits) and the per-address
+mailbox backstop (`mailbox_max_per_ip`). On a public GFS that worries you,
+set `auto_accept_clients = false` and approve households in the admin UI, or
+lower `mailbox_tickets_per_day`; a household you suspend stops getting
+tickets at once.
+
+**Small GFS, small anonymity set.** A ticket hides its household among the
+households that fetched under the same issuer key in that epoch. Keep
+`mailbox_ticket_epoch_days` long (30; households refuse below 7) — a
+shorter epoch makes that set smaller.
+
 **Tickets across nodes.** The issuer key (`gfs_ticket_issuer_keys`, one
 RSA-2048 key per epoch, made by the first node that needs it), the
 per-household daily count (`gfs_ticket_issuance`) and the spent-ticket set
 (`gfs_spent_tickets`) all live in the shared database, so a ticket issued
 by node A redeems on node B, and a ticket spent on one node is refused
 (`409 ticket_spent`) on every other. The issuer **private key is stored
-unencrypted in the database**: back it up with the database and protect the
-database like the identity seed. Losing it costs only a refetch (households
-get `403 stale_ticket_key` and fetch new tickets); leaking it lets the holder
-mint mailboxes until the epoch's key retires. The maintenance loop prunes
+unencrypted in the database** (PKCS#8): the GFS has no key-encryption key
+to wrap it under — the identity seed is itself a plain file, and an
+approved-key cluster shares no secret at all. Back it up with the database
+and protect the database like the identity seed. Losing it costs only a
+refetch (households get `403 stale_ticket_key` and fetch new tickets).
+Leaking it is an **abuse** risk only — the holder can mint mailboxes until
+the epoch's key retires (two epochs at most) — with **no privacy impact**:
+the key signs blinded messages, so it can't tie a ticket to a household. The maintenance loop prunes
 retired keys, past days' counts and spent nonces of retired keys.
 
 Mailbox frames live in a pool of their own: they never count against, and

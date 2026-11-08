@@ -599,8 +599,11 @@ an RFC 9577 `Token` and keeps them in memory.
 `Token`, b64url). The GFS checks the challenge digest, finds the key by
 `token_key_id` among the accepted keys (`403 stale_ticket_key` otherwise),
 verifies RSASSA-PSS (`403 invalid_ticket`), lets the per-address backstop
-count it, then records the token nonce in `gfs_spent_tickets` — a primary
-key in the shared DB, so a second spend on any node is `409 ticket_spent`.
+count it, then records the token nonce in `gfs_spent_tickets` IN the
+mailbox insert's transaction — a primary key in the shared DB, so a second
+spend on any node is `409 ticket_spent`, and a register that creates
+nothing (the mailbox exists, a concurrent register won, a collision, a
+crash) spends nothing.
 No ticket on a new mailbox is `403 ticket_required`. Spent nonces live until
 their key retires; the maintenance loop prunes them, past days' counts and
 retired keys.
@@ -612,37 +615,81 @@ sequenceDiagram
     participant B as GFS node B
     H->>A: GET /gfs/info
     A-->>H: capabilities (signed) incl. mailbox_tickets {suite, issuer_key_id, public_key, per_day, epoch_days}
-    H->>H: check suite + key id; blind N TokenRequests (RFC 9474)
+    H->>B: GET /gfs/info (anonymous, cookie-less session)
+    B-->>H: capabilities (signed)
+    H->>H: same key id in both views? ≤ 1 new key this epoch? epoch_days ≥ 7?
+    H->>H: blind N TokenRequests (RFC 9474)
     H->>A: POST /gfs/mailbox/tickets {action, instance_id, suite, issuer_key_id, requests, ts, signature}
     A->>A: verify identity signature, active, quota (gfs_ticket_issuance)
     A-->>H: 200 {suite, issuer_key_id, responses} (blind signatures)
     H->>H: finalize → RFC 9577 Tokens (cached, unlinkable)
-    Note over H,B: later, anonymously, for a NEW mailbox
+    Note over H,B: later (jittered, never right after a fetch), anonymously
+    H->>B: POST /gfs/mailbox/register {…} (no ticket)
+    B-->>H: 403 ticket_required (a NEW mailbox; an existing one is 200)
+    H->>B: GET /gfs/info (anonymous) — key still an admitted one?
     H->>B: POST /gfs/mailbox/register {…, ticket_suite, ticket}
     B->>B: challenge digest, key by token_key_id, RSASSA-PSS verify, backstop
-    B->>B: INSERT nonce → gfs_spent_tickets (shared DB)
+    B->>B: one transaction: INSERT nonce → gfs_spent_tickets + the mailbox
     B-->>H: 200 registered
     H->>A: POST /gfs/mailbox/register {…, same ticket}
     A-->>H: 409 ticket_spent
 ```
 
-**Residuals.** The issuer learns "household H took N tickets today", never
-which mailbox spent one. A fetch right before a register lets the GFS line
-the two up by time, so a household fetches ahead (e.g. on connect, once a
-day) and spends from its cache (`MailboxTicketCache`). The cache never
-fetches on its own: an empty cache fails a register with `no_ticket`, and a
-`stale_ticket_key` refusal drops that key's tickets and fails — so a GFS
-that refuses a register on purpose cannot make the household fetch right
-next to it. Only `ticket_spent` is retried, once, from the cache. The
-capability's `epoch_days` lets a household notice a key that changes faster
-than an epoch (pinning one key per epoch is wired with redesign PR 2). IP / timing
-correlation with the household's identified `/gfs/ws` stays the accepted,
-stated limit (as for claims above). Household side:
-`TicketIssuer.from_capability`, `build_ticket_request`, `fetch_tickets`,
+**Key consistency.** A GFS that showed each household (or each address)
+its own issuer key could read the household off every redeemed ticket's
+`token_key_id` — the Privacy Pass consistency problem. The household's
+`TicketKeyGuard` checks the key before blinding AND before redeeming:
+
+- the key must equal the one an **anonymous** read of `/gfs/info` shows
+  (a second, cookie-less session — the one mailbox registration uses),
+  so the GFS can't single the household out by its identified session;
+- **one new key per epoch** at most: the household pins `(key_id,
+  first_seen)` and takes a different key only once its clock is in a later
+  epoch (epochs aligned to the Unix epoch, as the GFS aligns them; one hour
+  of skew allowed); the replaced key stays usable for its one overlap
+  epoch;
+- `epoch_days` below **7** is refused (`ticket_epoch_too_short`): a short
+  epoch lets the GFS rotate keys to tag households and shrinks the set
+  they hide in.
+
+A failed check raises `ticket_key_inconsistent`, logs a WARNING with no
+key and no id, and leaves the tickets unused. What remains: a GFS that
+gives one *address* its own key in BOTH views from its first contact — the
+same IP / timing limit as below.
+
+**Anonymity set.** A redeemed ticket hides its household among the
+households that fetched tickets under the **same key in that epoch** —
+nothing more. On a small GFS that set is small (a GFS with five active
+households can narrow a ticket to one of five). That is a property of set
+size, not a leak in the design; what grows it is a longer epoch (the
+default 30 days; never below 7) and more households on the GFS.
+
+**Timing.** The issuer learns "household H took N tickets today", never
+which mailbox spent one. A fetch right before a register would let the GFS
+line the two up, so the cache refills on its own schedule — about once a
+day, each wait jittered ±50 % (`MailboxTicketCache.start`), and a slot
+within an hour after a register is skipped — and a register spends from the
+cache. The cache never fetches on its own: an empty cache fails a register
+with `no_ticket`, and a `stale_ticket_key` refusal drops that key's tickets
+and fails — so a GFS that refuses a register on purpose cannot make the
+household fetch right next to it. Only `ticket_spent` is retried, once,
+from the cache.
+
+**No wasted tickets, no shown-twice tickets.** `register_mailbox` tries
+without a ticket first and shows one only on `403 ticket_required`, so
+re-registering an existing mailbox never shows (or spends) one. A ticket
+the guard refused, or whose request never reached the GFS (no connection),
+goes back to the cache. A ticket the GFS saw is never put back: showing it
+again for another mailbox would link the two.
+
+IP / timing correlation with the household's identified `/gfs/ws` stays the
+accepted, stated limit (as for claims above). Household side:
+`TicketIssuer.from_capability`, `read_ticket_issuer`, `TicketKeyGuard`,
+`build_ticket_request`, `fetch_tickets`, `MailboxTicketCache`,
 `register_mailbox(tickets=…)` in `socialhome/federation/gfs_mailbox.py` —
-not wired into space flows until redesign PR 2. GFS side:
-`socialhome/privacy_pass.py`, `socialhome/global_server/mailbox_tickets.py`,
-GFS migration 0030.
+not wired into space flows until redesign PR 2 (which also persists the
+`TicketKeyPin`). GFS side: `socialhome/privacy_pass.py`,
+`socialhome/global_server/mailbox_tickets.py`, GFS migration 0030.
 
 ## Privacy — who learns what
 

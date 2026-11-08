@@ -1345,34 +1345,44 @@ def _gfs_cluster_cross_node_media(urls: list[str]) -> None:
     asyncio.run(_run())
 
 
-def _gfs_cluster_ticket_cache(http, url: str, household: tuple[str, bytes]):
+async def _gfs_cluster_ticket_cache(
+    http, url: str, household: tuple[str, bytes], *, anon_url: str | None = None
+):
     """A household ticket cache that fetches from *url*, with the issuer read
-    from *url*'s signed ``/gfs/info`` (signature verified first)."""
-    from socialhome.capabilities_sig import verify_capabilities
+    from *url*'s signed ``/gfs/info`` (verified under the GFS key) and
+    cross-checked by the key guard against a second read over a separate,
+    cookie-less session — from *anon_url* (another node) when given."""
+    import aiohttp
+
     from socialhome.federation.gfs_mailbox import (
         MailboxTicketCache,
-        TicketIssuer,
+        TicketKeyGuard,
         fetch_tickets,
+        read_ticket_issuer,
     )
 
     code, info = _request(f"{url}/gfs/info", timeout=10.0)
-    if code != 200 or not verify_capabilities(
-        info["public_key"],
-        info["gfs_instance_id"],
-        info["capabilities"],
-        info["capabilities_sig"],
-        info["capabilities_sig_suite"],
-    ):
-        raise SystemExit(f"gfs-cluster: /gfs/info unsigned or unreachable → {code}")
-    issuer = TicketIssuer.from_capability(info["capabilities"].get("mailbox_tickets"))
+    if code != 200:
+        raise SystemExit(f"gfs-cluster: /gfs/info unreachable → {code}")
+    gfs_pk = info["public_key"]
+    issuer = await read_ticket_issuer(http, url, gfs_public_key=gfs_pk)
     iid, seed = household
+
+    async def anon_view():
+        jar = aiohttp.DummyCookieJar()
+        async with aiohttp.ClientSession(cookie_jar=jar) as anon:
+            return await read_ticket_issuer(
+                anon, anon_url or url, gfs_public_key=gfs_pk
+            )
+
+    guard = TicketKeyGuard(anon_view)
 
     async def fetch(count: int) -> list[bytes]:
         return await fetch_tickets(
-            http, url, issuer, count, instance_id=iid, signing_key=seed
+            http, url, issuer, count, instance_id=iid, signing_key=seed, guard=guard
         )
 
-    return MailboxTicketCache(fetch, batch=4)
+    return MailboxTicketCache(fetch, batch=4, guard=guard)
 
 
 def _gfs_cluster_mailbox_tickets(urls: list[str]) -> None:
@@ -1401,9 +1411,14 @@ def _gfs_cluster_mailbox_tickets(urls: list[str]) -> None:
 
     async def _run() -> None:
         async with aiohttp.ClientSession() as http:
-            tickets = _gfs_cluster_ticket_cache(http, urls[0], household)
+            tickets = await _gfs_cluster_ticket_cache(
+                http, urls[0], household, anon_url=urls[1]
+            )
             got = await tickets.refill()
-            print(f"  {got} tickets fetched from node 0 (signed request, blind-signed) ✓")
+            print(
+                f"  {got} tickets fetched from node 0 (signed request, blind-signed; "
+                "issuer key matched an anonymous read via node 1) ✓"
+            )
             ticket = tickets._tickets[-1]
             spent.append(b64url_encode(ticket))
             root = new_mailbox_root()
@@ -1483,7 +1498,7 @@ def _gfs_cluster_mailboxes(urls: list[str]) -> None:
 
     async def _run() -> None:
         async with aiohttp.ClientSession() as http:
-            tickets = _gfs_cluster_ticket_cache(http, urls[0], household)
+            tickets = await _gfs_cluster_ticket_cache(http, urls[0], household)
             await tickets.refill()
             await register_mailbox(http, urls[0], keys, gfs_id, tickets=tickets)
             print(f"  mailbox registered via node 0 (gfs {gfs_id}) ✓")
@@ -1607,7 +1622,9 @@ def _gfs_cluster_mailbox_other_id(all_urls: list[str]) -> None:
 
         async def _run() -> None:
             async with aiohttp.ClientSession() as http:
-                tickets = _gfs_cluster_ticket_cache(http, all_urls[0], household)
+                tickets = await _gfs_cluster_ticket_cache(
+                    http, all_urls[0], household
+                )
                 await tickets.refill()
                 await register_mailbox(http, all_urls[0], keys, id_0, tickets=tickets)
                 async with contextlib.aclosing(await _claim_when_known(http)) as claim:

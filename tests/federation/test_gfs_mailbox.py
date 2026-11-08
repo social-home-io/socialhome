@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
+import time
 
 import aiohttp
+import orjson
 import pytest
+from aiohttp.client_reqrep import ConnectionKey
 from aiohttp.test_utils import TestServer
 
 from socialhome import privacy_pass as pp
-from socialhome.capabilities_sig import verify_capabilities
 from socialhome.crypto import (
     INSTANCE_ID_RE,
     b64url_encode,
@@ -19,7 +22,11 @@ from socialhome.crypto import (
     ed25519_public_key,
     x25519_exchange,
 )
-from socialhome.domain.gfs_mailbox import derive_mailbox_id
+from socialhome.domain.gfs_mailbox import (
+    MAILBOX_TICKET_CHALLENGE,
+    TicketKeyPin,
+    derive_mailbox_id,
+)
 from socialhome.domain.relay_media_frame import (
     VALID_SEALED_LENGTHS,
     build_relay_media_body,
@@ -31,10 +38,12 @@ from socialhome.federation.gfs_mailbox import (
     MailboxTicketCache,
     MailboxTicketError,
     TicketIssuer,
+    TicketKeyGuard,
     build_register_body,
     derive_mailbox_keys,
     fetch_tickets,
     new_mailbox_root,
+    read_ticket_issuer,
     register_mailbox,
 )
 from socialhome.global_server.app_keys import (
@@ -142,19 +151,28 @@ async def gfs(tmp_dir):
     await server.close()
 
 
+async def _gfs_pk(session, url) -> str:
+    """The GFS public key, as the household pinned it when it registered."""
+    async with session.get(url + "/gfs/info") as resp:
+        return (await resp.json())["public_key"]
+
+
 async def _issuer(session, url) -> TicketIssuer:
     """The issuer from the GFS's SIGNED ``/gfs/info`` (as a household reads
-    it: the capability block's signature verified first)."""
-    async with session.get(url + "/gfs/info") as resp:
-        info = await resp.json()
-    assert verify_capabilities(
-        info["public_key"],
-        info["gfs_instance_id"],
-        info["capabilities"],
-        info["capabilities_sig"],
-        info["capabilities_sig_suite"],
+    it: the capability block's signature verified against the pinned key)."""
+    return await read_ticket_issuer(
+        session, url, gfs_public_key=await _gfs_pk(session, url)
     )
-    return TicketIssuer.from_capability(info["capabilities"]["mailbox_tickets"])
+
+
+def _guard(session, url, pk: str, **kw) -> TicketKeyGuard:
+    """The household's key guard: the anonymous view is a second, separate
+    read of ``/gfs/info`` (here over the same test session)."""
+
+    async def anon_view() -> TicketIssuer:
+        return await read_ticket_issuer(session, url, gfs_public_key=pk)
+
+    return TicketKeyGuard(anon_view, **kw)
 
 
 async def _ticket_cache(
@@ -172,15 +190,22 @@ async def _ticket_cache(
         )
     )
     issuer = await _issuer(session, url)
+    guard = _guard(session, url, await _gfs_pk(session, url))
 
     async def fetch(count: int) -> list[bytes]:
         if calls is not None:
             calls.append(count)
         return await fetch_tickets(
-            session, url, issuer, count, instance_id=HOME_ID, signing_key=HOME_SEED
+            session,
+            url,
+            issuer,
+            count,
+            instance_id=HOME_ID,
+            signing_key=HOME_SEED,
+            guard=guard,
         )
 
-    cache = MailboxTicketCache(fetch, batch=batch)
+    cache = MailboxTicketCache(fetch, batch=batch, guard=guard)
     if prefetch:
         await cache.refill()
     return cache
@@ -368,6 +393,9 @@ async def test_tickets_under_a_retired_key_are_dropped_without_a_fetch(tmp_dir):
             svc._current = None
             await server.app[gfs_db_key].enqueue("DELETE FROM gfs_ticket_issuer_keys")
             svc._miss_at = -1e9
+            # Two epochs on for the household too (its guard takes a new key
+            # only in a later epoch than the one it pinned).
+            tickets._guard._clock = lambda: time.time() + 61 * 86_400
             keys = derive_mailbox_keys(ROOT, GFS_ID, "after-rotation", 0)
             with pytest.raises(MailboxRegisterError) as err:
                 await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
@@ -386,7 +414,7 @@ async def test_tickets_under_a_retired_key_are_dropped_without_a_fetch(tmp_dir):
 
 
 async def test_drop_key_keeps_tickets_under_other_keys():
-    cache = MailboxTicketCache(None, batch=4)  # type: ignore[arg-type]
+    cache = MailboxTicketCache(None, batch=4, guard=None)  # type: ignore[arg-type]
     old = b"\x00\x02" + bytes(64) + b"o" * 32 + bytes(256)
     new = b"\x00\x02" + bytes(64) + b"n" * 32 + bytes(256)
     cache._tickets = [old, new, old]
@@ -449,6 +477,7 @@ async def test_an_unregistered_household_gets_no_tickets(gfs):
             1,
             instance_id=derive_instance_id(ed25519_public_key(stranger)),
             signing_key=stranger,
+            guard=_guard(session, url, await _gfs_pk(session, url)),
         )
     assert err.value.status == 403
 
@@ -460,6 +489,7 @@ def test_the_issuer_capability_is_checked():
         "issuer_key_id": b64url_encode(pp.token_key_id(key)),
         "public_key": b64url_encode(pp.encode_public_key(key)),
         "per_day": 50,
+        "epoch_days": 30,
     }
     assert TicketIssuer.from_capability(good).per_day == 50
     for bad in (
@@ -469,6 +499,8 @@ def test_the_issuer_capability_is_checked():
         {**good, "issuer_key_id": b64url_encode(bytes(32))},
         {**good, "public_key": "AAAA"},
         {**good, "per_day": "50"},
+        {k: v for k, v in good.items() if k != "epoch_days"},
+        {**good, "epoch_days": True},
     ):
         with pytest.raises(MailboxTicketError):
             TicketIssuer.from_capability(bad)
@@ -480,3 +512,273 @@ def test_a_register_body_carries_the_ticket_and_its_suite():
     assert body["ticket_suite"] == pp.TICKET_SUITE_PP_BLINDRSA
     assert body["ticket"] == b64url_encode(b"t" * 354)
     assert "ticket" not in build_register_body(keys, GFS_ID)
+
+
+# ── Key consistency, refill timing, ticket waste ────────────────────────
+
+DAY = 86_400
+
+
+def _local_issuer(epoch_days: int = 30) -> tuple[TicketIssuer, object]:
+    """A local issuer key: the parsed capability and the private key."""
+    key = pp.generate_issuer_key()
+    cap = {
+        "suite": pp.TICKET_SUITE_PP_BLINDRSA,
+        "issuer_key_id": b64url_encode(pp.token_key_id(key.public_key())),
+        "public_key": b64url_encode(pp.encode_public_key(key.public_key())),
+        "per_day": 50,
+        "epoch_days": epoch_days,
+    }
+    return TicketIssuer.from_capability(cap), key
+
+
+def _local_ticket(issuer: TicketIssuer, key) -> bytes:
+    request, pending = pp.token_request(issuer.public_key, MAILBOX_TICKET_CHALLENGE)
+    _t, blinded = pp.parse_token_request(request)
+    return pp.finalize_token(
+        issuer.public_key, pending, pp.blind_sign(key, blinded)
+    ).encode()
+
+
+def test_a_capability_with_a_short_epoch_is_refused():
+    """A short epoch lets a GFS rotate keys to tag households, and shrinks
+    the set of households a ticket hides among."""
+    issuer, _key = _local_issuer()
+    cap = {
+        "suite": pp.TICKET_SUITE_PP_BLINDRSA,
+        "issuer_key_id": b64url_encode(issuer.key_id),
+        "public_key": b64url_encode(pp.encode_public_key(issuer.public_key)),
+        "per_day": 50,
+        "epoch_days": 1,
+    }
+    with pytest.raises(MailboxTicketError) as err:
+        TicketIssuer.from_capability(cap)
+    assert err.value.error == "ticket_epoch_too_short"
+
+
+async def test_the_key_pin_refuses_an_early_rotation():
+    """At most one new issuer key per epoch: a GFS can't hand this household
+    a fresh key whenever it likes (and so tag its tickets)."""
+    a, _ = _local_issuer()
+    b, _ = _local_issuer()
+    c, _ = _local_issuer()
+    now = [float(30 * DAY * 1000 + DAY)]  # one day into an epoch
+    views = [a]
+
+    async def anon_view() -> TicketIssuer:
+        return views[0]
+
+    guard = TicketKeyGuard(anon_view, clock=lambda: now[0])
+    await guard.confirm_issuer(a)
+    assert guard.pin == TicketKeyPin(a.key_id, int(now[0]), 30, None)
+    now[0] += 5 * DAY  # same epoch: a new key is refused
+    views[0] = b
+    with pytest.raises(MailboxTicketError) as err:
+        await guard.confirm_issuer(b)
+    assert err.value.error == "ticket_key_inconsistent"
+    now[0] += 25 * DAY  # the next epoch: the rotation is taken
+    await guard.confirm_issuer(b)
+    assert guard.pin is not None and guard.pin.previous_key_id == a.key_id
+    views[0] = c  # …but only one per epoch
+    with pytest.raises(MailboxTicketError):
+        await guard.confirm_issuer(c)
+    views[0] = a  # the previous key (a node behind at the boundary) is fine
+    await guard.confirm_issuer(a)
+    assert guard.pin.key_id == b.key_id
+
+
+async def test_a_restored_pin_is_kept(tmp_dir):
+    a, _ = _local_issuer()
+    b, _ = _local_issuer()
+    now = 30 * DAY * 1000 + DAY
+
+    async def anon_view() -> TicketIssuer:
+        return b
+
+    guard = TicketKeyGuard(
+        anon_view, pin=TicketKeyPin(a.key_id, now, 30, None), clock=lambda: now
+    )
+    with pytest.raises(MailboxTicketError):
+        await guard.confirm_issuer(b)
+
+
+async def test_per_household_keys_are_refused(gfs, caplog):
+    """The GFS shows this household (identified view) a key nobody else is
+    shown (the anonymous view): no ticket is blinded under it, and the
+    WARNING names no key and no household."""
+    server, session, url, _tickets = gfs
+    mine = await _issuer(session, url)
+    everyone, _ = _local_issuer()
+
+    async def anon_view() -> TicketIssuer:
+        return everyone
+
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(MailboxTicketError) as err:
+        await fetch_tickets(
+            session,
+            url,
+            mine,
+            2,
+            instance_id=HOME_ID,
+            signing_key=HOME_SEED,
+            guard=TicketKeyGuard(anon_view),
+        )
+    assert err.value.error == "ticket_key_inconsistent"
+    issued = await server.app[gfs_db_key].fetchall(
+        "SELECT issued FROM gfs_ticket_issuance"
+    )
+    assert [r["issued"] for r in issued] == [4]  # only the fixture's batch
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings
+    for rec in warnings:
+        text = rec.getMessage()
+        for secret in (mine.key_id, everyone.key_id):
+            assert b64url_encode(secret) not in text and secret.hex() not in text
+        assert HOME_ID not in text
+
+
+async def test_a_ticket_is_not_redeemed_when_the_anonymous_view_moved(gfs):
+    """Before redeeming, the anonymous view must still show a key this
+    household admitted: a GFS that now shows everyone another key (inside
+    the epoch) gets no register, and the ticket is kept."""
+    server, session, url, tickets = gfs
+    guard = tickets._guard
+    other, _ = _local_issuer()
+
+    async def anon_view() -> TicketIssuer:
+        return other
+
+    guard._anon_view = anon_view
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "moved", 0)
+    with pytest.raises(MailboxTicketError) as err:
+        await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
+    assert err.value.error == "ticket_key_inconsistent"
+    assert len(tickets) == 4  # the ticket was never shown: it is kept
+    assert await server.app[gfs_mailbox_repo_key].get(keys.mailbox_id) is None
+
+
+async def test_reregistering_an_existing_mailbox_spends_no_ticket(gfs):
+    _server, session, url, tickets = gfs
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "again", 0)
+    await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
+    assert len(tickets) == 3
+    for _ in range(2):
+        await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
+    assert len(tickets) == 3  # no ticket shown for a mailbox that exists
+
+
+class _Resp:
+    def __init__(self, status: int, body: dict) -> None:
+        self.status = status
+        self._body = body
+
+    async def read(self) -> bytes:
+        return orjson.dumps(self._body)
+
+
+class _FlakySession:
+    """Answers ``ticket_required`` to the ticketless try, then can't
+    connect: the ticketed request never reaches the GFS."""
+
+    def __init__(self) -> None:
+        self.bodies: list[dict] = []
+
+    @contextlib.asynccontextmanager
+    async def post(self, url, *, json, timeout):
+        self.bodies.append(json)
+        if "ticket" not in json:
+            yield _Resp(403, {"error": "ticket_required"})
+            return
+        raise aiohttp.ClientConnectorError(
+            ConnectionKey("gfs.test", 443, True, True, None, None, None),
+            OSError(111, "refused"),
+        )
+        yield  # pragma: no cover
+
+
+async def test_a_ticket_that_never_reached_the_gfs_is_put_back():
+    issuer, key = _local_issuer()
+
+    async def anon_view() -> TicketIssuer:
+        return issuer
+
+    guard = TicketKeyGuard(anon_view)
+    await guard.confirm_issuer(issuer)
+    cache = MailboxTicketCache(None, batch=4, guard=guard)  # type: ignore[arg-type]
+    cache._tickets = [_local_ticket(issuer, key)]
+    session = _FlakySession()
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "offline", 0)
+    with pytest.raises(aiohttp.ClientConnectorError):
+        await register_mailbox(
+            session,  # type: ignore[arg-type]
+            "https://gfs.test",
+            keys,
+            GFS_ID,
+            tickets=cache,
+        )
+    assert len(cache) == 1  # put back: the GFS never saw it
+    assert ["ticket" in b for b in session.bodies] == [False, True]
+
+
+async def test_refills_run_at_jittered_times_and_never_next_to_a_register():
+    """The cache refills on its own jittered schedule, and skips a slot
+    that falls right after a register (a ticket taken)."""
+    issuer, key = _local_issuer()
+    calls: list[int] = []
+
+    async def fetch(count: int) -> list[bytes]:
+        calls.append(count)
+        return [_local_ticket(issuer, key)] * count
+
+    class _Rng:
+        def __init__(self) -> None:
+            self.asked: list[tuple[float, float]] = []
+
+        def uniform(self, lo: float, hi: float) -> float:
+            self.asked.append((lo, hi))
+            return lo
+
+    rng = _Rng()
+    cache = MailboxTicketCache(
+        fetch, batch=2, guard=None, period=0.05, quiet=3600.0, rng=rng
+    )  # type: ignore[arg-type]
+    cache._tickets = [b"x"]
+    cache.take()  # a register just happened
+    await cache.start()
+    await asyncio.sleep(0.2)
+    await cache.stop()
+    assert calls == []  # every slot was too close to the register
+    assert rng.asked and all(lo < hi for lo, hi in rng.asked)
+    quiet = MailboxTicketCache(
+        fetch, batch=2, guard=None, period=0.05, quiet=0.0, rng=rng
+    )  # type: ignore[arg-type]
+    await quiet.start()
+    await asyncio.sleep(0.2)
+    await quiet.stop()
+    assert calls == [2] and len(quiet) == 2
+
+
+async def test_the_issuer_is_read_only_under_the_pinned_gfs_key(gfs):
+    _server, session, url, _tickets = gfs
+    other = b64url_encode(bytes(32)).rstrip("=")
+    with pytest.raises(MailboxTicketError) as err:
+        await read_ticket_issuer(session, url, gfs_public_key=other)
+    assert err.value.error == "invalid_ticket_capability"
+    with pytest.raises(MailboxTicketError) as err:
+        await read_ticket_issuer(session, "http://127.0.0.1:1", gfs_public_key=other)
+    assert err.value.error == "gfs_info_unreachable"
+
+
+async def test_a_ticket_under_an_unadmitted_key_is_refused():
+    issuer, key = _local_issuer()
+    stranger, skey = _local_issuer()
+
+    async def anon_view() -> TicketIssuer:
+        return issuer
+
+    guard = TicketKeyGuard(anon_view)
+    with pytest.raises(MailboxTicketError) as err:
+        await guard.confirm_ticket(_local_ticket(stranger, skey))
+    assert err.value.error == "ticket_key_inconsistent"
+    await guard.confirm_ticket(_local_ticket(issuer, key))

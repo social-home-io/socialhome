@@ -119,6 +119,20 @@ class TicketIssuerKey:
         return f"TicketIssuerKey(epoch={self.epoch}, created_at={self.created_at})"
 
 
+@dataclass(slots=True, frozen=True)
+class TicketKeyPin:
+    """A household's pin of one GFS's ticket issuer key (key consistency,
+    :class:`socialhome.federation.gfs_mailbox.TicketKeyGuard`): the key id
+    it admitted, when it first saw it (Unix seconds), the epoch length then
+    advertised, and the key before it (still redeemable for one epoch).
+    Persisted with the household's GFS state once mailboxes are wired."""
+
+    key_id: bytes
+    first_seen: int
+    epoch_days: int
+    previous_key_id: bytes | None
+
+
 def derive_mailbox_id(sign_pk: bytes) -> str:
     """The mailbox id of the Ed25519 public key *sign_pk*."""
     if len(sign_pk) != 32:

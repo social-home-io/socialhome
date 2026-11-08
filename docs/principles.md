@@ -1120,6 +1120,21 @@ network address and timing, as for every envelope it relays (see the
 link-joined pair sign-off above) — the lookup that would have told it
 directly is gone.
 
+### Mailbox tickets hide a household among its epoch's households
+
+Creating a GFS mailbox spends an anonymous Privacy Pass ticket the
+household fetched over its identified channel
+([gfs-relay.md](protocol/gfs-relay.md#mailbox-registration-tickets)). The
+GFS can't tie a ticket to the fetch, but a ticket only hides its household
+among the households that fetched tickets under the **same issuer key in
+that epoch**. On a small GFS that set is small — with five active
+households a ticket narrows to one of five. That is a property of set size,
+not a leak in the design. What grows it: a longer epoch (30 days by
+default; households refuse anything under 7) and more households on the
+GFS. What keeps the set honest: the household takes a key only when an
+anonymous read of `/gfs/info` shows the same one, and at most one new key
+per epoch, so a GFS can't give one household a key of its own.
+
 ## No third-party fetches from user content
 
 Viewing content never makes the viewer's browser contact a host the

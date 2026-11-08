@@ -218,8 +218,8 @@ class MailboxTicketService:
             "issuer_key_id": crypto.b64url_encode(live.row.key_id),
             "public_key": crypto.b64url_encode(pp.encode_public_key(live.public)),
             "per_day": self._cfg.mailbox_tickets_per_day,
-            # How long one key signs: a household that sees the key change
-            # faster than this can tell it is being handed its own key.
+            # How long one key signs: the household's TicketKeyGuard takes at
+            # most one new key per epoch and refuses an epoch under 7 days.
             "epoch_days": self._cfg.mailbox_ticket_epoch_days,
         }
 
