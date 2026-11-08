@@ -833,6 +833,21 @@ of WARNING. The purge marks the household before its row goes, so a frame
 landing mid-purge counts too. Past the window, or from a household we never
 held, the refusal stays a WARNING.
 
+**The WebRTC connection closes.** The purge ends with
+`FederationTransport.close_peer`: the peer leaves the registry at once (no
+send picks it up again), then the PeerConnection closes once the
+DataChannel's send buffer has drained — bounded by
+`RTC_CLOSE_FLUSH_TIMEOUT_S` (2 s) — so an `UNPAIR` the channel accepted a
+moment ago still leaves. The household receiving that `UNPAIR` over the
+DataChannel finishes handling it even though its purge closes the very
+connection it arrived on. A tombstone keeps its connection until it is
+purged. If the pair later re-pairs, either side builds a fresh connection:
+a peer whose channel the other side closed counts as spent and is rebuilt
+on the next send or inbound OFFER — at most once a minute for inbound
+OFFERs, so a peer that keeps closing and re-dialling cannot make us build a
+connection per OFFER. An old connection that fails while it drains never
+evicts the new one a quick re-pair built.
+
 ### A peer that is offline at unpair time
 
 When the first attempt does not land, the route reports

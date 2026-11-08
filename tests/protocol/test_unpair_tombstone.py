@@ -310,6 +310,9 @@ class _StalledTransport:
         await self.release.wait()
         return SimpleNamespace(ok=False, via="rtc", status_code=None, error="boom")
 
+    async def close_peer(self, instance_id):
+        """The unpair purge closes the RTC peer — nothing to close here."""
+
 
 @pytest.mark.parametrize("ended_by", ["forget", "tombstone"])
 async def test_send_in_flight_across_an_unpair_queues_nothing(env, ended_by):

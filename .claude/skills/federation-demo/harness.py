@@ -13943,6 +13943,20 @@ _LOG_BENIGN: tuple[str, ...] = (
     "juice: STUN server binding successful",
     "juice: Candidate gathering done",
     "juice: Using STUN server",
+    # libjuice's single poll thread (conn_poll.c) builds its pollfd set
+    # under the registry mutex, then polls without it. When one
+    # PeerConnection closes (its UDP socket freed) and another is created
+    # straight after — a rebuild: retire/evict then re-dial, or a spent
+    # peer replaced by an inbound OFFER — the new agent can take both the
+    # freed registry slot and the freed fd number. The in-flight poll
+    # reports POLLNVAL for the old socket, the process pass matches it to
+    # the new agent by fd, and ``conn_poll_process_udp`` logs this and
+    # returns: no ``agent_conn_fail``, and the next round polls the new
+    # socket. Reproduced outside Social Home with back-to-back
+    # close+create of bare PeerConnections (2–3 hits per 200 cycles);
+    # close-only, close mid-gathering and double close give 0. Unchanged
+    # upstream through libjuice 1.7.4. Narrow to this exact message.
+    "juice: Invalid socket",
     # Outbox terminal-drop on HTTP 410: by design when dual-transport
     # delivery (perfect-negotiation RTC + HTTPS-inbox fallback)
     # causes the second arrival to hit the receiver's replay cache.
