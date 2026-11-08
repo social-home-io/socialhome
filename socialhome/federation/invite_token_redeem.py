@@ -2305,12 +2305,17 @@ class SpaceInviteTokenRedeemCoordinator:
             if minted is not None:
                 ack_body["mailbox"] = minted[0].to_wire()
                 own = minted[1]
-        if not await self._send_bootstrap_ack(
-            body,
-            nonce,
-            ack_body,
-            gfs_url=gfs_url,
-        ):
+        try:
+            acked = await self._send_bootstrap_ack(
+                body,
+                nonce,
+                ack_body,
+                gfs_url=gfs_url,
+            )
+        except BaseException:
+            await self._abandon_mailbox(space_id, own)
+            raise
+        if not acked:
             # A re-ACK to an already-seated household (no reservation)
             # has nothing to undo: that seat was committed earlier.
             if reservation is not None:

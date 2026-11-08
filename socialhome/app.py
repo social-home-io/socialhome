@@ -5685,6 +5685,8 @@ def create_app(config: Config | None = None) -> web.Application:
         gfs_connection_service.attach_on_removed(
             lambda conn: gfs_ws_supervisor.forget(conn.id)
         )
+        # v_88 — and its mailbox-ticket loops stop with it.
+        gfs_connection_service.attach_on_removed(space_mailboxes.forget_connection)
         # Warm the RAM-only GFS capability cache now, not only when each
         # socket connects: until then ``GET /api/gfs/connections`` reads
         # ``envelope_relay: false`` and the pairing reach picker / GFS

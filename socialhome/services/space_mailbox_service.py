@@ -310,6 +310,17 @@ class SpaceMailboxService:
         finally:
             await self._save_pin(conn)
 
+    async def forget_connection(self, conn: GfsConnection) -> None:
+        """The household left this GFS: stop its ticket loops and drop its
+        unspent tickets (the claims on it fail and back off until the seats
+        that use them go)."""
+        state = self._tickets.pop(conn.id, None)
+        if state is None:
+            return
+        await state.cache.stop()
+        await state.guard.stop()
+        state.cache.clear()
+
     async def _tickets_for(self, conn: GfsConnection) -> _Tickets:
         existing = self._tickets.get(conn.id)
         if existing is not None:

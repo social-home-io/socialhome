@@ -7162,6 +7162,71 @@ def _assert_moderator_seat(label: str, inst: dict, space_id: str) -> None:
 # ─── Step: gfs-invite-link-content ─────────────────────────────────────────
 
 
+def _gfs_invite_mailboxes(state: dict, space_id: str) -> tuple[str, str]:
+    """v_88 — both sides of the link-joined pair hold a per-space mailbox
+    entry for the other, both mailboxes are registered and claimed at the
+    GFS, and neither is an instance id. Returns ``(e's mailbox id, a's)``."""
+    a = state["instances"]["a"]
+    e = state["instances"]["e"]
+    deadline = time.time() + 30
+    a_rows: list = []
+    e_rows: list = []
+    while time.time() < deadline:
+        a_rows = _rows(
+            "a",
+            "SELECT mailbox FROM space_instances WHERE space_id = ? "
+            "AND instance_id = ?",
+            (space_id, e["instance_id"]),
+        )
+        e_rows = _rows(
+            "e",
+            "SELECT mailbox FROM space_instances WHERE space_id = ? "
+            "AND instance_id = ?",
+            (space_id, a["instance_id"]),
+        )
+        if a_rows and a_rows[0][0] and e_rows and e_rows[0][0]:
+            break
+        time.sleep(0.5)
+    else:
+        raise SystemExit(
+            "gfs-invite-link-content: no per-space mailbox on the seat "
+            f"(a: {a_rows!r}, e: {e_rows!r}) — v_88 mailboxes were not minted.",
+        )
+    on_a = json.loads(a_rows[0][0])
+    on_e = json.loads(e_rows[0][0])
+    if not (on_a.get("peer") and on_a.get("own") and on_e.get("peer") and on_e.get("own")):
+        raise SystemExit(
+            f"gfs-invite-link-content: a half-built mailbox pair: a={on_a!r} e={on_e!r}",
+        )
+    e_mailbox = on_a["peer"]["mailbox_id"]
+    a_mailbox = on_e["peer"]["mailbox_id"]
+    if on_a["peer"]["instance_id"] != e["instance_id"] or on_e["peer"]["instance_id"] != a["instance_id"]:
+        raise SystemExit("gfs-invite-link-content: a mailbox entry names the wrong household")
+    if e_mailbox in (e["instance_id"], a["instance_id"]) or a_mailbox in (
+        e["instance_id"],
+        a["instance_id"],
+    ):
+        raise SystemExit("gfs-invite-link-content: a mailbox id equals an instance id")
+    deadline = time.time() + 30
+    claimed: list = []
+    while time.time() < deadline:
+        claimed = _gfs_rows(
+            "SELECT mailbox_id FROM gfs_mailboxes WHERE mailbox_id IN (?, ?) "
+            "AND last_claim_at IS NOT NULL",
+            (e_mailbox, a_mailbox),
+        )
+        if len(claimed) == 2:
+            break
+        time.sleep(0.5)
+    else:
+        raise SystemExit(
+            "gfs-invite-link-content: the GFS holds "
+            f"{len(claimed)} of the 2 mailboxes registered and claimed.",
+        )
+    print("  e and a each minted, registered and claimed a mailbox for the space ✓")
+    return e_mailbox, a_mailbox
+
+
 def cmd_gfs_invite_link_content() -> None:
     """A link-joined household is a full member on the wire, both ways.
 
@@ -7208,6 +7273,11 @@ def cmd_gfs_invite_link_content() -> None:
     a_base = f"http://127.0.0.1:{a['port']}"
     e_base = f"http://127.0.0.1:{e['port']}"
 
+    # 0. v_88 — e reaches this space only through the GFS, so the seat
+    #    minted, registered and claimed a per-space mailbox on both sides,
+    #    and each side holds the other's signed entry.
+    e_mailbox, a_mailbox = _gfs_invite_mailboxes(state, space_id)
+
     gfs_off = _gfs_log_size()
 
     # 1. Host → link-joined member.
@@ -7239,21 +7309,47 @@ def cmd_gfs_invite_link_content() -> None:
             "without being stored.",
         )
 
-    # 2. It really went through the relay: the GFS carried envelopes
-    #    addressed to e in that window. (The blob is opaque, so this is
-    #    the honest form of the claim — a count and a recipient.)
-    to_e = [
-        line
-        for line in _gfs_log_lines_matching("gfs.envelope:", offset=gfs_off)
-        if e["instance_id"] in line
-    ]
-    if not to_e:
+    #    Byte-identical: the row e stored holds exactly what a wrote.
+    a_row = _rows("a", "SELECT content FROM space_posts WHERE id = ?", (post_id,))
+    e_row = _rows("e", "SELECT content FROM space_posts WHERE id = ?", (post_id,))
+    if not a_row or a_row != e_row:
         raise SystemExit(
-            "gfs-invite-link-content: the GFS relayed nothing to e while a's "
-            "post was delivered — it arrived by some transport a link-joined "
-            f"peer should not have. Check {GFS_DIR / 'log.txt'}.",
+            f"gfs-invite-link-content: e stored {e_row!r}, a holds {a_row!r} "
+            "— the post did not arrive byte-identical.",
         )
-    print(f"  the GFS carried {len(to_e)} envelope(s) addressed to e ✓")
+
+    # 2. It really went through the relay — to e's MAILBOX (v_88): the GFS
+    #    delivered envelopes to a mailbox in that window and logged e's
+    #    instance id on none of them. (The GFS logs a mailbox as
+    #    ``<mailbox>`` and never its id; the blob is opaque.)
+    env_lines = _gfs_log_lines_matching("gfs.envelope:", offset=gfs_off)
+    to_mailbox = [line for line in env_lines if "<mailbox>" in line]
+    to_e = [line for line in env_lines if e["instance_id"] in line]
+    if not to_mailbox:
+        raise SystemExit(
+            "gfs-invite-link-content: the GFS delivered nothing to a mailbox "
+            "while a's post reached e — the v_88 mailbox was not used. Check "
+            f"{GFS_DIR / 'log.txt'}.",
+        )
+    if to_e:
+        raise SystemExit(
+            "gfs-invite-link-content: the GFS logged e's instance id for "
+            f"space traffic — it should see only a mailbox: {to_e!r}",
+        )
+    leaked = [
+        line
+        for line in _gfs_log_lines_matching("", offset=gfs_off)
+        if e_mailbox in line or a_mailbox in line or space_id in line
+    ]
+    if leaked:
+        raise SystemExit(
+            "gfs-invite-link-content: a GFS log line names a mailbox id or "
+            f"the space: {leaked!r}",
+        )
+    print(
+        f"  the GFS carried {len(to_mailbox)} envelope(s) to e's mailbox and "
+        "logged no instance id, mailbox id or space ✓"
+    )
 
     # 3. Link-joined member → host. The reply leg.
     reply = f"Reply from the link-joined household — {time.time_ns()}"
@@ -7271,6 +7367,13 @@ def cmd_gfs_invite_link_content() -> None:
             f"expected {reply!r}",
         )
     print("  a received e's reply over the relay ✓")
+    # v_88 — the reply rode a's mailbox for the space too.
+    reply_lines = _gfs_log_lines_matching("gfs.envelope:", offset=gfs_off)
+    if [line for line in reply_lines if a["instance_id"] in line]:
+        raise SystemExit(
+            "gfs-invite-link-content: the GFS logged a's instance id for the "
+            "reply — e should address a's mailbox for this space.",
+        )
 
     # 4. An epoch rotation must re-key a link-joined member too.
     victim_id, _victim_token = _seat_local_member(

@@ -197,6 +197,19 @@ async def test_a_fresh_household_gets_tickets_on_connect_and_the_pin_persists(gf
     await again.stop()
 
 
+async def test_leaving_a_gfs_stops_its_ticket_loops(gfs):
+    _server, session, _url, conn = gfs
+    svc = _service(session, conn)
+    await _ready(svc, conn)
+    state = svc._tickets[conn.id]
+    assert len(state.cache)
+    await svc.forget_connection(conn)
+    assert conn.id not in svc._tickets
+    assert len(state.cache) == 0
+    await svc.forget_connection(conn)  # idempotent
+    await svc.stop()
+
+
 def test_pin_round_trips_and_garbage_is_ignored():
     from socialhome.domain.gfs_mailbox import TicketKeyPin
 
