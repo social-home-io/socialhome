@@ -65,6 +65,16 @@ HTTPS_CHUNK_BYTES: int = 512 * 1024
 #: 1.5 GiB — above every space / DM media max a receiver accepts.
 ROUTED_CHUNK_BYTES: int = 384 * 1024
 
+#: The largest chunk a JSON envelope carries through the GFS relay to a
+#: household seated from an invite link when binary relay frames are not
+#: available (a peer below v_87, or a GFS without ``envelope_media``): the
+#: chunk is base64'ed in the payload, encrypted and base64'ed again (×
+#: :data:`JSON_EXPANSION`) and must fit the relay's top size bucket
+#: (``gfs_relay_transport.RELAY_MAX_ENVELOPE_BYTES``, 191 KiB): 96 KiB ≈
+#: 171 KiB plus the envelope. 4096 of them are 384 MiB — above every space
+#: media max. With binary relay frames the chunk is :data:`HTTPS_CHUNK_BYTES`.
+RELAY_JSON_CHUNK_BYTES: int = 96 * 1024
+
 #: Upper bound on ``chunk_count`` for one transfer — a receiver refuses a
 #: chunk claiming more (``inbound_media_store``), so a sender never splits
 #: a file into more.
@@ -124,6 +134,13 @@ def routed_media_chunk_bytes(*, file_size_bytes: int) -> int:
     :data:`MAX_MEDIA_CHUNKS` chunks (above 1.5 GiB — past every media max
     today, so the receiver refuses such a file anyway)."""
     return max(ROUTED_CHUNK_BYTES, -(-file_size_bytes // MAX_MEDIA_CHUNKS))
+
+
+def relay_json_chunk_bytes(*, file_size_bytes: int) -> int:
+    """The chunk size for a relay seat reached by JSON envelopes:
+    :data:`RELAY_JSON_CHUNK_BYTES`, grown only past :data:`MAX_MEDIA_CHUNKS`
+    chunks (a file over 384 MiB, which no receiver accepts)."""
+    return max(RELAY_JSON_CHUNK_BYTES, -(-file_size_bytes // MAX_MEDIA_CHUNKS))
 
 
 def chunk_count(size: int, chunk_bytes: int) -> int:

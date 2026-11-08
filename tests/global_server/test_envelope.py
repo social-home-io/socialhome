@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 
 import pytest
@@ -20,6 +21,10 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from socialhome.capabilities_sig import verify_capabilities
 from socialhome.crypto import b64url_encode, sign_ed25519
+from socialhome.domain.relay_media_frame import (
+    RELAY_MEDIA_MAGIC,
+    build_relay_media_body,
+)
 from socialhome.global_server import envelope_relay as envelope_relay_mod
 from socialhome.global_server.app_keys import (
     gfs_cluster_key,
@@ -30,7 +35,7 @@ from socialhome.global_server.app_keys import (
     gfs_moment_public_registry_key,
     gfs_ws_registry_key,
 )
-from socialhome.global_server.config import GfsConfig
+from socialhome.global_server.config import EnvelopeMediaConfig, GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.envelope_relay import (
     ENVELOPE_MAX_BODY_BYTES,
@@ -444,3 +449,131 @@ async def test_a_newline_in_to_instance_is_a_400_and_forges_no_log_line(gfs, cap
 
     rows = await gfs._app[gfs_db_key].fetchall("SELECT * FROM gfs_envelope_queue", ())
     assert rows == []
+
+
+# ── Binary media frames (v_87) ───────────────────────────────────────────
+
+RECIPIENT = "recipient2home2222222222222222aa"
+
+
+def _media_body(n: int = 200 * 1024, to: str = RECIPIENT) -> bytes:
+    return build_relay_media_body(to, os.urandom(n))
+
+
+async def test_media_frame_reaches_a_labelled_socket_byte_identical(gfs):
+    body = _media_body(514 * 1024)
+    async with gfs.ws_connect("/gfs/ws") as ws:
+        await ws.send_json(
+            {**_hello(RECIPIENT, gfs._seed), "accepts": ["envelope_media"]}
+        )
+        await _wait_connected(gfs._app, RECIPIENT)
+        resp = await gfs.post("/gfs/envelope", data=body)
+        assert resp.status == 202
+        assert await resp.json() == {"status": "accepted"}
+        msg = await asyncio.wait_for(ws.receive_bytes(), timeout=5)
+    assert msg == body
+
+
+async def test_offline_media_is_drained_as_binary_on_a_labelled_hello(gfs):
+    body = _media_body()
+    resp = await gfs.post("/gfs/envelope", data=body)
+    assert resp.status == 202
+    for _ in range(500):
+        if gfs._app[gfs_envelope_relay_key].media_inflight_bytes == 0:
+            break
+        await asyncio.sleep(0.01)
+    queue = gfs._app[gfs_envelope_queue_repo_key]
+    assert await queue.media_bytes_for(RECIPIENT, now=0) == len(body)
+    async with gfs.ws_connect("/gfs/ws") as ws:
+        await ws.send_json(
+            {**_hello(RECIPIENT, gfs._seed), "accepts": ["envelope_media"]}
+        )
+        msg = await asyncio.wait_for(ws.receive_bytes(), timeout=5)
+    assert msg == body
+
+
+@pytest.mark.security
+async def test_media_answer_is_the_uniform_202_for_an_unknown_recipient(gfs):
+    known = await gfs.post("/gfs/envelope", data=_media_body())
+    unknown = await gfs.post(
+        "/gfs/envelope",
+        data=_media_body(to="stranger2home2222222222222222abc"),
+    )
+    assert known.status == unknown.status == 202
+    assert await known.read() == await unknown.read()
+
+
+@pytest.mark.security
+async def test_media_body_over_528_kib_is_413(gfs):
+    body = build_relay_media_body(RECIPIENT, b"\x00" * (528 * 1024))
+    resp = await gfs.post("/gfs/envelope", data=body)
+    assert resp.status == 413
+
+
+@pytest.mark.security
+async def test_a_json_body_keeps_its_320_kib_cap(gfs):
+    resp = await gfs.post(
+        "/gfs/envelope",
+        data=b"{" + b" " * (ENVELOPE_MAX_BODY_BYTES + 10) + b"}",
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status == 413
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        RELAY_MEDIA_MAGIC + b"\x09" + b"a" * 32 + b"x",
+        RELAY_MEDIA_MAGIC + b"\x01" + b"A" * 32 + b"x",
+        RELAY_MEDIA_MAGIC + b"\x01" + b"a" * 32,
+    ],
+)
+async def test_malformed_media_body_is_400(gfs, body):
+    resp = await gfs.post("/gfs/envelope", data=body)
+    assert resp.status == 400
+
+
+@pytest.mark.security
+async def test_per_ip_media_byte_budget_sheds_with_429(gfs, monkeypatch):
+    relay = gfs._app[gfs_envelope_relay_key]
+    monkeypatch.setattr(
+        relay, "_media_budget", envelope_relay_mod.SlidingByteBudget(600 * 1024)
+    )
+    first = await gfs.post("/gfs/envelope", data=_media_body(400 * 1024))
+    second = await gfs.post("/gfs/envelope", data=_media_body(400 * 1024))
+    assert (first.status, second.status) == (202, 429)
+    # JSON envelopes are not charged to the media byte budget.
+    third = await gfs.post("/gfs/envelope", json=_envelope(RECIPIENT))
+    assert third.status == 202
+
+
+@pytest.mark.security
+async def test_gfs_info_signs_envelope_media(gfs):
+    body = await (await gfs.get("/gfs/info")).json()
+    assert body["capabilities"]["envelope_media"] is True
+    assert verify_capabilities(
+        body["public_key"],
+        body["gfs_instance_id"],
+        body["capabilities"],
+        body["capabilities_sig"],
+        body["capabilities_sig_suite"],
+    )
+
+
+async def test_media_off_drops_the_capability_and_refuses_the_body(tmp_dir):
+    cfg = GfsConfig(
+        host="127.0.0.1",
+        port=0,
+        base_url="http://gfs.test",
+        data_dir=str(tmp_dir),
+        instance_id="gfs-node-a",
+        cluster_enabled=False,
+        cluster_node_id="gfs-node-a",
+        cluster_peers=(),
+        envelope_media=EnvelopeMediaConfig(enabled=False),
+    )
+    async with TestClient(TestServer(create_gfs_app(cfg))) as tc:
+        info = await (await tc.get("/gfs/info")).json()
+        assert "envelope_media" not in info["capabilities"]
+        resp = await tc.post("/gfs/envelope", data=_media_body())
+        assert resp.status == 400

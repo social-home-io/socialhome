@@ -22,7 +22,7 @@ def test_ours_is_v31_with_routed_origin_signature_capability():
     v_23 peer-replicated space roster gossip, v_22 the delegated-admin
     signing-seed share, v_21 authenticated mesh route discovery, v_20
     SPACE_SYNC_REJECTED)."""
-    assert OURS == 85
+    assert OURS == 87
     assert FederationCapability.MIN_FOR_CONTENT_FILE_HASHES == 85
     assert FederationCapability.MIN_FOR_GFS_JOIN_REQUEST == 84
     assert FederationCapability.MIN_FOR_MEDIA_HTTPS == 81

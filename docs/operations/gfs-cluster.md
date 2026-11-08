@@ -182,6 +182,37 @@ deliver within 120 s. The **Media cache** card on Overview adds this node's
 holder requests, streams served (and bytes), re-uploads, declines and
 requests nobody could serve ("Not found"), or says the feature is off.
 
+## Envelope relay media frames (v_87)
+
+`POST /gfs/envelope` also takes binary media frames (`\x00SHR`, up to
+**528 KiB**, see [gfs-relay.md](../protocol/gfs-relay.md#binary-media-frames-v_87)).
+Their caps live in `[envelope_relay]`, each with a `GFS_ENVELOPE_RELAY_<KEY>`
+env override:
+
+```toml
+[envelope_relay]
+media = true                                # carry them; false drops the envelope_media capability
+media_ip_bytes_per_minute = 67108864        # 64 MiB per client address, per node (429 past it)
+media_queue_bytes_per_recipient = 16777216  # 16 MiB queued for one offline household (tail-drop)
+media_queue_ttl_seconds = 3600              # 1 h
+media_queue_max_total_bytes = 1073741824    # 1 GiB queued for everyone (tail-drop)
+media_max_inflight_bytes = 67108864         # 64 MiB held in memory between answer and push
+```
+
+The queue is the shared `gfs_media_queue` table (GFS migration 0028), so a
+frame posted to one node for a household connected to another is drained by
+that node on the `NODE_DRAIN_HINT` (ids only — the bytes never cross the
+cluster link, so the 768 KiB `relays` cap does not apply). The byte budget
+counts per node like the other per-IP limits.
+
+**Proxy body limits.** Every front end must let a 528 KiB request body
+through on `/gfs/envelope`. HAProxy has no request body limit by default and
+does not buffer it unless a rule asks (`wait-for-body` is only on the three
+signalling POSTs above), so the stock config is fine; nginx defaults to
+`client_max_body_size 1m` (fine), and Cloudflare's 100 MB default upload limit
+(Free / Pro) is far above it. A front end set below 528 KiB answers 413, and a
+household then cannot send media frames through that server.
+
 ## Rate limits across nodes
 
 The anonymous per-IP limits on the public pages, the highlight offer /

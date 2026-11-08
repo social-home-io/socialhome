@@ -10,6 +10,7 @@ from aiohttp import web
 
 from ...domain.gfs_space_media import SPACE_MEDIA_CAPABILITY
 from ...domain.gfs_space_media_on_demand import ON_DEMAND_CAPABILITY_KEY
+from ...domain.relay_media_frame import ENVELOPE_MEDIA_CAPABILITY
 from ...domain.space_item import (
     PAYLOAD_SUITE_FIELD,
     PAYLOAD_SUITE_UNSUPPORTED_ERROR,
@@ -282,6 +283,14 @@ class GfsInfoView(GfsBaseView):
             if on_demand is not None:
                 space_media[ON_DEMAND_CAPABILITY_KEY] = on_demand
             capabilities[SPACE_MEDIA_CAPABILITY] = space_media
+        # v_87 — ``POST /gfs/envelope`` takes a binary ``\x00SHR`` media frame
+        # (one sealed 512 KiB chunk, ≤ 528 KiB) and pushes it to a socket that
+        # listed ``envelope_media``. Signed: a household sends mesh-sized
+        # chunks to a relay seat only through a server that proved it (an
+        # older one answers the body with 400). Absent while the operator has
+        # it off (``[envelope_relay] media = false``).
+        if cfg.envelope_media.enabled:
+            capabilities[ENVELOPE_MEDIA_CAPABILITY] = True
         if cfg.instance_id_aliases:
             # The former ids this server answers to (``instance_id_aliases``),
             # SIGNED: a household pinned to one of them adopts

@@ -69,6 +69,7 @@ from aiohttp import WSMsgType, web
 
 from ... import crypto
 from ...domain.subscriber_accepts import (
+    ACCEPTS_ENVELOPE_MEDIA,
     ACCEPTS_SPACE_ITEM_NO_CERT,
     ACCEPTS_SPACE_KEY_PULL,
     ACCEPTS_SPACE_MEDIA_SERVE,
@@ -149,6 +150,8 @@ class GfsWebSocketView(web.View):
             # v_83 — it answers ``space_media_request`` (re-upload / stream
             # a space blob a reader missed).
             media_serve=ACCEPTS_SPACE_MEDIA_SERVE in accepts,
+            # v_87 — it opens binary relay media frames (``\x00SHR``).
+            envelope_media=ACCEPTS_ENVELOPE_MEDIA in accepts,
         )
         await fed_repo.upsert_rtc_connection(instance_id, transport="websocket")
 

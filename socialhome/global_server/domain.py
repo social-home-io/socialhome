@@ -452,6 +452,20 @@ class GfsQueuedEnvelope:
     frame_type: str = "envelope"
 
 
+@dataclass(slots=True, frozen=True)
+class GfsQueuedMedia:
+    """One binary relay media frame (v_87, GFS migration 0028) waiting for
+    its recipient. ``body`` is the opaque ``\x00SHR`` frame exactly as it
+    was posted — pushed unchanged as a binary WebSocket message, never
+    parsed past its recipient id, never logged. No sender field."""
+
+    id: int
+    to_instance: str
+    body: bytes
+    created_at: int
+    expires_at: int
+
+
 #: How far an OWNER epoch notice may raise a space's confirmed content epoch
 #: beyond the stored one — unless it stays within
 #: :data:`MAX_EPOCH_CLOCK_LEAD_S` of wall-clock now, which is how far a v_44

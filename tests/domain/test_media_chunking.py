@@ -18,9 +18,11 @@ from socialhome.domain.media_chunking import (
     JSON_EXPANSION,
     MAX_MEDIA_CHUNKS,
     MIN_CHANNEL_CHUNK_BYTES,
+    RELAY_JSON_CHUNK_BYTES,
     ROUTED_CHUNK_BYTES,
     fits_channel,
     media_chunk_bytes,
+    relay_json_chunk_bytes,
     routed_media_chunk_bytes,
     split_into_chunks,
 )
@@ -217,3 +219,9 @@ def test_the_routed_size_keeps_the_per_file_floor():
     assert -(-file_size // size) <= MAX_MEDIA_CHUNKS
     with pytest.raises(TypeError):
         routed_media_chunk_bytes(0)  # type: ignore[misc]
+
+
+def test_relay_json_chunk_size_and_growth():
+    assert relay_json_chunk_bytes(file_size_bytes=1) == RELAY_JSON_CHUNK_BYTES
+    huge = RELAY_JSON_CHUNK_BYTES * MAX_MEDIA_CHUNKS + 1
+    assert relay_json_chunk_bytes(file_size_bytes=huge) > RELAY_JSON_CHUNK_BYTES

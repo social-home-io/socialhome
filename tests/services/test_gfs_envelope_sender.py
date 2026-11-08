@@ -375,3 +375,63 @@ async def test_a_throttled_relay_is_a_waitable_window_not_a_failure(
     # answers 422 with.
     assert isinstance(exc.value, SpacePermissionError)
     assert "try again" in str(exc.value)
+
+
+# ── Binary media frames (v_87) ────────────────────────────────────────────
+
+
+class _MediaGfs(_FakeGfs):
+    """Records raw bodies; ``envelope_media`` in its signed block."""
+
+    def __init__(self, **kw) -> None:
+        super().__init__(
+            capabilities={"envelope_relay": True, "envelope_media": True}, **kw
+        )
+        self.raw: list[tuple[bytes, str]] = []
+
+    async def _envelope(self, request: web.Request) -> web.Response:
+        self.raw.append((await request.read(), request.content_type))
+        if self.envelope_status >= 300:
+            return web.json_response({"error": "nope"}, status=self.envelope_status)
+        return web.json_response({"status": "accepted"}, status=202)
+
+
+@pytest.fixture
+async def media_gfs():
+    fake = _MediaGfs()
+    server = TestServer(fake.app())
+    await server.start_server()
+    fake.url = str(server.make_url("")).rstrip("/")
+    yield fake
+    await server.close()
+
+
+async def test_media_body_is_posted_raw_and_identity_free(media_gfs, http_session):
+    sender, conn = _wire(media_gfs, http_session)
+    body = b"\x00SHR\x01" + b"b" * 32 + b"sealed-bytes"
+    assert await sender.send_media_body(body=body, gfs_url=conn.inbox_url)
+    assert media_gfs.raw == [(body, "application/octet-stream")]
+
+
+async def test_media_needs_a_server_that_proved_envelope_media(gfs, http_session):
+    sender, conn = _wire(gfs, http_session)  # envelope_relay only
+    assert await sender.media_connection(conn.inbox_url) is None
+    assert await sender.media_connection("") is None
+    with pytest.raises(EnvelopeRelayUnavailable):
+        await sender.send_media_body(body=b"\x00SHR", gfs_url=conn.inbox_url)
+
+
+async def test_media_429_is_throttled_and_other_refusals_false(media_gfs, http_session):
+    sender, conn = _wire(media_gfs, http_session)
+    media_gfs.envelope_status = 429
+    with pytest.raises(EnvelopeRelayThrottled):
+        await sender.send_media_body(body=b"\x00SHR", gfs_url=conn.inbox_url)
+    media_gfs.envelope_status = 400
+    assert not await sender.send_media_body(body=b"\x00SHR", gfs_url=conn.inbox_url)
+
+
+async def test_media_unreachable_server_is_false(media_gfs, http_session):
+    sender, conn = _wire(media_gfs, http_session)
+    assert await sender.media_connection(conn.inbox_url) is not None
+    await http_session.close()
+    assert not await sender.send_media_body(body=b"\x00SHR", gfs_url=conn.inbox_url)

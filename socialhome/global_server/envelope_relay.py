@@ -70,6 +70,22 @@ Ordering note: envelopes that arrive DURING a drain go straight to the
 now-live socket and can therefore overtake a queued one. The bootstrap
 protocol is a nonce-matched request/reply, so this is harmless; what is
 guaranteed is that queued envelopes are delivered in queue order.
+
+**Binary media frames (v_87).** The same route takes a raw ``\x00SHR`` body
+(:mod:`socialhome.domain.relay_media_frame`): one media chunk sealed to the
+recipient, up to 528 KiB, told apart from JSON by its first bytes. The server
+reads its recipient id and nothing else, and pushes the body unchanged as a
+BINARY WebSocket message to a socket whose hello listed ``envelope_media``.
+Everything about it is budgeted apart from the JSON envelopes, so media can
+never evict or crowd out a household's control traffic: a per-IP byte budget
+on top of the per-IP request limit (:meth:`GfsEnvelopeRelay.media_budget_allows`),
+its own in-flight bound counted in bytes, its own per-recipient pending cap
+and lock, and its own queue table (``gfs_media_queue``, GFS migration 0028)
+with a per-recipient and a server-wide byte cap, both tail-drop, and a short
+TTL. Across a cluster it rides the same shared queue + ``NODE_DRAIN_HINT`` as
+an envelope: the node holding the socket drains it (the hint carries the
+recipient id only, never the bytes). Caps: ``[envelope_relay]`` in the GFS
+TOML (:class:`~socialhome.global_server.config.EnvelopeMediaConfig`).
 """
 
 from __future__ import annotations
@@ -79,6 +95,7 @@ import logging
 import math
 import re
 import time
+from collections import deque
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
@@ -90,7 +107,8 @@ from ..moment_public_seal import (
     MAX_REACT_BODY_BYTES,
     MOMENT_FRAME_TYPES,
 )
-from .public import ClientIpResolver, build_window_limiter
+from .config import EnvelopeMediaConfig
+from .public import RATE_LIMIT_MAX_TRACKED_IPS, ClientIpResolver, build_window_limiter
 
 if TYPE_CHECKING:
     from .cluster import ClusterService
@@ -328,6 +346,50 @@ ENVELOPE_SATURATION_WARN_INTERVAL_S: float = 60.0
 ENVELOPE_CLOSE_TIMEOUT_S: float = 5.0
 
 
+class SlidingByteBudget:
+    """Per-key bytes over a sliding window, with a bounded key space.
+
+    The byte counterpart of :class:`~.public.SlidingWindowCounter`: one entry
+    per accepted charge (a media frame), pruned to the window on every touch,
+    keys evicted least-recently-seen past *max_keys*."""
+
+    __slots__ = ("_by_key", "_limit", "_max_keys", "_window_s")
+
+    def __init__(
+        self,
+        limit: int,
+        *,
+        window_s: float = 60.0,
+        max_keys: int = RATE_LIMIT_MAX_TRACKED_IPS,
+    ) -> None:
+        self._limit = limit
+        self._window_s = window_s
+        self._max_keys = max_keys
+        #: key → (charges as (stamp, bytes), their sum).
+        self._by_key: dict[str, tuple[deque[tuple[float, int]], int]] = {}
+
+    def allow(self, key: str, size: int, *, now: float | None = None) -> bool:
+        """Charge *size* bytes to *key* if they fit its window; whether they did."""
+        stamp = time.monotonic() if now is None else now
+        charges, total = self._by_key.pop(key, (deque(), 0))
+        while charges and stamp - charges[0][0] >= self._window_s:
+            total -= charges.popleft()[1]
+        ok = total + size <= self._limit
+        if ok:
+            charges.append((stamp, size))
+            total += size
+        if charges:
+            self._by_key[key] = (charges, total)
+        overflow = len(self._by_key) - self._max_keys
+        if overflow > 0:
+            for old in list(self._by_key)[:overflow]:
+                del self._by_key[old]
+        return ok
+
+    def __len__(self) -> int:
+        return len(self._by_key)
+
+
 class InvalidEnvelope(ValueError):
     """The posted body is not a well-formed routing envelope."""
 
@@ -410,6 +472,11 @@ class GfsEnvelopeRelay:
         "_max_inflight",
         "_max_inflight_per_recipient",
         "_max_queued",
+        "_media",
+        "_media_budget",
+        "_media_inflight",
+        "_media_inflight_bytes",
+        "_media_pending",
         "_pending_by_recipient",
         "_queue_repo",
         "_saturated_drops",
@@ -430,6 +497,7 @@ class GfsEnvelopeRelay:
         max_inflight: int = ENVELOPE_MAX_INFLIGHT,
         max_inflight_per_recipient: int = ENVELOPE_MAX_INFLIGHT_PER_RECIPIENT,
         clock: Callable[[], float] = time.monotonic,
+        media: EnvelopeMediaConfig | None = None,
     ) -> None:
         self._fed_repo = fed_repo
         self._queue_repo = queue_repo
@@ -452,6 +520,12 @@ class GfsEnvelopeRelay:
         self._fan_out: ClusterRelayFanOut | None = None
         self._accept_locks = KeyedLocks()
         self._drain_locks = KeyedLocks()
+        #: v_87 — binary relay media frames, budgeted apart from envelopes.
+        self._media = media if media is not None else EnvelopeMediaConfig()
+        self._media_budget = SlidingByteBudget(self._media.media_ip_bytes_per_minute)
+        self._media_inflight: set[asyncio.Task[None]] = set()
+        self._media_inflight_bytes = 0
+        self._media_pending: dict[str, int] = {}
 
     def attach_cluster(self, cluster: ClusterService) -> None:
         """Hint *cluster* after every enqueue, so a sibling node holding the
@@ -505,6 +579,107 @@ class GfsEnvelopeRelay:
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
         task.add_done_callback(lambda _t: self._release_pending(to_instance))
+
+    # ── Binary relay media frames (v_87) ───────────────────────────────
+
+    @property
+    def media_enabled(self) -> bool:
+        """Whether this server carries binary relay media frames (and
+        advertises ``envelope_media``)."""
+        return self._media.enabled
+
+    @property
+    def media_inflight_bytes(self) -> int:
+        """Media bytes held between the answer and the push / enqueue."""
+        return self._media_inflight_bytes
+
+    def media_budget_allows(self, client_key: str, size: int) -> bool:
+        """Charge *size* media bytes to *client_key* (the caller's address
+        bucket); ``False`` once its per-minute byte budget is spent (the
+        route answers 429, which a household waits out)."""
+        return self._media_budget.allow(client_key, size)
+
+    def submit_media(self, to_instance: str, body: bytes) -> None:
+        """:meth:`submit` for a binary media frame: hand it to a background
+        :meth:`accept_media` and return at once (the same uniform-timing
+        reason). Dropped — same ``202`` — past the in-flight byte bound or
+        the recipient's pending cap; neither touches the envelopes' slots."""
+        size = len(body)
+        pending = self._media_pending.get(to_instance, 0)
+        if (
+            pending >= self._max_inflight_per_recipient
+            or self._media_inflight_bytes + size > self._media.media_max_inflight_bytes
+        ):
+            self._note_saturated()
+            return
+        self._media_pending[to_instance] = pending + 1
+        self._media_inflight_bytes += size
+        task = asyncio.get_running_loop().create_task(
+            self._accept_media_in_background(to_instance, body),
+            name="gfs-envelope-media-accept",
+        )
+        self._media_inflight.add(task)
+
+        def _done(t: asyncio.Task[None], to: str = to_instance, n: int = size) -> None:
+            self._media_inflight.discard(t)
+            self._media_inflight_bytes -= n
+            left = self._media_pending.get(to, 0) - 1
+            if left > 0:
+                self._media_pending[to] = left
+            else:
+                self._media_pending.pop(to, None)
+
+        task.add_done_callback(_done)
+
+    async def _accept_media_in_background(self, to_instance: str, body: bytes) -> None:
+        try:
+            # Its own lock namespace: a recipient's media never waits behind,
+            # or holds up, its envelopes.
+            async with self._accept_locks.hold("media:" + to_instance):
+                await self.accept_media(to_instance, body)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.warning(
+                "gfs.envelope: background media accept failed for %s",
+                to_instance,
+                exc_info=True,
+            )
+
+    async def accept_media(self, to_instance: str, body: bytes) -> None:
+        """Push *body* to *to_instance*'s socket as a binary message, or
+        queue it in the media queue (per-recipient + server-wide byte caps,
+        tail-drop, :attr:`EnvelopeMediaConfig.media_queue_ttl_seconds`).
+        Unknown / inactive recipients are dropped, as for envelopes."""
+        instance = await self._fed_repo.get_instance(to_instance)
+        if instance is None or instance.status != "active":
+            log.debug(
+                "gfs.envelope: dropping media for unknown/inactive recipient %s",
+                to_instance,
+            )
+            return
+        if await self._ws_registry.send_media(to_instance, body):
+            log.debug("gfs.envelope: media delivered to live socket %s", to_instance)
+            return
+        now = int(time.time())
+        queued = await self._queue_repo.enqueue_media(
+            to_instance,
+            body,
+            created_at=now,
+            expires_at=now + self._media.media_queue_ttl_seconds,
+            max_bytes_per_recipient=self._media.media_queue_bytes_per_recipient,
+            max_total_bytes=self._media.media_queue_max_total_bytes,
+        )
+        if not queued:
+            log.warning(
+                "gfs.envelope: media queue full for %s (%d bytes queued) — "
+                "dropping the new frame; the recipient is offline or being "
+                "flooded, or the server-wide media queue is full",
+                to_instance,
+                await self._queue_repo.media_bytes_for(to_instance, now=now),
+            )
+            return
+        await self._after_enqueue(to_instance)
 
     def _release_pending(self, to_instance: str) -> None:
         left = self._pending_by_recipient.get(to_instance, 0) - 1
@@ -563,7 +738,7 @@ class GfsEnvelopeRelay:
         """Let in-flight ``accept`` tasks finish, cancelling any still running
         after *timeout* (default :data:`ENVELOPE_CLOSE_TIMEOUT_S`). Called from
         the server's cleanup hook BEFORE the database shuts down."""
-        pending = set(self._inflight)
+        pending = set(self._inflight) | set(self._media_inflight)
         if not pending:
             return
         _done, still = await asyncio.wait(
@@ -804,6 +979,11 @@ class GfsEnvelopeRelay:
                 break
             await self._queue_repo.delete(envelope.id)
             delivered += 1
+        else:
+            # Every envelope went out: now the media frames, one row at a
+            # time (a household's media queue is up to 16 MiB). Only to a
+            # socket that opens them — anything else leaves them queued.
+            delivered += await self._drain_media(to_instance)
         if delivered:
             log.debug(
                 "gfs.envelope: drained %d queued envelope(s) to %s",
@@ -811,6 +991,32 @@ class GfsEnvelopeRelay:
                 to_instance,
             )
         return delivered
+
+    async def _drain_media(self, to_instance: str) -> int:
+        if not self._ws_registry.takes_media(to_instance):
+            return 0
+        delivered = 0
+        after = 0
+        while True:
+            try:
+                row = await self._queue_repo.next_media_for(
+                    to_instance, now=int(time.time()), after_id=after
+                )
+            except Exception as exc:  # fail-soft, like the envelope lookup
+                log.warning(
+                    "gfs.envelope: media drain lookup failed for %s: %s",
+                    to_instance,
+                    exc,
+                    exc_info=True,
+                )
+                return delivered
+            if row is None:
+                return delivered
+            if not await self._ws_registry.send_media(to_instance, row.body):
+                return delivered
+            await self._queue_repo.delete_media(row.id)
+            after = row.id
+            delivered += 1
 
 
 def build_envelope_rate_limit(resolver: ClientIpResolver):

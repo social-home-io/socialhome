@@ -21,6 +21,10 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.space_item import ITEM_SIZE_BUCKETS, PAD_FIELD
+from socialhome.federation.gfs_relay_media import (
+    RELAY_MEDIA_MAX_MEDIA_BODY_BYTES,
+    open_relay_media,
+)
 from socialhome.federation.gfs_relay_transport import (
     RELAY_KIND_ENVELOPE,
     RELAY_MAX_BODY_BYTES,
@@ -445,3 +449,93 @@ async def test_an_explicit_gfs_url_overrides_relay_via():
     assert relay.calls[0]["gfs_url"] == "https://route-2.example.org"
     # Still nothing but the recipient and the ciphertext.
     assert set(relay.calls[0]["envelope"]) == {"to_instance", "sealed"}
+
+
+# ─── Binary media frames (v_87) ───────────────────────────────────────────
+
+
+class _FakeMediaRelay(_FakeRelay):
+    def __init__(self, *, conn: object = object(), **kw) -> None:
+        super().__init__(**kw)
+        self.conn = conn
+        self.bodies: list[tuple[bytes, str]] = []
+
+    async def media_connection(self, gfs_url):
+        if isinstance(self.raises, RuntimeError):
+            raise self.raises
+        return self.conn
+
+    async def send_media_body(self, *, body, gfs_url):
+        if self.raises is not None:
+            raise self.raises
+        self.bodies.append((body, gfs_url))
+        return self.ok
+
+
+async def test_media_frame_is_sealed_to_the_peer_and_posted_to_its_relay():
+    kp = generate_x25519_keypair()
+    relay = _FakeMediaRelay()
+    media = b"\x00SHM\x01" + b"m" * 5000
+    ok, status = await GfsRelayTransport(relay_sender=relay).send_media(
+        instance=_instance(kp), media_body=media
+    )
+    assert (ok, status) == (True, None)
+    [(body, url)] = relay.bodies
+    assert url == "https://gfs.example.org"
+    assert body.startswith(b"\x00SHR\x01" + b"b" * 32)
+    assert (
+        open_relay_media(
+            body, own_instance_id="b" * 32, keywrap_private_key=kp.private_key
+        )
+        == media
+    )
+
+
+@pytest.mark.parametrize(
+    ("raises", "want"),
+    [
+        (EnvelopeRelayThrottled("busy"), RELAY_STATUS_THROTTLED),
+        (EnvelopeRelayUnavailable("none"), None),
+        (RuntimeError("boom"), None),
+    ],
+)
+async def test_media_frame_failures_never_raise(raises, want):
+    kp = generate_x25519_keypair()
+    transport = GfsRelayTransport(relay_sender=_FakeMediaRelay(raises=raises))
+    assert await transport.send_media(
+        instance=_instance(kp), media_body=b"\x00SHM"
+    ) == (False, want)
+
+
+async def test_media_frame_too_big_or_without_a_key_is_refused_before_the_wire():
+    kp = generate_x25519_keypair()
+    relay = _FakeMediaRelay()
+    transport = GfsRelayTransport(relay_sender=relay)
+    too_big = b"m" * (RELAY_MEDIA_MAX_MEDIA_BODY_BYTES + 1)
+    assert await transport.send_media(instance=_instance(kp), media_body=too_big) == (
+        False,
+        RELAY_STATUS_TOO_LARGE,
+    )
+    assert await transport.send_media(
+        instance=_instance(kp, remote_keywrap_pk=""), media_body=b"\x00SHM"
+    ) == (False, None)
+    assert relay.bodies == []
+
+
+async def test_media_ready_needs_a_key_a_relay_and_a_proving_server():
+    kp = generate_x25519_keypair()
+    assert await GfsRelayTransport(relay_sender=_FakeMediaRelay()).media_ready(
+        _instance(kp)
+    )
+    assert not await GfsRelayTransport(
+        relay_sender=_FakeMediaRelay(conn=None)
+    ).media_ready(_instance(kp))
+    assert not await GfsRelayTransport(relay_sender=_FakeMediaRelay()).media_ready(
+        _instance(kp, relay_via="")
+    )
+    assert not await GfsRelayTransport(relay_sender=_FakeMediaRelay()).media_ready(
+        _instance(kp, remote_keywrap_pk="")
+    )
+    assert not await GfsRelayTransport(
+        relay_sender=_FakeMediaRelay(raises=RuntimeError("probe"))
+    ).media_ready(_instance(kp))

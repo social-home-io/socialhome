@@ -365,15 +365,29 @@ class SpaceMediaGfsUploader:
     async def is_relay_reader(self, instance_id: str) -> bool:
         """Whether *instance_id* is a member household seated from an invite
         link that takes ``media_refs`` (v_80): its items carry the
-        descriptor, and it gets no ``SPACE_MEDIA_BLOB`` push."""
+        descriptor, and it gets no ``SPACE_MEDIA_BLOB`` push. Not one whose
+        GFS keeps no space media cache while it reads binary relay frames
+        (v_87): that one gets the push, through the relay."""
         if self._federation is None:
             return False
         inst = await self._federation_repo.get_instance(instance_id)
         if inst is None or inst.source is not InstanceSource.SPACE_SESSION:
             return False
-        return await self._federation.peer_supports(
+        if not await self._federation.peer_supports(
             instance_id, min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_REFS
-        )
+        ):
+            return False
+        # v_87 — a reader whose GFS keeps NO space media cache (its last
+        # signed capability block proved ``envelope_media`` and carried no
+        # ``space_media``) has nothing to fetch from: it gets the push as
+        # binary relay frames instead, when it opens them.
+        if inst.relay_via and await self._federation.peer_supports(
+            instance_id, min_version=FederationCapability.MIN_FOR_RELAY_MEDIA
+        ):
+            conn = await self._gfs.connection_for_url(inst.relay_via)
+            if conn is not None and self._gfs.space_media_cache_off(conn):
+                return False
+        return True
 
     async def _reader_conn(self, instance_id: str) -> GfsConnection | None:
         if not await self.is_relay_reader(instance_id):

@@ -63,6 +63,10 @@ log = logging.getLogger(__name__)
 #: envelopes. Fixed by the GFS contract.
 GFS_ENVELOPE_PATH: str = "/gfs/envelope"
 
+#: Total timeout for one binary media frame (≤ 528 KiB) to the relay: more
+#: than the envelope's, so a slow uplink still gets a chunk out.
+GFS_MEDIA_TIMEOUT_S: float = 60.0
+
 #: Per-POST ceiling. Matches the other GFS calls in this codebase.
 GFS_ENVELOPE_TIMEOUT_S: float = 10.0
 
@@ -187,6 +191,71 @@ class GfsEnvelopeSender:
             )
             return False
 
+    async def media_connection(self, gfs_url: str) -> GfsConnection | None:
+        """The active connection at *gfs_url* whose server proved
+        ``envelope_media`` (v_87), or ``None``. An empty *gfs_url* names no
+        server, so no media route (a relay seat always has its
+        ``relay_via``)."""
+        if not gfs_url:
+            return None
+        want = normalize_gfs_base(gfs_url)
+        for conn in await self._repo.list_active():
+            if (
+                conn.status == "active"
+                and normalize_gfs_base(conn.inbox_url) == want
+                and await self._gfs.envelope_media_supported(conn)
+            ):
+                return conn
+        return None
+
+    async def send_media_body(self, *, body: bytes, gfs_url: str) -> bool:
+        """POST one binary relay media body (``\\x00SHR``, v_87) to the
+        relay at *gfs_url*, raw, as ``application/octet-stream``. ``True``
+        when it accepted (``202``).
+
+        The body is already identity-free (recipient id + a seal; built by
+        :func:`~socialhome.federation.gfs_relay_media.seal_relay_media`) and
+        no header names this household. Raises
+        :class:`~socialhome.federation.invite_bootstrap.EnvelopeRelayThrottled`
+        on ``429`` (the per-IP request or byte budget — waitable) and
+        :class:`EnvelopeRelayUnavailable` when no connection at *gfs_url*
+        proved ``envelope_media``; any other refusal is ``False``."""
+        conn = await self.media_connection(gfs_url)
+        if conn is None:
+            raise EnvelopeRelayUnavailable(
+                "no GFS connection here carries media frames for that household",
+            )
+        url = f"{conn.inbox_url.rstrip('/')}{GFS_ENVELOPE_PATH}"
+        try:
+            async with self._gfs.client().post(
+                url,
+                allow_redirects=False,
+                data=body,
+                headers={"Content-Type": "application/octet-stream"},
+                timeout=aiohttp.ClientTimeout(total=GFS_MEDIA_TIMEOUT_S),
+            ) as resp:
+                if resp.status < 300:
+                    return True
+                if resp.status == 429:
+                    raise EnvelopeRelayThrottled(
+                        "the GFS is busy — try again in a moment",
+                    )
+                log.info(
+                    "gfs.envelope: %r (%s) rejected a relayed media frame — HTTP %d",
+                    conn.display_name,
+                    conn.inbox_url,
+                    resp.status,
+                )
+                return False
+        except (TimeoutError, aiohttp.ClientError, RuntimeError) as exc:
+            log.info(
+                "gfs.envelope: could not reach %r (%s) with a media frame: %s",
+                conn.display_name,
+                conn.inbox_url,
+                exc,
+            )
+            return False
+
     async def _resolve_connection(self, gfs_url: str) -> GfsConnection:
         """The active connection that will carry the blob.
 
@@ -220,6 +289,7 @@ class GfsEnvelopeSender:
 __all__ = [
     "GFS_ENVELOPE_PATH",
     "GFS_ENVELOPE_TIMEOUT_S",
+    "GFS_MEDIA_TIMEOUT_S",
     "EnvelopeRelayThrottled",
     "EnvelopeRelayUnavailable",
     "GfsEnvelopeSender",

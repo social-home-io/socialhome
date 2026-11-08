@@ -434,3 +434,35 @@ async def test_a_media_request_reaches_only_a_socket_that_serves_media(registry)
     await registry.register("new", again, media_serve=True)
     await registry.unregister("new", again)
     assert "new" not in registry._media_serve
+
+
+# ── Binary relay media frames (v_87) ───────────────────────────────────────
+
+
+async def test_media_goes_only_to_a_socket_that_listed_envelope_media(registry):
+    labelled, plain = _FakeWS(), _FakeWS()
+    await registry.register("lab", labelled, envelope_media=True)
+    await registry.register("old", plain)
+    assert registry.takes_media("lab") and not registry.takes_media("old")
+    assert await registry.send_media("lab", b"\x00SHR-body")
+    assert not await registry.send_media("old", b"\x00SHR-body")
+    assert not await registry.send_media("nobody", b"\x00SHR-body")
+    assert labelled.sent_bytes == [b"\x00SHR-body"] and plain.sent_bytes == []
+    stats = registry.fanout_stats.snapshot()["by_kind"]["envelope_media"]
+    assert stats["bytes"] == len(b"\x00SHR-body")
+
+
+async def test_the_media_label_follows_the_current_socket(registry):
+    first, second = _FakeWS(), _FakeWS()
+    await registry.register("x", first, envelope_media=True)
+    await registry.register("x", second)
+    assert not registry.takes_media("x")
+    await registry.unregister("x", second)
+    assert not registry.takes_media("x")
+
+
+async def test_a_dead_media_socket_is_evicted(registry):
+    ws = _FakeWS(broken=True)
+    await registry.register("x", ws, envelope_media=True)
+    assert not await registry.send_media("x", b"\x00SHR")
+    assert not registry.is_connected("x")

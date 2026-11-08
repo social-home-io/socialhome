@@ -154,6 +154,15 @@ class GfsMaintenanceScheduler:
                     exc,
                     exc_info=True,
                 )
+            try:
+                # v_87 — binary relay media frames past their (1 h) TTL.
+                envelopes += await self._envelope_queue_repo.prune_expired_media(now)
+            except Exception as exc:
+                log.warning(
+                    "gfs maintenance: prune_expired media frames failed: %s",
+                    exc,
+                    exc_info=True,
+                )
         invites = 0
         if self._invite_repo is not None:
             try:

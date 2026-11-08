@@ -34,10 +34,15 @@ import orjson
 
 from ..crypto import b64url_encode, sign_ed25519
 from ..domain.gfs_space_media_on_demand import SPACE_MEDIA_REQUEST_FRAME
+from ..domain.relay_media_frame import is_relay_media_body
 from ..domain.subscriber_accepts import OUR_HELLO_ACCEPTS
 from ..domain.ws_binary_frame import InvalidBinaryFrame, decode_binary_frame
 
 log = logging.getLogger(__name__)
+
+#: The in-process frame type a binary relay media frame (v_87) is handed to
+#: the envelope handler under. Never on a wire: the GFS sends the raw bytes.
+ENVELOPE_MEDIA_FRAME: str = "envelope_media"
 
 
 RECONNECT_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 30.0)
@@ -415,7 +420,20 @@ class GfsWebSocketClient:
         """A ``ws_binary1`` frame: the ciphertext string is rebuilt exactly
         (:func:`decode_binary_frame`) BEFORE anything verifies a signature
         over it, then the frame is dispatched like a text one. A malformed
-        frame is dropped with one line, never a traceback."""
+        frame is dropped with one line, never a traceback.
+
+        A binary relay media frame (v_87, ``\\x00SHR`` — its first byte is
+        ``0``, a ``ws_binary1`` frame's is its version ``1``) goes to the
+        envelope handler as ``{type: "envelope_media", body}``, in process
+        only, so it rides the same per-connection wiring as a sealed
+        envelope (:meth:`GfsRelayInbound.handle_frame`)."""
+        if is_relay_media_body(data):
+            await self._on_frame(
+                {"type": ENVELOPE_MEDIA_FRAME, "body": bytes(data)},
+                size=len(data),
+                kind="bytes",
+            )
+            return
         try:
             frame = decode_binary_frame(data)
         except InvalidBinaryFrame as exc:
@@ -514,7 +532,7 @@ class GfsWebSocketClient:
                     exc_info=True,
                 )
             return
-        if frame_type == "envelope":
+        if frame_type in ("envelope", ENVELOPE_MEDIA_FRAME):
             if self._on_envelope is None:
                 # WARNING, not DEBUG: the relay DELETED its queue row to
                 # hand us this frame, so dropping it here loses the

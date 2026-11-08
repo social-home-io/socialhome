@@ -249,6 +249,15 @@ class RelayEnvelopeSender(Protocol):
         gfs_url: str = "",
     ) -> bool: ...
 
+    async def media_connection(self, gfs_url: str) -> Any:
+        """v_87 — the connection at *gfs_url* that carries binary media
+        frames (proved ``envelope_media``), or ``None``."""
+        ...
+
+    async def send_media_body(self, *, body: bytes, gfs_url: str) -> bool:
+        """v_87 — POST one binary relay media body (``\\x00SHR``) raw."""
+        ...
+
 
 @dataclass(slots=True, frozen=True)
 class InviteBootstrapHint:

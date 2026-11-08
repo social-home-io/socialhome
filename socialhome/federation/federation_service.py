@@ -87,6 +87,7 @@ from ..domain.media_chunking import (
     HTTPS_CHUNK_BYTES,
     fits_channel,
     media_chunk_bytes,
+    relay_json_chunk_bytes,
     routed_media_chunk_bytes,
 )
 from ..domain.media_validator import validate_inbound_media_meta
@@ -104,7 +105,9 @@ from .app_framing import (
 )
 from .encoder import FederationEncoder
 from .event_dispatch_registry import EventDispatchRegistry
+from .gfs_relay_transport import RELAY_STATUS_THROTTLED, RELAY_STATUS_TOO_LARGE
 from .inbound_validator import (
+    TRANSPORT_GFS_RELAY,
     InboundContext,
     InboundPipeline,
     _InboxInstance,
@@ -350,6 +353,7 @@ class FederationService:
         "_last_mesh_begin_at",
         "_media_https_backoff",
         "_media_https_inbound_pipeline",
+        "_media_relay_inbound_pipeline",
         "_online_status_service",
         "_outbox_repo",
         "_own_identity_pk",
@@ -523,6 +527,7 @@ class FederationService:
         # keeps refusing binary bodies gets JSON only for a while.
         self._media_https_backoff = MediaHttpsBackoff()
         self._rtc_inbound_pipeline = None  # lazy-built on first RTC frame
+        self._media_relay_inbound_pipeline = None  # lazy, v_87 relay frames
         # Event dispatch registry for federation event handlers.
         # Handlers register themselves via attach_* methods.
         self._event_registry = EventDispatchRegistry()
@@ -596,6 +601,21 @@ class FederationService:
             lookup_step=make_lookup_instance(
                 repo=self._federation_repo,
                 lookup_fn=_lookup_by_inbox_id,
+            ),
+        )
+        steps.insert(1, make_check_event_types(MEDIA_HTTPS_EVENT_TYPES))
+        return InboundPipeline(steps)
+
+    def _build_media_relay_pipeline(self):
+        """The §24.11 pipeline for a media body that came through the GFS
+        relay (v_87): the DataChannel chain (lookup by the sender's
+        instance id) with the inbox media route's event-type gate straight
+        after the parse — a relay media frame is a media chunk, nothing
+        else. Composed from the shared step list, never a copy."""
+        steps = self._common_pipeline_steps(
+            lookup_step=make_lookup_instance_by_id(
+                repo=self._federation_repo,
+                unpaired_recently=self._unpaired_recently,
             ),
         )
         steps.insert(1, make_check_event_types(MEDIA_HTTPS_EVENT_TYPES))
@@ -1274,7 +1294,29 @@ class FederationService:
         instance = await self._federation_repo.get_instance(instance_id)
         if instance is None or instance.status is not PairingStatus.CONFIRMED:
             return routed_media_chunk_bytes(file_size_bytes=file_size_bytes)
+        if instance.source is InstanceSource.SPACE_SESSION:
+            # A relay seat: full 512 KiB chunks when they go as binary relay
+            # frames (v_87), else chunks the JSON relay can carry.
+            if await self.relay_media_ok(instance):
+                return HTTPS_CHUNK_BYTES
+            return relay_json_chunk_bytes(file_size_bytes=file_size_bytes)
         return self.media_chunk_bytes(instance_id, file_size_bytes=file_size_bytes)
+
+    async def relay_media_ok(self, instance: RemoteInstance) -> bool:
+        """Whether a media chunk to *instance* — a household seated from an
+        invite link — can go as a binary relay frame (v_87): the peer is at
+        :data:`FederationCapability.MIN_FOR_RELAY_MEDIA` and its relay
+        (``relay_via``) proved ``envelope_media`` under a valid signature.
+        Otherwise it gets JSON chunks of
+        :data:`~socialhome.domain.media_chunking.RELAY_JSON_CHUNK_BYTES`."""
+        return (
+            self._transport is not None
+            and instance.source is InstanceSource.SPACE_SESSION
+            and await self.peer_supports(
+                instance.id, min_version=FederationCapability.MIN_FOR_RELAY_MEDIA
+            )
+            and await self._transport.relay_media_ready(instance)
+        )
 
     async def peer_supports(self, instance_id: str, *, min_version: int) -> bool:
         """``True`` iff the named peer's advertised ``proto_version`` is
@@ -2462,6 +2504,23 @@ class FederationService:
             # Binary send didn't land (channel raced closed / over HWM) —
             # try the HTTPS leg so the chunk still goes as binary.
         if (
+            instance.source is InstanceSource.SPACE_SESSION
+            and len(raw_chunk) <= HTTPS_CHUNK_BYTES
+            and await self.relay_media_ok(instance)
+        ):
+            # v_87 — one binary frame through the GFS relay. Its outcome is
+            # final: a chunk sized for the frame cannot fall back to a JSON
+            # envelope on the relay (413), so a failure goes back to the
+            # outbox, which retries (a 429 is marked waitable).
+            return await self._send_media_relay(
+                transport,
+                instance=instance,
+                event_type=event_type,
+                payload=payload,
+                raw_chunk=raw_chunk,
+                space_id=space_id,
+            )
+        if (
             instance.source is not InstanceSource.SPACE_SESSION
             and instance.remote_inbox_url
             # A peer already known to be away gets the JSON leg straight
@@ -2488,6 +2547,61 @@ class FederationService:
                 via_https=True,
             )
         return None
+
+    async def _send_media_relay(
+        self,
+        transport: FederationTransport,
+        *,
+        instance: RemoteInstance,
+        event_type: FederationEventType,
+        payload: dict,
+        raw_chunk: bytes,
+        space_id: str | None,
+    ) -> DeliveryResult:
+        """Build + sign the media envelope (the inbox frame of
+        :meth:`_send_media_binary`) and hand it to the GFS relay as one
+        sealed binary frame (v_87). ``ok`` means the relay ACCEPTED it (its
+        uniform ``202``), as for every relayed envelope."""
+        try:
+            session_key = self._key_manager.decrypt(instance.key_self_to_remote)
+        except Exception:
+            log.warning(
+                "send_media_chunk: failed to decrypt session key for %s",
+                instance.id,
+                exc_info=True,
+            )
+            return DeliveryResult(
+                instance_id=instance.id, ok=False, error="session_key", via="gfs_relay"
+            )
+        header, sealed = build_media_envelope(
+            encoder=self._encoder,
+            session_key=session_key,
+            from_instance=self._own_instance_id,
+            to_instance=instance.id,
+            sig_suite=instance.sig_suite or self._encoder.sig_suite,
+            event_type=event_type,
+            payload=payload,
+            raw_chunk=raw_chunk,
+            space_id=space_id,
+        )
+        ok, status = await transport.send_media_relay(
+            instance=instance, header_dict=header, payload_bytes=sealed
+        )
+        if ok:
+            self.note_relay_accepted(instance.id)
+            return DeliveryResult(instance_id=instance.id, ok=True, via="gfs_relay")
+        error = "relay_media_failed"
+        if status == RELAY_STATUS_THROTTLED:
+            error = DELIVERY_ERROR_RELAY_THROTTLED
+        elif status == RELAY_STATUS_TOO_LARGE:
+            error = DELIVERY_ERROR_RELAY_TOO_LARGE
+        return DeliveryResult(
+            instance_id=instance.id,
+            ok=False,
+            status_code=status,
+            error=error,
+            via="gfs_relay",
+        )
 
     async def _send_media_binary(
         self,
@@ -3503,6 +3617,46 @@ class FederationService:
         # chunk, fresh msg_id), whose part lands under the same transfer key
         # and index (a re-send overwrites its part, the assembled file is
         # write-once), so nothing legitimate is lost or applied twice.
+        return await self._finish_media_frame(
+            ctx, frame.payload, wire_frame_suite=wire_suite
+        )
+
+    async def handle_inbound_media_relay(self, media_body: bytes) -> dict:
+        """Validate + decrypt one binary media body that the GFS relay
+        delivered (v_87), then dispatch.
+
+        *media_body* is the inbox media body (``\\x00SHM``, the suite byte,
+        one ``fed-media-v1`` frame) the caller opened from a ``\\x00SHR``
+        frame sealed to our key-wrap key. The sender's ``from_instance`` is
+        read from the signed header only to LOOK UP its row (as for a relayed
+        JSON envelope); the pipeline then requires that row's key to have
+        signed these exact bytes. The header runs
+        :meth:`_build_media_relay_pipeline` with
+        ``transport = TRANSPORT_GFS_RELAY`` (peer-class and relay-opt-in gates,
+        the relay's timestamp window, signature, replay, decrypt, idempotency,
+        ban), then the shared tail :meth:`_finish_media_frame` with the body's
+        suite byte bound to the signed ``media_frame_suite`` — exactly the
+        inbox's checks. Raises :class:`ValueError` on any refusal.
+        """
+        try:
+            wire_suite, frame = decode_body(media_body)
+        except MediaFramingError as exc:
+            raise ValueError(f"Invalid media frame: {exc}") from exc
+        try:
+            claimed = _loads(frame.header).get("from_instance")
+        except Exception as exc:
+            raise ValueError("Invalid media frame header") from exc
+        if not isinstance(claimed, str) or not claimed:
+            raise ValueError("relayed media frame names no sender")
+        if self._media_relay_inbound_pipeline is None:
+            self._media_relay_inbound_pipeline = self._build_media_relay_pipeline()
+        pipeline: InboundPipeline = self._media_relay_inbound_pipeline  # type: ignore[assignment]
+        ctx = InboundContext(
+            raw_body=frame.header,
+            instance_id=claimed,
+            transport=TRANSPORT_GFS_RELAY,
+        )
+        await pipeline.run(ctx)
         return await self._finish_media_frame(
             ctx, frame.payload, wire_frame_suite=wire_suite
         )

@@ -12,6 +12,12 @@ import logging
 import orjson
 from aiohttp import web
 
+from ...domain.relay_media_frame import (
+    RELAY_MEDIA_MAX_BODY_BYTES,
+    InvalidRelayMediaBody,
+    is_relay_media_body,
+    parse_relay_media_body,
+)
 from .. import app_keys as K
 from ..envelope_relay import ENVELOPE_MAX_BODY_BYTES, InvalidEnvelope, validate_envelope
 from .base import GfsBaseView
@@ -49,11 +55,30 @@ class EnvelopeRelayView(GfsBaseView):
     into a presence/existence oracle for anyone willing to walk instance ids.
     Malformed → 400, over the cap → 413, rate-limited → 429 (from the
     middleware).
+
+    **Binary media frames (v_87).** A body starting with ``\x00SHR``
+    (:mod:`socialhome.domain.relay_media_frame`) is one sealed media chunk
+    for ``to_instance``, read from the body itself: up to 528 KiB (a JSON
+    body keeps its 320 KiB cap), charged to the caller's per-minute byte
+    budget (429 past it), answered with the same uniform ``202`` and handed
+    to ``GfsEnvelopeRelay.submit_media``. A server with media off refuses it
+    with 400, like any body it cannot parse.
     """
 
     async def post(self) -> web.Response:
         relay = self.svc(K.gfs_envelope_relay_key)
-        raw = await self.bounded_raw(ENVELOPE_MAX_BODY_BYTES)
+        cap = (
+            max(ENVELOPE_MAX_BODY_BYTES, RELAY_MEDIA_MAX_BODY_BYTES)
+            if relay.media_enabled
+            else ENVELOPE_MAX_BODY_BYTES
+        )
+        raw = await self.bounded_raw(cap)
+        if is_relay_media_body(raw):
+            return self._media(relay, raw)
+        if len(raw) > ENVELOPE_MAX_BODY_BYTES:
+            raise web.HTTPRequestEntityTooLarge(
+                max_size=ENVELOPE_MAX_BODY_BYTES, actual_size=len(raw)
+            )
         try:
             parsed = orjson.loads(raw)
         except ValueError as exc:
@@ -66,4 +91,20 @@ class EnvelopeRelayView(GfsBaseView):
         # unknown / saturated all end here with the same response after the
         # same work, and there is no outcome to branch on.
         relay.submit(to_instance, sealed)
+        return web.json_response(_ACCEPTED_BODY, status=202)
+
+    def _media(self, relay, raw: bytes) -> web.Response:
+        """One binary relay media frame: outer shape, byte budget, hand-off."""
+        if not relay.media_enabled:
+            raise web.HTTPBadRequest(reason="media frames are not relayed here")
+        try:
+            to_instance, _sealed = parse_relay_media_body(raw)
+        except InvalidRelayMediaBody as exc:
+            raise web.HTTPBadRequest(reason=str(exc)) from exc
+        resolver = self.svc(K.gfs_client_ip_key)
+        if not relay.media_budget_allows(resolver.bucket(self.request), len(raw)):
+            resp = web.json_response({"error": "rate_limited"}, status=429)
+            resp.headers["Retry-After"] = "60"
+            return resp
+        relay.submit_media(to_instance, bytes(raw))
         return web.json_response(_ACCEPTED_BODY, status=202)

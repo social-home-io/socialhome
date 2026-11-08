@@ -925,6 +925,20 @@ once to that member's GFS (`relay_via`), and the member fetches, checks and
 decrypts it there — see [`media.md`](./media.md#space-media-via-the-gfs-cache-v_80).
 A link-joined member below v_80 still gets only what fits the relay (its
 posts' text, not their pictures). Files over 8 MiB are not cached yet.
+
+**Mesh-sized media through the relay (v_87).** The relay can now carry a
+full 512 KiB chunk: a household sends it as one binary `\x00SHR` frame
+(the chunk's inbox media body sealed to the member's key-wrap key) when the
+member is at v_87 and its GFS proves `envelope_media` — see
+[`gfs-relay.md`](./gfs-relay.md#binary-media-frames-v_87). Live pictures
+still go through the cache above; the relay push is used for a v_87 member
+whose GFS keeps **no** space media cache (its signed block proves
+`envelope_media` and carries no `space_media`), which before got no pictures
+at all. Without `envelope_media` or below v_87 a chunk to a link-joined
+member is a JSON envelope of at most 96 KiB (`RELAY_JSON_CHUNK_BYTES`), which
+fits the relay's envelope cap. Catching up older files over the relay
+(files no longer in the cache) comes with the wanted / catch-up work after
+the GFS redesign.
 A private space with an opaque channel (v_51) uploads under the GFS's
 channel scope, so the GFS learns only the channel id.
 

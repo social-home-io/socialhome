@@ -284,6 +284,87 @@ sequenceDiagram
     B->>B: drop routes to A (B's own gfs_relay stays 1)<br/>next send to A: RTC / HTTPS / outbox, never the relay
 ```
 
+## Binary media frames (v_87)
+
+The JSON relay body tops out at ~191 KiB of sealed plaintext, so a 512 KiB
+media chunk (base64'ed twice inside an envelope, ~1 MiB) never fit. Since
+v_87 the same `POST /gfs/envelope` also takes a **binary** body that carries
+one chunk at mesh size:
+
+```
+outer  = "\x00SHR" | u8 version 1 | to_instance (32 ASCII) | sealed
+sealed = u8 kem-suite id (0x01 = x25519) | eph_pk (32) | nonce (12) | AES-256-GCM(ct || tag)
+plain  = u32 BE length | media body | zero padding to a size bucket
+```
+
+The **media body** is the chunk's binary inbox body from v_81
+(`\x00SHM`, the frame-suite byte, the signed §24.11 header, the AES-GCM
+sealed chunk — `federation/media_framing.py`). The seal hides the header's
+`from_instance`, `event_type` and `space_id` from the GFS; the AEAD's
+associated data binds the outer prefix (recipient id included) and
+`eph_pk`, so a re-addressed frame does not open. Padding buckets are 64,
+128, 256, 516 KiB and the cap; a full 512 KiB chunk lands in 516 KiB
+(~517 KiB on the wire, cap 528 KiB).
+
+- **Scope:** a household seated from an invite link (`space_session`) at
+  v_87, whose `relay_via` GFS proved the signed `envelope_media` capability.
+  Today this carries `SPACE_MEDIA_BLOB` to a link-joined member whose GFS
+  keeps **no** space media cache (its signed block carries no
+  `space_media`); live pictures otherwise keep using the cache. The
+  generic relay for files no longer in the cache comes with the wanted /
+  catch-up work after the GFS redesign.
+- **Fallback:** a peer below v_87, or a GFS without `envelope_media`, gets
+  JSON chunks of at most 96 KiB (`RELAY_JSON_CHUNK_BYTES`), which fit the
+  JSON relay. A binary frame that the relay throttles (429) is waited out;
+  it never falls back to JSON (the chunk is too large for it).
+- **GFS:** identity-free and content-blind as for every relayed body — it
+  reads the magic, the version and the recipient id, never a sender, and
+  pushes the body unchanged as a BINARY WebSocket message to a socket whose
+  hello listed `envelope_media`. Its budgets are separate from the JSON
+  envelopes' (per-IP bytes, in-flight bytes, its own queue table with
+  per-recipient and server-wide byte caps and a 1 h TTL — see
+  [`docs/operations/gfs-cluster.md`](../operations/gfs-cluster.md#envelope-relay-media-frames-v_87)),
+  so media can never crowd a household's control envelopes out. Across a
+  cluster the frame rides the shared queue and the `NODE_DRAIN_HINT` like
+  any queued envelope.
+- **Receiver:** the WebSocket client hands the bytes to
+  `GfsRelayInbound`, which checks the recipient id and the kem-suite byte
+  (unknown → refused, no default), opens the seal and runs
+  `FederationService.handle_inbound_media_relay`: the §24.11 chain on the
+  signed header (lookup by its `from_instance`, a media-only event-type
+  gate, peer-class and relay-opt-in gates, the relay's timestamp window,
+  signature, replay, decrypt, idempotency, ban), then the same tail as the
+  inbox and the DataChannel (`_finish_media_frame`: frame and AEAD suites,
+  chunk decrypt, `chunk_sha256` binding).
+
+```mermaid
+sequenceDiagram
+    participant A as Host household
+    participant G as GFS
+    participant E as Link-joined member (v_87)
+    A->>A: chunk 512 KiB → inbox media body (\x00SHM, signed header + sealed chunk)
+    A->>A: seal to E's key-wrap key, pad → \x00SHR | v1 | E | sealed
+    A->>G: POST /gfs/envelope (raw, ≤ 528 KiB)
+    G-->>A: 202 accepted (uniform)
+    alt E's socket listed envelope_media
+        G->>E: binary WS message (the same bytes)
+    else offline / other node
+        G->>G: gfs_media_queue (16 MiB / recipient, 1 h) + NODE_DRAIN_HINT
+        G->>E: binary WS message on its next labelled hello
+    end
+    E->>E: open seal → §24.11 media pipeline → chunk stored
+```
+
+**Cost:** one frame per chunk per relay-seated member household — a
+512 KiB chunk is ~517 KiB on the wire to the GFS and the same again from the
+GFS to the member (JSON chunks of 96 KiB cost ~1.8× their size each way, plus
+an envelope per 96 KiB). A 200 MiB file to 50 relay-seated members is
+400 chunks × 50 = 20 000 frames, ~10.1 GiB up and ~10.1 GiB down through the
+GFS; at the default 64 MiB / min per sending address that is ~2.7 h from one
+household (the sender waits out each 429). That is why live pictures stay on
+the cache (one upload per GFS, not per member) and the relay carries only
+what the cache cannot.
+
 ## Privacy — who learns what
 
 | Party | Learns |
@@ -353,6 +434,13 @@ sequenceDiagram
   (`peer_gfs_routes`, migration 0081).
 - `socialhome/app.py` — `_build_gfs_route_discovery`; the GFS
   `on_connected` hook calls `trigger()`.
+- v_87 binary media frames: `socialhome/domain/relay_media_frame.py`
+  (outer shape), `socialhome/federation/gfs_relay_media.py` (seal / open),
+  `GfsRelayTransport.send_media`, `FederationService._send_media_relay` /
+  `handle_inbound_media_relay`, `GfsRelayInbound._handle_media`; GFS side
+  `global_server/envelope_relay.py` (`submit_media`, `accept_media`,
+  `SlidingByteBudget`), `global_server/routes/envelope.py`,
+  `gfs_media_queue` (GFS migration 0028).
 
 ## Spec references
 

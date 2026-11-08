@@ -1213,7 +1213,24 @@ the body, not a header) and a suite byte (`MEDIA_FRAME_SUITE_IDS`:
 parses; an unknown byte is refused, and the signed `media_frame_suite`
 must equal it (the byte itself is unsigned). A channel frame from a
 v_14..v_80 sender has no field and reads as v1 — the migration tripwire.
-A new layout ships as a sibling byte + suite name. **Nonce budget:** both the metadata
+A new layout ships as a sibling byte + suite name. **Through the GFS relay
+(v_87):** that same `\0SHM` body is sealed once more to the recipient's
+static X25519 key-wrap key and sent as `"\0SHR" | u8 version 1 |
+to_instance | sealed` (`federation/gfs_relay_media.py`), where `sealed` =
+`u8 kem-suite id | eph_pk (32) | nonce (12) | AES-256-GCM(ct || tag)`. The
+kem-suite byte maps through `KEM_SUITE_IDS` (`0x01` = `"x25519"`, the
+suite the JSON relay seal tags as `kem_suite`) and must be in
+`SUPPORTED_KEM_SUITES`; an unknown byte is refused with
+`UnsupportedKemSuite`, never defaulted — the Phase-2 hybrid takes a new
+byte. Key: HKDF-SHA256 over the ephemeral DH output with its own `info`
+(`socialhome/relay-media:v1`, distinct from the JSON seal's
+`space-keywrap:v1`). AAD: `socialhome/relay_media/v1|` + the outer prefix
+(magic, version, recipient id) + `eph_pk`, so a relay that re-addresses a
+frame or swaps the ephemeral key breaks the tag. The plaintext is
+`u32 length | body | zero padding` to a size bucket (64 / 128 / 256 /
+516 KiB / the 528 KiB cap) so the GFS sees a bucket, not a size. The outer
+version byte names the layout the GFS reads (`SUPPORTED_RELAY_MEDIA_VERSIONS`,
+`domain/relay_media_frame.py`). **Nonce budget:** both the metadata
 AEAD and the chunk AEAD draw a fresh random 96-bit nonce under the same
 directional session key already used for every JSON envelope to that
 peer. Chunking raises the messages-per-key count (a 200 MiB video ≈ 400

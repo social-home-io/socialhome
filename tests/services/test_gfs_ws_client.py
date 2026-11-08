@@ -1347,3 +1347,52 @@ async def test_a_space_media_request_goes_to_its_handler():
     assert got == [frame]
     client.attach_space_media_request_handler(_boom)
     await client._on_text(json.dumps(frame))
+
+
+# ── Binary relay media frames (v_87) ─────────────────────────────────────
+
+
+def test_the_hello_lists_envelope_media():
+    seed, _pub = _gen_keypair()
+    client = GfsWebSocketClient(
+        gfs_url="https://gfs.test",
+        instance_id="sh-x",
+        signing_key=seed,
+        session_factory=lambda: None,
+        on_relay=None,
+    )
+    assert "envelope_media" in client._build_hello()["accepts"]
+
+
+async def test_a_relay_media_frame_goes_to_the_envelope_handler_unchanged():
+    seed, _pub = _gen_keypair()
+    got: list[dict] = []
+
+    async def _env(frame: dict) -> None:
+        got.append(frame)
+
+    client = GfsWebSocketClient(
+        gfs_url="https://gfs.test",
+        instance_id="sh-x",
+        signing_key=seed,
+        session_factory=lambda: None,
+        on_relay=None,
+        on_envelope=_env,
+    )
+    data = b"\x00SHR\x01" + b"b" * 32 + os.urandom(1000)
+    await client._on_binary(data)
+    assert got == [{"type": "envelope_media", "body": data}]
+
+
+async def test_a_relay_media_frame_without_a_handler_is_dropped_loudly(caplog):
+    seed, _pub = _gen_keypair()
+    client = GfsWebSocketClient(
+        gfs_url="https://gfs.test",
+        instance_id="sh-x",
+        signing_key=seed,
+        session_factory=lambda: None,
+        on_relay=None,
+    )
+    with caplog.at_level(logging.WARNING):
+        await client._on_binary(b"\x00SHR\x01" + b"b" * 32 + b"x")
+    assert "no handler is attached" in caplog.text

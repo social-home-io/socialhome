@@ -2198,6 +2198,33 @@ class FederationTransport:
             return MediaPostResult(ok=False, status_code=413)
         return await self._https_inbox.send_media(instance=instance, body=body)
 
+    async def relay_media_ready(self, instance: RemoteInstance) -> bool:
+        """Whether a binary media frame can reach *instance* through its GFS
+        relay (v_87): a relay tier is wired and the row's ``relay_via``
+        server proved ``envelope_media``. The peer's version is the
+        caller's check."""
+        if self._gfs_relay is None:
+            return False
+        return await self._gfs_relay.media_ready(instance)
+
+    async def send_media_relay(
+        self,
+        *,
+        instance: RemoteInstance,
+        header_dict: dict,
+        payload_bytes: bytes,
+    ) -> tuple[bool, int | None]:
+        """Deliver one binary media body through the GFS relay (v_87): the
+        exact body :meth:`send_media_https` POSTs to an inbox, sealed to the
+        peer and handed to its relay as a ``\\x00SHR`` frame. Never raises;
+        the status follows :meth:`GfsRelayTransport.send`."""
+        if self._gfs_relay is None:
+            return False, None
+        return await self._gfs_relay.send_media(
+            instance=instance,
+            media_body=encode_media_body(header_dict, payload_bytes),
+        )
+
     def is_media_ready(self, instance_id: str) -> bool:
         peer = self._peers.get(instance_id)
         return peer is not None and peer.is_media_ready

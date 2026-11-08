@@ -430,6 +430,8 @@ class GfsApp:
             fed_repo=repos.federation,
             queue_repo=repos.envelope_queue,
             ws_registry=ws_registry,
+            # v_87 — binary relay media frames and their own budgets.
+            media=config.envelope_media,
         )
         # Broadcast items (``/gfs/publish``, member publishes, channel items,
         # public moments) ride the coalesced drain hint ONCE per peer node;

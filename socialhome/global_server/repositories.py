@@ -40,6 +40,7 @@ from .domain import (
     GfsMomentMedia,
     GfsPendingDeleteCert,
     GfsQueuedEnvelope,
+    GfsQueuedMedia,
     GfsSpaceEpoch,
     GfsSpaceMedia,
     GfsSpaceMediaDemand,
@@ -3160,6 +3161,27 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
 
     async def count_for(self, to_instance: str) -> int: ...
 
+    async def enqueue_media(
+        self,
+        to_instance: str,
+        body: bytes,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_bytes_per_recipient: int,
+        max_total_bytes: int,
+    ) -> bool: ...
+
+    async def next_media_for(
+        self, to_instance: str, *, now: int, after_id: int = 0
+    ) -> GfsQueuedMedia | None: ...
+
+    async def delete_media(self, media_id: int) -> int: ...
+
+    async def prune_expired_media(self, now: int) -> int: ...
+
+    async def media_bytes_for(self, to_instance: str, *, now: int) -> int: ...
+
 
 class SqliteGfsEnvelopeQueueRepo:
     """SQLite-backed :class:`AbstractGfsEnvelopeQueueRepo`.
@@ -3305,6 +3327,95 @@ class SqliteGfsEnvelopeQueueRepo:
             return int(cur.rowcount or 0)
 
         return await self._db.transact(_run)
+
+    # ── Binary relay media frames (v_87, migration 0028) ───────────────
+
+    async def enqueue_media(
+        self,
+        to_instance: str,
+        body: bytes,
+        *,
+        created_at: int,
+        expires_at: int,
+        max_bytes_per_recipient: int,
+        max_total_bytes: int,
+    ) -> bool:
+        """Queue one binary relay media frame unless that would pass this
+        recipient's media bytes or every recipient's — **tail-drop**, for
+        the reason :meth:`enqueue` gives (the endpoint is anonymous; eviction
+        would be a delete primitive). Its own table: it never counts against,
+        and never touches, the envelope queue. One transaction for the check
+        and the insert; expired rows do not count."""
+
+        def _run(conn) -> bool:
+            mine, total = conn.execute(
+                "SELECT COALESCE(SUM(CASE WHEN to_instance=? THEN size_bytes"
+                " ELSE 0 END), 0), COALESCE(SUM(size_bytes), 0)"
+                " FROM gfs_media_queue WHERE expires_at > ?",
+                (to_instance, created_at),
+            ).fetchone()
+            size = len(body)
+            if int(mine) + size > max_bytes_per_recipient:
+                return False
+            if int(total) + size > max_total_bytes:
+                return False
+            conn.execute(
+                "INSERT INTO gfs_media_queue(to_instance, body, size_bytes,"
+                " created_at, expires_at) VALUES(?,?,?,?,?)",
+                (to_instance, body, size, created_at, expires_at),
+            )
+            return True
+
+        return await self._db.transact(_run)
+
+    async def next_media_for(
+        self, to_instance: str, *, now: int, after_id: int = 0
+    ) -> GfsQueuedMedia | None:
+        """The oldest unexpired media frame for *to_instance* past
+        *after_id* — one row at a time, so a drain holds one frame in
+        memory, not a household's whole queue."""
+        row = await self._db.fetchone(
+            "SELECT id, to_instance, body, created_at, expires_at"
+            " FROM gfs_media_queue WHERE to_instance=? AND expires_at > ?"
+            " AND id > ? ORDER BY id ASC LIMIT 1",
+            (to_instance, now, after_id),
+        )
+        d = _as_dict(row)
+        if not d:
+            return None
+        return GfsQueuedMedia(
+            id=int(d["id"]),
+            to_instance=d["to_instance"],
+            body=bytes(d["body"]),
+            created_at=int(d["created_at"]),
+            expires_at=int(d["expires_at"]),
+        )
+
+    async def delete_media(self, media_id: int) -> int:
+        def _run(conn) -> int:
+            cur = conn.execute("DELETE FROM gfs_media_queue WHERE id=?", (media_id,))
+            return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)
+
+    async def prune_expired_media(self, now: int) -> int:
+        def _run(conn) -> int:
+            cur = conn.execute(
+                "DELETE FROM gfs_media_queue WHERE expires_at <= ?", (now,)
+            )
+            return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)
+
+    async def media_bytes_for(self, to_instance: str, *, now: int) -> int:
+        """Unexpired media bytes queued for *to_instance* (operator logs)."""
+        row = await self._db.fetchone(
+            "SELECT COALESCE(SUM(size_bytes), 0) AS n FROM gfs_media_queue"
+            " WHERE to_instance=? AND expires_at > ?",
+            (to_instance, now),
+        )
+        d = _as_dict(row)
+        return int(d["n"]) if d else 0
 
     async def enqueue_relay(
         self,

@@ -57,6 +57,9 @@ from .fanout_stats import FanoutStats, frame_kind
 log = logging.getLogger(__name__)
 
 
+#: Fan-out stats label for a binary relay media push (v_87).
+ENVELOPE_MEDIA_FRAME_KIND: str = "envelope_media"
+
 _EVICT_REPLACED_CODE = 4409  # private-use range; "Replaced by newer connection"
 
 #: Close code for a socket evicted because a send stalled (RFC 6455 1013,
@@ -84,6 +87,7 @@ class GfsWebSocketRegistry:
         "_binary",
         "_by_instance",
         "_closing",
+        "_envelope_media",
         "_lock",
         "_media_serve",
         "_no_frame_cert",
@@ -102,6 +106,9 @@ class GfsWebSocketRegistry:
         #: The instances whose CURRENT socket answers ``space_media_request``
         #: (``space_media_serve`` in its hello, v_83).
         self._media_serve: set[str] = set()
+        #: The instances whose CURRENT socket opens binary relay media
+        #: frames (``envelope_media`` in its hello, v_87).
+        self._envelope_media: set[str] = set()
         #: What this node pushed, by frame kind and size class (admin
         #: overview) — counted only for frames that reached a socket.
         self.fanout_stats = FanoutStats()
@@ -119,12 +126,14 @@ class GfsWebSocketRegistry:
         binary: bool = False,
         no_frame_cert: bool = False,
         media_serve: bool = False,
+        envelope_media: bool = False,
     ) -> None:
         """Register *ws* for *instance_id*, evicting any prior socket.
         ``binary``: this socket reads ``ws_binary1`` frames.
         ``no_frame_cert``: it takes member items without the plaintext
         ``writer_cert`` (``space_item_no_cert``).
-        ``media_serve``: it answers ``space_media_request`` (v_83)."""
+        ``media_serve``: it answers ``space_media_request`` (v_83).
+        ``envelope_media``: it opens binary relay media frames (v_87)."""
         async with self._lock:
             previous = self._by_instance.get(instance_id)
             self._by_instance[instance_id] = ws
@@ -132,6 +141,7 @@ class GfsWebSocketRegistry:
                 (self._binary, binary),
                 (self._no_frame_cert, no_frame_cert),
                 (self._media_serve, media_serve),
+                (self._envelope_media, envelope_media),
             ):
                 if on:
                     labels.add(instance_id)
@@ -167,6 +177,7 @@ class GfsWebSocketRegistry:
                 self._binary.discard(instance_id)
                 self._no_frame_cert.discard(instance_id)
                 self._media_serve.discard(instance_id)
+                self._envelope_media.discard(instance_id)
         log.info(
             "gfs.ws.unregister: instance=%s total=%d",
             instance_id,
@@ -181,6 +192,7 @@ class GfsWebSocketRegistry:
             self._binary.clear()
             self._no_frame_cert.clear()
             self._media_serve.clear()
+            self._envelope_media.clear()
         for ws in sockets:
             if ws.closed:
                 continue
@@ -256,6 +268,28 @@ class GfsWebSocketRegistry:
             )
             return False
         return await self._push(instance_id, ws, ws.send_str(msg), payload, len(raw))
+
+    def takes_media(self, instance_id: str) -> bool:
+        """Whether *instance_id*'s socket is here and opens binary relay
+        media frames (``envelope_media`` in its hello)."""
+        return self.is_connected(instance_id) and instance_id in self._envelope_media
+
+    async def send_media(self, instance_id: str, body: bytes) -> bool:
+        """Push one binary relay media body (v_87) to *instance_id* as a
+        BINARY message, unchanged — only to a socket that listed
+        ``envelope_media``. Same contract as :meth:`send`: ``False`` when
+        there is no such socket or the push failed / stalled (the socket is
+        then evicted), never raises."""
+        ws = self._by_instance.get(instance_id)
+        if ws is None or ws.closed or instance_id not in self._envelope_media:
+            return False
+        return await self._push(
+            instance_id,
+            ws,
+            ws.send_bytes(body),
+            {"type": ENVELOPE_MEDIA_FRAME_KIND},
+            len(body),
+        )
 
     def _for_socket(self, instance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         """*payload* as this socket takes it: a member item without its

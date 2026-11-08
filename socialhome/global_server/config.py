@@ -191,6 +191,91 @@ def _on_demand_bool(raw: object) -> bool:
     raise ValueError(f"[space_media] on_demand must be true or false, got {raw!r}")
 
 
+@dataclass(slots=True, frozen=True)
+class EnvelopeMediaConfig:
+    """``[envelope_relay]`` media keys (v_87, :mod:`.envelope_relay`): the
+    binary relay media frames (``\\x00SHR``) ``POST /gfs/envelope`` carries
+    for households reached only through this server. Their budgets are
+    separate from the JSON envelopes', so media can never crowd a household's
+    control envelopes out.
+
+    * ``media`` — carry media frames at all (and advertise ``envelope_media``).
+    * ``media_ip_bytes_per_minute`` — bytes one client address may post as
+      media frames a minute (per node; 429 past it).
+    * ``media_queue_bytes_per_recipient`` — media bytes queued for one
+      offline household (tail-drop past it).
+    * ``media_queue_ttl_seconds`` — how long a queued media frame waits.
+    * ``media_queue_max_total_bytes`` — media bytes queued for everyone.
+    * ``media_max_inflight_bytes`` — media bytes this node holds in memory
+      between the answer and the push / enqueue (dropped past it)."""
+
+    enabled: bool = True
+    media_ip_bytes_per_minute: int = 64 * 1024**2
+    media_queue_bytes_per_recipient: int = 16 * 1024**2
+    media_queue_ttl_seconds: int = 3600
+    media_queue_max_total_bytes: int = 1024**3
+    media_max_inflight_bytes: int = 64 * 1024**2
+
+    @classmethod
+    def parse(
+        cls, table: dict, env: dict[str, str] | None = None, *, base=None
+    ) -> EnvelopeMediaConfig:
+        """From an ``[envelope_relay]`` table (keys absent keep *base*'s
+        values, else the defaults), then the ``GFS_ENVELOPE_RELAY_<KEY>`` env
+        vars. :class:`ValueError` names the bad key."""
+        out = base if base is not None else cls()
+        values: dict[str, object] = {}
+        for key, (lo, hi) in _ENVELOPE_MEDIA_BOUNDS.items():
+            env_key = f"GFS_ENVELOPE_RELAY_{key.upper()}"
+            if env is not None and env_key in env:
+                raw: object = env[env_key]
+            elif env is None and key in table:
+                raw = table[key]
+            else:
+                continue
+            values[key] = _bounded_int("envelope_relay", key, raw, lo, hi)
+        enabled = out.enabled
+        if env is not None and "GFS_ENVELOPE_RELAY_MEDIA" in env:
+            enabled = _bool("envelope_relay", "media", env["GFS_ENVELOPE_RELAY_MEDIA"])
+        elif env is None and "media" in table:
+            enabled = _bool("envelope_relay", "media", table["media"])
+        return replace(out, enabled=enabled, **values)
+
+
+#: The integer ``[envelope_relay]`` media keys and their inclusive bounds. The
+#: per-recipient queue holds at least one frame (528 KiB) and at most 1 GiB.
+_ENVELOPE_MEDIA_BOUNDS: dict[str, tuple[int, int]] = {
+    "media_ip_bytes_per_minute": (528 * 1024, 1 << 40),
+    "media_queue_bytes_per_recipient": (528 * 1024, 1 << 30),
+    "media_queue_ttl_seconds": (60, 86_400),
+    "media_queue_max_total_bytes": (528 * 1024, 1 << 40),
+    "media_max_inflight_bytes": (528 * 1024, 1 << 34),
+}
+
+
+def _bounded_int(section: str, key: str, raw: object, lo: int, hi: int) -> int:
+    value: int | None = None
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        value = raw
+    elif isinstance(raw, str) and raw.strip().lstrip("-").isdigit():
+        value = int(raw)
+    if value is None:
+        raise ValueError(f"[{section}] {key} must be an integer")
+    if not lo <= value <= hi:
+        raise ValueError(f"[{section}] {key} must be {lo}..{hi}, got {value}")
+    return value
+
+
+def _bool(section: str, key: str, raw: object) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str) and raw.strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    if isinstance(raw, str) and raw.strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"[{section}] {key} must be true or false, got {raw!r}")
+
+
 #: Peer networks whose ``X-Forwarded-For`` header the GFS believes by default:
 #: loopback, the RFC1918 private ranges and the IPv6 unique-local block. A GFS
 #: is almost always reached through a reverse proxy / ingress container that
@@ -330,6 +415,9 @@ class GfsConfig:
     space_media_ip_bytes_per_hour: int = DEFAULT_SPACE_MEDIA_IP_BYTES_PER_HOUR
     space_media_on_demand: SpaceMediaOnDemandConfig = SpaceMediaOnDemandConfig()
 
+    # [envelope_relay] — binary relay media frames (``GFS_ENVELOPE_RELAY_*``).
+    envelope_media: EnvelopeMediaConfig = EnvelopeMediaConfig()
+
     # Loaded-from path, for audit + --set-password write-back.
     source_path: str = ""
 
@@ -362,6 +450,7 @@ class GfsConfig:
         webrtc = data.get("webrtc", {})
         cluster = data.get("cluster", {})
         space_media = data.get("space_media", {})
+        envelope_relay = data.get("envelope_relay", {})
         default_stun = ("stun:stun.l.google.com:19302",)
         cfg = cls(
             host=str(server.get("host") or "0.0.0.0"),
@@ -436,6 +525,7 @@ class GfsConfig:
                 ),
             ),
             space_media_on_demand=SpaceMediaOnDemandConfig.parse(space_media),
+            envelope_media=EnvelopeMediaConfig.parse(envelope_relay),
             source_path=str(p),
         )
         if not cfg.base_url:
@@ -647,6 +737,9 @@ class GfsConfig:
             ),
             space_media_on_demand=SpaceMediaOnDemandConfig.parse(
                 {}, dict(env), base=self.space_media_on_demand
+            ),
+            envelope_media=EnvelopeMediaConfig.parse(
+                {}, dict(env), base=self.envelope_media
             ),
         )._with_clean_aliases()
 
