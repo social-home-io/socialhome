@@ -19,6 +19,14 @@ it got from the same origin calls it the same), the sender's name mapped
 household calls it (``space_direct_media_name(space, us, F)`` — a
 collaborator's edit of our event that kept its cover).
 
+**Hashed files (v_85).** An item that carries a valid ``files`` map
+(:mod:`socialhome.domain.file_hashes`) names each hashed file by its
+content instead: ``space_content_media_name(space, h)`` — whatever is
+stored under it hashes to ``h``, so it needs no sender binding, and an
+item naming another item's file name with other bytes only ever reaches
+its own. A raw ``sc-`` name is never kept as is: it is re-derived from the
+hash the item claims, or (unhashed) rebound to its sender like any name.
+
 GFS descriptors (v_80, :class:`SpaceMediaGfsFetcher`) name the files a
 link-joined reader fetches from a GFS instead; they take precedence
 (:meth:`SpaceMediaNamer.combine`).
@@ -26,16 +34,23 @@ link-joined reader fetches from a GFS instead; they take precedence
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Protocol
 
+from ..domain.file_hashes import (
+    FileHash,
+    is_space_content_media_name,
+    space_content_media_name,
+)
 from ..domain.space_media_ref import (
     SpaceMediaLocalization,
     page_media_urls,
     rewrite_page_body_media,
 )
 from .inbound_media_store import (
+    MEDIA_REF_PREFIX,
     is_reserved_media_name,
+    local_media_ref,
     media_basename,
     space_direct_media_name,
 )
@@ -64,11 +79,18 @@ class SpaceMediaNamer:
         urls: Iterable[str | None],
         *,
         held: Iterable[str | None] = (),
+        hashes: Mapping[str, FileHash] | None = None,
     ) -> SpaceMediaLocalization:
         """This household's names for the files *urls* of an item household
         *origin* delivered, given the files the stored row already shows
-        (*held*; empty for a new row). A reserved name (DM / moment / GFS
-        media) is left alone — the sanitizers drop it."""
+        (*held*; empty for a new row) and the item's valid hash map
+        (*hashes*, by the sender's file names — v_85). A reserved name (DM /
+        moment / GFS media) is left alone — the sanitizers drop it.
+
+        Per file, first match: a file the row holds keeps its name; our own
+        file as the sender calls it keeps ours; a file the row holds under
+        the sender's name keeps it; a hashed file takes its content name;
+        anything else its sender-bound name."""
         if not space_id or not origin:
             return SpaceMediaLocalization()
         held_names = {n for n in (media_basename(u) for u in held) if n}
@@ -85,8 +107,15 @@ class SpaceMediaNamer:
                 continue
             if name in held_names:
                 continue  # the same file, by the name it has here
-            names[name] = own_names.get(name) or space_direct_media_name(
-                space_id, origin, name
+            direct = space_direct_media_name(space_id, origin, name)
+            fh = hashes.get(name) if hashes else None
+            names[name] = (
+                own_names.get(name)
+                # A legacy row keeps the file it holds from this sender —
+                # an edit that now carries hashes never re-points it.
+                or (direct if direct in held_names else None)
+                or (space_content_media_name(space_id, fh.h, name) if fh else None)
+                or direct
             )
         return SpaceMediaLocalization(names=names)
 
@@ -101,19 +130,47 @@ class SpaceMediaNamer:
         )
 
 
-def same_file(held: object, sent: object, *, space_id: str, origin: str) -> bool:
+def same_file(
+    held: object,
+    sent: object,
+    *,
+    space_id: str,
+    origin: str,
+    hashes: Mapping[str, FileHash] | None = None,
+) -> bool:
     """Whether the reference this household holds (*held*) is the file
     household *origin* names *sent*: the same reference, or *sent* under
-    the name it takes here as *origin* delivers it. Both empty is the same
-    (no file)."""
+    the name it takes here as *origin* delivers it (its content name when
+    *hashes* — the item's valid hash map — covers it). Both empty is the
+    same (no file)."""
     if held == sent or (not held and not sent):
         return True
     if not isinstance(held, str) or not isinstance(sent, str) or not held or not sent:
         return False
     name = media_basename(sent)
-    return bool(name) and media_basename(held) == space_direct_media_name(
-        space_id, origin, name
-    )
+    if not name:
+        return False
+    fh = hashes.get(name) if hashes else None
+    if fh is not None:
+        return media_basename(held) == space_content_media_name(space_id, fh.h, name)
+    return media_basename(held) == space_direct_media_name(space_id, origin, name)
+
+
+def comment_media_ref(
+    space_id: str, value: object, hashes: Mapping[str, FileHash] | None
+) -> str | None:
+    """A received space comment's picture as stored here: its content
+    name when the comment's valid hash map (v_85) covers it, else the
+    reference as sent (comments keep their sender's name, as before v_85) —
+    never a raw ``sc-`` name, which only a hash may produce."""
+    ref = local_media_ref(value)
+    if ref is None:
+        return None
+    name = ref[len(MEDIA_REF_PREFIX) :]
+    fh = hashes.get(name) if hashes else None
+    if fh is not None:
+        return MEDIA_REF_PREFIX + space_content_media_name(space_id, fh.h, name)
+    return None if is_space_content_media_name(name) else ref
 
 
 async def space_own_files(

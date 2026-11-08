@@ -38,6 +38,7 @@ from ..canonical_json import legacy_json_dumps
 from ..domain.calendar import coerce_capacity
 from ..domain.errors import WrongTypeError
 from ..domain.federation import FederationEventType
+from ..domain.file_hashes import FILES_FIELD, FILES_SUITE_FIELD
 from ..domain.link_preview import link_preview_from_dict, link_preview_to_dict
 from ..domain.page_version import is_version_hash, version_hash
 from ..domain.space import ContentAction, SpaceModerationItem
@@ -70,6 +71,11 @@ FEATURE_OF_EVENT: Mapping[FederationEventType, str] = {
 }
 
 _ROUTING = frozenset({"space_id", "actor_user_id", "moderation"})
+
+#: v_85 — the files' hash map any release with files may carry: it names
+#: the host's copies of the files the rule compares by name (after the
+#: receiver's renames), never content of its own.
+_FILE_HASH_KEYS = frozenset({FILES_FIELD, FILES_SUITE_FIELD})
 _STAMPS = frozenset({"created_at", "updated_at", "occurred_at"})
 _PAGE_SEQUENCING = frozenset(
     {
@@ -189,7 +195,12 @@ def item_matches_event(
     # bookkeeping this event type may carry freely, or content the rule
     # compared. A key nobody classified (a new wire field, an alias the
     # receiver also reads) refuses the release until it is.
-    if set(payload) - FREE_KEYS.get(event_type, frozenset()) - set(actual):
+    if (
+        set(payload)
+        - FREE_KEYS.get(event_type, frozenset())
+        - _FILE_HASH_KEYS
+        - set(actual)
+    ):
         return False
     return _digest(expected) == _digest(actual)
 

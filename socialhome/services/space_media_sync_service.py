@@ -38,6 +38,7 @@ import aiofiles
 import aiofiles.os
 
 from ..domain.federation import FederationEventType
+from ..domain.file_hashes import blob_hash_fields, sha256_hex
 from ..domain.media_chunking import split_into_chunks
 from ..repositories.space_media_outbox_repo import (
     AbstractSpaceMediaOutboxRepo,
@@ -45,6 +46,7 @@ from ..repositories.space_media_outbox_repo import (
 )
 from .backoff import jittered_backoff_seconds
 from .media_chunk_pipeline import send_chunks
+from .media_file_hasher import MediaFileHasher
 from .peer_unpair_service import is_unpair_tombstone
 
 if TYPE_CHECKING:
@@ -81,6 +83,7 @@ class SpaceMediaSyncService:
         "_stop",
         "_task",
         "_wake",
+        "file_hasher",
     )
 
     def __init__(
@@ -97,6 +100,10 @@ class SpaceMediaSyncService:
         #: Only to recognise an unpair tombstone (see :func:`is_unpair_tombstone`).
         self._federation_repo = federation_repo
         self._media_dir = media_dir
+        #: v_85 — the household's one file hasher (shared by every
+        #: sender of a space item, so a file described then shipped is
+        #: hashed once).
+        self.file_hasher = MediaFileHasher(media_dir)
         self._interval = interval_seconds
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -411,11 +418,23 @@ class SpaceMediaSyncService:
             "transfer_id": transfer_id,
             "filename": entry.blob_id,
             "file_size_bytes": size,
+            # v_85 — the whole file's hash: the receiver stores a hashed
+            # file content-addressed and checks the assembled bytes first.
+            **blob_hash_fields(await self._file_hash(entry.blob_id, data)),
         }
         return (
             ({**common, **seq}, raw)
             for seq, raw in split_into_chunks(data, chunk_bytes)
         )
+
+    async def _file_hash(self, name: str, data: bytes) -> str:
+        """The SHA-256 of *data*, read from the household hasher's cache
+        when it holds this very file (the same size) — a file shipped to
+        many households, or described then shipped, is hashed once."""
+        cached = await self.file_hasher.hash_name(name)
+        if cached is not None and cached.size == len(data):
+            return cached.h
+        return await asyncio.to_thread(sha256_hex, data)
 
     async def _reschedule_or_fail(
         self,

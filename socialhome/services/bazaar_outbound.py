@@ -42,6 +42,8 @@ from ..domain.events import (
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..infrastructure.event_bus import EventBus
+from .file_hashes_sender import FileHashesMixin
+from .media_file_hasher import MediaFileHasher
 from .moderation_release import with_release
 
 if TYPE_CHECKING:
@@ -56,7 +58,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class BazaarOutbound:
+class BazaarOutbound(FileHashesMixin):
     """Bus-event → federation broadcaster for bazaar listings."""
 
     __slots__ = (
@@ -64,6 +66,7 @@ class BazaarOutbound:
         "_bus",
         "_federation",
         "_federation_repo",
+        "_file_hasher",
         "_media_sync",
         "_seats",
         "_users",
@@ -79,8 +82,11 @@ class BazaarOutbound:
         federation_repo=None,
         user_repo: AbstractUserRepo | None = None,
         remote_member_repo: AbstractSpaceRemoteMemberRepo | None = None,
+        file_hasher: MediaFileHasher | None = None,
     ) -> None:
         self._bus = bus
+        #: v_85 — a listing's photos ride with their SHA-256.
+        self._file_hasher = file_hasher
         #: The space's roster mirror: which household seats a remote buyer
         #: or seller, so an offer (v_73) goes to that one household only.
         #: ``None``: offers stay on the household they were made on.
@@ -140,6 +146,7 @@ class BazaarOutbound:
         # A listing riding a reviewed post is published by its approval,
         # which it names (v_43).
         with_release(payload)
+        payload = await self._with_file_hashes(payload, list(listing.image_urls))
         try:
             await self._federation.broadcast_to_space_members(
                 listing.space_id,

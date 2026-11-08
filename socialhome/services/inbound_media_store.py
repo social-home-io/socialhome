@@ -52,6 +52,7 @@ removed without being followed (:func:`drop_parts`), never descended.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import pathlib
@@ -64,6 +65,11 @@ import aiofiles
 import aiofiles.os
 
 from ..domain.errors import InvalidMediaRefError
+from ..domain.file_hashes import (
+    is_file_hash,
+    is_space_content_media_name,
+    space_content_media_name,
+)
 from ..domain.media_chunking import MAX_MEDIA_CHUNKS
 from ..domain.media_constraints import (
     AUDIO_MAX_UPLOAD_BYTES,
@@ -191,6 +197,22 @@ def space_direct_media_name(space_id: str, origin: str, filename: str) -> str:
     dot = filename.rfind(".")
     ext = filename[dot:] if 0 < dot and len(filename) - dot <= 10 else ""
     return f"{SPACE_DIRECT_MEDIA_PREFIX}{digest[:40]}{ext}"
+
+
+def content_name_binds(name: str, space_id: str, h: str | None) -> bool:
+    """Whether bytes hashing to *h* may be stored as *name* in *space_id*:
+    any name that is not a content name (``sc-``, v_85), or exactly the
+    content name of *h* in that space. THE invariant of a content name —
+    every write helper here checks it (:func:`store_chunk`,
+    :func:`link_once`, :func:`write_once`), so whatever lies under
+    ``sc(S, h)`` hashes to ``h``."""
+    if not is_space_content_media_name(name):
+        return True
+    return (
+        bool(space_id)
+        and is_file_hash(h)
+        and space_content_media_name(space_id, str(h), name) == name
+    )
 
 
 def is_space_direct_media_name(name: str) -> bool:
@@ -410,6 +432,23 @@ async def remove_quietly(path: pathlib.Path) -> None:
         pass
 
 
+async def link_once(source: pathlib.Path, target: pathlib.Path) -> bool:
+    """Give the stored file *source* the second name *target* (a hard
+    link) unless *target* exists — write-once. ``False`` when *target* was
+    there already or the filesystem has no hard links (then nothing is
+    written: the second name stays missing, never a copy that could
+    diverge). Never a content name (``sc-``): only a verified
+    :func:`store_chunk` writes one. Never raises."""
+    if is_space_content_media_name(target.name):
+        log.warning("%s: a content name is never a second name — refused", target.name)
+        return False
+    try:
+        await aiofiles.os.link(source, target)
+    except OSError:
+        return False
+    return True
+
+
 async def publish_once(tmp: pathlib.Path, target: pathlib.Path) -> bool:
     """Move the finished ``tmp`` to ``target`` unless ``target`` exists.
 
@@ -461,7 +500,14 @@ async def read_bounded(stream: _ByteStream, max_bytes: int) -> bytes | None:
 async def write_once(target: pathlib.Path, data: bytes, tmp: pathlib.Path) -> bool:
     """Write *data* to *tmp* (its directory created), then move it to
     *target* write-once (:func:`publish_once`). ``True`` when stored,
-    ``False`` when *target* already existed. *tmp* never survives."""
+    ``False`` when *target* already existed — or is a content name
+    (``sc-``), which only a verified :func:`store_chunk` writes. *tmp*
+    never survives."""
+    if is_space_content_media_name(target.name):
+        log.warning(
+            "%s: a content name is only written verified — refused", target.name
+        )
+        return False
     await aiofiles.os.makedirs(tmp.parent, exist_ok=True)
     try:
         async with aiofiles.open(tmp, "wb") as fh:
@@ -533,6 +579,8 @@ async def store_chunk(
     data: bytes,
     target: pathlib.Path,
     expected_size: int,
+    expected_sha256: str | None = None,
+    space_id: str = "",
 ) -> bool | None:
     """Land one chunk and assemble ``target`` once every chunk is here.
 
@@ -542,8 +590,12 @@ async def store_chunk(
     by :func:`partial_key`, which binds ``chunk_count``). Returns
 
     * ``None`` — still waiting for a chunk, or the assembled bytes did not
-      come to ``expected_size`` (``-1`` = not declared): nothing published,
-      and on a mismatch the parts are dropped (a resend starts clean).
+      come to ``expected_size`` (``-1`` = not declared) or do not hash to
+      ``expected_sha256`` (v_85, when given): nothing published, and on a
+      mismatch the parts are dropped (a resend starts clean).
+    * ``None`` too when ``target`` is a content name (``sc-``) that is not
+      ``space_content_media_name(space_id, expected_sha256)``
+      (:func:`content_name_binds`) — nothing is written.
     * ``True`` — this call assembled and published ``target``.
     * ``False`` — ``target`` already exists (another chunk completed the
       set first, or a re-delivery); it is never replaced.
@@ -553,6 +605,16 @@ async def store_chunk(
     file of its own inside ``part_dir`` (removed with it), and
     :func:`publish_once` lets exactly one of two concurrent assemblies win.
     """
+    if not content_name_binds(target.name, space_id, expected_sha256):
+        # v_85 — a content name takes only the bytes of ITS hash, in ITS
+        # space (checked again on the assembled bytes below).
+        log.warning(
+            "%s: not the content name of %s in space %s — refusing",
+            target.name,
+            expected_sha256,
+            space_id,
+        )
+        return None
     # Only this function creates ``.partial`` and its part folders; a
     # symlink at either level would point every write outside it. The
     # root is checked before ``makedirs`` so nothing is created behind it.
@@ -583,12 +645,15 @@ async def store_chunk(
         return None
     tmp = part_dir / f"assembling-{uuid.uuid4().hex}"
     written = 0
+    digest = hashlib.sha256() if expected_sha256 is not None else None
     try:
         async with aiofiles.open(tmp, "wb") as out:
             for name in names:
                 async with aiofiles.open(part_dir / name, "rb") as inp:
                     chunk = await inp.read()
                 written += len(chunk)
+                if digest is not None:
+                    await asyncio.to_thread(digest.update, chunk)
                 await out.write(chunk)
     except FileNotFoundError:
         # A concurrent assembly published and removed the parts mid-read.
@@ -603,6 +668,15 @@ async def store_chunk(
             target.name,
             written,
             expected_size,
+        )
+        await remove_quietly(tmp)
+        await drop_parts(part_dir)
+        return None
+    if digest is not None and digest.hexdigest() != expected_sha256:
+        log.warning(
+            "%s: assembled bytes do not hash to the declared %s — discarding",
+            target.name,
+            expected_sha256,
         )
         await remove_quietly(tmp)
         await drop_parts(part_dir)

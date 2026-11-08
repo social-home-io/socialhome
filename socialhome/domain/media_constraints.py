@@ -232,3 +232,13 @@ SPACE_DIRECT_MEDIA_PREFIX: str = "sd-"
 #: ``space_page_media_name``): page-scoped, never the shared name the page
 #: body shows.
 SPACE_PAGE_MEDIA_PREFIX: str = "sp-"
+
+#: Prefix of a content-addressed space file (v_85,
+#: ``domain.file_hashes.space_content_media_name``): ``sc-`` + a digest of
+#: the space and the file's SHA-256. Whatever is stored under it hashes to
+#: that SHA-256 — every write path checks the bytes first. Never taken from
+#: the wire as is: a received ``sc-`` reference is always re-derived from
+#: the item's hash map (or rebound to its sender like any unhashed name),
+#: and a ``SPACE_MEDIA_BLOB`` names its file by its hash, never by a raw
+#: ``sc-`` file name.
+SPACE_CONTENT_MEDIA_PREFIX: str = "sc-"

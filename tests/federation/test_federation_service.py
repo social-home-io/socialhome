@@ -6800,3 +6800,38 @@ async def test_a_429_backs_the_binary_leg_off_for_its_retry_after():
     p.cap.https_result = MediaPostResult(ok=True, status_code=200)
     await _send_dm_chunk(p)
     assert len(p.cap.https_media) == 2  # binary again after Retry-After
+
+
+@pytest.mark.asyncio
+async def test_the_files_hash_map_reaches_only_v85_households(monkeypatch):
+    """v_85: ``files`` / ``files_suite`` ride a space item only to a
+    household that reads them — an older one's fail-closed moderation
+    release check would refuse the unknown keys."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    new, _ = _make_remote_instance(km)
+    old, _ = _make_remote_instance(km)
+    new = dataclasses.replace(new, proto_version=85)
+    old = dataclasses.replace(old, proto_version=84)
+    await fed_repo.save_instance(new)
+    await fed_repo.save_instance(old)
+    fed_repo.add_space_member("sp-h", new.id)
+    fed_repo.add_space_member("sp-h", old.id)
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    sent: dict[str, dict] = {}
+
+    async def _send(_self, *, to_instance_id, event_type, payload, space_id=None):
+        sent[to_instance_id] = payload
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _send)
+    files = {"a.webp": {"h": "a" * 64}}
+    await svc.broadcast_to_space_members(
+        "sp-h",
+        FederationEventType.SPACE_POST_CREATED,
+        {"id": "p", "files": files, "files_suite": "sha256"},
+    )
+    assert sent == {
+        new.id: {"id": "p", "files": files, "files_suite": "sha256"},
+        old.id: {"id": "p"},
+    }

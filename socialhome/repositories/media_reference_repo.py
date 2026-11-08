@@ -59,6 +59,7 @@ from typing import Protocol, runtime_checkable
 import orjson
 
 from ..db import AsyncDatabase
+from ..domain.file_hashes import is_space_content_media_name
 from ..domain.media_constraints import (
     SPACE_DIRECT_MEDIA_PREFIX,
     SPACE_PAGE_MEDIA_PREFIX,
@@ -118,6 +119,20 @@ _LIST_COLUMNS: tuple[tuple[str, str, str], ...] = (
 _JSON_FIELD_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("feed_posts", "link_preview_json", "$.thumbnail_url"),
     ("space_posts", "link_preview_json", "$.thumbnail_url"),
+)
+
+
+#: ``(table, key column, value expression, shape)`` — every file a space
+#: item shows, by the item's id (v_85: a holder's content-addressed names).
+_ITEM_FILE_SOURCES: tuple[tuple[str, str, str, str], ...] = (
+    ("space_posts", "id", "media_url", "one"),
+    ("space_posts", "id", "image_urls_json", "list"),
+    ("space_posts", "id", "json_extract(link_preview_json, '$.thumbnail_url')", "one"),
+    ("space_post_comments", "id", "media_url", "one"),
+    ("space_calendar_events", "id", "cover_url", "one"),
+    ("gallery_items", "id", "filename", "one"),
+    ("gallery_items", "id", "thumbnail_filename", "one"),
+    ("bazaar_listings", "post_id", "image_urls_json", "list"),
 )
 
 
@@ -457,6 +472,12 @@ class AbstractMediaReferenceRepo(Protocol):
         demand (v_83)."""
         ...
 
+    async def content_names_of_item(self, item_id: str) -> list[str]:
+        """The content-addressed (``sc-``, v_85) files the space item
+        *item_id* (a post, comment, calendar event, gallery item or bazaar
+        listing) shows here."""
+        ...
+
 
 class SqliteMediaReferenceRepo:
     """Answers "is this media file still referenced?" across the schema."""
@@ -731,6 +752,26 @@ class SqliteMediaReferenceRepo:
                     else:
                         names |= _names_in_markdown(raw)
         return {space_page_media_name(space_id, n) for n in names}
+
+    async def content_names_of_item(self, item_id: str) -> list[str]:
+        """The content-addressed (``sc-``, v_85) files item *item_id* shows
+        here, each once, in source order."""
+        out: list[str] = []
+        for table, key, value, shape in _ITEM_FILE_SOURCES:
+            rows = await self._db.fetchall(
+                f"SELECT {value} AS v FROM {table} WHERE {key} = ?", (item_id,)
+            )
+            for r in rows:
+                raw = r["v"]
+                names = (
+                    _names_in_list(raw)
+                    if shape == "list"
+                    else [n for n in (media_basename(raw),) if n]
+                )
+                for name in names:
+                    if is_space_content_media_name(name) and name not in out:
+                        out.append(name)
+        return out
 
     async def is_referenced(self, basename: str) -> bool:
         """``True`` when any row still points at the file ``basename``

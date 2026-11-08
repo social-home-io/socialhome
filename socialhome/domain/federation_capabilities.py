@@ -1363,7 +1363,22 @@ from __future__ import annotations
 #:   v_84 drops the body; the applicant's request stays "Requested" until it
 #:   expires (7 days), as an unanswered paired request does. Not space-sync
 #:   relevant. Labelled "Ask to join a global space through the GFS".
-OURS: int = 84
+#: * **v_85** (2026-11-08) — **file hashes in space content**. Every space
+#:   item with files (posts, comments, calendar covers, gallery items, bazaar
+#:   listings, moderation submissions) carries ``files`` (author file
+#:   name → ``{h}``, SHA-256) + ``files_suite: "sha256"`` inside its
+#:   encrypted payload, and so does each §25.6 record the host (or a
+#:   delegated admin) streams — computed from its own copy, pre-v_85 content
+#:   included. ``SPACE_MEDIA_BLOB`` carries ``h`` + ``h_suite``. A receiver
+#:   stores a hashed file content-addressed (``sc-`` = H(space, h)) and
+#:   refuses bytes that do not hash to ``h``. **Fallback**: the map reaches
+#:   only v_85 households (``broadcast_to_space_members`` and the moderation
+#:   submission leave it out below — a moderation release check refuses a
+#:   key it does not classify); an older household keeps the sender-bound
+#:   ``sd-`` names, as an unhashed item does here. Space-sync relevant
+#:   (records carry ``files``): a line in ``SYNC_RECORD_LINES``. Labelled
+#:   "Space pictures and files checked against their hash".
+OURS: int = 85
 
 
 class FederationCapability:
@@ -1999,6 +2014,11 @@ class FederationCapability:
     #: row to gate on (the GFS directory carries no version): an older host
     #: drops the body and the request expires unanswered.
     MIN_FOR_GFS_JOIN_REQUEST = 84
+    #: v_85 — space items and §25.6 records carry their files' SHA-256
+    #: (``files`` + ``files_suite``), ``SPACE_MEDIA_BLOB`` carries ``h``: a
+    #: receiver stores hashed files content-addressed and checks the bytes.
+    #: Only a household at or above it is sent the map.
+    MIN_FOR_CONTENT_FILE_HASHES = 85
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2321,6 +2341,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_GFS_JOIN_REQUEST,
         "Ask to join a global space through the GFS",
     ),
+    (
+        FederationCapability.MIN_FOR_CONTENT_FILE_HASHES,
+        "Space pictures and files checked against their hash",
+    ),
 ]
 
 
@@ -2416,6 +2440,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_PAGE_MEDIA: "space_page_media",
     FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND: "space_media_on_demand",
     FederationCapability.MIN_FOR_GFS_JOIN_REQUEST: "gfs_join_requests",
+    FederationCapability.MIN_FOR_CONTENT_FILE_HASHES: "content_file_hashes",
 }
 
 
@@ -2527,6 +2552,9 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # A behind member household's people see the space's pages without
         # the pictures another household added.
         FederationCapability.MIN_FOR_PAGE_MEDIA,
+        # A behind member household keeps sender-bound names: its people
+        # see every picture, but the bytes are not checked against a hash.
+        FederationCapability.MIN_FOR_CONTENT_FILE_HASHES,
     }
 )
 

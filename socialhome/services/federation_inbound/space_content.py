@@ -79,6 +79,7 @@ from ...domain.events import (
     TimetableSaved,
 )
 from ...domain.federation import FederationEventType
+from ...domain.file_hashes import parse_file_hashes
 from ...domain.gallery import GalleryAlbum, GalleryItem, valid_taken_day
 from ...domain.media_constraints import CAPTION_MAX
 from ...domain.page import MAX_PAGE_TITLE_LENGTH, Page
@@ -328,7 +329,12 @@ class SpaceContentInboundHandlers:
         before the item is saved; :meth:`_keep_media` once it is."""
         present = [u for u in urls if u]
         direct = self._media_names.localize(
-            space_id, event.from_instance, present, held=held or ()
+            space_id,
+            event.from_instance,
+            present,
+            held=held or (),
+            # v_85 — vouched for by the sender's envelope signature.
+            hashes=parse_file_hashes(event.payload),
         )
         if self._gfs_media is None:
             return direct
@@ -3181,7 +3187,10 @@ class SpaceContentInboundHandlers:
             return
         # The seller's household ships the photos: they take its names here.
         names = self._media_names.localize(
-            space_id, event.from_instance, list(listing.image_urls)
+            space_id,
+            event.from_instance,
+            list(listing.image_urls),
+            hashes=parse_file_hashes(event.payload),
         )
         listing = replace(
             listing,

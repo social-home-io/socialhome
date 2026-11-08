@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import base64
 import functools
+import hashlib
 import html
 import json
 import os
@@ -74,11 +75,19 @@ ROOT = Path("/tmp/sh-demo")
 
 def _received_name(space_id: str, sender: dict, filename: str) -> str:
     """The name space file ``filename`` takes on a household that got it
-    from ``sender`` (an ``state["instances"]`` entry): received space files
-    are named by the household that delivered them (``SpaceMediaNamer``),
-    never by the name the sender uses."""
+    from ``sender`` (an ``state["instances"]`` entry), never the name the
+    sender uses: v_85 — every demo household hashes its files, so a
+    received file is content-addressed (``sc-`` = H(space, sha256(bytes)),
+    from the sender's own copy); without that copy, the sender-bound
+    ``sd-`` name (``SpaceMediaNamer``)."""
+    from socialhome.domain.file_hashes import space_content_media_name
     from socialhome.services.inbound_media_store import space_direct_media_name
 
+    label = next((lb for lb, port, *_ in INSTANCES if port == sender.get("port")), "")
+    own = _instance_dir(label) / "media" / filename if label else None
+    if own is not None and own.is_file():
+        digest = hashlib.sha256(own.read_bytes()).hexdigest()
+        return space_content_media_name(space_id, digest, filename)
     return space_direct_media_name(space_id, sender["instance_id"], filename)
 
 #: Upper bound for :func:`cmd_replay`'s poll. The outbox schedule is
@@ -605,6 +614,28 @@ def _make_noisy_png(width: int, height: int) -> bytes:
 
 def _instance_dir(label: str) -> Path:
     return ROOT / label
+
+
+def _content_addressed_failures(
+    label: str, space_id: str, shown: str, sent: str, sent_bytes: bytes
+) -> list[str]:
+    """v_85 — what is wrong with how household *label* stores a space file
+    another household sent as *sent* (bytes *sent_bytes*) and its row shows
+    as *shown*: it must be the content name ``sc-`` = H(space, sha256), and
+    the file on disk must hash to that sha256. ``[]`` when all is well."""
+    from socialhome.domain.file_hashes import space_content_media_name
+
+    digest = hashlib.sha256(sent_bytes).hexdigest()
+    sent_name = sent.rsplit("/", 1)[-1].split("?", 1)[0]
+    want = space_content_media_name(space_id, digest, sent_name)
+    got = shown.rsplit("/", 1)[-1].split("?", 1)[0]
+    if got != want:
+        return [f"{label}: stores {sent_name} as {got!r}, not its content name {want!r}"]
+    path = _instance_dir(label) / "media" / got
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        return [f"{label}: {got} on disk does not hash to {digest[:12]}…"]
+    print(f"  {label} stores it content-addressed ({got[:12]}…), hash checked ✓")
+    return []
 
 
 def _log_path(label: str) -> Path:
@@ -12183,6 +12214,18 @@ def cmd_verify() -> None:
                     print(
                         f"  {guest_label} has the event's cover "
                         f"({len(got_cover)} bytes, identical) ✓"
+                    )
+                    # v_85 — the cover rode with its SHA-256: the guest
+                    # stores it content-addressed, and the bytes on its disk
+                    # hash to what b's event carried.
+                    failures.extend(
+                        _content_addressed_failures(
+                            guest_label,
+                            space_id,
+                            guest_cover,
+                            str(want_cover),
+                            cover_b,
+                        )
                     )
             tz = mirror.get("tz")
             if tz != "Europe/Berlin":

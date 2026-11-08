@@ -40,6 +40,7 @@ from ..domain.events import (
     SpacePostCreated,
 )
 from ..domain.federation import FederationEventType
+from ..domain.federation_capabilities import FederationCapability
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..domain.space_item import (
@@ -54,6 +55,7 @@ from ..domain.space_item import (
 )
 from ..domain.space_media_ref import post_media_urls
 from ..infrastructure.event_bus import EventBus
+from .file_hashes_sender import FileHashesMixin
 from .moderation_release import current_release, with_release
 from .space_item_author import build_signed_item_inner
 from .space_media_refs import SpaceMediaRefsMixin
@@ -71,13 +73,14 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class SpacePostOutbound(SpaceMediaRefsMixin):
+class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
     """Bus-event → federation broadcaster for space posts."""
 
     __slots__ = (
         "_bus",
         "_federation",
         "_federation_repo",
+        "_file_hasher",
         "_media_gfs",
         "_media_sync",
         "_member_gfs",
@@ -128,6 +131,8 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
         #: the space through a GFS (link-joined members, followers) as a
         #: ``media_refs`` descriptor + one upload per GFS.
         self._media_gfs = None
+        #: v_85 — every file of a post / comment rides with its SHA-256.
+        self._file_hasher = None
         #: Needed to enumerate the broadcast set (every member
         #: household) for the media outbox. Optional — when ``None``
         #: the media fan-out is a no-op.
@@ -478,6 +483,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
                     if cert is not None:
                         payload["public_relay"]["writer_cert"] = cert
         with_release(payload)
+        payload = await self._with_file_hashes(payload, media_urls)
         try:
             await self._federation.broadcast_to_space_members(
                 event.space_id,
@@ -631,6 +637,40 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
                 post_id=event.post_id,
             )
 
+    async def _ship_comment_media(
+        self, space_id: str, correlation_id: str, media_urls: list[str]
+    ) -> None:
+        """Queue a comment's picture for every other member household at
+        v_85 (one ``SPACE_MEDIA_BLOB`` outbox row each) — an older one keeps
+        the comment's name as sent and never looks the blob up. Fail-soft."""
+        if self._media_sync is None or self._federation_repo is None or not media_urls:
+            return
+        try:
+            members = await self._federation_repo.list_member_instance_ids(space_id)
+            own = str(self._federation.own_instance_id or "")
+            targets = [
+                t
+                for t in members
+                if t
+                and t != own
+                and await self._federation.space_member_supports(
+                    t, min_version=FederationCapability.MIN_FOR_CONTENT_FILE_HASHES
+                )
+            ]
+            if targets:
+                await self._media_sync.enqueue_for_blob(
+                    space_id=space_id,
+                    correlation_id=correlation_id,
+                    target_instance_ids=targets,
+                    media_urls=media_urls,
+                )
+        except Exception:
+            log.exception(
+                "SPACE_MEDIA_BLOB enqueue failed for space=%s item=%s",
+                space_id,
+                correlation_id,
+            )
+
     # ── Comments ─────────────────────────────────────────────────────────
 
     async def _on_comment_added(self, event: CommentAdded) -> None:
@@ -651,6 +691,8 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
             "parent_id": c.parent_id,
             "occurred_at": c.created_at.isoformat() if c.created_at else None,
         }
+        media_urls = [c.media_url] if c.media_url else []
+        payload = await self._with_file_hashes(payload, media_urls)
         try:
             await self._federation.broadcast_to_space_members(
                 event.space_id,
@@ -663,6 +705,10 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
                 event.space_id,
                 c.id,
             )
+        # v_85 — a comment's picture ships like a post's (it is stored
+        # content-addressed on the receiver, so only bytes that hash to what
+        # the comment carries ever back it).
+        await self._ship_comment_media(event.space_id, c.id, media_urls)
         if await self._member_publishable(event.space_id):
             await self._schedule_item(
                 event.space_id,

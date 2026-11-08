@@ -2135,6 +2135,7 @@ def _wire_federation_stack(
         user_repo=user_repo,
         # v_73 — an offer goes to the one household seating its seller.
         remote_member_repo=space_remote_member_repo,
+        file_hasher=space_media_sync_service.file_hasher,
     )
 
     # DM history sync: reconcile missed messages when a peer reconnects.
@@ -5056,6 +5057,19 @@ def create_app(config: Config | None = None) -> web.Application:
             own_identity_seed=identity_seed,
         )
         space_post_outbound.attach_writer_certs(writer_certs)
+        # v_85 — every space item with files carries their SHA-256 (one
+        # hasher for the household, shared with the SPACE_MEDIA_BLOB sender).
+        file_hasher = space_media_sync_service.file_hasher
+        for sender in (
+            space_post_outbound,
+            space_cal_service,
+            fed.gallery_federation_outbound,
+            moderation_federation,
+        ):
+            sender.attach_file_hasher(file_hasher)
+        # §25.6: the host's (or a delegated admin's) catch-up vouches for
+        # the hashes of the files it streams.
+        app[K.space_sync_service_key].attach_file_hasher(file_hasher)
         if gfs_member_publish is not None:
             space_post_outbound.attach_member_gfs(gfs_member_publish)
             # v_60 — our authors' public profiles for a space's GFS followers.

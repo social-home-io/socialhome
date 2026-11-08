@@ -5,6 +5,9 @@ import time
 
 import pytest
 
+from socialhome.domain.file_hashes import space_content_media_name
+from socialhome.media.cleanup import unlink_unreferenced
+from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.services import dm_media_sync_service as dm
 from socialhome.services import space_media_sync_service as space
 from socialhome.services.media_orphan_sweep_service import (
@@ -305,3 +308,42 @@ async def test_partial_sweep_does_not_count_a_set_it_could_not_remove(tmp_path):
     svc = MediaOrphanSweepService(media_dir=media, reference_repo=_FakeRefRepo([]))
     assert await svc.sweep_partial_once() == 0
     assert (d / "nested").is_dir()
+
+
+# ── v_85: content-addressed space files ──────────────────────────────────
+
+
+async def test_content_addressed_files_are_kept_while_referenced(db, tmp_path):
+    """A content-addressed (``sc-``) file is shared by every item of its
+    space that shows the same bytes: kept while any row references it,
+    swept once orphaned past the 24 h grace."""
+    shared = space_content_media_name("sp-1", "a" * 64, "a.webp")
+    orphan = space_content_media_name("sp-1", "b" * 64, "b.webp")
+    young = space_content_media_name("sp-1", "c" * 64, "c.webp")
+    for name, age in ((shared, 2), (orphan, 2), (young, 0)):
+        _write(tmp_path, name, age_seconds=age * GRACE_SECONDS)
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp-1', 'S', 'host', 'anna', ?)",
+        ("00" * 32,),
+    )
+    for post_id in ("p-1", "p-2"):
+        await db.enqueue(
+            "INSERT INTO space_posts(id, space_id, author, type, content,"
+            " image_urls_json) VALUES(?, 'sp-1', 'u', 'image', '', ?)",
+            (post_id, f'["api/media/{shared}"]'),
+        )
+    refs = SqliteMediaReferenceRepo(db)
+    # One of the two posts goes: its delete path keeps the shared file.
+    await db.enqueue("DELETE FROM space_posts WHERE id='p-1'", ())
+    await unlink_unreferenced(tmp_path, refs, [f"api/media/{shared}"])
+    assert (tmp_path / shared).exists()
+    svc = MediaOrphanSweepService(media_dir=tmp_path, reference_repo=refs)
+    assert await svc.sweep_once() == 1
+    assert (tmp_path / shared).exists()
+    assert not (tmp_path / orphan).exists()
+    assert (tmp_path / young).exists()  # inside the grace window
+    # The last post goes: the file goes with it.
+    await db.enqueue("DELETE FROM space_posts WHERE id='p-2'", ())
+    await unlink_unreferenced(tmp_path, refs, [f"api/media/{shared}"])
+    assert not (tmp_path / shared).exists()

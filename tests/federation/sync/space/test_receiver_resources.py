@@ -19,6 +19,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.post import Post, PostType
 from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.domain.task import Task, TaskPriority, TaskStatus
@@ -2420,3 +2421,60 @@ async def test_a_non_host_stream_cannot_attach_refs_to_a_held_post(setup, monkey
     assert sink.kept == []
     (_space, stored) = c.posts[-1]
     assert stored.image_urls == ("api/media/a.webp",)
+
+
+# ── v_85: the host's records vouch for their files' hashes ───────────────
+
+
+def _hashed(**names: str) -> dict:
+    return {
+        "files": {n.replace("_", "."): {"h": h} for n, h in names.items()},
+        "files_suite": "sha256",
+    }
+
+
+def _content(name: str, h: str, space_id: str = "sp-1") -> str:
+    return f"api/media/{space_content_media_name(space_id, h, name)}"
+
+
+async def test_the_hosts_hashed_records_take_content_names(setup):
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "posts",
+        [
+            {
+                "id": "p-h",
+                "author": "u-1",
+                "type": "image",
+                "image_urls": ["api/media/a.webp", "api/media/b.webp"],
+                **_hashed(a_webp="a" * 64),
+            }
+        ],
+    )
+    _sid, post = c.posts[0]
+    # A hashed file takes its content name; one the map misses stays legacy.
+    assert post.image_urls == (_content("a.webp", "a" * 64), _here("b.webp"))
+
+
+async def test_a_hashed_record_with_an_unknown_suite_stays_legacy(setup):
+    r, c, kp = setup
+    files = _hashed(a_webp="a" * 64)
+    files["files_suite"] = "md5"
+    await _send(
+        r,
+        kp,
+        "posts",
+        [
+            {
+                "id": "p-u",
+                "author": "u-1",
+                "type": "image",
+                "image_urls": ["api/media/a.webp"],
+                **files,
+            }
+        ],
+    )
+    _sid, post = c.posts[0]
+    assert post.image_urls == (_here("a.webp"),)

@@ -54,6 +54,7 @@ from ....domain.events import (
 )
 from ....domain.federation import FederationEvent, FederationEventType
 from ....domain.federation_capabilities import FederationCapability
+from ....domain.file_hashes import parse_file_hashes
 from ....domain.gallery import GalleryAlbum, GalleryItem, valid_taken_day
 from ....domain.media_constraints import CAPTION_MAX
 from ....domain.page import Page
@@ -113,7 +114,7 @@ from ....services.link_preview_service import (
     space_wire_link_preview,
 )
 from ....services.page_conflict_service import PageMode, canonical_from_wire
-from ....services.space_media_names import SpaceMediaNamer
+from ....services.space_media_names import SpaceMediaNamer, comment_media_ref
 from ....services.space_service import (
     apply_inviter_reproof,
     apply_owner_statement_from_metadata,
@@ -669,6 +670,7 @@ class SpaceSyncReceiver:
         provider: str,
         takes_descriptor: bool,
         held: list[str] | None = None,
+        from_host: bool = False,
     ) -> SpaceMediaLocalization:
         """v_80 — this household's names for a streamed item's files kept
         in a GFS media cache, bound to the household that streamed it.
@@ -683,8 +685,18 @@ class SpaceSyncReceiver:
         Under those, every file takes its direct name as the provider
         delivers it (:class:`SpaceMediaNamer`, *held* — what the stored row
         shows already): the provider's §25.6 catch-up ships the bytes under
-        the same names."""
-        direct = self._media_names.localize(space_id, provider, urls, held=held or ())
+        the same names. v_85: a record's ``files`` hash map counts only from
+        the host (*from_host*, ``_acts_as_host``) — which vouches for its
+        rows whole and may hash content from before v_85 from its own copy
+        (owner decision B); another provider's map is ignored (legacy
+        names)."""
+        direct = self._media_names.localize(
+            space_id,
+            provider,
+            urls,
+            held=held or (),
+            hashes=parse_file_hashes(record) if from_host else None,
+        )
         if self._gfs_media is None:
             return direct
         return SpaceMediaNamer.combine(
@@ -1429,6 +1441,7 @@ class SpaceSyncReceiver:
                     held=(
                         post_media_urls(held_post[1]) if held_post is not None else None
                     ),
+                    from_host=from_host,
                 )
                 post = media.post(post)
                 if await self._space_post_repo.save(space_id, post) is None:
@@ -1459,12 +1472,23 @@ class SpaceSyncReceiver:
                 await self._persist_comment_tombstones(
                     gone, space_id, provider=provider
                 )
+            comments_from_host = await self._is_host(space_id, provider)
             for r in records:
                 if r.get("deleted"):
                     continue
                 comment = _comment_from_record(r)
                 if comment is None:
                     continue
+                # v_85 — a hashed picture takes its content name (the
+                # host's hashes only); a raw content name never lands.
+                comment = replace(
+                    comment,
+                    media_url=comment_media_ref(
+                        space_id,
+                        comment.media_url,
+                        parse_file_hashes(r) if comments_from_host else None,
+                    ),
+                )
                 if await self._space_post_repo.add_comment(comment, space_id=space_id):
                     # History, not news: only replies held for this comment
                     # (the parent-wait buffer) follow it.
@@ -1602,6 +1626,7 @@ class SpaceSyncReceiver:
                         if held_event is not None and held_event[1].cover_url
                         else None
                     ),
+                    from_host=from_host,
                 )
                 event = replace(event, cover_url=media.url(event.cover_url))
                 if not await self._space_calendar_repo.save_event(
@@ -1743,6 +1768,7 @@ class SpaceSyncReceiver:
                     len(records),
                 )
                 return
+            bazaar_from_host = await self._is_host(space_id, provider)
             for r in records:
                 listing = _bazaar_listing_from_record(r, space_id)
                 if listing is not None:
@@ -1757,6 +1783,8 @@ class SpaceSyncReceiver:
                             if held_listing is not None
                             else ()
                         ),
+                        # v_85 — the host's hashes only.
+                        hashes=parse_file_hashes(r) if bazaar_from_host else None,
                     )
                     listing = replace(
                         listing,
@@ -3465,6 +3493,7 @@ class SpaceSyncReceiver:
             [u for u in (item.thumbnail_url, item.url) if u],
             provider=provider,
             takes_descriptor=held_elsewhere is None,
+            from_host=from_host,
         )
         item = replace(
             item,

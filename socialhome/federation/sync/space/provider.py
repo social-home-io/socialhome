@@ -31,13 +31,16 @@ from ....domain.federation import (
     FederationEventType,
 )
 from ....domain.federation_capabilities import FederationCapability
+from ....domain.file_hashes import file_hashes_to_wire
 from ....domain.space_media_ref import (
+    FILE_HASH_RESOURCES,
     MEDIA_REF_RESOURCES,
     MEDIA_REFS_FIELD,
     PAGE_HISTORY_FILES,
     STREAM_HISTORY_FILES,
     page_media_urls,
     recent_history_files,
+    record_file_urls,
     record_media_urls,
 )
 from ....services.space_media_names import space_own_files
@@ -279,6 +282,76 @@ class _WithMediaRefs:
             yield await self._add(space_id, batch)
 
 
+#: v_85 — records of one resource a host's stream hashes the files of (its
+#: own copies; a file is read once per change — the hasher caches by size
+#: and mtime). Records past it stream without a map (a new receiver gives
+#: their files the legacy names).
+MAX_CATCHUP_HASHED_RECORDS: int = 200
+
+
+class _FileHasher(Protocol):
+    async def hashes_for(self, urls: Any) -> dict: ...
+
+
+class _WithFileHashes:
+    """v_85 — a resource the host (or a delegated admin) streams to a v_85
+    requester: each record that shows files carries their ``files`` hash
+    map, computed from OUR copy of each file — content from before v_85
+    included (owner decision B). Receivers take it from the host only. At
+    most :data:`MAX_CATCHUP_HASHED_RECORDS` records per resource per
+    stream."""
+
+    __slots__ = ("_budget", "_hasher", "_inner", "resource")
+
+    def __init__(self, inner: ResourceExporter, hasher: _FileHasher) -> None:
+        self._inner = inner
+        self._hasher = hasher
+        self._budget = MAX_CATCHUP_HASHED_RECORDS
+        self.resource = inner.resource
+
+    async def _add(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            urls = record_file_urls(self.resource, row)
+            if urls and self._budget > 0:
+                self._budget -= 1
+                try:
+                    wire = file_hashes_to_wire(await self._hasher.hashes_for(urls))
+                except Exception:
+                    log.warning(
+                        "sync: files of a %s record not hashed",
+                        self.resource,
+                        exc_info=True,
+                    )
+                    wire = {}
+                if wire:
+                    row = {**row, **wire}
+            out.append(row)
+        return out
+
+    async def list_records(self, space_id: str) -> list[dict[str, Any]]:
+        return await self._add(await self._inner.list_records(space_id))
+
+    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        inner = self._inner
+        if not isinstance(inner, BatchedExporter):
+            yield await self.list_records(space_id)
+            return
+        async for batch in inner.iter_batches(space_id):
+            yield await self._add(batch)
+
+    async def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        inner = self._inner
+        if not isinstance(inner, IncrementalExporter):
+            async for batch in self.iter_batches(space_id):
+                yield batch
+            return
+        async for batch in inner.iter_changed(space_id, since):
+            yield await self._add(batch)
+
+
 class _OwnPeopleOnly:
     """A resource narrowed to this household's own people: a record is kept
     when its owner (``owner_of``, by default its ``user_id``) is one of them,
@@ -409,6 +482,7 @@ class SpaceSyncService:
         "_builder",
         "_exporters",
         "_federation",
+        "_file_hasher",
         "_gallery_repo",
         "_inviter_proof_for",
         "_media_gfs",
@@ -520,6 +594,15 @@ class SpaceSyncService:
         #: v_80 — describes the files of a stream to a link-joined member
         #: and uploads them to its GFS (``None``: no descriptors).
         self._media_gfs: _MediaPlanner | None = None
+        #: v_85 — hashes the files of the records the host streams
+        #: (``None``: no ``files`` maps).
+        self._file_hasher: _FileHasher | None = None
+
+    def attach_file_hasher(self, hasher: _FileHasher) -> None:
+        """Wire the household's file hasher (v_85): records with files that
+        this household streams as the space's host (or a delegated admin)
+        to a v_85 requester carry ``files``."""
+        self._file_hasher = hasher
 
     def attach_media_gfs(self, media_gfs: _MediaPlanner) -> None:
         """Wire the v_80 GFS media uploader: posts / calendar / gallery
@@ -591,6 +674,18 @@ class SpaceSyncService:
             or await self._roster_authority(session.space_id)
         ):
             exporter = _OwnPeopleOnly(exporter, self._own_members, owner_of)
+        if (
+            exporter is not None
+            and resource in FILE_HASH_RESOURCES
+            and self._file_hasher is not None
+            and self._roster_authority is not None
+            and await self._roster_authority(session.space_id)
+            and await self._session_version(session)
+            >= FederationCapability.MIN_FOR_CONTENT_FILE_HASHES
+        ):
+            # v_85 — the host (or a delegated admin) vouches for the files
+            # it streams: each record carries their hashes (decision B).
+            exporter = _WithFileHashes(exporter, self._file_hasher)
         if (
             exporter is not None
             and resource in MEDIA_REF_RESOURCES
@@ -786,8 +881,10 @@ class SpaceSyncService:
             # tick): it ships no media — the live media outbox already
             # delivered every blob created since, and re-enqueueing every
             # blob of the space each tick re-shipped the whole space's bytes
-            # to every peer every 30 minutes.
-            if session.sync_mode == "incremental":
+            # to every peer every 30 minutes. Nor does a full stream that is
+            # full only because the requester crossed a sync line (v_85 and
+            # the others): it holds the files already.
+            if session.sync_mode == "incremental" or session.shape_crossed:
                 return
             # Catch-up media: enumerate every post + gallery item in
             # the space, collect their media URLs, and enqueue
@@ -835,6 +932,7 @@ class SpaceSyncService:
         session.snapshot_seq = None
         session.since_seq = None
         session.shape = ""
+        session.shape_crossed = False
         if self._watermarks is None:
             return exporters
         session.snapshot_seq = await self._watermarks.snapshot()
@@ -861,6 +959,14 @@ class SpaceSyncService:
                 self._roster_authority is None
                 or await self._roster_authority(session.space_id)
             ),
+        )
+        session.shape_crossed = session.since_seq is None and (
+            await self._watermarks.shape_crossed(
+                space_id=session.space_id,
+                instance_id=session.requester_instance_id,
+                shape=session.shape,
+                have_seq=getattr(session, "have_seq", None),
+            )
         )
         session.kept_full_digests = {}
         exporters = [

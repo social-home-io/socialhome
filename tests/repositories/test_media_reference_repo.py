@@ -2,6 +2,7 @@
 
 import pytest
 
+from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.space_media_ref import space_page_media_name
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 
@@ -989,3 +990,27 @@ async def test_a_conflict_sides_names_are_read_with_the_strict_pattern(db):
     assert not await repo.is_referenced("notours.webp")
     names = await repo.referenced_basenames()
     assert "side.webp" in names and "notours.webp" not in names
+
+
+async def test_content_names_of_an_item(db):
+    """v_85 — the content-addressed files a space item shows (a GFS re-upload
+    holder's candidates), each once; never another item's, never a legacy
+    name."""
+    await _seed_parents(db)
+    a = space_content_media_name("sp1", "a" * 64, "a.webp")
+    b = space_content_media_name("sp1", "b" * 64, "b.webp")
+    t = space_content_media_name("sp1", "c" * 64, "t.webp")
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, media_url,"
+        " image_urls_json, link_preview_json) VALUES('p-sc', 'sp1', 'u1',"
+        " 'image', ?, ?, ?)",
+        (
+            f"api/media/{a}",
+            f'["api/media/{a}", "api/media/{b}", "api/media/sd-legacy.webp"]',
+            f'{{"url": "https://x.example", "thumbnail_url": "api/media/{t}"}}',
+        ),
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.content_names_of_item("p-sc") == [a, b, t]
+    assert await repo.content_names_of_item("sp0") == []
+    assert await repo.content_names_of_item("nope") == []

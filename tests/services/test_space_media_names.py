@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from socialhome.domain.file_hashes import FileHash, space_content_media_name
 from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.services.inbound_media_store import (
     SPACE_DIRECT_MEDIA_PREFIX,
@@ -219,3 +220,105 @@ async def test_only_the_spaces_own_files_ship():
         "api/media/b.webp",
     ]
     assert await space_own_files(None, SP, urls) == []
+
+
+# ── v_85: content-addressed names for hashed files ─────────────────────────
+
+_HA = "a" * 64
+_HM = "b" * 64
+
+
+def _sc(h: str, name: str = "f.webp", space: str = SP) -> str:
+    return space_content_media_name(space, h, name)
+
+
+def _fh(h: str) -> FileHash:
+    return FileHash(h, 3)
+
+
+def test_a_hashed_file_takes_its_content_name_whoever_delivers_it():
+    namer = SpaceMediaNamer("us")
+    url = "api/media/f.webp"
+    by_a = namer.localize(SP, "hh-a", [url], hashes={"f.webp": _fh(_HA)})
+    by_host = namer.localize(SP, "host", [url], hashes={"f.webp": _fh(_HA)})
+    assert by_a.names == {"f.webp": _sc(_HA)} == by_host.names
+    # Unhashed (legacy) files keep the sender-bound sd- names.
+    legacy = namer.localize(SP, "hh-a", [url, "api/media/g.webp"], hashes={})
+    assert legacy.names == {
+        "f.webp": sd("hh-a", "f.webp"),
+        "g.webp": sd("hh-a", "g.webp"),
+    }
+
+
+def test_a_decoy_item_naming_anothers_file_resolves_to_its_own_bytes():
+    """Member M posts an item naming A's file name with M's own bytes: M's
+    item points at M's content name, A's at A's — never each other's."""
+    namer = SpaceMediaNamer("us")
+    url = "api/media/f.webp"
+    a_item = namer.localize(SP, "hh-a", [url], hashes={"f.webp": _fh(_HA)})
+    m_item = namer.localize(SP, "hh-m", [url], hashes={"f.webp": _fh(_HM)})
+    assert a_item.url(url) == f"api/media/{_sc(_HA)}"
+    assert m_item.url(url) == f"api/media/{_sc(_HM)}"
+
+
+def test_a_cross_space_hash_never_matches():
+    namer = SpaceMediaNamer("us")
+    url = "api/media/f.webp"
+    one = namer.localize("sp-1", "hh-a", [url], hashes={"f.webp": _fh(_HA)})
+    two = namer.localize("sp-2", "hh-a", [url], hashes={"f.webp": _fh(_HA)})
+    assert one.names["f.webp"] != two.names["f.webp"]
+    assert two.names["f.webp"] == _sc(_HA, space="sp-2")
+
+
+def test_a_raw_content_name_is_never_kept_as_is():
+    namer = SpaceMediaNamer("us")
+    raw = _sc(_HA)
+    url = f"api/media/{raw}"
+    # Hashed: re-derived from the hash the item claims — never the raw name.
+    hashed = namer.localize(SP, "host", [url], hashes={raw: _fh(_HM)})
+    assert hashed.names == {raw: _sc(_HM, raw)}
+    # Unhashed: rebound to its sender like any legacy name.
+    legacy = namer.localize(SP, "hh-m", [url])
+    assert legacy.names == {raw: sd("hh-m", raw)}
+
+
+def test_held_and_own_files_keep_their_names_over_a_hash():
+    namer = SpaceMediaNamer("us")
+    got = namer.localize(
+        SP,
+        "hh-a",
+        ["api/media/sd-held.webp", f"api/media/{sd('us', 'mine.webp')}"],
+        held=["api/media/sd-held.webp", "api/media/mine.webp"],
+        hashes={"sd-held.webp": _fh(_HA), sd("us", "mine.webp"): _fh(_HM)},
+    )
+    # The held file stays; our own file keeps the name it has here.
+    assert got.names == {sd("us", "mine.webp"): "mine.webp"}
+
+
+def test_same_file_knows_the_content_name():
+    assert same_file(
+        f"api/media/{_sc(_HA)}",
+        "api/media/f.webp",
+        space_id=SP,
+        origin="hh-a",
+        hashes={"f.webp": _fh(_HA)},
+    )
+    assert not same_file(
+        f"api/media/{_sc(_HA)}",
+        "api/media/f.webp",
+        space_id=SP,
+        origin="hh-a",
+        hashes={"f.webp": _fh(_HM)},
+    )
+
+
+def test_a_legacy_row_keeps_its_senders_file_when_an_edit_carries_hashes():
+    namer = SpaceMediaNamer("us")
+    got = namer.localize(
+        SP,
+        "hh-a",
+        ["api/media/f.webp"],
+        held=[f"api/media/{sd('hh-a', 'f.webp')}"],
+        hashes={"f.webp": _fh(_HA)},
+    )
+    assert got.names == {"f.webp": sd("hh-a", "f.webp")}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,6 +26,7 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.space_media_outbox_repo import (
     SqliteSpaceMediaOutboxRepo,
 )
+from socialhome.services.media_file_hasher import MediaFileHasher
 from socialhome.services.space_media_sync_service import (
     PIPELINE_WINDOW,
     SpaceMediaSyncService,
@@ -140,6 +142,9 @@ async def test_flush_once_ships_small_file_as_single_chunk(
     assert payload["final"] is True
     assert payload["correlation_id"] == "p-1"
     assert payload["space_id"] == "sp-1"
+    # v_85 — the whole file's hash, so the receiver checks the bytes.
+    assert payload["h"] == hashlib.sha256(body).hexdigest()
+    assert payload["h_suite"] == "sha256"
     # Bytes ride the dedicated ``raw_chunk`` arg now (binary channel, or
     # base64 on the JSON/SPACE_ROUTED fallback), not a ``bytes_b64``
     # field in the metadata.
@@ -539,3 +544,34 @@ async def test_a_mesh_only_member_gets_chunks_that_fit_a_routed_envelope(
     assert len(by_target["peer-mesh"]) == 4
     for chunks in by_target.values():
         assert b"".join(chunks) == body
+
+
+async def test_the_whole_files_hash_comes_from_the_shared_cache(
+    db, outbox, tmp_path, monkeypatch
+):
+    """#1322 review: a file shipped to many households is hashed once (the
+    household hasher's cache), not once per outbox row."""
+    await _seed_space(db)
+    body = b"WEBP-cached-" * 8
+    (tmp_path / "c.webp").write_bytes(body)
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    reads: list[str] = []
+    real = MediaFileHasher.hash_name
+
+    async def _counting(self, name):
+        reads.append(name)
+        return await real(self, name)
+
+    monkeypatch.setattr(MediaFileHasher, "hash_name", _counting)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-x", "peer-b"],
+        media_urls=["api/media/c.webp"],
+    )
+    assert await svc.flush_once() == 2
+    assert reads == ["c.webp", "c.webp"]
+    hashes = {c.kwargs["payload"]["h"] for c in fed.send_media_chunk.call_args_list}
+    assert hashes == {hashlib.sha256(body).hexdigest()}

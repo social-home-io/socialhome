@@ -49,6 +49,7 @@ from ..domain.events import (
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..infrastructure.event_bus import EventBus
+from .file_hashes_sender import FileHashesMixin
 from .space_media_refs import SpaceMediaRefsMixin
 
 if TYPE_CHECKING:
@@ -60,12 +61,13 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class GalleryFederationOutbound(SpaceMediaRefsMixin):
+class GalleryFederationOutbound(SpaceMediaRefsMixin, FileHashesMixin):
     """Publish space-scoped gallery item mutations to paired peers."""
 
     __slots__ = (
         "_bus",
         "_federation",
+        "_file_hasher",
         "_gallery_repo",
         "_media_gfs",
         "_media_sync",
@@ -95,6 +97,8 @@ class GalleryFederationOutbound(SpaceMediaRefsMixin):
         #: v_80 — the item's files for link-joined members (``media_refs``
         #: + one upload per GFS).
         self._media_gfs = None
+        #: v_85 — the thumbnail and the file ride with their SHA-256.
+        self._file_hasher = None
 
     def wire(self) -> None:
         """Subscribe handlers on the bus. Idempotent."""
@@ -171,6 +175,7 @@ class GalleryFederationOutbound(SpaceMediaRefsMixin):
         media_plan = await self._plan_media_refs(
             space_id, files, item_id=item.id, followers=False
         )
+        payload = await self._with_file_hashes(payload, files)
         await self._fan_out(
             space_id,
             FederationEventType.SPACE_GALLERY_ITEM_CREATED,

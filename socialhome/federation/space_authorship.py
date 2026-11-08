@@ -88,6 +88,7 @@ from typing import TYPE_CHECKING
 
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.file_hashes import FILES_FIELD, FILES_SUITE_FIELD, parse_file_hashes
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     MODERATION_BLOCK_KEY,
@@ -732,20 +733,34 @@ class SpaceAuthorship:
             *feature_media_urls(item.feature, item.payload or {}),
             *(feature_media_urls(item.feature, dict(held)) if held else ()),
         ]
-        names = self._media_names.localize(
-            space_id,
-            str(event.from_instance or ""),
-            feature_media_urls(item.feature, payload),
-            held=expected,
+        origin = str(event.from_instance or "")
+        urls = feature_media_urls(item.feature, payload)
+        names = self._media_names.localize(space_id, origin, urls, held=expected)
+        # v_85 — a hashed file is held here under its content name (when
+        # the submission carried the hash) or under a sender-bound one:
+        # whichever the item shows.
+        hashes = parse_file_hashes(payload) if item.feature != "pages" else {}
+        hashed = (
+            self._media_names.localize(
+                space_id, origin, urls, held=expected, hashes=hashes
+            )
+            if hashes
+            else names
         )
         expected_names = {media_basename(u) for u in expected}
-        return renamed_media(
-            item.feature,
-            payload,
-            lambda u: (
-                names.url(u) if media_basename(names.url(u)) in expected_names else u
-            ),
-        )
+
+        def _aligned(u: str | None) -> str | None:
+            for candidate in (hashed.url(u), names.url(u)):
+                if media_basename(candidate) in expected_names:
+                    return candidate
+            return u
+
+        payload = {
+            k: v
+            for k, v in payload.items()
+            if k not in (FILES_FIELD, FILES_SUITE_FIELD)
+        }
+        return renamed_media(item.feature, payload, _aligned)
 
     async def may_mutate(
         self,

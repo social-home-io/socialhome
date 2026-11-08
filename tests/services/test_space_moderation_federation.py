@@ -8,6 +8,7 @@ outbound targeting and the remote-payload sanitiser over stubs.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -28,6 +29,7 @@ from socialhome.domain.space import (
     SpaceType,
 )
 from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
+from socialhome.services.media_file_hasher import MediaFileHasher
 from socialhome.services.space_moderation_federation import (
     SpaceModerationFederation,
     _signed_copy,
@@ -648,3 +650,53 @@ async def test_a_held_pages_cover_and_body_pictures_go_to_the_reviewers():
         ["api/media/c.webp", "api/media/a.webp", "api/media/b.webp"],
         ["api/media/n.webp"],
     ]
+
+
+async def test_a_submissions_files_ride_with_their_hashes_to_v85_only(tmp_path):
+    """v_85 — a held item's proposed files carry their SHA-256 to a v_85
+    reviewer household; an older one gets the item as before (its release
+    check would refuse an unknown key). A page's files stay page-scoped:
+    no map."""
+    (tmp_path / "c.webp").write_bytes(b"cover")
+    out, fed = _fed(versions={"host": 85, "house-mod": 84})
+    out.attach_file_hasher(MediaFileHasher(tmp_path))
+    create = _item(
+        "calendar",
+        {"entity": "event", "target_id": None, "cover_url": "api/media/c.webp"},
+    )
+    await out.send_submitted(SPACE, create, ["host", "house-mod"])
+    sent = {to: payload for to, _t, payload in fed.sent}
+    assert sent["host"]["files"] == {
+        "c.webp": {"h": hashlib.sha256(b"cover").hexdigest()}
+    }
+    assert sent["host"]["files_suite"] == "sha256"
+    assert "files" not in sent["house-mod"]
+    fed.sent.clear()
+    page = _item(
+        "pages",
+        {"entity": "page", "target_id": None, "cover_image_url": "api/media/c.webp"},
+    )
+    await out.send_submitted(SPACE, page, ["host"])
+    assert "files" not in fed.sent[0][2]
+
+
+async def test_a_post_with_a_signed_follower_copy_carries_no_hashes(
+    tmp_path, monkeypatch
+):
+    """The host matches the author-signed follower copy's file names against
+    the files it holds by their sender-bound names (``approved_relay_for``):
+    such a submission stays unhashed."""
+    (tmp_path / "p.webp").write_bytes(b"pic")
+    out, fed = _fed(versions={"host": 85})
+    out.attach_file_hasher(MediaFileHasher(tmp_path))
+
+    async def _relay(_self, _space, _item):
+        return {"signed": True}
+
+    monkeypatch.setattr(type(out), "_public_relay_for", _relay)
+    post = _item(
+        "posts",
+        {"entity": "post", "target_id": None, "image_urls": ["api/media/p.webp"]},
+    )
+    await out.send_submitted(SPACE, post, ["host"])
+    assert "files" not in fed.sent[0][2]

@@ -67,6 +67,12 @@ from ..domain.events import (
     UserStatusChanged,
 )
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.file_hashes import (
+    blob_hash,
+    is_space_content_media_name,
+    parse_file_hashes,
+    space_content_media_name,
+)
 from ..domain.highlight import (
     Highlight,
     HighlightAudience,
@@ -155,6 +161,7 @@ from .inbound_media_store import (
     inbound_size_refusal,
     is_reserved_media_name,
     is_safe_media_name,
+    link_once,
     local_media_ref,
     media_basename,
     media_file_path,
@@ -177,7 +184,7 @@ from .space_crypto_service import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
-from .space_media_names import SpaceMediaNamer
+from .space_media_names import SpaceMediaNamer, comment_media_ref
 from .space_mentions import SpaceMentionResolver
 from .space_moderation_federation import moderation_media_urls
 from .space_service import (
@@ -648,7 +655,12 @@ class FederationInboundService(ProtectionGateMixin):
         already) under the v_80 GFS reader names (empty without a
         fetcher)."""
         direct = self._media_names.localize(
-            space_id, event.from_instance, urls, held=held or ()
+            space_id,
+            event.from_instance,
+            urls,
+            held=held or (),
+            # v_85 — vouched for by the sender's envelope signature.
+            hashes=parse_file_hashes(event.payload),
         )
         if self._gfs_media is None:
             return direct
@@ -2209,6 +2221,18 @@ class FederationInboundService(ProtectionGateMixin):
                 event.from_instance,
             )
             return
+        # v_85 — the whole file's hash: the bytes land content-addressed
+        # (``sc-``) and are checked against it before they are stored. A
+        # raw ``sc-`` name is never written by naming it.
+        h = blob_hash(p)
+        if h is None and is_space_content_media_name(filename):
+            log.warning(
+                "SPACE_MEDIA_BLOB: rejecting filename %r from %s (content name "
+                "without its hash)",
+                filename,
+                event.from_instance,
+            )
+            return
         chunk_meta = parse_chunk_meta(
             p.get("chunk_index") or 0,
             p.get("chunk_count") or 1,
@@ -2234,16 +2258,46 @@ class FederationInboundService(ProtectionGateMixin):
         )
         if page_local == "":
             return  # a page file from anyone but the host (logged)
+        alias: str | None = None
         if page_local is not None:
             local, scope = page_local, None
         else:
             local = space_direct_media_name(space_id, event.from_instance, filename)
-            scope = await self._space_media_in_scope(
-                space_id=space_id,
-                correlation_id=correlation_id,
-                filename=local,
-                sent=filename,
-            )
+            scope = None
+            if h is not None:
+                # A hashed file is the row's content name — unless the row
+                # here is a legacy (unhashed) one showing the sender's name.
+                content = space_content_media_name(space_id, h, filename)
+                scope = await self._space_media_in_scope(
+                    space_id=space_id,
+                    correlation_id=correlation_id,
+                    filename=content,
+                    sent=filename,
+                )
+                if scope != _NOT_ITS_FILE:
+                    if scope is None and (
+                        await self._space_media_in_scope(
+                            space_id=space_id,
+                            correlation_id=correlation_id,
+                            filename=content,
+                            known_only=True,
+                        )
+                        is not None
+                    ):
+                        # The row is not here yet (the bytes overtook it):
+                        # it may arrive hashed (the content name) or not (a
+                        # page, an older provider: the sender's name). The
+                        # verified bytes take both — the unreferenced one
+                        # goes with the orphan sweep.
+                        alias = local
+                    local = content
+            if h is None or scope == _NOT_ITS_FILE:
+                scope = await self._space_media_in_scope(
+                    space_id=space_id,
+                    correlation_id=correlation_id,
+                    filename=local,
+                    sent=filename,
+                )
             if scope == _NOT_ITS_FILE and await self._host_fills(
                 event,
                 space_id=space_id,
@@ -2271,6 +2325,8 @@ class FederationInboundService(ProtectionGateMixin):
         await self._assemble_space_chunk(
             raw=raw,
             filename=local,
+            alias=alias,
+            space_id=space_id,
             partial_dir=partial_key(
                 event.from_instance, transfer_id, chunk_count=chunk_count
             ),
@@ -2280,6 +2336,7 @@ class FederationInboundService(ProtectionGateMixin):
             post_id=correlation_id,
             from_instance=event.from_instance,
             total_size=_declared_size(p, raw, chunk_count),
+            expected_sha256=h,
         )
 
     async def _host_fills(
@@ -2306,6 +2363,10 @@ class FederationInboundService(ProtectionGateMixin):
         delivers its rows and files under its own (matching) names.
         Write-once: an existing file is never replaced."""
         assert self._media_dir is not None
+        if is_space_content_media_name(filename):
+            # A content name is filled only by bytes of its own hash — the
+            # content-name path above, never under the name as sent.
+            return False
         if await aiofiles.os.path.exists(self._media_dir / filename):
             return False
         if (
@@ -2423,6 +2484,13 @@ class FederationInboundService(ProtectionGateMixin):
             if listing.space_id != space_id:
                 return _ROW_ELSEWHERE
             return _scoped(filename in {media_basename(u) for u in listing.image_urls})
+        # A space comment's picture (v_85 ships it).
+        comment = await self._space_post_repo.get_comment(correlation_id)
+        if comment is not None:
+            parent = await self._space_post_repo.get(comment.post_id)
+            if parent is None or parent[0] != space_id:
+                return _ROW_ELSEWHERE
+            return _scoped(filename == media_basename(comment.media_url))
         if self._gallery_repo is not None:
             item = await self._gallery_repo.get_item(correlation_id)
             if item is not None:
@@ -2468,8 +2536,13 @@ class FederationInboundService(ProtectionGateMixin):
         post_id: object,
         from_instance: str,
         total_size: int,
+        expected_sha256: str | None = None,
+        alias: str | None = None,
+        space_id: str = "",
     ) -> None:
         """Write one space-media chunk; assemble once all have landed.
+        *alias*: a second name the published file also takes (a hard link,
+        write-once — v_85, a hashed file whose row is not here yet).
 
         ``raw`` is the already-decoded chunk bytes; ``filename`` has been
         validated and scope-checked by the caller; ``partial_dir`` is the
@@ -2505,6 +2578,11 @@ class FederationInboundService(ProtectionGateMixin):
                     what="SPACE_MEDIA_BLOB",
                     from_instance=from_instance,
                 )
+                if alias is not None:
+                    # The content file is here already (another item): it
+                    # holds exactly these bytes, so the sender's name may
+                    # point at it too.
+                    await link_once(target, self._media_dir / alias)
             await drop_parts(partial_root)
             return
         # The sender pipelines a file's chunks, so the ``final`` one may
@@ -2518,6 +2596,8 @@ class FederationInboundService(ProtectionGateMixin):
                 data=raw,
                 target=target,
                 expected_size=total_size,
+                expected_sha256=expected_sha256,
+                space_id=space_id,
             )
         except OSError as exc:
             log.warning(
@@ -2536,6 +2616,8 @@ class FederationInboundService(ProtectionGateMixin):
                 what="SPACE_MEDIA_BLOB",
                 from_instance=from_instance,
             )
+            if alias is not None:
+                await link_once(target, self._media_dir / alias)
             return
         log.info(
             "SPACE_MEDIA_BLOB: stored %s from %d chunk(s) for post=%s",
@@ -2543,6 +2625,8 @@ class FederationInboundService(ProtectionGateMixin):
             chunk_count,
             post_id,
         )
+        if alias is not None:
+            await link_once(target, self._media_dir / alias)
 
     async def _on_space_post_updated(self, event: FederationEvent) -> None:
         p = event.payload
@@ -2746,7 +2830,10 @@ class FederationInboundService(ProtectionGateMixin):
             created_at=parse_iso8601_lenient(p.get("occurred_at")),
             parent_id=p.get("parent_id"),
             content=p.get("content") or "",
-            media_url=local_media_ref(p.get("media_url")),
+            # v_85 — a hashed picture takes its content name.
+            media_url=comment_media_ref(
+                space_id, p.get("media_url"), parse_file_hashes(p)
+            ),
         )
         if not await self._space_post_repo.add_comment(comment, space_id=space_id):
             log_cross_space_refusal(

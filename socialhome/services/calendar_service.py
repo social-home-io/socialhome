@@ -70,6 +70,7 @@ from ..utils.rrule import expand_rrule
 from ..utils.timezones import is_valid_tz, parse_all_day_bound, parse_event_bound
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
+from .file_hashes_sender import FileHashesMixin
 from .inbound_media_store import require_local_media_ref
 from .media_ref_guard import MediaRefGuardedMixin
 from .moderation_release import with_release
@@ -1247,6 +1248,7 @@ class SpaceCalendarService(
     ProtectionGateMixin,
     ContentAccessMixin,
     SpaceMediaRefsMixin,
+    FileHashesMixin,
 ):
     """Space calendar event operations.
 
@@ -1262,6 +1264,7 @@ class SpaceCalendarService(
         "_bus",
         "_child_protection",
         "_federation",
+        "_file_hasher",
         "_household",
         "_media_gfs",
         "_media_guard",
@@ -1288,6 +1291,8 @@ class SpaceCalendarService(
         self._media_sync: SpaceMediaSyncService | None = None
         #: v_80 — a new cover's ``media_refs`` for link-joined members.
         self._media_gfs = None
+        #: v_85 — the cover rides with its SHA-256.
+        self._file_hasher = None
 
     # ── Subscription feed tokens (Phase F) ───────────────────────────────
 
@@ -2576,6 +2581,7 @@ class SpaceCalendarService(
         payload["capacity"] = event.capacity
         # A write released from the moderation queue names it (v_43).
         payload = with_release(payload)
+        payload = await self._with_file_hashes(payload, [event.cover_url])
         if MODERATION_BLOCK_KEY not in payload:
             await self._federation.broadcast_to_space_members(
                 space_id, evt_type, payload, **extra

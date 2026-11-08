@@ -33,6 +33,7 @@ from socialhome.domain.events import (
     UserStatusChanged,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.gfs_server import GfsServer
 from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.media_constraints import SPACE_COVER_MAX_DIMENSION
@@ -5549,3 +5550,133 @@ async def test_a_space_post_never_names_a_reserved_media_file(db, bus, inbound):
     _sid, post = await SqliteSpacePostRepo(db).get("post-rs")
     assert post.media_url is None
     assert post.image_urls == (_here("sp-rs", "a.webp"),)
+
+
+# ── v_85: hashed files take content names ─────────────────────────────────
+
+
+def _sc_ref(space_id: str, h: str, name: str) -> str:
+    return f"api/media/{space_content_media_name(space_id, h, name)}"
+
+
+def _files(**hashes: str) -> dict:
+    return {
+        "files": {name.replace("_", "."): {"h": h} for name, h in hashes.items()},
+        "files_suite": "sha256",
+    }
+
+
+async def _post(
+    inbound, space_id, post_id, *, from_instance="peer-a", author="user-remote", **extra
+):
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {
+                "id": post_id,
+                "author": author,
+                "type": "image",
+                "content": "",
+                "image_urls": ["api/media/a.webp"],
+                **extra,
+            },
+            space_id=space_id,
+            from_instance=from_instance,
+        )
+    )
+    got = await SqliteSpacePostRepo(db_of(inbound)).get(post_id)
+    assert got is not None
+    return got[1]
+
+
+def db_of(inbound):
+    return inbound._space_post_repo._db
+
+
+async def test_a_hashed_posts_picture_takes_its_content_name(db, bus, inbound):
+    await db.enqueue(_SEED_SPACE_SQL, _seed_space_args("sp-h"))
+    await _seat(db, "sp-h", "user-remote")
+    post = await _post(inbound, "sp-h", "p-h", **_files(a_webp="a" * 64))
+    assert post.image_urls == (_sc_ref("sp-h", "a" * 64, "a.webp"),)
+
+
+async def test_a_decoy_post_resolves_to_its_own_content(db, bus, inbound):
+    """M's post names A's file name with M's own hash: M's post shows M's
+    content name; A's post keeps A's."""
+    await db.enqueue(_SEED_SPACE_SQL, _seed_space_args("sp-d"))
+    await _seat(db, "sp-d", "user-remote")
+    await _seat(db, "sp-d", "user-m", instance_id="peer-m")
+    a_post = await _post(inbound, "sp-d", "p-a", **_files(a_webp="a" * 64))
+    m_post = await _post(
+        inbound,
+        "sp-d",
+        "p-m",
+        from_instance="peer-m",
+        author="user-m",
+        **_files(a_webp="b" * 64),
+    )
+    assert a_post.image_urls == (_sc_ref("sp-d", "a" * 64, "a.webp"),)
+    assert m_post.image_urls == (_sc_ref("sp-d", "b" * 64, "a.webp"),)
+    held = await SqliteSpacePostRepo(db).get("p-a")
+    assert held is not None and held[1].image_urls == a_post.image_urls
+
+
+async def test_an_unknown_suite_falls_back_to_the_legacy_name(db, bus, inbound):
+    await db.enqueue(_SEED_SPACE_SQL, _seed_space_args("sp-u"))
+    await _seat(db, "sp-u", "user-remote")
+    files = _files(a_webp="a" * 64)
+    files["files_suite"] = "blake3"
+    post = await _post(inbound, "sp-u", "p-u", **files)
+    assert post.image_urls == (_here("sp-u", "a.webp"),)
+
+
+async def test_a_legacy_post_keeps_its_sender_bound_name(db, bus, inbound):
+    await db.enqueue(_SEED_SPACE_SQL, _seed_space_args("sp-l"))
+    await _seat(db, "sp-l", "user-remote")
+    post = await _post(inbound, "sp-l", "p-l")
+    assert post.image_urls == (_here("sp-l", "a.webp"),)
+
+
+@pytest.mark.parametrize(
+    ("media_url", "files", "stored"),
+    [
+        # Hashed: the content name.
+        (
+            "api/media/c.webp",
+            {"c.webp": "c" * 64},
+            f"api/media/{space_content_media_name('sp-cm', 'c' * 64, 'c.webp')}",
+        ),
+        # Legacy: the sender's name, as before v_85.
+        ("api/media/c.webp", None, "api/media/c.webp"),
+        # A raw content name only a hash may produce: dropped.
+        (
+            f"api/media/{space_content_media_name('sp-cm', 'd' * 64, 'c.webp')}",
+            None,
+            None,
+        ),
+    ],
+)
+async def test_a_comments_picture_takes_its_content_name(
+    db, bus, inbound, media_url, files, stored
+):
+    await db.enqueue(_SEED_SPACE_SQL, _seed_space_args("sp-cm"))
+    await _seat(db, "sp-cm", "user-remote")
+    await _post(inbound, "sp-cm", "p-cm")
+    payload = {
+        "space_id": "sp-cm",
+        "post_id": "p-cm",
+        "comment_id": "c-cm",
+        "author": "user-remote",
+        "type": "image",
+        "content": "",
+        "media_url": media_url,
+    }
+    if files:
+        payload.update(_files(**{k.replace(".", "_"): v for k, v in files.items()}))
+    await inbound._on_space_comment_added(
+        _event(FederationEventType.SPACE_COMMENT_CREATED, payload)
+    )
+    row = await db.fetchone(
+        "SELECT media_url FROM space_post_comments WHERE id=?", ("c-cm",)
+    )
+    assert row is not None and row["media_url"] == stored

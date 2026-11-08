@@ -4,6 +4,7 @@ household for a blob a reader missed
 
 from __future__ import annotations
 
+import hashlib
 import os
 import pathlib
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from socialhome import space_media_hint as hint_mod
+from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.gfs_space_media import (
     AUTH_AUTHORITY,
     SpaceMediaUploadAuth,
@@ -110,7 +112,8 @@ class _Spaces:
 
 
 class _MediaRefs:
-    def __init__(self, foreign=(), gone=()):
+    def __init__(self, foreign=(), gone=(), content=None):
+        self.content = dict(content or {})
         self.foreign = set(foreign)
         #: Files only a deleted (or held) row shows.
         self.gone = set(gone)
@@ -120,6 +123,10 @@ class _MediaRefs:
 
     async def live_in_space(self, basename, space_id):
         return space_id == SPACE and basename not in self.gone
+
+    async def content_names_of_item(self, item_id):
+        #: v_85 — the item's content-addressed files (none by default).
+        return list(self.content.get(item_id, ()))
 
 
 class _Uploader:
@@ -258,6 +265,24 @@ async def test_a_file_another_household_delivered_is_found_under_its_name(tmp_pa
         await _ask(r, _frame(bid, origin=AUTHOR, filename="m.webp"))
         assert gfs.serves[0][2] == blob
         (tmp_path / name).unlink()
+
+
+async def test_a_file_held_under_its_content_name_is_found(tmp_path):
+    """v_85 — the host stores a member's hashed picture content-addressed
+    (``sc-``); the item's content files are candidates, and the sealed
+    address picks the one the GFS asked for (a decoy file of the same
+    item never matches)."""
+    data = os.urandom(5000)
+    other = os.urandom(5000)
+    name = space_content_media_name(SPACE, hashlib.sha256(data).hexdigest(), "m.webp")
+    decoy = space_content_media_name(SPACE, hashlib.sha256(other).hexdigest(), "x.webp")
+    (tmp_path / name).write_bytes(data)
+    (tmp_path / decoy).write_bytes(other)
+    blob, bid = _blob(data, origin=AUTHOR, filename="m.webp")
+    gfs = _Gfs()
+    r = _responder(tmp_path, gfs=gfs, refs=_MediaRefs(content={ITEM: [decoy, name]}))
+    await _ask(r, _frame(bid, origin=AUTHOR, filename="m.webp"))
+    assert gfs.serves[0][2] == blob
 
 
 async def test_a_private_channel_blob_is_served_under_the_channel_scope(tmp_path):

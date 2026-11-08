@@ -309,6 +309,34 @@ def record_media_urls(resource: str, record: dict[str, Any]) -> list[str]:
     return []
 
 
+#: The §25.6 resources whose records carry the ``files`` hash map (v_85):
+#: posts, calendar, gallery, a comment's picture and a bazaar listing's
+#: photos. Never pages: a page's files keep their page-scoped ``sp-`` names
+#: and only the host fills them (v_82), so no receiver would read a map.
+FILE_HASH_RESOURCES: frozenset[str] = frozenset(
+    {"posts", "calendar", "gallery", "comments", "bazaar"}
+)
+
+
+def record_file_urls(resource: str, record: dict[str, Any]) -> list[str]:
+    """Every local file an item of *resource* shows — what its ``files``
+    hash map (v_85) describes: :func:`record_media_urls`, plus a comment's
+    ``media_url`` and a bazaar listing's ``image_urls`` — never a page's
+    (:data:`FILE_HASH_RESOURCES`)."""
+    if resource not in FILE_HASH_RESOURCES:
+        return []
+    if resource == "comments":
+        return _str(record.get("media_url"))
+    if resource == "bazaar":
+        images = record.get("image_urls")
+        urls: list[str] = []
+        if isinstance(images, (list, tuple)):
+            for url in images:
+                urls.extend(_str(url))
+        return urls
+    return record_media_urls(resource, record)
+
+
 def post_media_urls(post: Post) -> list[str]:
     """:func:`record_media_urls` for a :class:`~.post.Post`."""
     preview = post.link_preview
