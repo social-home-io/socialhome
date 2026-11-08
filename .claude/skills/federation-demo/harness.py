@@ -1345,29 +1345,6 @@ def _gfs_cluster_cross_node_media(urls: list[str]) -> None:
     asyncio.run(_run())
 
 
-def _gfs_cluster_household(url: str) -> tuple[str, bytes]:
-    """Register a fresh household on *url* (landing pair token); returns its
-    ``(instance_id, signing seed)`` — what a ticket request is signed with."""
-    from socialhome.crypto import derive_instance_id, generate_identity_keypair
-
-    kp = generate_identity_keypair()
-    iid = derive_instance_id(kp.public_key)
-    code, resp = _request(
-        f"{url}/gfs/register",
-        method="POST",
-        body={
-            "token": _gfs_landing_token(url),
-            "instance_id": iid,
-            "public_key": kp.public_key.hex(),
-            "display_name": f"tickets-{iid[:6]}",
-        },
-        timeout=15.0,
-    )
-    if code not in (200, 201) or (resp or {}).get("status") != "registered":
-        raise SystemExit(f"gfs-cluster: ticket household register → {code} {resp!r}")
-    return iid, kp.private_key
-
-
 def _gfs_cluster_ticket_cache(http, url: str, household: tuple[str, bytes]):
     """A household ticket cache that fetches from *url*, with the issuer read
     from *url*'s signed ``/gfs/info`` (signature verified first)."""
@@ -1417,7 +1394,7 @@ def _gfs_cluster_mailbox_tickets(urls: list[str]) -> None:
         register_mailbox,
     )
 
-    household = _gfs_cluster_household(urls[0])
+    household = _gfs_cluster_register(urls[0], "tickets")
     _c, info = _request(f"{urls[0]}/gfs/info", timeout=10.0)
     gfs_id = info["gfs_instance_id"]
     spent: list[str] = []
@@ -1486,7 +1463,7 @@ def _gfs_cluster_mailboxes(urls: list[str]) -> None:
     if code != 200 or "envelope_mailbox" not in caps:
         raise SystemExit(f"gfs-cluster: /gfs/info has no envelope_mailbox → {code}")
     gfs_id = info["gfs_instance_id"]
-    household = _gfs_cluster_household(urls[0])
+    household = _gfs_cluster_register(urls[0], "tickets")
     keys = derive_mailbox_keys(new_mailbox_root(), gfs_id, "demo-space", 0)
     sealed = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "bWFpbGJveA"}
 
@@ -1611,7 +1588,7 @@ def _gfs_cluster_mailbox_other_id(all_urls: list[str]) -> None:
             raise SystemExit("gfs-cluster: the extra node never joined the cluster")
         time.sleep(2.0)
         keys = derive_mailbox_keys(new_mailbox_root(), id_0, "demo-space-x", 0)
-        household = _gfs_cluster_household(all_urls[0])
+        household = _gfs_cluster_register(all_urls[0], "tickets")
         sealed = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "b3RoZXItaWQ"}
 
         async def _claim_when_known(http):
