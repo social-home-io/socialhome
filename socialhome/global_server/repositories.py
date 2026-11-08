@@ -3758,7 +3758,15 @@ class AbstractGfsMailboxRepo(Protocol):
 
     async def is_mailbox(self, mailbox_id: str) -> bool: ...
 
-    async def register(self, mailbox_id: str, sign_pk: bytes, *, now: int) -> str: ...
+    async def register(
+        self,
+        mailbox_id: str,
+        sign_pk: bytes,
+        *,
+        now: int,
+        ticket_nonce: bytes,
+        ticket_expires_at: int,
+    ) -> str: ...
 
     async def remember_gfs_ids(self, ids: set[str], *, day: int) -> None: ...
 
@@ -3800,13 +3808,25 @@ class SqliteGfsMailboxRepo:
         )
         return row is not None
 
-    async def register(self, mailbox_id: str, sign_pk: bytes, *, now: int) -> str:
+    async def register(
+        self,
+        mailbox_id: str,
+        sign_pk: bytes,
+        *,
+        now: int,
+        ticket_nonce: bytes,
+        ticket_expires_at: int,
+    ) -> str:
         """Pin *sign_pk* for *mailbox_id* (trust on first use: an existing
-        row is never rewritten), in ONE transaction with the check that no
-        instance holds the id. ``"created"``, ``"exists"`` (registered
-        before — the caller compares the key) or ``"collision"`` (an
-        instance holds the id). *now* is stored as given (the caller rounds
-        it to the day)."""
+        row is never rewritten) and spend the registration ticket
+        *ticket_nonce* (``gfs_spent_tickets``, kept until
+        *ticket_expires_at*) — in ONE transaction with the check that no
+        instance holds the id, so a ticket is spent exactly when a mailbox
+        is created. ``"created"``, ``"exists"`` (registered before — the
+        caller compares the key; no ticket spent), ``"collision"`` (an
+        instance holds the id; no ticket spent) or ``"ticket_spent"`` (the
+        nonce was spent before; nothing created). *now* is stored as given
+        (the caller rounds it to the day)."""
 
         def _run(conn) -> str:
             if conn.execute(
@@ -3817,12 +3837,19 @@ class SqliteGfsMailboxRepo:
                 "SELECT 1 FROM gfs_mailboxes WHERE mailbox_id=?", (mailbox_id,)
             ).fetchone():
                 return "exists"
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO gfs_mailboxes(mailbox_id, sign_pk, created_at)"
+            spent = conn.execute(
+                "INSERT OR IGNORE INTO gfs_spent_tickets(nonce, expires_at)"
+                " VALUES(?,?)",
+                (ticket_nonce, ticket_expires_at),
+            )
+            if not spent.rowcount:
+                return "ticket_spent"
+            conn.execute(
+                "INSERT INTO gfs_mailboxes(mailbox_id, sign_pk, created_at)"
                 " VALUES(?,?,?)",
                 (mailbox_id, sign_pk, now),
             )
-            return "created" if cur.rowcount else "exists"
+            return "created"
 
         return await self._db.transact(_run)
 
@@ -3895,8 +3922,6 @@ class AbstractGfsMailboxTicketRepo(Protocol):
     async def take_issuance(
         self, instance_id: str, *, day: int, want: int, per_day: int
     ) -> int: ...
-
-    async def spend(self, nonce: bytes, *, expires_at: int) -> bool: ...
 
     async def prune(self, *, now: int, day: int, keys_before: int) -> None: ...
 
@@ -3972,18 +3997,6 @@ class SqliteGfsMailboxTicketRepo:
             return grant
 
         return await self._db.transact(_run)
-
-    async def spend(self, nonce: bytes, *, expires_at: int) -> bool:
-        """Record a redeemed token's *nonce*; ``False`` when it was spent
-        before (atomic — the primary key decides between two nodes)."""
-
-        return bool(
-            await self._db.enqueue_rowcount(
-                "INSERT OR IGNORE INTO gfs_spent_tickets(nonce, expires_at)"
-                " VALUES(?,?)",
-                (nonce, expires_at),
-            )
-        )
 
     async def prune(self, *, now: int, day: int, keys_before: int) -> None:
         """Drop spent nonces whose key is no longer accepted, issuance rows

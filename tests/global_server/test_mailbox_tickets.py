@@ -39,7 +39,10 @@ from socialhome.global_server.mailbox_tickets import (
     MailboxTicketService,
 )
 from socialhome.global_server.mailboxes import MailboxRefused
-from socialhome.global_server.repositories import SqliteGfsMailboxTicketRepo
+from socialhome.global_server.repositories import (
+    SqliteGfsMailboxRepo,
+    SqliteGfsMailboxTicketRepo,
+)
 from socialhome.global_server.server import create_gfs_app
 from tests.federation.test_gfs_mailbox import (
     HOME_ID,
@@ -52,6 +55,18 @@ from tests.global_server.test_mailbox_cluster import nodes  # noqa: F401
 from tests.global_server.test_mailboxes import Box, _cfg
 
 pytestmark = pytest.mark.security
+
+
+async def _spend(db, nonce: bytes, expires_at: int) -> None:
+    """Spend *nonce* the way the GFS does: with a new mailbox's insert."""
+    outcome = await SqliteGfsMailboxRepo(db).register(
+        nonce.hex()[:32],
+        b"\x01" * 32,
+        now=0,
+        ticket_nonce=nonce,
+        ticket_expires_at=expires_at,
+    )
+    assert outcome == "created"
 
 
 async def _home(app, *, status: str = "active") -> None:
@@ -244,6 +259,20 @@ async def test_the_address_backstop_still_binds_and_keeps_the_ticket(tmp_dir):
         assert len(spent) == 1  # only the first ticket
 
 
+async def test_a_concurrent_register_of_one_mailbox_spends_one_ticket(gfs):
+    """Two registers of the SAME new mailbox race with two tickets: one
+    mailbox, one ticket spent — the loser's ticket is not burned (the
+    nonce is written in the mailbox insert's transaction)."""
+    first, second = await _tokens(gfs, 2)
+    box = Box()
+    a, b = await asyncio.gather(_register(gfs, first, box), _register(gfs, second, box))
+    assert (a.status, b.status) == (200, 200)
+    spent = await gfs.server.app[gfs_db_key].fetchall(
+        "SELECT nonce FROM gfs_spent_tickets"
+    )
+    assert len(spent) == 1
+
+
 async def test_a_forged_token_is_refused(gfs):
     (token,) = await _tokens(gfs, 1)
     raw = bytearray(b64url_decode(token))
@@ -339,7 +368,7 @@ async def test_a_ticket_outlives_its_epoch_by_one(gfs_db):
         await svc.check(pp.TICKET_SUITE_PP_BLINDRSA, token)
     assert err.value.error == "stale_ticket_key"
     # Spent nonces and keys past their life are pruned.
-    await svc.spend(nonce, expires_at)
+    await _spend(gfs_db, nonce, expires_at)
     await svc.prune(now=int(clock.t) + DAY_SECONDS + 1)
     db = gfs_db
     assert await db.fetchall("SELECT * FROM gfs_spent_tickets") == []
@@ -349,12 +378,15 @@ async def test_a_ticket_outlives_its_epoch_by_one(gfs_db):
 
 async def test_two_services_on_one_db_share_the_epoch_key(gfs_db):
     clock = _Clock(1_000_000.0)
-    make = lambda: MailboxTicketService(
-        repo=SqliteGfsMailboxTicketRepo(gfs_db),
-        config=EnvelopeMailboxConfig(),
-        federation=None,  # type: ignore[arg-type]
-        clock=clock,
-    )
+
+    def make() -> MailboxTicketService:
+        return MailboxTicketService(
+            repo=SqliteGfsMailboxTicketRepo(gfs_db),
+            config=EnvelopeMailboxConfig(),
+            federation=None,  # type: ignore[arg-type]
+            clock=clock,
+        )
+
     a, b = make(), make()
     ka, kb = await asyncio.gather(a.current_key(), b.current_key())
     assert ka.row.key_id == kb.row.key_id
@@ -462,7 +494,7 @@ async def test_a_spent_nonce_outlives_its_key_by_a_day(gfs_db):
     nonce, expires_at = await svc.check(
         pp.TICKET_SUITE_PP_BLINDRSA, b64url_encode(_local_token(live))
     )
-    await svc.spend(nonce, expires_at)
+    await _spend(gfs_db, nonce, expires_at)
     for now in (expires_at, expires_at + DAY_SECONDS - 1):
         await svc.prune(now=now)
         assert len(await gfs_db.fetchall("SELECT 1 FROM gfs_spent_tickets")) == 1

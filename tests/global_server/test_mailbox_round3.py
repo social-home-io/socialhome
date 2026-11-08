@@ -47,8 +47,14 @@ async def _put(q, to, n, *, mailbox, total, ceiling=None, now=TODAY + 10, ttl=10
 
 async def _boxes(gfs_db, *ids: str):
     repo = SqliteGfsMailboxRepo(gfs_db)
-    for mid in ids:
-        await repo.register(mid, b"\x01" * 32, now=TODAY)
+    for i, mid in enumerate(ids):
+        await repo.register(
+            mid,
+            b"\x01" * 32,
+            now=TODAY,
+            ticket_nonce=(i + 1).to_bytes(32, "big"),
+            ticket_expires_at=10**10,
+        )
     return SqliteGfsEnvelopeQueueRepo(gfs_db)
 
 

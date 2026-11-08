@@ -135,13 +135,10 @@ class Box:
 
 class FreeTickets:
     """A ticket service stub for unit tests of the per-address limits:
-    every ticket checks and spends."""
+    every ticket checks."""
 
     async def check(self, suite, ticket):
         return b"\x00" * 32, 0
-
-    async def spend(self, nonce, expires_at):
-        return None
 
 
 async def mint_ticket(app) -> str:

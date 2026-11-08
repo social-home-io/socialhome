@@ -316,25 +316,35 @@ class GfsMailboxService:
                 raise MailboxRefused(409, "id_in_use")
             return mailbox_id
         # A NEW mailbox costs one anonymous ticket (:mod:`.mailbox_tickets`),
-        # checked before anything is counted and spent only once the
-        # per-address backstop let it through.
+        # checked before anything is counted and spent in the insert's own
+        # transaction once the per-address backstop let it through.
         nonce_t, expires_at = await self._tickets.check(
             body.get("ticket_suite"), body.get("ticket")
         )
         scopes = self._count_new(client_bucket, now)
         if scopes is None:
             raise MailboxRefused(429, "mailbox_cap")
+        outcome = "error"
         try:
-            await self._tickets.spend(nonce_t, expires_at)
-            outcome = await self._repo.register(mailbox_id, sign_pk, now=day_floor(now))
-        except BaseException:
-            for key in scopes:  # nothing was created: give the count back
-                self._new_sketch.add(key, -1)
-            raise
+            outcome = await self._repo.register(
+                mailbox_id,
+                sign_pk,
+                now=day_floor(now),
+                ticket_nonce=nonce_t,
+                ticket_expires_at=expires_at,
+            )
+        finally:
+            if outcome != "created":  # nothing new: give the count back
+                for key in scopes:
+                    self._new_sketch.add(key, -1)
         if outcome == "collision":
-            for key in scopes:
-                self._new_sketch.add(key, -1)
             raise MailboxRefused(409, "id_in_use")
+        if outcome == "ticket_spent":
+            raise MailboxRefused(409, "ticket_spent")
+        if outcome == "exists":  # a concurrent register won the insert
+            raced = await self._repo.get(mailbox_id)
+            if raced is None or raced.sign_pk != sign_pk:
+                raise MailboxRefused(409, "id_in_use")
         return mailbox_id
 
     def _count_new(self, bucket: str, now: float) -> list[str] | None:

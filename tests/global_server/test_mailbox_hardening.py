@@ -53,6 +53,14 @@ from tests.global_server.test_mailboxes import (
     ticketed,
 )
 
+_ticket_seq = iter(range(1, 10**6))
+
+
+def _ticket() -> dict:
+    """A fresh registration-ticket nonce for one direct repo register."""
+    nonce = next(_ticket_seq).to_bytes(32, "big")
+    return {"ticket_nonce": nonce, "ticket_expires_at": 10**10}
+
 
 async def _client(tmp_dir, **cfg) -> TestClient:
     app = create_gfs_app(_cfg(tmp_dir, **cfg))
@@ -149,11 +157,13 @@ async def test_pinned_registration_refuses_a_key_change_and_a_mailbox_id(gfs_db)
     assert await fed.register_instance_pinned(swapped) is False
     assert (await fed.get_instance("i" * 32)).public_key == pk_a
     # Both directions of the collision.
-    assert await boxes.register("m" * 32, b"\x01" * 32, now=0) == "created"
+    assert await boxes.register("m" * 32, b"\x01" * 32, now=0, **_ticket()) == "created"
     clash = ClientInstance(instance_id="m" * 32, display_name="z", public_key=pk_a)
     assert await fed.register_instance_pinned(clash) is False
     assert await fed.get_instance("m" * 32) is None
-    assert await boxes.register("i" * 32, b"\x02" * 32, now=0) == "collision"
+    assert (
+        await boxes.register("i" * 32, b"\x02" * 32, now=0, **_ticket()) == "collision"
+    )
     assert await boxes.get("i" * 32) is None
 
 
@@ -186,7 +196,7 @@ async def test_an_id_in_both_tables_gets_nothing_and_the_warning_names_no_id(
 async def _queue(gfs_db, *ids: str) -> SqliteGfsEnvelopeQueueRepo:
     boxes = SqliteGfsMailboxRepo(gfs_db)
     for mid in ids:
-        await boxes.register(mid, mid.encode()[:32].ljust(32, b"x"), now=0)
+        await boxes.register(mid, mid.encode()[:32].ljust(32, b"x"), now=0, **_ticket())
     return SqliteGfsEnvelopeQueueRepo(gfs_db)
 
 

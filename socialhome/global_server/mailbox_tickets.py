@@ -21,9 +21,10 @@ N tickets today", nothing it could match to a redemption.
 carries one unblinded ``Token``. The server checks the challenge digest
 (the fixed :data:`MAILBOX_TICKET_CHALLENGE`), finds the issuer key by its
 ``token_key_id`` among the keys it still accepts, verifies the
-authenticator (RSASSA-PSS, OpenSSL) and records the token nonce in
-``gfs_spent_tickets`` — a primary key, so a second spend on any node is
-refused.
+authenticator (RSASSA-PSS, OpenSSL); the mailbox insert then records the
+token nonce in ``gfs_spent_tickets`` in the SAME transaction — a primary
+key, so a second spend on any node is refused, and a register that creates
+nothing (an existing mailbox, a collision, a crash) spends nothing.
 
 **Keys** — one RSA-2048 issuer key per epoch (``mailbox_ticket_epoch_days``),
 made on first use by whichever node needs it first and stored in the shared
@@ -292,8 +293,10 @@ class MailboxTicketService:
     # ── Redemption ───────────────────────────────────────────────────────
 
     async def check(self, suite: object, ticket: object) -> tuple[bytes, int]:
-        """Verify a ticket without spending it: ``(nonce, expires_at)`` for
-        :meth:`spend`. Raises :class:`MailboxRefused`."""
+        """Verify a ticket without spending it: ``(nonce, expires_at)``,
+        which the mailbox insert records in its own transaction
+        (:meth:`SqliteGfsMailboxRepo.register`). Raises
+        :class:`MailboxRefused`."""
         if suite is None and ticket is None:
             raise MailboxRefused(403, "ticket_required")
         try:
@@ -315,12 +318,6 @@ class MailboxTicketService:
         if not token.verify(live.public):
             raise MailboxRefused(403, "invalid_ticket")
         return token.nonce, live.row.created_at + 2 * self._epoch_seconds
-
-    async def spend(self, nonce: bytes, expires_at: int) -> None:
-        """Mark a checked ticket spent; :class:`MailboxRefused` 409 when it
-        was spent before (on any node)."""
-        if not await self._repo.spend(nonce, expires_at=expires_at):
-            raise MailboxRefused(409, "ticket_spent")
 
     async def prune(self, *, now: int) -> None:
         """Forget spent nonces of retired keys, past days' counts and keys
