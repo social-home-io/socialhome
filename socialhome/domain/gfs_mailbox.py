@@ -31,6 +31,8 @@ import hashlib
 import re
 from dataclasses import dataclass
 
+from ..privacy_pass import token_challenge
+
 #: Hash prefix of the mailbox id (separates it from an instance id).
 MAILBOX_ID_PREFIX: bytes = b"sh-mbx-v1"
 #: The id's length — the same as an instance id's.
@@ -51,6 +53,24 @@ ENVELOPE_MAILBOX_CAPABILITY: str = "envelope_mailbox"
 #: Routes.
 MAILBOX_REGISTER_ROUTE: str = "/gfs/mailbox/register"
 MAILBOX_WS_ROUTE: str = "/gfs/mailbox/ws"
+MAILBOX_TICKETS_ROUTE: str = "/gfs/mailbox/tickets"
+
+#: The signed ``/gfs/info`` capability carrying the ticket issuer key
+#: (``{suite, issuer_key_id, public_key, per_day}``).
+MAILBOX_TICKETS_CAPABILITY: str = "mailbox_tickets"
+#: The RFC 9577 ``TokenChallenge`` every mailbox ticket is issued for: no
+#: redemption context (tickets are fetched ahead of use, in batches) and the
+#: registration as the origin, so a ticket for this purpose is never
+#: accepted for another one. The issuer itself is bound by the token's
+#: ``token_key_id``.
+MAILBOX_TICKET_CHALLENGE: bytes = token_challenge(
+    b"gfs.social-home.io", origin_info=b"mailbox-register"
+)
+#: The signed ``action`` of a ticket request (domain separation from every
+#: other ``{instance_id, ..., ts}``-signed GFS request).
+TICKETS_ACTION: str = "mailbox_tickets"
+#: Most token requests one ``POST /gfs/mailbox/tickets`` may carry.
+MAX_TICKETS_PER_REQUEST: int = 64
 
 #: WebSocket frame types of the claim handshake.
 FRAME_MAILBOX_CHALLENGE: str = "mailbox_challenge"
@@ -82,6 +102,21 @@ class GfsMailbox:
     sign_pk: bytes
     created_at: int
     last_claim_at: int | None
+
+
+@dataclass(slots=True, frozen=True)
+class TicketIssuerKey:
+    """One mailbox-ticket issuer key (GFS table ``gfs_ticket_issuer_keys``,
+    migration 0030): the RSA private key as PKCS#8 DER, its RFC 9578 key id
+    and when it was made (it is accepted for redemption for two epochs)."""
+
+    epoch: int
+    key_id: bytes
+    private_key_der: bytes
+    created_at: int
+
+    def __repr__(self) -> str:  # never print the private key
+        return f"TicketIssuerKey(epoch={self.epoch}, created_at={self.created_at})"
 
 
 def derive_mailbox_id(sign_pk: bytes) -> str:

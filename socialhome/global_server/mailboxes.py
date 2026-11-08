@@ -21,8 +21,9 @@ bucket and its /56 and /48 supernets (×4, ×16) — NEW mailboxes per UTC day
 and live claim sockets are counted in count-min sketches keyed by a salted
 hash: no address is kept even in memory, and no eviction can reset a count
 (a collision only over-counts). Each node allows its share over the live
-nodes. A server-wide cap on new mailboxes per day is counted in the shared
-table (cluster-wide).
+nodes. Every NEW mailbox also spends one anonymous Privacy Pass ticket
+(:mod:`.mailbox_tickets`) — households registered here fetch a daily batch —
+which replaced a server-wide daily cap that anyone could burn.
 
 **Claim** (``GET /gfs/mailbox/ws``, :mod:`.routes.mailbox`) — the server
 sends a random challenge; the client answers with the mailbox id, the GFS id
@@ -49,6 +50,7 @@ import secrets
 import time
 from array import array
 from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING
 
 from .. import crypto
 from ..domain.gfs_mailbox import (
@@ -65,6 +67,9 @@ from .config import EnvelopeMailboxConfig
 from .federation import TIMING_UNIFORM_DUMMY_KEY_HEX
 from .public import node_share
 from .repositories import AbstractGfsMailboxRepo
+
+if TYPE_CHECKING:
+    from .mailbox_tickets import MailboxTicketService
 
 log = logging.getLogger(__name__)
 
@@ -83,8 +88,8 @@ DAY_SECONDS: int = 86_400
 #: Wide on purpose (a home gets a /56, an organisation a /48): the
 #: supernet caps stop one network from minting through many /64s, without
 #: letting a noisy neighbour in the same /48 exhaust everybody else's room.
-#: With the defaults a /56 may register 3 200 and a /48 51 200 a day — the
-#: server-wide ``mailbox_max_new_per_day`` binds first.
+#: With the defaults a /56 may register 3 200 and a /48 51 200 a day — and
+#: every one of them spends a ticket (:mod:`.mailbox_tickets`).
 PREFIX_MULTIPLIERS: tuple[tuple[int, int], ...] = ((64, 1), (56, 16), (48, 256))
 #: How long a GFS id this cluster once served stays accepted for a
 #: registration / claim bound to it (``gfs_known_gfs_ids``).
@@ -175,6 +180,7 @@ class GfsMailboxService:
         "_siblings",
         "_socket_sketch",
         "_spent_nonces",
+        "_tickets",
     )
 
     def __init__(
@@ -183,12 +189,14 @@ class GfsMailboxService:
         repo: AbstractGfsMailboxRepo,
         gfs_instance_id: str,
         config: EnvelopeMailboxConfig,
+        tickets: MailboxTicketService,
         aliases: Iterable[str] = (),
         sibling_ids: Callable[[], Iterable[str]] | None = None,
         nodes: Callable[[], int] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._repo = repo
+        self._tickets = tickets
         self._gfs_instance_id = gfs_instance_id
         self._aliases = frozenset(aliases)
         #: The public ids of cluster siblings that share our identity key —
@@ -307,25 +315,26 @@ class GfsMailboxService:
             if existing.sign_pk != sign_pk:  # a SHA-256 collision; never
                 raise MailboxRefused(409, "id_in_use")
             return mailbox_id
-        today = day_floor(now)
+        # A NEW mailbox costs one anonymous ticket (:mod:`.mailbox_tickets`),
+        # checked before anything is counted and spent only once the
+        # per-address backstop let it through.
+        nonce_t, expires_at = await self._tickets.check(
+            body.get("ticket_suite"), body.get("ticket")
+        )
         scopes = self._count_new(client_bucket, now)
         if scopes is None:
             raise MailboxRefused(429, "mailbox_cap")
-        # The server-wide daily cap is counted in the insert transaction,
-        # so concurrent registrations on every node can't overshoot it.
-        outcome = await self._repo.register(
-            mailbox_id,
-            sign_pk,
-            now=today,
-            max_new_today=self._cfg.mailbox_max_new_per_day,
-        )
-        if outcome in ("collision", "server_cap"):
+        try:
+            await self._tickets.spend(nonce_t, expires_at)
+            outcome = await self._repo.register(mailbox_id, sign_pk, now=day_floor(now))
+        except BaseException:
             for key in scopes:  # nothing was created: give the count back
                 self._new_sketch.add(key, -1)
+            raise
         if outcome == "collision":
+            for key in scopes:
+                self._new_sketch.add(key, -1)
             raise MailboxRefused(409, "id_in_use")
-        if outcome == "server_cap":
-            raise MailboxRefused(429, "server_mailbox_cap")
         return mailbox_id
 
     def _count_new(self, bucket: str, now: float) -> list[str] | None:

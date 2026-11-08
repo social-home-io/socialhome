@@ -257,8 +257,12 @@ class EnvelopeMailboxConfig:
       claimed, its registration) is this many days old is dropped by the
       maintenance loop, with its queued frames. Counted in whole days; a
       claim socket held open refreshes it once a day.
-    * ``mailbox_max_new_per_day`` — NEW mailboxes the whole server takes per
-      UTC day (cluster-wide: counted in the shared table).
+    * ``mailbox_tickets_per_day`` — registration tickets one registered
+      household may fetch per UTC day (cluster-wide, shared table). Every
+      NEW mailbox spends one (:mod:`.mailbox_tickets`), so this — not a
+      server-wide cap anyone could burn — bounds how many mailboxes exist.
+    * ``mailbox_ticket_epoch_days`` — how long one ticket issuer key signs;
+      a key's tickets stay redeemable for one more epoch after it.
     * ``mailbox_max_sockets_per_ip`` — claim sockets one client address may
       hold open at once (per node share; ×16 per /56, ×256 per /48).
     * ``mailbox_queue_max_per_recipient`` / ``mailbox_queue_bytes_per_recipient``
@@ -276,7 +280,8 @@ class EnvelopeMailboxConfig:
     enabled: bool = True
     mailbox_max_per_ip: int = 200
     mailbox_idle_days: int = 30
-    mailbox_max_new_per_day: int = 20_000
+    mailbox_tickets_per_day: int = 50
+    mailbox_ticket_epoch_days: int = 30
     mailbox_max_sockets_per_ip: int = 512
     mailbox_queue_max_per_recipient: int = 200
     mailbox_queue_bytes_per_recipient: int = 4 * 1024**2
@@ -317,7 +322,8 @@ class EnvelopeMailboxConfig:
 _ENVELOPE_MAILBOX_BOUNDS: dict[str, tuple[int, int]] = {
     "mailbox_max_per_ip": (1, 1_000_000),
     "mailbox_idle_days": (1, 3650),
-    "mailbox_max_new_per_day": (1, 100_000_000),
+    "mailbox_tickets_per_day": (1, 10_000),
+    "mailbox_ticket_epoch_days": (1, 365),
     "mailbox_max_sockets_per_ip": (1, 1_000_000),
     "mailbox_queue_max_per_recipient": (1, 100_000),
     "mailbox_queue_bytes_per_recipient": (320 * 1024, 1 << 30),

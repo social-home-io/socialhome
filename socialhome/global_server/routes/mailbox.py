@@ -1,11 +1,18 @@
-"""Anonymous GFS mailboxes — register + claim socket (GFS redesign PR 1).
+"""Anonymous GFS mailboxes — tickets, register + claim socket (GFS redesign PR 1).
 
 * ``POST /gfs/mailbox/register`` — pin a mailbox key with proof of
   possession (:meth:`GfsMailboxService.register`). ``200 {"status":
   "registered", "mailbox_id"}`` for a new and an existing mailbox alike;
   ``400`` malformed / unknown ``sig_suite`` / stale ``ts`` / id not the
   key's hash, ``403`` bad signature, ``409`` replayed nonce or an id an
-  instance holds, ``429`` per-address limits.
+  instance holds, ``429`` per-address limits. A NEW mailbox also needs
+  ``ticket_suite`` + ``ticket`` (one RFC 9577 token, base64url): ``400``
+  unknown suite, ``403`` ``invalid_ticket`` / ``stale_ticket_key``, ``409``
+  ``ticket_spent``.
+* ``POST /gfs/mailbox/tickets`` — a registered household's signed request
+  for blind-signed tickets (:meth:`MailboxTicketService.issue`): ``200
+  {"suite", "issuer_key_id", "responses"}``; ``403`` unknown / unsigned /
+  inactive, ``409`` ``stale_issuer_key``, ``429`` ``ticket_quota``.
 * ``GET /gfs/mailbox/ws`` — the anonymous claim socket, separate from the
   identified ``/gfs/ws``. The server speaks first::
 
@@ -69,8 +76,10 @@ log = logging.getLogger(__name__)
 CLAIM_TIMEOUT_SECONDS: float = 5.0
 #: The largest frame a mailbox client sends (its claim).
 CLAIM_MAX_MSG_BYTES: int = 4096
-#: Largest registration body.
+#: Largest registration body (a ticket is ~470 base64 characters).
 REGISTER_MAX_BODY_BYTES: int = 2048
+#: Largest ticket request body (64 blinded requests of ~350 characters).
+TICKETS_MAX_BODY_BYTES: int = 32 * 1024
 #: Protocol-level ping interval — inside Cloudflare's 100 s WS idle timeout.
 MAILBOX_WS_HEARTBEAT_S: float = 30.0
 #: How often a held claim socket checks whether the UTC day changed (the
@@ -222,3 +231,26 @@ class MailboxWebSocketView(web.View):
             await ws.close(code=WS_CLOSE_AUTH_FAILED, message=WS_AUTH_FAILED_REASON)
             return None
         return mailbox_id, parse_accepts(claim.get("accepts"))
+
+
+class MailboxTicketsView(GfsBaseView):
+    """``POST /gfs/mailbox/tickets`` — a registered household's daily batch
+    of blind-signed registration tickets (:mod:`..mailbox_tickets`)."""
+
+    async def post(self) -> web.Response:
+        svc = self.svc(K.gfs_mailbox_tickets_key)
+        if not svc.enabled:
+            raise web.HTTPNotFound()
+        raw = await self.bounded_raw(TICKETS_MAX_BODY_BYTES)
+        try:
+            body = orjson.loads(raw)
+        except ValueError:
+            return web.json_response({"error": "invalid_json"}, status=400)
+        try:
+            result = await svc.issue(body)
+        except MailboxRefused as exc:
+            resp = web.json_response({"error": exc.error}, status=exc.status)
+            if exc.status == 429:
+                resp.headers["Retry-After"] = "3600"
+            return resp
+        return web.json_response(result)

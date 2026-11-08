@@ -31,7 +31,11 @@ from ...domain.gfs_channel import (
     CHANNEL_UNREGISTER_ROUTE,
     CHANNEL_UNSUBSCRIBE_ROUTE,
 )
-from ...domain.gfs_mailbox import MAILBOX_REGISTER_ROUTE, MAILBOX_WS_ROUTE
+from ...domain.gfs_mailbox import (
+    MAILBOX_REGISTER_ROUTE,
+    MAILBOX_TICKETS_ROUTE,
+    MAILBOX_WS_ROUTE,
+)
 from ...gfs_proof import PROOF_ROUTE
 from .. import admin as admin_mod
 from ..link_preview import SPACE_IMAGE_ROUTE
@@ -91,7 +95,7 @@ from .highlights import (
     HighlightUnpublishView,
 )
 from .invites import SpaceInviteTokenView, SpaceInviteView
-from .mailbox import MailboxRegisterView, MailboxWebSocketView
+from .mailbox import MailboxRegisterView, MailboxTicketsView, MailboxWebSocketView
 from .member_publish import (
     MemberPublishAnonView,
     MemberPublishView,
@@ -208,6 +212,9 @@ def register_routes(
     # key with proof of possession, claim its frames on a socket of its own.
     app.router.add_view(MAILBOX_REGISTER_ROUTE, MailboxRegisterView)
     app.router.add_view(MAILBOX_WS_ROUTE, MailboxWebSocketView)
+    # A registered household's daily batch of anonymous registration
+    # tickets (Privacy Pass): signed by the household, blind-signed here.
+    app.router.add_view(MAILBOX_TICKETS_ROUTE, MailboxTicketsView)
     # Trusted-mode member publish (v_49): identified by the household
     # signature, authorized by a space-authority-signed writer cert; plus the
     # authority-signed content-epoch notice the freshness check relies on.

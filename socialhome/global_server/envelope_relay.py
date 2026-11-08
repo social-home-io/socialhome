@@ -106,7 +106,11 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
-from ..domain.gfs_mailbox import MAILBOX_REGISTER_ROUTE, MAILBOX_WS_ROUTE
+from ..domain.gfs_mailbox import (
+    MAILBOX_REGISTER_ROUTE,
+    MAILBOX_TICKETS_ROUTE,
+    MAILBOX_WS_ROUTE,
+)
 from ..moment_public_seal import (
     FRAME_MOMENT_REACTION,
     MAX_REACT_BODY_BYTES,
@@ -1206,6 +1210,9 @@ MAILBOX_REGISTER_MAX_PER_MINUTE: int = 30
 #: Mailbox claim sockets one client address may open a minute (one per
 #: mailbox at startup and on every reconnect).
 MAILBOX_CLAIM_MAX_PER_MINUTE: int = 120
+#: Ticket requests per address a minute (each is signed and the per-household
+#: daily quota binds first; this only sheds junk before the signature check).
+MAILBOX_TICKETS_MAX_PER_MINUTE: int = 30
 
 
 def build_mailbox_rate_limits(
@@ -1224,6 +1231,12 @@ def build_mailbox_rate_limits(
             resolver,
             MAILBOX_CLAIM_MAX_PER_MINUTE,
             lambda path: path == MAILBOX_WS_ROUTE,
+            nodes=nodes,
+        ),
+        build_window_limiter(
+            resolver,
+            MAILBOX_TICKETS_MAX_PER_MINUTE,
+            lambda path: path == MAILBOX_TICKETS_ROUTE,
             nodes=nodes,
         ),
     ]

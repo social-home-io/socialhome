@@ -8,7 +8,10 @@ from dataclasses import asdict
 import orjson
 from aiohttp import web
 
-from ...domain.gfs_mailbox import ENVELOPE_MAILBOX_CAPABILITY
+from ...domain.gfs_mailbox import (
+    ENVELOPE_MAILBOX_CAPABILITY,
+    MAILBOX_TICKETS_CAPABILITY,
+)
 from ...domain.gfs_space_media import SPACE_MEDIA_CAPABILITY
 from ...domain.gfs_space_media_on_demand import ON_DEMAND_CAPABILITY_KEY
 from ...domain.relay_media_frame import ENVELOPE_MEDIA_CAPABILITY
@@ -302,6 +305,12 @@ class GfsInfoView(GfsBaseView):
         mailbox = self.svc(K.gfs_mailbox_service_key).capability()
         if mailbox is not None:
             capabilities[ENVELOPE_MAILBOX_CAPABILITY] = mailbox
+        # Anonymous registration tickets for those mailboxes (Privacy Pass,
+        # RFC 9578 type 0x0002): the current issuer key, SIGNED here so a
+        # household blinds only under the key every household sees.
+        tickets = await self.svc(K.gfs_mailbox_tickets_key).capability()
+        if tickets is not None:
+            capabilities[MAILBOX_TICKETS_CAPABILITY] = tickets
         if cfg.instance_id_aliases:
             # The former ids this server answers to (``instance_id_aliases``),
             # SIGNED: a household pinned to one of them adopts
