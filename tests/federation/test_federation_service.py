@@ -3178,8 +3178,8 @@ async def test_app_binary_frame_seals_the_turn_flag():
         app_id="chess",
         session_id="sess-bin",
         payload={"move": "g1f3"},
-        to_user="bob",
-        from_user="alice",
+        to_user=_TO_USER,
+        from_user=_FROM_USER,
         turn=True,
     )
     assert p.cap.json_envelopes == []
@@ -3265,6 +3265,10 @@ async def test_app_inbound_handler_dispatches_to_app_fed():
     assert payload == {"move": "g1f3"}
     # No person named by the sender (older shape): household-addressed.
     assert routings == [{"to_user": None, "from_user": None, "turn": False}]
+
+
+_TO_USER = "bob@binary-frame-test"
+_FROM_USER = "alice@binary-frame-test"
 
 
 @pytest.mark.asyncio
