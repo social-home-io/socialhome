@@ -4063,8 +4063,12 @@ it:
      `authority_rotation_seq` moves nothing — a GFS, even the one that gave
      the pin, cannot swap the key;
    - under the same key a contact must name the same owner key, and only a
-     **newer** one replaces the one held — the contact's signed `issued_at`
-     is kept, so an older key-wrap key cannot be replayed;
+     **newer** one is taken: the pin keeps the newest signed `issued_at`
+     it ever took as a high-water mark that never goes down (also across a
+     listing that carries no contact), so an older key-wrap key cannot be
+     replayed; a contact dated more than 5 minutes in the future is no
+     contact (a seed-holding demoted admin or a clock jump cannot freeze a
+     binding);
    - anything else — another authority without that chain, another owner,
      two GFSs that disagree — is a lasting **conflict**: the contact is
      dropped and the space is not asked through the GFS (its people use an
@@ -4136,12 +4140,22 @@ Once pinned it cannot swap the keys: a new authority key needs a cert from
 the pinned owner key, a new contact needs the pinned authority key, an
 older contact is refused, and a purged listing keeps its pin.
 
-**A known lever, accepted.** Fail-closed has a cost: any one GFS a
-household uses can make a space unaskable for that household — by listing
-it under another authority (a conflict) or by dropping its contact. It
-cannot read or redirect a request, only stop one; the conflict is not
-cleared by a purge (that would re-open the TOFU it guards). The space's
-people still join with an invite link.
+**Known levers, accepted.** Fail-closed has a cost: any one GFS a
+household uses can stop it asking a space through the GFS — by listing it
+under another authority (a **lasting** conflict, not cleared by a purge:
+that would re-open the TOFU it guards) or by dropping its contact (nothing
+to ask through while it is missing; the pin and its `issued_at` mark stay,
+and the owner's next, newer contact is taken again). It cannot read or
+redirect a request, only stop one. **The way out:** pair with the space's
+owner household — a confirmed pairing is asked over the pairing and the pin
+is not consulted — or join with an invite link.
+
+**Limits.** The owner household key is the root of the pin. The protocol
+has no owner-household change today — an ownership transfer moves a space
+between people of the owner household (`SpaceService.transfer_ownership`)
+and a household identity key is permanent — so a contact naming another
+owner key is a conflict. If such a change is ever added, it needs a chain
+signed by the old owner here first.
 
 **Cost.** Per request: zero lookups, two sealed envelopes (request,
 answer, ~1–2 KB each), then the §D2b redeem (the space snapshot, bounded

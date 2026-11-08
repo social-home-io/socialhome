@@ -3114,7 +3114,12 @@ class SqliteSpaceRepo:
             """
             SELECT * FROM space_join_requests
              WHERE status='pending'
-               AND datetime(expires_at) < datetime('now')
+               -- An empty or unreadable expiry (``datetime()`` → NULL) reads
+               -- as expired: a request is never pending forever.
+               AND (
+                    datetime(expires_at) IS NULL
+                    OR datetime(expires_at) < datetime('now')
+               )
             """,
         )
         return rows_to_dicts(rows)

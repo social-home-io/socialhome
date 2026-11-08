@@ -31,7 +31,7 @@ from socialhome.space_join_contact import sign_join_contact
 
 GFS_A = "https://gfs-a.example"
 GFS_B = "https://gfs-b.example"
-T0 = datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
+T0 = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 
 
 class _Host:
@@ -195,3 +195,44 @@ def test_garbage_reads_as_nothing():
     assert load_pin("not json") is None
     assert load_pin(orjson.dumps([1]).decode()) is None
     assert merge_pin("x", None, space_id="sp") == "x"
+
+
+def test_a_contactless_listing_does_not_reset_freshness():
+    """The probe: day-1 contact, then a listing without one, then the
+    replayed day-0 contact — the old key-wrap key must not come back."""
+    host, space = _Host(), generate_identity_keypair()
+    old_kw, new_kw = generate_x25519_keypair(), generate_x25519_keypair()
+    pin = _see(None, _item(host, space, at=T0, keywrap=old_kw))
+    pin = _see(pin, _item(host, space, at=T0 + timedelta(days=1), keywrap=new_kw))
+    bare = _item(host, space)
+    bare.pop("join_contact")
+    pin = _see(pin, bare)
+    assert usable_contact(pin) is None
+    pin = _see(pin, _item(host, space, at=T0, keywrap=old_kw), GFS_B)
+    assert usable_contact(pin) is None
+    # The owner's next, newer contact is taken again.
+    later = T0 + timedelta(days=2)
+    pin = _see(pin, _item(host, space, at=later, keywrap=new_kw))
+    assert usable_contact(pin)[0]["keywrap_pk"] == new_kw.public_key.hex()
+
+
+def test_a_contact_from_the_future_is_refused():
+    """A seed holder (a demoted admin) or a clock jump must not freeze a
+    binding by signing it far ahead: more than a few minutes in the future
+    is not a contact."""
+    host, space = _Host(), generate_identity_keypair()
+    ahead = datetime.now(UTC) + timedelta(hours=1)
+    assert usable_contact(_see(None, _item(host, space, at=ahead))) is None
+    near = datetime.now(UTC) + timedelta(minutes=1)
+    assert usable_contact(_see(None, _item(host, space, at=near))) is not None
+
+
+def test_a_transfer_inside_the_owner_household_keeps_the_pin():
+    """Ownership moves between people of the owner household only
+    (``transfer_ownership``): the owner key the pin holds does not change,
+    so the next listing is taken as before."""
+    host, space = _Host(), generate_identity_keypair()
+    pin = _see(None, _item(host, space))
+    pin = _see(pin, _item(host, space, at=T0 + timedelta(hours=2)))
+    assert usable_contact(pin) is not None
+    assert load_pin(pin)["conflict"] is False

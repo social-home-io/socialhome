@@ -1086,16 +1086,34 @@ password, a location or any space content). Once a household pinned them,
 no GFS can swap the keys: a new authority key is taken only with a v_44
 cert signed by the pinned owner key at a higher epoch (the GFS's own
 counters move nothing), a new contact must be signed by the pinned
-authority key and be newer than the one held, and the pin lives apart
+authority key and be newer than any contact the pin ever took (and not
+future-dated), and the pin lives apart
 from the display cache, so withholding a listing until it is purged does
 not reset it. Two GFSs listing a space under different authorities make the
 space unaskable from that household rather than picking one. A household
 that wants no first-contact trust asks with an invite link instead.
 
-**A known denial lever.** Because a conflict fails closed and stays, any
-one GFS a household uses can make a space unaskable for it (list another
-authority, or drop the contact). It can stop a request, never read or
-redirect one; the space's people still join by invite link.
+**Known denial levers.** Any one GFS a household uses can stop that
+household asking a space through the GFS, two ways:
+
+- *Listing the space under another authority key* is a **conflict**: it
+  fails closed and stays — a purge of the listing does not clear it, since
+  that would re-open the first-contact trust it guards.
+- *Dropping the contact* from the listing just leaves nothing to ask
+  through **while** it is missing; the pin and the newest `issued_at` it
+  took stay, and the owner's next contact (newer than that) is taken again.
+
+Either way the GFS can stop a request, never read or redirect one. The way
+out does not depend on the GFS: once the household is paired with the
+space's owner household it asks over the pairing (the pin is not
+consulted), and the space's people can always invite it with a link.
+
+**What the pin cannot follow.** The owner household key is the root: the
+protocol has no way to change it today (an ownership transfer moves a
+space between people *of* the owner household; a household identity key is
+permanent), so a contact naming another owner key is a conflict, not a
+change to follow. Should owner-household changes ever exist, they need an
+owner-signed chain here first.
 
 The GFS can still try to tell which household sent a sealed blob by its
 network address and timing, as for every envelope it relays (see the

@@ -15,13 +15,25 @@ the **space authority key** and, through the contact it signed, the
   pin holds. Nothing a GFS controls — its own ``authority_rotation_seq``,
   which GFS lists it, how often — moves a pin;
 * under the same key, a contact must name the same owner key, and only a
-  newer one (signed ``issued_at``) replaces the one held, so an older
-  key-wrap key cannot be replayed;
+  newer one (signed ``issued_at``) is taken: the pin keeps the newest
+  ``issued_at`` it ever took as a high-water mark that never goes down —
+  also across a listing without a contact — so an older key-wrap key
+  cannot be replayed. A contact signed more than
+  :data:`MAX_FUTURE_SKEW` ahead is no contact (a seed holder or a clock
+  jump cannot freeze a binding by dating it in the future);
 * anything else — another authority without that chain, another owner, a
   GFS that swapped the key — is a **conflict**: the contact is dropped and
-  stays dropped (fail closed). Nothing is sealed to such a space; its
-  people ask with an invite link instead. (Any one GFS can therefore close
-  a space for the households that see it — a documented, accepted lever.)
+  stays dropped (fail closed). Nothing is sealed to such a space through
+  the GFS; its people ask once paired with its owner household (a pairing
+  is asked over the pairing, this pin is not consulted) or join with an
+  invite link. (Any one GFS can therefore close the GFS route to a space
+  for the households that see it — a documented, accepted lever.)
+
+The owner household key does not change in the protocol today: an
+ownership transfer moves the space between people OF the owner household
+(``SpaceService.transfer_ownership``), and a household's identity key is
+permanent. So there is no owner-change chain to follow; a contact naming
+another owner key is a conflict.
 
 The pin lives in its own table (``public_space_join_pins``), never in the
 display cache: a GFS that withholds a listing until the cache row is
@@ -33,6 +45,7 @@ Pure functions over JSON strings.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import orjson
@@ -51,6 +64,9 @@ from .keywrap_seal import verify_keywrap_binding
 
 log = logging.getLogger(__name__)
 
+#: How far in the future a contact's signed ``issued_at`` may be.
+MAX_FUTURE_SKEW: timedelta = timedelta(minutes=5)
+
 
 def candidate_from_listing(item: dict, *, gfs_url: str) -> str | None:
     """What one directory row offers (JSON), or ``None`` when it names no
@@ -63,6 +79,14 @@ def candidate_from_listing(item: dict, *, gfs_url: str) -> str | None:
     if not space_id or not isinstance(authority_pk, str) or not authority_pk:
         return None
     contact = parse_join_contact(item.get("join_contact"))
+    if contact is not None and _from_the_future(contact):
+        log.warning(
+            "public_space_discovery: %s listed a join contact for %s dated in the"
+            " future — ignored",
+            gfs_url,
+            space_id,
+        )
+        contact = None
     if contact is not None and not _contact_holds(
         contact,
         space_id=space_id,
@@ -128,6 +152,7 @@ def load_pin(raw: str | None) -> dict[str, Any] | None:
     return {
         "contact": parse_join_contact(contact) if contact is not None else None,
         "authority_pk": value["authority_pk"],
+        "contact_issued_at": str(value.get("contact_issued_at") or ""),
         "owner_pk": str(value.get("owner_pk") or ""),
         "owner_instance": str(value.get("owner_instance") or ""),
         "key_epoch": epoch
@@ -157,6 +182,7 @@ def _first_pin(new: dict[str, Any], *, space_id: str) -> str:
         {
             "contact": contact,
             "authority_pk": new["authority_pk"],
+            "contact_issued_at": contact["issued_at"] if contact else "",
             "owner_pk": contact["identity_pk"].lower() if contact else "",
             "owner_instance": contact["instance_id"] if contact else "",
             "key_epoch": _cert_epoch_for(new, new["authority_pk"], space_id=space_id),
@@ -178,16 +204,17 @@ def _same_key(old: dict[str, Any], new: dict[str, Any], *, space_id: str) -> str
             f"{new['gfs']} lists a contact naming another owner key",
             space_id=space_id,
         )
-    held = old["contact"]
-    if held is not None:
-        held_at, new_at = contact_issued_at(held), contact_issued_at(contact)
-        if held_at is not None and new_at is not None and new_at < held_at:
-            # An older contact (a replayed key-wrap key): keep the newer one.
-            return _dump(old)
+    mark = _parse(old["contact_issued_at"])
+    new_at = contact_issued_at(contact)
+    if mark is not None and (new_at is None or new_at < mark):
+        # Older than the newest contact this pin ever took (a replayed
+        # key-wrap key) — even if the held one was dropped meanwhile.
+        return _dump(old)
     return _dump(
         {
             **old,
             "contact": contact,
+            "contact_issued_at": contact["issued_at"],
             "owner_pk": old["owner_pk"] or contact["identity_pk"].lower(),
             "owner_instance": old["owner_instance"] or contact["instance_id"],
         }
@@ -216,6 +243,11 @@ def _rotation(old: dict[str, Any], new: dict[str, Any], *, space_id: str) -> str
     contact = new["contact"]
     if contact is not None and contact["identity_pk"].lower() != old["owner_pk"]:
         return None
+    mark = _parse(old["contact_issued_at"])
+    if contact is not None and mark is not None:
+        at = contact_issued_at(contact)
+        if at is None or at < mark:
+            contact = None  # an older contact rides no rotation back
     log.info(
         "public_space_discovery: space %s rotated its authority key (epoch %d), "
         "certified by its owner",
@@ -226,6 +258,9 @@ def _rotation(old: dict[str, Any], new: dict[str, Any], *, space_id: str) -> str
         {
             **old,
             "contact": contact,
+            "contact_issued_at": (
+                contact["issued_at"] if contact else old["contact_issued_at"]
+            ),
             "authority_pk": new["authority_pk"],
             "key_epoch": cert.key_epoch,
             "gfs": new["gfs"],
@@ -300,6 +335,19 @@ def _contact_holds(
         keywrap_pub=keywrap,
         keywrap_sig=contact["keywrap_sig"],
     )
+
+
+def _parse(raw: str) -> datetime | None:
+    try:
+        ts = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return ts if ts.tzinfo is not None else None
+
+
+def _from_the_future(contact: dict[str, str]) -> bool:
+    at = contact_issued_at(contact)
+    return at is None or at > datetime.now(UTC) + MAX_FUTURE_SKEW
 
 
 def _dump(value: dict) -> str:

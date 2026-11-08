@@ -19,7 +19,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import orjson
@@ -27,7 +27,11 @@ import pytest
 from aiohttp.test_utils import TestServer
 
 from socialhome.domain.events import SpaceJoinRequested
-from socialhome.domain.federation import InstanceSource
+from socialhome.domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    PairingStatus,
+)
 from socialhome.domain.federation_capabilities import OURS, FederationCapability
 from socialhome.domain.space import (
     HostNotPairedError,
@@ -932,6 +936,63 @@ async def test_one_bad_row_does_not_stop_the_resume(households, gfs):
     a.gfsjoin.join.attach_redeem(_breaks_on_first)
     assert await a.gfsjoin.join.resume_approvals() == 1
     assert await a.space_repo.get_member(second.id, a.user_id) is not None
+
+
+async def test_a_conflict_stops_mattering_once_the_owner_is_paired(households, gfs):
+    """The way out of a conflicted pin: pair with the space's owner
+    household. A confirmed pairing is asked over the pairing — the GFS pin
+    is not consulted — so a space the GFS route refuses can still be asked."""
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    forged_space = await b.space_service.create_space(
+        owner_username=b.username,
+        name="Forger",
+        space_type=SpaceType.GLOBAL,
+        join_mode=JoinMode.REQUEST,
+    )
+    forged = await _listing_item(b, forged_space)
+    forged["space_id"] = space.id
+    await _cache(a, forged, "https://evil.example")
+    with pytest.raises(HostNotPairedError):
+        await _ask(a, b, space)
+
+    paired = SimpleNamespace(
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
+        home_lat=None,
+        home_lon=None,
+    )
+    real_get = a.federation_repo.get_instance
+
+    async def _get(instance_id):
+        return paired if instance_id == b.instance_id else await real_get(instance_id)
+
+    sent = AsyncMock()
+    with (
+        patch.object(a.federation_repo, "get_instance", _get),
+        patch.object(type(a.federation), "send_event", sent),
+    ):
+        await _ask(a, b, space)
+    assert (
+        sent.await_args.kwargs["event_type"] is FederationEventType.SPACE_JOIN_REQUEST
+    )
+    assert sent.await_args.kwargs["to_instance_id"] == b.instance_id
+
+
+async def test_a_request_with_no_usable_expiry_is_swept(households, gfs):
+    """``expires_at`` empty or unreadable reads as expired — a request is
+    never pending forever."""
+    a, b = households
+    space = await _global_space(b, gfs, a)
+    for n, bad in enumerate(("", "soon")):
+        await b.gfsjoin.join.handle_body(
+            _signed(a, space_id=space.id, user_id=f"u{n}", request_id=f"r{n}")
+        )
+        await b.db.enqueue(
+            "UPDATE space_join_requests SET expires_at=? WHERE id=?", (bad, f"r{n}")
+        )
+    assert await b.space_service.expire_due_join_requests() == 2
+    assert await b.space_repo.list_pending_join_requests(space.id) == []
 
 
 def test_a_version_that_is_no_number_reads_as_one():
