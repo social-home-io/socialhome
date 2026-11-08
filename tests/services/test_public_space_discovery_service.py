@@ -6,6 +6,7 @@ import json
 import logging
 from datetime import UTC, datetime, timedelta
 
+import aiohttp
 import pytest
 
 from socialhome.crypto import (
@@ -694,6 +695,59 @@ async def test_fetch_directory_logs_non_200_above_debug(env, caplog):
     joined = " ".join(r.getMessage() for r in records)
     assert "404" in joined
     assert "https://gfs.example.com/gfs/spaces" in joined
+
+
+class _RaisingSession:
+    """A session whose GET fails the way a down/slow GFS does."""
+
+    def __init__(self, exc: BaseException):
+        self._exc = exc
+
+    def get(self, url, **kw):
+        raise self._exc
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [aiohttp.ClientConnectionError("connection refused"), TimeoutError()],
+)
+async def test_fetch_directory_network_failure_logs_without_traceback(env, caplog, exc):
+    """REGRESSION: a down or slow GFS is expected now and then — one line
+    naming the URL, no traceback (the federation-demo log audit counts
+    every ``Traceback``)."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://gfs.example.com"))
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_RaisingSession(exc),
+    )
+    with caplog.at_level(
+        logging.DEBUG,
+        logger="socialhome.services.public_space_discovery_service",
+    ):
+        assert await svc.poll_once() == 0
+    records = [r for r in caplog.records if r.levelno >= logging.INFO]
+    assert len(records) == 1
+    assert records[0].exc_info is None
+    assert "https://gfs.example.com/gfs/spaces" in records[0].getMessage()
+
+
+async def test_fetch_directory_unexpected_error_keeps_its_traceback(env, caplog):
+    """A real bug in the fetch still logs with its traceback."""
+    _, repo, gfs_repo = env
+    await gfs_repo.save(_gfs_conn("gfs-1", inbox_url="https://gfs.example.com"))
+    svc = PublicSpaceDiscoveryService(
+        repo,
+        gfs_connection_repo=gfs_repo,
+        http_client=_RaisingSession(RuntimeError("bug")),
+    )
+    with caplog.at_level(
+        logging.INFO,
+        logger="socialhome.services.public_space_discovery_service",
+    ):
+        assert await svc.poll_once() == 0
+    assert [r.exc_info is not None for r in caplog.records] == [True]
 
 
 # ─── response bounds (FIX 5) ─────────────────────────────────────────────
