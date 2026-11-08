@@ -679,8 +679,6 @@ class FederationService:
                 encoder=self._encoder,
                 loads=_loads,
             ),
-            # v_88: again on the decrypted payload's ``space_id``.
-            make_check_mailbox_space(),
             # An approved trust-relay pair confirms on the requester's first
             # envelope that verified AND decrypted — proof it completed the
             # pairing on its side. Before dispatch, so the handler already

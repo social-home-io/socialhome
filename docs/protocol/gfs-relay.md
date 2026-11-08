@@ -827,8 +827,11 @@ are refused. The envelope enters the unchanged §24.11 pipeline with
 transport `TRANSPORT_GFS_MAILBOX` (`"gfs_mailbox"`), which gets the relay's
 timestamp window and relay opt-in gate (`RELAY_TRANSPORTS`). One extra step
 runs right after the parse, `check_mailbox_space`: the envelope's
-`space_id` must be the mailbox's space or absent; it runs again after the
-decrypt on the payload's `space_id`. Anything else is refused. Mailbox
+`space_id` must be the mailbox's space or absent. Anything else is
+refused. Only the routing field counts: a space-less envelope (the
+capabilities exchange, or the redeem ACK when an already-seated household
+joins a second space of the same host) may ride any of the pair's
+mailboxes and name a space in its payload. Mailbox
 frames spend their own inbound budget (`gfs-mailbox:*`), so whoever learns
 a mailbox id cannot drain the instance relay's.
 
@@ -860,6 +863,11 @@ Residuals:
   moment it appears. A pre-registered pool of unassigned mailboxes (taken
   at seat time with no network call) would close that, but it changes the
   derivation (a pool slot instead of the space) — left for a follow-up.
+- A household that already holds a `space_session` seat with the host
+  and joins a **second** space of it redeems over the existing seat (the
+  direct §D2 path), so no mailbox is minted for that second space: its
+  traffic stays instance-addressed until PR 3 lets a seat add a mailbox
+  for a further space.
 - A household that later pairs with a `space_session` peer keeps the
   pair's mailboxes until the space seat ends (the transport stops using
   the entry once the row is no longer `space_session`).

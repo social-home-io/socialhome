@@ -553,15 +553,10 @@ def make_check_mailbox_space() -> InboundStep:
     async def check_mailbox_space(ctx: InboundContext) -> None:
         if ctx.transport != TRANSPORT_GFS_MAILBOX:
             return
+        # The routing field only: a space-less envelope (capabilities, a
+        # redeem ACK about another space of the same pair) may ride any of
+        # the pair's mailboxes and name a space in its payload.
         space_id = ctx.envelope.get("space_id")
-        # After the decrypt (the step runs twice): a handler that falls back
-        # to the payload's ``space_id`` must not see another space either.
-        if ctx.event is not None and isinstance(ctx.event.payload, dict):
-            inner = ctx.event.payload.get("space_id")
-            if inner not in (None, ""):
-                space_id = inner if space_id in (None, "") else space_id
-                if inner != space_id:
-                    raise ValueError("envelope and payload name different spaces")
         if space_id in (None, ""):
             return
         if not ctx.mailbox_space_id or space_id != ctx.mailbox_space_id:
