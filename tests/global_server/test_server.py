@@ -350,6 +350,9 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         "envelope_media": True,
         # GFS redesign PR 1 — anonymous per-space mailboxes.
         "envelope_mailbox": {"sig_suites": ["ed25519"], "idle_days": 30},
+        # Anonymous registration tickets for those mailboxes (Privacy Pass):
+        # the issuer key every household blinds under, signed here.
+        "mailbox_tickets": body["capabilities"]["mailbox_tickets"],
         # ``POST /gfs/proof`` needs a real base_url to bind; this fixture's
         # env fallback infers ``http://0.0.0.0:8765`` (a wildcard bind
         # address), so the GFS honestly does not offer it.

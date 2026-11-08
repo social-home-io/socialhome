@@ -451,10 +451,13 @@ signature, spends the nonce (a replay is `409`), refuses an id an instance
 holds (`409 id_in_use`, atomically with the insert — and `/gfs/register`
 in turn only takes an instance id derived from its key, never a mailbox's,
 never moving a row to another key) and pins the key on first use;
-registering again is a no-op. Limits: 30 / min per address, then
-`mailbox_max_per_ip` (200) new mailboxes per UTC day per /64 (×16 per /56,
-×256 per /48) in salted count-min sketches (no address kept, nothing to
-evict), and `mailbox_max_new_per_day` (20 000) server-wide.
+registering again is a no-op and needs no ticket. A NEW mailbox spends one
+anonymous registration ticket (`ticket_suite` + `ticket`, below). Limits:
+30 / min per address, then a backstop of `mailbox_max_per_ip` (200) new
+mailboxes per UTC day per /64 (×16 per /56, ×256 per /48) in salted
+count-min sketches (no address kept, nothing to evict). There is no
+server-wide daily cap any more: ~100 addresses could burn the old 20 000
+and block every new space join for the rest of the day.
 
 **Claim** — `GET /gfs/mailbox/ws`, a socket of its own, never the identified
 `/gfs/ws`, and **one mailbox per socket** (owner decision: a shared socket
@@ -511,14 +514,6 @@ expired rows of a pool are swept (an index range) before an insert is
 refused, so they never hold room. (Round 3's ranked mailbox eviction was
 removed in favour of this: one model, no scans, nothing to game.)
 
-**Interim backstop — anonymous tickets follow.** Today a flood of mailboxes
-is bounded by the per-address caps and the server-wide
-`mailbox_max_new_per_day` (20 000, counted in the insert transaction). The
-owner decided on anonymous, blind-signed registration tickets (a daily
-batch per registered household over its `/gfs/ws`, Privacy Pass style,
-unlinkable; a registration spends one) — a separate follow-up PR that lands
-before redesign PR 2.
-
 ```mermaid
 sequenceDiagram
     participant H as Household (member over the GFS)
@@ -526,8 +521,8 @@ sequenceDiagram
     participant B as GFS node B
     participant S as Sender household
     H->>H: keys = HKDF(mailbox root, gfs id, space, gen); id = b32(SHA-256("sh-mbx-v1"‖sign_pk))[:32]
-    H->>A: POST /gfs/mailbox/register {sign_pk, id, gfs_instance_id, ts, nonce, sig}
-    A->>A: verify PoP, nonce, id ≠ instance → pin key (gfs_mailboxes)
+    H->>A: POST /gfs/mailbox/register {sign_pk, id, gfs_instance_id, ts, nonce, sig, ticket_suite, ticket}
+    A->>A: verify PoP, nonce, id ≠ instance, ticket → spend it, pin key (gfs_mailboxes)
     A-->>H: 200 registered
     S->>A: POST /gfs/envelope {to_instance: id, sealed}
     A-->>S: 202 accepted (uniform)
@@ -561,6 +556,87 @@ tag), `socialhome/federation/gfs_mailbox.py` (key derivation, register,
 (`GfsMailboxService`), `socialhome/global_server/routes/mailbox.py`,
 `GfsEnvelopeRelay._recipient` / `_sockets` / `holds`,
 `ClusterService.attach_drain(holds=…)`, GFS migration 0029.
+
+## Mailbox registration tickets
+
+Registration is anonymous, so per-address limits alone can't stop a botnet
+from minting mailboxes — and sybil mailboxes could fill the mailbox pool's
+per-recipient reserve up to its ceiling. Every NEW mailbox therefore spends
+one **ticket**: a standard Privacy Pass token (RFC 9576 architecture, RFC
+9577 token format, RFC 9578 §6 publicly verifiable issuance — token type
+0x0002, blind RSA RFC 9474 `RSABSSA-SHA384-PSS-Deterministic`, 2048-bit).
+Tickets are issued per **registered household**, so `mailbox_tickets_per_day`
+(50) × the registered households is the real bound on mailboxes; who may
+register a household is the operator's gate. No `OURS` bump — nothing
+changes between households.
+
+**Issuer key.** The signed `/gfs/info` capability `mailbox_tickets` is
+`{suite: "privacypass-blindrsa2048-sha384-pss", issuer_key_id, public_key,
+per_day}` — `issuer_key_id` the b64url SHA-256 of the RSASSA-PSS SPKI,
+`public_key` that SPKI. A household rejects an unknown suite (no fallback)
+and a key whose id does not match. One RSA-2048 key per epoch
+(`mailbox_ticket_epoch_days`, 30), made by the first node that needs it and
+stored in the shared DB, accepted for redemption until two epochs after it
+was made. Because the key sits in the signed capability every household
+reads, a GFS serving different keys to different households (to partition
+their tickets) is detectable by comparing.
+
+**Issuance** — `POST /gfs/mailbox/tickets`, signed by the household's
+identity key over `{action: "mailbox_tickets", instance_id, suite,
+issuer_key_id, requests, ts}` (±300 s; the `action` keeps any other signed
+GFS request from being replayed here), only for a household `active` on
+this GFS. `requests` are up to 64 blinded RFC 9578 `TokenRequest`s for the
+fixed `TokenChallenge` (issuer `gfs.social-home.io`, origin_info
+`mailbox-register`, empty redemption context — tickets are fetched ahead
+of use). The GFS grants up to `per_day` per household per UTC day (one row:
+instance id, day, count) and blind-signs; it sees only blinded messages and
+stores none. Blinded under an older key → `409 stale_issuer_key` (nothing
+counted, re-read `/gfs/info`); over the quota → `429 ticket_quota`. The
+household finalizes each response (checking the unblinded signature) into
+an RFC 9577 `Token` and keeps them in memory.
+
+**Redemption** — the register body carries `ticket_suite` + `ticket` (one
+`Token`, b64url). The GFS checks the challenge digest, finds the key by
+`token_key_id` among the accepted keys (`403 stale_ticket_key` otherwise),
+verifies RSASSA-PSS (`403 invalid_ticket`), lets the per-address backstop
+count it, then records the token nonce in `gfs_spent_tickets` — a primary
+key in the shared DB, so a second spend on any node is `409 ticket_spent`.
+No ticket on a new mailbox is `403 ticket_required`. Spent nonces live until
+their key retires; the maintenance loop prunes them, past days' counts and
+retired keys.
+
+```mermaid
+sequenceDiagram
+    participant H as Household (registered, active)
+    participant A as GFS node A
+    participant B as GFS node B
+    H->>A: GET /gfs/info
+    A-->>H: capabilities (signed) incl. mailbox_tickets {suite, issuer_key_id, public_key, per_day}
+    H->>H: check suite + key id; blind N TokenRequests (RFC 9474)
+    H->>A: POST /gfs/mailbox/tickets {action, instance_id, suite, issuer_key_id, requests, ts, signature}
+    A->>A: verify identity signature, active, quota (gfs_ticket_issuance)
+    A-->>H: 200 {suite, issuer_key_id, responses} (blind signatures)
+    H->>H: finalize → RFC 9577 Tokens (cached, unlinkable)
+    Note over H,B: later, anonymously, for a NEW mailbox
+    H->>B: POST /gfs/mailbox/register {…, ticket_suite, ticket}
+    B->>B: challenge digest, key by token_key_id, RSASSA-PSS verify, backstop
+    B->>B: INSERT nonce → gfs_spent_tickets (shared DB)
+    B-->>H: 200 registered
+    H->>A: POST /gfs/mailbox/register {…, same ticket}
+    A-->>H: 409 ticket_spent
+```
+
+**Residuals.** The issuer learns "household H took N tickets today", never
+which mailbox spent one. A fetch right before a register lets the GFS line
+the two up by time, so a household fetches ahead (e.g. on connect, once a
+day) and spends from its cache (`MailboxTicketCache`). IP / timing
+correlation with the household's identified `/gfs/ws` stays the accepted,
+stated limit (as for claims above). Household side:
+`TicketIssuer.from_capability`, `build_ticket_request`, `fetch_tickets`,
+`register_mailbox(tickets=…)` in `socialhome/federation/gfs_mailbox.py` —
+not wired into space flows until redesign PR 2. GFS side:
+`socialhome/privacy_pass.py`, `socialhome/global_server/mailbox_tickets.py`,
+GFS migration 0030.
 
 ## Privacy — who learns what
 

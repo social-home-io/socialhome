@@ -237,14 +237,19 @@ A GFS with mailboxes on (the default) advertises `envelope_mailbox` in its
 signed `/gfs/info` and serves two anonymous routes (see
 [gfs-relay.md](../protocol/gfs-relay.md#anonymous-per-space-mailboxes-gfs-redesign-pr-1)):
 `POST /gfs/mailbox/register` and the claim socket `GET /gfs/mailbox/ws`.
+With them comes the signed capability `mailbox_tickets` and the identified
+route `POST /gfs/mailbox/tickets`: a registered household fetches a daily
+batch of anonymous Privacy Pass tickets, and every NEW mailbox spends one
+([gfs-relay.md](../protocol/gfs-relay.md#mailbox-registration-tickets)).
 The keys live in `[envelope_relay]`, each with a `GFS_ENVELOPE_RELAY_<KEY>`
 env override:
 
 ```toml
 [envelope_relay]
 mailboxes = true            # serve them; false drops the routes (404) and the capability
-mailbox_max_per_ip = 200            # NEW mailboxes per address per UTC day (/64; ×16 per /56, ×256 per /48)
-mailbox_max_new_per_day = 20000     # NEW mailboxes server-wide per UTC day (shared table)
+mailbox_max_per_ip = 200            # NEW mailboxes per address per UTC day (/64; ×16 per /56, ×256 per /48) — a backstop
+mailbox_tickets_per_day = 50        # registration tickets per registered household per UTC day (shared table)
+mailbox_ticket_epoch_days = 30      # one ticket issuer key per epoch; its tickets redeem for one more epoch
 mailbox_max_sockets_per_ip = 512    # open claim sockets per address (/64; ×16 /56, ×256 /48)
 mailbox_idle_days = 30              # last claim (or registration) this many days ago → dropped
 mailbox_queue_max_per_recipient = 200         # queued envelopes for one offline mailbox
@@ -255,6 +260,26 @@ mailbox_media_queue_bytes_per_recipient = 8388608   # 8 MiB of media for one mai
 mailbox_media_queue_max_total_bytes = 268435456     # 256 MiB of media for ALL mailboxes (tail-drop)
 ```
 
+`mailbox_max_new_per_day` is **gone** (a leftover key or
+`GFS_ENVELOPE_RELAY_MAILBOX_MAX_NEW_PER_DAY` is ignored — delete it): ~100 addresses could burn the
+server-wide 20 000 and block every new space join for a day. The bound on
+mailboxes is now `mailbox_tickets_per_day` × the registered households —
+who may register a household stays your gate (pairing tokens, open
+sign-up). Env form: `GFS_ENVELOPE_RELAY_MAILBOX_TICKETS_PER_DAY`,
+`GFS_ENVELOPE_RELAY_MAILBOX_TICKET_EPOCH_DAYS`.
+
+**Tickets across nodes.** The issuer key (`gfs_ticket_issuer_keys`, one
+RSA-2048 key per epoch, made by the first node that needs it), the
+per-household daily count (`gfs_ticket_issuance`) and the spent-ticket set
+(`gfs_spent_tickets`) all live in the shared database, so a ticket issued
+by node A redeems on node B, and a ticket spent on one node is refused
+(`409 ticket_spent`) on every other. The issuer **private key is stored
+unencrypted in the database**: back it up with the database and protect the
+database like the identity seed. Losing it costs only a refetch (households
+get `403 stale_ticket_key` and fetch new tickets); leaking it lets the holder
+mint mailboxes until the epoch's key retires. The maintenance loop prunes
+retired keys, past days' counts and spent nonces of retired keys.
+
 Mailbox frames live in a pool of their own: they never count against, and
 never evict, households' queued envelopes (1 GiB total, tail-drop with the
 same reserve up to 2 GiB) or media
@@ -263,7 +288,7 @@ the number of minted ids (see
 [gfs-relay.md](../protocol/gfs-relay.md#anonymous-per-space-mailboxes-gfs-redesign-pr-1)).
 
 The per-address caps and the 30 / min register limit (120 / min claim
-sockets) count in each node's memory — the caps in salted count-min sketches
+sockets, 30 / min ticket requests) count in each node's memory — the caps in salted count-min sketches
 that keep no address at all — and are divided over the live nodes like the
 other anonymous limits (below). The address is never written to the
 database or logged next to a mailbox id.
@@ -294,10 +319,11 @@ can be round-robined like `/gfs/ws`.
 
 **What `gfs-deployment` needs** (no change in this repo; open it there):
 
-- **Routes.** Send `/gfs/mailbox/register` (POST, ≤ 2 KiB body) and
+- **Routes.** Send `/gfs/mailbox/register` (POST, ≤ 2 KiB body),
+  `/gfs/mailbox/tickets` (POST, ≤ 32 KiB body) and
   `/gfs/mailbox/ws` (GET + `Upgrade: websocket`) to the GFS backend like
   `/gfs/envelope` and `/gfs/ws` — if the frontend lists paths explicitly,
-  add both. The WebSocket route needs the same `timeout tunnel` as `/gfs/ws`
+  add all three. The WebSocket route needs the same `timeout tunnel` as `/gfs/ws`
   (aiohttp pings every 30 s, inside Cloudflare's 100 s idle timeout, so an
   idle claim socket stays up through both).
 - **Connections and file descriptors.** Every household reached through the
