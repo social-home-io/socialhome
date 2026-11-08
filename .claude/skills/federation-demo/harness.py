@@ -1345,6 +1345,119 @@ def _gfs_cluster_cross_node_media(urls: list[str]) -> None:
     asyncio.run(_run())
 
 
+def _gfs_cluster_household(url: str) -> tuple[str, bytes]:
+    """Register a fresh household on *url* (landing pair token); returns its
+    ``(instance_id, signing seed)`` — what a ticket request is signed with."""
+    from socialhome.crypto import derive_instance_id, generate_identity_keypair
+
+    kp = generate_identity_keypair()
+    iid = derive_instance_id(kp.public_key)
+    code, resp = _request(
+        f"{url}/gfs/register",
+        method="POST",
+        body={
+            "token": _gfs_landing_token(url),
+            "instance_id": iid,
+            "public_key": kp.public_key.hex(),
+            "display_name": f"tickets-{iid[:6]}",
+        },
+        timeout=15.0,
+    )
+    if code not in (200, 201) or (resp or {}).get("status") != "registered":
+        raise SystemExit(f"gfs-cluster: ticket household register → {code} {resp!r}")
+    return iid, kp.private_key
+
+
+def _gfs_cluster_ticket_cache(http, url: str, household: tuple[str, bytes]):
+    """A household ticket cache that fetches from *url*, with the issuer read
+    from *url*'s signed ``/gfs/info`` (signature verified first)."""
+    from socialhome.capabilities_sig import verify_capabilities
+    from socialhome.federation.gfs_mailbox import (
+        MailboxTicketCache,
+        TicketIssuer,
+        fetch_tickets,
+    )
+
+    code, info = _request(f"{url}/gfs/info", timeout=10.0)
+    if code != 200 or not verify_capabilities(
+        info["public_key"],
+        info["gfs_instance_id"],
+        info["capabilities"],
+        info["capabilities_sig"],
+        info["capabilities_sig_suite"],
+    ):
+        raise SystemExit(f"gfs-cluster: /gfs/info unsigned or unreachable → {code}")
+    issuer = TicketIssuer.from_capability(info["capabilities"].get("mailbox_tickets"))
+    iid, seed = household
+
+    async def fetch(count: int) -> list[bytes]:
+        return await fetch_tickets(
+            http, url, issuer, count, instance_id=iid, signing_key=seed
+        )
+
+    return MailboxTicketCache(fetch, batch=4)
+
+
+def _gfs_cluster_mailbox_tickets(urls: list[str]) -> None:
+    """Step 3d-tickets of ``gfs-cluster``: anonymous registration tickets
+    (Privacy Pass). A household registered on the cluster fetches a batch
+    from node 0 over its signed channel; one ticket registers a NEW mailbox
+    on node 1 (keys + spent set are in the shared DB); the same ticket again
+    — on node 0 — is refused ``409 ticket_spent``; a mailbox with no ticket
+    is refused ``403 ticket_required``. No ticket shows in any node's log."""
+    import asyncio
+
+    import aiohttp
+
+    from socialhome.crypto import b64url_encode
+    from socialhome.federation.gfs_mailbox import (
+        build_register_body,
+        derive_mailbox_keys,
+        new_mailbox_root,
+        register_mailbox,
+    )
+
+    household = _gfs_cluster_household(urls[0])
+    _c, info = _request(f"{urls[0]}/gfs/info", timeout=10.0)
+    gfs_id = info["gfs_instance_id"]
+    spent: list[str] = []
+
+    async def _run() -> None:
+        async with aiohttp.ClientSession() as http:
+            tickets = _gfs_cluster_ticket_cache(http, urls[0], household)
+            got = await tickets.refill()
+            print(f"  {got} tickets fetched from node 0 (signed request, blind-signed) ✓")
+            ticket = tickets._tickets[-1]
+            spent.append(b64url_encode(ticket))
+            root = new_mailbox_root()
+            first = derive_mailbox_keys(root, gfs_id, "ticket-space-1", 0)
+            await register_mailbox(http, urls[1], first, gfs_id, tickets=tickets)
+            print("  a ticket from node 0 registered a new mailbox on node 1 ✓")
+            second = derive_mailbox_keys(root, gfs_id, "ticket-space-2", 0)
+            body = build_register_body(second, gfs_id, ticket=ticket)
+            async with http.post(f"{urls[0]}/gfs/mailbox/register", json=body) as r:
+                err = (await r.json()).get("error")
+                if (r.status, err) != (409, "ticket_spent"):
+                    raise SystemExit(
+                        f"gfs-cluster: a reused ticket on node 0 → {r.status} {err}"
+                    )
+            print("  the same ticket again on node 0 → 409 ticket_spent ✓")
+            body = build_register_body(second, gfs_id)
+            async with http.post(f"{urls[1]}/gfs/mailbox/register", json=body) as r:
+                err = (await r.json()).get("error")
+                if (r.status, err) != (403, "ticket_required"):
+                    raise SystemExit(f"gfs-cluster: no ticket → {r.status} {err}")
+            print("  a new mailbox without a ticket → 403 ticket_required ✓")
+
+    asyncio.run(_run())
+    leaked = _gfs_cluster_log_matches(spent[0][:43])
+    if leaked:
+        raise SystemExit(
+            "gfs-cluster: a GFS log line carries a ticket:\n  " + "\n  ".join(leaked[:5])
+        )
+    print("  no ticket appears in any GFS log line ✓")
+
+
 def _gfs_cluster_mailboxes(urls: list[str]) -> None:
     """Step 3d'' of ``gfs-cluster`` (GFS redesign PR 1): an anonymous
     mailbox registered via node 0 and claimed on node 1 gets a JSON envelope
@@ -1373,6 +1486,7 @@ def _gfs_cluster_mailboxes(urls: list[str]) -> None:
     if code != 200 or "envelope_mailbox" not in caps:
         raise SystemExit(f"gfs-cluster: /gfs/info has no envelope_mailbox → {code}")
     gfs_id = info["gfs_instance_id"]
+    household = _gfs_cluster_household(urls[0])
     keys = derive_mailbox_keys(new_mailbox_root(), gfs_id, "demo-space", 0)
     sealed = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "bWFpbGJveA"}
 
@@ -1392,7 +1506,9 @@ def _gfs_cluster_mailboxes(urls: list[str]) -> None:
 
     async def _run() -> None:
         async with aiohttp.ClientSession() as http:
-            await register_mailbox(http, urls[0], keys, gfs_id)
+            tickets = _gfs_cluster_ticket_cache(http, urls[0], household)
+            await tickets.refill()
+            await register_mailbox(http, urls[0], keys, gfs_id, tickets=tickets)
             print(f"  mailbox registered via node 0 (gfs {gfs_id}) ✓")
             async with MailboxClaim(http, urls[1], keys, gfs_id) as claim:
                 await _post(http, json={"to_instance": keys.mailbox_id, "sealed": sealed})
@@ -1495,6 +1611,7 @@ def _gfs_cluster_mailbox_other_id(all_urls: list[str]) -> None:
             raise SystemExit("gfs-cluster: the extra node never joined the cluster")
         time.sleep(2.0)
         keys = derive_mailbox_keys(new_mailbox_root(), id_0, "demo-space-x", 0)
+        household = _gfs_cluster_household(all_urls[0])
         sealed = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "b3RoZXItaWQ"}
 
         async def _claim_when_known(http):
@@ -1513,7 +1630,9 @@ def _gfs_cluster_mailbox_other_id(all_urls: list[str]) -> None:
 
         async def _run() -> None:
             async with aiohttp.ClientSession() as http:
-                await register_mailbox(http, all_urls[0], keys, id_0)
+                tickets = _gfs_cluster_ticket_cache(http, all_urls[0], household)
+                await tickets.refill()
+                await register_mailbox(http, all_urls[0], keys, id_0, tickets=tickets)
                 async with contextlib.aclosing(await _claim_when_known(http)) as claim:
                     async with http.post(
                         f"{all_urls[0]}/gfs/envelope",
@@ -3490,6 +3609,7 @@ def cmd_gfs_cluster() -> None:
         _gfs_cluster_cross_node_media(urls)
         # 3d''. Anonymous mailboxes: register via node 0, claim on node 1.
         _gfs_cluster_mailboxes(urls)
+        _gfs_cluster_mailbox_tickets(urls)
         _gfs_cluster_cross_node_broadcast(urls)
         _gfs_cluster_cross_node_moment(urls)
         # 3g. A public-highlight link through a round-robin balancer: every
