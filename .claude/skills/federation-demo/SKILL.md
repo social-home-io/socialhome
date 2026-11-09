@@ -966,6 +966,7 @@ python .claude/skills/federation-demo/harness.py gfs-space-no-subscribers
 python .claude/skills/federation-demo/harness.py gfs-invite-link
 python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py gfs-media-on-demand
+python .claude/skills/federation-demo/harness.py gfs-member-mesh
 python .claude/skills/federation-demo/harness.py gfs-relay-media
 python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
@@ -1803,16 +1804,17 @@ pending elevation.
 
 ### ``gfs-invite-link-content`` — the relay carries ordinary space traffic
 
-**Per-space mailboxes (v_88).** e reaches the space only through the GFS,
-so the step first asserts that both sides of the seat hold a per-space
-mailbox: a's ``space_instances.mailbox`` row for e carries e's signed entry
-and a's own generation, e's row for a the mirror; both mailbox ids are in
-the GFS's ``gfs_mailboxes`` with ``last_claim_at`` set (registered with a
-ticket, claimed on the anonymous socket); neither is an instance id. a's
-post then reaches e **byte-identical** (a's and e's ``space_posts.content``
-match) and the GFS log shows deliveries to ``<mailbox>`` only — no line in
-that window names e's instance id, either mailbox id, or (on a relay line)
-the space. e's reply rides a's mailbox the same way.
+**One mailbox per household (v_89).** e reaches the space only through
+the GFS, so the step first asserts that both sides hold the other's signed
+member card naming its ONE mailbox at the GFS: a's
+``space_instances.mailbox`` row for e carries ``{"card": …}`` with e's
+mailbox, e's row for a the mirror; both mailbox ids are in the GFS's
+``gfs_mailboxes`` with ``last_claim_at`` set (registered with a ticket,
+claimed on the anonymous socket); neither is an instance id. a's post then
+reaches e **byte-identical** (a's and e's ``space_posts.content`` match)
+and the GFS log shows deliveries to ``<mailbox>`` only — no line in that
+window names e's instance id, either mailbox id, or (on a relay line) the
+space. e's reply rides a's mailbox the same way.
 
 **Pictures through the GFS media cache (v_80).** The step ends with a
 ~0.5 MB photo post (``_picture_via_gfs_media_cache``): the reader holds
@@ -1890,6 +1892,19 @@ re-runnable within ~10 min (a attaches its upload authorization once per
 (GFS, blob) per ``REUPLOAD_COALESCE_S``). ``verify`` asserts
 ``MIN_FOR_SPACE_MEDIA_ON_DEMAND`` is v_83 and covered by the ``OURS``
 round-trip.
+
+### ``gfs-member-mesh`` — any member reaches a GFS-only member, host offline (v_89)
+
+Prereqs: the chain through ``gfs-invite-link-content``. d (paired with b,
+mesh-only to a) joins a's space with an ``internal`` link. The host's
+member directory (``SPACE_MAILBOX_DIRECTORY``, writer-seat households only)
+reaches both: d holds e's member card naming e's ONE mailbox and a lazy
+``space_session`` seat for e with no ``relay_via`` and no inbox; e holds
+d's card. Then a is **killed** and d — not the host — creates a calendar
+event: e must show it, so d's fan-out reached e's mailbox with no host
+involved. Over that window the GFS log must show ``<mailbox>`` deliveries,
+no envelope / mailbox line may name an instance id or the space, and no
+line e's mailbox id. a is respawned at the end (``@_offline_step``).
 
 ### ``gfs-relay-media`` — a picture reaches a link-joined member as binary relay frames (v_87)
 

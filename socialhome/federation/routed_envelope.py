@@ -94,7 +94,7 @@ from typing import TYPE_CHECKING
 import orjson
 
 from ..crypto import derive_instance_id
-from ..domain.federation import FederationEvent, FederationEventType
+from ..domain.federation import FederationEvent, FederationEventType, InstanceSource
 from ..domain.federation_capabilities import FederationCapability
 from . import routed_crypto
 from .inbound_validator import InboundContext, run_post_decrypt_gates
@@ -103,6 +103,7 @@ from .route_discovery import ROUTE_CACHE_TTL_S, cap_by_expiry
 if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
     from .federation_service import FederationService
+    from .host_hop import HostHop
     from .route_discovery import RouteDiscoveryService
 
 log = logging.getLogger(__name__)
@@ -232,6 +233,7 @@ class SpaceRoutedHandler:
         "_eph_ttl_s",
         "_federation",
         "_federation_repo",
+        "_host_hop",
         "_origin_eph_state",
         "_pending_routed",
         "_reply_eph_state",
@@ -256,6 +258,10 @@ class SpaceRoutedHandler:
         self._federation_repo = federation_repo
         self._dispatcher = event_dispatcher
         self._target_eph_lookup = target_eph_lookup
+        #: v_89 — the space host as the one hop toward a carded member
+        #: (:mod:`socialhome.federation.host_hop`). ``None`` → no
+        #: ``SPACE_ROUTED`` is relayed from or to a ``space_session`` seat.
+        self._host_hop: HostHop | None = None
         self._seen_ttl_s = seen_ttl_s
         self._eph_ttl_s = eph_ttl_s
         #: ``route_id`` → wall-clock expiry. Stops a misbehaving
@@ -279,7 +285,11 @@ class SpaceRoutedHandler:
         #: Set on forward-leg unwrap; consumed by ``send_routed_reply``
         #: so the target can seal the ACK back to the origin without a
         #: second discovery probe.
-        self._reply_eph_state: dict[str, tuple[str, str, str, list[str], float]] = {}
+        #: The last item is the forward leg's routing ``space_id`` (v_89 host
+        #: hop), carried on the reply leg too.
+        self._reply_eph_state: dict[
+            str, tuple[str, str, str, list[str], float, str | None]
+        ] = {}
         #: Origin-side: ``route_id`` → what we need to honour a
         #: ``SPACE_ROUTE_STALE`` nack for that send. TTL
         #: :data:`_PENDING_ROUTED_TTL_S` (the route-cache window, not the
@@ -301,6 +311,12 @@ class SpaceRoutedHandler:
         self._route_service: RouteDiscoveryService | None = None
 
     # ── Attach ─────────────────────────────────────────────────────────
+
+    def attach_host_hop(self, host_hop: HostHop) -> None:
+        """Wire the v_89 host hop (both directions: we send through it, and
+        we relay / unwrap its three-hop shape)."""
+        self._host_hop = host_hop
+        host_hop.attach_routed(self)
 
     def attach_route_service(self, route_service: RouteDiscoveryService) -> None:
         """Give the handler the discovery service so a verified
@@ -360,6 +376,7 @@ class SpaceRoutedHandler:
         inner_payload: dict,
         target_identity_pk: str = "",
         is_retry: bool = False,
+        space_id: str | None = None,
     ) -> str:
         """Ship ``inner_event_type`` along ``path`` (origin → … → target).
 
@@ -376,7 +393,10 @@ class SpaceRoutedHandler:
         key. ``""`` (legacy callers) falls back to the ``derive_instance_id``
         binding alone. ``is_retry`` marks the single retransmit the origin
         makes after a nack, so a nack for the retransmit gives up instead
-        of looping.
+        of looping. ``space_id`` (v_89 host hop) rides as the envelope's
+        routing field on every leg: the host checks the route against that
+        space, and a target reached through its GFS mailbox takes the frame
+        only for a space it is in.
 
         Returns the generated ``route_id`` so the caller can correlate
         the eventual reply (the reply arrives via the dispatcher with
@@ -455,6 +475,7 @@ class SpaceRoutedHandler:
                 "inner_event_type": inner_event_type.value,
                 "sealed": sealed,
             },
+            space_id=space_id,
         )
         return route_id
 
@@ -484,7 +505,9 @@ class SpaceRoutedHandler:
                 f"SpaceRoutedHandler.send_routed_reply: no reply state for"
                 f" route_id={route_id[:8]} (expired or never received)",
             )
-        target_priv_b64, target_pub_b64, origin_pub_b64, reply_path, _exp = entry
+        target_priv_b64, target_pub_b64, origin_pub_b64, reply_path, _exp, space_id = (
+            entry
+        )
         inner_payload_json = orjson.dumps(
             inner_payload, option=orjson.OPT_SORT_KEYS
         ).decode()
@@ -524,7 +547,19 @@ class SpaceRoutedHandler:
                 "inner_event_type": inner_event_type.value,
                 "sealed": sealed,
             },
+            space_id=space_id,
         )
+
+    async def _touches_seat(self, sender: str, forward_to: str | None) -> bool:
+        """Whether the sender, or the hop we would forward to, is a
+        ``space_session`` seat of ours."""
+        for inst in (sender, forward_to):
+            if not inst:
+                continue
+            row = await self._federation_repo.get_instance(inst)
+            if row is not None and row.source is InstanceSource.SPACE_SESSION:
+                return True
+        return False
 
     # ── Inbound handler ────────────────────────────────────────────────
 
@@ -656,8 +691,28 @@ class SpaceRoutedHandler:
             )
             return
 
+        # v_89 — a ``space_session`` seat is never a mesh node: a routed
+        # envelope it sent us, or one we would forward to it, is taken only
+        # in the host-hop shape (``[member, host, member]`` of the routing
+        # space, cards held — :meth:`HostHop.allows`).
+        last = next_index == len(path) - 1
+        if await self._touches_seat(
+            event.from_instance, None if last else path[next_index + 1]
+        ) and (
+            self._host_hop is None
+            or not await self._host_hop.allows(
+                space_id=event.space_id, path=path, inner_type=inner_type
+            )
+        ):
+            log.info(
+                "SPACE_ROUTED route_id=%s: a seat's routed envelope is not the "
+                "host-hop shape; dropping",
+                route_id[:8],
+            )
+            return
+
         # We are at ``next_index``. If that's the last element, unwrap.
-        if next_index == len(path) - 1:
+        if last:
             await self._unwrap_and_dispatch(
                 event=event,
                 route_id=route_id,
@@ -687,6 +742,7 @@ class SpaceRoutedHandler:
                     "inner_event_type": inner_type_raw,
                     "sealed": sealed_raw,
                 },
+                space_id=event.space_id,
             )
         except Exception:
             log.warning(
@@ -747,6 +803,16 @@ class SpaceRoutedHandler:
                 )
                 return
             target_priv = self._target_eph_lookup(target_pub)
+            if (
+                target_priv is None
+                and self._host_hop is not None
+                and await self._host_hop.allows(
+                    space_id=event.space_id, path=path, inner_type=inner_type
+                )
+            ):
+                # v_89 host hop: sealed to our static key-wrap key (the key
+                # our card names), not to a discovered ephemeral.
+                target_priv = self._host_hop.static_target_priv(target_pub)
             if target_priv is None:
                 await self._nack_stale_target_eph(
                     event=event,
@@ -784,6 +850,17 @@ class SpaceRoutedHandler:
                     route_id[:8],
                 )
                 return
+            inner_space = inner_payload.get("space_id")
+            if event.space_id and inner_space and inner_space != event.space_id:
+                # v_89 — the routing space_id is not under the origin's
+                # signature (a host hop re-signs the outer leg): a payload
+                # naming another space than the route is dropped.
+                log.warning(
+                    "SPACE_ROUTED route_id=%s: the inner payload names another "
+                    "space than the route; dropping",
+                    route_id[:8],
+                )
+                return
             # Cache reply state — sealed["origin_eph_pk"] tells us the
             # peer we'll derive the reply key against.
             origin_pub = str(sealed.get("origin_eph_pk") or "")
@@ -793,6 +870,7 @@ class SpaceRoutedHandler:
                 origin_pub,
                 list(reversed(path)),
                 now + self._eph_ttl_s,
+                event.space_id,
             )
             origin = path[0]
             synth = FederationEvent(

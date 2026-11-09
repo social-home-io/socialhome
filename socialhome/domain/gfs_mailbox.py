@@ -141,6 +141,18 @@ class TicketKeyPin:
     previous_key_id: bytes | None
 
 
+@dataclass(slots=True, frozen=True)
+class OwnMailbox:
+    """The household's own mailbox at one GFS (v_89): its generation, the
+    GFS id pinned when it was minted (kept even if the GFS later changes id —
+    the derivation depends on it) and the GFS's base URL. Only this is
+    stored; the keys come back from the household's mailbox root."""
+
+    gen: int
+    gfs_instance_id: str
+    gfs_url: str
+
+
 def derive_mailbox_id(sign_pk: bytes) -> str:
     """The mailbox id of the Ed25519 public key *sign_pk*."""
     if len(sign_pk) != 32:
@@ -214,6 +226,7 @@ __all__ = [
     "SUPPORTED_MAILBOX_SIG_SUITES",
     "GfsMailbox",
     "InvalidMailboxField",
+    "OwnMailbox",
     "UnsupportedMailboxSigSuite",
     "claim_signed_bytes",
     "derive_mailbox_id",

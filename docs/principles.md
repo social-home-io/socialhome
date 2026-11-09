@@ -317,16 +317,31 @@ exactly:**
   is real and is the sharpest edge of this concession.
 - **It can correlate with the household's own WebSocket session** — same
   server, same IP — exactly as the `/gfs/publish` residual above notes.
-- **Per-space mailboxes narrow the recipient (v_88).** When both sides
-  are at v_88 and the GFS proves `envelope_mailbox`, `to_instance` is the
-  recipient's anonymous mailbox for that space, not its instance id, sent
-  over the cookie-less session. Per mailbox frame the GFS then learns the
+- **One mailbox per household hides the instance id (v_89; owner
+  sign-off 2026-11-09).** When both sides are at v_89 and the GFS proves
+  `envelope_mailbox`, `to_instance` is the recipient household's ONE
+  anonymous mailbox at that GFS, not its instance id, sent over the
+  cookie-less session — by the host and by every writer member that holds
+  the household's member card. Per mailbox frame the GFS then learns the
   mailbox id, time, size bucket and sender IP; per claim socket its IP and
   online time — never an instance id, space id, event type or sender id.
-  The IP / timing correlation above still applies. The teardown
-  `SPACE_SESSION_CLEANUP` (one frame) and the joiner→host direction when
-  the host sent no mailbox stay instance-addressed. See
-  [gfs-relay.md](protocol/gfs-relay.md#per-space-mailboxes-v_88).
+  Stated plainly, what it can still see:
+  - **One household's traffic across all its spaces lands in one
+    mailbox**, so the GFS can count it as one recipient and see its total
+    volume and rhythm. It cannot tell which or how many spaces that
+    traffic belongs to.
+  - **Within one space it can cluster that space's member mailboxes**: a
+    fan-out hits the same set of mailboxes at (almost) the same instant,
+    so the mailboxes of one space's GFS-reached members are linkable as
+    "plausibly members of one thing" — the accepted residual, as for
+    instance ids above.
+
+  Nothing that identifies a household across households reaches the GFS:
+  no instance id, no space id, no content, no member list. The IP / timing
+  correlation above still applies. The teardown `SPACE_SESSION_CLEANUP`
+  (one frame) and a household whose card names no mailbox stay
+  instance-addressed. See
+  [gfs-relay.md](protocol/gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89).
 - **It cannot forge.** The seal is confidentiality only; authorization is
   the Ed25519 signature under the pair's key, checked by the unmodified
   §24.11 pipeline at the receiver. A relay that substitutes, replays or

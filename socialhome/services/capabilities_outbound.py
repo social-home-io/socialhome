@@ -129,7 +129,19 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
             )
             return []
         own = getattr(self._federation, "own_instance_id", "")
-        return [p for p in peers if getattr(p, "id", None) and p.id != own]
+        return [
+            p
+            for p in peers
+            if getattr(p, "id", None)
+            and p.id != own
+            # v_89 — a member seated from a host's directory learns our
+            # version from our member card (the host passes it on), not
+            # from a fan-out to every such seat on every start.
+            and not (
+                getattr(p, "source", None) is InstanceSource.SPACE_SESSION
+                and not getattr(p, "relay_via", None)
+            )
+        ]
 
     def wire(self) -> None:
         """Subscribe to :class:`PairingConfirmed` so new pairs get a

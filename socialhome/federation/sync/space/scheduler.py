@@ -65,7 +65,7 @@ from ....domain.events import (
     SpaceSyncComplete,
     SpaceSyncDeferred,
 )
-from ....domain.federation import FederationEventType, PairingStatus
+from ....domain.federation import FederationEventType, InstanceSource, PairingStatus
 from ....domain.space import Space, SpaceRole, SpaceType
 from ....infrastructure.event_bus import EventBus
 from ....infrastructure.reconnect_queue import P1_SECURITY, P4_DM, P6_PRODUCTIVITY
@@ -749,6 +749,12 @@ class SpaceSyncScheduler:
             inst
             for inst in await self._federation_repo.list_instances()
             if inst.status is PairingStatus.CONFIRMED
+            # v_89 — a member seated from the host's directory (a
+            # ``space_session`` row with no relay of its own) is reached for
+            # live fan-out only: catch-up comes from the host, or every
+            # member would sync with every GFS-reached member (N² streams
+            # through the GFS every 30 min).
+            and not (inst.source is InstanceSource.SPACE_SESSION and not inst.relay_via)
         ]
         local_spaces = await self._list_local_space_ids()
         for peer in confirmed:

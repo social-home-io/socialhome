@@ -254,15 +254,19 @@ either `{space_id, role, space_meta}` (ACK — the same
 `build_space_snapshot_for_federation` blob the §D2 path returns,
 content key and roster included) or `{reason}` (DENY).
 
-**Per-space mailboxes (v_88).** When the issuer is at v_88 or above, the
-redeemer mints an anonymous mailbox for the space at the invite's GFS
-before it sends the redeem, and adds its signed directory entry to the
-sealed redeem as `mailbox`. The issuer verifies it, mints its own mailbox
-for the space (registered and claimed before the ACK leaves) and returns
-its entry as `mailbox` in the sealed ACK. Both store the other's entry on
-the pair's `space_instances` row, and later envelopes of that space go to
-the mailbox id instead of the instance id. An older issuer ignores the
-field. See [gfs-relay.md](./gfs-relay.md#per-space-mailboxes-v_88).
+**Member cards (v_89).** When the issuer is at v_89 or above, the
+redeemer adds its signed member card to the sealed redeem as `card`: its
+key-wrap key and, when it has one, its ONE anonymous mailbox at the
+invite's GFS (shared by every space it reaches there; minted, registered and
+claimed before the redeem leaves). The issuer verifies the card (the
+instance id derives from its identity key; a mailbox named there must be at
+the GFS the body came through) and returns its own card as `card` in the
+sealed ACK. Both keep the other's card on the pair's `space_instances` row,
+and later envelopes to a household whose card names a mailbox go to the
+mailbox id instead of the instance id. Once seated the redeemer also sends
+`SPACE_MEMBER_CARD`, and the host passes the cards on to the space's
+writer members in `SPACE_MAILBOX_DIRECTORY`, so every member can reach it.
+An older issuer ignores the field. See [gfs-relay.md](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89).
 
 **The ACK always fits the relay.** A 1200 px space cover is dimension-capped,
 not byte-capped — a detailed photo is several hundred KiB of WebP — and the
@@ -781,11 +785,11 @@ design (the invite blob is public, so neither household publishes an
 `inbox_url`), and a `space_session` peer may have no mesh path either.
 Option 1 of the three that were open here is what shipped: every
 federation envelope between such a pair is carried by the same
-`POST /gfs/envelope` relay the redeem handshake used. From v_88 an
-envelope of a space goes to the counterpart's mailbox for that space when
-the redeem / ACK carried its entry and the GFS proves `envelope_mailbox`;
-otherwise it is addressed to the instance id as below
-([gfs-relay.md](./gfs-relay.md#per-space-mailboxes-v_88)).
+`POST /gfs/envelope` relay the redeem handshake used. From v_89 an
+envelope goes to the counterpart's one mailbox at that GFS when its member
+card names one and the GFS proves `envelope_mailbox`; otherwise it is
+addressed to the instance id as below
+([gfs-relay.md](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89)).
 
 `FederationTransport.send` picks the transport. A peer with
 `source = space_session` is routed to `GfsRelayTransport`

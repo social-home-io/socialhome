@@ -401,12 +401,16 @@ class FederationEventType(str, enum.Enum):
     #: ``space_id`` travels in plaintext.
     SPACE_AUTHORITY_ROTATED = "space_authority_rotated"
     SPACE_SESSION_CLEANUP = "space_session_cleanup"
-    #: v_88 — a household reached only through a GFS tells its counterpart
-    #: in ONE space (routing ``space_id``) where its mailbox for that space
-    #: now is: a new signed entry, or ``null`` = "lost, use the
-    #: instance-addressed relay until further notice". Encrypted payload
-    #: ``{"mailbox": entry | null}``.
-    SPACE_MAILBOX_UPDATED = "space_mailbox_updated"
+    #: v_89 — a member household gives the space's host its signed member
+    #: key card (identity + key-wrap keys, its ONE mailbox at the space's
+    #: GFS or none). Routing ``space_id``; encrypted payload ``{"card"}``.
+    SPACE_MEMBER_CARD = "space_member_card"
+    #: v_89 — the host's member directory for one space, to WRITER-seat
+    #: member households only (never followers): ``{"cards": [card…],
+    #: "removed": [instance_id…], "snapshot": bool}`` in the encrypted
+    #: payload; one bounded snapshot to a newcomer, deltas after that.
+    #: Taken from the space's host only.
+    SPACE_MAILBOX_DIRECTORY = "space_mailbox_directory"
 
     # ── Space sync ──
     SPACE_SYNC_BEGIN = "space_sync_begin"
@@ -697,9 +701,11 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: Teardown of the space-scoped relationship itself (§D2b): the
         #: side that drops its row tells the other to drop its own.
         FederationEventType.SPACE_SESSION_CLEANUP,
-        #: v_88 — where this pair's mailbox for the space now is (or that it
-        #: was lost). Affects only the pair's own row.
-        FederationEventType.SPACE_MAILBOX_UPDATED,
+        #: v_89 — a member's card to the host, and the host's member
+        #: directory (taken from the space's host only). Each card is
+        #: self-certifying; neither grants a right.
+        FederationEventType.SPACE_MEMBER_CARD,
+        FederationEventType.SPACE_MAILBOX_DIRECTORY,
         # ── Content ──
         #: The space's own posts, comments and every pillar rendered
         #: inside it. This is what "joined the space" means.
@@ -815,14 +821,20 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: (``NODE_PARTITION_*``, ``INSTANCE_SYNC_STATUS``) are about the
         #: whole household and stay out.
         FederationEventType.SPACE_PARTITION_GAP,
-        # ── Routing: NOTHING ──
+        # ── Routing: the host hop only ──
         #: A link-joined household is never a mesh hop (``_mesh_capable_peers``
-        #: excludes it), so none of ``SPACE_FIND_ROUTE`` / ``SPACE_ROUTE_FOUND``
-        #: / ``SPACE_ROUTED`` / ``SPACE_ROUTE_STALE`` has any meaning coming
-        #: from one. ``SPACE_ROUTE_FOUND`` carries ``path`` — every relay
-        #: household's id — so answering a stranger's probe would hand them a
-        #: map of our social graph; a route-stale nack from a peer we never
-        #: route through is noise at best.
+        #: excludes it), so ``SPACE_FIND_ROUTE`` / ``SPACE_ROUTE_FOUND`` /
+        #: ``SPACE_ROUTE_STALE`` have no meaning coming from one
+        #: (``SPACE_ROUTE_FOUND`` carries ``path`` — every relay household's
+        #: id — so answering a stranger's probe would hand them a map of our
+        #: social graph). ``SPACE_ROUTED`` is let through for ONE shape only
+        #: (v_89, :mod:`socialhome.federation.host_hop`): a three-hop
+        #: ``[member, host, member]`` route of one space, between two member
+        #: households whose cards the host holds — so a member with no
+        #: connection to a GFS still reaches a household that reaches the
+        #: space only through it. Every other shape from this peer class is
+        #: dropped by ``SpaceRoutedHandler``.
+        FederationEventType.SPACE_ROUTED,
         # ── Joining a SECOND space from the same household ──
         #: Once the pair exists, ``request_redeem`` takes the direct-peer
         #: branch, so a second invite token from this household rides the
@@ -1068,7 +1080,8 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_AUTHORITY_ROTATED,
         FederationEventType.SPACE_SUBSCRIBER_KEY_HANDOFF,
         FederationEventType.SPACE_SESSION_CLEANUP,
-        FederationEventType.SPACE_MAILBOX_UPDATED,
+        FederationEventType.SPACE_MEMBER_CARD,
+        FederationEventType.SPACE_MAILBOX_DIRECTORY,
         # ── §25.6 catch-up sync. A reader syncs the same way a member
         #    does; what the chunks may CONTAIN is the exporter's call on
         #    the sending side, not this gate's. ──

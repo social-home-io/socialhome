@@ -266,8 +266,12 @@ sequenceDiagram
 `SPACE_KEY_EXCHANGE`, `SPACE_KEY_EXCHANGE_ACK`,
 `SPACE_KEY_EXCHANGE_REKEY`, `SPACE_ADMIN_KEY_SHARE`,
 `SPACE_AUTHORITY_ROTATED` (v_44), `SPACE_SESSION_CLEANUP`,
-`SPACE_MAILBOX_UPDATED` (v_88 — a GFS-only pair's per-space mailbox moved
-or was lost; see [gfs-relay](./gfs-relay.md#per-space-mailboxes-v_88)).
+`SPACE_MEMBER_CARD` (v_89 — a member household hands the host its signed
+member card: its key-wrap key and its one GFS mailbox, or none) and
+`SPACE_MAILBOX_DIRECTORY` (v_89 — the host passes those cards on as
+`{cards, removed, snapshot}` to writer-seat member households only, never
+to followers); see
+[gfs-relay](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89).
 
 `SPACE_AUTHORITY_ROTATED` is the owner's rotation of the space authority
 key after an admin household is revoked — see
@@ -299,7 +303,14 @@ approval" below.
 `SPACE_ROUTE_STALE` (v_28+). Generic source-routed envelope, the
 discovery probe that finds the path, and the signed nack a restarted
 target sends back so the origin re-discovers instead of waiting out its
-route cache. See "Mesh routing (SPACE_ROUTED)" below.
+route cache. See "Mesh routing (SPACE_ROUTED)" below. From v_89 a
+`space_session` seat (a household seated from an invite link or a member
+card) may send or be forwarded a `SPACE_ROUTED` in exactly one shape, the
+**host hop**: three hops `[member, host, member]`, the routing space's host
+in the middle, both ends carded on the host, sealed to the target's
+key-wrap key from its card. Anything else from that peer class is dropped
+(`federation/host_hop.py`, `SpaceRoutedHandler._touches_seat`); see
+[gfs-relay](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89).
 
 **Space sync**
 

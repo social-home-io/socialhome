@@ -44,6 +44,7 @@ from socialhome.domain.federation import (
     DeliveryResult,
     FederationEvent,
     FederationEventType,
+    InstanceSource,
     PairingStatus,
 )
 from socialhome.domain.federation_capabilities import FederationCapability
@@ -73,6 +74,7 @@ class _FakeInstance:
     id: str
     status: PairingStatus = PairingStatus.CONFIRMED
     proto_version: int = 6
+    source: InstanceSource = InstanceSource.MANUAL
 
 
 class _FakeFederationRepo:
@@ -824,6 +826,7 @@ async def test_send_routed_reply_raises_on_degenerate_reply_path():
         opub,
         ["a"],
         float("inf"),
+        None,
     )
     with pytest.raises(LookupError, match="reply_path too short"):
         await handler.send_routed_reply(

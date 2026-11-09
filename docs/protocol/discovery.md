@@ -4126,10 +4126,10 @@ it:
    (`GET /api/me/join-requests` `joining_space_ids`). Seated, the person
    is a `space_session` member: the same seat, content and rights as any
    member reached through the relay. Because the redeem runs over the same
-   sealed bootstrap leg, it carries the per-space mailbox entries too
-   (v_88): the applicant's entry in the sealed redeem, the host's in the
-   sealed ACK, so the GFS later sees mailbox ids for this space instead of
-   instance ids ([gfs-relay.md](./gfs-relay.md#per-space-mailboxes-v_88)).
+   sealed bootstrap leg, it carries the member cards too
+   (v_89): the applicant's card in the sealed redeem, the host's in the
+   sealed ACK, so the GFS later sees each household's one mailbox id
+   instead of its instance id ([gfs-relay.md](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89)).
 
 **What the GFS learns.** Nothing beyond what it relays: the size and time
 of each sealed blob and its recipient. It is not asked for anyone's keys,

@@ -14,7 +14,7 @@ import pytest
 
 from socialhome.crypto import generate_x25519_keypair
 from socialhome.domain.federation import GfsConnection, RemoteInstance
-from socialhome.federation.gfs_mailbox import derive_mailbox_keys
+from socialhome.federation.gfs_mailbox import MailboxFlooded, derive_mailbox_keys
 from socialhome.federation.gfs_relay_media import seal_relay_media
 from socialhome.federation.gfs_relay_transport import (
     GfsRelayTransport,
@@ -474,19 +474,15 @@ async def test_relayed_pairing_bodies_have_their_own_bucket(keys):
 
 class _MailboxFederation:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, bytes, str, str | None]] = []
-        self.media: list[tuple[bytes, str, str | None]] = []
+        self.calls: list[tuple[str, bytes, str]] = []
+        self.media: list[tuple[bytes, str]] = []
 
-    async def handle_inbound_rtc(
-        self, instance_id, raw_body, *, transport="", mailbox_space_id=None
-    ):
-        self.calls.append((instance_id, raw_body, transport, mailbox_space_id))
+    async def handle_inbound_rtc(self, instance_id, raw_body, *, transport=""):
+        self.calls.append((instance_id, raw_body, transport))
         return {"status": "ok"}
 
-    async def handle_inbound_media_relay(
-        self, body, *, transport="", mailbox_space_id=None
-    ):
-        self.media.append((body, transport, mailbox_space_id))
+    async def handle_inbound_media_relay(self, body, *, transport=""):
+        self.media.append((body, transport))
         return {"status": "ok"}
 
     own_instance_id = "c" * 32
@@ -513,11 +509,11 @@ class _MailboxSender:
         return True
 
 
-def _mailbox_keys(space="sp-1"):
-    return derive_mailbox_keys(b"\x05" * 32, "g" * 32, space, 0)
+def _mailbox_keys(gen=0):
+    return derive_mailbox_keys(b"\x05" * 32, "g" * 32, gen)
 
 
-async def test_mailbox_round_trip_goes_through_the_pipeline_with_its_space(keys):
+async def test_mailbox_round_trip_goes_through_the_pipeline(keys):
     mkeys = _mailbox_keys()
     sender = _MailboxSender()
     transport = GfsRelayTransport(relay_sender=sender)
@@ -548,10 +544,11 @@ async def test_mailbox_round_trip_goes_through_the_pipeline_with_its_space(keys)
     await inbound.handle_mailbox_frame(
         {"type": "envelope", "sealed": post["sealed"]}, keys=mkeys
     )
-    [(sender_id, raw, label, space)] = federation.calls
+    [(sender_id, raw, label)] = federation.calls
     assert sender_id == "a" * 32
     assert json.loads(raw) == envelope  # byte-for-byte the same envelope
-    assert label == TRANSPORT_GFS_MAILBOX and space == "sp-1"
+    # The sender gate (a card for the envelope's space) runs in the pipeline.
+    assert label == TRANSPORT_GFS_MAILBOX
 
 
 async def test_mailbox_frame_sealed_to_the_keywrap_key_does_not_open(keys):
@@ -591,10 +588,10 @@ async def test_mailbox_media_frame_opens_under_the_mailbox_id(keys):
     federation = _MailboxFederation()
     inbound = _inbound(keys, federation=federation)
     await inbound.handle_mailbox_frame(frame, keys=mkeys)
-    assert federation.media == [(body, TRANSPORT_GFS_MAILBOX, "sp-1")]
+    assert federation.media == [(body, TRANSPORT_GFS_MAILBOX)]
     # Addressed to another mailbox: refused.
     with pytest.raises(ValueError):
-        await inbound.handle_mailbox_frame(frame, keys=_mailbox_keys("sp-2"))
+        await inbound.handle_mailbox_frame(frame, keys=_mailbox_keys(1))
 
 
 def _sealed_from(sender: str, mkeys, space: str = "sp-1") -> dict:
@@ -607,13 +604,14 @@ def _sealed_from(sender: str, mkeys, space: str = "sp-1") -> dict:
     }
 
 
-async def test_a_flood_on_one_mailbox_shuts_only_that_pair(keys, monkeypatch):
-    """One mailbox per member pair: every frame on it — junk, a frame that
-    opens but fails the pipeline, a good one — is charged to that mailbox's
-    own bucket before any open, so a flood shuts only that pair's mailbox
-    and never another's (round-3 F2/F3 of #1333)."""
+async def test_a_flood_on_one_mailbox_shuts_only_that_mailbox(keys, monkeypatch):
+    """Every frame on a mailbox — junk, a frame that opens but fails the
+    pipeline, a good one — is charged to that mailbox's own bucket before
+    any open, so a flood shuts only that mailbox (refused as
+    ``MailboxFlooded``, which the mailbox service answers with a rotation)
+    and never another (a household's mailbox at another GFS)."""
     monkeypatch.setattr(gri, "MAILBOX_INBOUND_LIMIT", 4)
-    mbox_a, mbox_b = _mailbox_keys("sp-1"), _mailbox_keys("sp-2")
+    mbox_a, mbox_b = _mailbox_keys(0), _mailbox_keys(1)
 
     class _RefusingFirst(_MailboxFederation):
         def __init__(self) -> None:
@@ -638,9 +636,9 @@ async def test_a_flood_on_one_mailbox_shuts_only_that_pair(keys, monkeypatch):
         await inbound.handle_mailbox_frame(_sealed_from("x" * 32, mbox_a), keys=mbox_a)
     await inbound.handle_mailbox_frame(_sealed_from("x" * 32, mbox_a), keys=mbox_a)
     await inbound.handle_mailbox_frame(_sealed_from("x" * 32, mbox_a), keys=mbox_a)
-    with pytest.raises(ValueError, match="rate limit"):
+    with pytest.raises(MailboxFlooded, match="rate limit"):
         await inbound.handle_mailbox_frame(_sealed_from("x" * 32, mbox_a), keys=mbox_a)
-    # The other pair's mailbox is untouched.
+    # The other mailbox is untouched.
     await inbound.handle_mailbox_frame(
         _sealed_from("y" * 32, mbox_b, "sp-2"), keys=mbox_b
     )

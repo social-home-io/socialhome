@@ -17,7 +17,11 @@ from socialhome.domain.events import (
     SpaceSyncComplete,
     SpaceSyncDeferred,
 )
-from socialhome.domain.federation import FederationEventType, PairingStatus
+from socialhome.domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    PairingStatus,
+)
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -172,10 +176,17 @@ def _space(space_id: str, *, owner_instance_id: str = "self") -> Space:
     )
 
 
-def _peer(instance_id: str) -> SimpleNamespace:
+def _peer(
+    instance_id: str,
+    *,
+    source: InstanceSource = InstanceSource.MANUAL,
+    relay_via: str | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=instance_id,
         status=PairingStatus.CONFIRMED,
+        source=source,
+        relay_via=relay_via,
     )
 
 
@@ -447,6 +458,49 @@ async def test_periodic_tick_enqueues_for_every_confirmed_peer(
     # The periodic re-sync is ``incremental``: the provider re-streams the
     # rows but does not re-ship every media blob every 30 minutes.
     assert {s["payload"]["sync_mode"] for s in beg} == {"incremental"}
+
+
+async def test_the_tick_heals_a_gfs_seat_but_never_syncs_a_directory_seat(
+    bus, queue, sync_manager
+):
+    """v_89. A frame to a household's GFS mailbox can be lost (the GFS
+    queue's tail-drop or TTL while it was offline, a mailbox the GFS forgot):
+    the 30-min incremental §25.6 sync between the host and its GFS-reached
+    member (a ``space_session`` seat WITH a relay) restores it. A member
+    seated from the host's directory (no relay of its own) gets live
+    fan-out only — syncing every member with every GFS-reached member would
+    be N² streams through the GFS every tick."""
+    fed = _FakeFederation()
+    spaces = {SpaceType.HOUSEHOLD: [_space("sp-1")]}
+    members = {"sp-1": ["joiner", "directory-member"]}
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo(
+            [
+                _peer(
+                    "joiner",
+                    source=InstanceSource.SPACE_SESSION,
+                    relay_via="https://gfs.example",
+                ),
+                _peer("directory-member", source=InstanceSource.SPACE_SESSION),
+            ]
+        ),
+        space_repo=_FakeSpaceRepo(spaces_by_type=spaces, members_by_space=members),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+    )
+    await queue.start()
+    try:
+        await sched._tick_once()
+        await asyncio.sleep(0.05)
+    finally:
+        await queue.stop()
+    beg = [s for s in fed.sent if s["type"] == FederationEventType.SPACE_SYNC_BEGIN]
+    assert [(s["to"], s["payload"]["sync_mode"]) for s in beg] == [
+        ("joiner", "incremental")
+    ]
 
 
 async def test_start_stop_idempotent(bus, queue, sync_manager):

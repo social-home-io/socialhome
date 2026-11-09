@@ -1,21 +1,22 @@
 """Household side of GFS mailboxes (GFS redesign PR 1 — library only).
 
-A household reached through a GFS gets one anonymous mailbox per (space,
-generation) there. This module holds what the household needs to own one:
+A household that reaches a space through a GFS owns ONE anonymous mailbox
+per (GFS, generation) there, shared by every space it reaches through that
+GFS (v_89). This module holds what the household needs to own one:
 
 * :func:`new_mailbox_root` / :func:`derive_mailbox_keys` — the mailbox's
   X25519 sealing key and Ed25519 claim key, both derived with HKDF-SHA256
   from the household's **mailbox root**: a dedicated 32-byte secret
-  generated once (:func:`new_mailbox_root`), the GFS id, the space id and
-  the generation. The root is stored under the household
+  generated once (:func:`new_mailbox_root`), the GFS id and the
+  generation. The root is stored under the household
   KEK beside its other secrets (wired in redesign PR 2). It is NOT the
   key-wrap seed: that key has its own job (sealing to the household) and
   its own rotation, and a mailbox key must never be able to reveal or
   depend on it. Besides the root, only ``gen`` needs storing: the keys come
   back from the root, the id from the claim key
   (:func:`socialhome.domain.gfs_mailbox.derive_mailbox_id`). Different
-  spaces / generations give unrelated keys and ids, so the GFS cannot link
-  them.
+  GFSs / generations give unrelated keys and ids, so neither two GFSs nor a
+  rotation link them.
 * :class:`TicketIssuer` / :func:`fetch_tickets` / :class:`MailboxTicketCache`
   — anonymous registration tickets (standard Privacy Pass, RFC 9578 token
   type 0x0002, :mod:`socialhome.privacy_pass`). The household asks for a
@@ -33,7 +34,7 @@ generation) there. This module holds what the household needs to own one:
   without a ticket first and shows one only when the GFS answers
   ``ticket_required`` (a NEW mailbox), so re-registering never shows one.
 * :func:`unregister_mailbox` — the anonymous ``POST /gfs/mailbox/unregister``
-  signed by the mailbox key when the household leaves the space. The GFS
+  signed by the mailbox key when the household no longer needs it. The GFS
   answers 200 whatever happened (no oracle); ``False`` means the request did
   not get that answer (an older GFS without the route, a network fault) and
   the mailbox simply ages out in the idle sweep.
@@ -41,8 +42,6 @@ generation) there. This module holds what the household needs to own one:
   one mailbox per socket): answers the challenge, then yields the queued
   and live frames — ``dict`` for a JSON envelope frame, ``bytes`` for a
   binary ``\\x00SHR`` media frame, unchanged.
-
-Not wired into any space flow yet (that is redesign PR 2, v_88).
 """
 
 from __future__ import annotations
@@ -180,6 +179,12 @@ class MailboxTicketError(Exception):
         self.error = error
 
 
+class MailboxFlooded(ValueError):
+    """A frame on one of our mailboxes was dropped by that mailbox's inbound
+    budget (v_89). The mailbox service counts these and rotates a mailbox
+    that stays flooded."""
+
+
 class MailboxClaimError(Exception):
     """The claim socket was refused or broke before the claim completed.
     ``close_code`` is the GFS's WebSocket close code when it refused the
@@ -201,7 +206,6 @@ class MailboxClaimError(Exception):
 class MailboxKeys:
     """One mailbox's keys (secret — never logged, never stored: derive)."""
 
-    space_id: str
     gen: int
     kem_private: bytes
     kem_public: bytes
@@ -210,7 +214,7 @@ class MailboxKeys:
     mailbox_id: str
 
     def __repr__(self) -> str:  # never print the secrets
-        return f"MailboxKeys(space_id={self.space_id!r}, gen={self.gen})"
+        return f"MailboxKeys(gen={self.gen})"
 
 
 def _hkdf(seed: bytes, info: bytes) -> bytes:
@@ -227,41 +231,23 @@ def new_mailbox_root() -> bytes:
 def derive_mailbox_keys(
     mailbox_root: bytes,
     gfs_instance_id: str,
-    space_id: str,
     gen: int,
-    *,
-    peer: str | None = None,
 ) -> MailboxKeys:
-    """The mailbox keys of (*space_id*, *gen*[, *peer*]) at the GFS
-    *gfs_instance_id* under the household's dedicated *mailbox_root*
-    secret (:func:`new_mailbox_root`). The GFS id is in the derivation, so
-    two GFSs serving the same (global) space get unrelated mailboxes — they
-    can't match ids to link a household across servers. Pass the id the
-    household PINNED when it minted the mailbox (and keep using it: a GFS
-    that changes its id keeps answering to the old one as an alias)."""
+    """The keys of the household's mailbox of generation *gen* at the GFS
+    *gfs_instance_id* under its dedicated *mailbox_root* secret
+    (:func:`new_mailbox_root`). One mailbox per (GFS, gen) serves every space
+    the household reaches through that GFS (v_89). The GFS id is in the
+    derivation, so two GFSs get unrelated mailboxes — they can't match ids
+    to link a household across servers. Pass the id the household PINNED
+    when it minted the mailbox (and keep using it: a GFS that changes its id
+    keeps answering to the old one as an alias)."""
     if not gfs_instance_id or "|" in gfs_instance_id:
         raise ValueError("invalid GFS instance id")
     if len(mailbox_root) != MAILBOX_ROOT_BYTES:
         raise ValueError("mailbox root must be 32 bytes")
-    if not space_id or "|" in space_id:
-        raise ValueError("invalid space id")
     if isinstance(gen, bool) or not isinstance(gen, int) or gen < 0:
         raise ValueError("gen must be a non-negative integer")
-    if peer is not None and (not peer or "|" in peer):
-        raise ValueError("invalid peer instance id")
-    scope = (
-        b"|"
-        + gfs_instance_id.encode()
-        + b"|"
-        + space_id.encode()
-        + b"|"
-        + str(gen).encode()
-    )
-    if peer is not None:
-        # One mailbox per member PAIR (#1333): the counterpart is part of
-        # the keys, so a household's mailboxes for two members of one space
-        # are as unrelated as two spaces'.
-        scope += b"|peer:" + peer.encode()
+    scope = b"|" + gfs_instance_id.encode() + b"|household|" + str(gen).encode()
     kem_private = _hkdf(mailbox_root, _KEM_INFO + scope)
     sign_seed = _hkdf(mailbox_root, _SIGN_INFO + scope)
     kem_public = (
@@ -271,7 +257,6 @@ def derive_mailbox_keys(
     )
     sign_public = ed25519_public_key(sign_seed)
     return MailboxKeys(
-        space_id=space_id,
         gen=gen,
         kem_private=kem_private,
         kem_public=kem_public,

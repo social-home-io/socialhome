@@ -285,10 +285,10 @@ def _seal_for_relay(
 
 @dataclass(slots=True, frozen=True)
 class MailboxTarget:
-    """Where an envelope of one space goes for a household reached only
-    through a GFS (v_88): its mailbox there, the key the frame is sealed to
-    and the GFS's base URL. Built from the household's signed directory
-    entry; never logged (the mailbox id must not reach a log line)."""
+    """Where an envelope goes for a household reached through a GFS (v_89):
+    its ONE mailbox there (shared by its spaces), the key the frame is
+    sealed to and the GFS's base URL. Built from the household's signed
+    member card; never logged (the mailbox id must not reach a log line)."""
 
     mailbox_id: str
     kem_pk: bytes
@@ -490,7 +490,7 @@ class GfsRelayTransport:
             return False, None
         return bool(ok), None
 
-    # ── Per-space mailboxes (v_88) ──────────────────────────────────────
+    # ── GFS mailboxes (v_89) ──────────────────────────────────────
 
     async def mailbox_ready(
         self, target: MailboxTarget, *, media: bool = False
@@ -519,7 +519,7 @@ class GfsRelayTransport:
     ) -> tuple[bool, int | None]:
         """Seal ``envelope_dict`` — the unchanged §24.11 envelope — to the
         mailbox's ``kem_pk`` and hand it to the GFS addressed to the mailbox
-        id (v_88). The GFS sees ``{to_instance: <mailbox id>, sealed}`` and
+        id (v_89). The GFS sees ``{to_instance: <mailbox id>, sealed}`` and
         nothing that names *instance*. Same contract as :meth:`send`."""
         sealed, status = _seal_for_relay(
             envelope_dict, recipient_pub=target.kem_pk, who=instance.id
