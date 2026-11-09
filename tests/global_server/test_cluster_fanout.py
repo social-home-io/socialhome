@@ -108,6 +108,22 @@ async def _stop_node(server: TestServer) -> None:
     await server.close()
 
 
+async def _stop_nodes(*servers: TestServer) -> None:
+    """Stop a test cluster: every node's cluster loops first, then the
+    servers.
+
+    A node's heartbeat and re-announce loops run until its OWN cleanup.
+    Closed one by one, the nodes still running kept pinging the one that
+    was closing; a connection its listener accepted just before it closed
+    was left to no handler and reported by the GC as an unclosed transport
+    — in whatever test ran then. ``ClusterService.stop`` is idempotent, so
+    each server's cleanup calling it again is a no-op."""
+    for server in servers:
+        await server.app[gfs_cluster_key].stop()
+    for server in servers:
+        await server.close()
+
+
 async def _approve(here: TestServer, there: TestServer, there_id: str) -> None:
     """Operator approval on *here*: pin *there*'s id, URL and identity key.
 
@@ -253,8 +269,7 @@ async def test_two_node_sync_end_to_end(tmp_dir, tmp_path_factory, fast_sync_ret
         assert await cluster_a.ping_peer(url_b) is True
         assert await cluster_a.ping_peer("http://127.0.0.1:1") is False
     finally:
-        await _stop_node(a)
-        await _stop_node(b)
+        await _stop_nodes(a, b)
 
 
 @pytest.mark.parametrize("first", ["A", "B"])
@@ -279,8 +294,7 @@ async def test_admin_approval_converges_in_either_order(tmp_path_factory, first)
             assert row.status == "online"
             assert row.last_seen is not None
     finally:
-        await _stop_node(a)
-        await _stop_node(b)
+        await _stop_nodes(a, b)
 
 
 async def test_post_to_peer_raises_on_non_2xx(
@@ -393,8 +407,58 @@ async def test_heartbeat_loop_tracks_peer_liveness(
         )
         assert await _wait_for(lambda: _async_eq(_status("B-alias"), "online"))
     finally:
-        await _stop_node(a)
-        await _stop_node(b)
+        await _stop_nodes(a, b)
+
+
+async def test_no_node_contacts_a_sibling_while_it_shuts_down(
+    tmp_path_factory, monkeypatch, fast_sync_retry
+):
+    """Stopping a cluster sends nothing into a node that is already closing.
+
+    Each node's heartbeat pings its siblings until its OWN cleanup stops
+    it. Closing A then B left B pinging A all through A's shutdown; a ping
+    A's listener took just before it closed became a socket no handler
+    owned, and the GC later reported it as an unclosed transport (a
+    ResourceWarning that failed whichever test was running — seen as
+    ``test_heartbeat_loop_tracks_peer_liveness``). A's shutdown is held
+    open a little here so a ping inside it is certain before the fix."""
+    monkeypatch.setattr(cluster_mod, "HEARTBEAT_INTERVAL_S", 0.01)
+    a = await _start_node(tmp_path_factory.mktemp("quiet-a"), "A")
+    b = await _start_node(tmp_path_factory.mktemp("quiet-b"), "B")
+    closing: set[str] = set()
+    into_closing: list[str] = []
+    real_ping = ClusterService._ping_peer
+    real_close = TestServer.close
+
+    async def _recording_ping(self, peer_url):
+        if peer_url.rstrip("/") in closing:
+            into_closing.append(peer_url)
+        return await real_ping(self, peer_url)
+
+    async def _slow_close(self):
+        if self.started and not self.closed:
+            closing.add(str(self.make_url("")).rstrip("/"))
+            await asyncio.sleep(0.2)
+        await real_close(self)
+
+    monkeypatch.setattr(ClusterService, "_ping_peer", _recording_ping)
+    monkeypatch.setattr(TestServer, "close", _slow_close)
+    try:
+        await _approve(a, b, "B")
+        await _approve(b, a, "A")
+        assert await _wait_for(
+            lambda: _async_eq(_status_of(a, "B"), "online"),
+        )
+    finally:
+        await _stop_nodes(a, b)
+    assert into_closing == []
+
+
+async def _status_of(server: TestServer, node_id: str) -> str | None:
+    for n in await server.app[gfs_cluster_repo_key].list_nodes():
+        if n.node_id == node_id:
+            return n.status
+    return None
 
 
 async def _async_true(value: bool) -> bool:
@@ -873,8 +937,7 @@ async def test_a_frame_for_one_node_is_refused_by_another(tmp_path_factory):
             ) as resp:
                 assert resp.status == 200
     finally:
-        for node in (a, b, c):
-            await _stop_node(node)
+        await _stop_nodes(a, b, c)
 
 
 async def test_fan_out_with_recipients_converges_across_three_nodes(
@@ -898,8 +961,7 @@ async def test_fan_out_with_recipients_converges_across_three_nodes(
                 == "7"
             )
     finally:
-        for node in nodes.values():
-            await _stop_node(node)
+        await _stop_nodes(*nodes.values())
 
 
 # ─── Owner notices + targeted relays across two real nodes on ONE DB ──────
@@ -996,8 +1058,7 @@ async def shared_db_nodes(tmp_path_factory, monkeypatch):
     try:
         yield a, b
     finally:
-        await b.close()
-        await a.close()
+        await _stop_nodes(b, a)
 
 
 async def _seed_households(app) -> tuple[bytes, bytes, bytes]:
@@ -1163,8 +1224,7 @@ async def three_shared_nodes(tmp_path_factory, monkeypatch):
     try:
         yield nodes
     finally:
-        for server in reversed(nodes):
-            await server.close()
+        await _stop_nodes(*reversed(nodes))
 
 
 async def _seed_space_with_followers(app, ids) -> tuple[bytes, dict[str, bytes]]:
@@ -1740,8 +1800,7 @@ async def sticky_nodes(tmp_path_factory, monkeypatch):
     try:
         yield nodes
     finally:
-        for server in reversed(nodes):
-            await server.close()
+        await _stop_nodes(*reversed(nodes))
 
 
 def _balancer(nodes, scoped_id: str) -> TestServer:

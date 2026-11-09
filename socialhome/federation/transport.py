@@ -1599,6 +1599,18 @@ class _RtcPeer:
 #: "no way to reach this household" instead of an HTTP failure.
 TRANSPORT_ERROR_NO_ROUTE = "no_route"
 
+#: Event types whose sender treats ``ok`` as "the peer has it" and acts on
+#: it. These skip the DataChannel: a DataChannel send succeeds as soon as
+#: the frame is in OUR SCTP buffer, so a peer that died a moment ago (its
+#: close not yet seen here) swallows the frame and the send still reports
+#: success. The HTTPS inbox answers 2xx only after the peer's §24.11
+#: pipeline took the envelope — a receipt. ``UNPAIR``: on ``ok`` the
+#: unpair forgets the peer instead of keeping a tombstone with the
+#: ``UNPAIR`` queued, so a false ``ok`` means the peer never learns.
+NEEDS_RECEIPT_EVENT_TYPES: frozenset[str] = frozenset(
+    {FederationEventType.UNPAIR.value},
+)
+
 #: :meth:`FederationTransport.send_via_gfs_relay` asked to relay to a paired
 #: peer we never opted into the relay with (``RemoteInstance.gfs_relay``).
 TRANSPORT_ERROR_GFS_RELAY_NOT_ENABLED = "gfs_relay_not_enabled"
@@ -1916,6 +1928,9 @@ class FederationTransport:
           (``RemoteInstance.gfs_relay``) and only when the inbox was not
           reached or there is no inbox URL — the connection-server relay
           over its confirmed routes.
+        * An event in :data:`NEEDS_RECEIPT_EVENT_TYPES` skips the
+          DataChannel even when it is open: its ``ok`` must be the peer's
+          receipt, not our own buffer's.
 
         The envelope is unchanged across transports — the signature and
         AES-256-GCM payload are already baked in.
@@ -1927,7 +1942,11 @@ class FederationTransport:
             )
 
         peer = self._peers.get(instance.id)
-        if peer is not None and peer.is_ready:
+        if (
+            peer is not None
+            and peer.is_ready
+            and envelope_dict.get("event_type") not in NEEDS_RECEIPT_EVENT_TYPES
+        ):
             try:
                 sent = await peer.send(envelope_dict)
             except Exception as exc:

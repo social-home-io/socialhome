@@ -381,6 +381,31 @@ def test_offline_noise_naming_the_household_inside_its_window_passes(
     assert _audit_a(harness, demo_root) == []
 
 
+def test_rtc_send_racing_the_kill_passes_inside_the_window_only(harness, demo_root):
+    """REGRESSION (main ``all``, 2026-11-09: ``a: log audit — fed RTC send to
+    <c> failed: cannot send on a closed channel``): a send that raced c's
+    death fell back to HTTPS — expected while c is deliberately down, a
+    finding outside that window, and never the traceback'd ``raised``."""
+    closed = (
+        "WARNING:socialhome.federation.transport:fed RTC send to "
+        f"{_C_IID} failed: cannot send on a closed channel"
+    )
+    _append(harness, "a", closed)
+    assert _audit_a(harness, demo_root)
+    (harness._instance_dir("a") / "log.txt").write_text("INFO:x:boot\n")
+    harness._open_offline_window("c")
+    _append(harness, "a", closed)
+    harness._close_noise_windows()
+    assert _audit_a(harness, demo_root) == []
+    _append(
+        harness,
+        "a",
+        "WARNING:socialhome.federation.transport:fed RTC send to "
+        f"{_C_IID} raised (boom) — falling back to HTTPS inbox",
+    )
+    assert _audit_a(harness, demo_root)
+
+
 def test_offline_window_never_excuses_a_line_about_another_household(
     harness, demo_root
 ):

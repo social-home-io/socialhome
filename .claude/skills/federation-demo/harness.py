@@ -166,6 +166,10 @@ _OFFLINE_PEER_NOISE: tuple[str, ...] = (
     "mesh catch-up sync to host ",
     # ``unpair-offline``: the UNPAIR to the offline household is queued.
     "not delivered (delivery_failed) — queued for retry",
+    # A send that raced the household's death: its DataChannel closed
+    # between ``is_ready`` and the write, and the frame fell back to HTTPS
+    # ("fed RTC send to <iid> failed: cannot send on a closed channel").
+    "failed: cannot send on a closed channel",
 )
 
 #: libdatachannel / libjuice status lines while a peer's process dies, or

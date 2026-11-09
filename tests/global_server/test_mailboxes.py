@@ -365,6 +365,42 @@ async def test_live_json_and_media_reach_a_claimed_socket(gfs):
     await ws.close()
 
 
+@pytest.mark.parametrize("media", [False, True], ids=["envelope", "media"])
+async def test_a_failed_push_closes_the_socket_and_arrives_after_reclaim(gfs, media):
+    """A live push that fails must close the claim socket (1013): dropping it
+    from the registry while it stayed open left the mailbox deaf. The frame
+    went to the queue and drains on the reclaim."""
+    box = Box()
+    await _register(gfs, box)
+    ws = await _claim(gfs, box)
+    assert (await ws.receive_json(timeout=2))["type"] == "mailbox_claimed"
+    server_ws = gfs._app[gfs_mailbox_ws_registry_key]._by_instance[box.id]
+
+    async def _reset(*_args, **_kwargs):
+        raise ConnectionResetError("simulated reset")
+
+    if media:
+        server_ws.send_bytes = _reset
+        body = _media(box.id, b"\xee")
+        await gfs.post("/gfs/envelope", data=body)
+    else:
+        server_ws.send_str = _reset
+        await gfs.post("/gfs/envelope", json={"to_instance": box.id, "sealed": SEALED})
+    closed = await ws.receive(timeout=5)
+    assert closed.type == WSMsgType.CLOSE
+    assert ws.close_code == 1013
+    await _settle(gfs._app)
+
+    again = await _claim(gfs, box)
+    assert (await again.receive_json(timeout=2))["type"] == "mailbox_claimed"
+    got = await again.receive(timeout=5)
+    if media:
+        assert got.type == WSMsgType.BINARY and got.data == body
+    else:
+        assert json.loads(got.data) == {"type": "envelope", "sealed": SEALED}
+    await again.close()
+
+
 @pytest.mark.security
 async def test_a_mailbox_cannot_be_claimed_without_its_key(gfs):
     """A wrong key and an unknown mailbox close the same way."""
