@@ -513,9 +513,8 @@ def make_check_relay_opt_in() -> InboundStep:
     A household seated from an invite link
     (:data:`~socialhome.domain.federation.InstanceSource.SPACE_SESSION`)
     is relay-only by construction and is left to
-    :func:`make_check_peer_class` — except a seat made from a host's member
-    directory (v_89, no ``relay_via``): it reaches us only at our mailbox,
-    never instance-addressed. Live wires (RTC, HTTPS inbox) are not
+    :func:`make_check_peer_class` (and, for a seat made from a host's member
+    directory, :func:`make_check_mailbox_sender`). Live wires (RTC, HTTPS inbox) are not
     touched. Runs straight after the lookup, before any crypto.
     """
 
@@ -526,18 +525,6 @@ def make_check_relay_opt_in() -> InboundStep:
         # is exempt; every other source — today ``manual``, tomorrow
         # whatever is added — needs the explicit opt-in.
         if getattr(ctx.instance, "source", None) is InstanceSource.SPACE_SESSION:
-            if ctx.transport == TRANSPORT_GFS_RELAY and not getattr(
-                ctx.instance, "relay_via", None
-            ):
-                # v_89 — a household seated from a host's directory (no relay
-                # of its own) reaches us only at our mailbox, where the card
-                # gate runs; instance-addressed it would skip that gate.
-                log.info(
-                    "inbound: refusing a relayed %r from a directory seat — it "
-                    "reaches us only at our mailbox",
-                    ctx.envelope.get("event_type"),
-                )
-                raise ValueError("a directory seat does not use the instance relay")
             return
         if getattr(ctx.instance, "gfs_relay", False) is True:
             return
@@ -556,9 +543,10 @@ def make_check_relay_opt_in() -> InboundStep:
 def make_check_mailbox_sender(
     allowed: Callable[[], Callable[[str, str], Awaitable[bool]] | None],
 ) -> InboundStep:
-    """Step 1b (v_89): a frame that arrived on our GFS mailbox
-    (:data:`TRANSPORT_GFS_MAILBOX`) is taken only from a sender whose
-    verified member card we hold for the envelope's space.
+    """Step 2a (v_89): a frame that arrived on our GFS mailbox
+    (:data:`TRANSPORT_GFS_MAILBOX`) — or on the instance-addressed relay from
+    a household seated from a host's directory — is taken only from a sender
+    whose verified member card we hold for the envelope's space.
 
     Our ONE mailbox serves every space we reach through that GFS, and every
     writer member of those spaces may send to it — so the address alone
@@ -566,18 +554,30 @@ def make_check_mailbox_sender(
     ``(sender, space_id) -> bool``: we are in the space and hold the
     sender's card for it (the host's from the ACK, a member's from the
     host's directory, a joiner's from its redeem). Runs straight after the
-    parse (``from_instance`` and ``space_id`` are signed routing fields —
-    the signature step later proves the sender wrote them), before any
-    crypto. A space-less ``SPACE_*`` envelope never rides a mailbox (senders
+    instance lookup (``from_instance`` and ``space_id`` are signed routing
+    fields — the signature step later proves the sender wrote them), before
+    any crypto. A space-less ``SPACE_*`` envelope never rides a mailbox (senders
     send those instance-addressed); a space-less other event (the
     capabilities exchange) goes on to the ordinary seat checks. Fails
     closed: no check wired → refused."""
 
     async def check_mailbox_sender(ctx: InboundContext) -> None:
-        if ctx.transport != TRANSPORT_GFS_MAILBOX:
+        on_mailbox = ctx.transport == TRANSPORT_GFS_MAILBOX
+        # A household seated from a host's directory (a ``space_session``
+        # row with no relay of its own) is held to the same card check on
+        # the instance-addressed relay — it must not skip the gate by
+        # addressing our instance id instead of our mailbox.
+        directory_seat = (
+            ctx.transport == TRANSPORT_GFS_RELAY
+            and getattr(ctx.instance, "source", None) is InstanceSource.SPACE_SESSION
+            and not getattr(ctx.instance, "relay_via", None)
+        )
+        if not on_mailbox and not directory_seat:
             return
         space_id = ctx.envelope.get("space_id")
         if space_id in (None, ""):
+            if not on_mailbox:
+                return  # space-less: the seat vocabulary judges it
             if str(ctx.envelope.get("event_type") or "").startswith("space_"):
                 log.info(
                     "inbound: refusing a space-less %r envelope on a mailbox",

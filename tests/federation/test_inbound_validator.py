@@ -850,40 +850,35 @@ async def test_the_mailbox_sender_gate_ignores_every_other_transport():
         await step(InboundContext(envelope=env, transport=transport))
 
 
-async def test_a_directory_seat_never_comes_in_over_the_instance_relay():
+async def test_a_directory_seat_gets_the_card_check_on_the_instance_relay():
     """Review round 1 (#1336): a household seated from a host's directory
-    (``space_session``, no relay of its own) reaches us only at our mailbox,
-    where the card gate runs — never instance-addressed on the GFS relay,
-    which would skip that gate. A sealed-redeem seat (with its relay) still
-    may."""
-    step = make_check_relay_opt_in()
+    (``space_session``, no relay of its own) must not skip the card gate by
+    addressing our instance id on the GFS relay instead of our mailbox. Its
+    space envelope there needs the card for that space; a space-less one is
+    left to the seat vocabulary; a sealed-redeem seat (with its relay) is
+    not affected."""
+    check, seen = _carded(("remote-iid", "sp-1"))
+    step = make_check_mailbox_sender(lambda: check)
     directory_seat = _RelayInstance(InstanceSource.SPACE_SESSION, gfs_relay=False)
     directory_seat.relay_via = None
-    with pytest.raises(ValueError):
-        await step(
-            InboundContext(
-                envelope=_minimal_envelope(),
-                instance=directory_seat,
-                transport=TRANSPORT_GFS_RELAY,
-            )
+
+    def _ctx(space_id, instance, event_type=None):
+        env = _minimal_envelope()
+        env["space_id"] = space_id
+        if event_type:
+            env["event_type"] = event_type
+        return InboundContext(
+            envelope=env, instance=instance, transport=TRANSPORT_GFS_RELAY
         )
+
+    with pytest.raises(ValueError, match="card"):
+        await step(_ctx("sp-other", directory_seat))
+    await step(_ctx("sp-1", directory_seat))
+    await step(_ctx(None, directory_seat, "space_session_cleanup"))
     redeem_seat = _RelayInstance(InstanceSource.SPACE_SESSION, gfs_relay=False)
-    redeem_seat.relay_via = "https://gfs.example.org"
-    await step(
-        InboundContext(
-            envelope=_minimal_envelope(),
-            instance=redeem_seat,
-            transport=TRANSPORT_GFS_RELAY,
-        )
-    )
-    # On our mailbox the card gate judges it instead.
-    await step(
-        InboundContext(
-            envelope=_minimal_envelope(),
-            instance=directory_seat,
-            transport=TRANSPORT_GFS_MAILBOX,
-        )
-    )
+    seen.clear()
+    await step(_ctx("sp-other", redeem_seat))
+    assert seen == []  # not judged here at all
 
 
 async def test_mailbox_transport_gets_the_relay_gates_and_window():
@@ -906,14 +901,15 @@ async def test_mailbox_transport_gets_the_relay_gates_and_window():
     )
 
 
-async def test_mailbox_sender_gate_runs_right_after_the_parse():
+async def test_mailbox_sender_gate_runs_right_after_the_lookup():
     steps = FederationService._common_pipeline_steps(
         _StubPipelineOwner(),  # type: ignore[arg-type]
         lookup_step=_noop_step,
     )
     names = [getattr(s, "__name__", "") for s in steps]
-    assert names.index("parse_json") < names.index("check_mailbox_sender")
-    assert names.index("check_mailbox_sender") < names.index("_noop_step")
+    # Right after the lookup (it reads the sender's row), before any crypto.
+    assert names.index("_noop_step") < names.index("check_mailbox_sender")
+    assert names.index("check_mailbox_sender") < names.index("verify_signature")
 
 
 async def test_unpairing_gate_sits_between_signature_and_replay():

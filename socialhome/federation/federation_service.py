@@ -661,10 +661,11 @@ class FederationService:
         """Return the shared step list for both inbox and RTC pipelines."""
         steps = [
             make_parse_json(loads=_loads),
-            # v_89: a frame on our GFS mailbox is taken only from a sender
-            # whose member card we hold for its space. No-op elsewhere.
-            make_check_mailbox_sender(lambda: self._mailbox_sender_check),
             lookup_step,
+            # v_89: a frame on our GFS mailbox (or relayed from a directory
+            # seat) is taken only from a sender whose member card we hold
+            # for its space. No-op elsewhere.
+            make_check_mailbox_sender(lambda: self._mailbox_sender_check),
             # §D2b peer-class gate: a household seated from an invite link
             # may only speak the space vocabulary. Straight after the
             # lookup (the first step that knows WHO the sender is) and
