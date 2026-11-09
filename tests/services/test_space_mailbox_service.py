@@ -77,6 +77,9 @@ class _Spaces:
     async def list_local_member_user_ids(self, space_id):
         return [] if space_id in self.left else ["someone"]
 
+    async def list_member_instances(self, space_id):
+        return [i for (s, i) in self.rows if s == space_id]
+
     async def set_space_instance_mailbox(self, space_id, instance_id, value):
         if (space_id, instance_id) in self.rows:
             self.rows[(space_id, instance_id)] = value
@@ -244,7 +247,7 @@ async def test_mint_registers_claims_and_delivers_frames(gfs):
 
     svc.attach_inbound(_inbound)
     await _ready(svc, conn)
-    minted = await svc.mint("space-1", url)
+    minted = await svc.mint("space-1", url, peer="peer-iid")
     assert minted is not None
     entry, own = minted
     verify_entry(
@@ -272,18 +275,22 @@ async def test_mint_registers_claims_and_delivers_frames(gfs):
     await svc.stop()
 
 
-async def test_one_mailbox_per_space_unlinkable_across_spaces(gfs):
+async def test_one_mailbox_per_member_pair_unlinkable_across_pairs_and_spaces(gfs):
+    """Owner decision (#1333): a host seats each GFS-only member with its OWN
+    mailbox — two members of one space get unrelated mailboxes (and two
+    sockets); a retry for the same member reuses its one."""
     _server, session, url, conn = gfs
     svc = _service(session, conn)
     await _ready(svc, conn)
-    a1, own1 = await svc.mint("space-1", url)
-    a2, own2 = await svc.mint("space-1", url)  # a second GFS-only member
-    b, _ = await svc.mint("space-2", url)
+    a1, own1 = await svc.mint("space-1", url, peer="member-a")
+    a2, own2 = await svc.mint("space-1", url, peer="member-a")  # a retry
+    b, _ = await svc.mint("space-1", url, peer="member-b")  # another member
+    c, _ = await svc.mint("space-2", url, peer="member-a")  # another space
     assert a1.mailbox_id == a2.mailbox_id and own1 == own2
-    assert svc.open_claims() == 2  # one socket per mailbox
-    assert b.mailbox_id != a1.mailbox_id
-    assert b.kem_pk != a1.kem_pk and b.sign_pk != a1.sign_pk
-    for e in (a1, b):
+    assert len({a1.mailbox_id, b.mailbox_id, c.mailbox_id}) == 3
+    assert len({a1.kem_pk, b.kem_pk, c.kem_pk}) == 3
+    assert svc.open_claims() == 3  # one socket per mailbox
+    for e in (a1, b, c):
         assert e.mailbox_id != HOME_ID and HOME_ID not in e.mailbox_id
     await svc.stop()
 
@@ -292,7 +299,7 @@ async def test_a_gfs_without_mailboxes_mints_nothing(gfs):
     _server, session, url, conn = gfs
     svc = _service(session, conn, mailbox=False)
     await _ready(svc, conn)
-    assert await svc.mint("space-1", url) is None
+    assert await svc.mint("space-1", url, peer="peer-iid") is None
     assert svc.open_claims() == 0
     await svc.stop()
 
@@ -303,10 +310,12 @@ async def test_remember_and_targets_per_space_and_space_less(gfs):
     spaces.rows[("space-1", "peer-iid")] = None
     host = _service(session, conn)
     await _ready(host, conn)
-    peer_entry, _ = await host.mint("space-1", url)  # stands in for the peer's
+    peer_entry, _ = await host.mint(
+        "space-1", url, peer="peer-iid"
+    )  # stands in for the peer's
     svc = _service(session, conn, spaces=spaces)
     await _ready(svc, conn)
-    _mine, own = await svc.mint("space-1", url)
+    _mine, own = await svc.mint("space-1", url, peer="peer-iid")
     await svc.remember("space-1", "peer-iid", peer=peer_entry, own=own)
     stored = orjson.loads(spaces.rows[("space-1", "peer-iid")])
     assert stored["own"] == {"gen": own.gen, "gfs_id": GFS_ID, "gfs": url}
@@ -350,7 +359,7 @@ async def test_a_mailbox_the_gfs_forgot_is_announced_lost_then_recovered(gfs):
 
     svc.attach_announcer(_announce)
     await _ready(svc, conn)
-    entry, own = await svc.mint("space-1", url)
+    entry, own = await svc.mint("space-1", url, peer="peer-iid")
     await svc.remember("space-1", "peer-iid", peer=None, own=own)
     assert await svc.wait_claimed(5)
     tickets = len(svc._tickets[conn.id].cache)
@@ -384,7 +393,7 @@ async def test_a_forgotten_mailbox_with_no_ticket_waits_for_the_refill(gfs):
 
     svc.attach_announcer(_announce)
     await _ready(svc, conn)
-    entry, own = await svc.mint("space-1", url)
+    entry, own = await svc.mint("space-1", url, peer="peer-iid")
     await svc.remember("space-1", "peer-iid", peer=None, own=own)
     assert await svc.wait_claimed(5)
     cache = svc._tickets[conn.id].cache
@@ -409,7 +418,7 @@ async def test_leaving_releases_and_unregisters_the_mailbox(gfs):
     spaces.rows[("space-1", "peer-iid")] = None
     svc = _service(session, conn, spaces=spaces)
     await _ready(svc, conn)
-    entry, own = await svc.mint("space-1", url)
+    entry, own = await svc.mint("space-1", url, peer="peer-iid")
     await svc.remember("space-1", "peer-iid", peer=None, own=own)
     assert await svc.release_unused() == 0  # still used
     del spaces.rows[("space-1", "peer-iid")]  # we left / were removed
@@ -442,10 +451,10 @@ async def test_a_pending_mint_is_reused_by_a_retry_then_expires(gfs):
     )
     await _ready(svc, conn)
     tickets_before = len(svc._tickets[conn.id].cache)
-    entry, _own = await svc.mint("space-1", url)
+    entry, _own = await svc.mint("space-1", url, peer="peer-iid")
     assert len(svc._tickets[conn.id].cache) == tickets_before - 1
     assert await svc.release_unused() == 0  # in flight
-    again, _ = await svc.mint("space-1", url)  # the retry
+    again, _ = await svc.mint("space-1", url, peer="peer-iid")  # the retry
     assert again.mailbox_id == entry.mailbox_id
     assert len(svc._tickets[conn.id].cache) == tickets_before - 1
     now[0] += PENDING_TTL_S + 1
@@ -477,7 +486,7 @@ async def test_a_left_space_releases_its_mailbox_and_a_rejoin_gets_a_new_one(gfs
         release_delay=(0.0, 0.0),
     )
     await _ready(svc, conn)
-    entry, own = await svc.mint("space-1", url)
+    entry, own = await svc.mint("space-1", url, peer="peer-iid")
     await svc.remember("space-1", "peer-iid", peer=entry, own=own)
     now[0] += PENDING_TTL_S + 1
     assert await svc.release_unused() == 0  # still sitting in the space
@@ -488,7 +497,7 @@ async def test_a_left_space_releases_its_mailbox_and_a_rejoin_gets_a_new_one(gfs
     assert await svc.target_for("peer-iid", "space-1") is None
     assert await server.app[gfs_mailbox_repo_key].get(entry.mailbox_id) is None
     spaces.left.discard("space-1")  # joined again later
-    rejoined, _ = await svc.mint("space-1", url)
+    rejoined, _ = await svc.mint("space-1", url, peer="peer-iid")
     assert rejoined.mailbox_id != entry.mailbox_id
     await svc.stop()
 
@@ -499,7 +508,7 @@ async def test_a_row_of_a_left_space_is_not_reopened_on_start(gfs):
     spaces.rows[("space-1", "peer-iid")] = None
     svc = _service(session, conn, spaces=spaces)
     await _ready(svc, conn)
-    _entry, own = await svc.mint("space-1", url)
+    _entry, own = await svc.mint("space-1", url, peer="peer-iid")
     await svc.remember("space-1", "peer-iid", peer=None, own=own)
     await svc.stop()
     spaces.left.add("space-1")
@@ -516,7 +525,7 @@ async def test_a_seat_right_after_connecting_still_gets_a_mailbox(gfs):
     server, session, url, conn = gfs
     svc = _service(session, conn)
     await svc.start()  # no connect refill has run
-    minted = await svc.mint("space-1", url)
+    minted = await svc.mint("space-1", url, peer="peer-iid")
     assert minted is not None
     assert await server.app[gfs_mailbox_repo_key].get(minted[0].mailbox_id)
     await svc.stop()
@@ -528,13 +537,13 @@ async def test_a_mint_that_outlives_its_callers_wait_still_finishes(gfs):
     server, session, url, conn = gfs
     svc = _service(session, conn)
     await _ready(svc, conn)
-    assert await svc.mint_within("space-1", url, timeout=0) is None
+    assert await svc.mint_within("space-1", url, peer="peer-iid", timeout=0) is None
     for _ in range(200):
         if svc.open_claims():
             break
         await asyncio.sleep(0.02)
     assert svc.open_claims() == 1
-    entry, _ = await svc.mint_within("space-1", url, timeout=5)
+    entry, _ = await svc.mint_within("space-1", url, peer="peer-iid", timeout=5)
     assert await server.app[gfs_mailbox_repo_key].get(entry.mailbox_id)
     assert svc.open_claims() == 1
     await svc.stop()
@@ -565,7 +574,7 @@ async def test_no_mailbox_id_in_logs_at_info_or_above(gfs, caplog):
     svc = _service(session, conn, spaces=spaces)
     with caplog.at_level(logging.INFO):
         await _ready(svc, conn)
-        entry, own = await svc.mint("space-1", url)
+        entry, own = await svc.mint("space-1", url, peer="peer-iid")
         await svc.remember("space-1", "peer-iid", peer=None, own=own)
         del spaces.rows[("space-1", "peer-iid")]
         await svc.release_unused()
@@ -614,7 +623,7 @@ async def test_the_identified_session_never_carries_mailbox_traffic(gfs):
     )
     try:
         await _ready(svc, conn)
-        _entry, own = await svc.mint("space-1", url)
+        _entry, own = await svc.mint("space-1", url, peer="peer-iid")
         assert await svc.wait_claimed(5)
         await svc.remember("space-1", "peer-iid", peer=None, own=own)
         del spaces.rows[("space-1", "peer-iid")]

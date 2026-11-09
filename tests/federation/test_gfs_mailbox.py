@@ -95,6 +95,23 @@ def test_keys_are_deterministic_per_space_and_gen():
     assert a.kem_private != a.sign_seed
 
 
+def test_keys_are_per_member_pair():
+    """Owner decision (#1333 round 4): one mailbox per (space, peer, gen) —
+    a host's mailboxes for two members of one space are unrelated, and the
+    peer is part of the keys, not of the space the mailbox serves."""
+    a = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0, peer="a" * 32)
+    b = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0, peer="b" * 32)
+    plain = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
+    assert len({a.mailbox_id, b.mailbox_id, plain.mailbox_id}) == 3
+    assert a.kem_public != b.kem_public and a.sign_public != b.sign_public
+    assert a.space_id == b.space_id == "space-1"
+    assert a == derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0, peer="a" * 32)
+    other_gfs = derive_mailbox_keys(ROOT, "gfs-node-b", "space-1", 0, peer="a" * 32)
+    assert other_gfs.mailbox_id != a.mailbox_id
+    with pytest.raises(ValueError):
+        derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0, peer="x|y")
+
+
 def test_a_mailbox_root_is_a_fresh_32_byte_secret():
     one, two = new_mailbox_root(), new_mailbox_root()
     assert len(one) == len(two) == 32 and one != two

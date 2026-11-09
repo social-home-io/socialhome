@@ -225,9 +225,14 @@ def new_mailbox_root() -> bytes:
 
 
 def derive_mailbox_keys(
-    mailbox_root: bytes, gfs_instance_id: str, space_id: str, gen: int
+    mailbox_root: bytes,
+    gfs_instance_id: str,
+    space_id: str,
+    gen: int,
+    *,
+    peer: str | None = None,
 ) -> MailboxKeys:
-    """The mailbox keys of (*space_id*, *gen*) at the GFS
+    """The mailbox keys of (*space_id*, *gen*[, *peer*]) at the GFS
     *gfs_instance_id* under the household's dedicated *mailbox_root*
     secret (:func:`new_mailbox_root`). The GFS id is in the derivation, so
     two GFSs serving the same (global) space get unrelated mailboxes — they
@@ -242,6 +247,8 @@ def derive_mailbox_keys(
         raise ValueError("invalid space id")
     if isinstance(gen, bool) or not isinstance(gen, int) or gen < 0:
         raise ValueError("gen must be a non-negative integer")
+    if peer is not None and (not peer or "|" in peer):
+        raise ValueError("invalid peer instance id")
     scope = (
         b"|"
         + gfs_instance_id.encode()
@@ -250,6 +257,11 @@ def derive_mailbox_keys(
         + b"|"
         + str(gen).encode()
     )
+    if peer is not None:
+        # One mailbox per member PAIR (#1333): the counterpart is part of
+        # the keys, so a household's mailboxes for two members of one space
+        # are as unrelated as two spaces'.
+        scope += b"|peer:" + peer.encode()
     kem_private = _hkdf(mailbox_root, _KEM_INFO + scope)
     sign_seed = _hkdf(mailbox_root, _SIGN_INFO + scope)
     kem_public = (

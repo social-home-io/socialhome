@@ -180,6 +180,10 @@ REDEEM_TIMEOUT_SECONDS: float = 10.0
 HOST_MINT_TIMEOUT_S: float = 3.0
 #: v_88 — the joiner's bound on minting its mailbox before the redeem.
 JOINER_MINT_TIMEOUT_S: float = 20.0
+#: v_88 — a host mint past its bound waits up to TRIES × S for the seat row
+#: (the commit follows the ACK) before handing its entry over.
+LATE_MINT_SEAT_WAIT_TRIES: int = 60
+LATE_MINT_SEAT_WAIT_S: float = 0.5
 
 #: The ONE reason string every issuer-side denial ships.
 #:
@@ -491,11 +495,13 @@ class SpaceInviteTokenRedeemCoordinator:
         space_id: str,
         gfs_url: str,
         *,
+        peer: str,
         timeout: float,
         on_late: Callable[[tuple[SpaceMailboxEntry, OwnMailbox]], Awaitable[None]]
         | None = None,
     ) -> tuple[SpaceMailboxEntry, OwnMailbox] | None:
-        """Our mailbox for *space_id* at *gfs_url* (v_88), or ``None`` —
+        """Our mailbox for *space_id* toward the ONE counterpart *peer* at
+        *gfs_url* (v_88, one mailbox per member pair), or ``None`` —
         never raises, and stops waiting after *timeout* seconds: a seat
         without a mailbox keeps today's relay. A mint that finishes later
         goes to *on_late*."""
@@ -503,7 +509,7 @@ class SpaceInviteTokenRedeemCoordinator:
             return None
         try:
             return await self._mailboxes.mint_within(
-                space_id, gfs_url, timeout=timeout, on_late=on_late
+                space_id, gfs_url, peer=peer, timeout=timeout, on_late=on_late
             )
         except Exception:
             log.warning("invite bootstrap: minting a mailbox failed", exc_info=True)
@@ -809,6 +815,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 await self._mint_mailbox(
                     bootstrap.space_id,
                     bootstrap.gfs_url,
+                    peer=issuer_instance_id,
                     timeout=JOINER_MINT_TIMEOUT_S,
                 )
                 if bootstrap.proto_version >= FederationCapability.MIN_FOR_SPACE_MAILBOX
@@ -2334,21 +2341,32 @@ class SpaceInviteTokenRedeemCoordinator:
             # Bounded well inside the joiner's redeem timeout: a slow GFS
             # costs this pair its mailbox toward us, never the join.
             mailboxes = self._mailboxes
-            joiner_entry = peer_entry
 
             async def _late(result: tuple[SpaceMailboxEntry, OwnMailbox]) -> None:
-                # Past the bound: store it on the (by now committed) seat
-                # and hand the joiner our entry (SPACE_MAILBOX_UPDATED).
-                await self._remember_mailbox(
-                    space_id, redeemer_instance_id, peer=joiner_entry, own=result[1]
-                )
-                if mailboxes is not None:
-                    await mailboxes.announce_to(
-                        space_id, redeemer_instance_id, result[0]
-                    )
+                # Past the bound: once the seat row exists (it may not yet —
+                # the ACK can still be on its way), put OUR mailbox on it,
+                # keeping whatever entry the joiner holds there NOW (never
+                # the redeem's, which a later update may have replaced), and
+                # hand the joiner our entry (SPACE_MAILBOX_UPDATED). A seat
+                # that never comes leaves the mint pending, then swept.
+                if mailboxes is None:
+                    return
+                for _ in range(LATE_MINT_SEAT_WAIT_TRIES):
+                    if await mailboxes.set_own(
+                        space_id, redeemer_instance_id, result[1]
+                    ):
+                        await mailboxes.announce_to(
+                            space_id, redeemer_instance_id, result[0]
+                        )
+                        return
+                    await asyncio.sleep(LATE_MINT_SEAT_WAIT_S)
 
             minted = await self._mint_mailbox(
-                space_id, gfs_url, timeout=HOST_MINT_TIMEOUT_S, on_late=_late
+                space_id,
+                gfs_url,
+                peer=redeemer_instance_id,
+                timeout=HOST_MINT_TIMEOUT_S,
+                on_late=_late,
             )
             if minted is not None:
                 ack_body["mailbox"] = minted[0].to_wire()

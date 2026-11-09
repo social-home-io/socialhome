@@ -135,6 +135,14 @@ RELEASE_DELAY_S: tuple[float, float] = (120.0, 900.0)
 #: Re-registrations a lost mailbox may be REFUSED (not merely short of a
 #: ticket) before it is replaced by a fresh generation.
 LOST_ROTATE_AFTER: int = 3
+#: Per member pair and day, at most: this many ``SPACE_MAILBOX_UPDATED``
+#: announces, re-registrations of a lost mailbox, and rotations. A GFS that
+#: answers every claim with 4401 can then cost at most 4 tickets + 1 per
+#: day per pair and 6 small envelopes to one counterpart — never a storm.
+ANNOUNCES_PER_DAY: int = 6
+RECOVERY_REGISTERS_PER_DAY: int = 4
+ROTATIONS_PER_DAY: int = 1
+_DAY_S: float = 86_400.0
 #: :meth:`SpaceMailboxService._register` outcomes.
 REGISTER_OK: str = "ok"
 REGISTER_NO_TICKET: str = "no_ticket"
@@ -159,6 +167,8 @@ class _Tickets:
 class _Claim:
     keys: MailboxKeys
     own: OwnMailbox
+    #: The ONE counterpart this mailbox serves (one mailbox per member pair).
+    peer: str
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task | None = None
     socket: MailboxClaim | None = None
@@ -172,8 +182,17 @@ class _Claim:
     released: bool = False
 
 
-def _claim_key(space_id: str, own: OwnMailbox) -> tuple[str, str, int]:
-    return (space_id, own.gfs_instance_id, own.gen)
+ClaimKey = tuple[str, str, str, int]
+
+
+def _claim_key(space_id: str, peer: str, own: OwnMailbox) -> ClaimKey:
+    """One mailbox per member PAIR (owner decision, #1333): (space, the
+    counterpart, our pinned GFS id, gen)."""
+    return (space_id, peer, own.gfs_instance_id, own.gen)
+
+
+def _derive(root: bytes, space_id: str, peer: str, own: OwnMailbox) -> MailboxKeys:
+    return derive_mailbox_keys(root, own.gfs_instance_id, space_id, own.gen, peer=peer)
 
 
 def pin_to_json(pin: TicketKeyPin) -> str:
@@ -219,6 +238,7 @@ class SpaceMailboxService:
         "_clock",
         "_config",
         "_connecting",
+        "_daily",
         "_federation_repo",
         "_gfs",
         "_gfs_repo",
@@ -283,11 +303,11 @@ class SpaceMailboxService:
         self._inbound: InboundHandler | None = None
         #: GFS connection id → its ticket machinery.
         self._tickets: dict[str, _Tickets] = {}
-        #: (space, gfs id, gen) → our open claim.
-        self._claims: dict[tuple[str, str, int], _Claim] = {}
+        #: (space, peer, gfs id, gen) → our open claim.
+        self._claims: dict[ClaimKey, _Claim] = {}
         #: Claims minted for a seat not written yet → until when they are
         #: kept (:data:`PENDING_TTL_S`).
-        self._pending: dict[tuple[str, str, int], float] = {}
+        self._pending: dict[ClaimKey, float] = {}
         #: (space, instance) → the counterpart's entry (mirror of the rows).
         self._peers: dict[tuple[str, str], SpaceMailboxEntry] = {}
         self._lock = asyncio.Lock()
@@ -297,6 +317,8 @@ class SpaceMailboxService:
         self._release_delay = release_delay
         #: Releases waiting out their delay (:meth:`settle_releases`).
         self._releases: set[asyncio.Task] = set()
+        #: (space, peer) → (day, announces, recovery registers, rotations).
+        self._daily: dict[tuple[str, str], list[int]] = {}
         self._federation_repo: AbstractFederationRepo | None = None
         self._stop = asyncio.Event()
         #: Background tasks: the sweep, connect-time refills.
@@ -361,9 +383,9 @@ class SpaceMailboxService:
         self._stop.clear()
         await self._load_root()
         rows = await self._load_rows()
-        for space_id, _instance_id, own in rows:
+        for space_id, instance_id, own in rows:
             if own is not None and await self._space_in_use(space_id):
-                await self._open_claim(space_id, own)
+                await self._open_claim(space_id, instance_id, own)
         self._spawn(self._sweep_loop(), "gfs-mailbox-sweep")
 
     async def stop(self) -> None:
@@ -602,11 +624,25 @@ class SpaceMailboxService:
                 return conn
         return None
 
+    def _spend(self, space_id: str, peer: str, what: int, limit: int) -> bool:
+        """Count one *what* (1 announce, 2 recovery register, 3 rotation)
+        for the pair today; ``False`` once *limit* is reached."""
+        day = int(self._clock() // _DAY_S)
+        row = self._daily.get((space_id, peer))
+        if row is None or row[0] != day:
+            row = [day, 0, 0, 0]
+            self._daily[(space_id, peer)] = row
+        if row[what] >= limit:
+            return False
+        row[what] += 1
+        return True
+
     async def mint_within(
         self,
         space_id: str,
         gfs_url: str,
         *,
+        peer: str,
         timeout: float,
         on_late: Callable[[tuple[SpaceMailboxEntry, OwnMailbox]], Awaitable[None]]
         | None = None,
@@ -617,7 +653,7 @@ class SpaceMailboxService:
         retry reuses the mailbox. Returns ``None`` on the timeout."""
         task: asyncio.Task[tuple[SpaceMailboxEntry, OwnMailbox] | None]
         task = asyncio.create_task(
-            self.mint(space_id, gfs_url), name="gfs-mailbox-mint"
+            self.mint(space_id, gfs_url, peer=peer), name="gfs-mailbox-mint"
         )
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -651,37 +687,39 @@ class SpaceMailboxService:
             )
 
     async def mint(
-        self, space_id: str, gfs_url: str
+        self, space_id: str, gfs_url: str, *, peer: str
     ) -> tuple[SpaceMailboxEntry, OwnMailbox] | None:
-        """Our mailbox for *space_id* at the GFS *gfs_url*, registered and
-        claimed, and its signed entry — or ``None`` when that GFS takes no
-        mailboxes or no ticket could be had (the pair then keeps today's
-        instance-addressed relay). Reuses the generation we already hold for
-        the space there (a host with several GFS-only members has ONE
-        mailbox per space; a retried redeem gets the same one). Kept for
-        :data:`PENDING_TTL_S` even if no seat refers to it yet."""
+        """Our mailbox for *space_id* toward the ONE counterpart *peer* at the
+        GFS *gfs_url*, registered and claimed, and its signed entry — or
+        ``None`` when that GFS takes no mailboxes or no ticket could be had
+        (the pair then keeps today's instance-addressed relay). One mailbox
+        per member pair (owner decision): a host seats each GFS-only member
+        with its own mailbox, so a flood on one hurts only that pair. A
+        retried redeem gets the same one (kept for :data:`PENDING_TTL_S` even
+        if no seat refers to it yet). Mints run one at a time (the service
+        lock): a host seating many members spends their tickets in turn."""
         conn = await self._connection_at(gfs_url)
         if conn is None:
             return None
         root = await self._load_root()
         async with self._lock:
-            own = await self._own_for(space_id, conn.gfs_instance_id)
+            own = await self._own_for(space_id, peer, conn.gfs_instance_id)
             if own is None:
                 own = OwnMailbox(
                     gen=self._rng.randrange(_GEN_SPACE),
                     gfs_instance_id=conn.gfs_instance_id,
                     gfs_url=normalize_gfs_base(conn.inbox_url),
                 )
-            key = _claim_key(space_id, own)
+            key = _claim_key(space_id, peer, own)
             try:
-                keys = derive_mailbox_keys(root, own.gfs_instance_id, space_id, own.gen)
+                keys = _derive(root, space_id, peer, own)
             except ValueError:
                 log.info("gfs.mailbox: this space id cannot carry a mailbox")
                 return None
             if key not in self._claims:
                 if await self._register(conn, keys) != REGISTER_OK:
                     return None
-                await self._open_claim(space_id, own, keys=keys)
+                await self._open_claim(space_id, peer, own, keys=keys)
             self._pending[key] = max(
                 self._pending.get(key, 0.0), self._clock() + PENDING_TTL_S
             )
@@ -696,21 +734,33 @@ class SpaceMailboxService:
         )
         return entry, own
 
-    async def _own_for(self, space_id: str, gfs_id: str) -> OwnMailbox | None:
-        """The generation we already hold for *space_id* at *gfs_id* — a
-        pending mint (a retry), or one of a space a person of ours still sits
-        in (a host's further members) — or ``None``. A space we LEFT never
+    async def _own_for(
+        self, space_id: str, peer: str, gfs_id: str
+    ) -> OwnMailbox | None:
+        """The generation we already hold for the pair (*space_id*, *peer*)
+        at *gfs_id* — a pending mint (a retry) or the seat's, while a person
+        of ours still sits in the space — or ``None``. A space we LEFT never
         hands its old generation to a re-join: that gets a fresh, unrelated
         mailbox (the old one goes with the next sweep)."""
         in_use = await self._space_in_use(space_id)
         for key, claim in self._claims.items():
-            space, gid, _gen = key
-            if space == space_id and gid == gfs_id and (key in self._pending or in_use):
+            space, pair, gid, _gen = key
+            if (
+                space == space_id
+                and pair == peer
+                and gid == gfs_id
+                and (key in self._pending or in_use)
+            ):
                 return claim.own
         if not in_use:
             return None
-        for space, _instance, own in await self._load_rows():
-            if space == space_id and own is not None and own.gfs_instance_id == gfs_id:
+        for space, instance, own in await self._load_rows():
+            if (
+                space == space_id
+                and instance == peer
+                and own is not None
+                and own.gfs_instance_id == gfs_id
+            ):
                 return own
         return None
 
@@ -780,15 +830,39 @@ class SpaceMailboxService:
         *,
         peer: SpaceMailboxEntry | None,
         own: OwnMailbox | None,
-    ) -> None:
-        """Write the pair's mailbox state onto its ``space_instances`` row
-        (which must exist). From then on the row keeps *own* in use. Under
-        the service lock: a release in flight sees the row and the pending
-        state of the same moment, never one without the other."""
+    ) -> bool:
+        """Write the pair's mailbox state onto its ``space_instances`` row.
+        From then on the row keeps *own* in use. Under the service lock: a
+        release in flight sees the row and the pending state of the same
+        moment, never one without the other. Returns whether the row exists
+        (nothing is written — and *own* stays pending — otherwise)."""
         if peer is None and own is None:
-            return
+            return False
         async with self._lock:
+            if not await self._seated(space_id, instance_id):
+                return False
             await self._write_row(space_id, instance_id, peer=peer, own=own)
+            return True
+
+    async def set_own(self, space_id: str, instance_id: str, own: OwnMailbox) -> bool:
+        """Put *own* on the pair's row, keeping the counterpart's CURRENT
+        entry (a mailbox minted after the seat — a host mint past its bound —
+        must never overwrite a newer entry the counterpart sent since).
+        ``False`` — nothing written, *own* stays pending — while the seat row
+        does not exist yet."""
+        async with self._lock:
+            if not await self._seated(space_id, instance_id):
+                return False
+            await self._write_row(
+                space_id,
+                instance_id,
+                peer=self._peers.get((space_id, instance_id)),
+                own=own,
+            )
+            return True
+
+    async def _seated(self, space_id: str, instance_id: str) -> bool:
+        return instance_id in await self._spaces.list_member_instances(space_id)
 
     async def _write_row(
         self,
@@ -798,17 +872,17 @@ class SpaceMailboxService:
         peer: SpaceMailboxEntry | None,
         own: OwnMailbox | None,
     ) -> None:
-        """The row write behind :meth:`remember` (caller holds the lock)."""
-        value = (
-            orjson.dumps(
-                {
-                    "peer": peer.to_wire() if peer is not None else None,
-                    "own": own_to_wire(own) if own is not None else None,
-                }
-            ).decode()
-            if peer is not None or own is not None
-            else None
-        )
+        """The row write behind :meth:`remember` (caller holds the lock).
+        Always a JSON object — ``{"peer": null, "own": null}`` included — so
+        the pair stays a mailbox pair: a counterpart's ``null`` (lost) never
+        turns into "not GFS-only", and its later entry is still taken. Only
+        leaving the space clears the column (:meth:`release_unused`)."""
+        value = orjson.dumps(
+            {
+                "peer": peer.to_wire() if peer is not None else None,
+                "own": own_to_wire(own) if own is not None else None,
+            }
+        ).decode()
         await self._spaces.set_space_instance_mailbox(space_id, instance_id, value)
         if peer is not None:
             self._peers[(space_id, instance_id)] = peer
@@ -816,7 +890,7 @@ class SpaceMailboxService:
             self._peers.pop((space_id, instance_id), None)
         if own is not None:
             # The row keeps it in use from now on.
-            self._pending.pop(_claim_key(space_id, own), None)
+            self._pending.pop(_claim_key(space_id, instance_id, own), None)
 
     # ── Targets ──────────────────────────────────────────────────────────
 
@@ -864,8 +938,8 @@ class SpaceMailboxService:
                     )
                     self._peers.pop((space, instance_id), None)
             used = {
-                _claim_key(space, own)
-                for space, _i, own in rows
+                _claim_key(space, instance_id, own)
+                for space, instance_id, own in rows
                 if own is not None and in_use[space]
             }
             gone = [
@@ -941,15 +1015,19 @@ class SpaceMailboxService:
         return None
 
     async def _open_claim(
-        self, space_id: str, own: OwnMailbox, *, keys: MailboxKeys | None = None
+        self,
+        space_id: str,
+        peer: str,
+        own: OwnMailbox,
+        *,
+        keys: MailboxKeys | None = None,
     ) -> None:
-        key = _claim_key(space_id, own)
+        key = _claim_key(space_id, peer, own)
         if key in self._claims:
             return
         if keys is None:
-            root = await self._load_root()
-            keys = derive_mailbox_keys(root, own.gfs_instance_id, space_id, own.gen)
-        claim = _Claim(keys=keys, own=own)
+            keys = _derive(await self._load_root(), space_id, peer, own)
+        claim = _Claim(keys=keys, own=own, peer=peer)
         self._claims[key] = claim
         claim.task = asyncio.create_task(
             self._claim_loop(claim), name="gfs-mailbox-claim"
@@ -1010,14 +1088,19 @@ class SpaceMailboxService:
         counterparts are told it is back (:meth:`_claim_once`). A mailbox
         the GFS keeps REFUSING is replaced by a fresh generation. Returns
         whether this claim was replaced."""
+        space_id = claim.keys.space_id
         if not claim.lost:
             claim.lost = True
             await self._announce_claim(claim)
+        if not self._spend(space_id, claim.peer, 2, RECOVERY_REGISTERS_PER_DAY):
+            return False  # today's re-registrations are used up
         status = await self._register(conn, claim.keys, fetch=False)
         if status != REGISTER_REFUSED:
             return False
         claim.refusals += 1
         if claim.refusals < LOST_ROTATE_AFTER:
+            return False
+        if not self._spend(space_id, claim.peer, 3, ROTATIONS_PER_DAY):
             return False
         return await self._rotate(conn, claim)
 
@@ -1031,16 +1114,17 @@ class SpaceMailboxService:
             gfs_instance_id=claim.own.gfs_instance_id,
             gfs_url=claim.own.gfs_url,
         )
-        keys = derive_mailbox_keys(
-            await self._load_root(), own.gfs_instance_id, space_id, own.gen
-        )
+        keys = _derive(await self._load_root(), space_id, claim.peer, own)
         if await self._register(conn, keys, fetch=False) != REGISTER_OK:
             claim.refusals = 0  # try again later
             return False
-        old_key = _claim_key(space_id, claim.own)
+        old_key = _claim_key(space_id, claim.peer, claim.own)
         async with self._lock:
             for space, instance_id, row_own in await self._load_rows():
-                if row_own is not None and _claim_key(space, row_own) == old_key:
+                if (
+                    row_own is not None
+                    and _claim_key(space, instance_id, row_own) == old_key
+                ):
                     await self._write_row(
                         space,
                         instance_id,
@@ -1048,8 +1132,8 @@ class SpaceMailboxService:
                         own=own,
                     )
             self._claims.pop(old_key, None)
-            new = _Claim(keys=keys, own=own, lost=True)
-            self._claims[_claim_key(space_id, own)] = new
+            new = _Claim(keys=keys, own=own, peer=claim.peer, lost=True)
+            self._claims[_claim_key(space_id, claim.peer, own)] = new
             new.task = asyncio.create_task(
                 self._claim_loop(new), name="gfs-mailbox-claim"
             )
@@ -1058,17 +1142,21 @@ class SpaceMailboxService:
         return True
 
     async def _announce_claim(self, claim: _Claim) -> None:
-        """Tell every counterpart this claim serves where it is: its entry,
-        or ``None`` while it is lost. Fail-soft."""
-        key = _claim_key(claim.keys.space_id, claim.own)
-        targets = [
-            (space, instance_id)
+        """Tell the ONE counterpart this claim serves where it is: its
+        entry, or ``None`` while it is lost — at most
+        :data:`ANNOUNCES_PER_DAY` a day. Fail-soft."""
+        space_id = claim.keys.space_id
+        key = _claim_key(space_id, claim.peer, claim.own)
+        if not any(
+            own is not None and _claim_key(space, instance_id, own) == key
             for space, instance_id, own in await self._load_rows()
-            if own is not None and _claim_key(space, own) == key
-        ]
+        ):
+            return  # no seat uses it (yet)
+        if not self._spend(space_id, claim.peer, 1, ANNOUNCES_PER_DAY):
+            log.info("gfs.mailbox: today's mailbox updates for a pair are used up")
+            return
         entry = None if claim.lost else self._entry_for(claim.keys, claim.own)
-        for space, instance_id in targets:
-            await self.announce_to(space, instance_id, entry)
+        await self.announce_to(space_id, claim.peer, entry)
 
     def _entry_for(self, keys: MailboxKeys, own: OwnMailbox) -> SpaceMailboxEntry:
         return build_entry(

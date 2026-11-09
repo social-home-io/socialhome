@@ -49,6 +49,9 @@ class _RacingSpaces:
         if (s, i) in self.rows:
             self.rows[(s, i)] = v
 
+    async def list_member_instances(self, space_id):
+        return [i for (s, i) in self.rows if s == space_id]
+
     async def list_space_instance_mailboxes(self):
         return [(s, i, v) for (s, i), v in self.rows.items() if v is not None]
 
@@ -78,8 +81,8 @@ async def test_a_seat_written_during_a_sweep_keeps_its_mailbox(monkeypatch):
     svc = _bare_service(spaces)
     spaces.svc = svc
     keys = derive_mailbox_keys(b"\1" * 32, "g", "s1", 7)
-    key = _claim_key("s1", OWN)
-    svc._claims[key] = _Claim(keys=keys, own=OWN)
+    key = _claim_key("s1", "host", OWN)
+    svc._claims[key] = _Claim(keys=keys, own=OWN, peer="host")
     svc._pending[key] = svc._clock() + 1800
     dropped: list = []
 
@@ -110,11 +113,16 @@ async def test_each_release_waits_its_own_random_delay(monkeypatch):
         async def set_space_instance_mailbox(self, *a):
             return None
 
+        async def list_member_instances(self, space_id):
+            return []
+
     svc = _bare_service(_Spaces(), rng=random.Random(4))
     for space in ("s1", "s2", "s3"):
         own = OwnMailbox(gen=1, gfs_instance_id="g", gfs_url="http://g")
         keys = derive_mailbox_keys(b"\1" * 32, "g", space, 1)
-        svc._claims[_claim_key(space, own)] = _Claim(keys=keys, own=own)
+        svc._claims[_claim_key(space, "host", own)] = _Claim(
+            keys=keys, own=own, peer="host"
+        )
     delays: list[float] = []
 
     async def _release(self, claim, *, delay):
@@ -158,6 +166,9 @@ async def test_a_mailbox_the_gfs_keeps_refusing_is_replaced(monkeypatch):
         async def set_space_instance_mailbox(self, s, i, v):
             self.rows[(s, i)] = v
 
+        async def list_member_instances(self, space_id):
+            return [i for (s, i) in self.rows if s == space_id]
+
     class _Repo:
         async def list_active(self):
             return []
@@ -167,8 +178,8 @@ async def test_a_mailbox_the_gfs_keeps_refusing_is_replaced(monkeypatch):
     svc._gfs_repo = _Repo()  # type: ignore[assignment]
     svc._root = b"\1" * 32
     old_keys = derive_mailbox_keys(b"\1" * 32, "g", "s1", 7)
-    claim = _Claim(keys=old_keys, own=OWN)
-    svc._claims[_claim_key("s1", OWN)] = claim
+    claim = _Claim(keys=old_keys, own=OWN, peer="host")
+    svc._claims[_claim_key("s1", "host", OWN)] = claim
     announced: list = []
 
     async def _announce(space_id, instance_id, entry):
@@ -187,7 +198,7 @@ async def test_a_mailbox_the_gfs_keeps_refusing_is_replaced(monkeypatch):
     assert await svc._recover(object(), claim) is True  # type: ignore[arg-type]
     row = orjson.loads(spaces.rows[("s1", "host")])
     assert row["own"]["gen"] != 7
-    new_key = ("s1", "g", row["own"]["gen"])
+    new_key = ("s1", "host", "g", row["own"]["gen"])
     assert list(svc._claims) == [new_key]
     assert svc._claims[new_key].lost  # it announces itself once claimed
     await svc.stop()

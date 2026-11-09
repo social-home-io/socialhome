@@ -103,7 +103,7 @@ from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.gfs_envelope_sender import GfsEnvelopeSender
 from socialhome.services.gfs_relay_inbound import (
-    MAILBOX_JUNK_LIMIT,
+    MAILBOX_INBOUND_LIMIT,
     RELAY_DELIVERED_VIA,
     GfsRelayInbound,
 )
@@ -275,15 +275,19 @@ class _FakeGfsMailboxes(SpaceMailboxService):
     async def _register(self, conn, keys, *, fetch=True) -> str:
         return REGISTER_OK
 
-    async def _open_claim(self, space_id, own, *, keys=None) -> None:
+    async def _open_claim(self, space_id, peer, own, *, keys=None) -> None:
         if keys is None:
             keys = derive_mailbox_keys(
-                await self._load_root(), own.gfs_instance_id, space_id, own.gen
+                await self._load_root(),
+                own.gfs_instance_id,
+                space_id,
+                own.gen,
+                peer=peer,
             )
-        claim_key = (space_id, own.gfs_instance_id, own.gen)
+        claim_key = (space_id, peer, own.gfs_instance_id, own.gen)
         if claim_key in self._claims:
             return
-        self._claims[claim_key] = _Claim(keys=keys, own=own)
+        self._claims[claim_key] = _Claim(keys=keys, own=own, peer=peer)
         self.fake.mailboxes[keys.mailbox_id] = (self.inbound, keys)
 
     async def _close_claim(self, claim) -> None:
@@ -2120,8 +2124,8 @@ async def test_an_entry_naming_another_gfs_than_its_leg_is_ignored(
 
 
 async def test_mailbox_frames_have_their_own_inbound_budget(mailbox_households, gfs):
-    """Whoever learns a mailbox id can post to it anonymously: frames that do
-    not open spend that mailbox's junk bucket, never the instance relay's."""
+    """Whoever learns a mailbox id can post to it anonymously: those frames
+    spend that one mailbox's bucket, never the instance relay's."""
     a, b = mailbox_households
     await _join(a, b, gfs)
     limiter = RateLimiter()
@@ -2131,12 +2135,12 @@ async def test_mailbox_frames_have_their_own_inbound_budget(mailbox_households, 
         "type": "envelope",
         "sealed": {"kem_suite": "x25519", "eph_pk": "AA", "ciphertext": "AA"},
     }
-    for _ in range(MAILBOX_JUNK_LIMIT + 1):
+    for _ in range(MAILBOX_INBOUND_LIMIT + 1):
         with contextlib.suppress(ValueError):
             await a.relay_inbound.handle_mailbox_frame(junk, keys=keys)
     assert not limiter.has_room(
-        f"gfs-mailbox:junk:{keys.mailbox_id}",
-        limit=MAILBOX_JUNK_LIMIT,
+        f"gfs-mailbox:{keys.mailbox_id}",
+        limit=MAILBOX_INBOUND_LIMIT,
         window_s=BOOTSTRAP_INBOUND_WINDOW_S,
     )
     assert limiter.has_room(
@@ -2205,10 +2209,10 @@ async def test_a_host_mint_past_its_bound_is_handed_over_later(
     monkeypatch.setattr(redeem_module, "HOST_MINT_TIMEOUT_S", 0.05)
     real_mint = SpaceMailboxService.mint
 
-    async def _slow_mint(self, space_id, gfs_url):
+    async def _slow_mint(self, space_id, gfs_url, *, peer):
         if self is b.mailboxes:
             await asyncio.sleep(0.3)
-        return await real_mint(self, space_id, gfs_url)
+        return await real_mint(self, space_id, gfs_url, peer=peer)
 
     monkeypatch.setattr(SpaceMailboxService, "mint", _slow_mint)
     space = await _join(a, b, gfs)
