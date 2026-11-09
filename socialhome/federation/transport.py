@@ -553,14 +553,15 @@ class _RtcPeer:
         self._is_offerer = True
         self._expected_answer_from = self.instance_id
         self._loop = asyncio.get_running_loop()
-        self._pc = rtc.PeerConnection(_build_rtc_config(self._ice_provider()))
+        pc = rtc.PeerConnection(_build_rtc_config(self._ice_provider()))
+        self._pc = pc
         # A fresh OFFER starts a clean negotiation: any candidates dropped
         # so far belonged to the PeerConnection we are replacing, so they
         # must not re-trigger recovery against this one — and we are no
         # longer waiting on anybody else's offer, we are making one.
         self._dropped_candidates = 0
         self._starved_awaiting_offer = False
-        self._channel = await self._pc.create_data_channel(CHANNEL_LABEL)
+        self._channel = await pc.create_data_channel(CHANNEL_LABEL)
         # Ask aiolibdatachannel to notify us once the buffered amount
         # drops below half the HWM — lets future refactors await
         # backpressure instead of polling. For now we just read
@@ -571,7 +572,7 @@ class _RtcPeer:
         # channel after the PC is established would force a renegotiation
         # the perfect-negotiation glare logic isn't tuned for. One idle
         # channel on a peering that never sends media is cheap.
-        self._media_channel = await self._pc.create_data_channel(
+        self._media_channel = await pc.create_data_channel(
             media_framing.CHANNEL_LABEL,
         )
         self._media_channel.set_buffered_amount_low_threshold(self._send_hwm // 2)
@@ -580,21 +581,25 @@ class _RtcPeer:
         # after the PC is established would force a renegotiation the
         # perfect-negotiation glare logic isn't tuned for. One idle channel
         # on a peering that never sends app messages is cheap.
-        self._app_channel = await self._pc.create_data_channel(
+        self._app_channel = await pc.create_data_channel(
             app_framing.CHANNEL_LABEL,
         )
         self._app_channel.set_buffered_amount_low_threshold(self._send_hwm // 2)
         # Tasks bound to the pc: auto-cancelled on pc.close().
-        self._pc.spawn_task(self._drain_channel(self._channel))
-        self._pc.spawn_task(self._drain_media_channel(self._media_channel))
-        self._pc.spawn_task(self._drain_app_channel(self._app_channel))
-        self._pc.spawn_task(self._drain_events())
+        pc.spawn_task(self._drain_channel(self._channel))
+        pc.spawn_task(self._drain_media_channel(self._media_channel))
+        pc.spawn_task(self._drain_app_channel(self._app_channel))
+        pc.spawn_task(self._drain_events())
 
-        local = await self._pc.set_local_description("offer")
+        local = await pc.set_local_description("offer")
+        if self._superseded(pc, "own OFFER"):
+            return
         await self._signaling(
             FederationEventType.FEDERATION_RTC_OFFER,
             {"sdp": local.sdp, "sdp_type": local.type},
         )
+        if self._superseded(pc, "own OFFER"):
+            return
         # Only now: start forwarding trickled ICE candidates. ``_drain_ice``
         # and the OFFER/ANSWER signaling are independent HTTPS posts to the
         # peer's inbox; if the drain task starts before the OFFER is queued,
@@ -602,7 +607,7 @@ class _RtcPeer:
         # receiver drops the candidate at the §24.12.5 buffer timeout.
         # Gathering keeps producing candidates inside libdatachannel's queue
         # until we start consuming, so deferral is lossless.
-        self._pc.spawn_task(self._drain_ice())
+        pc.spawn_task(self._drain_ice())
 
     async def accept_offer(self, *, sdp: str, from_instance: str) -> None:
         """Receive an SDP offer (answerer role) and reply with an answer.
@@ -645,12 +650,15 @@ class _RtcPeer:
         # and it is still the offerer.
         self._is_offerer = False
         self._loop = asyncio.get_running_loop()
-        self._pc = rtc.PeerConnection(_build_rtc_config(self._ice_provider()))
+        pc = rtc.PeerConnection(_build_rtc_config(self._ice_provider()))
+        self._pc = pc
 
-        self._pc.spawn_task(self._drain_incoming_channel())
-        self._pc.spawn_task(self._drain_events())
+        pc.spawn_task(self._drain_incoming_channel())
+        pc.spawn_task(self._drain_events())
 
-        await self._pc.set_remote_description(sdp, "offer")
+        await pc.set_remote_description(sdp, "offer")
+        if self._superseded(pc, "OFFER"):
+            return
         # Release any ICE candidates that arrived before the offer (or
         # during the construction of the PC). They'll have been parked
         # in :meth:`add_ice_candidate` waiting on this event.
@@ -667,11 +675,15 @@ class _RtcPeer:
         starved = self._dropped_candidates
         self._dropped_candidates = 0
         self._starved_awaiting_offer = False
-        local = await self._pc.set_local_description("answer")
+        local = await pc.set_local_description("answer")
+        if self._superseded(pc, "OFFER"):
+            return
         await self._signaling(
             FederationEventType.FEDERATION_RTC_ANSWER,
             {"sdp": local.sdp, "sdp_type": local.type},
         )
+        if self._superseded(pc, "OFFER"):
+            return
         # Only now: start forwarding trickled ICE candidates — see the
         # matching comment in :meth:`start_offer` for the wire-ordering
         # rationale. The original code spawned this task before
@@ -679,7 +691,7 @@ class _RtcPeer:
         # race the ANSWER POST and arrive at the offerer first; the
         # offerer then dropped the candidate at the buffer timeout
         # because its remote description hadn't been applied yet.
-        self._pc.spawn_task(self._drain_ice())
+        pc.spawn_task(self._drain_ice())
         # Same recovery trigger as :meth:`apply_answer`: the remote
         # description has landed on a PC that already lost candidates.
         # Deliberately at the END of the method rather than immediately
@@ -1502,6 +1514,26 @@ class _RtcPeer:
         except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
             log.warning("fed RTC app send to %s failed: %s", self.instance_id, exc)
             return False
+
+    def _superseded(self, pc: Any, step: str) -> bool:
+        """Whether *pc* stopped being this peer's PeerConnection while the
+        handshake awaited (SDP, signalling).
+
+        :meth:`close` (unpair, retire, a spent peer replaced by
+        :meth:`FederationTransport._answering_peer` when the remote
+        re-offers), a polite rollback or a starved-answerer teardown can
+        each run during those awaits. The handshake on *pc* is then dead —
+        a newer one, if any, owns the peer — so the caller stops instead of
+        touching ``self._pc`` (``None`` or a different connection)."""
+        if self._pc is pc:
+            return False
+        log.debug(
+            "fed RTC peer %s: %s handling stopped — its PeerConnection was "
+            "closed or replaced meanwhile",
+            self.instance_id,
+            step,
+        )
+        return True
 
     async def _close_pc(self) -> None:
         """Close and discard the current PeerConnection, resetting negotiation state.
