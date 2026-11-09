@@ -166,6 +166,7 @@ class SpaceMemberDirectory:
         "_mailboxes",
         "_seat_ender",
         "_seater",
+        "_snap_in",
         "_spaces",
         "_wall_clock",
         "_writers",
@@ -208,6 +209,9 @@ class SpaceMemberDirectory:
         self._early_hello: dict[tuple[str, str], float] = {}
         #: (space, household) whose stored card just lost its mailbox.
         self._lost_mailbox: set[tuple[str, str]] = set()
+        #: space → (``dir_seq``, cards taken) of the snapshot coming in: its
+        #: last part moves our ``dir_seq`` only when every card arrived.
+        self._snap_in: dict[str, tuple[int, int]] = {}
         mailboxes.attach_needed(self.needed_gfs)
         mailboxes.attach_after_sweep(self.sweep_once)
         mailboxes.attach_on_change(self.on_own_change)
@@ -631,19 +635,13 @@ class SpaceMemberDirectory:
         for card in cards.values():
             await self._store(space_id, card, create_row=True)
             await self._flag(space_id, card.instance_id, card.instance_id in reached)
-        boxes = self._mailboxes.mailbox_gfs_urls()
-        if any(
-            c.mailbox is not None
-            and c.instance_id in reached
-            and normalize_gfs_base(c.mailbox.gfs) not in boxes
-            for c in cards.values()
-        ):
-            # A GFS-reached member at a GFS we hold no mailbox at: ours is
-            # minted in the background; the card follows on its own wait.
-            self._mailboxes.mint_soon()
-        host_doc = await self._doc(space_id, host)
-        host_doc["dir_seq"] = seq
-        await self._put(space_id, host, host_doc)
+        # Our mailbox at a flagged card's GFS is minted by the jittered
+        # sweep (``needed_gfs``), never now: a register on receipt would
+        # line up with the host's traffic.
+        if self._complete(space_id, payload, seq, len(cards_raw)):
+            host_doc = await self._doc(space_id, host)
+            host_doc["dir_seq"] = seq
+            await self._put(space_id, host, host_doc)
         has_mailbox = bool(self._mailboxes.mailbox_gfs_urls())
         for card in cards.values():
             if card.instance_id == host:
@@ -651,6 +649,24 @@ class SpaceMemberDirectory:
             if card.mailbox is not None or has_mailbox:
                 await self._seat(card)
         await self._publish_to_host(space_id, host, host_is_v89=True)
+
+    def _complete(
+        self, space_id: str, payload: dict[str, Any], seq: int, n_cards: int
+    ) -> bool:
+        """Whether this frame completes a directory version: a delta does;
+        a snapshot only at its last part (``cards_total``) and only when
+        every card part arrived — else our ``dir_seq`` stays behind and the
+        next §25.6 sync echo gets a fresh snapshot."""
+        if payload.get("snapshot") is not True:
+            return True
+        got_seq, got = self._snap_in.get(space_id, (seq, 0))
+        got = (got if got_seq == seq else 0) + n_cards
+        total = payload.get("cards_total")
+        if not _is_count(total):
+            self._snap_in[space_id] = (seq, got)
+            return False
+        self._snap_in.pop(space_id, None)
+        return got >= total
 
     async def _flag(self, space_id: str, instance_id: str, reached: bool) -> None:
         """Keep the host's ``gfs_reached`` flag on a member's row (set with
@@ -879,6 +895,16 @@ class SpaceMemberDirectory:
         delta = {c.instance_id: c for c in changed or [] if c.instance_id in listed}
         if own_doc.get("own_rev") != own.rev:
             delta[self._instance_id] = own
+        # Who we flag as GFS-reached: a household whose flag changed (its
+        # seat paired, or a new relay seat) goes out again, card unchanged,
+        # so no stale flag keeps a member's mailbox alive.
+        reached = sorted(
+            [i for i in cards if i in listed and await self._reached_by_gfs(i)]
+        )
+        before_reached = {i for i in own_doc.get("reached") or [] if isinstance(i, str)}
+        for inst in before_reached.symmetric_difference(reached):
+            if inst in listed and inst != self._instance_id:
+                delta.setdefault(inst, listed[inst])
         # What a household given mailbox cards only must hear: a mailbox
         # card, a card that just lost its mailbox, a removal.
         for_mbx = [
@@ -893,6 +919,7 @@ class SpaceMemberDirectory:
             if for_mbx or removed or not _is_count(own_doc.get("dir_seq_mbx")):
                 own_doc["dir_seq_mbx"] = seq
         own_doc["listed"] = sorted(listed)
+        own_doc["reached"] = reached
         own_doc["own_rev"] = own.rev
         await self._put(space_id, self._instance_id, own_doc)
         for to in recipients:
@@ -918,25 +945,12 @@ class SpaceMemberDirectory:
         everything: bool,
     ) -> None:
         """The whole directory to *to*, all under one ``dir_seq``: first the
-        id of every listed household (``members``, ids only, in its own part
-        — at most :data:`MEMBERS_MAX`, one relay envelope), then the cards it
-        needs (all, or only those with a mailbox), mailbox cards first, at
-        most :data:`SNAPSHOT_MAX`, in parts that fit the GFS relay."""
-        members = sorted(i for i in listed if i != to)
-        if len(members) <= MEMBERS_MAX:
-            if not await self._send(
-                space_id, to, [], snapshot=True, dir_seq=seq, members=members
-            ):
-                return
-        else:
-            # The scale limit: past it the snapshot cannot name every
-            # household and the receiver drops nobody (deltas carry the
-            # removals, and a lost one is not repaired).
-            log.warning(
-                "directory: %d households — past the %d a snapshot can name",
-                len(members),
-                MEMBERS_MAX,
-            )
+        cards it needs (all, or only those with a mailbox), mailbox cards
+        first, at most :data:`SNAPSHOT_MAX`, in parts that fit the GFS
+        relay; LAST the id of every listed household (``members``, ids only,
+        at most :data:`MEMBERS_MAX`, one relay envelope) with the number of
+        cards sent (``cards_total``) — only that part, complete, moves the
+        receiver's ``dir_seq``."""
         picked = [
             c
             for i, c in sorted(listed.items())
@@ -950,13 +964,24 @@ class SpaceMemberDirectory:
                 SNAPSHOT_MAX,
             )
             picked = picked[:SNAPSHOT_MAX]
-        parts = [
-            picked[i : i + SNAPSHOT_PART_MAX]
-            for i in range(0, len(picked), SNAPSHOT_PART_MAX)
-        ]
-        for part in parts:
+        for i in range(0, len(picked), SNAPSHOT_PART_MAX):
+            part = picked[i : i + SNAPSHOT_PART_MAX]
             if not await self._send(space_id, to, part, snapshot=True, dir_seq=seq):
                 return
+        last: dict[str, Any] = {"cards_total": len(picked)}
+        members = sorted(i for i in listed if i != to)
+        if len(members) <= MEMBERS_MAX:
+            last["members"] = members
+        else:
+            # The scale limit: past it the snapshot cannot name every
+            # household and the receiver drops nobody (deltas carry the
+            # removals, and a lost one is not repaired).
+            log.warning(
+                "directory: %d households — past the %d a snapshot can name",
+                len(members),
+                MEMBERS_MAX,
+            )
+        await self._send(space_id, to, [], snapshot=True, dir_seq=seq, **last)
 
     async def on_own_change(self) -> None:
         """Our mailboxes changed (minted, released, rotated): every space we

@@ -1901,9 +1901,10 @@ member directory (``SPACE_MAILBOX_DIRECTORY``, writer-seat households only)
 reaches both: d holds e's member card naming e's ONE mailbox and a lazy
 ``space_session`` seat for e with no ``relay_via`` and no inbox; e holds
 d's card. The directory flags e as GFS-reached (``gfs_reached``), so d —
-connected to that GFS — mints its own household mailbox there; the step
-waits (up to 240 s: the card follows the mint after a 30–120 s wait) until
-e holds d's card naming it. Then a is **killed**: d — not the host —
+connected to that GFS — mints its own household mailbox there at its next
+jittered sweep (never on the directory frame); the step waits up to 20 min
+(the 5–15 min sweep, then the card's own 30–120 s wait) until e holds d's
+card naming it. Then a is **killed**: d — not the host —
 creates a calendar event and e must show it (d's fan-out reached e's
 mailbox); e creates one and d must show it (e's fan-out reached d's
 mailbox, no host hop). Over that window the GFS log must show

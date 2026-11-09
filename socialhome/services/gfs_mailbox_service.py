@@ -256,7 +256,6 @@ class GfsMailboxService:
         "_instance_id",
         "_key_manager",
         "_lock",
-        "_minting",
         "_needed",
         "_on_change",
         "_pending",
@@ -327,7 +326,6 @@ class GfsMailboxService:
         self._release_delay = release_delay
         self._claim_jitter_range = claim_jitter
         self._card_delay = card_delay
-        self._minting: asyncio.Task[None] | None = None
         self._releases: set[asyncio.Task] = set()
         self._stop = asyncio.Event()
         self._tasks: set[asyncio.Task] = set()
@@ -434,14 +432,18 @@ class GfsMailboxService:
     async def sweep_once(self) -> None:
         """One sweep tick: the directory's hook first (it publishes a card
         that changed in an EARLIER tick — never in the same tick as the
-        anonymous register that changed it), then release and mint."""
+        anonymous register that changed it), then release and mint. Only
+        this jittered tick mints — never a directory frame, which would
+        line the register up with the host's traffic; a mint's card follows
+        after its own wait (:meth:`_card_after_mint`)."""
         if self._after_sweep is not None:
             try:
                 await self._after_sweep()
             except Exception:
                 log.warning("gfs.mailbox: directory sweep failed", exc_info=True)
         await self.release_unused()
-        await self.mint_missing()
+        if await self.mint_missing():
+            self._spawn(self._card_after_mint(), "gfs-mailbox-card")
 
     async def _load_root(self) -> bytes:
         if self._root is not None:
@@ -807,30 +809,10 @@ class GfsMailboxService:
             return 1 if own is not None else 0
         return 0
 
-    def mint_soon(self) -> None:
-        """:meth:`mint_missing` in the background (the directory just learnt
-        of a GFS-reached member in an inbound handler); an ask while one
-        runs is folded into it. A mint is followed by the directory's sweep
-        hook after :data:`CARD_AFTER_MINT_S`, so the new card reaches the
-        hosts soon — never in the register's tick."""
-        if self._stop.is_set() or (
-            self._minting is not None and not self._minting.done()
-        ):
-            return
-        task: asyncio.Task[None] = asyncio.create_task(
-            self._mint_then_publish(), name="gfs-mailbox-mint-soon"
-        )
-        self._minting = task
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-
-    async def _mint_then_publish(self) -> None:
-        try:
-            if not await self.mint_missing():
-                return
-        except Exception:
-            log.warning("gfs.mailbox: a mint failed", exc_info=True)
-            return
+    async def _card_after_mint(self) -> None:
+        """After a sweep's mint: the directory's hook once more, after its
+        own wait (:data:`CARD_AFTER_MINT_S`), so the new card reaches the
+        hosts well before the next sweep — never in the register's tick."""
         try:
             await asyncio.wait_for(
                 self._stop.wait(), timeout=self._rng.uniform(*self._card_delay)

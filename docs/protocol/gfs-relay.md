@@ -766,14 +766,19 @@ in has a **GFS-reached** member there:
   mailbox there with the same mint, claim, sweep and Privacy Pass ticket
   (a cached one: no identified fetch next to the register), opens no new
   identified link, and its card in every space it is in there names it.
-  The mint runs in the background on the directory frame; the new card
-  goes to the hosts after its own 30–120 s wait (`CARD_AFTER_MINT_S`),
-  never in the register's tick.
+  Only the jittered ~10 min sweep (5–15 min) mints it, never the arrival
+  of a directory frame: the host sends its frames right after its own
+  identified traffic, so a register on receipt would tie the new mailboxes
+  to the host. The new card then goes to the hosts after its own 30–120 s
+  wait (`CARD_AFTER_MINT_S`), never in the register's tick.
 
 The host flags them: each directory frame carries `gfs_reached`, the ids
 of its cards whose household the host reaches only through a GFS (its
 sealed-redeem seat with a relay); a member keeps the flag on that card's
-row. Only a flagged card keeps a mailbox alive: the mailbox is released
+row. The host keeps the set it flagged (`reached` on its own row) and
+sends a card again, unchanged, as a delta when its flag changes (its seat
+paired, a new relay seat), so no stale flag lingers. Only a flagged card
+keeps a mailbox alive: the mailbox is released
 once none of the household's spaces still has a GFS-reached member on that
 GFS, so two ex-members' mailboxes never hold each other open. A card whose
 content moves under the same mailbox `rev` (a mailbox minted for another
@@ -843,9 +848,13 @@ host-signed).
   the directory (left, removed, or no longer a writer). Delivery is not
   tracked per household.
 - **Snapshots** (at most `SNAPSHOT_MAX` = 500 cards, mailbox cards first, in
-  parts of at most `SNAPSHOT_PART_MAX` = 150, ≈ 105 KiB each) start with
+  parts of at most `SNAPSHOT_PART_MAX` = 150, ≈ 105 KiB each) end with
   their own `members` part: the id of every listed household (ids only,
-  ~35 B each, at most `MEMBERS_MAX` = 2 900 ≈ 100 KiB, one relay envelope).
+  ~35 B each, at most `MEMBERS_MAX` = 2 900 ≈ 100 KiB, one relay envelope)
+  and `cards_total`, the number of cards the parts carried. Only that last
+  part moves the member's `dir_seq`, and only when every card arrived: a
+  lost card part leaves the member behind, so its next sync echo gets a
+  fresh snapshot.
   **Scale limit:** a directory of more than 2 900 households is sent
   without `members` and then drops nobody — a lost removal is repaired
   only up to that size. The member replaces its directory

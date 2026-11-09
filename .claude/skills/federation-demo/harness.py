@@ -7682,9 +7682,10 @@ def cmd_gfs_member_mesh() -> None:
     print("  d (paired with a) joined a's space ✓")
 
     # 2. The directory: cards + lazy seats on both sides. d's card names
-    #    its own mailbox once minted (the card follows the mint after its
-    #    own 30-120 s wait, then the host's delta carries it to e).
-    deadline = time.time() + 240
+    #    its own mailbox once minted — by d's jittered sweep (every 5-15
+    #    min, never on the directory frame), the card after its own 30-120
+    #    s wait, then the host's delta carries it to e.
+    deadline = time.time() + 1200
     on_d = on_e = None
     while time.time() < deadline:
         on_d = _card_on("d", space_id, e["instance_id"])

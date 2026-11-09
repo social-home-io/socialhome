@@ -190,10 +190,14 @@ class FakeMailboxes:
     def attach_on_change(self, fn) -> None:
         self.on_change = fn
 
-    mints = 0
+    registers = 0
 
-    def mint_soon(self) -> None:
-        self.mints += 1
+    async def ensure(self, *a, **k):
+        self.registers += 1
+
+    async def mint_missing(self) -> int:
+        self.registers += 1
+        return 0
 
 
 class FakeRegistry:
@@ -260,6 +264,9 @@ class FakeFederation:
             ):
                 merged = dict(prev["payload"])
                 merged["cards"] = merged["cards"] + d["payload"]["cards"]
+                for key in ("members", "cards_total"):
+                    if key in d["payload"]:
+                        merged[key] = d["payload"][key]
                 if "gfs_reached" in d["payload"]:
                     merged["gfs_reached"] = (
                         merged.get("gfs_reached", []) + d["payload"]["gfs_reached"]
@@ -971,10 +978,12 @@ async def test_a_big_snapshot_goes_in_parts_that_fit_the_relay(monkeypatch):
         if p["payload"].get("snapshot") and p["payload"]["cards"]
     ]
     assert [len(p["payload"]["cards"]) for p in parts] == [2, 2, 1]
-    # One version; the members (ids only) ride their own first part.
+    # One version; the members (ids only) ride their own LAST part, with
+    # the count of cards the snapshot carried.
     every = w.fed.raw_to(newcomer["id"])
     assert len({p["payload"]["dir_seq"] for p in every}) == 1
-    assert len(every[0]["payload"]["members"]) == 5
+    assert len(every[-1]["payload"]["members"]) == 5
+    assert every[-1]["payload"]["cards_total"] == 5
     assert all("members" not in p["payload"] for p in parts)
 
 
@@ -1278,16 +1287,16 @@ async def test_a_lost_removal_is_repaired_in_a_space_past_500_households():
     host.fed.directories.clear()
     await host.dir.on_sync_begin(_begin(member, host.me["id"], 1))
     parts = [d["payload"] for d in host.fed.raw_to(member["id"])]
-    assert parts[0]["snapshot"] is True and parts[0]["cards"] == []
-    assert len(parts[0]["members"]) == 521  # 520 others + our own
-    assert gone["id"] not in parts[0]["members"]
-    assert all("members" not in p for p in parts[1:])
+    assert parts[-1]["snapshot"] is True and parts[-1]["cards"] == []
+    assert len(parts[-1]["members"]) == 521  # 520 others + our own
+    assert gone["id"] not in parts[-1]["members"]
+    assert all("members" not in p for p in parts[:-1])
     assert len({p["dir_seq"] for p in parts}) == 1
 
     m = World(host=host.me)
     m.member(gone)
     m.spaces.put_card(SPACE, _card(gone, gfs=GFS))
-    await m.directory(parts[0])
+    await m.directory(parts[-1])
     assert gone["id"] not in m.spaces.rows[SPACE]
 
 
@@ -1325,7 +1334,6 @@ async def test_a_paired_member_needs_a_mailbox_where_a_gfs_reached_member_is():
         }
     )
     assert await w.dir.needed_gfs() == set()
-    assert w.mailboxes.mints == 0
     await w.directory(
         {
             "cards": [_card(gfs_only, gfs=GFS).to_wire()],
@@ -1333,7 +1341,9 @@ async def test_a_paired_member_needs_a_mailbox_where_a_gfs_reached_member_is():
         }
     )
     assert await w.dir.needed_gfs() == {GFS}
-    assert w.mailboxes.mints == 1
+    # Review round 5: no register on receipt — the jittered sweep mints, so
+    # the anonymous register never lines up with the host's traffic.
+    assert w.mailboxes.registers == 0
     await w.directory({"cards": [], "removed": [gfs_only["id"]]})
     assert await w.dir.needed_gfs() == set()
 
@@ -1371,3 +1381,67 @@ async def test_a_member_no_longer_gfs_reached_frees_the_mailbox():
     assert await w.dir.needed_gfs() == {GFS}
     await w.directory({"cards": [card], "gfs_reached": [], "snapshot": True})
     assert await w.dir.needed_gfs() == set()
+
+
+# ── Review round 5 ──────────────────────────────────────────────────────
+
+
+async def test_a_lost_snapshot_card_part_is_repaired_by_the_next_sync(monkeypatch):
+    """Only a complete snapshot moves the member's ``dir_seq``: its last
+    part (``members``) counts the cards the parts carried. A lost card part
+    leaves the member behind, so its next sync echo gets a fresh snapshot."""
+    monkeypatch.setattr(smd, "SNAPSHOT_PART_MAX", 2)
+    host = World()
+    member, *others = (_hh() for _ in range(4))
+    host.member(member, *others)
+    for h in others:
+        host.spaces.put_card(SPACE, _card(h, gfs=GFS))
+    host.writers.writers[SPACE] = {member["id"], *(h["id"] for h in others)}
+    host.seat_all()
+    await host.dir.reconcile(SPACE, snapshot_to={member["id"]})
+    parts = [
+        d["payload"]
+        for d in host.fed.raw_to(member["id"])
+        if d["payload"].get("snapshot")
+    ]
+    assert len(parts) == 3 and "members" in parts[-1]
+    seq = parts[-1]["dir_seq"]
+
+    m = World(host=host.me)
+    m.member(member)
+    for part in (parts[1], parts[2]):  # parts[0] lost
+        await m.directory(part)
+    echo = await m.dir.directory_seq(SPACE, host.me["id"])
+    assert echo != seq  # behind: the snapshot is not complete
+
+    host.fed.directories.clear()
+    host.dir._hello_at.clear()
+    await host.dir.on_sync_begin(_begin(member, host.me["id"], echo or 0))
+    again = [d["payload"] for d in host.fed.raw_to(member["id"])]
+    for part in again:
+        await m.directory(part)
+    assert await m.dir.directory_seq(SPACE, host.me["id"]) == again[-1]["dir_seq"]
+    assert all(m.spaces.doc(SPACE, h["id"]).get("card") for h in others)
+
+
+async def test_a_gfs_reached_flag_change_goes_out_as_a_delta():
+    """The host keeps who it flagged: a household that stops (or starts)
+    being GFS-reached — its seat paired, no card change — goes out as a
+    delta with the new flag, so no stale flag keeps a mailbox alive."""
+    w = World()
+    gfs_only, paired = _hh(), _hh()
+    w.member(gfs_only, paired)
+    w.spaces.put_card(SPACE, _card(gfs_only, gfs=GFS))
+    w.spaces.put_card(SPACE, _card(paired, gfs=GFS))
+    w.fed_repo.instances[gfs_only["id"]] = _seat_row(GFS)
+    w.writers.writers[SPACE] = {gfs_only["id"], paired["id"]}
+    w.seat_all()
+    await w.dir.reconcile(SPACE)
+    w.fed.directories.clear()
+    await w.dir.reconcile(SPACE)
+    assert w.fed.raw_to(paired["id"]) == []  # nothing changed
+    w.fed_repo.instances[gfs_only["id"]] = _seat_row("")  # paired since
+    await w.dir.reconcile(SPACE)
+    (delta,) = w.fed.raw_to(paired["id"])
+    assert [c["instance_id"] for c in delta["payload"]["cards"]] == [gfs_only["id"]]
+    assert delta["payload"]["gfs_reached"] == []
