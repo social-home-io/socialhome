@@ -209,12 +209,11 @@ class SpaceMemberDirectory:
         self._early_hello: dict[tuple[str, str], float] = {}
         #: (space, household) whose stored card just lost its mailbox.
         self._lost_mailbox: set[tuple[str, str]] = set()
-        #: space → (``dir_seq``, cards taken) of the snapshot coming in: its
-        #: last part moves our ``dir_seq`` only when every card arrived.
-        self._snap_in: dict[str, tuple[int, int]] = {}
+        #: space → (``dir_seq``, part indices taken) of the snapshot coming
+        #: in: it moves our ``dir_seq`` only once every part arrived.
+        self._snap_in: dict[str, tuple[int, frozenset[int]]] = {}
         mailboxes.attach_needed(self.needed_gfs)
         mailboxes.attach_after_sweep(self.sweep_once)
-        mailboxes.attach_on_change(self.on_own_change)
 
     def attach_to(self, federation_service: FederationService) -> None:
         """Both events: the host takes ``SPACE_MEMBER_CARD``, members take
@@ -597,6 +596,16 @@ class SpaceMemberDirectory:
         if seq < held or (seq == held and not snapshot):
             log.info("directory: ignoring an out-of-date directory")
             return
+        if not snapshot and payload.get("base_seq") != held:
+            # A delta builds on one version: taken on another (a snapshot
+            # still coming in, or lost) it would move us past what we never
+            # got. We stay behind; our next sync echo gets a snapshot.
+            log.info("directory: ignoring a delta on a version we do not hold")
+            return
+        parts = payload.get("parts")
+        if snapshot and _is_count(parts) and parts > SNAPSHOT_MAX + 1:
+            log.info("directory: ignoring an oversized directory")
+            return
         cards_raw = payload.get("cards")
         cards_raw = cards_raw if isinstance(cards_raw, list) else []
         removed = _ids(payload.get("removed"))
@@ -638,7 +647,7 @@ class SpaceMemberDirectory:
         # Our mailbox at a flagged card's GFS is minted by the jittered
         # sweep (``needed_gfs``), never now: a register on receipt would
         # line up with the host's traffic.
-        if self._complete(space_id, payload, seq, len(cards_raw)):
+        if self._complete(space_id, payload, seq):
             host_doc = await self._doc(space_id, host)
             host_doc["dir_seq"] = seq
             await self._put(space_id, host, host_doc)
@@ -650,23 +659,23 @@ class SpaceMemberDirectory:
                 await self._seat(card)
         await self._publish_to_host(space_id, host, host_is_v89=True)
 
-    def _complete(
-        self, space_id: str, payload: dict[str, Any], seq: int, n_cards: int
-    ) -> bool:
+    def _complete(self, space_id: str, payload: dict[str, Any], seq: int) -> bool:
         """Whether this frame completes a directory version: a delta does;
-        a snapshot only at its last part (``cards_total``) and only when
-        every card part arrived — else our ``dir_seq`` stays behind and the
+        a snapshot once every one of its ``parts`` (by ``part`` index)
+        arrived, in any order — else our ``dir_seq`` stays behind and the
         next §25.6 sync echo gets a fresh snapshot."""
         if payload.get("snapshot") is not True:
             return True
-        got_seq, got = self._snap_in.get(space_id, (seq, 0))
-        got = (got if got_seq == seq else 0) + n_cards
-        total = payload.get("cards_total")
-        if not _is_count(total):
-            self._snap_in[space_id] = (seq, got)
+        part, parts = payload.get("part"), payload.get("parts")
+        if not (_is_count(part) and _is_count(parts) and part < parts):
+            return False
+        got_seq, got = self._snap_in.get(space_id, (seq, frozenset()))
+        have = (got if got_seq == seq else frozenset()) | {part}
+        if len(have) < parts:
+            self._snap_in[space_id] = (seq, have)
             return False
         self._snap_in.pop(space_id, None)
-        return got >= total
+        return True
 
     async def _flag(self, space_id: str, instance_id: str, reached: bool) -> None:
         """Keep the host's ``gfs_reached`` flag on a member's row (set with
@@ -913,6 +922,8 @@ class SpaceMemberDirectory:
             if c.mailbox is not None or (space_id, c.instance_id) in lost
         ]
         seq = _count(own_doc.get("dir_seq"))
+        # What each kind of recipient holds now: a delta builds on it.
+        base_all, base_mbx = seq, _count(own_doc.get("dir_seq_mbx"))
         if delta or removed:
             seq = max(seq + 1, int(self._wall_clock() * 1000))
             own_doc["dir_seq"] = seq
@@ -934,7 +945,14 @@ class SpaceMemberDirectory:
             # cardless): its ``dir_seq`` must keep up, or its next sync
             # would cost a full snapshot.
             if relevant or removed:
-                await self._send(space_id, to, out, removed=removed, dir_seq=seq)
+                await self._send(
+                    space_id,
+                    to,
+                    out,
+                    removed=removed,
+                    dir_seq=seq,
+                    base_seq=base_all if everything else base_mbx,
+                )
 
     async def _send_snapshot(
         self,
@@ -948,9 +966,9 @@ class SpaceMemberDirectory:
         cards it needs (all, or only those with a mailbox), mailbox cards
         first, at most :data:`SNAPSHOT_MAX`, in parts that fit the GFS
         relay; LAST the id of every listed household (``members``, ids only,
-        at most :data:`MEMBERS_MAX`, one relay envelope) with the number of
-        cards sent (``cards_total``) — only that part, complete, moves the
-        receiver's ``dir_seq``."""
+        at most :data:`MEMBERS_MAX`, one relay envelope). Every frame carries
+        its ``part`` index and the number of ``parts``: only a complete
+        snapshot moves the receiver's ``dir_seq``."""
         picked = [
             c
             for i, c in sorted(listed.items())
@@ -964,11 +982,17 @@ class SpaceMemberDirectory:
                 SNAPSHOT_MAX,
             )
             picked = picked[:SNAPSHOT_MAX]
-        for i in range(0, len(picked), SNAPSHOT_PART_MAX):
-            part = picked[i : i + SNAPSHOT_PART_MAX]
-            if not await self._send(space_id, to, part, snapshot=True, dir_seq=seq):
+        chunks = [
+            picked[i : i + SNAPSHOT_PART_MAX]
+            for i in range(0, len(picked), SNAPSHOT_PART_MAX)
+        ]
+        parts = len(chunks) + 1
+        for n, chunk in enumerate(chunks):
+            if not await self._send(
+                space_id, to, chunk, snapshot=True, dir_seq=seq, part=n, parts=parts
+            ):
                 return
-        last: dict[str, Any] = {"cards_total": len(picked)}
+        last: dict[str, Any] = {"part": parts - 1, "parts": parts}
         members = sorted(i for i in listed if i != to)
         if len(members) <= MEMBERS_MAX:
             last["members"] = members
@@ -982,18 +1006,6 @@ class SpaceMemberDirectory:
                 MEMBERS_MAX,
             )
         await self._send(space_id, to, [], snapshot=True, dir_seq=seq, **last)
-
-    async def on_own_change(self) -> None:
-        """Our mailboxes changed (minted, released, rotated): every space we
-        host gets our new card as a delta now. Our card reaches the hosts of
-        the other spaces at the next sweep — never in the same tick as the
-        anonymous register that changed it."""
-        for space_id in sorted({space for (space, _i) in await self._rows()}):
-            try:
-                if await self.host_of(space_id) == self._instance_id:
-                    await self.reconcile(space_id)
-            except Exception:
-                log.warning("directory: reconcile failed", exc_info=True)
 
     async def sweep_once(self) -> None:
         """The backstop (each mailbox sweep tick): every space we host with
@@ -1016,6 +1028,7 @@ class SpaceMemberDirectory:
         host): every household carded in it loses its card, its row and
         — once no shared space is left — its seat (the host's own row is
         the roster's to drop)."""
+        self._snap_in.pop(space_id, None)
         host = await self.host_of(space_id)
         for inst in sorted(await self._space_cards(space_id)):
             if inst == host:

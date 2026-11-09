@@ -824,7 +824,8 @@ newer card is only a delta. A send queued in the outbox for an offline host
 counts as sent.
 
 **The member directory.** The host passes the cards on as
-`SPACE_MAILBOX_DIRECTORY {cards, removed, snapshot, members, dir_seq}`
+`SPACE_MAILBOX_DIRECTORY {cards, removed, snapshot, part, parts, members,
+gfs_reached, dir_seq, base_seq}`
 (routing `space_id`, everything else encrypted), only to **writer-seat**
 member households at v_89 (`only_instances`), never to followers.
 Receivers take it from the space's host only (the §24.11 envelope is
@@ -834,7 +835,13 @@ host-signed).
   (`max(last + 1, wall ms)`), kept on the host's own row; every delta and
   snapshot carries it. A member keeps the last one it took on the host's row
   and drops a delta that is not newer (a late old delta never re-adds a
-  removed household); the parts of one snapshot share their version.
+  removed household); the parts of one snapshot share their version. A
+  delta also names the version it builds on (`base_seq`: the host's
+  previous `dir_seq`, or `dir_seq_mbx` for a household given mailbox cards
+  only) and is taken only by a member holding exactly that version — so a
+  delta never moves a member past a snapshot still coming in, or lost (a
+  joiner's): it stays behind, and its next sync echo gets a fresh
+  snapshot.
 - **Only to a seated household.** Directory frames go only to a
   writer-seat household that told the host it is seated — its card, or a
   §25.6 `SPACE_SYNC_BEGIN` (kept as `seated` on its row): a frame sent the
@@ -850,11 +857,11 @@ host-signed).
 - **Snapshots** (at most `SNAPSHOT_MAX` = 500 cards, mailbox cards first, in
   parts of at most `SNAPSHOT_PART_MAX` = 150, ≈ 105 KiB each) end with
   their own `members` part: the id of every listed household (ids only,
-  ~35 B each, at most `MEMBERS_MAX` = 2 900 ≈ 100 KiB, one relay envelope)
-  and `cards_total`, the number of cards the parts carried. Only that last
-  part moves the member's `dir_seq`, and only when every card arrived: a
-  lost card part leaves the member behind, so its next sync echo gets a
-  fresh snapshot.
+  ~35 B each, at most `MEMBERS_MAX` = 2 900 ≈ 100 KiB, one relay envelope).
+  Every frame carries its `part` index and the number of `parts` (at most
+  `SNAPSHOT_MAX` + 1); the member tracks the indices it got, and only a
+  complete snapshot moves its `dir_seq`: a lost (or repeated) part leaves
+  it behind, so its next sync echo gets a fresh snapshot.
   **Scale limit:** a directory of more than 2 900 households is sent
   without `members` and then drops nobody — a lost removal is repaired
   only up to that size. The member replaces its directory
@@ -941,9 +948,10 @@ times, or a flood (≥ 500 frames dropped by its inbound budget in a day,
 e.g. a removed member that still knows the address), gets a fresh
 generation, at most once a day. A plain rotation keeps the old address
 delivering until its own release delay is over (a flooded one drops at
-once). Every change moves the card `rev`: spaces we host get the new card
-as a delta at once; the hosts of our other spaces get it at the next sweep,
-never in the same tick as the anonymous register.
+once). Every change (mint, rotation, release) moves the card `rev`; the
+new card reaches every space — the ones we host too — through the sweep
+hook after its own 30–120 s wait (`CARD_AFTER_MINT_S`), never in the tick
+of the anonymous register.
 
 **Losses and recovery.** Frames to a mailbox that is offline wait in the
 GFS queue (24 h TTL, tail-drop). Since v_89 that queue is the household's

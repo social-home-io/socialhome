@@ -187,9 +187,6 @@ class FakeMailboxes:
     def attach_after_sweep(self, fn) -> None:
         pass
 
-    def attach_on_change(self, fn) -> None:
-        self.on_change = fn
-
     registers = 0
 
     async def ensure(self, *a, **k):
@@ -264,9 +261,10 @@ class FakeFederation:
             ):
                 merged = dict(prev["payload"])
                 merged["cards"] = merged["cards"] + d["payload"]["cards"]
-                for key in ("members", "cards_total"):
-                    if key in d["payload"]:
-                        merged[key] = d["payload"][key]
+                if "members" in d["payload"]:
+                    merged["members"] = d["payload"]["members"]
+                # One merged frame: a whole snapshot in one part.
+                merged["part"], merged["parts"] = 0, 1
                 if "gfs_reached" in d["payload"]:
                     merged["gfs_reached"] = (
                         merged.get("gfs_reached", []) + d["payload"]["gfs_reached"]
@@ -354,6 +352,10 @@ class World:
         if "dir_seq" not in payload:
             self._seq += 1
             payload = {**payload, "dir_seq": self._seq}
+        if not payload.get("snapshot") and "base_seq" not in payload:
+            # In order: the delta builds on the version we hold.
+            held = self.spaces.doc(SPACE, self.host["id"]).get("dir_seq") or 0
+            payload = {**payload, "base_seq": held}
         await self.dir._on_directory(
             _event(
                 FederationEventType.SPACE_MAILBOX_DIRECTORY,
@@ -983,7 +985,8 @@ async def test_a_big_snapshot_goes_in_parts_that_fit_the_relay(monkeypatch):
     every = w.fed.raw_to(newcomer["id"])
     assert len({p["payload"]["dir_seq"] for p in every}) == 1
     assert len(every[-1]["payload"]["members"]) == 5
-    assert every[-1]["payload"]["cards_total"] == 5
+    assert [p["payload"]["part"] for p in every] == [0, 1, 2, 3]
+    assert {p["payload"]["parts"] for p in every} == {4}
     assert all("members" not in p["payload"] for p in parts)
 
 
@@ -1387,9 +1390,9 @@ async def test_a_member_no_longer_gfs_reached_frees_the_mailbox():
 
 
 async def test_a_lost_snapshot_card_part_is_repaired_by_the_next_sync(monkeypatch):
-    """Only a complete snapshot moves the member's ``dir_seq``: its last
-    part (``members``) counts the cards the parts carried. A lost card part
-    leaves the member behind, so its next sync echo gets a fresh snapshot."""
+    """Only a complete snapshot (every ``part`` of ``parts``) moves the
+    member's ``dir_seq``. A lost card part leaves the member behind, so its
+    next sync echo gets a fresh snapshot."""
     monkeypatch.setattr(smd, "SNAPSHOT_PART_MAX", 2)
     host = World()
     member, *others = (_hh() for _ in range(4))
@@ -1445,3 +1448,103 @@ async def test_a_gfs_reached_flag_change_goes_out_as_a_delta():
     (delta,) = w.fed.raw_to(paired["id"])
     assert [c["instance_id"] for c in delta["payload"]["cards"]] == [gfs_only["id"]]
     assert delta["payload"]["gfs_reached"] == []
+
+
+# ── Review round 6 ──────────────────────────────────────────────────────
+
+
+def _snapshot_world(monkeypatch, n_others=4):
+    monkeypatch.setattr(smd, "SNAPSHOT_PART_MAX", 2)
+    host = World()
+    member, *others = (_hh() for _ in range(n_others + 1))
+    host.member(member, *others)
+    for h in others:
+        host.spaces.put_card(SPACE, _card(h, gfs=GFS))
+    host.writers.writers[SPACE] = {member["id"], *(h["id"] for h in others)}
+    host.seat_all()
+    m = World(host=host.me)
+    m.member(member)
+    return host, member, others, m
+
+
+async def test_a_delta_never_completes_an_unfinished_snapshot(monkeypatch):
+    """Snapshot S part 0 arrives, then delta S+1 (built on S), then the rest
+    of S: the delta must not move us past the unfinished snapshot — it is
+    taken only on the version it builds on (``base_seq``), so we stay
+    behind and our next sync echo gets a fresh snapshot."""
+    host, member, others, m = _snapshot_world(monkeypatch)
+    await host.dir.reconcile(SPACE, snapshot_to={member["id"]})
+    snap = [d["payload"] for d in host.fed.raw_to(member["id"])]
+    seq = snap[-1]["dir_seq"]
+    host.fed.directories.clear()
+    newer = _card(others[0], gfs=GFS, rev=9)
+    host.spaces.put_card(SPACE, newer)
+    await host.dir.reconcile(SPACE, changed=[newer])
+    (delta,) = [d["payload"] for d in host.fed.raw_to(member["id"])]
+    assert delta["base_seq"] == seq and delta["dir_seq"] > seq
+
+    await m.directory(snap[0])
+    await m.directory(delta)  # out of order: dropped
+    for part in snap[1:]:
+        await m.directory(part)
+    echo = await m.dir.directory_seq(SPACE, host.me["id"])
+    assert echo == seq  # the snapshot, not the delta
+    host.fed.directories.clear()
+    host.dir._hello_at.clear()
+    await host.dir.on_sync_begin(_begin(member, host.me["id"], echo))
+    assert host.fed.raw_to(member["id"])  # repaired by a fresh snapshot
+
+
+async def test_a_joiner_whose_snapshot_was_lost_is_repaired(monkeypatch):
+    """The joiner's whole snapshot is lost; a later delta must not stand in
+    for it."""
+    host, member, others, m = _snapshot_world(monkeypatch)
+    await host.dir.reconcile(SPACE, snapshot_to={member["id"]})  # all lost
+    host.fed.directories.clear()
+    newer = _card(others[0], gfs=GFS, rev=9)
+    host.spaces.put_card(SPACE, newer)
+    await host.dir.reconcile(SPACE, changed=[newer])
+    (delta,) = [d["payload"] for d in host.fed.raw_to(member["id"])]
+    m.spaces.put_card(SPACE, _card(host.me, gfs=GFS))  # the host's, from the ACK
+    await m.directory(delta)
+    echo = await m.dir.directory_seq(SPACE, host.me["id"])
+    assert echo == 0
+    host.fed.directories.clear()
+    host.dir._hello_at.clear()
+    await host.dir.on_sync_begin(_begin(member, host.me["id"], echo))
+    assert host.fed.raw_to(member["id"])
+
+
+async def test_a_repeated_part_never_stands_in_for_a_lost_one(monkeypatch):
+    host, member, _others, m = _snapshot_world(monkeypatch)
+    await host.dir.reconcile(SPACE, snapshot_to={member["id"]})
+    snap = [d["payload"] for d in host.fed.raw_to(member["id"])]
+    assert len(snap) == 3  # 2 + 2 cards, then members
+    for part in (snap[0], snap[0], snap[2]):  # part 1 lost, part 0 twice
+        await m.directory(part)
+    assert await m.dir.directory_seq(SPACE, host.me["id"]) != snap[-1]["dir_seq"]
+
+
+async def test_a_snapshot_claiming_too_many_parts_is_ignored(monkeypatch):
+    w, _host = _member_world()
+    a = _hh()
+    await w.directory(
+        {
+            "cards": [_card(a, gfs=GFS).to_wire()],
+            "snapshot": True,
+            "part": 0,
+            "parts": smd.SNAPSHOT_MAX + 2,
+        }
+    )
+    assert a["id"] not in w.spaces.rows[SPACE]
+
+
+async def test_a_forgotten_space_drops_its_unfinished_snapshot(monkeypatch):
+    host, member, _others, m = _snapshot_world(monkeypatch)
+    await host.dir.reconcile(SPACE, snapshot_to={member["id"]})
+    snap = [d["payload"] for d in host.fed.raw_to(member["id"])]
+    await m.directory(snap[0])
+    assert SPACE in m.dir._snap_in
+    m.spaces.local[SPACE] = []  # we left
+    await m.dir.sweep_once()
+    assert SPACE not in m.dir._snap_in

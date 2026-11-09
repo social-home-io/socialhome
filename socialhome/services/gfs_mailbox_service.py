@@ -29,8 +29,9 @@ mailbox). This service is the household half:
 * **Recovery / rotation.** A GFS that forgot the mailbox gets the SAME one
   registered again (cached ticket); one it keeps refusing, or a flood on
   it, gets a fresh generation (at most :data:`ROTATIONS_PER_DAY`). Every
-  change bumps the card ``rev`` and calls the change hook, so the new card
-  reaches every space the household is in (the member directory).
+  change bumps the card ``rev``; the new card reaches every space the
+  household is in through the directory's sweep hook after its own wait
+  (:data:`CARD_AFTER_MINT_S`), never in the register's tick.
 
 No log line at INFO or above names a mailbox id or a key.
 """
@@ -257,7 +258,6 @@ class GfsMailboxService:
         "_key_manager",
         "_lock",
         "_needed",
-        "_on_change",
         "_pending",
         "_release_delay",
         "_releases",
@@ -306,7 +306,6 @@ class GfsMailboxService:
         self._root: bytes | None = None
         self._inbound: InboundHandler | None = None
         self._needed: Callable[[], Awaitable[set[str]]] | None = None
-        self._on_change: Callable[[], Awaitable[None]] | None = None
         self._after_sweep: Callable[[], Awaitable[None]] | None = None
         #: GFS connection id → its ticket machinery.
         self._tickets: dict[str, _Tickets] = {}
@@ -358,12 +357,6 @@ class GfsMailboxService:
         member directory's answer. Unwired → none (every mailbox is released
         once its pending time is over)."""
         self._needed = needed
-
-    def attach_on_change(self, on_change: Callable[[], Awaitable[None]]) -> None:
-        """Called after our set of mailboxes changed (minted, released,
-        rotated): the card ``rev`` moved and the new card must reach every
-        space we are in."""
-        self._on_change = on_change
 
     def attach_after_sweep(self, hook: Callable[[], Awaitable[None]]) -> None:
         """Run at the end of every sweep tick (the directory's backstop)."""
@@ -435,15 +428,14 @@ class GfsMailboxService:
         anonymous register that changed it), then release and mint. Only
         this jittered tick mints — never a directory frame, which would
         line the register up with the host's traffic; a mint's card follows
-        after its own wait (:meth:`_card_after_mint`)."""
+        after its own wait (:meth:`_changed`)."""
         if self._after_sweep is not None:
             try:
                 await self._after_sweep()
             except Exception:
                 log.warning("gfs.mailbox: directory sweep failed", exc_info=True)
         await self.release_unused()
-        if await self.mint_missing():
-            self._spawn(self._card_after_mint(), "gfs-mailbox-card")
+        await self.mint_missing()
 
     async def _load_root(self) -> bytes:
         if self._root is not None:
@@ -479,12 +471,12 @@ class GfsMailboxService:
         await self._config.set(MAILBOXES_CONFIG_KEY, orjson.dumps(doc).decode())
 
     async def _changed(self) -> None:
-        if self._on_change is None:
-            return
-        try:
-            await self._on_change()
-        except Exception:
-            log.warning("gfs.mailbox: publishing a changed card failed", exc_info=True)
+        """Our mailboxes changed (minted, released, rotated): the new card
+        reaches every space — hosted ones too — only through the sweep hook
+        after its own wait (:data:`CARD_AFTER_MINT_S`), never in the tick of
+        the anonymous register / release that changed it."""
+        if not self._stop.is_set():
+            self._spawn(self._card_after_change(), "gfs-mailbox-card")
 
     # ── Tickets ──────────────────────────────────────────────────────────
 
@@ -650,7 +642,7 @@ class GfsMailboxService:
     async def ensure_within(self, gfs_url: str, *, timeout: float) -> OwnMailbox | None:
         """:meth:`ensure`, waiting at most *timeout* seconds. A mint that
         runs longer finishes in the background (its card change reaches the
-        spaces through the change hook); ``None`` on the timeout."""
+        spaces after the card delay); ``None`` on the timeout."""
         task: asyncio.Task[OwnMailbox | None] = asyncio.create_task(
             self.ensure(gfs_url), name="gfs-mailbox-mint"
         )
@@ -809,10 +801,7 @@ class GfsMailboxService:
             return 1 if own is not None else 0
         return 0
 
-    async def _card_after_mint(self) -> None:
-        """After a sweep's mint: the directory's hook once more, after its
-        own wait (:data:`CARD_AFTER_MINT_S`), so the new card reaches the
-        hosts well before the next sweep — never in the register's tick."""
+    async def _card_after_change(self) -> None:
         try:
             await asyncio.wait_for(
                 self._stop.wait(), timeout=self._rng.uniform(*self._card_delay)
@@ -998,7 +987,7 @@ class GfsMailboxService:
         (registered from a cached ticket), at most :data:`ROTATIONS_PER_DAY`.
         The old one keeps delivering (dropping, when *flooded*) until it is
         closed and unregistered after its own delay; the new card reaches
-        every space through the change hook and the sweep. Returns whether
+        every space after the card delay. Returns whether
         it rotated."""
         async with self._lock:
             old = self._claims.get(gfs_id)

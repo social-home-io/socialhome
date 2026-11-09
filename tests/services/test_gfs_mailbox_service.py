@@ -145,6 +145,13 @@ async def _ready(svc, conn):
     await svc._connected(conn.id, delay=0)
 
 
+async def _settle(svc) -> None:
+    """Let the delayed card publishes (``card_delay`` 0 in tests) run."""
+    await asyncio.gather(
+        *[t for t in list(svc._tasks) if t.get_name() == "gfs-mailbox-card"]
+    )
+
+
 def _counter():
     calls: list[int] = []
 
@@ -183,7 +190,7 @@ async def test_ensure_mints_one_mailbox_per_gfs_and_reuses_it(gfs):
     config = _Config()
     svc = _service(session, conn, config=config)
     calls, hook = _counter()
-    svc.attach_on_change(hook)
+    svc.attach_after_sweep(hook)
     await _ready(svc, conn)
     tickets = len(svc._tickets[conn.id].cache)
     assert tickets > 0
@@ -203,6 +210,7 @@ async def test_ensure_mints_one_mailbox_per_gfs_and_reuses_it(gfs):
     assert again == own
     assert len(svc._tickets[conn.id].cache) == tickets - 1  # one ticket spent
     assert svc.rev == rev0 + 1  # moved once
+    await _settle(svc)
     assert calls == [1]  # hook once
     assert svc.open_claims() == 1
     await svc.stop()
@@ -233,7 +241,7 @@ async def test_an_unneeded_mailbox_is_released_once_no_longer_pending(gfs):
     config = _Config()
     svc = _service(session, conn, config=config, now=now)
     calls, hook = _counter()
-    svc.attach_on_change(hook)
+    svc.attach_after_sweep(hook)
 
     async def needed() -> set[str]:
         return set()
@@ -254,6 +262,7 @@ async def test_an_unneeded_mailbox_is_released_once_no_longer_pending(gfs):
     assert svc.open_claims() == 0
     assert orjson.loads(config.data[MAILBOXES_CONFIG_KEY])["boxes"] == {}
     assert svc.rev == rev + 1
+    await _settle(svc)
     assert calls == [1, 1]  # mint + release
     assert await server.app[gfs_mailbox_repo_key].get(mailbox_id) is None
     await svc.stop()
@@ -303,10 +312,42 @@ async def test_a_sweep_mint_publishes_the_card_after_its_own_wait(gfs):
     await _ready(svc, conn)
     await svc.sweep_once()
     assert svc.mailbox_at(url) is not None
-    await asyncio.gather(*[t for t in svc._tasks if t.get_name() == "gfs-mailbox-card"])
+    await _settle(svc)
     assert hooks == [1, 1]  # the sweep's own, then the new card's
     await svc.sweep_once()  # nothing missing: no extra publish
     assert hooks == [1, 1, 1]
+    await svc.stop()
+
+
+async def test_no_mailbox_change_publishes_before_the_card_delay(gfs, monkeypatch):
+    """Review round 6: a mint, a rotation or a release never publishes in
+    its own tick — not even the spaces we host (the directory has no
+    immediate change hook any more): the card goes out only after the
+    jittered card delay, through the sweep hook."""
+    _server, session, url, conn = gfs
+    svc = _service(session, conn)
+    svc._card_delay = (30.0, 30.0)
+    hooks: list[int] = []
+
+    async def needed() -> set[str]:
+        return {url}
+
+    async def after() -> None:
+        hooks.append(1)
+
+    svc.attach_needed(needed)
+    svc.attach_after_sweep(after)
+    assert not hasattr(svc, "attach_on_change")
+    await _ready(svc, conn)
+    await svc.sweep_once()  # its own leading hook, then the mint
+    assert svc.mailbox_at(url) is not None
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert hooks == [1]  # nothing after the register
+    assert await svc.rotate(GFS_ID) is True
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert hooks == [1]
     await svc.stop()
 
 
@@ -322,6 +363,7 @@ async def test_the_card_after_a_mint_is_fail_soft_and_stops_with_the_service(
         raise RuntimeError("hook")
 
     async def one(self) -> int:
+        await self._changed()  # what a real mint does
         return 1
 
     monkeypatch.setattr(gms.GfsMailboxService, "mint_missing", one)
@@ -342,7 +384,7 @@ async def test_a_flood_rotates_the_mailbox_once_a_day(gfs, monkeypatch):
     monkeypatch.setattr(gms, "FLOOD_ROTATE_DROPS", 3)
     svc = _service(session, conn)
     calls, hook = _counter()
-    svc.attach_on_change(hook)
+    svc.attach_after_sweep(hook)
     await _ready(svc, conn)
     old = await svc.ensure(url)
     old_keys, _ = svc.mailbox_at(url)
@@ -357,6 +399,7 @@ async def test_a_flood_rotates_the_mailbox_once_a_day(gfs, monkeypatch):
             await asyncio.sleep(0.01)
     new_keys, new = svc.mailbox_at(url)
     assert new.gen != old.gen and new_keys.mailbox_id != old_keys.mailbox_id
+    await _settle(svc)
     assert calls == [1, 1]  # mint + rotation
     await svc.settle_releases()
     repo = server.app[gfs_mailbox_repo_key]
@@ -370,6 +413,7 @@ async def test_a_flood_rotates_the_mailbox_once_a_day(gfs, monkeypatch):
     await asyncio.sleep(0.05)
     assert svc.mailbox_at(url)[1] == new
     assert await svc.rotate(GFS_ID) is False  # ROTATIONS_PER_DAY spent
+    await _settle(svc)
     assert calls == [1, 1]
     await svc.stop()
 
