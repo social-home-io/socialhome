@@ -346,3 +346,32 @@ async def test_an_inner_payload_naming_another_space_is_dropped():
     )
     await _settle()
     assert nodes[target].dispatched == []
+
+
+async def test_a_directory_seated_origin_keeps_its_vocabulary_on_a_mesh_route():
+    """Review round 1 (#1336): an origin we hold only as a ``space_session``
+    seat may not deliver, over an ordinary paired mesh route (no seat hop),
+    an inner event outside the seat vocabulary."""
+    nodes = _build_chain(["a", "b", "c"])
+    for node in nodes.values():
+        _carry_space_id(node)
+    nodes["c"].repo._instances["a"] = _FakeInstance(
+        id="a", source=InstanceSource.SPACE_SESSION
+    )
+    kp = generate_x25519_keypair()
+    nodes["c"].target_eph_store[b64url_encode(kp.public_key)] = b64url_encode(
+        kp.private_key
+    )
+    for inner, expected in (
+        (FederationEventType.DM_MESSAGE, 0),
+        (FederationEventType.SPACE_POST_CREATED, 1),
+    ):
+        nodes["c"].dispatched.clear()
+        await nodes["a"].handler.send_routed(
+            path=["a", "b", "c"],
+            target_eph_pk_b64=b64url_encode(kp.public_key),
+            inner_event_type=inner,
+            inner_payload={"x": 1},
+        )
+        await _settle()
+        assert len(nodes["c"].dispatched) == expected

@@ -93,6 +93,9 @@ class FakeSpaceRepo:
     async def add_space_instance(self, space_id, instance_id):
         self.rows.setdefault(space_id, {}).setdefault(instance_id, None)
 
+    async def remove_space_instance(self, space_id, instance_id):
+        self.rows.get(space_id, {}).pop(instance_id, None)
+
     async def set_space_instance_mailbox(self, space_id, instance_id, value):
         # UPDATE-only: never creates membership.
         if instance_id in self.rows.get(space_id, {}):
@@ -576,8 +579,17 @@ async def test_a_snapshot_clears_unlisted_cards_but_never_the_hosts():
     host_card = _card(host, gfs=GFS)
     w.spaces.put_card(SPACE, host_card)
     w.spaces.put_card(SPACE, _card(gone, gfs=GFS))
+    ended: list[str] = []
+
+    async def ender(iid):
+        ended.append(iid)
+
+    w.dir.attach_seat_ender(ender)
     await w.directory({"cards": [_card(a, gfs=GFS).to_wire()], "snapshot": True})
-    assert w.spaces.doc(SPACE, gone["id"]) == {}
+    # Review round 1 (#1336): the household's ROW goes too (no fan-out of
+    # the space reaches it any more) and its seat is ended if unused.
+    assert gone["id"] not in w.spaces.rows[SPACE]
+    assert ended == [gone["id"]]
     assert w.spaces.doc(SPACE, host["id"])["card"] == host_card.to_wire()
     assert w.spaces.doc(SPACE, a["id"])["card"]["instance_id"] == a["id"]
 
@@ -590,7 +602,7 @@ async def test_a_delta_keeps_unlisted_cards_and_removed_clears():
     w.spaces.put_card(SPACE, _card(keep, gfs=GFS))
     w.spaces.put_card(SPACE, _card(gone, gfs=GFS))
     await w.directory({"cards": [], "removed": [gone["id"], host["id"]]})
-    assert w.spaces.doc(SPACE, gone["id"]) == {}
+    assert gone["id"] not in w.spaces.rows[SPACE]
     assert w.spaces.doc(SPACE, keep["id"])["card"]["instance_id"] == keep["id"]
     assert w.spaces.doc(SPACE, host["id"])["card"] == host_card.to_wire()
 
@@ -708,7 +720,7 @@ async def test_sender_allowed_needs_the_space_the_roster_and_a_card():
     assert not await w.dir.sender_allowed(a["id"], SPACE)
 
 
-async def test_target_for_falls_back_to_another_spaces_mailbox_card():
+async def test_target_for_uses_another_spaces_card_only_space_less():
     w, _host = _member_world()
     a, nobody = _hh(), _hh()
     w.member(a)
@@ -717,12 +729,14 @@ async def test_target_for_falls_back_to_another_spaces_mailbox_card():
     with_box = _card(a, gfs=GFS)
     w.spaces.rows[SPACE_2] = {}
     w.spaces.put_card(SPACE_2, with_box)
-    for space in (SPACE, None):
-        target = await w.dir.target_for(a["id"], space)
-        assert target is not None
-        assert target.mailbox_id == with_box.mailbox.mailbox_id
-        assert target.kem_pk == with_box.mailbox.kem_pk
-        assert target.gfs_url == GFS
+    # Only a SPACE-LESS envelope may use another space's card: one of space
+    # X never goes to a household on the strength of its card in Y.
+    assert await w.dir.target_for(a["id"], SPACE) is None
+    target = await w.dir.target_for(a["id"], None)
+    assert target is not None
+    assert target.mailbox_id == with_box.mailbox.mailbox_id
+    assert target.kem_pk == with_box.mailbox.kem_pk
+    assert target.gfs_url == GFS
     assert await w.dir.target_for(nobody["id"], SPACE) is None
 
 

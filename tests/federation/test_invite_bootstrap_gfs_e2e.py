@@ -486,6 +486,7 @@ async def _household(
         await mailbox_service.start()
         coordinator.attach_mailboxes(mailbox_service, directory)
         space_service.attach_space_mailboxes(mailbox_service)
+        directory.attach_seat_ender(space_service.end_space_session_if_unused)
         directory.attach_to(federation)
         federation._mailbox_sender_check = directory.sender_allowed
         fed_transport._mailbox_targets = directory.target_for
@@ -2304,6 +2305,19 @@ async def test_a_removed_member_leaves_the_directory_and_is_refused(
     # a's roster still says.
     assert not await a.directory.sender_allowed(c.instance_id, space.id)
     assert await a.directory.sender_allowed(b.instance_id, space.id)
+    # Review round 1 (#1336): the household's row is gone and its directory
+    # seat ended (no other shared space) — a's fan-out no longer reaches c,
+    # not even at the mailbox its card in another space names.
+    assert c.instance_id not in await a.space_repo.list_member_instances(space.id)
+    assert await a.federation_repo.get_instance(c.instance_id) is None
+    c_mailbox = _mailbox_of(c, gfs)
+    gfs.mailbox.clear()
+    await a.federation.broadcast_to_space_members(
+        space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("after")
+    )
+    await gfs.drain()
+    assert c_mailbox not in [to for to, _ in gfs.mailbox]
+    assert c.received == []
 
 
 async def test_a_redeem_seat_replaces_a_directory_seat_and_nothing_else_does(

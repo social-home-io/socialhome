@@ -823,6 +823,21 @@ class SpaceInviteTokenRedeemCoordinator:
         }
         if join_location is not None:
             payload["join_location"] = join_location
+        if self._directory is not None:
+            # v_89 — our card rides every redeem, so the host holds it when
+            # the seat commits (a card sent after the ACK could beat the
+            # commit). Our mailbox only at the relay of an existing seat
+            # with the issuer (a second space joined over it).
+            issuer_row = await self._federation_repo.get_instance(issuer_instance_id)
+            relay = (
+                issuer_row.relay_via or ""
+                if issuer_row is not None
+                and issuer_row.source is InstanceSource.SPACE_SESSION
+                else ""
+            )
+            own = await self._own_card("", relay)
+            if own is not None:
+                payload["card"] = own.to_wire()
         try:
             if direct_peer:
                 await self._federation.send_event(
@@ -1265,10 +1280,23 @@ class SpaceInviteTokenRedeemCoordinator:
             # ``record_mesh_member_claim`` owns every check.
             await self._federation.record_mesh_member_claim(event)
             # v_89 — now that its version is known (its row, or the mesh
-            # claim just recorded), the newcomer gets the space's member
-            # directory if the space has a member reached through a GFS.
+            # claim just recorded): its card (carried by the redeem) is
+            # stored, and the newcomer gets the space's member directory if
+            # the space has a member reached through a GFS.
             seated_space = ack_payload.get("space_id")
             if self._directory is not None and isinstance(seated_space, str):
+                card = self._directory.verify_seat_card(
+                    event.payload.get("card"),
+                    instance_id=event.from_instance,
+                    gfs_url=(
+                        sender.relay_via or ""
+                        if sender is not None
+                        and sender.source is InstanceSource.SPACE_SESSION
+                        else ""
+                    ),
+                )
+                if card is not None:
+                    await self._directory.store_seat_card(seated_space, card)
                 try:
                     await self._directory.reconcile(seated_space)
                 except Exception:

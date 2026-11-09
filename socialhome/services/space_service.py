@@ -1406,6 +1406,13 @@ class SpaceService(
         )
         return True
 
+    async def end_space_session_if_unused(self, instance_id: str) -> bool:
+        """v_89 — a household left a space's member directory: end its
+        ``space_session`` seat once no shared space justifies it. No
+        ``SPACE_SESSION_CLEANUP``: a directory seat has no address to send
+        one to, and the other side ends its own the same way."""
+        return await self.revoke_space_session_if_orphaned(instance_id, notify=False)
+
     async def apply_space_session_cleanup(self, instance_id: str) -> bool:
         """Inbound half of :meth:`revoke_space_session_if_orphaned`.
 

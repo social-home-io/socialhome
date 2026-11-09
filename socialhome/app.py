@@ -5109,6 +5109,9 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         invite_redeem_coordinator.attach_mailboxes(space_mailboxes, member_directory)
         real_space_service.attach_space_mailboxes(space_mailboxes)
+        member_directory.attach_seat_ender(
+            real_space_service.end_space_session_if_unused
+        )
         member_directory.attach_to(federation_service)
         member_directory.wire(bus)
         host_hop = HostHop(

@@ -97,7 +97,11 @@ from ..crypto import derive_instance_id
 from ..domain.federation import FederationEvent, FederationEventType, InstanceSource
 from ..domain.federation_capabilities import FederationCapability
 from . import routed_crypto
-from .inbound_validator import InboundContext, run_post_decrypt_gates
+from .inbound_validator import (
+    InboundContext,
+    make_check_peer_class,
+    run_post_decrypt_gates,
+)
 from .route_discovery import ROUTE_CACHE_TTL_S, cap_by_expiry
 
 if TYPE_CHECKING:
@@ -1153,6 +1157,19 @@ class SpaceRoutedHandler:
         being served), so the space is taken from the inner event —
         routing field first, then the payload's own copy.
         """
+        # v_89 — the origin's own class: a household we hold only as a
+        # ``space_session`` seat keeps the seat vocabulary whatever route
+        # its envelope took (a paired mesh route has no seat hop to check).
+        origin_row = await self._federation_repo.get_instance(synth.from_instance)
+        try:
+            await make_check_peer_class()(
+                InboundContext(
+                    envelope={"event_type": synth.event_type.value},
+                    instance=origin_row,
+                )
+            )
+        except ValueError:
+            return False
         payload = synth.payload if isinstance(synth.payload, dict) else {}
         ctx = InboundContext(
             envelope={

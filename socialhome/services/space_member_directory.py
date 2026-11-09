@@ -137,6 +137,7 @@ class SpaceMemberDirectory:
         "_keywrap_sig",
         "_lost_mailbox",
         "_mailboxes",
+        "_seat_ender",
         "_seater",
         "_spaces",
         "_writers",
@@ -167,6 +168,7 @@ class SpaceMemberDirectory:
         self._keywrap_sig = keywrap_sig
         self._federation: FederationService | None = None
         self._seater: Seater | None = None
+        self._seat_ender: Callable[[str], Awaitable[object]] | None = None
         self._clock = clock
         #: (space, household) → when its last "seated" card re-sent its
         #: snapshot (:data:`HELLO_RESNAPSHOT_S`).
@@ -204,6 +206,12 @@ class SpaceMemberDirectory:
             log.warning(
                 "directory: reconcile after a seat change failed", exc_info=True
             )
+
+    def attach_seat_ender(self, ender: Callable[[str], Awaitable[object]]) -> None:
+        """How a household that left the directory loses its seat once no
+        shared space justifies it (``SpaceService
+        .end_space_session_if_unused``)."""
+        self._seat_ender = ender
 
     def attach_seater(self, seater: Seater) -> None:
         """How a directory card becomes a lazy ``space_session`` seat (the
@@ -489,14 +497,14 @@ class SpaceMemberDirectory:
                 continue
             if card.instance_id != self._instance_id:
                 cards[card.instance_id] = card
+        gone: set[str] = set()
         if payload.get("snapshot") is True:
-            # Authoritative: a card we hold that it no longer lists goes.
-            for inst in await self._space_cards(space_id):
-                if inst not in cards and inst != host:
-                    await self._clear(space_id, inst)
-        for inst in removed:
-            if inst != host:
-                await self._clear(space_id, inst)
+            # Authoritative: a household it no longer lists is gone.
+            gone |= {i for i in await self._space_cards(space_id) if i not in cards}
+        gone |= set(removed)
+        gone -= {host, self._instance_id}
+        for inst in sorted(gone):
+            await self._forget(space_id, inst)
         for card in cards.values():
             await self._store(space_id, card, create_row=True)
         has_mailbox = bool(self._mailboxes.mailbox_gfs_urls())
@@ -506,6 +514,21 @@ class SpaceMemberDirectory:
             if card.mailbox is not None or has_mailbox:
                 await self._seat(card)
         await self._publish_to_host(space_id, host, host_is_v89=True)
+
+    async def _forget(self, space_id: str, instance_id: str) -> None:
+        """A household that left the host's directory of *space_id* (left,
+        removed, no longer a writer): its card AND its ``space_instances``
+        row go — the row a directory card created, or our fan-out of the
+        space would still reach it — and its seat ends once no space we
+        share justifies it. Roster gossip re-adds the row of a household
+        that still holds a seat (a follower)."""
+        await self._clear(space_id, instance_id)
+        await self._spaces.remove_space_instance(space_id, instance_id)
+        if self._seat_ender is not None:
+            try:
+                await self._seat_ender(instance_id)
+            except Exception:
+                log.warning("directory: ending a member's seat failed", exc_info=True)
 
     async def _seat(self, card: MemberCard) -> None:
         """A lazy ``space_session`` seat for *card*'s household — never
@@ -712,14 +735,16 @@ class SpaceMemberDirectory:
     async def target_for(
         self, instance_id: str, space_id: str | None
     ) -> MailboxTarget | None:
-        """The mailbox an envelope (of *space_id*, or space-less) goes to
-        for *instance_id*: its card for that space, else any space's (one
-        mailbox serves all its spaces) — or ``None``."""
+        """The mailbox an envelope goes to for *instance_id*: its card for
+        *space_id*, or — space-less only — any space's (one mailbox serves
+        all its spaces); ``None`` otherwise."""
+        # Another space's card only for a SPACE-LESS envelope: one of space X
+        # never goes to a household on the strength of its card in Y.
         card = (
-            await self.card_of(space_id, instance_id) if space_id is not None else None
+            await self.card_of(space_id, instance_id)
+            if space_id is not None
+            else await self._any_card(instance_id)
         )
-        if card is None or card.mailbox is None:
-            card = await self._any_card(instance_id)
         if card is None or card.mailbox is None:
             return None
         return MailboxTarget(

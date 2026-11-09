@@ -688,6 +688,8 @@ class _RelayInstance:
         self.source = source
         self.gfs_relay = gfs_relay
         self.from_instance = "remote-iid"
+        #: A link-joined (sealed-redeem) seat carries its relay.
+        self.relay_via: str | None = "https://gfs.example.org"
 
 
 async def test_relay_gate_rejects_a_paired_peer_we_never_opted_in_with(caplog):
@@ -846,6 +848,42 @@ async def test_the_mailbox_sender_gate_ignores_every_other_transport():
     env["space_id"] = "sp-other"
     for transport in ("", TRANSPORT_GFS_RELAY):
         await step(InboundContext(envelope=env, transport=transport))
+
+
+async def test_a_directory_seat_never_comes_in_over_the_instance_relay():
+    """Review round 1 (#1336): a household seated from a host's directory
+    (``space_session``, no relay of its own) reaches us only at our mailbox,
+    where the card gate runs — never instance-addressed on the GFS relay,
+    which would skip that gate. A sealed-redeem seat (with its relay) still
+    may."""
+    step = make_check_relay_opt_in()
+    directory_seat = _RelayInstance(InstanceSource.SPACE_SESSION, gfs_relay=False)
+    directory_seat.relay_via = None
+    with pytest.raises(ValueError):
+        await step(
+            InboundContext(
+                envelope=_minimal_envelope(),
+                instance=directory_seat,
+                transport=TRANSPORT_GFS_RELAY,
+            )
+        )
+    redeem_seat = _RelayInstance(InstanceSource.SPACE_SESSION, gfs_relay=False)
+    redeem_seat.relay_via = "https://gfs.example.org"
+    await step(
+        InboundContext(
+            envelope=_minimal_envelope(),
+            instance=redeem_seat,
+            transport=TRANSPORT_GFS_RELAY,
+        )
+    )
+    # On our mailbox the card gate judges it instead.
+    await step(
+        InboundContext(
+            envelope=_minimal_envelope(),
+            instance=directory_seat,
+            transport=TRANSPORT_GFS_MAILBOX,
+        )
+    )
 
 
 async def test_mailbox_transport_gets_the_relay_gates_and_window():

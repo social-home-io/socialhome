@@ -813,6 +813,13 @@ space's host only (the §24.11 envelope is host-signed).
 - Triggers: a card received, a seat that goes live or ends in a space we
   host, and the ~10 min sweep (role changes, our own card).
 - Nothing is sent while no card of the space carries a mailbox.
+- A household the directory drops (`removed`, or left out of a one-part
+  snapshot) loses its card AND its `space_instances` row on every member,
+  so no member's fan-out of that space reaches it any more, and its
+  directory seat ends once no shared space is left
+  (`SpaceService.end_space_session_if_unused`). An envelope of space X is
+  only ever addressed by the household's card for X; another space's card
+  serves space-less envelopes only.
 
 **Lazy seats.** On a directory card a member seats that household as a
 `space_session` row from the card's key-wrap key: static-static session
@@ -840,7 +847,14 @@ dropped (`federation/host_hop.py`, `SpaceRoutedHandler._touches_seat`).
 The inner event must be one the seat may send directly
 (`SPACE_SESSION_ALLOWED_EVENT_TYPES`): the hop never widens a seat's
 vocabulary. The routing `space_id` is re-signed by the host on its leg, so
-an inner payload that names another space than the route is dropped.
+an inner payload that names another space than the route is dropped. On
+ANY routed envelope the origin's own class is checked at the target: an
+origin we hold only as a `space_session` seat keeps the seat vocabulary on
+an ordinary paired mesh route too.
+
+A directory seat (no `relay_via`) is refused instance-addressed on the GFS
+relay (`make_check_relay_opt_in`): it reaches us only at our mailbox, where
+the card gate runs.
 
 **Receiving.** A frame on our mailbox is opened with the mailbox key and
 goes through the unchanged §24.11 pipeline with transport `gfs_mailbox`.
@@ -917,6 +931,18 @@ sequenceDiagram
     E->>E: open → §24.11 (gfs_mailbox, check_mailbox_sender: card of D)
     Note over D,E: D has no connection to that GFS → [D, A, E] SPACE_ROUTED, sealed to E's key-wrap key
 ```
+
+**Open (owner decision pending).** Paired and mesh members own no
+mailbox, so a GFS-only member reaches one of them only through the host
+(which must be online). The likely fix: a household already connected to a
+GFS that a card in one of its spaces names mints its one household mailbox
+there.
+
+**Residuals.** One sender (a member, or whoever learned the address) can
+fill a household's 32 MiB queue at the GFS and crowd out other spaces'
+frames; the inbound flood rotation does not help while the household is
+offline. Lost frames are healed by the 30-min §25.6 sync from the host, so
+the heal needs the host online (helpers come with PR 4).
 
 **Left out, and why (keep it simple).**
 

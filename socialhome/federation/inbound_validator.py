@@ -240,6 +240,12 @@ class _InboxInstance:
         return self._inst.remote_identity_pk
 
     @property
+    def relay_via(self) -> str | None:
+        """The seat's relay — empty for a member seated from a host's
+        directory (v_89, ``make_check_relay_opt_in``)."""
+        return self._inst.relay_via
+
+    @property
     def remote_pq_identity_pk(self) -> str | None:
         return self._inst.remote_pq_identity_pk
 
@@ -507,7 +513,9 @@ def make_check_relay_opt_in() -> InboundStep:
     A household seated from an invite link
     (:data:`~socialhome.domain.federation.InstanceSource.SPACE_SESSION`)
     is relay-only by construction and is left to
-    :func:`make_check_peer_class`. Live wires (RTC, HTTPS inbox) are not
+    :func:`make_check_peer_class` — except a seat made from a host's member
+    directory (v_89, no ``relay_via``): it reaches us only at our mailbox,
+    never instance-addressed. Live wires (RTC, HTTPS inbox) are not
     touched. Runs straight after the lookup, before any crypto.
     """
 
@@ -518,6 +526,18 @@ def make_check_relay_opt_in() -> InboundStep:
         # is exempt; every other source — today ``manual``, tomorrow
         # whatever is added — needs the explicit opt-in.
         if getattr(ctx.instance, "source", None) is InstanceSource.SPACE_SESSION:
+            if ctx.transport == TRANSPORT_GFS_RELAY and not getattr(
+                ctx.instance, "relay_via", None
+            ):
+                # v_89 — a household seated from a host's directory (no relay
+                # of its own) reaches us only at our mailbox, where the card
+                # gate runs; instance-addressed it would skip that gate.
+                log.info(
+                    "inbound: refusing a relayed %r from a directory seat — it "
+                    "reaches us only at our mailbox",
+                    ctx.envelope.get("event_type"),
+                )
+                raise ValueError("a directory seat does not use the instance relay")
             return
         if getattr(ctx.instance, "gfs_relay", False) is True:
             return
