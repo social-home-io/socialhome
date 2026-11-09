@@ -798,31 +798,50 @@ newer card is only a delta. A send queued in the outbox for an offline host
 counts as sent.
 
 **The member directory.** The host passes the cards on as
-`SPACE_MAILBOX_DIRECTORY {cards, removed, snapshot}` (routing `space_id`,
-everything else encrypted), only to **writer-seat** member households at
-v_89 (`only_instances`), never to followers. Receivers take it from the
-space's host only (the §24.11 envelope is host-signed).
+`SPACE_MAILBOX_DIRECTORY {cards, removed, snapshot, members, dir_seq}`
+(routing `space_id`, everything else encrypted), only to **writer-seat**
+member households at v_89 (`only_instances`), never to followers.
+Receivers take it from the space's host only (the §24.11 envelope is
+host-signed).
 
-- A newcomer gets one snapshot, at most `SNAPSHOT_MAX` = 500 cards, mailbox
-  cards first, in parts of at most `SNAPSHOT_PART_MAX` = 150 (≈ 105 KiB, well
-  inside the relay's envelope cap); only a one-part snapshot clears cards it
-  no longer lists. A household with a mailbox gets every writer's card (it
-  checks every sender against them); one without gets only the cards that
-  carry a mailbox (all it can use).
-- After that, deltas: a changed card (a card without a mailbox only to
-  households with one — unless it just lost its mailbox), and `removed` for
-  a household that left the directory (left, removed, or no longer a
-  writer).
-- Triggers: a card received, a seat that goes live or ends in a space we
-  host, and the ~10 min sweep (role changes, our own card).
+- **One version.** Every directory change gets a new `dir_seq`
+  (`max(last + 1, wall ms)`), kept on the host's own row; every delta and
+  snapshot carries it. A member keeps the last one it took on the host's row
+  and drops a delta that is not newer (a late old delta never re-adds a
+  removed household); the parts of one snapshot share their version.
+- **Deltas** go to every writer-seat household under the new version: a
+  changed card (a card without a mailbox only to households with one,
+  unless it just lost its mailbox) and `removed` for a household that left
+  the directory (left, removed, or no longer a writer). Delivery is not
+  tracked per household.
+- **Snapshots** (at most `SNAPSHOT_MAX` = 500 cards, mailbox cards first, in
+  parts of at most `SNAPSHOT_PART_MAX` = 150, ≈ 105 KiB each) name every
+  listed household in `members`. The member replaces its directory
+  wholesale: a carded household not in `members` loses its card, row and
+  seat; one listed without a card (mailbox cards only) keeps its row. A
+  household with a mailbox gets every writer's card; one without, only the
+  cards that carry a mailbox.
+- **When a snapshot goes:** to a household whose card ("seated") arrives
+  (at most every 10 min), to a joiner when its seat card is stored at
+  commit, and — the **repair** — on the existing periodic §25.6 incremental
+  sync: the member's `SPACE_SYNC_BEGIN` to the host echoes its `dir_seq`
+  (an additive BEGIN field; the sync stream itself is unchanged, so no
+  `SYNC_RECORD_LINES` entry); a host whose version is newer answers with one
+  snapshot. A lost delta, a snapshot that raced the seat, or a joiner at 0
+  is repaired within one sync period (30 min). A mesh-only host is not on
+  that periodic sync (its catch-up path stops once complete), so it relies
+  on the seated card.
+- Triggers for deltas: a card received, a seat that goes live or ends in a
+  space we host, our own card, and the ~10 min sweep (role changes).
 - Nothing is sent while no card of the space carries a mailbox.
-- A household the directory drops (`removed`, or left out of a one-part
-  snapshot) loses its card AND its `space_instances` row on every member,
-  so no member's fan-out of that space reaches it any more, and its
-  directory seat ends once no shared space is left
-  (`SpaceService.end_space_session_if_unused`). An envelope of space X is
-  only ever addressed by the household's card for X; another space's card
-  serves space-less envelopes only.
+- A household the directory drops loses its card AND its `space_instances`
+  row on every member, so no member's fan-out of that space reaches it, and
+  its directory seat ends once no shared space is left
+  (`SpaceService.end_space_session_if_unused`). A space we left, or that was
+  dissolved (here or by its remote host), drops all of its directory cards,
+  rows and seats at the next sweep, and the card gate refuses it at once.
+  An envelope of space X is only ever addressed by the household's card for
+  X; another space's card serves space-less envelopes only.
 
 **Lazy seats.** On a directory card a member seats that household as a
 `space_session` row from the card's key-wrap key: static-static session

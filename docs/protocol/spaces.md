@@ -558,7 +558,11 @@ member household, not only on the host:
   household while the echo still matches the current `roster_sequence`
   and the writer cert the host would send; after a roster change it sends
   the household the snapshot **without the removals at or below the
-  echoed version** (it applied them in that full snapshot). Seat and
+  echoed version** (it applied them in that full snapshot). The same
+  BEGIN also echoes `dir_seq`, the version of the space's member directory
+  the household holds (v_89, see
+  [gfs-relay.md](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89));
+  a host whose directory is newer answers with one directory snapshot. Seat and
   upgrade snapshots are sent whole, as before. Both sides keep this in
   memory: a restart costs one full snapshot per household. A household
   that never echoes (older, or a link-joined one) is unchanged. Additive:

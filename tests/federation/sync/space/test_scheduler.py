@@ -503,6 +503,43 @@ async def test_the_tick_heals_a_gfs_seat_but_never_syncs_a_directory_seat(
     ]
 
 
+async def test_a_begin_echoes_the_member_directory_version(bus, queue, sync_manager):
+    """v_89 review round 2: the periodic BEGIN to a space's host carries the
+    ``dir_seq`` of the member directory we hold, so a host that is ahead
+    repairs a lost delta with one snapshot."""
+    fed = _FakeFederation()
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([_peer("host")]),
+        space_repo=_FakeSpaceRepo(
+            spaces_by_type={SpaceType.HOUSEHOLD: [_space("sp-1")]},
+            members_by_space={"sp-1": ["host"]},
+        ),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+    )
+    asked: list[tuple[str, str]] = []
+
+    async def echo(space_id, peer):
+        asked.append((space_id, peer))
+        return 7
+
+    sched.attach_directory_echo(echo)
+    await queue.start()
+    try:
+        await sched._tick_once()
+        await asyncio.sleep(0.05)
+    finally:
+        await queue.stop()
+    (begin,) = [
+        s for s in fed.sent if s["type"] == FederationEventType.SPACE_SYNC_BEGIN
+    ]
+    assert begin["payload"]["dir_seq"] == 7
+    assert asked == [("sp-1", "host")]
+
+
 async def test_start_stop_idempotent(bus, queue, sync_manager):
     sched = SpaceSyncScheduler(
         bus=bus,

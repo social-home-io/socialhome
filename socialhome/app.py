@@ -5114,6 +5114,14 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         member_directory.attach_to(federation_service)
         member_directory.wire(bus)
+        # Repair of a lost directory delta rides the periodic §25.6 sync:
+        # the BEGIN echoes the member's ``dir_seq``; a host ahead answers.
+        app[K.space_sync_scheduler_key].attach_directory_echo(
+            member_directory.directory_seq
+        )
+        federation_service._event_registry.register(
+            FederationEventType.SPACE_SYNC_BEGIN, member_directory.on_sync_begin
+        )
         host_hop = HostHop(
             own_instance_id=real_instance_id,
             card_of=member_directory.card_of,

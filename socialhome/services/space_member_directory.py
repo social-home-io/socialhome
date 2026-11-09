@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 import orjson
 
@@ -80,9 +80,6 @@ SNAPSHOT_PART_MAX: int = 150
 HELLO_RESNAPSHOT_S: float = 600.0
 #: Most households one directory delta may remove (and a receiver takes).
 REMOVED_MAX: int = 500
-#: ``snap`` values: the directory a recipient was given.
-SNAP_ALL: str = "all"
-SNAP_MAILBOXES: str = "mbx"
 
 #: Seats a household lazily from its verified card.
 Seater = Callable[[MemberCard], Awaitable[None]]
@@ -96,6 +93,18 @@ def _loads(raw: str | None) -> dict[str, Any]:
     except orjson.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _is_count(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _count(value: object) -> int:
+    return value if _is_count(value) else 0
+
+
+def _ids(raw: object) -> list[str]:
+    return [r for r in raw if isinstance(r, str)] if isinstance(raw, list) else []
 
 
 def _event_space(event: FederationEvent) -> str | None:
@@ -140,6 +149,7 @@ class SpaceMemberDirectory:
         "_seat_ender",
         "_seater",
         "_spaces",
+        "_wall_clock",
         "_writers",
     )
 
@@ -156,6 +166,7 @@ class SpaceMemberDirectory:
         keywrap_pk: bytes,
         keywrap_sig: str,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._spaces = space_repo
         self._federation_repo = federation_repo
@@ -170,6 +181,7 @@ class SpaceMemberDirectory:
         self._seater: Seater | None = None
         self._seat_ender: Callable[[str], Awaitable[object]] | None = None
         self._clock = clock
+        self._wall_clock = wall_clock
         #: (space, household) → when its last "seated" card re-sent its
         #: snapshot (:data:`HELLO_RESNAPSHOT_S`).
         self._hello_at: dict[tuple[str, str], float] = {}
@@ -294,6 +306,13 @@ class SpaceMemberDirectory:
             await self._put(space_id, instance_id, doc)
 
     async def _in_use(self, space_id: str) -> bool:
+        """A person of ours sits in *space_id* and it still exists (not
+        dissolved, not remote-terminated)."""
+        space = await self._spaces.get(space_id)
+        if space is None or space.dissolved:
+            return False
+        if space.archived and space.archived_reason in ("dissolved", "removed"):
+            return False
         return bool(await self._spaces.list_local_member_user_ids(space_id))
 
     async def host_of(self, space_id: str) -> str | None:
@@ -389,7 +408,11 @@ class SpaceMemberDirectory:
         try:
             await self._store(space_id, card)
             if await self.host_of(space_id) == self._instance_id:
-                await self.reconcile(space_id, changed=[card])
+                # The joiner's first snapshot now (it may race the seat and
+                # be dropped: its first sync, behind on ``dir_seq``, repairs).
+                await self.reconcile(
+                    space_id, changed=[card], snapshot_to={card.instance_id}
+                )
         except Exception:
             log.warning("directory: storing a seat card failed", exc_info=True)
 
@@ -487,15 +510,28 @@ class SpaceMemberDirectory:
         if not await self._in_use(space_id):
             return
         payload = event.payload if isinstance(event.payload, dict) else {}
+        seq = payload.get("dir_seq")
+        snapshot = payload.get("snapshot") is True
+        if not _is_count(seq):
+            log.info("directory: ignoring a directory without a version")
+            return
+        host_doc = await self._doc(space_id, host)
+        held = _count(host_doc.get("dir_seq"))
+        # One version per directory change: a delta must be newer than what
+        # we hold (a late old one never re-adds a removed household); the
+        # parts of one snapshot share their version.
+        if seq < held or (seq == held and not snapshot):
+            log.info("directory: ignoring an out-of-date directory")
+            return
         cards_raw = payload.get("cards")
-        removed_raw = payload.get("removed")
         cards_raw = cards_raw if isinstance(cards_raw, list) else []
-        removed = (
-            [r for r in removed_raw if isinstance(r, str)]
-            if isinstance(removed_raw, list)
-            else []
-        )
-        if len(cards_raw) > SNAPSHOT_MAX or len(removed) > REMOVED_MAX:
+        removed = _ids(payload.get("removed"))
+        members = _ids(payload.get("members")) if snapshot else []
+        if (
+            len(cards_raw) > SNAPSHOT_MAX
+            or len(removed) > REMOVED_MAX
+            or len(members) > SNAPSHOT_MAX
+        ):
             log.info("directory: ignoring an oversized directory")
             return
         cards: dict[str, MemberCard] = {}
@@ -507,16 +543,21 @@ class SpaceMemberDirectory:
                 continue
             if card.instance_id != self._instance_id:
                 cards[card.instance_id] = card
-        gone: set[str] = set()
-        if payload.get("snapshot") is True:
-            # Authoritative: a household it no longer lists is gone.
-            gone |= {i for i in await self._space_cards(space_id) if i not in cards}
-        gone |= set(removed)
+        gone = set(removed)
+        if snapshot:
+            # The whole directory: a carded household it does not list is
+            # gone — card, row and seat (a household listed without a card,
+            # one we are given mailbox cards only for, keeps its row).
+            listed = set(members) | set(cards)
+            gone |= {i for i in await self._space_cards(space_id) if i not in listed}
         gone -= {host, self._instance_id}
         for inst in sorted(gone):
             await self._forget(space_id, inst)
         for card in cards.values():
             await self._store(space_id, card, create_row=True)
+        host_doc = await self._doc(space_id, host)
+        host_doc["dir_seq"] = seq
+        await self._put(space_id, host, host_doc)
         has_mailbox = bool(self._mailboxes.mailbox_gfs_urls())
         for card in cards.values():
             if card.instance_id == host:
@@ -571,26 +612,61 @@ class SpaceMemberDirectory:
             return
         old = await self.card_of(space_id, sender)
         changed = await self._store(space_id, card)
-        # A first card, or the same card again, is also the household's
-        # "I am seated": its snapshot is sent again (one that arrived before
-        # it held the space is not lost) — at most once per
-        # :data:`HELLO_RESNAPSHOT_S` per household and space. A NEWER card
-        # (a rotation) is only a delta.
-        key = (space_id, sender)
+        # A first card, or the same card again, is the household's "I am
+        # seated": it gets a snapshot (at most once per
+        # :data:`HELLO_RESNAPSHOT_S`). A NEWER card (a rotation) is only a
+        # delta.
+        snapshot_to = (
+            {sender}
+            if (old is None or not changed) and self._may_resnapshot(space_id, sender)
+            else set()
+        )
+        await self.reconcile(
+            space_id, changed=[card] if changed else [], snapshot_to=snapshot_to
+        )
+
+    def _may_resnapshot(self, space_id: str, instance_id: str) -> bool:
+        key = (space_id, instance_id)
         now = self._clock()
-        doc = await self._doc(space_id, sender)
-        dirty = doc.get("hello") is not True
-        # Its first card is its "seated": only now does it get a snapshot
-        # (one sent earlier could beat its seat and be dropped).
-        doc["hello"] = True
-        if (old is None or not changed) and (
-            now - self._hello_at.get(key, float("-inf")) >= HELLO_RESNAPSHOT_S
+        if now - self._hello_at.get(key, float("-inf")) < HELLO_RESNAPSHOT_S:
+            return False
+        self._hello_at[key] = now
+        return True
+
+    async def directory_seq(self, space_id: str, host_id: str) -> int | None:
+        """The ``dir_seq`` of *space_id*'s directory we hold — what our §25.6
+        ``SPACE_SYNC_BEGIN`` to its host echoes — or ``None`` when we do not
+        sync it with that household (not its host, or a v_88-less host)."""
+        if host_id != await self.host_of(space_id) or host_id == self._instance_id:
+            return None
+        seq = (await self._doc(space_id, host_id)).get("dir_seq")
+        return seq if _is_count(seq) else 0
+
+    async def on_sync_begin(self, event: FederationEvent) -> None:
+        """Host side of the repair: a member household's periodic §25.6
+        ``SPACE_SYNC_BEGIN`` echoes the ``dir_seq`` it holds; one behind ours
+        (a lost delta, a snapshot that raced its seat, a fresh joiner at 0)
+        gets one bounded snapshot. No echo → nothing (an older member)."""
+        p = event.payload if isinstance(event.payload, dict) else {}
+        echo = p.get("dir_seq")
+        space_id = str(event.space_id or p.get("space_id") or "")
+        sender = event.from_instance
+        if not _is_count(echo) or not space_id or not sender:
+            return
+        if await self.host_of(space_id) != self._instance_id:
+            return
+        if sender not in await self._recipients(space_id):
+            return
+        own_doc = await self._doc(space_id, self._instance_id)
+        mine = await self.card_of(space_id, sender)
+        key = "dir_seq" if mine is not None and mine.mailbox else "dir_seq_mbx"
+        current = own_doc.get(key)
+        if (
+            _is_count(current)
+            and echo < current
+            and self._may_resnapshot(space_id, sender)
         ):
-            self._hello_at[key] = now
-            dirty = doc.pop("snap", None) is not None or dirty
-        if dirty:
-            await self._put(space_id, sender, doc)
-        await self.reconcile(space_id, changed=[card] if changed else [])
+            await self.reconcile(space_id, snapshot_to={sender})
 
     async def _recipients(self, space_id: str) -> list[str]:
         """Writer-seat member households at v_89 (never a follower)."""
@@ -618,13 +694,20 @@ class SpaceMemberDirectory:
         return result.attempted > 0 and not result.terminal_failures
 
     async def reconcile(
-        self, space_id: str, *, changed: list[MemberCard] | None = None
+        self,
+        space_id: str,
+        *,
+        changed: list[MemberCard] | None = None,
+        snapshot_to: set[str] | None = None,
     ) -> None:
-        """Bring every writer-seat household's directory of *space_id* (a
-        space we host) up to date: a snapshot to one that has none of the
-        kind it needs, a delta of *changed* cards (and of our own card when
-        it moved, and of households that left the directory) to the rest.
-        Nothing at all while no card of the space carries a mailbox."""
+        """Bring the directory of *space_id* (a space we host) up to date:
+        a delta of *changed* cards (and of our own card when it moved, and
+        of households that left it) to every writer-seat household, under a
+        new ``dir_seq``; and one snapshot to each household in
+        *snapshot_to*. Nothing at all while no card of the space carries a
+        mailbox. Delivery is not tracked per household: one that missed a
+        delta is behind on ``dir_seq`` at its next §25.6 sync and gets a
+        snapshot then (:meth:`on_sync_begin`)."""
         if self._federation is None:
             return
         if await self.host_of(space_id) != self._instance_id:
@@ -648,45 +731,54 @@ class SpaceMemberDirectory:
         delta = {c.instance_id: c for c in changed or [] if c.instance_id in listed}
         if own_doc.get("own_rev") != own.rev:
             delta[self._instance_id] = own
-        for to in recipients:
-            doc = await self._doc(space_id, to)
-            mine = cards.get(to)
-            want = SNAP_ALL if mine is not None and mine.mailbox else SNAP_MAILBOXES
-            if doc.get("snap") not in (SNAP_ALL, SNAP_MAILBOXES) and not doc.get(
-                "hello"
-            ):
-                continue  # not seated yet as far as we know: its card first
-            if doc.get("snap") not in (SNAP_ALL, SNAP_MAILBOXES) or (
-                doc.get("snap") == SNAP_MAILBOXES and want == SNAP_ALL
-            ):
-                await self._send_snapshot(space_id, to, listed, want=want)
-                continue
-            out = [
-                c
-                for i, c in delta.items()
-                if i != to
-                and (
-                    doc.get("snap") == SNAP_ALL
-                    or c.mailbox is not None
-                    or (space_id, i) in lost
-                )
-            ]
-            if out or removed:
-                await self._send(space_id, to, out, removed=removed)
-        own_doc = await self._doc(space_id, self._instance_id)
+        # What a household given mailbox cards only must hear: a mailbox
+        # card, a card that just lost its mailbox, a removal.
+        for_mbx = [
+            c
+            for c in delta.values()
+            if c.mailbox is not None or (space_id, c.instance_id) in lost
+        ]
+        seq = _count(own_doc.get("dir_seq"))
+        if delta or removed:
+            seq = max(seq + 1, int(self._wall_clock() * 1000))
+            own_doc["dir_seq"] = seq
+            if for_mbx or removed or not _is_count(own_doc.get("dir_seq_mbx")):
+                own_doc["dir_seq_mbx"] = seq
         own_doc["listed"] = sorted(listed)
         own_doc["own_rev"] = own.rev
         await self._put(space_id, self._instance_id, own_doc)
+        for to in recipients:
+            mine = cards.get(to)
+            everything = mine is not None and mine.mailbox is not None
+            if to in (snapshot_to or set()):
+                await self._send_snapshot(space_id, to, listed, seq, everything)
+                continue
+            out = [
+                c
+                for c in (delta.values() if everything else for_mbx)
+                if c.instance_id != to
+            ]
+            if out or removed:
+                await self._send(space_id, to, out, removed=removed, dir_seq=seq)
 
     async def _send_snapshot(
-        self, space_id: str, to: str, listed: dict[str, MemberCard], *, want: str
+        self,
+        space_id: str,
+        to: str,
+        listed: dict[str, MemberCard],
+        seq: int,
+        everything: bool,
     ) -> None:
+        """The whole directory to *to*: every listed household's id
+        (``members``), and the cards it needs (all, or only those with a
+        mailbox), mailbox cards first, at most :data:`SNAPSHOT_MAX`, in
+        parts that fit the GFS relay — all under one ``dir_seq``."""
+        members = sorted(i for i in listed if i != to)[:SNAPSHOT_MAX]
         picked = [
             c
             for i, c in sorted(listed.items())
-            if i != to and (want == SNAP_ALL or c.mailbox is not None)
+            if i != to and (everything or c.mailbox is not None)
         ]
-        # Mailbox cards first: they are what a member needs to reach anyone.
         picked.sort(key=lambda c: c.mailbox is None)
         if len(picked) > SNAPSHOT_MAX:
             log.warning(
@@ -695,19 +787,15 @@ class SpaceMemberDirectory:
                 SNAPSHOT_MAX,
             )
             picked = picked[:SNAPSHOT_MAX]
-        # In parts that fit the GFS relay. Only a snapshot in ONE part is
-        # authoritative at the receiver (it clears cards it no longer lists);
-        # a longer one only adds, and later deltas carry the removals.
         parts = [
             picked[i : i + SNAPSHOT_PART_MAX]
             for i in range(0, len(picked), SNAPSHOT_PART_MAX)
         ] or [[]]
         for part in parts:
-            if not await self._send(space_id, to, part, snapshot=len(parts) == 1):
+            if not await self._send(
+                space_id, to, part, snapshot=True, members=members, dir_seq=seq
+            ):
                 return
-        doc = await self._doc(space_id, to)
-        doc["snap"] = want
-        await self._put(space_id, to, doc)
 
     async def on_own_change(self) -> None:
         """Our mailboxes changed (minted, released, rotated): every space we
@@ -723,16 +811,31 @@ class SpaceMemberDirectory:
 
     async def sweep_once(self) -> None:
         """The backstop (each mailbox sweep tick): every space we host with
-        cards is reconciled (newcomers, leavers, our own card), and our card
-        reaches every other space's host that lacks it."""
+        cards is reconciled (newcomers, leavers, our own card); a space we
+        left or that was dissolved drops its directory (cards, rows, seats);
+        and our card reaches every other space's host that lacks it."""
         spaces = sorted({space for (space, _i) in await self._rows()})
         for space_id in spaces:
             try:
-                if await self.host_of(space_id) == self._instance_id:
+                if not await self._in_use(space_id):
+                    await self._forget_space(space_id)
+                elif await self.host_of(space_id) == self._instance_id:
                     await self.reconcile(space_id)
             except Exception:
                 log.warning("directory: reconcile failed", exc_info=True)
         await self.publish_cards()
+
+    async def _forget_space(self, space_id: str) -> None:
+        """A space we left, or that was dissolved (here or by its remote
+        host): every household carded in it loses its card, its row and
+        — once no shared space is left — its seat (the host's own row is
+        the roster's to drop)."""
+        host = await self.host_of(space_id)
+        for inst in sorted(await self._space_cards(space_id)):
+            if inst == host:
+                await self._clear(space_id, inst)
+            else:
+                await self._forget(space_id, inst)
 
     # ── Transport + inbound ──────────────────────────────────────────────
 

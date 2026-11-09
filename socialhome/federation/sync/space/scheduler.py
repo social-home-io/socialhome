@@ -158,6 +158,7 @@ class SpaceSyncScheduler:
         "_bus",
         "_deferred_attempts",
         "_deferred_tasks",
+        "_directory_echo",
         "_drain_timers",
         "_federation",
         "_federation_repo",
@@ -227,6 +228,8 @@ class SpaceSyncScheduler:
         self._authority_echo: Callable[[str, str], Awaitable[dict | None]] | None = None
         #: Roster echo builder (see :meth:`attach_roster_echo`).
         self._roster_echo: Callable[[str, str], Awaitable[dict | None]] | None = None
+        #: v_89 member directory version echo (see :meth:`attach_directory_echo`).
+        self._directory_echo: Callable[[str, str], Awaitable[int | None]] | None = None
         #: ``(space_id, provider)`` → deferred retries since it last completed.
         self._deferred_attempts: dict[tuple[str, str], int] = {}
         #: Pending deferred-retry waits (they end on ``_stop``).
@@ -261,6 +264,16 @@ class SpaceSyncScheduler:
         a BEGIN to that household carries, or ``None``
         (``SpaceAuthorityRotationService.authority_epoch_echo``, v_46)."""
         self._authority_echo = echo
+
+    def attach_directory_echo(
+        self, echo: Callable[[str, str], Awaitable[int | None]]
+    ) -> None:
+        """``echo(space_id, to_instance_id)`` → the ``dir_seq`` of the
+        space's member directory we hold, carried by a BEGIN to the space's
+        host (v_89, ``SpaceMemberDirectory.directory_seq``): a host that is
+        ahead answers with one snapshot, so a lost directory delta is
+        repaired by this periodic sync. ``None`` → not sent."""
+        self._directory_echo = echo
 
     def attach_roster_echo(
         self, echo: Callable[[str, str], Awaitable[dict | None]]
@@ -665,6 +678,14 @@ class SpaceSyncScheduler:
             roster_echo = await self._roster_echo_for(space_id, peer_instance_id)
             if roster_echo is not None:
                 payload["roster_echo"] = roster_echo
+            if self._directory_echo is not None:
+                try:
+                    dir_seq = await self._directory_echo(space_id, peer_instance_id)
+                except Exception:
+                    log.debug("directory echo failed", exc_info=True)
+                    dir_seq = None
+                if dir_seq is not None:
+                    payload["dir_seq"] = dir_seq
             echo = await self._echo_for(space_id, peer_instance_id)
             if echo is not None:
                 payload["authority_epoch_echo"] = echo
