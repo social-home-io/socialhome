@@ -7676,6 +7676,22 @@ def cmd_gfs_relay_media() -> None:
         cmd_gfs_up(env_extra=env_extra)
         _wait_for_gfs_ws_since(a_iid, offset=offset, timeout=90.0)
         _wait_for_gfs_ws_since(e_iid, offset=offset, timeout=90.0)
+        # v_88: the pair's two mailbox claims come back too — each after its
+        # own 0-60 s jitter — before anything is sent (a queued media frame
+        # is drained without a log line the check below could read).
+        deadline = time.time() + 150.0
+        while time.time() < deadline:
+            claims = _gfs_log_lines_matching(
+                "gfs.ws.register: instance=<mailbox>", offset=offset
+            )
+            if len(claims) >= 2:
+                break
+            time.sleep(1.0)
+        else:
+            raise SystemExit(
+                f"{step}: the pair's mailbox claims did not come back within "
+                "150 s of the GFS restart"
+            )
 
     _restart({"GFS_SPACE_MEDIA_MAX_BYTES": "0"})
     try:
@@ -7743,8 +7759,15 @@ def cmd_gfs_relay_media() -> None:
         pushed = _gfs_log_lines_matching(
             "media delivered to live socket <mailbox>", offset=gfs_off
         )
-        drained = _gfs_log_lines_matching("to <mailbox>", offset=gfs_off)
-        if not pushed and not any("drained" in line for line in drained):
+        # A frame queued while e's claim was reconnecting (each claim waits
+        # its own 0-60 s after the GFS restart) is drained later; the GFS
+        # logs a drain as ``to <recipient>`` (it never names a mailbox).
+        drained = [
+            line
+            for line in _gfs_log_lines_matching("drained", offset=gfs_off)
+            if "<mailbox>" in line or "<recipient>" in line
+        ]
+        if not pushed and not drained:
             raise SystemExit(
                 f"{step}: the GFS logged no binary media frame for e's mailbox — "
                 "the bytes did not ride the relay"
