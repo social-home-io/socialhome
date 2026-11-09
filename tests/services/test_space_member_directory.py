@@ -995,16 +995,23 @@ def _begin(sender: dict, to: str, dir_seq: int) -> FederationEvent:
 
 
 async def test_the_host_answers_a_joiner_seated_by_link_at_once():
-    """Finding 1: a joiner's card can reach the host before the host's row
-    exists and be dropped — the seat card stored at commit answers it."""
+    """Finding 1: the joiner's "seated" card can reach the host before the
+    host's seat row exists (the commit follows the ACK). It is kept aside
+    and answered when the seat's card is stored at commit; without it, no
+    snapshot goes at commit (one then could beat the joiner's own seat)."""
     w = World()
-    j, a = _hh(), _hh()
-    w.member(j, a)
+    j, a, k = _hh(), _hh(), _hh()
+    w.member(a)
     w.spaces.put_card(SPACE, _card(a, gfs=GFS))
-    w.writers.writers[SPACE] = {j["id"], a["id"]}
+    w.writers.writers[SPACE] = {j["id"], a["id"], k["id"]}
+    await w.card_from(j, _card(j, gfs=GFS))  # before the row: kept aside
+    assert w.fed.to(j["id"]) == []
+    w.member(j, k)
     await w.dir.store_seat_card(SPACE, _card(j, gfs=GFS))
     (snap,) = [d for d in w.fed.to(j["id"]) if d["payload"].get("snapshot")]
     assert _ids(snap) == {a["id"], w.me["id"]}
+    await w.dir.store_seat_card(SPACE, _card(k, gfs=GFS))
+    assert [d for d in w.fed.to(k["id"]) if d["payload"].get("snapshot")] == []
 
 
 async def test_a_member_behind_on_dir_seq_gets_a_snapshot_on_its_sync():

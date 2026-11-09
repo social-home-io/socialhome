@@ -76,6 +76,8 @@ SNAPSHOT_MAX: int = 500
 #: Most cards one directory envelope carries: ~0.7 KiB a card, so a part
 #: stays well inside the GFS relay's envelope cap (~191 KiB).
 SNAPSHOT_PART_MAX: int = 150
+#: "Seated" cards kept aside until their seat row exists, at most.
+EARLY_HELLO_MAX: int = 1000
 #: A household's "seated" card re-sends its snapshot at most this often.
 HELLO_RESNAPSHOT_S: float = 600.0
 #: Most households one directory delta may remove (and a receiver takes).
@@ -136,6 +138,7 @@ class SpaceMemberDirectory:
 
     __slots__ = (
         "_clock",
+        "_early_hello",
         "_federation",
         "_federation_repo",
         "_hello_at",
@@ -185,6 +188,9 @@ class SpaceMemberDirectory:
         #: (space, household) → when its last "seated" card re-sent its
         #: snapshot (:data:`HELLO_RESNAPSHOT_S`).
         self._hello_at: dict[tuple[str, str], float] = {}
+        #: (space, household) whose "seated" card arrived before its seat
+        #: row (:meth:`store_seat_card` answers it).
+        self._early_hello: set[tuple[str, str]] = set()
         #: (space, household) whose stored card just lost its mailbox.
         self._lost_mailbox: set[tuple[str, str]] = set()
         mailboxes.attach_needed(self.needed_gfs)
@@ -408,10 +414,17 @@ class SpaceMemberDirectory:
         try:
             await self._store(space_id, card)
             if await self.host_of(space_id) == self._instance_id:
-                # The joiner's first snapshot now (it may race the seat and
-                # be dropped: its first sync, behind on ``dir_seq``, repairs).
+                # Its "seated" card came before our seat row (the commit
+                # follows the ACK) and was kept aside: it is answered now. No
+                # snapshot otherwise — one sent now could beat the joiner's
+                # own seat; its card, or its first sync behind on
+                # ``dir_seq``, asks for one.
+                early = (space_id, card.instance_id) in self._early_hello
+                self._early_hello.discard((space_id, card.instance_id))
                 await self.reconcile(
-                    space_id, changed=[card], snapshot_to={card.instance_id}
+                    space_id,
+                    changed=[card],
+                    snapshot_to={card.instance_id} if early else set(),
                 )
         except Exception:
             log.warning("directory: storing a seat card failed", exc_info=True)
@@ -603,6 +616,11 @@ class SpaceMemberDirectory:
         if not space_id or await self.host_of(space_id) != self._instance_id:
             return
         if sender not in await self._spaces.list_member_instances(space_id):
+            # A joiner's "seated" card can beat our seat row (the commit
+            # follows the ACK): kept aside, answered when the seat's card is
+            # stored (:meth:`store_seat_card`). Bounded.
+            if len(self._early_hello) < EARLY_HELLO_MAX:
+                self._early_hello.add((space_id, sender))
             return
         raw = event.payload.get("card") if isinstance(event.payload, dict) else None
         try:

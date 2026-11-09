@@ -822,8 +822,10 @@ host-signed).
   household with a mailbox gets every writer's card; one without, only the
   cards that carry a mailbox.
 - **When a snapshot goes:** to a household whose card ("seated") arrives
-  (at most every 10 min), to a joiner when its seat card is stored at
-  commit, and — the **repair** — on the existing periodic §25.6 incremental
+  (at most every 10 min; a joiner's card that beats the host's seat row —
+  the commit follows the ACK — is kept aside and answered at commit; no
+  snapshot is sent at commit otherwise, as it could beat the joiner's own
+  seat), and — the **repair** — on the existing periodic §25.6 incremental
   sync: the member's `SPACE_SYNC_BEGIN` to the host echoes its `dir_seq`
   (an additive BEGIN field; the sync stream itself is unchanged, so no
   `SYNC_RECORD_LINES` entry); a host whose version is newer answers with one
