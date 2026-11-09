@@ -755,10 +755,12 @@ mailboxes hit by the same fan-out bursts (that space's member set); that
 is the accepted residual.
 
 **Who owns one.** A household holds a mailbox at a GFS while a space it is
-in is reached through that GFS: it holds a `space_session` seat whose relay
-is that GFS (a link-joined member, or a host with link-joined members), or
-a member card of the space names a mailbox there (it sends to it, so it can
-be answered). A household with no connection to that GFS has none. Gated on
+in reaches it through that GFS: it holds a sealed-redeem `space_session`
+seat whose relay is that GFS (a link-joined member, or a host with
+link-joined members). A household that reaches the space otherwise (paired
+or mesh) owns none: it is reached through the host hop. A mailbox another
+member's card names never keeps ours alive, so two members' mailboxes
+cannot hold each other open after the GFS-only member leaves. Gated on
 `FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH` (v_89), slug
 `mailbox_member_mesh`. Not space-scoped, no sync-stream change.
 
@@ -786,9 +788,11 @@ can withhold or drop a card, never forge or alter one.
 **Getting the card to the host.** In the sealed redeem (joiner → host) and
 ACK (host → joiner), as `card`; a card there may name a mailbox only at the
 GFS the body came through. After every redeem the joiner also sends
-`SPACE_MEMBER_CARD` once: it doubles as "seated — send my directory", so a
-snapshot that raced the seat is sent again. A member sends its card again
-only when its `rev` moves.
+`SPACE_MEMBER_CARD` once: a first or repeated card doubles as "seated —
+send my directory", so a snapshot that raced the seat is sent again (at
+most every 10 min per household); a newer card is only a delta. A member
+sends its card again only when its `rev` moves; a send queued in the outbox
+for an offline host counts as sent.
 
 **The member directory.** The host passes the cards on as
 `SPACE_MAILBOX_DIRECTORY {cards, removed, snapshot}` (routing `space_id`,
@@ -797,12 +801,15 @@ v_89 (`only_instances`), never to followers. Receivers take it from the
 space's host only (the §24.11 envelope is host-signed).
 
 - A newcomer gets one snapshot, at most `SNAPSHOT_MAX` = 500 cards, mailbox
-  cards first. A household with a mailbox gets every writer's card (it
+  cards first, in parts of at most `SNAPSHOT_PART_MAX` = 150 (≈ 105 KiB, well
+  inside the relay's envelope cap); only a one-part snapshot clears cards it
+  no longer lists. A household with a mailbox gets every writer's card (it
   checks every sender against them); one without gets only the cards that
   carry a mailbox (all it can use).
 - After that, deltas: a changed card (a card without a mailbox only to
-  households with one), and `removed` for a household that left the
-  directory (left, removed, or no longer a writer).
+  households with one — unless it just lost its mailbox), and `removed` for
+  a household that left the directory (left, removed, or no longer a
+  writer).
 - Triggers: a card received, a seat that goes live or ends in a space we
   host, and the ~10 min sweep (role changes, our own card).
 - Nothing is sent while no card of the space carries a mailbox.
@@ -830,12 +837,17 @@ may send or be forwarded a `SPACE_ROUTED` in exactly this shape: three
 hops, the routing space's host in the middle, and both ends carded on the
 host (the other end on an end). Anything else from that peer class is
 dropped (`federation/host_hop.py`, `SpaceRoutedHandler._touches_seat`).
+The inner event must be one the seat may send directly
+(`SPACE_SESSION_ALLOWED_EVENT_TYPES`): the hop never widens a seat's
+vocabulary. The routing `space_id` is re-signed by the host on its leg, so
+an inner payload that names another space than the route is dropped.
 
 **Receiving.** A frame on our mailbox is opened with the mailbox key and
 goes through the unchanged §24.11 pipeline with transport `gfs_mailbox`.
 `make_check_mailbox_sender` (straight after the parse) takes an envelope of
 a space only from a sender that is a member household of that space by our
-roster and whose verified card we hold; a space-less `SPACE_*` envelope is
+roster and whose verified card we hold for THAT space (only the space's
+host may present another space's card); a space-less `SPACE_*` envelope is
 refused on a mailbox (those go instance-addressed). Rights do not grow:
 every handler still runs `check_space_writer`, and other people's rows come
 only from the host or a delegated admin.
@@ -845,9 +857,11 @@ unregistered after its own 2–15 min delay. A GFS that forgot it gets the
 same mailbox registered again from a cached ticket; one that refuses it 3
 times, or a flood (≥ 500 frames dropped by its inbound budget in a day,
 e.g. a removed member that still knows the address), gets a fresh
-generation, at most once a day. Every change moves the card `rev`; the new
-card reaches every space at the next sweep (to each host, which passes it
-on), never in the same tick as the anonymous register.
+generation, at most once a day. A plain rotation keeps the old address
+delivering until its own release delay is over (a flooded one drops at
+once). Every change moves the card `rev`: spaces we host get the new card
+as a delta at once; the hosts of our other spaces get it at the next sweep,
+never in the same tick as the anonymous register.
 
 **Losses and recovery.** Frames to a mailbox that is offline wait in the
 GFS queue (24 h TTL, tail-drop). Since v_89 that queue is the household's
@@ -867,7 +881,7 @@ redeem seat is one). Helper and media recovery are PR 4.
 | Per envelope | The same bytes as before (same buckets) |
 | Sockets / tickets | One claim socket and one ticket per household per GFS — not per space, not per pair |
 | A household in 10 spaces through one GFS | 1 socket, 1 ticket, 1 queue (2000 / 32 MiB); 10 cards (~0.7 KiB each, one per host) |
-| A join (global space, N = 200 writers, G = 200 GFS-only) | Redeem + ACK carry one card each; one `SPACE_MEMBER_CARD`; snapshot ≤ 200 × ~0.7 KiB ≈ 140 KiB to the newcomer (up to 2 when the first races the seat); a ~0.7 KiB delta to each of 199 households ≈ 140 KiB |
+| A join (global space, N = 200 writers, G = 200 GFS-only) | Redeem + ACK carry one card each; one `SPACE_MEMBER_CARD`; snapshot ≤ 200 × ~0.7 KiB ≈ 140 KiB in 2 parts to the newcomer (up to 2 snapshots when the first races the seat); a ~0.7 KiB delta to each of 199 households ≈ 140 KiB |
 | Rollout of that space | G × N cards ≈ 200 × 200 × 0.7 KiB ≈ 28 MB once (every GFS-reached household needs every writer's card) |
 | One non-host calendar event, host offline | 199 × one ~4 KiB frame ≈ 800 KB uplink from the author, 199 GFS pushes, followers 0 |
 | A removal | `removed` to 199 households, a few bytes each; no rotation |
