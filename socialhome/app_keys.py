@@ -168,8 +168,9 @@ gfs_connection_repo_key: AppKey = AppKey("gfs_connection_repo")
 #: The owner's choice of GFSs for a global space + the members' signed list.
 gfs_server_selection_service_key: AppKey = AppKey("gfs_server_selection_service")
 gfs_ws_supervisor_key: AppKey = AppKey("gfs_ws_supervisor")
-#: v_88 — this household's per-space GFS mailboxes.
+#: v_89 — this household's GFS mailboxes (one per GFS) and member directory.
 space_mailbox_service_key: AppKey = AppKey("space_mailbox_service")
+space_member_directory_key: AppKey = AppKey("space_member_directory")
 startup_announcer_key: AppKey = AppKey("startup_announcer")
 #: v_53 shared-GFS route discovery — ``probe_peer`` after a pairing confirm.
 gfs_route_discovery_key: AppKey = AppKey("gfs_route_discovery")

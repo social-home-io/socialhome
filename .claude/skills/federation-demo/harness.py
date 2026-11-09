@@ -744,7 +744,8 @@ def _spawn(label: str, port: int, *, extra_env: dict | None = None) -> int:
         **os.environ,
         "SH_MODE": "standalone",
         "SH_CONFIG": str(d / "socialhome.toml"),
-        "SH_LOG_LEVEL": "INFO",
+        # ``SH_DEMO_LOG_LEVEL=DEBUG`` for an investigation run.
+        "SH_LOG_LEVEL": os.environ.get("SH_DEMO_LOG_LEVEL", "INFO"),
     }
     if extra_env:
         env.update(extra_env)
@@ -1427,10 +1428,10 @@ def _gfs_cluster_mailbox_tickets(urls: list[str]) -> None:
             ticket = tickets._tickets[-1]
             spent.append(b64url_encode(ticket))
             root = new_mailbox_root()
-            first = derive_mailbox_keys(root, gfs_id, "ticket-space-1", 0)
+            first = derive_mailbox_keys(root, gfs_id, 786800)
             await register_mailbox(http, urls[1], first, gfs_id, tickets=tickets)
             print("  a ticket from node 0 registered a new mailbox on node 1 ✓")
-            second = derive_mailbox_keys(root, gfs_id, "ticket-space-2", 0)
+            second = derive_mailbox_keys(root, gfs_id, 937300)
             body = build_register_body(second, gfs_id, ticket=ticket)
             async with http.post(f"{urls[0]}/gfs/mailbox/register", json=body) as r:
                 err = (await r.json()).get("error")
@@ -1484,7 +1485,7 @@ def _gfs_cluster_mailboxes(urls: list[str]) -> None:
         raise SystemExit(f"gfs-cluster: /gfs/info has no envelope_mailbox → {code}")
     gfs_id = info["gfs_instance_id"]
     household = _gfs_cluster_register(urls[0], "tickets")
-    keys = derive_mailbox_keys(new_mailbox_root(), gfs_id, "demo-space", 0)
+    keys = derive_mailbox_keys(new_mailbox_root(), gfs_id, 413420)
     sealed = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "bWFpbGJveA"}
 
     async def _post(http: aiohttp.ClientSession, *, json=None, data=None) -> None:
@@ -1607,7 +1608,7 @@ def _gfs_cluster_mailbox_other_id(all_urls: list[str]) -> None:
         else:
             raise SystemExit("gfs-cluster: the extra node never joined the cluster")
         time.sleep(2.0)
-        keys = derive_mailbox_keys(new_mailbox_root(), id_0, "demo-space-x", 0)
+        keys = derive_mailbox_keys(new_mailbox_root(), id_0, 849570)
         household = _gfs_cluster_register(all_urls[0], "tickets")
         sealed = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "b3RoZXItaWQ"}
 
@@ -7166,50 +7167,44 @@ def _assert_moderator_seat(label: str, inst: dict, space_id: str) -> None:
 # ─── Step: gfs-invite-link-content ─────────────────────────────────────────
 
 
+def _card_on(label: str, space_id: str, instance_id: str) -> dict | None:
+    """The member card *label* holds for *instance_id* in *space_id* (v_89:
+    ``space_instances.mailbox`` JSON ``{"card": …}``), or ``None``."""
+    rows = _rows(
+        label,
+        "SELECT mailbox FROM space_instances WHERE space_id = ? AND instance_id = ?",
+        (space_id, instance_id),
+    )
+    if not rows or not rows[0][0]:
+        return None
+    card = json.loads(rows[0][0]).get("card")
+    return card if isinstance(card, dict) else None
+
+
 def _gfs_invite_mailboxes(state: dict, space_id: str) -> tuple[str, str]:
-    """v_88 — both sides of the link-joined pair hold a per-space mailbox
-    entry for the other, both mailboxes are registered and claimed at the
-    GFS, and neither is an instance id. Returns ``(e's mailbox id, a's)``."""
+    """v_89 — the link-joined pair each hold the other's signed member card,
+    each naming that household's ONE mailbox at the GFS (registered and
+    claimed), never an instance id. Returns ``(e's mailbox id, a's)``."""
     a = state["instances"]["a"]
     e = state["instances"]["e"]
     deadline = time.time() + 30
-    a_rows: list = []
-    e_rows: list = []
+    on_a = on_e = None
     while time.time() < deadline:
-        a_rows = _rows(
-            "a",
-            "SELECT mailbox FROM space_instances WHERE space_id = ? "
-            "AND instance_id = ?",
-            (space_id, e["instance_id"]),
-        )
-        e_rows = _rows(
-            "e",
-            "SELECT mailbox FROM space_instances WHERE space_id = ? "
-            "AND instance_id = ?",
-            (space_id, a["instance_id"]),
-        )
-        if a_rows and a_rows[0][0] and e_rows and e_rows[0][0]:
+        on_a = _card_on("a", space_id, e["instance_id"])
+        on_e = _card_on("e", space_id, a["instance_id"])
+        if on_a and on_a.get("mailbox") and on_e and on_e.get("mailbox"):
             break
         time.sleep(0.5)
     else:
         raise SystemExit(
-            "gfs-invite-link-content: no per-space mailbox on the seat "
-            f"(a: {a_rows!r}, e: {e_rows!r}) — v_88 mailboxes were not minted.",
+            "gfs-invite-link-content: no member card with a mailbox on the seat "
+            f"(a holds {on_a!r}, e holds {on_e!r}) — v_89 mailboxes were not minted.",
         )
-    on_a = json.loads(a_rows[0][0])
-    on_e = json.loads(e_rows[0][0])
-    if not (on_a.get("peer") and on_a.get("own") and on_e.get("peer") and on_e.get("own")):
-        raise SystemExit(
-            f"gfs-invite-link-content: a half-built mailbox pair: a={on_a!r} e={on_e!r}",
-        )
-    e_mailbox = on_a["peer"]["mailbox_id"]
-    a_mailbox = on_e["peer"]["mailbox_id"]
-    if on_a["peer"]["instance_id"] != e["instance_id"] or on_e["peer"]["instance_id"] != a["instance_id"]:
-        raise SystemExit("gfs-invite-link-content: a mailbox entry names the wrong household")
-    if e_mailbox in (e["instance_id"], a["instance_id"]) or a_mailbox in (
-        e["instance_id"],
-        a["instance_id"],
-    ):
+    if on_a["instance_id"] != e["instance_id"] or on_e["instance_id"] != a["instance_id"]:
+        raise SystemExit("gfs-invite-link-content: a member card names the wrong household")
+    e_mailbox = on_a["mailbox"]["mailbox_id"]
+    a_mailbox = on_e["mailbox"]["mailbox_id"]
+    if {e_mailbox, a_mailbox} & {e["instance_id"], a["instance_id"]}:
         raise SystemExit("gfs-invite-link-content: a mailbox id equals an instance id")
     deadline = time.time() + 30
     claimed: list = []
@@ -7227,7 +7222,7 @@ def _gfs_invite_mailboxes(state: dict, space_id: str) -> tuple[str, str]:
             "gfs-invite-link-content: the GFS holds "
             f"{len(claimed)} of the 2 mailboxes registered and claimed.",
         )
-    print("  e and a each minted, registered and claimed a mailbox for the space ✓")
+    print("  e and a each minted, registered and claimed ONE mailbox ✓")
     return e_mailbox, a_mailbox
 
 
@@ -7277,9 +7272,9 @@ def cmd_gfs_invite_link_content() -> None:
     a_base = f"http://127.0.0.1:{a['port']}"
     e_base = f"http://127.0.0.1:{e['port']}"
 
-    # 0. v_88 — e reaches this space only through the GFS, so the seat
-    #    minted, registered and claimed a per-space mailbox on both sides,
-    #    and each side holds the other's signed entry.
+    # 0. v_89 — e reaches this space only through the GFS, so both sides
+    #    minted, registered and claimed their ONE mailbox at the GFS, and
+    #    each holds the other's signed member card naming it.
     e_mailbox, a_mailbox = _gfs_invite_mailboxes(state, space_id)
 
     gfs_off = _gfs_log_size()
@@ -7322,7 +7317,7 @@ def cmd_gfs_invite_link_content() -> None:
             "— the post did not arrive byte-identical.",
         )
 
-    # 2. It really went through the relay — to e's MAILBOX (v_88): the GFS
+    # 2. It really went through the relay — to e's MAILBOX (v_89): the GFS
     #    delivered envelopes to a mailbox in that window and logged e's
     #    instance id on none of them. (The GFS logs a mailbox as
     #    ``<mailbox>`` and never its id; the blob is opaque.)
@@ -7332,7 +7327,7 @@ def cmd_gfs_invite_link_content() -> None:
     if not to_mailbox:
         raise SystemExit(
             "gfs-invite-link-content: the GFS delivered nothing to a mailbox "
-            "while a's post reached e — the v_88 mailbox was not used. Check "
+            "while a's post reached e — the v_89 mailbox was not used. Check "
             f"{GFS_DIR / 'log.txt'}.",
         )
     if to_e:
@@ -7375,12 +7370,12 @@ def cmd_gfs_invite_link_content() -> None:
             f"expected {reply!r}",
         )
     print("  a received e's reply over the relay ✓")
-    # v_88 — the reply rode a's mailbox for the space too.
+    # v_89 — the reply rode a's mailbox too.
     reply_lines = _gfs_log_lines_matching("gfs.envelope:", offset=gfs_off)
     if [line for line in reply_lines if a["instance_id"] in line]:
         raise SystemExit(
             "gfs-invite-link-content: the GFS logged a's instance id for the "
-            "reply — e should address a's mailbox for this space.",
+            "reply — e should address a's mailbox.",
         )
 
     # 4. An epoch rotation must re-key a link-joined member too.
@@ -7632,6 +7627,193 @@ def _picture_via_gfs_media_cache(
     return filename
 
 
+# ─── Step: gfs-member-mesh ─────────────────────────────────────────────────
+
+
+@_offline_step
+def cmd_gfs_member_mesh() -> None:
+    """v_89 — any member reaches a GFS-only member, with the host offline.
+
+    Prereqs: the gfs chain through ``gfs-invite-link-content`` (e holds a
+    link-joined seat in a's global space; a, d and e are clients of the GFS).
+
+    1. d (paired with a) joins a's space with an ``internal`` link.
+    2. The host's member directory reaches both: d holds e's member card
+       (naming e's ONE mailbox) and a lazy ``space_session`` seat for e with
+       no address of its own; e holds d's card (it checks every sender on
+       its mailbox against the cards it holds). The directory flags e as
+       GFS-reached, so d — connected to that GFS — mints its OWN household
+       mailbox there and its card (naming it) reaches e through the host.
+    3. a goes OFFLINE. d — a non-host member — creates a calendar event in
+       the space; e must show it. No host involved: d's fan-out reached e's
+       mailbox directly. Then e creates one and d must show it: e's fan-out
+       reached d's mailbox, no host hop.
+    4. The GFS log over that window shows mailbox deliveries; no envelope or
+       mailbox line names an instance id or the space, and no line names
+       e's mailbox id.
+    """
+    state = _load()
+    space_id = (state or {}).get("gfs_invite_space_id")
+    if not state or not _gfs_alive(state) or not space_id:
+        raise SystemExit("run the gfs chain through 'gfs-invite-link-content' first")
+    a = state["instances"]["a"]
+    d = state["instances"]["d"]
+    e = state["instances"]["e"]
+    a_base = f"http://127.0.0.1:{a['port']}"
+    d_base = f"http://127.0.0.1:{d['port']}"
+    e_base = f"http://127.0.0.1:{e['port']}"
+    step = "gfs-member-mesh"
+
+    # 1. d joins with an internal link (d is paired with a).
+    s, link = _request(
+        f"{a_base}/api/spaces/{space_id}/invite-tokens",
+        token=a["token"],
+        method="POST",
+        body={"role": "member", "uses": 1, "via": "internal"},
+    )
+    link = _must(f"{step}: a mints an internal member link", s, link, ok=(201,))
+    s, joined = _request(
+        f"{d_base}/api/spaces/join",
+        token=d["token"],
+        method="POST",
+        body=_join_body_from_blob(_decode_invite_blob(link["code"])),
+        timeout=40.0,
+    )
+    _must(f"{step}: d redeems the internal link", s, joined, ok=(200, 201))
+    print("  d (paired with a) joined a's space ✓")
+
+    # 2. The directory: cards + lazy seats on both sides. d mints its own
+    #    mailbox when the directory flags e as GFS-reached; its card goes to
+    #    the host at once and the host's delta carries it to e.
+    deadline = time.time() + 90
+    on_d = on_e = None
+    while time.time() < deadline:
+        on_d = _card_on("d", space_id, e["instance_id"])
+        on_e = _card_on("e", space_id, d["instance_id"])
+        if on_d and on_d.get("mailbox") and on_e and on_e.get("mailbox"):
+            break
+        time.sleep(1.0)
+    else:
+        raise SystemExit(
+            f"{step}: the host's directory did not reach both members "
+            f"(d holds {on_d!r} for e, e holds {on_e!r} for d)",
+        )
+    e_mailbox = on_d["mailbox"]["mailbox_id"]
+    d_mailbox = on_e["mailbox"]["mailbox_id"]
+    seat = _rows(
+        "d",
+        "SELECT source, relay_via, remote_inbox_url FROM remote_instances "
+        "WHERE id = ?",
+        (e["instance_id"],),
+    )
+    if not seat or seat[0][0] != "space_session" or seat[0][1] or seat[0][2]:
+        raise SystemExit(f"{step}: d has no address-less lazy seat for e: {seat!r}")
+    print("  d holds e's card + a lazy seat; e holds d's card, with d's mailbox ✓")
+
+    # 3. The host goes offline; d (not the host) creates an event.
+    gfs_off = _gfs_log_size()
+    _kill_household("a", a)
+    try:
+        summary = f"Member-to-member evening {time.time_ns()}"
+        s, ev = _request(
+            f"{d_base}/api/spaces/{space_id}/calendar/events",
+            token=d["token"],
+            method="POST",
+            body={
+                "summary": summary,
+                "start": "2027-03-01T18:00:00+00:00",
+                "end": "2027-03-01T20:00:00+00:00",
+                "tz": "Europe/Berlin",
+            },
+        )
+        ev = _must(f"{step}: d creates a calendar event", s, ev, ok=(201,))
+        seen = None
+        deadline = time.time() + 60
+        while time.time() < deadline and seen is None:
+            s, events = _request(
+                f"{e_base}/api/spaces/{space_id}/calendar/events"
+                "?start=2027-03-01T00:00:00Z&end=2027-03-02T00:00:00Z",
+                token=e["token"],
+            )
+            rows = (
+                events if isinstance(events, list) else (events or {}).get("events")
+            ) or []
+            seen = next((x for x in rows if x.get("id") == ev["id"]), None)
+            if seen is None:
+                time.sleep(1.0)
+        if seen is None or seen.get("summary") != summary:
+            raise SystemExit(
+                f"{step}: e never showed d's event with the host offline — "
+                "a member's fan-out did not reach the GFS-only member",
+            )
+        print("  host a offline; d created an event and e shows it ✓")
+
+        # 3b. e (GFS-only) creates one; paired d must show it — e's fan-out
+        #     reaches d's own mailbox, the host is not needed.
+        summary_e = f"GFS-only member's evening {time.time_ns()}"
+        s, ev_e = _request(
+            f"{e_base}/api/spaces/{space_id}/calendar/events",
+            token=e["token"],
+            method="POST",
+            body={
+                "summary": summary_e,
+                "start": "2027-03-01T18:00:00+00:00",
+                "end": "2027-03-01T20:00:00+00:00",
+                "tz": "Europe/Berlin",
+            },
+        )
+        ev_e = _must(f"{step}: e creates a calendar event", s, ev_e, ok=(201,))
+        seen = None
+        deadline = time.time() + 60
+        while time.time() < deadline and seen is None:
+            s, events = _request(
+                f"{d_base}/api/spaces/{space_id}/calendar/events"
+                "?start=2027-03-01T00:00:00Z&end=2027-03-02T00:00:00Z",
+                token=d["token"],
+            )
+            rows = (
+                events if isinstance(events, list) else (events or {}).get("events")
+            ) or []
+            seen = next((x for x in rows if x.get("id") == ev_e["id"]), None)
+            if seen is None:
+                time.sleep(1.0)
+        if seen is None or seen.get("summary") != summary_e:
+            raise SystemExit(
+                f"{step}: d never showed e's event with the host offline — "
+                "the GFS-only member's fan-out did not reach d's mailbox",
+            )
+        print("  host a offline; e created an event and paired d shows it ✓")
+
+        # 4. What the GFS saw. The identified sockets log their own household
+        #    (a going down); the relay's envelope / mailbox lines name nobody.
+        env_lines = _gfs_log_lines_matching("gfs.envelope:", offset=gfs_off)
+        if not [line for line in env_lines if "<mailbox>" in line]:
+            raise SystemExit(f"{step}: the GFS delivered nothing to a mailbox")
+        named = (a["instance_id"], d["instance_id"], e["instance_id"], space_id)
+        leaked = [
+            line
+            for line in _gfs_log_lines_matching("", offset=gfs_off)
+            if e_mailbox in line
+            or d_mailbox in line
+            or (
+                ("gfs.envelope" in line or "mailbox" in line)
+                and any(x in line for x in named)
+            )
+        ]
+        if leaked:
+            raise SystemExit(
+                f"{step}: a GFS relay line names an instance id, a mailbox id "
+                f"or the space: {leaked[:3]!r}"
+            )
+        print(
+            "  the GFS logged mailbox deliveries and no instance id, mailbox id "
+            "or space ✓"
+        )
+    finally:
+        _respawn(state, "a")
+    print(f"{step}: ok")
+
+
 # ─── Step: gfs-relay-media ─────────────────────────────────────────────────
 
 
@@ -7676,20 +7858,23 @@ def cmd_gfs_relay_media() -> None:
         cmd_gfs_up(env_extra=env_extra)
         _wait_for_gfs_ws_since(a_iid, offset=offset, timeout=90.0)
         _wait_for_gfs_ws_since(e_iid, offset=offset, timeout=90.0)
-        # v_88: the pair's two mailbox claims come back too — each after its
-        # own 0-60 s jitter — before anything is sent (a queued media frame
-        # is drained without a log line the check below could read).
+        # v_89: EVERY household's mailbox claim comes back too — after its
+        # reconnect backoff — before anything is sent (a queued media frame is drained without a log line the
+        # check below could read). Not just the pair's: a paired member of
+        # the space (d) holds one at this GFS too, and its claim coming back
+        # first must not stand in for e's.
+        want = max(2, _mailboxes_held())
         deadline = time.time() + 150.0
         while time.time() < deadline:
             claims = _gfs_log_lines_matching(
                 "gfs.ws.register: instance=<mailbox>", offset=offset
             )
-            if len(claims) >= 2:
+            if len(claims) >= want:
                 break
             time.sleep(1.0)
         else:
             raise SystemExit(
-                f"{step}: the pair's mailbox claims did not come back within "
+                f"{step}: {want} mailbox claims did not come back within "
                 "150 s of the GFS restart"
             )
 
@@ -7748,13 +7933,20 @@ def cmd_gfs_relay_media() -> None:
                             break
             time.sleep(1.0)
         if got != src:
+            # What a still has queued for the photo, per recipient.
+            outbox = _rows(
+                "a",
+                "SELECT target_instance_id, status, attempts, last_error, "
+                "next_attempt_at FROM space_media_outbox ORDER BY created_at",
+            )
+            print(f"  a's space media outbox: {outbox!r}")
             raise SystemExit(
                 f"{step}: e never held a's {len(src)}-byte photo byte-identical "
                 f"(as {local!r}, {len(got)} bytes) within 120 s — no media through "
                 "the relay."
             )
-        # v_88 — e reaches this space only through the GFS, so the frames
-        # go to e's per-space MAILBOX: the GFS logs ``<mailbox>`` and must
+        # v_89 — e reaches this space only through the GFS, so the frames
+        # go to e's MAILBOX: the GFS logs ``<mailbox>`` and must
         # name e's instance id on none of them.
         pushed = _gfs_log_lines_matching(
             "media delivered to live socket <mailbox>", offset=gfs_off
@@ -11698,6 +11890,17 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_86 trusted file fills gate in place ✓")
+    # v_89 — member cards + the host's member directory + one GFS mailbox per
+    # household: cards and directories go only to a household at >= v_89,
+    # so the OURS round-trip above is what proves every pair takes them.
+    if int(_Cap.MIN_FOR_MAILBOX_MEMBER_MESH) != 89 or _OURS < 89:
+        failures.append(
+            "MIN_FOR_MAILBOX_MEMBER_MESH moved off v_89 (or OURS fell below it) "
+            "— members would never reach a household that reaches a space "
+            "through a GFS"
+        )
+    else:
+        print("  v_89 member mesh (cards, directory, one mailbox) gate in place ✓")
     # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
     # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
     # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key
@@ -18818,6 +19021,23 @@ def _verify_moment_totals(state: dict, moment_id: str) -> list[str]:
             "away; d's API shows them ✓"
         )
     return failures
+
+
+def _mailboxes_held() -> int:
+    """How many GFS mailboxes the households hold (v_89: one per household
+    per GFS; the demo runs one GFS)."""
+    n = 0
+    for label in ("a", "b", "c", "d", "e"):
+        try:
+            rows = _rows(
+                label,
+                "SELECT value FROM instance_config WHERE key = 'gfs_mailboxes'",
+            )
+        except Exception:
+            continue
+        if rows and rows[0][0]:
+            n += len((json.loads(rows[0][0]) or {}).get("boxes") or {})
+    return n
 
 
 def _rows(label: str, sql: str, params: tuple = ()) -> list[tuple]:

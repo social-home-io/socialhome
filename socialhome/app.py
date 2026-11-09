@@ -75,6 +75,7 @@ from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import FederationService
 from .federation.gfs_join_request import GfsJoinRequestCoordinator
 from .federation.gfs_relay_transport import GfsRelayTransport
+from .federation.host_hop import HostHop
 from .federation.invite_link_forward import InviteLinkForwardCoordinator
 from .federation.invite_token_redeem import SpaceInviteTokenRedeemCoordinator
 from .federation.pairing_gfs_reach import PairingGfsReach
@@ -356,6 +357,7 @@ from .services.gfs_channel_service import GfsChannelService
 from .services.gfs_connection_service import GfsConnectionService
 from .services.gfs_directory import GfsDirectoryCache
 from .services.gfs_envelope_sender import GfsEnvelopeSender
+from .services.gfs_mailbox_service import GfsMailboxService
 from .services.gfs_member_publish_service import GfsMemberPublishService
 from .services.gfs_relay_inbound import GfsRelayInbound
 from .services.gfs_route_discovery_service import GfsRouteDiscoveryService
@@ -445,12 +447,12 @@ from .services.space_crypto_service import (
     SpaceContentEncryption,
 )
 from .services.space_location_outbound import SpaceLocationOutbound
-from .services.space_mailbox_service import SpaceMailboxService
 from .services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 from .services.space_media_gfs_responder import SpaceMediaGfsResponder
 from .services.space_media_gfs_uploader import SpaceMediaGfsUploader
 from .services.space_media_names import SpaceMediaNamer
 from .services.space_media_sync_service import SpaceMediaSyncService
+from .services.space_member_directory import SpaceMemberDirectory
 from .services.space_member_profile_federation_outbound import (
     SpaceMemberProfileFederationOutbound,
 )
@@ -966,7 +968,7 @@ def _build_gfs_relay_inbound(
     )
 
 
-def _build_space_mailboxes(
+def _build_gfs_mailboxes(
     *,
     repos: SimpleNamespace,
     key_manager: KeyManager,
@@ -975,36 +977,47 @@ def _build_space_mailboxes(
     instance_id: str,
     gfs_relay_inbound: GfsRelayInbound,
     gfs_envelope_sender: GfsEnvelopeSender,
-) -> SpaceMailboxService:
-    """v_88 — this household's per-space GFS mailboxes (GFS redesign PR 2),
-    with frames on them handed to the relay's inbound leg."""
+) -> tuple[GfsMailboxService, SpaceMemberDirectory]:
+    """v_89 — this household's ONE mailbox per GFS (frames on it handed to
+    the relay's inbound leg) and the member directory on top of it."""
     # Every mailbox request rides its own cookie-less session with no
-    # keep-alive: no pooled connection carries two mailboxes' traffic, and no
-    # cookie of the identified session reaches a mailbox. Closed by stop().
+    # keep-alive: no pooled connection carries mailbox traffic next to the
+    # identified one, and no cookie of the identified session reaches a
+    # mailbox. Closed by stop().
     mailbox_session = aiohttp.ClientSession(
         connector=aiohttp.TCPConnector(force_close=True),
         cookie_jar=aiohttp.DummyCookieJar(),
         json_serialize=dumps_str,
     )
     gfs_envelope_sender.attach_mailbox_session(mailbox_session)
-    svc = SpaceMailboxService(
+    mailboxes = GfsMailboxService(
         mailbox_session=mailbox_session,
-        space_repo=repos.space,
         instance_config=repos.instance_config,
         key_manager=key_manager,
         gfs_repo=repos.gfs_connection,
         gfs_service=gfs_connection_service,
         instance_id=instance_id,
         identity_seed=identity.identity_seed,
-        keywrap_public_key=identity.keywrap_public_key,
-        keywrap_sig=identity.keywrap_sig,
     )
 
     async def _inbound(frame: dict | bytes, keys) -> object:
         return await gfs_relay_inbound.handle_mailbox_frame(frame, keys=keys)
 
-    svc.attach_inbound(_inbound)
-    return svc
+    mailboxes.attach_inbound(_inbound)
+    directory = SpaceMemberDirectory(
+        space_repo=repos.space,
+        federation_repo=repos.federation,
+        writer_households=SpaceWriterHouseholds(
+            repos.space_remote_member, own_instance_id=instance_id
+        ),
+        mailboxes=mailboxes,
+        instance_id=instance_id,
+        identity_seed=identity.identity_seed,
+        identity_pk=identity.identity_public_key,
+        keywrap_pk=identity.keywrap_public_key,
+        keywrap_sig=identity.keywrap_sig,
+    )
+    return mailboxes, directory
 
 
 def _build_gfs_join_requests(
@@ -5080,10 +5093,12 @@ def create_app(config: Config | None = None) -> web.Application:
             rate_limiter=limiter,
         )
         gfs_relay_inbound.attach_join_requests(gfs_join_requests)
-        # v_88 — a household reached only through a GFS gets an anonymous
-        # mailbox per space there; minted at seat time by the redeem paths,
-        # released with the seat, frames into the relay's inbound leg.
-        space_mailboxes = _build_space_mailboxes(
+        # v_89 — ONE anonymous mailbox per GFS for a household that reaches
+        # a space through it (minted at seat time, released when nothing
+        # needs it), member cards and the host's member directory (any
+        # member reaches a GFS-reached one), and the host as the one
+        # SPACE_ROUTED hop for a member with no connection to that GFS.
+        space_mailboxes, member_directory = _build_gfs_mailboxes(
             repos=repos,
             key_manager=key_manager,
             gfs_connection_service=gfs_connection_service,
@@ -5092,12 +5107,35 @@ def create_app(config: Config | None = None) -> web.Application:
             gfs_relay_inbound=gfs_relay_inbound,
             gfs_envelope_sender=gfs_envelope_sender,
         )
-        invite_redeem_coordinator.attach_mailboxes(space_mailboxes)
+        invite_redeem_coordinator.attach_mailboxes(space_mailboxes, member_directory)
         real_space_service.attach_space_mailboxes(space_mailboxes)
-        # Lost / moved mailboxes: SPACE_MAILBOX_UPDATED both ways.
-        space_mailboxes.attach_to(federation_service, repos.federation)
+        member_directory.attach_seat_ender(
+            real_space_service.end_space_session_if_unused
+        )
+        member_directory.attach_to(federation_service)
+        member_directory.wire(bus)
+        # Repair of a lost directory delta rides the periodic §25.6 sync:
+        # the BEGIN echoes the member's ``dir_seq``; a host ahead answers.
+        app[K.space_sync_scheduler_key].attach_directory_echo(
+            member_directory.directory_seq
+        )
+        federation_service._event_registry.register(
+            FederationEventType.SPACE_SYNC_BEGIN, member_directory.on_sync_begin
+        )
+        host_hop = HostHop(
+            own_instance_id=real_instance_id,
+            card_of=member_directory.card_of,
+            host_of=member_directory.host_of,
+            keywrap_private_key=identity.keywrap_private_key,
+            keywrap_public_key=identity.keywrap_public_key,
+        )
+        routed_handler.attach_host_hop(host_hop)
+        federation_service.attach_member_mesh(
+            host_hop=host_hop, mailbox_sender_check=member_directory.sender_allowed
+        )
         await space_mailboxes.start()
         app[K.space_mailbox_service_key] = space_mailboxes
+        app[K.space_member_directory_key] = member_directory
         real_space_service.attach_gfs_join_requests(gfs_join_requests)
         # An approval whose redeem did not seat its person yet (the host was
         # offline, we restarted): retried now, and on every GFS reconnect.
@@ -5329,9 +5367,9 @@ def create_app(config: Config | None = None) -> web.Application:
                 federation_repo=repos.federation,
                 gfs_connection_repo=repos.gfs_connection,
             ),
-            # v_88 — a link-joined household's per-space mailbox, when it
-            # sent one and our connection to its GFS proved mailboxes.
-            mailbox_targets=space_mailboxes.target_for,
+            # v_89 — a carded household's GFS mailbox, when our connection
+            # to its GFS proved mailboxes.
+            mailbox_targets=member_directory.target_for,
             signaling_send=_signaling_send,
             ice_servers=fed_ice_servers,
             inbound_handler=federation_service.handle_inbound_rtc,
@@ -5526,7 +5564,7 @@ def create_app(config: Config | None = None) -> web.Application:
             # v_84 — a connection came up: retry approvals of "Ask to join"
             # that have not seated their person yet (own task, non-blocking).
             gfs_join_requests.resume_soon()
-            # v_88 — mailbox tickets: a household with none gets a batch now
+            # v_89 — mailbox tickets: a household with none gets a batch now
             # rather than at its first daily slot. Fail-soft.
             try:
                 await space_mailboxes.on_connected(gfs_id)
@@ -5699,7 +5737,7 @@ def create_app(config: Config | None = None) -> web.Application:
         gfs_connection_service.attach_on_removed(
             lambda conn: gfs_ws_supervisor.forget(conn.id)
         )
-        # v_88 — and its mailbox-ticket loops stop with it.
+        # v_89 — and its mailbox-ticket loops stop with it.
         gfs_connection_service.attach_on_removed(space_mailboxes.forget_connection)
         # Warm the RAM-only GFS capability cache now, not only when each
         # socket connects: until then ``GET /api/gfs/connections`` reads
@@ -6119,7 +6157,7 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_reconcile_retry.stop()
         if gfs_ws_supervisor is not None:
             await gfs_ws_supervisor.stop()
-        # v_88 — the anonymous mailbox claim sockets and ticket loops.
+        # v_89 — the anonymous mailbox claim sockets and ticket loops.
         if (space_mailboxes := app.get(K.space_mailbox_service_key)) is not None:
             await space_mailboxes.stop()
         # Before the HTTP session closes: queued sealed moment keys ride it.

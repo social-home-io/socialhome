@@ -84,10 +84,10 @@ TIMESTAMP_SKEW_SECONDS = 300
 #: Set on :attr:`InboundContext.transport` by the relay dispatch seam.
 TRANSPORT_GFS_RELAY = "gfs_relay"
 
-#: Transport label for an envelope that arrived on one of OUR per-space GFS
-#: mailboxes (v_88, GFS redesign PR 2). The same relay, addressed to an
+#: Transport label for an envelope that arrived on OUR GFS mailbox (v_89,
+#: one per GFS, shared by our spaces). The same relay, addressed to an
 #: anonymous mailbox instead of our instance id: it gets the relay's
-#: timestamp window and gates, plus :func:`make_check_mailbox_space`.
+#: timestamp window and gates, plus :func:`make_check_mailbox_sender`.
 TRANSPORT_GFS_MAILBOX = "gfs_mailbox"
 
 #: Every transport that is the GFS relay (queued, so up to a day old).
@@ -187,11 +187,6 @@ class InboundContext:
     #: the bytes may legitimately be up to a day old.
     transport: str = ""
 
-    #: v_88 — the space of the mailbox that delivered these bytes (only
-    #: with :data:`TRANSPORT_GFS_MAILBOX`). A frame on that mailbox may
-    #: carry that space's envelopes or space-less ones, nothing else.
-    mailbox_space_id: str | None = None
-
 
 #: Middleware shape: async callable that takes context + raises or returns.
 InboundStep = Callable[[InboundContext], Awaitable[None]]
@@ -243,6 +238,12 @@ class _InboxInstance:
     @property
     def remote_identity_pk(self) -> str:
         return self._inst.remote_identity_pk
+
+    @property
+    def relay_via(self) -> str | None:
+        """The seat's relay — empty for a member seated from a host's
+        directory (v_89, ``make_check_relay_opt_in``)."""
+        return self._inst.relay_via
 
     @property
     def remote_pq_identity_pk(self) -> str | None:
@@ -512,7 +513,8 @@ def make_check_relay_opt_in() -> InboundStep:
     A household seated from an invite link
     (:data:`~socialhome.domain.federation.InstanceSource.SPACE_SESSION`)
     is relay-only by construction and is left to
-    :func:`make_check_peer_class`. Live wires (RTC, HTTPS inbox) are not
+    :func:`make_check_peer_class` (and, for a seat made from a host's member
+    directory, :func:`make_check_mailbox_sender`). Live wires (RTC, HTTPS inbox) are not
     touched. Runs straight after the lookup, before any crypto.
     """
 
@@ -538,26 +540,44 @@ def make_check_relay_opt_in() -> InboundStep:
     return check_relay_opt_in
 
 
-def make_check_mailbox_space() -> InboundStep:
-    """Step 1b (v_88): a frame that arrived on one of our per-space GFS
-    mailboxes (:data:`TRANSPORT_GFS_MAILBOX`) may carry an envelope of THAT
-    mailbox's space, or a space-less one — nothing else.
+def make_check_mailbox_sender(
+    allowed: Callable[[], Callable[[str, str], Awaitable[bool]] | None],
+) -> InboundStep:
+    """Step 2a (v_89): a frame that arrived on our GFS mailbox
+    (:data:`TRANSPORT_GFS_MAILBOX`) — or on the instance-addressed relay from
+    a household seated from a host's directory — is taken only from a sender
+    whose verified member card we hold for the envelope's space.
 
-    A mailbox is handed to one household for one space; an envelope of
-    another space on it is either a bug or someone using the address to
-    reach us about something it was not given for. Runs straight after the
-    parse (``space_id`` is a signed routing field — the signature step later
-    proves the sender wrote it), before any lookup or crypto. Fails closed:
-    a mailbox frame with no recorded space is refused."""
+    Our ONE mailbox serves every space we reach through that GFS, and every
+    writer member of those spaces may send to it — so the address alone
+    authorizes nothing. ``allowed()`` returns the member directory's check
+    ``(sender, space_id) -> bool``: we are in the space and hold the
+    sender's card for it (the host's from the ACK, a member's from the
+    host's directory, a joiner's from its redeem). Runs straight after the
+    instance lookup (``from_instance`` and ``space_id`` are signed routing
+    fields — the signature step later proves the sender wrote them), before
+    any crypto. A space-less ``SPACE_*`` envelope never rides a mailbox (senders
+    send those instance-addressed); a space-less other event (the
+    capabilities exchange) goes on to the ordinary seat checks. Fails
+    closed: no check wired → refused."""
 
-    async def check_mailbox_space(ctx: InboundContext) -> None:
-        if ctx.transport != TRANSPORT_GFS_MAILBOX:
+    async def check_mailbox_sender(ctx: InboundContext) -> None:
+        on_mailbox = ctx.transport == TRANSPORT_GFS_MAILBOX
+        # A household seated from a host's directory (a ``space_session``
+        # row with no relay of its own) is held to the same card check on
+        # the instance-addressed relay — it must not skip the gate by
+        # addressing our instance id instead of our mailbox.
+        directory_seat = (
+            ctx.transport == TRANSPORT_GFS_RELAY
+            and getattr(ctx.instance, "source", None) is InstanceSource.SPACE_SESSION
+            and not getattr(ctx.instance, "relay_via", None)
+        )
+        if not on_mailbox and not directory_seat:
             return
         space_id = ctx.envelope.get("space_id")
         if space_id in (None, ""):
-            # Space-less: only non-space traffic (the capabilities exchange)
-            # may ride a mailbox; a ``SPACE_*`` event must name its space
-            # (senders send a space-less one instance-addressed).
+            if not on_mailbox:
+                return  # space-less: the seat vocabulary judges it
             if str(ctx.envelope.get("event_type") or "").startswith("space_"):
                 log.info(
                     "inbound: refusing a space-less %r envelope on a mailbox",
@@ -565,15 +585,23 @@ def make_check_mailbox_space() -> InboundStep:
                 )
                 raise ValueError("a space event on a mailbox must name its space")
             return
-        if not ctx.mailbox_space_id or space_id != ctx.mailbox_space_id:
-            # Type only — never the space ids or the mailbox.
+        sender = ctx.envelope.get("from_instance")
+        check = allowed()
+        if (
+            check is None
+            or not isinstance(sender, str)
+            or not isinstance(space_id, str)
+            or not await check(sender, space_id)
+        ):
+            # Type only — never the space id or the mailbox.
             log.info(
-                "inbound: refusing a %r envelope of another space on a mailbox",
+                "inbound: refusing a %r envelope on a mailbox from a sender "
+                "with no card for its space",
                 ctx.envelope.get("event_type"),
             )
-            raise ValueError("envelope is not for this mailbox's space")
+            raise ValueError("no member card of this sender for this space")
 
-    return check_mailbox_space
+    return check_mailbox_sender
 
 
 def make_check_unpairing(

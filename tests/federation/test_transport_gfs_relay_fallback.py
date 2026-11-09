@@ -829,18 +829,22 @@ def test_the_guard_catches_a_wrapper_and_an_explicit_none(tmp_path, monkeypatch)
     assert found == ["send_to_instance", "send_event"]
 
 
-async def test_a_mailbox_only_send_never_falls_back_to_the_named_relay():
-    """v_88 round 9: a mailbox update must never leave instance-addressed
-    (naming both households) right after an anonymous register / claim —
-    no mailbox ready means no send at all."""
+async def test_a_directory_seat_never_goes_instance_addressed():
+    """v_89: a member seated from the host's directory has no ``relay_via``.
+    With no usable mailbox it gets nothing over the relay — never an
+    instance-addressed frame naming two households that never met at the
+    GFS (the caller goes through the host instead)."""
+    lazy = dataclasses.replace(_seat(), relay_via=None)
     relay = _MailboxRelay(mailbox_ready=False)
     t = _mailbox_transport(relay, [], targets={"sp-1": _TARGET})
     env = {"msg_id": "m", "space_id": "sp-1"}
-    result = await t.send_mailbox_only(instance=_seat(), envelope_dict=env)
-    assert not result.ok
+    result = await t.send(instance=lazy, envelope_dict=env)
+    assert not result.ok and result.error == "no_mailbox"
     assert relay.calls == [] and relay.mailbox_calls == []
+    assert not await t.mailbox_reachable(lazy, "sp-1")
     relay2 = _MailboxRelay()
     t2 = _mailbox_transport(relay2, [], targets={"sp-1": _TARGET})
-    result = await t2.send_mailbox_only(instance=_seat(), envelope_dict=env)
+    result = await t2.send(instance=lazy, envelope_dict=env)
     assert result.ok and relay2.mailbox_calls == [(_TARGET, env)]
     assert relay2.calls == []
+    assert await t2.mailbox_reachable(lazy, "sp-1")

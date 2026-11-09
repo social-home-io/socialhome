@@ -34,7 +34,7 @@ from socialhome.federation.inbound_validator import (
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_event_types,
-    make_check_mailbox_space,
+    make_check_mailbox_sender,
     make_check_peer_class,
     make_check_relay_opt_in,
     make_check_replay,
@@ -622,7 +622,8 @@ async def test_peer_class_gate_rejects_every_unclassified_type_by_default():
         FederationEventType.SPACE_ADMIN_KEY_SHARE,
         FederationEventType.SPACE_FIND_ROUTE,
         FederationEventType.SPACE_ROUTE_FOUND,
-        FederationEventType.SPACE_ROUTED,
+        # SPACE_ROUTED passes this gate since v_89 — only in the host-hop
+        # shape, which ``SpaceRoutedHandler`` enforces (test_host_hop.py).
         FederationEventType.SPACE_JOIN_REQUEST,
         FederationEventType.SPACE_JOIN_REQUEST_VIA,
         FederationEventType.DM_MESSAGE,
@@ -687,6 +688,8 @@ class _RelayInstance:
         self.source = source
         self.gfs_relay = gfs_relay
         self.from_instance = "remote-iid"
+        #: A link-joined (sealed-redeem) seat carries its relay.
+        self.relay_via: str | None = "https://gfs.example.org"
 
 
 async def test_relay_gate_rejects_a_paired_peer_we_never_opted_in_with(caplog):
@@ -778,26 +781,33 @@ async def test_relay_gate_runs_after_the_lookup_and_before_any_crypto():
     assert names.index("check_relay_opt_in") < names.index("verify_signature")
 
 
-# ─── v_88: per-space mailbox gates ───────────────────────────────────────
+# ─── v_89: the sender gate of our GFS mailbox ─────────────────────────────
 
 
-def _mailbox_ctx(space_id, *, mailbox_space="sp-1", event_type=None):
-    env = _minimal_envelope()
+def _mailbox_ctx(space_id, *, event_type=None, sender="remote-iid"):
+    env = _minimal_envelope(from_instance=sender)
     if event_type is not None:
         env["event_type"] = event_type
     env["space_id"] = space_id
-    return InboundContext(
-        envelope=env,
-        transport=TRANSPORT_GFS_MAILBOX,
-        mailbox_space_id=mailbox_space,
-    )
+    return InboundContext(envelope=env, transport=TRANSPORT_GFS_MAILBOX)
+
+
+def _carded(*pairs):
+    """A directory check that knows the (sender, space) cards in *pairs*."""
+    seen: list[tuple[str, str]] = []
+
+    async def check(sender, space_id):
+        seen.append((sender, space_id))
+        return (sender, space_id) in pairs
+
+    return check, seen
 
 
 async def test_a_space_less_space_event_is_refused_on_a_mailbox():
-    """A ``SPACE_*`` event must name its space to ride a mailbox (senders
-    send a space-less one instance-addressed), so a mailbox frame can never
-    carry space traffic of a space it was not given for."""
-    step = make_check_mailbox_space()
+    """A ``SPACE_*`` event must name its space to ride our mailbox (senders
+    send a space-less one instance-addressed)."""
+    check, _ = _carded(("remote-iid", "sp-1"))
+    step = make_check_mailbox_sender(lambda: check)
     for space_id in (None, ""):
         with pytest.raises(ValueError, match="space"):
             await step(_mailbox_ctx(space_id))
@@ -805,34 +815,70 @@ async def test_a_space_less_space_event_is_refused_on_a_mailbox():
         await step(_mailbox_ctx(None, event_type="space_invite_token_redeem_ack"))
 
 
-async def test_mailbox_frame_of_its_own_space_or_a_space_less_non_space_event_passes():
-    step = make_check_mailbox_space()
+async def test_a_carded_sender_of_its_space_and_space_less_non_space_events_pass():
+    check, seen = _carded(("remote-iid", "sp-1"))
+    step = make_check_mailbox_sender(lambda: check)
     await step(_mailbox_ctx("sp-1"))
+    assert seen == [("remote-iid", "sp-1")]
     await step(_mailbox_ctx(None, event_type="instance_capabilities_updated"))
     await step(_mailbox_ctx("", event_type="instance_capabilities_updated"))
 
 
-async def test_mailbox_frame_of_another_space_is_refused_without_naming_it(caplog):
-    step = make_check_mailbox_space()
-    with caplog.at_level("DEBUG"), pytest.raises(ValueError, match="space"):
+async def test_a_sender_without_a_card_for_that_space_is_refused_quietly(caplog):
+    """One mailbox serves all our spaces: knowing the address authorizes
+    nothing — a card for THAT space does. The log names neither."""
+    check, _ = _carded(("remote-iid", "sp-1"))
+    step = make_check_mailbox_sender(lambda: check)
+    with caplog.at_level("DEBUG"), pytest.raises(ValueError, match="card"):
         await step(_mailbox_ctx("sp-other"))
+    with pytest.raises(ValueError, match="card"):
+        await step(_mailbox_ctx("sp-1", sender="stranger-iid"))
     assert "sp-other" not in caplog.text and "sp-1" not in caplog.text
 
 
-async def test_mailbox_frame_with_no_recorded_space_fails_closed():
-    step = make_check_mailbox_space()
+async def test_the_mailbox_sender_gate_fails_closed_unwired():
+    step = make_check_mailbox_sender(lambda: None)
     with pytest.raises(ValueError):
-        await step(_mailbox_ctx("sp-1", mailbox_space=None))
+        await step(_mailbox_ctx("sp-1"))
 
 
-async def test_mailbox_space_gate_ignores_every_other_transport():
-    step = make_check_mailbox_space()
+async def test_the_mailbox_sender_gate_ignores_every_other_transport():
+    step = make_check_mailbox_sender(lambda: None)
     env = _minimal_envelope()
     env["space_id"] = "sp-other"
     for transport in ("", TRANSPORT_GFS_RELAY):
-        await step(
-            InboundContext(envelope=env, transport=transport, mailbox_space_id="x")
+        await step(InboundContext(envelope=env, transport=transport))
+
+
+async def test_a_directory_seat_gets_the_card_check_on_the_instance_relay():
+    """Review round 1 (#1336): a household seated from a host's directory
+    (``space_session``, no relay of its own) must not skip the card gate by
+    addressing our instance id on the GFS relay instead of our mailbox. Its
+    space envelope there needs the card for that space; a space-less one is
+    left to the seat vocabulary; a sealed-redeem seat (with its relay) is
+    not affected."""
+    check, seen = _carded(("remote-iid", "sp-1"))
+    step = make_check_mailbox_sender(lambda: check)
+    directory_seat = _RelayInstance(InstanceSource.SPACE_SESSION, gfs_relay=False)
+    directory_seat.relay_via = None
+
+    def _ctx(space_id, instance, event_type=None):
+        env = _minimal_envelope()
+        env["space_id"] = space_id
+        if event_type:
+            env["event_type"] = event_type
+        return InboundContext(
+            envelope=env, instance=instance, transport=TRANSPORT_GFS_RELAY
         )
+
+    with pytest.raises(ValueError, match="card"):
+        await step(_ctx("sp-other", directory_seat))
+    await step(_ctx("sp-1", directory_seat))
+    await step(_ctx(None, directory_seat, "space_session_cleanup"))
+    redeem_seat = _RelayInstance(InstanceSource.SPACE_SESSION, gfs_relay=False)
+    seen.clear()
+    await step(_ctx("sp-other", redeem_seat))
+    assert seen == []  # not judged here at all
 
 
 async def test_mailbox_transport_gets_the_relay_gates_and_window():
@@ -855,14 +901,15 @@ async def test_mailbox_transport_gets_the_relay_gates_and_window():
     )
 
 
-async def test_mailbox_space_gate_runs_right_after_the_parse():
+async def test_mailbox_sender_gate_runs_right_after_the_lookup():
     steps = FederationService._common_pipeline_steps(
         _StubPipelineOwner(),  # type: ignore[arg-type]
         lookup_step=_noop_step,
     )
     names = [getattr(s, "__name__", "") for s in steps]
-    assert names.index("parse_json") < names.index("check_mailbox_space")
-    assert names.index("check_mailbox_space") < names.index("_noop_step")
+    # Right after the lookup (it reads the sender's row), before any crypto.
+    assert names.index("_noop_step") < names.index("check_mailbox_sender")
+    assert names.index("check_mailbox_sender") < names.index("verify_signature")
 
 
 async def test_unpairing_gate_sits_between_signature_and_replay():

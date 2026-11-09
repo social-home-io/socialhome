@@ -235,7 +235,7 @@ household then cannot send media frames through that server.
 
 A GFS with mailboxes on (the default) advertises `envelope_mailbox` in its
 signed `/gfs/info` and serves two anonymous routes (see
-[gfs-relay.md](../protocol/gfs-relay.md#anonymous-per-space-mailboxes-gfs-redesign-pr-1)):
+[gfs-relay.md](../protocol/gfs-relay.md#anonymous-mailboxes-gfs-redesign-pr-1)):
 `POST /gfs/mailbox/register` and the claim socket `GET /gfs/mailbox/ws`.
 With them comes the signed capability `mailbox_tickets` and the identified
 route `POST /gfs/mailbox/tickets`: a registered household fetches a daily
@@ -252,11 +252,11 @@ mailbox_tickets_per_day = 50        # registration tickets per registered househ
 mailbox_ticket_epoch_days = 30      # one ticket issuer key per epoch; its tickets redeem for one more epoch
 mailbox_max_sockets_per_ip = 512    # open claim sockets per address (/64; ×16 /56, ×256 /48)
 mailbox_idle_days = 30              # last claim (or registration) this many days ago → dropped
-mailbox_queue_max_per_recipient = 200         # queued envelopes for one offline mailbox
-mailbox_queue_bytes_per_recipient = 4194304   # 4 MiB
+mailbox_queue_max_per_recipient = 2000        # queued envelopes for one offline mailbox (one per household, all its spaces)
+mailbox_queue_bytes_per_recipient = 33554432  # 32 MiB
 mailbox_queue_max_total_bytes = 268435456     # 256 MiB for ALL mailboxes, then tail-drop …
 mailbox_queue_ceiling_bytes = 1073741824      # … except a mailbox under its reserve (< 20 envelopes, < 64 KiB), up to 1 GiB
-mailbox_media_queue_bytes_per_recipient = 8388608   # 8 MiB of media for one mailbox
+mailbox_media_queue_bytes_per_recipient = 16777216  # 16 MiB of media for one mailbox
 mailbox_media_queue_max_total_bytes = 268435456     # 256 MiB of media for ALL mailboxes (tail-drop)
 ```
 
@@ -304,7 +304,7 @@ never evict, households' queued envelopes (1 GiB total, tail-drop with the
 same reserve up to 2 GiB) or media
 (`media_queue_max_total_bytes`). Worst-case queue disk ≈ 2.75 GiB whatever
 the number of minted ids (see
-[gfs-relay.md](../protocol/gfs-relay.md#anonymous-per-space-mailboxes-gfs-redesign-pr-1)).
+[gfs-relay.md](../protocol/gfs-relay.md#anonymous-mailboxes-gfs-redesign-pr-1)).
 
 The per-address caps and the 30 / min register limit (120 / min claim
 sockets, 30 / min ticket requests) count in each node's memory — the caps in salted count-min sketches

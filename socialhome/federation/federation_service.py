@@ -33,6 +33,7 @@ import aiohttp
 import orjson as _orjson
 
 if TYPE_CHECKING:
+    from .host_hop import HostHop
     from .pending_seat_buffer import PendingSeatBuffer
     from .route_discovery import RouteDiscoveryService
     from .routed_envelope import SpaceRoutedHandler
@@ -116,7 +117,7 @@ from .inbound_validator import (
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_event_types,
-    make_check_mailbox_space,
+    make_check_mailbox_sender,
     make_check_peer_class,
     make_check_relay_opt_in,
     make_check_replay,
@@ -348,12 +349,14 @@ class FederationService:
         "_encoder",
         "_event_registry",
         "_federation_repo",
+        "_host_hop",
         "_http_client",
         "_ice_servers",
         "_idempotency_cache",
         "_inbound_pipeline",
         "_key_manager",
         "_last_mesh_begin_at",
+        "_mailbox_sender_check",
         "_media_https_backoff",
         "_media_https_inbound_pipeline",
         "_media_relay_inbound_pipeline",
@@ -474,6 +477,12 @@ class FederationService:
         #: :data:`UNPAIR_SEND_RACE_S`, so bounded by recent unpairs.
         self._unpaired_at: dict[str, float] = {}
         self._routed_handler: SpaceRoutedHandler | None = None
+        #: v_89 — the host as the one hop toward a directory seat we cannot
+        #: reach directly; and the member directory's check of a sender on
+        #: our GFS mailbox (``make_check_mailbox_sender``). Unwired → no host
+        #: hop, and every mailbox frame with a space is refused.
+        self._host_hop: HostHop | None = None
+        self._mailbox_sender_check: Callable[[str, str], Awaitable[bool]] | None = None
         # Social Home Apps federation bridge — set via :meth:`attach_apps`.
         # When unset, inbound APP_SESSION / APP_MESSAGE events are silently
         # dropped (no app bridge wired on this instance).
@@ -652,10 +661,11 @@ class FederationService:
         """Return the shared step list for both inbox and RTC pipelines."""
         steps = [
             make_parse_json(loads=_loads),
-            # v_88: a frame on one of our per-space mailboxes carries only
-            # that space's envelopes (or space-less ones). No-op elsewhere.
-            make_check_mailbox_space(),
             lookup_step,
+            # v_89: a frame on our GFS mailbox (or relayed from a directory
+            # seat) is taken only from a sender whose member card we hold
+            # for its space. No-op elsewhere.
+            make_check_mailbox_sender(lambda: self._mailbox_sender_check),
             # §D2b peer-class gate: a household seated from an invite link
             # may only speak the space vocabulary. Straight after the
             # lookup (the first step that knows WHO the sender is) and
@@ -1095,6 +1105,18 @@ class FederationService:
         # A learned route drains that member's deferred queue at once
         # instead of after its backoff.
         route_service.add_route_learned_listener(self.on_route_learned)
+
+    def attach_member_mesh(
+        self,
+        *,
+        host_hop: HostHop,
+        mailbox_sender_check: Callable[[str, str], Awaitable[bool]],
+    ) -> None:
+        """Wire the v_89 member mesh: the host hop
+        (:meth:`send_with_mesh_fallback` toward a directory seat with no
+        usable mailbox) and the check of a sender on our GFS mailbox."""
+        self._host_hop = host_hop
+        self._mailbox_sender_check = mailbox_sender_check
 
     def attach_call_signaling(self, call_signaling) -> None:
         """Attach a :class:`CallSignalingService` after construction."""
@@ -1977,48 +1999,6 @@ class FederationService:
             status_code=status_code,
         )
 
-    async def send_event_unqueued(
-        self,
-        *,
-        to_instance_id: str,
-        event_type: FederationEventType,
-        payload: dict,
-        space_id: str | None,
-        mailbox_only: bool,
-    ) -> DeliveryResult:
-        """Seal one event like :meth:`send_event` and try it ONCE over the
-        transport — never the outbox (whose quick replays would ignore the
-        caller's timing) and no reachability change. *mailbox_only*: the
-        target's per-space mailbox or nothing (v_88 mailbox updates).
-        """
-        instance = await self._federation_repo.get_instance(to_instance_id)
-        if instance is None or self._transport is None:
-            return DeliveryResult(
-                instance_id=to_instance_id, ok=False, error="unavailable"
-            )
-        envelope_dict = self._seal_envelope(
-            instance, event_type=event_type, payload=payload, space_id=space_id
-        )
-        if envelope_dict is None:
-            return DeliveryResult(
-                instance_id=to_instance_id, ok=False, error="key_decrypt_error"
-            )
-        if mailbox_only:
-            result = await self._transport.send_mailbox_only(
-                instance=instance, envelope_dict=envelope_dict
-            )
-        else:
-            result = await self._transport.send(
-                instance=instance, envelope_dict=envelope_dict
-            )
-        return DeliveryResult(
-            instance_id=to_instance_id,
-            ok=result.ok,
-            status_code=result.status_code,
-            error=result.error,
-            via=result.via,
-        )
-
     async def send_event_via_gfs(
         self,
         *,
@@ -2256,6 +2236,25 @@ class FederationService:
         """
         instance = await self._federation_repo.get_instance(to_instance_id)
         if instance is not None and instance.status is PairingStatus.CONFIRMED:
+            if (
+                instance.source is InstanceSource.SPACE_SESSION
+                and not instance.relay_via
+                and space_id
+                and self._host_hop is not None
+                and (
+                    self._transport is None
+                    or not await self._transport.mailbox_reachable(instance, space_id)
+                )
+            ):
+                # v_89 — a member seated from the host's directory that we
+                # cannot reach at its GFS mailbox (no connection to that GFS,
+                # or it has none): the space's host is the one hop.
+                return await self._host_hop.send(
+                    to_instance_id=to_instance_id,
+                    event_type=event_type,
+                    payload=payload,
+                    space_id=space_id,
+                )
             return await self.send_event(
                 to_instance_id=to_instance_id,
                 event_type=event_type,
@@ -2365,11 +2364,18 @@ class FederationService:
         space_id: str,
         host_instance_id: str,
         extra_payload: dict | None = None,
+        sync_mode: str = "initial",
+        dir_seq: int | None = None,
+        have_seq: int | None = None,
     ) -> bool:
         """Initiate a §25.6 catch-up sync FROM a mesh-only host.
 
         ``extra_payload`` is the v_46 ``authority_epoch_echo`` for the
-        host, carried on the BEGIN under that key when given.
+        host, carried on the BEGIN under that key when given. ``dir_seq``
+        (v_89) is the member directory version we hold, echoed so a host
+        that is ahead answers with one snapshot; ``sync_mode="incremental"``
+        (with its ``have_seq``) is the periodic BEGIN after catch-up that
+        carries it.
 
         For a space whose host is NOT a confirmed direct peer (we joined over a
         relay), the normal SpaceSyncScheduler never triggers (it only syncs with
@@ -2397,6 +2403,8 @@ class FederationService:
                 sync_id=sync_id,
                 space_id=space_id,
                 provider_instance_id=host_instance_id,
+                sync_mode=sync_mode,
+                have_seq=have_seq,
             )
             self._sync_manager.register_requester_https_session(
                 sync_id=sync_id,
@@ -2407,11 +2415,15 @@ class FederationService:
             payload: dict = {
                 "sync_id": sync_id,
                 "space_id": space_id,
-                "sync_mode": "initial",
+                "sync_mode": sync_mode,
                 "prefer_direct": False,
             }
             if extra_payload is not None:
                 payload["authority_epoch_echo"] = extra_payload
+            if dir_seq is not None:
+                payload["dir_seq"] = dir_seq
+            if have_seq is not None:
+                payload["have_seq"] = have_seq
             result = await self.send_with_mesh_fallback(
                 to_instance_id=host_instance_id,
                 event_type=FederationEventType.SPACE_SYNC_BEGIN,
@@ -3560,7 +3572,6 @@ class FederationService:
         raw_body: bytes,
         *,
         transport: str = "",
-        mailbox_space_id: str | None = None,
     ) -> InboundContext:
         """Run the §24.11 RTC validation pipeline WITHOUT dispatching.
 
@@ -3585,7 +3596,6 @@ class FederationService:
             raw_body=raw_body,
             instance_id=instance_id,
             transport=transport,
-            mailbox_space_id=mailbox_space_id,
         )
         await pipeline.run(ctx)
         return ctx
@@ -3596,7 +3606,6 @@ class FederationService:
         raw_body: bytes,
         *,
         transport: str = "",
-        mailbox_space_id: str | None = None,
     ) -> dict:
         """§24.11 validation pipeline for a WebRTC DataChannel frame.
 
@@ -3613,7 +3622,6 @@ class FederationService:
             instance_id,
             raw_body,
             transport=transport,
-            mailbox_space_id=mailbox_space_id,
         )
 
         if ctx.early_response is not None:
@@ -3707,7 +3715,6 @@ class FederationService:
         media_body: bytes,
         *,
         transport: str = TRANSPORT_GFS_RELAY,
-        mailbox_space_id: str | None = None,
     ) -> dict:
         """Validate + decrypt one binary media body that the GFS relay
         delivered (v_87), then dispatch.
@@ -3742,7 +3749,6 @@ class FederationService:
             raw_body=frame.header,
             instance_id=claimed,
             transport=transport,
-            mailbox_space_id=mailbox_space_id,
         )
         await pipeline.run(ctx)
         return await self._finish_media_frame(

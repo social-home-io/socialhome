@@ -475,7 +475,7 @@ event needs and whether the peer is reachable:
 | 1 — hot | WebRTC DataChannel `fed-v1` | Routine, real-time envelopes once the P2P channel is up. |
 | 2 — warm | WebRTC DataChannel `sync-v1` | Bulk content sync (initial sync after pairing, recovery after long offline). |
 | 3 — cold | HTTPS inbox `POST /federation/inbox/{id}` | Fallback before/while DataChannel is down, and for peers behind a blocked UDP path. |
-| 4 — no address / last resort | Connection-server envelope relay `POST {gfs}/gfs/envelope` — to the instance id, or (v_88) to the household's anonymous per-space GFS mailbox | Households seated from an invite link or a GFS "Ask to join" (§D2b): the pair never exchanged an address, so tiers 1-3 have nothing to dial. Also the last-resort fallback for a **paired** household this household opted into the relay with (`remote_instances.gfs_relay` — set by a pairing code with a GFS reach, or later per connection by the admin, v_54), over its confirmed `peer_gfs_routes`. |
+| 4 — no address / last resort | Connection-server envelope relay `POST {gfs}/gfs/envelope` — to the instance id, or (v_89) to the household's one anonymous mailbox at that GFS | Households seated from an invite link or a GFS "Ask to join" (§D2b): the pair never exchanged an address, so tiers 1-3 have nothing to dial. Also the last-resort fallback for a **paired** household this household opted into the relay with (`remote_instances.gfs_relay` — set by a pairing code with a GFS reach, or later per connection by the admin, v_54), over its confirmed `peer_gfs_routes`. |
 
 **Redirects.** Every outbound POST to a household inbox — tier 3 and outbox
 redelivery (a connection server never POSTs to a household: it holds no
@@ -493,20 +493,33 @@ Tier 4 is a `TransportStrategy` like the others
 selects it in two cases:
 
 - `source = space_session` — the only tier, to the connection server that
-  introduced the pair (`relay_via`). From v_88 this tier has a second
-  target: the household's **per-space GFS mailbox**. Per send,
-  `FederationTransport._mailbox_target` asks `SpaceMailboxService` for the
-  counterpart's signed mailbox entry for the envelope's space (stored in
-  `space_instances.mailbox` from the sealed redeem / ACK); when there is
-  one at v_88 or above and our connection to its GFS proved
+  introduced the pair (`relay_via`). From v_89 this tier has a second
+  target: the household's **one GFS mailbox** at that GFS, shared by every
+  space it reaches there. Per send, `FederationTransport._mailbox_target`
+  asks `GfsMailboxService` for the counterpart's verified member card
+  (stored in `space_instances.mailbox` from the sealed redeem / ACK,
+  `SPACE_MEMBER_CARD`, or the host's `SPACE_MAILBOX_DIRECTORY`); when it
+  names a mailbox at v_89 or above and our connection to that GFS proved
   `envelope_mailbox`, the envelope (or v_87 media frame) is sealed to the
   mailbox key and addressed to the mailbox id
   (`GfsRelayTransport.send_mailbox` / `send_media_mailbox`, over the
   anonymous session). Otherwise it is addressed to the instance id as
-  before. `SpaceMailboxService` also owns this household's side: the
-  KEK-wrapped mailbox root, tickets, minting at seat time, one anonymous
-  claim socket per mailbox, and unregistering a mailbox once no seat uses
-  it. See [`protocol/gfs-relay.md`](./protocol/gfs-relay.md#per-space-mailboxes-v_88).
+  before. `GfsMailboxService` also owns this household's side: the
+  KEK-wrapped mailbox root, tickets, one mailbox and one anonymous claim
+  socket per GFS (`instance_config` `gfs_mailboxes`), our signed member
+  card, and unregistering a mailbox once nothing needs it.
+  **Member directory.** `SpaceMemberDirectory` on the host passes the
+  cards it holds to the space's writer-seat member households (never
+  followers); a member seats each carded household lazily as a
+  `space_session` row with no `relay_via` (static-static keys from the
+  card's key-wrap key), so its own fan-out reaches that household's
+  mailbox. Such a directory seat is skipped by the 30-min sync tick and
+  the capabilities fan-out, and is never sent an instance-addressed relay
+  frame: when no mailbox is reachable (no connection to that GFS, or the
+  household has none) `FederationService.send_with_mesh_fallback` sends a
+  three-hop `SPACE_ROUTED` `[member, host, member]` through the space's
+  host, sealed to the target's key-wrap key (`federation/host_hop.py`).
+  See [`protocol/gfs-relay.md`](./protocol/gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89).
 - `source = manual` with our `gfs_relay` opt-in on — the **fallback**: RTC
   if the DataChannel is open, else the HTTPS inbox, and only when the inbox
   was not reached (network error, timeout, 5xx — never a 4xx, which is the
@@ -577,12 +590,13 @@ unseals with the household's key-wrap key and routes on the sealed
 `kind`: §24.11 envelopes to the pipeline (with `RELAY_DELIVERED_VIA`
 naming our own `gfs_connections.id` for the delivering server during the
 dispatch), invite-bootstrap bodies to the redeem coordinator. A frame on
-one of our per-space mailboxes (v_88, `handle_mailbox_frame`) is opened
-with that mailbox's own key, must be a relayed §24.11 envelope (or media
-frame), and enters the pipeline with transport `TRANSPORT_GFS_MAILBOX` —
-the relay's timestamp window and opt-in gate, plus `check_mailbox_space`
-right after the parse (the envelope's `space_id` must be the mailbox's
-space or absent).
+our GFS mailbox (v_89, `handle_mailbox_frame`) is opened with that
+mailbox's own key, must be a relayed §24.11 envelope (or media frame), and
+enters the pipeline with transport `TRANSPORT_GFS_MAILBOX` — the relay's
+timestamp window and opt-in gate, plus `make_check_mailbox_sender` right
+after the parse: an envelope of a space is taken only from a member
+household of that space whose verified member card we hold, and a
+space-less `SPACE_*` envelope is refused on a mailbox.
 
 The authorize steps run **after** the replay-id is persisted, so a
 dropped envelope still answers 200 and the sender's outbox stops

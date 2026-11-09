@@ -1646,12 +1646,14 @@ NEEDS_RECEIPT_EVENT_TYPES: frozenset[str] = frozenset(
 #: :meth:`FederationTransport.send_via_gfs_relay` asked to relay to a paired
 #: peer we never opted into the relay with (``RemoteInstance.gfs_relay``).
 TRANSPORT_ERROR_GFS_RELAY_NOT_ENABLED = "gfs_relay_not_enabled"
+#: v_89 — a directory seat (no ``relay_via``) with no usable GFS mailbox.
+TRANSPORT_ERROR_NO_MAILBOX = "no_mailbox"
 
 
 def _space_event_without_space(envelope_dict: dict) -> bool:
     """A ``SPACE_*`` envelope with no routing ``space_id`` (a redeem reply,
     a teardown): it never rides a mailbox — the receiver refuses one there —
-    so it goes instance-addressed (v_88)."""
+    so it goes instance-addressed."""
     return not envelope_dict.get("space_id") and str(
         envelope_dict.get("event_type") or ""
     ).startswith("space_")
@@ -1778,9 +1780,8 @@ class FederationTransport:
         #: honoured at once. ``None`` disables the relay fallback for
         #: paired peers (tests, builds with no connection server).
         self._gfs_routes = gfs_routes
-        #: v_88 — ``(instance_id, space_id | None)`` → the household's
-        #: per-space GFS mailbox for that space (its signed directory entry),
-        #: or ``None``. Asked per relay send to a ``space_session`` seat; a
+        #: v_89 — ``(instance_id, space_id | None)`` → the household's GFS
+        #: mailbox as its member card for that space names it, or ``None``. Asked per relay send to a ``space_session`` seat; a
         #: target is used only when our connection to its GFS proved
         #: ``envelope_mailbox`` (:meth:`_mailbox_target`). ``None`` → every
         #: relay send stays instance-addressed (tests, older wiring).
@@ -2137,8 +2138,8 @@ class FederationTransport:
                 )
             )
             if target is not None:
-                # v_88 — addressed to the household's mailbox for this space:
-                # the GFS sees the mailbox id, never ``instance.id``.
+                # v_89 — addressed to the household's GFS mailbox: the GFS
+                # sees the mailbox id, never ``instance.id``.
                 ok, status = await self._gfs_relay.send_mailbox(
                     instance=instance, target=target, envelope_dict=envelope_dict
                 )
@@ -2147,6 +2148,14 @@ class FederationTransport:
                     via="gfs_relay",
                     status_code=status,
                     error=None if ok else _relay_failure_reason(status),
+                )
+            if not instance.relay_via:
+                # A member seated from the host's directory (v_89) and no
+                # mailbox to reach it at: never the instance-addressed relay
+                # (it would show the GFS two households that never met
+                # there) — the caller goes through the host instead.
+                return _TransportSendResult(
+                    ok=False, via="gfs_relay", error=TRANSPORT_ERROR_NO_MAILBOX
                 )
             ok, status = await self._gfs_relay.send(
                 instance=instance,
@@ -2173,31 +2182,12 @@ class FederationTransport:
             error=TRANSPORT_ERROR_NO_ROUTE,
         )
 
-    async def send_mailbox_only(
-        self, *, instance: RemoteInstance, envelope_dict: dict
-    ) -> _TransportSendResult:
-        """Deliver ``envelope_dict`` to *instance*'s mailbox for its space
-        (v_88) or not at all — never the instance-addressed relay, which
-        names both households. For mailbox updates sent right after an
-        anonymous register / claim."""
-        target = (
-            None
-            if _space_event_without_space(envelope_dict) or self._gfs_relay is None
-            else await self._mailbox_target(
-                instance, envelope_dict.get("space_id"), media=False
-            )
-        )
-        if target is None or self._gfs_relay is None:
-            return _TransportSendResult(ok=False, via="gfs_relay", error="no_mailbox")
-        ok, status = await self._gfs_relay.send_mailbox(
-            instance=instance, target=target, envelope_dict=envelope_dict
-        )
-        return _TransportSendResult(
-            ok=ok,
-            via="gfs_relay",
-            status_code=status,
-            error=None if ok else _relay_failure_reason(status),
-        )
+    async def mailbox_reachable(
+        self, instance: RemoteInstance, space_id: str | None
+    ) -> bool:
+        """Whether an envelope of *space_id* to *instance* would go to its
+        GFS mailbox (v_89) — the host-hop decision for a directory seat."""
+        return await self._mailbox_target(instance, space_id, media=False) is not None
 
     async def send_via_gfs_url(
         self,
@@ -2410,10 +2400,11 @@ class FederationTransport:
         self, instance: RemoteInstance, space_id: object, *, media: bool
     ) -> MailboxTarget | None:
         """The mailbox an envelope of *space_id* (``None`` = space-less: any
-        shared space's) goes to for *instance* (v_88), or ``None`` — no
-        resolver, no entry, an entry below v_88, or a GFS of ours that did
-        not prove ``envelope_mailbox`` (and ``envelope_media`` for *media*).
-        ``None`` means today's instance-addressed relay. Never raises."""
+        shared space's) goes to for *instance* (v_89), or ``None`` — no
+        resolver, no card with a mailbox, or a GFS of ours that did not
+        prove ``envelope_mailbox`` (and ``envelope_media`` for *media*).
+        ``None`` means the instance-addressed relay for a seat with a
+        ``relay_via``, nothing for a directory seat. Never raises."""
         if self._mailbox_targets is None or self._gfs_relay is None:
             return None
         space = space_id if isinstance(space_id, str) and space_id else None

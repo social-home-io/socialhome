@@ -1486,36 +1486,65 @@ RSASP1 (its timing does not follow the message) and checks the result with
 RSAVP1 before it leaves (a fault never leaks the key). The RFC 9474 A.3 and
 RFC 9578 A.2 test vectors are mandatory tests (`tests/test_privacy_pass.py`).
 
-### Per-space mailbox entries (v_88)
+### Member key cards (v_89)
 
-A household reached only through a GFS hands its counterpart a signed
-**directory entry** for its per-space mailbox inside the sealed redeem /
-ACK ([`protocol/gfs-relay.md`](protocol/gfs-relay.md#per-space-mailboxes-v_88)).
+Every v_89 household that reaches a space through a GFS — and every member
+of such a space — signs one small **member card** and hands it to the
+space's host (sealed redeem / ACK field `card`, or `SPACE_MEMBER_CARD`); the
+host passes it on to writer-seat members in `SPACE_MAILBOX_DIRECTORY`
+([`protocol/gfs-relay.md`](protocol/gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89)).
+It replaces v_88's per-space directory entry (never released). The card is
+`{instance_id, identity_pk, keywrap_pk, keywrap_sig, proto_version, rev,
+mailbox | null, sig_suite, sig}`, `mailbox` being `{mailbox_id, kem_pk,
+kem_suite, sign_pk, gfs, gen}` — the household's ONE mailbox at that GFS.
 Two suite tags ride in it, each validated with no fallback
-(`domain/space_mailbox.py`):
+(`domain/member_card.py`, `federation/member_card.py`):
 
-- **Entry signature.** `sig_suite: "ed25519"`
-  (`ENTRY_SIG_SUITE_ED25519` in `SUPPORTED_ENTRY_SIG_SUITES`): the
-  household identity key over `"sh-mbx-entry:v1\n"` + canonical JSON
-  (`canonical_json.canonical_bytes`) of every entry field except `sig`.
-  The receiver verifies it under the identity key it already trusts for
-  that household, which must derive to the entry's `instance_id`, and
-  checks the key-wrap binding (`verify_keywrap_binding`) and the space.
+- **Card signature.** `sig_suite: "ed25519"`
+  (`CARD_SIG_SUITE_ED25519` in `SUPPORTED_CARD_SIG_SUITES`): the household
+  identity key over `"sh-member-card:v1\n"` + canonical JSON
+  (`canonical_json.canonical_bytes`) of every card field except `sig`. The
+  card is **self-certifying**: the receiver checks that `instance_id`
+  derives from `identity_pk` (§4.1.2), verifies the signature under it,
+  and checks the key-wrap binding (`verify_keywrap_binding`). A host that
+  passes cards on can withhold or drop one, never forge or alter one.
   Phase 2 adds `"ed25519+mldsa65"` beside it.
-- **Mailbox seal.** `kem_suite: "x25519"` (`ENTRY_KEM_SUITE_X25519` in
-  `SUPPORTED_ENTRY_KEM_SUITES`): a frame for the mailbox is the same
+- **Mailbox seal.** `kem_suite: "x25519"` (`CARD_KEM_SUITE_X25519` in
+  `SUPPORTED_CARD_KEM_SUITES`): a frame for the mailbox is the same
   ephemeral X25519 ECIES seal as the relay (`seal_to_keywrap`; for media
-  the `\0SHR` seal), made to the entry's `kem_pk` instead of the
+  the `\0SHR` seal), made to the card's `kem_pk` instead of the
   household's key-wrap key. The JSON envelope is padded to the relay size
   buckets first, so the bytes per envelope do not change.
 
-An unknown suite makes the entry invalid (`InvalidMailboxEntry`, a
-`ValueError`); the pair then keeps the instance-addressed relay. The
-mailbox keys derive from the **mailbox root**, a 32-byte secret stored
-KEK-wrapped in `instance_config` (`gfs_mailbox_root`), so only the
-generation is stored per mailbox. Post-quantum: X25519 and Ed25519 here
-move with the rest of the relay (`x25519+mlkem768`, `ed25519+mldsa65`) as
-sibling suites.
+An unknown suite raises `UnsupportedMemberCardSuite` (an
+`InvalidMemberCard`, a `ValueError`); so do a card whose fields do not
+match exactly, a `mailbox_id` that is not the claim key's
+(`base32(SHA-256("sh-mbx-v1" ‖ sign_pk))[:32]`) or equals the instance id,
+a key-wrap key not bound to the identity, and — when handed over by its
+own household — a card naming another household. A refused card is
+dropped: that household gets no mailbox target and stays reachable only
+the instance-addressed way or through the host. A card in a redeem / ACK
+may name a mailbox only at the GFS the body came through.
+
+The mailbox keys derive from the **mailbox root**, a 32-byte secret stored
+KEK-wrapped in `instance_config` (`gfs_mailbox_root`), with HKDF-SHA256 from
+(GFS id, generation) only — no space id — so one mailbox serves every
+space and only `{gen, gfs}` per GFS is stored (`instance_config`
+`gfs_mailboxes`).
+
+**Lazy seats and the host hop.** A member seats a carded household from the
+card's key-wrap key: static–static session keys, no round-trip — like the
+app table seat keys, no forward secrecy for the life of those keys. When it
+cannot reach that household's mailbox it sends a three-hop `SPACE_ROUTED`
+`[member, host, member]` through the space's host, whose inner payload is
+sealed to the target's **static** key-wrap key from its card instead of a
+per-route ephemeral (`federation/host_hop.py`; no `SPACE_FIND_ROUTE`
+probe). The host sees only ciphertext; the origin signature (v_31) still
+binds `path[0]`. That leg has no forward secrecy either: a later leak of
+the target's key-wrap key opens recorded host-hop payloads.
+
+Post-quantum: X25519 and Ed25519 here move with the rest of the relay
+(`x25519+mlkem768`, `ed25519+mldsa65`) as sibling suites.
 
 ## Key storage
 
@@ -1542,7 +1571,7 @@ sibling suites.
 | `app_group_sessions` | `seat_key_json` | This household's X25519 seat key at a group table (`priv` KEK-wrapped; `pub` + identity signature in the clear) | `priv`: KEK AES-256-GCM | `socialhome/app_group/seat_key_at_rest\|session_id` |
 | `moment_public_keys` | `key_sealed` | 32-byte public-moment step key at `key_step` of generation `key_gen` (own or delivered, v_62), advanced in place | KEK AES-256-GCM | `moment-public-key\|own\|delivered\|author\|key_gen` |
 | `pending_pairings` | `own_dh_sk` | X25519 ephemeral secret | KEK AES-256-GCM | — |
-| `instance_config` | `gfs_mailbox_root` (key) | 32-byte per-space GFS mailbox root (v_88); every mailbox key derives from it | KEK AES-256-GCM | — |
+| `instance_config` | `gfs_mailbox_root` (key) | 32-byte household GFS mailbox root (v_89); every mailbox key derives from it with the GFS id and a generation | KEK AES-256-GCM | — |
 | `platform_users` | `password_hash` | `scrypt$N$r$p$salt$hash` | self-contained (params + salt embedded) | — |
 | `api_tokens` | `token_hash` | `sha256(token)` | no | — |
 

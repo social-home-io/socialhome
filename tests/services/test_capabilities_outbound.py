@@ -62,9 +62,18 @@ async def test_capabilities_reach_a_household_seated_from_an_invite_link():
         link_joined,
         source=InstanceSource.SPACE_SESSION,
         remote_inbox_url="",
+        relay_via="https://gfs.example.org",
+    )
+    # v_89 — a member seated from a host's directory (no relay of its own)
+    # learns our version from our member card, not from this fan-out.
+    directory_seat = dataclasses.replace(
+        _peer("inst-directory"),
+        source=InstanceSource.SPACE_SESSION,
+        remote_inbox_url="",
+        relay_via=None,
     )
     repo = SimpleNamespace(
-        list_instances=AsyncMock(return_value=[social, link_joined]),
+        list_instances=AsyncMock(return_value=[social, link_joined, directory_seat]),
         list_social_instances=AsyncMock(return_value=[social]),
         get_local_identity=AsyncMock(return_value={"display_name": "My Home"}),
     )

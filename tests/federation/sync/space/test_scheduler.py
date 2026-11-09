@@ -17,7 +17,11 @@ from socialhome.domain.events import (
     SpaceSyncComplete,
     SpaceSyncDeferred,
 )
-from socialhome.domain.federation import FederationEventType, PairingStatus
+from socialhome.domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    PairingStatus,
+)
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -57,6 +61,8 @@ class _FakeFederation:
         self.requests: list[tuple] = []
         #: The ``extra_payload`` (v_46 authority echo) of each catch-up.
         self.mesh_extras: list[dict | None] = []
+        #: Further BEGIN fields per mesh BEGIN (``sync_mode``, ``dir_seq``).
+        self.mesh_fields: list[dict] = []
 
     def record_sync_request(
         self,
@@ -80,10 +86,11 @@ class _FakeFederation:
         return instance_id in self.space_session
 
     async def begin_mesh_catchup_sync(
-        self, *, space_id, host_instance_id, extra_payload=None
+        self, *, space_id, host_instance_id, extra_payload=None, **fields
     ):
         self.mesh_catchups.append((space_id, host_instance_id))
         self.mesh_extras.append(extra_payload)
+        self.mesh_fields.append(fields)
         # Mirrors the real return contract: True = the BEGIN shipped, False =
         # a transient failure (``no_route`` on a still-warming mesh).
         return self.catchup_ships
@@ -172,10 +179,17 @@ def _space(space_id: str, *, owner_instance_id: str = "self") -> Space:
     )
 
 
-def _peer(instance_id: str) -> SimpleNamespace:
+def _peer(
+    instance_id: str,
+    *,
+    source: InstanceSource = InstanceSource.MANUAL,
+    relay_via: str | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=instance_id,
         status=PairingStatus.CONFIRMED,
+        source=source,
+        relay_via=relay_via,
     )
 
 
@@ -449,6 +463,86 @@ async def test_periodic_tick_enqueues_for_every_confirmed_peer(
     assert {s["payload"]["sync_mode"] for s in beg} == {"incremental"}
 
 
+async def test_the_tick_heals_a_gfs_seat_but_never_syncs_a_directory_seat(
+    bus, queue, sync_manager
+):
+    """v_89. A frame to a household's GFS mailbox can be lost (the GFS
+    queue's tail-drop or TTL while it was offline, a mailbox the GFS forgot):
+    the 30-min incremental §25.6 sync between the host and its GFS-reached
+    member (a ``space_session`` seat WITH a relay) restores it. A member
+    seated from the host's directory (no relay of its own) gets live
+    fan-out only — syncing every member with every GFS-reached member would
+    be N² streams through the GFS every tick."""
+    fed = _FakeFederation()
+    spaces = {SpaceType.HOUSEHOLD: [_space("sp-1")]}
+    members = {"sp-1": ["joiner", "directory-member"]}
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo(
+            [
+                _peer(
+                    "joiner",
+                    source=InstanceSource.SPACE_SESSION,
+                    relay_via="https://gfs.example",
+                ),
+                _peer("directory-member", source=InstanceSource.SPACE_SESSION),
+            ]
+        ),
+        space_repo=_FakeSpaceRepo(spaces_by_type=spaces, members_by_space=members),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+    )
+    await queue.start()
+    try:
+        await sched._tick_once()
+        await asyncio.sleep(0.05)
+    finally:
+        await queue.stop()
+    beg = [s for s in fed.sent if s["type"] == FederationEventType.SPACE_SYNC_BEGIN]
+    assert [(s["to"], s["payload"]["sync_mode"]) for s in beg] == [
+        ("joiner", "incremental")
+    ]
+
+
+async def test_a_begin_echoes_the_member_directory_version(bus, queue, sync_manager):
+    """v_89 review round 2: the periodic BEGIN to a space's host carries the
+    ``dir_seq`` of the member directory we hold, so a host that is ahead
+    repairs a lost delta with one snapshot."""
+    fed = _FakeFederation()
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([_peer("host")]),
+        space_repo=_FakeSpaceRepo(
+            spaces_by_type={SpaceType.HOUSEHOLD: [_space("sp-1")]},
+            members_by_space={"sp-1": ["host"]},
+        ),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+    )
+    asked: list[tuple[str, str]] = []
+
+    async def echo(space_id, peer):
+        asked.append((space_id, peer))
+        return 7
+
+    sched.attach_directory_echo(echo)
+    await queue.start()
+    try:
+        await sched._tick_once()
+        await asyncio.sleep(0.05)
+    finally:
+        await queue.stop()
+    (begin,) = [
+        s for s in fed.sent if s["type"] == FederationEventType.SPACE_SYNC_BEGIN
+    ]
+    assert begin["payload"]["dir_seq"] == 7
+    assert asked == [("sp-1", "host")]
+
+
 async def test_start_stop_idempotent(bus, queue, sync_manager):
     sched = SpaceSyncScheduler(
         bus=bus,
@@ -549,6 +643,47 @@ async def test_tick_begins_catchup_for_mesh_only_host(bus, queue, sync_manager):
     # Must NOT go out via the confirmed-peer path, which ships a bare
     # send_event with no requester-side receive session.
     assert fed.sent == []
+
+
+async def test_a_mesh_only_host_hears_our_directory_version_after_catch_up(
+    bus, queue, sync_manager
+):
+    """v_89 review round 3: a removal delta lost to a member that reaches
+    the host only over the mesh is repaired the same way as for a paired
+    member — the catch-up BEGIN echoes our ``dir_seq``, and once catch-up is
+    complete the periodic tick still sends a small incremental BEGIN with
+    it (only for a space whose directory we hold), so a host that is ahead
+    answers with one snapshot."""
+    fed = _FakeFederation(confirmed=set())
+    sched = _mesh_sched(
+        bus,
+        queue,
+        sync_manager,
+        fed,
+        [
+            _space("sp-mesh", owner_instance_id="host-x"),
+            _space("sp-plain", owner_instance_id="host-x"),
+        ],
+    )
+
+    async def echo(space_id, peer):
+        return 41 if space_id == "sp-mesh" else None
+
+    sched.attach_directory_echo(echo)
+    await sched._tick_once()
+    by_space = dict(zip([c[0] for c in fed.mesh_catchups], fed.mesh_fields))
+    assert by_space["sp-mesh"]["dir_seq"] == 41
+    assert by_space["sp-plain"].get("dir_seq") is None
+    # Catch-up complete for both: only the space with a directory keeps
+    # echoing, as an incremental BEGIN.
+    sched._mesh_catchup_done.update({("sp-mesh", "host-x"), ("sp-plain", "host-x")})
+    fed.mesh_catchups.clear()
+    fed.mesh_fields.clear()
+    await sched._tick_once()
+    assert fed.mesh_catchups == [("sp-mesh", "host-x")]
+    assert fed.mesh_fields == [
+        {"dir_seq": 41, "sync_mode": "incremental", "have_seq": None}
+    ]
 
 
 async def test_tick_skips_confirmed_host(bus, queue, sync_manager):

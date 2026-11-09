@@ -317,16 +317,42 @@ exactly:**
   is real and is the sharpest edge of this concession.
 - **It can correlate with the household's own WebSocket session** — same
   server, same IP — exactly as the `/gfs/publish` residual above notes.
-- **Per-space mailboxes narrow the recipient (v_88).** When both sides
-  are at v_88 and the GFS proves `envelope_mailbox`, `to_instance` is the
-  recipient's anonymous mailbox for that space, not its instance id, sent
-  over the cookie-less session. Per mailbox frame the GFS then learns the
+- **One mailbox per household hides the instance id (v_89; owner
+  sign-off 2026-11-09).** When both sides are at v_89 and the GFS proves
+  `envelope_mailbox`, `to_instance` is the recipient household's ONE
+  anonymous mailbox at that GFS, not its instance id, sent over the
+  cookie-less session — by the host and by every writer member that holds
+  the household's member card. Per mailbox frame the GFS then learns the
   mailbox id, time, size bucket and sender IP; per claim socket its IP and
   online time — never an instance id, space id, event type or sender id.
-  The IP / timing correlation above still applies. The teardown
-  `SPACE_SESSION_CLEANUP` (one frame) and the joiner→host direction when
-  the host sent no mailbox stay instance-addressed. See
-  [gfs-relay.md](protocol/gfs-relay.md#per-space-mailboxes-v_88).
+  Stated plainly, what it can still see:
+  - **One household's traffic across all its spaces lands in one
+    mailbox**, so the GFS can count it as one recipient and see its total
+    volume and rhythm. It cannot tell which or how many spaces that
+    traffic belongs to.
+  - **Within one space it can cluster that space's member mailboxes**: a
+    fan-out hits the same set of mailboxes at (almost) the same instant,
+    so the mailboxes of one space's GFS-reached members are linkable as
+    "plausibly members of one thing" — the accepted residual, as for
+    instance ids above.
+
+  - **A paired or mesh member connected to that GFS owns one too** (owner
+    decision 2026-11-09) once a space it is in has a GFS-reached member
+    there, so a GFS-only member reaches it with the host offline. It
+    costs that household one more claim socket and ticket at that GFS and
+    adds its mailbox to the space's cluster above; it opens no new
+    identified link, and the mailbox is released once no GFS-reached
+    member is left there. A member not connected to that GFS is reached
+    through the host hop.
+
+  Nothing that identifies a household across households reaches the GFS:
+  no instance id, no space id, no content, no member list. A GFS that logs
+  IPs **can** tell which household owns which mailbox: its identified
+  socket and its mailbox come from the same IP (see [No random delays for
+  GFS unlinkability](#no-random-delays-for-gfs-unlinkability)). The teardown `SPACE_SESSION_CLEANUP`
+  (one frame) and a household whose card names no mailbox stay
+  instance-addressed. See
+  [gfs-relay.md](protocol/gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89).
 - **It cannot forge.** The seal is confidentiality only; authorization is
   the Ed25519 signature under the pair's key, checked by the unmodified
   §24.11 pipeline at the receiver. A relay that substitutes, replays or
@@ -1153,6 +1179,33 @@ for a residual only a GFS that recognises the household's IP can use. Key
 consistency stays the anonymous cross-read plus the one-key-per-epoch pin,
 which is now persisted per GFS, so a restart cannot reset it; tickets refill
 on a GFS connect when the cache is empty.
+
+### No random delays for GFS unlinkability
+
+Owner decision 2026-11-09. A household's identified GFS socket and its
+anonymous mailbox (register, claim socket, tickets) come from the **same
+IP**. A GFS that logs IPs can therefore tell which household owns which
+mailbox, whatever the timing. Random jitter, waits and quiet windows would
+only be expensive cover for a gap the IP already leaves open, so there are
+none: a mint publishes its card at once, a claim connects at once, tickets
+are fetched when needed.
+
+What holds instead:
+
+- the GFS never sees content, space ids or instance ids for mailbox
+  traffic (frames carry a mailbox id and a sealed body);
+- the GFS stores no mailbox ↔ household link (`gfs_mailboxes` holds the
+  key and two day-rounded timestamps, nothing else);
+- the project's GFS does not log IPs.
+
+The future path to real unlinkability is **Oblivious HTTP** (RFC 9458)
+through a third-party relay, so the GFS never sees the household's IP on
+mailbox traffic. Not built.
+
+**The rule:** don't add jitter, waits or quiet windows as a privacy
+measure. A review finding a "timing link" between a household's
+identified and anonymous GFS traffic is answered by pointing here. Delays
+for load or retries (sweep cadence, backoff) are fine.
 
 ## No third-party fetches from user content
 

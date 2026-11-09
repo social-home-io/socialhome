@@ -1,0 +1,165 @@
+"""The space host as the one ``SPACE_ROUTED`` hop toward a carded member (v_89).
+
+A member household that holds a seat for another member of a space but
+cannot reach it directly — it has no connection to the GFS the other
+reaches the space through, or the other has no mailbox — sends through the
+space's host instead: a three-hop route ``[us, host, them]`` of that space
+(owner decision 2026-11-08: "we need the relay only members").
+
+* **No discovery.** The route is fixed and the inner payload is sealed to
+  the target's static key-wrap key from its verified member card — the
+  same key its seat was made from — so there is no probe flood, and a
+  relay seat stays out of route discovery entirely.
+* **The host relays, never reads.** The inner payload is sealed end to end
+  (:mod:`socialhome.federation.routed_crypto`); the host sees the route and
+  the routing ``space_id``.
+* **One shape only.** :meth:`HostHop.allows` is what ``SpaceRoutedHandler``
+  asks before it relays or unwraps a ``SPACE_ROUTED`` that a
+  ``space_session`` seat sent us, or that it would forward to one: exactly
+  three hops, the routing space's host in the middle, both ends holding a
+  card for that space on the side that checks. Anything else from that
+  peer class is dropped.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
+
+from ..crypto import b64url_encode
+from ..domain.federation import (
+    SPACE_SESSION_ALLOWED_EVENT_TYPES,
+    DeliveryResult,
+    FederationEventType,
+)
+from ..domain.member_card import MemberCard
+
+if TYPE_CHECKING:
+    from .routed_envelope import SpaceRoutedHandler
+
+log = logging.getLogger(__name__)
+
+#: ``DeliveryResult.error`` when no host hop can carry a send.
+HOST_HOP_UNAVAILABLE: str = "host_hop_unavailable"
+
+CardLookup = Callable[[str, str], Awaitable[MemberCard | None]]
+HostLookup = Callable[[str], Awaitable[str | None]]
+
+
+class HostHop:
+    """See the module docstring."""
+
+    __slots__ = (
+        "_card_of",
+        "_host_of",
+        "_keywrap_private",
+        "_keywrap_public_b64",
+        "_own_instance_id",
+        "_routed",
+    )
+
+    def __init__(
+        self,
+        *,
+        own_instance_id: str,
+        card_of: CardLookup,
+        host_of: HostLookup,
+        keywrap_private_key: bytes,
+        keywrap_public_key: bytes,
+    ) -> None:
+        self._own_instance_id = own_instance_id
+        self._card_of = card_of
+        self._host_of = host_of
+        self._keywrap_private = keywrap_private_key
+        self._keywrap_public_b64 = b64url_encode(keywrap_public_key)
+        self._routed: SpaceRoutedHandler | None = None
+
+    def attach_routed(self, routed: SpaceRoutedHandler) -> None:
+        self._routed = routed
+
+    def static_target_priv(self, target_pub_b64: str) -> str | None:
+        """Our key-wrap private key (base64url) when a routed envelope was
+        sealed to our key-wrap public key — the host hop's target key —
+        else ``None``."""
+        if target_pub_b64 and target_pub_b64 == self._keywrap_public_b64:
+            return b64url_encode(self._keywrap_private)
+        return None
+
+    async def send(
+        self,
+        *,
+        to_instance_id: str,
+        event_type: FederationEventType,
+        payload: dict,
+        space_id: str,
+    ) -> DeliveryResult:
+        """Ship one event of *space_id* to *to_instance_id* through the
+        space's host. Never raises."""
+        failed = DeliveryResult(
+            instance_id=to_instance_id, ok=False, error=HOST_HOP_UNAVAILABLE
+        )
+        if self._routed is None or not space_id:
+            return failed
+        host = await self._host_of(space_id)
+        if host is None or host in (self._own_instance_id, to_instance_id):
+            return failed
+        card = await self._card_of(space_id, to_instance_id)
+        if card is None:
+            return failed
+        try:
+            await self._routed.send_routed(
+                path=[self._own_instance_id, host, to_instance_id],
+                target_eph_pk_b64=b64url_encode(bytes.fromhex(card.keywrap_pk)),
+                inner_event_type=event_type,
+                inner_payload=payload,
+                target_identity_pk=card.identity_pk,
+                space_id=space_id,
+            )
+        except Exception:
+            log.warning("host hop: routed send failed", exc_info=True)
+            return failed
+        return DeliveryResult(instance_id=to_instance_id, ok=True, via="host_hop")
+
+    async def allows(
+        self,
+        *,
+        space_id: str | None,
+        path: list[str],
+        inner_type: FederationEventType,
+    ) -> bool:
+        """Whether a ``SPACE_ROUTED`` with *path*, routing *space_id* and
+        inner *inner_type* is the host-hop shape we take from (or forward
+        to) a ``space_session`` seat: three hops, the space's host in the
+        middle, an inner event a seat may send directly too (the §D2b
+        vocabulary — the hop never widens it), and — on the host — both
+        ends' cards held for that space; on an end, the other end's."""
+        if not space_id or len(path) != 3 or len(set(path)) != 3:
+            return False
+        if (
+            inner_type not in SPACE_SESSION_ALLOWED_EVENT_TYPES
+            or inner_type is FederationEventType.SPACE_ROUTED
+        ):
+            log.info("host hop: an inner %r is not seat vocabulary", inner_type.value)
+            return False
+        host = await self._host_of(space_id)
+        if host is None or path[1] != host:
+            return False
+        me = self._own_instance_id
+        ends: tuple[str, ...]
+        if me == host:
+            ends = (path[0], path[2])
+        elif me == path[2]:
+            ends = (path[0],)
+        elif me == path[0]:
+            ends = (path[2],)
+        else:
+            return False
+        for end in ends:
+            if await self._card_of(space_id, end) is None:
+                log.info("host hop: no card for an end of the route — dropping")
+                return False
+        return True
+
+
+__all__ = ["HOST_HOP_UNAVAILABLE", "HostHop"]

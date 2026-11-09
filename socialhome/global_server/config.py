@@ -266,8 +266,12 @@ class EnvelopeMailboxConfig:
     * ``mailbox_max_sockets_per_ip`` — claim sockets one client address may
       hold open at once (per node share; ×16 per /56, ×256 per /48).
     * ``mailbox_queue_max_per_recipient`` / ``mailbox_queue_bytes_per_recipient``
-      — queued envelopes for ONE offline mailbox (rows / bytes, tail-drop);
-      far below a household's (2000 / 64 MiB): ids are free to mint.
+      — queued envelopes for ONE offline mailbox (rows / bytes, tail-drop,
+      24 h TTL). Since v_89 a household has ONE mailbox per GFS for all its
+      spaces, so this is its whole queue there: sized for a household in
+      ~10 spaces offline for a day (2000 / 32 MiB — the row cap matches a
+      registered household's; bytes half of its 64 MiB, as minting is
+      ticket-bound, not free).
     * ``mailbox_queue_max_total_bytes`` — envelope bytes queued for ALL
       mailboxes; past it a new envelope is dropped (never anything evicted)
       unless its mailbox is under its reserve (20 envelopes / 64 KiB), which
@@ -283,11 +287,11 @@ class EnvelopeMailboxConfig:
     mailbox_tickets_per_day: int = 50
     mailbox_ticket_epoch_days: int = 30
     mailbox_max_sockets_per_ip: int = 512
-    mailbox_queue_max_per_recipient: int = 200
-    mailbox_queue_bytes_per_recipient: int = 4 * 1024**2
+    mailbox_queue_max_per_recipient: int = 2000
+    mailbox_queue_bytes_per_recipient: int = 32 * 1024**2
     mailbox_queue_max_total_bytes: int = 256 * 1024**2
     mailbox_queue_ceiling_bytes: int = 1024**3
-    mailbox_media_queue_bytes_per_recipient: int = 8 * 1024**2
+    mailbox_media_queue_bytes_per_recipient: int = 16 * 1024**2
     mailbox_media_queue_max_total_bytes: int = 256 * 1024**2
 
     @classmethod

@@ -1410,24 +1410,31 @@ from __future__ import annotations
 #:   (96 KiB), which fit the JSON relay's envelope cap. Not space-scoped, no
 #:   sync-stream change. Labelled "Members reached through a GFS get pictures
 #:   in full-size pieces".
-#: * **v_88** (2026-11-08) — **per-space GFS mailboxes** (GFS redesign PR 2).
-#:   A household that reaches a space only through a GFS (a ``space_session``
-#:   seat, from an invite link or an approved "Ask to join") mints one
-#:   anonymous mailbox per (space, generation) at that GFS, registers it with
-#:   an anonymous ticket and claims it on its own anonymous socket. Its
-#:   signed directory entry (``{space, instance_id, mailbox_id, kem_pk,
-#:   kem_suite, sign_pk, gfs, gen, proto_version, keywrap_pk, keywrap_sig,
-#:   sig_suite, sig}``) rides inside the sealed redeem; the host stores it on
-#:   the pair's ``space_instances`` row (migration 0144) and answers with its
-#:   own in the sealed ACK. Envelopes (and v_87 media frames) of that space
-#:   then go to the mailbox id, the whole envelope sealed to the entry's
-#:   ``kem_pk`` — the GFS sees a mailbox id, never an instance id. The
-#:   receiver takes a frame on mailbox M only for M's space (or space-less).
-#:   **Fallback**: no entry, an entry below v_88, or a GFS whose signed
-#:   ``/gfs/info`` lacks ``envelope_mailbox`` → today's instance-addressed
-#:   relay. No sync-stream record change. Labelled "Members reached through a
-#:   GFS get an anonymous mailbox per space".
-OURS: int = 88
+#: * **v_88** (2026-11-08) — per-space GFS mailboxes (GFS redesign PR 2,
+#:   #1333). Never released: v_89 replaced it before any release, so no
+#:   household speaks it and nothing gates on it any more.
+#: * **v_89** (2026-11-09) — **one GFS mailbox per household, reachable by
+#:   every member** (GFS redesign PR 3). A household that reaches a space
+#:   through a GFS owns ONE anonymous mailbox at that GFS, shared by every
+#:   space it reaches there (owner decision 2026-11-09). Each household
+#:   signs a member key card (``{instance_id, identity_pk, keywrap_pk,
+#:   keywrap_sig, proto_version, rev, mailbox | null, sig_suite, sig}``) and
+#:   gives it to the host once — in the sealed redeem / ACK, else
+#:   ``SPACE_MEMBER_CARD``. The host passes the cards on to writer-seat
+#:   member households only in ``SPACE_MAILBOX_DIRECTORY`` (a bounded
+#:   snapshot to a newcomer, deltas after). A member seats a carded
+#:   household lazily, so ANY member's fan-out reaches its mailbox, and a
+#:   GFS-reached household takes a mailbox frame only from a sender whose
+#:   card it holds for that space. The directory flags GFS-reached
+#:   households (``gfs_reached``): a paired or mesh member connected to
+#:   that GFS mints its own ONE mailbox there too, so a GFS-only member
+#:   reaches it with the host offline. A member with no connection to that
+#:   GFS goes through the host as a three-hop ``SPACE_ROUTED`` sealed to
+#:   the target's key-wrap key. **Fallback**: a peer below v_89 gets no card,
+#:   no directory and no mailbox; the host keeps today's instance-addressed
+#:   relay to it. No sync-stream record change. Labelled "Every member
+#:   reaches households that reach a space through a GFS".
+OURS: int = 89
 
 
 class FederationCapability:
@@ -2077,11 +2084,12 @@ class FederationCapability:
     #: GFS relay (``\x00SHR``): a link-joined peer gets 512 KiB media
     #: chunks through a GFS proving ``envelope_media``.
     MIN_FOR_RELAY_MEDIA = 87
-    #: v_88 — a household at or above it opens envelopes addressed to its
-    #: per-space GFS mailbox and reads the directory entry in a sealed
-    #: redeem / ACK (GFS redesign PR 2). The gate is the entry itself: only
-    #: a v_88 household mints one, and an older one never gets one.
-    MIN_FOR_SPACE_MAILBOX = 88
+    #: v_89 — a household at or above it owns one GFS mailbox (shared by
+    #: its spaces), reads member key cards in a sealed redeem / ACK and in
+    #: ``SPACE_MEMBER_CARD`` / ``SPACE_MAILBOX_DIRECTORY``, seats carded
+    #: members lazily and takes a three-hop host ``SPACE_ROUTED``. Cards and
+    #: directories go only to a household at or above it.
+    MIN_FOR_MAILBOX_MEMBER_MESH = 89
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2417,8 +2425,8 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         "Members reached through a GFS get pictures in full-size pieces",
     ),
     (
-        FederationCapability.MIN_FOR_SPACE_MAILBOX,
-        "Members reached through a GFS get an anonymous mailbox per space",
+        FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH,
+        "Every member reaches households that reach a space through a GFS",
     ),
 ]
 
@@ -2518,7 +2526,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_CONTENT_FILE_HASHES: "content_file_hashes",
     FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS: "trusted_file_fills",
     FederationCapability.MIN_FOR_RELAY_MEDIA: "relay_media",
-    FederationCapability.MIN_FOR_SPACE_MAILBOX: "space_mailboxes",
+    FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH: "mailbox_member_mesh",
 }
 
 

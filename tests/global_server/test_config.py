@@ -988,12 +988,14 @@ def test_envelope_mailbox_bad_values_are_refused(tmp_dir, line):
 
 def test_envelope_mailbox_queue_and_socket_caps(tmp_dir, monkeypatch):
     m = GfsConfig().envelope_mailbox
+    # v_89: ONE mailbox per household per GFS carries all its spaces —
+    # sized for a household in ~10 spaces offline for a day.
     assert (m.mailbox_queue_max_per_recipient, m.mailbox_queue_bytes_per_recipient) == (
-        200,
-        4 * 1024**2,
+        2000,
+        32 * 1024**2,
     )
     assert m.mailbox_queue_max_total_bytes == 256 * 1024**2
-    assert m.mailbox_media_queue_bytes_per_recipient == 8 * 1024**2
+    assert m.mailbox_media_queue_bytes_per_recipient == 16 * 1024**2
     assert (m.mailbox_tickets_per_day, m.mailbox_ticket_epoch_days) == (50, 30)
     assert m.mailbox_max_sockets_per_ip == 512
     p = tmp_dir / "global_server.toml"

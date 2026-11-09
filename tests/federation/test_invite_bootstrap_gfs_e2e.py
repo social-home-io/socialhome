@@ -55,7 +55,6 @@ from socialhome.domain.space import JoinMode, SpacePermissionError, SpaceType
 from socialhome.domain.user import User
 from socialhome.federation import invite_token_redeem as redeem_module
 from socialhome.federation.federation_service import FederationService
-from socialhome.federation.gfs_mailbox import derive_mailbox_keys
 from socialhome.federation.gfs_relay_transport import (
     RELAY_SIZE_BUCKETS,
     GfsRelayTransport,
@@ -102,18 +101,20 @@ from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.gfs_envelope_sender import GfsEnvelopeSender
+from socialhome.services.gfs_mailbox_service import (
+    REGISTER_OK,
+    GfsMailboxService,
+    _Claim,
+)
 from socialhome.services.gfs_relay_inbound import (
     MAILBOX_INBOUND_LIMIT,
     RELAY_DELIVERED_VIA,
     GfsRelayInbound,
 )
 from socialhome.services.peer_unpair_service import PeerUnpairService
-from socialhome.services.space_mailbox_service import (
-    REGISTER_OK,
-    SpaceMailboxService,
-    _Claim,
-)
+from socialhome.services.space_member_directory import SpaceMemberDirectory
 from socialhome.services.space_service import SpaceService
+from socialhome.services.space_writer_households import SpaceWriterHouseholds
 
 try:
     import pytest_socket  # noqa: F401
@@ -266,31 +267,23 @@ class _FakeGfs:
             await asyncio.gather(*batch, return_exceptions=True)
 
 
-class _FakeGfsMailboxes(SpaceMailboxService):
+class _FakeGfsMailboxes(GfsMailboxService):
     """The real mailbox service, registered and claimed at the fake GFS
     (no tickets, no sockets): the claim is a route in the fake."""
 
-    __slots__ = ("fake", "inbound")
+    __slots__ = ("fake", "inbound", "registers")
 
     async def _register(self, conn, keys, *, fetch=True) -> str:
+        self.registers += 1
         return REGISTER_OK
 
-    async def _open_claim(
-        self, space_id, peer, own, *, keys=None, start_delay=0.0
-    ) -> None:
-        if keys is None:
-            keys = derive_mailbox_keys(
-                await self._load_root(),
-                own.gfs_instance_id,
-                space_id,
-                own.gen,
-                peer=peer,
-            )
-        claim_key = (space_id, peer, own.gfs_instance_id, own.gen)
-        if claim_key in self._claims:
+    async def _open_claim(self, own, *, start_delay=0.0) -> None:
+        existing = self._claims.get(own.gfs_instance_id)
+        if existing is not None and existing.own == own:
             return
-        self._claims[claim_key] = _Claim(keys=keys, own=own, peer=peer)
-        self.fake.mailboxes[keys.mailbox_id] = (self.inbound, keys)
+        claim = _Claim(keys=self._keys(own), own=own)
+        self._claims[own.gfs_instance_id] = claim
+        self.fake.mailboxes[claim.keys.mailbox_id] = (self.inbound, claim.keys)
 
     async def _close_claim(self, claim) -> None:
         self.fake.mailboxes.pop(claim.keys.mailbox_id, None)
@@ -462,27 +455,40 @@ async def _household(
     )
     gfs.sockets[instance_id] = relay_inbound
     mailbox_service = None
+    directory = None
     if mailboxes:
         mailbox_service = _FakeGfsMailboxes(
-            space_repo=space_repo,
             instance_config=SqliteInstanceConfigRepo(db),
             key_manager=key_manager,
             gfs_repo=gfs_repo,
             gfs_service=gfs_service,
             instance_id=instance_id,
             identity_seed=ident.private_key,
-            keywrap_public_key=keywrap.public_key,
-            keywrap_sig=keywrap_sig,
             release_delay=(0.0, 0.0),
-            claim_jitter=(0.0, 0.0),
         )
         mailbox_service.fake = gfs
         mailbox_service.inbound = relay_inbound
+        mailbox_service.registers = 0
+        directory = SpaceMemberDirectory(
+            space_repo=space_repo,
+            federation_repo=federation_repo,
+            writer_households=SpaceWriterHouseholds(
+                remote_members, own_instance_id=instance_id
+            ),
+            mailboxes=mailbox_service,
+            instance_id=instance_id,
+            identity_seed=ident.private_key,
+            identity_pk=ident.public_key,
+            keywrap_pk=keywrap.public_key,
+            keywrap_sig=keywrap_sig,
+        )
         await mailbox_service.start()
-        coordinator.attach_mailboxes(mailbox_service)
+        coordinator.attach_mailboxes(mailbox_service, directory)
         space_service.attach_space_mailboxes(mailbox_service)
-        mailbox_service.attach_to(federation, federation_repo)
-        fed_transport._mailbox_targets = mailbox_service.target_for
+        directory.attach_seat_ender(space_service.end_space_session_if_unused)
+        directory.attach_to(federation)
+        federation._mailbox_sender_check = directory.sender_allowed
+        fed_transport._mailbox_targets = directory.target_for
 
     user_id = f"{name}-user-id"
     await user_repo.save(
@@ -515,6 +521,7 @@ async def _household(
         coordinator=coordinator,
         relay_inbound=relay_inbound,
         mailboxes=mailbox_service,
+        directory=directory,
         user_id=user_id,
         username=f"{name}user",
     )
@@ -1430,7 +1437,9 @@ NON_SPACE_PROBE_TYPES = [
     FederationEventType.URL_UPDATED,
     FederationEventType.SPACE_FIND_ROUTE,
     FederationEventType.SPACE_ROUTE_FOUND,
-    FederationEventType.SPACE_ROUTED,
+    # SPACE_ROUTED passes the peer-class gate since v_89 (the host hop); the
+    # routed handler takes it from a seat only in the three-hop host shape
+    # (tests/federation/test_host_hop.py).
     FederationEventType.SPACE_ADMIN_KEY_SHARE,
     FederationEventType.SPACE_JOIN_REQUEST,
     FederationEventType.SPACE_DIRECTORY_SYNC,
@@ -1465,7 +1474,7 @@ async def test_a_link_joined_household_cannot_push_non_space_events(
         assert result.ok is True, "the relay accepts everything by design"
     await gfs.drain()
 
-    assert len(NON_SPACE_PROBE_TYPES) == 19
+    assert len(NON_SPACE_PROBE_TYPES) == 18
     assert dispatched == [], f"host dispatched {dispatched} from a link-joined peer"
 
 
@@ -1942,6 +1951,8 @@ async def mailbox_households(tmp_path, gfs, http_session):
     b = await _household(tmp_path, "mb", gfs, http_session, mailboxes=True)
     yield a, b
     await gfs.drain()
+    await a.mailboxes.stop()
+    await b.mailboxes.stop()
     await a.db.shutdown()
     await b.db.shutdown()
 
@@ -1953,23 +1964,58 @@ async def _rows(h):
     }
 
 
-async def test_a_link_join_gives_both_sides_a_mailbox_for_the_space(
+def _mailbox_of(h, gfs) -> str:
+    [mailbox_id] = [
+        mid
+        for mid, (inbound, _k) in gfs.mailboxes.items()
+        if inbound is h.relay_inbound
+    ]
+    return mailbox_id
+
+
+async def _link_join(joiner, host, gfs, space, token: str) -> None:
+    """*joiner* redeems a fresh published link to *host*'s *space*."""
+    await host.space_repo.create_invite_token(space.id, host.user_id, uses=1)
+    await host.db.enqueue(
+        "UPDATE space_invite_tokens SET token=? WHERE space_id=? AND token<>?",
+        (token, space.id, TOKEN_MARKER),
+    )
+    await joiner.space_service.redeem_invite_token(
+        token,
+        user_id=joiner.user_id,
+        issuer_instance_id=host.instance_id,
+        bootstrap=InviteBootstrapHint(
+            invite_token=token,
+            space_id=space.id,
+            instance_id=host.instance_id,
+            identity_pk=host.identity_pk.hex(),
+            keywrap_pk=host.keywrap_pub.hex(),
+            keywrap_sig=host.keywrap_sig,
+            proto_version=OURS,
+            display_hint=SPACE_NAME,
+            gfs_url=gfs.url,
+        ),
+    )
+    await gfs.drain()
+
+
+async def test_a_link_join_gives_each_side_one_mailbox_and_the_others_card(
     mailbox_households, gfs
 ):
     a, b = mailbox_households
     space = await _join(a, b, gfs)
-    a_rows, b_rows = await _rows(a), await _rows(b)
-    a_row = a_rows[(space.id, b.instance_id)]
-    b_row = b_rows[(space.id, a.instance_id)]
-    # Each holds the other's signed entry and its own generation.
-    assert a_row["peer"]["instance_id"] == b.instance_id
-    assert b_row["peer"]["instance_id"] == a.instance_id
-    assert a_row["own"] and b_row["own"]
-    assert a_row["peer"]["mailbox_id"] != b_row["peer"]["mailbox_id"]
+    a_card = (await _rows(b))[(space.id, a.instance_id)]["card"]
+    b_card = (await _rows(a))[(space.id, b.instance_id)]["card"]
+    # Each holds the other's signed, self-certifying card naming its ONE
+    # mailbox at this GFS — and nothing in a card names the space.
+    assert a_card["instance_id"] == a.instance_id
+    assert b_card["instance_id"] == b.instance_id
+    assert "space" not in a_card and "space" not in a_card["mailbox"]
     assert set(gfs.mailboxes) == {
-        a_row["peer"]["mailbox_id"],
-        b_row["peer"]["mailbox_id"],
+        a_card["mailbox"]["mailbox_id"],
+        b_card["mailbox"]["mailbox_id"],
     }
+    assert a.mailboxes.registers == 1 and b.mailboxes.registers == 1
 
 
 async def test_space_content_rides_the_mailbox_and_the_gfs_sees_no_instance_id(
@@ -1977,8 +2023,7 @@ async def test_space_content_rides_the_mailbox_and_the_gfs_sees_no_instance_id(
 ):
     a, b = mailbox_households
     space = await _join(a, b, gfs)
-    a_mailbox = (await _rows(b))[(space.id, a.instance_id)]["peer"]["mailbox_id"]
-    b_mailbox = (await _rows(a))[(space.id, b.instance_id)]["peer"]["mailbox_id"]
+    a_mailbox, b_mailbox = _mailbox_of(a, gfs), _mailbox_of(b, gfs)
 
     result = await b.federation.broadcast_to_space_members(
         space.id, FederationEventType.SPACE_POST_CREATED, _post_payload()
@@ -2001,11 +2046,53 @@ async def test_space_content_rides_the_mailbox_and_the_gfs_sees_no_instance_id(
         assert leak not in wire
 
 
-async def test_an_envelope_of_another_space_on_a_mailbox_is_refused(
-    mailbox_households, gfs
-):
-    """A mailbox is for one space: a genuine, signed envelope of the same
-    pair but for another space is refused on it."""
+async def test_one_mailbox_serves_every_space_of_the_household(mailbox_households, gfs):
+    """Owner decision 2026-11-09: ONE mailbox per household per GFS. A
+    second space reached through the same GFS adds no mailbox, no ticket
+    and no socket — its envelopes land in the same mailbox."""
+    a, b = mailbox_households
+    for h in (a, b):  # the direct §D2 redeem over the existing seat
+        h.coordinator.attach_to(h.federation)
+    first = await _join(a, b, gfs)
+    second = await b.space_service.create_space(
+        owner_username=b.username,
+        name="Second club",
+        space_type=SpaceType.PRIVATE,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    await b.db.enqueue("UPDATE spaces SET private_gfs=1 WHERE id=?", (second.id,))
+    await _link_join(a, b, gfs, second, "tok-second-space")
+    a.received.clear()
+    gfs.mailbox.clear()
+    assert len(gfs.mailboxes) == 2  # one per household, not per space
+    assert a.mailboxes.registers == 1 and b.mailboxes.registers == 1
+    for space in (first, second):
+        await b.federation.broadcast_to_space_members(
+            space.id, FederationEventType.SPACE_POST_CREATED, _post_payload(space.id)
+        )
+    await gfs.drain()
+    assert sorted(e.payload["content"] for e in a.received) == sorted(
+        [first.id, second.id]
+    )
+    assert {to for to, _ in gfs.mailbox} == {_mailbox_of(a, gfs)}
+    # The joiner's "seated" card for the second space crossed the host's
+    # mailbox gate (it held a's card from the first space only) …
+    assert (await _rows(b))[(second.id, a.instance_id)]["card"]["instance_id"] == (
+        a.instance_id
+    )
+    # … and the member's writes in the second space reach the host.
+    b.received.clear()
+    await a.federation.broadcast_to_space_members(
+        second.id, FederationEventType.SPACE_POST_CREATED, _post_payload("a-in-2")
+    )
+    await gfs.drain()
+    assert [e.payload["content"] for e in b.received] == ["a-in-2"]
+
+
+async def test_a_frame_from_a_sender_without_a_card_is_refused(mailbox_households, gfs):
+    """Our ONE mailbox serves every space, so the address authorizes
+    nothing: a genuine, signed envelope from the seated host about a space
+    it is not a member household of on our side is refused on it."""
     a, b = mailbox_households
     await _join(a, b, gfs)
     keys = next(k for (inb, k) in gfs.mailboxes.values() if inb is a.relay_inbound)
@@ -2033,34 +2120,9 @@ async def test_an_envelope_of_another_space_on_a_mailbox_is_refused(
             envelope_dict=envelope, peer_keywrap_pub=keys.kem_public
         ),
     }
-    with pytest.raises(ValueError, match="mailbox's space"):
+    with pytest.raises(ValueError, match="card"):
         await a.relay_inbound.handle_mailbox_frame(frame, keys=keys)
     assert a.received == []
-
-
-async def test_a_host_without_mailboxes_keeps_the_instance_addressed_relay(
-    tmp_path, gfs, http_session
-):
-    """Mixed versions: the joiner sends its entry; a host that does not
-    mint one (no mailbox service) never answers with one, and the joiner
-    keeps addressing the host by instance id."""
-    gfs.mailboxes_on = True
-    a = await _household(tmp_path, "xa", gfs, http_session, mailboxes=True)
-    b = await _household(tmp_path, "xb", gfs, http_session, mailboxes=False)
-    try:
-        space = await _join(a, b, gfs)
-        row = (await _rows(a))[(space.id, b.instance_id)]
-        assert row["peer"] is None and row["own"]
-        await a.federation.broadcast_to_space_members(
-            space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("x")
-        )
-        await gfs.drain()
-        assert [to for to, _ in gfs.mailbox] == [b.instance_id]
-        assert [e.payload["content"] for e in b.received] == ["x"]
-    finally:
-        await gfs.drain()
-        await a.db.shutdown()
-        await b.db.shutdown()
 
 
 async def test_a_gfs_without_mailboxes_keeps_todays_relay(tmp_path, gfs, http_session):
@@ -2068,18 +2130,20 @@ async def test_a_gfs_without_mailboxes_keeps_todays_relay(tmp_path, gfs, http_se
     b = await _household(tmp_path, "yb", gfs, http_session, mailboxes=True)
     try:
         space = await _join(a, b, gfs)
-        empty = {"peer": None, "own": None}
-        # Marked as a mailbox pair (the sweep retries once the GFS can),
-        # but no mailbox on either side: instance-addressed meanwhile.
-        assert list((await _rows(a)).values()) == [empty]
-        assert list((await _rows(b)).values()) == [empty]
+        # Cards without a mailbox on either side: instance-addressed.
+        rows_a, rows_b = await _rows(a), await _rows(b)
+        assert rows_a[(space.id, b.instance_id)]["card"]["mailbox"] is None
+        assert rows_b[(space.id, a.instance_id)]["card"]["mailbox"] is None
         await b.federation.broadcast_to_space_members(
             space.id, FederationEventType.SPACE_POST_CREATED, _post_payload()
         )
         await gfs.drain()
         assert [to for to, _ in gfs.mailbox] == [a.instance_id]
+        assert gfs.mailboxes == {}
     finally:
         await gfs.drain()
+        await a.mailboxes.stop()
+        await b.mailboxes.stop()
         await a.db.shutdown()
         await b.db.shutdown()
 
@@ -2096,35 +2160,36 @@ async def test_a_kick_drops_and_unregisters_both_mailboxes(mailbox_households, g
         user_id=a.user_id,
     )
     await gfs.drain()
-    await a.mailboxes.settle_releases()
-    await b.mailboxes.settle_releases()
+    # Past the pending window of a fresh mint: only "needed" keeps one.
+    for h in (a, b):
+        h.mailboxes._pending.clear()
+        await h.mailboxes.release_unused()
+        await h.mailboxes.settle_releases()
     assert gfs.mailboxes == {}
     assert set(gfs.unregistered) == boxes
 
 
-async def test_an_entry_naming_another_gfs_than_its_leg_is_ignored(
+async def test_a_card_naming_another_gfs_than_its_leg_is_ignored(
     mailbox_households, gfs
 ):
-    """A peer cannot steer our anonymous frames to another GFS: the entry
+    """A peer cannot steer our anonymous frames to another GFS: a seat card
     must name the GFS the sealed body came through."""
     a, b = mailbox_households
     space = await _join(a, b, gfs)
-    wire = (await _rows(b))[(space.id, a.instance_id)]["peer"]
-    entry = SpaceInviteTokenRedeemCoordinator._peer_entry(
-        wire,
-        identity_pk=a.identity_pk.hex(),
-        instance_id=a.instance_id,
-        space_id=space.id,
-        gfs_url=gfs.url,
+    wire = (await _rows(b))[(space.id, a.instance_id)]["card"]
+    ok = SpaceMemberDirectory.verify_seat_card(
+        wire, instance_id=a.instance_id, gfs_url=gfs.url
     )
-    assert entry is not None
+    assert ok is not None
     assert (
-        SpaceInviteTokenRedeemCoordinator._peer_entry(
-            wire,
-            identity_pk=a.identity_pk.hex(),
-            instance_id=a.instance_id,
-            space_id=space.id,
-            gfs_url="https://another-gfs.example.org",
+        SpaceMemberDirectory.verify_seat_card(
+            wire, instance_id=a.instance_id, gfs_url="https://another.example.org"
+        )
+        is None
+    )
+    assert (
+        SpaceMemberDirectory.verify_seat_card(
+            wire, instance_id=b.instance_id, gfs_url=gfs.url
         )
         is None
     )
@@ -2157,186 +2222,129 @@ async def test_mailbox_frames_have_their_own_inbound_budget(mailbox_households, 
     )
 
 
-async def test_a_lost_mailbox_falls_back_to_the_relay_then_resumes(
-    mailbox_households, gfs
-):
-    """The host's mailbox is gone at the GFS: it tells the joiner
-    (``SPACE_MAILBOX_UPDATED`` null), the joiner's frames go
-    instance-addressed meanwhile — none lost — and once the host announces
-    its mailbox again the joiner uses it again."""
-    a, b = mailbox_households
+# ─── v_89: every member reaches a GFS-only member ─────────────────────────
+
+
+@pytest.fixture
+async def three_mailbox_households(tmp_path, gfs, http_session):
+    """Host ``b`` and two households ``a`` / ``c`` that each reach b's
+    space ONLY through the GFS (link-joined)."""
+    gfs.mailboxes_on = True
+    a = await _household(tmp_path, "ma", gfs, http_session, mailboxes=True)
+    b = await _household(tmp_path, "mb", gfs, http_session, mailboxes=True)
+    c = await _household(tmp_path, "mc", gfs, http_session, mailboxes=True)
     space = await _join(a, b, gfs)
-    b_mailbox = (await _rows(a))[(space.id, b.instance_id)]["peer"]["mailbox_id"]
-    await b.mailboxes.announce_to(space.id, a.instance_id, None)
-    await gfs.drain()
-    assert (await _rows(a))[(space.id, b.instance_id)]["peer"] is None
+    await _link_join(c, b, gfs, space, "tok-for-c")
+    for h in (a, b, c):
+        h.received.clear()
     gfs.mailbox.clear()
-    await a.federation.broadcast_to_space_members(
-        space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("during")
-    )
+    yield a, b, c, space
     await gfs.drain()
-    assert [to for to, _ in gfs.mailbox] == [b.instance_id]  # the fallback
-    assert [e.payload["content"] for e in b.received] == ["during"]
-    claim = next(iter(b.mailboxes._claims.values()))
-    await b.mailboxes.announce_to(
-        space.id, a.instance_id, b.mailboxes._entry_for(claim.keys, claim.own)
-    )
-    await gfs.drain()
-    gfs.mailbox.clear()
-    await a.federation.broadcast_to_space_members(
-        space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("after")
-    )
-    await gfs.drain()
-    assert [to for to, _ in gfs.mailbox] == [b_mailbox]  # back on the mailbox
-    assert [e.payload["content"] for e in b.received] == ["during", "after"]
+    for h in (a, b, c):
+        await h.mailboxes.stop()
+        await h.db.shutdown()
 
 
-async def test_a_mailbox_update_for_another_gfs_or_space_is_ignored(
-    mailbox_households, gfs
+async def test_the_host_directory_gives_each_member_the_others_card_and_seat(
+    three_mailbox_households, gfs
 ):
-    a, b = mailbox_households
-    space = await _join(a, b, gfs)
-    before = (await _rows(a))[(space.id, b.instance_id)]["peer"]
-    claim = next(iter(b.mailboxes._claims.values()))
-    elsewhere = dataclasses.replace(claim.own, gfs_url="https://other-gfs.example")
-    await b.mailboxes.announce_to(
-        space.id, a.instance_id, b.mailboxes._entry_for(claim.keys, elsewhere)
+    a, _b, c, space = three_mailbox_households
+    for me, other in ((a, c), (c, a)):
+        card = (await _rows(me))[(space.id, other.instance_id)]["card"]
+        assert card["instance_id"] == other.instance_id
+        assert card["mailbox"]["mailbox_id"] == _mailbox_of(other, gfs)
+        row = await me.federation_repo.get_instance(other.instance_id)
+        # A lazy seat: no round-trip, no address of its own.
+        assert row.source is InstanceSource.SPACE_SESSION
+        assert row.status is PairingStatus.CONFIRMED
+        assert not row.relay_via and not row.remote_inbox_url
+    # Three households, three mailboxes — never one per member pair.
+    assert len(gfs.mailboxes) == 3
+
+
+async def test_a_member_reaches_another_gfs_only_member_with_the_host_offline(
+    three_mailbox_households, gfs
+):
+    """The parity this PR exists for: non-host member c's fan-out reaches
+    GFS-only a directly at a's mailbox — the host b is offline — and the
+    GFS sees only a mailbox id and ciphertext."""
+    a, b, c, space = three_mailbox_households
+    b_mailbox = _mailbox_of(b, gfs)
+    # The host goes offline: nothing reaches it any more.
+    gfs.sockets.pop(b.instance_id)
+    gfs.mailboxes.pop(b_mailbox)
+    await c.federation.broadcast_to_space_members(
+        space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("from-c")
     )
     await gfs.drain()
-    assert (await _rows(a))[(space.id, b.instance_id)]["peer"] == before
+    assert [(e.from_instance, e.payload["content"]) for e in a.received] == [
+        (c.instance_id, "from-c")
+    ]
+    assert _mailbox_of(a, gfs) in [to for to, _ in gfs.mailbox]
+    wire = json.dumps(gfs.mailbox)
+    for leak in (a.instance_id, b.instance_id, c.instance_id, space.id, "from-c"):
+        assert leak not in wire
 
 
-async def test_a_host_mint_past_its_bound_is_handed_over_later(
-    mailbox_households, gfs, monkeypatch
+async def test_a_removed_member_leaves_the_directory_and_is_refused(
+    three_mailbox_households, gfs
 ):
-    """The host's mint is bounded (the ACK must not wait); when it finishes
-    later, the host stores it and pushes its entry to the joiner, which then
-    addresses the host's mailbox."""
-    a, b = mailbox_households
-    monkeypatch.setattr(redeem_module, "HOST_MINT_TIMEOUT_S", 0.05)
-    real_mint = SpaceMailboxService.mint
-
-    async def _slow_mint(self, space_id, gfs_url, *, peer):
-        if self is b.mailboxes:
-            await asyncio.sleep(0.3)
-        return await real_mint(self, space_id, gfs_url, peer=peer)
-
-    monkeypatch.setattr(SpaceMailboxService, "mint", _slow_mint)
-    space = await _join(a, b, gfs)
-    assert (await _rows(a))[(space.id, b.instance_id)]["peer"] is None
-    for _ in range(100):
-        await asyncio.sleep(0.05)
-        await gfs.drain()
-        if (await _rows(a))[(space.id, b.instance_id)]["peer"] is not None:
-            break
-    peer = (await _rows(a))[(space.id, b.instance_id)]["peer"]
-    assert peer is not None and peer["instance_id"] == b.instance_id
-    assert (await _rows(b))[(space.id, a.instance_id)]["own"] is not None
-
-
-async def test_a_seat_without_mailboxes_gets_them_from_the_sweep(
-    mailbox_households, gfs, monkeypatch
-):
-    """Round 5: neither side could mint at seat time (no ticket, a refused
-    or unreachable register). The pair is still marked, it starts on the
-    instance-addressed relay, and each side's sweep mints its mailbox later
-    and announces it — the fallback is transient, not permanent."""
-    a, b = mailbox_households
-    real_mint = SpaceMailboxService.mint
-    failing = {"on": True}
-
-    async def _mint(self, space_id, gfs_url, *, peer, fetch=True, start_delay=0.0):
-        if failing["on"]:
-            return None
-        return await real_mint(
-            self, space_id, gfs_url, peer=peer, fetch=fetch, start_delay=start_delay
-        )
-
-    monkeypatch.setattr(SpaceMailboxService, "mint", _mint)
-    space = await _join(a, b, gfs)
-    assert (await _rows(a))[(space.id, b.instance_id)] == {"peer": None, "own": None}
-    assert (await _rows(b))[(space.id, a.instance_id)] == {"peer": None, "own": None}
-    await a.federation.broadcast_to_space_members(
-        space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("before")
+    a, b, c, space = three_mailbox_households
+    await b.space_service.remove_remote_member(
+        space.id,
+        actor_username=b.username,
+        instance_id=c.instance_id,
+        user_id=c.user_id,
     )
     await gfs.drain()
-    assert [to for to, _ in gfs.mailbox] == [b.instance_id]  # transient
-    failing["on"] = False
-    assert await a.mailboxes.retry_missing() == 1
-    assert await b.mailboxes.retry_missing() == 1
+    await b.directory.sweep_once()  # the delta: c left the directory
     await gfs.drain()
-    # Round 6: each side announces only later, after its own delay.
-    assert (await _rows(a))[(space.id, b.instance_id)]["peer"] is None
-    for h in (a, b):
-        h.mailboxes._wall_clock = lambda: 10**12  # every announce due
-        h.mailboxes._last_anon_at = float("-inf")  # and quiet
-        assert await h.mailboxes.send_due_announces() == 1
-    await gfs.drain()
-    a_row = (await _rows(a))[(space.id, b.instance_id)]
-    b_row = (await _rows(b))[(space.id, a.instance_id)]
-    assert a_row["own"] and a_row["peer"] and b_row["own"] and b_row["peer"]
+    assert "card" not in (await _rows(a)).get((space.id, c.instance_id), {})
+    # Its card is gone, so its frames on a's mailbox are refused — whatever
+    # a's roster still says.
+    assert not await a.directory.sender_allowed(c.instance_id, space.id)
+    assert await a.directory.sender_allowed(b.instance_id, space.id)
+    # Review round 1 (#1336): the household's row is gone and its directory
+    # seat ended (no other shared space) — a's fan-out no longer reaches c,
+    # not even at the mailbox its card in another space names.
+    assert c.instance_id not in await a.space_repo.list_member_instances(space.id)
+    assert await a.federation_repo.get_instance(c.instance_id) is None
+    c_mailbox = _mailbox_of(c, gfs)
     gfs.mailbox.clear()
     await a.federation.broadcast_to_space_members(
         space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("after")
     )
     await gfs.drain()
-    assert [to for to, _ in gfs.mailbox] == [a_row["peer"]["mailbox_id"]]
-    assert [e.payload["content"] for e in b.received][-1] == "after"
+    assert c_mailbox not in [to for to, _ in gfs.mailbox]
+    assert c.received == []
 
 
-async def _sweep_until_paired(a, b, space_id, gfs, *, rounds: int = 4) -> None:
-    """Run both sides' sweep steps (mark, retry, due announces — with the
-    announce delay elapsed) until each holds the other's entry."""
-    for _ in range(rounds):
-        for h in (a, b):
-            await h.mailboxes.mark_unmarked()
-            await h.mailboxes.retry_missing()
-            h.mailboxes._wall_clock = lambda: 10**12  # every announce due
-            h.mailboxes._last_anon_at = float("-inf")  # and quiet
-            await h.mailboxes.send_due_announces()
-        await gfs.drain()
-
-
-async def test_an_old_invite_link_still_ends_with_mailboxes_both_ways(
-    mailbox_households, gfs
+async def test_a_redeem_seat_replaces_a_directory_seat_and_nothing_else_does(
+    three_mailbox_households, gfs
 ):
-    """Round 6 (b): the link was minted before the host upgraded (its
-    ``issuer_proto_version`` < 88). The joiner mints nothing at seat time,
-    but it learns the host's real version from the ACK, seats the host at
-    it and marks the pair; the sweeps then give both sides mailboxes."""
-    a, b = mailbox_households
-    space, hint = await _mint_invite(b, gfs.url)
-    old_hint = dataclasses.replace(hint, proto_version=87)
-    await a.space_service.redeem_invite_token(
-        TOKEN_MARKER,
-        user_id=a.user_id,
-        issuer_instance_id=b.instance_id,
-        bootstrap=old_hint,
-    )
-    await gfs.drain()
-    host_row = await a.federation_repo.get_instance(b.instance_id)
-    assert host_row.proto_version == OURS  # from the ACK, not the link
-    assert (await _rows(a))[(space.id, b.instance_id)] == {"peer": None, "own": None}
-    await _sweep_until_paired(a, b, space.id, gfs)
-    a_row = (await _rows(a))[(space.id, b.instance_id)]
-    b_row = (await _rows(b))[(space.id, a.instance_id)]
-    assert a_row["own"] and a_row["peer"] and b_row["own"] and b_row["peer"]
-
-
-async def test_a_seat_that_lost_its_row_write_is_marked_and_recovered(
-    mailbox_households, gfs
-):
-    """Round 6 (c) / (a): no mailbox state at all on either side (a crash
-    between the seat and its row write, or a seat made before v_88): the
-    sweep marks the pair and both sides end up with mailboxes."""
-    a, b = mailbox_households
-    space = await _join(a, b, gfs)
-    await a.space_repo.set_space_instance_mailbox(space.id, b.instance_id, None)
-    await b.space_repo.set_space_instance_mailbox(space.id, a.instance_id, None)
-    await a.mailboxes._load_rows()
-    await b.mailboxes._load_rows()
-    assert await _rows(a) == {} and await _rows(b) == {}
-    await _sweep_until_paired(a, b, space.id, gfs)
-    a_row = (await _rows(a))[(space.id, b.instance_id)]
-    b_row = (await _rows(b))[(space.id, a.instance_id)]
-    assert a_row["own"] and a_row["peer"] and b_row["own"] and b_row["peer"]
+    """A directory seat takes its static-static roles from the instance-id
+    order; a later sealed redeem between the two takes the redeem's roles on
+    BOTH sides (the other side holds no row, so it seats fresh). The
+    directory seat must give way, or the two keys would not match — while a
+    second directory card never re-keys anything."""
+    a, _b, c, _space = three_mailbox_households
+    lazy = await a.federation_repo.get_instance(c.instance_id)
+    assert lazy.source is InstanceSource.SPACE_SESSION and not lazy.relay_via
+    lazy_key = a.key_manager.decrypt(lazy.key_self_to_remote)
+    kwargs = {
+        "instance_id": c.instance_id,
+        "display_name": "c",
+        "identity_pk": c.identity_pk.hex(),
+        "keywrap_pk": c.keywrap_pub.hex(),
+        "keywrap_sig": c.keywrap_sig,
+        "proto_version": OURS,
+        # The opposite of the id-order role, so the keys must change.
+        "is_redeemer": not (a.instance_id < c.instance_id),
+    }
+    await a.coordinator._seat_space_session_instance(**kwargs)  # no relay
+    same = await a.federation_repo.get_instance(c.instance_id)
+    assert a.key_manager.decrypt(same.key_self_to_remote) == lazy_key
+    await a.coordinator._seat_space_session_instance(**kwargs, gfs_url=gfs.url)
+    seat = await a.federation_repo.get_instance(c.instance_id)
+    assert seat.relay_via == gfs.url
+    assert a.key_manager.decrypt(seat.key_self_to_remote) != lazy_key
