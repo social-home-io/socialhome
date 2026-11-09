@@ -162,6 +162,7 @@ def _service(session, conn, *, config=None, spaces=None, kek=None, mailbox=True)
         identity_seed=HOME_SEED,
         keywrap_public_key=KW_PUB,
         keywrap_sig=KW_SIG,
+        release_delay=(0.0, 0.0),
     )
     return svc
 
@@ -331,6 +332,7 @@ async def test_leaving_releases_and_unregisters_the_mailbox(gfs):
     assert await svc.release_unused() == 0  # still used
     del spaces.rows[("space-1", "peer-iid")]  # we left / were removed
     assert await svc.release_unused() == 1
+    await svc.settle_releases()
     assert svc.open_claims() == 0
     assert await server.app[gfs_mailbox_repo_key].get(entry.mailbox_id) is None
     await svc.stop()
@@ -354,6 +356,7 @@ async def test_a_pending_mint_is_reused_by_a_retry_then_expires(gfs):
         keywrap_public_key=KW_PUB,
         keywrap_sig=KW_SIG,
         clock=lambda: now[0],
+        release_delay=(0.0, 0.0),
     )
     await _ready(svc, conn)
     tickets_before = len(svc._tickets[conn.id].cache)
@@ -365,6 +368,7 @@ async def test_a_pending_mint_is_reused_by_a_retry_then_expires(gfs):
     assert len(svc._tickets[conn.id].cache) == tickets_before - 1
     now[0] += PENDING_TTL_S + 1
     assert await svc.release_unused() == 1
+    await svc.settle_releases()
     assert svc.open_claims() == 0
     assert await server.app[gfs_mailbox_repo_key].get(entry.mailbox_id) is None
     await svc.stop()
@@ -388,6 +392,7 @@ async def test_a_left_space_releases_its_mailbox_and_a_rejoin_gets_a_new_one(gfs
         keywrap_public_key=KW_PUB,
         keywrap_sig=KW_SIG,
         clock=lambda: now[0],
+        release_delay=(0.0, 0.0),
     )
     await _ready(svc, conn)
     entry, own = await svc.mint("space-1", url)
@@ -396,6 +401,7 @@ async def test_a_left_space_releases_its_mailbox_and_a_rejoin_gets_a_new_one(gfs
     assert await svc.release_unused() == 0  # still sitting in the space
     spaces.left.add("space-1")  # the last person of ours left
     assert await svc.release_unused() == 1
+    await svc.settle_releases()
     assert spaces.rows[("space-1", "peer-iid")] is None
     assert await svc.target_for("peer-iid", "space-1") is None
     assert await server.app[gfs_mailbox_repo_key].get(entry.mailbox_id) is None
@@ -481,6 +487,7 @@ async def test_no_mailbox_id_in_logs_at_info_or_above(gfs, caplog):
         await svc.remember("space-1", "peer-iid", peer=None, own=own)
         del spaces.rows[("space-1", "peer-iid")]
         await svc.release_unused()
+        await svc.settle_releases()
         await svc.stop()
     for rec in caplog.records:
         if rec.levelno >= logging.INFO:
@@ -521,6 +528,7 @@ async def test_the_identified_session_never_carries_mailbox_traffic(gfs):
         identity_seed=HOME_SEED,
         keywrap_public_key=KW_PUB,
         keywrap_sig=KW_SIG,
+        release_delay=(0.0, 0.0),
     )
     try:
         await _ready(svc, conn)
@@ -529,6 +537,7 @@ async def test_the_identified_session_never_carries_mailbox_traffic(gfs):
         await svc.remember("space-1", "peer-iid", peer=None, own=own)
         del spaces.rows[("space-1", "peer-iid")]
         await svc.release_unused()
+        await svc.settle_releases()
     finally:
         await svc.stop()
         await identified.close()

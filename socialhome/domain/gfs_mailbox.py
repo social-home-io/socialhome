@@ -75,6 +75,11 @@ TICKETS_ACTION: str = "mailbox_tickets"
 #: Most token requests one ``POST /gfs/mailbox/tickets`` may carry.
 MAX_TICKETS_PER_REQUEST: int = 64
 
+#: The close code of a refused claim (unknown mailbox, or not under that
+#: key — the GFS answers both alike). Mirrors the GFS's
+#: ``WS_CLOSE_AUTH_FAILED``; pinned equal by a test.
+MAILBOX_CLOSE_AUTH_FAILED: int = 4401
+
 #: WebSocket frame types of the claim handshake.
 FRAME_MAILBOX_CHALLENGE: str = "mailbox_challenge"
 FRAME_MAILBOX_CLAIM: str = "mailbox_claim"

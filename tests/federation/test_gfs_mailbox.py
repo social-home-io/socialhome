@@ -25,6 +25,7 @@ from socialhome.crypto import (
     x25519_exchange,
 )
 from socialhome.domain.gfs_mailbox import (
+    MAILBOX_CLOSE_AUTH_FAILED,
     MAILBOX_TICKET_CHALLENGE,
     TicketKeyPin,
     derive_mailbox_id,
@@ -60,6 +61,7 @@ from socialhome.global_server.app_keys import (
 )
 from socialhome.global_server.config import EnvelopeMailboxConfig, GfsConfig
 from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server.routes.ws import WS_CLOSE_AUTH_FAILED
 from socialhome.global_server.server import create_gfs_app
 
 ROOT = bytes(range(32))
@@ -265,9 +267,12 @@ async def test_register_claim_and_receive_queued_and_live_frames(gfs):
 async def test_claim_of_an_unregistered_mailbox_is_refused(gfs):
     _server, session, url, _tickets = gfs
     keys = derive_mailbox_keys(ROOT, GFS_ID, "never-registered", 0)
-    with pytest.raises(MailboxClaimError, match="4401"):
+    with pytest.raises(MailboxClaimError, match="4401") as info:
         async with MailboxClaim(session, url, keys, GFS_ID):
             pass
+    # v_88 recovery reads this: the GFS does not know the mailbox (any more).
+    assert info.value.mailbox_unknown
+    assert info.value.close_code == WS_CLOSE_AUTH_FAILED == MAILBOX_CLOSE_AUTH_FAILED
 
 
 async def test_a_claim_signed_for_another_gfs_id_is_refused(gfs):

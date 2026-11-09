@@ -108,6 +108,7 @@ from socialhome.services.gfs_relay_inbound import (
 )
 from socialhome.services.peer_unpair_service import PeerUnpairService
 from socialhome.services.space_mailbox_service import (
+    REGISTER_OK,
     SpaceMailboxService,
     _Claim,
 )
@@ -270,8 +271,8 @@ class _FakeGfsMailboxes(SpaceMailboxService):
 
     __slots__ = ("fake", "inbound")
 
-    async def _register(self, conn, keys) -> bool:
-        return True
+    async def _register(self, conn, keys, *, fetch=True) -> str:
+        return REGISTER_OK
 
     async def _open_claim(self, space_id, own, *, keys=None) -> None:
         if keys is None:
@@ -465,6 +466,7 @@ async def _household(
             identity_seed=ident.private_key,
             keywrap_public_key=keywrap.public_key,
             keywrap_sig=keywrap_sig,
+            release_delay=(0.0, 0.0),
         )
         mailbox_service.fake = gfs
         mailbox_service.inbound = relay_inbound
@@ -2081,6 +2083,8 @@ async def test_a_kick_drops_and_unregisters_both_mailboxes(mailbox_households, g
         user_id=a.user_id,
     )
     await gfs.drain()
+    await a.mailboxes.settle_releases()
+    await b.mailboxes.settle_releases()
     assert gfs.mailboxes == {}
     assert set(gfs.unregistered) == boxes
 

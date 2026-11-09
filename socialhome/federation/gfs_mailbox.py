@@ -73,6 +73,7 @@ from ..domain.gfs_mailbox import (
     FRAME_MAILBOX_CHALLENGE,
     FRAME_MAILBOX_CLAIM,
     FRAME_MAILBOX_CLAIMED,
+    MAILBOX_CLOSE_AUTH_FAILED,
     MAILBOX_REGISTER_ROUTE,
     MAILBOX_SIG_SUITE_ED25519,
     MAILBOX_TICKET_CHALLENGE,
@@ -180,7 +181,20 @@ class MailboxTicketError(Exception):
 
 
 class MailboxClaimError(Exception):
-    """The claim socket was refused or broke before the claim completed."""
+    """The claim socket was refused or broke before the claim completed.
+    ``close_code`` is the GFS's WebSocket close code when it refused the
+    claim (:data:`MAILBOX_CLOSE_AUTH_FAILED`: it does not know the mailbox,
+    or not under that key), else ``None``."""
+
+    def __init__(self, message: str, *, close_code: int | None = None) -> None:
+        super().__init__(message)
+        self.close_code = close_code
+
+    @property
+    def mailbox_unknown(self) -> bool:
+        """The GFS refused the claim as unknown / wrong key — the mailbox is
+        gone there (idle sweep, data loss) and must be registered again."""
+        return self.close_code == MAILBOX_CLOSE_AUTH_FAILED
 
 
 @dataclass(slots=True, frozen=True)
@@ -962,7 +976,8 @@ class MailboxClaim:
             raise MailboxClaimError("claim timed out") from exc
         if msg.type != aiohttp.WSMsgType.TEXT:
             raise MailboxClaimError(
-                f"claim refused (close {ws.close_code}: {msg.extra or ''})"
+                f"claim refused (close {ws.close_code}: {msg.extra or ''})",
+                close_code=ws.close_code,
             )
         try:
             body = orjson.loads(msg.data)

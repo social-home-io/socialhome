@@ -401,6 +401,12 @@ class FederationEventType(str, enum.Enum):
     #: ``space_id`` travels in plaintext.
     SPACE_AUTHORITY_ROTATED = "space_authority_rotated"
     SPACE_SESSION_CLEANUP = "space_session_cleanup"
+    #: v_88 — a household reached only through a GFS tells its counterpart
+    #: in ONE space (routing ``space_id``) where its mailbox for that space
+    #: now is: a new signed entry, or ``null`` = "lost, use the
+    #: instance-addressed relay until further notice". Encrypted payload
+    #: ``{"mailbox": entry | null}``.
+    SPACE_MAILBOX_UPDATED = "space_mailbox_updated"
 
     # ── Space sync ──
     SPACE_SYNC_BEGIN = "space_sync_begin"
@@ -691,6 +697,9 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: Teardown of the space-scoped relationship itself (§D2b): the
         #: side that drops its row tells the other to drop its own.
         FederationEventType.SPACE_SESSION_CLEANUP,
+        #: v_88 — where this pair's mailbox for the space now is (or that it
+        #: was lost). Affects only the pair's own row.
+        FederationEventType.SPACE_MAILBOX_UPDATED,
         # ── Content ──
         #: The space's own posts, comments and every pillar rendered
         #: inside it. This is what "joined the space" means.
@@ -1059,6 +1068,7 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_AUTHORITY_ROTATED,
         FederationEventType.SPACE_SUBSCRIBER_KEY_HANDOFF,
         FederationEventType.SPACE_SESSION_CLEANUP,
+        FederationEventType.SPACE_MAILBOX_UPDATED,
         # ── §25.6 catch-up sync. A reader syncs the same way a member
         #    does; what the chunks may CONTAIN is the exporter's call on
         #    the sending side, not this gate's. ──
