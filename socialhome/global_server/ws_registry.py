@@ -13,9 +13,15 @@ socket's TCP keepalive could detect).
 
 Send semantics: :meth:`send` returns ``True`` when delivery to the live
 socket succeeded and ``False`` if no socket is registered or the send
-failed; the caller (fan-out) then treats the household as unreachable.
-Dead sockets are evicted on send failure so a single broken peer cannot
-block fan-out. :meth:`send` never RAISES — a frame that cannot even be
+failed; the caller (fan-out) then queues the frame or treats the household
+as unreachable. A socket whose push fails is evicted AND closed
+(:data:`EVICT_SEND_FAILED_CODE`), so a single broken peer cannot block
+fan-out and the household reconnects and drains what was queued meanwhile.
+Evicting without closing left a socket that still looked open to the
+household but got nothing more — it had no reason to reconnect. A
+cancelled push is the caller's cancellation, not a peer fault: it
+propagates and the socket stays registered (aiohttp writes a frame whole
+or not at all). Otherwise :meth:`send` never RAISES — a frame that cannot even be
 serialised also returns ``False`` (the socket is left registered, since
 the fault is in the payload, not the peer). The fan-out gathers every
 delivery, so an escaping exception would turn one bad frame into a 500 on
@@ -62,9 +68,10 @@ ENVELOPE_MEDIA_FRAME_KIND: str = "envelope_media"
 
 _EVICT_REPLACED_CODE = 4409  # private-use range; "Replaced by newer connection"
 
-#: Close code for a socket evicted because a send stalled (RFC 6455 1013,
-#: "try again later") — the household simply reconnects.
-_EVICT_STALLED_CODE = 1013
+#: Close code for a socket evicted because a push failed or stalled (RFC
+#: 6455 1013, "try again later") — the household simply reconnects, and its
+#: queue drains after the new hello / claim.
+EVICT_SEND_FAILED_CODE = 1013
 
 #: Longest one frame push may take before the socket counts as stalled.
 #: A healthy household drains a frame well within this even on a slow
@@ -205,14 +212,7 @@ class GfsWebSocketRegistry:
         ws: web.WebSocketResponse,
     ) -> None:
         """Drop *ws* if it is the currently-tracked socket for *instance_id*."""
-        async with self._lock:
-            current = self._by_instance.get(instance_id)
-            if current is ws:
-                self._by_instance.pop(instance_id, None)
-                self._binary.discard(instance_id)
-                self._no_frame_cert.discard(instance_id)
-                self._media_serve.discard(instance_id)
-                self._envelope_media.discard(instance_id)
+        await self._forget(instance_id, ws)
         log.info(
             "gfs.ws.unregister: instance=%s total=%d",
             self._who(instance_id),
@@ -275,7 +275,8 @@ class GfsWebSocketRegistry:
 
         Returns ``True`` on successful send, ``False`` when no socket is
         registered or the send failed (in which case the dead socket is
-        evicted and the caller treats the household as unreachable).
+        evicted and closed, and the caller queues the frame or treats the
+        household as unreachable). A cancellation of the caller propagates.
         """
         ws = self._by_instance.get(instance_id)
         if ws is None or ws.closed:
@@ -317,8 +318,10 @@ class GfsWebSocketRegistry:
         """Push one binary relay media body (v_87) to *instance_id* as a
         BINARY message, unchanged — only to a socket that listed
         ``envelope_media``. Same contract as :meth:`send`: ``False`` when
-        there is no such socket or the push failed / stalled (the socket is
-        then evicted), never raises."""
+        there is no such socket, it is backed up, or the push failed (the
+        socket is then evicted and closed) or stalled (only dropped, see
+        :data:`WS_MEDIA_SEND_TIMEOUT_S`); never raises, except a
+        cancellation of the caller."""
         ws = self._by_instance.get(instance_id)
         if ws is None or ws.closed or instance_id not in self._envelope_media:
             return False
@@ -373,8 +376,10 @@ class GfsWebSocketRegistry:
         evict_on_stall: bool = True,
     ) -> bool:
         """Await one ``send_str`` / ``send_bytes`` under the stall timeout;
-        count it, or evict a dead / stalled socket (a stalled media push,
-        ``evict_on_stall=False``, is only dropped)."""
+        count it, or evict AND close a dead / stalled socket so the household
+        reconnects (a stalled media push, ``evict_on_stall=False``, is only
+        dropped). A cancellation is the caller's: it propagates and leaves
+        the socket registered."""
         try:
             async with asyncio.timeout(
                 WS_SEND_TIMEOUT_S if timeout_s is None else timeout_s
@@ -392,25 +397,16 @@ class GfsWebSocketRegistry:
             log.debug(
                 "gfs.ws.send stalled instance=%s — evicting", self._who(instance_id)
             )
-            await self._drop_dead(instance_id, ws)
-            task = asyncio.get_running_loop().create_task(
-                self._close_stalled(instance_id, ws),
-                name="gfs-ws-close-stalled",
-            )
-            self._closing.add(task)
-            task.add_done_callback(self._closing.discard)
+            await self._evict(instance_id, ws, b"send-timeout")
             return False
-        except ConnectionResetError, RuntimeError, asyncio.CancelledError:
-            await self._drop_dead(instance_id, ws)
-            return False
-        except Exception as exc:  # defensive
+        except Exception as exc:
             log.debug(
-                "gfs.ws.send failed instance=%s: %s",
+                "gfs.ws.send failed instance=%s — evicting: %s",
                 self._who(instance_id),
                 exc,
                 exc_info=True,
             )
-            await self._drop_dead(instance_id, ws)
+            await self._evict(instance_id, ws, b"send-failed")
             return False
 
     async def broadcast(self, payload: dict[str, Any]) -> int:
@@ -426,30 +422,46 @@ class GfsWebSocketRegistry:
                 delivered += 1
         return delivered
 
-    async def _close_stalled(self, instance_id: str, ws: web.WebSocketResponse) -> None:
-        """Close a socket whose send stalled; never raises.
+    async def _evict(
+        self, instance_id: str, ws: web.WebSocketResponse, reason: bytes
+    ) -> None:
+        """Drop *ws* from the registry and close it in the background
+        (:data:`EVICT_SEND_FAILED_CODE`), so the household reconnects and
+        drains its queue. The close is scheduled first: whatever happens to
+        this caller, the socket never stays open but unregistered."""
+        task = asyncio.get_running_loop().create_task(
+            self._close_evicted(instance_id, ws, reason),
+            name="gfs-ws-close-evicted",
+        )
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
+        await self._forget(instance_id, ws)
 
-        Bounded too: the close frame queues behind the same paused
-        transport. aiohttp closes the transport outright when ``close`` is
-        cancelled, which is exactly what a stalled peer needs."""
+    async def _close_evicted(
+        self, instance_id: str, ws: web.WebSocketResponse, reason: bytes
+    ) -> None:
+        """Close an evicted socket; never raises.
+
+        Bounded too: after a stall the close frame queues behind the same
+        paused transport. aiohttp closes the transport outright when
+        ``close`` is cancelled, which is exactly what a stalled peer needs."""
         try:
             async with asyncio.timeout(WS_SEND_TIMEOUT_S):
-                await ws.close(code=_EVICT_STALLED_CODE, message=b"send-timeout")
+                await ws.close(code=EVICT_SEND_FAILED_CODE, message=reason)
         except Exception as exc:
             log.debug(
-                "gfs.ws: closing stalled socket %s failed: %s",
+                "gfs.ws: closing evicted socket %s failed: %s",
                 self._who(instance_id),
                 exc,
                 exc_info=True,
             )
 
-    async def _drop_dead(
-        self,
-        instance_id: str,
-        ws: web.WebSocketResponse,
-    ) -> None:
+    async def _forget(self, instance_id: str, ws: web.WebSocketResponse) -> None:
+        """Drop *ws* and its labels if it is *instance_id*'s current socket."""
         async with self._lock:
             if self._by_instance.get(instance_id) is ws:
                 self._by_instance.pop(instance_id, None)
                 self._binary.discard(instance_id)
                 self._no_frame_cert.discard(instance_id)
+                self._media_serve.discard(instance_id)
+                self._envelope_media.discard(instance_id)

@@ -333,6 +333,57 @@ async def test_ws_reconnect_evicts_previous(ws_client):
     await second.close()
 
 
+async def test_a_failed_push_closes_the_socket_and_the_envelope_drains_on_reconnect(
+    ws_client,
+):
+    """A live push that fails must close the household's socket (1013): it
+    used to be only dropped from the registry, so the household stayed
+    connected, received nothing more and never reconnected. The envelope
+    went to the queue and drains after the next hello."""
+    sealed = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "Y2lwaGVy"}
+    # ``POST /gfs/envelope`` takes only a well-formed instance id.
+    peer = "recipient2home2222222222222222aa"
+    fed_repo = ws_client._app[gfs_fed_repo_key]
+    existing = await fed_repo.get_instance("peer.home")
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id=peer,
+            display_name="Peer",
+            public_key=existing.public_key,
+            status="active",
+        )
+    )
+    registry = ws_client._app[gfs_ws_registry_key]
+    async with ws_client.ws_connect("/gfs/ws") as ws:
+        await ws.send_json(_hello(peer, ws_client._seed))
+        for _ in range(50):
+            if registry.is_connected(peer):
+                break
+            await asyncio.sleep(0.01)
+        server_ws = registry._by_instance[peer]
+
+        async def _reset(*_args, **_kwargs):
+            raise ConnectionResetError("simulated reset")
+
+        server_ws.send_str = _reset
+        resp = await ws_client.post(
+            "/gfs/envelope", json={"to_instance": peer, "sealed": sealed}
+        )
+        assert resp.status == 202
+        closed = await asyncio.wait_for(ws.receive(), timeout=5)
+        assert closed.type.name == "CLOSE"
+        assert ws.close_code == 1013
+
+    async with ws_client.ws_connect("/gfs/ws") as ws:
+        await ws.send_json(_hello(peer, ws_client._seed))
+        while True:
+            msg = await asyncio.wait_for(ws.receive(), timeout=5)
+            frame = json.loads(msg.data)
+            if frame.get("type") == "envelope":
+                break
+        assert frame == {"type": "envelope", "sealed": sealed}
+
+
 async def test_ws_unregisters_on_clean_disconnect(ws_client):
     async with ws_client.ws_connect("/gfs/ws") as ws:
         await ws.send_json(_hello("peer.home", ws_client._seed))

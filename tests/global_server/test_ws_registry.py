@@ -511,3 +511,129 @@ async def test_media_is_not_pushed_onto_a_backed_up_socket(registry):
     await registry.register("y", idle, envelope_media=True)
     assert await registry.send_media("y", b"\x00SHR-2")
     assert idle.sent_bytes == [b"\x00SHR-2"]
+
+
+# ── A failed push closes the socket; a cancelled one leaves it alone ──────────
+
+
+class _RaisingWS(_FakeWS):
+    """A socket whose sends raise *exc* — a reset peer, a closing transport,
+    an aiohttp bug: whatever it is, this push did not go out."""
+
+    def __init__(self, exc: BaseException) -> None:
+        super().__init__()
+        self._exc = exc
+
+    async def send_str(self, msg: str) -> None:
+        raise self._exc
+
+    async def send_bytes(self, data: bytes) -> None:
+        raise self._exc
+
+
+async def _settle_closes(registry: GfsWebSocketRegistry) -> None:
+    await asyncio.gather(*list(registry._closing), return_exceptions=True)
+
+
+def _no_labels(registry: GfsWebSocketRegistry, instance_id: str) -> bool:
+    return not any(
+        instance_id in labels
+        for labels in (
+            registry._binary,
+            registry._no_frame_cert,
+            registry._media_serve,
+            registry._envelope_media,
+        )
+    )
+
+
+_SEND_FAILURES = [
+    OSError("broken pipe"),
+    ConnectionResetError("reset by peer"),
+    RuntimeError("transport closing"),
+    ValueError("anything else"),
+]
+
+
+@pytest.mark.parametrize("exc", _SEND_FAILURES, ids=lambda e: type(e).__name__)
+@pytest.mark.parametrize("binary", [False, True], ids=["text", "binary"])
+async def test_a_push_that_raises_closes_and_drops_the_socket(registry, exc, binary):
+    """Dropping the socket from the registry without closing it left the
+    household connected but deaf: nothing more reached it, and it had no
+    reason to reconnect (and drain what was queued meanwhile). A failed push
+    now closes the socket too, so the household reconnects."""
+    ws = _RaisingWS(exc)
+    await registry.register(
+        "inst-1", ws, binary=binary, media_serve=True, envelope_media=True
+    )
+    frame = {"type": "envelope", "sealed": {"ciphertext": "bm9uY2U:Y3Q"}}
+    assert await registry.send("inst-1", frame) is False
+    assert registry.is_connected("inst-1") is False
+    await _settle_closes(registry)
+    assert ws.closed_with is not None
+    assert ws.closed_with[0] == ws_registry_mod.EVICT_SEND_FAILED_CODE
+    assert _no_labels(registry, "inst-1")
+
+
+@pytest.mark.parametrize("exc", _SEND_FAILURES, ids=lambda e: type(e).__name__)
+async def test_a_media_push_that_raises_closes_and_drops_the_socket(registry, exc):
+    ws = _RaisingWS(exc)
+    await registry.register("inst-1", ws, envelope_media=True)
+    assert await registry.send_media("inst-1", b"\x00SHR") is False
+    assert registry.is_connected("inst-1") is False
+    await _settle_closes(registry)
+    assert ws.closed_with is not None
+    assert ws.closed_with[0] == ws_registry_mod.EVICT_SEND_FAILED_CODE
+    assert _no_labels(registry, "inst-1")
+
+
+class _BlockingWS(_FakeWS):
+    """A healthy socket whose push is still in flight when the CALLER is
+    cancelled (a fan-out worker shut down, a request handler torn down)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+
+    async def send_str(self, msg: str) -> None:
+        self.started.set()
+        await asyncio.Event().wait()
+
+    async def send_bytes(self, data: bytes) -> None:
+        self.started.set()
+        await asyncio.Event().wait()
+
+
+@pytest.mark.parametrize("media", [False, True], ids=["frame", "media"])
+async def test_a_cancelled_push_propagates_and_keeps_the_socket(registry, media):
+    """The cancellation is the caller's, not the peer's: it must propagate
+    (swallowing it broke the caller's own cancellation) and the socket —
+    healthy, as aiohttp writes a frame whole or not at all — stays fully
+    registered, labels and all."""
+    ws = _BlockingWS()
+    await registry.register("inst-1", ws, envelope_media=True, media_serve=True)
+    push = (
+        registry.send_media("inst-1", b"\x00SHR")
+        if media
+        else registry.send("inst-1", {"type": "envelope", "sealed": {}})
+    )
+    task = asyncio.create_task(push)
+    await ws.started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await _settle_closes(registry)
+    assert registry.is_connected("inst-1")
+    assert registry.takes_media("inst-1")
+    assert registry.takes("inst-1", "space_media_request")
+    assert ws.closed_with is None
+
+
+async def test_a_backed_up_media_skip_keeps_the_socket_open(registry):
+    """The deliberate skip (#1325) is not a failure: no eviction, no close."""
+    busy = _BufferedWS(ws_registry_mod.WS_MEDIA_MAX_BUFFERED_BYTES + 1)
+    await registry.register("x", busy, envelope_media=True)
+    assert not await registry.send_media("x", b"\x00SHR-1")
+    await _settle_closes(registry)
+    assert registry.is_connected("x")
+    assert busy.closed_with is None
