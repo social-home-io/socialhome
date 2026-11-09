@@ -47,7 +47,7 @@ import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 import aiohttp
 import orjson
@@ -215,6 +215,10 @@ class _Claim:
 ClaimKey = tuple[str, str, str, int]
 #: "Keep the row's value" (``_write_row``'s ``announce_at``).
 _KEEP: object = object()
+
+
+def _is_int(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _claim_key(space_id: str, peer: str, own: OwnMailbox) -> ClaimKey:
@@ -407,13 +411,23 @@ class SpaceMailboxService:
             instance_id: str,
             entry: SpaceMailboxEntry | None,
             mailbox_only: bool = False,
+            seq: int | None = None,
         ) -> bool:
+            # Re-checked right before the send: an anonymous op may have
+            # landed since the caller looked — then the mailbox path only.
+            if self._clock() - self._last_anon_at < ANON_QUIET_S:
+                mailbox_only = True
+            payload: dict[str, Any] = {
+                "mailbox": entry.to_wire() if entry is not None else None
+            }
+            if seq is not None:
+                payload["seq"] = seq  # inside the encrypted payload
             # Never the outbox: its quick replays would ignore the quiet
             # window; the row's ``announce_at`` is the only retry.
             result = await federation_service.send_event_unqueued(
                 to_instance_id=instance_id,
                 event_type=FederationEventType.SPACE_MAILBOX_UPDATED,
-                payload={"mailbox": entry.to_wire() if entry is not None else None},
+                payload=payload,
                 space_id=space_id,
                 mailbox_only=mailbox_only,
             )
@@ -708,9 +722,13 @@ class SpaceMailboxService:
 
     def _left(self, space_id: str, peer: str, what: int, limit: int) -> bool:
         """Whether a *what* is still left for the pair today (no count)."""
+        return self._remaining(space_id, peer, what, limit) > 0
+
+    def _remaining(self, space_id: str, peer: str, what: int, limit: int) -> int:
         row = self._daily.get((space_id, peer))
-        day = int(self._clock() // _DAY_S)
-        return row is None or row[0] != day or row[what] < limit
+        if row is None or row[0] != int(self._clock() // _DAY_S):
+            return limit
+        return max(0, limit - row[what])
 
     def _spend(self, space_id: str, peer: str, what: int, limit: int) -> bool:
         """Count one *what* (1 announce, 2 recovery register, 3 rotation,
@@ -1009,14 +1027,20 @@ class SpaceMailboxService:
         *,
         mailbox_only: bool = False,
     ) -> bool:
-        """:meth:`announce_to` within :data:`ANNOUNCES_PER_DAY` for the pair.
-        Returns whether it went out."""
-        if not self._spend(space_id, instance_id, 1, ANNOUNCES_PER_DAY):
+        """:meth:`announce_to` within :data:`ANNOUNCES_PER_DAY` for the pair:
+        only an update that went out uses a slot, and the last slot is kept
+        for a ``None`` (lost) — an entry needs two left. Returns whether it
+        went out."""
+        need = 1 if entry is None else 2
+        if self._remaining(space_id, instance_id, 1, ANNOUNCES_PER_DAY) < need:
             log.info("gfs.mailbox: today's mailbox updates for a pair are used up")
             return False
-        return await self.announce_to(
+        sent = await self.announce_to(
             space_id, instance_id, entry, mailbox_only=mailbox_only
         )
+        if sent:
+            self._spend(space_id, instance_id, 1, ANNOUNCES_PER_DAY)
+        return sent
 
     async def send_due_announces(self) -> int:
         """Send ONE delayed announce whose ``announce_at`` passed — the
@@ -1145,11 +1169,13 @@ class SpaceMailboxService:
         peer: SpaceMailboxEntry | None,
         own: OwnMailbox | None,
         announce_at: float | None | object = _KEEP,
+        seq: int | object = _KEEP,
+        peer_seq: int | object = _KEEP,
     ) -> None:
         """The row write behind :meth:`remember` (caller holds the lock).
         *announce_at* — when our change is still to be announced
         (:meth:`announce_change`) — is kept from the row unless given
-        (``None`` clears it).
+        (``None`` clears it); so are *seq* / *peer_seq*.
         Always a JSON object — ``{"peer": null, "own": null}`` included — so
         the pair stays a mailbox pair: a counterpart's ``null`` (lost) never
         turns into "not GFS-only", and its later entry is still taken. Only
@@ -1158,12 +1184,17 @@ class SpaceMailboxService:
             "peer": peer.to_wire() if peer is not None else None,
             "own": own_to_wire(own) if own is not None else None,
         }
+        old = await self._row(space_id, instance_id) or {}
         if announce_at is _KEEP:
-            announce_at = (await self._row(space_id, instance_id) or {}).get(
-                "announce_at"
-            )
+            announce_at = old.get("announce_at")
         if isinstance(announce_at, int | float):
             doc["announce_at"] = int(announce_at)
+        # Update numbers: ours sent (``seq``), the counterpart's last taken
+        # (``peer_seq``) — kept unless given.
+        for name, value in (("seq", seq), ("peer_seq", peer_seq)):
+            value = old.get(name) if value is _KEEP else value
+            if _is_int(value):
+                doc[name] = value
         value = orjson.dumps(doc).decode()
         await self._spaces.set_space_instance_mailbox(space_id, instance_id, value)
         if peer is not None:
@@ -1509,6 +1540,24 @@ class SpaceMailboxService:
             keywrap_sig=self._keywrap_sig,
         )
 
+    async def _next_seq(self, space_id: str, instance_id: str) -> int | None:
+        """The pair's next update number, persisted on its row first (so a
+        restart never reuses one); ``None`` without a row."""
+        async with self._lock:
+            row = await self._row(space_id, instance_id)
+            if row is None:
+                return None
+            last = row.get("seq")
+            seq = (last if _is_int(last) else 0) + 1
+            await self._write_row(
+                space_id,
+                instance_id,
+                peer=self._peers.get((space_id, instance_id)),
+                own=parse_own(row.get("own")),
+                seq=seq,
+            )
+            return seq
+
     async def announce_to(
         self,
         space_id: str,
@@ -1523,7 +1572,11 @@ class SpaceMailboxService:
             return False
         try:
             result = await self._announcer(
-                space_id, instance_id, entry, mailbox_only=mailbox_only
+                space_id,
+                instance_id,
+                entry,
+                mailbox_only=mailbox_only,
+                seq=await self._next_seq(space_id, instance_id),
             )
         except Exception:
             log.warning("gfs.mailbox: a mailbox update did not go out", exc_info=True)
@@ -1571,10 +1624,22 @@ class SpaceMailboxService:
                 and await self._seated(space_id, sender)
             ):
                 return  # not a seated GFS-only pair of ours
+            # Unqueued updates can arrive out of order: one not newer than
+            # the last taken (a stalled entry after a later ``None``) is
+            # dropped.
+            seq = event.payload.get("seq") if isinstance(event.payload, dict) else None
+            last = (await self._row(space_id, sender) or {}).get("peer_seq")
+            if _is_int(seq) and _is_int(last) and seq <= last:
+                log.info("gfs.mailbox: ignoring an out-of-order mailbox update")
+                return
             # A seated v_88 pair with no state yet (an old invite link, a
             # crash before the row write) gets it now — never dropped.
             await self._write_row(
-                space_id, sender, peer=peer, own=rows.get((space_id, sender))
+                space_id,
+                sender,
+                peer=peer,
+                own=rows.get((space_id, sender)),
+                peer_seq=seq if _is_int(seq) else _KEEP,
             )
 
     async def _claim_once(self, conn: GfsConnection, claim: _Claim) -> None:

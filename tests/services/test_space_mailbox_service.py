@@ -251,7 +251,7 @@ async def test_the_sweep_mints_a_missing_own_mailbox_and_announces_it(gfs):
     svc._federation_repo = _FedRepo(url)  # type: ignore[assignment]
     announced: list = []
 
-    async def _announce(space_id, instance_id, entry, mailbox_only=False):
+    async def _announce(space_id, instance_id, entry, mailbox_only=False, seq=None):
         announced.append((space_id, instance_id, entry))
 
     svc.attach_announcer(_announce)
@@ -432,7 +432,7 @@ async def test_a_mailbox_the_gfs_forgot_is_announced_lost_then_recovered(gfs):
     svc = _service(session, conn, spaces=spaces)
     announced: list = []
 
-    async def _announce(space_id, instance_id, entry, mailbox_only=False):
+    async def _announce(space_id, instance_id, entry, mailbox_only=False, seq=None):
         announced.append((space_id, instance_id, entry))
 
     svc.attach_announcer(_announce)
@@ -476,7 +476,7 @@ async def test_a_forgotten_mailbox_with_no_ticket_waits_for_the_refill(gfs):
     svc = _service(session, conn, spaces=spaces)
     announced: list = []
 
-    async def _announce(space_id, instance_id, entry, mailbox_only=False):
+    async def _announce(space_id, instance_id, entry, mailbox_only=False, seq=None):
         announced.append(entry)
 
     svc.attach_announcer(_announce)
@@ -756,7 +756,7 @@ async def test_refused_claims_never_keep_the_quiet_window_open(gfs):
     svc = _service(session, conn, spaces=spaces)
     announced: list = []
 
-    async def _announce(space_id, instance_id, entry, mailbox_only=False):
+    async def _announce(space_id, instance_id, entry, mailbox_only=False, seq=None):
         announced.append((instance_id, entry))
 
     svc.attach_announcer(_announce)

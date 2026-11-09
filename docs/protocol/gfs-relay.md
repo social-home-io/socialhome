@@ -916,9 +916,13 @@ delayed. The window: with a ticket cached, until the next claim attempt
 `announce_at` (1–5 min), then the next sweep (~5–15 min), and only outside
 the 5 min quiet window after an op the GFS accepted (a refused claim or a
 register with no ticket never extends it; ticket-using re-registers are
-capped at 4 a day per pair). Typically under ~25 min. Worst case: the
-pair's 6 updates for the day are used up — the `null` then waits for the
-next day, and frames to that mailbox are lost until it is re-registered.
+capped at 4 a day per pair). Typically under ~25 min. An outage costs no
+budget: only an update that went out uses one of the pair's 6 daily
+slots, and the last slot is kept for a `null` (an entry needs two left),
+so entries alone can never block it. Worst case: the pair already SENT 6
+updates today (three lost-and-back cycles) — a further `null` then waits
+for the next day, and frames to that mailbox are lost until it is
+re-registered.
 
 **How every post-seat update goes out (`announce_change`).** Outside the
 seat-time redeem / ACK, every `SPACE_MAILBOX_UPDATED` — a retried mint,
@@ -936,8 +940,11 @@ sent only through the counterpart's mailbox while within `ANON_QUIET_S`
 before the send). One that did not go out (daily budget, delivery) moves
 forward by a fresh jitter; one that went out clears the marker unless the
 row's mailbox changed meanwhile. Updates are sent once and never queued
-in the outbox (its quick replays would ignore the quiet window), so no
-stale `null` can land after a newer entry. The receiver of an update verifies the entry like the one in the
+in the outbox (its quick replays would ignore the quiet window). Each
+carries a per-pair `seq` inside the encrypted payload (kept on the row as
+`seq`, persisted before the send); the receiver keeps the last one it took
+as `peer_seq` and drops any update not newer — a stalled entry can never
+land after a later `null`. The receiver of an update verifies the entry like the one in the
 redeem (identity signature, key-wrap binding, the space) and that it names
 the GFS the seat reaches it through, and stores it on that pair's row
 only. `SPACE_MAILBOX_UPDATED` ships in v_88 (unreleased when it was
@@ -999,8 +1006,9 @@ nor ping in step. A mailbox minted at seat time connects at once (its
 register already sits next to the seat).
 
 **Daily caps (a GFS that answers every claim with 4401).** Per member pair
-and day: at most `ANNOUNCES_PER_DAY` (6) `SPACE_MAILBOX_UPDATED` (claim
-announces, retried mailboxes and the late host mint all count),
+and day: at most `ANNOUNCES_PER_DAY` (6) `SPACE_MAILBOX_UPDATED` sent
+(every post-seat update counts once it went out; a failed send costs
+nothing; the last slot is kept for a `null`),
 `RECOVERY_REGISTERS_PER_DAY` (4) re-registrations of a lost mailbox (≤ 4
 tickets) and `ROTATIONS_PER_DAY` (1) fresh generation (1 ticket). Such a GFS
 costs a pair at most 5 tickets and 6 small envelopes a day — never a storm.
