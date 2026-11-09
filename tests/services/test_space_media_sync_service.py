@@ -413,12 +413,13 @@ async def test_a_700_kb_picture_ships_in_chunks_the_targets_channel_takes(
 
 
 class _Readers:
-    """Stand-in for the GFS media uploader's reader check (v_80)."""
+    """Stand-in for the GFS media uploader's check (v_80): which households
+    take a file from their GFS's media cache."""
 
     def __init__(self, readers):
         self.readers = set(readers)
 
-    async def is_relay_reader(self, iid):
+    async def reads_from_gfs(self, iid, filename):
         return iid in self.readers
 
 
@@ -618,7 +619,7 @@ async def test_one_stuck_recipient_never_starves_the_others(
     (a mesh path that hangs) held every later recipient back. Each row now
     has its own time limit: the stuck one is rescheduled, the next one
     ships."""
-    monkeypatch.setattr(sms, "ROW_SEND_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(sms, "CHUNK_IDLE_TIMEOUT_S", 0.05)
     await _seed_space(db)
     (tmp_path / "img.webp").write_bytes(b"x" * 64)
     hang = asyncio.Event()
@@ -677,3 +678,94 @@ async def test_recipients_are_sent_in_parallel_one_row_each_at_a_time(
     )
     assert await svc.flush_once() == 4
     assert peak["all"] == 2  # two recipients at once
+
+
+async def test_a_slow_but_steady_send_completes(db, outbox, tmp_path, monkeypatch):
+    """Round 8: the limit is per chunk (no progress for so long), not per
+    file — a big file over a slow path that keeps moving is delivered."""
+    monkeypatch.setattr(sms, "CHUNK_IDLE_TIMEOUT_S", 0.2)
+    fed = _fed(1024)
+
+    async def send(**_kw):
+        await asyncio.sleep(0.02)  # each chunk well inside the limit
+        return _OK
+
+    fed.send_media_chunk = AsyncMock(side_effect=send)
+    svc = await _enqueue_many_chunks(db, outbox, tmp_path, fed, chunks=64)
+    # 64 chunks / window × 0.02 s > 0.2 s in total: a whole-file deadline
+    # of the same size would have cut it.
+    assert await svc.flush_once() == 1
+    assert fed.send_media_chunk.await_count == 64
+
+
+async def test_a_stalled_chunk_times_out(db, outbox, tmp_path, monkeypatch):
+    monkeypatch.setattr(sms, "CHUNK_IDLE_TIMEOUT_S", 0.05)
+    fed = _fed(1024)
+    calls = 0
+
+    async def send(**_kw):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            await asyncio.Event().wait()  # stalls for good
+        return _OK
+
+    fed.send_media_chunk = AsyncMock(side_effect=send)
+    svc = await _enqueue_many_chunks(db, outbox, tmp_path, fed, chunks=8)
+    assert await asyncio.wait_for(svc.flush_once(), timeout=5) == 0
+    (row,) = await outbox.list_for_correlation("ev-1")
+    assert row.status == "pending" and "timeout" in (row.last_error or "")
+
+
+async def test_files_in_flight_stay_within_a_byte_budget(
+    db, outbox, tmp_path, monkeypatch
+):
+    """Round 8: recipients go in parallel, but the files held in memory
+    for them at once stay within ``MAX_INFLIGHT_FILE_BYTES``."""
+    monkeypatch.setattr(sms, "MAX_INFLIGHT_FILE_BYTES", 3000)
+    await _seed_space(db)
+    for name in ("one.webp", "two.webp", "three.webp"):
+        (tmp_path / name).write_bytes(b"x" * 2000)
+    held = 0
+    peak = 0
+
+    async def send(*, raw_chunk, **_kw):
+        nonlocal held, peak
+        held += 2000
+        peak = max(peak, held)
+        await asyncio.sleep(0.01)
+        held -= 2000
+        return _OK
+
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(side_effect=send)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-a", "peer-b", "peer-x"],
+        media_urls=["api/media/one.webp"],
+    )
+    assert await svc.flush_once() == 3
+    assert peak <= 3000  # one 2000-byte file at a time under a 3000 budget
+
+
+async def test_a_row_left_in_flight_is_sent_on_the_next_pass(db, outbox, tmp_path):
+    """Round 8: a send that died past ``Exception`` (an inner cancellation,
+    a DB error while rescheduling) left its row ``in_flight`` until the
+    next restart. Every pass now takes such rows back first."""
+    await _seed_space(db)
+    (tmp_path / "img.webp").write_bytes(b"x" * 64)
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-a"],
+        media_urls=["api/media/img.webp"],
+    )
+    await outbox.mark_in_flight(blob_id="img.webp", target_instance_id="peer-a")
+    await svc.flush_once()
+    (row,) = await outbox.list_for_correlation("p-1")
+    assert row.status == "pending"  # taken back: due again in a few seconds

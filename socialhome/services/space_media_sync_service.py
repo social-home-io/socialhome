@@ -56,17 +56,20 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: One row's send (every chunk of one file to one household) gets at most
-#: this long: rows go out one at a time, so a send that hangs (a mesh path
-#: that never answers) must not hold every later recipient back. A row
-#: that runs out is rescheduled like any failed one.
-ROW_SEND_TIMEOUT_S: float = 300.0
+#: One chunk's send gets at most this long (no progress for so long): a
+#: send that hangs (a mesh path that never answers) fails its row, which
+#: is rescheduled like any failed one. Per chunk, not per file, so a big
+#: file over a slow path that keeps moving is still delivered.
+CHUNK_IDLE_TIMEOUT_S: float = 120.0
+#: The files one flush pass holds in memory at once (recipients go in
+#: parallel); a file larger than this goes alone.
+MAX_INFLIGHT_FILE_BYTES: int = 64 * 1024 * 1024
 #: Recipients served at once by one flush pass.
 PARALLEL_RECIPIENTS: int = 6
 
 
 class _RelayReaders(Protocol):
-    async def is_relay_reader(self, instance_id: str) -> bool: ...
+    async def reads_from_gfs(self, instance_id: str, filename: str) -> bool: ...
 
 
 #: Max chunks of one blob in flight at once (see DmMediaSyncService). Small
@@ -83,8 +86,10 @@ class SpaceMediaSyncService:
     """Build + dispatch ``SPACE_MEDIA_BLOB`` rows."""
 
     __slots__ = (
+        "_budget",
         "_federation",
         "_federation_repo",
+        "_held",
         "_interval",
         "_media_dir",
         "_outbox",
@@ -121,8 +126,11 @@ class SpaceMediaSyncService:
         # the next poll. ``_interval`` remains a fallback poll.
         self._wake = asyncio.Event()
         #: v_80 — who reads the space's pictures from a GFS media cache
-        #: instead (:meth:`SpaceMediaGfsUploader.is_relay_reader`).
+        #: instead (:meth:`SpaceMediaGfsUploader.reads_from_gfs`).
         self._relay_readers: _RelayReaders | None = None
+        #: Bytes of the files the current pass holds (``MAX_INFLIGHT_FILE_BYTES``).
+        self._budget = asyncio.Condition()
+        self._held = 0
 
     def attach_relay_readers(self, readers: _RelayReaders) -> None:
         """Wire the v_80 reader check: a member household seated from an
@@ -281,6 +289,11 @@ class SpaceMediaSyncService:
         if self._federation is None:
             return 0
         fed = self._federation  # non-None past the guard; captured for closures
+        # A row a send left ``in_flight`` when it died past ``Exception``
+        # (an inner cancellation, a DB error while rescheduling) is taken
+        # back on every pass, not only at the next start. ``_loop`` is the
+        # only caller, so passes never overlap.
+        await self._outbox.reclaim_in_flight()
         due = await self._outbox.list_due(limit=limit)
         # Like the GFS: one copy of the bytes, one row per recipient, and the
         # recipients served in parallel (at most :data:`PARALLEL_RECIPIENTS`
@@ -327,12 +340,14 @@ class SpaceMediaSyncService:
             )
             return False
         if self._relay_readers is not None and (
-            await self._relay_readers.is_relay_reader(entry.target_instance_id)
+            await self._relay_readers.reads_from_gfs(
+                entry.target_instance_id, entry.blob_id
+            )
         ):
-            # Decided at send time, not when the row was queued: a view
-            # that was stale then (a GFS just restarted without its cache)
-            # must not drop the push for good. A reader takes the file from
-            # its GFS's media cache instead.
+            # Decided at send time, not when the row was queued, and only
+            # when the reader's GFS is known to hold the file (or the
+            # reader can ask for it): a GFS whose cache was off when the
+            # file was planned never got it, so that reader keeps the push.
             log.debug(
                 "space-media-sync: %s reads %s from its GFS — no push",
                 entry.target_instance_id,
@@ -343,6 +358,26 @@ class SpaceMediaSyncService:
                 target_instance_id=entry.target_instance_id,
             )
             return False
+        try:
+            size = (await aiofiles.os.stat(entry.bytes_path)).st_size
+        except OSError:
+            size = 0  # the build below reports the missing file
+        need = min(size, MAX_INFLIGHT_FILE_BYTES)
+        async with self._budget:
+            await self._budget.wait_for(
+                lambda: self._held + need <= MAX_INFLIGHT_FILE_BYTES
+            )
+            self._held += need
+        try:
+            return await self._send_row(entry, fed)
+        finally:
+            async with self._budget:
+                self._held -= need
+                self._budget.notify_all()
+
+    async def _send_row(
+        self, entry: SpaceMediaOutboxEntry, fed: FederationService
+    ) -> bool:
         await self._outbox.mark_in_flight(
             blob_id=entry.blob_id,
             target_instance_id=entry.target_instance_id,
@@ -394,29 +429,32 @@ class SpaceMediaSyncService:
             # non-CONFIRMED / mesh-only member still receives the
             # bytes as base64 over SPACE_ROUTED. The binary channel
             # is point-to-point only, so mesh members never use it.
-            result = await fed.send_media_chunk(
-                to_instance_id=tgt,
-                event_type=FederationEventType.SPACE_MEDIA_BLOB,
-                payload=payload,
-                raw_chunk=raw,
-                mesh_fallback=True,
-                # The envelope's routing ``space_id`` — every other
-                # space fan-out sets it, and these frames did not:
-                # the §24.11 ban check reads it off the envelope and
-                # silently no-ops when it is absent, so a household
-                # banned from the space could still push bytes at us.
-                space_id=space_id,
-            )
+            try:
+                result = await asyncio.wait_for(
+                    fed.send_media_chunk(
+                        to_instance_id=tgt,
+                        event_type=FederationEventType.SPACE_MEDIA_BLOB,
+                        payload=payload,
+                        raw_chunk=raw,
+                        mesh_fallback=True,
+                        # The envelope's routing ``space_id`` — every other
+                        # space fan-out sets it, and these frames did not:
+                        # the §24.11 ban check reads it off the envelope
+                        # and silently no-ops when it is absent, so a
+                        # household banned from the space could still push
+                        # bytes at us.
+                        space_id=space_id,
+                    ),
+                    timeout=CHUNK_IDLE_TIMEOUT_S,
+                )
+            except TimeoutError:
+                raise RuntimeError(
+                    f"timeout: no progress for {CHUNK_IDLE_TIMEOUT_S:.0f} s"
+                ) from None
             if not result.ok:
                 raise RuntimeError(result.error or "delivery_failed")
 
-        try:
-            failure = await asyncio.wait_for(
-                send_chunks(payloads, _send, window=PIPELINE_WINDOW),
-                timeout=ROW_SEND_TIMEOUT_S,
-            )
-        except TimeoutError:
-            failure = ({}, TimeoutError(f"timeout after {ROW_SEND_TIMEOUT_S:.0f} s"))
+        failure = await send_chunks(payloads, _send, window=PIPELINE_WINDOW)
         log.debug(
             "space-media-sync: %s → %s %s after %.1f s",
             entry.blob_id,

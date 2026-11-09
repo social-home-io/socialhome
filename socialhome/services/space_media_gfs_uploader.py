@@ -269,6 +269,7 @@ class SpaceMediaGfsUploader:
         "_spaces",
         "_stop",
         "_stored",
+        "_stored_names",
         "_task",
         "_unauthorized",
     )
@@ -306,6 +307,10 @@ class SpaceMediaGfsUploader:
         self._pending = 0
         #: (GFS, blob) → monotonic time until which the GFS holds it.
         self._stored: OrderedDict[tuple[str, str], float] = OrderedDict()
+        #: (GFS connection id, local file name) → until when we know that
+        #: GFS holds the file (uploaded by us) — what lets the media outbox
+        #: drop a push to a reader there.
+        self._stored_names: OrderedDict[tuple[str, str], float] = OrderedDict()
         self._described: OrderedDict[tuple, SpaceMediaRef] = OrderedDict()
 
     def attach_federation(self, federation: FederationService) -> None:
@@ -711,7 +716,7 @@ class SpaceMediaGfsUploader:
             if status == _NO_AUTHORIZATION:
                 return  # nothing to send anywhere; warned once per space
             if status in _STATUS_STORED:
-                await self._remember(conn, ref.blob_id)
+                await self._remember(conn, ref.blob_id, filename=ref.filename)
                 log.info(
                     "space media %s: uploaded blob %s (%d bytes) to GFS %s (HTTP %d)",
                     ref.filename,
@@ -772,17 +777,40 @@ class SpaceMediaGfsUploader:
             return await self._authorize_channel(claim, space_id)
         return await self._authorize(claim)
 
-    async def _remember(self, conn: GfsConnection, blob_id: str) -> None:
-        """Remember *blob_id* as held by *conn* until min(:data:`KEEP_S`,
-        its TTL) — an ``already_stored`` answer does not refresh a blob's
-        expiry, so the upload time is the bound."""
+    async def _remember(
+        self, conn: GfsConnection, blob_id: str, *, filename: str | None = None
+    ) -> None:
+        """Remember *blob_id* (and the local *filename* it seals) as held by
+        *conn* until min(:data:`KEEP_S`, its TTL) — an ``already_stored``
+        answer does not refresh a blob's expiry, so the upload time is the
+        bound."""
         ttl = await self._gfs.space_media_ttl_s(conn)
         keep = min(KEEP_S, ttl) if ttl else KEEP_S
-        key = (conn.id, blob_id)
-        self._stored[key] = _monotonic() + keep
-        self._stored.move_to_end(key)
-        while len(self._stored) > MAX_REMEMBERED:
-            self._stored.popitem(last=False)
+        until = _monotonic() + keep
+        for cache, key in (
+            (self._stored, (conn.id, blob_id)),
+            (self._stored_names, (conn.id, filename) if filename else None),
+        ):
+            if key is None:
+                continue
+            cache[key] = until
+            cache.move_to_end(key)
+            while len(cache) > MAX_REMEMBERED:
+                cache.popitem(last=False)
+
+    async def reads_from_gfs(self, instance_id: str, filename: str) -> bool:
+        """Whether *instance_id* takes *filename* from its GFS's media cache,
+        so the media outbox may drop its push: a relay reader whose GFS we
+        know holds the file (we uploaded it there), or one that can ask its
+        GFS for a missed file (v_83). A v_80–82 reader whose GFS never got
+        the file (its cache was off when the file was planned) keeps its
+        push."""
+        conn = await self._reader_conn(instance_id)
+        if conn is None:
+            return False
+        if await self._on_demand_reader(instance_id):
+            return True
+        return self._stored_names.get((conn.id, filename), 0.0) > _monotonic()
 
     async def _reseal(
         self, ref: SpaceMediaRef, scope: str, scope_id: str

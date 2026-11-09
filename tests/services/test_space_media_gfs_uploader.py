@@ -1187,3 +1187,36 @@ async def test_a_reader_whose_gfs_we_are_not_connected_to_stays_a_reader(tmp_pat
         versions={"e": FederationCapability.MIN_FOR_RELAY_MEDIA},
     )
     assert await u.is_relay_reader("e") is True
+
+
+async def test_a_reader_reads_a_file_from_its_gfs_only_once_it_is_stored_there(
+    tmp_path,
+):
+    """Round 8: the push to a link-joined reader is dropped only when its
+    GFS is known to hold the file (uploaded there), or when the reader can
+    ask its GFS for a missed file (v_83). A v_80–82 reader whose GFS never
+    got the file keeps its push."""
+    _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1], status=200)
+    u = _uploader(
+        tmp_path, gfs=gfs, instances=[RELAY], versions={"e": V}, seed=b"\2" * 32
+    )
+    assert await u.reads_from_gfs("e", "a.webp") is False  # not stored yet
+    plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    await u.start()
+    try:
+        u.upload(plan)
+        await asyncio.wait_for(u.drain(), timeout=5)
+    finally:
+        await u.stop()
+    assert await u.reads_from_gfs("e", "a.webp") is True
+    assert await u.reads_from_gfs("e", "b.webp") is False
+    assert await u.reads_from_gfs("b", "a.webp") is False  # no reader
+    on_demand = _uploader(
+        tmp_path,
+        gfs=gfs,
+        instances=[RELAY],
+        versions={"e": FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND},
+    )
+    assert await on_demand.reads_from_gfs("e", "a.webp") is True
