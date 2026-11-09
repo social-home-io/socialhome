@@ -336,6 +336,17 @@ class SpaceSyncScheduler:
             log.exception("authority epoch echo for %s failed", space_id)
             return None
 
+    async def _directory_echo_for(
+        self, space_id: str, to_instance_id: str
+    ) -> int | None:
+        if self._directory_echo is None:
+            return None
+        try:
+            return await self._directory_echo(space_id, to_instance_id)
+        except Exception:
+            log.debug("directory echo failed", exc_info=True)
+            return None
+
     async def _roster_echo_for(self, space_id: str, to_instance_id: str) -> dict | None:
         if self._roster_echo is None:
             return None
@@ -678,14 +689,9 @@ class SpaceSyncScheduler:
             roster_echo = await self._roster_echo_for(space_id, peer_instance_id)
             if roster_echo is not None:
                 payload["roster_echo"] = roster_echo
-            if self._directory_echo is not None:
-                try:
-                    dir_seq = await self._directory_echo(space_id, peer_instance_id)
-                except Exception:
-                    log.debug("directory echo failed", exc_info=True)
-                    dir_seq = None
-                if dir_seq is not None:
-                    payload["dir_seq"] = dir_seq
+            dir_seq = await self._directory_echo_for(space_id, peer_instance_id)
+            if dir_seq is not None:
+                payload["dir_seq"] = dir_seq
             echo = await self._echo_for(space_id, peer_instance_id)
             if echo is not None:
                 payload["authority_epoch_echo"] = echo
@@ -853,7 +859,29 @@ class SpaceSyncScheduler:
         for space, host in pairs:
             key = (space.id, host)
             if key in self._mesh_catchup_done:
-                # Sentinel observed — this pair is genuinely caught up.
+                # Sentinel observed — this pair is genuinely caught up. v_89:
+                # a space whose member directory we hold still echoes its
+                # version every tick (a small incremental BEGIN), so a host
+                # that is ahead — a delta we lost — answers with a snapshot.
+                dir_seq = await self._directory_echo_for(space.id, host)
+                if dir_seq is not None and not await self._federation.is_confirmed_peer(
+                    host
+                ):
+                    fields = await self.begin_fields(
+                        space_id=space.id,
+                        peer_instance_id=host,
+                        sync_mode="incremental",
+                    )
+                    try:
+                        await self._federation.begin_mesh_catchup_sync(
+                            space_id=space.id,
+                            host_instance_id=host,
+                            sync_mode="incremental",
+                            dir_seq=dir_seq,
+                            have_seq=fields.get("have_seq"),
+                        )
+                    except Exception:  # pragma: no cover — fail-soft
+                        log.debug("mesh directory echo failed", exc_info=True)
                 continue
             if await self._federation.is_confirmed_peer(host):
                 # Triggers 1/2 own this peer; nothing to do here.
@@ -866,6 +894,7 @@ class SpaceSyncScheduler:
             # stream keeps the retry loop alive.
             pending += 1
             try:
+                dir_seq = await self._directory_echo_for(space.id, host)
                 shipped = await self._federation.begin_mesh_catchup_sync(
                     space_id=space.id,
                     host_instance_id=host,
@@ -875,6 +904,7 @@ class SpaceSyncScheduler:
                         if host == space.owner_instance_id
                         else None
                     ),
+                    dir_seq=dir_seq,
                 )
             except Exception:  # pragma: no cover — begin_* is fail-soft
                 log.exception(

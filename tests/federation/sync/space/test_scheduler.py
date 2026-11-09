@@ -61,6 +61,8 @@ class _FakeFederation:
         self.requests: list[tuple] = []
         #: The ``extra_payload`` (v_46 authority echo) of each catch-up.
         self.mesh_extras: list[dict | None] = []
+        #: Further BEGIN fields per mesh BEGIN (``sync_mode``, ``dir_seq``).
+        self.mesh_fields: list[dict] = []
 
     def record_sync_request(
         self,
@@ -84,10 +86,11 @@ class _FakeFederation:
         return instance_id in self.space_session
 
     async def begin_mesh_catchup_sync(
-        self, *, space_id, host_instance_id, extra_payload=None
+        self, *, space_id, host_instance_id, extra_payload=None, **fields
     ):
         self.mesh_catchups.append((space_id, host_instance_id))
         self.mesh_extras.append(extra_payload)
+        self.mesh_fields.append(fields)
         # Mirrors the real return contract: True = the BEGIN shipped, False =
         # a transient failure (``no_route`` on a still-warming mesh).
         return self.catchup_ships
@@ -640,6 +643,47 @@ async def test_tick_begins_catchup_for_mesh_only_host(bus, queue, sync_manager):
     # Must NOT go out via the confirmed-peer path, which ships a bare
     # send_event with no requester-side receive session.
     assert fed.sent == []
+
+
+async def test_a_mesh_only_host_hears_our_directory_version_after_catch_up(
+    bus, queue, sync_manager
+):
+    """v_89 review round 3: a removal delta lost to a member that reaches
+    the host only over the mesh is repaired the same way as for a paired
+    member — the catch-up BEGIN echoes our ``dir_seq``, and once catch-up is
+    complete the periodic tick still sends a small incremental BEGIN with
+    it (only for a space whose directory we hold), so a host that is ahead
+    answers with one snapshot."""
+    fed = _FakeFederation(confirmed=set())
+    sched = _mesh_sched(
+        bus,
+        queue,
+        sync_manager,
+        fed,
+        [
+            _space("sp-mesh", owner_instance_id="host-x"),
+            _space("sp-plain", owner_instance_id="host-x"),
+        ],
+    )
+
+    async def echo(space_id, peer):
+        return 41 if space_id == "sp-mesh" else None
+
+    sched.attach_directory_echo(echo)
+    await sched._tick_once()
+    by_space = dict(zip([c[0] for c in fed.mesh_catchups], fed.mesh_fields))
+    assert by_space["sp-mesh"]["dir_seq"] == 41
+    assert by_space["sp-plain"].get("dir_seq") is None
+    # Catch-up complete for both: only the space with a directory keeps
+    # echoing, as an incremental BEGIN.
+    sched._mesh_catchup_done.update({("sp-mesh", "host-x"), ("sp-plain", "host-x")})
+    fed.mesh_catchups.clear()
+    fed.mesh_fields.clear()
+    await sched._tick_once()
+    assert fed.mesh_catchups == [("sp-mesh", "host-x")]
+    assert fed.mesh_fields == [
+        {"dir_seq": 41, "sync_mode": "incremental", "have_seq": None}
+    ]
 
 
 async def test_tick_skips_confirmed_host(bus, queue, sync_manager):

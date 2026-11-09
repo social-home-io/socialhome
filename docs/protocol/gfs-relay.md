@@ -814,14 +814,17 @@ host-signed).
   §25.6 `SPACE_SYNC_BEGIN` (kept as `seated` on its row): a frame sent the
   moment its seat goes live could beat its own seat and be dropped as from
   a stranger.
-- **Deltas** go to every seated writer-seat household under the new version: a
+- **Deltas** go to every seated writer-seat household under the new
+  version (cardless to one whose only news was its own card, so its version
+  keeps up): a
   changed card (a card without a mailbox only to households with one,
   unless it just lost its mailbox) and `removed` for a household that left
   the directory (left, removed, or no longer a writer). Delivery is not
   tracked per household.
 - **Snapshots** (at most `SNAPSHOT_MAX` = 500 cards, mailbox cards first, in
   parts of at most `SNAPSHOT_PART_MAX` = 150, ≈ 105 KiB each) name every
-  listed household in `members`. The member replaces its directory
+  listed household in `members` (a directory of more than 500 households
+  is sent without `members`, and then drops nobody). The member replaces its directory
   wholesale: a carded household not in `members` loses its card, row and
   seat; one listed without a card (mailbox cards only) keeps its row. A
   household with a mailbox gets every writer's card; one without, only the
@@ -835,9 +838,11 @@ host-signed).
   (an additive BEGIN field; the sync stream itself is unchanged, so no
   `SYNC_RECORD_LINES` entry); a host whose version is newer answers with one
   snapshot. A lost delta, a snapshot that raced the seat, or a joiner at 0
-  is repaired within one sync period (30 min). A mesh-only host is not on
-  that periodic sync (its catch-up path stops once complete), so it relies
-  on the seated card.
+  is repaired within one sync period (30 min). A member that reaches the
+  host only over the mesh echoes it on its catch-up BEGIN, and once
+  catch-up is complete the periodic tick still sends that host a small
+  incremental BEGIN (with its `have_seq`) carrying the echo — only for a
+  space whose directory it holds.
 - Triggers for deltas: a card received, a seat that goes live or ends in a
   space we host, our own card, and the ~10 min sweep (role changes).
 - Nothing is sent while no card of the space carries a mailbox.

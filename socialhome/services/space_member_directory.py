@@ -76,8 +76,10 @@ SNAPSHOT_MAX: int = 500
 #: Most cards one directory envelope carries: ~0.7 KiB a card, so a part
 #: stays well inside the GFS relay's envelope cap (~191 KiB).
 SNAPSHOT_PART_MAX: int = 150
-#: "Seated" cards kept aside until their seat row exists, at most.
+#: "Seated" cards kept aside until their seat row exists: at most this many,
+#: each for at most this long (a seat commits right after its ACK).
 EARLY_HELLO_MAX: int = 1000
+EARLY_HELLO_TTL_S: float = 600.0
 #: A household's "seated" card re-sends its snapshot at most this often.
 HELLO_RESNAPSHOT_S: float = 600.0
 #: Most households one directory delta may remove (and a receiver takes).
@@ -190,7 +192,7 @@ class SpaceMemberDirectory:
         self._hello_at: dict[tuple[str, str], float] = {}
         #: (space, household) whose "seated" card arrived before its seat
         #: row (:meth:`store_seat_card` answers it).
-        self._early_hello: set[tuple[str, str]] = set()
+        self._early_hello: dict[tuple[str, str], float] = {}
         #: (space, household) whose stored card just lost its mailbox.
         self._lost_mailbox: set[tuple[str, str]] = set()
         mailboxes.attach_needed(self.needed_gfs)
@@ -419,8 +421,8 @@ class SpaceMemberDirectory:
                 # snapshot otherwise — one sent now could beat the joiner's
                 # own seat; its card, or its first sync behind on
                 # ``dir_seq``, asks for one.
-                early = (space_id, card.instance_id) in self._early_hello
-                self._early_hello.discard((space_id, card.instance_id))
+                expires = self._early_hello.pop((space_id, card.instance_id), None)
+                early = expires is not None and expires > self._clock()
                 if early:
                     await self._mark_seated(space_id, card.instance_id)
                 await self.reconcile(
@@ -541,7 +543,8 @@ class SpaceMemberDirectory:
         cards_raw = payload.get("cards")
         cards_raw = cards_raw if isinstance(cards_raw, list) else []
         removed = _ids(payload.get("removed"))
-        members = _ids(payload.get("members")) if snapshot else []
+        has_members = snapshot and isinstance(payload.get("members"), list)
+        members = _ids(payload.get("members")) if has_members else []
         if (
             len(cards_raw) > SNAPSHOT_MAX
             or len(removed) > REMOVED_MAX
@@ -559,10 +562,12 @@ class SpaceMemberDirectory:
             if card.instance_id != self._instance_id:
                 cards[card.instance_id] = card
         gone = set(removed)
-        if snapshot:
+        if has_members:
             # The whole directory: a carded household it does not list is
             # gone — card, row and seat (a household listed without a card,
-            # one we are given mailbox cards only for, keeps its row).
+            # one we are given mailbox cards only for, keeps its row). A
+            # snapshot without ``members`` (too big to name them all) drops
+            # nobody.
             listed = set(members) | set(cards)
             gone |= {i for i in await self._space_cards(space_id) if i not in listed}
         gone -= {host, self._instance_id}
@@ -621,8 +626,10 @@ class SpaceMemberDirectory:
             # A joiner's "seated" card can beat our seat row (the commit
             # follows the ACK): kept aside, answered when the seat's card is
             # stored (:meth:`store_seat_card`). Bounded.
+            now = self._clock()
+            self._early_hello = {k: t for k, t in self._early_hello.items() if t > now}
             if len(self._early_hello) < EARLY_HELLO_MAX:
-                self._early_hello.add((space_id, sender))
+                self._early_hello[(space_id, sender)] = now + EARLY_HELLO_TTL_S
             return
         raw = event.payload.get("card") if isinstance(event.payload, dict) else None
         try:
@@ -657,11 +664,16 @@ class SpaceMemberDirectory:
     async def directory_seq(self, space_id: str, host_id: str) -> int | None:
         """The ``dir_seq`` of *space_id*'s directory we hold — what our §25.6
         ``SPACE_SYNC_BEGIN`` to its host echoes — or ``None`` when we do not
-        sync it with that household (not its host, or a v_88-less host)."""
+        sync it with that household (not its host), or none is held."""
         if host_id != await self.host_of(space_id) or host_id == self._instance_id:
             return None
         seq = (await self._doc(space_id, host_id)).get("dir_seq")
-        return seq if _is_count(seq) else 0
+        if _is_count(seq):
+            return seq
+        # No directory yet: echo 0 only where the space has one at all (we
+        # hold a card of it) — a space with no GFS-reached member costs no
+        # periodic echo.
+        return 0 if await self._space_cards(space_id) else None
 
     async def on_sync_begin(self, event: FederationEvent) -> None:
         """Host side of the repair: a member household's periodic §25.6
@@ -794,12 +806,12 @@ class SpaceMemberDirectory:
             if to in (snapshot_to or set()):
                 await self._send_snapshot(space_id, to, listed, seq, everything)
                 continue
-            out = [
-                c
-                for c in (delta.values() if everything else for_mbx)
-                if c.instance_id != to
-            ]
-            if out or removed:
+            relevant = list(delta.values()) if everything else for_mbx
+            out = [c for c in relevant if c.instance_id != to]
+            # Sent even when it only held the recipient's own card (then
+            # cardless): its ``dir_seq`` must keep up, or its next sync
+            # would cost a full snapshot.
+            if relevant or removed:
                 await self._send(space_id, to, out, removed=removed, dir_seq=seq)
 
     async def _send_snapshot(
@@ -814,7 +826,13 @@ class SpaceMemberDirectory:
         (``members``), and the cards it needs (all, or only those with a
         mailbox), mailbox cards first, at most :data:`SNAPSHOT_MAX`, in
         parts that fit the GFS relay — all under one ``dir_seq``."""
-        members = sorted(i for i in listed if i != to)[:SNAPSHOT_MAX]
+        members = sorted(i for i in listed if i != to)
+        # Past the cap the snapshot cannot name every household: it is sent
+        # without ``members``, and the receiver then drops nobody (deltas
+        # carry the removals).
+        extra: dict[str, Any] = (
+            {"members": members} if len(members) <= SNAPSHOT_MAX else {}
+        )
         picked = [
             c
             for i, c in sorted(listed.items())
@@ -834,7 +852,7 @@ class SpaceMemberDirectory:
         ] or [[]]
         for part in parts:
             if not await self._send(
-                space_id, to, part, snapshot=True, members=members, dir_seq=seq
+                space_id, to, part, snapshot=True, dir_seq=seq, **extra
             ):
                 return
 

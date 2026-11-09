@@ -626,7 +626,13 @@ async def test_a_snapshot_clears_unlisted_cards_but_never_the_hosts():
         ended.append(iid)
 
     w.dir.attach_seat_ender(ender)
-    await w.directory({"cards": [_card(a, gfs=GFS).to_wire()], "snapshot": True})
+    await w.directory(
+        {
+            "cards": [_card(a, gfs=GFS).to_wire()],
+            "members": [a["id"], host["id"]],
+            "snapshot": True,
+        }
+    )
     # Review round 1 (#1336): the household's ROW goes too (no fan-out of
     # the space reaches it any more) and its seat is ended if unused.
     assert gone["id"] not in w.spaces.rows[SPACE]
@@ -899,9 +905,10 @@ async def test_a_newer_card_is_a_delta_and_a_repeated_one_resnapshots_rarely():
     w.seat_all()
     await w.card_from(a, _card(a, gfs=GFS, rev=1))
     w.fed.directories.clear()
-    # A rotation (newer rev): a delta to B, no new snapshot for A.
+    # A rotation (newer rev): a delta to B; A gets no snapshot, only its
+    # cardless version bump.
     await w.card_from(a, _card(a, gfs=GFS, rev=2))
-    assert w.fed.to(a["id"]) == []
+    assert [d["payload"]["cards"] for d in w.fed.to(a["id"])] == [[]]
     assert [d["payload"]["cards"][0]["rev"] for d in w.fed.to(b["id"])] == [2]
     # The same card again ("seated", past the first card's window): one
     # snapshot, then none for a while.
@@ -1158,3 +1165,61 @@ async def test_no_directory_frame_goes_to_a_household_not_yet_seated():
     await w.dir.on_sync_begin(_begin(j, w.me["id"], 0))
     (snap,) = w.fed.to(j["id"])
     assert snap["payload"]["snapshot"] is True
+
+
+# ── Review round 3 (#1336) ───────────────────────────────────────────────
+
+
+async def test_an_oversized_directory_snapshot_drops_nobody(monkeypatch):
+    """Past ``SNAPSHOT_MAX`` households the snapshot cannot name them all:
+    it is sent without ``members`` and the receiver drops nobody (later
+    deltas carry the removals)."""
+    monkeypatch.setattr(smd, "SNAPSHOT_MAX", 2)
+    host = World()
+    to, *others = (_hh() for _ in range(4))
+    host.member(to, *others)
+    for h in others:
+        host.spaces.put_card(SPACE, _card(h, gfs=GFS))
+    host.writers.writers[SPACE] = {to["id"], *(h["id"] for h in others)}
+    host.seat_all()
+    await host.dir.reconcile(SPACE, snapshot_to={to["id"]})
+    (snap,) = [d for d in host.fed.to(to["id"]) if d["payload"].get("snapshot")]
+    assert "members" not in snap["payload"]
+
+    m, _h = _member_world()
+    kept = _hh()
+    m.member(kept)
+    m.spaces.put_card(SPACE, _card(kept, gfs=GFS))
+    await m.directory({**snap["payload"], "dir_seq": 5})
+    assert kept["id"] in m.spaces.rows[SPACE]
+
+
+async def test_a_delta_of_only_my_own_card_still_moves_my_version():
+    """A delta that holds only the recipient's own card still reaches it,
+    cardless, so its ``dir_seq`` keeps up (or every rotation of its own
+    mailbox would cost it a full snapshot at its next sync)."""
+    w = World()
+    a = _hh()
+    w.member(a)
+    w.writers.writers[SPACE] = {a["id"]}
+    w.seat_all()
+    await w.card_from(a, _card(a, gfs=GFS, rev=1))
+    w.fed.directories.clear()
+    await w.card_from(a, _card(a, gfs=GFS, rev=2))  # a rotation: newer card
+    (frame,) = w.fed.to(a["id"])
+    assert frame["payload"]["cards"] == []
+    assert frame["payload"]["dir_seq"] == w.spaces.doc(SPACE, w.me["id"])["dir_seq"]
+
+
+async def test_an_early_seated_card_is_forgotten_after_a_while():
+    now = [1000.0]
+    w = World()
+    w.dir._clock = lambda: now[0]
+    j = _hh()
+    w.writers.writers[SPACE] = {j["id"]}
+    await w.card_from(j, _card(j, gfs=GFS))  # before its row: kept aside
+    assert w.dir._early_hello
+    now[0] += smd.EARLY_HELLO_TTL_S + 1
+    k = _hh()
+    await w.card_from(k, _card(k, gfs=GFS))  # any later one prunes
+    assert (SPACE, j["id"]) not in w.dir._early_hello

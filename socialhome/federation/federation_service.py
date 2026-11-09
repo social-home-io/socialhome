@@ -2364,11 +2364,18 @@ class FederationService:
         space_id: str,
         host_instance_id: str,
         extra_payload: dict | None = None,
+        sync_mode: str = "initial",
+        dir_seq: int | None = None,
+        have_seq: int | None = None,
     ) -> bool:
         """Initiate a §25.6 catch-up sync FROM a mesh-only host.
 
         ``extra_payload`` is the v_46 ``authority_epoch_echo`` for the
-        host, carried on the BEGIN under that key when given.
+        host, carried on the BEGIN under that key when given. ``dir_seq``
+        (v_89) is the member directory version we hold, echoed so a host
+        that is ahead answers with one snapshot; ``sync_mode="incremental"``
+        (with its ``have_seq``) is the periodic BEGIN after catch-up that
+        carries it.
 
         For a space whose host is NOT a confirmed direct peer (we joined over a
         relay), the normal SpaceSyncScheduler never triggers (it only syncs with
@@ -2396,6 +2403,8 @@ class FederationService:
                 sync_id=sync_id,
                 space_id=space_id,
                 provider_instance_id=host_instance_id,
+                sync_mode=sync_mode,
+                have_seq=have_seq,
             )
             self._sync_manager.register_requester_https_session(
                 sync_id=sync_id,
@@ -2406,11 +2415,15 @@ class FederationService:
             payload: dict = {
                 "sync_id": sync_id,
                 "space_id": space_id,
-                "sync_mode": "initial",
+                "sync_mode": sync_mode,
                 "prefer_direct": False,
             }
             if extra_payload is not None:
                 payload["authority_epoch_echo"] = extra_payload
+            if dir_seq is not None:
+                payload["dir_seq"] = dir_seq
+            if have_seq is not None:
+                payload["have_seq"] = have_seq
             result = await self.send_with_mesh_fallback(
                 to_instance_id=host_instance_id,
                 event_type=FederationEventType.SPACE_SYNC_BEGIN,
