@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, TypeGuard
 
 import orjson
 
+from ..canonical_json import canonical_bytes
 from ..domain.events import SpaceRemoteSeatEnded, SpaceRemoteSeatLive
 from ..domain.federation import (
     DELIVERY_ERROR_QUEUED,
@@ -132,9 +133,7 @@ def _event_space(event: FederationEvent) -> str | None:
 def _content_digest(card: MemberCard) -> str:
     """What a card says, its revision and signature aside."""
     wire = {k: v for k, v in card.to_wire().items() if k not in ("rev", "sig")}
-    return hashlib.sha256(orjson.dumps(wire, option=orjson.OPT_SORT_KEYS)).hexdigest()[
-        :32
-    ]
+    return hashlib.sha256(canonical_bytes(wire)).hexdigest()[:32]
 
 
 def _card(doc: dict[str, Any]) -> MemberCard | None:
