@@ -7858,21 +7858,25 @@ def cmd_gfs_relay_media() -> None:
         cmd_gfs_up(env_extra=env_extra)
         _wait_for_gfs_ws_since(a_iid, offset=offset, timeout=90.0)
         _wait_for_gfs_ws_since(e_iid, offset=offset, timeout=90.0)
-        # v_89: the pair's two mailbox claims come back too — each after its
-        # own 0-60 s jitter — before anything is sent (a queued media frame
-        # is drained without a log line the check below could read).
-        deadline = time.time() + 150.0
+        # v_89: EVERY household's mailbox claim comes back too — each after
+        # its own 0-60 s jitter plus its reconnect backoff — before anything
+        # is sent (a queued media frame is drained without a log line the
+        # check below could read). Not just the pair's: a paired member of
+        # the space (d) holds one at this GFS too, and its claim coming back
+        # first must not stand in for e's.
+        want = max(2, _mailboxes_held())
+        deadline = time.time() + 330.0
         while time.time() < deadline:
             claims = _gfs_log_lines_matching(
                 "gfs.ws.register: instance=<mailbox>", offset=offset
             )
-            if len(claims) >= 2:
+            if len(claims) >= want:
                 break
             time.sleep(1.0)
         else:
             raise SystemExit(
-                f"{step}: the pair's mailbox claims did not come back within "
-                "150 s of the GFS restart"
+                f"{step}: {want} mailbox claims did not come back within "
+                "330 s of the GFS restart"
             )
 
     _restart({"GFS_SPACE_MEDIA_MAX_BYTES": "0"})
@@ -19011,6 +19015,23 @@ def _verify_moment_totals(state: dict, moment_id: str) -> list[str]:
             "away; d's API shows them ✓"
         )
     return failures
+
+
+def _mailboxes_held() -> int:
+    """How many GFS mailboxes the households hold (v_89: one per household
+    per GFS; the demo runs one GFS)."""
+    n = 0
+    for label in ("a", "b", "c", "d", "e"):
+        try:
+            rows = _rows(
+                label,
+                "SELECT value FROM instance_config WHERE key = 'gfs_mailboxes'",
+            )
+        except Exception:
+            continue
+        if rows and rows[0][0]:
+            n += len((json.loads(rows[0][0]) or {}).get("boxes") or {})
+    return n
 
 
 def _rows(label: str, sql: str, params: tuple = ()) -> list[tuple]:
