@@ -27,6 +27,7 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.space_media_outbox_repo import (
     SqliteSpaceMediaOutboxRepo,
 )
+from socialhome.services import space_media_sync_service as sms
 from socialhome.services.media_file_hasher import MediaFileHasher
 from socialhome.services.space_media_sync_service import (
     PIPELINE_WINDOW,
@@ -47,7 +48,7 @@ async def _seed_space(db, *, space_id="sp-1"):
     )
     # The outbox queues only for a paired or member household of the space
     # (the enqueue guard): seat every peer these tests address.
-    for peer in ("peer-a", "peer-b", "peer-x", "peer-tomb", "peer-mesh"):
+    for peer in ("peer-a", "peer-b", "peer-e", "peer-x", "peer-tomb", "peer-mesh"):
         await db.enqueue(
             "INSERT INTO space_instances(space_id, instance_id) VALUES(?,?)",
             (space_id, peer),
@@ -423,10 +424,13 @@ class _Readers:
 
 async def test_a_link_joined_v80_reader_gets_no_byte_push(db, outbox, tmp_path):
     """A member seated from an invite link at v_80 reads the space's
-    pictures from its GFS's media cache; the relay refuses these bytes, so
-    no outbox row is ever queued for it."""
+    pictures from its GFS's media cache: its row is dropped at send time,
+    nothing is pushed to it."""
     await _seed_space(db)
-    svc = SpaceMediaSyncService(outbox=outbox, federation=None, media_dir=tmp_path)
+    (tmp_path / "img-1.webp").write_bytes(b"x" * 64)
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
     svc.attach_relay_readers(_Readers({"peer-e"}))
     await svc.enqueue_for_blob(
         space_id="sp-1",
@@ -434,8 +438,34 @@ async def test_a_link_joined_v80_reader_gets_no_byte_push(db, outbox, tmp_path):
         target_instance_ids=["peer-a", "peer-e"],
         media_urls=["api/media/img-1.webp"],
     )
-    rows = await outbox.list_for_correlation("p-1")
-    assert {r.target_instance_id for r in rows} == {"peer-a"}
+    assert await svc.flush_once() == 1
+    sent_to = {c.kwargs["to_instance_id"] for c in fed.send_media_chunk.call_args_list}
+    assert sent_to == {"peer-a"}
+    assert await outbox.list_for_correlation("p-1") == []
+
+
+async def test_who_reads_from_the_gfs_is_decided_at_send_time(db, outbox, tmp_path):
+    """Round 7: a household that looked like a GFS-cache reader when the
+    post was made (a capability view not yet refreshed after its GFS
+    restarted without a cache) still gets the push once the send-time
+    check says it is not one — the decision is no longer frozen at
+    enqueue time."""
+    await _seed_space(db)
+    (tmp_path / "img-1.webp").write_bytes(b"x" * 64)
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    readers = _Readers({"peer-e"})
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    svc.attach_relay_readers(readers)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-e"],
+        media_urls=["api/media/img-1.webp"],
+    )
+    readers.readers.clear()  # the fresh view: its GFS keeps no cache
+    assert await svc.flush_once() == 1
+    assert fed.send_media_chunk.call_args.kwargs["to_instance_id"] == "peer-e"
 
 
 async def _enqueue_many_chunks(db, outbox, tmp_path, fed, *, chunks: int):
@@ -476,7 +506,8 @@ async def test_chunk_sends_never_exceed_the_pipeline_window(db, outbox, tmp_path
     assert await svc.flush_once() == 1
     assert fed.send_media_chunk.await_count == 64
     assert 1 < peak_inflight <= PIPELINE_WINDOW
-    assert peak_tasks <= baseline + PIPELINE_WINDOW
+    # + 1: the recipient's own task (recipients are served in parallel).
+    assert peak_tasks <= baseline + PIPELINE_WINDOW + 1
 
 
 async def test_a_failed_chunk_stops_sending_the_rest(db, outbox, tmp_path):
@@ -578,3 +609,71 @@ async def test_the_whole_files_hash_comes_from_the_shared_cache(
     assert reads == ["c.webp", "c.webp"]
     hashes = {c.kwargs["payload"]["h"] for c in fed.send_media_chunk.call_args_list}
     assert hashes == {hashlib.sha256(body).hexdigest()}
+
+
+async def test_one_stuck_recipient_never_starves_the_others(
+    db, outbox, tmp_path, monkeypatch
+):
+    """Round 7: rows go out one at a time, so a send that never returns
+    (a mesh path that hangs) held every later recipient back. Each row now
+    has its own time limit: the stuck one is rescheduled, the next one
+    ships."""
+    monkeypatch.setattr(sms, "ROW_SEND_TIMEOUT_S", 0.05)
+    await _seed_space(db)
+    (tmp_path / "img.webp").write_bytes(b"x" * 64)
+    hang = asyncio.Event()
+
+    async def send(*, to_instance_id, **_kw):
+        if to_instance_id == "peer-a":
+            await hang.wait()  # never set
+        return _OK
+
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(side_effect=send)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-a", "peer-b"],
+        media_urls=["api/media/img.webp"],
+    )
+    assert await asyncio.wait_for(svc.flush_once(), timeout=5) == 1
+    left = await outbox.list_for_correlation("p-1")
+    assert [r.target_instance_id for r in left] == ["peer-a"]
+    assert left[0].status == "pending" and "timeout" in (left[0].last_error or "")
+
+
+async def test_recipients_are_sent_in_parallel_one_row_each_at_a_time(
+    db, outbox, tmp_path
+):
+    """Owner (round 7): like the GFS — one copy of the bytes, one row per
+    recipient, and the recipients served in parallel (a small cap), never
+    two sends to the same recipient at once."""
+    await _seed_space(db)
+    for name in ("one.webp", "two.webp"):
+        (tmp_path / name).write_bytes(b"x" * 64)
+    in_flight: dict[str, int] = {}
+    peak: dict[str, int] = {"all": 0}
+    both = asyncio.Event()
+
+    async def send(*, to_instance_id, **_kw):
+        in_flight[to_instance_id] = in_flight.get(to_instance_id, 0) + 1
+        assert in_flight[to_instance_id] == 1  # one per recipient
+        peak["all"] = max(peak["all"], sum(in_flight.values()))
+        if peak["all"] >= 2:
+            both.set()
+        await asyncio.wait_for(both.wait(), timeout=2)
+        in_flight[to_instance_id] -= 1
+        return _OK
+
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(side_effect=send)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-a", "peer-b"],
+        media_urls=["api/media/one.webp", "api/media/two.webp"],
+    )
+    assert await svc.flush_once() == 4
+    assert peak["all"] == 2  # two recipients at once

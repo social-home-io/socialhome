@@ -744,7 +744,8 @@ def _spawn(label: str, port: int, *, extra_env: dict | None = None) -> int:
         **os.environ,
         "SH_MODE": "standalone",
         "SH_CONFIG": str(d / "socialhome.toml"),
-        "SH_LOG_LEVEL": "INFO",
+        # ``SH_DEMO_LOG_LEVEL=DEBUG`` for an investigation run.
+        "SH_LOG_LEVEL": os.environ.get("SH_DEMO_LOG_LEVEL", "INFO"),
     }
     if extra_env:
         env.update(extra_env)
@@ -7932,6 +7933,13 @@ def cmd_gfs_relay_media() -> None:
                             break
             time.sleep(1.0)
         if got != src:
+            # What a still has queued for the photo, per recipient.
+            outbox = _rows(
+                "a",
+                "SELECT target_instance_id, status, attempts, last_error, "
+                "next_attempt_at FROM space_media_outbox ORDER BY created_at",
+            )
+            print(f"  a's space media outbox: {outbox!r}")
             raise SystemExit(
                 f"{step}: e never held a's {len(src)}-byte photo byte-identical "
                 f"(as {local!r}, {len(got)} bytes) within 120 s — no media through "

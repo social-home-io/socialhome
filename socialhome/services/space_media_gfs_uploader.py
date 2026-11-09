@@ -376,6 +376,7 @@ class SpaceMediaGfsUploader:
         if not await self._federation.peer_supports(
             instance_id, min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_REFS
         ):
+            log.debug("space-media: %s is no relay reader (below v_80)", instance_id)
             return False
         # v_87 — a reader whose GFS keeps NO space media cache (its last
         # signed capability block proved ``envelope_media`` and carried no
@@ -386,7 +387,16 @@ class SpaceMediaGfsUploader:
         ):
             conn = await self._gfs.connection_for_url(inst.relay_via)
             if conn is not None and self._gfs.space_media_cache_off(conn):
+                log.debug(
+                    "space-media: %s is no relay reader (its GFS keeps no cache)",
+                    instance_id,
+                )
                 return False
+        log.debug(
+            "space-media: %s is a relay reader (relay %s)",
+            instance_id,
+            "set" if inst.relay_via else "none",
+        )
         return True
 
     async def _reader_conn(self, instance_id: str) -> GfsConnection | None:
