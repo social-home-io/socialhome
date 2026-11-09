@@ -2141,6 +2141,32 @@ class FederationTransport:
             error=TRANSPORT_ERROR_NO_ROUTE,
         )
 
+    async def send_mailbox_only(
+        self, *, instance: RemoteInstance, envelope_dict: dict
+    ) -> _TransportSendResult:
+        """Deliver ``envelope_dict`` to *instance*'s mailbox for its space
+        (v_88) or not at all — never the instance-addressed relay, which
+        names both households. For mailbox updates sent right after an
+        anonymous register / claim."""
+        target = (
+            None
+            if _space_event_without_space(envelope_dict) or self._gfs_relay is None
+            else await self._mailbox_target(
+                instance, envelope_dict.get("space_id"), media=False
+            )
+        )
+        if target is None or self._gfs_relay is None:
+            return _TransportSendResult(ok=False, via="gfs_relay", error="no_mailbox")
+        ok, status = await self._gfs_relay.send_mailbox(
+            instance=instance, target=target, envelope_dict=envelope_dict
+        )
+        return _TransportSendResult(
+            ok=ok,
+            via="gfs_relay",
+            status_code=status,
+            error=None if ok else _relay_failure_reason(status),
+        )
+
     async def send_via_gfs_url(
         self,
         *,

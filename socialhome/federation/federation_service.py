@@ -1977,6 +1977,48 @@ class FederationService:
             status_code=status_code,
         )
 
+    async def send_event_unqueued(
+        self,
+        *,
+        to_instance_id: str,
+        event_type: FederationEventType,
+        payload: dict,
+        space_id: str | None,
+        mailbox_only: bool,
+    ) -> DeliveryResult:
+        """Seal one event like :meth:`send_event` and try it ONCE over the
+        transport — never the outbox (whose quick replays would ignore the
+        caller's timing) and no reachability change. *mailbox_only*: the
+        target's per-space mailbox or nothing (v_88 mailbox updates).
+        """
+        instance = await self._federation_repo.get_instance(to_instance_id)
+        if instance is None or self._transport is None:
+            return DeliveryResult(
+                instance_id=to_instance_id, ok=False, error="unavailable"
+            )
+        envelope_dict = self._seal_envelope(
+            instance, event_type=event_type, payload=payload, space_id=space_id
+        )
+        if envelope_dict is None:
+            return DeliveryResult(
+                instance_id=to_instance_id, ok=False, error="key_decrypt_error"
+            )
+        if mailbox_only:
+            result = await self._transport.send_mailbox_only(
+                instance=instance, envelope_dict=envelope_dict
+            )
+        else:
+            result = await self._transport.send(
+                instance=instance, envelope_dict=envelope_dict
+            )
+        return DeliveryResult(
+            instance_id=to_instance_id,
+            ok=result.ok,
+            status_code=result.status_code,
+            error=result.error,
+            via=result.via,
+        )
+
     async def send_event_via_gfs(
         self,
         *,

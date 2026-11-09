@@ -178,9 +178,10 @@ _GEN_SPACE: int = 2**31
 
 InboundHandler = Callable[[dict | bytes, MailboxKeys], Awaitable[object]]
 #: ``(space_id, instance_id, entry | None)`` → send ``SPACE_MAILBOX_UPDATED``.
-#: Sends one ``SPACE_MAILBOX_UPDATED``; returns ``False`` when it was not
-#: delivered (anything else counts as delivered).
-Announcer = Callable[[str, str, SpaceMailboxEntry | None], Awaitable[bool | None]]
+#: Sends one ``SPACE_MAILBOX_UPDATED`` once, never queued (space, instance,
+#: entry, ``mailbox_only=``: the counterpart's mailbox or nothing); returns
+#: ``False`` when it did not go out (anything else counts as sent).
+Announcer = Callable[..., Awaitable[bool | None]]
 
 
 @dataclass(slots=True)
@@ -402,16 +403,19 @@ class SpaceMailboxService:
         )
 
         async def _announce(
-            space_id: str, instance_id: str, entry: SpaceMailboxEntry | None
+            space_id: str,
+            instance_id: str,
+            entry: SpaceMailboxEntry | None,
+            mailbox_only: bool = False,
         ) -> bool:
-            result = await federation_service.send_event(
+            # Never the outbox: its quick replays would ignore the quiet
+            # window; the row's ``announce_at`` is the only retry.
+            result = await federation_service.send_event_unqueued(
                 to_instance_id=instance_id,
                 event_type=FederationEventType.SPACE_MAILBOX_UPDATED,
                 payload={"mailbox": entry.to_wire() if entry is not None else None},
                 space_id=space_id,
-                # Latest-only: a queued older update (a stale ``None``)
-                # never lands after a newer one.
-                outbox_key=f"mailbox:{space_id}",
+                mailbox_only=mailbox_only,
             )
             return result.ok
 
@@ -702,6 +706,12 @@ class SpaceMailboxService:
                 return conn
         return None
 
+    def _left(self, space_id: str, peer: str, what: int, limit: int) -> bool:
+        """Whether a *what* is still left for the pair today (no count)."""
+        row = self._daily.get((space_id, peer))
+        day = int(self._clock() // _DAY_S)
+        return row is None or row[0] != day or row[what] < limit
+
     def _spend(self, space_id: str, peer: str, what: int, limit: int) -> bool:
         """Count one *what* (1 announce, 2 recovery register, 3 rotation,
         4 re-mint of a missing mailbox)
@@ -875,7 +885,6 @@ class SpaceMailboxService:
                 if session is None:
                     log.warning("gfs.mailbox: no anonymous session — not registering")
                     return REGISTER_UNREACHABLE
-                self._last_anon_at = self._clock()
                 await register_mailbox(
                     session,
                     conn.inbox_url,
@@ -883,7 +892,9 @@ class SpaceMailboxService:
                     conn.gfs_instance_id,
                     tickets=tickets.cache,
                 )
+                self._last_anon_at = self._clock()  # the GFS took it
         except MailboxRegisterError as exc:
+            self._last_anon_at = self._clock()  # the GFS answered it
             log.warning(
                 "gfs.mailbox: %r refused a mailbox (%d %s) — the space keeps the "
                 "instance-addressed relay",
@@ -991,21 +1002,28 @@ class SpaceMailboxService:
         return marked
 
     async def announce_counted(
-        self, space_id: str, instance_id: str, entry: SpaceMailboxEntry | None
+        self,
+        space_id: str,
+        instance_id: str,
+        entry: SpaceMailboxEntry | None,
+        *,
+        mailbox_only: bool = False,
     ) -> bool:
         """:meth:`announce_to` within :data:`ANNOUNCES_PER_DAY` for the pair.
         Returns whether it went out."""
         if not self._spend(space_id, instance_id, 1, ANNOUNCES_PER_DAY):
             log.info("gfs.mailbox: today's mailbox updates for a pair are used up")
             return False
-        return await self.announce_to(space_id, instance_id, entry)
+        return await self.announce_to(
+            space_id, instance_id, entry, mailbox_only=mailbox_only
+        )
 
     async def send_due_announces(self) -> int:
         """Send ONE delayed announce whose ``announce_at`` passed — the
         pair's current state (:meth:`_send_state`) — walking the due list.
-        An instance-addressed one is skipped while we registered or claimed
-        anonymously within :data:`ANON_QUIET_S` (checked right before the
-        send). One that did not go out (budget, delivery) moves forward by a
+        Within :data:`ANON_QUIET_S` of an anonymous register / claim the GFS
+        accepted, only the counterpart's mailbox may carry it (checked right
+        before the send). One that did not go out (budget, delivery) moves forward by a
         fresh jitter; one that went out clears the marker, unless the row's
         own changed meanwhile (a rotation stays due). Returns how many went
         out."""
@@ -1020,12 +1038,14 @@ class SpaceMailboxService:
             own = parse_own(own_raw)
             if own is None:
                 continue
-            if (
-                await self.target_for(instance_id, space_id) is None
-                and self._clock() - self._last_anon_at < ANON_QUIET_S
-            ):
-                continue  # never next to an anonymous register / claim
-            sent = await self._send_state(space_id, instance_id, own)
+            # Inside the quiet window only the counterpart's mailbox may
+            # carry it (never a fallback to the relay naming both of us).
+            quiet = self._clock() - self._last_anon_at >= ANON_QUIET_S
+            if not quiet and await self.target_for(instance_id, space_id) is None:
+                continue
+            sent = await self._send_state(
+                space_id, instance_id, own, mailbox_only=not quiet
+            )
             async with self._lock:
                 row = await self._row(space_id, instance_id)
                 if row is not None and row.get("own") == own_raw:
@@ -1363,8 +1383,10 @@ class SpaceMailboxService:
         whether this claim was replaced."""
         space_id = claim.keys.space_id
         status = None
-        if self._spend(space_id, claim.peer, 2, RECOVERY_REGISTERS_PER_DAY):
+        if self._left(space_id, claim.peer, 2, RECOVERY_REGISTERS_PER_DAY):
             status = await self._register(conn, claim.keys, fetch=False)
+            if status in (REGISTER_OK, REGISTER_REFUSED):  # a ticket was used
+                self._spend(space_id, claim.peer, 2, RECOVERY_REGISTERS_PER_DAY)
         if status == REGISTER_OK:
             return False
         if not claim.lost:
@@ -1428,15 +1450,18 @@ class SpaceMailboxService:
         ``SPACE_MAILBOX_UPDATED`` after the seat. When we hold the
         counterpart's entry it rides THAT mailbox, at once — the GFS sees a
         sealed frame to it, never this household naming that one. Otherwise
-        (instance-addressed, both households named) the row gets
-        ``announce_at`` = now + :data:`ANNOUNCE_JITTER_S`, never sooner than
-        one already pending, and a quiet sweep sends it."""
+        (instance-addressed, both households named) — or when that mailbox
+        send did not go out — the row gets ``announce_at`` = now +
+        :data:`ANNOUNCE_JITTER_S`, never sooner than one already pending, and
+        a later sweep sends it."""
         if await self.target_for(instance_id, space_id) is not None:
             row = await self._row(space_id, instance_id)
             own = parse_own(row.get("own")) if row is not None else None
-            if own is not None:
-                await self._send_state(space_id, instance_id, own)
-            return
+            if own is None or await self._send_state(
+                space_id, instance_id, own, mailbox_only=True
+            ):
+                return
+            # Not ready, or today's budget spent: scheduled like the rest.
         async with self._lock:
             row = await self._row(space_id, instance_id)
             own = parse_own(row.get("own")) if row is not None else None
@@ -1455,7 +1480,12 @@ class SpaceMailboxService:
             )
 
     async def _send_state(
-        self, space_id: str, instance_id: str, own: OwnMailbox
+        self,
+        space_id: str,
+        instance_id: str,
+        own: OwnMailbox,
+        *,
+        mailbox_only: bool = False,
     ) -> bool:
         """Announce *own*'s current state (``None`` while its claim is
         lost) within the daily budget. Returns whether it went out."""
@@ -1464,7 +1494,9 @@ class SpaceMailboxService:
         if claim is None or not claim.lost:
             keys = _derive(await self._load_root(), space_id, instance_id, own)
             entry = self._entry_for(keys, own)
-        return await self.announce_counted(space_id, instance_id, entry)
+        return await self.announce_counted(
+            space_id, instance_id, entry, mailbox_only=mailbox_only
+        )
 
     def _entry_for(self, keys: MailboxKeys, own: OwnMailbox) -> SpaceMailboxEntry:
         return build_entry(
@@ -1478,14 +1510,21 @@ class SpaceMailboxService:
         )
 
     async def announce_to(
-        self, space_id: str, instance_id: str, entry: SpaceMailboxEntry | None
+        self,
+        space_id: str,
+        instance_id: str,
+        entry: SpaceMailboxEntry | None,
+        *,
+        mailbox_only: bool = False,
     ) -> bool:
         """Send ``SPACE_MAILBOX_UPDATED`` to one counterpart. Fail-soft;
         returns whether it was delivered."""
         if self._announcer is None:
             return False
         try:
-            result = await self._announcer(space_id, instance_id, entry)
+            result = await self._announcer(
+                space_id, instance_id, entry, mailbox_only=mailbox_only
+            )
         except Exception:
             log.warning("gfs.mailbox: a mailbox update did not go out", exc_info=True)
             return False
@@ -1549,8 +1588,10 @@ class SpaceMailboxService:
                 claim.own.gfs_instance_id,
                 heartbeat=self._heartbeat(),
             )
-            self._last_anon_at = self._clock()
             async with socket:
+                # Accepted: only a claim the GFS saw opens the quiet window
+                # (a refused or failed attempt must not keep it open).
+                self._last_anon_at = self._clock()
                 claim.socket = socket
                 claim.claimed.set()
                 if claim.lost:

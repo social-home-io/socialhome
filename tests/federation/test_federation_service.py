@@ -6875,3 +6875,29 @@ async def test_the_files_hash_map_reaches_only_v85_households(monkeypatch):
         new.id: {"id": "p", "files": files, "files_suite": "sha256"},
         old.id: {"id": "p"},
     }
+
+
+@pytest.mark.asyncio
+async def test_send_event_unqueued_never_queues_and_honours_mailbox_only():
+    """v_88 round 9 (mailbox updates): one attempt, never the outbox; with
+    ``mailbox_only`` and no mailbox, nothing is sent at all."""
+    relay = _OneServerRelay((False, None))
+    svc, inst, _key, _fed_repo, outbox = await _svc_for_one_server(relay)
+    result = await svc.send_event_unqueued(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.SPACE_MAILBOX_UPDATED,
+        payload={"mailbox": None},
+        space_id="sp-1",
+        mailbox_only=True,
+    )
+    assert result.ok is False and relay.calls == []
+    result = await svc.send_event_unqueued(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.SPACE_MAILBOX_UPDATED,
+        payload={"mailbox": None},
+        space_id="sp-1",
+        mailbox_only=False,
+    )
+    assert result.ok is False and len(relay.calls) == 1
+    assert relay.calls[0][1]["space_id"] == "sp-1"
+    assert outbox.enqueued == []

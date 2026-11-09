@@ -895,7 +895,8 @@ the household was away, or data loss): the claim is refused (`4401`). The
 household registers the SAME mailbox again — same derived id and keys,
 from a cached ticket (never fetched for it: an identified fetch right
 before an anonymous register would tie them), within
-`RECOVERY_REGISTERS_PER_DAY` — and claims it; the counterpart's frames
+`RECOVERY_REGISTERS_PER_DAY`, counted only when a ticket was used — and
+claims it; the counterpart's frames
 resume and nothing is announced. Only when that cannot happen now (no
 cached ticket, refused, unreachable, today's re-registrations used up) is
 the counterpart told `{mailbox: null}` — and told the entry again once the
@@ -909,26 +910,34 @@ mailbox it does not know with the same uniform `202` as any other (so a
 sender cannot probe which mailboxes exist) and drops it; nothing goes to
 the sender's outbox. Frames sent between the GFS forgetting a mailbox and
 its re-registration — or the counterpart's `null` — are lost, not
-delayed. The window is the time to the next claim attempt when a ticket is
-cached, else until the `null` lands (at once over the counterpart's
-mailbox; 1–5 min plus the next quiet sweep instance-addressed).
+delayed. The window: with a ticket cached, until the next claim attempt
+(the first refused claim re-registers at once). Without one, until the
+`null` lands — at once when the counterpart's mailbox is ready; otherwise
+`announce_at` (1–5 min), then the next sweep (~5–15 min), and only outside
+the 5 min quiet window after an op the GFS accepted (a refused claim or a
+register with no ticket never extends it; ticket-using re-registers are
+capped at 4 a day per pair). Typically under ~25 min. Worst case: the
+pair's 6 updates for the day are used up — the `null` then waits for the
+next day, and frames to that mailbox are lost until it is re-registered.
 
 **How every post-seat update goes out (`announce_change`).** Outside the
 seat-time redeem / ACK, every `SPACE_MAILBOX_UPDATED` — a retried mint,
 the late host mint, a lost notice, a re-claim after one, a rotation —
-takes one path. When we hold the counterpart's entry it rides THAT
-mailbox, at once: the GFS sees a sealed frame to the counterpart's mailbox
-from our IP, never this household naming that one (the accepted IP-timing
-residual). Otherwise it would go instance-addressed and name both
-households, so it waits: the row gets `announce_at` = now + 1–5 min
+takes one path. When we hold the counterpart's entry it is sent to THAT
+mailbox only, at once: the GFS sees a sealed frame to the counterpart's
+mailbox from our IP, never this household naming that one (the accepted
+IP-timing residual) — and if that mailbox is not ready the send does not
+fall back to the instance-addressed relay. Otherwise, or when that send
+did not go out, it would name both households, so it waits: the row gets `announce_at` = now + 1–5 min
 (`ANNOUNCE_JITTER_S`, never sooner than one already pending), and a later
 sweep (`send_due_announces`) sends the pair's state *at that moment* —
-skipping it while we registered or connected a claim anonymously within
-`ANON_QUIET_S` (5 min, checked right before the send). One that did not
-go out (daily budget, delivery) moves forward by a fresh jitter; one that
-went out clears the marker unless the row's mailbox changed meanwhile.
-Updates are latest-only in the outbox (`outbox_key` `mailbox:<space>`): a
-queued stale `null` never lands after a newer entry. The receiver of an update verifies the entry like the one in the
+sent only through the counterpart's mailbox while within `ANON_QUIET_S`
+(5 min) of an anonymous register or claim the GFS accepted (checked right
+before the send). One that did not go out (daily budget, delivery) moves
+forward by a fresh jitter; one that went out clears the marker unless the
+row's mailbox changed meanwhile. Updates are sent once and never queued
+in the outbox (its quick replays would ignore the quiet window), so no
+stale `null` can land after a newer entry. The receiver of an update verifies the entry like the one in the
 redeem (identity signature, key-wrap binding, the space) and that it names
 the GFS the seat reaches it through, and stores it on that pair's row
 only. `SPACE_MAILBOX_UPDATED` ships in v_88 (unreleased when it was

@@ -251,7 +251,7 @@ async def test_the_sweep_mints_a_missing_own_mailbox_and_announces_it(gfs):
     svc._federation_repo = _FedRepo(url)  # type: ignore[assignment]
     announced: list = []
 
-    async def _announce(space_id, instance_id, entry):
+    async def _announce(space_id, instance_id, entry, mailbox_only=False):
         announced.append((space_id, instance_id, entry))
 
     svc.attach_announcer(_announce)
@@ -432,7 +432,7 @@ async def test_a_mailbox_the_gfs_forgot_is_announced_lost_then_recovered(gfs):
     svc = _service(session, conn, spaces=spaces)
     announced: list = []
 
-    async def _announce(space_id, instance_id, entry):
+    async def _announce(space_id, instance_id, entry, mailbox_only=False):
         announced.append((space_id, instance_id, entry))
 
     svc.attach_announcer(_announce)
@@ -476,7 +476,7 @@ async def test_a_forgotten_mailbox_with_no_ticket_waits_for_the_refill(gfs):
     svc = _service(session, conn, spaces=spaces)
     announced: list = []
 
-    async def _announce(space_id, instance_id, entry):
+    async def _announce(space_id, instance_id, entry, mailbox_only=False):
         announced.append(entry)
 
     svc.attach_announcer(_announce)
@@ -742,3 +742,46 @@ async def test_the_identified_session_never_carries_mailbox_traffic(gfs):
         assert path in anon_paths
     assert "/gfs/mailbox/tickets" not in anon_paths
     assert "/gfs/ws" not in anon_paths + identified_paths
+
+
+async def test_refused_claims_never_keep_the_quiet_window_open(gfs):
+    """Round 9: two lost mailboxes keep retrying their claims (4401) with
+    no ticket to re-register. Those attempts never reach an accepted op at
+    the GFS, so they must not refresh the quiet window — else the lost
+    ``null`` would wait forever while frames are dropped."""
+    server, session, url, conn = gfs
+    spaces = _Spaces()
+    spaces.rows[("space-1", "peer-a")] = None
+    spaces.rows[("space-1", "peer-b")] = None
+    svc = _service(session, conn, spaces=spaces)
+    announced: list = []
+
+    async def _announce(space_id, instance_id, entry, mailbox_only=False):
+        announced.append((instance_id, entry))
+
+    svc.attach_announcer(_announce)
+    await _ready(svc, conn)
+    entries = {}
+    for peer in ("peer-a", "peer-b"):
+        entry, own = await svc.mint("space-1", url, peer=peer)
+        await svc.remember("space-1", peer, peer=None, own=own)
+        entries[peer] = entry
+    assert await svc.wait_claimed(5)
+    svc._tickets[conn.id].cache.clear()
+    svc._last_anon_at = float("-inf")
+    for entry in entries.values():
+        assert await server.app[gfs_mailbox_repo_key].unregister(entry.mailbox_id)
+        await server.app[gfs_mailbox_ws_registry_key].close_one(
+            entry.mailbox_id, code=1012, message=b"restart"
+        )
+    rows = [("space-1", "peer-a"), ("space-1", "peer-b")]
+    await _until(
+        lambda: all("announce_at" in orjson.loads(spaces.rows[r]) for r in rows)
+    )
+    await asyncio.sleep(1.0)  # more refused claim attempts
+    assert svc._last_anon_at == float("-inf")
+    svc._wall_clock = lambda: 10.0**12  # type: ignore[assignment]
+    assert await svc.send_due_announces() == 1
+    assert await svc.send_due_announces() == 1
+    assert sorted(announced) == [("peer-a", None), ("peer-b", None)]
+    await svc.stop()

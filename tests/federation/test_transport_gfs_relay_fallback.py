@@ -827,3 +827,20 @@ def test_the_guard_catches_a_wrapper_and_an_explicit_none(tmp_path, monkeypatch)
         if space is None or explicit_none:
             found.append(name)
     assert found == ["send_to_instance", "send_event"]
+
+
+async def test_a_mailbox_only_send_never_falls_back_to_the_named_relay():
+    """v_88 round 9: a mailbox update must never leave instance-addressed
+    (naming both households) right after an anonymous register / claim —
+    no mailbox ready means no send at all."""
+    relay = _MailboxRelay(mailbox_ready=False)
+    t = _mailbox_transport(relay, [], targets={"sp-1": _TARGET})
+    env = {"msg_id": "m", "space_id": "sp-1"}
+    result = await t.send_mailbox_only(instance=_seat(), envelope_dict=env)
+    assert not result.ok
+    assert relay.calls == [] and relay.mailbox_calls == []
+    relay2 = _MailboxRelay()
+    t2 = _mailbox_transport(relay2, [], targets={"sp-1": _TARGET})
+    result = await t2.send_mailbox_only(instance=_seat(), envelope_dict=env)
+    assert result.ok and relay2.mailbox_calls == [(_TARGET, env)]
+    assert relay2.calls == []
