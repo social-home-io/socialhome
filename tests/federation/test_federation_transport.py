@@ -848,6 +848,91 @@ async def test_accept_offer_signals_answer_before_ice_candidates(monkeypatch):
     await t.close_all()
 
 
+async def test_offer_whose_peer_is_replaced_while_answering_does_not_raise():
+    """REGRESSION (federation-demo log audit, ``AttributeError: 'NoneType'
+    object has no attribute 'spawn_task'``): an OFFER is being answered —
+    parked in ``await self._signaling(ANSWER)`` — when that PeerConnection
+    reaches CLOSED (the remote retired it) and the remote's next OFFER finds
+    the peer spent, so :meth:`FederationTransport._answering_peer` replaces
+    it and closes the old one. The first ``accept_offer`` then resumed on a
+    peer whose ``_pc`` was ``None`` and the dispatch registry logged an
+    ERROR. The superseded handshake must just stop; the new peer answers.
+    """
+    calls: list[FederationEventType] = []
+    t: FederationTransport
+
+    async def _signal(to_instance_id, event_type, payload):
+        calls.append(event_type)
+        if len(calls) == 1:
+            # While the first ANSWER is in flight: its PC closes (what
+            # ``_drain_events`` records on CLOSED) and the remote re-offers.
+            t._peers["peer-replaced"]._closed = True
+            await t.on_rtc_offer(
+                from_instance="peer-replaced",
+                payload={"sdp": _STUB_SDP, "sdp_type": "offer"},
+            )
+        return DeliveryResult(instance_id=to_instance_id, ok=True, status_code=200)
+
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        signaling_send=_signal,
+    )
+
+    await t.on_rtc_offer(
+        from_instance="peer-replaced",
+        payload={"sdp": _STUB_SDP, "sdp_type": "offer"},
+    )
+
+    assert calls == [
+        FederationEventType.FEDERATION_RTC_ANSWER,
+        FederationEventType.FEDERATION_RTC_ANSWER,
+    ]
+    new_peer = t._peers["peer-replaced"]
+    assert not new_peer.is_spent
+    assert new_peer._pc is not None
+
+    await t.close_all()
+
+
+@pytest.mark.parametrize("close_during", ["set_local_description", "signaling"])
+async def test_own_offer_on_a_peer_closed_mid_handshake_stops_quietly(
+    monkeypatch, close_during
+):
+    """Offerer twin of the regression above: :meth:`_RtcPeer.close` (an
+    unpair, a retire) landing while ``start_offer`` awaits its SDP or the
+    OFFER signalling must end the handshake, not dereference ``_pc=None``."""
+    peer: _RtcPeer
+    signalled: list[FederationEventType] = []
+
+    class _ClosingPC(rtc.PeerConnection):  # type: ignore[misc]
+        async def set_local_description(self, type_: str = "offer"):
+            desc = await super().set_local_description(type_)
+            if close_during == "set_local_description":
+                peer.close()
+            return desc
+
+    monkeypatch.setattr(rtc, "PeerConnection", _ClosingPC)
+
+    async def _signaling(et, payload):
+        signalled.append(et)
+        peer.close()
+
+    async def _inbound(_envelope):
+        return None
+
+    peer = _RtcPeer(instance_id="peer-gone", signaling=_signaling, inbound=_inbound)
+    await peer.start_offer()
+
+    assert peer._pc is None
+    expected = (
+        []
+        if close_during == "set_local_description"
+        else [FederationEventType.FEDERATION_RTC_OFFER]
+    )
+    assert signalled == expected
+
+
 async def test_start_offer_signals_offer_before_ice_candidates(monkeypatch):
     """Offerer side: OFFER must hit the signaler before any ICE.
 
