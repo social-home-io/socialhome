@@ -45,7 +45,9 @@ redeem immediately with a reason a human can act on.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import urlparse
 
@@ -108,7 +110,7 @@ class GfsEnvelopeSender:
     whole job is to learn as little as possible about it.
     """
 
-    __slots__ = ("_gfs", "_repo")
+    __slots__ = ("_gfs", "_mailbox_session", "_repo")
 
     def __init__(
         self,
@@ -118,6 +120,15 @@ class GfsEnvelopeSender:
     ) -> None:
         self._gfs = gfs_service
         self._repo = gfs_repo
+        #: v_88 — the cookie-less, no-keep-alive session mailbox frames
+        #: ride (shared with the mailbox service); ``None`` → the connection
+        #: service's anonymous session.
+        self._mailbox_session: aiohttp.ClientSession | None = None
+
+    def attach_mailbox_session(self, session: aiohttp.ClientSession) -> None:
+        """Send mailbox frames over *session* (no pooled connection may
+        carry two mailboxes' traffic)."""
+        self._mailbox_session = session
 
     async def send_sealed_envelope(
         self,
@@ -255,6 +266,102 @@ class GfsEnvelopeSender:
                 exc,
             )
             return False
+
+    async def mailbox_connection(self, gfs_url: str) -> GfsConnection | None:
+        """The active connection at *gfs_url* whose server proved
+        ``envelope_mailbox`` (v_88), or ``None``."""
+        if not gfs_url:
+            return None
+        want = normalize_gfs_base(gfs_url)
+        for conn in await self._repo.list_active():
+            if (
+                conn.status == "active"
+                and normalize_gfs_base(conn.inbox_url) == want
+                and await self._gfs.envelope_mailbox_supported(conn)
+            ):
+                return conn
+        return None
+
+    async def send_to_mailbox(
+        self,
+        *,
+        mailbox_id: str,
+        gfs_url: str,
+        sealed: dict | None = None,
+        media_body: bytes | None = None,
+    ) -> bool:
+        """POST one frame for a per-space mailbox (v_88) to the GFS at
+        *gfs_url*: a JSON ``{to_instance: mailbox_id, sealed}`` envelope, or
+        a raw binary ``\\x00SHR`` media body (already addressed to the
+        mailbox). ``True`` when the relay accepted it.
+
+        Rides the ANONYMOUS session (cookie-less, the one mailbox
+        registration uses): a sticky cookie of this household's identified
+        session must never tie it to a mailbox it writes to. Raises
+        :class:`~socialhome.federation.invite_bootstrap.EnvelopeRelayThrottled`
+        on ``429`` and :class:`EnvelopeRelayUnavailable` when no connection
+        at *gfs_url* proved ``envelope_mailbox``; any other refusal is
+        ``False``. Never logs the mailbox id."""
+        conn = await self.mailbox_connection(gfs_url)
+        if conn is None:
+            raise EnvelopeRelayUnavailable(
+                "no GFS connection here delivers to that mailbox",
+            )
+        url = f"{conn.inbox_url.rstrip('/')}{GFS_ENVELOPE_PATH}"
+        if media_body is not None:
+            kwargs: dict[str, Any] = {
+                "data": media_body,
+                "headers": {"Content-Type": "application/octet-stream"},
+                "timeout": aiohttp.ClientTimeout(total=GFS_MEDIA_TIMEOUT_S),
+            }
+        else:
+            if not isinstance(sealed, dict):
+                return False
+            # Rebuilt, two fields only — like :meth:`send_sealed_envelope`.
+            kwargs = {
+                "json": {"to_instance": mailbox_id, "sealed": sealed},
+                "timeout": aiohttp.ClientTimeout(total=GFS_ENVELOPE_TIMEOUT_S),
+            }
+        try:
+            async with self._mailbox_anon(conn) as session:
+                if session is None:
+                    log.warning(
+                        "gfs.envelope: no anonymous session — a mailbox frame "
+                        "is not sent over the identified one",
+                    )
+                    return False
+                async with session.post(url, allow_redirects=False, **kwargs) as resp:
+                    if resp.status < 300:
+                        return True
+                    if resp.status == 429:
+                        raise EnvelopeRelayThrottled(
+                            "the GFS is busy — try again in a moment",
+                        )
+                    log.info(
+                        "gfs.envelope: %r (%s) rejected a mailbox frame — HTTP %d",
+                        conn.display_name,
+                        conn.inbox_url,
+                        resp.status,
+                    )
+                    return False
+        except (TimeoutError, aiohttp.ClientError, RuntimeError) as exc:
+            log.info(
+                "gfs.envelope: could not reach %r (%s) with a mailbox frame: %s",
+                conn.display_name,
+                conn.inbox_url,
+                exc,
+            )
+            return False
+
+    @contextlib.asynccontextmanager
+    async def _mailbox_anon(
+        self, conn: GfsConnection
+    ) -> AsyncIterator[aiohttp.ClientSession | None]:
+        if self._mailbox_session is not None:
+            yield self._mailbox_session
+            return
+        async with self._gfs.anon_session(conn) as session:
+            yield session
 
     async def _resolve_connection(self, gfs_url: str) -> GfsConnection:
         """The active connection that will carry the blob.

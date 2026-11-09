@@ -236,6 +236,16 @@ class AbstractSpaceRepo(Protocol):
     async def get_space_instance_identity_pk(
         self, space_id: str, instance_id: str
     ) -> str | None: ...
+    async def set_space_instance_mailbox(
+        self, space_id: str, instance_id: str, mailbox_json: str | None
+    ) -> None: ...
+    async def list_space_instance_mailboxes(self) -> list[tuple[str, str, str]]: ...
+    async def get_space_instance_mailbox(
+        self, space_id: str, instance_id: str
+    ) -> str | None: ...
+    async def list_unmarked_session_pairs(
+        self, *, min_proto: int
+    ) -> list[tuple[str, str]]: ...
     async def list_member_instances(self, space_id: str) -> list[str]: ...
 
     # ── Bans ───────────────────────────────────────────────────────────
@@ -1927,6 +1937,51 @@ class SqliteSpaceRepo:
         if row is None or not row["identity_pk"]:
             return None
         return str(row["identity_pk"])
+
+    async def set_space_instance_mailbox(
+        self, space_id: str, instance_id: str, mailbox_json: str | None
+    ) -> None:
+        """Store the per-space GFS mailbox JSON of one (space, household)
+        pair (migration 0144). UPDATE-only: never creates membership."""
+        await self._db.enqueue(
+            "UPDATE space_instances SET mailbox=? WHERE space_id=? AND instance_id=?",
+            (mailbox_json, space_id, instance_id),
+        )
+
+    async def list_unmarked_session_pairs(
+        self, *, min_proto: int
+    ) -> list[tuple[str, str]]:
+        """``(space_id, instance_id)`` of every seated ``space_session``
+        household at *min_proto* or above that holds no mailbox state yet
+        (migration 0144 — seated before v_88, an old invite link, a crash
+        between the seat and its row write)."""
+        rows = await self._db.fetchall(
+            "SELECT si.space_id, si.instance_id FROM space_instances si"
+            " JOIN remote_instances ri ON ri.id = si.instance_id"
+            " WHERE si.mailbox IS NULL AND ri.source = 'space_session'"
+            " AND ri.proto_version >= ?"
+            " ORDER BY si.space_id, si.instance_id",
+            (min_proto,),
+        )
+        return [(r["space_id"], r["instance_id"]) for r in rows]
+
+    async def list_space_instance_mailboxes(self) -> list[tuple[str, str, str]]:
+        """Every ``(space_id, instance_id, mailbox_json)`` with a mailbox."""
+        rows = await self._db.fetchall(
+            "SELECT space_id, instance_id, mailbox FROM space_instances"
+            " WHERE mailbox IS NOT NULL"
+        )
+        return [(r["space_id"], r["instance_id"], r["mailbox"]) for r in rows]
+
+    async def get_space_instance_mailbox(
+        self, space_id: str, instance_id: str
+    ) -> str | None:
+        """One (space, household) row's mailbox JSON, or ``None``."""
+        row = await self._db.fetchone(
+            "SELECT mailbox FROM space_instances WHERE space_id=? AND instance_id=?",
+            (space_id, instance_id),
+        )
+        return row["mailbox"] if row is not None else None
 
     async def remove_space_instance(
         self,

@@ -142,7 +142,7 @@ from .hardening import (
     install_security_headers,
 )
 from .i18n import Catalog
-from .identity_bootstrap import ensure_instance_identity
+from .identity_bootstrap import IdentityMaterial, ensure_instance_identity
 from .infrastructure import (
     PAIR_WINDOW_404_ATTEMPTS,
     DeliveryOutcome,
@@ -445,6 +445,7 @@ from .services.space_crypto_service import (
     SpaceContentEncryption,
 )
 from .services.space_location_outbound import SpaceLocationOutbound
+from .services.space_mailbox_service import SpaceMailboxService
 from .services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 from .services.space_media_gfs_responder import SpaceMediaGfsResponder
 from .services.space_media_gfs_uploader import SpaceMediaGfsUploader
@@ -963,6 +964,47 @@ def _build_gfs_relay_inbound(
         gfs_connection_repo=gfs_connection_repo,
         rate_limiter=rate_limiter,
     )
+
+
+def _build_space_mailboxes(
+    *,
+    repos: SimpleNamespace,
+    key_manager: KeyManager,
+    gfs_connection_service: GfsConnectionService,
+    identity: IdentityMaterial,
+    instance_id: str,
+    gfs_relay_inbound: GfsRelayInbound,
+    gfs_envelope_sender: GfsEnvelopeSender,
+) -> SpaceMailboxService:
+    """v_88 — this household's per-space GFS mailboxes (GFS redesign PR 2),
+    with frames on them handed to the relay's inbound leg."""
+    # Every mailbox request rides its own cookie-less session with no
+    # keep-alive: no pooled connection carries two mailboxes' traffic, and no
+    # cookie of the identified session reaches a mailbox. Closed by stop().
+    mailbox_session = aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(force_close=True),
+        cookie_jar=aiohttp.DummyCookieJar(),
+        json_serialize=dumps_str,
+    )
+    gfs_envelope_sender.attach_mailbox_session(mailbox_session)
+    svc = SpaceMailboxService(
+        mailbox_session=mailbox_session,
+        space_repo=repos.space,
+        instance_config=repos.instance_config,
+        key_manager=key_manager,
+        gfs_repo=repos.gfs_connection,
+        gfs_service=gfs_connection_service,
+        instance_id=instance_id,
+        identity_seed=identity.identity_seed,
+        keywrap_public_key=identity.keywrap_public_key,
+        keywrap_sig=identity.keywrap_sig,
+    )
+
+    async def _inbound(frame: dict | bytes, keys) -> object:
+        return await gfs_relay_inbound.handle_mailbox_frame(frame, keys=keys)
+
+    svc.attach_inbound(_inbound)
+    return svc
 
 
 def _build_gfs_join_requests(
@@ -5038,6 +5080,24 @@ def create_app(config: Config | None = None) -> web.Application:
             rate_limiter=limiter,
         )
         gfs_relay_inbound.attach_join_requests(gfs_join_requests)
+        # v_88 — a household reached only through a GFS gets an anonymous
+        # mailbox per space there; minted at seat time by the redeem paths,
+        # released with the seat, frames into the relay's inbound leg.
+        space_mailboxes = _build_space_mailboxes(
+            repos=repos,
+            key_manager=key_manager,
+            gfs_connection_service=gfs_connection_service,
+            identity=identity,
+            instance_id=real_instance_id,
+            gfs_relay_inbound=gfs_relay_inbound,
+            gfs_envelope_sender=gfs_envelope_sender,
+        )
+        invite_redeem_coordinator.attach_mailboxes(space_mailboxes)
+        real_space_service.attach_space_mailboxes(space_mailboxes)
+        # Lost / moved mailboxes: SPACE_MAILBOX_UPDATED both ways.
+        space_mailboxes.attach_to(federation_service, repos.federation)
+        await space_mailboxes.start()
+        app[K.space_mailbox_service_key] = space_mailboxes
         real_space_service.attach_gfs_join_requests(gfs_join_requests)
         # An approval whose redeem did not seat its person yet (the host was
         # offline, we restarted): retried now, and on every GFS reconnect.
@@ -5269,6 +5329,9 @@ def create_app(config: Config | None = None) -> web.Application:
                 federation_repo=repos.federation,
                 gfs_connection_repo=repos.gfs_connection,
             ),
+            # v_88 — a link-joined household's per-space mailbox, when it
+            # sent one and our connection to its GFS proved mailboxes.
+            mailbox_targets=space_mailboxes.target_for,
             signaling_send=_signaling_send,
             ice_servers=fed_ice_servers,
             inbound_handler=federation_service.handle_inbound_rtc,
@@ -5463,6 +5526,12 @@ def create_app(config: Config | None = None) -> web.Application:
             # v_84 — a connection came up: retry approvals of "Ask to join"
             # that have not seated their person yet (own task, non-blocking).
             gfs_join_requests.resume_soon()
+            # v_88 — mailbox tickets: a household with none gets a batch now
+            # rather than at its first daily slot. Fail-soft.
+            try:
+                await space_mailboxes.on_connected(gfs_id)
+            except Exception:
+                log.exception("gfs: mailbox ticket refill failed for %s", gfs_id)
             await gfs_connection_service.refresh_connection_metadata(gfs_id)
             # Proof of possession: once this connection's server has proved
             # it holds the pinned key (the persisted ratchet), the bulk
@@ -5630,6 +5699,8 @@ def create_app(config: Config | None = None) -> web.Application:
         gfs_connection_service.attach_on_removed(
             lambda conn: gfs_ws_supervisor.forget(conn.id)
         )
+        # v_88 — and its mailbox-ticket loops stop with it.
+        gfs_connection_service.attach_on_removed(space_mailboxes.forget_connection)
         # Warm the RAM-only GFS capability cache now, not only when each
         # socket connects: until then ``GET /api/gfs/connections`` reads
         # ``envelope_relay: false`` and the pairing reach picker / GFS
@@ -6048,6 +6119,9 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_reconcile_retry.stop()
         if gfs_ws_supervisor is not None:
             await gfs_ws_supervisor.stop()
+        # v_88 — the anonymous mailbox claim sockets and ticket loops.
+        if (space_mailboxes := app.get(K.space_mailbox_service_key)) is not None:
+            await space_mailboxes.stop()
         # Before the HTTP session closes: queued sealed moment keys ride it.
         await moment_public_key_outbound.stop()
         await moment_public_outbound.stop()

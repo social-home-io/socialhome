@@ -1486,6 +1486,37 @@ RSASP1 (its timing does not follow the message) and checks the result with
 RSAVP1 before it leaves (a fault never leaks the key). The RFC 9474 A.3 and
 RFC 9578 A.2 test vectors are mandatory tests (`tests/test_privacy_pass.py`).
 
+### Per-space mailbox entries (v_88)
+
+A household reached only through a GFS hands its counterpart a signed
+**directory entry** for its per-space mailbox inside the sealed redeem /
+ACK ([`protocol/gfs-relay.md`](protocol/gfs-relay.md#per-space-mailboxes-v_88)).
+Two suite tags ride in it, each validated with no fallback
+(`domain/space_mailbox.py`):
+
+- **Entry signature.** `sig_suite: "ed25519"`
+  (`ENTRY_SIG_SUITE_ED25519` in `SUPPORTED_ENTRY_SIG_SUITES`): the
+  household identity key over `"sh-mbx-entry:v1\n"` + canonical JSON
+  (`canonical_json.canonical_bytes`) of every entry field except `sig`.
+  The receiver verifies it under the identity key it already trusts for
+  that household, which must derive to the entry's `instance_id`, and
+  checks the key-wrap binding (`verify_keywrap_binding`) and the space.
+  Phase 2 adds `"ed25519+mldsa65"` beside it.
+- **Mailbox seal.** `kem_suite: "x25519"` (`ENTRY_KEM_SUITE_X25519` in
+  `SUPPORTED_ENTRY_KEM_SUITES`): a frame for the mailbox is the same
+  ephemeral X25519 ECIES seal as the relay (`seal_to_keywrap`; for media
+  the `\0SHR` seal), made to the entry's `kem_pk` instead of the
+  household's key-wrap key. The JSON envelope is padded to the relay size
+  buckets first, so the bytes per envelope do not change.
+
+An unknown suite makes the entry invalid (`InvalidMailboxEntry`, a
+`ValueError`); the pair then keeps the instance-addressed relay. The
+mailbox keys derive from the **mailbox root**, a 32-byte secret stored
+KEK-wrapped in `instance_config` (`gfs_mailbox_root`), so only the
+generation is stored per mailbox. Post-quantum: X25519 and Ed25519 here
+move with the rest of the relay (`x25519+mlkem768`, `ed25519+mldsa65`) as
+sibling suites.
+
 ## Key storage
 
 ### Database
@@ -1511,6 +1542,7 @@ RFC 9578 A.2 test vectors are mandatory tests (`tests/test_privacy_pass.py`).
 | `app_group_sessions` | `seat_key_json` | This household's X25519 seat key at a group table (`priv` KEK-wrapped; `pub` + identity signature in the clear) | `priv`: KEK AES-256-GCM | `socialhome/app_group/seat_key_at_rest\|session_id` |
 | `moment_public_keys` | `key_sealed` | 32-byte public-moment step key at `key_step` of generation `key_gen` (own or delivered, v_62), advanced in place | KEK AES-256-GCM | `moment-public-key\|own\|delivered\|author\|key_gen` |
 | `pending_pairings` | `own_dh_sk` | X25519 ephemeral secret | KEK AES-256-GCM | — |
+| `instance_config` | `gfs_mailbox_root` (key) | 32-byte per-space GFS mailbox root (v_88); every mailbox key derives from it | KEK AES-256-GCM | — |
 | `platform_users` | `password_hash` | `scrypt$N$r$p$salt$hash` | self-contained (params + salt embedded) | — |
 | `api_tokens` | `token_hash` | `sha256(token)` | no | — |
 

@@ -2013,6 +2013,67 @@ async def test_space_instance_identity_pk_is_per_space_and_update_only(env):
     assert await env.repo.get_space_instance_identity_pk("sp-a", "hh-1") == "ab" * 32
 
 
+async def test_space_instance_mailbox_is_per_pair_update_only_and_goes_with_the_seat(
+    env,
+):
+    await env.repo.save(_space("sp-a"))
+    # No row → nothing is created.
+    await env.repo.set_space_instance_mailbox("sp-a", "hh-1", '{"own": null}')
+    assert await env.repo.list_space_instance_mailboxes() == []
+    await env.repo.add_space_instance("sp-a", "hh-1")
+    await env.repo.add_space_instance("sp-a", "hh-2")
+    await env.repo.set_space_instance_mailbox("sp-a", "hh-1", '{"peer": null}')
+    assert await env.repo.list_space_instance_mailboxes() == [
+        ("sp-a", "hh-1", '{"peer": null}')
+    ]
+    # A seat refresh keeps it; the seat's removal drops it.
+    await env.repo.add_space_instance("sp-a", "hh-1")
+    assert len(await env.repo.list_space_instance_mailboxes()) == 1
+    await env.repo.remove_space_instance("sp-a", "hh-1")
+    assert await env.repo.list_space_instance_mailboxes() == []
+    # NULL clears it.
+    await env.repo.set_space_instance_mailbox("sp-a", "hh-2", "{}")
+    await env.repo.set_space_instance_mailbox("sp-a", "hh-2", None)
+    assert await env.repo.list_space_instance_mailboxes() == []
+
+
+async def test_one_space_instance_mailbox_is_read_by_its_key(env):
+    await env.repo.save(_space("sp-a"))
+    assert await env.repo.get_space_instance_mailbox("sp-a", "hh-1") is None
+    await env.repo.add_space_instance("sp-a", "hh-1")
+    await env.repo.add_space_instance("sp-a", "hh-2")
+    await env.repo.set_space_instance_mailbox("sp-a", "hh-1", '{"own": null}')
+    assert await env.repo.get_space_instance_mailbox("sp-a", "hh-1") == '{"own": null}'
+    assert await env.repo.get_space_instance_mailbox("sp-a", "hh-2") is None
+
+
+async def test_unmarked_session_pairs_are_space_session_seats_at_a_version(env):
+    """v_88 sweep: seated ``space_session`` pairs at or above a version that
+    hold no mailbox state yet (seated before v_88, an old invite link, a
+    crash between the seat and its row write)."""
+
+    async def _peer(iid: str, source: str, proto: int) -> None:
+        await env.db.enqueue(
+            "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+            " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+            " local_inbox_id, source, proto_version)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (iid, iid, "00", "k", "k", "", f"wh-{iid}", source, proto),
+        )
+
+    await env.repo.save(_space("sp-a"))
+    await _peer("hh-new", "space_session", 88)
+    await _peer("hh-old", "space_session", 87)
+    await _peer("hh-paired", "manual", 88)
+    await _peer("hh-marked", "space_session", 88)
+    for iid in ("hh-new", "hh-old", "hh-paired", "hh-marked"):
+        await env.repo.add_space_instance("sp-a", iid)
+    await env.repo.set_space_instance_mailbox("sp-a", "hh-marked", "{}")
+    assert await env.repo.list_unmarked_session_pairs(min_proto=88) == [
+        ("sp-a", "hh-new")
+    ]
+
+
 async def test_invited_by_round_trips_and_save_never_touches_it(env):
     await env.repo.save(_space("sp-i"))
     assert await env.repo.get_invited_by("sp-i") is None

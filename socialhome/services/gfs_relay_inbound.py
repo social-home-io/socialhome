@@ -73,7 +73,7 @@ import orjson
 from ..domain.errors import WrongTypeError
 from ..federation.gfs_relay_media import open_relay_media
 from ..federation.gfs_relay_transport import is_relay_envelope_body
-from ..federation.inbound_validator import TRANSPORT_GFS_RELAY
+from ..federation.inbound_validator import TRANSPORT_GFS_MAILBOX, TRANSPORT_GFS_RELAY
 from ..federation.invite_bootstrap import JOIN_REQUEST_KINDS, unseal_envelope_body
 from ..federation.invite_token_redeem import (
     BOOTSTRAP_BODY_INBOUND_LIMIT,
@@ -93,6 +93,7 @@ from .gfs_ws_client import ENVELOPE_MEDIA_FRAME
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
     from ..federation.gfs_join_request import GfsJoinRequestCoordinator
+    from ..federation.gfs_mailbox import MailboxKeys
     from ..federation.invite_token_redeem import SpaceInviteTokenRedeemCoordinator
     from ..rate_limiter import RateLimiter
 
@@ -123,6 +124,16 @@ _PROCESS_WIDE_KEY = "invite-bootstrap:inbound"
 _ENVELOPES_KEY = "invite-bootstrap:envelopes"
 #: Relayed §11 pairing bodies — their own bucket, the bootstrap-body budget.
 _PAIRING_KEY = "invite-bootstrap:pairing"
+#: v_88 — ONE bucket per mailbox (envelopes) and one for its media frames.
+#: A mailbox serves exactly one member pair, so its only legitimate sender
+#: is that one counterpart: every frame on it — junk, a failed open, a
+#: pipeline refusal, a good envelope — is charged to the mailbox's own
+#: bucket, checked before any open. A flood (by whoever learned the id)
+#: shuts only that pair's mailbox, never another's, never the instance
+#: relay's budget.
+_MAILBOX_KEY = "gfs-mailbox"
+_MAILBOX_MEDIA_KEY = "gfs-mailbox-media"
+MAILBOX_INBOUND_LIMIT: int = RELAY_ENVELOPE_INBOUND_LIMIT
 #: v_87 — binary relay media frames, their own bucket.
 _MEDIA_KEY = "gfs-relay:media"
 #: v_87 — media frames that failed to open or failed their checks.
@@ -237,13 +248,92 @@ class GfsRelayInbound:
             return await self._join.handle_body(body, gfs_url=gfs_url)
         return await self._invite.handle_bootstrap_body(body, gfs_url=gfs_url)
 
-    async def _handle_media(self, raw: object) -> dict:
+    async def handle_mailbox_frame(
+        self, frame: dict | bytes, *, keys: MailboxKeys
+    ) -> dict:
+        """Inbound entry point for one frame on one of OUR per-space mailboxes
+        (v_88), handed over by its anonymous claim socket.
+
+        A JSON ``{type: "envelope", sealed}`` frame is opened with the
+        mailbox's own X25519 key (never the key-wrap key) and must be a
+        relayed §24.11 envelope — no invite, pairing or join bodies ride a
+        mailbox. It goes to the unmodified pipeline with ``transport =
+        TRANSPORT_GFS_MAILBOX`` and the mailbox's space, so
+        ``check_mailbox_space`` refuses an envelope of any other space. A
+        binary ``\x00SHR`` frame is a media chunk addressed to the mailbox
+        id, opened with the same key. Same budgets as the instance-addressed
+        relay. Raises :class:`ValueError` on any refusal."""
+        if isinstance(frame, bytes | bytearray):
+            return await self._handle_media(frame, keys=keys)
+        if not isinstance(frame, dict) or frame.get("type") != "envelope":
+            raise ValueError("unexpected frame on a mailbox")
+        # Every frame is charged to this mailbox's bucket BEFORE any open
+        # (see ``MAILBOX_INBOUND_LIMIT``).
+        if self._rate_limiter is not None and not self._rate_limiter.is_allowed(
+            f"{_MAILBOX_KEY}:{keys.mailbox_id}",
+            limit=MAILBOX_INBOUND_LIMIT,
+            window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+        ):
+            raise ValueError("mailbox rate limit exceeded — frame dropped")
+        body = unseal_envelope_body(
+            envelope={"sealed": frame.get("sealed")},
+            keywrap_private_key=keys.kem_private,
+        )
+        if not is_relay_envelope_body(body):
+            raise ValueError("a mailbox carries relayed envelopes only")
+        inner = body.get("envelope")
+        if not isinstance(inner, dict):
+            raise WrongTypeError("relayed federation envelope missing envelope body")
+        from_instance = inner.get("from_instance")
+        if not isinstance(from_instance, str) or not from_instance:
+            raise ValueError("relayed federation envelope missing from_instance")
+        try:
+            return await self._federation.handle_inbound_rtc(
+                from_instance,
+                orjson.dumps(inner),
+                transport=TRANSPORT_GFS_MAILBOX,
+                mailbox_space_id=keys.space_id,
+            )
+        except ValueError as exc:
+            # The routing facts only — never the payload, never the mailbox.
+            log.info(
+                "gfs_mailbox: rejected %r envelope from %s: %s",
+                inner.get("event_type"),
+                from_instance,
+                exc,
+            )
+            raise
+
+    async def _handle_media(
+        self, raw: object, *, keys: MailboxKeys | None = None
+    ) -> dict:
         """Open one binary relay media frame and run it through the §24.11
-        media tail. Raises :class:`ValueError` on any refusal (the WS client
-        logs the reason, never the bytes)."""
+        media tail — addressed to our instance id (key-wrap key) or, with
+        *keys*, to one of our mailboxes (its own key). Raises
+        :class:`ValueError` on any refusal (the WS client logs the reason,
+        never the bytes)."""
         if not isinstance(raw, bytes | bytearray):
             raise TypeError("relayed media frame carries no body")
         limiter = self._rate_limiter
+        if keys is not None:
+            # A mailbox's media: its own bucket, every frame charged (one
+            # member pair per mailbox — see ``MAILBOX_INBOUND_LIMIT``).
+            if limiter is not None and not limiter.is_allowed(
+                f"{_MAILBOX_MEDIA_KEY}:{keys.mailbox_id}",
+                limit=RELAY_MEDIA_INBOUND_LIMIT,
+                window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+            ):
+                raise ValueError("mailbox media rate limit exceeded — frame dropped")
+            media_body = open_relay_media(
+                bytes(raw),
+                own_instance_id=keys.mailbox_id,
+                keywrap_private_key=keys.kem_private,
+            )
+            return await self._federation.handle_inbound_media_relay(
+                media_body,
+                transport=TRANSPORT_GFS_MAILBOX,
+                mailbox_space_id=keys.space_id,
+            )
         if limiter is not None and not limiter.has_room(
             _MEDIA_JUNK_KEY,
             limit=RELAY_MEDIA_JUNK_LIMIT,

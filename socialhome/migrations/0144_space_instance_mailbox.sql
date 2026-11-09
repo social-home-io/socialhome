@@ -1,0 +1,48 @@
+-- 0144 — GFS redesign PR 2 (v_88): per-space GFS mailboxes.
+--
+-- ``space_instances.mailbox TEXT`` (NULL default) — JSON on the row of ONE
+-- (space, household) pair this household reaches only through a GFS (a
+-- ``space_session`` seat): ``{"peer": <the household's signed directory
+-- entry for this space> | null, "own": {"gen", "gfs_id", "gfs"} | null}``.
+-- ``peer`` is where envelopes of this space for that household go (its
+-- anonymous mailbox id, the key frames are sealed to, the GFS it lives on);
+-- ``own`` is the generation of OUR mailbox for that space at that GFS (the
+-- keys are derived from the household's mailbox root — only ``gen`` is
+-- stored). NULL everywhere else: paired / mesh members never get a mailbox.
+--
+-- CLAUDE.md "audit before a migration":
+--
+--   (1) Audited every code path that touches this data. ``space_instances``
+--       is written by ``space_repo.add_space_instance`` (an upsert that sets
+--       only ``last_seen_at`` — the new column survives it),
+--       ``remove_space_instance`` (a DELETE: the pair's mailboxes go with the
+--       seat, which is exactly "drop on leave / removal"), 0078's
+--       version / identity UPDATEs and 0086/0087's sync watermark columns.
+--       The seat paths that create a ``space_session`` pair
+--       (``invite_token_redeem._bootstrap_redeem_locked`` /
+--       ``_seat_local_after_ack_locked``, reached by an invite link and by an
+--       approved GFS "Ask to join") are where the entry arrives — inside the
+--       sealed, identity-signed redeem / ACK. The transport reads it per send.
+--       The backup export does not copy ``space_instances``.
+--   (2) Non-migration alternatives considered and rejected:
+--       * ``remote_instances`` (one row per household) — a column there
+--         holds one mailbox per household, i.e. recreates the cross-space
+--         link the per-space mailbox exists to remove.
+--       * 0143 ``gfs_join_requests`` — holds the APPLICANT side of an "Ask
+--         to join" only, and only until the redeem; an invite link never
+--         touches it.
+--       * Derive-only — we can derive OUR keys from the mailbox root, never
+--         the counterpart's: its mailbox has to be stored.
+--       * Memory — lost on restart, so every envelope after a restart would
+--         go instance-addressed again (and our own claim sockets would not
+--         know which spaces to reopen).
+--       * Roster events — they reach followers, who must never learn a
+--         member household's mailbox.
+--       * ``instance_config`` — a key/value store keyed per space would
+--         need its own cleanup on leave; the ``space_instances`` row's
+--         lifetime IS the mailbox's.
+--   (3) Smallest possible change: one NULL-default column (metadata-only in
+--       SQLite — no table rewrite, no backfill). NULL = no mailbox: the pair
+--       keeps today's instance-addressed relay.
+
+ALTER TABLE space_instances ADD COLUMN mailbox TEXT;

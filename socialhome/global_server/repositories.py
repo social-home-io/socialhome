@@ -3776,6 +3776,8 @@ class AbstractGfsMailboxRepo(Protocol):
 
     async def prune_idle(self, *, older_than: int) -> int: ...
 
+    async def unregister(self, mailbox_id: str) -> bool: ...
+
 
 class SqliteGfsMailboxRepo:
     """SQLite-backed :class:`AbstractGfsMailboxRepo`."""
@@ -3901,6 +3903,27 @@ class SqliteGfsMailboxRepo:
                 (older_than,),
             )
             return int(cur.rowcount or 0)
+
+        return await self._db.transact(_run)
+
+    async def unregister(self, mailbox_id: str) -> bool:
+        """Drop *mailbox_id* with whatever still waits for it in the two
+        queues, in one transaction. Returns whether a mailbox went (the
+        queues are touched only then, so no instance's rows ever are)."""
+
+        def _run(conn) -> bool:
+            cur = conn.execute(
+                "DELETE FROM gfs_mailboxes WHERE mailbox_id=?", (mailbox_id,)
+            )
+            if not cur.rowcount:
+                return False
+            conn.execute(
+                "DELETE FROM gfs_envelope_queue WHERE to_instance=?", (mailbox_id,)
+            )
+            conn.execute(
+                "DELETE FROM gfs_media_queue WHERE to_instance=?", (mailbox_id,)
+            )
+            return True
 
         return await self._db.transact(_run)
 

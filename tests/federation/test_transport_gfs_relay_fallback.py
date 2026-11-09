@@ -9,7 +9,9 @@ byte for byte — those cases live in ``test_federation_transport.py``.
 
 from __future__ import annotations
 
+import ast
 import dataclasses
+import pathlib
 
 import pytest
 
@@ -25,6 +27,7 @@ from socialhome.domain.federation import (
 from socialhome.federation.gfs_relay_transport import (
     RELAY_STATUS_THROTTLED,
     RELAY_STATUS_TOO_LARGE,
+    MailboxTarget,
 )
 from socialhome.federation.transport import (
     TRANSPORT_ERROR_GFS_RELAY_NOT_ENABLED,
@@ -571,3 +574,273 @@ async def test_no_relay_tier_means_no_relay_media():
     assert await t.send_media_relay(
         instance=_paired(), header_dict={}, payload_bytes=b""
     ) == (False, None)
+
+
+# ── v_88: per-space mailboxes for link-joined households ──────────────────
+
+
+class _MailboxRelay(_MediaRelay):
+    def __init__(self, *, mailbox_ready: bool = True) -> None:
+        super().__init__()
+        self.mailbox_ready_answer = mailbox_ready
+        self.mailbox_calls: list[tuple[MailboxTarget, dict]] = []
+        self.mailbox_media: list[tuple[MailboxTarget, bytes]] = []
+
+    async def mailbox_ready(self, target, *, media=False) -> bool:
+        return self.mailbox_ready_answer
+
+    async def send_mailbox(self, *, instance, target, envelope_dict):
+        self.mailbox_calls.append((target, envelope_dict))
+        return True, None
+
+    async def send_media_mailbox(self, *, instance, target, media_body):
+        self.mailbox_media.append((target, media_body))
+        return True, None
+
+
+_TARGET = MailboxTarget(mailbox_id="m" * 32, kem_pk=b"k" * 32, gfs_url=ROUTE_A)
+
+
+def _seat() -> RemoteInstance:
+    return dataclasses.replace(
+        _paired(inbox="", gfs_relay=False),
+        source=InstanceSource.SPACE_SESSION,
+        relay_via=ROUTE_A,
+    )
+
+
+def _mailbox_transport(relay, lookups, *, targets=None):
+    async def _resolve(instance_id, space_id):
+        lookups.append((instance_id, space_id))
+        return (targets or {}).get(space_id)
+
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_Https(),
+        gfs_relay=relay,
+        gfs_routes=_routes(),
+        mailbox_targets=_resolve,
+        signaling_send=_Signaler(),
+    )
+    t.mark_ice_primed()
+    return t
+
+
+async def test_a_seat_with_a_mailbox_for_the_space_is_addressed_to_it():
+    relay, lookups = _MailboxRelay(), []
+    t = _mailbox_transport(relay, lookups, targets={"sp-1": _TARGET})
+    env = {"msg_id": "m", "space_id": "sp-1"}
+    result = await t.send(instance=_seat(), envelope_dict=env)
+    assert result.ok
+    assert relay.mailbox_calls == [(_TARGET, env)]
+    assert relay.calls == []  # never instance-addressed
+    assert lookups == [("peer-1", "sp-1")]
+
+
+async def test_no_entry_or_a_gfs_without_mailboxes_keeps_todays_relay():
+    relay, lookups = _MailboxRelay(), []
+    t = _mailbox_transport(relay, lookups, targets={"sp-1": _TARGET})
+    await t.send(instance=_seat(), envelope_dict={"msg_id": "m", "space_id": "sp-2"})
+    assert relay.mailbox_calls == [] and len(relay.calls) == 1
+    relay2 = _MailboxRelay(mailbox_ready=False)
+    t2 = _mailbox_transport(relay2, [], targets={"sp-1": _TARGET})
+    await t2.send(instance=_seat(), envelope_dict={"msg_id": "m", "space_id": "sp-1"})
+    assert relay2.mailbox_calls == [] and len(relay2.calls) == 1
+
+
+async def test_a_space_less_envelope_asks_for_any_shared_space():
+    relay, lookups = _MailboxRelay(), []
+    t = _mailbox_transport(relay, lookups, targets={None: _TARGET})
+    await t.send(
+        instance=_seat(),
+        envelope_dict={
+            "msg_id": "m",
+            "space_id": None,
+            "event_type": "instance_capabilities_updated",
+        },
+    )
+    assert lookups == [("peer-1", None)]
+    assert len(relay.mailbox_calls) == 1
+
+
+async def test_a_space_less_space_event_never_rides_a_mailbox():
+    """A ``SPACE_*`` envelope without its routing ``space_id`` (a redeem
+    reply, a teardown) goes instance-addressed: a mailbox takes its own
+    space's events only."""
+    relay, lookups = _MailboxRelay(), []
+    t = _mailbox_transport(relay, lookups, targets={None: _TARGET})
+    await t.send(
+        instance=_seat(),
+        envelope_dict={
+            "msg_id": "m",
+            "space_id": None,
+            "event_type": "space_invite_token_redeem_ack",
+        },
+    )
+    assert lookups == [] and relay.mailbox_calls == []
+    assert len(relay.calls) == 1
+
+
+async def test_a_paired_peer_never_asks_for_a_mailbox():
+    relay, lookups = _MailboxRelay(), []
+    t = _mailbox_transport(relay, lookups, targets={"sp-1": _TARGET})
+    await t.send(instance=_paired(), envelope_dict={"msg_id": "m", "space_id": "sp-1"})
+    assert lookups == [] and relay.mailbox_calls == []
+
+
+async def test_relay_media_to_a_seat_goes_to_its_mailbox():
+    relay, lookups = _MailboxRelay(), []
+    t = _mailbox_transport(relay, lookups, targets={"sp-1": _TARGET})
+    ok = await t.send_media_relay(
+        instance=_seat(),
+        header_dict={"msg_id": "m", "space_id": "sp-1"},
+        payload_bytes=b"x",
+    )
+    assert ok == (True, None)
+    [(target, body)] = relay.mailbox_media
+    assert target is _TARGET and body.startswith(b"\x00SHM")
+    assert relay.media == []
+
+
+async def test_a_failing_mailbox_lookup_falls_back_and_never_raises():
+    relay = _MailboxRelay()
+
+    async def _boom(instance_id, space_id):
+        raise RuntimeError("db gone")
+
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_Https(),
+        gfs_relay=relay,
+        mailbox_targets=_boom,
+        signaling_send=_Signaler(),
+    )
+    result = await t.send(
+        instance=_seat(), envelope_dict={"msg_id": "m", "space_id": "sp-1"}
+    )
+    assert result.ok and len(relay.calls) == 1
+
+
+#: Send sites (``send_event`` and the wrappers that end in it) that send a
+#: ``SPACE_*`` event WITHOUT its routing ``space_id`` — or with an explicit
+#: ``space_id=None`` — on purpose (v_88): such an envelope never rides a
+#: mailbox (it goes instance-addressed, and a mailbox refuses it). Mesh
+#: routing and discovery are not space content; the redeem legs, a private
+#: invite's accept and a join request's answer run before the other side
+#: holds the space (a routing ``space_id`` would hit its space gates); the
+#: removal notice and the teardown are for a household that no longer
+#: does. A new space event belongs on its space's mailbox: pass
+#: ``space_id=`` — or add it here with the reason.
+_SPACE_LESS_SPACE_SENDS: dict[str, set[str]] = {
+    "socialhome/federation/invite_token_redeem.py": {
+        "SPACE_INVITE_TOKEN_REDEEM",
+        "SPACE_INVITE_TOKEN_REDEEM_ACK",
+        "SPACE_INVITE_TOKEN_REDEEM_DENY",
+    },
+    "socialhome/federation/private_invite_handler.py": {
+        "SPACE_REMOTE_MEMBER_REMOVED",
+    },
+    "socialhome/federation/route_discovery.py": {
+        "SPACE_FIND_ROUTE",
+        "SPACE_ROUTE_FOUND",
+    },
+    "socialhome/federation/routed_envelope.py": {
+        "SPACE_ROUTED",
+        "SPACE_ROUTE_STALE",
+    },
+    "socialhome/services/peer_directory_service.py": {"SPACE_DIRECTORY_SYNC"},
+    "socialhome/services/report_service.py": {"SPACE_REPORT"},
+    "socialhome/services/space_service.py": {
+        "SPACE_SESSION_CLEANUP",
+        "SPACE_PRIVATE_INVITE_ACCEPT",
+        "SPACE_JOIN_REQUEST_APPROVED",
+        "SPACE_JOIN_REQUEST_DENIED",
+    },
+}
+
+
+#: ``send_event`` and the wrappers that end in it.
+_SEND_CALLS: frozenset[str] = frozenset(
+    {"send_event", "send_event_once", "send_to_instance", "send_with_mesh_fallback"}
+)
+
+
+def test_every_space_event_send_names_its_space_or_is_listed():
+    root = pathlib.Path(__file__).resolve().parents[2]
+    found: dict[str, set[str]] = {}
+    for path in sorted((root / "socialhome").rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else ""
+            if name not in _SEND_CALLS:
+                continue
+            kw = {k.arg: k.value for k in node.keywords}
+            et = kw.get("event_type")
+            if et is None:
+                continue
+            space = kw.get("space_id")
+            explicit_none = isinstance(space, ast.Constant) and space.value is None
+            if space is not None and not explicit_none:
+                continue
+            src = ast.unparse(et)
+            if "FederationEventType.SPACE_" not in src:
+                continue
+            event = src.rsplit(".", 1)[-1].strip("()")
+            rel = str(path.relative_to(root))
+            found.setdefault(rel, set()).add(event)
+    unexpected = {
+        rel: events - _SPACE_LESS_SPACE_SENDS.get(rel, set())
+        for rel, events in found.items()
+        if events - _SPACE_LESS_SPACE_SENDS.get(rel, set())
+    }
+    assert unexpected == {}, (
+        "a SPACE_* send without space_id= — pass the routing space_id so a "
+        f"GFS-only member gets it on that space's mailbox: {unexpected}"
+    )
+
+
+def test_the_guard_catches_a_wrapper_and_an_explicit_none(tmp_path, monkeypatch):
+    """Mutation guard for the guard: a ``send_to_instance`` without
+    ``space_id`` and a ``send_event(..., space_id=None)`` are both caught."""
+    src = (
+        "async def f(o):\n"
+        "    await o.send_to_instance(to_instance_id='x',"
+        " event_type=FederationEventType.SPACE_POST_CREATED, payload={})\n"
+        "    await o.send_event(to_instance_id='x',"
+        " event_type=FederationEventType.SPACE_TASK_CREATED, payload={},"
+        " space_id=None)\n"
+    )
+    found = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = fn.attr if isinstance(fn, ast.Attribute) else ""
+        if name not in _SEND_CALLS:
+            continue
+        kw = {k.arg: k.value for k in node.keywords}
+        space = kw.get("space_id")
+        explicit_none = isinstance(space, ast.Constant) and space.value is None
+        if space is None or explicit_none:
+            found.append(name)
+    assert found == ["send_to_instance", "send_event"]
+
+
+async def test_a_mailbox_only_send_never_falls_back_to_the_named_relay():
+    """v_88 round 9: a mailbox update must never leave instance-addressed
+    (naming both households) right after an anonymous register / claim —
+    no mailbox ready means no send at all."""
+    relay = _MailboxRelay(mailbox_ready=False)
+    t = _mailbox_transport(relay, [], targets={"sp-1": _TARGET})
+    env = {"msg_id": "m", "space_id": "sp-1"}
+    result = await t.send_mailbox_only(instance=_seat(), envelope_dict=env)
+    assert not result.ok
+    assert relay.calls == [] and relay.mailbox_calls == []
+    relay2 = _MailboxRelay()
+    t2 = _mailbox_transport(relay2, [], targets={"sp-1": _TARGET})
+    result = await t2.send_mailbox_only(instance=_seat(), envelope_dict=env)
+    assert result.ok and relay2.mailbox_calls == [(_TARGET, env)]
+    assert relay2.calls == []

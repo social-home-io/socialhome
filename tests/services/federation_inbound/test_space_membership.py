@@ -733,9 +733,11 @@ class _RecordingFederation:
     def __init__(self) -> None:
         self._event_registry = _FakeRegistry()
         self.sent: list[tuple[str, FederationEventType, dict]] = []
+        self.space_ids: list[str | None] = []
 
-    async def send_event(self, *, to_instance_id, event_type, payload):
+    async def send_event(self, *, to_instance_id, event_type, payload, space_id=None):
         self.sent.append((to_instance_id, event_type, payload))
+        self.space_ids.append(space_id)
 
 
 async def test_catch_up_replays_config_when_we_are_ahead(bus, repo):
@@ -777,6 +779,9 @@ async def test_catch_up_replays_config_when_we_are_ahead(bus, repo):
     assert to == "peer-behind"
     assert ev is FederationEventType.SPACE_CONFIG_CHANGED
     assert payload["space_id"] == "sp-ahead"
+    # v_88 — the routing field too, so a GFS-only household gets it on the
+    # mailbox of THIS space (a payload-only space_id is refused there).
+    assert fed.space_ids == ["sp-ahead"]
     assert payload["sequence"] == 7
     assert payload["space_type"] == "public"
     assert payload["join_mode"] == "open"

@@ -116,6 +116,7 @@ from .inbound_validator import (
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_event_types,
+    make_check_mailbox_space,
     make_check_peer_class,
     make_check_relay_opt_in,
     make_check_replay,
@@ -651,6 +652,9 @@ class FederationService:
         """Return the shared step list for both inbox and RTC pipelines."""
         steps = [
             make_parse_json(loads=_loads),
+            # v_88: a frame on one of our per-space mailboxes carries only
+            # that space's envelopes (or space-less ones). No-op elsewhere.
+            make_check_mailbox_space(),
             lookup_step,
             # §D2b peer-class gate: a household seated from an invite link
             # may only speak the space vocabulary. Straight after the
@@ -1971,6 +1975,48 @@ class FederationService:
             instance_id=instance.id,
             ok=200 <= status_code < 300,
             status_code=status_code,
+        )
+
+    async def send_event_unqueued(
+        self,
+        *,
+        to_instance_id: str,
+        event_type: FederationEventType,
+        payload: dict,
+        space_id: str | None,
+        mailbox_only: bool,
+    ) -> DeliveryResult:
+        """Seal one event like :meth:`send_event` and try it ONCE over the
+        transport — never the outbox (whose quick replays would ignore the
+        caller's timing) and no reachability change. *mailbox_only*: the
+        target's per-space mailbox or nothing (v_88 mailbox updates).
+        """
+        instance = await self._federation_repo.get_instance(to_instance_id)
+        if instance is None or self._transport is None:
+            return DeliveryResult(
+                instance_id=to_instance_id, ok=False, error="unavailable"
+            )
+        envelope_dict = self._seal_envelope(
+            instance, event_type=event_type, payload=payload, space_id=space_id
+        )
+        if envelope_dict is None:
+            return DeliveryResult(
+                instance_id=to_instance_id, ok=False, error="key_decrypt_error"
+            )
+        if mailbox_only:
+            result = await self._transport.send_mailbox_only(
+                instance=instance, envelope_dict=envelope_dict
+            )
+        else:
+            result = await self._transport.send(
+                instance=instance, envelope_dict=envelope_dict
+            )
+        return DeliveryResult(
+            instance_id=to_instance_id,
+            ok=result.ok,
+            status_code=result.status_code,
+            error=result.error,
+            via=result.via,
         )
 
     async def send_event_via_gfs(
@@ -3514,6 +3560,7 @@ class FederationService:
         raw_body: bytes,
         *,
         transport: str = "",
+        mailbox_space_id: str | None = None,
     ) -> InboundContext:
         """Run the §24.11 RTC validation pipeline WITHOUT dispatching.
 
@@ -3538,6 +3585,7 @@ class FederationService:
             raw_body=raw_body,
             instance_id=instance_id,
             transport=transport,
+            mailbox_space_id=mailbox_space_id,
         )
         await pipeline.run(ctx)
         return ctx
@@ -3548,6 +3596,7 @@ class FederationService:
         raw_body: bytes,
         *,
         transport: str = "",
+        mailbox_space_id: str | None = None,
     ) -> dict:
         """§24.11 validation pipeline for a WebRTC DataChannel frame.
 
@@ -3564,6 +3613,7 @@ class FederationService:
             instance_id,
             raw_body,
             transport=transport,
+            mailbox_space_id=mailbox_space_id,
         )
 
         if ctx.early_response is not None:
@@ -3652,7 +3702,13 @@ class FederationService:
             ctx, frame.payload, wire_frame_suite=wire_suite
         )
 
-    async def handle_inbound_media_relay(self, media_body: bytes) -> dict:
+    async def handle_inbound_media_relay(
+        self,
+        media_body: bytes,
+        *,
+        transport: str = TRANSPORT_GFS_RELAY,
+        mailbox_space_id: str | None = None,
+    ) -> dict:
         """Validate + decrypt one binary media body that the GFS relay
         delivered (v_87), then dispatch.
 
@@ -3685,7 +3741,8 @@ class FederationService:
         ctx = InboundContext(
             raw_body=frame.header,
             instance_id=claimed,
-            transport=TRANSPORT_GFS_RELAY,
+            transport=transport,
+            mailbox_space_id=mailbox_space_id,
         )
         await pipeline.run(ctx)
         return await self._finish_media_frame(

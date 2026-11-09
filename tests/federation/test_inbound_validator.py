@@ -25,6 +25,8 @@ from socialhome.federation.federation_service import FederationService
 from socialhome.federation.inbound_validator import (
     RELAY_QUEUE_TTL_SECONDS,
     RELAY_TIMESTAMP_SKEW_SECONDS,
+    RELAY_TRANSPORTS,
+    TRANSPORT_GFS_MAILBOX,
     TRANSPORT_GFS_RELAY,
     InboundContext,
     InboundPipeline,
@@ -32,6 +34,7 @@ from socialhome.federation.inbound_validator import (
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_event_types,
+    make_check_mailbox_space,
     make_check_peer_class,
     make_check_relay_opt_in,
     make_check_replay,
@@ -773,6 +776,93 @@ async def test_relay_gate_runs_after_the_lookup_and_before_any_crypto():
     names = [getattr(s, "__name__", "") for s in steps]
     assert names.index("_noop_step") < names.index("check_relay_opt_in")
     assert names.index("check_relay_opt_in") < names.index("verify_signature")
+
+
+# ─── v_88: per-space mailbox gates ───────────────────────────────────────
+
+
+def _mailbox_ctx(space_id, *, mailbox_space="sp-1", event_type=None):
+    env = _minimal_envelope()
+    if event_type is not None:
+        env["event_type"] = event_type
+    env["space_id"] = space_id
+    return InboundContext(
+        envelope=env,
+        transport=TRANSPORT_GFS_MAILBOX,
+        mailbox_space_id=mailbox_space,
+    )
+
+
+async def test_a_space_less_space_event_is_refused_on_a_mailbox():
+    """A ``SPACE_*`` event must name its space to ride a mailbox (senders
+    send a space-less one instance-addressed), so a mailbox frame can never
+    carry space traffic of a space it was not given for."""
+    step = make_check_mailbox_space()
+    for space_id in (None, ""):
+        with pytest.raises(ValueError, match="space"):
+            await step(_mailbox_ctx(space_id))
+    with pytest.raises(ValueError):
+        await step(_mailbox_ctx(None, event_type="space_invite_token_redeem_ack"))
+
+
+async def test_mailbox_frame_of_its_own_space_or_a_space_less_non_space_event_passes():
+    step = make_check_mailbox_space()
+    await step(_mailbox_ctx("sp-1"))
+    await step(_mailbox_ctx(None, event_type="instance_capabilities_updated"))
+    await step(_mailbox_ctx("", event_type="instance_capabilities_updated"))
+
+
+async def test_mailbox_frame_of_another_space_is_refused_without_naming_it(caplog):
+    step = make_check_mailbox_space()
+    with caplog.at_level("DEBUG"), pytest.raises(ValueError, match="space"):
+        await step(_mailbox_ctx("sp-other"))
+    assert "sp-other" not in caplog.text and "sp-1" not in caplog.text
+
+
+async def test_mailbox_frame_with_no_recorded_space_fails_closed():
+    step = make_check_mailbox_space()
+    with pytest.raises(ValueError):
+        await step(_mailbox_ctx("sp-1", mailbox_space=None))
+
+
+async def test_mailbox_space_gate_ignores_every_other_transport():
+    step = make_check_mailbox_space()
+    env = _minimal_envelope()
+    env["space_id"] = "sp-other"
+    for transport in ("", TRANSPORT_GFS_RELAY):
+        await step(
+            InboundContext(envelope=env, transport=transport, mailbox_space_id="x")
+        )
+
+
+async def test_mailbox_transport_gets_the_relay_gates_and_window():
+    """A mailbox is the relay: a paired peer we never opted in with is
+    refused on it too, and its frames get the relay's (queued) window."""
+    assert TRANSPORT_GFS_MAILBOX in RELAY_TRANSPORTS
+    step = make_check_relay_opt_in()
+    with pytest.raises(ValueError):
+        await step(
+            InboundContext(
+                envelope=_minimal_envelope(),
+                instance=_RelayInstance(InstanceSource.MANUAL, gfs_relay=False),
+                transport=TRANSPORT_GFS_MAILBOX,
+            )
+        )
+    old = (datetime.now(UTC) - timedelta(hours=6)).isoformat()
+    env = {**_minimal_envelope(), "timestamp": old}
+    await make_check_timestamp()(
+        InboundContext(envelope=env, transport=TRANSPORT_GFS_MAILBOX)
+    )
+
+
+async def test_mailbox_space_gate_runs_right_after_the_parse():
+    steps = FederationService._common_pipeline_steps(
+        _StubPipelineOwner(),  # type: ignore[arg-type]
+        lookup_step=_noop_step,
+    )
+    names = [getattr(s, "__name__", "") for s in steps]
+    assert names.index("parse_json") < names.index("check_mailbox_space")
+    assert names.index("check_mailbox_space") < names.index("_noop_step")
 
 
 async def test_unpairing_gate_sits_between_signature_and_replay():

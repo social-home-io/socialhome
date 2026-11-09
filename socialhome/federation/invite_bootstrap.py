@@ -258,6 +258,22 @@ class RelayEnvelopeSender(Protocol):
         """v_87 — POST one binary relay media body (``\\x00SHR``) raw."""
         ...
 
+    async def mailbox_connection(self, gfs_url: str) -> Any:
+        """v_88 — the connection at *gfs_url* that delivers to per-space
+        mailboxes (proved ``envelope_mailbox``), or ``None``."""
+        ...
+
+    async def send_to_mailbox(
+        self,
+        *,
+        mailbox_id: str,
+        gfs_url: str,
+        sealed: dict | None = None,
+        media_body: bytes | None = None,
+    ) -> bool:
+        """v_88 — POST one frame for a mailbox over the anonymous session."""
+        ...
+
 
 @dataclass(slots=True, frozen=True)
 class InviteBootstrapHint:

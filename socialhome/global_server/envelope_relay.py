@@ -109,6 +109,7 @@ import orjson
 from ..domain.gfs_mailbox import (
     MAILBOX_REGISTER_ROUTE,
     MAILBOX_TICKETS_ROUTE,
+    MAILBOX_UNREGISTER_ROUTE,
     MAILBOX_WS_ROUTE,
 )
 from ..moment_public_seal import (
@@ -1207,6 +1208,9 @@ class GfsEnvelopeRelay:
 #: share of a cluster-wide budget). A household registers one per space it
 #: joins over this server, plus rotations — a handful a day.
 MAILBOX_REGISTER_MAX_PER_MINUTE: int = 30
+#: Mailbox unregistrations one client address may post a minute (one per
+#: space the household leaves — rarer than registrations).
+MAILBOX_UNREGISTER_MAX_PER_MINUTE: int = MAILBOX_REGISTER_MAX_PER_MINUTE
 #: Mailbox claim sockets one client address may open a minute (one per
 #: mailbox at startup and on every reconnect).
 MAILBOX_CLAIM_MAX_PER_MINUTE: int = 120
@@ -1218,13 +1222,19 @@ MAILBOX_TICKETS_MAX_PER_MINUTE: int = 30
 def build_mailbox_rate_limits(
     resolver: ClientIpResolver, *, nodes: Callable[[], int] | None = None
 ) -> list:
-    """Per-address limiters for the two anonymous mailbox routes. The
+    """Per-address limiters for the anonymous mailbox routes. The
     address is held in memory by the limiter only — never stored."""
     return [
         build_window_limiter(
             resolver,
             MAILBOX_REGISTER_MAX_PER_MINUTE,
             lambda path: path == MAILBOX_REGISTER_ROUTE,
+            nodes=nodes,
+        ),
+        build_window_limiter(
+            resolver,
+            MAILBOX_UNREGISTER_MAX_PER_MINUTE,
+            lambda path: path == MAILBOX_UNREGISTER_ROUTE,
             nodes=nodes,
         ),
         build_window_limiter(

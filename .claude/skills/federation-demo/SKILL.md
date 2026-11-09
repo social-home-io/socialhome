@@ -1803,6 +1803,17 @@ pending elevation.
 
 ### ``gfs-invite-link-content`` — the relay carries ordinary space traffic
 
+**Per-space mailboxes (v_88).** e reaches the space only through the GFS,
+so the step first asserts that both sides of the seat hold a per-space
+mailbox: a's ``space_instances.mailbox`` row for e carries e's signed entry
+and a's own generation, e's row for a the mirror; both mailbox ids are in
+the GFS's ``gfs_mailboxes`` with ``last_claim_at`` set (registered with a
+ticket, claimed on the anonymous socket); neither is an instance id. a's
+post then reaches e **byte-identical** (a's and e's ``space_posts.content``
+match) and the GFS log shows deliveries to ``<mailbox>`` only — no line in
+that window names e's instance id, either mailbox id, or (on a relay line)
+the space. e's reply rides a's mailbox the same way.
+
 **Pictures through the GFS media cache (v_80).** The step ends with a
 ~0.5 MB photo post (``_picture_via_gfs_media_cache``): the reader holds
 the file byte-identical, the GFS's own ``gfs_space_media`` holds the blob
@@ -1890,7 +1901,8 @@ link-joined space: e (v_87, its GFS keeps no cache) is no longer a "relay
 reader", so a pushes ``SPACE_MEDIA_BLOB`` in 512 KiB chunks, each one sealed
 ``\x00SHR`` frame on ``POST /gfs/envelope``. Asserts: e holds the file
 byte-identical under the name its copy of the post shows; the GFS logged
-binary media frames for e (``media delivered to live socket`` or a drain);
+binary media frames for e's **mailbox** (v_88: ``media delivered to live
+socket <mailbox>`` or a drain) and none addressed to e's instance id;
 a refused no relay frame for e. The GFS is restarted with its default config
 afterwards, whatever happened. ``gfs-cluster`` covers the cross-node half
 (step 3d': a frame posted on node 0 arrives byte-identical on node 1's

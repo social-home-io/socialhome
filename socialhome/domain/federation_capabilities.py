@@ -1410,7 +1410,24 @@ from __future__ import annotations
 #:   (96 KiB), which fit the JSON relay's envelope cap. Not space-scoped, no
 #:   sync-stream change. Labelled "Members reached through a GFS get pictures
 #:   in full-size pieces".
-OURS: int = 87
+#: * **v_88** (2026-11-08) — **per-space GFS mailboxes** (GFS redesign PR 2).
+#:   A household that reaches a space only through a GFS (a ``space_session``
+#:   seat, from an invite link or an approved "Ask to join") mints one
+#:   anonymous mailbox per (space, generation) at that GFS, registers it with
+#:   an anonymous ticket and claims it on its own anonymous socket. Its
+#:   signed directory entry (``{space, instance_id, mailbox_id, kem_pk,
+#:   kem_suite, sign_pk, gfs, gen, proto_version, keywrap_pk, keywrap_sig,
+#:   sig_suite, sig}``) rides inside the sealed redeem; the host stores it on
+#:   the pair's ``space_instances`` row (migration 0144) and answers with its
+#:   own in the sealed ACK. Envelopes (and v_87 media frames) of that space
+#:   then go to the mailbox id, the whole envelope sealed to the entry's
+#:   ``kem_pk`` — the GFS sees a mailbox id, never an instance id. The
+#:   receiver takes a frame on mailbox M only for M's space (or space-less).
+#:   **Fallback**: no entry, an entry below v_88, or a GFS whose signed
+#:   ``/gfs/info`` lacks ``envelope_mailbox`` → today's instance-addressed
+#:   relay. No sync-stream record change. Labelled "Members reached through a
+#:   GFS get an anonymous mailbox per space".
+OURS: int = 88
 
 
 class FederationCapability:
@@ -2060,6 +2077,11 @@ class FederationCapability:
     #: GFS relay (``\x00SHR``): a link-joined peer gets 512 KiB media
     #: chunks through a GFS proving ``envelope_media``.
     MIN_FOR_RELAY_MEDIA = 87
+    #: v_88 — a household at or above it opens envelopes addressed to its
+    #: per-space GFS mailbox and reads the directory entry in a sealed
+    #: redeem / ACK (GFS redesign PR 2). The gate is the entry itself: only
+    #: a v_88 household mints one, and an older one never gets one.
+    MIN_FOR_SPACE_MAILBOX = 88
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2394,6 +2416,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_RELAY_MEDIA,
         "Members reached through a GFS get pictures in full-size pieces",
     ),
+    (
+        FederationCapability.MIN_FOR_SPACE_MAILBOX,
+        "Members reached through a GFS get an anonymous mailbox per space",
+    ),
 ]
 
 
@@ -2492,6 +2518,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_CONTENT_FILE_HASHES: "content_file_hashes",
     FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS: "trusted_file_fills",
     FederationCapability.MIN_FOR_RELAY_MEDIA: "relay_media",
+    FederationCapability.MIN_FOR_SPACE_MAILBOX: "space_mailboxes",
 }
 
 

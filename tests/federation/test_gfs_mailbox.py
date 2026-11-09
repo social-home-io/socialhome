@@ -17,15 +17,19 @@ from aiohttp.test_utils import TestServer
 from socialhome import privacy_pass as pp
 from socialhome.crypto import (
     INSTANCE_ID_RE,
+    b64url_decode,
     b64url_encode,
     derive_instance_id,
     ed25519_public_key,
+    verify_ed25519,
     x25519_exchange,
 )
 from socialhome.domain.gfs_mailbox import (
+    MAILBOX_CLOSE_AUTH_FAILED,
     MAILBOX_TICKET_CHALLENGE,
     TicketKeyPin,
     derive_mailbox_id,
+    unregister_signed_bytes,
 )
 from socialhome.domain.relay_media_frame import (
     VALID_SEALED_LENGTHS,
@@ -40,11 +44,13 @@ from socialhome.federation.gfs_mailbox import (
     TicketIssuer,
     TicketKeyGuard,
     build_register_body,
+    build_unregister_body,
     derive_mailbox_keys,
     fetch_tickets,
     new_mailbox_root,
     read_ticket_issuer,
     register_mailbox,
+    unregister_mailbox,
 )
 from socialhome.global_server.app_keys import (
     gfs_db_key,
@@ -55,6 +61,7 @@ from socialhome.global_server.app_keys import (
 )
 from socialhome.global_server.config import EnvelopeMailboxConfig, GfsConfig
 from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server.routes.ws import WS_CLOSE_AUTH_FAILED
 from socialhome.global_server.server import create_gfs_app
 
 ROOT = bytes(range(32))
@@ -77,12 +84,32 @@ def test_keys_are_deterministic_per_space_and_gen():
         derive_mailbox_keys(ROOT, GFS_ID, "space-2", 0),
         derive_mailbox_keys(ROOT, GFS_ID, "space-1", 1),
         derive_mailbox_keys(b"\x09" * 32, GFS_ID, "space-1", 0),
+        # The same space at another GFS: unrelated, so two GFSs can't match
+        # ids to link a household (v_88 privacy invariant).
+        derive_mailbox_keys(ROOT, "gfs-node-b", "space-1", 0),
     ]
     for other in others:
         assert other.mailbox_id != a.mailbox_id
         assert other.kem_public != a.kem_public
         assert other.sign_public != a.sign_public
     assert a.kem_private != a.sign_seed
+
+
+def test_keys_are_per_member_pair():
+    """Owner decision (#1333 round 4): one mailbox per (space, peer, gen) —
+    a host's mailboxes for two members of one space are unrelated, and the
+    peer is part of the keys, not of the space the mailbox serves."""
+    a = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0, peer="a" * 32)
+    b = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0, peer="b" * 32)
+    plain = derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0)
+    assert len({a.mailbox_id, b.mailbox_id, plain.mailbox_id}) == 3
+    assert a.kem_public != b.kem_public and a.sign_public != b.sign_public
+    assert a.space_id == b.space_id == "space-1"
+    assert a == derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0, peer="a" * 32)
+    other_gfs = derive_mailbox_keys(ROOT, "gfs-node-b", "space-1", 0, peer="a" * 32)
+    assert other_gfs.mailbox_id != a.mailbox_id
+    with pytest.raises(ValueError):
+        derive_mailbox_keys(ROOT, GFS_ID, "space-1", 0, peer="x|y")
 
 
 def test_a_mailbox_root_is_a_fresh_32_byte_secret():
@@ -257,9 +284,12 @@ async def test_register_claim_and_receive_queued_and_live_frames(gfs):
 async def test_claim_of_an_unregistered_mailbox_is_refused(gfs):
     _server, session, url, _tickets = gfs
     keys = derive_mailbox_keys(ROOT, GFS_ID, "never-registered", 0)
-    with pytest.raises(MailboxClaimError, match="4401"):
+    with pytest.raises(MailboxClaimError, match="4401") as info:
         async with MailboxClaim(session, url, keys, GFS_ID):
             pass
+    # v_88 recovery reads this: the GFS does not know the mailbox (any more).
+    assert info.value.mailbox_unknown
+    assert info.value.close_code == WS_CLOSE_AUTH_FAILED == MAILBOX_CLOSE_AUTH_FAILED
 
 
 async def test_a_claim_signed_for_another_gfs_id_is_refused(gfs):
@@ -903,3 +933,99 @@ async def test_a_ticket_under_a_retired_key_is_dropped_not_put_back(gfs):
     assert len(tickets) == 4  # only the dead one went
     assert await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
     assert len(tickets) == 3
+
+
+# ── Unregister (redesign PR 2) ───────────────────────────────────────────
+
+
+def test_unregister_body_signs_under_the_mailbox_key():
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "s", 0)
+    body = build_unregister_body(keys, GFS_ID, now=1_700_000_000, nonce="n" * 22)
+    assert set(body) == {
+        "sig_suite",
+        "mailbox_id",
+        "gfs_instance_id",
+        "ts",
+        "nonce",
+        "sig",
+    }
+    assert body["sig_suite"] == "ed25519"
+    assert body["mailbox_id"] == keys.mailbox_id
+    assert (body["gfs_instance_id"], body["ts"], body["nonce"]) == (
+        GFS_ID,
+        1_700_000_000,
+        "n" * 22,
+    )
+    signed = unregister_signed_bytes(GFS_ID, keys.mailbox_id, 1_700_000_000, "n" * 22)
+    assert verify_ed25519(keys.sign_public, signed, b64url_decode(body["sig"]))
+    # A fresh nonce each time by default.
+    assert (
+        build_unregister_body(keys, GFS_ID)["nonce"]
+        != build_unregister_body(keys, GFS_ID)["nonce"]
+    )
+
+
+async def test_unregister_mailbox_drops_it_at_the_gfs(gfs):
+    server, session, url, tickets = gfs
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "leaving", 0)
+    await register_mailbox(session, url, keys, GFS_ID, tickets=tickets)
+    assert await server.app[gfs_mailbox_repo_key].get(keys.mailbox_id) is not None
+    assert await unregister_mailbox(session, url, keys, GFS_ID) is True
+    assert await server.app[gfs_mailbox_repo_key].get(keys.mailbox_id) is None
+
+
+async def test_unregister_mailbox_is_false_on_a_gfs_without_the_route(tmp_dir):
+    """An older GFS (or one with mailboxes off) answers 404: False."""
+    cfg = GfsConfig(
+        host="127.0.0.1",
+        port=0,
+        base_url="http://gfs.test",
+        data_dir=str(tmp_dir),
+        instance_id=GFS_ID,
+        cluster_enabled=False,
+        cluster_node_id=GFS_ID,
+        cluster_peers=(),
+        envelope_mailbox=EnvelopeMailboxConfig(enabled=False),
+    )
+    server = TestServer(create_gfs_app(cfg))
+    await server.start_server()
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = str(server.make_url("")).rstrip("/")
+            keys = derive_mailbox_keys(ROOT, GFS_ID, "s", 0)
+            assert await unregister_mailbox(session, url, keys, GFS_ID) is False
+    finally:
+        await server.close()
+
+
+class _DeadSession:
+    """Can't connect at all."""
+
+    @contextlib.asynccontextmanager
+    async def post(self, url, *, json, timeout):
+        raise aiohttp.ClientConnectorError(
+            ConnectionKey("gfs.test", 443, True, True, None, None, None),
+            OSError(111, "refused"),
+        )
+        yield  # pragma: no cover
+
+
+class _SlowSession:
+    @contextlib.asynccontextmanager
+    async def post(self, url, *, json, timeout):
+        raise TimeoutError
+        yield  # pragma: no cover
+
+
+@pytest.mark.parametrize("session", [_DeadSession(), _SlowSession()])
+async def test_unregister_mailbox_is_false_on_a_network_fault(session):
+    keys = derive_mailbox_keys(ROOT, GFS_ID, "s", 0)
+    assert (
+        await unregister_mailbox(
+            session,  # type: ignore[arg-type]
+            "https://gfs.test",
+            keys,
+            GFS_ID,
+        )
+        is False
+    )

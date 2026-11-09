@@ -590,6 +590,9 @@ class SpaceMembershipInboundHandlers:
                 to_instance_id=to_instance_id,
                 event_type=FederationEventType.SPACE_CONFIG_CHANGED,
                 payload=payload,
+                # The routing field too (v_88): a household reached only
+                # through a GFS gets it on THIS space's mailbox.
+                space_id=space.id,
             )
         except Exception as exc:  # pragma: no cover
             log.warning("SPACE_CONFIG_CATCH_UP push failed: %s", exc, exc_info=True)

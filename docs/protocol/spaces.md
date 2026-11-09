@@ -265,7 +265,9 @@ sequenceDiagram
 
 `SPACE_KEY_EXCHANGE`, `SPACE_KEY_EXCHANGE_ACK`,
 `SPACE_KEY_EXCHANGE_REKEY`, `SPACE_ADMIN_KEY_SHARE`,
-`SPACE_AUTHORITY_ROTATED` (v_44), `SPACE_SESSION_CLEANUP`.
+`SPACE_AUTHORITY_ROTATED` (v_44), `SPACE_SESSION_CLEANUP`,
+`SPACE_MAILBOX_UPDATED` (v_88 — a GFS-only pair's per-space mailbox moved
+or was lost; see [gfs-relay](./gfs-relay.md#per-space-mailboxes-v_88)).
 
 `SPACE_AUTHORITY_ROTATED` is the owner's rotation of the space authority
 key after an admin household is revoked — see

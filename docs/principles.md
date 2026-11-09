@@ -317,6 +317,16 @@ exactly:**
   is real and is the sharpest edge of this concession.
 - **It can correlate with the household's own WebSocket session** — same
   server, same IP — exactly as the `/gfs/publish` residual above notes.
+- **Per-space mailboxes narrow the recipient (v_88).** When both sides
+  are at v_88 and the GFS proves `envelope_mailbox`, `to_instance` is the
+  recipient's anonymous mailbox for that space, not its instance id, sent
+  over the cookie-less session. Per mailbox frame the GFS then learns the
+  mailbox id, time, size bucket and sender IP; per claim socket its IP and
+  online time — never an instance id, space id, event type or sender id.
+  The IP / timing correlation above still applies. The teardown
+  `SPACE_SESSION_CLEANUP` (one frame) and the joiner→host direction when
+  the host sent no mailbox stay instance-addressed. See
+  [gfs-relay.md](protocol/gfs-relay.md#per-space-mailboxes-v_88).
 - **It cannot forge.** The seal is confidentiality only; authorization is
   the Ed25519 signature under the pair's key, checked by the unmodified
   §24.11 pipeline at the receiver. A relay that substitutes, replays or
@@ -1137,7 +1147,12 @@ per epoch. So a GFS can't single a household out through its identified
 session. A GFS that recognises the household's **address** still can: it
 can show that address its own key in both views from first contact and
 keep it (the stated IP limit). A cross-check outside the GFS — a key id
-compared among paired households — is planned.
+compared among paired households — was considered and **not built**
+(v_88, keep it simple): it would add a federation field and a version bump
+for a residual only a GFS that recognises the household's IP can use. Key
+consistency stays the anonymous cross-read plus the one-key-per-epoch pin,
+which is now persisted per GFS, so a restart cannot reset it; tickets refill
+on a GFS connect when the cache is empty.
 
 ## No third-party fetches from user content
 

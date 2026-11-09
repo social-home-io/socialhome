@@ -34,6 +34,7 @@ from ...domain.gfs_channel import (
 from ...domain.gfs_mailbox import (
     MAILBOX_REGISTER_ROUTE,
     MAILBOX_TICKETS_ROUTE,
+    MAILBOX_UNREGISTER_ROUTE,
     MAILBOX_WS_ROUTE,
 )
 from ...gfs_proof import PROOF_ROUTE
@@ -95,7 +96,12 @@ from .highlights import (
     HighlightUnpublishView,
 )
 from .invites import SpaceInviteTokenView, SpaceInviteView
-from .mailbox import MailboxRegisterView, MailboxTicketsView, MailboxWebSocketView
+from .mailbox import (
+    MailboxRegisterView,
+    MailboxTicketsView,
+    MailboxUnregisterView,
+    MailboxWebSocketView,
+)
 from .member_publish import (
     MemberPublishAnonView,
     MemberPublishView,
@@ -212,6 +218,9 @@ def register_routes(
     # key with proof of possession, claim its frames on a socket of its own.
     app.router.add_view(MAILBOX_REGISTER_ROUTE, MailboxRegisterView)
     app.router.add_view(MAILBOX_WS_ROUTE, MailboxWebSocketView)
+    # Drop a mailbox when the household leaves its space (redesign PR 2):
+    # signed by the mailbox key, the same answer whatever happened.
+    app.router.add_view(MAILBOX_UNREGISTER_ROUTE, MailboxUnregisterView)
     # A registered household's daily batch of anonymous registration
     # tickets (Privacy Pass): signed by the household, blind-signed here.
     app.router.add_view(MAILBOX_TICKETS_ROUTE, MailboxTicketsView)

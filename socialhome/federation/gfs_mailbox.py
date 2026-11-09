@@ -32,6 +32,11 @@ generation) there. This module holds what the household needs to own one:
   cluster node answers to its siblings' and its former ids too). It tries
   without a ticket first and shows one only when the GFS answers
   ``ticket_required`` (a NEW mailbox), so re-registering never shows one.
+* :func:`unregister_mailbox` — the anonymous ``POST /gfs/mailbox/unregister``
+  signed by the mailbox key when the household leaves the space. The GFS
+  answers 200 whatever happened (no oracle); ``False`` means the request did
+  not get that answer (an older GFS without the route, a network fault) and
+  the mailbox simply ages out in the idle sweep.
 * :class:`MailboxClaim` — the anonymous claim socket (``/gfs/mailbox/ws``,
   one mailbox per socket): answers the challenge, then yields the queued
   and live frames — ``dict`` for a JSON envelope frame, ``bytes`` for a
@@ -68,10 +73,12 @@ from ..domain.gfs_mailbox import (
     FRAME_MAILBOX_CHALLENGE,
     FRAME_MAILBOX_CLAIM,
     FRAME_MAILBOX_CLAIMED,
+    MAILBOX_CLOSE_AUTH_FAILED,
     MAILBOX_REGISTER_ROUTE,
     MAILBOX_SIG_SUITE_ED25519,
     MAILBOX_TICKET_CHALLENGE,
     MAILBOX_TICKETS_ROUTE,
+    MAILBOX_UNREGISTER_ROUTE,
     MAILBOX_WS_ROUTE,
     MAX_TICKETS_PER_REQUEST,
     TICKETS_ACTION,
@@ -80,6 +87,7 @@ from ..domain.gfs_mailbox import (
     derive_mailbox_id,
     is_mailbox_nonce,
     register_signed_bytes,
+    unregister_signed_bytes,
 )
 from ..domain.subscriber_accepts import ACCEPTS_ENVELOPE_MEDIA
 
@@ -173,7 +181,20 @@ class MailboxTicketError(Exception):
 
 
 class MailboxClaimError(Exception):
-    """The claim socket was refused or broke before the claim completed."""
+    """The claim socket was refused or broke before the claim completed.
+    ``close_code`` is the GFS's WebSocket close code when it refused the
+    claim (:data:`MAILBOX_CLOSE_AUTH_FAILED`: it does not know the mailbox,
+    or not under that key), else ``None``."""
+
+    def __init__(self, message: str, *, close_code: int | None = None) -> None:
+        super().__init__(message)
+        self.close_code = close_code
+
+    @property
+    def mailbox_unknown(self) -> bool:
+        """The GFS refused the claim as unknown / wrong key — the mailbox is
+        gone there (idle sweep, data loss) and must be registered again."""
+        return self.close_code == MAILBOX_CLOSE_AUTH_FAILED
 
 
 @dataclass(slots=True, frozen=True)
@@ -204,9 +225,14 @@ def new_mailbox_root() -> bytes:
 
 
 def derive_mailbox_keys(
-    mailbox_root: bytes, gfs_instance_id: str, space_id: str, gen: int
+    mailbox_root: bytes,
+    gfs_instance_id: str,
+    space_id: str,
+    gen: int,
+    *,
+    peer: str | None = None,
 ) -> MailboxKeys:
-    """The mailbox keys of (*space_id*, *gen*) at the GFS
+    """The mailbox keys of (*space_id*, *gen*[, *peer*]) at the GFS
     *gfs_instance_id* under the household's dedicated *mailbox_root*
     secret (:func:`new_mailbox_root`). The GFS id is in the derivation, so
     two GFSs serving the same (global) space get unrelated mailboxes — they
@@ -221,6 +247,8 @@ def derive_mailbox_keys(
         raise ValueError("invalid space id")
     if isinstance(gen, bool) or not isinstance(gen, int) or gen < 0:
         raise ValueError("gen must be a non-negative integer")
+    if peer is not None and (not peer or "|" in peer):
+        raise ValueError("invalid peer instance id")
     scope = (
         b"|"
         + gfs_instance_id.encode()
@@ -229,6 +257,11 @@ def derive_mailbox_keys(
         + b"|"
         + str(gen).encode()
     )
+    if peer is not None:
+        # One mailbox per member PAIR (#1333): the counterpart is part of
+        # the keys, so a household's mailboxes for two members of one space
+        # are as unrelated as two spaces'.
+        scope += b"|peer:" + peer.encode()
     kem_private = _hkdf(mailbox_root, _KEM_INFO + scope)
     sign_seed = _hkdf(mailbox_root, _SIGN_INFO + scope)
     kem_public = (
@@ -389,6 +422,12 @@ class TicketKeyGuard:
     @property
     def pin(self) -> TicketKeyPin | None:
         return self._pin
+
+    @property
+    def has_view(self) -> bool:
+        """Whether an anonymous view is cached (:meth:`confirm_issuer` needs
+        one)."""
+        return self._anon is not None
 
     def _refuse(self, why: str, error: str = "ticket_key_inconsistent"):
         log.warning("gfs.mailbox.tickets: issuer key not consistent (%s)", why)
@@ -625,9 +664,17 @@ class MailboxTicketCache:
         self._task = None
 
     async def _slot(self) -> None:
+        await self.refill_if_quiet()
+
+    async def refill_if_quiet(self) -> bool:
+        """:meth:`refill`, unless a ticket was taken within the quiet window
+        (an identified fetch right after an anonymous register would tie
+        them) — e.g. on a (re)connect, so a fresh household is not without
+        tickets until the first daily slot. Returns whether it refilled."""
         if time.monotonic() - self._last_take < self._quiet:
-            return  # right after a register: wait for another slot
+            return False  # right after a register: wait for another slot
         await self.refill()
+        return True
 
     def take(self) -> bytes:
         """One unspent ticket (it leaves the cache: a ticket is never
@@ -793,6 +840,51 @@ async def register_mailbox(
     return keys.mailbox_id
 
 
+def build_unregister_body(
+    keys: MailboxKeys,
+    gfs_instance_id: str,
+    *,
+    now: int | None = None,
+    nonce: str | None = None,
+) -> dict:
+    """The ``POST /gfs/mailbox/unregister`` body dropping *keys*' mailbox at
+    the GFS whose public instance id is *gfs_instance_id*."""
+    ts = int(time.time()) if now is None else now
+    nonce = nonce if nonce is not None else b64url_encode(secrets.token_bytes(16))
+    signed = unregister_signed_bytes(gfs_instance_id, keys.mailbox_id, ts, nonce)
+    return {
+        "sig_suite": MAILBOX_SIG_SUITE_ED25519,
+        "mailbox_id": keys.mailbox_id,
+        "gfs_instance_id": gfs_instance_id,
+        "ts": ts,
+        "nonce": nonce,
+        "sig": b64url_encode(sign_ed25519(keys.sign_seed, signed)),
+    }
+
+
+async def unregister_mailbox(
+    session: aiohttp.ClientSession,
+    gfs_url: str,
+    keys: MailboxKeys,
+    gfs_instance_id: str,
+) -> bool:
+    """Drop *keys*' mailbox at *gfs_url*. ``True`` on the GFS's 200;
+    ``False`` on any other status (an older GFS answers 404) or a network
+    fault — never raises for those (the idle sweep drops it eventually)."""
+    url = gfs_url.rstrip("/") + MAILBOX_UNREGISTER_ROUTE
+    try:
+        status, _body = await _post_register(
+            session, url, build_unregister_body(keys, gfs_instance_id)
+        )
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        log.warning("gfs.mailbox: unregister did not reach the GFS: %r", exc)
+        return False
+    if status != 200:
+        log.warning("gfs.mailbox: unregister answered HTTP %d", status)
+        return False
+    return True
+
+
 def build_claim(
     keys: MailboxKeys,
     gfs_instance_id: str,
@@ -821,7 +913,15 @@ class MailboxClaim:
     ``bytes`` media frames until the socket closes. Reconnects are the
     caller's job (PR 2)."""
 
-    __slots__ = ("_accepts", "_gfs_instance_id", "_gfs_url", "_keys", "_session", "_ws")
+    __slots__ = (
+        "_accepts",
+        "_gfs_instance_id",
+        "_gfs_url",
+        "_heartbeat",
+        "_keys",
+        "_session",
+        "_ws",
+    )
 
     def __init__(
         self,
@@ -831,8 +931,12 @@ class MailboxClaim:
         gfs_instance_id: str,
         *,
         accepts: tuple[str, ...] = (ACCEPTS_ENVELOPE_MEDIA,),
+        heartbeat: float = MAILBOX_CLIENT_HEARTBEAT_S,
     ) -> None:
         self._session = session
+        #: Ping period — a caller with many sockets gives each its own, so
+        #: sockets opened together do not ping in step.
+        self._heartbeat = heartbeat
         self._gfs_url = gfs_url.rstrip("/")
         self._keys = keys
         self._gfs_instance_id = gfs_instance_id
@@ -842,7 +946,7 @@ class MailboxClaim:
     async def __aenter__(self) -> Self:
         ws = await self._session.ws_connect(
             self._gfs_url + MAILBOX_WS_ROUTE,
-            heartbeat=MAILBOX_CLIENT_HEARTBEAT_S,
+            heartbeat=self._heartbeat,
             max_msg_size=MAILBOX_CLIENT_MAX_MSG_BYTES,
         )
         self._ws = ws
@@ -896,7 +1000,8 @@ class MailboxClaim:
             raise MailboxClaimError("claim timed out") from exc
         if msg.type != aiohttp.WSMsgType.TEXT:
             raise MailboxClaimError(
-                f"claim refused (close {ws.close_code}: {msg.extra or ''})"
+                f"claim refused (close {ws.close_code}: {msg.extra or ''})",
+                close_code=ws.close_code,
             )
         try:
             body = orjson.loads(msg.data)
