@@ -691,6 +691,15 @@ async def test_sender_allowed_needs_the_space_the_roster_and_a_card():
     # …the host's does (a second space joined over the existing seat).
     w.spaces.put_card(SPACE_2, _card(_host, gfs=GFS))
     assert await w.dir.sender_allowed(_host["id"], SPACE)
+    # …and on the HOST, a member household's card from another space does
+    # (its first card for this space arrives over that very gate).
+    hw = World()
+    m = _hh()
+    hw.member(m)
+    hw.spaces.rows[SPACE_2] = {}
+    hw.spaces.put_card(SPACE_2, _card(m, gfs=GFS))
+    assert await hw.dir.sender_allowed(m["id"], SPACE)
+    assert not await hw.dir.sender_allowed(_hh()["id"], SPACE)
     # A card held but not a member household of this space: refused.
     w.spaces.put_card(SPACE_2, _card(stranger, gfs=GFS))
     assert not await w.dir.sender_allowed(stranger["id"], SPACE)

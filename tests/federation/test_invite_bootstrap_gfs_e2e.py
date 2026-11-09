@@ -2075,6 +2075,18 @@ async def test_one_mailbox_serves_every_space_of_the_household(mailbox_household
         [first.id, second.id]
     )
     assert {to for to, _ in gfs.mailbox} == {_mailbox_of(a, gfs)}
+    # The joiner's "seated" card for the second space crossed the host's
+    # mailbox gate (it held a's card from the first space only) …
+    assert (await _rows(b))[(second.id, a.instance_id)]["card"]["instance_id"] == (
+        a.instance_id
+    )
+    # … and the member's writes in the second space reach the host.
+    b.received.clear()
+    await a.federation.broadcast_to_space_members(
+        second.id, FederationEventType.SPACE_POST_CREATED, _post_payload("a-in-2")
+    )
+    await gfs.drain()
+    assert [e.payload["content"] for e in b.received] == ["a-in-2"]
 
 
 async def test_a_frame_from_a_sender_without_a_card_is_refused(mailbox_households, gfs):

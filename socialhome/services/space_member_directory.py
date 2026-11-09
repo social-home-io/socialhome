@@ -740,14 +740,16 @@ class SpaceMemberDirectory:
             return False
         if await self.card_of(space_id, sender) is not None:
             return True
-        # The space's host only may use a card of another space (a second
-        # space joined over the existing seat carries none): the host is the
-        # roster's authority. A member needs its card for THIS space, so a
-        # removal (its card cleared) takes effect at once.
-        return (
-            await self.host_of(space_id) == sender
-            and await self._any_card(sender) is not None
-        )
+        # A card of another space counts only where the roster is ours to
+        # trust: the sender is the space's host (a second space joined over
+        # the existing seat carries no card), or WE host the space (its
+        # member household's first card for it is on its way in). A member
+        # needs the sender's card for THIS space, so a removal (its card
+        # cleared by the host's delta) takes effect at once.
+        host = await self.host_of(space_id)
+        if sender != host and host != self._instance_id:
+            return False
+        return await self._any_card(sender) is not None
 
 
 __all__ = [
