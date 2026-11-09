@@ -82,6 +82,10 @@ EARLY_HELLO_MAX: int = 1000
 EARLY_HELLO_TTL_S: float = 600.0
 #: A household's "seated" card re-sends its snapshot at most this often.
 HELLO_RESNAPSHOT_S: float = 600.0
+#: Most household ids one snapshot's ``members`` part names: ~35 B each in
+#: the JSON, so ~100 KiB — one GFS relay envelope after encryption and
+#: sealing. The scale limit of the lost-removal repair.
+MEMBERS_MAX: int = 2900
 #: Most households one directory delta may remove (and a receiver takes).
 REMOVED_MAX: int = 500
 
@@ -548,7 +552,7 @@ class SpaceMemberDirectory:
         if (
             len(cards_raw) > SNAPSHOT_MAX
             or len(removed) > REMOVED_MAX
-            or len(members) > SNAPSHOT_MAX
+            or len(members) > MEMBERS_MAX
         ):
             log.info("directory: ignoring an oversized directory")
             return
@@ -822,17 +826,26 @@ class SpaceMemberDirectory:
         seq: int,
         everything: bool,
     ) -> None:
-        """The whole directory to *to*: every listed household's id
-        (``members``), and the cards it needs (all, or only those with a
-        mailbox), mailbox cards first, at most :data:`SNAPSHOT_MAX`, in
-        parts that fit the GFS relay — all under one ``dir_seq``."""
+        """The whole directory to *to*, all under one ``dir_seq``: first the
+        id of every listed household (``members``, ids only, in its own part
+        — at most :data:`MEMBERS_MAX`, one relay envelope), then the cards it
+        needs (all, or only those with a mailbox), mailbox cards first, at
+        most :data:`SNAPSHOT_MAX`, in parts that fit the GFS relay."""
         members = sorted(i for i in listed if i != to)
-        # Past the cap the snapshot cannot name every household: it is sent
-        # without ``members``, and the receiver then drops nobody (deltas
-        # carry the removals).
-        extra: dict[str, Any] = (
-            {"members": members} if len(members) <= SNAPSHOT_MAX else {}
-        )
+        if len(members) <= MEMBERS_MAX:
+            if not await self._send(
+                space_id, to, [], snapshot=True, dir_seq=seq, members=members
+            ):
+                return
+        else:
+            # The scale limit: past it the snapshot cannot name every
+            # household and the receiver drops nobody (deltas carry the
+            # removals, and a lost one is not repaired).
+            log.warning(
+                "directory: %d households — past the %d a snapshot can name",
+                len(members),
+                MEMBERS_MAX,
+            )
         picked = [
             c
             for i, c in sorted(listed.items())
@@ -849,11 +862,9 @@ class SpaceMemberDirectory:
         parts = [
             picked[i : i + SNAPSHOT_PART_MAX]
             for i in range(0, len(picked), SNAPSHOT_PART_MAX)
-        ] or [[]]
+        ]
         for part in parts:
-            if not await self._send(
-                space_id, to, part, snapshot=True, dir_seq=seq, **extra
-            ):
+            if not await self._send(space_id, to, part, snapshot=True, dir_seq=seq):
                 return
 
     async def on_own_change(self) -> None:

@@ -822,9 +822,12 @@ host-signed).
   the directory (left, removed, or no longer a writer). Delivery is not
   tracked per household.
 - **Snapshots** (at most `SNAPSHOT_MAX` = 500 cards, mailbox cards first, in
-  parts of at most `SNAPSHOT_PART_MAX` = 150, ≈ 105 KiB each) name every
-  listed household in `members` (a directory of more than 500 households
-  is sent without `members`, and then drops nobody). The member replaces its directory
+  parts of at most `SNAPSHOT_PART_MAX` = 150, ≈ 105 KiB each) start with
+  their own `members` part: the id of every listed household (ids only,
+  ~35 B each, at most `MEMBERS_MAX` = 2 900 ≈ 100 KiB, one relay envelope).
+  **Scale limit:** a directory of more than 2 900 households is sent
+  without `members` and then drops nobody — a lost removal is repaired
+  only up to that size. The member replaces its directory
   wholesale: a carded household not in `members` loses its card, row and
   seat; one listed without a card (mailbox cards only) keeps its row. A
   household with a mailbox gets every writer's card; one without, only the

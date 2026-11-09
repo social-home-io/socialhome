@@ -237,8 +237,28 @@ class FakeFederation:
     async def space_member_supports(self, instance_id, *, min_version):
         return instance_id not in self.unsupported
 
-    def to(self, instance_id) -> list[dict]:
+    def raw_to(self, instance_id) -> list[dict]:
+        """Every directory frame sent to *instance_id*, as sent."""
         return [d for d in self.directories if d["to"] == instance_id]
+
+    def to(self, instance_id) -> list[dict]:
+        """The frames to *instance_id*, the parts of one snapshot (its
+        ``members`` part and its card parts, one ``dir_seq``) merged."""
+        out: list[dict] = []
+        for d in self.raw_to(instance_id):
+            prev = out[-1] if out else None
+            if (
+                prev is not None
+                and d["payload"].get("snapshot")
+                and prev["payload"].get("snapshot")
+                and prev["payload"]["dir_seq"] == d["payload"]["dir_seq"]
+            ):
+                merged = dict(prev["payload"])
+                merged["cards"] = merged["cards"] + d["payload"]["cards"]
+                out[-1] = {**prev, "payload": merged}
+            else:
+                out.append(d)
+        return out
 
 
 def _ids(directory: dict) -> set[str]:
@@ -936,11 +956,17 @@ async def test_a_big_snapshot_goes_in_parts_that_fit_the_relay(monkeypatch):
     w.seat_all()
     w.fed.directories.clear()
     await w.card_from(newcomer, _card(newcomer, gfs=GFS))
-    parts = [p for p in w.fed.to(newcomer["id"]) if p["payload"].get("snapshot")]
+    parts = [
+        p
+        for p in w.fed.raw_to(newcomer["id"])
+        if p["payload"].get("snapshot") and p["payload"]["cards"]
+    ]
     assert [len(p["payload"]["cards"]) for p in parts] == [2, 2, 1]
-    # Every part names every member and shares one version.
-    assert len({p["payload"]["dir_seq"] for p in parts}) == 1
-    assert all(len(p["payload"]["members"]) == 5 for p in parts)
+    # One version; the members (ids only) ride their own first part.
+    every = w.fed.raw_to(newcomer["id"])
+    assert len({p["payload"]["dir_seq"] for p in every}) == 1
+    assert len(every[0]["payload"]["members"]) == 5
+    assert all("members" not in p["payload"] for p in parts)
 
 
 async def test_a_card_that_lost_its_mailbox_reaches_mailbox_only_recipients():
@@ -1171,10 +1197,10 @@ async def test_no_directory_frame_goes_to_a_household_not_yet_seated():
 
 
 async def test_an_oversized_directory_snapshot_drops_nobody(monkeypatch):
-    """Past ``SNAPSHOT_MAX`` households the snapshot cannot name them all:
-    it is sent without ``members`` and the receiver drops nobody (later
-    deltas carry the removals)."""
-    monkeypatch.setattr(smd, "SNAPSHOT_MAX", 2)
+    """Past ``MEMBERS_MAX`` households (the scale limit) the snapshot cannot
+    name them all: it is sent without ``members`` and the receiver drops
+    nobody (later deltas carry the removals)."""
+    monkeypatch.setattr(smd, "MEMBERS_MAX", 2)
     host = World()
     to, *others = (_hh() for _ in range(4))
     host.member(to, *others)
@@ -1184,7 +1210,7 @@ async def test_an_oversized_directory_snapshot_drops_nobody(monkeypatch):
     host.seat_all()
     await host.dir.reconcile(SPACE, snapshot_to={to["id"]})
     (snap,) = [d for d in host.fed.to(to["id"]) if d["payload"].get("snapshot")]
-    assert "members" not in snap["payload"]
+    assert all("members" not in d["payload"] for d in host.fed.raw_to(to["id"]))
 
     m, _h = _member_world()
     kept = _hh()
@@ -1223,3 +1249,34 @@ async def test_an_early_seated_card_is_forgotten_after_a_while():
     k = _hh()
     await w.card_from(k, _card(k, gfs=GFS))  # any later one prunes
     assert (SPACE, j["id"]) not in w.dir._early_hello
+
+
+async def test_a_lost_removal_is_repaired_in_a_space_past_500_households():
+    """Review round 4: past ``SNAPSHOT_MAX`` cards the snapshot still names
+    every household — ids only, in its own first part (capped by bytes to
+    fit one relay envelope) — so a lost removal is repaired there too."""
+    host = World()
+    member, gone = _hh(), _hh()
+    others = [_hh() for _ in range(520)]
+    host.member(member, gone, *others)
+    for h in (member, gone, *others):
+        host.spaces.put_card(SPACE, _card(h, gfs=GFS))
+    host.writers.writers[SPACE] = {h["id"] for h in (member, gone, *others)}
+    host.seat_all()
+    await host.dir.reconcile(SPACE)
+    host.writers.writers[SPACE].discard(gone["id"])
+    await host.dir.reconcile(SPACE)  # the removal delta — lost
+    host.fed.directories.clear()
+    await host.dir.on_sync_begin(_begin(member, host.me["id"], 1))
+    parts = [d["payload"] for d in host.fed.raw_to(member["id"])]
+    assert parts[0]["snapshot"] is True and parts[0]["cards"] == []
+    assert len(parts[0]["members"]) == 521  # 520 others + our own
+    assert gone["id"] not in parts[0]["members"]
+    assert all("members" not in p for p in parts[1:])
+    assert len({p["dir_seq"] for p in parts}) == 1
+
+    m = World(host=host.me)
+    m.member(gone)
+    m.spaces.put_card(SPACE, _card(gone, gfs=GFS))
+    await m.directory(parts[0])
+    assert gone["id"] not in m.spaces.rows[SPACE]
