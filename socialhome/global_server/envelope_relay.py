@@ -300,7 +300,7 @@ def queued_relay_push(row: dict) -> dict:
 
 
 #: Per-recipient caps for queued RELAY items (member-published space items,
-#: ``POST /gfs/member-publish``). Counted separately from the envelope caps
+#: ``POST /gfs/member-publish-anon``). Counted separately from the envelope caps
 #: above so a busy public space can never crowd out a household's sealed
 #: invite / link-federation envelopes. Past either cap the recipient's OWN
 #: oldest relay item is evicted (``enqueue_relay``) — only authenticated

@@ -434,7 +434,6 @@ class GfsConnectionService:
         "_listing_seen",
         "_listing_sessions",
         "_member_publish_strict",
-        "_member_publish_trusted",
         "_member_servers",
         "_moment_counts",
         "_moment_delete_log",
@@ -608,15 +607,11 @@ class GfsConnectionService:
         # (``time.monotonic()``): the next suite there for
         # :data:`PAYLOAD_SUITE_REFUSAL_TTL_S`. Bounded, oldest out.
         self._suite_refused_at: dict[tuple[str, str, str], float] = {}
-        # Same again for ``member_publish_trusted`` (v_49): whether the GFS
-        # carries the identified ``POST /gfs/member-publish`` and the
-        # ``/gfs/spaces/{id}/epoch`` notice. Nothing identified is ever sent
-        # to a GFS that has not proved it under a valid signature.
-        self._member_publish_trusted: dict[str, bool] = {}
-        # Same again for ``member_publish_strict`` (v_50): whether the GFS
-        # carries the anonymous ``POST /gfs/member-publish-anon`` and takes
-        # ``publish_mode`` / ``writer_key_cert`` on the epoch notice (an older
-        # server would refuse an owner notice carrying them).
+        # Same again for ``member_publish_strict`` (v_50; the only member
+        # publish since v_90): whether the GFS carries the anonymous
+        # ``POST /gfs/member-publish-anon`` and the ``/gfs/spaces/{id}/epoch``
+        # notice with its ``writer_key_cert`` (an older server would refuse
+        # an owner notice carrying it).
         self._member_publish_strict: dict[str, bool] = {}
         self._private_channels: dict[str, bool] = {}
         # Same discipline for ``addressee_key``: whether the server takes the
@@ -840,7 +835,6 @@ class GfsConnectionService:
             self._space_item_followers,
             self._payload_zlib1,
             self._payload_zlib1_dict1,
-            self._member_publish_trusted,
             self._member_publish_strict,
             self._private_channels,
             self._addressee_key,
@@ -2251,27 +2245,13 @@ class GfsConnectionService:
             self._invite_links,
         )
 
-    async def member_publish_trusted_supported(self, conn: GfsConnection) -> bool:
-        """Whether *conn*'s GFS proved ``member_publish_trusted`` on /gfs/info.
-
-        Gates every identified member publish and every epoch notice
-        (:mod:`socialhome.services.gfs_member_publish_service`): a household
-        sends its identity to a connection server only after that server's
-        signed capability block proved it agreed to the trusted-mode
-        contract."""
-        return await self._signed_capability_supported(
-            conn,
-            "member_publish_trusted",
-            self._member_publish_trusted,
-        )
-
     async def member_publish_strict_supported(self, conn: GfsConnection) -> bool:
         """Whether *conn*'s GFS proved ``member_publish_strict`` on /gfs/info.
 
-        Gates every anonymous member publish and the v_50 fields of the
-        epoch notice (:mod:`socialhome.services.gfs_member_publish_service`).
-        Without it a strict space's items take the host path — never the
-        identified one."""
+        Gates every member publish (always anonymous), every member
+        auto-subscribe and every epoch notice
+        (:mod:`socialhome.services.gfs_member_publish_service`). Without it a
+        space's items take the host path. (The label keeps its v_50 name.)"""
         return await self._signed_capability_supported(
             conn,
             "member_publish_strict",
@@ -3608,18 +3588,14 @@ class GfsConnectionService:
         blob_id: str,
         blob: bytes,
         auth_header: str,
-        identified: bool = False,
     ) -> int | None:
         """``PUT /gfs/media/{blob_id}`` — the one scope-free path; the scope
         (a listed space, or a private space's opaque channel) rides only
         inside the signed claim — one sealed blob,
         authorized by *auth_header* (:mod:`socialhome.domain.gfs_space_media`).
         The request names no household: it rides the cookie-less session
-        (:meth:`anon_session`). An ``identified`` upload (a writer cert names
-        our household key) never goes to a server we are not registered on.
-        Returns the HTTP status, or ``None`` when nothing could be sent."""
-        if identified and not conn.registered:
-            return None
+        (:meth:`anon_session`). Returns the HTTP status, or ``None`` when
+        nothing could be sent."""
         url = f"{conn.inbox_url.rstrip('/')}/gfs/media/{blob_id}"
         headers = {
             SPACE_MEDIA_AUTH_HEADER: auth_header,

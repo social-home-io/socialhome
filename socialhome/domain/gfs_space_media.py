@@ -26,13 +26,9 @@ GFS already verifies for that scope — no new key, roster or registration:
     over the claim under
     :data:`~socialhome.authority_sig.AUTHORITY_EVENT_SPACE_MEDIA_PUT`,
     verified against the space's TOFU-pinned key. Names nobody.
-  * :data:`AUTH_WRITER_CERT` (trusted mode, v_49) — ``writer_cert`` (v1
-    fields only) + ``epoch``; ``sig`` by the household key the cert names
-    over :meth:`SpaceMediaClaim.writer_signing_bytes`. The cert names the
-    writer's household key — the trusted-mode trade-off
-    ``/gfs/member-publish`` already makes.
-  * :data:`AUTH_WRITER_KEY` (strict mode, v_50) — ``epoch``; ``sig`` by the
-    space's per-epoch writer GROUP key the GFS pinned. Names nobody.
+  * :data:`AUTH_WRITER_KEY` — ``epoch``; ``sig`` by the space's per-epoch
+    writer GROUP key the GFS pinned, over
+    :meth:`SpaceMediaClaim.writer_signing_bytes`. Names nobody.
 
 * scope ``channel`` (the checks ``/gfs/channels/*`` already make):
 
@@ -40,10 +36,10 @@ GFS already verifies for that scope — no new key, roster or registration:
     registration (what registration, epoch notices and unregister are
     signed with) over :data:`CHANNEL_MEDIA_PUT_PREFIX` + the claim. Names
     nobody.
-  * :data:`AUTH_CHANNEL_CERT` (trusted channel) — ``channel_cert`` +
-    ``epoch``; ``sig`` by the household key the cert names (as above).
-  * :data:`AUTH_WRITER_KEY` (strict channel) — the channel writer key pinned
-    for ``epoch``.
+  * :data:`AUTH_WRITER_KEY` — the channel writer key pinned for ``epoch``.
+
+No kind names a household (the identified writer-cert kinds went with the
+identified member publish, v_90).
 
 **The address is bound to the scope** (security review v2, N1): a blob's
 id is :func:`space_media_address` — ``sha256("sm1|" + scope_kind + "|" +
@@ -71,19 +67,14 @@ import orjson
 from ..authority_sig import AUTHORITY_EVENT_SPACE_MEDIA_PUT, authority_signing_bytes
 from ..canonical_json import canonical_bytes
 from ..moment_public_media import MAX_BLOB_BYTES, is_blob_id
-from .gfs_channel import (
-    CHANNEL_CERT_KEYS,
-    ChannelCert,
-    InvalidChannelWire,
-    valid_channel_id,
-)
-from .writer_cert import MAX_WRITER_CERT_EPOCH, WriterCert
+from .gfs_channel import InvalidChannelWire, valid_channel_id
+from .writer_cert import MAX_WRITER_CERT_EPOCH
 
 #: The header carrying the upload authorization.
 SPACE_MEDIA_AUTH_HEADER: str = "X-SH-Space-Media-Auth"
 
-#: Longest accepted header value (a cert is ~0.4 KB; base64url of the whole
-#: object stays well under 1.5 KB).
+#: Longest accepted header value (base64url of the whole object stays well
+#: under 1 KB).
 SPACE_MEDIA_AUTH_MAX_CHARS: int = 4096
 
 #: Key of the cache's entry in the signed ``/gfs/info`` capability block:
@@ -98,23 +89,14 @@ SCOPE_CHANNEL: str = "channel"
 MEDIA_SCOPES: frozenset[str] = frozenset({SCOPE_SPACE, SCOPE_CHANNEL})
 
 AUTH_AUTHORITY: str = "authority"
-AUTH_WRITER_CERT: str = "writer_cert"
 AUTH_WRITER_KEY: str = "writer_key"
 AUTH_CHANNEL: str = "channel"
-AUTH_CHANNEL_CERT: str = "channel_cert"
 
 #: Which kinds each scope takes.
 AUTH_KINDS_BY_SCOPE: dict[str, frozenset[str]] = {
-    SCOPE_SPACE: frozenset({AUTH_AUTHORITY, AUTH_WRITER_CERT, AUTH_WRITER_KEY}),
-    SCOPE_CHANNEL: frozenset({AUTH_CHANNEL, AUTH_CHANNEL_CERT, AUTH_WRITER_KEY}),
+    SCOPE_SPACE: frozenset({AUTH_AUTHORITY, AUTH_WRITER_KEY}),
+    SCOPE_CHANNEL: frozenset({AUTH_CHANNEL, AUTH_WRITER_KEY}),
 }
-
-#: Suite of a cert holder's own signature (its household identity key).
-#: Receivers refuse any other value, never a default.
-SPACE_MEDIA_SIG_SUITE_ED25519: str = "ed25519"
-SUPPORTED_SPACE_MEDIA_SIG_SUITES: frozenset[str] = frozenset(
-    {SPACE_MEDIA_SIG_SUITE_ED25519}
-)
 
 #: The scope-bound address construction, version-tagged so it can evolve:
 #: ``sha256(b"sm1|" + scope_kind + b"|" + scope_id + b"|" + ciphertext)``,
@@ -123,7 +105,7 @@ SUPPORTED_SPACE_MEDIA_SIG_SUITES: frozenset[str] = frozenset(
 ADDR_SUITE_SM1: str = "sm1"
 SUPPORTED_ADDR_SUITES: frozenset[str] = frozenset({ADDR_SUITE_SM1})
 
-#: Domain separation of the writer kinds' signed bytes (the scope is inside).
+#: Domain separation of the writer key's signed bytes (the scope is inside).
 SPACE_MEDIA_WRITER_PREFIX: bytes = b"space-media-put:v1:"
 
 #: Domain separation of what a channel key signs for the cache (beside the
@@ -138,18 +120,6 @@ _MAX_SIG_CHARS: int = 512
 _MAX_SUITE_CHARS: int = 64
 _MAX_UNIX: int = 2**53
 
-#: The v1 writer cert fields — the only ones that travel to a GFS.
-_CERT_KEYS: frozenset[str] = frozenset(
-    {
-        "cert_suite",
-        "space_id",
-        "epoch",
-        "instance_pk",
-        "scope",
-        "issued_at",
-        "cert_sig",
-    }
-)
 _CLAIM_KEYS: frozenset[str] = frozenset(
     {"scope", "scope_id", "blob_id", "addr_suite", "size", "expires_at", "ts"}
 )
@@ -157,18 +127,12 @@ _SIGNED: frozenset[str] = _CLAIM_KEYS | {"auth", "sig", "sig_suite"}
 _KEYS_BY_KIND: dict[str, frozenset[str]] = {
     AUTH_AUTHORITY: _SIGNED,
     AUTH_CHANNEL: _SIGNED,
-    AUTH_WRITER_CERT: _SIGNED | {"epoch", "writer_cert"},
-    AUTH_CHANNEL_CERT: _SIGNED | {"epoch", "channel_cert"},
     AUTH_WRITER_KEY: _SIGNED | {"epoch"},
 }
 
 
 class InvalidSpaceMediaAuth(ValueError):
     """A malformed upload authorization header."""
-
-
-class UnsupportedSpaceMediaSigSuite(ValueError):
-    """A cert holder's signature names a suite this build lacks."""
 
 
 class UnsupportedSpaceMediaAddrSuite(ValueError):
@@ -194,12 +158,6 @@ def space_media_address(
     h.update(f"{suite}|{scope_kind}|{scope_id}|".encode())
     h.update(data)
     return h.hexdigest()
-
-
-def require_space_media_sig_suite(suite: object) -> str:
-    if not isinstance(suite, str) or suite not in SUPPORTED_SPACE_MEDIA_SIG_SUITES:
-        raise UnsupportedSpaceMediaSigSuite(f"unsupported suite {suite!r}")
-    return suite
 
 
 def media_delete_payload(scope: str, scope_id: str, blob_id: str, ts: int) -> dict:
@@ -264,9 +222,8 @@ class SpaceMediaClaim:
         return CHANNEL_MEDIA_PUT_PREFIX + canonical_bytes(self.signing_body())
 
     def writer_signing_bytes(self, *, kind: str, epoch: int) -> bytes:
-        """The bytes a writer signs (household key for the cert kinds,
-        writer group key for :data:`AUTH_WRITER_KEY`); the kind and epoch
-        are bound in, the scope is in the claim."""
+        """The bytes the writer group key signs for :data:`AUTH_WRITER_KEY`;
+        the kind and epoch are bound in, the scope is in the claim."""
         return SPACE_MEDIA_WRITER_PREFIX + canonical_bytes(
             {**self.signing_body(), "auth": kind, "epoch": epoch}
         )
@@ -281,8 +238,6 @@ class SpaceMediaUploadAuth:
     sig: str
     sig_suite: str
     epoch: int | None = None
-    writer_cert: WriterCert | None = None
-    channel_cert: ChannelCert | None = None
 
     def to_wire(self) -> dict:
         wire: dict = {
@@ -293,10 +248,6 @@ class SpaceMediaUploadAuth:
         }
         if self.epoch is not None:
             wire["epoch"] = self.epoch
-        if self.writer_cert is not None:
-            wire["writer_cert"] = self.writer_cert.v1().to_wire()
-        if self.channel_cert is not None:
-            wire["channel_cert"] = self.channel_cert.to_wire()
         return wire
 
     def to_header(self) -> str:
@@ -346,10 +297,6 @@ class SpaceMediaUploadAuth:
             sig=_short_str(obj.get("sig"), "sig", _MAX_SIG_CHARS),
             sig_suite=_short_str(obj.get("sig_suite"), "sig_suite", _MAX_SUITE_CHARS),
             epoch=epoch,
-            writer_cert=_cert(obj["writer_cert"]) if "writer_cert" in obj else None,
-            channel_cert=(
-                _channel_cert(obj["channel_cert"]) if "channel_cert" in obj else None
-            ),
         )
 
 
@@ -381,21 +328,3 @@ def _blob_id(value: object) -> str:
     if not is_blob_id(value):
         raise InvalidSpaceMediaAuth("bad blob_id")
     return str(value)
-
-
-def _cert(raw: object) -> WriterCert:
-    if not isinstance(raw, dict) or set(raw) != _CERT_KEYS:
-        raise InvalidSpaceMediaAuth("bad writer_cert")
-    try:
-        return WriterCert.from_wire(raw)
-    except ValueError as exc:
-        raise InvalidSpaceMediaAuth("bad writer_cert") from exc
-
-
-def _channel_cert(raw: object) -> ChannelCert:
-    if not isinstance(raw, dict) or set(raw) != CHANNEL_CERT_KEYS:
-        raise InvalidSpaceMediaAuth("bad channel_cert")
-    try:
-        return ChannelCert.from_wire(raw)
-    except ValueError as exc:
-        raise InvalidSpaceMediaAuth("bad channel_cert") from exc

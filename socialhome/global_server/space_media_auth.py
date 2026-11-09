@@ -11,12 +11,7 @@ shape):
   by, verified against the space's TOFU-pinned key
   (:meth:`.federation.GfsFederationService.verify_space_authority`), under
   its own event type so a relay payload can never authorize an upload;
-* **trusted-mode writer cert** (v_49) — the cert ``/gfs/member-publish``
-  checks (:meth:`.member_publish.GfsMemberPublishService.verify_writer_cert`:
-  pinned authority key, epoch open, space not strict), held by whoever
-  signs the claim with the household key the cert names;
-* **strict-mode writer key** (v_50) — the writer group key
-  ``/gfs/member-publish-anon`` checks
+* **writer key** — the writer group key ``/gfs/member-publish-anon`` checks
   (:meth:`~.member_publish.GfsMemberPublishService.verify_writer_key_sig`).
 
 The space must be listed here, not moderator-banned, with a pinned key.
@@ -26,10 +21,7 @@ knows only the random channel id and the keys pinned for it):
 
 * **channel key** — the key registration, epoch notices and unregister are
   signed with (:meth:`.channels.GfsChannelService.verify_channel_key`);
-* **channel cert** — the cert a trusted channel publish carries
-  (:meth:`~.channels.GfsChannelService.verify_cert_holder`), held by whoever
-  signs the claim with the household key the cert names;
-* **channel writer key** — the strict channel's per-epoch writer key
+* **channel writer key** — the channel's per-epoch writer key
   (:meth:`~.channels.GfsChannelService.verify_writer_key`).
 
 The claim's ``ts`` must be within :data:`SPACE_MEDIA_TS_SKEW_S` of this
@@ -59,22 +51,18 @@ from ..authority_sig import (
     AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
     AUTHORITY_EVENT_SPACE_MEDIA_PUT,
 )
-from ..crypto import b64url_decode, counting_ed25519_verifies, verify_ed25519
+from ..crypto import counting_ed25519_verifies, verify_ed25519
 from ..domain.gfs_space_media import (
     AUTH_AUTHORITY,
     AUTH_CHANNEL,
-    AUTH_CHANNEL_CERT,
     AUTH_KINDS_BY_SCOPE,
-    AUTH_WRITER_CERT,
     AUTH_WRITER_KEY,
     CHANNEL_MEDIA_DELETE_PREFIX,
     CHANNEL_MEDIA_PUT_PREFIX,
     SCOPE_CHANNEL,
     SCOPE_SPACE,
     SpaceMediaUploadAuth,
-    UnsupportedSpaceMediaSigSuite,
     media_delete_payload,
-    require_space_media_sig_suite,
 )
 from .federation import (
     TIMING_UNIFORM_DUMMY_KEY_HEX,
@@ -98,12 +86,10 @@ SPACE_MEDIA_MAX_PER_MINUTE_PER_IP: int = 120
 #: refusal of that kind is topped up to the same count (dummy verifications
 #: against a fixed key), so a refusal's timing tells nothing about which
 #: spaces are listed or banned, which channels exist, which writer keys are
-#: pinned or which mode a space is in. A delete makes one.
+#: pinned. A delete makes one.
 _VERIFIES_BY_KIND: dict[str, int] = {
     AUTH_AUTHORITY: 1,
     AUTH_CHANNEL: 1,
-    AUTH_CHANNEL_CERT: 2,
-    AUTH_WRITER_CERT: 2,
     AUTH_WRITER_KEY: 1,
 }
 
@@ -205,7 +191,6 @@ class GfsSpaceMediaAuth:
         if auth.kind not in AUTH_KINDS_BY_SCOPE.get(scope_kind, frozenset()):
             raise PermissionError("authorization kind not taken for this scope")
         self._require_fresh(claim.ts)
-        space: GlobalSpace | None = None
         household = ""
         if scope_kind == SCOPE_CHANNEL:
             # The scope first (its refusal is topped up by the caller): a
@@ -214,8 +199,9 @@ class GfsSpaceMediaAuth:
             # anonymous).
             await self._channels.require_channel_in_use(scope_id)
         elif auth.kind != AUTH_AUTHORITY:
-            space = _active(await self._federation.listed_space(scope_id))
-            household = space.owning_instance
+            household = _active(
+                await self._federation.listed_space(scope_id)
+            ).owning_instance
         if auth.kind == AUTH_AUTHORITY:
             space = await self._federation.verify_space_authority(
                 scope_id,
@@ -237,20 +223,6 @@ class GfsSpaceMediaAuth:
         if auth.epoch is None:  # pragma: no cover - the codec requires one
             raise PermissionError("writer upload without an epoch")
         message = claim.writer_signing_bytes(kind=auth.kind, epoch=auth.epoch)
-        if auth.kind == AUTH_WRITER_CERT and auth.writer_cert is not None:
-            if space is None:  # pragma: no cover - looked up above
-                raise PermissionError("space not looked up")
-            author_pk = self._cert_holder(auth, auth.writer_cert.instance_pk, message)
-            await self._member_publish.verify_writer_cert(
-                space, auth.writer_cert, epoch=auth.epoch, author_pk=author_pk
-            )
-            return household
-        if auth.kind == AUTH_CHANNEL_CERT and auth.channel_cert is not None:
-            author_pk = self._cert_holder(auth, auth.channel_cert.instance_pk, message)
-            await self._channels.verify_cert_holder(
-                scope_id, auth.channel_cert, epoch=auth.epoch, author_pk=author_pk
-            )
-            return household
         if auth.kind == AUTH_WRITER_KEY and scope_kind == SCOPE_SPACE:
             await self._member_publish.verify_writer_key_sig(
                 scope_id,
@@ -315,22 +287,6 @@ class GfsSpaceMediaAuth:
         if self._deletes_seen.seen(seen):
             raise PermissionError("replayed delete")
         self._deletes_seen.record(seen)
-
-    @staticmethod
-    def _cert_holder(
-        auth: SpaceMediaUploadAuth, instance_pk: str, message: bytes
-    ) -> bytes:
-        """The household key a cert names, once ``auth.sig`` proves the
-        uploader holds it. :class:`PermissionError` otherwise."""
-        try:
-            require_space_media_sig_suite(auth.sig_suite)
-            author_pk = b64url_decode(instance_pk)
-            ok = verify_ed25519(author_pk, message, b64url_decode(auth.sig))
-        except (UnsupportedSpaceMediaSigSuite, ValueError, TypeError) as exc:
-            raise PermissionError(f"cert holder signature refused: {exc}") from exc
-        if not ok:
-            raise PermissionError("cert holder signature does not verify")
-        return author_pk
 
     def _require_fresh(self, ts: int) -> None:
         if abs(ts - self._clock()) > SPACE_MEDIA_TS_SKEW_S:

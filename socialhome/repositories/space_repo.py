@@ -611,7 +611,7 @@ class SqliteSpaceRepo:
                 calendar_access, tasks_access,
                 allow_subscribers,
                 allow_subscriber_comment, allow_subscriber_react,
-                delegated_admin_authority, gfs_publish_mode, private_gfs,
+                delegated_admin_authority, private_gfs,
                 allow_post_text, allow_post_image, allow_post_video,
                 allow_post_transcript, allow_post_poll, allow_post_schedule,
                 allow_post_file, allow_post_bazaar,
@@ -621,7 +621,7 @@ class SqliteSpaceRepo:
                 dissolved, archived, archived_reason, about_markdown, cover_hash, tz,
                 min_age, category
             ) VALUES(
-                -- 61 placeholders, one per column listed above.
+                -- 60 placeholders, one per column listed above.
                 ?, ?, ?, ?,                   -- id, name, description, emoji
                 ?, ?, ?,                      -- owner_instance_id, owner_username, identity_public_key
                 ?, ?, ?,                      -- config_sequence, roster_sequence, config_hlc
@@ -634,7 +634,7 @@ class SqliteSpaceRepo:
                 ?, ?,                         -- calendar_access, tasks_access
                 ?,                            -- allow_subscribers
                 ?, ?,                         -- allow_subscriber_comment, allow_subscriber_react
-                ?, ?, ?,                      -- delegated_admin_authority, gfs_publish_mode, private_gfs
+                ?, ?,                         -- delegated_admin_authority, private_gfs
                 ?, ?, ?,                      -- allow_post_text, allow_post_image, allow_post_video
                 ?, ?, ?,                      -- allow_post_transcript, allow_post_poll, allow_post_schedule
                 ?, ?,                         -- allow_post_file, allow_post_bazaar
@@ -675,7 +675,6 @@ class SqliteSpaceRepo:
                 allow_subscriber_comment=excluded.allow_subscriber_comment,
                 allow_subscriber_react=excluded.allow_subscriber_react,
                 delegated_admin_authority=excluded.delegated_admin_authority,
-                gfs_publish_mode=excluded.gfs_publish_mode,
                 private_gfs=excluded.private_gfs,
                 allow_post_text=excluded.allow_post_text,
                 allow_post_image=excluded.allow_post_image,
@@ -738,7 +737,6 @@ class SqliteSpaceRepo:
                 cols["allow_subscriber_comment"],
                 cols["allow_subscriber_react"],
                 cols["delegated_admin_authority"],
-                cols["gfs_publish_mode"],
                 cols["private_gfs"],
                 cols["allow_post_text"],
                 cols["allow_post_image"],

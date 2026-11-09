@@ -7,7 +7,7 @@ every household and names no space. A space-specific probe
 server which space this household cares about, so every such request is
 gated on this directory first — by the mirror (follower subscribe and the
 legacy (un)subscribe fallback) and by member publish (which servers to
-publish / auto-subscribe on, and whether a space went strict).
+publish / auto-subscribe on).
 
 One instance is shared by both services (``app._build_*``), so a server's
 directory is downloaded once per TTL rather than once per caller.
@@ -25,7 +25,6 @@ import aiohttp
 import orjson
 
 from ..domain.federation import GfsConnection
-from ..domain.gfs_member_publish import GFS_PUBLISH_MODE_STRICT
 from .gfs_http import read_body_capped
 
 log = logging.getLogger(__name__)
@@ -52,14 +51,12 @@ MISS_REFRESH_S: float = 5.0
 #: which is the leak this cache exists to prevent. Sized with headroom far
 #: past any realistic connection server (member publish read the directory
 #: uncapped before). The body is parsed in a worker thread (CPU-bound), and
-#: only the ids (and their publish mode) are kept after parsing.
+#: only the ids (and their owners) are kept after parsing.
 MAX_DIRECTORY_IDS: int = 500_000
 MAX_DIRECTORY_BODY_BYTES: int = 64 * 1024 * 1024
 
 #: The directory is a bigger body than a single listing; still bounded.
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
-
-_TRUSTED = "trusted"
 
 
 def _now() -> float:
@@ -68,7 +65,7 @@ def _now() -> float:
 
 
 class GfsDirectoryCache:
-    """Per-connection cache of ``{space id: member publish mode}``.
+    """Per-connection cache of the listed space ids.
 
     Concurrent misses for one connection share ONE fetch. Entries past the
     longest TTL are pruned on every store, so a removed connection's entry
@@ -81,10 +78,10 @@ class GfsDirectoryCache:
         # A getter, not a session: the cookie-less publish session is
         # attached after construction (``app._on_startup``).
         self._client = client
-        self._entries: dict[str, tuple[dict[str, str] | None, float]] = {}
+        self._entries: dict[str, tuple[frozenset[str] | None, float]] = {}
         # conn id → {space id: listed owning instance} of the same download.
         self._owners: dict[str, dict[str, str]] = {}
-        self._inflight: dict[str, asyncio.Task[dict[str, str] | None]] = {}
+        self._inflight: dict[str, asyncio.Task[frozenset[str] | None]] = {}
         # Bumped by :meth:`forget`: a download started before it never
         # stores its (possibly stale) result.
         self._generation = 0
@@ -101,7 +98,7 @@ class GfsDirectoryCache:
         self._owners.clear()
         self._inflight.clear()
 
-    async def directory(self, conn: GfsConnection) -> dict[str, str] | None:
+    async def directory(self, conn: GfsConnection) -> frozenset[str] | None:
         """*conn*'s directory, or ``None`` when it can't be read."""
         cached = self._entries.get(conn.id)
         if cached is not None and self._fresh(cached):
@@ -143,13 +140,8 @@ class GfsDirectoryCache:
             return None
         return self._owners.get(conn.id, {}).get(space_id, "")
 
-    async def mode(self, conn: GfsConnection, space_id: str) -> str | None:
-        """The listed member publish mode, or ``None`` when not listed."""
-        listed = await self.directory(conn)
-        return None if listed is None else listed.get(space_id)
-
     @staticmethod
-    def _fresh(entry: tuple[dict[str, str] | None, float]) -> bool:
+    def _fresh(entry: tuple[frozenset[str] | None, float]) -> bool:
         listed, at = entry
         if listed is None:
             ttl = FAILURE_TTL_S
@@ -159,7 +151,7 @@ class GfsDirectoryCache:
             ttl = LISTING_NEGATIVE_TTL_S
         return _now() - at < ttl
 
-    async def _fetch(self, conn: GfsConnection) -> dict[str, str] | None:
+    async def _fetch(self, conn: GfsConnection) -> frozenset[str] | None:
         """One download per connection at a time, run as its own task:
         every caller — the first one too — awaits it through
         :func:`asyncio.shield`, so a caller that is cancelled is the only
@@ -174,7 +166,7 @@ class GfsDirectoryCache:
             task.add_done_callback(functools.partial(self._fetched, conn.id))
         return await asyncio.shield(task)
 
-    def _fetched(self, conn_id: str, task: asyncio.Task[dict[str, str] | None]) -> None:
+    def _fetched(self, conn_id: str, task: asyncio.Task[frozenset[str] | None]) -> None:
         if self._inflight.get(conn_id) is task:
             del self._inflight[conn_id]
         # Retrieved so a fetch every caller abandoned never logs as an
@@ -184,7 +176,7 @@ class GfsDirectoryCache:
 
     async def _read_and_store(
         self, conn: GfsConnection, generation: int
-    ) -> dict[str, str] | None:
+    ) -> frozenset[str] | None:
         read = await self._read(conn)
         listed, owners = read if read is not None else (None, {})
         if generation == self._generation:
@@ -192,7 +184,7 @@ class GfsDirectoryCache:
         return listed
 
     def _store(
-        self, conn_id: str, listed: dict[str, str] | None, owners: dict[str, str]
+        self, conn_id: str, listed: frozenset[str] | None, owners: dict[str, str]
     ) -> None:
         now = _now()
         for cid, (_listed, at) in list(self._entries.items()):
@@ -204,7 +196,7 @@ class GfsDirectoryCache:
 
     async def _read(
         self, conn: GfsConnection
-    ) -> tuple[dict[str, str], dict[str, str]] | None:
+    ) -> tuple[frozenset[str], dict[str, str]] | None:
         client = self._client()
         if client is None:
             return None
@@ -232,8 +224,8 @@ class GfsDirectoryCache:
 
 def _parse_directory(
     raw: bytes, url: str
-) -> tuple[dict[str, str], dict[str, str]] | None:
-    """``({space id: publish mode}, {space id: owning instance})`` of a
+) -> tuple[frozenset[str], dict[str, str]] | None:
+    """``({space ids}, {space id: owning instance})`` of a
     directory body, or ``None`` when
     it is unparsable, has no ``spaces`` list, or lists more than
     :data:`MAX_DIRECTORY_IDS` (refused, never truncated)."""
@@ -255,24 +247,15 @@ def _parse_directory(
             MAX_DIRECTORY_IDS,
         )
         return None
-    # ``member_publish_mode`` (v_50) is absent on an older server, which
-    # reads as ``trusted``.
     entries = [
         sp
         for sp in spaces
         if isinstance(sp, dict) and isinstance(sp.get("space_id"), str)
     ]
-    modes = {
-        sp["space_id"]: (
-            GFS_PUBLISH_MODE_STRICT
-            if sp.get("member_publish_mode") == GFS_PUBLISH_MODE_STRICT
-            else _TRUSTED
-        )
-        for sp in entries
-    }
+    ids = frozenset(sp["space_id"] for sp in entries)
     owners = {
         sp["space_id"]: sp["owning_instance"]
         for sp in entries
         if isinstance(sp.get("owning_instance"), str)
     }
-    return modes, owners
+    return ids, owners

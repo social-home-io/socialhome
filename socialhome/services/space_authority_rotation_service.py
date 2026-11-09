@@ -721,8 +721,8 @@ class SpaceAuthorityRotationService:
                         writer_cert = None
                     if writer_cert is not None:
                         payload["writer_cert"] = writer_cert
-                        # v_50 — and, in a strict space, the new epoch's
-                        # writer group key (derived from the NEW seed).
+                        # v_50 — and the new epoch's writer group key
+                        # (derived from the NEW seed).
                         try:
                             writer_key = await self._writer_certs.writer_key_for_peer(
                                 space.id, inst, epoch=writer_cert.get("epoch")
@@ -1254,7 +1254,7 @@ class SpaceAuthorityRotationService:
                     space.owner_instance_id
                 ):
                     await self._writer_certs.accept(space_id, p.get("writer_cert"))
-                    # v_50 — the strict-mode writer key under the new seed.
+                    # v_50 — the writer group key under the new seed.
                     if p.get("writer_key") is not None:
                         await self._writer_certs.accept_writer_key(
                             space_id, p.get("writer_key")

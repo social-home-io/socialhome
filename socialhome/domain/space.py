@@ -467,19 +467,6 @@ def normalize_retention_exempt_types(
     return tuple(sorted(kept))
 
 
-def _publish_mode(
-    raw: object, default: Literal["trusted", "strict"]
-) -> Literal["trusted", "strict"]:
-    """A ``gfs_publish_mode`` value: ``"strict"`` / ``"trusted"`` as given,
-    ``default`` for anything else (absent, or an unknown value from a newer
-    peer — never silently ``strict``, never an error)."""
-    if raw == "strict":
-        return "strict"
-    if raw == "trusted":
-        return "trusted"
-    return default
-
-
 @dataclass(slots=True, frozen=True)
 class SpaceFeatures:
     """Per-space feature toggles and access levels."""
@@ -572,17 +559,6 @@ class SpaceFeatures:
     #: (least-privilege). Older peers that omit the field default to False.
     delegated_admin_authority: bool = False
 
-    #: Owner choice (v_50): how member households publish over a connection
-    #: server (GFS). ``"trusted"`` (the default): the publish is IDENTIFIED —
-    #: the server learns which household posted, never the content.
-    #: ``"strict"``: the publish is ANONYMOUS, signed with the epoch's writer
-    #: group key; the server learns only that some publisher of the space
-    #: posted, and refuses identified publishes into the space. OWNER-only
-    #: (like ``allow_subscribers``): pinned on host inbound and only taken
-    #: from the owner household on every other household. Older peers that
-    #: omit the field read ``"trusted"``.
-    gfs_publish_mode: Literal["trusted", "strict"] = "trusted"
-
     #: Owner choice for a PRIVATE space: may it use a connection server
     #: (GFS) at all? OFF (the default for a new private space): the space
     #: never touches a GFS — no invite link redeemable through the relay, no
@@ -594,7 +570,7 @@ class SpaceFeatures:
     #: members reach each other while the host is offline. The server then
     #: learns those member households, never the space id, name, key or
     #: content. Turning it OFF is refused while link-joined members remain.
-    #: OWNER-only (like ``gfs_publish_mode``): pinned on host inbound and
+    #: OWNER-only (like ``allow_subscribers``): pinned on host inbound and
     #: only taken from the owner household everywhere else. Meaningless on a
     #: public / global space. Older peers that omit the field read OFF.
     private_gfs: bool = False
@@ -738,7 +714,6 @@ class SpaceFeatures:
             allow_subscriber_comment=bool(row.get("allow_subscriber_comment", 0)),
             allow_subscriber_react=bool(row.get("allow_subscriber_react", 0)),
             delegated_admin_authority=bool(row.get("delegated_admin_authority", 0)),
-            gfs_publish_mode=_publish_mode(row.get("gfs_publish_mode"), "trusted"),
             private_gfs=bool(row.get("private_gfs", 0)),
             allowed_post_types=allowed or ("text",),
             allowed_apps=_allowed_apps_column(row.get("allowed_apps")),
@@ -765,7 +740,6 @@ class SpaceFeatures:
             "allow_subscriber_comment": int(self.allow_subscriber_comment),
             "allow_subscriber_react": int(self.allow_subscriber_react),
             "delegated_admin_authority": int(self.delegated_admin_authority),
-            "gfs_publish_mode": self.gfs_publish_mode,
             "private_gfs": int(self.private_gfs),
             "allow_post_text": int("text" in self.allowed_post_types),
             "allow_post_image": int("image" in self.allowed_post_types),
@@ -805,7 +779,6 @@ class SpaceFeatures:
             "allow_subscriber_comment": self.allow_subscriber_comment,
             "allow_subscriber_react": self.allow_subscriber_react,
             "delegated_admin_authority": self.delegated_admin_authority,
-            "gfs_publish_mode": self.gfs_publish_mode,
             "private_gfs": self.private_gfs,
             "allowed_post_types": list(self.allowed_post_types),
             "allowed_apps": list(self.allowed_apps),
@@ -887,9 +860,6 @@ class SpaceFeatures:
             ),
             delegated_admin_authority=bool(
                 raw.get("delegated_admin_authority", defaults.delegated_admin_authority)
-            ),
-            gfs_publish_mode=_publish_mode(
-                raw.get("gfs_publish_mode"), defaults.gfs_publish_mode
             ),
             private_gfs=bool(raw.get("private_gfs", defaults.private_gfs)),
             allowed_post_types=allowed,
