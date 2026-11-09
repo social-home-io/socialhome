@@ -242,6 +242,8 @@ async def test_the_sweep_mints_a_missing_own_mailbox_and_announces_it(gfs):
         {"peer": None, "own": None}
     ).decode()
     svc = _service(session, conn, spaces=spaces)
+    now = [1_000_000.0]
+    svc._wall_clock = lambda: now[0]  # type: ignore[assignment]
     svc._federation_repo = _FedRepo(url)  # type: ignore[assignment]
     announced: list = []
 
@@ -253,6 +255,9 @@ async def test_the_sweep_mints_a_missing_own_mailbox_and_announces_it(gfs):
     assert await svc.retry_missing() == 1
     row = orjson.loads(spaces.rows[("space-1", "peer-iid")])
     assert row["own"] is not None
+    assert announced == []  # later, not next to the register
+    now[0] = row["announce_at"] + 1
+    assert await svc.send_due_announces() == 1
     [(space, peer, entry)] = announced
     assert (space, peer) == ("space-1", "peer-iid") and entry is not None
     assert await server.app[gfs_mailbox_repo_key].get(entry.mailbox_id)

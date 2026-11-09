@@ -1063,6 +1063,13 @@ class SpaceInviteTokenRedeemCoordinator:
             # a social peer, but the space still needs a keyed instance
             # row to federate against. Seated only after every gate
             # above has passed.
+            # The host's CURRENT version comes from its identity-signed ACK,
+            # not the link: an invite minted before the host upgraded still
+            # carries the old one (v_88: the pair is then a mailbox pair).
+            host_proto = max(
+                bootstrap.proto_version if bootstrap is not None else 1,
+                _int_or_one(result.get("proto_version")),
+            )
             if bootstrap is not None:
                 await self._seat_space_session_instance(
                     instance_id=issuer_instance_id,
@@ -1070,7 +1077,7 @@ class SpaceInviteTokenRedeemCoordinator:
                     identity_pk=bootstrap.identity_pk,
                     keywrap_pk=bootstrap.keywrap_pk,
                     keywrap_sig=bootstrap.keywrap_sig,
-                    proto_version=bootstrap.proto_version,
+                    proto_version=host_proto,
                     is_redeemer=True,
                     # The server that served the invite blob — the issuer
                     # answered on it, so it reaches them.
@@ -1144,8 +1151,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 )
             if (
                 bootstrap is not None
-                and bootstrap.proto_version
-                >= FederationCapability.MIN_FOR_SPACE_MAILBOX
+                and host_proto >= FederationCapability.MIN_FOR_SPACE_MAILBOX
             ):
                 # v_88 — the pair's mailboxes: the host's (if it sent one)
                 # and ours (minted for this space before the redeem). Written
@@ -2361,7 +2367,7 @@ class SpaceInviteTokenRedeemCoordinator:
                     if await mailboxes.set_own(
                         space_id, redeemer_instance_id, result[1]
                     ):
-                        await mailboxes.announce_to(
+                        await mailboxes.announce_counted(
                             space_id, redeemer_instance_id, result[0]
                         )
                         return
@@ -2556,6 +2562,8 @@ class SpaceInviteTokenRedeemCoordinator:
                 "space_id": space_id,
                 "role": role,
                 "pending_role": body.get("pending_role"),
+                # v_88 — the host's current version (the link's may be old).
+                "proto_version": body.get("proto_version"),
                 "space_meta": body.get("space_meta"),
                 # v_88 — the host's mailbox for this space (verified when
                 # the seat is written, against the hint's identity key).

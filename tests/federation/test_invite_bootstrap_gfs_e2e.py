@@ -275,7 +275,9 @@ class _FakeGfsMailboxes(SpaceMailboxService):
     async def _register(self, conn, keys, *, fetch=True) -> str:
         return REGISTER_OK
 
-    async def _open_claim(self, space_id, peer, own, *, keys=None) -> None:
+    async def _open_claim(
+        self, space_id, peer, own, *, keys=None, start_delay=0.0
+    ) -> None:
         if keys is None:
             keys = derive_mailbox_keys(
                 await self._load_root(),
@@ -2243,10 +2245,12 @@ async def test_a_seat_without_mailboxes_gets_them_from_the_sweep(
     real_mint = SpaceMailboxService.mint
     failing = {"on": True}
 
-    async def _mint(self, space_id, gfs_url, *, peer, fetch=True):
+    async def _mint(self, space_id, gfs_url, *, peer, fetch=True, start_delay=0.0):
         if failing["on"]:
             return None
-        return await real_mint(self, space_id, gfs_url, peer=peer, fetch=fetch)
+        return await real_mint(
+            self, space_id, gfs_url, peer=peer, fetch=fetch, start_delay=start_delay
+        )
 
     monkeypatch.setattr(SpaceMailboxService, "mint", _mint)
     space = await _join(a, b, gfs)
@@ -2261,6 +2265,12 @@ async def test_a_seat_without_mailboxes_gets_them_from_the_sweep(
     assert await a.mailboxes.retry_missing() == 1
     assert await b.mailboxes.retry_missing() == 1
     await gfs.drain()
+    # Round 6: each side announces only later, after its own delay.
+    assert (await _rows(a))[(space.id, b.instance_id)]["peer"] is None
+    for h in (a, b):
+        h.mailboxes._wall_clock = lambda: 10**12  # every announce due
+        assert await h.mailboxes.send_due_announces() == 1
+    await gfs.drain()
     a_row = (await _rows(a))[(space.id, b.instance_id)]
     b_row = (await _rows(b))[(space.id, a.instance_id)]
     assert a_row["own"] and a_row["peer"] and b_row["own"] and b_row["peer"]
@@ -2271,3 +2281,60 @@ async def test_a_seat_without_mailboxes_gets_them_from_the_sweep(
     await gfs.drain()
     assert [to for to, _ in gfs.mailbox] == [a_row["peer"]["mailbox_id"]]
     assert [e.payload["content"] for e in b.received][-1] == "after"
+
+
+async def _sweep_until_paired(a, b, space_id, gfs, *, rounds: int = 4) -> None:
+    """Run both sides' sweep steps (mark, retry, due announces — with the
+    announce delay elapsed) until each holds the other's entry."""
+    for _ in range(rounds):
+        for h in (a, b):
+            await h.mailboxes.mark_unmarked()
+            await h.mailboxes.retry_missing()
+            h.mailboxes._wall_clock = lambda: 10**12  # every announce due
+            await h.mailboxes.send_due_announces()
+        await gfs.drain()
+
+
+async def test_an_old_invite_link_still_ends_with_mailboxes_both_ways(
+    mailbox_households, gfs
+):
+    """Round 6 (b): the link was minted before the host upgraded (its
+    ``issuer_proto_version`` < 88). The joiner mints nothing at seat time,
+    but it learns the host's real version from the ACK, seats the host at
+    it and marks the pair; the sweeps then give both sides mailboxes."""
+    a, b = mailbox_households
+    space, hint = await _mint_invite(b, gfs.url)
+    old_hint = dataclasses.replace(hint, proto_version=87)
+    await a.space_service.redeem_invite_token(
+        TOKEN_MARKER,
+        user_id=a.user_id,
+        issuer_instance_id=b.instance_id,
+        bootstrap=old_hint,
+    )
+    await gfs.drain()
+    host_row = await a.federation_repo.get_instance(b.instance_id)
+    assert host_row.proto_version == OURS  # from the ACK, not the link
+    assert (await _rows(a))[(space.id, b.instance_id)] == {"peer": None, "own": None}
+    await _sweep_until_paired(a, b, space.id, gfs)
+    a_row = (await _rows(a))[(space.id, b.instance_id)]
+    b_row = (await _rows(b))[(space.id, a.instance_id)]
+    assert a_row["own"] and a_row["peer"] and b_row["own"] and b_row["peer"]
+
+
+async def test_a_seat_that_lost_its_row_write_is_marked_and_recovered(
+    mailbox_households, gfs
+):
+    """Round 6 (c) / (a): no mailbox state at all on either side (a crash
+    between the seat and its row write, or a seat made before v_88): the
+    sweep marks the pair and both sides end up with mailboxes."""
+    a, b = mailbox_households
+    space = await _join(a, b, gfs)
+    await a.space_repo.set_space_instance_mailbox(space.id, b.instance_id, None)
+    await b.space_repo.set_space_instance_mailbox(space.id, a.instance_id, None)
+    await a.mailboxes._load_rows()
+    await b.mailboxes._load_rows()
+    assert await _rows(a) == {} and await _rows(b) == {}
+    await _sweep_until_paired(a, b, space.id, gfs)
+    a_row = (await _rows(a))[(space.id, b.instance_id)]
+    b_row = (await _rows(b))[(space.id, a.instance_id)]
+    assert a_row["own"] and a_row["peer"] and b_row["own"] and b_row["peer"]

@@ -814,11 +814,27 @@ instance-addressed relay toward it is only a **transient** state: the seat
 is still marked as a mailbox pair (`{"peer": null, "own": null}` when
 neither side has one), and each side's sweep (`retry_missing`, every
 ~10 min, jittered) mints the missing mailbox later — from cached tickets
-only, at most `RETRIES_PER_SWEEP` (4) pairs per run in random order and
-`REMINTS_PER_DAY` (1) per pair, only toward a counterpart at v_88 or later
-— and announces it with `SPACE_MAILBOX_UPDATED`. The joiner uses the same
-path to hand the host its entry. A late `remember(own=None)` never nulls
-an own a late mint already set.
+only, ONE pair per run (`RETRIES_PER_SWEEP`, so two registers never sit
+back to back) in random order and `REMINTS_PER_DAY` (1) per pair, only
+toward a counterpart at v_88 or later. The retried claim waits its own
+`CLAIM_JITTER_S` before connecting, and the identified
+`SPACE_MAILBOX_UPDATED` goes out only after an independent random delay of
+10 min – 6 h (`ANNOUNCE_DELAY_S`): the row keeps an `announce_at` marker and
+a later sweep (`send_due_announces`, one per run) sends it — so the GFS
+cannot line the anonymous register / claim up with the H→J announce. The
+joiner uses the same path to hand the host its entry. A late
+`remember(own=None)` never nulls an own a late mint already set.
+
+**Pairs with no state at all** — a seat made before v_88, a seat from an
+invite link minted before the host upgraded, or a crash between the seat
+and its row write — are marked too: each sweep marks every seated
+`space_session` pair whose counterpart is at v_88 or later and whose row
+holds no mailbox state as `{"peer": null, "own": null}` (`mark_unmarked`,
+re-checked under the lock so a concurrent update is never wiped), and the
+retry above takes it from there. The joiner gates on the host's version
+carried in the identity-signed redeem ACK, not the link's, and records the
+host at it. A `SPACE_MAILBOX_UPDATED` from a seated v_88 `space_session`
+counterpart with no row yet creates the row instead of being dropped.
 
 **Sending.** For each relay send to a `space_session` seat,
 `FederationTransport` asks `SpaceMailboxService.target_for` for the
@@ -952,7 +968,8 @@ nor ping in step. A mailbox minted at seat time connects at once (its
 register already sits next to the seat).
 
 **Daily caps (a GFS that answers every claim with 4401).** Per member pair
-and day: at most `ANNOUNCES_PER_DAY` (6) `SPACE_MAILBOX_UPDATED`,
+and day: at most `ANNOUNCES_PER_DAY` (6) `SPACE_MAILBOX_UPDATED` (claim
+announces, retried mailboxes and the late host mint all count),
 `RECOVERY_REGISTERS_PER_DAY` (4) re-registrations of a lost mailbox (≤ 4
 tickets) and `ROTATIONS_PER_DAY` (1) fresh generation (1 ticket). Such a GFS
 costs a pair at most 5 tickets and 6 small envelopes a day — never a storm.

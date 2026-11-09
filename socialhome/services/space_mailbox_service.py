@@ -147,7 +147,14 @@ ROTATIONS_PER_DAY: int = 1
 #: at most this many per pair and day, and :data:`RETRIES_PER_SWEEP` pairs
 #: per sweep (random order) — the instance-addressed fallback is transient.
 REMINTS_PER_DAY: int = 1
-RETRIES_PER_SWEEP: int = 4
+#: One retry per sweep: two mailboxes registered back to back would let the
+#: GFS line them up.
+RETRIES_PER_SWEEP: int = 1
+#: A retried mailbox is announced (``SPACE_MAILBOX_UPDATED``, identified)
+#: only after its own random delay in this range — persisted on the row as
+#: ``announce_at`` and sent by a later sweep — so the GFS cannot tie the
+#: anonymous register / claim of mailbox M to the identified H→J announce.
+ANNOUNCE_DELAY_S: tuple[float, float] = (600.0, 6 * 3600.0)
 #: Each claim waits its own uniform delay in this range before its first
 #: connect (a restart reopens them all) and after a lost socket (a GFS
 #: restart drops them all), so the GFS cannot line them up by time.
@@ -200,6 +207,8 @@ class _Claim:
 
 
 ClaimKey = tuple[str, str, str, int]
+#: "Keep the row's value" (``_write_row``'s ``announce_at``).
+_KEEP: object = object()
 
 
 def _claim_key(space_id: str, peer: str, own: OwnMailbox) -> ClaimKey:
@@ -280,6 +289,7 @@ class SpaceMailboxService:
         "_tasks",
         "_tickets",
         "_tickets_lock",
+        "_wall_clock",
     )
 
     def __init__(
@@ -299,6 +309,7 @@ class SpaceMailboxService:
         clock: Callable[[], float] = time.monotonic,
         release_delay: tuple[float, float] = RELEASE_DELAY_S,
         claim_jitter: tuple[float, float] = CLAIM_JITTER_S,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._spaces = space_repo
         self._config = instance_config
@@ -335,6 +346,8 @@ class SpaceMailboxService:
         self._announcer: Announcer | None = None
         self._release_delay = release_delay
         self._claim_jitter_range = claim_jitter
+        #: Wall clock for the persisted ``announce_at`` (survives restarts).
+        self._wall_clock = wall_clock
         #: Releases waiting out their delay (:meth:`settle_releases`).
         self._releases: set[asyncio.Task] = set()
         #: (space, peer) → (day, announces, recovery registers, rotations).
@@ -454,7 +467,9 @@ class SpaceMailboxService:
                 pass
             try:
                 await self.release_unused()
+                await self.mark_unmarked()
                 await self.retry_missing()
+                await self.send_due_announces()
             except Exception:
                 log.warning("gfs.mailbox: sweep failed", exc_info=True)
 
@@ -485,7 +500,25 @@ class SpaceMailboxService:
 
     async def _load_rows(self) -> list[tuple[str, str, OwnMailbox | None]]:
         """Re-read every ``space_instances.mailbox`` and refresh the peer
-        mirror. Returns ``(space, instance, own)`` per row."""
+        mirror. Returns ``(space, instance, own)`` per row. Callers hold the
+        lock (or run before anything else does): the mirror is replaced by
+        a snapshot, which must not overwrite a concurrent locked write —
+        unlocked readers use :meth:`_own_rows`."""
+        out, peers = await self._read_rows()
+        self._peers = peers
+        return out
+
+    async def _own_rows(self) -> list[tuple[str, str, OwnMailbox | None]]:
+        """``(space, instance, own)`` per row, leaving the peer mirror alone
+        (safe without the lock)."""
+        return (await self._read_rows())[0]
+
+    async def _read_rows(
+        self,
+    ) -> tuple[
+        list[tuple[str, str, OwnMailbox | None]],
+        dict[tuple[str, str], SpaceMailboxEntry],
+    ]:
         out: list[tuple[str, str, OwnMailbox | None]] = []
         peers: dict[tuple[str, str], SpaceMailboxEntry] = {}
         for (
@@ -508,8 +541,7 @@ class SpaceMailboxService:
                 if entry is not None and entry.space == space_id:
                     peers[(space_id, instance_id)] = entry
             out.append((space_id, instance_id, parse_own(data.get("own"))))
-        self._peers = peers
-        return out
+        return out, peers
 
     # ── Tickets ──────────────────────────────────────────────────────────
 
@@ -717,7 +749,13 @@ class SpaceMailboxService:
             )
 
     async def mint(
-        self, space_id: str, gfs_url: str, *, peer: str, fetch: bool = True
+        self,
+        space_id: str,
+        gfs_url: str,
+        *,
+        peer: str,
+        fetch: bool = True,
+        start_delay: float = 0.0,
     ) -> tuple[SpaceMailboxEntry, OwnMailbox] | None:
         """Our mailbox for *space_id* toward the ONE counterpart *peer* at the
         GFS *gfs_url*, registered and claimed, and its signed entry — or
@@ -749,7 +787,9 @@ class SpaceMailboxService:
             if key not in self._claims:
                 if await self._register(conn, keys, fetch=fetch) != REGISTER_OK:
                     return None
-                await self._open_claim(space_id, peer, own, keys=keys)
+                await self._open_claim(
+                    space_id, peer, own, keys=keys, start_delay=start_delay
+                )
             self._pending[key] = max(
                 self._pending.get(key, 0.0), self._clock() + PENDING_TTL_S
             )
@@ -784,7 +824,7 @@ class SpaceMailboxService:
                 return claim.own
         if not in_use:
             return None
-        for space, instance, own in await self._load_rows():
+        for space, instance, own in await self._own_rows():
             if (
                 space == space_id
                 and instance == peer
@@ -887,11 +927,94 @@ class SpaceMailboxService:
             await self._write_row(space_id, instance_id, peer=peer, own=own)
             return True
 
+    async def _raw_rows(self) -> dict[tuple[str, str], dict]:
+        out: dict[tuple[str, str], dict] = {}
+        for space, inst, raw in await self._spaces.list_space_instance_mailboxes():
+            try:
+                data = orjson.loads(raw)
+            except orjson.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                out[(space, inst)] = data
+        return out
+
+    async def mark_unmarked(self) -> int:
+        """Mark every seated ``space_session`` pair at v_88 or later that
+        holds no mailbox state yet (seated before v_88, an old invite link,
+        a crash between the seat and its row write) as an empty mailbox
+        pair, so :meth:`retry_missing` finds it. Returns how many."""
+        marked = 0
+        pairs = await self._spaces.list_unmarked_session_pairs(
+            min_proto=FederationCapability.MIN_FOR_SPACE_MAILBOX
+        )
+        for space_id, instance_id in pairs:
+            if not await self._space_in_use(space_id):
+                continue
+            async with self._lock:
+                if not await self._seated(space_id, instance_id):
+                    continue
+                # The counterpart's update may have stored state since the
+                # listing — never overwrite it with an empty mark.
+                if (space_id, instance_id) in await self._raw_rows():
+                    continue
+                await self._write_row(space_id, instance_id, peer=None, own=None)
+                marked += 1
+        return marked
+
+    async def announce_counted(
+        self, space_id: str, instance_id: str, entry: SpaceMailboxEntry | None
+    ) -> bool:
+        """:meth:`announce_to` within :data:`ANNOUNCES_PER_DAY` for the pair.
+        Returns whether it went out."""
+        if not self._spend(space_id, instance_id, 1, ANNOUNCES_PER_DAY):
+            log.info("gfs.mailbox: today's mailbox updates for a pair are used up")
+            return False
+        await self.announce_to(space_id, instance_id, entry)
+        return True
+
+    async def send_due_announces(self) -> int:
+        """Send ONE retried mailbox's announce whose ``announce_at`` passed
+        (a later sweep sends the next). Returns how many went out."""
+        now = self._wall_clock()
+        due = sorted(
+            (data["announce_at"], space, inst)
+            for (space, inst), data in (await self._raw_rows()).items()
+            if isinstance(data.get("announce_at"), int | float)
+            and data["announce_at"] <= now
+        )
+        for _at, space_id, instance_id in due[:1]:
+            own = next(
+                (
+                    o
+                    for s_, i_, o in await self._own_rows()
+                    if s_ == space_id and i_ == instance_id
+                ),
+                None,
+            )
+            if own is None:
+                continue
+            keys = _derive(await self._load_root(), space_id, instance_id, own)
+            if not await self.announce_counted(
+                space_id, instance_id, self._entry_for(keys, own)
+            ):
+                return 0  # today's budget: a later sweep tries again
+            async with self._lock:
+                await self._write_row(
+                    space_id,
+                    instance_id,
+                    peer=self._peers.get((space_id, instance_id)),
+                    own=own,
+                    announce_at=None,
+                )
+            return 1
+        return 0
+
     async def retry_missing(self) -> int:
         """Mint our mailbox for seated GFS-only pairs that have none (the
         seat-time mint found no ticket, was refused, could not reach the GFS,
         or finished after the seat without landing) and announce it to the
-        counterpart with ``SPACE_MAILBOX_UPDATED``. Cached tickets only (an
+        counterpart with ``SPACE_MAILBOX_UPDATED`` — later, after its own
+        random delay (:meth:`send_due_announces`). Cached tickets only (an
         identified fetch next to an anonymous register would tie them), at
         most :data:`RETRIES_PER_SWEEP` pairs per run in random order and
         :data:`REMINTS_PER_DAY` per pair; only toward a counterpart at v_88
@@ -900,7 +1023,7 @@ class SpaceMailboxService:
         if self._federation_repo is None:
             return 0
         rows = [
-            (space, inst) for space, inst, own in await self._load_rows() if own is None
+            (space, inst) for space, inst, own in await self._own_rows() if own is None
         ]
         self._rng.shuffle(rows)
         done = 0
@@ -923,18 +1046,33 @@ class SpaceMailboxService:
                 continue
             tried += 1
             minted = await self.mint(
-                space_id, instance.relay_via, peer=instance_id, fetch=False
+                space_id,
+                instance.relay_via,
+                peer=instance_id,
+                fetch=False,
+                start_delay=self._claim_jitter(),
             )
             if minted is None:
                 continue
-            if await self.set_own(space_id, instance_id, minted[1]):
-                await self.announce_to(space_id, instance_id, minted[0])
+            # Announced by a LATER sweep (``send_due_announces``), after its
+            # own random delay — never next to the register and the claim.
+            announce_at = self._wall_clock() + self._rng.uniform(*ANNOUNCE_DELAY_S)
+            if await self.set_own(
+                space_id, instance_id, minted[1], announce_at=announce_at
+            ):
                 done += 1
         if done:
             log.info("gfs.mailbox: minted %d missing mailbox(es)", done)
         return done
 
-    async def set_own(self, space_id: str, instance_id: str, own: OwnMailbox) -> bool:
+    async def set_own(
+        self,
+        space_id: str,
+        instance_id: str,
+        own: OwnMailbox,
+        *,
+        announce_at: float | None = None,
+    ) -> bool:
         """Put *own* on the pair's row, keeping the counterpart's CURRENT
         entry (a mailbox minted after the seat — a host mint past its bound —
         must never overwrite a newer entry the counterpart sent since).
@@ -948,6 +1086,7 @@ class SpaceMailboxService:
                 instance_id,
                 peer=self._peers.get((space_id, instance_id)),
                 own=own,
+                announce_at=announce_at,
             )
             return True
 
@@ -961,18 +1100,29 @@ class SpaceMailboxService:
         *,
         peer: SpaceMailboxEntry | None,
         own: OwnMailbox | None,
+        announce_at: float | None | object = _KEEP,
     ) -> None:
         """The row write behind :meth:`remember` (caller holds the lock).
+        *announce_at* — when our own entry is still to be announced (a
+        retried mailbox, :data:`ANNOUNCE_DELAY_S`) — is kept from the row
+        unless given (``None`` clears it).
         Always a JSON object — ``{"peer": null, "own": null}`` included — so
         the pair stays a mailbox pair: a counterpart's ``null`` (lost) never
         turns into "not GFS-only", and its later entry is still taken. Only
         leaving the space clears the column (:meth:`release_unused`)."""
-        value = orjson.dumps(
-            {
-                "peer": peer.to_wire() if peer is not None else None,
-                "own": own_to_wire(own) if own is not None else None,
-            }
-        ).decode()
+        doc: dict[str, Any] = {
+            "peer": peer.to_wire() if peer is not None else None,
+            "own": own_to_wire(own) if own is not None else None,
+        }
+        if announce_at is _KEEP:
+            announce_at = (
+                (await self._raw_rows())
+                .get((space_id, instance_id), {})
+                .get("announce_at")
+            )
+        if isinstance(announce_at, int | float):
+            doc["announce_at"] = int(announce_at)
+        value = orjson.dumps(doc).decode()
         await self._spaces.set_space_instance_mailbox(space_id, instance_id, value)
         if peer is not None:
             self._peers[(space_id, instance_id)] = peer
@@ -1249,7 +1399,7 @@ class SpaceMailboxService:
         key = _claim_key(space_id, claim.peer, claim.own)
         if not any(
             own is not None and _claim_key(space, instance_id, own) == key
-            for space, instance_id, own in await self._load_rows()
+            for space, instance_id, own in await self._own_rows()
         ):
             return  # no seat uses it (yet)
         if not self._spend(space_id, claim.peer, 1, ANNOUNCES_PER_DAY):
@@ -1315,10 +1465,16 @@ class SpaceMailboxService:
                 return
         async with self._lock:
             rows = {(space, inst): own for space, inst, own in await self._load_rows()}
-            if (space_id, sender) not in rows:
-                return  # no mailbox state for this pair (not GFS-only)
+            if (space_id, sender) not in rows and not (
+                (instance.proto_version or 0)
+                >= FederationCapability.MIN_FOR_SPACE_MAILBOX
+                and await self._seated(space_id, sender)
+            ):
+                return  # not a seated GFS-only pair of ours
+            # A seated v_88 pair with no state yet (an old invite link, a
+            # crash before the row write) gets it now — never dropped.
             await self._write_row(
-                space_id, sender, peer=peer, own=rows[(space_id, sender)]
+                space_id, sender, peer=peer, own=rows.get((space_id, sender))
             )
 
     async def _claim_once(self, conn: GfsConnection, claim: _Claim) -> None:

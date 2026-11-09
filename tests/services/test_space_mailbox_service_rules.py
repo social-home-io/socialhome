@@ -25,6 +25,7 @@ from socialhome.domain.space_mailbox import OwnMailbox
 from socialhome.federation.gfs_mailbox import derive_mailbox_keys
 from socialhome.federation.space_mailbox_entry import build_entry
 from socialhome.services.space_mailbox_service import (
+    ANNOUNCE_DELAY_S,
     ANNOUNCES_PER_DAY,
     CLAIM_JITTER_S,
     LOST_ROTATE_AFTER,
@@ -81,7 +82,7 @@ def _bare_service(spaces, **kw) -> SpaceMailboxService:
         key_manager=None,  # type: ignore[arg-type]
         gfs_repo=None,  # type: ignore[arg-type]
         gfs_service=None,  # type: ignore[arg-type]
-        instance_id="i",
+        instance_id="a" * 32,
         identity_seed=b"\0" * 32,
         keywrap_public_key=b"\0" * 32,
         keywrap_sig="x",
@@ -243,6 +244,11 @@ class _RowSpaces:
     async def list_space_instance_mailboxes(self):
         return [(s, i, v) for (s, i), v in self.rows.items() if v is not None]
 
+    async def list_unmarked_session_pairs(self, *, min_proto):
+        return sorted(
+            k for k in self.seated if self.rows.get(k) is None and k[1] != "paired"
+        )
+
 
 def _joiner(space="s1", gen=1):
     ident = generate_identity_keypair()
@@ -262,6 +268,7 @@ def _joiner(space="s1", gen=1):
         source=InstanceSource.SPACE_SESSION,
         remote_identity_pk=ident.public_key.hex(),
         relay_via="http://g",
+        proto_version=88,
     )
     return iid, entry, row
 
@@ -430,3 +437,131 @@ async def test_reopened_claims_wait_their_own_delay(monkeypatch):
 
 async def _noop(self):
     return None
+
+
+class _Fed:
+    def __init__(self, rows: dict) -> None:
+        self.rows = rows
+
+    async def get_instance(self, instance_id):
+        return self.rows.get(instance_id)
+
+
+def _session_row(pk_hex="00", proto=88, relay="http://g"):
+    return SimpleNamespace(
+        source=InstanceSource.SPACE_SESSION,
+        remote_identity_pk=pk_hex,
+        relay_via=relay,
+        proto_version=proto,
+    )
+
+
+async def test_the_sweep_marks_seated_session_pairs_without_state():
+    """Round 6 (a)(c): a seat with no mailbox state at all (seated before
+    v_88, or a crash between the seat and its row write) is marked by the
+    sweep, so the retry can find it."""
+    spaces = _RowSpaces(seated={("s1", "host"), ("s1", "paired")})
+    svc = _bare_service(spaces)
+    assert await svc.mark_unmarked() == 1
+    assert orjson.loads(spaces.rows[("s1", "host")]) == {"peer": None, "own": None}
+    assert ("s1", "paired") not in spaces.rows
+    assert await svc.mark_unmarked() == 0
+
+
+async def test_an_update_from_a_seated_v88_sender_without_state_is_taken():
+    """Round 6 (b): the joiner seated from an OLD invite link holds no
+    state for the host — the host's update must create it, not be dropped."""
+    iid, entry, row = _joiner()
+    spaces = _RowSpaces(seated={("s1", iid)})
+    svc = _bare_service(spaces)
+    svc._federation_repo = _Fed({iid: row})  # type: ignore[assignment]
+    await svc._on_mailbox_updated(_update(iid, entry.to_wire()))
+    assert orjson.loads(spaces.rows[("s1", iid)])["peer"] == entry.to_wire()
+    # Not seated, or a sender below v_88: still dropped.
+    other, entry2, row2 = _joiner()
+    row2.proto_version = 87
+    svc._federation_repo = _Fed({other: row2})  # type: ignore[assignment]
+    spaces.seated.add(("s1", other))
+    await svc._on_mailbox_updated(_update(other, entry2.to_wire()))
+    assert ("s1", other) not in spaces.rows
+
+
+async def test_one_retry_per_sweep_with_a_jittered_claim_and_a_later_announce(
+    monkeypatch,
+):
+    """Round 6 #2: a retry registers ONE mailbox per sweep, its claim waits
+    its own jitter, and the counterpart is told only by a LATER sweep after
+    an independent random delay (persisted on the row), so the GFS cannot
+    tie the register / claim to the identified announce."""
+    spaces = _RowSpaces(
+        {
+            ("s1", "h1"): orjson.dumps({"peer": None, "own": None}).decode(),
+            ("s2", "h2"): orjson.dumps({"peer": None, "own": None}).decode(),
+        }
+    )
+    now = [1_000_000.0]
+    svc = _bare_service(spaces, rng=random.Random(2), wall_clock=lambda: now[0])
+    svc._root = b"\1" * 32
+    svc._federation_repo = _Fed(  # type: ignore[assignment]
+        {"h1": _session_row(), "h2": _session_row()}
+    )
+    mints: list = []
+
+    async def _mint(self, space_id, gfs_url, *, peer, fetch=True, start_delay=0.0):
+        own = OwnMailbox(gen=len(mints) + 1, gfs_instance_id="g", gfs_url="http://g")
+        mints.append((space_id, peer, fetch, start_delay))
+        keys = derive_mailbox_keys(b"\1" * 32, "g", space_id, own.gen, peer=peer)
+        return self._entry_for(keys, own), own
+
+    announced: list = []
+
+    async def _announce(space_id, instance_id, entry):
+        announced.append((space_id, instance_id, entry))
+
+    monkeypatch.setattr(SpaceMailboxService, "mint", _mint)
+    svc.attach_announcer(_announce)
+    assert await svc.retry_missing() == 1  # one per sweep
+    [(space, peer, fetch, delay)] = mints
+    assert fetch is False and delay > 0  # cached tickets, jittered claim
+    assert announced == []  # not next to the register
+    row = orjson.loads(spaces.rows[(space, peer)])
+    lo, hi = ANNOUNCE_DELAY_S
+    assert now[0] + lo <= row["announce_at"] <= now[0] + hi and lo >= 600
+    assert await svc.send_due_announces() == 0  # not due yet
+    now[0] = row["announce_at"] + 1
+    assert await svc.send_due_announces() == 1
+    assert [(s, i) for s, i, _e in announced] == [(space, peer)]
+    assert "announce_at" not in orjson.loads(spaces.rows[(space, peer)])
+    assert orjson.loads(spaces.rows[(space, peer)])["own"]["gen"] == 1
+
+
+async def test_retry_and_late_announces_count_against_the_daily_cap():
+    spaces = _RowSpaces(seated={("s1", "host")})
+    svc = _bare_service(spaces)
+    sent: list = []
+
+    async def _announce(space_id, instance_id, entry):
+        sent.append(entry)
+
+    svc.attach_announcer(_announce)
+    for _ in range(ANNOUNCES_PER_DAY + 3):
+        await svc.announce_counted("s1", "host", None)
+    assert len(sent) == ANNOUNCES_PER_DAY
+
+
+async def test_marking_never_overwrites_state_written_since_the_listing():
+    """Round 6: the counterpart's update can land between the sweep's
+    listing of unmarked pairs and its locked write — the mark must not wipe
+    the peer entry that update stored."""
+    stored = orjson.dumps({"peer": {"x": 1}, "own": None}).decode()
+
+    class _Racy(_RowSpaces):
+        async def list_unmarked_session_pairs(self, *, min_proto):
+            pairs = await super().list_unmarked_session_pairs(min_proto=min_proto)
+            self.rows[("s1", "host")] = stored  # the update lands meanwhile
+            return pairs
+
+    spaces = _Racy(seated={("s1", "host")})
+    svc = _bare_service(spaces)
+    assert await svc.mark_unmarked() == 0
+    assert spaces.rows[("s1", "host")] == stored
