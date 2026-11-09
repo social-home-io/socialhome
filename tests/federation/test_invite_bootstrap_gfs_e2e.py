@@ -465,7 +465,6 @@ async def _household(
             instance_id=instance_id,
             identity_seed=ident.private_key,
             release_delay=(0.0, 0.0),
-            claim_jitter=(0.0, 0.0),
         )
         mailbox_service.fake = gfs
         mailbox_service.inbound = relay_inbound

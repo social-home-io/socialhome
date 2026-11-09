@@ -7681,11 +7681,10 @@ def cmd_gfs_member_mesh() -> None:
     _must(f"{step}: d redeems the internal link", s, joined, ok=(200, 201))
     print("  d (paired with a) joined a's space ✓")
 
-    # 2. The directory: cards + lazy seats on both sides. d's card names
-    #    its own mailbox once minted — by d's jittered sweep (every 5-15
-    #    min, never on the directory frame), the card after its own 30-120
-    #    s wait, then the host's delta carries it to e.
-    deadline = time.time() + 1200
+    # 2. The directory: cards + lazy seats on both sides. d mints its own
+    #    mailbox when the directory flags e as GFS-reached; its card goes to
+    #    the host at once and the host's delta carries it to e.
+    deadline = time.time() + 90
     on_d = on_e = None
     while time.time() < deadline:
         on_d = _card_on("d", space_id, e["instance_id"])
@@ -7858,14 +7857,13 @@ def cmd_gfs_relay_media() -> None:
         cmd_gfs_up(env_extra=env_extra)
         _wait_for_gfs_ws_since(a_iid, offset=offset, timeout=90.0)
         _wait_for_gfs_ws_since(e_iid, offset=offset, timeout=90.0)
-        # v_89: EVERY household's mailbox claim comes back too — each after
-        # its own 0-60 s jitter plus its reconnect backoff — before anything
-        # is sent (a queued media frame is drained without a log line the
+        # v_89: EVERY household's mailbox claim comes back too — after its
+        # reconnect backoff — before anything is sent (a queued media frame is drained without a log line the
         # check below could read). Not just the pair's: a paired member of
         # the space (d) holds one at this GFS too, and its claim coming back
         # first must not stand in for e's.
         want = max(2, _mailboxes_held())
-        deadline = time.time() + 330.0
+        deadline = time.time() + 150.0
         while time.time() < deadline:
             claims = _gfs_log_lines_matching(
                 "gfs.ws.register: instance=<mailbox>", offset=offset
@@ -7876,7 +7874,7 @@ def cmd_gfs_relay_media() -> None:
         else:
             raise SystemExit(
                 f"{step}: {want} mailbox claims did not come back within "
-                "330 s of the GFS restart"
+                "150 s of the GFS restart"
             )
 
     _restart({"GFS_SPACE_MEDIA_MAX_BYTES": "0"})

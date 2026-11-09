@@ -346,8 +346,10 @@ exactly:**
     through the host hop.
 
   Nothing that identifies a household across households reaches the GFS:
-  no instance id, no space id, no content, no member list. The IP / timing
-  correlation above still applies. The teardown `SPACE_SESSION_CLEANUP`
+  no instance id, no space id, no content, no member list. A GFS that logs
+  IPs **can** tell which household owns which mailbox: its identified
+  socket and its mailbox come from the same IP (see [No random delays for
+  GFS unlinkability](#no-random-delays-for-gfs-unlinkability)). The teardown `SPACE_SESSION_CLEANUP`
   (one frame) and a household whose card names no mailbox stay
   instance-addressed. See
   [gfs-relay.md](protocol/gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89).
@@ -1177,6 +1179,33 @@ for a residual only a GFS that recognises the household's IP can use. Key
 consistency stays the anonymous cross-read plus the one-key-per-epoch pin,
 which is now persisted per GFS, so a restart cannot reset it; tickets refill
 on a GFS connect when the cache is empty.
+
+### No random delays for GFS unlinkability
+
+Owner decision 2026-11-09. A household's identified GFS socket and its
+anonymous mailbox (register, claim socket, tickets) come from the **same
+IP**. A GFS that logs IPs can therefore tell which household owns which
+mailbox, whatever the timing. Random jitter, waits and quiet windows would
+only be expensive cover for a gap the IP already leaves open, so there are
+none: a mint publishes its card at once, a claim connects at once, tickets
+are fetched when needed.
+
+What holds instead:
+
+- the GFS never sees content, space ids or instance ids for mailbox
+  traffic (frames carry a mailbox id and a sealed body);
+- the GFS stores no mailbox ↔ household link (`gfs_mailboxes` holds the
+  key and two day-rounded timestamps, nothing else);
+- the project's GFS does not log IPs.
+
+The future path to real unlinkability is **Oblivious HTTP** (RFC 9458)
+through a third-party relay, so the GFS never sees the household's IP on
+mailbox traffic. Not built.
+
+**The rule:** don't add jitter, waits or quiet windows as a privacy
+measure. A review finding a "timing link" between a household's
+identified and anonymous GFS traffic is answered by pointing here. Delays
+for load or retries (sweep cadence, backoff) are fine.
 
 ## No third-party fetches from user content
 

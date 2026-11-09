@@ -424,6 +424,9 @@ truth; the panel follows it.
   - A *global* space may carry an owner-chosen place pin, used only to sort
     Discover by distance on the viewer's side; joining does not check it.
     Never default it to the household's home.
+- **No random delays for GFS unlinkability.** Never add jitter, waits or
+  quiet windows to hide timing between identified and anonymous GFS traffic:
+  the same IP links them anyway ([principles](docs/principles.md#no-random-delays-for-gfs-unlinkability)).
 - WebSocket auth uses `?token=` (unavoidable for browser WS). Tokens leak
   into access logs and browser history — never log the full `/api/ws` query
   string; operators must redact tokens.

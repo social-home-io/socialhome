@@ -752,9 +752,8 @@ async def test_a_ticket_that_never_reached_the_gfs_is_put_back():
     assert ["ticket" in b for b in session.bodies] == [False, True]
 
 
-async def test_refills_run_at_jittered_times_and_never_next_to_a_register():
-    """The cache refills on its own jittered schedule, and skips a slot
-    that falls right after a register (a ticket taken)."""
+async def test_refills_run_on_their_own_schedule():
+    """The cache refills on its own schedule (spread for load)."""
     issuer, key = _local_issuer()
     calls: list[int] = []
 
@@ -771,23 +770,12 @@ async def test_refills_run_at_jittered_times_and_never_next_to_a_register():
             return lo
 
     rng = _Rng()
-    cache = MailboxTicketCache(
-        fetch, batch=2, guard=None, period=0.05, quiet=3600.0, rng=rng
-    )  # type: ignore[arg-type]
-    cache._tickets = [b"x"]
-    cache.take()  # a register just happened
+    cache = MailboxTicketCache(fetch, batch=2, guard=None, period=0.05, rng=rng)  # type: ignore[arg-type]
     await cache.start()
     await asyncio.sleep(0.2)
     await cache.stop()
-    assert calls == []  # every slot was too close to the register
+    assert calls == [2] and len(cache) == 2
     assert rng.asked and all(lo < hi for lo, hi in rng.asked)
-    quiet = MailboxTicketCache(
-        fetch, batch=2, guard=None, period=0.05, quiet=0.0, rng=rng
-    )  # type: ignore[arg-type]
-    await quiet.start()
-    await asyncio.sleep(0.2)
-    await quiet.stop()
-    assert calls == [2] and len(quiet) == 2
 
 
 async def test_the_issuer_is_read_only_under_the_pinned_gfs_key(gfs):
@@ -902,9 +890,7 @@ async def test_the_refill_loop_survives_an_outage():
         def uniform(self, lo: float, hi: float) -> float:
             return lo
 
-    cache = MailboxTicketCache(
-        fetch, batch=2, guard=None, period=0.05, quiet=0.0, rng=_Rng()
-    )  # type: ignore[arg-type]
+    cache = MailboxTicketCache(fetch, batch=2, guard=None, period=0.05, rng=_Rng())  # type: ignore[arg-type]
     await cache.start()
     await asyncio.sleep(0.3)
     await cache.stop()

@@ -571,8 +571,9 @@ address for it. The GFS still sees, per envelope, the mailbox, the time,
 the size and the sender's address, and per claim socket its address and
 online time; within one space it can cluster mailboxes that the same
 fan-out bursts hit. Across spaces nothing is stored or cryptographically
-linked — only IP / timing correlation with the household's identified
-socket, the residual named above.
+linked. A GFS that logs IPs **can** tell which household owns which mailbox:
+the household's identified socket and its mailbox come from the same IP
+(see [No random delays for GFS unlinkability](../principles.md#no-random-delays-for-gfs-unlinkability)).
 
 Implementation: `socialhome/domain/gfs_mailbox.py` (id, signed bytes, suite
 tag), `socialhome/federation/gfs_mailbox.py` (key derivation, register,
@@ -647,7 +648,7 @@ sequenceDiagram
     A->>A: verify identity signature, active, quota (gfs_ticket_issuance)
     A-->>H: 200 {suite, issuer_key_id, responses} (blind signatures)
     H->>H: finalize → RFC 9577 Tokens (cached, unlinkable)
-    Note over H,B: later (jittered, never right after a fetch), anonymously
+    Note over H,B: later, anonymously
     H->>B: POST /gfs/mailbox/register {…} (no ticket)
     B-->>H: 403 ticket_required (a NEW mailbox; an existing one is 200)
     H->>B: GET /gfs/info (anonymous) — key still an admitted one?
@@ -667,10 +668,9 @@ its own issuer key could read the household off every redeemed ticket's
 - the key must equal the one an **anonymous** read of `/gfs/info` shows
   (a second, cookie-less session — the one mailbox registration uses),
   so the GFS can't single the household out by its identified session.
-  That read runs on its own jittered schedule (about every 6 h, ±50 %) and
-  is cached; the identified ticket fetch compares against the cache, so no
-  anonymous read sits milliseconds before it from the same address. Before
-  redeeming (itself anonymous) the household reads afresh;
+  That read runs on its own schedule (about every 6 h) and is cached; the
+  identified ticket fetch compares against the cache. Before redeeming
+  (itself anonymous) the household reads afresh;
 - **one new key per epoch** at most: the household pins `(key_id,
   first_seen)` and takes a different key only once its clock is in a later
   epoch (epochs aligned to the Unix epoch, as the GFS aligns them; one hour
@@ -686,7 +686,7 @@ with no key and no id, and leaves the tickets unused. A ticket under a key
 the household no longer admits (`ticket_key_not_admitted`) is dropped with
 every ticket under that key. What remains: a GFS that recognises the
 household's *address* can show it its own key in BOTH views from first
-contact and keep it — the same IP / timing limit as below.
+contact and keep it — the same IP limit as below.
 
 **No cross-check outside the GFS (decision, v_88).** Comparing key ids among
 paired households was considered and not built. It would add a federation
@@ -704,21 +704,16 @@ households can narrow a ticket to one of five). That is a property of set
 size, not a leak in the design; what grows it is a longer epoch (the
 default 30 days; never below 7) and more households on the GFS.
 
-**Timing.** The issuer learns "household H took N tickets today", never
-which mailbox spent one. A fetch right before a register would let the GFS
-line the two up, so the cache refills on its own schedule — about once a
-day, each wait jittered ±50 % (`MailboxTicketCache.start`), and a slot
-within an hour after a register is skipped — and a register spends from the
-cache. A failed refill or anonymous read (a GFS outage included) logs a
-WARNING and the loop tries again at the next slot. On a GFS connect, a cache
-that is empty gets the anonymous key read at once and one identified refill
-30–300 s later (jittered, never next to the anonymous read, and not within
-the quiet window after a register — `MailboxTicketCache.refill_if_quiet`),
-so a fresh household is not without tickets until its first daily slot. A register never fetches: an empty cache fails a register
-with `no_ticket`, and a `stale_ticket_key` refusal drops that key's tickets
-and fails — so a GFS that refuses a register on purpose cannot make the
-household fetch right next to it. Only `ticket_spent` is retried, once,
-from the cache.
+**Refills.** The issuer learns "household H took N tickets today", never
+which mailbox spent one. The cache refills about once a day
+(`MailboxTicketCache.start`), on a GFS connect when it is empty (the
+anonymous key read, then the identified refill), and before a register that
+finds it empty. A failed refill or anonymous read (a GFS outage included)
+logs a WARNING and the loop tries again at the next slot. A
+`stale_ticket_key` refusal drops that key's tickets and fails; only
+`ticket_spent` is retried, once, from the cache. There are no timing rules
+between a fetch and a register (owner decision 2026-11-09, see
+[principles](../principles.md#no-random-delays-for-gfs-unlinkability)).
 
 **No wasted tickets, no shown-twice tickets.** `register_mailbox` tries
 without a ticket first and shows one only on `403 ticket_required`, so
@@ -727,7 +722,7 @@ the guard refused, or whose request never reached the GFS (no connection),
 goes back to the cache. A ticket the GFS saw is never put back: showing it
 again for another mailbox would link the two.
 
-IP / timing correlation with the household's identified `/gfs/ws` stays the
+IP correlation with the household's identified `/gfs/ws` stays the
 accepted, stated limit (as for claims above). Household side:
 `TicketIssuer.from_capability`, `read_ticket_issuer`, `TicketKeyGuard`,
 `build_ticket_request`, `fetch_tickets`, `MailboxTicketCache`,
@@ -752,7 +747,10 @@ sign-off 2026-11-09, see [`principles.md`](../principles.md)). It still
 never learns an instance id, a space id, a sender or content: frames carry
 only the mailbox id and a sealed body. Within one space it can cluster the
 mailboxes hit by the same fan-out bursts (that space's member set); that
-is the accepted residual.
+is the accepted residual. A GFS that logs IPs can also tell which household
+owns which mailbox (same IP as its identified socket); no random delays try
+to hide that — see [No random delays for GFS
+unlinkability](../principles.md#no-random-delays-for-gfs-unlinkability).
 
 **Who owns one.** A household holds a mailbox at a GFS while a space it is
 in has a **GFS-reached** member there:
@@ -763,14 +761,10 @@ in has a **GFS-reached** member there:
 - it is a paired or mesh member, is connected to that GFS, and the host's
   directory flags another member whose card names a mailbox there as
   GFS-reached (owner decision 2026-11-09). It mints its ONE household
-  mailbox there with the same mint, claim, sweep and Privacy Pass ticket
-  (a cached one: no identified fetch next to the register), opens no new
-  identified link, and its card in every space it is in there names it.
-  Only the jittered ~10 min sweep (5–15 min) mints it, never the arrival
-  of a directory frame: the host sends its frames right after its own
-  identified traffic, so a register on receipt would tie the new mailboxes
-  to the host. The new card then goes to the hosts after its own 30–120 s
-  wait (`CARD_AFTER_MINT_S`), never in the register's tick.
+  mailbox there with the same mint, claim, sweep and Privacy Pass ticket,
+  opens no new identified link, and its card in every space it is in there
+  names it. It mints as soon as a directory frame flags such a member (the
+  sweep is the backstop), and the new card goes to the hosts at once.
 
 The host flags them: each directory frame carries `gfs_reached`, the ids
 of its cards whose household the host reaches only through a GFS (its
@@ -942,16 +936,15 @@ every handler still runs `check_space_writer`, and other people's rows come
 only from the host or a delegated admin.
 
 **Release and rotation.** A mailbox nothing needs any more is closed and
-unregistered after its own 2–15 min delay. A GFS that forgot it gets the
-same mailbox registered again from a cached ticket; one that refuses it 3
+unregistered after a 2–15 min grace (members still sending to it learn the
+new card meanwhile). A GFS that forgot it gets the same mailbox registered
+again; one that refuses it 3
 times, or a flood (≥ 500 frames dropped by its inbound budget in a day,
 e.g. a removed member that still knows the address), gets a fresh
 generation, at most once a day. A plain rotation keeps the old address
 delivering until its own release delay is over (a flooded one drops at
-once). Every change (mint, rotation, release) moves the card `rev`; the
-new card reaches every space — the ones we host too — through the sweep
-hook after its own 30–120 s wait (`CARD_AFTER_MINT_S`), never in the tick
-of the anonymous register.
+once). Every change (mint, rotation, release) moves the card `rev`, and the
+new card reaches every space — the ones we host too — at once.
 
 **Losses and recovery.** Frames to a mailbox that is offline wait in the
 GFS queue (24 h TTL, tail-drop). Since v_89 that queue is the household's
@@ -1024,12 +1017,12 @@ the heal needs the host online (helpers come with PR 4).
 
 **Left out, and why (keep it simple).**
 
-- A pre-registered pool of mailboxes to hide the seat-time timing: still
-  the documented residual (a new mailbox is registered next to the
-  identified redeem).
-- Re-sending a directory that a member lost after its snapshot: deltas
-  ride the durable outbox; a lost snapshot is sent again on the member's
-  next card (seat, rotation, upgrade).
+- Any timing cover (a pre-registered pool, jitter, waits): the same IP
+  links a household's mailbox to it anyway — see [No random delays for GFS
+  unlinkability](../principles.md#no-random-delays-for-gfs-unlinkability).
+- Re-sending a directory that a member lost: a member that missed a delta
+  or a snapshot part is behind on `dir_seq` and gets a fresh snapshot at
+  its next §25.6 sync.
 - Binary media frames to a directory seat: it gets JSON relay chunks (its
   row has no relay of its own to probe); pictures still come from the GFS
   media cache.

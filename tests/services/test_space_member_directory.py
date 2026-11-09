@@ -187,14 +187,13 @@ class FakeMailboxes:
     def attach_after_sweep(self, fn) -> None:
         pass
 
-    registers = 0
+    mints = 0
 
-    async def ensure(self, *a, **k):
-        self.registers += 1
+    def mint_soon(self) -> None:
+        self.mints += 1
 
-    async def mint_missing(self) -> int:
-        self.registers += 1
-        return 0
+    def attach_on_change(self, fn) -> None:
+        self.on_change = fn
 
 
 class FakeRegistry:
@@ -1344,9 +1343,8 @@ async def test_a_paired_member_needs_a_mailbox_where_a_gfs_reached_member_is():
         }
     )
     assert await w.dir.needed_gfs() == {GFS}
-    # Review round 5: no register on receipt — the jittered sweep mints, so
-    # the anonymous register never lines up with the host's traffic.
-    assert w.mailboxes.registers == 0
+    # Minted at once on receipt (no random timing rules, owner 2026-11-09).
+    assert w.mailboxes.mints == 1
     await w.directory({"cards": [], "removed": [gfs_only["id"]]})
     assert await w.dir.needed_gfs() == set()
 
@@ -1548,3 +1546,12 @@ async def test_a_forgotten_space_drops_its_unfinished_snapshot(monkeypatch):
     m.spaces.local[SPACE] = []  # we left
     await m.dir.sweep_once()
     assert SPACE not in m.dir._snap_in
+
+
+async def test_our_own_mailbox_change_reaches_hosted_spaces_and_hosts_at_once():
+    """No card delay (owner 2026-11-09): a mailbox change reconciles the
+    spaces we host and gives every other host our card in the same call."""
+    w, host = _member_world()
+    w.mailboxes.rev = 3
+    await w.mailboxes.on_change()
+    assert [c["to"] for c in w.fed.cards] == [host["id"]]

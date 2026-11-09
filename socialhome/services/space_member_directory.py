@@ -214,6 +214,7 @@ class SpaceMemberDirectory:
         self._snap_in: dict[str, tuple[int, frozenset[int]]] = {}
         mailboxes.attach_needed(self.needed_gfs)
         mailboxes.attach_after_sweep(self.sweep_once)
+        mailboxes.attach_on_change(self.on_own_change)
 
     def attach_to(self, federation_service: FederationService) -> None:
         """Both events: the host takes ``SPACE_MEMBER_CARD``, members take
@@ -644,9 +645,16 @@ class SpaceMemberDirectory:
         for card in cards.values():
             await self._store(space_id, card, create_row=True)
             await self._flag(space_id, card.instance_id, card.instance_id in reached)
-        # Our mailbox at a flagged card's GFS is minted by the jittered
-        # sweep (``needed_gfs``), never now: a register on receipt would
-        # line up with the host's traffic.
+        boxes = self._mailboxes.mailbox_gfs_urls()
+        if any(
+            c.mailbox is not None
+            and c.instance_id in reached
+            and normalize_gfs_base(c.mailbox.gfs) not in boxes
+            for c in cards.values()
+        ):
+            # A GFS-reached member at a GFS we hold no mailbox at: ours is
+            # minted now (in the background) and its card goes out at once.
+            self._mailboxes.mint_soon()
         if self._complete(space_id, payload, seq):
             host_doc = await self._doc(space_id, host)
             host_doc["dir_seq"] = seq
@@ -1006,6 +1014,18 @@ class SpaceMemberDirectory:
                 MEMBERS_MAX,
             )
         await self._send(space_id, to, [], snapshot=True, dir_seq=seq, **last)
+
+    async def on_own_change(self) -> None:
+        """Our mailboxes changed (minted, released, rotated): every space we
+        host gets our new card as a delta, and every other space's host our
+        new card, now."""
+        for space_id in sorted({space for (space, _i) in await self._rows()}):
+            try:
+                if await self.host_of(space_id) == self._instance_id:
+                    await self.reconcile(space_id)
+            except Exception:
+                log.warning("directory: reconcile failed", exc_info=True)
+        await self.publish_cards()
 
     async def sweep_once(self) -> None:
         """The backstop (each mailbox sweep tick): every space we host with

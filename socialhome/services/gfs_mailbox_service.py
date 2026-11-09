@@ -25,13 +25,16 @@ mailbox). This service is the household half:
   "pending" for :data:`PENDING_TTL_S`.
 * **Sweep.** Every ~10 min: release a mailbox nothing needs any more
   (:meth:`attach_needed` says which GFSs are needed), mint one that is
-  needed and missing (cached tickets only), then the directory's hook.
+  needed and missing, then the directory's hook.
 * **Recovery / rotation.** A GFS that forgot the mailbox gets the SAME one
-  registered again (cached ticket); one it keeps refusing, or a flood on
-  it, gets a fresh generation (at most :data:`ROTATIONS_PER_DAY`). Every
-  change bumps the card ``rev``; the new card reaches every space the
-  household is in through the directory's sweep hook after its own wait
-  (:data:`CARD_AFTER_MINT_S`), never in the register's tick.
+  registered again; one it keeps refusing, or a flood on it, gets a fresh
+  generation (at most :data:`ROTATIONS_PER_DAY`). Every change bumps the
+  card ``rev`` and calls the change hook, so the new card reaches every
+  space the household is in at once (the member directory).
+
+No random delays hide the timing of mailbox traffic: the same IP links a
+household's identified socket and its mailbox anyway (``docs/principles.md``,
+"No random delays for GFS unlinkability").
 
 No log line at INFO or above names a mailbox id or a key.
 """
@@ -98,9 +101,6 @@ CLAIM_STABLE_S: float = 60.0
 PENDING_TTL_S: float = 1800.0
 #: Mean time between two sweeps (jittered ±50 %).
 SWEEP_PERIOD_S: float = 600.0
-#: A fresh household's first ticket fetch waits this long (uniform) after
-#: the anonymous key read on connect.
-CONNECT_REFILL_DELAY_S: tuple[float, float] = (1.0, 10.0)
 #: Bound on closing every claim at shutdown.
 STOP_TIMEOUT_S: float = 8.0
 #: A released mailbox is closed and unregistered after its own random wait.
@@ -116,17 +116,9 @@ ROTATIONS_PER_DAY: int = 1
 #: mailbox is rotated (abuse, e.g. a flood by a removed member that still
 #: knows the address — the new one reaches only current members).
 FLOOD_ROTATE_DROPS: int = 500
-#: Each claim waits its own uniform delay in this range before its first
-#: connect and after a lost socket, so the GFS cannot line it up with the
-#: household's identified socket by time.
-CLAIM_JITTER_S: tuple[float, float] = (0.0, 60.0)
-#: After a mint the new card goes to the hosts after its own uniform wait in
-#: this range (well before the next sweep, never in the register's tick: a
-#: GFS must not line the anonymous register up with the card's delivery).
-CARD_AFTER_MINT_S: tuple[float, float] = (30.0, 120.0)
-#: Each claim socket pings at its own period in this range (inside
-#: Cloudflare's 100 s idle timeout).
-CLAIM_HEARTBEAT_S: tuple[float, float] = (20.0, 40.0)
+#: Each claim socket pings this often (inside Cloudflare's 100 s idle
+#: timeout).
+CLAIM_HEARTBEAT_S: float = 30.0
 _DAY_S: float = 86_400.0
 #: :meth:`GfsMailboxService._register` outcomes.
 REGISTER_OK: str = "ok"
@@ -156,8 +148,6 @@ class _Claim:
     task: asyncio.Task | None = None
     socket: MailboxClaim | None = None
     claimed: asyncio.Event = field(default_factory=asyncio.Event)
-    #: Wait before the first connect (0 for a mailbox minted at seat time).
-    start_delay: float = 0.0
     #: Re-registrations refused while lost (→ :data:`LOST_ROTATE_AFTER`).
     refusals: int = 0
     #: Released or rotated away (waiting for its delay): frames are dropped.
@@ -243,8 +233,6 @@ class GfsMailboxService:
     __slots__ = (
         "_after_sweep",
         "_boxes",
-        "_card_delay",
-        "_claim_jitter_range",
         "_claims",
         "_clock",
         "_config",
@@ -258,6 +246,7 @@ class GfsMailboxService:
         "_key_manager",
         "_lock",
         "_needed",
+        "_on_change",
         "_pending",
         "_release_delay",
         "_releases",
@@ -287,8 +276,6 @@ class GfsMailboxService:
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
         release_delay: tuple[float, float] = RELEASE_DELAY_S,
-        claim_jitter: tuple[float, float] = CLAIM_JITTER_S,
-        card_delay: tuple[float, float] = CARD_AFTER_MINT_S,
     ) -> None:
         self._config = instance_config
         self._key_manager = key_manager
@@ -306,6 +293,7 @@ class GfsMailboxService:
         self._root: bytes | None = None
         self._inbound: InboundHandler | None = None
         self._needed: Callable[[], Awaitable[set[str]]] | None = None
+        self._on_change: Callable[[], Awaitable[None]] | None = None
         self._after_sweep: Callable[[], Awaitable[None]] | None = None
         #: GFS connection id → its ticket machinery.
         self._tickets: dict[str, _Tickets] = {}
@@ -323,8 +311,6 @@ class GfsMailboxService:
         self._root_lock = asyncio.Lock()
         self._tickets_lock = asyncio.Lock()
         self._release_delay = release_delay
-        self._claim_jitter_range = claim_jitter
-        self._card_delay = card_delay
         self._releases: set[asyncio.Task] = set()
         self._stop = asyncio.Event()
         self._tasks: set[asyncio.Task] = set()
@@ -358,6 +344,12 @@ class GfsMailboxService:
         once its pending time is over)."""
         self._needed = needed
 
+    def attach_on_change(self, on_change: Callable[[], Awaitable[None]]) -> None:
+        """Called right after our set of mailboxes changed (minted,
+        released, rotated): the card ``rev`` moved and the new card goes to
+        every space we are in now."""
+        self._on_change = on_change
+
     def attach_after_sweep(self, hook: Callable[[], Awaitable[None]]) -> None:
         """Run at the end of every sweep tick (the directory's backstop)."""
         self._after_sweep = hook
@@ -376,11 +368,8 @@ class GfsMailboxService:
             async with self._lock:
                 await self._store_boxes()
         for own in list(self._boxes.values()):
-            await self._open_claim(own, start_delay=self._claim_jitter())
+            await self._open_claim(own)
         self._spawn(self._sweep_loop(), "gfs-mailbox-sweep")
-
-    def _claim_jitter(self) -> float:
-        return self._rng.uniform(*self._claim_jitter_range)
 
     async def stop(self) -> None:
         """Close every claim socket (bounded) and stop the ticket loops."""
@@ -423,12 +412,8 @@ class GfsMailboxService:
                 log.warning("gfs.mailbox: sweep failed", exc_info=True)
 
     async def sweep_once(self) -> None:
-        """One sweep tick: the directory's hook first (it publishes a card
-        that changed in an EARLIER tick — never in the same tick as the
-        anonymous register that changed it), then release and mint. Only
-        this jittered tick mints — never a directory frame, which would
-        line the register up with the host's traffic; a mint's card follows
-        after its own wait (:meth:`_changed`)."""
+        """One sweep tick: the directory's backstop hook, then release and
+        mint (a change publishes its card at once, :meth:`_changed`)."""
         if self._after_sweep is not None:
             try:
                 await self._after_sweep()
@@ -471,12 +456,12 @@ class GfsMailboxService:
         await self._config.set(MAILBOXES_CONFIG_KEY, orjson.dumps(doc).decode())
 
     async def _changed(self) -> None:
-        """Our mailboxes changed (minted, released, rotated): the new card
-        reaches every space — hosted ones too — only through the sweep hook
-        after its own wait (:data:`CARD_AFTER_MINT_S`), never in the tick of
-        the anonymous register / release that changed it."""
-        if not self._stop.is_set():
-            self._spawn(self._card_after_change(), "gfs-mailbox-card")
+        if self._on_change is None:
+            return
+        try:
+            await self._on_change()
+        except Exception:
+            log.warning("gfs.mailbox: publishing a changed card failed", exc_info=True)
 
     # ── Tickets ──────────────────────────────────────────────────────────
 
@@ -495,9 +480,8 @@ class GfsMailboxService:
 
         self._spawn(_run(), "gfs-mailbox-connect")
 
-    async def _connected(self, conn_id: str, *, delay: float | None = None) -> None:
-        """The anonymous issuer-key read now; the identified ticket fetch a
-        jittered while later — never next to each other."""
+    async def _connected(self, conn_id: str) -> None:
+        """The anonymous issuer-key read, then the ticket fetch."""
         conn = await self._gfs_repo.get(conn_id)
         if conn is None or conn.status != "active":
             return
@@ -508,18 +492,7 @@ class GfsMailboxService:
             if len(tickets.cache):
                 return
             await tickets.guard.refresh()
-            wait = (
-                delay
-                if delay is not None
-                else self._rng.uniform(*CONNECT_REFILL_DELAY_S)
-            )
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=wait)
-                return
-            except TimeoutError:
-                pass
-            if not len(tickets.cache):
-                await tickets.cache.refill_if_quiet()
+            await tickets.cache.refill()
         except MailboxTicketError as exc:
             log.info("gfs.mailbox: no tickets on connect (%s)", exc.error)
         except (aiohttp.ClientError, TimeoutError, OSError) as exc:
@@ -642,7 +615,7 @@ class GfsMailboxService:
     async def ensure_within(self, gfs_url: str, *, timeout: float) -> OwnMailbox | None:
         """:meth:`ensure`, waiting at most *timeout* seconds. A mint that
         runs longer finishes in the background (its card change reaches the
-        spaces after the card delay); ``None`` on the timeout."""
+        spaces when it is done); ``None`` on the timeout."""
         task: asyncio.Task[OwnMailbox | None] = asyncio.create_task(
             self.ensure(gfs_url), name="gfs-mailbox-mint"
         )
@@ -654,13 +627,10 @@ class GfsMailboxService:
             log.info("gfs.mailbox: a mint took too long — the seat goes without")
             return None
 
-    async def ensure(
-        self, gfs_url: str, *, fetch: bool = True, start_delay: float = 0.0
-    ) -> OwnMailbox | None:
+    async def ensure(self, gfs_url: str) -> OwnMailbox | None:
         """Our ONE mailbox at the GFS *gfs_url*, registered and claimed —
         minted now if we hold none there — or ``None`` when that GFS takes
-        no mailboxes or no ticket could be had. *fetch* (seat time only) may
-        fetch a ticket when the cache is empty. A fresh mailbox is pending
+        no mailboxes or no ticket could be had. A fresh mailbox is pending
         for :data:`PENDING_TTL_S` until something needs it."""
         conn = await self._connection_at(gfs_url)
         if conn is None:
@@ -676,12 +646,12 @@ class GfsMailboxService:
                     gfs_url=normalize_gfs_base(conn.inbox_url),
                 )
                 keys = self._keys(own)
-                if await self._register(conn, keys, fetch=fetch) != REGISTER_OK:
+                if await self._register(conn, keys) != REGISTER_OK:
                     return None
                 self._boxes[conn.gfs_instance_id] = own
                 await self._store_boxes()
                 minted = True
-            await self._open_claim(own, start_delay=start_delay)
+            await self._open_claim(own)
             self._pending[conn.gfs_instance_id] = max(
                 self._pending.get(conn.gfs_instance_id, 0.0),
                 self._clock() + PENDING_TTL_S,
@@ -690,22 +660,16 @@ class GfsMailboxService:
             await self._changed()
         return own
 
-    async def _register(
-        self, conn: GfsConnection, keys: MailboxKeys, *, fetch: bool = True
-    ) -> str:
+    async def _register(self, conn: GfsConnection, keys: MailboxKeys) -> str:
         """Register *keys*' mailbox: :data:`REGISTER_OK`, ``"no_ticket"``,
-        ``"refused"`` or ``"unreachable"``. *fetch* (seat time only) may
-        fetch a ticket when the cache is empty; everywhere else the register
-        waits for the scheduled refill — an identified fetch right before an
-        anonymous register would tie the two."""
+        ``"refused"`` or ``"unreachable"``. An empty ticket cache is refilled
+        first."""
         try:
             tickets = await self._tickets_for(conn)
-            if not len(tickets.cache) and not fetch:
-                return REGISTER_NO_TICKET
             if not len(tickets.cache):
                 if not tickets.guard.has_view:
                     await tickets.guard.refresh()
-                await tickets.cache.refill_if_quiet()
+                await tickets.cache.refill()
             async with self._anon(conn) as session:
                 if session is None:
                     log.warning("gfs.mailbox: no anonymous session — not registering")
@@ -788,34 +752,30 @@ class GfsMailboxService:
             task.add_done_callback(bucket.discard)
 
     async def mint_missing(self) -> int:
-        """Mint our mailbox at ONE needed GFS where we hold none (cached
-        tickets only: an identified fetch next to an anonymous register
-        would tie them). Returns how many were minted (0 or 1)."""
+        """Mint our mailbox at ONE needed GFS where we hold none. Returns
+        how many were minted (0 or 1)."""
         needed = await self._needed_urls()
         missing = sorted(needed - self.mailbox_gfs_urls())
         self._rng.shuffle(missing)
         for url in missing:
             if await self._connection_at(url) is None:
                 continue
-            own = await self.ensure(url, fetch=False, start_delay=self._claim_jitter())
+            own = await self.ensure(url)
             return 1 if own is not None else 0
         return 0
 
-    async def _card_after_change(self) -> None:
+    def mint_soon(self) -> None:
+        """:meth:`mint_missing` in the background (the directory just learnt
+        of a GFS-reached member in an inbound handler); concurrent asks are
+        safe, :meth:`ensure` mints under the lock."""
+        if not self._stop.is_set():
+            self._spawn(self._mint_soon(), "gfs-mailbox-mint")
+
+    async def _mint_soon(self) -> None:
         try:
-            await asyncio.wait_for(
-                self._stop.wait(), timeout=self._rng.uniform(*self._card_delay)
-            )
-            return
-        except TimeoutError:
-            pass
-        if self._after_sweep is not None:
-            try:
-                await self._after_sweep()
-            except Exception:
-                log.warning(
-                    "gfs.mailbox: publishing the new card failed", exc_info=True
-                )
+            await self.mint_missing()
+        except Exception:
+            log.warning("gfs.mailbox: a mint failed", exc_info=True)
 
     async def _release_claim(self, claim: _Claim, *, delay: float) -> None:
         """Close and unregister one released mailbox after *delay* seconds.
@@ -865,11 +825,11 @@ class GfsMailboxService:
                 return conn
         return None
 
-    async def _open_claim(self, own: OwnMailbox, *, start_delay: float = 0.0) -> None:
+    async def _open_claim(self, own: OwnMailbox) -> None:
         existing = self._claims.get(own.gfs_instance_id)
         if existing is not None and existing.own == own:
             return
-        claim = _Claim(keys=self._keys(own), own=own, start_delay=start_delay)
+        claim = _Claim(keys=self._keys(own), own=own)
         self._claims[own.gfs_instance_id] = claim
         claim.task = asyncio.create_task(
             self._claim_loop(claim), name="gfs-mailbox-claim"
@@ -888,12 +848,6 @@ class GfsMailboxService:
 
     async def _claim_loop(self, claim: _Claim) -> None:
         backoff = CLAIM_BACKOFF_MIN_S
-        if claim.start_delay > 0:
-            try:
-                await asyncio.wait_for(claim.stop.wait(), timeout=claim.start_delay)
-                return
-            except TimeoutError:
-                pass
         while not claim.stop.is_set():
             conn = await self._conn_for(claim.own)
             started = self._clock()
@@ -920,7 +874,6 @@ class GfsMailboxService:
             if claim.stop.is_set():
                 return
             wait = self._rng.uniform(0.5 * backoff, 1.5 * backoff)
-            wait += self._claim_jitter()
             try:
                 await asyncio.wait_for(claim.stop.wait(), timeout=wait)
                 return
@@ -945,8 +898,8 @@ class GfsMailboxService:
 
     async def _recover(self, conn: GfsConnection, claim: _Claim) -> bool:
         """The GFS no longer knows our mailbox (its idle sweep while we were
-        away, or data loss): register the SAME mailbox again from a cached
-        ticket (never fetched here), so frames resume with nothing to tell
+        away, or data loss): register the SAME mailbox again, so frames
+        resume with nothing to tell
         anyone. Frames sent to it meanwhile were dropped by the GFS (its
         uniform 202); §25.6 catch-up fills that gap. A mailbox the GFS keeps
         REFUSING is rotated. Returns whether this claim was replaced."""
@@ -954,7 +907,7 @@ class GfsMailboxService:
         row = self._daily_row(gid)
         if row[_RECOVERY] >= RECOVERY_REGISTERS_PER_DAY:
             return False
-        status = await self._register(conn, claim.keys, fetch=False)
+        status = await self._register(conn, claim.keys)
         if status in (REGISTER_OK, REGISTER_REFUSED):  # a ticket was used
             row[_RECOVERY] += 1
         if status != REGISTER_REFUSED:
@@ -984,11 +937,10 @@ class GfsMailboxService:
 
     async def rotate(self, gfs_id: str, *, flooded: bool = False) -> bool:
         """Replace our mailbox at *gfs_id* with a fresh generation
-        (registered from a cached ticket), at most :data:`ROTATIONS_PER_DAY`.
-        The old one keeps delivering (dropping, when *flooded*) until it is
-        closed and unregistered after its own delay; the new card reaches
-        every space after the card delay. Returns whether
-        it rotated."""
+        at most :data:`ROTATIONS_PER_DAY`. The old one keeps delivering
+        (dropping, when *flooded*) until it is closed and unregistered after
+        its release delay; the new card reaches every space at once.
+        Returns whether it rotated."""
         async with self._lock:
             old = self._claims.get(gfs_id)
             own = self._boxes.get(gfs_id)
@@ -1002,16 +954,14 @@ class GfsMailboxService:
                 gfs_instance_id=own.gfs_instance_id,
                 gfs_url=own.gfs_url,
             )
-            if await self._register(conn, self._keys(fresh), fetch=False) != (
-                REGISTER_OK
-            ):
+            if await self._register(conn, self._keys(fresh)) != REGISTER_OK:
                 if old is not None:
                     old.refusals = 0  # try again later
                 return False
             self._boxes[gfs_id] = fresh
             await self._store_boxes()
             self._claims.pop(gfs_id, None)
-            await self._open_claim(fresh, start_delay=self._claim_jitter())
+            await self._open_claim(fresh)
         if old is not None:
             # The old address keeps delivering until its release delay is
             # over (members learn the new card meanwhile) — unless it is
@@ -1031,7 +981,7 @@ class GfsMailboxService:
                 conn.inbox_url,
                 claim.keys,
                 claim.own.gfs_instance_id,
-                heartbeat=self._rng.uniform(*CLAIM_HEARTBEAT_S),
+                heartbeat=CLAIM_HEARTBEAT_S,
             )
             async with socket:
                 claim.socket = socket
