@@ -44,6 +44,9 @@ from tests.federation.test_federation_service import (
 )
 
 GFS = "https://gfs.example"
+#: Long and distinctive: the leak check searches sealed bytes for it, and a
+#: short id (e.g. "sp1") turns up in random ciphertext by chance.
+_SPACE_ID = "space-relay-media-leak-check-0001"
 
 
 class _CaptureRelayTransport(_CaptureMediaTransport):
@@ -99,7 +102,7 @@ async def _send(p, raw: bytes):
         event_type=FederationEventType.SPACE_MEDIA_BLOB,
         payload={"filename": "img.webp", "transfer_id": "t1"},
         raw_chunk=raw,
-        space_id="sp1",
+        space_id=_SPACE_ID,
         mesh_fallback=True,
     )
 
@@ -202,7 +205,7 @@ def _frame(p, *, raw=b"chunk", event_type=FederationEventType.SPACE_MEDIA_BLOB):
         event_type=event_type,
         payload={"filename": "f.webp", "transfer_id": "t1"},
         raw_chunk=raw,
-        space_id="sp1",
+        space_id=_SPACE_ID,
     )
 
 
@@ -291,7 +294,7 @@ async def test_relay_frame_header_carries_no_plaintext_for_the_gfs():
     p = _relay_paired()
     header, sealed = _frame(p)
     body = _relay_frame(p, header, sealed)["body"]
-    for leak in (p.a_id, "space_media_blob", "sp1"):
+    for leak in (p.a_id, "space_media_blob", _SPACE_ID):
         assert leak.encode() not in body
     assert orjson.dumps(header)[:20] not in body
 
