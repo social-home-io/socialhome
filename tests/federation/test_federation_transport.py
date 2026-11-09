@@ -513,6 +513,70 @@ async def test_send_falls_back_to_inbox_when_rtc_send_raises():
     assert https_inbox.calls
 
 
+@pytest.mark.parametrize("inbox_ok", [True, False])
+async def test_unpair_skips_open_datachannel_for_the_inbox_receipt(inbox_ok):
+    """REGRESSION (federation-demo ``unpair-offline``: ``c was down yet
+    notified? peer_notified: True``): an UNPAIR never rides the DataChannel.
+
+    A DataChannel send succeeds once the frame is in OUR SCTP buffer. A peer
+    that died a moment ago — its close not yet seen here — swallows the
+    frame, the send reports ``ok``, and the unpair forgets the peer instead
+    of keeping a tombstone + queued UNPAIR, so the peer never learns. The
+    UNPAIR goes to the HTTPS inbox, whose 2xx is the peer's own receipt.
+    """
+    https_inbox = _RecordingHttpsInbox(ok=inbox_ok, status=200 if inbox_ok else None)
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=https_inbox,
+        signaling_send=_FakeSignaler(),
+    )
+    inst = _fake_instance("peer-unpair")
+    peer = _RtcPeer(
+        instance_id=inst.id,
+        signaling=t._signaling_factory(inst.id),
+        inbound=t._inbound_factory(inst.id),
+    )
+
+    class _BufferingChannel:
+        """Takes every frame, like a channel to a peer that just died."""
+
+        def __init__(self):
+            self.sent = []
+            self.buffered_amount = 0
+
+        async def send(self, data):
+            self.sent.append(data)
+
+    ch = _BufferingChannel()
+    peer._channel = ch  # type: ignore[attr-defined]
+    peer._open.set()  # type: ignore[attr-defined]
+    t._peers[inst.id] = peer  # type: ignore[attr-defined]
+
+    result = await t.send(
+        instance=inst,
+        envelope_dict={
+            "msg_id": "x",
+            "event_type": FederationEventType.UNPAIR.value,
+        },
+    )
+
+    assert ch.sent == []
+    assert len(https_inbox.calls) == 1
+    assert result.via == "https"
+    assert result.ok is inbox_ok
+
+    # Every other event still takes the open DataChannel.
+    other = await t.send(
+        instance=inst,
+        envelope_dict={
+            "msg_id": "y",
+            "event_type": FederationEventType.USER_UPDATED.value,
+        },
+    )
+    assert other.via == "rtc"
+    assert len(ch.sent) == 1
+
+
 # ─── Inbound signalling ────────────────────────────────────────────────────
 
 
