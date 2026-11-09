@@ -29,7 +29,8 @@ is documented in [`invites.md`](./invites.md); the transport tiers are in
 
 ## Event types
 
-`GFS_RELAY_PROBE`, `GFS_RELAY_PROBE_ACK`.
+`GFS_RELAY_PROBE`, `GFS_RELAY_PROBE_ACK`; `SPACE_MAILBOX_UPDATED` (v_88, see
+[Per-space mailboxes](#per-space-mailboxes-v_88)).
 
 Both carry exactly `{nonce}` — 128 random bits, `secrets.token_urlsafe(16)`
 — inside the AES-256-GCM federation payload. The plaintext envelope fields
@@ -789,7 +790,9 @@ that household.
    **before** the ACK leaves, so the joiner's first envelopes land, and puts
    its entry in the sealed ACK. The host's mint is bounded to 3 s
    (`HOST_MINT_TIMEOUT_S`), well inside the joiner's redeem timeout: a slow
-   GFS costs the pair its mailbox toward the host, never the join.
+   GFS never costs the join. A mint that finishes later is not lost: the
+   host stores it on the seat and hands the joiner its entry with
+   `SPACE_MAILBOX_UPDATED`.
 3. **Both** store `{peer: <the other's entry>, own: {gen, gfs_id, gfs}}` in
    the pair's `space_instances.mailbox` (migration 0144). A mailbox minted
    for a redeem that fails stays pending for 30 min (`PENDING_TTL_S`): a
@@ -801,8 +804,11 @@ none and the pair keeps the instance-addressed relay toward it.
 
 **Sending.** For each relay send to a `space_session` seat,
 `FederationTransport` asks `SpaceMailboxService.target_for` for the
-target's mailbox for the envelope's `space_id` (a space-less envelope uses
-any shared space's mailbox). The target is used only when the entry is at
+target's mailbox for the envelope's `space_id`. A space-less envelope of
+non-space traffic (the capabilities exchange) uses any shared space's
+mailbox; a space-less `SPACE_*` envelope (a redeem reply, a teardown,
+mesh routing — the list is pinned by a test over every `send_event`
+site) never rides a mailbox and goes instance-addressed. The target is used only when the entry is at
 v_88 or above and our connection to the entry's GFS proved the signed
 `envelope_mailbox` capability (and `envelope_media` for a binary media
 frame). Then:
@@ -827,13 +833,16 @@ are refused. The envelope enters the unchanged §24.11 pipeline with
 transport `TRANSPORT_GFS_MAILBOX` (`"gfs_mailbox"`), which gets the relay's
 timestamp window and relay opt-in gate (`RELAY_TRANSPORTS`). One extra step
 runs right after the parse, `check_mailbox_space`: the envelope's
-`space_id` must be the mailbox's space or absent. Anything else is
-refused. Only the routing field counts: a space-less envelope (the
-capabilities exchange, or the redeem ACK when an already-seated household
-joins a second space of the same host) may ride any of the pair's
-mailboxes and name a space in its payload. Mailbox
-frames spend their own inbound budget (`gfs-mailbox:*`), so whoever learns
-a mailbox id cannot drain the instance relay's.
+`space_id` must be the mailbox's space; a space-less envelope is taken
+only for non-space traffic (never a `SPACE_*` event). Anything else is
+refused. Budgets: a frame that does not even open charges that mailbox's
+junk bucket (`MAILBOX_JUNK_LIMIT`, checked before any open); a frame the
+§24.11 pipeline accepted charges its VERIFIED sender
+(`MAILBOX_SENDER_INBOUND_LIMIT`, checked before the pipeline, charged only
+after it). So one member — or an ex-member that still knows a host's shared
+mailbox — exhausting its share never drops another member's frames, a
+claimed id costs its owner nothing, and nothing here touches the instance
+relay's budget.
 
 **Rotation and release.** A mailbox changes only when the household leaves
 or is removed. A mailbox is in use while a `space_instances` row refers to
@@ -841,10 +850,35 @@ it AND a person of this household still sits in the space. Every other one
 (not pending) is closed and unregistered (`POST /gfs/mailbox/unregister`,
 see above) — at once when a `space_session` seat is revoked, and by a
 jittered sweep every ~10 min for every other path that ends a seat (leave,
-dissolve, a stub purge). The rows of a left space forget their mailbox
-state, and a left space's mailbox is not reopened on start. A GFS without that route lets its idle sweep drop the mailbox. A
-re-join picks a fresh random `gen`, so the GFS cannot tie the old and the
-new mailbox.
+dissolve, a stub purge). Each released mailbox is closed and
+unregistered after its OWN random wait of 2–15 min (`RELEASE_DELAY_S`;
+frames on it are dropped meanwhile), so one kick that ends several seats
+never unregisters their mailboxes back to back from one address. The rows
+of a left space forget their mailbox state, and a left space's mailbox is
+not reopened on start. A GFS without the unregister route lets its idle
+sweep drop the mailbox. A re-join picks a fresh random `gen`, so the GFS
+cannot tie the old and the new mailbox. A seat write and a release never
+interleave (both under the service lock).
+
+**A lost mailbox.** The GFS forgot a mailbox (its 30-day idle sweep while
+the household was away, or data loss): the claim is refused (`4401`). The
+household at once sends each counterpart that uses it
+`SPACE_MAILBOX_UPDATED {mailbox: null}` (an ordinary space envelope,
+routing `space_id`, payload encrypted), and the counterpart's sends fall
+back to the instance-addressed relay — nothing is addressed to the dead
+mailbox meanwhile. It then registers the SAME mailbox again as soon as a
+ticket is cached: never fetched for it (an identified fetch right before
+an anonymous register would tie them), the scheduled refill brings one.
+Once claimed again it sends `SPACE_MAILBOX_UPDATED` with its entry and the
+counterpart uses it again. A mailbox the GFS keeps refusing
+(`LOST_ROTATE_AFTER` refusals, not just no ticket) is replaced by a fresh
+generation, the seat rows move to it, and it announces itself once
+claimed. The receiver of an update verifies the entry like the one in the
+redeem (identity signature, key-wrap binding, the space) and that it names
+the GFS the seat reaches it through, and stores it on that pair's row
+only. `SPACE_MAILBOX_UPDATED` ships in v_88 (unreleased when it was
+added), so no version bump; it is allowed from a `space_session` seat and
+is follower-safe (it touches only the pair's own row).
 
 **What the GFS sees.** Per mailbox frame: the mailbox id, the time, the size
 bucket and the sender's IP. Per claim socket: its IP and online time. Never
