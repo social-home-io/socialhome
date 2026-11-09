@@ -336,6 +336,15 @@ exactly:**
     "plausibly members of one thing" — the accepted residual, as for
     instance ids above.
 
+  - **A paired or mesh member connected to that GFS owns one too** (owner
+    decision 2026-11-09) once a space it is in has a GFS-reached member
+    there, so a GFS-only member reaches it with the host offline. It
+    costs that household one more claim socket and ticket at that GFS and
+    adds its mailbox to the space's cluster above; it opens no new
+    identified link, and the mailbox is released once no GFS-reached
+    member is left there. A member not connected to that GFS is reached
+    through the host hop.
+
   Nothing that identifies a household across households reaches the GFS:
   no instance id, no space id, no content, no member list. The IP / timing
   correlation above still applies. The teardown `SPACE_SESSION_CLEANUP`

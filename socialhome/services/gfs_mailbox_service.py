@@ -119,6 +119,10 @@ FLOOD_ROTATE_DROPS: int = 500
 #: connect and after a lost socket, so the GFS cannot line it up with the
 #: household's identified socket by time.
 CLAIM_JITTER_S: tuple[float, float] = (0.0, 60.0)
+#: After a mint the new card goes to the hosts after its own uniform wait in
+#: this range (well before the next sweep, never in the register's tick: a
+#: GFS must not line the anonymous register up with the card's delivery).
+CARD_AFTER_MINT_S: tuple[float, float] = (30.0, 120.0)
 #: Each claim socket pings at its own period in this range (inside
 #: Cloudflare's 100 s idle timeout).
 CLAIM_HEARTBEAT_S: tuple[float, float] = (20.0, 40.0)
@@ -238,6 +242,7 @@ class GfsMailboxService:
     __slots__ = (
         "_after_sweep",
         "_boxes",
+        "_card_delay",
         "_claim_jitter_range",
         "_claims",
         "_clock",
@@ -251,6 +256,7 @@ class GfsMailboxService:
         "_instance_id",
         "_key_manager",
         "_lock",
+        "_minting",
         "_needed",
         "_on_change",
         "_pending",
@@ -283,6 +289,7 @@ class GfsMailboxService:
         wall_clock: Callable[[], float] = time.time,
         release_delay: tuple[float, float] = RELEASE_DELAY_S,
         claim_jitter: tuple[float, float] = CLAIM_JITTER_S,
+        card_delay: tuple[float, float] = CARD_AFTER_MINT_S,
     ) -> None:
         self._config = instance_config
         self._key_manager = key_manager
@@ -319,6 +326,8 @@ class GfsMailboxService:
         self._tickets_lock = asyncio.Lock()
         self._release_delay = release_delay
         self._claim_jitter_range = claim_jitter
+        self._card_delay = card_delay
+        self._minting: asyncio.Task[None] | None = None
         self._releases: set[asyncio.Task] = set()
         self._stop = asyncio.Event()
         self._tasks: set[asyncio.Task] = set()
@@ -797,6 +806,45 @@ class GfsMailboxService:
             own = await self.ensure(url, fetch=False, start_delay=self._claim_jitter())
             return 1 if own is not None else 0
         return 0
+
+    def mint_soon(self) -> None:
+        """:meth:`mint_missing` in the background (the directory just learnt
+        of a GFS-reached member in an inbound handler); an ask while one
+        runs is folded into it. A mint is followed by the directory's sweep
+        hook after :data:`CARD_AFTER_MINT_S`, so the new card reaches the
+        hosts soon — never in the register's tick."""
+        if self._stop.is_set() or (
+            self._minting is not None and not self._minting.done()
+        ):
+            return
+        task: asyncio.Task[None] = asyncio.create_task(
+            self._mint_then_publish(), name="gfs-mailbox-mint-soon"
+        )
+        self._minting = task
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _mint_then_publish(self) -> None:
+        try:
+            if not await self.mint_missing():
+                return
+        except Exception:
+            log.warning("gfs.mailbox: a mint failed", exc_info=True)
+            return
+        try:
+            await asyncio.wait_for(
+                self._stop.wait(), timeout=self._rng.uniform(*self._card_delay)
+            )
+            return
+        except TimeoutError:
+            pass
+        if self._after_sweep is not None:
+            try:
+                await self._after_sweep()
+            except Exception:
+                log.warning(
+                    "gfs.mailbox: publishing the new card failed", exc_info=True
+                )
 
     async def _release_claim(self, claim: _Claim, *, delay: float) -> None:
         """Close and unregister one released mailbox after *delay* seconds.

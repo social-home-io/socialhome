@@ -136,6 +136,7 @@ def _service(session, conn, *, config=None, now=None):
         wall_clock=lambda: WALL,
         release_delay=(0.0, 0.0),
         claim_jitter=(0.0, 0.0),
+        card_delay=(0.0, 0.0),
     )
 
 
@@ -280,6 +281,81 @@ async def test_the_sweep_mints_a_needed_mailbox_from_cached_tickets_only(gfs):
     assert len(svc._tickets[conn.id].cache) == tickets - 1
     assert await svc.mint_missing() == 0  # nothing missing any more
     await svc.stop()
+
+
+async def test_mint_soon_mints_in_the_background_and_publishes_later(gfs):
+    """A directory that just learnt of a GFS-reached member asks for a mint
+    without waiting on it (an inbound handler); a mint is followed — after
+    its own jittered wait, never in the register's tick — by the directory's
+    sweep hook, which hands the new card to the hosts. A second ask while one
+    runs is folded into it."""
+    _server, session, url, conn = gfs
+    svc = _service(session, conn)
+    hooks: list[int] = []
+
+    async def needed() -> set[str]:
+        return {url}
+
+    async def after() -> None:
+        hooks.append(1)
+
+    svc.attach_needed(needed)
+    svc.attach_after_sweep(after)
+    await _ready(svc, conn)
+    svc.mint_soon()
+    svc.mint_soon()  # folded into the running one
+    for _ in range(200):
+        if hooks:
+            break
+        await asyncio.sleep(0.01)
+    assert svc.mailbox_at(url) is not None
+    assert hooks == [1]
+    svc.mint_soon()  # nothing missing: no mint, no publish
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+    assert hooks == [1]
+    await svc.stop()
+
+
+async def test_mint_soon_is_fail_soft_and_stops_with_the_service(
+    gfs, monkeypatch, caplog
+):
+    """A mint that raises, or a hook that raises, is logged and dropped; a
+    shutdown during the wait skips the publish; nothing starts once
+    stopped."""
+    _server, session, _url, conn = gfs
+    svc = _service(session, conn)
+    hooks: list[int] = []
+
+    async def boom(self) -> int:
+        raise RuntimeError("no")
+
+    async def after() -> None:
+        hooks.append(1)
+        raise RuntimeError("hook")
+
+    svc.attach_after_sweep(after)
+    with monkeypatch.context() as m:
+        m.setattr(gms.GfsMailboxService, "mint_missing", boom)
+        svc.mint_soon()
+        await asyncio.gather(*list(svc._tasks))
+    assert "a mint failed" in caplog.text and hooks == []
+
+    async def one(self) -> int:
+        return 1
+
+    monkeypatch.setattr(gms.GfsMailboxService, "mint_missing", one)
+    svc.mint_soon()
+    await asyncio.gather(*list(svc._tasks))
+    assert hooks == [1] and "publishing the new card failed" in caplog.text
+
+    svc._card_delay = (30.0, 30.0)
+    svc.mint_soon()
+    await asyncio.sleep(0)
+    await svc.stop()  # the wait ends on stop: no publish
+    assert hooks == [1]
+    svc.mint_soon()  # stopped: nothing starts
+    assert not svc._tasks
 
 
 async def test_a_flood_rotates_the_mailbox_once_a_day(gfs, monkeypatch):

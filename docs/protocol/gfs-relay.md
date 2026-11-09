@@ -755,12 +755,33 @@ mailboxes hit by the same fan-out bursts (that space's member set); that
 is the accepted residual.
 
 **Who owns one.** A household holds a mailbox at a GFS while a space it is
-in reaches it through that GFS: it holds a sealed-redeem `space_session`
-seat whose relay is that GFS (a link-joined member, or a host with
-link-joined members). A household that reaches the space otherwise (paired
-or mesh) owns none: it is reached through the host hop. A mailbox another
-member's card names never keeps ours alive, so two members' mailboxes
-cannot hold each other open after the GFS-only member leaves. Gated on
+in has a **GFS-reached** member there:
+
+- it reaches the space through that GFS itself — it holds a sealed-redeem
+  `space_session` seat whose relay is that GFS (a link-joined member, or a
+  host with link-joined members); or
+- it is a paired or mesh member, is connected to that GFS, and the host's
+  directory flags another member whose card names a mailbox there as
+  GFS-reached (owner decision 2026-11-09). It mints its ONE household
+  mailbox there with the same mint, claim, sweep and Privacy Pass ticket
+  (a cached one: no identified fetch next to the register), opens no new
+  identified link, and its card in every space it is in there names it.
+  The mint runs in the background on the directory frame; the new card
+  goes to the hosts after its own 30–120 s wait (`CARD_AFTER_MINT_S`),
+  never in the register's tick.
+
+The host flags them: each directory frame carries `gfs_reached`, the ids
+of its cards whose household the host reaches only through a GFS (its
+sealed-redeem seat with a relay); a member keeps the flag on that card's
+row. Only a flagged card keeps a mailbox alive: the mailbox is released
+once none of the household's spaces still has a GFS-reached member on that
+GFS, so two ex-members' mailboxes never hold each other open. A card whose
+content moves under the same mailbox `rev` (a mailbox minted for another
+space now applies here) is sent with a newer `rev`.
+
+A member with no connection to that GFS owns none there: it is reached,
+and reaches the GFS-reached member, through the host hop. That is the one
+remaining case that needs the host online. Gated on
 `FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH` (v_89), slug
 `mailbox_member_mesh`. Not space-scoped, no sync-stream change.
 
@@ -865,16 +886,17 @@ address of its own (`relay_via` empty). It never replaces a confirmed row.
 Its version follows the card. Such a seat:
 
 - gets the member's own fan-out (`broadcast_to_space_members`) at its
-  mailbox directly;
+  mailbox directly — both ways: a GFS-only member's fan-out reaches a
+  paired member at that member's own mailbox, with the host offline;
 - is never sent an instance-addressed relay frame (that would show the GFS
   two households that never met there): no mailbox → the host hop below;
 - is not in the 30-min sync tick (catch-up comes from the host; else every
   member would sync with every GFS-reached member) and not in the
   capabilities fan-out (its version rides its card).
 
-**The host hop.** A member that cannot reach a seat at its mailbox (no
-connection to that GFS, or the household has no mailbox) sends through the
-space's host: a three-hop `SPACE_ROUTED` `[member, host, member]` with the
+**The host hop.** The fallback only: a member that cannot reach a seat at
+its mailbox (no connection to that GFS, or the household has no mailbox —
+a paired member not connected to that GFS) sends through the space's host: a three-hop `SPACE_ROUTED` `[member, host, member]` with the
 routing `space_id`, sealed to the target's key-wrap key from its card — no
 route discovery. The host relays without reading. A `space_session` seat
 may send or be forwarded a `SPACE_ROUTED` in exactly this shape: three
@@ -923,7 +945,8 @@ spaces offline for a day: `mailbox_queue_max_per_recipient` 2000 and
 space's frames once the cap is hit. A dropped frame — tail-drop, TTL, or a
 mailbox the GFS forgot — is healed by the 30-min incremental §25.6 sync
 from the host (`SpaceSyncScheduler._tick_once` walks CONFIRMED peers, and a
-redeem seat is one). Helper and media recovery are PR 4.
+redeem seat is one). That heal still needs the host online; PR 4 adds
+admin / moderator helpers for it. Helper and media recovery are PR 4.
 
 **Cost.**
 
@@ -932,9 +955,10 @@ redeem seat is one). Helper and media recovery are PR 4.
 | Per envelope | The same bytes as before (same buckets) |
 | Sockets / tickets | One claim socket and one ticket per household per GFS — not per space, not per pair |
 | A household in 10 spaces through one GFS | 1 socket, 1 ticket, 1 queue (2000 / 32 MiB); 10 cards (~0.7 KiB each, one per host) |
+| A paired / mesh member connected to a GFS a GFS-reached member uses | +1 claim socket and +1 ticket per household on that GFS (not per space); +1 newer card (~0.7 KiB) per space it is in there; directory frames +~35 B per GFS-reached card (`gfs_reached`) |
 | A join (global space, N = 200 writers, G = 200 GFS-only) | Redeem + ACK carry one card each; one `SPACE_MEMBER_CARD`; snapshot ≤ 200 × ~0.7 KiB ≈ 140 KiB in 2 parts to the newcomer (up to 2 snapshots when the first races the seat); a ~0.7 KiB delta to each of 199 households ≈ 140 KiB |
 | Rollout of that space | G × N cards ≈ 200 × 200 × 0.7 KiB ≈ 28 MB once (every GFS-reached household needs every writer's card) |
-| One non-host calendar event, host offline | 199 × one ~4 KiB frame ≈ 800 KB uplink from the author, 199 GFS pushes, followers 0 |
+| One non-host calendar event, host offline | 199 × one ~4 KiB frame ≈ 800 KB uplink from the author, 199 GFS pushes, followers 0 — from a GFS-only member too: paired members connected to the GFS take it at their own mailbox; one not connected gets it through the host hop once the host is back (or the 30-min heal) |
 | A removal | `removed` to 199 households, a few bytes each; no rotation |
 | Sweep | One local DB pass every ~10 min |
 

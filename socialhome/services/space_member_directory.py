@@ -40,6 +40,7 @@ answer to a card it just received and a member's answer to a directory.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -126,6 +127,14 @@ def _event_space(event: FederationEvent) -> str | None:
     if event.space_id and inner and inner != event.space_id:
         return None
     return event.space_id or inner
+
+
+def _content_digest(card: MemberCard) -> str:
+    """What a card says, its revision and signature aside."""
+    wire = {k: v for k, v in card.to_wire().items() if k not in ("rev", "sig")}
+    return hashlib.sha256(orjson.dumps(wire, option=orjson.OPT_SORT_KEYS)).hexdigest()[
+        :32
+    ]
 
 
 def _card(doc: dict[str, Any]) -> MemberCard | None:
@@ -337,9 +346,8 @@ class SpaceMemberDirectory:
         """The GFSs WE reach *space_id* through: the relay of a sealed-redeem
         seat between us and a member household of it (a GFS-only member we
         host, or the host we joined by link) — normalized. A mailbox only
-        another member's card names does not count: a household that reaches
-        the space otherwise is reached through the host, so two members'
-        mailboxes never keep each other alive."""
+        another member's card names counts only for a GFS-reached member
+        (:meth:`_member_gfs`)."""
         urls: set[str] = set()
         for inst in await self._space_cards(space_id):
             instance = await self._federation_repo.get_instance(inst)
@@ -351,20 +359,51 @@ class SpaceMemberDirectory:
                 urls.add(normalize_gfs_base(instance.relay_via))
         return urls
 
+    async def _member_gfs(self, space_id: str) -> set[str]:
+        """The GFSs of *space_id*'s GFS-REACHED members (the host's
+        directory flags them, ``gfs_reached``) — normalized: a member
+        household connected to one holds its ONE mailbox there, so such a
+        member reaches it directly, with the host offline. Only a flagged
+        card counts: two paired members' mailboxes never keep each other
+        alive once the GFS-reached member is gone."""
+        urls: set[str] = set()
+        for (space, inst), doc in (await self._rows()).items():
+            if space != space_id or doc.get("gfs_reached") is not True:
+                continue
+            card = _card(doc)
+            if card is not None and card.instance_id == inst and card.mailbox:
+                urls.add(normalize_gfs_base(card.mailbox.gfs))
+        return urls
+
+    async def _reached_by_gfs(self, instance_id: str) -> bool:
+        """Host side: *instance_id* reaches us only through a GFS (its
+        sealed-redeem seat with a relay)."""
+        row = await self._federation_repo.get_instance(instance_id)
+        return (
+            row is not None
+            and row.source is InstanceSource.SPACE_SESSION
+            and bool(row.relay_via)
+        )
+
     def _card_rev(self) -> int:
         """Our card's revision: the mailbox service's (it moves with every
         mailbox change and upgrade), at least 1."""
         return max(self._mailboxes.rev, 1)
 
-    async def own_card(self, space_id: str, *, gfs_url: str = "") -> MemberCard:
+    async def own_card(
+        self, space_id: str, *, gfs_url: str = "", rev: int | None = None
+    ) -> MemberCard:
         """Our signed card for *space_id*: with our mailbox at *gfs_url* (or,
-        without one given, at a GFS the space is reached through), else no
-        mailbox."""
+        without one given, at a GFS the space is reached through, ours or a
+        GFS-reached member's), else no mailbox. *rev* overrides the card
+        revision (a card whose content moved under the same mailbox ``rev``)."""
         mailbox = None
         candidates = (
             [normalize_gfs_base(gfs_url)]
             if gfs_url
-            else sorted(await self._space_gfs(space_id))
+            else sorted(
+                await self._space_gfs(space_id) | await self._member_gfs(space_id)
+            )
         )
         for url in candidates:
             got = self._mailboxes.mailbox_at(url)
@@ -378,17 +417,20 @@ class SpaceMemberDirectory:
             keywrap_pk=self._keywrap_pk,
             keywrap_sig=self._keywrap_sig,
             proto_version=OURS,
-            rev=self._card_rev(),
+            rev=self._card_rev() if rev is None else rev,
             mailbox=mailbox,
         )
 
     async def needed_gfs(self) -> set[str]:
         """Every GFS we need a mailbox at: one a space we are in is reached
-        through by US (:meth:`_space_gfs`)."""
+        through by US (:meth:`_space_gfs`), or one a GFS-reached member of
+        it is reached at (:meth:`_member_gfs`) — released once none is
+        left."""
         urls: set[str] = set()
         for space in sorted({space for (space, _i) in await self._rows()}):
             if await self._in_use(space):
                 urls |= await self._space_gfs(space)
+                urls |= await self._member_gfs(space)
         return urls
 
     # ── Seat time (sealed redeem / ACK) ──────────────────────────────────
@@ -437,9 +479,10 @@ class SpaceMemberDirectory:
         except Exception:
             log.warning("directory: storing a seat card failed", exc_info=True)
 
-    async def _mark_sent(self, space_id: str, host_id: str, rev: int) -> None:
+    async def _mark_sent(self, space_id: str, host_id: str, card: MemberCard) -> None:
         doc = await self._doc(space_id, host_id)
-        doc["sent"] = rev
+        doc["sent"] = card.rev
+        doc["sent_digest"] = _content_digest(card)
         await self._put(space_id, host_id, doc)
 
     async def seated(self, space_id: str, host_id: str, *, host_proto: int) -> None:
@@ -484,8 +527,15 @@ class SpaceMemberDirectory:
         host has no row we could read its version from)."""
         assert self._federation is not None
         doc = await self._doc(space_id, host)
-        if doc.get("sent") == self._card_rev():
-            return False
+        sent = _count(doc.get("sent"))
+        card = await self.own_card(space_id)
+        if sent >= card.rev:
+            if doc.get("sent_digest") == _content_digest(card):
+                return False
+            # Same mailbox ``rev``, other content (a mailbox we hold for
+            # another space now applies here): a newer rev, or the host
+            # keeps the old card.
+            card = await self.own_card(space_id, rev=sent + 1)
         v89 = FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH
         known = doc.get("host_proto")
         if host_is_v89:
@@ -496,7 +546,6 @@ class SpaceMemberDirectory:
             isinstance(known, int) and known >= v89
         ) and not await self._federation.space_member_supports(host, min_version=v89):
             return False
-        card = await self.own_card(space_id)
         try:
             result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=host,
@@ -513,7 +562,7 @@ class SpaceMemberDirectory:
             return False
         # Queued in the durable outbox counts: it redelivers on its own, and
         # a copy per sweep while the host is away would pile up.
-        await self._mark_sent(space_id, host, card.rev)
+        await self._mark_sent(space_id, host, card)
         return True
 
     async def _on_directory(self, event: FederationEvent) -> None:
@@ -547,10 +596,12 @@ class SpaceMemberDirectory:
         cards_raw = payload.get("cards")
         cards_raw = cards_raw if isinstance(cards_raw, list) else []
         removed = _ids(payload.get("removed"))
+        reached = set(_ids(payload.get("gfs_reached")))
         has_members = snapshot and isinstance(payload.get("members"), list)
         members = _ids(payload.get("members")) if has_members else []
         if (
             len(cards_raw) > SNAPSHOT_MAX
+            or len(reached) > SNAPSHOT_MAX
             or len(removed) > REMOVED_MAX
             or len(members) > MEMBERS_MAX
         ):
@@ -579,6 +630,17 @@ class SpaceMemberDirectory:
             await self._forget(space_id, inst)
         for card in cards.values():
             await self._store(space_id, card, create_row=True)
+            await self._flag(space_id, card.instance_id, card.instance_id in reached)
+        boxes = self._mailboxes.mailbox_gfs_urls()
+        if any(
+            c.mailbox is not None
+            and c.instance_id in reached
+            and normalize_gfs_base(c.mailbox.gfs) not in boxes
+            for c in cards.values()
+        ):
+            # A GFS-reached member at a GFS we hold no mailbox at: ours is
+            # minted in the background; the card follows on its own wait.
+            self._mailboxes.mint_soon()
         host_doc = await self._doc(space_id, host)
         host_doc["dir_seq"] = seq
         await self._put(space_id, host, host_doc)
@@ -589,6 +651,20 @@ class SpaceMemberDirectory:
             if card.mailbox is not None or has_mailbox:
                 await self._seat(card)
         await self._publish_to_host(space_id, host, host_is_v89=True)
+
+    async def _flag(self, space_id: str, instance_id: str, reached: bool) -> None:
+        """Keep the host's ``gfs_reached`` flag on a member's row (set with
+        each of its cards the host sends, changed or not)."""
+        if instance_id == self._instance_id:
+            return
+        doc = await self._doc(space_id, instance_id)
+        if (doc.get("gfs_reached") is True) == reached or "card" not in doc:
+            return
+        if reached:
+            doc["gfs_reached"] = True
+        else:
+            doc.pop("gfs_reached", None)
+        await self._put(space_id, instance_id, doc)
 
     async def _forget(self, space_id: str, instance_id: str) -> None:
         """A household that left the host's directory of *space_id* (left,
@@ -739,10 +815,25 @@ class SpaceMemberDirectory:
         self, space_id: str, to: str, cards: list[MemberCard], **extra: Any
     ) -> bool:
         assert self._federation is not None
+        payload: dict[str, Any] = {
+            "space_id": space_id,
+            "cards": [c.to_wire() for c in cards],
+            **extra,
+        }
+        if cards:
+            # Which of these households reach the space only through a GFS:
+            # a member connected to that GFS mints its mailbox there.
+            payload["gfs_reached"] = sorted(
+                [
+                    c.instance_id
+                    for c in cards
+                    if await self._reached_by_gfs(c.instance_id)
+                ]
+            )
         result = await self._federation.broadcast_to_space_members(
             space_id,
             FederationEventType.SPACE_MAILBOX_DIRECTORY,
-            {"space_id": space_id, "cards": [c.to_wire() for c in cards], **extra},
+            payload,
             min_proto_version=FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH,
             only_instances=frozenset({to}),
         )

@@ -7640,10 +7640,13 @@ def cmd_gfs_member_mesh() -> None:
     2. The host's member directory reaches both: d holds e's member card
        (naming e's ONE mailbox) and a lazy ``space_session`` seat for e with
        no address of its own; e holds d's card (it checks every sender on
-       its mailbox against the cards it holds).
+       its mailbox against the cards it holds). The directory flags e as
+       GFS-reached, so d — connected to that GFS — mints its OWN household
+       mailbox there and its card (naming it) reaches e through the host.
     3. a goes OFFLINE. d — a non-host member — creates a calendar event in
        the space; e must show it. No host involved: d's fan-out reached e's
-       mailbox directly.
+       mailbox directly. Then e creates one and d must show it: e's fan-out
+       reached d's mailbox, no host hop.
     4. The GFS log over that window shows mailbox deliveries; no envelope or
        mailbox line names an instance id or the space, and no line names
        e's mailbox id.
@@ -7678,13 +7681,15 @@ def cmd_gfs_member_mesh() -> None:
     _must(f"{step}: d redeems the internal link", s, joined, ok=(200, 201))
     print("  d (paired with a) joined a's space ✓")
 
-    # 2. The directory: cards + lazy seats on both sides.
-    deadline = time.time() + 60
+    # 2. The directory: cards + lazy seats on both sides. d's card names
+    #    its own mailbox once minted (the card follows the mint after its
+    #    own 30-120 s wait, then the host's delta carries it to e).
+    deadline = time.time() + 240
     on_d = on_e = None
     while time.time() < deadline:
         on_d = _card_on("d", space_id, e["instance_id"])
         on_e = _card_on("e", space_id, d["instance_id"])
-        if on_d and on_d.get("mailbox") and on_e:
+        if on_d and on_d.get("mailbox") and on_e and on_e.get("mailbox"):
             break
         time.sleep(1.0)
     else:
@@ -7693,6 +7698,7 @@ def cmd_gfs_member_mesh() -> None:
             f"(d holds {on_d!r} for e, e holds {on_e!r} for d)",
         )
     e_mailbox = on_d["mailbox"]["mailbox_id"]
+    d_mailbox = on_e["mailbox"]["mailbox_id"]
     seat = _rows(
         "d",
         "SELECT source, relay_via, remote_inbox_url FROM remote_instances "
@@ -7701,7 +7707,7 @@ def cmd_gfs_member_mesh() -> None:
     )
     if not seat or seat[0][0] != "space_session" or seat[0][1] or seat[0][2]:
         raise SystemExit(f"{step}: d has no address-less lazy seat for e: {seat!r}")
-    print("  d holds e's card + a lazy seat; e holds d's card ✓")
+    print("  d holds e's card + a lazy seat; e holds d's card, with d's mailbox ✓")
 
     # 3. The host goes offline; d (not the host) creates an event.
     gfs_off = _gfs_log_size()
@@ -7741,6 +7747,42 @@ def cmd_gfs_member_mesh() -> None:
             )
         print("  host a offline; d created an event and e shows it ✓")
 
+        # 3b. e (GFS-only) creates one; paired d must show it — e's fan-out
+        #     reaches d's own mailbox, the host is not needed.
+        summary_e = f"GFS-only member's evening {time.time_ns()}"
+        s, ev_e = _request(
+            f"{e_base}/api/spaces/{space_id}/calendar/events",
+            token=e["token"],
+            method="POST",
+            body={
+                "summary": summary_e,
+                "start": "2027-03-01T18:00:00+00:00",
+                "end": "2027-03-01T20:00:00+00:00",
+                "tz": "Europe/Berlin",
+            },
+        )
+        ev_e = _must(f"{step}: e creates a calendar event", s, ev_e, ok=(201,))
+        seen = None
+        deadline = time.time() + 60
+        while time.time() < deadline and seen is None:
+            s, events = _request(
+                f"{d_base}/api/spaces/{space_id}/calendar/events"
+                "?start=2027-03-01T00:00:00Z&end=2027-03-02T00:00:00Z",
+                token=d["token"],
+            )
+            rows = (
+                events if isinstance(events, list) else (events or {}).get("events")
+            ) or []
+            seen = next((x for x in rows if x.get("id") == ev_e["id"]), None)
+            if seen is None:
+                time.sleep(1.0)
+        if seen is None or seen.get("summary") != summary_e:
+            raise SystemExit(
+                f"{step}: d never showed e's event with the host offline — "
+                "the GFS-only member's fan-out did not reach d's mailbox",
+            )
+        print("  host a offline; e created an event and paired d shows it ✓")
+
         # 4. What the GFS saw. The identified sockets log their own household
         #    (a going down); the relay's envelope / mailbox lines name nobody.
         env_lines = _gfs_log_lines_matching("gfs.envelope:", offset=gfs_off)
@@ -7751,6 +7793,7 @@ def cmd_gfs_member_mesh() -> None:
             line
             for line in _gfs_log_lines_matching("", offset=gfs_off)
             if e_mailbox in line
+            or d_mailbox in line
             or (
                 ("gfs.envelope" in line or "mailbox" in line)
                 and any(x in line for x in named)

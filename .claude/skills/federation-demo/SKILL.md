@@ -1900,11 +1900,15 @@ mesh-only to a) joins a's space with an ``internal`` link. The host's
 member directory (``SPACE_MAILBOX_DIRECTORY``, writer-seat households only)
 reaches both: d holds e's member card naming e's ONE mailbox and a lazy
 ``space_session`` seat for e with no ``relay_via`` and no inbox; e holds
-d's card. Then a is **killed** and d — not the host — creates a calendar
-event: e must show it, so d's fan-out reached e's mailbox with no host
-involved. Over that window the GFS log must show ``<mailbox>`` deliveries,
-no envelope / mailbox line may name an instance id or the space, and no
-line e's mailbox id. a is respawned at the end (``@_offline_step``).
+d's card. The directory flags e as GFS-reached (``gfs_reached``), so d —
+connected to that GFS — mints its own household mailbox there; the step
+waits (up to 240 s: the card follows the mint after a 30–120 s wait) until
+e holds d's card naming it. Then a is **killed**: d — not the host —
+creates a calendar event and e must show it (d's fan-out reached e's
+mailbox); e creates one and d must show it (e's fan-out reached d's
+mailbox, no host hop). Over that window the GFS log must show
+``<mailbox>`` deliveries, no envelope / mailbox line may name an instance
+id or the space, and no line either mailbox id. a is respawned at the end (``@_offline_step``).
 
 ### ``gfs-relay-media`` — a picture reaches a link-joined member as binary relay frames (v_87)
 

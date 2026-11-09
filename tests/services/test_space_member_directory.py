@@ -190,6 +190,11 @@ class FakeMailboxes:
     def attach_on_change(self, fn) -> None:
         self.on_change = fn
 
+    mints = 0
+
+    def mint_soon(self) -> None:
+        self.mints += 1
+
 
 class FakeRegistry:
     def __init__(self) -> None:
@@ -255,6 +260,10 @@ class FakeFederation:
             ):
                 merged = dict(prev["payload"])
                 merged["cards"] = merged["cards"] + d["payload"]["cards"]
+                if "gfs_reached" in d["payload"]:
+                    merged["gfs_reached"] = (
+                        merged.get("gfs_reached", []) + d["payload"]["gfs_reached"]
+                    )
                 out[-1] = {**prev, "payload": merged}
             else:
                 out.append(d)
@@ -1280,3 +1289,85 @@ async def test_a_lost_removal_is_repaired_in_a_space_past_500_households():
     m.spaces.put_card(SPACE, _card(gone, gfs=GFS))
     await m.directory(parts[0])
     assert gone["id"] not in m.spaces.rows[SPACE]
+
+
+# ── Owner decision 2026-11-09: paired members own a mailbox too ─────────
+
+
+async def test_the_directory_marks_which_households_reach_the_space_by_gfs():
+    """The host knows which members reach the space only through a GFS (its
+    sealed-redeem seats, with a relay): every directory frame names those
+    among its cards in ``gfs_reached``."""
+    w = World()
+    gfs_only, paired = _hh(), _hh()
+    w.member(gfs_only, paired)
+    w.spaces.put_card(SPACE, _card(gfs_only, gfs=GFS))
+    w.spaces.put_card(SPACE, _card(paired, gfs=GFS))
+    w.fed_repo.instances[gfs_only["id"]] = _seat_row(GFS)
+    w.writers.writers[SPACE] = {gfs_only["id"], paired["id"]}
+    w.seat_all()
+    await w.dir.reconcile(SPACE, snapshot_to={paired["id"]})
+    (snap,) = [d for d in w.fed.to(paired["id"]) if d["payload"].get("snapshot")]
+    assert snap["payload"]["gfs_reached"] == [gfs_only["id"]]
+
+
+async def test_a_paired_member_needs_a_mailbox_where_a_gfs_reached_member_is():
+    """A paired / mesh member connected to the GFS a GFS-reached member's
+    card names needs its ONE mailbox there (minted at once); another paired
+    member's mailbox never keeps it alive, so two of them cannot hold each
+    other's mailboxes open once the GFS-reached member is gone."""
+    w, _host = _member_world()
+    gfs_only, paired = _hh(), _hh()
+    await w.directory(
+        {
+            "cards": [_card(paired, gfs=GFS).to_wire()],
+            "gfs_reached": [],
+        }
+    )
+    assert await w.dir.needed_gfs() == set()
+    assert w.mailboxes.mints == 0
+    await w.directory(
+        {
+            "cards": [_card(gfs_only, gfs=GFS).to_wire()],
+            "gfs_reached": [gfs_only["id"]],
+        }
+    )
+    assert await w.dir.needed_gfs() == {GFS}
+    assert w.mailboxes.mints == 1
+    await w.directory({"cards": [], "removed": [gfs_only["id"]]})
+    assert await w.dir.needed_gfs() == set()
+
+
+async def test_a_paired_members_card_names_its_mailbox_there_with_a_new_rev():
+    """Once it holds that mailbox, its card for the space names it — under a
+    newer ``rev`` even when the mailbox itself is older (minted for another
+    space), so the host takes it."""
+    w, _host = _member_world()
+    w.mailboxes.rev = 3
+    assert await w.dir.publish_cards() == 1
+    first = w.fed.cards[-1]["payload"]["card"]
+    assert first["mailbox"] is None and first["rev"] == 3
+    w.mailboxes.add_box(GFS)  # held already (another space), rev unchanged
+    gfs_only = _hh()
+    await w.directory(
+        {
+            "cards": [_card(gfs_only, gfs=GFS).to_wire()],
+            "gfs_reached": [gfs_only["id"]],
+        }
+    )
+    second = w.fed.cards[-1]["payload"]["card"]
+    assert second["mailbox"]["gfs"] == GFS
+    assert second["rev"] > first["rev"]
+    assert await w.dir.publish_cards() == 0  # nothing new since
+
+
+async def test_a_member_no_longer_gfs_reached_frees_the_mailbox():
+    """The host's next frame with that card drops the flag (the household
+    paired with the host): our mailbox there is no longer needed."""
+    w, _host = _member_world()
+    other = _hh()
+    card = _card(other, gfs=GFS).to_wire()
+    await w.directory({"cards": [card], "gfs_reached": [other["id"]]})
+    assert await w.dir.needed_gfs() == {GFS}
+    await w.directory({"cards": [card], "gfs_reached": [], "snapshot": True})
+    assert await w.dir.needed_gfs() == set()

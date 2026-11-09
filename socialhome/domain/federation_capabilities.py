@@ -1425,9 +1425,12 @@ from __future__ import annotations
 #:   snapshot to a newcomer, deltas after). A member seats a carded
 #:   household lazily, so ANY member's fan-out reaches its mailbox, and a
 #:   GFS-reached household takes a mailbox frame only from a sender whose
-#:   card it holds for that space. A member with no connection to that GFS
-#:   goes through the host as a three-hop ``SPACE_ROUTED`` sealed to the
-#:   target's key-wrap key. **Fallback**: a peer below v_89 gets no card,
+#:   card it holds for that space. The directory flags GFS-reached
+#:   households (``gfs_reached``): a paired or mesh member connected to
+#:   that GFS mints its own ONE mailbox there too, so a GFS-only member
+#:   reaches it with the host offline. A member with no connection to that
+#:   GFS goes through the host as a three-hop ``SPACE_ROUTED`` sealed to
+#:   the target's key-wrap key. **Fallback**: a peer below v_89 gets no card,
 #:   no directory and no mailbox; the host keeps today's instance-addressed
 #:   relay to it. No sync-stream record change. Labelled "Every member
 #:   reaches households that reach a space through a GFS".
