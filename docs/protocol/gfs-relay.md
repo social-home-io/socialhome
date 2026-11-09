@@ -786,13 +786,16 @@ not the claim key's, and a key-wrap key not bound to the identity. A host
 can withhold or drop a card, never forge or alter one.
 
 **Getting the card to the host.** In the sealed redeem (joiner → host) and
-ACK (host → joiner), as `card`; a card there may name a mailbox only at the
-GFS the body came through. After every redeem the joiner also sends
-`SPACE_MEMBER_CARD` once: a first or repeated card doubles as "seated —
-send my directory", so a snapshot that raced the seat is sent again (at
-most every 10 min per household); a newer card is only a delta. A member
-sends its card again only when its `rev` moves; a send queued in the outbox
-for an offline host counts as sent.
+ACK (host → joiner), and in every other redeem, as `card`; a card there may
+name a mailbox only at the GFS the body (or the existing seat) came
+through. Every member also gives the host of each space it holds a writer
+seat in its card once per `rev` (`SPACE_MEMBER_CARD`, right after a redeem
+and from the sweep): it is the household's "seated". The host sends a
+household its first snapshot only after that card arrived (a snapshot sent
+when the seat went live could beat the seat at the receiver and be
+dropped); the same card again re-sends the snapshot at most every 10 min; a
+newer card is only a delta. A send queued in the outbox for an offline host
+counts as sent.
 
 **The member directory.** The host passes the cards on as
 `SPACE_MAILBOX_DIRECTORY {cards, removed, snapshot}` (routing `space_id`,

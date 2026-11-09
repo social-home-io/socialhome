@@ -25,6 +25,7 @@ from socialhome.domain.federation import (
     PairingStatus,
 )
 from socialhome.domain.gfs_mailbox import OwnMailbox
+from socialhome.domain.space import SpaceRole
 from socialhome.federation.gfs_mailbox import derive_mailbox_keys, new_mailbox_root
 from socialhome.federation.member_card import build_card, verify_card
 from socialhome.services import space_member_directory as smd
@@ -75,6 +76,19 @@ def _card(h: dict, *, rev: int = 1, gfs: str | None = GFS, proto: int = 89):
 
 
 class FakeSpaceRepo:
+    async def list_all(self):
+        return [
+            SimpleNamespace(id=sid, owner_instance_id=owner)
+            for sid, owner in self.owner.items()
+        ]
+
+    async def list_members(self, space_id):
+        # Our local people hold a member's (writer) seat.
+        return [
+            SimpleNamespace(user_id=u, role=SpaceRole.MEMBER)
+            for u in self.local.get(space_id, [])
+        ]
+
     def __init__(self) -> None:
         self.owner: dict[str, str] = {}
         self.local: dict[str, list[str]] = {}
@@ -268,6 +282,15 @@ class World:
         self.spaces.local[SPACE] = ["u-local"]
         self.spaces.rows[SPACE] = {self.me["id"]: None, self.host["id"]: None}
 
+    def hello_all(self, space_id: str = SPACE) -> None:
+        """Every writer household already said it is seated (its card
+        reached us) — the host sends a first snapshot only after that."""
+        for iid in self.writers.writers.get(space_id, set()):
+            row = self.spaces.rows.setdefault(space_id, {})
+            doc = orjson.loads(row[iid]) if row.get(iid) else {}
+            doc["hello"] = True
+            row[iid] = orjson.dumps(doc).decode()
+
     def member(self, *households: dict, space_id: str = SPACE) -> None:
         for h in households:
             self.spaces.rows.setdefault(space_id, {}).setdefault(h["id"], None)
@@ -309,6 +332,7 @@ async def test_host_stores_a_card_and_sends_snapshots_then_deltas():
     a, b = _hh(), _hh()
     w.member(a, b)
     w.writers.writers[SPACE] = {a["id"], b["id"]}
+    w.hello_all()
 
     card_a = _card(a, gfs=GFS)
     await w.card_from(a, card_a)
@@ -346,6 +370,7 @@ async def test_a_mailbox_less_card_is_not_a_delta_for_a_mailbox_only_recipient()
     w.member(a, b, c)
     w.spaces.put_card(SPACE, _card(a, gfs=GFS))
     w.writers.writers[SPACE] = {a["id"], b["id"], c["id"]}
+    w.hello_all()
     await w.dir.reconcile(SPACE)
     assert w.spaces.doc(SPACE, b["id"])["snap"] == "mbx"
     w.fed.directories.clear()
@@ -361,6 +386,7 @@ async def test_a_follower_household_never_receives_a_directory():
     a, follower = _hh(), _hh()
     w.member(a, follower)
     w.writers.writers[SPACE] = {a["id"]}  # the follower holds no writer seat
+    w.hello_all()
     await w.card_from(follower, _card(follower, gfs=GFS))
     await w.card_from(a, _card(a, gfs=GFS))
     await w.dir.reconcile(SPACE)
@@ -375,6 +401,7 @@ async def test_a_recipient_below_v89_is_skipped():
     a, old = _hh(), _hh()
     w.member(a, old)
     w.writers.writers[SPACE] = {a["id"], old["id"]}
+    w.hello_all()
     w.fed.unsupported.add(old["id"])
     await w.card_from(a, _card(a, gfs=GFS))
     assert w.fed.to(old["id"]) == []
@@ -417,6 +444,7 @@ async def test_reconcile_sends_nothing_while_no_card_has_a_mailbox():
     a, b = _hh(), _hh()
     w.member(a, b)
     w.writers.writers[SPACE] = {a["id"], b["id"]}
+    w.hello_all()
     card_a = _card(a, gfs=None)
     await w.card_from(a, card_a)
     await w.dir.reconcile(SPACE)
@@ -442,6 +470,7 @@ async def test_snapshot_is_bounded_and_carries_mailbox_cards_first(monkeypatch):
     for h, gfs in ((r, GFS), (m1, GFS), (m2, GFS), (n1, None), (n2, None)):
         w.spaces.put_card(SPACE, _card(h, gfs=gfs))
     w.writers.writers[SPACE] = {h["id"] for h in (r, m1, m2, n1, n2)}
+    w.hello_all()
     await w.dir.reconcile(SPACE)
     (snap,) = w.fed.to(r["id"])
     assert snap["payload"]["snapshot"] is True
@@ -455,11 +484,13 @@ async def test_a_household_that_stops_being_a_writer_is_removed_once():
     w.spaces.put_card(SPACE, _card(a, gfs=GFS))
     w.spaces.put_card(SPACE, _card(b, gfs=GFS))
     w.writers.writers[SPACE] = {a["id"], b["id"]}
+    w.hello_all()
     await w.dir.reconcile(SPACE)
     assert b["id"] in _ids(w.fed.to(a["id"])[0])
     w.fed.directories.clear()
 
     w.writers.writers[SPACE] = {a["id"]}
+    w.hello_all()
     await w.dir.reconcile(SPACE)
     (delta,) = w.fed.to(a["id"])
     assert delta["payload"]["removed"] == [b["id"]]
@@ -487,6 +518,7 @@ async def test_our_own_card_change_goes_out_as_a_delta():
         proto_version=89,
     )
     w.writers.writers[SPACE] = {a["id"]}
+    w.hello_all()
     await w.dir.reconcile(SPACE)
     (snap,) = w.fed.to(a["id"])
     (own,) = snap["payload"]["cards"]
@@ -850,6 +882,7 @@ async def test_a_newer_card_is_a_delta_and_a_repeated_one_resnapshots_rarely():
     a, b = _hh(), _hh()
     w.member(a, b)
     w.writers.writers[SPACE] = {a["id"], b["id"]}
+    w.hello_all()
     await w.card_from(a, _card(a, gfs=GFS, rev=1))
     w.fed.directories.clear()
     # A rotation (newer rev): a delta to B, no new snapshot for A.
@@ -879,6 +912,7 @@ async def test_a_big_snapshot_goes_in_parts_that_fit_the_relay(monkeypatch):
     for h in others:
         w.spaces.put_card(SPACE, _card(h, gfs=GFS))
     w.writers.writers[SPACE] = {newcomer["id"], *(h["id"] for h in others)}
+    w.hello_all()
     w.fed.directories.clear()
     await w.card_from(newcomer, _card(newcomer, gfs=GFS))
     parts = w.fed.to(newcomer["id"])
@@ -893,9 +927,40 @@ async def test_a_card_that_lost_its_mailbox_reaches_mailbox_only_recipients():
     a, b = _hh(), _hh()
     w.member(a, b)
     w.writers.writers[SPACE] = {a["id"], b["id"]}
+    w.hello_all()
     await w.card_from(a, _card(a, gfs=GFS, rev=1))
     await w.card_from(b, _card(b, gfs=None, rev=1))  # B gets "mbx" only
     w.fed.directories.clear()
     await w.card_from(a, _card(a, gfs=None, rev=2))  # A's mailbox is gone
     (delta,) = w.fed.to(b["id"])
     assert delta["payload"]["cards"][0]["mailbox"] is None
+
+
+async def test_no_first_snapshot_before_the_household_says_it_is_seated():
+    """Review round 1 (#1336) — the race the demo hit: a snapshot sent when
+    a household's seat goes live can beat the seat at the receiver and be
+    dropped. The host sends a household its first snapshot only once its
+    card ("seated") arrived."""
+    w = World()
+    a, newcomer = _hh(), _hh()
+    w.member(a, newcomer)
+    w.spaces.put_card(SPACE, _card(a, gfs=GFS))
+    w.writers.writers[SPACE] = {a["id"], newcomer["id"]}
+    await w.dir.reconcile(SPACE)
+    assert w.fed.to(newcomer["id"]) == []
+    await w.card_from(newcomer, _card(newcomer, gfs=None))
+    (snap,) = w.fed.to(newcomer["id"])
+    assert snap["payload"]["snapshot"] is True
+
+
+async def test_a_member_gives_its_card_once_to_every_host_it_holds_a_seat_with():
+    """Every member hands its card to the host once per space and ``rev`` —
+    with no GFS member in the space yet too (that is its "seated")."""
+    w, host = _member_world()
+    w.mailboxes.rev = 4
+    assert await w.dir.publish_cards() == 1
+    assert [c["to"] for c in w.fed.cards] == [host["id"]]
+    assert await w.dir.publish_cards() == 0
+    w.spaces.local[SPACE] = []  # no seat of ours any more
+    w.mailboxes.rev = 5
+    assert await w.dir.publish_cards() == 0

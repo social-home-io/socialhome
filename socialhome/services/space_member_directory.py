@@ -63,7 +63,7 @@ from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from .gfs_envelope_sender import normalize_gfs_base
 from .gfs_mailbox_service import GfsMailboxService
-from .space_writer_households import SpaceWriterHouseholds
+from .space_writer_households import SpaceWriterHouseholds, holds_member_seat
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -410,20 +410,20 @@ class SpaceMemberDirectory:
     # ── Member: publish our card, take the directory ─────────────────────
 
     async def publish_cards(self) -> int:
-        """Give our current card to the host of every space we are in that
-        has a GFS-reached member (we hold a card of it) and whose host does
-        not have this ``rev`` yet. Returns how many went out."""
+        """Give our current card to the host of every space we are in whose
+        host (≥ v_89) does not have this ``rev`` yet — once per space and
+        ``rev``: it is also how the host learns we are seated (its first
+        snapshot answers it). Returns how many went out."""
         if self._federation is None:
             return 0
         sent = 0
-        spaces = {space for (space, _i) in await self._rows()}
-        for space_id in sorted(spaces):
-            host = await self.host_of(space_id)
-            if host is None or host == self._instance_id:
+        for space in sorted(await self._spaces.list_all(), key=lambda sp: sp.id):
+            space_id = space.id
+            host = space.owner_instance_id
+            if not host or host == self._instance_id:
                 continue
-            if not await self._space_cards(space_id) or not await self._in_use(
-                space_id
-            ):
+            # A writer seat of ours only: followers get no directory.
+            if not await holds_member_seat(self._spaces, space_id):
                 continue
             if await self._publish_to_host(space_id, host):
                 sent += 1
@@ -568,13 +568,18 @@ class SpaceMemberDirectory:
         # (a rotation) is only a delta.
         key = (space_id, sender)
         now = self._clock()
+        doc = await self._doc(space_id, sender)
+        dirty = doc.get("hello") is not True
+        # Its first card is its "seated": only now does it get a snapshot
+        # (one sent earlier could beat its seat and be dropped).
+        doc["hello"] = True
         if (old is None or not changed) and (
             now - self._hello_at.get(key, float("-inf")) >= HELLO_RESNAPSHOT_S
         ):
             self._hello_at[key] = now
-            doc = await self._doc(space_id, sender)
-            if doc.pop("snap", None) is not None:
-                await self._put(space_id, sender, doc)
+            dirty = doc.pop("snap", None) is not None or dirty
+        if dirty:
+            await self._put(space_id, sender, doc)
         await self.reconcile(space_id, changed=[card] if changed else [])
 
     async def _recipients(self, space_id: str) -> list[str]:
@@ -637,6 +642,10 @@ class SpaceMemberDirectory:
             doc = await self._doc(space_id, to)
             mine = cards.get(to)
             want = SNAP_ALL if mine is not None and mine.mailbox else SNAP_MAILBOXES
+            if doc.get("snap") not in (SNAP_ALL, SNAP_MAILBOXES) and not doc.get(
+                "hello"
+            ):
+                continue  # not seated yet as far as we know: its card first
             if doc.get("snap") not in (SNAP_ALL, SNAP_MAILBOXES) or (
                 doc.get("snap") == SNAP_MAILBOXES and want == SNAP_ALL
             ):
