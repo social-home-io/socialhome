@@ -30,7 +30,7 @@ dependencies = [
     # ``cannot identify image file`` and the upload 422s.
     "pillow-heif==1.8.1",
     "av==19.0.2",
-    "python-multipart==0.0.32",
+    "python-multipart==0.0.33",
     "jinja2==3.1.6",
     "icalendar==7.3.0",
     # WebRTC DataChannel transport (§4.2.3, §24.12). Primary SH-to-SH
@@ -68,7 +68,7 @@ dependencies = [
     # (``socialhome/dashboard/advertiser.py``). LGPL-2.1-or-later, used as
     # an unmodified, dynamically imported library — compatible with
     # MPL-2.0. Pure ``asyncio`` API; cp314 wheels on every arch we ship.
-    "zeroconf==0.151.5",
+    "zeroconf==0.153.0",
     # Interface scan for the addresses the dashboard announces (also a
     # zeroconf dependency; declared because we import it directly). MIT.
     "ifaddr==0.2.0",
