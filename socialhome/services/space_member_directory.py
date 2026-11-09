@@ -398,11 +398,15 @@ class SpaceMemberDirectory:
         doc["sent"] = rev
         await self._put(space_id, host_id, doc)
 
-    async def seated(self, space_id: str, host_id: str) -> None:
-        """We were just seated in *space_id* by its host (the sealed ACK):
-        give the host our card now — it doubles as "seated, send my
-        directory", so a snapshot that raced the seat is sent again."""
+    async def seated(self, space_id: str, host_id: str, *, host_proto: int) -> None:
+        """We were just seated in *space_id* by its host: give the host our
+        card now — it is our "seated", which its first snapshot answers.
+        *host_proto* is the host's version from its ACK, kept on its row (a
+        mesh-only host has no row we could read it from)."""
         try:
+            doc = await self._doc(space_id, host_id)
+            doc["host_proto"] = host_proto
+            await self._put(space_id, host_id, doc)
             await self._publish_to_host(space_id, host_id)
         except Exception:
             log.warning("directory: announcing our seat failed", exc_info=True)
@@ -438,9 +442,15 @@ class SpaceMemberDirectory:
         doc = await self._doc(space_id, host)
         if doc.get("sent") == self._card_rev():
             return False
-        if not host_is_v89 and not await self._federation.space_member_supports(
-            host, min_version=FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH
-        ):
+        v89 = FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH
+        known = doc.get("host_proto")
+        if host_is_v89:
+            if not (isinstance(known, int) and known >= v89):
+                doc["host_proto"] = v89
+                await self._put(space_id, host, doc)
+        elif not (
+            isinstance(known, int) and known >= v89
+        ) and not await self._federation.space_member_supports(host, min_version=v89):
             return False
         card = await self.own_card(space_id)
         try:

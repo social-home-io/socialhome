@@ -1145,7 +1145,14 @@ class SpaceInviteTokenRedeemCoordinator:
             # v_89 — every redeem path: our card to the host, which doubles
             # as "seated, send my directory" (a snapshot that raced the
             # seat is sent again). Skipped for a host below v_89.
-            await self._directory.seated(space_id, issuer_instance_id)
+            await self._directory.seated(
+                space_id,
+                issuer_instance_id,
+                host_proto=max(
+                    bootstrap.proto_version if bootstrap is not None else 1,
+                    _int_or_one(result.get("proto_version")),
+                ),
+            )
         out: dict = {
             "space_id": space_id,
             "role": role_str,
@@ -1239,7 +1246,9 @@ class SpaceInviteTokenRedeemCoordinator:
                 )
                 return
             await self._add_writer_cert(ack_payload, event.from_instance)
-            ack_payload = {"redeem_nonce": nonce, **ack_payload}
+            # v_89 — our version: a mesh-only redeemer holds no row it could
+            # read it from (it gives us its card only at v_89).
+            ack_payload = {"redeem_nonce": nonce, "proto_version": OURS, **ack_payload}
             try:
                 if routed_route_id is not None and self._routed_handler is not None:
                     await self._routed_handler.send_routed_reply(
@@ -1975,6 +1984,8 @@ class SpaceInviteTokenRedeemCoordinator:
                 # space on the redeemer's side (the seating block keyed on
                 # result["space_meta"] which was always absent).
                 "space_meta": p.get("space_meta"),
+                # v_89 — the issuer's version (a mesh-only host has no row).
+                "proto_version": p.get("proto_version"),
             }
         )
 

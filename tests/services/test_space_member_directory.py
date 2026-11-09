@@ -964,3 +964,22 @@ async def test_a_member_gives_its_card_once_to_every_host_it_holds_a_seat_with()
     w.spaces.local[SPACE] = []  # no seat of ours any more
     w.mailboxes.rev = 5
     assert await w.dir.publish_cards() == 0
+
+
+async def test_a_mesh_only_host_gets_our_card_on_its_acks_version():
+    """Found by the demo: a host we reach only over the mesh has no row we
+    could read its version from, so our "seated" card never went out and no
+    snapshot ever came. Its ACK names its version; we keep it on its row and
+    the sweep uses it later too."""
+    w, host = _member_world()
+    w.fed.unsupported.add(host["id"])  # no row: version unknown
+    w.mailboxes.rev = 2
+    await w.dir.seated(SPACE, host["id"], host_proto=89)
+    assert [c["to"] for c in w.fed.cards] == [host["id"]]
+    w.mailboxes.rev = 3
+    assert await w.dir.publish_cards() == 1
+    # A host below v_89 is never sent one.
+    w2, host2 = _member_world()
+    w2.fed.unsupported.add(host2["id"])
+    await w2.dir.seated(SPACE, host2["id"], host_proto=88)
+    assert w2.fed.cards == []
