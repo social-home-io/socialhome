@@ -29,6 +29,7 @@ from socialhome.services.space_mailbox_service import (
     ANNOUNCES_PER_DAY,
     ANON_QUIET_S,
     CLAIM_JITTER_S,
+    FAILED_ANNOUNCES_PER_DAY,
     LOST_ROTATE_AFTER,
     RECOVERY_REGISTERS_PER_DAY,
     REGISTER_NO_TICKET,
@@ -919,7 +920,7 @@ async def test_updates_carry_a_rising_seq_kept_on_the_row():
             return SimpleNamespace(ok=True)
 
     spaces = _RowSpaces({("s1", "host"): _own_row(seq=4)})
-    svc = _bare_service(spaces)
+    svc = _bare_service(spaces, wall_clock=lambda: 0.001)  # 1 ms: the counter leads
     svc.attach_to(_Fed(), None)  # type: ignore[arg-type]
     await svc.announce_to("s1", "host", None)
     await svc.announce_to("s1", "host", None)
@@ -940,3 +941,95 @@ async def test_an_update_not_newer_than_the_last_seen_is_dropped():
     assert stored["peer"] is None and stored["peer_seq"] == 7
     await svc._on_mailbox_updated(_update(iid, entry.to_wire(), seq=8))
     assert orjson.loads(spaces.rows[("s1", iid)])["peer"] == entry.to_wire()
+
+
+async def test_a_fresh_counterpart_after_a_re_seat_is_not_dropped():
+    """Round 11: the seat row (and its ``peer_seq``) survives a leave and
+    re-join; the counterpart starts over. Its numbers are time-based, so its
+    first update is still newer than anything it sent before."""
+    payloads: list = []
+
+    class _Registry:
+        def register(self, *a):
+            return None
+
+    class _Fed:
+        _event_registry = _Registry()
+
+        async def send_event_unqueued(self, **kw):
+            payloads.append(kw["payload"])
+            return SimpleNamespace(ok=True)
+
+    # The counterpart, fresh (no seq on its row), a while later.
+    sender = _bare_service(
+        _RowSpaces({("s1", "host"): _own_row()}), wall_clock=lambda: 2_000_000.0
+    )
+    sender.attach_to(_Fed(), None)  # type: ignore[arg-type]
+    await sender.announce_to("s1", "host", None)
+    [payload] = payloads
+    # We still hold its old, high number from before it re-joined.
+    iid, entry, row = _joiner()
+    spaces = _RowSpaces(
+        {("s1", iid): _own_row(peer_seq=1_000_000_000)}, seated={("s1", iid)}
+    )
+    svc = _bare_service(spaces)
+    svc._federation_repo = _Fed2({iid: row})  # type: ignore[assignment]
+    await svc._on_mailbox_updated(_update(iid, entry.to_wire(), seq=payload["seq"]))
+    assert orjson.loads(spaces.rows[("s1", iid)])["peer"] == entry.to_wire()
+
+
+class _Fed2:
+    def __init__(self, rows: dict) -> None:
+        self.rows = rows
+
+    async def get_instance(self, instance_id):
+        return self.rows.get(instance_id)
+
+
+async def test_two_entries_racing_cannot_take_the_slot_kept_for_a_null():
+    """Round 11: the slot is reserved before the send's await, so two
+    concurrent entries with two slots left cannot both go."""
+    spaces = _RowSpaces({("s1", "host"): _own_row()})
+    svc = _bare_service(spaces)
+    for _ in range(ANNOUNCES_PER_DAY - 2):
+        svc._spend("s1", "host", 1, ANNOUNCES_PER_DAY)
+    _iid, entry, _r = _joiner()
+    gate = asyncio.Event()
+    sent: list = []
+
+    async def _announce(space_id, instance_id, e, mailbox_only=False, seq=None):
+        await gate.wait()
+        sent.append(e)
+
+    svc.attach_announcer(_announce)
+    racers = [
+        asyncio.create_task(svc.announce_counted("s1", "host", entry)) for _ in range(2)
+    ]
+    await asyncio.sleep(0)
+    gate.set()
+    await asyncio.gather(*racers)
+    assert len(sent) == 1
+    assert await svc.announce_counted("s1", "host", None) is True
+
+
+async def test_failed_announces_are_capped_too_keeping_one_for_a_null():
+    """Round 11: failed sends use no slot, but every sweep would retry them
+    (instance-addressed ones name both households) — failed attempts are
+    capped per pair and day, again with the last one kept for a null."""
+    spaces = _RowSpaces({("s1", "host"): _own_row()})
+    svc = _bare_service(spaces)
+    _iid, entry, _r = _joiner()
+    calls: list = []
+
+    async def _announce(space_id, instance_id, e, mailbox_only=False, seq=None):
+        calls.append(e)
+        return False
+
+    svc.attach_announcer(_announce)
+    for _ in range(50):
+        await svc.announce_counted("s1", "host", entry)
+    assert len(calls) == FAILED_ANNOUNCES_PER_DAY - 1
+    await svc.announce_counted("s1", "host", None)
+    assert len(calls) == FAILED_ANNOUNCES_PER_DAY and calls[-1] is None
+    await svc.announce_counted("s1", "host", None)
+    assert len(calls) == FAILED_ANNOUNCES_PER_DAY

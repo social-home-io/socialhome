@@ -136,10 +136,13 @@ RELEASE_DELAY_S: tuple[float, float] = (120.0, 900.0)
 #: ticket) before it is replaced by a fresh generation.
 LOST_ROTATE_AFTER: int = 3
 #: Per member pair and day, at most: this many ``SPACE_MAILBOX_UPDATED``
-#: announces, re-registrations of a lost mailbox, and rotations. A GFS that
-#: answers every claim with 4401 can then cost at most 4 tickets + 1 per
-#: day per pair and 6 small envelopes to one counterpart — never a storm.
+#: that went out, failed attempts at one (the last of each kept for a
+#: ``None``), re-registrations of a lost mailbox that used a ticket, and
+#: rotations. A GFS that answers every claim with 4401 can then cost at
+#: most 4 tickets + 1 per day per pair and 6 + 12 small envelopes to one
+#: counterpart — never a storm.
 ANNOUNCES_PER_DAY: int = 6
+FAILED_ANNOUNCES_PER_DAY: int = 2 * ANNOUNCES_PER_DAY
 RECOVERY_REGISTERS_PER_DAY: int = 4
 ROTATIONS_PER_DAY: int = 1
 #: A seated GFS-only pair with no mailbox of ours (no ticket, a refused or
@@ -731,18 +734,23 @@ class SpaceMailboxService:
         return max(0, limit - row[what])
 
     def _spend(self, space_id: str, peer: str, what: int, limit: int) -> bool:
-        """Count one *what* (1 announce, 2 recovery register, 3 rotation,
-        4 re-mint of a missing mailbox)
-        for the pair today; ``False`` once *limit* is reached."""
+        """Count one *what* (1 announce sent, 2 recovery register, 3
+        rotation, 4 re-mint of a missing mailbox, 5 failed announce) for the
+        pair today; ``False`` once *limit* is reached."""
         day = int(self._clock() // _DAY_S)
         row = self._daily.get((space_id, peer))
         if row is None or row[0] != day:
-            row = [day, 0, 0, 0, 0]
+            row = [day, 0, 0, 0, 0, 0]
             self._daily[(space_id, peer)] = row
         if row[what] >= limit:
             return False
         row[what] += 1
         return True
+
+    def _refund(self, space_id: str, peer: str, what: int) -> None:
+        row = self._daily.get((space_id, peer))
+        if row is not None and row[0] == int(self._clock() // _DAY_S) and row[what]:
+            row[what] -= 1
 
     async def mint_within(
         self,
@@ -1027,19 +1035,27 @@ class SpaceMailboxService:
         *,
         mailbox_only: bool = False,
     ) -> bool:
-        """:meth:`announce_to` within :data:`ANNOUNCES_PER_DAY` for the pair:
-        only an update that went out uses a slot, and the last slot is kept
-        for a ``None`` (lost) — an entry needs two left. Returns whether it
-        went out."""
+        """:meth:`announce_to` within the pair's daily caps: a slot of
+        :data:`ANNOUNCES_PER_DAY` is reserved before the send and given back
+        if it did not go out — which then uses one of
+        :data:`FAILED_ANNOUNCES_PER_DAY`. In both, the last one is kept for a
+        ``None`` (lost): an entry needs two left. Returns whether it went
+        out."""
         need = 1 if entry is None else 2
-        if self._remaining(space_id, instance_id, 1, ANNOUNCES_PER_DAY) < need:
+        if (
+            self._remaining(space_id, instance_id, 1, ANNOUNCES_PER_DAY) < need
+            or self._remaining(space_id, instance_id, 5, FAILED_ANNOUNCES_PER_DAY)
+            < need
+        ):
             log.info("gfs.mailbox: today's mailbox updates for a pair are used up")
             return False
+        self._spend(space_id, instance_id, 1, ANNOUNCES_PER_DAY)  # reserved
         sent = await self.announce_to(
             space_id, instance_id, entry, mailbox_only=mailbox_only
         )
-        if sent:
-            self._spend(space_id, instance_id, 1, ANNOUNCES_PER_DAY)
+        if not sent:
+            self._refund(space_id, instance_id, 1)
+            self._spend(space_id, instance_id, 5, FAILED_ANNOUNCES_PER_DAY)
         return sent
 
     async def send_due_announces(self) -> int:
@@ -1541,14 +1557,18 @@ class SpaceMailboxService:
         )
 
     async def _next_seq(self, space_id: str, instance_id: str) -> int | None:
-        """The pair's next update number, persisted on its row first (so a
-        restart never reuses one); ``None`` without a row."""
+        """The pair's next update number, persisted on its row first: the
+        wall clock in ms (at least one past the last), so it keeps rising
+        across a re-seat, a reset row or a restored backup without any reset
+        logic at the receiver; ``None`` without a row."""
         async with self._lock:
             row = await self._row(space_id, instance_id)
             if row is None:
                 return None
             last = row.get("seq")
-            seq = (last if _is_int(last) else 0) + 1
+            seq = max(
+                (last if _is_int(last) else 0) + 1, int(self._wall_clock() * 1000)
+            )
             await self._write_row(
                 space_id,
                 instance_id,
