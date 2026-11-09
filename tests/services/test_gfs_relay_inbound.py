@@ -34,6 +34,7 @@ from socialhome.federation.invite_token_redeem import (
 )
 from socialhome.federation.keywrap_seal import seal_to_keywrap
 from socialhome.rate_limiter import RateLimiter
+from socialhome.services import gfs_relay_inbound as gri
 from socialhome.services.gfs_relay_inbound import RELAY_DELIVERED_VIA, GfsRelayInbound
 
 ENVELOPE = {
@@ -594,3 +595,76 @@ async def test_mailbox_media_frame_opens_under_the_mailbox_id(keys):
     # Addressed to another mailbox: refused.
     with pytest.raises(ValueError):
         await inbound.handle_mailbox_frame(frame, keys=_mailbox_keys("sp-2"))
+
+
+def _sealed_from(sender: str, mkeys, space: str = "sp-1") -> dict:
+    return {
+        "type": "envelope",
+        "sealed": seal_relay_envelope(
+            envelope_dict={**ENVELOPE, "from_instance": sender, "space_id": space},
+            peer_keywrap_pub=mkeys.kem_public,
+        ),
+    }
+
+
+async def test_one_senders_flood_never_blocks_anothers_frames(keys, monkeypatch):
+    """The host's mailbox is shared by every GFS-only member: its budget is
+    charged per VERIFIED sender, after the pipeline — one member (or an
+    ex-member replaying its key) exhausting its own share never drops a
+    frame of another."""
+    monkeypatch.setattr(gri, "MAILBOX_SENDER_INBOUND_LIMIT", 3)
+    mkeys = _mailbox_keys()
+    federation = _MailboxFederation()
+    inbound = _inbound(keys, federation=federation, limiter=RateLimiter())
+    for _ in range(3):
+        await inbound.handle_mailbox_frame(_sealed_from("x" * 32, mkeys), keys=mkeys)
+    with pytest.raises(ValueError, match="sender"):
+        await inbound.handle_mailbox_frame(_sealed_from("x" * 32, mkeys), keys=mkeys)
+    await inbound.handle_mailbox_frame(_sealed_from("y" * 32, mkeys), keys=mkeys)
+    assert [c[0] for c in federation.calls] == ["x" * 32] * 3 + ["y" * 32]
+
+
+async def test_frames_that_fail_verification_charge_no_senders_budget(
+    keys, monkeypatch
+):
+    """Claiming someone's id costs that someone nothing: only a frame the
+    pipeline accepted is charged to its sender."""
+    monkeypatch.setattr(gri, "MAILBOX_SENDER_INBOUND_LIMIT", 2)
+    mkeys = _mailbox_keys()
+
+    class _Refusing(_MailboxFederation):
+        async def handle_inbound_rtc(self, *a, **kw):
+            raise ValueError("bad signature")
+
+    limiter = RateLimiter()
+    refusing = _inbound(keys, federation=_Refusing(), limiter=limiter)
+    for _ in range(5):
+        with pytest.raises(ValueError):
+            await refusing.handle_mailbox_frame(
+                _sealed_from("y" * 32, mkeys), keys=mkeys
+            )
+    federation = _MailboxFederation()
+    inbound = _inbound(keys, federation=federation, limiter=limiter)
+    await inbound.handle_mailbox_frame(_sealed_from("y" * 32, mkeys), keys=mkeys)
+    assert len(federation.calls) == 1
+
+
+async def test_unopenable_junk_fills_only_its_mailboxs_junk_bucket(keys, monkeypatch):
+    """Frames that do not even open are charged to a cheap per-mailbox junk
+    bucket, checked before any open; another mailbox is unaffected."""
+    monkeypatch.setattr(gri, "MAILBOX_JUNK_LIMIT", 2)
+    mkeys = _mailbox_keys()
+    inbound = _inbound(keys, federation=_MailboxFederation(), limiter=RateLimiter())
+    junk = {
+        "type": "envelope",
+        "sealed": {"kem_suite": "x25519", "eph_pk": "AA", "ciphertext": "AA"},
+    }
+    for _ in range(2):
+        with pytest.raises(ValueError):
+            await inbound.handle_mailbox_frame(junk, keys=mkeys)
+    with pytest.raises(ValueError, match="junk"):
+        await inbound.handle_mailbox_frame(_sealed_from("y" * 32, mkeys), keys=mkeys)
+    other = _mailbox_keys("sp-2")
+    await inbound.handle_mailbox_frame(
+        _sealed_from("y" * 32, other, "sp-2"), keys=other
+    )

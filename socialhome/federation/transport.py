@@ -1604,6 +1604,15 @@ TRANSPORT_ERROR_NO_ROUTE = "no_route"
 TRANSPORT_ERROR_GFS_RELAY_NOT_ENABLED = "gfs_relay_not_enabled"
 
 
+def _space_event_without_space(envelope_dict: dict) -> bool:
+    """A ``SPACE_*`` envelope with no routing ``space_id`` (a redeem reply,
+    a teardown): it never rides a mailbox — the receiver refuses one there —
+    so it goes instance-addressed (v_88)."""
+    return not envelope_dict.get("space_id") and str(
+        envelope_dict.get("event_type") or ""
+    ).startswith("space_")
+
+
 def https_failure_is_relayable(status: int | None) -> bool:
     """Whether an HTTPS-inbox failure may fall back to the relay.
 
@@ -2069,8 +2078,12 @@ class FederationTransport:
                     via="gfs_relay",
                     error="gfs_relay_unavailable",
                 )
-            target = await self._mailbox_target(
-                instance, envelope_dict.get("space_id"), media=False
+            target = (
+                None
+                if _space_event_without_space(envelope_dict)
+                else await self._mailbox_target(
+                    instance, envelope_dict.get("space_id"), media=False
+                )
             )
             if target is not None:
                 # v_88 — addressed to the household's mailbox for this space:

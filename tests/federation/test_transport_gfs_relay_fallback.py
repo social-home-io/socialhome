@@ -9,7 +9,9 @@ byte for byte — those cases live in ``test_federation_transport.py``.
 
 from __future__ import annotations
 
+import ast
 import dataclasses
+import pathlib
 
 import pytest
 
@@ -649,9 +651,34 @@ async def test_no_entry_or_a_gfs_without_mailboxes_keeps_todays_relay():
 async def test_a_space_less_envelope_asks_for_any_shared_space():
     relay, lookups = _MailboxRelay(), []
     t = _mailbox_transport(relay, lookups, targets={None: _TARGET})
-    await t.send(instance=_seat(), envelope_dict={"msg_id": "m", "space_id": None})
+    await t.send(
+        instance=_seat(),
+        envelope_dict={
+            "msg_id": "m",
+            "space_id": None,
+            "event_type": "instance_capabilities_updated",
+        },
+    )
     assert lookups == [("peer-1", None)]
     assert len(relay.mailbox_calls) == 1
+
+
+async def test_a_space_less_space_event_never_rides_a_mailbox():
+    """A ``SPACE_*`` envelope without its routing ``space_id`` (a redeem
+    reply, a teardown) goes instance-addressed: a mailbox takes its own
+    space's events only."""
+    relay, lookups = _MailboxRelay(), []
+    t = _mailbox_transport(relay, lookups, targets={None: _TARGET})
+    await t.send(
+        instance=_seat(),
+        envelope_dict={
+            "msg_id": "m",
+            "space_id": None,
+            "event_type": "space_invite_token_redeem_ack",
+        },
+    )
+    assert lookups == [] and relay.mailbox_calls == []
+    assert len(relay.calls) == 1
 
 
 async def test_a_paired_peer_never_asks_for_a_mailbox():
@@ -692,3 +719,63 @@ async def test_a_failing_mailbox_lookup_falls_back_and_never_raises():
         instance=_seat(), envelope_dict={"msg_id": "m", "space_id": "sp-1"}
     )
     assert result.ok and len(relay.calls) == 1
+
+
+#: ``send_event`` sites that send a ``SPACE_*`` event WITHOUT its routing
+#: ``space_id`` on purpose (v_88): such an envelope never rides a mailbox
+#: (it goes instance-addressed, and a mailbox refuses it). Mesh routing and
+#: discovery are not space content; the redeem legs run before the joiner
+#: holds the space (a routing ``space_id`` would hit its space gates); the
+#: teardown has no space left. A new space event belongs on its space's
+#: mailbox: pass ``space_id=`` — or add it here with the reason.
+_SPACE_LESS_SPACE_SENDS: dict[str, set[str]] = {
+    "socialhome/federation/invite_token_redeem.py": {
+        "SPACE_INVITE_TOKEN_REDEEM",
+        "SPACE_INVITE_TOKEN_REDEEM_ACK",
+        "SPACE_INVITE_TOKEN_REDEEM_DENY",
+    },
+    "socialhome/federation/route_discovery.py": {
+        "SPACE_FIND_ROUTE",
+        "SPACE_ROUTE_FOUND",
+    },
+    "socialhome/federation/routed_envelope.py": {
+        "SPACE_ROUTED",
+        "SPACE_ROUTE_STALE",
+    },
+    "socialhome/services/peer_directory_service.py": {"SPACE_DIRECTORY_SYNC"},
+    "socialhome/services/report_service.py": {"SPACE_REPORT"},
+    "socialhome/services/space_service.py": {"SPACE_SESSION_CLEANUP"},
+}
+
+
+def test_every_space_event_send_names_its_space_or_is_listed():
+    root = pathlib.Path(__file__).resolve().parents[2]
+    found: dict[str, set[str]] = {}
+    for path in sorted((root / "socialhome").rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else ""
+            if name != "send_event":
+                continue
+            kw = {k.arg: k.value for k in node.keywords}
+            et = kw.get("event_type")
+            if et is None or "space_id" in kw:
+                continue
+            src = ast.unparse(et)
+            if "FederationEventType.SPACE_" not in src:
+                continue
+            event = src.rsplit(".", 1)[-1].strip("()")
+            rel = str(path.relative_to(root))
+            found.setdefault(rel, set()).add(event)
+    unexpected = {
+        rel: events - _SPACE_LESS_SPACE_SENDS.get(rel, set())
+        for rel, events in found.items()
+        if events - _SPACE_LESS_SPACE_SENDS.get(rel, set())
+    }
+    assert unexpected == {}, (
+        "a SPACE_* send without space_id= — pass the routing space_id so a "
+        f"GFS-only member gets it on that space's mailbox: {unexpected}"
+    )

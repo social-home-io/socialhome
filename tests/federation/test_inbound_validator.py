@@ -781,8 +781,10 @@ async def test_relay_gate_runs_after_the_lookup_and_before_any_crypto():
 # ─── v_88: per-space mailbox gates ───────────────────────────────────────
 
 
-def _mailbox_ctx(space_id, *, mailbox_space="sp-1"):
+def _mailbox_ctx(space_id, *, mailbox_space="sp-1", event_type=None):
     env = _minimal_envelope()
+    if event_type is not None:
+        env["event_type"] = event_type
     env["space_id"] = space_id
     return InboundContext(
         envelope=env,
@@ -791,21 +793,23 @@ def _mailbox_ctx(space_id, *, mailbox_space="sp-1"):
     )
 
 
-async def test_a_space_less_mailbox_frame_may_name_another_space_in_its_payload():
-    """Regression (demo): the redeem ACK for a second space of the same pair
-    is space-less on the wire and rides the pair's existing mailbox; its
-    payload names the new space. Only the routing field is checked."""
+async def test_a_space_less_space_event_is_refused_on_a_mailbox():
+    """A ``SPACE_*`` event must name its space to ride a mailbox (senders
+    send a space-less one instance-addressed), so a mailbox frame can never
+    carry space traffic of a space it was not given for."""
     step = make_check_mailbox_space()
-    ctx = _mailbox_ctx(None)
-    ctx.event = SimpleNamespace(payload={"space_id": "sp-2"})
-    await step(ctx)
+    for space_id in (None, ""):
+        with pytest.raises(ValueError, match="space"):
+            await step(_mailbox_ctx(space_id))
+    with pytest.raises(ValueError):
+        await step(_mailbox_ctx(None, event_type="space_invite_token_redeem_ack"))
 
 
-async def test_mailbox_frame_of_its_own_space_or_space_less_passes():
+async def test_mailbox_frame_of_its_own_space_or_a_space_less_non_space_event_passes():
     step = make_check_mailbox_space()
     await step(_mailbox_ctx("sp-1"))
-    await step(_mailbox_ctx(None))
-    await step(_mailbox_ctx(""))
+    await step(_mailbox_ctx(None, event_type="instance_capabilities_updated"))
+    await step(_mailbox_ctx("", event_type="instance_capabilities_updated"))
 
 
 async def test_mailbox_frame_of_another_space_is_refused_without_naming_it(caplog):

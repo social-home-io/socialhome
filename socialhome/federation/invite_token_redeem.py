@@ -43,6 +43,7 @@ import logging
 import secrets
 import uuid
 import weakref
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -486,15 +487,24 @@ class SpaceInviteTokenRedeemCoordinator:
         self._mailboxes = mailboxes
 
     async def _mint_mailbox(
-        self, space_id: str, gfs_url: str, *, timeout: float
+        self,
+        space_id: str,
+        gfs_url: str,
+        *,
+        timeout: float,
+        on_late: Callable[[tuple[SpaceMailboxEntry, OwnMailbox]], Awaitable[None]]
+        | None = None,
     ) -> tuple[SpaceMailboxEntry, OwnMailbox] | None:
         """Our mailbox for *space_id* at *gfs_url* (v_88), or ``None`` —
-        never raises, and gives up after *timeout* seconds: a seat without a
-        mailbox keeps today's relay."""
+        never raises, and stops waiting after *timeout* seconds: a seat
+        without a mailbox keeps today's relay. A mint that finishes later
+        goes to *on_late*."""
         if self._mailboxes is None or not space_id or not gfs_url:
             return None
         try:
-            return await self._mailboxes.mint_within(space_id, gfs_url, timeout=timeout)
+            return await self._mailboxes.mint_within(
+                space_id, gfs_url, timeout=timeout, on_late=on_late
+            )
         except Exception:
             log.warning("invite bootstrap: minting a mailbox failed", exc_info=True)
             return None
@@ -2323,8 +2333,22 @@ class SpaceInviteTokenRedeemCoordinator:
         if peer_entry is not None:
             # Bounded well inside the joiner's redeem timeout: a slow GFS
             # costs this pair its mailbox toward us, never the join.
+            mailboxes = self._mailboxes
+            joiner_entry = peer_entry
+
+            async def _late(result: tuple[SpaceMailboxEntry, OwnMailbox]) -> None:
+                # Past the bound: store it on the (by now committed) seat
+                # and hand the joiner our entry (SPACE_MAILBOX_UPDATED).
+                await self._remember_mailbox(
+                    space_id, redeemer_instance_id, peer=joiner_entry, own=result[1]
+                )
+                if mailboxes is not None:
+                    await mailboxes.announce_to(
+                        space_id, redeemer_instance_id, result[0]
+                    )
+
             minted = await self._mint_mailbox(
-                space_id, gfs_url, timeout=HOST_MINT_TIMEOUT_S
+                space_id, gfs_url, timeout=HOST_MINT_TIMEOUT_S, on_late=_late
             )
             if minted is not None:
                 ack_body["mailbox"] = minted[0].to_wire()

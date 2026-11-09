@@ -11,6 +11,9 @@ import orjson
 from socialhome.domain.space_mailbox import OwnMailbox
 from socialhome.federation.gfs_mailbox import derive_mailbox_keys
 from socialhome.services.space_mailbox_service import (
+    LOST_ROTATE_AFTER,
+    REGISTER_OK,
+    REGISTER_REFUSED,
     RELEASE_DELAY_S,
     SpaceMailboxService,
     _Claim,
@@ -130,4 +133,61 @@ async def test_each_release_waits_its_own_random_delay(monkeypatch):
     assert lo >= 60.0  # minutes, not milliseconds
     assert len(set(delays)) == 3  # independent
     assert svc.open_claims() == 0
+    await svc.stop()
+
+
+async def test_a_mailbox_the_gfs_keeps_refusing_is_replaced(monkeypatch):
+    """Re-registering the same mailbox is refused again and again (not
+    just short of a ticket): after ``LOST_ROTATE_AFTER`` refusals it is
+    replaced by a fresh generation, the seat rows move to it and the
+    counterpart was told to fall back meanwhile."""
+
+    class _Spaces:
+        def __init__(self) -> None:
+            own = {"gen": 7, "gfs_id": "g", "gfs": "http://g"}
+            self.rows = {
+                ("s1", "host"): orjson.dumps({"peer": None, "own": own}).decode()
+            }
+
+        async def list_local_member_user_ids(self, space_id):
+            return ["me"]
+
+        async def list_space_instance_mailboxes(self):
+            return [(s, i, v) for (s, i), v in self.rows.items() if v is not None]
+
+        async def set_space_instance_mailbox(self, s, i, v):
+            self.rows[(s, i)] = v
+
+    class _Repo:
+        async def list_active(self):
+            return []
+
+    spaces = _Spaces()
+    svc = _bare_service(spaces, rng=random.Random(1))
+    svc._gfs_repo = _Repo()  # type: ignore[assignment]
+    svc._root = b"\1" * 32
+    old_keys = derive_mailbox_keys(b"\1" * 32, "g", "s1", 7)
+    claim = _Claim(keys=old_keys, own=OWN)
+    svc._claims[_claim_key("s1", OWN)] = claim
+    announced: list = []
+
+    async def _announce(space_id, instance_id, entry):
+        announced.append(entry)
+
+    svc.attach_announcer(_announce)
+
+    async def _register(self, conn, keys, *, fetch=True):
+        refused = keys.mailbox_id == old_keys.mailbox_id
+        return REGISTER_REFUSED if refused else REGISTER_OK
+
+    monkeypatch.setattr(SpaceMailboxService, "_register", _register)
+    for _ in range(LOST_ROTATE_AFTER - 1):
+        assert await svc._recover(object(), claim) is False  # type: ignore[arg-type]
+    assert announced == [None]  # told once, at the first refusal
+    assert await svc._recover(object(), claim) is True  # type: ignore[arg-type]
+    row = orjson.loads(spaces.rows[("s1", "host")])
+    assert row["own"]["gen"] != 7
+    new_key = ("s1", "g", row["own"]["gen"])
+    assert list(svc._claims) == [new_key]
+    assert svc._claims[new_key].lost  # it announces itself once claimed
     await svc.stop()

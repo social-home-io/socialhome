@@ -553,11 +553,17 @@ def make_check_mailbox_space() -> InboundStep:
     async def check_mailbox_space(ctx: InboundContext) -> None:
         if ctx.transport != TRANSPORT_GFS_MAILBOX:
             return
-        # The routing field only: a space-less envelope (capabilities, a
-        # redeem ACK about another space of the same pair) may ride any of
-        # the pair's mailboxes and name a space in its payload.
         space_id = ctx.envelope.get("space_id")
         if space_id in (None, ""):
+            # Space-less: only non-space traffic (the capabilities exchange)
+            # may ride a mailbox; a ``SPACE_*`` event must name its space
+            # (senders send a space-less one instance-addressed).
+            if str(ctx.envelope.get("event_type") or "").startswith("space_"):
+                log.info(
+                    "inbound: refusing a space-less %r envelope on a mailbox",
+                    ctx.envelope.get("event_type"),
+                )
+                raise ValueError("a space event on a mailbox must name its space")
             return
         if not ctx.mailbox_space_id or space_id != ctx.mailbox_space_id:
             # Type only — never the space ids or the mailbox.

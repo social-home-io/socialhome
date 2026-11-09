@@ -24,7 +24,11 @@ from socialhome.crypto import (
 from socialhome.domain.federation import GfsConnection
 from socialhome.domain.federation_capabilities import OURS
 from socialhome.federation.space_mailbox_entry import verify_entry
-from socialhome.global_server.app_keys import gfs_fed_repo_key, gfs_mailbox_repo_key
+from socialhome.global_server.app_keys import (
+    gfs_fed_repo_key,
+    gfs_mailbox_repo_key,
+    gfs_mailbox_ws_registry_key,
+)
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
@@ -319,6 +323,84 @@ async def test_remember_and_targets_per_space_and_space_less(gfs):
     assert again.open_claims() == 1
     for s in (host, svc, again):
         await s.stop()
+
+
+async def _until(predicate, *, timeout: float = 15.0) -> None:
+    for _ in range(int(timeout / 0.05)):
+        if predicate():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("condition not met in time")
+
+
+async def test_a_mailbox_the_gfs_forgot_is_announced_lost_then_recovered(gfs):
+    """The GFS dropped our mailbox (its 30-day idle sweep while we were
+    away, or data loss): the counterpart is told at once to fall back to the
+    instance-addressed relay (``None``), the SAME mailbox is registered
+    again from the cached tickets (no fetch next to the register), claimed,
+    and the counterpart is told it is back."""
+    server, session, url, conn = gfs
+    spaces = _Spaces()
+    spaces.rows[("space-1", "peer-iid")] = None
+    svc = _service(session, conn, spaces=spaces)
+    announced: list = []
+
+    async def _announce(space_id, instance_id, entry):
+        announced.append((space_id, instance_id, entry))
+
+    svc.attach_announcer(_announce)
+    await _ready(svc, conn)
+    entry, own = await svc.mint("space-1", url)
+    await svc.remember("space-1", "peer-iid", peer=None, own=own)
+    assert await svc.wait_claimed(5)
+    tickets = len(svc._tickets[conn.id].cache)
+    # The GFS forgets it, and the socket drops.
+    assert await server.app[gfs_mailbox_repo_key].unregister(entry.mailbox_id)
+    await server.app[gfs_mailbox_ws_registry_key].close_one(
+        entry.mailbox_id, code=1012, message=b"restart"
+    )
+    await _until(lambda: len(announced) >= 2)
+    assert announced[0] == ("space-1", "peer-iid", None)  # fall back now
+    space, peer, back = announced[1]
+    assert (space, peer) == ("space-1", "peer-iid")
+    assert back is not None and back.mailbox_id == entry.mailbox_id  # same one
+    assert await server.app[gfs_mailbox_repo_key].get(entry.mailbox_id)
+    assert len(svc._tickets[conn.id].cache) == tickets - 1  # from the cache
+    await svc.stop()
+
+
+async def test_a_forgotten_mailbox_with_no_ticket_waits_for_the_refill(gfs):
+    """No cached ticket: nothing is fetched next to the register; the
+    counterpart stays on the instance-addressed relay until a ticket
+    arrives on the schedule, then the mailbox comes back."""
+    server, session, url, conn = gfs
+    spaces = _Spaces()
+    spaces.rows[("space-1", "peer-iid")] = None
+    svc = _service(session, conn, spaces=spaces)
+    announced: list = []
+
+    async def _announce(space_id, instance_id, entry):
+        announced.append(entry)
+
+    svc.attach_announcer(_announce)
+    await _ready(svc, conn)
+    entry, own = await svc.mint("space-1", url)
+    await svc.remember("space-1", "peer-iid", peer=None, own=own)
+    assert await svc.wait_claimed(5)
+    cache = svc._tickets[conn.id].cache
+    cache.clear()
+    assert await server.app[gfs_mailbox_repo_key].unregister(entry.mailbox_id)
+    await server.app[gfs_mailbox_ws_registry_key].close_one(
+        entry.mailbox_id, code=1012, message=b"restart"
+    )
+    await _until(lambda: announced == [None])
+    await asyncio.sleep(0.5)
+    assert announced == [None]  # still lost: no ticket, none fetched
+    assert len(cache) == 0
+    await cache.refill()  # the scheduled refill
+    await _until(lambda: len(announced) == 2, timeout=30)
+    assert announced[1] is not None and announced[1].mailbox_id == entry.mailbox_id
+    await svc.stop()
 
 
 async def test_leaving_releases_and_unregisters_the_mailbox(gfs):

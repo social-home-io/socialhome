@@ -103,6 +103,7 @@ from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.gfs_envelope_sender import GfsEnvelopeSender
 from socialhome.services.gfs_relay_inbound import (
+    MAILBOX_JUNK_LIMIT,
     RELAY_DELIVERED_VIA,
     GfsRelayInbound,
 )
@@ -473,6 +474,7 @@ async def _household(
         await mailbox_service.start()
         coordinator.attach_mailboxes(mailbox_service)
         space_service.attach_space_mailboxes(mailbox_service)
+        mailbox_service.attach_to(federation, federation_repo)
         fed_transport._mailbox_targets = mailbox_service.target_for
 
     user_id = f"{name}-user-id"
@@ -2118,26 +2120,23 @@ async def test_an_entry_naming_another_gfs_than_its_leg_is_ignored(
 
 
 async def test_mailbox_frames_have_their_own_inbound_budget(mailbox_households, gfs):
-    """Whoever learns a mailbox id can post to it anonymously: those frames
-    spend the mailbox buckets, never the instance relay's."""
+    """Whoever learns a mailbox id can post to it anonymously: frames that do
+    not open spend that mailbox's junk bucket, never the instance relay's."""
     a, b = mailbox_households
-    space = await _join(a, b, gfs)
+    await _join(a, b, gfs)
     limiter = RateLimiter()
     a.relay_inbound._rate_limiter = limiter
     keys = next(k for (inb, k) in gfs.mailboxes.values() if inb is a.relay_inbound)
     junk = {
         "type": "envelope",
-        "sealed": seal_relay_envelope(
-            envelope_dict={"msg_id": "x", "space_id": space.id},
-            peer_keywrap_pub=keys.kem_public,
-        ),
+        "sealed": {"kem_suite": "x25519", "eph_pk": "AA", "ciphertext": "AA"},
     }
-    for _ in range(BOOTSTRAP_INBOUND_LIMIT + 1):
+    for _ in range(MAILBOX_JUNK_LIMIT + 1):
         with contextlib.suppress(ValueError):
             await a.relay_inbound.handle_mailbox_frame(junk, keys=keys)
     assert not limiter.has_room(
-        f"gfs-mailbox:inbound:{keys.mailbox_id}",
-        limit=BOOTSTRAP_INBOUND_LIMIT,
+        f"gfs-mailbox:junk:{keys.mailbox_id}",
+        limit=MAILBOX_JUNK_LIMIT,
         window_s=BOOTSTRAP_INBOUND_WINDOW_S,
     )
     assert limiter.has_room(
@@ -2145,3 +2144,80 @@ async def test_mailbox_frames_have_their_own_inbound_budget(mailbox_households, 
         limit=BOOTSTRAP_INBOUND_LIMIT,
         window_s=BOOTSTRAP_INBOUND_WINDOW_S,
     )
+
+
+async def test_a_lost_mailbox_falls_back_to_the_relay_then_resumes(
+    mailbox_households, gfs
+):
+    """The host's mailbox is gone at the GFS: it tells the joiner
+    (``SPACE_MAILBOX_UPDATED`` null), the joiner's frames go
+    instance-addressed meanwhile — none lost — and once the host announces
+    its mailbox again the joiner uses it again."""
+    a, b = mailbox_households
+    space = await _join(a, b, gfs)
+    b_mailbox = (await _rows(a))[(space.id, b.instance_id)]["peer"]["mailbox_id"]
+    await b.mailboxes.announce_to(space.id, a.instance_id, None)
+    await gfs.drain()
+    assert (await _rows(a))[(space.id, b.instance_id)]["peer"] is None
+    gfs.mailbox.clear()
+    await a.federation.broadcast_to_space_members(
+        space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("during")
+    )
+    await gfs.drain()
+    assert [to for to, _ in gfs.mailbox] == [b.instance_id]  # the fallback
+    assert [e.payload["content"] for e in b.received] == ["during"]
+    claim = next(iter(b.mailboxes._claims.values()))
+    await b.mailboxes.announce_to(
+        space.id, a.instance_id, b.mailboxes._entry_for(claim.keys, claim.own)
+    )
+    await gfs.drain()
+    gfs.mailbox.clear()
+    await a.federation.broadcast_to_space_members(
+        space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("after")
+    )
+    await gfs.drain()
+    assert [to for to, _ in gfs.mailbox] == [b_mailbox]  # back on the mailbox
+    assert [e.payload["content"] for e in b.received] == ["during", "after"]
+
+
+async def test_a_mailbox_update_for_another_gfs_or_space_is_ignored(
+    mailbox_households, gfs
+):
+    a, b = mailbox_households
+    space = await _join(a, b, gfs)
+    before = (await _rows(a))[(space.id, b.instance_id)]["peer"]
+    claim = next(iter(b.mailboxes._claims.values()))
+    elsewhere = dataclasses.replace(claim.own, gfs_url="https://other-gfs.example")
+    await b.mailboxes.announce_to(
+        space.id, a.instance_id, b.mailboxes._entry_for(claim.keys, elsewhere)
+    )
+    await gfs.drain()
+    assert (await _rows(a))[(space.id, b.instance_id)]["peer"] == before
+
+
+async def test_a_host_mint_past_its_bound_is_handed_over_later(
+    mailbox_households, gfs, monkeypatch
+):
+    """The host's mint is bounded (the ACK must not wait); when it finishes
+    later, the host stores it and pushes its entry to the joiner, which then
+    addresses the host's mailbox."""
+    a, b = mailbox_households
+    monkeypatch.setattr(redeem_module, "HOST_MINT_TIMEOUT_S", 0.05)
+    real_mint = SpaceMailboxService.mint
+
+    async def _slow_mint(self, space_id, gfs_url):
+        if self is b.mailboxes:
+            await asyncio.sleep(0.3)
+        return await real_mint(self, space_id, gfs_url)
+
+    monkeypatch.setattr(SpaceMailboxService, "mint", _slow_mint)
+    space = await _join(a, b, gfs)
+    assert (await _rows(a))[(space.id, b.instance_id)]["peer"] is None
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        await gfs.drain()
+        if (await _rows(a))[(space.id, b.instance_id)]["peer"] is not None:
+            break
+    peer = (await _rows(a))[(space.id, b.instance_id)]["peer"]
+    assert peer is not None and peer["instance_id"] == b.instance_id
+    assert (await _rows(b))[(space.id, a.instance_id)]["own"] is not None

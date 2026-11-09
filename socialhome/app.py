@@ -5094,6 +5094,8 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         invite_redeem_coordinator.attach_mailboxes(space_mailboxes)
         real_space_service.attach_space_mailboxes(space_mailboxes)
+        # Lost / moved mailboxes: SPACE_MAILBOX_UPDATED both ways.
+        space_mailboxes.attach_to(federation_service, repos.federation)
         await space_mailboxes.start()
         app[K.space_mailbox_service_key] = space_mailboxes
         real_space_service.attach_gfs_join_requests(gfs_join_requests)

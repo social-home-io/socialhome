@@ -47,7 +47,7 @@ import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 import orjson
@@ -93,6 +93,9 @@ from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from .gfs_connection_service import GfsConnectionService
 from .gfs_envelope_sender import normalize_gfs_base
+
+if TYPE_CHECKING:
+    from ..federation.federation_service import FederationService
 
 log = logging.getLogger(__name__)
 
@@ -322,14 +325,29 @@ class SpaceMailboxService:
         self._announcer = announcer
 
     def attach_to(
-        self, federation_service: object, federation_repo: AbstractFederationRepo
+        self,
+        federation_service: FederationService,
+        federation_repo: AbstractFederationRepo,
     ) -> None:
-        """Take the counterparts' ``SPACE_MAILBOX_UPDATED`` (v_88)."""
+        """Both directions of ``SPACE_MAILBOX_UPDATED`` (v_88): take the
+        counterparts' updates, and send ours as an ordinary space envelope
+        (routing ``space_id``, the entry in the encrypted payload)."""
         self._federation_repo = federation_repo
-        registry = federation_service._event_registry  # type: ignore[attr-defined]
-        registry.register(
+        federation_service._event_registry.register(
             FederationEventType.SPACE_MAILBOX_UPDATED, self._on_mailbox_updated
         )
+
+        async def _announce(
+            space_id: str, instance_id: str, entry: SpaceMailboxEntry | None
+        ) -> None:
+            await federation_service.send_event(
+                to_instance_id=instance_id,
+                event_type=FederationEventType.SPACE_MAILBOX_UPDATED,
+                payload={"mailbox": entry.to_wire() if entry is not None else None},
+                space_id=space_id,
+            )
+
+        self._announcer = _announce
 
     def attach_inbound(self, handler: InboundHandler) -> None:
         """Where frames on our mailboxes go (``GfsRelayInbound
