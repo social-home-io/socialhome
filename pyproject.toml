@@ -77,7 +77,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest==9.2.0",
-    "pytest-asyncio==1.4.1",
+    "pytest-asyncio==1.4.1.post1",
     "pytest-aiohttp==1.1.1",    # provides ``aiohttp_server`` / ``aiohttp_client`` fixtures
     "pytest-cov==7.1.0",
     # ``pytest-xdist`` runs the suite across all available CPU cores
