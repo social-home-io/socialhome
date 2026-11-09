@@ -821,8 +821,17 @@ The first attempt is bounded (5 s, `UNPAIR_NOTIFY_TIMEOUT_S`) so an
 unreachable peer never blocks the admin's unpair. When it lands, both sides
 run the cleanup below and the route reports `peer_notified: true`.
 
+**"Lands" means the peer's receipt.** The `UNPAIR` never rides the
+DataChannel, even an open one (`NEEDS_RECEIPT_EVENT_TYPES` in
+`federation/transport.py`): a DataChannel send succeeds once the frame is in
+our own SCTP buffer, so a peer that died a moment ago — its close not yet
+seen here — would swallow it while the unpair reported `peer_notified: true`
+and forgot the peer instead of keeping a tombstone, and the peer would never
+learn. The HTTPS inbox answers 2xx only after the peer's §24.11 pipeline
+took the envelope. (Outbox redelivery was HTTPS-only already.)
+
 **Frames already on the way.** The `UNPAIR` and the peer's own traffic
-travel independently (the `UNPAIR` often over the HTTPS inbox, the peer's
+travel independently (the `UNPAIR` over the HTTPS inbox, the peer's
 frames over the still-open DataChannel), so envelopes the peer sealed
 before it processed the `UNPAIR` — typically a just-restarted household's
 catch-up burst (`SPACE_SYNC_BEGIN`, roster snapshot, routed frames) — can
@@ -837,10 +846,10 @@ held, the refusal stays a WARNING.
 `FederationTransport.close_peer`: the peer leaves the registry at once (no
 send picks it up again), then the PeerConnection closes once the
 DataChannel's send buffer has drained — bounded by
-`RTC_CLOSE_FLUSH_TIMEOUT_S` (2 s) — so an `UNPAIR` the channel accepted a
-moment ago still leaves. The household receiving that `UNPAIR` over the
-DataChannel finishes handling it even though its purge closes the very
-connection it arrived on. A tombstone keeps its connection until it is
+`RTC_CLOSE_FLUSH_TIMEOUT_S` (2 s) — so frames the channel accepted a
+moment ago still leave. A household receiving an `UNPAIR` over the
+DataChannel (an older peer still sends it there) finishes handling it even
+though its purge closes the very connection it arrived on. A tombstone keeps its connection until it is
 purged. If the pair later re-pairs, either side builds a fresh connection:
 a peer whose channel the other side closed counts as spent and is rebuilt
 on the next send or inbound OFFER — at most once a minute for inbound
