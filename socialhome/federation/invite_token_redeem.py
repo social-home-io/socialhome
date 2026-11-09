@@ -2367,9 +2367,7 @@ class SpaceInviteTokenRedeemCoordinator:
                     if await mailboxes.set_own(
                         space_id, redeemer_instance_id, result[1]
                     ):
-                        await mailboxes.announce_counted(
-                            space_id, redeemer_instance_id, result[0]
-                        )
+                        await mailboxes.announce_change(space_id, redeemer_instance_id)
                         return
                     await asyncio.sleep(LATE_MINT_SEAT_WAIT_S)
 

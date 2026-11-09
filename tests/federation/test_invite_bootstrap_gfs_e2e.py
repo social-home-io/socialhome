@@ -2269,6 +2269,7 @@ async def test_a_seat_without_mailboxes_gets_them_from_the_sweep(
     assert (await _rows(a))[(space.id, b.instance_id)]["peer"] is None
     for h in (a, b):
         h.mailboxes._wall_clock = lambda: 10**12  # every announce due
+        h.mailboxes._last_anon_at = float("-inf")  # and quiet
         assert await h.mailboxes.send_due_announces() == 1
     await gfs.drain()
     a_row = (await _rows(a))[(space.id, b.instance_id)]
@@ -2291,6 +2292,7 @@ async def _sweep_until_paired(a, b, space_id, gfs, *, rounds: int = 4) -> None:
             await h.mailboxes.mark_unmarked()
             await h.mailboxes.retry_missing()
             h.mailboxes._wall_clock = lambda: 10**12  # every announce due
+            h.mailboxes._last_anon_at = float("-inf")  # and quiet
             await h.mailboxes.send_due_announces()
         await gfs.drain()
 

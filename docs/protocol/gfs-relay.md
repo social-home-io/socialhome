@@ -817,13 +817,10 @@ neither side has one), and each side's sweep (`retry_missing`, every
 only, ONE pair per run (`RETRIES_PER_SWEEP`, so two registers never sit
 back to back) in random order and `REMINTS_PER_DAY` (1) per pair, only
 toward a counterpart at v_88 or later. The retried claim waits its own
-`CLAIM_JITTER_S` before connecting, and the identified
-`SPACE_MAILBOX_UPDATED` goes out only after an independent random delay of
-10 min – 6 h (`ANNOUNCE_DELAY_S`): the row keeps an `announce_at` marker and
-a later sweep (`send_due_announces`, one per run) sends it — so the GFS
-cannot line the anonymous register / claim up with the H→J announce. The
-joiner uses the same path to hand the host its entry. A late
-`remember(own=None)` never nulls an own a late mint already set.
+`CLAIM_JITTER_S` before connecting, and the new entry is announced the one
+way every post-seat update is (below). The joiner uses the same path to
+hand the host its entry. A late `remember(own=None)` never nulls an own a
+late mint already set.
 
 **Pairs with no state at all** — a seat made before v_88, a seat from an
 invite link minted before the host upgraded, or a crash between the seat
@@ -895,27 +892,43 @@ interleave (both under the service lock).
 
 **A lost mailbox.** The GFS forgot a mailbox (its 30-day idle sweep while
 the household was away, or data loss): the claim is refused (`4401`). The
-household marks the pair for a delayed announce and registers the SAME
-mailbox again as soon as a ticket is cached: never fetched for it (an
-identified fetch right before an anonymous register would tie them), the
-scheduled refill brings one. A mailbox the GFS keeps refusing
-(`LOST_ROTATE_AFTER` refusals, not just no ticket) is replaced by a fresh
-generation: the seat rows move to it (keeping the pending announce) and its
-claim waits its own `CLAIM_JITTER_S`.
+household registers the SAME mailbox again — same derived id and keys,
+from a cached ticket (never fetched for it: an identified fetch right
+before an anonymous register would tie them), within
+`RECOVERY_REGISTERS_PER_DAY` — and claims it; the counterpart's frames
+resume and nothing is announced. Only when that cannot happen now (no
+cached ticket, refused, unreachable, today's re-registrations used up) is
+the counterpart told `{mailbox: null}` — and told the entry again once the
+mailbox is back. A mailbox the GFS keeps refusing (`LOST_ROTATE_AFTER`
+refusals, not just no ticket) is replaced by a fresh generation: the seat
+rows move to it, its claim waits its own `CLAIM_JITTER_S`, and the new
+entry is announced.
 
-**Every identified announce is delayed.** Outside the seat-time
-redeem / ACK, no `SPACE_MAILBOX_UPDATED` goes out next to an anonymous
-register or claim: a recovery, a re-claim, a rotation and a retried mint
-only set the row's `announce_at` (10 min – 6 h, `ANNOUNCE_DELAY_S`; an
-already pending one is kept). A later sweep (`send_due_announces`) sends
-the pair's state *at that moment* — its entry, or `{mailbox: null}` while
-the claim is still lost — one per sweep, walking past pairs whose daily
-budget is spent or whose send failed, and clears the marker only once
-delivered and only if the row's mailbox is still the one announced. A
-sweep tick in which anything registered or claimed sends no announce at
-all. Meanwhile a counterpart's sends to a forgotten mailbox fail at the GFS
-and wait in its outbox until the mailbox is back or the `null` arrives —
-delayed, not lost. The receiver of an update verifies the entry like the one in the
+**Frames to a forgotten mailbox are lost.** The GFS answers a frame for a
+mailbox it does not know with the same uniform `202` as any other (so a
+sender cannot probe which mailboxes exist) and drops it; nothing goes to
+the sender's outbox. Frames sent between the GFS forgetting a mailbox and
+its re-registration — or the counterpart's `null` — are lost, not
+delayed. The window is the time to the next claim attempt when a ticket is
+cached, else until the `null` lands (at once over the counterpart's
+mailbox; 1–5 min plus the next quiet sweep instance-addressed).
+
+**How every post-seat update goes out (`announce_change`).** Outside the
+seat-time redeem / ACK, every `SPACE_MAILBOX_UPDATED` — a retried mint,
+the late host mint, a lost notice, a re-claim after one, a rotation —
+takes one path. When we hold the counterpart's entry it rides THAT
+mailbox, at once: the GFS sees a sealed frame to the counterpart's mailbox
+from our IP, never this household naming that one (the accepted IP-timing
+residual). Otherwise it would go instance-addressed and name both
+households, so it waits: the row gets `announce_at` = now + 1–5 min
+(`ANNOUNCE_JITTER_S`, never sooner than one already pending), and a later
+sweep (`send_due_announces`) sends the pair's state *at that moment* —
+skipping it while we registered or connected a claim anonymously within
+`ANON_QUIET_S` (5 min, checked right before the send). One that did not
+go out (daily budget, delivery) moves forward by a fresh jitter; one that
+went out clears the marker unless the row's mailbox changed meanwhile.
+Updates are latest-only in the outbox (`outbox_key` `mailbox:<space>`): a
+queued stale `null` never lands after a newer entry. The receiver of an update verifies the entry like the one in the
 redeem (identity signature, key-wrap binding, the space) and that it names
 the GFS the seat reaches it through, and stores it on that pair's row
 only. `SPACE_MAILBOX_UPDATED` ships in v_88 (unreleased when it was
@@ -983,12 +996,15 @@ announces, retried mailboxes and the late host mint all count),
 tickets) and `ROTATIONS_PER_DAY` (1) fresh generation (1 ticket). Such a GFS
 costs a pair at most 5 tickets and 6 small envelopes a day — never a storm.
 
-**Catch-up at 200 pairs.** One retry and one announce per sweep (~10 min,
-jittered): a host with 200 GFS-only pairs that minted nothing at seat time
-needs about 200 sweeps ≈ 33 h to mint them all (tickets permitting) and,
-because a sweep that registered sends no announce, about another 33 h of
-quiet sweeps to announce them — roughly 2–3 days, on the instance-addressed
-relay meanwhile. Accepted: the fallback is transient and nothing is lost.
+**Catch-up at 200 pairs.** One retry per sweep (~10 min, jittered): a host
+with 200 GFS-only pairs that minted nothing at seat time needs about 200
+sweeps ≈ 33 h to mint them all (tickets permitting). Pairs whose member
+mailbox the host holds (the usual case: members mint at seat time) are told
+at once through it. Pairs with no mailbox either way are announced
+instance-addressed, one per quiet sweep — and a sweep that just registered
+is not quiet — so about another 33 h after the retries finish: roughly 2–3
+days on the instance-addressed relay for those. Accepted: the fallback is
+transient (the instance-addressed relay delivers meanwhile).
 
 **Decision and open question for PR 3 (v_89).** One mailbox per member pair
 is right while only the host and its GFS-only members talk (N members → N

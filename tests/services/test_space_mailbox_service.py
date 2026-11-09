@@ -34,6 +34,7 @@ from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services.space_mailbox_service import (
+    ANNOUNCE_JITTER_S,
     MAILBOX_ROOT_CONFIG_KEY,
     PENDING_TTL_S,
     TICKET_PIN_CONFIG_PREFIX,
@@ -260,6 +261,8 @@ async def test_the_sweep_mints_a_missing_own_mailbox_and_announces_it(gfs):
     assert row["own"] is not None
     assert announced == []  # later, not next to the register
     now[0] = row["announce_at"] + 1
+    assert await svc.send_due_announces() == 0  # still inside the quiet window
+    svc._last_anon_at = float("-inf")  # ANON_QUIET_S later
     assert await svc.send_due_announces() == 1
     [(space, peer, entry)] = announced
     assert (space, peer) == ("space-1", "peer-iid") and entry is not None
@@ -438,30 +441,28 @@ async def test_a_mailbox_the_gfs_forgot_is_announced_lost_then_recovered(gfs):
     await svc.remember("space-1", "peer-iid", peer=None, own=own)
     assert await svc.wait_claimed(5)
     tickets = len(svc._tickets[conn.id].cache)
+    svc._last_anon_at = float("-inf")
     # The GFS forgets it, and the socket drops.
     assert await server.app[gfs_mailbox_repo_key].unregister(entry.mailbox_id)
     await server.app[gfs_mailbox_ws_registry_key].close_one(
         entry.mailbox_id, code=1012, message=b"restart"
     )
-    # Round 7: the counterpart is told only after a delay (never next to
-    # the anonymous re-register / re-claim), and then of the CURRENT state.
-    row = ("space-1", "peer-iid")
-    await _until(lambda: "announce_at" in orjson.loads(spaces.rows[row]))
-    for _ in range(200):  # re-registered from the cache and claimed again
-        claim = next(iter(svc._claims.values()))
-        if not claim.lost and await server.app[gfs_mailbox_repo_key].get(
-            entry.mailbox_id
+    # Round 8: the SAME mailbox is registered again from the cache and
+    # claimed — the counterpart's frames resume, nothing is announced.
+    for _ in range(200):
+        if await server.app[gfs_mailbox_repo_key].get(entry.mailbox_id) and (
+            svc.open_claims() == 1
+            and next(iter(svc._claims.values())).socket is not None
         ):
             break
         await asyncio.sleep(0.05)
-    assert announced == []
-    svc._wall_clock = lambda: 10.0**12  # type: ignore[assignment]
-    assert await svc.send_due_announces() == 1
-    [(space, peer, back)] = announced
-    assert (space, peer) == ("space-1", "peer-iid")
-    assert back is not None and back.mailbox_id == entry.mailbox_id  # same one
     assert await server.app[gfs_mailbox_repo_key].get(entry.mailbox_id)
+    await asyncio.sleep(0.3)
+    assert announced == []
+    assert "announce_at" not in orjson.loads(spaces.rows[("space-1", "peer-iid")])
     assert len(svc._tickets[conn.id].cache) == tickets - 1  # from the cache
+    # The async re-register / re-claim marked the quiet window.
+    assert svc._last_anon_at > float("-inf")
     await svc.stop()
 
 
@@ -491,16 +492,21 @@ async def test_a_forgotten_mailbox_with_no_ticket_waits_for_the_refill(gfs):
     )
     row = ("space-1", "peer-iid")
     await _until(lambda: "announce_at" in orjson.loads(spaces.rows[row]))
+    # Round 8: no entry of the counterpart's (instance-addressed): a SHORT
+    # delay for the lost notice, minutes not hours.
+    at = orjson.loads(spaces.rows[row])["announce_at"]
+    assert at <= svc._wall_clock() + ANNOUNCE_JITTER_S[1]
     await asyncio.sleep(0.5)
-    assert announced == []  # round 7: delayed, never at once
+    assert announced == []
     svc._wall_clock = lambda: 10.0**12  # type: ignore[assignment]
+    svc._last_anon_at = float("-inf")
     assert await svc.send_due_announces() == 1
     assert announced == [None]  # still lost: no ticket, none fetched
     assert len(cache) == 0
     await cache.refill()  # the scheduled refill
     await _until(lambda: "announce_at" in orjson.loads(spaces.rows[row]), timeout=30)
-    assert await svc.send_due_announces() == 0  # its own delay first
     svc._wall_clock = lambda: 10.0**13  # type: ignore[assignment]
+    svc._last_anon_at = float("-inf")
     assert await svc.send_due_announces() == 1
     assert announced[1] is not None and announced[1].mailbox_id == entry.mailbox_id
     await svc.stop()
