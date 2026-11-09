@@ -421,6 +421,8 @@ class SpaceMemberDirectory:
                 # ``dir_seq``, asks for one.
                 early = (space_id, card.instance_id) in self._early_hello
                 self._early_hello.discard((space_id, card.instance_id))
+                if early:
+                    await self._mark_seated(space_id, card.instance_id)
                 await self.reconcile(
                     space_id,
                     changed=[card],
@@ -630,6 +632,7 @@ class SpaceMemberDirectory:
             return
         old = await self.card_of(space_id, sender)
         changed = await self._store(space_id, card)
+        await self._mark_seated(space_id, sender)
         # A first card, or the same card again, is the household's "I am
         # seated": it gets a snapshot (at most once per
         # :data:`HELLO_RESNAPSHOT_S`). A NEWER card (a rotation) is only a
@@ -673,20 +676,19 @@ class SpaceMemberDirectory:
             return
         if await self.host_of(space_id) != self._instance_id:
             return
-        if sender not in await self._recipients(space_id):
+        if sender not in await self._writers_v89(space_id):
             return
+        # A household that syncs with us is seated.
+        news = await self._mark_seated(space_id, sender)
         own_doc = await self._doc(space_id, self._instance_id)
         mine = await self.card_of(space_id, sender)
         key = "dir_seq" if mine is not None and mine.mailbox else "dir_seq_mbx"
         current = own_doc.get(key)
-        if (
-            _is_count(current)
-            and echo < current
-            and self._may_resnapshot(space_id, sender)
-        ):
+        behind = news or (_is_count(current) and echo < current)
+        if behind and self._may_resnapshot(space_id, sender):
             await self.reconcile(space_id, snapshot_to={sender})
 
-    async def _recipients(self, space_id: str) -> list[str]:
+    async def _writers_v89(self, space_id: str) -> list[str]:
         """Writer-seat member households at v_89 (never a follower)."""
         assert self._federation is not None
         out = []
@@ -696,6 +698,26 @@ class SpaceMemberDirectory:
             ):
                 out.append(inst)
         return out
+
+    async def _recipients(self, space_id: str) -> list[str]:
+        """The writer-seat households at v_89 that told us they are seated
+        (their card, or a §25.6 BEGIN): a directory frame to one that is not
+        could beat its own seat and be dropped as from a stranger."""
+        out = []
+        for inst in await self._writers_v89(space_id):
+            if (await self._doc(space_id, inst)).get("seated") is True:
+                out.append(inst)
+        return out
+
+    async def _mark_seated(self, space_id: str, instance_id: str) -> bool:
+        """Note that *instance_id* is seated in *space_id*. Returns whether
+        that is news."""
+        doc = await self._doc(space_id, instance_id)
+        if doc.get("seated") is True:
+            return False
+        doc["seated"] = True
+        await self._put(space_id, instance_id, doc)
+        return True
 
     async def _send(
         self, space_id: str, to: str, cards: list[MemberCard], **extra: Any
@@ -740,8 +762,9 @@ class SpaceMemberDirectory:
             and not lost
         ):
             return  # no member reached through a GFS: nothing to pass on
+        writers = await self._writers_v89(space_id)
         recipients = await self._recipients(space_id)
-        listed = {i: c for i, c in cards.items() if i in recipients}
+        listed = {i: c for i, c in cards.items() if i in writers}
         listed[self._instance_id] = own
         own_doc = await self._doc(space_id, self._instance_id)
         before = {i for i in own_doc.get("listed") or [] if isinstance(i, str)}

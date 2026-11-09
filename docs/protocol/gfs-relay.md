@@ -809,7 +809,12 @@ host-signed).
   snapshot carries it. A member keeps the last one it took on the host's row
   and drops a delta that is not newer (a late old delta never re-adds a
   removed household); the parts of one snapshot share their version.
-- **Deltas** go to every writer-seat household under the new version: a
+- **Only to a seated household.** Directory frames go only to a
+  writer-seat household that told the host it is seated — its card, or a
+  §25.6 `SPACE_SYNC_BEGIN` (kept as `seated` on its row): a frame sent the
+  moment its seat goes live could beat its own seat and be dropped as from
+  a stranger.
+- **Deltas** go to every seated writer-seat household under the new version: a
   changed card (a card without a mailbox only to households with one,
   unless it just lost its mailbox) and `removed` for a household that left
   the directory (left, removed, or no longer a writer). Delivery is not

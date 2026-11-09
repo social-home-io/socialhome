@@ -291,6 +291,15 @@ class World:
         self.spaces.local[SPACE] = ["u-local"]
         self.spaces.rows[SPACE] = {self.me["id"]: None, self.host["id"]: None}
 
+    def seat_all(self, space_id: str = SPACE) -> None:
+        """Every writer household already told us it is seated (its card or
+        a sync) — directory frames go only to such a household."""
+        for iid in self.writers.writers.get(space_id, set()):
+            row = self.spaces.rows.setdefault(space_id, {})
+            doc = orjson.loads(row[iid]) if row.get(iid) else {}
+            doc["seated"] = True
+            row[iid] = orjson.dumps(doc).decode()
+
     def member(self, *households: dict, space_id: str = SPACE) -> None:
         for h in households:
             self.spaces.rows.setdefault(space_id, {}).setdefault(h["id"], None)
@@ -335,6 +344,7 @@ async def test_host_stores_a_card_and_sends_snapshots_then_deltas():
     a, b = _hh(), _hh()
     w.member(a, b)
     w.writers.writers[SPACE] = {a["id"], b["id"]}
+    w.seat_all()
 
     card_a = _card(a, gfs=GFS)
     await w.card_from(a, card_a)
@@ -374,6 +384,7 @@ async def test_a_mailbox_less_card_is_not_a_delta_for_a_mailbox_only_recipient()
     w.member(a, b, c)
     w.spaces.put_card(SPACE, _card(a, gfs=GFS))
     w.writers.writers[SPACE] = {a["id"], b["id"], c["id"]}
+    w.seat_all()
     await w.dir.reconcile(SPACE)
     w.fed.directories.clear()
 
@@ -469,6 +480,7 @@ async def test_snapshot_is_bounded_and_carries_mailbox_cards_first(monkeypatch):
     for h, gfs in ((r, GFS), (m1, GFS), (m2, GFS), (n1, None), (n2, None)):
         w.spaces.put_card(SPACE, _card(h, gfs=gfs))
     w.writers.writers[SPACE] = {h["id"] for h in (r, m1, m2, n1, n2)}
+    w.seat_all()
     await w.dir.reconcile(SPACE, snapshot_to={r["id"]})
     (snap,) = w.fed.to(r["id"])
     assert snap["payload"]["snapshot"] is True
@@ -482,6 +494,7 @@ async def test_a_household_that_stops_being_a_writer_is_removed_once():
     w.spaces.put_card(SPACE, _card(a, gfs=GFS))
     w.spaces.put_card(SPACE, _card(b, gfs=GFS))
     w.writers.writers[SPACE] = {a["id"], b["id"]}
+    w.seat_all()
     await w.dir.reconcile(SPACE, snapshot_to={a["id"]})
     assert b["id"] in _ids(w.fed.to(a["id"])[0])
     w.fed.directories.clear()
@@ -514,6 +527,7 @@ async def test_our_own_card_change_goes_out_as_a_delta():
         proto_version=89,
     )
     w.writers.writers[SPACE] = {a["id"]}
+    w.seat_all()
     await w.dir.reconcile(SPACE)
     (snap,) = w.fed.to(a["id"])
     (own,) = snap["payload"]["cards"]
@@ -882,6 +896,7 @@ async def test_a_newer_card_is_a_delta_and_a_repeated_one_resnapshots_rarely():
     a, b = _hh(), _hh()
     w.member(a, b)
     w.writers.writers[SPACE] = {a["id"], b["id"]}
+    w.seat_all()
     await w.card_from(a, _card(a, gfs=GFS, rev=1))
     w.fed.directories.clear()
     # A rotation (newer rev): a delta to B, no new snapshot for A.
@@ -911,6 +926,7 @@ async def test_a_big_snapshot_goes_in_parts_that_fit_the_relay(monkeypatch):
     for h in others:
         w.spaces.put_card(SPACE, _card(h, gfs=GFS))
     w.writers.writers[SPACE] = {newcomer["id"], *(h["id"] for h in others)}
+    w.seat_all()
     w.fed.directories.clear()
     await w.card_from(newcomer, _card(newcomer, gfs=GFS))
     parts = [p for p in w.fed.to(newcomer["id"]) if p["payload"].get("snapshot")]
@@ -1023,6 +1039,7 @@ async def test_a_member_behind_on_dir_seq_gets_a_snapshot_on_its_sync():
     w.member(a, b)
     w.spaces.put_card(SPACE, _card(a, gfs=GFS))
     w.writers.writers[SPACE] = {a["id"], b["id"]}
+    w.seat_all()
     await w.dir.reconcile(SPACE)
     seq = w.spaces.doc(SPACE, w.me["id"])["dir_seq"]
     w.fed.directories.clear()
@@ -1122,3 +1139,22 @@ async def test_a_mailbox_only_snapshot_keeps_listed_members_rows():
         }
     )
     assert w.spaces.doc(SPACE, paired["id"])["card"]["instance_id"] == paired["id"]
+
+
+async def test_no_directory_frame_goes_to_a_household_not_yet_seated():
+    """Found by ``all``: a delta sent when a joiner's seat goes live on the
+    host can beat the joiner's own seat and be dropped as from a stranger.
+    Directory frames go only to a household that said it is seated (its
+    card, or a §25.6 BEGIN); a BEGIN from an unseated one answers with a
+    snapshot."""
+    w = World()
+    a, j = _hh(), _hh()
+    w.member(a, j)
+    card_a = _card(a, gfs=GFS)
+    w.spaces.put_card(SPACE, card_a)
+    w.writers.writers[SPACE] = {a["id"], j["id"]}
+    await w.dir.reconcile(SPACE, changed=[card_a])  # a mailbox card: a delta
+    assert w.fed.to(j["id"]) == []
+    await w.dir.on_sync_begin(_begin(j, w.me["id"], 0))
+    (snap,) = w.fed.to(j["id"])
+    assert snap["payload"]["snapshot"] is True
