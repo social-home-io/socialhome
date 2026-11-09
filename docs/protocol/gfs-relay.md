@@ -791,9 +791,11 @@ that household.
    register (spending a ticket only when the mailbox is new), open its own
    claim socket `/gfs/mailbox/ws`. Its signed entry rides in the sealed
    redeem.
-2. **Host.** It verifies the entry, then mints its own mailbox for the space
-   at the same GFS. A host keeps **one mailbox per space per GFS**, shared
-   by all its GFS-only members of that space. It registers and claims it
+2. **Host.** It verifies the entry, then mints its own mailbox toward THIS
+   member at the same GFS — **one mailbox per member pair** (owner decision,
+   #1333): keys from (space, the member's instance id, gen), so a host's
+   mailboxes for two members of one space are as unrelated as two spaces',
+   and a flood on one hurts only that pair. It registers and claims it
    **before** the ACK leaves, so the joiner's first envelopes land, and puts
    its entry in the sealed ACK. The host's mint is bounded to 3 s
    (`HOST_MINT_TIMEOUT_S`), well inside the joiner's redeem timeout: a slow
@@ -842,14 +844,13 @@ timestamp window and relay opt-in gate (`RELAY_TRANSPORTS`). One extra step
 runs right after the parse, `check_mailbox_space`: the envelope's
 `space_id` must be the mailbox's space; a space-less envelope is taken
 only for non-space traffic (never a `SPACE_*` event). Anything else is
-refused. Budgets: a frame that does not even open charges that mailbox's
-junk bucket (`MAILBOX_JUNK_LIMIT`, checked before any open); a frame the
-§24.11 pipeline accepted charges its VERIFIED sender
-(`MAILBOX_SENDER_INBOUND_LIMIT`, checked before the pipeline, charged only
-after it). So one member — or an ex-member that still knows a host's shared
-mailbox — exhausting its share never drops another member's frames, a
-claimed id costs its owner nothing, and nothing here touches the instance
-relay's budget.
+refused. Budget: ONE bucket per mailbox (`MAILBOX_INBOUND_LIMIT`, and one
+for its media frames), checked before any open and charged for every
+frame — junk, a frame that opens but fails the pipeline, a good one. A
+mailbox serves exactly one member pair, so its only legitimate sender is
+that one counterpart: whoever floods it (the member, or someone who learned
+the id) shuts only that pair's mailbox, never another's, and never the
+instance relay's budget.
 
 **Rotation and release.** A mailbox changes only when the household leaves
 or is removed. A mailbox is in use while a `space_instances` row refers to
@@ -918,13 +919,31 @@ Residuals:
 field in the redeem and sends no entry back.
 
 **Cost.** Per envelope: the same bytes as today (the same buckets). Per
-join: two registers (≤ ~1 KiB each, one ticket each when new), one ~1 KiB
-entry in the sealed redeem and one in the sealed ACK. Sockets: +1 anonymous
-WS per (household, space) reached only through a GFS, +1 per hosted space
-with at least one GFS-only member — N GFS-only members cost the host one
-socket. Worst realistic case, a global space with 200 GFS-only members:
-201 extra sockets at the GFS; the host's fan-out is still 200 sealed
-envelopes per item, as before.
+join: two registers (≤ ~1 KiB each, one ticket each — the joiner's and the
+host's), one ~1 KiB entry in the sealed redeem and one in the sealed ACK.
+Sockets: +1 anonymous WS on each side per GFS-only member pair. Worst
+realistic case, a global space with 200 GFS-only members: 400 extra sockets
+at the GFS (200 the members', 200 the host's), and the host spends 200
+tickets over time — at the default 50 tickets a day (batches of 8 cached)
+a host seating 200 members in one day runs out: the members past its
+tickets get no host mailbox (they address the host instance-addressed; the
+host still addresses THEIR mailboxes) until a later re-seat. Mints run one
+at a time (the service lock); a host mint is bounded to 3 s per seat. The
+host's fan-out is still 200 sealed envelopes per item, as before.
+
+**Daily caps (a GFS that answers every claim with 4401).** Per member pair
+and day: at most `ANNOUNCES_PER_DAY` (6) `SPACE_MAILBOX_UPDATED`,
+`RECOVERY_REGISTERS_PER_DAY` (4) re-registrations of a lost mailbox (≤ 4
+tickets) and `ROTATIONS_PER_DAY` (1) fresh generation (1 ticket). Such a GFS
+costs a pair at most 5 tickets and 6 small envelopes a day — never a storm.
+
+**Decision and open question for PR 3 (v_89).** One mailbox per member pair
+is right while only the host and its GFS-only members talk (N members → N
+host mailboxes). Member-to-member delivery (v_89) would make it one per
+member PAIR across the space — N² mailboxes, sockets and tickets (200
+members ≈ 40 000). PR 3 must re-evaluate this scaling before it builds on
+it (e.g. per-pair only toward the host, one per member for member traffic,
+or a different budget model).
 
 **Not in this step (PR 3+).** Passing entries to all members (v_89),
 member-to-member mesh, a host `SPACE_ROUTED` hop, a generic
@@ -942,7 +961,7 @@ sequenceDiagram
     E->>G: POST /gfs/envelope {to_instance: A, sealed redeem + entry E}
     G->>A: envelope (A's /gfs/ws)
     A->>A: verify entry E (identity sig, key-wrap binding, space)
-    A->>G: POST /gfs/mailbox/register (one per space per GFS)
+    A->>G: POST /gfs/mailbox/register (one per member pair)
     A->>G: GET /gfs/mailbox/ws — claim mailbox A
     A->>G: POST /gfs/envelope {to_instance: E, sealed ACK + entry A}
     G->>E: envelope (E's /gfs/ws)

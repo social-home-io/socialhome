@@ -5,13 +5,30 @@ from __future__ import annotations
 
 import asyncio
 import random
+from types import SimpleNamespace
 
 import orjson
 
+from socialhome.crypto import (
+    b64url_encode,
+    derive_instance_id,
+    generate_identity_keypair,
+    generate_x25519_keypair,
+    sign_ed25519,
+)
+from socialhome.domain.federation import (
+    FederationEvent,
+    FederationEventType,
+    InstanceSource,
+)
 from socialhome.domain.space_mailbox import OwnMailbox
 from socialhome.federation.gfs_mailbox import derive_mailbox_keys
+from socialhome.federation.space_mailbox_entry import build_entry
 from socialhome.services.space_mailbox_service import (
+    ANNOUNCES_PER_DAY,
     LOST_ROTATE_AFTER,
+    RECOVERY_REGISTERS_PER_DAY,
+    REGISTER_NO_TICKET,
     REGISTER_OK,
     REGISTER_REFUSED,
     RELEASE_DELAY_S,
@@ -202,3 +219,148 @@ async def test_a_mailbox_the_gfs_keeps_refusing_is_replaced(monkeypatch):
     assert list(svc._claims) == [new_key]
     assert svc._claims[new_key].lost  # it announces itself once claimed
     await svc.stop()
+
+
+class _RowSpaces:
+    """Rows as the repo stores them: ``mailbox`` JSON or NULL (absent from
+    the listing), plus which (space, household) pairs are seated."""
+
+    def __init__(self, rows=None, seated=None) -> None:
+        self.rows: dict[tuple[str, str], str | None] = dict(rows or {})
+        self.seated: set[tuple[str, str]] = set(seated or self.rows)
+
+    async def list_local_member_user_ids(self, space_id):
+        return ["me"]
+
+    async def list_member_instances(self, space_id):
+        return [i for (s, i) in self.seated if s == space_id]
+
+    async def set_space_instance_mailbox(self, s, i, v):
+        if (s, i) in self.seated:
+            self.rows[(s, i)] = v
+
+    async def list_space_instance_mailboxes(self):
+        return [(s, i, v) for (s, i), v in self.rows.items() if v is not None]
+
+
+def _joiner(space="s1", gen=1):
+    ident = generate_identity_keypair()
+    kw = generate_x25519_keypair()
+    iid = derive_instance_id(ident.public_key)
+    keys = derive_mailbox_keys(b"\2" * 32, "g", space, gen, peer="host")
+    entry = build_entry(
+        keys,
+        instance_id=iid,
+        identity_seed=ident.private_key,
+        gfs_url="http://g",
+        proto_version=88,
+        keywrap_pk=kw.public_key,
+        keywrap_sig=b64url_encode(sign_ed25519(ident.private_key, kw.public_key)),
+    )
+    row = SimpleNamespace(
+        source=InstanceSource.SPACE_SESSION,
+        remote_identity_pk=ident.public_key.hex(),
+        relay_via="http://g",
+    )
+    return iid, entry, row
+
+
+def _update(sender, raw, space="s1"):
+    return FederationEvent(
+        msg_id="m",
+        event_type=FederationEventType.SPACE_MAILBOX_UPDATED,
+        from_instance=sender,
+        to_instance="i",
+        timestamp="2026-11-09T00:00:00+00:00",
+        payload={"mailbox": raw},
+        space_id=space,
+    )
+
+
+async def test_a_null_update_then_an_entry_is_taken_on_a_row_without_own():
+    """Round-3 F1: the host minted no mailbox (own = null) and the joiner
+    reported its own lost (null) — the row must stay a mailbox pair, so the
+    joiner's later entry is still taken (it was wiped to NULL for good)."""
+    iid, entry, row = _joiner()
+
+    class _Repo:
+        async def get_instance(self, instance_id):
+            return row if instance_id == iid else None
+
+    spaces = _RowSpaces(
+        {("s1", iid): orjson.dumps({"peer": entry.to_wire(), "own": None}).decode()}
+    )
+    svc = _bare_service(spaces)
+    svc._federation_repo = _Repo()  # type: ignore[assignment]
+    await svc._load_rows()
+    await svc._on_mailbox_updated(_update(iid, None))
+    assert orjson.loads(spaces.rows[("s1", iid)]) == {"peer": None, "own": None}
+    assert await svc.target_for(iid, "s1") is None  # fall back meanwhile
+    await svc._on_mailbox_updated(_update(iid, entry.to_wire()))
+    assert orjson.loads(spaces.rows[("s1", iid)])["peer"] == entry.to_wire()
+    target = await svc.target_for(iid, "s1")
+    assert target is not None and target.mailbox_id == entry.mailbox_id
+
+
+async def test_a_late_own_waits_for_the_seat_and_keeps_the_newest_entry():
+    """Round-3 F4: a host mint past its bound may finish before the seat row
+    exists — nothing is written (it stays pending) until it does, and then
+    only OUR half is set: the joiner's entry there now is kept."""
+    iid, newer, _row = _joiner(gen=2)
+    spaces = _RowSpaces(seated=set())
+    svc = _bare_service(spaces)
+    key = _claim_key("s1", iid, OWN)
+    svc._pending[key] = svc._clock() + 1800
+    assert await svc.set_own("s1", iid, OWN) is False
+    assert key in svc._pending and spaces.rows == {}
+    spaces.seated.add(("s1", iid))
+    spaces.rows[("s1", iid)] = orjson.dumps(
+        {"peer": newer.to_wire(), "own": None}
+    ).decode()
+    await svc._load_rows()
+    assert await svc.set_own("s1", iid, OWN) is True
+    row = orjson.loads(spaces.rows[("s1", iid)])
+    assert row["peer"] == newer.to_wire()  # never the redeem's older entry
+    assert row["own"]["gen"] == OWN.gen
+    assert key not in svc._pending
+
+
+async def test_a_gfs_refusing_every_claim_cannot_burn_tickets_or_storm(monkeypatch):
+    """Round-3 F6: per member pair and day, re-registrations and announces
+    are capped — a GFS that answers every claim with 4401 costs at most
+    RECOVERY_REGISTERS_PER_DAY register attempts and ANNOUNCES_PER_DAY
+    updates to the one counterpart."""
+    spaces = _RowSpaces(
+        {
+            ("s1", "host"): orjson.dumps(
+                {"peer": None, "own": {"gen": 7, "gfs_id": "g", "gfs": "http://g"}}
+            ).decode()
+        }
+    )
+    svc = _bare_service(spaces)
+    svc._root = b"\1" * 32
+    keys = derive_mailbox_keys(b"\1" * 32, "g", "s1", 7, peer="host")
+    claim = _Claim(keys=keys, own=OWN, peer="host")
+    svc._claims[_claim_key("s1", "host", OWN)] = claim
+    announced: list = []
+    registers: list = []
+
+    async def _announce(space_id, instance_id, entry):
+        announced.append(entry)
+
+    async def _register(self, conn, k, *, fetch=True):
+        registers.append(k.mailbox_id)
+        return REGISTER_NO_TICKET  # never refused: no rotation either
+
+    svc.attach_announcer(_announce)
+    monkeypatch.setattr(SpaceMailboxService, "_register", _register)
+    for _ in range(50):
+        claim.lost = False  # each episode: claimed, then 4401 again
+        await svc._recover(object(), claim)  # type: ignore[arg-type]
+    assert len(registers) == RECOVERY_REGISTERS_PER_DAY
+    assert len(announced) == ANNOUNCES_PER_DAY
+    # A new day resets the budget.
+    svc._clock = lambda: 10 * 86_400.0  # type: ignore[assignment]
+    claim.lost = False
+    await svc._recover(object(), claim)  # type: ignore[arg-type]
+    assert len(registers) == RECOVERY_REGISTERS_PER_DAY + 1

@@ -721,18 +721,24 @@ async def test_a_failing_mailbox_lookup_falls_back_and_never_raises():
     assert result.ok and len(relay.calls) == 1
 
 
-#: ``send_event`` sites that send a ``SPACE_*`` event WITHOUT its routing
-#: ``space_id`` on purpose (v_88): such an envelope never rides a mailbox
-#: (it goes instance-addressed, and a mailbox refuses it). Mesh routing and
-#: discovery are not space content; the redeem legs run before the joiner
+#: Send sites (``send_event`` and the wrappers that end in it) that send a
+#: ``SPACE_*`` event WITHOUT its routing ``space_id`` — or with an explicit
+#: ``space_id=None`` — on purpose (v_88): such an envelope never rides a
+#: mailbox (it goes instance-addressed, and a mailbox refuses it). Mesh
+#: routing and discovery are not space content; the redeem legs, a private
+#: invite's accept and a join request's answer run before the other side
 #: holds the space (a routing ``space_id`` would hit its space gates); the
-#: teardown has no space left. A new space event belongs on its space's
-#: mailbox: pass ``space_id=`` — or add it here with the reason.
+#: removal notice and the teardown are for a household that no longer
+#: does. A new space event belongs on its space's mailbox: pass
+#: ``space_id=`` — or add it here with the reason.
 _SPACE_LESS_SPACE_SENDS: dict[str, set[str]] = {
     "socialhome/federation/invite_token_redeem.py": {
         "SPACE_INVITE_TOKEN_REDEEM",
         "SPACE_INVITE_TOKEN_REDEEM_ACK",
         "SPACE_INVITE_TOKEN_REDEEM_DENY",
+    },
+    "socialhome/federation/private_invite_handler.py": {
+        "SPACE_REMOTE_MEMBER_REMOVED",
     },
     "socialhome/federation/route_discovery.py": {
         "SPACE_FIND_ROUTE",
@@ -744,8 +750,19 @@ _SPACE_LESS_SPACE_SENDS: dict[str, set[str]] = {
     },
     "socialhome/services/peer_directory_service.py": {"SPACE_DIRECTORY_SYNC"},
     "socialhome/services/report_service.py": {"SPACE_REPORT"},
-    "socialhome/services/space_service.py": {"SPACE_SESSION_CLEANUP"},
+    "socialhome/services/space_service.py": {
+        "SPACE_SESSION_CLEANUP",
+        "SPACE_PRIVATE_INVITE_ACCEPT",
+        "SPACE_JOIN_REQUEST_APPROVED",
+        "SPACE_JOIN_REQUEST_DENIED",
+    },
 }
+
+
+#: ``send_event`` and the wrappers that end in it.
+_SEND_CALLS: frozenset[str] = frozenset(
+    {"send_event", "send_event_once", "send_to_instance", "send_with_mesh_fallback"}
+)
 
 
 def test_every_space_event_send_names_its_space_or_is_listed():
@@ -758,11 +775,15 @@ def test_every_space_event_send_names_its_space_or_is_listed():
                 continue
             fn = node.func
             name = fn.attr if isinstance(fn, ast.Attribute) else ""
-            if name != "send_event":
+            if name not in _SEND_CALLS:
                 continue
             kw = {k.arg: k.value for k in node.keywords}
             et = kw.get("event_type")
-            if et is None or "space_id" in kw:
+            if et is None:
+                continue
+            space = kw.get("space_id")
+            explicit_none = isinstance(space, ast.Constant) and space.value is None
+            if space is not None and not explicit_none:
                 continue
             src = ast.unparse(et)
             if "FederationEventType.SPACE_" not in src:
@@ -779,3 +800,30 @@ def test_every_space_event_send_names_its_space_or_is_listed():
         "a SPACE_* send without space_id= — pass the routing space_id so a "
         f"GFS-only member gets it on that space's mailbox: {unexpected}"
     )
+
+
+def test_the_guard_catches_a_wrapper_and_an_explicit_none(tmp_path, monkeypatch):
+    """Mutation guard for the guard: a ``send_to_instance`` without
+    ``space_id`` and a ``send_event(..., space_id=None)`` are both caught."""
+    src = (
+        "async def f(o):\n"
+        "    await o.send_to_instance(to_instance_id='x',"
+        " event_type=FederationEventType.SPACE_POST_CREATED, payload={})\n"
+        "    await o.send_event(to_instance_id='x',"
+        " event_type=FederationEventType.SPACE_TASK_CREATED, payload={},"
+        " space_id=None)\n"
+    )
+    found = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = fn.attr if isinstance(fn, ast.Attribute) else ""
+        if name not in _SEND_CALLS:
+            continue
+        kw = {k.arg: k.value for k in node.keywords}
+        space = kw.get("space_id")
+        explicit_none = isinstance(space, ast.Constant) and space.value is None
+        if space is None or explicit_none:
+            found.append(name)
+    assert found == ["send_to_instance", "send_event"]
