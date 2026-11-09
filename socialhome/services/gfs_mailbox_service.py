@@ -245,6 +245,8 @@ class GfsMailboxService:
         "_instance_id",
         "_key_manager",
         "_lock",
+        "_mint_failed",
+        "_minting",
         "_needed",
         "_on_change",
         "_pending",
@@ -294,6 +296,9 @@ class GfsMailboxService:
         self._inbound: InboundHandler | None = None
         self._needed: Callable[[], Awaitable[set[str]]] | None = None
         self._on_change: Callable[[], Awaitable[None]] | None = None
+        self._minting: asyncio.Task[None] | None = None
+        #: normalized GFS url → until when :meth:`mint_soon` skips it.
+        self._mint_failed: dict[str, float] = {}
         self._after_sweep: Callable[[], Awaitable[None]] | None = None
         #: GFS connection id → its ticket machinery.
         self._tickets: dict[str, _Tickets] = {}
@@ -751,29 +756,47 @@ class GfsMailboxService:
             bucket.add(task)
             task.add_done_callback(bucket.discard)
 
-    async def mint_missing(self) -> int:
+    async def mint_missing(self, *, paced: bool = False) -> int:
         """Mint our mailbox at ONE needed GFS where we hold none. Returns
-        how many were minted (0 or 1)."""
+        how many were minted (0 or 1). A failed mint holds that GFS off
+        *paced* asks (:meth:`mint_soon`) for a sweep period — load pacing,
+        so a GFS that keeps refusing cannot burn the day's tickets one
+        directory frame at a time; the sweep still tries."""
         needed = await self._needed_urls()
         missing = sorted(needed - self.mailbox_gfs_urls())
         self._rng.shuffle(missing)
+        now = self._clock()
         for url in missing:
+            if paced and self._mint_failed.get(url, float("-inf")) > now:
+                continue
             if await self._connection_at(url) is None:
                 continue
             own = await self.ensure(url)
-            return 1 if own is not None else 0
+            if own is None:
+                self._mint_failed[url] = now + SWEEP_PERIOD_S
+                return 0
+            self._mint_failed.pop(url, None)
+            return 1
         return 0
 
     def mint_soon(self) -> None:
         """:meth:`mint_missing` in the background (the directory just learnt
-        of a GFS-reached member in an inbound handler); concurrent asks are
-        safe, :meth:`ensure` mints under the lock."""
-        if not self._stop.is_set():
-            self._spawn(self._mint_soon(), "gfs-mailbox-mint")
+        of a GFS-reached member in an inbound handler): one at a time, a GFS
+        whose mint just failed skipped."""
+        if self._stop.is_set() or (
+            self._minting is not None and not self._minting.done()
+        ):
+            return
+        task: asyncio.Task[None] = asyncio.create_task(
+            self._mint_soon(), name="gfs-mailbox-mint"
+        )
+        self._minting = task
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     async def _mint_soon(self) -> None:
         try:
-            await self.mint_missing()
+            await self.mint_missing(paced=True)
         except Exception:
             log.warning("gfs.mailbox: a mint failed", exc_info=True)
 

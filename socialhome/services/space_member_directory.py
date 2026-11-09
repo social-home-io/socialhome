@@ -603,6 +603,10 @@ class SpaceMemberDirectory:
             # got. We stay behind; our next sync echo gets a snapshot.
             log.info("directory: ignoring a delta on a version we do not hold")
             return
+        coming = self._snap_in.get(space_id)
+        if snapshot and coming is not None and seq < coming[0]:
+            log.info("directory: ignoring a part of an older snapshot")
+            return
         parts = payload.get("parts")
         if snapshot and _is_count(parts) and parts > SNAPSHOT_MAX + 1:
             log.info("directory: ignoring an oversized directory")
@@ -945,7 +949,10 @@ class SpaceMemberDirectory:
             mine = cards.get(to)
             everything = mine is not None and mine.mailbox is not None
             if to in (snapshot_to or set()):
-                await self._send_snapshot(space_id, to, listed, seq, everything)
+                # The version this household builds on: a household given
+                # mailbox cards only follows ``dir_seq_mbx``.
+                version = seq if everything else _count(own_doc.get("dir_seq_mbx"))
+                await self._send_snapshot(space_id, to, listed, version, everything)
                 continue
             relevant = list(delta.values()) if everything else for_mbx
             out = [c for c in relevant if c.instance_id != to]

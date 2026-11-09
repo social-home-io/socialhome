@@ -1250,10 +1250,12 @@ async def test_a_delta_of_only_my_own_card_still_moves_my_version():
     w.writers.writers[SPACE] = {a["id"]}
     w.seat_all()
     await w.card_from(a, _card(a, gfs=GFS, rev=1))
+    before = w.spaces.doc(SPACE, w.me["id"])["dir_seq"]
     w.fed.directories.clear()
     await w.card_from(a, _card(a, gfs=GFS, rev=2))  # a rotation: newer card
     (frame,) = w.fed.to(a["id"])
     assert frame["payload"]["cards"] == []
+    assert frame["payload"]["base_seq"] == before  # builds on the last one
     assert frame["payload"]["dir_seq"] == w.spaces.doc(SPACE, w.me["id"])["dir_seq"]
 
 
@@ -1555,3 +1557,63 @@ async def test_our_own_mailbox_change_reaches_hosted_spaces_and_hosts_at_once():
     w.mailboxes.rev = 3
     await w.mailboxes.on_change()
     assert [c["to"] for c in w.fed.cards] == [host["id"]]
+
+
+async def test_a_mailbox_only_member_takes_mailbox_deltas_after_its_snapshot():
+    """Round 7: a household given mailbox cards only builds on
+    ``dir_seq_mbx`` — its snapshot must carry that version, or the next
+    mailbox delta (``base_seq`` = ``dir_seq_mbx``) would be dropped."""
+    host = World()
+    m_only, carded, plain = _hh(), _hh(), _hh()
+    host.member(m_only, carded, plain)
+    host.spaces.put_card(SPACE, _card(carded, gfs=GFS))
+    host.writers.writers[SPACE] = {m_only["id"], carded["id"], plain["id"]}
+    host.seat_all()
+    await host.dir.reconcile(SPACE)
+    plain_card = _card(plain, gfs=None)
+    host.spaces.put_card(SPACE, plain_card)  # a non-mailbox change
+    host.seat_all()
+    await host.dir.reconcile(SPACE, changed=[plain_card])
+    own = host.spaces.doc(SPACE, host.me["id"])
+    assert own["dir_seq"] != own["dir_seq_mbx"], own
+    host.fed.directories.clear()
+    host.dir._hello_at.clear()
+    await host.dir.reconcile(SPACE, snapshot_to={m_only["id"]})
+    snap = [d["payload"] for d in host.fed.raw_to(m_only["id"])]
+    host.fed.directories.clear()
+    newer = _card(carded, gfs=GFS, rev=9)
+    host.spaces.put_card(SPACE, newer)
+    await host.dir.reconcile(SPACE, changed=[newer])
+    (delta,) = [d["payload"] for d in host.fed.raw_to(m_only["id"])]
+    assert delta["base_seq"] == snap[-1]["dir_seq"]
+
+    m = World(host=host.me)
+    m.member(m_only)
+    for part in snap:
+        await m.directory(part)
+    await m.directory(delta)
+    assert m.spaces.doc(SPACE, carded["id"])["card"]["rev"] == 9
+
+
+async def test_a_part_of_an_older_snapshot_is_dropped(monkeypatch):
+    """Round 7: a late part of an OLDER snapshot never mixes into the one
+    coming in."""
+    host, member, others, m = _snapshot_world(monkeypatch)
+    await host.dir.reconcile(SPACE, snapshot_to={member["id"]})
+    old = [d["payload"] for d in host.fed.raw_to(member["id"])]
+    host.fed.directories.clear()
+    host.dir._hello_at.clear()
+    newer = _card(others[0], gfs=GFS, rev=9)
+    host.spaces.put_card(SPACE, newer)
+    await host.dir.reconcile(SPACE, changed=[newer], snapshot_to={member["id"]})
+    new = [d["payload"] for d in host.fed.raw_to(member["id"])]
+    assert new[0]["dir_seq"] > old[0]["dir_seq"]
+    await m.directory(new[0])
+    await m.directory(old[1])  # late, older: dropped
+    await m.directory(new[1])
+    await m.directory(new[2])
+    assert await m.dir.directory_seq(SPACE, host.me["id"]) == new[-1]["dir_seq"]
+    assert m.dir._snap_in == {}
+    late = old[0]
+    await m.directory(late)
+    assert m.dir._snap_in == {}

@@ -430,3 +430,51 @@ async def test_no_info_log_names_a_mailbox_id(gfs, caplog, monkeypatch):
         text = record.getMessage() + (record.exc_text or "")
         for mailbox_id in ids:
             assert mailbox_id not in text
+
+
+async def test_mint_soon_runs_one_mint_at_a_time_and_paces_a_refusing_gfs(
+    gfs, monkeypatch
+):
+    """Round 7 (load pacing, not timing privacy): a burst of directory
+    frames starts ONE mint; a GFS whose register failed is not asked again
+    by ``mint_soon`` for a sweep period (the sweep itself still tries), so
+    a refusing GFS cannot burn the day's tickets one frame at a time."""
+    _server, session, url, conn = gfs
+    now = [1000.0]
+    svc = _service(session, conn, now=now)
+
+    async def needed() -> set[str]:
+        return {url}
+
+    svc.attach_needed(needed)
+    calls: list[str] = []
+    gate = asyncio.Event()
+
+    async def failing(self, gfs_url):
+        calls.append(gfs_url)
+        await gate.wait()
+
+    monkeypatch.setattr(gms.GfsMailboxService, "ensure", failing)
+    await svc.start()
+
+    def mints():
+        return [t for t in list(svc._tasks) if t.get_name() == "gfs-mailbox-mint"]
+
+    for _ in range(5):
+        svc.mint_soon()
+    await asyncio.sleep(0)
+    assert len(mints()) == 1  # one in flight
+    gate.set()
+    await asyncio.gather(*mints())
+    assert len(calls) == 1
+    for _ in range(5):
+        svc.mint_soon()  # the GFS just failed: paced
+        await asyncio.gather(*mints())
+    assert len(calls) == 1
+    assert await svc.mint_missing() == 0  # the sweep still tries
+    assert len(calls) == 2
+    now[0] += gms.SWEEP_PERIOD_S + 1
+    svc.mint_soon()
+    await asyncio.gather(*mints())
+    assert len(calls) == 3
+    await svc.stop()
