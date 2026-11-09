@@ -472,6 +472,7 @@ async def _household(
             keywrap_public_key=keywrap.public_key,
             keywrap_sig=keywrap_sig,
             release_delay=(0.0, 0.0),
+            claim_jitter=(0.0, 0.0),
         )
         mailbox_service.fake = gfs
         mailbox_service.inbound = relay_inbound
@@ -2065,7 +2066,11 @@ async def test_a_gfs_without_mailboxes_keeps_todays_relay(tmp_path, gfs, http_se
     b = await _household(tmp_path, "yb", gfs, http_session, mailboxes=True)
     try:
         space = await _join(a, b, gfs)
-        assert await _rows(a) == {} and await _rows(b) == {}
+        empty = {"peer": None, "own": None}
+        # Marked as a mailbox pair (the sweep retries once the GFS can),
+        # but no mailbox on either side: instance-addressed meanwhile.
+        assert list((await _rows(a)).values()) == [empty]
+        assert list((await _rows(b)).values()) == [empty]
         await b.federation.broadcast_to_space_members(
             space.id, FederationEventType.SPACE_POST_CREATED, _post_payload()
         )
@@ -2225,3 +2230,44 @@ async def test_a_host_mint_past_its_bound_is_handed_over_later(
     peer = (await _rows(a))[(space.id, b.instance_id)]["peer"]
     assert peer is not None and peer["instance_id"] == b.instance_id
     assert (await _rows(b))[(space.id, a.instance_id)]["own"] is not None
+
+
+async def test_a_seat_without_mailboxes_gets_them_from_the_sweep(
+    mailbox_households, gfs, monkeypatch
+):
+    """Round 5: neither side could mint at seat time (no ticket, a refused
+    or unreachable register). The pair is still marked, it starts on the
+    instance-addressed relay, and each side's sweep mints its mailbox later
+    and announces it — the fallback is transient, not permanent."""
+    a, b = mailbox_households
+    real_mint = SpaceMailboxService.mint
+    failing = {"on": True}
+
+    async def _mint(self, space_id, gfs_url, *, peer, fetch=True):
+        if failing["on"]:
+            return None
+        return await real_mint(self, space_id, gfs_url, peer=peer, fetch=fetch)
+
+    monkeypatch.setattr(SpaceMailboxService, "mint", _mint)
+    space = await _join(a, b, gfs)
+    assert (await _rows(a))[(space.id, b.instance_id)] == {"peer": None, "own": None}
+    assert (await _rows(b))[(space.id, a.instance_id)] == {"peer": None, "own": None}
+    await a.federation.broadcast_to_space_members(
+        space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("before")
+    )
+    await gfs.drain()
+    assert [to for to, _ in gfs.mailbox] == [b.instance_id]  # transient
+    failing["on"] = False
+    assert await a.mailboxes.retry_missing() == 1
+    assert await b.mailboxes.retry_missing() == 1
+    await gfs.drain()
+    a_row = (await _rows(a))[(space.id, b.instance_id)]
+    b_row = (await _rows(b))[(space.id, a.instance_id)]
+    assert a_row["own"] and a_row["peer"] and b_row["own"] and b_row["peer"]
+    gfs.mailbox.clear()
+    await a.federation.broadcast_to_space_members(
+        space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("after")
+    )
+    await gfs.drain()
+    assert [to for to, _ in gfs.mailbox] == [a_row["peer"]["mailbox_id"]]
+    assert [e.payload["content"] for e in b.received][-1] == "after"

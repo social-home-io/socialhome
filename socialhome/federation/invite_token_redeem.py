@@ -1142,9 +1142,15 @@ class SpaceInviteTokenRedeemCoordinator:
                 await expire_superseded_invitations(
                     self._spaces, space_id, join, issuer_instance_id
                 )
-            if bootstrap is not None:
+            if (
+                bootstrap is not None
+                and bootstrap.proto_version
+                >= FederationCapability.MIN_FOR_SPACE_MAILBOX
+            ):
                 # v_88 — the pair's mailboxes: the host's (if it sent one)
-                # and ours (minted for this space before the redeem).
+                # and ours (minted for this space before the redeem). Written
+                # even when neither side has one yet: the pair is marked, and
+                # the sweep mints the missing half later (``retry_missing``).
                 # Written AFTER our person is seated: until then the
                 # mailbox is pending, never swept as "a space we left".
                 own = result.get("_own_mailbox")
@@ -2385,16 +2391,24 @@ class SpaceInviteTokenRedeemCoordinator:
             if reservation is not None:
                 await self._rollback_redeem(reservation, space_session=True)
             return {"ok": True, "denied": True}
+        # A v_88 joiner's pair is marked even with no mailbox on either side
+        # yet: the sweep mints ours later and announces it.
+        mailbox_pair = (
+            _int_or_one(body.get("proto_version"))
+            >= FederationCapability.MIN_FOR_SPACE_MAILBOX
+        )
         if reservation is None:
-            await self._remember_mailbox(
-                space_id, redeemer_instance_id, peer=peer_entry, own=own
-            )
+            if mailbox_pair:
+                await self._remember_mailbox(
+                    space_id, redeemer_instance_id, peer=peer_entry, own=own
+                )
             return {"ok": True, "space_id": ack_body["space_id"]}
         await self._commit_redeem(reservation)
         # After the commit: its ``space_instances`` row now exists.
-        await self._remember_mailbox(
-            space_id, redeemer_instance_id, peer=peer_entry, own=own
-        )
+        if mailbox_pair:
+            await self._remember_mailbox(
+                space_id, redeemer_instance_id, peer=peer_entry, own=own
+            )
         # The ONE operator-visible record that a stranger joined through a
         # public link. Every other outcome on this path is already
         # observable (a DENY, a rejected relay envelope, a failed seal),

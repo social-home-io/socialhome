@@ -808,8 +808,17 @@ that household.
    retry — or a second household redeeming into the same space at the same
    time — reuses it and its ticket; then the sweep drops it.
 
-If the GFS takes no mailboxes, or no ticket can be had, that side mints
-none and the pair keeps the instance-addressed relay toward it.
+If the GFS takes no mailboxes, no ticket can be had, the register is
+refused or the GFS is unreachable, that side mints none at seat time. The
+instance-addressed relay toward it is only a **transient** state: the seat
+is still marked as a mailbox pair (`{"peer": null, "own": null}` when
+neither side has one), and each side's sweep (`retry_missing`, every
+~10 min, jittered) mints the missing mailbox later — from cached tickets
+only, at most `RETRIES_PER_SWEEP` (4) pairs per run in random order and
+`REMINTS_PER_DAY` (1) per pair, only toward a counterpart at v_88 or later
+— and announces it with `SPACE_MAILBOX_UPDATED`. The joiner uses the same
+path to hand the host its entry. A late `remember(own=None)` never nulls
+an own a late mint already set.
 
 **Sending.** For each relay send to a `space_session` seat,
 `FederationTransport` asks `SpaceMailboxService.target_for` for the
@@ -924,12 +933,23 @@ host's), one ~1 KiB entry in the sealed redeem and one in the sealed ACK.
 Sockets: +1 anonymous WS on each side per GFS-only member pair. Worst
 realistic case, a global space with 200 GFS-only members: 400 extra sockets
 at the GFS (200 the members', 200 the host's), and the host spends 200
-tickets over time — at the default 50 tickets a day (batches of 8 cached)
-a host seating 200 members in one day runs out: the members past its
-tickets get no host mailbox (they address the host instance-addressed; the
-host still addresses THEIR mailboxes) until a later re-seat. Mints run one
-at a time (the service lock); a host mint is bounded to 3 s per seat. The
-host's fan-out is still 200 sealed envelopes per item, as before.
+tickets over time. A household caches up to `TICKET_BATCH` (32) tickets and
+refills on connect and about daily — inside the GFS's default
+`mailbox_tickets_per_day` (50) and well under its per-address register cap
+`mailbox_max_per_ip` (200 a day). A host seating 200 members in one day
+mints the first 32 at seat time; the rest start instance-addressed toward
+the host (the host still uses THEIR mailboxes) and catch up through the
+sweep's retry as tickets arrive — 32 a day, so about a week for 200.
+Transient, never permanent. Mints run one at a time (the service lock); a
+host mint is bounded to 3 s per seat. The host's fan-out is still 200
+sealed envelopes per item, as before.
+
+**Claim timing.** Each claim waits its own uniform 0–60 s
+(`CLAIM_JITTER_S`) before its first connect after a restart and after a
+lost socket (a GFS restart drops them all), and pings at its own period
+(20–40 s, `CLAIM_HEARTBEAT_S`) — sockets opened together neither come back
+nor ping in step. A mailbox minted at seat time connects at once (its
+register already sits next to the seat).
 
 **Daily caps (a GFS that answers every claim with 4401).** Per member pair
 and day: at most `ANNOUNCES_PER_DAY` (6) `SPACE_MAILBOX_UPDATED`,
@@ -943,7 +963,12 @@ host mailboxes). Member-to-member delivery (v_89) would make it one per
 member PAIR across the space — N² mailboxes, sockets and tickets (200
 members ≈ 40 000). PR 3 must re-evaluate this scaling before it builds on
 it (e.g. per-pair only toward the host, one per member for member traffic,
-or a different budget model).
+or a different budget model). Two GFS caps already bound per-pair today and
+must be in that review: `mailbox_max_sockets_per_ip` (512 claim sockets
+per address) — past it a claim gets `429 too_many_sockets`, which the
+household treats as a plain backoff, so a host with more than ~500 pairs
+loses frames past the GFS queue without noticing — and `mailbox_max_per_ip`
+(200 new mailboxes per address and day).
 
 **Not in this step (PR 3+).** Passing entries to all members (v_89),
 member-to-member mesh, a host `SPACE_ROUTED` hop, a generic

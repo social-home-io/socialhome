@@ -170,6 +170,7 @@ def _service(session, conn, *, config=None, spaces=None, kek=None, mailbox=True)
         keywrap_public_key=KW_PUB,
         keywrap_sig=KW_SIG,
         release_delay=(0.0, 0.0),
+        claim_jitter=(0.0, 0.0),
     )
     return svc
 
@@ -209,6 +210,72 @@ async def test_a_fresh_household_gets_tickets_on_connect_and_the_pin_persists(gf
     assert again._tickets[conn.id].guard.pin.first_seen == pin.first_seen
     await svc.stop()
     await again.stop()
+
+
+class _FedRepo:
+    """The counterpart's ``remote_instances`` row (a space_session seat)."""
+
+    def __init__(self, url: str, *, proto: int = OURS) -> None:
+        from types import SimpleNamespace
+
+        from socialhome.domain.federation import InstanceSource
+
+        self.row = SimpleNamespace(
+            source=InstanceSource.SPACE_SESSION,
+            relay_via=url,
+            proto_version=proto,
+            remote_identity_pk="00",
+        )
+
+    async def get_instance(self, instance_id):
+        return self.row if instance_id == "peer-iid" else None
+
+
+async def test_the_sweep_mints_a_missing_own_mailbox_and_announces_it(gfs):
+    """Round 5: a seat that got no mailbox of ours (no ticket, a refused or
+    unreachable register, a mint past its bound) is retried by the sweep —
+    from cached tickets only — and the counterpart is told with
+    SPACE_MAILBOX_UPDATED: the instance-addressed fallback is transient."""
+    server, session, url, conn = gfs
+    spaces = _Spaces()
+    spaces.rows[("space-1", "peer-iid")] = orjson.dumps(
+        {"peer": None, "own": None}
+    ).decode()
+    svc = _service(session, conn, spaces=spaces)
+    svc._federation_repo = _FedRepo(url)  # type: ignore[assignment]
+    announced: list = []
+
+    async def _announce(space_id, instance_id, entry):
+        announced.append((space_id, instance_id, entry))
+
+    svc.attach_announcer(_announce)
+    await _ready(svc, conn)
+    assert await svc.retry_missing() == 1
+    row = orjson.loads(spaces.rows[("space-1", "peer-iid")])
+    assert row["own"] is not None
+    [(space, peer, entry)] = announced
+    assert (space, peer) == ("space-1", "peer-iid") and entry is not None
+    assert await server.app[gfs_mailbox_repo_key].get(entry.mailbox_id)
+    # Done: nothing more to retry.
+    assert await svc.retry_missing() == 0
+    await svc.stop()
+
+
+async def test_the_retry_spends_cached_tickets_only_and_skips_old_peers(gfs):
+    _server, session, url, conn = gfs
+    spaces = _Spaces()
+    spaces.rows[("space-1", "peer-iid")] = orjson.dumps(
+        {"peer": None, "own": None}
+    ).decode()
+    svc = _service(session, conn, spaces=spaces)
+    svc._federation_repo = _FedRepo(url, proto=87)  # type: ignore[assignment]
+    await _ready(svc, conn)
+    assert await svc.retry_missing() == 0  # a peer below v_88: never
+    svc._federation_repo = _FedRepo(url)  # type: ignore[assignment]
+    svc._tickets[conn.id].cache.clear()
+    assert await svc.retry_missing() == 0  # no cached ticket: none fetched
+    assert len(svc._tickets[conn.id].cache) == 0
+    await svc.stop()
 
 
 async def test_leaving_a_gfs_stops_its_ticket_loops(gfs):
@@ -448,6 +515,7 @@ async def test_a_pending_mint_is_reused_by_a_retry_then_expires(gfs):
         keywrap_sig=KW_SIG,
         clock=lambda: now[0],
         release_delay=(0.0, 0.0),
+        claim_jitter=(0.0, 0.0),
     )
     await _ready(svc, conn)
     tickets_before = len(svc._tickets[conn.id].cache)
@@ -484,6 +552,7 @@ async def test_a_left_space_releases_its_mailbox_and_a_rejoin_gets_a_new_one(gfs
         keywrap_sig=KW_SIG,
         clock=lambda: now[0],
         release_delay=(0.0, 0.0),
+        claim_jitter=(0.0, 0.0),
     )
     await _ready(svc, conn)
     entry, own = await svc.mint("space-1", url, peer="peer-iid")
@@ -620,6 +689,7 @@ async def test_the_identified_session_never_carries_mailbox_traffic(gfs):
         keywrap_public_key=KW_PUB,
         keywrap_sig=KW_SIG,
         release_delay=(0.0, 0.0),
+        claim_jitter=(0.0, 0.0),
     )
     try:
         await _ready(svc, conn)

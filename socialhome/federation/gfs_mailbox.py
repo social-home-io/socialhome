@@ -913,7 +913,15 @@ class MailboxClaim:
     ``bytes`` media frames until the socket closes. Reconnects are the
     caller's job (PR 2)."""
 
-    __slots__ = ("_accepts", "_gfs_instance_id", "_gfs_url", "_keys", "_session", "_ws")
+    __slots__ = (
+        "_accepts",
+        "_gfs_instance_id",
+        "_gfs_url",
+        "_heartbeat",
+        "_keys",
+        "_session",
+        "_ws",
+    )
 
     def __init__(
         self,
@@ -923,8 +931,12 @@ class MailboxClaim:
         gfs_instance_id: str,
         *,
         accepts: tuple[str, ...] = (ACCEPTS_ENVELOPE_MEDIA,),
+        heartbeat: float = MAILBOX_CLIENT_HEARTBEAT_S,
     ) -> None:
         self._session = session
+        #: Ping period — a caller with many sockets gives each its own, so
+        #: sockets opened together do not ping in step.
+        self._heartbeat = heartbeat
         self._gfs_url = gfs_url.rstrip("/")
         self._keys = keys
         self._gfs_instance_id = gfs_instance_id
@@ -934,7 +946,7 @@ class MailboxClaim:
     async def __aenter__(self) -> Self:
         ws = await self._session.ws_connect(
             self._gfs_url + MAILBOX_WS_ROUTE,
-            heartbeat=MAILBOX_CLIENT_HEARTBEAT_S,
+            heartbeat=self._heartbeat,
             max_msg_size=MAILBOX_CLIENT_MAX_MSG_BYTES,
         )
         self._ws = ws

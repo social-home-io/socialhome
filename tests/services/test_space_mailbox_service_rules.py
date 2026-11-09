@@ -26,6 +26,7 @@ from socialhome.federation.gfs_mailbox import derive_mailbox_keys
 from socialhome.federation.space_mailbox_entry import build_entry
 from socialhome.services.space_mailbox_service import (
     ANNOUNCES_PER_DAY,
+    CLAIM_JITTER_S,
     LOST_ROTATE_AFTER,
     RECOVERY_REGISTERS_PER_DAY,
     REGISTER_NO_TICKET,
@@ -364,3 +365,68 @@ async def test_a_gfs_refusing_every_claim_cannot_burn_tickets_or_storm(monkeypat
     claim.lost = False
     await svc._recover(object(), claim)  # type: ignore[arg-type]
     assert len(registers) == RECOVERY_REGISTERS_PER_DAY + 1
+
+
+async def test_remember_without_own_keeps_a_late_own():
+    """Round 5: the post-commit ``remember(own=None)`` can land after a late
+    ``set_own`` — it must keep that own, never null it (the sweep would then
+    unregister a mailbox the joiner was already told about)."""
+    iid, entry, _row = _joiner()
+    spaces = _RowSpaces(seated={("s1", iid)})
+    svc = _bare_service(spaces)
+    assert await svc.set_own("s1", iid, OWN) is True
+    assert await svc.remember("s1", iid, peer=entry, own=None) is True
+    row = orjson.loads(spaces.rows[("s1", iid)])
+    assert row["own"]["gen"] == OWN.gen
+    assert row["peer"] == entry.to_wire()
+
+
+async def test_a_pair_without_entries_is_still_marked():
+    """A v_88 seat where neither side minted is written as an empty pair
+    row, so the sweep's retry can find it later."""
+    spaces = _RowSpaces(seated={("s1", "host")})
+    svc = _bare_service(spaces)
+    assert await svc.remember("s1", "host", peer=None, own=None) is True
+    assert orjson.loads(spaces.rows[("s1", "host")]) == {"peer": None, "own": None}
+
+
+def test_claim_connects_are_spread_out():
+    """Round 5: claims reopened together (start, a GFS restart) must not
+    connect — or ping — in step: each waits its own uniform(0, 60 s) first,
+    and each socket gets its own heartbeat period."""
+    svc = _bare_service(_RowSpaces(), rng=random.Random(3))
+    delays = [svc._claim_jitter() for _ in range(20)]
+    lo, hi = CLAIM_JITTER_S
+    assert lo == 0.0 and hi >= 60.0
+    assert all(lo <= d <= hi for d in delays) and len(set(delays)) == 20
+    beats = [svc._heartbeat() for _ in range(20)]
+    assert all(20.0 <= b <= 40.0 for b in beats) and len(set(beats)) == 20
+
+
+async def test_reopened_claims_wait_their_own_delay(monkeypatch):
+    spaces = _RowSpaces(
+        {
+            (f"s{n}", "host"): orjson.dumps(
+                {"peer": None, "own": {"gen": n, "gfs_id": "g", "gfs": "http://g"}}
+            ).decode()
+            for n in range(3)
+        }
+    )
+    svc = _bare_service(spaces, rng=random.Random(5))
+    svc._root = b"\1" * 32
+    seen: list = []
+
+    async def _loop(self, claim):
+        seen.append(claim.start_delay)
+
+    monkeypatch.setattr(SpaceMailboxService, "_claim_loop", _loop)
+    monkeypatch.setattr(SpaceMailboxService, "_sweep_loop", _noop)
+    await svc.start()
+    await asyncio.sleep(0)
+    assert len(seen) == 3 and len(set(seen)) == 3
+    assert all(0.0 <= d <= CLAIM_JITTER_S[1] for d in seen)
+    await svc.stop()
+
+
+async def _noop(self):
+    return None
