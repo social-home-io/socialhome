@@ -66,6 +66,13 @@ from socialhome.federation.route_discovery import (
 )
 from socialhome.federation.routed_envelope import SpaceRoutedHandler
 
+
+async def _no_row(_instance_id: str) -> None:
+    """The routed handler asks for a hop's row (v_89 host-hop seat check):
+    nobody here is a ``space_session`` seat."""
+    return
+
+
 pytestmark = pytest.mark.security
 
 
@@ -205,7 +212,7 @@ def test_target_ephemeral_ttl_is_not_extended_by_use():
 
     svc = RouteDiscoveryService(
         federation_service=SimpleNamespace(own_instance_id="self"),  # type: ignore[arg-type]
-        federation_repo=SimpleNamespace(),  # type: ignore[arg-type]
+        federation_repo=SimpleNamespace(get_instance=_no_row),  # type: ignore[arg-type]
     )
     pub = svc._generate_target_eph(time.monotonic())
     _priv, expiry_at_mint = svc._target_eph_state[pub]
@@ -267,7 +274,7 @@ def _relay_between(origin_id: str, target_id: str):
 
     handler = SpaceRoutedHandler(
         federation_service=fed,  # type: ignore[arg-type]
-        federation_repo=SimpleNamespace(),  # type: ignore[arg-type]
+        federation_repo=SimpleNamespace(get_instance=_no_row),  # type: ignore[arg-type]
         event_dispatcher=_noop,
         target_eph_lookup=lambda _p: None,
     )
@@ -419,7 +426,7 @@ async def _origin_with_pending_send():
 
     handler = SpaceRoutedHandler(
         federation_service=fed,  # type: ignore[arg-type]
-        federation_repo=SimpleNamespace(),  # type: ignore[arg-type]
+        federation_repo=SimpleNamespace(get_instance=_no_row),  # type: ignore[arg-type]
         event_dispatcher=_noop,
         target_eph_lookup=lambda _p: None,
     )
@@ -728,7 +735,7 @@ async def test_non_member_cannot_dispatch_space_content_as_a_member(caplog):
     target_priv, target_pub = routed_crypto.generate_ephemeral_keypair()
     handler = SpaceRoutedHandler(
         federation_service=fed,  # type: ignore[arg-type]
-        federation_repo=SimpleNamespace(),  # type: ignore[arg-type]
+        federation_repo=SimpleNamespace(get_instance=_no_row),  # type: ignore[arg-type]
         event_dispatcher=_dispatch,
         target_eph_lookup=lambda pub: target_priv if pub == target_pub else None,
     )
@@ -788,7 +795,7 @@ async def test_the_genuine_member_still_reaches_the_dispatcher():
     target_priv, target_pub = routed_crypto.generate_ephemeral_keypair()
     handler = SpaceRoutedHandler(
         federation_service=fed,  # type: ignore[arg-type]
-        federation_repo=SimpleNamespace(),  # type: ignore[arg-type]
+        federation_repo=SimpleNamespace(get_instance=_no_row),  # type: ignore[arg-type]
         event_dispatcher=_dispatch,
         target_eph_lookup=lambda pub: target_priv if pub == target_pub else None,
     )
