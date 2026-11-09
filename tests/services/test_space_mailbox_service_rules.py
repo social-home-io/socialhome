@@ -74,6 +74,9 @@ class _RacingSpaces:
     async def list_space_instance_mailboxes(self):
         return [(s, i, v) for (s, i), v in self.rows.items() if v is not None]
 
+    async def get_space_instance_mailbox(self, s, i):
+        return self.rows.get((s, i))
+
 
 def _bare_service(spaces, **kw) -> SpaceMailboxService:
     return SpaceMailboxService(
@@ -132,6 +135,9 @@ async def test_each_release_waits_its_own_random_delay(monkeypatch):
         async def set_space_instance_mailbox(self, *a):
             return None
 
+        async def get_space_instance_mailbox(self, *a):
+            return None
+
         async def list_member_instances(self, space_id):
             return []
 
@@ -182,6 +188,9 @@ async def test_a_mailbox_the_gfs_keeps_refusing_is_replaced(monkeypatch):
         async def list_space_instance_mailboxes(self):
             return [(s, i, v) for (s, i), v in self.rows.items() if v is not None]
 
+        async def get_space_instance_mailbox(self, s, i):
+            return self.rows.get((s, i))
+
         async def set_space_instance_mailbox(self, s, i, v):
             self.rows[(s, i)] = v
 
@@ -213,13 +222,19 @@ async def test_a_mailbox_the_gfs_keeps_refusing_is_replaced(monkeypatch):
     monkeypatch.setattr(SpaceMailboxService, "_register", _register)
     for _ in range(LOST_ROTATE_AFTER - 1):
         assert await svc._recover(object(), claim) is False  # type: ignore[arg-type]
-    assert announced == [None]  # told once, at the first refusal
+    # Round 7: never told at once (identified next to the anonymous claim
+    # failure) — the row carries a delayed announce instead.
+    assert announced == []
+    marked_at = orjson.loads(spaces.rows[("s1", "host")])["announce_at"]
     assert await svc._recover(object(), claim) is True  # type: ignore[arg-type]
     row = orjson.loads(spaces.rows[("s1", "host")])
     assert row["own"]["gen"] != 7
+    assert row["announce_at"] == marked_at  # still one delayed announce
     new_key = ("s1", "host", "g", row["own"]["gen"])
     assert list(svc._claims) == [new_key]
-    assert svc._claims[new_key].lost  # it announces itself once claimed
+    assert not svc._claims[new_key].lost
+    assert svc._claims[new_key].start_delay > 0  # its claim is jittered too
+    assert announced == []
     await svc.stop()
 
 
@@ -243,6 +258,9 @@ class _RowSpaces:
 
     async def list_space_instance_mailboxes(self):
         return [(s, i, v) for (s, i), v in self.rows.items() if v is not None]
+
+    async def get_space_instance_mailbox(self, s, i):
+        return self.rows.get((s, i))
 
     async def list_unmarked_session_pairs(self, *, min_proto):
         return sorted(
@@ -366,7 +384,8 @@ async def test_a_gfs_refusing_every_claim_cannot_burn_tickets_or_storm(monkeypat
         claim.lost = False  # each episode: claimed, then 4401 again
         await svc._recover(object(), claim)  # type: ignore[arg-type]
     assert len(registers) == RECOVERY_REGISTERS_PER_DAY
-    assert len(announced) == ANNOUNCES_PER_DAY
+    assert announced == []  # round 7: deferred to a later sweep
+    assert "announce_at" in orjson.loads(spaces.rows[("s1", "host")])
     # A new day resets the budget.
     svc._clock = lambda: 10 * 86_400.0  # type: ignore[assignment]
     claim.lost = False
@@ -565,3 +584,112 @@ async def test_marking_never_overwrites_state_written_since_the_listing():
     svc = _bare_service(spaces)
     assert await svc.mark_unmarked() == 0
     assert spaces.rows[("s1", "host")] == stored
+
+
+def _due_row(gen: int, at: int = 1) -> str:
+    return orjson.dumps(
+        {
+            "peer": None,
+            "own": {"gen": gen, "gfs_id": "g", "gfs": "http://g"},
+            "announce_at": at,
+        }
+    ).decode()
+
+
+async def test_a_sweep_that_registered_or_claimed_sends_no_announce(monkeypatch):
+    """Round 7: an identified announce never shares a sweep tick with an
+    anonymous register / claim (another pair's either) — the GFS could tie
+    the two."""
+    spaces = _RowSpaces({("s1", "h1"): _due_row(1)})
+    svc = _bare_service(spaces)
+    svc._root = b"\1" * 32
+    sent: list = []
+
+    async def _announce(space_id, instance_id, entry):
+        sent.append(instance_id)
+
+    async def _busy(self):
+        self._anon_ops += 1  # this tick registered a mailbox
+        return 1
+
+    async def _idle(self):
+        return 0
+
+    svc.attach_announcer(_announce)
+    monkeypatch.setattr(SpaceMailboxService, "retry_missing", _busy)
+    await svc.sweep_once()
+    assert sent == []
+    monkeypatch.setattr(SpaceMailboxService, "retry_missing", _idle)
+    await svc.sweep_once()
+    assert sent == ["h1"]
+
+
+async def test_a_due_announce_never_reverts_a_concurrent_rotation():
+    """Round 7: the row's own can move (a rotation) while the announce is
+    in flight — clearing the marker must not write the old own back, and
+    the new own stays due."""
+    spaces = _RowSpaces({("s1", "h1"): _due_row(1)})
+    svc = _bare_service(spaces)
+    svc._root = b"\1" * 32
+
+    async def _announce(space_id, instance_id, entry):
+        spaces.rows[("s1", "h1")] = _due_row(2)  # rotated meanwhile
+
+    svc.attach_announcer(_announce)
+    assert await svc.send_due_announces() == 1
+    row = orjson.loads(spaces.rows[("s1", "h1")])
+    assert row["own"]["gen"] == 2 and "announce_at" in row
+
+
+async def test_a_pair_out_of_budget_does_not_stall_the_other_announces():
+    spaces = _RowSpaces({("s1", "h1"): _due_row(1, 1), ("s1", "h2"): _due_row(2, 2)})
+    svc = _bare_service(spaces)
+    svc._root = b"\1" * 32
+    for _ in range(ANNOUNCES_PER_DAY):
+        assert svc._spend("s1", "h1", 1, ANNOUNCES_PER_DAY)
+    sent: list = []
+
+    async def _announce(space_id, instance_id, entry):
+        sent.append(instance_id)
+
+    svc.attach_announcer(_announce)
+    assert await svc.send_due_announces() == 1
+    assert sent == ["h2"]
+    assert "announce_at" in orjson.loads(spaces.rows[("s1", "h1")])
+
+
+async def test_an_undelivered_announce_stays_due():
+    """Round 7: the fail-soft announce reports delivery; the marker is
+    cleared only once it went out."""
+    spaces = _RowSpaces({("s1", "h1"): _due_row(1)})
+    svc = _bare_service(spaces)
+    svc._root = b"\1" * 32
+
+    async def _announce(space_id, instance_id, entry):
+        return False  # not delivered
+
+    svc.attach_announcer(_announce)
+    assert await svc.send_due_announces() == 0
+    assert "announce_at" in orjson.loads(spaces.rows[("s1", "h1")])
+
+    async def _boom(space_id, instance_id, entry):
+        raise RuntimeError("down")
+
+    svc.attach_announcer(_boom)
+    assert await svc.send_due_announces() == 0
+    assert "announce_at" in orjson.loads(spaces.rows[("s1", "h1")])
+
+
+async def test_a_row_write_reads_only_its_own_row():
+    """Round 7: keeping ``announce_at`` reads one row, not the table (a
+    rotation over N rows would be O(N^2))."""
+    spaces = _RowSpaces({("s1", "h1"): _due_row(1)})
+    svc = _bare_service(spaces)
+
+    async def _no_scan():
+        raise AssertionError("whole-table read")
+
+    spaces.list_space_instance_mailboxes = _no_scan  # type: ignore[method-assign]
+    async with svc._lock:
+        await svc._write_row("s1", "h1", peer=None, own=OWN)
+    assert orjson.loads(spaces.rows[("s1", "h1")])["announce_at"] == 1

@@ -240,6 +240,9 @@ class AbstractSpaceRepo(Protocol):
         self, space_id: str, instance_id: str, mailbox_json: str | None
     ) -> None: ...
     async def list_space_instance_mailboxes(self) -> list[tuple[str, str, str]]: ...
+    async def get_space_instance_mailbox(
+        self, space_id: str, instance_id: str
+    ) -> str | None: ...
     async def list_unmarked_session_pairs(
         self, *, min_proto: int
     ) -> list[tuple[str, str]]: ...
@@ -1969,6 +1972,16 @@ class SqliteSpaceRepo:
             " WHERE mailbox IS NOT NULL"
         )
         return [(r["space_id"], r["instance_id"], r["mailbox"]) for r in rows]
+
+    async def get_space_instance_mailbox(
+        self, space_id: str, instance_id: str
+    ) -> str | None:
+        """One (space, household) row's mailbox JSON, or ``None``."""
+        row = await self._db.fetchone(
+            "SELECT mailbox FROM space_instances WHERE space_id=? AND instance_id=?",
+            (space_id, instance_id),
+        )
+        return row["mailbox"] if row is not None else None
 
     async def remove_space_instance(
         self,

@@ -2037,6 +2037,16 @@ async def test_space_instance_mailbox_is_per_pair_update_only_and_goes_with_the_
     assert await env.repo.list_space_instance_mailboxes() == []
 
 
+async def test_one_space_instance_mailbox_is_read_by_its_key(env):
+    await env.repo.save(_space("sp-a"))
+    assert await env.repo.get_space_instance_mailbox("sp-a", "hh-1") is None
+    await env.repo.add_space_instance("sp-a", "hh-1")
+    await env.repo.add_space_instance("sp-a", "hh-2")
+    await env.repo.set_space_instance_mailbox("sp-a", "hh-1", '{"own": null}')
+    assert await env.repo.get_space_instance_mailbox("sp-a", "hh-1") == '{"own": null}'
+    assert await env.repo.get_space_instance_mailbox("sp-a", "hh-2") is None
+
+
 async def test_unmarked_session_pairs_are_space_session_seats_at_a_version(env):
     """v_88 sweep: seated ``space_session`` pairs at or above a version that
     hold no mailbox state yet (seated before v_88, an old invite link, a

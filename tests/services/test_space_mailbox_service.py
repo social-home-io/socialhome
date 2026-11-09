@@ -87,6 +87,9 @@ class _Spaces:
     async def list_space_instance_mailboxes(self):
         return [(s, i, v) for (s, i), v in self.rows.items() if v is not None]
 
+    async def get_space_instance_mailbox(self, space_id, instance_id):
+        return self.rows.get((space_id, instance_id))
+
 
 class _GfsRepo:
     def __init__(self, conn: GfsConnection) -> None:
@@ -440,9 +443,21 @@ async def test_a_mailbox_the_gfs_forgot_is_announced_lost_then_recovered(gfs):
     await server.app[gfs_mailbox_ws_registry_key].close_one(
         entry.mailbox_id, code=1012, message=b"restart"
     )
-    await _until(lambda: len(announced) >= 2)
-    assert announced[0] == ("space-1", "peer-iid", None)  # fall back now
-    space, peer, back = announced[1]
+    # Round 7: the counterpart is told only after a delay (never next to
+    # the anonymous re-register / re-claim), and then of the CURRENT state.
+    row = ("space-1", "peer-iid")
+    await _until(lambda: "announce_at" in orjson.loads(spaces.rows[row]))
+    for _ in range(200):  # re-registered from the cache and claimed again
+        claim = next(iter(svc._claims.values()))
+        if not claim.lost and await server.app[gfs_mailbox_repo_key].get(
+            entry.mailbox_id
+        ):
+            break
+        await asyncio.sleep(0.05)
+    assert announced == []
+    svc._wall_clock = lambda: 10.0**12  # type: ignore[assignment]
+    assert await svc.send_due_announces() == 1
+    [(space, peer, back)] = announced
     assert (space, peer) == ("space-1", "peer-iid")
     assert back is not None and back.mailbox_id == entry.mailbox_id  # same one
     assert await server.app[gfs_mailbox_repo_key].get(entry.mailbox_id)
@@ -474,12 +489,19 @@ async def test_a_forgotten_mailbox_with_no_ticket_waits_for_the_refill(gfs):
     await server.app[gfs_mailbox_ws_registry_key].close_one(
         entry.mailbox_id, code=1012, message=b"restart"
     )
-    await _until(lambda: announced == [None])
+    row = ("space-1", "peer-iid")
+    await _until(lambda: "announce_at" in orjson.loads(spaces.rows[row]))
     await asyncio.sleep(0.5)
+    assert announced == []  # round 7: delayed, never at once
+    svc._wall_clock = lambda: 10.0**12  # type: ignore[assignment]
+    assert await svc.send_due_announces() == 1
     assert announced == [None]  # still lost: no ticket, none fetched
     assert len(cache) == 0
     await cache.refill()  # the scheduled refill
-    await _until(lambda: len(announced) == 2, timeout=30)
+    await _until(lambda: "announce_at" in orjson.loads(spaces.rows[row]), timeout=30)
+    assert await svc.send_due_announces() == 0  # its own delay first
+    svc._wall_clock = lambda: 10.0**13  # type: ignore[assignment]
+    assert await svc.send_due_announces() == 1
     assert announced[1] is not None and announced[1].mailbox_id == entry.mailbox_id
     await svc.stop()
 
