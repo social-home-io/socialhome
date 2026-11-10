@@ -802,3 +802,12 @@ async def test_a_shape_crossing_is_told_apart_from_a_newcomer(wm, have_seq, cros
         space_id="sp", instance_id="h", shape="S", have_seq=have_seq
     )
     assert got is crossed
+
+
+def test_v92_content_names_on_every_path_is_a_sync_line():
+    """v_92: every hashed file is stored under its content name on every
+    path, GFS-described ones too — a change to how a receiver names a
+    streamed record's files, so a household crossing it gets one full
+    stream."""
+    assert FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED in SYNC_RECORD_LINES
+    assert _shape(92) != _shape(91)

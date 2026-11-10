@@ -1178,3 +1178,19 @@ async def test_a_reader_reads_a_file_from_its_gfs_only_once_it_is_stored_there(
         versions={"e": FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND},
     )
     assert await on_demand.reads_from_gfs("e", "a.webp") is True
+
+
+async def test_a_v92_reader_is_no_on_demand_reader(tmp_path):
+    """v_92: a member at v_92 asks for a missed file with
+    ``SPACE_MEDIA_WANTED``, not its GFS — so it counts as an on-demand
+    reader only in [v_83, v_92): its push is dropped only while its GFS is
+    known to hold the file."""
+    gfs = _NoCacheGfs([_Conn("g1", "https://g1.example")], off=False)
+    for version, on_demand in (
+        (FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND - 1, False),
+        (FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND, True),
+        (FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED - 1, True),
+        (FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED, False),
+    ):
+        u = _uploader(tmp_path, gfs=gfs, instances=[RELAY], versions={"e": version})
+        assert await u.reads_from_gfs("e", "a.webp") is on_demand, version

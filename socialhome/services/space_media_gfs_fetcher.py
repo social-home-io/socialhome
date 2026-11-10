@@ -110,6 +110,7 @@ from .inbound_media_store import (
     write_once,
 )
 from .space_media_gfs_uploader import media_names
+from .space_writer_households import holds_member_seat
 
 if TYPE_CHECKING:
     from ..domain.federation import GfsConnection
@@ -208,7 +209,8 @@ class SpaceMediaGfsFetcher:
         self._gfs = gfs_service
         self._gfs_repo = gfs_repo
         self._federation_repo = federation_repo
-        #: Only for this household's own channel id of a private space.
+        #: This household's own channel id of a private space, and whether
+        #: it holds a member seat (only a follower asks its GFS, v_92).
         self._spaces = space_repo
         self._dir = pathlib.Path(media_dir)
         #: (filename, asks on a miss) → the one fetch running for it.
@@ -649,7 +651,14 @@ class SpaceMediaGfsFetcher:
             if got != _MISS:
                 return got
             outcome = _REFUSED
-        if outcome == _MISS and want:
+        if (
+            outcome == _MISS
+            and want
+            and not await holds_member_seat(self._spaces, ref.space_id)
+        ):
+            # v_83 on-demand is a FOLLOWER's path (v_92): a member household
+            # asks its host or a helper with ``SPACE_MEDIA_WANTED``
+            # (:class:`~.space_media_wanted.SpaceMediaWanted`) instead.
             return await self._want(ref, scope_id, current[1], path, sources)
         if outcome == _MISS:
             log.info(

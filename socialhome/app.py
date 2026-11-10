@@ -419,7 +419,6 @@ from .services.push_withdraw_service import PushWithdrawService
 from .services.realtime_service import RealtimeService
 from .services.recovery_kit_service import RecoveryKitService
 from .services.recovery_reconnect_service import RecoveryReconnectService
-from .services.relay_media_refill import RelayMediaRefill
 from .services.relay_policy import RelayPolicy
 from .services.report_scope import ReportScope
 from .services.report_service import ReportService
@@ -452,6 +451,7 @@ from .services.space_media_gfs_responder import SpaceMediaGfsResponder
 from .services.space_media_gfs_uploader import SpaceMediaGfsUploader
 from .services.space_media_names import SpaceMediaNamer
 from .services.space_media_sync_service import SpaceMediaSyncService
+from .services.space_media_wanted import SpaceMediaWanted, SpaceMediaWantedProvider
 from .services.space_member_directory import SpaceMemberDirectory
 from .services.space_member_profile_federation_outbound import (
     SpaceMemberProfileFederationOutbound,
@@ -2315,14 +2315,17 @@ def _wire_federation_stack(
     )
     space_sync_service.attach_file_gates(file_gates)
     space_sync_resume_provider.attach_file_gates(file_gates)
-    # v_87 — a space file the GFS relay accepted but never delivered is
-    # asked for again from its relay-seated host on the next view.
-    app[K.relay_media_refill_key] = RelayMediaRefill(
-        media_refs=media_reference_repo,
+    # v_92 — a member household that views a space file it misses asks the
+    # host (then a trusted helper) for it; we answer such requests too.
+    app[K.space_media_wanted_key] = _build_space_media_wanted(
+        federation_service=federation_service,
         space_repo=space_repo,
-        federation_repo=federation_repo,
-        federation=federation_service,
-        resume=space_sync_resume_provider,
+        space_remote_member_repo=space_remote_member_repo,
+        media_reference_repo=media_reference_repo,
+        file_gates=file_gates,
+        space_media_sync_service=space_media_sync_service,
+        own_instance_id=identity.instance_id,
+        config=config,
     )
 
     async def _space_sync_resume(event) -> None:
@@ -2409,6 +2412,46 @@ def _build_catch_up_file_gates(
         roster_authority=roster_authority,
         supports=federation_service.space_member_supports,
         size=functools.partial(local_file_size, pathlib.Path(config.media_path)),
+    )
+
+
+def _build_space_media_wanted(
+    *,
+    federation_service: FederationService,
+    space_repo: SqliteSpaceRepo,
+    space_remote_member_repo: SqliteSpaceRemoteMemberRepo,
+    media_reference_repo: SqliteMediaReferenceRepo,
+    file_gates: CatchUpFileGates,
+    space_media_sync_service: SpaceMediaSyncService,
+    own_instance_id: str,
+    config: Config,
+) -> SpaceMediaWanted:
+    """v_92 ``SPACE_MEDIA_WANTED``: the requester the media route schedules
+    on a miss, and the provider registered for the inbound event (the v_86
+    file gate decides what we ship, the media outbox pushes it)."""
+    media_dir = pathlib.Path(config.media_path)
+    provider = SpaceMediaWantedProvider(
+        space_repo=space_repo,
+        media_refs=media_reference_repo,
+        file_gates=file_gates,
+        hasher=space_media_sync_service.file_hasher,
+        media_sync=space_media_sync_service,
+        media_dir=media_dir,
+    )
+
+    async def _space_media_wanted(event) -> None:
+        await provider.handle(event)
+
+    federation_service._event_registry.register(
+        FederationEventType.SPACE_MEDIA_WANTED, _space_media_wanted
+    )
+    return SpaceMediaWanted(
+        media_refs=media_reference_repo,
+        space_repo=space_repo,
+        remote_members=space_remote_member_repo,
+        federation=federation_service,
+        own_instance_id=own_instance_id,
+        media_dir=media_dir,
     )
 
 
@@ -6248,6 +6291,10 @@ def create_app(config: Config | None = None) -> web.Application:
         # so we don't leave a row marked ``in_flight`` past the
         # restart (the next boot would see it stuck and never retry).
         await dm_media_sync_service.stop()
+        # v_92 — file requests waiting for their window or a provider end
+        # without sending more.
+        if (wanted := app.get(K.space_media_wanted_key)) is not None:
+            await wanted.stop()
         await space_media_sync_service.stop()
         if (uploader := app.get(K.space_media_gfs_uploader_key)) is not None:
             await uploader.stop()

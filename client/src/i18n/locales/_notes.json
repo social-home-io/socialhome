@@ -494,6 +494,7 @@
   "capability.multi_gfs_posting": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters. GFS is a product term (connection server), keep it untranslated.",
   "capability.synced_picture_resets": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters. A member removed their per-space profile picture and households catching up on the space drop their old copy.",
   "capability.multi_mailbox": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters. A space update for several households behind the same GFS is sent once instead of once per household. GFS is a product term (connection server), keep it untranslated.",
+  "capability.space_media_wanted": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters. A picture of a space that never reached this household is asked for from the space's host (or an admin's household) when someone opens it.",
   "pairing.scan.uses_gfs": "Shown to the scanning admin. {host} is a server host name such as gfs.example.com.",
   "pairing.error.gfs_not_shared": "{host} is the GFS host name from the scanned code.",
   "pairing.reach.no_url": "Shown under the disabled URL options of the reach picker when no External URL is set. The \"GFS only\" option still works, so do not say pairing is impossible.",

@@ -13,7 +13,8 @@ A receiver takes a file only from a household it accepts it from
 
 Anything else the receiver refuses, so a plain member household ships
 only its own people's files, and a helper ships other people's hashed
-files only to a v_86 requester, only on a ``SPACE_SYNC_RESUME`` (a full
+files only to a v_86 requester, only on a ``SPACE_SYNC_RESUME`` or a v_92
+``SPACE_MEDIA_WANTED`` (``services/space_media_wanted.py``) (a full
 §25.6 catch-up is the host's job: it ships every file, and k helpers
 re-sending the same bytes to a newcomer would only spend bandwidth), at
 most :data:`FILL_MAX_FILES` files / :data:`FILL_MAX_BYTES` bytes per

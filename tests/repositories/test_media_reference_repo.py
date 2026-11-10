@@ -1016,34 +1016,124 @@ async def test_content_names_of_an_item(db):
     assert await repo.content_names_of_item("nope") == []
 
 
-# ─── space_rows_of: which live space rows show a file, and when (v_87) ───
+# ─── space_rows_of / live_item_files: the v_92 SPACE_MEDIA_WANTED reads ───
 
 
-async def test_space_rows_of_names_the_live_rows_and_their_time(db):
+async def _item_rows(db) -> None:
+    """One live item of each kind in sp1 showing ``sc-x.webp``, a deleted
+    one of each in sp2, a household album item and a comment on a deleted
+    post."""
     await _two_spaces(db)
+    await db.enqueue(
+        "INSERT INTO users(user_id, username, display_name) VALUES('u2', 'u2', 'U2')"
+    )
     await db.enqueue(
         "INSERT INTO space_posts(id, space_id, author, type, image_urls_json,"
         " created_at) VALUES('p1', 'sp1', 'u1', 'image', ?,"
         " '2026-11-01 10:00:00')",
-        ('["api/media/sc-abc.webp"]',),
+        ('["api/media/sc-x.webp", "api/media/plain.webp"]',),
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, link_preview_json,"
+        " created_at) VALUES('p-link', 'sp1', 'u2', 'text', ?, '2026-11-01 11:00:00')",
+        ('{"url": "https://x.example", "thumbnail_url": "api/media/sc-x.webp"}',),
     )
     await db.enqueue(
         "INSERT INTO space_posts(id, space_id, author, type, media_url, deleted,"
-        " created_at) VALUES('p2', 'sp2', 'u1', 'image', 'api/media/sc-abc.webp',"
-        " 1, '2026-11-02 10:00:00')",
+        " created_at) VALUES('p-gone', 'sp2', 'u1', 'image',"
+        " 'api/media/sc-x.webp', 1, '2026-11-02 10:00:00')",
     )
-    repo = SqliteMediaReferenceRepo(db)
-    assert await repo.space_rows_of("sc-abc.webp") == [
-        ("sp1", "2026-11-01 10:00:00", "posts")
-    ]
+    await db.enqueue(
+        "INSERT INTO space_post_comments(id, post_id, author, type, media_url,"
+        " created_at) VALUES('c1', 'p1', 'u2', 'image', 'api/media/sc-x.webp',"
+        " '2026-11-01 12:00:00')",
+    )
+    await db.enqueue(
+        "INSERT INTO space_post_comments(id, post_id, author, type, media_url,"
+        " created_at) VALUES('c-gone', 'p-gone', 'u2', 'image',"
+        " 'api/media/sc-x.webp', '2026-11-02 12:00:00')",
+    )
     await db.enqueue(
         "INSERT INTO space_calendar_events(id, space_id, summary, start_dt, end_dt,"
-        " created_by, cover_url, created_at) VALUES('e1', 'sp2', 'S',"
-        " '2026-01-01T00:00:00+00:00', '2026-01-01T01:00:00+00:00', 'u1',"
-        " 'api/media/sc-cal.webp', '2026-11-03 09:00:00')"
+        " created_by, cover_url, created_at) VALUES('e1', 'sp1', 'S',"
+        " '2026-01-01T00:00:00+00:00', '2026-01-01T01:00:00+00:00', 'u2',"
+        " 'api/media/sc-x.webp', '2026-11-03 09:00:00')"
     )
-    assert await repo.space_rows_of("sc-cal.webp") == [
-        ("sp2", "2026-11-03 09:00:00", "calendar")
+    await db.enqueue(
+        "INSERT INTO space_calendar_events(id, space_id, summary, start_dt, end_dt,"
+        " created_by, cover_url, deleted_at, created_at) VALUES('e-gone', 'sp2',"
+        " 'S', '2026-01-01T00:00:00+00:00', '2026-01-01T01:00:00+00:00', 'u2',"
+        " 'api/media/sc-x.webp', '2026-11-04', '2026-11-03 09:00:00')"
+    )
+    await db.enqueue(
+        "INSERT INTO gallery_albums(id, space_id, name) VALUES('al-s', 'sp1', 'A')"
+    )
+    await db.enqueue("INSERT INTO gallery_albums(id, name) VALUES('al-h', 'H')")
+    await db.enqueue(
+        "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type, filename,"
+        " thumbnail_filename, width, height, created_at) VALUES('g1', 'al-s', 'u2',"
+        " 'photo', 'big.webp', 'sc-x.webp', 1, 1, '2026-11-05 08:00:00')"
+    )
+    await db.enqueue(
+        "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type, filename,"
+        " thumbnail_filename, width, height) VALUES('g-house', 'al-h', 'u1',"
+        " 'photo', 'sc-x.webp', 'th.webp', 1, 1)"
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, created_at)"
+        " VALUES('p-bz', 'sp1', 'u1', 'bazaar', '2026-11-06 08:00:00')"
+    )
+    await db.enqueue(
+        "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode,"
+        " title, image_urls_json, end_time, currency, created_at) VALUES('p-bz',"
+        " 'sp1', 'u1', 'fixed', 'T', ?, '2099-01-01', 'EUR', '2026-11-06 08:00:00')",
+        ('["api/media/sc-x.webp"]',),
+    )
+
+
+async def test_space_rows_of_names_every_live_item_showing_a_file(db):
+    """v_92: every LIVE space item showing the file — posts (images, link
+    card), comments, calendar covers, space-album items, bazaar listings —
+    as ``(space, item, created_at)``; never a deleted one, a comment on a
+    deleted post, or a household album's item."""
+    await _item_rows(db)
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.space_rows_of("sc-x.webp") == [
+        ("sp1", "c1", "2026-11-01 12:00:00"),
+        ("sp1", "e1", "2026-11-03 09:00:00"),
+        ("sp1", "g1", "2026-11-05 08:00:00"),
+        ("sp1", "p-bz", "2026-11-06 08:00:00"),
+        ("sp1", "p-link", "2026-11-01 11:00:00"),
+        ("sp1", "p1", "2026-11-01 10:00:00"),
     ]
     assert await repo.space_rows_of("sc-none.webp") == []
     assert await repo.space_rows_of("") == []
+
+
+async def test_live_item_files_are_the_files_a_live_item_of_the_space_shows(db):
+    """v_92 provider side: the files one live item of THAT space shows, with
+    the person it belongs to (the file gate's owner)."""
+    await _item_rows(db)
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.live_item_files("sp1", "p1") == [
+        ("sc-x.webp", "u1"),
+        ("plain.webp", "u1"),
+    ]
+    assert await repo.live_item_files("sp1", "p-link") == [("sc-x.webp", "u2")]
+    assert await repo.live_item_files("sp1", "c1") == [("sc-x.webp", "u2")]
+    assert await repo.live_item_files("sp1", "e1") == [("sc-x.webp", "u2")]
+    assert await repo.live_item_files("sp1", "g1") == [
+        ("big.webp", "u2"),
+        ("sc-x.webp", "u2"),
+    ]
+    # The bazaar wrapper post shows no file; its listing does.
+    assert await repo.live_item_files("sp1", "p-bz") == [("sc-x.webp", "u1")]
+    # Another space's id, a deleted item, a comment on a deleted post, a
+    # household album's item, an unknown id: nothing.
+    assert await repo.live_item_files("sp2", "p1") == []
+    assert await repo.live_item_files("sp2", "p-gone") == []
+    assert await repo.live_item_files("sp2", "c-gone") == []
+    assert await repo.live_item_files("sp2", "e-gone") == []
+    assert await repo.live_item_files("sp1", "g-house") == []
+    assert await repo.live_item_files("sp1", "nope") == []
+    assert await repo.live_item_files("", "p1") == []

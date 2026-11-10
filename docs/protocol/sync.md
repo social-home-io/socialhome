@@ -24,6 +24,9 @@ protocol**. Ongoing live updates afterwards are covered by
 release sends it: a stream is confirmed once, by the requester's
 `SPACE_SYNC_COMPLETE {clean}` after the sentinel (see "Backpressure").
 
+Healing one missing file on view, not a stream: `SPACE_MEDIA_WANTED`
+(v_92, [media.md](./media.md#older-files-on-view--space_media_wanted-v_92)).
+
 ## Tiered transport
 
 - **Tier 2 — HTTPS inbox.** The bootstrap path. Always available; used
@@ -104,15 +107,13 @@ incremental session with no confirmed watermark streams in full.
 apply by primary key (re-deliveries are idempotent). The full replay is
 reached through an operator's `INSTANCE_RESYNC_REQUEST` (scope `space` /
 `calendar`, from the admin federation route), whose handler runs
-`replay_space_to` / `replay_calendar_to`. Since v_87 one automatic sender
-exists: the relay media refill (`RelayMediaRefill`) sends it with an
-optional `refill: "posts" | "calendar" | "gallery"` field when a file pushed
-through the GFS relay never arrived; a v_87 provider then replays only that
-resource — ≤ 20 rows, ≤ 16 files / 16 MiB — under its own (household,
-space, resource) window, never the reconnect resume's (see
-[gfs-relay.md](./gfs-relay.md#binary-media-frames-v_87)). Every `since`
-comparison runs through `datetime()` on both sides, so a naive stored stamp
-and a tz-aware `since` compare as times.
+`replay_space_to` / `replay_calendar_to`. A single file that never
+arrived is not a replay's business: a member asks for it on view with
+`SPACE_MEDIA_WANTED` (v_92, see
+[media.md](./media.md#older-files-on-view--space_media_wanted-v_92)),
+which replaced the never-released v_87 `refill` field of this request.
+Every `since` comparison runs through `datetime()` on both sides, so a
+naive stored stamp and a tz-aware `since` compare as times.
 
 ```mermaid
 sequenceDiagram

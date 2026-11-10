@@ -15,6 +15,7 @@ from socialhome.domain.file_hashes import (
     space_content_media_name,
 )
 from socialhome.domain.gfs_space_media import space_media_address
+from socialhome.domain.space import SpaceRole
 from socialhome.domain.space_media_ref import SpaceMediaRef, space_page_media_name
 from socialhome.services import space_media_gfs_fetcher as fetch_mod
 from socialhome.services.inbound_media_store import (
@@ -209,24 +210,38 @@ class _FedRepo:
 HOST = _Inst("a", InstanceSource.SPACE_SESSION, relay_via="https://g1.example")
 
 
-class _Spaces:
-    """Only the reader's own channel id of a private space."""
+@dataclass
+class _Seat:
+    user_id: str
+    role: SpaceRole
 
-    def __init__(self, channel_id: str | None = None):
+
+class _Spaces:
+    """The reader's own channel id of a private space, and its seat: a
+    follower household by default (v_92: only a follower asks its GFS)."""
+
+    def __init__(self, channel_id: str | None = None, *, member: bool = False):
         self.channel_id = channel_id
+        self.role = SpaceRole.MEMBER if member else SpaceRole.SUBSCRIBER
 
     async def get_gfs_channel(self, space_id):
         return (self.channel_id, "pk") if self.channel_id else None
 
+    async def list_local_member_user_ids(self, space_id):
+        return ["u-me"]
 
-def _fetcher(tmp_path, gfs, *, conns=(), insts=(HOST,), channel_id=None):
+    async def list_members(self, space_id):
+        return [_Seat("u-me", self.role)]
+
+
+def _fetcher(tmp_path, gfs, *, conns=(), insts=(HOST,), channel_id=None, member=False):
     return SpaceMediaGfsFetcher(
         refs_repo=_Refs(),
         space_crypto=_Crypto(),
         gfs_service=gfs,
         gfs_repo=_GfsRepo(conns),
         federation_repo=_FedRepo(insts),
-        space_repo=_Spaces(channel_id),
+        space_repo=_Spaces(channel_id, member=member),
         media_dir=tmp_path,
     )
 
@@ -1128,6 +1143,18 @@ async def test_a_view_that_misses_asks_once_and_gets_the_bytes(tmp_path):
         hint, media_key=KEY, scope="space", scope_id=SPACE, blob_id=_addr(blob)
     )
     assert (loc.item_id, loc.origin, loc.filename) == (ITEM, ORIGIN, "a.webp")
+
+
+async def test_a_member_household_never_asks_its_gfs(tmp_path):
+    """v_92: a household holding a member seat asks its host or a helper
+    with ``SPACE_MEDIA_WANTED`` — never its GFS's on-demand path, which is
+    for followers only."""
+    blob = _blob("a.webp", b"x")
+    gfs = _OnDemandGfs({}, served={_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs, member=True)
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
+    assert await f.ensure_local(_L("a.webp")) is False
+    assert gfs.wanted == []
 
 
 async def test_a_wanted_answer_is_checked_like_a_fetch(tmp_path, caplog):

@@ -583,14 +583,15 @@ Unchanged:
   (The GFS relay does not carry these blobs yet: its envelope cap is below
   a media chunk — relay-sync PR 3.)
 
-**Sending side.** No "file wanted" request exists yet (a later, generic
-PR). Until then a helper fills only when one household explicitly asks
-it to replay a space: the catch-up file gate
+**Sending side.** A helper fills when one household explicitly asks it:
+for one file on view with `SPACE_MEDIA_WANTED` (v_92, [below](#older-files-on-view--space_media_wanted-v_92)),
+or for a whole space with a replay. The catch-up file gate
 (`federation/sync/space/file_gate.py`) decides which files of a row a
-household ships on a §25.6 catch-up and on a replay (`SPACE_SYNC_RESUME`
-or a §319.6 `space:` resync, `resume.replay_space_to`):
+household ships on a §25.6 catch-up, on a replay (`SPACE_SYNC_RESUME`
+or a §319.6 `space:` resync, `resume.replay_space_to`) and on a
+`SPACE_MEDIA_WANTED`:
 
-| Provider | Full §25.6 catch-up | Replay (resume / resync) |
+| Provider | Full §25.6 catch-up | Replay (resume / resync) and `SPACE_MEDIA_WANTED` |
 |---|---|---|
 | Host / delegated admin | every file of every row (as before) | every file (as before) |
 | Admin / moderator household | its own people's files only | its own people's files + the hashed (`sc-`) files of other people's rows to a v_86 requester, at most 50 files / 32 MiB (`FILL_MAX_FILES` / `FILL_MAX_BYTES`) |
@@ -620,8 +621,112 @@ moderator households of a space at once: 5 × 32 MiB = 160 MiB once (the
 host's replay is bounded the same way); duplicates are dropped
 write-once at the receiver, the bytes still cross once per asked helper.
 Full streams add nothing for helpers: a plain member household now ships
-*less* than before (only its own people's files). The later "file wanted"
-request (host first, helper as fallback) replaces the replay push.
+*less* than before (only its own people's files). For one missing file
+a member asks with `SPACE_MEDIA_WANTED` (host first, a helper as
+fallback) instead of a replay.
+
+## Older files on view — `SPACE_MEDIA_WANTED` (v_92)
+
+**Why.** A member household can hold a live space item whose file never
+reached it: a push the GFS relay accepted and dropped, a catch-up that
+left the file out for its budget, a picture past the GFS media cache's few
+days. Before v_92 only the host's 30-minute §25.6 catch-up healed it — and
+nothing while the host was offline. Since v_92 every hashed file is stored
+under its content name `sc(S, h)` on every path (GFS-described ones too),
+so any household that holds the file can deliver it, checked against `h`.
+
+**Wire.** `SPACE_MEDIA_WANTED` `{space_id, files: [{item, name}, …]}` —
+`space_id` is the routing field; the list is inside the encrypted
+payload. 1–50 entries (`MAX_WANTED_FILES`); `item` is the id of the live
+item that shows the file (a post, comment, calendar event, space-album
+item or bazaar listing — the listing by its wrapper post's id), `name` is
+the `sc-` content name the requester stores the file under (the requester
+keeps no raw `h`; every v_85 household names the file the same way). The
+answer is ordinary `SPACE_MEDIA_BLOB` pushes (with `h`), so the receiver's
+v_86 fill rule above decides — from the host, a content authority or the
+row's author household only, bytes checked against the row's `h`.
+
+**Requester** (`services/space_media_wanted.py`, `SpaceMediaWanted`).
+
+- A view (`GET /api/media/{name}`) that misses an `sc-` file — after the
+  GFS media cache (followers only, below) — schedules a lookup in the
+  background; the view answers 404 at once.
+- Only live items of a space in which **this household holds a member
+  seat** (a writer role). A follower household keeps the v_83 GFS
+  on-demand path.
+- Names of one space are collected for 2 s (`COALESCE_S`, fixed) or until
+  50, then ONE request goes.
+- **Provider order:** the space's host first; after 60 s
+  (`PROVIDER_WAIT_S`, fixed) the names still not stored here go to the
+  next provider — a trusted household (a live `owner` / `admin` /
+  `moderator` seat in the roster mirror), sorted by instance id, never
+  ourselves. At most 3 providers per batch (`MAX_PROVIDERS`), only those at
+  v_92 (`space_member_supports`: a paired row's version, else the mesh
+  claim). A failed send moves on to the next provider at once.
+- Sent with `send_with_mesh_fallback` — paired, mesh `SPACE_ROUTED`, a
+  mailbox seat or the host hop, whichever reaches the provider (the type is
+  in `SPACE_SESSION_ALLOWED_EVENT_TYPES`).
+- One name is asked again only after 10 min (`NAME_COOLDOWN_S`); lookups
+  and batches in flight are bounded.
+
+**Provider** (`SpaceMediaWantedProvider`, registered for the event).
+
+1. The requester must be a member household of the space
+   (`list_member_instances`, the §S-1 gate a resume uses), else the whole
+   request is dropped; so is a request with no list or more than 50
+   entries. A malformed entry (no item, an item id over 200 chars, a name
+   that is not a safe `sc-` name) is skipped alone.
+2. The item must be a **live item of that space** showing a file whose
+   content name is `name` (`media_reference_repo.live_item_files`, the
+   space checked in SQL): a stored `sc-` name matches directly; an
+   unhashed local file (the host's own upload under its original name)
+   matches when `sc(S, sha256(file), basename) == name` (hashed off-loop
+   and cached by `MediaFileHasher`). No match, a deleted item or a file not
+   here: skipped.
+3. The **file gate** (`CatchUpFileGates.for_requester`) with the item's
+   owner: the host ships every file, an admin / moderator household other
+   people's hashed files to a v_86 requester, any household its own
+   people's files.
+4. A **budget** per (requester, space): at most 50 files / 32 MiB per
+   30 min — the resume's `RESUME_MEDIA_MAX_FILES` / `_BYTES` /
+   `RESUME_COOLDOWN_S`. Over it: skipped (logged at INFO with counts).
+5. Queued with `enqueue_for_blob(..., push=True)`: the media outbox never
+   drops such a row for "reads from its GFS" — the requester already
+   missed it. The mark is in memory: lost on a restart, the requester asks
+   again on its next view.
+
+```mermaid
+sequenceDiagram
+    participant V as Viewer (member household)
+    participant H as Host
+    participant A as Helper (admin / moderator household)
+    V->>V: GET /api/media/sc-… misses (404), lookup live items
+    Note over V: collect names of the space for 2 s (≤ 50)
+    V->>H: SPACE_MEDIA_WANTED {space_id, files: [{item, name}]}
+    H->>H: member? live item shows name? file gate + budget
+    H-->>V: SPACE_MEDIA_BLOB (h, push=True) for each file it holds
+    Note over V: wait 60 s, then only the names still missing
+    V->>A: SPACE_MEDIA_WANTED {space_id, files: [the rest]}
+    A-->>V: SPACE_MEDIA_BLOB (hashed files of others' rows, v_86 gate)
+```
+
+**Fallback.** A provider below v_92 is skipped; when none is left the
+file waits for the §25.6 catch-up. A requester below v_92 never asks (a
+v_83–v_91 relay reader still asks its GFS).
+
+**Cost (recipients × files × bytes per trigger).** One old file on view:
+1 request (< 1 KiB) to 1 provider and the file's bytes once (+ at most
+`MAX_PROVIDERS − 1` = 2 more requests when the host is offline or does
+not have it). A batch of 50 files: 1 request, ≤ 32 MiB once. Per
+(requester, space) ≤ 32 MiB per 30 min per provider, so a worst case of
+3 providers is ≤ 96 MiB per 30 min for one household scrolling a whole
+space's old pictures — and only bytes it is missing. Nothing fans out: the
+request goes to one provider at a time and the answer to the one
+requester; a global space with 10 000 followers adds nothing (followers
+never send it).
+
+It replaces the never-released v_87 relay media refill (a
+`SPACE_SYNC_RESUME` narrowed to one resource, host-only).
 
 ## Space media via the GFS cache (v_80)
 
@@ -830,8 +935,11 @@ cache — never got it. Now a view asks for it, and a household that holds
 the file sends it again. GFS side, routes, settings and bounds:
 [`discovery.md`](./discovery.md#space-media-on-demand-v_83).
 
-**Who.** The same readers as v_80 — link-joined members and followers of a
-global space. Both ask the same way. Paired and mesh members never use it.
+**Who.** Followers of a global space reached through a GFS. Since v_92
+a household holding a member seat (link-joined included) asks its host or
+a helper with [`SPACE_MEDIA_WANTED`](#older-files-on-view--space_media_wanted-v_92)
+instead, and the uploader counts a reader as one that asks its GFS only in
+[v_83, v_92). Paired and mesh members never use it.
 
 **Reader** (`SpaceMediaGfsFetcher`). Only a **view**
 (`GET /api/media/{local_name}`) whose fetch found the blob on no GFS asks —
@@ -1024,6 +1132,7 @@ follower subset above). A GFS without `on_demand` is never asked.
 - Capability: [`socialhome/domain/federation_capabilities.py`](../../socialhome/domain/federation_capabilities.py) (`MIN_FOR_MEDIA_CHANNEL`, `MIN_FOR_SPACE_MEDIA_REFS`, `MIN_FOR_PAGE_MEDIA`, `MIN_FOR_SPACE_MEDIA_ON_DEMAND`)
 - Page files (v_82): [`page_federation_outbound.py`](../../socialhome/services/page_federation_outbound.py) (`_ship_files`), [`page_proposal_forwarder.py`](../../socialhome/services/page_proposal_forwarder.py) (`_ship_files`), [`federation_inbound/space_content.py`](../../socialhome/services/federation_inbound/space_content.py) (`_localized_proposal`, `_keep_page_media`), [`space_media_names.py`](../../socialhome/services/space_media_names.py) (`pages`)
 - GFS media cache (v_80): [`space_media_seal.py`](../../socialhome/space_media_seal.py), [`domain/space_media_ref.py`](../../socialhome/domain/space_media_ref.py), [`space_media_gfs_uploader.py`](../../socialhome/services/space_media_gfs_uploader.py), [`space_media_gfs_fetcher.py`](../../socialhome/services/space_media_gfs_fetcher.py), [`space_media_refs.py`](../../socialhome/services/space_media_refs.py), [`sync/space/media_refs.py`](../../socialhome/federation/sync/space/media_refs.py)
+- Older files on view (v_92): [`space_media_wanted.py`](../../socialhome/services/space_media_wanted.py) (`SpaceMediaWanted`, `SpaceMediaWantedProvider`), [`media_reference_repo.py`](../../socialhome/repositories/media_reference_repo.py) (`space_rows_of`, `live_item_files`), [`routes/media.py`](../../socialhome/routes/media.py) (`MediaServeView`), [`space_media_sync_service.py`](../../socialhome/services/space_media_sync_service.py) (`enqueue_for_blob(push=True)`)
 - Space media on demand (v_83): [`space_media_hint.py`](../../socialhome/space_media_hint.py), [`domain/gfs_space_media_on_demand.py`](../../socialhome/domain/gfs_space_media_on_demand.py), [`space_media_gfs_responder.py`](../../socialhome/services/space_media_gfs_responder.py), [`space_media_gfs_fetcher.py`](../../socialhome/services/space_media_gfs_fetcher.py) (`_want`), [`gfs_connection_service.py`](../../socialhome/services/gfs_connection_service.py) (`want_space_media`, `serve_space_media`, `space_media_on_demand_wait`), GFS [`space_media_on_demand.py`](../../socialhome/global_server/space_media_on_demand.py) + [`routes/space_media_on_demand.py`](../../socialhome/global_server/routes/space_media_on_demand.py)
 
 ## Spec refs

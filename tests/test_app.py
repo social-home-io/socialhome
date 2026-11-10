@@ -64,6 +64,7 @@ from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRep
 from socialhome.services.app_federation_service import AppFederationService
 from socialhome.services.gfs_relay_inbound import GfsRelayInbound
 from socialhome.services.gfs_route_discovery_service import GfsRouteDiscoveryService
+from socialhome.services.space_media_wanted import SpaceMediaWanted
 
 
 @pytest.fixture
@@ -1004,3 +1005,14 @@ async def test_page_files_reach_the_host_unless_a_link_seat_lacks_upload_rights(
     assert await _check(PageMode.MEMBER, False, False)
     assert await _check(PageMode.MEMBER, True, True)
     assert not await _check(PageMode.MEMBER, True, False)
+
+
+async def test_space_media_wanted_is_wired_both_ways(cfg):
+    """v_92: the media route's requester sits under its key, the provider
+    answers ``SPACE_MEDIA_WANTED``, and the v_87 refill bridge is gone."""
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)):
+        assert isinstance(app[K.space_media_wanted_key], SpaceMediaWanted)
+        registry = app[K.federation_service_key]._event_registry
+        assert registry.handler_count(FederationEventType.SPACE_MEDIA_WANTED) == 1
+    assert not hasattr(K, "relay_media_refill_key")

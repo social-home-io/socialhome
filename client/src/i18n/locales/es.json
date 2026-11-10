@@ -2710,6 +2710,7 @@
   "capability.anonymous_gfs_posting_only": "Publicar a través del GFS sin nombrar el hogar",
   "capability.synced_picture_resets": "Fotos de perfil quitadas al sincronizar espacios",
   "capability.multi_mailbox": "Novedades de espacios por un GFS en un solo envío",
+  "capability.space_media_wanted": "Fotos antiguas de espacios al abrirlas",
   "settings.tab.security": "Seguridad",
   "settings.security.signing_in": "Inicio de sesión",
   "settings.security.signing_in_hint": "Solo lo usas tú. Nadie más ve tu usuario de acceso.",

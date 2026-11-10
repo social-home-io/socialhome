@@ -11894,6 +11894,15 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_91 multi-recipient mailbox upload gate in place ✓")
+    # v_92 — SPACE_MEDIA_WANTED: a member asks only providers at >= v_92, so
+    # the OURS round-trip above is what proves every pair answers it.
+    if int(_Cap.MIN_FOR_SPACE_MEDIA_WANTED) != 92 or _OURS < 92:
+        failures.append(
+            "MIN_FOR_SPACE_MEDIA_WANTED moved off v_92 (or OURS fell below it) — "
+            "members would never get an older space picture on view"
+        )
+    else:
+        print("  v_92 SPACE_MEDIA_WANTED gate in place ✓")
     # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
     # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
     # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key

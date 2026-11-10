@@ -126,7 +126,13 @@ SYNC_VERSION_HISTORY_THROUGH: int = 64
 #:   bytes; an item it already holds keeps its names. A gate in
 #:   ``provider._exporter_for``. A household crossing it gets one full
 #:   stream.
-SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 82, 85)
+#: * 92 — a v_92 receiver stores every hashed file of a streamed record
+#:   under its content name (``sc-``), GFS-described ones too (before, a
+#:   described file kept a reader-specific ``sg-`` name nobody else could
+#:   serve), so ``SPACE_MEDIA_WANTED`` can ask any provider for it. A
+#:   household crossing it gets one full stream, so records it took while
+#:   older are named the same way.
+SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 82, 85, 92)
 
 
 def sync_version_bucket(peer_version: int) -> int:
