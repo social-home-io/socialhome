@@ -38,6 +38,7 @@ from socialhome.services.highlight_public_seal import (
 from socialhome.services.highlight_signaling_handler import (
     MAX_CONCURRENT_VIEWERS_PER_HIGHLIGHT,
     HighlightSignalingHandler,
+    _AiolibAnswererPeer,
     _default_peer_factory,
 )
 from socialhome.webrtc_ice import build_ice_servers
@@ -1424,3 +1425,49 @@ async def test_a_token_revoked_mid_stream_setup_is_rechecked_before_streaming(
     assert [framing.decode(b).header for b in frames] == [
         {"kind": "error", "error": "expired"}
     ]
+
+
+# ── Sending paces on the library's drain event ─────────────────────────
+
+
+class _FixedDrainChannel:
+    """Drain bookkeeping of aiolibdatachannel 2026.11.10
+    (social-home-io/aiolibdatachannel#25): a send clears the drain event only
+    when the buffer is above the low threshold, and it is set again once the
+    buffer drains to it. The highlight channel keeps libdatachannel's
+    default threshold of 0."""
+
+    def __init__(self, *, buffered: int, threshold: int = 0) -> None:
+        self.sent: list[bytes] = []
+        self.buffered_amount = buffered
+        self._threshold = threshold
+        self._drained = asyncio.Event()
+        self._drained.set()
+
+    async def send(self, data, *, wait_for_drain: bool = True) -> None:
+        if wait_for_drain:
+            await self._drained.wait()
+        self.sent.append(data)
+        if self.buffered_amount > self._threshold:
+            self._drained.clear()
+
+    def drain_to(self, amount: int) -> None:
+        self.buffered_amount = amount
+        if amount <= self._threshold:
+            self._drained.set()
+
+
+async def test_aiolib_answerer_peer_send_goes_out_once_the_viewer_drains():
+    """A frame still buffered holds the next one until the viewer drains it,
+    then the next frame goes out — the stream never parks forever."""
+    peer = _AiolibAnswererPeer([])
+    ch = _FixedDrainChannel(buffered=64 * 1024)
+    peer._channel = ch  # type: ignore[assignment]
+    await peer.send(b"f0")
+    nxt = asyncio.create_task(peer.send(b"f1"))
+    await asyncio.sleep(0.02)
+    assert not nxt.done()
+    ch.drain_to(0)
+    await asyncio.wait_for(nxt, timeout=1.0)
+    assert ch.sent == [b"f0", b"f1"]
+    await peer.close()
