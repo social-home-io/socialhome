@@ -967,6 +967,7 @@ python .claude/skills/federation-demo/harness.py gfs-invite-link
 python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py gfs-media-on-demand
 python .claude/skills/federation-demo/harness.py gfs-member-mesh
+python .claude/skills/federation-demo/harness.py gfs-space-healing
 python .claude/skills/federation-demo/harness.py gfs-relay-media
 python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
@@ -1862,14 +1863,15 @@ on the one wire that cannot fall back to a peer row — see below.
 
 ### ``gfs-media-on-demand`` — a picture that left the GFS cache comes back on a view (v_83)
 
-Prereqs: the chain through ``gfs-invite-link-content`` (the two photos
-``gfs-space-post`` and ``gfs-invite-link-content`` proved through the GFS
-media cache: d, a follower, holds a's space photo; e, a link-joined member,
-holds a's invite-space photo). Each blob is expired exactly as the GFS
+Prereqs: the chain through ``gfs-invite-link-content`` (the photo
+``gfs-space-post`` proved through the GFS media cache: d, a follower, holds
+a's space photo). Since v_92 only a **follower** asks its GFS on demand; a
+member household (the link-joined e) asks the host and helpers with
+``SPACE_MEDIA_WANTED`` instead (``gfs-space-healing``). The blob is expired exactly as the GFS
 store does it (``gfs_space_media`` row + ``data_dir/space_media/<blob>``
 deleted, ``gfs_space_media_demand`` upserted with ``stored_at`` as
-``_remember_left`` writes it) and the reader's own ``sg-`` copy is deleted;
-then the reader VIEWS it (``GET /api/media/<sg-name>``) — a miss everywhere
+``_remember_left`` writes it) and the reader's own copy is deleted;
+then the reader VIEWS it (``GET /api/media/<name>``) — a miss everywhere
 → ``POST /gfs/media/{blob}/wanted`` → the GFS asks the host a
 (``space_media_request``) → a re-seals and serves the ticket.
 
@@ -1877,15 +1879,14 @@ then the reader VIEWS it (``GET /api/media/<sg-name>``) — a miss everywhere
    gets the photo byte-identical; the GFS row and file are back; a logged
    exactly one ``re-uploaded on demand`` line for the blob; the admin
    overview (``/admin/api/overview`` → ``space_media``) counts +1 holder
-   request, +1 re-upload. The other reader kind, when it holds the same
-   blob (d does for the invite photo), then views it from the cache
-   (``fetched blob … from GFS``) with no new holder request.
+   request, +1 re-upload. e, when it holds the same blob, then views it
+   from the cache (``fetched blob … from GFS``) with no new holder request.
 2. **Old** (``stored_at`` 30 days ago) → stream: byte-identical again, but
    no row and no file afterwards; ``streams_served`` +1, ``reuploads`` +0;
    a logged ``streamed on demand``. Waits first until the GFS has no live
    sessions (a delivered session stays joinable ``coalesce_seconds``).
 
-Both legs run for e and for d (members and followers alike). Not
+Both legs run for the follower d. Not
 re-runnable within ~10 min (a attaches its upload authorization once per
 (GFS, blob) per ``REUPLOAD_COALESCE_S``). ``verify`` asserts
 ``MIN_FOR_SPACE_MEDIA_ON_DEMAND`` is v_83 and covered by the ``OURS``
@@ -1907,6 +1908,41 @@ mailbox); e creates one and d must show it (e's fan-out reached d's
 mailbox, no host hop). Over that window the GFS log must show
 ``<mailbox>`` deliveries, no envelope / mailbox line may name an instance
 id or the space, and no line either mailbox id. a is respawned at the end (``@_offline_step``).
+
+### ``gfs-space-healing`` — a GFS-only member heals from a helper while the host is offline (v_92)
+
+Prereqs: the chain through ``gfs-member-mesh`` (d, paired with a, and e,
+reached only through the GFS, are members of a's link space and hold each
+other's member cards). a makes d's person a **moderator** and waits until
+e's roster mirror shows it — d's household is now a trusted helper.
+
+1. **Old picture, host online.** a posts a picture; e holds it under its
+   content name (``sc-…``). Every GFS media cache copy goes (the
+   ``gfs_space_media`` row + ``data_dir/space_media/<blob>`` of each blob a
+   household's ``space_media_refs`` names) and so does e's copy. e's view
+   (``GET /api/media/<sc-name>``) misses → ``SPACE_MEDIA_WANTED`` to the
+   host a (e logs ``space media wanted: asked <a>``, a logs
+   ``SPACE_MEDIA_WANTED from <e> …: 1 file(s) queued``) → e serves the
+   original bytes (polled up to 90 s).
+2. **Old picture, host offline.** A second picture, held by e and by d;
+   same drop; a is **killed**. e's view asks a (queued at a's mailbox,
+   unanswered), and after ``PROVIDER_WAIT_S`` (60 s) the helper d, which
+   logs that it served e; e serves the bytes (polled up to 180 s).
+3. **Missed event, host offline.** e is killed too; d creates a calendar
+   event and the frames queued for e's mailbox at the GFS
+   (``gfs_envelope_queue`` / ``gfs_media_queue`` rows since the step's
+   bookmark) are deleted — what a full mailbox or the TTL would drop. e
+   boots: its BEGIN to a goes unanswered for ``HOST_ANSWER_WAIT_S``
+   (120 s), e logs ``the host did not answer within … asking trusted helper
+   <d>`` and sends ``SPACE_SYNC_RESUME`` to d, which replays its own rows;
+   e shows the event (polled up to 300 s).
+4. Over the whole step the GFS log shows ``<mailbox>`` deliveries and no
+   relay line names an instance id or the space, and no line either mailbox
+   id. a and e are respawned at the end (``@_offline_step``).
+
+The pictures are fresh noise PNGs: a content name follows the bytes, so a
+reused picture would already be held. Re-runnable, but each run adds a
+moderator promotion that is already in place (a no-op) and three items.
 
 ### ``gfs-relay-media`` — a picture reaches a link-joined member as binary relay frames (v_87)
 
