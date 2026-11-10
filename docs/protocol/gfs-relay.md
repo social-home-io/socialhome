@@ -815,7 +815,13 @@ household its first snapshot only after that card arrived (a snapshot sent
 when the seat went live could beat the seat at the receiver and be
 dropped); the same card again re-sends the snapshot at most every 10 min; a
 newer card is only a delta. A send queued in the outbox for an offline host
-counts as sent.
+counts as sent. The same "seated" (or a first sync) also re-sends a
+private space's channel grant: the owner sends the household a roster
+snapshot carrying it (only when it has a grant for it). The snapshot that
+handed out the grants when the joiner's seat went live — the seat that
+started the channel — can beat the joiner's own seat (a joiner over an
+existing seat is seated only after the ACK it awaits), and the joiner's
+mailbox gate refuses a frame for a space its person is not seated in yet.
 
 **The member directory.** The host passes the cards on as
 `SPACE_MAILBOX_DIRECTORY {cards, removed, snapshot, part, parts, members,
@@ -994,6 +1000,7 @@ sequenceDiagram
     G->>E: envelope
     E->>G: SPACE_MEMBER_CARD to mailbox A ("seated")
     A->>G: SPACE_MAILBOX_DIRECTORY snapshot to mailbox E (all writers' cards)
+    A->>G: SPACE_ROSTER_SNAPSHOT to mailbox E (private space: E's channel grant)
     A->>D: SPACE_MAILBOX_DIRECTORY delta (card E)
     D->>D: lazy space_session seat for E (static-static keys)
     Note over A: host offline

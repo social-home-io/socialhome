@@ -93,6 +93,9 @@ REMOVED_MAX: int = 500
 
 #: Seats a household lazily from its verified card.
 Seater = Callable[[MemberCard], Awaitable[None]]
+#: Told ``(space_id, instance_id)`` on the host when a member household says
+#: it is seated (its "seated" card, or its first sync).
+SeatedHook = Callable[[str, str], Awaitable[object]]
 
 
 def _loads(raw: str | None) -> dict[str, Any]:
@@ -163,6 +166,7 @@ class SpaceMemberDirectory:
         "_keywrap_sig",
         "_lost_mailbox",
         "_mailboxes",
+        "_on_seated",
         "_seat_ender",
         "_seater",
         "_snap_in",
@@ -198,6 +202,7 @@ class SpaceMemberDirectory:
         self._federation: FederationService | None = None
         self._seater: Seater | None = None
         self._seat_ender: Callable[[str], Awaitable[object]] | None = None
+        self._on_seated: SeatedHook | None = None
         self._clock = clock
         self._wall_clock = wall_clock
         #: (space, household) → when its last "seated" card re-sent its
@@ -253,6 +258,23 @@ class SpaceMemberDirectory:
         """How a directory card becomes a lazy ``space_session`` seat (the
         redeem coordinator's seat path)."""
         self._seater = seater
+
+    def attach_on_seated(self, hook: SeatedHook) -> None:
+        """Who else answers a member household's "I am seated" on the host
+        (``GfsChannelService.on_member_seated``). Before it, the household's
+        mailbox gate refuses the host's frames for the space (its person is
+        not seated yet), so anything sent when its seat went live may be
+        lost — the private channel grant is sent again."""
+        self._on_seated = hook
+
+    async def _seated(self, space_id: str, instance_id: str) -> None:
+        """Tell the seated hook. Fail-soft."""
+        if self._on_seated is None:
+            return
+        try:
+            await self._on_seated(space_id, instance_id)
+        except Exception:
+            log.warning("directory: the seated hook failed", exc_info=True)
 
     # ── Rows ─────────────────────────────────────────────────────────────
 
@@ -479,6 +501,8 @@ class SpaceMemberDirectory:
                     changed=[card],
                     snapshot_to={card.instance_id} if early else set(),
                 )
+                if early:
+                    await self._seated(space_id, card.instance_id)
         except Exception:
             log.warning("directory: storing a seat card failed", exc_info=True)
 
@@ -768,6 +792,8 @@ class SpaceMemberDirectory:
         await self.reconcile(
             space_id, changed=[card] if changed else [], snapshot_to=snapshot_to
         )
+        if snapshot_to:
+            await self._seated(space_id, sender)
 
     def _may_resnapshot(self, space_id: str, instance_id: str) -> bool:
         key = (space_id, instance_id)
@@ -815,6 +841,8 @@ class SpaceMemberDirectory:
         behind = news or (_is_count(current) and echo < current)
         if behind and self._may_resnapshot(space_id, sender):
             await self.reconcile(space_id, snapshot_to={sender})
+        if news:
+            await self._seated(space_id, sender)
 
     async def _writers_v89(self, space_id: str) -> list[str]:
         """Writer-seat member households at v_89 (never a follower)."""
