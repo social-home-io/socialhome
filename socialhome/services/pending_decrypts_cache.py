@@ -42,6 +42,16 @@ Design:
   (which it will, because the host ships every epoch's key on §D1b
   member acceptance / re-acceptance).
 
+* **Multi-recipient frames by kid (v_90).** A multi-recipient mailbox
+  frame names only its ``kid`` (not the space or the epoch — the GFS must
+  not see them), so ``stash_kid(kid, redeliver)`` parks it in its OWN
+  bounded FIFO (:data:`DEFAULT_MAX_KID_ENTRIES`): a junk-kid flood on a
+  mailbox evicts only kid entries, never the sync chunks above. On
+  :class:`SpaceContentKeyImported` the attached resolver
+  (``SpaceContentEncryption.mr_kid``) turns the imported ``(space_id,
+  epoch)`` into its kid once, and the matching entries replay with the same
+  failure isolation. Never logs a kid.
+
 Forward-compat: once a future PR moves additional content paths under
 ``SpaceContentEncryption`` (currently §25.6 sync + the Phase-5a
 public-relay path are the callers), the cache accepts them without
@@ -68,21 +78,56 @@ log = logging.getLogger(__name__)
 #: the rare deployment that sees larger pending sets.
 DEFAULT_MAX_ENTRIES: int = 256
 
+#: v_90 — cap on parked multi-recipient frames (by kid), a deque of its own.
+#: A member offline across a rotation drains its mailbox before the new
+#: epoch's key handoff lands; 64 frames covers that backlog, and a flood of
+#: junk kids (anyone who learned a mailbox id) costs only these slots.
+DEFAULT_MAX_KID_ENTRIES: int = 64
+
+#: v_90 — ``(space_id, epoch)`` → the multi-recipient kid of that held key,
+#: or ``None`` (``SpaceContentEncryption.mr_kid``).
+KidResolver = Callable[[str, int], Awaitable[str | None]]
+
+Redeliver = Callable[[], Awaitable[None]]
+
 
 class PendingDecryptsCache:
     """FIFO cache of redeliver callables, drained on key arrival."""
 
-    __slots__ = ("_entries", "_max")
+    __slots__ = ("_entries", "_kid_entries", "_kid_resolver", "_max", "_max_kid")
 
     def __init__(
         self,
         *,
         bus: EventBus,
         max_entries: int = DEFAULT_MAX_ENTRIES,
+        max_kid_entries: int = DEFAULT_MAX_KID_ENTRIES,
     ) -> None:
-        self._entries: deque[tuple[str, int, Callable[[], Awaitable[None]]]] = deque()
+        self._entries: deque[tuple[str, int, Redeliver]] = deque()
         self._max = max_entries
+        self._kid_entries: deque[tuple[str, Redeliver]] = deque()
+        self._max_kid = max_kid_entries
+        self._kid_resolver: KidResolver | None = None
         bus.subscribe(SpaceContentKeyImported, self._on_key_imported)
+
+    def attach_kid_resolver(self, resolver: KidResolver) -> None:
+        """Wire the v_90 ``(space_id, epoch) -> kid`` lookup
+        (``SpaceContentEncryption.mr_kid``). Unwired, kid entries stay
+        parked until evicted."""
+        self._kid_resolver = resolver
+
+    def stash_kid(self, kid: str, redeliver: Redeliver) -> None:
+        """Park a v_90 multi-recipient frame under no key we hold yet, by its
+        *kid*, until a key import resolves to that kid. Its own FIFO, capped
+        at ``max_kid_entries`` (oldest dropped first). Never log the kid."""
+        self._kid_entries.append((kid, redeliver))
+        while len(self._kid_entries) > self._max_kid:
+            self._kid_entries.popleft()
+            log.warning(
+                "PendingDecryptsCache: evicting the oldest parked "
+                "multi-recipient frame — full at %d",
+                self._max_kid,
+            )
 
     def stash(
         self,
@@ -115,15 +160,17 @@ class PendingDecryptsCache:
         self,
         event: SpaceContentKeyImported,
     ) -> None:
-        """Replay every entry that matches the imported (space_id, epoch)."""
-        survivors: deque[tuple[str, int, Callable[[], Awaitable[None]]]] = deque()
-        to_replay: list[Callable[[], Awaitable[None]]] = []
+        """Replay every entry that matches the imported (space_id, epoch) —
+        and every kid entry whose kid that key resolves to."""
+        survivors: deque[tuple[str, int, Redeliver]] = deque()
+        to_replay: list[Redeliver] = []
         for entry in self._entries:
             if entry[0] == event.space_id and entry[1] == event.epoch:
                 to_replay.append(entry[2])
             else:
                 survivors.append(entry)
         self._entries = survivors
+        to_replay.extend(await self._take_kid_entries(event))
         for redeliver in to_replay:
             try:
                 await redeliver()
@@ -137,9 +184,37 @@ class PendingDecryptsCache:
                     event.epoch,
                 )
 
+    async def _take_kid_entries(
+        self, event: SpaceContentKeyImported
+    ) -> list[Redeliver]:
+        """Remove and return the kid entries the imported key opens. One
+        resolve per import, none with nothing parked; a failing resolver
+        leaves them parked."""
+        if not self._kid_entries or self._kid_resolver is None:
+            return []
+        try:
+            kid = await self._kid_resolver(event.space_id, event.epoch)
+        except Exception:
+            log.exception(
+                "PendingDecryptsCache: kid lookup failed for space=%s epoch=%d",
+                event.space_id,
+                event.epoch,
+            )
+            return []
+        if kid is None:
+            return []
+        taken = [r for k, r in self._kid_entries if k == kid]
+        if taken:
+            self._kid_entries = deque((k, r) for k, r in self._kid_entries if k != kid)
+        return taken
+
     # ── Testing / introspection ────────────────────────────────────────
 
     def __len__(self) -> int:
         """Current cache depth — handy for tests and the ``/api/admin``
         operator dashboard once we add a "pending decrypts" gauge."""
         return len(self._entries)
+
+    def kid_depth(self) -> int:
+        """Parked multi-recipient frames (v_90, the kid deque)."""
+        return len(self._kid_entries)

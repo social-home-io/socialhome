@@ -94,10 +94,11 @@ TOML (:class:`~socialhome.global_server.config.EnvelopeMediaConfig`).
 **Multi-recipient frames (v_90).** ``POST /gfs/envelope/multi`` carries ONE
 sealed frame for up to 500 mailboxes (a space's member households reached
 over this server). Only registered mailboxes are addressed; the answer is the
-same uniform ``202``. Each upload charges its distinct ids to a per-IP
-recipient budget equal to the single route's request limit
+same uniform ``202``. Each upload charges its distinct ids to a per-IP,
+per-node recipient budget equal to the single route's request limit
 (:data:`ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE`), so batching never buys more
-queue work than sending one by one. The body is stored once (``gfs_envelope_bodies``, GFS
+queue work than sending one by one (both budgets are this node's: an
+N-node cluster takes N times as much from one address). The body is stored once (``gfs_envelope_bodies``, GFS
 migration 0031) with one reference row per mailbox, each charged the full
 body against that mailbox's caps while the pool counts it once; a trigger
 frees it with its last reference. Each mailbox drains the same
@@ -241,13 +242,14 @@ ENVELOPE_MULTI_MAX_FIELD_CHARS: int = 64
 ENVELOPE_MULTI_MAX_BODY_BYTES: int = ENVELOPE_MAX_BODY_BYTES + MULTI_MAX_RECIPIENTS * (
     ENVELOPE_INSTANCE_ID_CHARS + 4
 )
-#: Per-IP/minute cap on ``POST /gfs/envelope/multi``, apart from
-#: ``/gfs/envelope``'s. One upload replaces up to 500 single envelopes (one
+#: Per-IP/minute cap on ``POST /gfs/envelope/multi`` on THIS node (an N-node
+#: cluster allows N times as much), apart from ``/gfs/envelope``'s. One upload replaces up to 500 single envelopes (one
 #: space post to every member mailbox here), so 60/min (one a second) covers
 #: a busy space's fan-out; a catch-up backfill is per recipient and stays on
 #: the single route.
 ENVELOPE_MULTI_MAX_PER_MINUTE: int = 60
-#: Per-IP/minute RECIPIENT budget on ``POST /gfs/envelope/multi``: each
+#: Per-IP/minute RECIPIENT budget on ``POST /gfs/envelope/multi`` on THIS
+#: node (an N-node cluster allows N times as much): each
 #: upload charges its number of distinct ids (:meth:`GfsEnvelopeRelay.
 #: multi_recipients_allow`; 429 past it). Equal to
 #: :data:`ENVELOPE_MAX_PER_MINUTE`, so one upload never buys more queue work
@@ -660,7 +662,8 @@ class GfsEnvelopeRelay:
         #: v_87 — binary relay media frames, budgeted apart from envelopes.
         self._media = media if media is not None else EnvelopeMediaConfig()
         self._media_budget = SlidingByteBudget(self._media.media_ip_bytes_per_minute)
-        #: v_90 — distinct recipients per address a minute on the multi route.
+        #: v_90 — distinct recipients per address a minute on the multi route,
+        #: on this node only.
         self._multi_budget = SlidingByteBudget(ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE)
         self._media_inflight: set[asyncio.Task[None]] = set()
         self._media_inflight_bytes = 0
@@ -774,7 +777,8 @@ class GfsEnvelopeRelay:
     def multi_recipients_allow(self, client_key: str, mailbox_ids: list[str]) -> bool:
         """Charge the distinct ids of one multi upload to *client_key* (the
         caller's address bucket); ``False`` once its per-minute recipient
-        budget (:data:`ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE`) is spent — the
+        budget on this node (:data:`ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE`) is
+        spent — the
         route answers 429. A repeated id is one recipient: the relay
         collapses it to one reference row."""
         return self._multi_budget.allow(client_key, len(set(mailbox_ids)))
@@ -1453,8 +1457,8 @@ def build_envelope_rate_limit(resolver: ClientIpResolver):
 
 
 def build_envelope_multi_rate_limit(resolver: ClientIpResolver):
-    """Per-IP rate limiter middleware for ``POST /gfs/envelope/multi``
-    (v_90), apart from the single route's budget — the same shedding handle
+    """Per-IP, per-node rate limiter middleware for ``POST
+    /gfs/envelope/multi`` (v_90), apart from the single route's budget — the same shedding handle
     for the same anonymous reason."""
     return build_window_limiter(
         resolver,

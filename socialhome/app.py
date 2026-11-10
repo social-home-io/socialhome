@@ -1004,9 +1004,14 @@ def _build_gfs_relay_inbound(
     gfs_connection_repo: AbstractGfsConnectionRepo,
     rate_limiter: RateLimiter,
     space_crypto: SpaceContentEncryption,
+    pending_decrypts: PendingDecryptsCache,
 ) -> GfsRelayInbound:
     """Build the inbound leg of the connection-server envelope relay. v_90
-    multi-recipient frames resolve their kid over our space keys."""
+    multi-recipient frames resolve their kid over our space keys; one under
+    a kid we hold no key for yet parks in the shared pending-decrypts cache
+    (its own bounded kid deque), which resolves each imported key's kid
+    through the store and replays it."""
+    pending_decrypts.attach_kid_resolver(space_crypto.mr_kid)
     return GfsRelayInbound(
         federation=federation_service,
         keywrap_private_key=keywrap_private_key,
@@ -1014,6 +1019,7 @@ def _build_gfs_relay_inbound(
         gfs_connection_repo=gfs_connection_repo,
         rate_limiter=rate_limiter,
         mr_key_for_kid=space_crypto.mr_key_for_kid,
+        pending_decrypts=pending_decrypts,
     )
 
 
@@ -5130,6 +5136,7 @@ def create_app(config: Config | None = None) -> web.Application:
             gfs_connection_repo=repos.gfs_connection,
             rate_limiter=limiter,
             space_crypto=space_crypto,
+            pending_decrypts=pending_decrypts_cache,
         )
         # v_84 — "Ask to join" a global space found in a GFS directory from
         # a household its host never paired with: sealed both ways over the

@@ -21,6 +21,8 @@ from socialhome.crypto import (
     generate_identity_keypair,
     generate_x25519_keypair,
 )
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.events import SpaceContentKeyImported
 from socialhome.domain.federation import (
     FederationEventType,
     GfsConnection,
@@ -60,9 +62,17 @@ from socialhome.federation.multi_recipient import (
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.rate_limiter import RateLimiter
+from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
 from socialhome.services import gfs_relay_inbound as gri
 from socialhome.services.gfs_relay_inbound import RELAY_DELIVERED_VIA, GfsRelayInbound
-from socialhome.services.space_crypto_service import MR_RECENT_EPOCHS
+from socialhome.services.pending_decrypts_cache import (
+    DEFAULT_MAX_KID_ENTRIES,
+    PendingDecryptsCache,
+)
+from socialhome.services.space_crypto_service import (
+    MR_RECENT_EPOCHS,
+    SpaceContentEncryption,
+)
 from tests.federation.test_federation_service import (
     InMemoryFederationRepo,
     InMemoryOutboxRepo,
@@ -689,7 +699,7 @@ class _MultiHousehold:
     """A receiver with a real FederationService pipeline, our mailbox, the
     kid → key lookup over its space keys, and carded senders."""
 
-    def __init__(self, *, limiter=None) -> None:
+    def __init__(self, *, limiter=None, pending=None, mr_key_for_kid=None) -> None:
         own = generate_identity_keypair()
         self.own_id = derive_instance_id(own.public_key)
         self.repo = InMemoryFederationRepo()
@@ -735,7 +745,8 @@ class _MultiHousehold:
             invite_coordinator=_Invite(),
             gfs_connection_repo=_GfsRepo(),
             rate_limiter=limiter,
-            mr_key_for_kid=_for_kid,
+            mr_key_for_kid=mr_key_for_kid or _for_kid,
+            pending_decrypts=pending,
         )
 
     async def add_sender(self, *, card_for: str | None = _SPACE):
@@ -813,6 +824,67 @@ async def test_an_unknown_kid_is_refused_without_naming_it(caplog):
     assert h.dispatched == []
     assert frame["sealed"]["kid"] not in caplog.text
     assert h.mailbox.mailbox_id not in caplog.text
+
+
+async def test_an_unknown_kid_is_parked_and_replayed_once_its_key_lands(caplog):
+    """A member offline across a rotation drains frames sealed under an
+    epoch whose key handoff has not arrived: parked by kid (no raise — the
+    sender counted it delivered), dispatched once that key is imported."""
+    bus = EventBus()
+    pending = PendingDecryptsCache(bus=bus)
+    h = _MultiHousehold(pending=pending)
+    sender, enc = await h.add_sender()
+    frame, env = _multi_frame(sender, enc, to=h.audience)
+    held = dict(h.kids)
+    h.kids.clear()
+    with caplog.at_level(logging.DEBUG):
+        assert await h.frame(frame) == {"status": "ok"}
+    assert h.dispatched == [] and pending.kid_depth() == 1
+    assert frame["sealed"]["kid"] not in caplog.text
+    assert h.mailbox.mailbox_id not in caplog.text
+
+    async def _kid_of(space_id: str, epoch: int) -> str | None:
+        return next(
+            (k for k, (s, e, _) in held.items() if (s, e) == (space_id, epoch)),
+            None,
+        )
+
+    pending.attach_kid_resolver(_kid_of)
+    await bus.publish(SpaceContentKeyImported(space_id=_OTHER_SPACE, epoch=7))
+    assert h.dispatched == [] and pending.kid_depth() == 1  # another key
+    h.kids.update(held)
+    await bus.publish(SpaceContentKeyImported(space_id=_SPACE, epoch=7))
+    [event] = h.dispatched
+    assert event.msg_id == env["msg_id"]
+    assert pending.kid_depth() == 0
+
+
+async def test_an_unknown_kid_is_charged_to_the_mailbox_bucket_before_parking(
+    monkeypatch,
+):
+    monkeypatch.setattr(gri, "MAILBOX_INBOUND_LIMIT", 2)
+    pending = PendingDecryptsCache(bus=EventBus())
+    h = _MultiHousehold(limiter=RateLimiter(), pending=pending)
+    sender, enc = await h.add_sender()
+    h.kids.clear()
+    for _ in range(2):
+        frame, _ = _multi_frame(sender, enc, to=h.audience)
+        assert await h.frame(frame) == {"status": "ok"}
+    frame, _ = _multi_frame(sender, enc, to=h.audience)
+    with pytest.raises(MailboxFlooded):
+        await h.frame(frame)
+    assert pending.kid_depth() == 2
+
+
+async def test_a_malformed_kid_is_never_parked():
+    pending = PendingDecryptsCache(bus=EventBus())
+    h = _MultiHousehold(pending=pending)
+    sender, enc = await h.add_sender()
+    frame, _ = _multi_frame(sender, enc, to=h.audience)
+    frame["sealed"]["kid"] = "A" * 21
+    with pytest.raises(ValueError, match="kid"):
+        await h.frame(frame)
+    assert pending.kid_depth() == 0
 
 
 async def test_an_unknown_suite_is_refused_before_the_kid_lookup():
@@ -1035,3 +1107,64 @@ async def test_a_multi_context_on_a_non_mailbox_transport_is_refused():
     assert await h.federation.handle_inbound_rtc(
         sender, orjson.dumps(env), transport=TRANSPORT_GFS_MAILBOX, multi=(_SPACE, key)
     ) == {"status": "ok"}
+
+
+# ── v_90 integration: parked frames with the real key store ──────────────
+
+
+@pytest.fixture
+async def key_store(tmp_dir):
+    """A real SQLite key store + SpaceContentEncryption on one bus, and the
+    shared pending-decrypts cache wired to its ``mr_kid`` — as in app.py."""
+    db = AsyncDatabase(tmp_dir / "keys.db", batch_timeout_ms=10)
+    await db.startup()
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?, 'T', 'inst-1', 'pascal', ?)",
+        (_SPACE, "ab" * 32),
+    )
+    bus = EventBus()
+    crypto = SpaceContentEncryption(
+        SqliteSpaceKeyRepo(db), KeyManager.from_data_dir(tmp_dir), bus=bus
+    )
+    pending = PendingDecryptsCache(bus=bus)
+    pending.attach_kid_resolver(crypto.mr_kid)
+    yield crypto, pending
+    await db.shutdown()
+
+
+async def test_a_frame_under_an_epoch_not_held_yet_is_dispatched_on_its_import(
+    key_store,
+):
+    crypto, pending = key_store
+    await crypto.import_key(_SPACE, 0, b"\x01" * 32)  # an older epoch we hold
+    h = _MultiHousehold(pending=pending, mr_key_for_kid=crypto.mr_key_for_kid)
+    sender, enc = await h.add_sender()
+    frame, env = _multi_frame(sender, enc, to=h.audience)  # epoch 1's key
+    assert await h.frame(frame) == {"status": "ok"}
+    assert h.dispatched == [] and pending.kid_depth() == 1
+    await crypto.import_key(_SPACE, 1, _CONTENT_KEYS[_SPACE])
+    [event] = h.dispatched
+    assert event.msg_id == env["msg_id"]
+    assert pending.kid_depth() == 0
+
+
+async def test_a_junk_kid_flood_evicts_only_kid_entries(key_store):
+    crypto, pending = key_store
+    h = _MultiHousehold(pending=pending, mr_key_for_kid=crypto.mr_key_for_kid)
+    sender, enc = await h.add_sender()
+    synced: list[str] = []
+
+    async def _sync_chunk() -> None:
+        synced.append("chunk")
+
+    pending.stash(_SPACE, 1, _sync_chunk)  # a §25.6 chunk waiting on epoch 1
+    for i in range(DEFAULT_MAX_KID_ENTRIES + 10):
+        frame, _ = _multi_frame(sender, enc, to=h.audience)
+        frame["sealed"]["kid"] = b64url_encode(i.to_bytes(16, "big"))
+        assert await h.frame(frame) == {"status": "ok"}
+    assert pending.kid_depth() == DEFAULT_MAX_KID_ENTRIES
+    assert len(pending) == 1
+    await crypto.import_key(_SPACE, 1, _CONTENT_KEYS[_SPACE])
+    assert synced == ["chunk"]
+    assert h.dispatched == []  # junk never opens

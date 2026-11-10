@@ -15,6 +15,7 @@ from socialhome.domain.events import SpaceContentKeyImported
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.pending_decrypts_cache import (
     DEFAULT_MAX_ENTRIES,
+    DEFAULT_MAX_KID_ENTRIES,
     PendingDecryptsCache,
 )
 
@@ -180,3 +181,158 @@ async def test_sync_redeliver_is_awaited_in_order():
     await bus.publish(SpaceContentKeyImported(space_id="sp", epoch=0))
     # slow-start, slow-end, fast — strict sequential drain.
     assert order == ["slow-start", "slow-end", "fast"]
+
+
+# ─── v_90: multi-recipient frames parked by kid ──────────────────────────
+
+
+_KID_A = "A" * 22
+_KID_B = "B" * 22
+
+
+def _kid_cache(bus: EventBus, kids: dict[tuple[str, int], str], **kw):
+    cache = PendingDecryptsCache(bus=bus, **kw)
+    asks: list[tuple[str, int]] = []
+
+    async def _resolve(space_id: str, epoch: int) -> str | None:
+        asks.append((space_id, epoch))
+        return kids.get((space_id, epoch))
+
+    cache.attach_kid_resolver(_resolve)
+    return cache, asks
+
+
+async def test_a_kid_entry_replays_when_its_epoch_key_is_imported():
+    bus = EventBus()
+    cache, asks = _kid_cache(bus, {("sp-1", 3): _KID_A, ("sp-1", 4): _KID_B})
+    calls: list[str] = []
+
+    async def _a() -> None:
+        calls.append("a")
+
+    async def _b() -> None:
+        calls.append("b")
+
+    cache.stash_kid(_KID_A, _a)
+    cache.stash_kid(_KID_B, _b)
+    assert cache.kid_depth() == 2 and len(cache) == 0
+    await bus.publish(SpaceContentKeyImported(space_id="sp-1", epoch=3))
+    assert calls == ["a"]
+    assert asks == [("sp-1", 3)]  # resolved once per import
+    assert cache.kid_depth() == 1
+    await bus.publish(SpaceContentKeyImported(space_id="sp-1", epoch=4))
+    assert calls == ["a", "b"] and cache.kid_depth() == 0
+
+
+async def test_no_kid_entries_cost_no_resolve():
+    bus = EventBus()
+    _cache, asks = _kid_cache(bus, {("sp-1", 3): _KID_A})
+    await bus.publish(SpaceContentKeyImported(space_id="sp-1", epoch=3))
+    assert asks == []
+
+
+async def test_an_unresolved_import_leaves_kid_entries_parked():
+    bus = EventBus()
+    cache, _ = _kid_cache(bus, {})
+    calls: list[str] = []
+
+    async def _a() -> None:
+        calls.append("a")
+
+    cache.stash_kid(_KID_A, _a)
+    await bus.publish(SpaceContentKeyImported(space_id="sp-1", epoch=3))
+    assert calls == [] and cache.kid_depth() == 1
+
+
+async def test_kid_entries_have_their_own_bound_and_never_evict_sync_entries():
+    """A junk-kid flood on a mailbox fills only the kid deque (FIFO,
+    DEFAULT_MAX_KID_ENTRIES); the §25.6 sync entries stay parked."""
+    assert DEFAULT_MAX_KID_ENTRIES == 64
+    bus = EventBus()
+    cache, _ = _kid_cache(bus, {("sp-1", 3): _KID_A})
+    calls: list[str] = []
+
+    async def _sync() -> None:
+        calls.append("sync")
+
+    async def _real() -> None:
+        calls.append("real")
+
+    async def _junk() -> None:
+        calls.append("junk")
+
+    cache.stash("sp-1", 3, _sync)
+    cache.stash_kid(_KID_A, _real)
+    for _ in range(DEFAULT_MAX_KID_ENTRIES):
+        cache.stash_kid(_KID_B, _junk)
+    assert cache.kid_depth() == DEFAULT_MAX_KID_ENTRIES
+    assert len(cache) == 1  # the sync entry survived the flood
+    await bus.publish(SpaceContentKeyImported(space_id="sp-1", epoch=3))
+    assert calls == ["sync"]  # the oldest kid entry was the one evicted
+
+
+async def test_a_raising_kid_replay_does_not_block_the_others():
+    bus = EventBus()
+    cache, _ = _kid_cache(bus, {("sp-1", 3): _KID_A})
+    calls: list[str] = []
+
+    async def _boom() -> None:
+        raise RuntimeError("bad frame")
+
+    async def _ok() -> None:
+        calls.append("ok")
+
+    cache.stash_kid(_KID_A, _boom)
+    cache.stash_kid(_KID_A, _ok)
+    await bus.publish(SpaceContentKeyImported(space_id="sp-1", epoch=3))
+    assert calls == ["ok"] and cache.kid_depth() == 0
+
+
+async def test_a_failing_resolver_keeps_kid_entries_and_still_replays_sync():
+    bus = EventBus()
+    cache = PendingDecryptsCache(bus=bus)
+    calls: list[str] = []
+
+    async def _resolve(space_id: str, epoch: int) -> str | None:
+        raise RuntimeError("store down")
+
+    async def _kid() -> None:
+        calls.append("kid")
+
+    async def _sync() -> None:
+        calls.append("sync")
+
+    cache.attach_kid_resolver(_resolve)
+    cache.stash_kid(_KID_A, _kid)
+    cache.stash("sp-1", 3, _sync)
+    await bus.publish(SpaceContentKeyImported(space_id="sp-1", epoch=3))
+    assert calls == ["sync"] and cache.kid_depth() == 1
+
+
+async def test_without_a_resolver_kid_entries_stay_parked():
+    bus = EventBus()
+    cache = PendingDecryptsCache(bus=bus)
+    calls: list[str] = []
+
+    async def _kid() -> None:
+        calls.append("kid")
+
+    cache.stash_kid(_KID_A, _kid)
+    await bus.publish(SpaceContentKeyImported(space_id="sp-1", epoch=3))
+    assert calls == [] and cache.kid_depth() == 1
+
+
+async def test_a_replay_that_parks_again_is_kept_for_the_next_import():
+    """A replay that still finds no key re-stashes; it is not lost and does
+    not loop within the same import."""
+    bus = EventBus()
+    cache, _ = _kid_cache(bus, {("sp-1", 3): _KID_A})
+    runs: list[int] = []
+
+    async def _again() -> None:
+        runs.append(1)
+        cache.stash_kid(_KID_A, _again)
+
+    cache.stash_kid(_KID_A, _again)
+    await bus.publish(SpaceContentKeyImported(space_id="sp-1", epoch=3))
+    assert runs == [1] and cache.kid_depth() == 1

@@ -350,7 +350,7 @@ class GfsEnvelopeSender:
         Same anonymous cookie-less session and same contract as
         :meth:`send_to_mailbox`: raises
         :class:`~socialhome.federation.invite_bootstrap.EnvelopeRelayThrottled`
-        on ``429`` (the GFS's per-IP upload or recipient budget) and
+        on ``429`` (the GFS's per-IP, per-node upload or recipient budget) and
         :class:`EnvelopeRelayUnavailable` when no connection at *gfs_url*
         proved ``envelope_multi``; an empty list, one over the server's
         ``max_recipients`` or any other refusal is ``False``. Never logs a

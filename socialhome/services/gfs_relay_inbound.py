@@ -104,6 +104,7 @@ if TYPE_CHECKING:
     from ..federation.gfs_join_request import GfsJoinRequestCoordinator
     from ..federation.invite_token_redeem import SpaceInviteTokenRedeemCoordinator
     from ..rate_limiter import RateLimiter
+    from .pending_decrypts_cache import PendingDecryptsCache
 
 log = logging.getLogger(__name__)
 
@@ -177,6 +178,7 @@ class GfsRelayInbound:
         "_join",
         "_keywrap_private_key",
         "_mr_key_for_kid",
+        "_pending",
         "_rate_limiter",
     )
 
@@ -189,6 +191,7 @@ class GfsRelayInbound:
         gfs_connection_repo: AbstractGfsConnectionRepo,
         rate_limiter: RateLimiter | None = None,
         mr_key_for_kid: MrKeyForKid | None = None,
+        pending_decrypts: PendingDecryptsCache | None = None,
     ) -> None:
         self._federation = federation
         self._keywrap_private_key = keywrap_private_key
@@ -199,6 +202,10 @@ class GfsRelayInbound:
         #: frame (``SpaceContentEncryption.mr_key_for_kid``). Unwired, multi
         #: frames are refused.
         self._mr_key_for_kid = mr_key_for_kid
+        #: v_90 — where a multi frame under a kid we hold no key for yet is
+        #: parked (``stash_kid``) until that key is imported. Unwired, such
+        #: a frame is refused.
+        self._pending = pending_decrypts
         self._join: GfsJoinRequestCoordinator | None = None
 
     def attach_join_requests(self, coordinator: GfsJoinRequestCoordinator) -> None:
@@ -286,9 +293,13 @@ class GfsRelayInbound:
         v_90: a ``sealed`` that names an ``mr_suite`` is a multi-recipient
         frame (one body the GFS fanned out to many mailboxes). Charged to the
         same bucket first; its ``kid`` resolves to one of our space epochs'
-        multi-recipient keys, which opens it, and the pipeline then requires
-        ``to_instance == "*"`` and that space, and decrypts under that key.
-        Raises :class:`ValueError` on any refusal."""
+        multi-recipient keys, which open it, and the pipeline then requires
+        our tag in the ``"*:"`` audience and that space, and decrypts under
+        that key. A well-shaped kid we hold no key for yet (a member offline
+        across a rotation, draining before the new epoch's key handoff) is
+        parked in the pending-decrypts cache and replayed through this
+        method once that key is imported — the frame is answered like an
+        accepted one. Raises :class:`ValueError` on any refusal."""
         if isinstance(frame, bytes | bytearray):
             return await self._handle_media(frame, keys=keys)
         if not isinstance(frame, dict) or frame.get("type") != "envelope":
@@ -304,7 +315,10 @@ class GfsRelayInbound:
         sealed = frame.get("sealed")
         multi: tuple[str, MrKeys] | None = None
         if is_multi_sealed(sealed):
-            body, multi = await self._open_multi(sealed)
+            opened = await self._open_multi(sealed)
+            if opened is None:
+                return self._park_multi(frame, sealed["kid"], keys=keys)
+            body, multi = opened
         else:
             body = unseal_envelope_body(
                 envelope={"sealed": sealed},
@@ -335,12 +349,11 @@ class GfsRelayInbound:
             )
             raise
 
-    async def _open_multi(self, sealed: dict) -> tuple[dict, tuple[str, MrKeys]]:
+    async def _open_multi(self, sealed: dict) -> tuple[dict, tuple[str, MrKeys]] | None:
         """Open a v_90 multi-recipient seal → ``(relay body, (space_id,
-        keys))``. The suite is judged first (no lookup for an unknown one),
-        then the kid resolves over our recent space epochs; an unknown kid
-        is refused. Logs the refusal type only — never the kid or the
-        mailbox."""
+        keys))``, or ``None`` for a well-shaped kid we hold no key for. The
+        suite is judged first (no lookup for an unknown one), then the
+        kid's shape, then it resolves over our recent space epochs."""
         require_mr_suite(sealed)
         if self._mr_key_for_kid is None:
             raise ValueError("multi-recipient frames are not wired on this household")
@@ -351,12 +364,29 @@ class GfsRelayInbound:
             raise ValueError("multi-recipient frame with a malformed kid")
         hit = await self._mr_key_for_kid(kid)
         if hit is None:
+            return None
+        space_id, _epoch, keys = hit
+        return open_multi(sealed, keys.key), (space_id, keys)
+
+    def _park_multi(self, frame: dict, kid: str, *, keys: MailboxKeys) -> dict:
+        """Park a multi frame under *kid* (no key held yet) until a key
+        import resolves to it, then re-run :meth:`handle_mailbox_frame` on
+        it (charged to the mailbox's bucket again). Unwired, refused. Logs
+        the outcome only — never the kid or the mailbox."""
+        if self._pending is None:
             log.info(
                 "gfs_mailbox: dropped a multi-recipient frame under no key we hold"
             )
             raise ValueError("multi-recipient frame under no space key we hold")
-        space_id, _epoch, keys = hit
-        return open_multi(sealed, keys.key), (space_id, keys)
+
+        async def _replay() -> None:
+            await self.handle_mailbox_frame(frame, keys=keys)
+
+        self._pending.stash_kid(kid, _replay)
+        log.info(
+            "gfs_mailbox: parked a multi-recipient frame under a key we do not hold yet"
+        )
+        return {"status": "ok"}
 
     async def _handle_media(
         self, raw: object, *, keys: MailboxKeys | None = None

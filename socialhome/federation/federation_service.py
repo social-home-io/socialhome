@@ -286,7 +286,7 @@ MAX_DEFERRED_MESH_BYTES: int = 16 * 1024 * 1024
 MAX_DEFERRED_MESH_PAYLOAD_BYTES: int = 256 * 1024
 
 #: How long a throttled v_90 multi upload waits when the GFS's ``429`` named
-#: no ``Retry-After``: the GFS's per-address upload and recipient budgets
+#: no ``Retry-After``: the GFS's per-address, per-node upload and recipient budgets
 #: are a minute wide, and it answers ``Retry-After: 60`` itself. Coming back
 #: sooner only earns another 429.
 MULTI_THROTTLE_RETRY_S: float = 60.0

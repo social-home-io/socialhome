@@ -1078,8 +1078,10 @@ exactly `{"to_mailboxes": [ids], "sealed": {mr_suite, kid, ciphertext}}`:
 Inside is the ordinary §24.11 envelope, signed once with `ed25519` by the
 sending household's identity key. Its `encrypted_payload` is under the
 same derived key, and its signed `to_instance` is `"*:"` + the sorted
-audience tags: one 4-byte `HMAC-SHA256(key, "sh-mr-to:v1\n" +
-instance_id)` per intended household. The content key never leaves
+audience tags: one 4-byte `HMAC-SHA256(tag_key, "sh-mr-to:v1\n" +
+instance_id)` per intended household. `tag_key` is a third 32-byte HKDF
+output of the same content key (same salt, info `sh-mr-tag:v1`), so the
+AES-GCM key is never also used as an HMAC key. The content key never leaves
 `SpaceContentEncryption` (like the media key). A sender uses multi only
 once its newest epoch key is at least 10 minutes old
 (`MULTI_EPOCH_GRACE_S`): right after a rotation a member may not hold the
@@ -1094,13 +1096,21 @@ kid mapped to (space, epoch) over the newest 3 epochs of our spaces (an
 in-memory map, dropped on a key change; a miss rebuilds it at most once a
 minute; the whole map is rebuilt once it is 10 minutes old), opened,
 and run through the unchanged §24.11 pipeline with transport
-`gfs_mailbox` plus `make_check_multi_recipient`:
+`gfs_mailbox` plus `make_check_multi_recipient`. A well-shaped kid that
+maps to no key we hold yet is **parked**, not dropped: the shared
+pending-decrypts cache keeps it in its own FIFO of 64 frames (oldest
+evicted first, so a junk-kid flood on a mailbox never evicts the parked
+§25.6 sync chunks), and when a space key is imported the cache works out
+that key's kid once and replays the matching frames through the same
+mailbox path (charged to the bucket again). The parked frame is answered
+like an accepted one and the log names neither the kid nor the mailbox.
+The pipeline checks:
 
 - `to_instance` starting with `*` is refused on every other path;
 - the event type must be in `MULTI_EVENT_TYPES`;
-- our own tag must be in the signed audience — a key holder (a follower,
-  a member, the GFS replaying a capture) cannot re-push a frame to a
-  household the sender left out;
+- our own tag (under the epoch's `tag_key`) must be in the signed
+  audience — a key holder (a follower, a member, the GFS replaying a
+  capture) cannot re-push a frame to a household the sender left out;
 - the envelope's `space_id`, and the payload's, must be the kid's space.
 
 Then `make_check_mailbox_sender` (we hold the sender's card for that
@@ -1119,9 +1129,12 @@ copied only when pushed to a claim socket.
 - **Pool total.** The mailbox pool counts the body once plus 64 bytes per
   reference (`REF_ROW_BYTES`), so reference rows are still bounded by the
   pool.
-- **Limits.** 1–500 ids. 60 uploads per minute per address, plus a
-  per-address budget of 600 recipients per minute (the same queue work as
-  600 single frames; `429` with `Retry-After: 60`). Uniform `202`.
+- **Limits.** 1–500 ids. 60 uploads per minute per address **per node**,
+  plus a per-address, per-node budget of 600 recipients per minute (the
+  same queue work as 600 single frames; `429` with `Retry-After: 60`).
+  Both are this node's, like `/gfs/envelope`'s limiter: a 4-node cluster
+  allows one address 4× (240 uploads, 2 400 recipients a minute).
+  Uniform `202`.
 - **Cluster.** The upload is queued on the receiving node; a node holding
   a claim socket drains it, the others get `NODE_DRAIN_HINT`.
 
@@ -1155,7 +1168,9 @@ of the same row, a held comment id is ignored, a chat reaction is
 
 - A member that was offline across a key rotation and drains its mailbox
   before the new key reaches it cannot open frames sealed under the new
-  epoch. They are dropped and healed by the 30-minute §25.6 sync from the
+  epoch yet. Up to 64 of them are parked and replayed once that key is
+  imported (see Receiving); past 64, or across a restart (the cache is in
+  memory), they are lost and healed by the 30-minute §25.6 sync from the
   host, like any frame lost to tail-drop or TTL (recovery through a helper
   member while the host is offline is PR 4).
 - A sender that has not yet imported a rotation seals under the epoch it
