@@ -1921,21 +1921,22 @@ e's roster mirror shows it — d's household is now a trusted helper.
    ``gfs_space_media`` row + ``data_dir/space_media/<blob>`` of each blob a
    household's ``space_media_refs`` names) and so does e's copy. e's view
    (``GET /api/media/<sc-name>``) misses → ``SPACE_MEDIA_WANTED`` to the
-   host a (e logs ``space media wanted: asked <a>``, a logs
-   ``SPACE_MEDIA_WANTED from <e> …: 1 file(s) queued``) → e serves the
-   original bytes (polled up to 90 s).
-2. **Old picture, host offline.** A second picture, held by e and by d;
-   same drop; a is **killed**. e's view asks a (queued at a's mailbox,
-   unanswered), and after ``PROVIDER_WAIT_S`` (60 s) the helper d, which
-   logs that it served e; e serves the bytes (polled up to 180 s).
-3. **Missed event, host offline.** e is killed too; d creates a calendar
-   event and the frames queued for e's mailbox at the GFS
-   (``gfs_envelope_queue`` / ``gfs_media_queue`` rows since the step's
-   bookmark) are deleted — what a full mailbox or the TTL would drop. e
-   boots: its BEGIN to a goes unanswered for ``HOST_ANSWER_WAIT_S``
-   (120 s), e logs ``the host did not answer within … asking trusted helper
-   <d>`` and sends ``SPACE_SYNC_RESUME`` to d, which replays its own rows;
-   e shows the event (polled up to 300 s).
+   host a only (e logs ``space media wanted: 1 file(s) of space … to <a>:
+   sent`` and nothing to d; a logs ``SPACE_MEDIA_WANTED from <e> …: 1
+   file(s) queued``) → e serves the original bytes (polled up to 90 s).
+2. **Missed event, host offline.** A second picture, held by e and by d;
+   same drop; a is **killed**, then e. d creates a calendar event and the
+   frames queued for e's mailbox at the GFS (``gfs_envelope_queue`` /
+   ``gfs_media_queue`` rows since the step's bookmark) are deleted — what a
+   full mailbox or the TTL would drop. e boots: its BEGIN to a goes
+   unanswered for ``HOST_ANSWER_WAIT_S`` (120 s) — a is now silent for e —
+   e logs ``the host did not answer within … asking trusted helper <d>``
+   and sends ``SPACE_SYNC_RESUME`` to d, which replays its own rows; e
+   shows the event (polled up to 300 s).
+3. **Old picture, host silent.** e views the second picture: the request
+   goes to a's mailbox and, a being silent, to the helper d, which logs
+   that it served e; e serves the bytes (polled up to 180 s). A helper is
+   asked only while the host is silent or unreachable.
 4. Over the whole step the GFS log shows ``<mailbox>`` deliveries and no
    relay line names an instance id or the space, and no line either mailbox
    id. a and e are respawned at the end (``@_offline_step``).

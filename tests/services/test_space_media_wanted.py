@@ -17,10 +17,11 @@ from socialhome.domain.federation import (
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.space import SpaceRole
-from socialhome.federation.sync.space.resume import (
-    RESUME_COOLDOWN_S,
-    RESUME_MEDIA_MAX_BYTES,
-    RESUME_MEDIA_MAX_FILES,
+from socialhome.federation.sync.space import file_gate as file_gate_mod
+from socialhome.federation.sync.space.file_gate import (
+    BUDGET_MAX_FILES,
+    BUDGET_WINDOW_S,
+    SpaceFileBudget,
 )
 from socialhome.federation.sync.space.trusted_helpers import (
     HELPER_ROLES,
@@ -29,7 +30,7 @@ from socialhome.federation.sync.space.trusted_helpers import (
 from socialhome.services import space_media_wanted as mod
 from socialhome.services.media_file_hasher import MediaFileHasher
 from socialhome.services.space_media_wanted import (
-    MAX_PROVIDERS,
+    MAX_HELPERS,
     MAX_WANTED_FILES,
     NAME_COOLDOWN_S,
     SpaceMediaWanted,
@@ -113,7 +114,6 @@ class _Fed:
     sent: list[tuple[str, FederationEventType, dict, str | None]] = field(
         default_factory=list
     )
-    on_send: object = None
 
     async def space_member_supports(self, instance_id, *, min_version):
         return self.versions.get(instance_id, 0) >= min_version
@@ -122,23 +122,28 @@ class _Fed:
         self, *, to_instance_id, event_type, payload, space_id=None
     ):
         self.sent.append((to_instance_id, event_type, payload, space_id))
-        if callable(self.on_send):
-            self.on_send(to_instance_id, payload)
         ok = to_instance_id not in self.fail
         return DeliveryResult(
             instance_id=to_instance_id, ok=ok, error=None if ok else "no_route"
         )
 
 
+class _Contact:
+    def __init__(self, silent=()):
+        self.silent = set(silent)
+
+    def is_silent(self, space_id):
+        return space_id in self.silent
+
+
 def _wanted(
-    tmp_path,
     *,
     refs=None,
     spaces=None,
     seats=None,
     fed=None,
+    contact=None,
     coalesce_s=0.0,
-    provider_wait_s=0.0,
     clock=None,
 ):
     kw = {} if clock is None else {"clock": clock}
@@ -147,10 +152,9 @@ def _wanted(
         space_repo=spaces or _Spaces(),
         remote_members=seats or _Seats(),
         federation=fed or _Fed({HOST: V92}),
+        host_contact=contact or _Contact(),
         own_instance_id=SELF,
-        media_dir=tmp_path,
         coalesce_s=coalesce_s,
-        provider_wait_s=provider_wait_s,
         **kw,
     )
 
@@ -162,10 +166,10 @@ def _names(sent) -> list[str]:
 # ── Requester ────────────────────────────────────────────────────────────
 
 
-async def test_a_view_asks_the_host_for_the_file_and_its_item(tmp_path):
+async def test_a_view_asks_the_host_for_the_file_and_its_item():
     a = _sc("a")
     fed = _Fed({HOST: V92})
-    w = _wanted(tmp_path, refs=_Refs({a: [(SPACE, "p1", "t")]}), fed=fed)
+    w = _wanted(refs=_Refs({a: [(SPACE, "p1", "t")]}), fed=fed)
     w.schedule(a)
     await w.drain()
     assert len(fed.sent) == 1
@@ -178,66 +182,58 @@ async def test_a_view_asks_the_host_for_the_file_and_its_item(tmp_path):
     assert payload == {"space_id": SPACE, "files": [{"item": "p1", "name": a}]}
 
 
-async def test_names_of_one_space_are_coalesced_into_one_request(tmp_path):
+async def test_names_of_one_space_are_coalesced_into_one_request():
     a, b = _sc("a"), _sc("b")
     refs = _Refs({a: [(SPACE, "p1", "t")], b: [(SPACE, "p2", "t")]})
     fed = _Fed({HOST: V92})
-    w = _wanted(tmp_path, refs=refs, fed=fed, coalesce_s=0.2)
+    w = _wanted(refs=refs, fed=fed, coalesce_s=0.2)
     w.schedule(a)
+    w.schedule(a)  # already waiting: once only
     w.schedule(b)
     await w.drain()
     assert len(fed.sent) == 1
     assert sorted(_names(fed.sent[0])) == sorted([a, b])
 
 
-async def test_a_full_batch_goes_at_once_and_the_rest_waits_for_the_next(tmp_path):
-    """A gallery grid with more than 50 missing pictures: the first 50 go
-    at once in one request; the next names open a new batch (its own one
-    request) instead of being dropped while on their cooldown."""
-    names = [_sc_n(i) for i in range(MAX_WANTED_FILES + 5)]
+async def test_a_burst_of_misses_goes_in_requests_of_at_most_50_names():
+    """A gallery grid opening 60 missing pictures at once: every name is
+    asked for, 50 per request."""
+    names = [_sc_n(i) for i in range(MAX_WANTED_FILES + 10)]
     refs = _Refs({n: [(SPACE, f"p{i}", "t")] for i, n in enumerate(names)})
     fed = _Fed({HOST: V92})
-    w = _wanted(tmp_path, refs=refs, fed=fed, coalesce_s=0.3)
-    for n in names:
-        w.schedule(n)
-        await asyncio.sleep(0)  # let each lookup run (≤ 8 at once)
-    await asyncio.sleep(0.05)
-    # The first 50 went without waiting the coalescing window.
-    assert len(fed.sent) == 1
-    assert _names(fed.sent[0]) == names[:MAX_WANTED_FILES]
-    await w.drain()
-    # The 51st..55th were not lost: one more request, after its window.
-    assert len(fed.sent) == 2
-    assert _names(fed.sent[1]) == names[MAX_WANTED_FILES:]
-
-
-async def test_a_burst_of_misses_is_queued_not_dropped(tmp_path):
-    """A gallery grid opening 60 missing pictures at once (no await between
-    the views): every name is looked up — a bounded queue drained by a few
-    workers — and asked for, in two requests."""
-    names = [_sc_n(i) for i in range(60)]
-    refs = _Refs({n: [(SPACE, f"p{i}", "t")] for i, n in enumerate(names)})
-    fed = _Fed({HOST: V92})
-    w = _wanted(tmp_path, refs=refs, fed=fed, coalesce_s=0.2)
+    w = _wanted(refs=refs, fed=fed, coalesce_s=0.05)
     for n in names:
         w.schedule(n)
     await w.drain()
-    assert len(fed.sent) == 2
-    asked = _names(fed.sent[0]) + _names(fed.sent[1])
-    assert sorted(asked) == sorted(names)
+    assert [_names(s) for s in fed.sent] == [
+        names[:MAX_WANTED_FILES],
+        names[MAX_WANTED_FILES:],
+    ]
 
 
-async def test_names_past_the_queue_bound_are_dropped_without_cooldown(
-    tmp_path, monkeypatch
-):
+async def test_names_of_two_spaces_go_to_each_space_in_its_own_request():
+    a = _sc("a")
+    b = space_content_media_name("sp-2", "b" * 64, "x.webp")
+    refs = _Refs({a: [(SPACE, "p1", "t")], b: [("sp-2", "p2", "t")]})
+    fed = _Fed({HOST: V92})
+    w = _wanted(refs=refs, fed=fed)
+    w.schedule(a)
+    w.schedule(b)
+    await w.drain()
+    assert sorted((s[3], tuple(_names(s))) for s in fed.sent) == [
+        (SPACE, (a,)),
+        ("sp-2", (b,)),
+    ]
+
+
+async def test_names_past_the_pending_bound_are_dropped_without_cooldown(monkeypatch):
     monkeypatch.setattr(mod, "MAX_PENDING_NAMES", 2)
     names = [_sc_n(i) for i in range(3)]
     refs = _Refs({n: [(SPACE, f"p{i}", "t")] for i, n in enumerate(names)})
     fed = _Fed({HOST: V92})
-    w = _wanted(tmp_path, refs=refs, fed=fed)
+    w = _wanted(refs=refs, fed=fed)
     for n in names:
         w.schedule(n)
-    w.schedule(names[0])  # already queued: once only
     await w.drain()
     assert sorted(n for s in fed.sent for n in _names(s)) == sorted(names[:2])
     # The dropped one is asked on its next view, not 10 minutes later.
@@ -246,13 +242,24 @@ async def test_names_past_the_queue_bound_are_dropped_without_cooldown(
     assert _names(fed.sent[-1]) == [names[2]]
 
 
-async def test_a_name_without_a_space_row_is_not_left_on_cooldown(tmp_path):
-    """Dropped before it is queued (no live row yet) → asked again on the
-    next view, not 10 minutes later."""
+async def test_the_cooldown_map_stays_bounded(monkeypatch):
+    monkeypatch.setattr(mod, "MAX_PENDING_NAMES", 2)
+    names = [_sc_n(i) for i in range(3)]
+    refs = _Refs({n: [(SPACE, f"p{i}", "t")] for i, n in enumerate(names)})
+    w = _wanted(refs=refs)
+    for n in names:
+        w.schedule(n)
+        await w.drain()
+    assert len(w._asked) == 2
+
+
+async def test_a_name_without_a_space_row_is_not_left_on_cooldown():
+    """Not queued (no live row yet) → asked again on the next view, not
+    10 minutes later."""
     a = _sc("a")
     refs = _Refs()
     fed = _Fed({HOST: V92})
-    w = _wanted(tmp_path, refs=refs, fed=fed)
+    w = _wanted(refs=refs, fed=fed)
     w.schedule(a)
     await w.drain()
     assert fed.sent == []
@@ -262,37 +269,21 @@ async def test_a_name_without_a_space_row_is_not_left_on_cooldown(tmp_path):
     assert [_names(s) for s in fed.sent] == [[a]]
 
 
-async def test_a_name_a_follower_household_skipped_is_not_left_on_cooldown(tmp_path):
+async def test_a_name_a_follower_household_skipped_is_not_left_on_cooldown():
     a = _sc("a")
     spaces = _Spaces(role=SpaceRole.SUBSCRIBER)
     fed = _Fed({HOST: V92})
-    w = _wanted(tmp_path, refs=_Refs({a: [(SPACE, "p1", "t")]}), spaces=spaces, fed=fed)
+    w = _wanted(refs=_Refs({a: [(SPACE, "p1", "t")]}), spaces=spaces, fed=fed)
     w.schedule(a)
     await w.drain()
-    assert fed.sent == []
+    assert fed.sent == []  # a follower keeps the GFS on-demand path (#1317)
     spaces.role = SpaceRole.MEMBER  # joined as a member since
     w.schedule(a)
     await w.drain()
     assert len(fed.sent) == 1
 
 
-async def test_a_name_dropped_at_the_batch_cap_is_not_left_on_cooldown(
-    tmp_path, monkeypatch
-):
-    a = _sc("a")
-    fed = _Fed({HOST: V92})
-    w = _wanted(tmp_path, refs=_Refs({a: [(SPACE, "p1", "t")]}), fed=fed)
-    monkeypatch.setattr(mod, "MAX_BATCH_TASKS", 0)
-    w.schedule(a)
-    await w.drain()
-    assert fed.sent == []
-    monkeypatch.setattr(mod, "MAX_BATCH_TASKS", 64)
-    w.schedule(a)
-    await w.drain()
-    assert len(fed.sent) == 1
-
-
-async def test_a_name_whose_lookup_failed_is_not_left_on_cooldown(tmp_path):
+async def test_a_name_whose_lookup_failed_is_not_left_on_cooldown():
     a = _sc("a")
 
     class _Flaky(_Refs):
@@ -305,46 +296,28 @@ async def test_a_name_whose_lookup_failed_is_not_left_on_cooldown(tmp_path):
             return await super().space_rows_of(basename)
 
     fed = _Fed({HOST: V92})
-    w = _wanted(tmp_path, refs=_Flaky({a: [(SPACE, "p1", "t")]}), fed=fed)
+    w = _wanted(refs=_Flaky({a: [(SPACE, "p1", "t")]}), fed=fed)
     w.schedule(a)
-    await w.drain()
+    await w.drain()  # contained
     w.schedule(a)
     await w.drain()
     assert len(fed.sent) == 1
 
 
-async def test_a_follower_household_never_asks(tmp_path):
-    """A follower keeps the GFS on-demand path (#1317)."""
-    a = _sc("a")
-    fed = _Fed({HOST: V92})
-    w = _wanted(
-        tmp_path,
-        refs=_Refs({a: [(SPACE, "p1", "t")]}),
-        spaces=_Spaces(role=SpaceRole.SUBSCRIBER),
-        fed=fed,
-    )
-    w.schedule(a)
-    await w.drain()
-    assert fed.sent == []
-
-
-async def test_a_legacy_or_unsafe_name_is_never_looked_up(tmp_path):
+async def test_a_legacy_or_unsafe_name_is_never_looked_up():
     refs = _Refs()
-    w = _wanted(tmp_path, refs=refs)
-    w.schedule("a.webp")
-    w.schedule("sd-abc.webp")
-    w.schedule("sc-../x")
-    w.schedule("")
+    w = _wanted(refs=refs)
+    for name in ("a.webp", "sd-abc.webp", "sc-../x", ""):
+        w.schedule(name)
     await w.drain()
     assert refs.asked == []
 
 
-async def test_a_name_is_asked_again_only_after_its_cooldown(tmp_path):
+async def test_a_name_is_asked_again_only_after_its_cooldown():
     a = _sc("a")
     now = [1000.0]
-    refs = _Refs({a: [(SPACE, "p1", "t")]})
     fed = _Fed({HOST: V92})
-    w = _wanted(tmp_path, refs=refs, fed=fed, clock=lambda: now[0])
+    w = _wanted(refs=_Refs({a: [(SPACE, "p1", "t")]}), fed=fed, clock=lambda: now[0])
     w.schedule(a)
     await w.drain()
     w.schedule(a)
@@ -356,113 +329,112 @@ async def test_a_name_is_asked_again_only_after_its_cooldown(tmp_path):
     assert len(fed.sent) == 2
 
 
-async def test_after_the_wait_missing_names_go_to_a_trusted_helper(tmp_path):
-    """Host first; after the fixed wait only the names still not stored go
-    to the next provider — the trusted helpers of the one shared picker
-    (``trusted_helpers``: admin / moderator households at v_92, sorted,
-    starting at this household's offset), never ourselves, at most
-    MAX_PROVIDERS."""
-    a, b = _sc("a"), _sc("b")
-    refs = _Refs({a: [(SPACE, "p1", "t")], b: [(SPACE, "p2", "t")]})
-    helpers = ["h-z", "h-a", SELF, HOST, "h-m", "h-b"]
-    fed = _Fed({iid: V92 for iid in [HOST, *helpers]})
-
-    def _host_sends_a(to, payload):
-        if to == HOST:
-            (tmp_path / a).write_bytes(b"x")
-
-    fed.on_send = _host_sends_a
+def _helper_case(*, contact=None, fail=(), host_version=V92):
+    a = _sc("a")
+    helpers = ["h-z", "h-a", SELF, HOST, "h-m"]
+    fed = _Fed({**{h: V92 for h in helpers}, HOST: host_version}, fail=set(fail))
     seats = _Seats(helpers)
-    w = _wanted(tmp_path, refs=refs, seats=seats, fed=fed, coalesce_s=0.1)
+    w = _wanted(
+        refs=_Refs({a: [(SPACE, "p1", "t")]}), seats=seats, fed=fed, contact=contact
+    )
     w.schedule(a)
-    w.schedule(b)
-    await w.drain()
-    ordered = ["h-a", "h-b", "h-m", "h-z"]
+    return w, fed, seats
+
+
+def _rotated() -> list[str]:
+    ordered = ["h-a", "h-m", "h-z"]
     start = helper_offset(SELF, SPACE) % len(ordered)
-    rotated = ordered[start:] + ordered[:start]
-    assert [s[0] for s in fed.sent] == [HOST, *rotated][:MAX_PROVIDERS]
-    assert sorted(_names(fed.sent[0])) == sorted([a, b])
-    assert _names(fed.sent[1]) == [b]
+    return ordered[start:] + ordered[:start]
+
+
+async def test_a_host_that_answers_is_the_only_one_asked():
+    """The host online (however slow): a helper never learns what a member
+    views."""
+    w, fed, seats = _helper_case()
+    await w.drain()
+    assert [s[0] for s in fed.sent] == [HOST]
+    assert seats.asked == []
+
+
+async def test_an_unreachable_host_sends_the_names_to_one_helper():
+    w, fed, seats = _helper_case(fail={HOST})
+    await w.drain()
+    assert [s[0] for s in fed.sent] == [HOST, _rotated()[0]]
     # Helpers are admin / moderator seats — the owner is the host.
     assert seats.asked == [HELPER_ROLES]
 
 
-async def test_nothing_more_is_asked_once_every_file_arrived(tmp_path):
+async def test_a_silent_host_sends_the_names_to_one_helper_too():
+    w, fed, _seats = _helper_case(contact=_Contact({SPACE}))
+    await w.drain()
+    assert [s[0] for s in fed.sent] == [HOST, _rotated()[0]]
+    assert fed.sent[0][2] == fed.sent[1][2]
+
+
+async def test_a_failed_helper_send_tries_the_next_up_to_the_cap():
+    first, second, third = _rotated()
+    w, fed, _seats = _helper_case(fail={HOST, first, second, third})
+    await w.drain()
+    assert [s[0] for s in fed.sent] == [HOST, first, second]
+    assert MAX_HELPERS == 2
+
+
+async def test_an_older_host_that_answers_is_left_to_its_catch_up():
+    """A host below v_92 cannot answer; while it is not silent no helper is
+    asked (its §25.6 catch-up heals the file). Silent: a helper is."""
+    w, fed, _seats = _helper_case(host_version=V92 - 1)
+    await w.drain()
+    assert fed.sent == []
+    w, fed, _seats = _helper_case(host_version=V92 - 1, contact=_Contact({SPACE}))
+    await w.drain()
+    assert [s[0] for s in fed.sent] == [_rotated()[0]]
+
+
+async def test_a_helper_below_v92_is_never_asked():
     a = _sc("a")
-    fed = _Fed({HOST: V92, "h-a": V92})
-    fed.on_send = lambda to, payload: (tmp_path / a).write_bytes(b"x")
-    w = _wanted(
-        tmp_path,
-        refs=_Refs({a: [(SPACE, "p1", "t")]}),
-        seats=_Seats(["h-a"]),
-        fed=fed,
-    )
+    fed = _Fed({HOST: V92, "h-a": V92 - 1}, fail={HOST})
+    w = _wanted(refs=_Refs({a: [(SPACE, "p1", "t")]}), seats=_Seats(["h-a"]), fed=fed)
     w.schedule(a)
     await w.drain()
     assert [s[0] for s in fed.sent] == [HOST]
 
 
-async def test_a_provider_below_v92_is_skipped(tmp_path):
+async def test_we_never_ask_ourselves_as_the_host():
     a = _sc("a")
-    fed = _Fed({HOST: V92 - 1, "h-a": V92 - 1, "h-b": V92})
+    fed = _Fed({SELF: V92})
     w = _wanted(
-        tmp_path,
-        refs=_Refs({a: [(SPACE, "p1", "t")]}),
-        seats=_Seats(["h-a", "h-b"]),
-        fed=fed,
+        refs=_Refs({a: [(SPACE, "p1", "t")]}), spaces=_Spaces(host=SELF), fed=fed
     )
     w.schedule(a)
     await w.drain()
-    assert [s[0] for s in fed.sent] == ["h-b"]
-
-
-async def test_a_failed_send_moves_to_the_next_provider_at_once(tmp_path):
-    a = _sc("a")
-    fed = _Fed({HOST: V92, "h-a": V92}, fail={HOST})
-    w = _wanted(
-        tmp_path,
-        refs=_Refs({a: [(SPACE, "p1", "t")]}),
-        seats=_Seats(["h-a"]),
-        fed=fed,
-        provider_wait_s=30.0,
-    )
-    w.schedule(a)
-    await asyncio.wait_for(w.drain(), timeout=5)
-    assert [s[0] for s in fed.sent] == [HOST, "h-a"]
-
-
-async def test_no_provider_no_request(tmp_path, caplog):
-    a = _sc("a")
-    fed = _Fed({})
-    w = _wanted(tmp_path, refs=_Refs({a: [(SPACE, "p1", "t")]}), fed=fed)
-    with caplog.at_level(logging.INFO):
-        w.schedule(a)
-        await w.drain()
     assert fed.sent == []
 
 
-async def test_stop_ends_a_batch_waiting_for_its_window(tmp_path):
+async def test_stop_ends_a_drain_waiting_for_its_window():
     a = _sc("a")
     fed = _Fed({HOST: V92})
-    w = _wanted(
-        tmp_path, refs=_Refs({a: [(SPACE, "p1", "t")]}), fed=fed, coalesce_s=60.0
-    )
+    w = _wanted(refs=_Refs({a: [(SPACE, "p1", "t")]}), fed=fed, coalesce_s=60.0)
     w.schedule(a)
     await asyncio.sleep(0.05)
     await asyncio.wait_for(w.stop(), timeout=2)
     assert fed.sent == []
     w.schedule(_sc("b"))  # after stop: nothing scheduled
     await w.drain()
+    assert fed.sent == []
 
 
-async def test_a_lookup_error_is_contained(tmp_path):
-    class _Boom(_Refs):
-        async def space_rows_of(self, basename):
-            raise RuntimeError("db gone")
+async def test_a_send_error_is_contained():
+    a, b = _sc("a"), _sc("b")
 
-    w = _wanted(tmp_path, refs=_Boom())
-    w.schedule(_sc("a"))
+    class _Boom(_Fed):
+        async def send_with_mesh_fallback(self, **kw):
+            raise RuntimeError("down")
+
+    w = _wanted(refs=_Refs({a: [(SPACE, "p1", "t")]}), fed=_Boom({HOST: V92}))
+    w.schedule(a)
     await w.drain()  # never raises
+    w.schedule(b)
+    await w.drain()
 
 
 # ── Provider stubs ───────────────────────────────────────────────────────
@@ -483,19 +455,20 @@ class _Gate:
         self.own = set(own)
         self.fills = fills
 
-    async def ship(self, owner, urls, *, hashed=False):
-        if self.all or owner in self.own:
+    def ship(self, owner, urls):
+        if self.all or self.fills or owner in self.own:
             return list(urls)
-        return [u for u in urls if self.fills and (hashed or u.startswith("sc-"))]
+        return []
 
 
 class _Gates:
     def __init__(self, gate):
         self.gate = gate
-        self.asked: list[tuple[str, str]] = []
+        self.asked: list[tuple[str, bool]] = []
 
-    async def for_requester(self, space_id, requester):
-        self.asked.append((space_id, requester))
+    async def for_space(self, space_id, *, fills=False):
+        # SPACE_MEDIA_WANTED proved the bytes: it always asks with fills.
+        self.asked.append((space_id, fills))
         return self.gate
 
 
@@ -519,9 +492,8 @@ class _Roster:
         return [iid for iid, role in self.seats.items() if role in roles]
 
 
-def _provider(tmp_path, items, *, gate=None, roster=None, clock=None):
+def _provider(tmp_path, items, *, gate=None, roster=None, clock=None, budget=None):
     outbox = _Outbox()
-    kw = {} if clock is None else {"clock": clock}
     roster = roster or _Roster({"req": "member"})
     p = SpaceMediaWantedProvider(
         member_gate=SpaceWriterHouseholds(roster, own_instance_id=SELF).may_receive,
@@ -530,7 +502,7 @@ def _provider(tmp_path, items, *, gate=None, roster=None, clock=None):
         hasher=MediaFileHasher(tmp_path),
         media_sync=outbox,
         media_dir=tmp_path,
-        **kw,
+        budget=budget or SpaceFileBudget(clock=clock or (lambda: 0.0)),
     )
     return p, outbox
 
@@ -604,7 +576,7 @@ async def test_a_follower_only_household_gets_nothing(tmp_path):
     assert outbox.queued == []
     for role in ("member", "moderator", "admin", "owner"):
         roster.seats["req"] = role
-        p._budget.clear()
+        p._budget = SpaceFileBudget()
         assert await p.handle(_event([{"item": "p1", "name": a}])) == 1, role
 
 
@@ -698,7 +670,7 @@ async def test_the_budget_is_50_files_and_32_mib_per_requester_and_space(
     tmp_path, caplog
 ):
     now = [0.0]
-    names = [_sc_n(i) for i in range(RESUME_MEDIA_MAX_FILES + 1)]
+    names = [_sc_n(i) for i in range(BUDGET_MAX_FILES + 1)]
     for n in names:
         (tmp_path / n).write_bytes(b"x")
     items = {(SPACE, f"p{i}"): [(n, "u1")] for i, n in enumerate(names)}
@@ -707,21 +679,21 @@ async def test_the_budget_is_50_files_and_32_mib_per_requester_and_space(
     first = [
         {"item": f"p{i}", "name": n} for i, n in enumerate(names[:MAX_WANTED_FILES])
     ]
-    assert await p.handle(_event(first)) == RESUME_MEDIA_MAX_FILES
+    assert await p.handle(_event(first)) == BUDGET_MAX_FILES
     with caplog.at_level(logging.INFO):
         assert await p.handle(_event([{"item": "p50", "name": names[50]}])) == 0
     assert "budget" in caplog.text
     # Another requester has its own budget; after the window, so does this one.
     roster.seats["req-2"] = "member"
     assert await p.handle(_event([{"item": "p50", "name": names[50]}], sender="req-2"))
-    now[0] += RESUME_COOLDOWN_S
+    now[0] += BUDGET_WINDOW_S
     assert await p.handle(_event([{"item": "p50", "name": names[50]}])) == 1
 
 
 async def test_an_exhausted_budget_drops_the_request_before_any_lookup(tmp_path):
     """Over the (requester, space) window: the whole request is dropped
     before a single item query or hash."""
-    names = [_sc_n(i) for i in range(RESUME_MEDIA_MAX_FILES + 1)]
+    names = [_sc_n(i) for i in range(BUDGET_MAX_FILES + 1)]
     for n in names:
         (tmp_path / n).write_bytes(b"x")
     items = {(SPACE, f"p{i}"): [(n, "u1")] for i, n in enumerate(names)}
@@ -729,7 +701,7 @@ async def test_an_exhausted_budget_drops_the_request_before_any_lookup(tmp_path)
     first = [
         {"item": f"p{i}", "name": n} for i, n in enumerate(names[:MAX_WANTED_FILES])
     ]
-    assert await p.handle(_event(first)) == RESUME_MEDIA_MAX_FILES
+    assert await p.handle(_event(first)) == BUDGET_MAX_FILES
     looked: list[tuple[str, str]] = []
     real = p._refs.live_item_files
 
@@ -743,7 +715,7 @@ async def test_an_exhausted_budget_drops_the_request_before_any_lookup(tmp_path)
 
 
 async def test_the_byte_budget_skips_a_file_that_would_pass_it(tmp_path, monkeypatch):
-    monkeypatch.setattr(mod, "RESUME_MEDIA_MAX_BYTES", 15)
+    monkeypatch.setattr(file_gate_mod, "BUDGET_MAX_BYTES", 15)
     a, b = _sc("a"), _sc("b")
     (tmp_path / a).write_bytes(b"x" * 10)
     (tmp_path / b).write_bytes(b"y" * 10)
@@ -751,7 +723,19 @@ async def test_the_byte_budget_skips_a_file_that_would_pass_it(tmp_path, monkeyp
     p, _outbox = _provider(tmp_path, items)
     files = [{"item": "p1", "name": a}, {"item": "p2", "name": b}]
     assert await p.handle(_event(files)) == 1
-    assert RESUME_MEDIA_MAX_BYTES == 32 * 1024 * 1024
+
+
+async def test_files_a_resume_already_sent_count_against_the_same_budget(tmp_path):
+    """ONE budget per (requester, space) across SPACE_MEDIA_WANTED and the
+    resume's files: a window the resume spent drops the request."""
+    a = _sc("a")
+    (tmp_path / a).write_bytes(b"x")
+    budget = SpaceFileBudget(clock=lambda: 0.0)
+    for _ in range(BUDGET_MAX_FILES):
+        assert budget.take("req", SPACE, 1)
+    p, outbox = _provider(tmp_path, {(SPACE, "p1"): [(a, "u1")]}, budget=budget)
+    assert await p.handle(_event([{"item": "p1", "name": a}])) == 0
+    assert outbox.queued == []
 
 
 @pytest.mark.parametrize("missing", ["items", "outbox"])

@@ -2219,12 +2219,6 @@ async def test_a_trusted_non_host_full_catch_up_ships_only_its_own_peoples_files
     async def _ours(_space_id: str) -> set[str]:
         return {"u-ours"}
 
-    async def _supports(_instance_id: str, *, min_version: int) -> bool:
-        return True
-
-    async def _size(_url: str) -> int:
-        return 1
-
     media_sync = AsyncMock()
     svc = SpaceSyncService(
         builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
@@ -2242,14 +2236,7 @@ async def test_a_trusted_non_host_full_catch_up_ships_only_its_own_peoples_files
         item_files=items,
     )
     svc.attach_roster_authority(_no, own_members=_ours)
-    svc.attach_file_gates(
-        CatchUpFileGates(
-            space_repo=_Spaces(),
-            roster_authority=_no,
-            supports=_supports,
-            size=_size,
-        )
-    )
+    svc.attach_file_gates(CatchUpFileGates(space_repo=_Spaces(), roster_authority=_no))
     session = _FakeSession()
     await svc.stream_initial(session)
     assert [r["id"] for r in _records(session)["posts"]] == ["p-ours"]

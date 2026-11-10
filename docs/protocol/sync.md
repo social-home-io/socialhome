@@ -168,8 +168,10 @@ arrives through the §25.6 sync. Since v_92 a replay reaches back at most
 bounded on every path; an older file arrives on view
 (`SPACE_MEDIA_WANTED`). The replayed rows' files — posts, **comments**,
 covers, gallery items, the host's pages — ship from the replaying household
-within `RESUME_MEDIA_MAX_FILES` (50) / `RESUME_MEDIA_MAX_BYTES` (32 MiB)
-through the v_86 file gate.
+within ONE budget per (requester, space) that `SPACE_MEDIA_WANTED` shares:
+50 files / 32 MiB per 30 minutes (`file_gate.SpaceFileBudget`). A household
+that is not the roster authority ships only the files of the rows it
+replays — its own people's.
 
 ### Host offline: trusted helpers (v_92)
 
@@ -182,30 +184,37 @@ invited us) actually goes out: not when it is queued, and never for a BEGIN
 that waits for a free slot (trigger 8) or is skipped because the host's row
 is gone — no answer is due for a BEGIN that was not sent. The receiver
 marks the space **heard** whenever that household answers: any signed
-chunk of the space it verifies from it, including the bare `__complete__` sentinel an up-to-date incremental session
-sends back (a quiet space must count, or it would always fall back), and the
-scheduler counts a host's capacity deferral too (`SpaceSyncDeferred` with
-`reason="capacity"`: the host refused with `too_many_sessions` or
-`node_capacity`, so it is online; an `interrupted` stream does not count)
-(`federation/sync/space/host_contact.py`, in memory; a restart forgets it). If
-`HOST_ANSWER_WAIT_S` (120 s, fixed — never random) after that BEGIN the host
-has not answered, the member sends `SPACE_SYNC_RESUME` to **one** trusted
-helper — a household holding a live `admin` or `moderator` seat in the
-roster mirror at v_92 (`space_member_supports`: an older helper would
-replay everyone's rows), never us or the host, sorted
-(`federation/sync/space/trusted_helpers.py`, the one picker
-`SPACE_MEDIA_WANTED` uses too); each household starts at its
+chunk of the space it verifies from it, including the bare `__complete__`
+sentinel an up-to-date incremental session sends back (a quiet space must
+count, or it would always fall back), and the scheduler counts every
+signed refusal of our BEGIN by the host too (`SpaceSyncDeferred` with the
+host's `too_many_sessions`, `node_capacity` or `rate_limited`: it is
+online; only the capacity ones are asked again shortly, a rate-limited
+BEGIN waits for the next tick; an `interrupted` stream is noticed on our
+side and does not count) (`federation/sync/space/host_contact.py`, in
+memory). If `HOST_ANSWER_WAIT_S` (120 s, fixed — never random) after that
+BEGIN the host has not answered, the space is marked **silent** until the
+host is heard again (`HostContact.went_silent` / `is_silent` — what
+`SPACE_MEDIA_WANTED` reads before it asks a helper) and the member sends
+`SPACE_SYNC_RESUME` to **one** trusted helper — a household holding a live
+`admin` or `moderator` seat in the roster mirror at v_92
+(`space_member_supports`: an older helper would replay everyone's rows),
+never us or the host, sorted (`federation/sync/space/trusted_helpers.py`,
+the one picker `SPACE_MEDIA_WANTED` uses too); each household starts at its
 own stable offset (`sha256(own instance id ‖ space id) mod k`, never random)
 so a space's members spread over its k helpers instead of all asking the
 first, then one step further each silent round — with `since` = the newest
-of: when the host was last heard, the previous helper ask for the space
-minus a fixed 5-minute overlap (`HELPER_OVERLAP_S`; remembered in memory per
-space, bounded like the heard marks), and 30 days ago. So while the host
-stays silent each round replays only what is new since the last ask; a file
-the member still lacks arrives when someone opens it (`SPACE_MEDIA_WANTED`).
-No helper at v_92 → nothing: the member waits for the host (logged once
-per round). A space we host, or hold the roster authority of, never falls
-back.
+of: when the host was last heard, the newest post or comment this household
+holds in the space from **that helper's** people
+(`space_post_repo.newest_from_household`) minus a fixed 5-minute overlap
+(`HELPER_OVERLAP_S`), and 30 days ago. A helper replays only its own
+people's rows, so its own newest row here is where its gap starts — read
+from the database, so neither a restart nor a rotation to another helper
+makes a resume reach back further than that helper's gap, and nothing is
+remembered about an ask (a send that failed changes nothing). A file the
+member still lacks arrives when someone opens it (`SPACE_MEDIA_WANTED`).
+No helper at v_92 → nothing: the member waits for the host (logged once per
+round). A space we host, or hold the roster authority of, never falls back.
 
 Every member is equal here: a host reached only over the mesh gets the same
 small incremental BEGIN every periodic tick as a paired host (trigger 2) —
@@ -217,13 +226,16 @@ reaches a helper. One incremental BEGIN per 30-min tick stays under the
 host's 5 / h per (household, space).
 
 Rights do not grow. A household that is not the space's roster authority
-(the predicate the file gate uses) replays **only its own people's rows**
-(tombstones by its own people's deletes) — every receiver takes other
-people's rows only from the household acting as host (`_acts_as_host`) —
-but it still ships the **hashed** files of every replayed row through the
-v_86 gate, so a member that holds a row from the host gets its picture,
-verified against the hash its row carries. Album deletes are replayed as
-before (they name no deleter; the receiver judges them by
+answers only a household holding a writer (member) seat in its roster
+mirror (`SpaceWriterHouseholds.may_receive`, the §25.6 provider's gate for
+member-only data — a follower-only household gets nothing from a helper;
+the roster authority keeps its own gate, where a follower gets its subset),
+replays **only its own people's rows** (tombstones by its own people's
+deletes) — every receiver takes other people's rows only from the
+household acting as host (`_acts_as_host`) — and ships **only those rows'
+files**, within the shared (requester, space) budget. Other people's files
+come on view (`SPACE_MEDIA_WANTED`). Album deletes are replayed as before
+(they name no deleter; the receiver judges them by
 `may_mutate(settings=True)`). The request goes with
 `send_with_mesh_fallback`, so a helper reached by mesh or a GFS mailbox seat
 gets it: paired, mesh and GFS-only members fall back alike.
@@ -235,11 +247,11 @@ sequenceDiagram
     participant H as Host (offline)
     participant A as Helper (admin / moderator)
     M->>H: SPACE_SYNC_BEGIN (periodic tick)
-    Note over M,H: no chunk, no sentinel, no deferral
-    Note over M: HOST_ANSWER_WAIT_S (120 s) after the BEGIN went out, host not heard
-    M->>A: SPACE_SYNC_RESUME to helper (offset + round) mod k (since = max(host heard, last ask − 5 min, now − 30 d))
+    Note over M,H: no chunk, no sentinel, no refusal
+    Note over M: HOST_ANSWER_WAIT_S (120 s) after the BEGIN went out, host not heard → silent
+    M->>A: SPACE_SYNC_RESUME to helper (offset + round) mod k (since = max(host heard, A's people's newest row here − 5 min, now − 30 d))
     A->>M: SPACE_*_CREATED (its own people's rows only)
-    A->>M: SPACE_MEDIA_BLOB (its own files + hashed files of others' rows, ≤ 50 / 32 MiB)
+    A->>M: SPACE_MEDIA_BLOB (the files of those rows, shared budget ≤ 50 / 32 MiB per 30 min)
     Note over M: next round asks the host first again
 ```
 
@@ -248,20 +260,18 @@ member households sends its host one BEGIN (as before) and, 120 s after it
 went out, one resume request (< 1 KiB) to ONE helper. The per-household
 offsets spread the M requests over the k helpers — about M/k each, never M
 on one. A helper serves at most one replay per (requester, space) per 30 min
-(`RESUME_COOLDOWN_S`), each ≤ 500 rows per resource of its own people plus
-≤ 50 files / 32 MiB. Worst case per helper and round: (M/k) × (≤ 500 rows
-per resource + ≤ 50 files / 32 MiB) on the **first** round of an outage;
-after that `since` advances to the previous ask (minus the 5-minute overlap,
-deduped by id), so each later round carries only the rows written since and
-their files — a quiet space's replays are near empty. Global space, 200
-member households, 2 helpers, host offline: ~100 requests per helper per
-round; the first round is bounded by 100 × 32 MiB ≈ 3.2 GiB of files per
-helper (only if each requester lacked 50 recent files; the files are the
-hashed pictures the member does not hold yet), every later round only the
-new rows' bytes — 200 × 48 = 9 600 small requests a day in all, ~4 800 per
-helper. Nothing fans out: one requester, one helper, one space per round.
-The first round after a boot reaches back to the host's last answer
-(≤ 30 days) once, since the helper-ask mark is in memory.
+(`RESUME_COOLDOWN_S`), each ≤ 500 rows per resource **of its own people**
+plus the files of those rows — rows new to the requester (it lacks them
+since the helper's people's newest row it holds), so nothing it already has
+is re-sent beyond the 5-minute overlap. A helper round is therefore small
+requests plus its own people's new rows and their files, never other
+people's files. Global space, 200 member households, 2 helpers, host
+offline: ~100 requests per helper per round, each answered with only what
+that helper's people wrote since the requester last held one of their rows
+(a quiet helper's replays are near empty; at most 50 files / 32 MiB per
+requester per 30 min in all, `SPACE_MEDIA_WANTED` included) — 200 × 48 =
+9 600 small requests a day in all, ~4 800 per helper. Nothing fans out: one
+requester, one helper, one space per round.
 
 ## What a sync streams
 
@@ -495,7 +505,10 @@ every periodic session (30 min); "Resume" = the `SPACE_SYNC_RESUME` replay
 Each type the stream carries has a heal test in
 `tests/federation/sync/space/test_sync_coverage.py` (chat messages up to
 the chat sink, whose live create / delete rule has its own tests); each type
-out of the stream, a test pinning that.
+out of the stream, a test pinning that. The item-state rules (votes,
+answers, picks, RSVPs, reactions, comment edits, timetable deletes, bazaar
+bids: whose rows a stream may change, cut lists, stamps) have their own
+module, `tests/federation/sync/space/test_sync_item_state.py`.
 
 | Item type | Live events | Stream resource | Resume (§4.4) | Deletes heal | Notes |
 |---|---|---|---|---|---|
@@ -1501,8 +1514,10 @@ and the sync handlers make no HTTP request.
   `0086_space_sync_change_stamps.sql` — incremental sessions.
 - `socialhome/federation/sync/space/host_contact.py` (`HostContact`),
   `receiver.py` (`attach_host_contact`), `scheduler.py` (trigger 10,
-  `HOST_ANSWER_WAIT_S`) and `resume.py` (`attach_row_scope`,
-  `RESUME_MAX_AGE_S`) — trusted helpers while the host is offline (v_92);
+  `HOST_ANSWER_WAIT_S`, `HELPER_OVERLAP_S`), `space_post_repo
+  .newest_from_household`, `resume.py` (`attach_row_scope`,
+  `RESUME_MAX_AGE_S`) and `file_gate.py` (`SpaceFileBudget`) — trusted
+  helpers while the host is offline (v_92);
   `provider.py` (`CATCHUP_MEDIA_MAX_AGE_S`, `CATCHUP_MEDIA_MAX_FILES`) and
   `media_reference_repo.recent_item_files` — the bounded catch-up media.
 

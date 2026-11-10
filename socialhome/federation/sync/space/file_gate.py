@@ -1,4 +1,4 @@
-"""Which files of a space row this household ships on catch-up (v_86).
+"""Which files of a space row this household ships, and how many (v_86, v_92).
 
 A receiver takes a file only from a household it accepts it from
 (``docs/protocol/media.md``, "Who fills a file"):
@@ -7,39 +7,47 @@ A receiver takes a file only from a household it accepts it from
   file of every row it streams, hashed or not (#1311);
 * the row's **author** household — the files of its own people's rows;
 * a **trusted** household (a live ``admin`` or ``moderator`` seat) — the
-  HASHED files (``sc-`` names) of other people's rows, at v_86. The bytes
-  are checked against the hash the receiver's row carries, so a helper
-  can never change a picture, only deliver it.
+  HASHED files of other people's rows. The bytes are checked against the
+  hash the receiver's row carries, so a helper can never change a picture,
+  only deliver it.
 
-Anything else the receiver refuses, so a plain member household ships
-only its own people's files, and a helper ships other people's hashed
-files only to a v_86 requester, only on a ``SPACE_SYNC_RESUME`` or a v_92
-``SPACE_MEDIA_WANTED`` (``services/space_media_wanted.py``) (a full
-§25.6 catch-up is the host's job: it ships every file, and k helpers
-re-sending the same bytes to a newcomer would only spend bandwidth), at
-most :data:`FILL_MAX_FILES` files / :data:`FILL_MAX_BYTES` bytes per
-resume (newest rows first, in the order the caller walks them). Rows are not this module's concern: a non-host
-provider still streams only its own people's rows (``_OwnPeopleOnly``).
+A §25.6 catch-up (:class:`CatchUpFileGate` without fills) is the host's job
+for other people's files: a helper ships only its own people's there, so k
+helpers never re-send one file to a newcomer. A helper's
+``SPACE_SYNC_RESUME`` replays only its own people's rows and ships only
+their files (``resume.py``). Other people's files leave a trusted helper
+only on a v_92 ``SPACE_MEDIA_WANTED`` (``services/space_media_wanted.py``),
+for one viewed file whose bytes it proved hash to the asked-for content
+name (``fills=True``).
+
+Every file a household ships on a resume or a ``SPACE_MEDIA_WANTED`` is
+charged to ONE budget per (requester, space) (:class:`SpaceFileBudget`):
+:data:`BUDGET_MAX_FILES` files / :data:`BUDGET_MAX_BYTES` bytes per
+:data:`BUDGET_WINDOW_S`. Rows are not this module's concern: a non-host
+provider streams only its own people's rows (``_OwnPeopleOnly``).
 """
 
 from __future__ import annotations
 
 import pathlib
+import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol
 
 import aiofiles.os
 
-from ....domain.federation_capabilities import FederationCapability
-from ....domain.file_hashes import is_space_content_media_name
 from ....domain.space import CONTENT_AUTHORITY_ROLES, SpaceMember
 from ....services.inbound_media_store import media_basename, media_file_path
 
-#: Other people's hashed files one helper ships per catch-up stream or
-#: resume — the same bound a resume puts on all its files.
-FILL_MAX_FILES: int = 50
+#: Files one household is sent per space per window (resume + wanted).
+BUDGET_MAX_FILES: int = 50
 #: … and bytes.
-FILL_MAX_BYTES: int = 32 * 1024 * 1024
+BUDGET_MAX_BYTES: int = 32 * 1024 * 1024
+#: The window, in seconds — the resume's once-per-30-minutes window.
+BUDGET_WINDOW_S: float = 30 * 60.0
+#: (requester, space) windows remembered (oldest dropped).
+BUDGET_TRACKED: int = 4096
 
 _CONTENT_ROLES: frozenset[str] = frozenset(r.value for r in CONTENT_AUTHORITY_ROLES)
 
@@ -56,103 +64,97 @@ async def local_file_size(media_dir: pathlib.Path, url: str) -> int | None:
         return None
 
 
+class SpaceFileBudget:
+    """One upload budget per (requester, space), shared by every path that
+    ships files on request (a resume's files, ``SPACE_MEDIA_WANTED``)."""
+
+    __slots__ = ("_clock", "_windows")
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        #: (requester, space) → [window start, files, bytes].
+        self._windows: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+
+    def _window(self, requester: str, space_id: str) -> list[float] | None:
+        window = self._windows.get((requester, space_id))
+        if window is None or self._clock() - window[0] >= BUDGET_WINDOW_S:
+            return None
+        return window
+
+    def exhausted(self, requester: str, space_id: str) -> bool:
+        """Whether the window can take no file at all."""
+        window = self._window(requester, space_id)
+        return window is not None and (
+            window[1] >= BUDGET_MAX_FILES or window[2] >= BUDGET_MAX_BYTES
+        )
+
+    def take(self, requester: str, space_id: str, size: int) -> bool:
+        """Charge one file of *size* bytes, or ``False`` when it would pass
+        the budget (nothing charged)."""
+        key = (requester, space_id)
+        window = self._window(requester, space_id)
+        if window is None:
+            window = [self._clock(), 0.0, 0.0]
+            self._windows[key] = window
+        self._windows.move_to_end(key)
+        while len(self._windows) > BUDGET_TRACKED:
+            self._windows.popitem(last=False)
+        if window[1] + 1 > BUDGET_MAX_FILES or window[2] + size > BUDGET_MAX_BYTES:
+            return False
+        window[1] += 1
+        window[2] += size
+        return True
+
+
 class _SpaceMembers(Protocol):
     async def list_members(self, space_id: str) -> list[SpaceMember]: ...
 
     async def list_local_member_user_ids(self, space_id: str) -> list[str]: ...
 
 
-class _Supports(Protocol):
-    async def __call__(self, instance_id: str, *, min_version: int) -> bool: ...
-
-
 class CatchUpFileGate:
-    """The file filter for one (space, requester) stream."""
+    """The file filter for one space."""
 
-    __slots__ = ("_all", "_bytes", "_files", "_fills", "_own", "_size")
+    __slots__ = ("_all", "_fills", "_own")
 
-    def __init__(
-        self,
-        *,
-        all_files: bool,
-        own: frozenset[str],
-        fills: bool,
-        size: Callable[[str], Awaitable[int | None]],
-    ) -> None:
+    def __init__(self, *, all_files: bool, own: frozenset[str], fills: bool) -> None:
         self._all = all_files
         self._own = own
         self._fills = fills
-        self._size = size
-        self._files = 0
-        self._bytes = 0
 
-    async def ship(
-        self, owner: str | None, urls: Sequence[str], *, hashed: bool = False
-    ) -> list[str]:
+    def ship(self, owner: str | None, urls: Sequence[str]) -> list[str]:
         """The files of a row owned by ``owner`` (``None``: names nobody)
-        this household ships to the requester. *hashed*: the CALLER proved
-        each file's bytes hash to a content name (a v_92
-        ``SPACE_MEDIA_WANTED`` match) — a hashed file even when stored here
-        under a legacy name (a member that got the item first as the public
-        GFS copy, which carries no hash map)."""
-        if self._all or (owner is not None and owner in self._own):
+        this household ships."""
+        if self._all or self._fills or (owner is not None and owner in self._own):
             return list(urls)
-        if not self._fills:
-            return []
-        kept: list[str] = []
-        for url in urls:
-            if not hashed and not is_space_content_media_name(media_basename(url)):
-                continue  # an unhashed file: the host's fill only
-            if self._files >= FILL_MAX_FILES:
-                break
-            size = await self._size(url)
-            if size is None or self._bytes + size > FILL_MAX_BYTES:
-                continue
-            self._files += 1
-            self._bytes += size
-            kept.append(url)
-        return kept
+        return []
 
 
 class CatchUpFileGates:
-    """Builds the :class:`CatchUpFileGate` for a stream."""
+    """Builds the :class:`CatchUpFileGate` for a space."""
 
-    __slots__ = ("_authority", "_size", "_spaces", "_supports")
+    __slots__ = ("_authority", "_spaces")
 
     def __init__(
         self,
         *,
         space_repo: _SpaceMembers,
         roster_authority: Callable[[str], Awaitable[bool]],
-        supports: _Supports,
-        size: Callable[[str], Awaitable[int | None]],
     ) -> None:
         self._spaces = space_repo
         self._authority = roster_authority
-        self._supports = supports
-        self._size = size
 
-    async def for_requester(
-        self, space_id: str, requester: str, *, fills: bool = True
-    ) -> CatchUpFileGate:
-        """The gate for one stream to ``requester``. ``fills=False`` (a full
-        §25.6 catch-up — the host's job, which ships every file) leaves a
-        helper only its own people's files, so k helpers never re-send the
-        same bytes to a newcomer; helper fills ride the bounded resume."""
+    async def for_space(self, space_id: str, *, fills: bool = False) -> CatchUpFileGate:
+        """The gate for *space_id*. Without *fills* (a §25.6 catch-up) a
+        non-host household ships its own people's files only. *fills*
+        (``SPACE_MEDIA_WANTED``: the caller proved each file's bytes hash to
+        the asked-for content name) lets a trusted household ship other
+        people's files too."""
         if await self._authority(space_id):
-            return CatchUpFileGate(
-                all_files=True, own=frozenset(), fills=False, size=self._size
-            )
+            return CatchUpFileGate(all_files=True, own=frozenset(), fills=False)
         own = frozenset(await self._spaces.list_local_member_user_ids(space_id))
-        trusted = any(
+        trusted = fills and any(
             m.user_id in own and str(m.role) in _CONTENT_ROLES
             for m in await self._spaces.list_members(space_id)
         )
-        fills = (
-            fills
-            and trusted
-            and await self._supports(
-                requester, min_version=FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS
-            )
-        )
-        return CatchUpFileGate(all_files=False, own=own, fills=fills, size=self._size)
+        return CatchUpFileGate(all_files=False, own=own, fills=trusted)

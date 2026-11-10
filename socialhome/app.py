@@ -19,7 +19,6 @@ Entry point: ``python -m socialhome.app`` (or via ``socialhome/__main__.py``).
 
 from __future__ import annotations
 
-import functools
 import logging
 import pathlib
 from collections.abc import Awaitable, Callable
@@ -127,7 +126,7 @@ from .federation.sync.dm_history import (
     DmHistoryReceiver,
     DmHistoryScheduler,
 )
-from .federation.sync.space.file_gate import CatchUpFileGates, local_file_size
+from .federation.sync.space.file_gate import CatchUpFileGates, SpaceFileBudget
 from .federation.sync.space.host_contact import HostContact
 from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .federation.sync.space.watermark import SyncWatermarks
@@ -2286,6 +2285,9 @@ def _wire_federation_stack(
     # for events newer than ``since``; we replay individual ``SPACE_*_CREATED``
     # events for posts, comments, tasks, pages, stickies, calendar events
     # and the gallery (albums, album deletes, items).
+    # v_92 — ONE file budget per (requester, space) across a resume's files
+    # and SPACE_MEDIA_WANTED.
+    file_budget = SpaceFileBudget()
     space_sync_resume_provider = SpaceSyncResumeProvider(
         federation_service=federation_service,
         space_repo=space_repo,
@@ -2302,21 +2304,25 @@ def _wire_federation_stack(
         media_dir=pathlib.Path(config.media_path),
         # v_82: only a replayed page's own files ship.
         media_refs=media_reference_repo,
+        budget=file_budget,
     )
 
-    # v_86 — which files of a row we ship on catch-up / resume: as a
-    # non-host household, our own people's files and (holding an admin /
-    # moderator seat) other people's hashed files to a v_86 requester.
-    file_gates = _build_catch_up_file_gates(
-        space_repo, _roster_authority, federation_service, config
+    # v_86 — which files of a row we ship: on a catch-up, as a non-host
+    # household, our own people's files only; on a SPACE_MEDIA_WANTED,
+    # holding an admin / moderator seat, other people's too.
+    file_gates = CatchUpFileGates(
+        space_repo=space_repo, roster_authority=_roster_authority
     )
     space_sync_service.attach_file_gates(file_gates)
-    space_sync_resume_provider.attach_file_gates(file_gates)
     # v_92 — a resume from a household that is not the roster authority
     # (a trusted helper while the host is offline) carries only its own
-    # people's rows; the gate above still fills the hashed files of the rest.
+    # people's rows and their files, to member households only.
     space_sync_resume_provider.attach_row_scope(
-        _roster_authority, own_members=_own_members
+        _roster_authority,
+        own_members=_own_members,
+        member_gate=SpaceWriterHouseholds(
+            space_remote_member_repo, own_instance_id=identity.instance_id
+        ).may_receive,
     )
     # v_92 — the receiver notes each answer of a space's acting host; a
     # member household whose host stays silent asks ONE trusted helper.
@@ -2326,6 +2332,8 @@ def _wire_federation_stack(
         host_contact=host_contact,
         resume=space_sync_resume_provider,
         roster_authority=_roster_authority,
+        # A helper's resume starts at its people's newest row held here.
+        newest_from=space_post_repo.newest_from_household,
     )
     # v_92 — a member household that views a space file it misses asks the
     # host (then a trusted helper) for it; we answer such requests too.
@@ -2335,6 +2343,8 @@ def _wire_federation_stack(
         space_remote_member_repo=space_remote_member_repo,
         media_reference_repo=media_reference_repo,
         file_gates=file_gates,
+        file_budget=file_budget,
+        host_contact=host_contact,
         space_media_sync_service=space_media_sync_service,
         own_instance_id=identity.instance_id,
         config=config,
@@ -2411,22 +2421,6 @@ def _wire_federation_stack(
     )
 
 
-def _build_catch_up_file_gates(
-    space_repo: SqliteSpaceRepo,
-    roster_authority: Callable[[str], Awaitable[bool]],
-    federation_service: FederationService,
-    config: Config,
-) -> CatchUpFileGates:
-    """v_86 — the catch-up / resume file gate (:mod:`.federation.sync.space
-    .file_gate`), sizing files from this household's media dir."""
-    return CatchUpFileGates(
-        space_repo=space_repo,
-        roster_authority=roster_authority,
-        supports=federation_service.space_member_supports,
-        size=functools.partial(local_file_size, pathlib.Path(config.media_path)),
-    )
-
-
 def _build_space_media_wanted(
     *,
     federation_service: FederationService,
@@ -2434,14 +2428,17 @@ def _build_space_media_wanted(
     space_remote_member_repo: SqliteSpaceRemoteMemberRepo,
     media_reference_repo: SqliteMediaReferenceRepo,
     file_gates: CatchUpFileGates,
+    file_budget: SpaceFileBudget,
+    host_contact: HostContact,
     space_media_sync_service: SpaceMediaSyncService,
     own_instance_id: str,
     config: Config,
 ) -> SpaceMediaWanted:
     """v_92 ``SPACE_MEDIA_WANTED``: the requester the media route schedules
-    on a miss, and the provider registered for the inbound event (the v_86
-    file gate decides what we ship, the media outbox pushes it)."""
-    media_dir = pathlib.Path(config.media_path)
+    on a miss (a helper only while ``host_contact`` shows the host silent),
+    and the provider registered for the inbound event (the file gate
+    decides what we ship, within the shared budget; the media outbox
+    pushes it)."""
     provider = SpaceMediaWantedProvider(
         # Member households only — the §25.6 gate for member-only data; a
         # follower-only household asks its GFS (v_83).
@@ -2452,7 +2449,8 @@ def _build_space_media_wanted(
         file_gates=file_gates,
         hasher=space_media_sync_service.file_hasher,
         media_sync=space_media_sync_service,
-        media_dir=media_dir,
+        media_dir=pathlib.Path(config.media_path),
+        budget=file_budget,
     )
 
     async def _space_media_wanted(event) -> None:
@@ -2466,8 +2464,8 @@ def _build_space_media_wanted(
         space_repo=space_repo,
         remote_members=space_remote_member_repo,
         federation=federation_service,
+        host_contact=host_contact,
         own_instance_id=own_instance_id,
-        media_dir=media_dir,
     )
 
 

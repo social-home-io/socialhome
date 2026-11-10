@@ -5,10 +5,9 @@ We are a member household of ``SP`` whose person (``u-local``) holds a
 MODERATOR seat — a trusted helper — and not its host. A member household
 whose host stayed silent asks us for ``SPACE_SYNC_RESUME``. Rights must not
 grow: we replay only OUR people's rows (every receiver takes other people's
-rows only from the household acting as host), and ship the HASHED file of
-another person's row (a v_86 fill the receiver checks against the hash its
-host-delivered row carries) — never another person's unhashed file. A
-``since`` older than 30 days is clamped.
+rows only from the household acting as host) and only THEIR files — never
+another person's file, hashed or not (those come on view,
+``SPACE_MEDIA_WANTED``). A ``since`` older than 30 days is clamped.
 """
 
 from __future__ import annotations
@@ -87,7 +86,7 @@ async def _queued(db) -> set[tuple[str, str]]:
     return {(r["blob_id"], r["target_instance_id"]) for r in rows}
 
 
-async def test_a_helper_replays_its_own_rows_and_fills_hashed_files(
+async def test_a_helper_replays_its_own_rows_and_their_files_only(
     env, tmp_dir, monkeypatch
 ):
     app, db = env
@@ -106,6 +105,6 @@ async def test_a_helper_replays_its_own_rows_and_fills_hashed_files(
     assert all(s["to"] == OTHER for s in sent)
     queued = await _queued(db)
     assert ("ours.webp", OTHER) in queued
-    assert (SC, OTHER) in queued
+    assert (SC, OTHER) not in queued
     assert ("raw.webp", OTHER) not in queued
     assert ("old.webp", OTHER) not in queued

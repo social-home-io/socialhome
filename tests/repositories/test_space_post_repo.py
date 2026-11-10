@@ -1055,3 +1055,36 @@ async def test_merge_reaction_stamps_never_touches_our_own_people(env):
     )
     _sid, got = await env.repo.get("sp-r3")
     assert got.reactions == {"👋": frozenset({"u-ours"}), "🎉": frozenset({"u-c"})}
+
+
+# ── v_92 helper resume: where a helper's replay starts ───────────────────
+
+
+async def test_newest_from_household_is_its_peoples_newest_post_or_comment(env):
+    """The newest ``created_at`` (UTC, naive) of the space's posts and
+    comments written by the people seated for one household — the persisted
+    point a helper resume to that household starts from."""
+    for uid, iid in (("uid-hb", "inst-b"), ("uid-hc", "inst-c")):
+        await env.db.enqueue(
+            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+            " VALUES(?,?,?,?)",
+            (env.space_id, iid, uid, "moderator"),
+        )
+    assert await env.repo.newest_from_household(env.space_id, "inst-b") is None
+    t0 = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
+    await env.repo.save(env.space_id, replace(_post("p-b", "uid-hb"), created_at=t0))
+    await env.repo.save(
+        env.space_id,
+        replace(_post("p-c", "uid-hc"), created_at=t0 + timedelta(days=2)),
+    )
+    assert await env.repo.newest_from_household(env.space_id, "inst-b") == (
+        "2026-11-01 12:00:00"
+    )
+    await env.repo.add_comment(
+        replace(_comment("c-b", "p-c", "uid-hb"), created_at=t0 + timedelta(hours=5)),
+        space_id=env.space_id,
+    )
+    assert await env.repo.newest_from_household(env.space_id, "inst-b") == (
+        "2026-11-01 17:00:00"
+    )
+    assert await env.repo.newest_from_household("sp-other", "inst-b") is None

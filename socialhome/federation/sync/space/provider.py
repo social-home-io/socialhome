@@ -614,8 +614,7 @@ class SpaceSyncService:
 
     def attach_file_gates(self, gates: CatchUpFileGates) -> None:
         """Wire the v_86 catch-up file gate: on a full stream a non-host
-        household ships only its own people's files (helper fills ride the
-        bounded resume, :mod:`.file_gate`)."""
+        household ships only its own people's files (:mod:`.file_gate`)."""
         self._file_gates = gates
 
     def attach_file_hasher(self, hasher: _FileHasher) -> None:
@@ -1193,12 +1192,9 @@ class SpaceSyncService:
         if self._item_files is not None:
             gate = (
                 # A full stream is the host's job (it ships every file): a
-                # helper ships only its own people's here — helper fills
-                # ride the bounded resume, so k helpers never re-send one
-                # file.
-                await self._file_gates.for_requester(
-                    space_id, target_instance_id, fills=False
-                )
+                # helper ships only its own people's here, so k helpers
+                # never re-send one file.
+                await self._file_gates.for_space(space_id)
                 if self._file_gates is not None
                 else None
             )
@@ -1219,7 +1215,7 @@ class SpaceSyncService:
             for _created_at, item_id, owner, names in items:
                 if budget <= 0:
                     break
-                urls = names if gate is None else await gate.ship(owner, names)
+                urls = names if gate is None else gate.ship(owner, names)
                 urls = urls[:budget]
                 budget -= len(urls)
                 await self._enqueue_media(space_id, target_instance_id, item_id, urls)

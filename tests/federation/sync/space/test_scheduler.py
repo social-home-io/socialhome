@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1787,11 +1787,14 @@ class _Seats:
 class _Resume:
     def __init__(self) -> None:
         self.requests: list[dict] = []
+        self.fail = False
 
     async def send_request(self, *, space_id, instance_id, since):
         self.requests.append(
             {"space_id": space_id, "instance_id": instance_id, "since": since}
         )
+        if self.fail:
+            raise RuntimeError("no route")
 
 
 def _helper_sched(
@@ -1804,8 +1807,11 @@ def _helper_sched(
     authority: bool = False,
     own_instance_id: str = "self",
     space_type: SpaceType = SpaceType.PRIVATE,
+    newest: dict[str, str] | None = None,
 ):
     from socialhome.federation.sync.space.host_contact import HostContact
+
+    held = newest if newest is not None else {}
 
     fed = _FakeFederation(confirmed={"host"})
     sched = SpaceSyncScheduler(
@@ -1827,8 +1833,14 @@ def _helper_sched(
     async def _authority(space_id: str) -> bool:
         return authority
 
+    async def _newest(space_id: str, instance_id: str) -> str | None:
+        return held.get(instance_id)
+
     sched.attach_helpers(
-        host_contact=contact, resume=resume, roster_authority=_authority
+        host_contact=contact,
+        resume=resume,
+        roster_authority=_authority,
+        newest_from=_newest,
     )
     return sched, contact, resume
 
@@ -1856,8 +1868,6 @@ async def test_a_silent_host_sends_one_helper_the_bounded_resume(
     """The tick asks the host first (its BEGIN); no answer within
     HOST_ANSWER_WAIT_S → ONE trusted helper (never us, never the host) gets
     SPACE_SYNC_RESUME since 30 days ago (nothing heard yet)."""
-    from datetime import timedelta
-
     sched, _contact, resume = _helper_sched(
         bus, queue, sync_manager, helpers=["self", "host", "mod-b", "admin-a"]
     )
@@ -1929,35 +1939,118 @@ async def test_the_resume_asks_since_the_host_was_last_heard(
     assert [r["since"] for r in resume.requests] == [last]
 
 
-async def test_the_next_round_asks_only_since_the_last_helper_ask(
+async def test_each_helper_is_asked_from_its_own_peoples_newest_row(
     bus, queue, sync_manager, quick_answer_wait
 ):
-    """While the host stays silent, round 2 does not replay round 1's rows
-    again: its ``since`` is the previous helper ask minus the fixed overlap
-    (the host's last answer and the 30-day floor are older)."""
-    from datetime import timedelta
+    """A helper replays only its own people's rows, so its resume starts at
+    the newest row this household holds from ITS people (minus the fixed
+    overlap) — read from the database, never from an ask to another
+    helper. Rotating A → B asks B from B's own point."""
+    sched, _contact, resume = _helper_sched(
+        bus,
+        queue,
+        sync_manager,
+        helpers=["mod-b", "admin-a"],
+        own_instance_id="member-a",  # starts on admin-a
+        newest={"admin-a": "2026-11-09 10:00:00", "mod-b": "2026-11-01 08:00:00"},
+    )
+    for _ in range(2):
+        await _round(sched)
+        await _wait_checks(sched)
+    overlap = timedelta(seconds=scheduler_mod.HELPER_OVERLAP_S)
+    assert [
+        (r["instance_id"], datetime.fromisoformat(r["since"])) for r in resume.requests
+    ] == [
+        ("admin-a", datetime(2026, 11, 9, 10, tzinfo=UTC) - overlap),
+        ("mod-b", datetime(2026, 11, 1, 8, tzinfo=UTC) - overlap),
+    ]
+    assert scheduler_mod.HELPER_OVERLAP_S == 5 * 60
 
-    sched, contact, resume = _helper_sched(
-        bus, queue, sync_manager, helpers=["admin-a"]
+
+async def test_a_restart_starts_from_the_rows_held_not_30_days_back(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """A fresh HostContact (a restart: nothing heard, nothing asked) still
+    starts at the helper's newest row held here."""
+    recent = (datetime.now(UTC) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"], newest={"admin-a": recent}
     )
     await _round(sched)
     await _wait_checks(sched)
-    first_ask = datetime.fromisoformat(contact.last_helper_ask_iso("sp-1"))
+    [request] = resume.requests
+    since = datetime.fromisoformat(request["since"])
+    assert since == datetime.fromisoformat(recent).replace(tzinfo=UTC) - timedelta(
+        seconds=scheduler_mod.HELPER_OVERLAP_S
+    )
+
+
+async def test_a_row_older_than_30_days_is_clamped_to_the_floor(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    sched, _contact, resume = _helper_sched(
+        bus,
+        queue,
+        sync_manager,
+        helpers=["admin-a"],
+        newest={"admin-a": "2020-01-01 00:00:00"},
+    )
     await _round(sched)
     await _wait_checks(sched)
-    first, second = (datetime.fromisoformat(r["since"]) for r in resume.requests)
-    assert first < datetime.now(UTC) - timedelta(days=29)
-    assert second == first_ask - timedelta(seconds=scheduler_mod.HELPER_OVERLAP_S)
-    assert scheduler_mod.HELPER_OVERLAP_S == 5 * 60
+    floor = datetime.now(UTC) - timedelta(days=30)
+    since = datetime.fromisoformat(resume.requests[0]["since"])
+    assert abs(since - floor) < timedelta(minutes=1)
+
+
+async def test_a_failed_helper_send_changes_nothing_for_the_next_round(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """Nothing is remembered about an ask: a send that failed leaves the
+    next round's start exactly where the rows put it."""
+    sched, _contact, resume = _helper_sched(
+        bus,
+        queue,
+        sync_manager,
+        helpers=["admin-a"],
+        newest={"admin-a": "2026-11-09 10:00:00"},
+    )
+    resume.fail = True
+    await _round(sched)
+    await _wait_checks(sched)
+    resume.fail = False
+    await _round(sched)
+    await _wait_checks(sched)
+    first, second = (r["since"] for r in resume.requests)
+    assert first == second
+
+
+async def test_an_unanswered_round_marks_the_host_silent(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """The scheduler's notion of a silent host is what SPACE_MEDIA_WANTED
+    reads before it asks a helper; the host's next answer clears it."""
+    sched, contact, _resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    assert not contact.is_silent("sp-1")
+    await _round(sched)
+    await _wait_checks(sched)
+    assert contact.is_silent("sp-1")
+    contact.heard("sp-1")
+    assert not contact.is_silent("sp-1")
 
 
 async def test_a_host_heard_after_the_helper_ask_moves_since_forward(
     bus, queue, sync_manager, quick_answer_wait
 ):
-    """``since`` = the newest of: the host's last answer, the last helper
-    ask minus the overlap, 30 days ago."""
+    """``since`` = the newest of: the host's last answer, the helper's
+    people's newest row here minus the overlap, 30 days ago."""
     sched, contact, resume = _helper_sched(
-        bus, queue, sync_manager, helpers=["admin-a"]
+        bus,
+        queue,
+        sync_manager,
+        helpers=["admin-a"],
+        newest={"admin-a": "2026-01-01 00:00:00"},
     )
     await _round(sched)
     await _wait_checks(sched)
@@ -2163,6 +2256,41 @@ async def test_a_hosts_capacity_deferral_counts_as_its_answer(bus, queue, sync_m
         )
     )
     assert contact.heard_since("sp-1", t0)
+    await sched.stop()
+
+
+@pytest.mark.parametrize(
+    ("reason", "answer", "retried"),
+    [
+        ("too_many_sessions", True, True),
+        ("node_capacity", True, True),
+        ("rate_limited", True, False),
+        ("interrupted", False, True),
+    ],
+)
+async def test_any_refusal_from_the_host_is_its_answer(
+    bus, queue, sync_manager, reason, answer, retried
+):
+    """Every signed refusal of our BEGIN by the host (no free slot, the
+    hourly budget spent) shows it is online — no helper. A stream cut
+    noticed on our side (``interrupted``) is not an answer. Only a
+    capacity refusal (or a cut) is asked again shortly: a rate-limited
+    BEGIN would only be refused again, so it waits for the next tick."""
+    sched, contact, _resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    t0 = contact.now()
+    await sched._on_sync_deferred(
+        SpaceSyncDeferred(
+            space_id="sp-1",
+            provider_instance_id="host",
+            sync_mode="incremental",
+            sync_id="s-1",
+            reason=reason,
+        )
+    )
+    assert contact.heard_since("sp-1", t0) is answer
+    assert bool(sched._deferred_tasks) is retried
     await sched.stop()
 
 

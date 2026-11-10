@@ -292,9 +292,11 @@ sending household was sent it for. Both blob types share
 
   The resume / resync replay enqueues the replayed rows' files for the
   one household that asked, with these bounds:
-  - at most `RESUME_MEDIA_MAX_FILES` (50) files and
-    `RESUME_MEDIA_MAX_BYTES` (32 MiB) per request; a file past the budget,
-    or one that isn't here, is skipped;
+  - at most 50 files and 32 MiB per (requester, space) per 30 min, ONE
+    budget shared with `SPACE_MEDIA_WANTED` (`file_gate.SpaceFileBudget`);
+    a file past the budget, or one that isn't here, is skipped;
+  - a household that is not the roster authority (a v_92 helper) replays
+    only its own people's rows and ships only their files;
   - one replay per (household, space) per `RESUME_COOLDOWN_S` (30 min);
     a sooner request is dropped. The window sits in the replay itself
     (`replay_space_to` / `replay_calendar_to`), so `SPACE_SYNC_RESUME`
@@ -583,25 +585,30 @@ Unchanged:
   (The GFS relay does not carry these blobs yet: its envelope cap is below
   a media chunk — relay-sync PR 3.)
 
-**Sending side.** A helper fills when one household explicitly asks it:
-for one file on view with `SPACE_MEDIA_WANTED` (v_92, [below](#older-files-on-view--space_media_wanted-v_92)),
-or for a whole space with a replay. The catch-up file gate
-(`federation/sync/space/file_gate.py`) decides which files of a row a
-household ships on a §25.6 catch-up, on a replay (`SPACE_SYNC_RESUME`
-or a §319.6 `space:` resync, `resume.replay_space_to`) and on a
-`SPACE_MEDIA_WANTED`:
+**Sending side.** Since v_92 a helper fills another person's file only
+when one household asks it for that file on view with
+`SPACE_MEDIA_WANTED` ([below](#older-files-on-view--space_media_wanted-v_92))
+— and a member asks a helper only while the host is silent or
+unreachable. The file gate (`federation/sync/space/file_gate.py`) decides
+which files of a row a household ships on a §25.6 catch-up and on a
+`SPACE_MEDIA_WANTED`; a replay (`SPACE_SYNC_RESUME` or a §319.6 `space:`
+resync, `resume.replay_space_to`) ships the files of the rows it replays:
 
-| Provider | Full §25.6 catch-up (v_92: items of the last 30 days, ≤ 200 files, every transport) | Replay (resume / resync, v_92: ≤ 30 days back) and `SPACE_MEDIA_WANTED` |
-|---|---|---|
-| Host / delegated admin | every file of those rows | every file (≤ 50 files / 32 MiB per replay) |
-| Admin / moderator household | its own people's files only | its own people's files + the hashed (`sc-`) files of other people's rows to a v_86 requester, at most 50 files / 32 MiB (`FILL_MAX_FILES` / `FILL_MAX_BYTES`) — the fallback a member asks while the host is silent ([sync.md](./sync.md#host-offline-trusted-helpers-v_92)); rows: its own people's only |
-| Any other household | its own people's files only | its own people's files only |
+| Provider | Full §25.6 catch-up (v_92: items of the last 30 days, ≤ 200 files, every transport) | Replay (resume / resync, v_92: ≤ 30 days back) | `SPACE_MEDIA_WANTED` |
+|---|---|---|---|
+| Host / delegated admin | every file of those rows | every file of the replayed rows | every asked-for file |
+| Admin / moderator household | its own people's files only | its own people's rows and their files only (the fallback while the host is silent, [sync.md](./sync.md#host-offline-trusted-helpers-v_92)) | other people's files too — the bytes proven to hash to the asked-for content name |
+| Any other household | its own people's files only | its own people's rows and their files | its own people's files only |
 
-Why not on the full catch-up: a full stream is the host's job and the
-host already ships every file. A newcomer that pairs with k helper
-households would otherwise receive each picture up to k + 1 times — the
-copies are dropped write-once, but the bandwidth is spent. A replay is
-targeted: one household asked one provider.
+Replays and `SPACE_MEDIA_WANTED` share ONE budget per (requester, space):
+50 files / 32 MiB per 30 minutes (`SpaceFileBudget`).
+
+Why not on the full catch-up or a helper's replay: a full stream is the
+host's job and the host already ships every file. A newcomer that pairs
+with k helper households would otherwise receive each picture up to k + 1
+times — the copies are dropped write-once, but the bandwidth is spent. A
+`SPACE_MEDIA_WANTED` is targeted: one household asked one provider for a
+file it is looking at.
 
 Rows are unchanged (`_OwnPeopleOnly`): a helper never streams other
 people's rows. A requester below v_86 gets no helper fills (a v_85
@@ -656,28 +663,31 @@ row's author household only, bytes checked against the row's `h`.
 - Only live items of a space in which **this household holds a member
   seat** (a writer role). A follower household keeps the v_83 GFS
   on-demand path.
-- Names of one space are collected for 2 s (`COALESCE_S`, fixed) or until
-  50, then ONE request goes. A batch that reaches 50 goes at once and the
-  next name opens a new batch (its own one request), so a gallery grid with
-  more than 50 missing pictures asks for all of them.
-- **Provider order:** the space's host first; after 60 s
-  (`PROVIDER_WAIT_S`, fixed) the names still not stored here go to the
-  next provider — a trusted household (a live `admin` / `moderator` seat
-  in the roster mirror; the owner is the host), sorted by instance id and
-  started at this household's stable offset, never ourselves — the one
-  picker the helper resume uses too (`federation/sync/space/trusted_helpers.py`).
-  At most 3 providers per batch (`MAX_PROVIDERS`), only those at v_92
-  (`space_member_supports`: a paired row's version, else the mesh claim). A failed send moves on to the next provider at once.
+- Views add their names to ONE pending set (deduplicated, ≤ 500,
+  `MAX_PENDING_NAMES`) drained by ONE task: after 2 s (`COALESCE_S`,
+  fixed) it looks the names up, groups them per space and sends one
+  request per 50 names of a space, so a gallery grid with more than 50
+  missing pictures asks for all of them.
+- **Provider:** the space's host. A trusted household (a live `admin` /
+  `moderator` seat in the roster mirror; the owner is the host), sorted by
+  instance id and started at this household's stable offset, never
+  ourselves — the one picker the helper resume uses too
+  (`federation/sync/space/trusted_helpers.py`) — gets the same request
+  ONLY when the send to the host failed or the host is **silent**
+  (`HostContact.is_silent`: it left the scheduler's last round unanswered
+  for 120 s and has not been heard since). Never after a wait while the
+  host answers, so a helper learns which items a member opens only while
+  the host is away. At most 2 helpers are tried (`MAX_HELPERS`); the first
+  that takes the request ends it. Only providers at v_92
+  (`space_member_supports`: a paired row's version, else the mesh claim); a
+  host below v_92 that answers is left to its catch-up.
 - Sent with `send_with_mesh_fallback` — paired, mesh `SPACE_ROUTED`, a
   mailbox seat or the host hop, whichever reaches the provider (the type is
   in `SPACE_SESSION_ALLOWED_EVENT_TYPES`).
-- One name is asked again only after 10 min (`NAME_COOLDOWN_S`). Views
-  queue their names (deduplicated, ≤ 500, `MAX_PENDING_NAMES`) for 8 lookup
-  workers (`MAX_LOOKUP_WORKERS`), so a grid opening many missing pictures at
-  once asks for all of them; batches in flight are bounded. A name that was
-  never queued (past the queue bound, no live row yet, a follower seat, the
-  batch cap, a failed lookup) is not held on that cooldown: the next view
-  asks again.
+- One name is asked again only after 10 min (`NAME_COOLDOWN_S`; the map
+  is bounded like the pending set). A name that was never queued (past the
+  pending bound, no live row yet, a follower seat, a failed lookup) is not
+  held on that cooldown: the next view asks again.
 
 **Provider** (`SpaceMediaWantedProvider`, registered for the event).
 
@@ -694,20 +704,18 @@ row's author household only, bytes checked against the row's `h`.
    matches when `sc(S, sha256(file), basename) == name` (hashed off-loop
    and cached by `MediaFileHasher`). No match, a deleted item or a file not
    here: skipped.
-3. The **file gate** (`CatchUpFileGates.for_requester`) with the item's
-   owner: the host ships every file, an admin / moderator household other
-   people's hashed files to a v_86 requester, any household its own
-   people's files. A file step 2 matched counts as hashed whatever name it
-   is stored under here (a member that got the item first as the public
+3. The **file gate** (`CatchUpFileGates.for_space(space, fills=True)`)
+   with the item's owner: the host ships every file, an admin / moderator
+   household other people's files too, any household its own people's
+   files. A file step 2 matched is proven hashed whatever name it is
+   stored under here (a member that got the item first as the public
    GFS copy, which carries no hash map, keeps it under its `sg-` name);
    it is sent under the asked-for `sc-` name, read from the local file —
    a receiver refuses a reserved `sg-` filename.
-4. A **budget** per (requester, space): at most 50 files / 32 MiB per
-   30 min (a request arriving with the window spent is dropped whole,
-   before any query or hash) — the resume's `RESUME_MEDIA_MAX_FILES` / `_BYTES` /
-   `RESUME_COOLDOWN_S` values, but a budget of its own: a provider that
-   also serves that requester a resume may ship up to 32 MiB for each in
-   the same 30 min. Over it: skipped (logged at INFO with counts).
+4. ONE **budget** per (requester, space), shared with the resume's files
+   (`SpaceFileBudget`, wired once): at most 50 files / 32 MiB per 30 min
+   (a request arriving with the window spent is dropped whole, before any
+   query or hash). Over it: skipped (logged at INFO with counts).
 5. Queued with `enqueue_for_blob(..., push=True)`: the media outbox never
    drops such a row for "reads from its GFS" — the requester already
    missed it. The mark is in memory and LRU-bounded (`MAX_PUSHED_MARKS`,
@@ -725,13 +733,13 @@ sequenceDiagram
     V->>H: SPACE_MEDIA_WANTED {space_id, files: [{item, name}]}
     H->>H: member? live item shows name? file gate + budget
     H-->>V: SPACE_MEDIA_BLOB (h, push=True) for each file it holds
-    Note over V: wait 60 s, then only the names still missing
-    V->>A: SPACE_MEDIA_WANTED {space_id, files: [the rest]}
-    A-->>V: SPACE_MEDIA_BLOB (hashed files of others' rows, v_86 gate)
+    Note over V: only if the send to H failed or H is silent (no answer to the last round)
+    V->>A: SPACE_MEDIA_WANTED {space_id, files: [the same names]}
+    A-->>V: SPACE_MEDIA_BLOB (proven-hashed files, shared budget)
 ```
 
-**Fallback.** A provider below v_92 is skipped; when none is left the
-file waits for the §25.6 catch-up. A requester below v_92 never asks (a
+**Fallback.** A provider below v_92 is skipped; a host below v_92 that
+answers, or no helper left, means the file waits for the §25.6 catch-up. A requester below v_92 never asks (a
 v_83–v_91 relay reader still asks its GFS). A member of a space whose
 **host** is below v_92 keeps the v_83 GFS on-demand ask during the rollout
 (`SpaceMediaGfsFetcher`, `space_member_supports(host, v_92)`); a member
@@ -740,19 +748,18 @@ not an `sc-` content name — an `sg-` name taken from the public GFS copy
 (no hash map) or before v_92. `SPACE_MEDIA_WANTED` carries content names
 only, so that ask is how such a file heals past the GFS cache.
 
-**Known limit (PR 5).** A helper's resume (`SPACE_SYNC_RESUME`, v_86
-fills) still skips `sg-` names: a member's `sg-` file heals only through
-its own GFS ask (above) — while no GFS holder answers, it waits for the
-host's §25.6 catch-up.
+**Known limit (PR 5).** A member's `sg-` file heals only through its own
+GFS ask (above) — while no GFS holder answers, it waits for the host's
+§25.6 catch-up.
 
 **Cost (recipients × files × bytes per trigger).** One old file on view:
-1 request (< 1 KiB) to 1 provider and the file's bytes once (+ at most
-`MAX_PROVIDERS − 1` = 2 more requests when the host is offline or does
-not have it). A batch of 50 files: 1 request, ≤ 32 MiB once. Per
-(requester, space) ≤ 32 MiB per 30 min per provider (separate from the
-same provider's resume budget), so a worst case of 3 providers is ≤ 96 MiB
-per 30 min for one household scrolling a whole
-space's old pictures — and only bytes it is missing. Nothing fans out: the
+1 request (< 1 KiB) to the host and the file's bytes once (+ at most
+`MAX_HELPERS` = 2 more requests while the host is silent or unreachable).
+A batch of 50 files: 1 request, ≤ 32 MiB once. Per (requester, space)
+≤ 32 MiB per 30 min per provider, the same provider's resume files
+included — a host that answers is the only provider, so one household
+scrolling a whole space's old pictures pulls ≤ 32 MiB per 30 min, and only
+bytes it is missing. Nothing fans out: the
 request goes to one provider at a time and the answer to the one
 requester; a global space with 10 000 followers adds nothing (followers
 never send it).

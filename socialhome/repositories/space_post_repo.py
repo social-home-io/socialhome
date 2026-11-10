@@ -211,6 +211,14 @@ class AbstractSpacePostRepo(Protocol):
         *,
         limit: int = 500,
     ) -> list[tuple[str, Comment]]: ...
+    async def newest_from_household(
+        self, space_id: str, instance_id: str
+    ) -> str | None:
+        """The newest ``created_at`` (``YYYY-MM-DD HH:MM:SS``, UTC) of the
+        space's posts and comments held here written by the people seated
+        for *instance_id*; ``None``: none (v_92 helper resume)."""
+        ...
+
     async def list_comments_sync_page(
         self,
         space_id: str,
@@ -991,6 +999,25 @@ class SqliteSpacePostRepo:
                 continue
             out.append((d["post_id"], comment))
         return out
+
+    async def newest_from_household(
+        self, space_id: str, instance_id: str
+    ) -> str | None:
+        people = (
+            "SELECT user_id FROM space_remote_members"
+            " WHERE space_id=? AND instance_id=?"
+        )
+        row = await self._db.fetchone(
+            "SELECT MAX(t) AS t FROM ("
+            " SELECT MAX(datetime(created_at)) AS t FROM space_posts"
+            f" WHERE space_id=? AND author IN ({people})"
+            " UNION ALL"
+            " SELECT MAX(datetime(c.created_at)) FROM space_post_comments c"
+            " JOIN space_posts p ON p.id = c.post_id"
+            f" WHERE p.space_id=? AND c.author IN ({people}))",
+            (space_id, space_id, instance_id, space_id, space_id, instance_id),
+        )
+        return str(row["t"]) if row is not None and row["t"] else None
 
     async def list_comments_sync_page(
         self,

@@ -1294,19 +1294,25 @@ work when the host does not answer:
 - **Catch-up from a helper.** A member household whose host leaves a
   round's sync request unanswered (120 s) picks ONE trusted helper
   automatically — an `admin` / `moderator` household at v_92, from the
-  member's roster mirror — and asks it to replay the space since the host
-  was last heard (at most 30 days). The helper sends its own people's rows
-  and the hashed files of the rest.
-- **Files on view.** `SPACE_MEDIA_WANTED` tells the host — and, when the
-  host is offline or lacks the file, an admin / moderator household —
-  which items a member household opens (item ids and content names, sealed
-  like every space envelope). That is new viewing metadata toward helpers:
-  before, only the host learned what a member caught up on.
+  member's roster mirror — and asks it to replay the space since that
+  helper's people's newest row it holds (at most 30 days). The helper sends
+  its own people's rows and their files only, and only to a household
+  holding a member seat.
+- **Files on view.** `SPACE_MEDIA_WANTED` tells the host which items a
+  member household opens (item ids and content names, sealed like every
+  space envelope). An admin / moderator household learns it **only while
+  the host is offline or unreachable** — the send to the host failed, or
+  the host left the member's last sync round unanswered and has not been
+  heard since — never while the host answers. That is new viewing metadata
+  toward helpers, limited to the host's absence: before, only the host
+  learned what a member caught up on.
 
 Rights narrow, they do not grow: a helper that is not the roster authority
-replays only its own people's rows (receivers take other people's rows only
-from the household acting as host), files still pass the v_86 hash checks,
-and only member households are answered. See
+replays only its own people's rows and their files (receivers take other
+people's rows only from the household acting as host), another person's
+file leaves it only for one viewed file whose bytes it proved hash to the
+asked-for content name (the v_86 hash checks still apply on arrival), and
+only member households are answered. See
 [sync](protocol/sync.md#host-offline-trusted-helpers-v_92) and
 [media](protocol/media.md#older-files-on-view--space_media_wanted-v_92).
 

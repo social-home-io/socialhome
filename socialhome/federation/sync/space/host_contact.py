@@ -5,21 +5,25 @@ host here (the owner, or the delegated admin household that invited us —
 ``receiver._acts_as_host``) answers our ``SPACE_SYNC_BEGIN``: any signed
 sync chunk of that space we verify — the ``__complete__`` sentinel of an
 up-to-date empty incremental session included, which is all a quiet space
-sends back — and the scheduler marks it on a host's "no free slot" deferral.
+sends back — and the scheduler marks it on any signed refusal of our BEGIN by
+the host (no free slot, the hourly budget spent).
 The scheduler reads it a fixed while after a BEGIN to the host: no answer
 since then means the host is offline (or has no path to us), and ONE
 trusted helper is asked for the bounded ``SPACE_SYNC_RESUME`` instead
 (``scheduler.SpaceSyncScheduler``).
 
-It also remembers when the scheduler last sent a helper resume for a space
-(:meth:`HostContact.helper_asked`): while the host stays silent, the next
-round asks only since that ask (minus a fixed overlap) instead of replaying
-the same rows and files again.
+It also holds whether the host is **silent** now: the scheduler marks a
+space when a round's BEGIN to its host went unanswered for the full wait
+(:meth:`HostContact.went_silent`); the host's next answer clears it. A
+member asks a trusted helper for a file it misses
+(``SPACE_MEDIA_WANTED``) only while the host is silent or cannot be
+reached (``services.space_media_wanted``) — never while it answers.
 
 In memory only: a restart forgets every answer, so a household that just
 booted falls back only once a BEGIN it sends goes unanswered for the full
-window (and its first helper resume reaches back no further than
-``RESUME_MAX_AGE_S``). Bounded: at most :data:`MAX_SPACES_TRACKED` spaces per map, oldest
+window, and is not silent before that. Where a helper resume starts is not
+kept here: it comes from the rows this household holds
+(``scheduler._resume_since``), so it survives a restart. Bounded: at most :data:`MAX_SPACES_TRACKED` spaces per map, oldest
 dropped.
 """
 
@@ -42,7 +46,7 @@ class HostContact:
     """Per space: the monotonic and the UTC wall-clock time its host was
     last heard."""
 
-    __slots__ = ("_clock", "_heard", "_helper", "_wall")
+    __slots__ = ("_clock", "_heard", "_silent", "_wall")
 
     def __init__(
         self,
@@ -53,8 +57,8 @@ class HostContact:
         self._clock = clock
         self._wall = wall
         self._heard: OrderedDict[str, tuple[float, str]] = OrderedDict()
-        #: space → when (UTC ISO 8601) a helper resume was last sent.
-        self._helper: OrderedDict[str, str] = OrderedDict()
+        #: spaces whose host left a round unanswered (oldest first).
+        self._silent: OrderedDict[str, None] = OrderedDict()
 
     def now(self) -> float:
         """The clock :meth:`heard_since` compares against."""
@@ -68,6 +72,7 @@ class HostContact:
         self._heard.move_to_end(space_id)
         while len(self._heard) > MAX_SPACES_TRACKED:
             self._heard.popitem(last=False)
+        self._silent.pop(space_id, None)
 
     def heard_since(self, space_id: str, t: float) -> bool:
         """Whether the host answered at or after *t* (:meth:`now`)."""
@@ -79,16 +84,16 @@ class HostContact:
         held = self._heard.get(space_id)
         return held[1] if held is not None else None
 
-    def helper_asked(self, space_id: str) -> None:
-        """The scheduler just sent *space_id*'s helper resume."""
+    def went_silent(self, space_id: str) -> None:
+        """The host left this round's BEGIN for *space_id* unanswered."""
         if not space_id:
             return
-        self._helper[space_id] = self._wall().isoformat()
-        self._helper.move_to_end(space_id)
-        while len(self._helper) > MAX_SPACES_TRACKED:
-            self._helper.popitem(last=False)
+        self._silent[space_id] = None
+        self._silent.move_to_end(space_id)
+        while len(self._silent) > MAX_SPACES_TRACKED:
+            self._silent.popitem(last=False)
 
-    def last_helper_ask_iso(self, space_id: str) -> str | None:
-        """When a helper resume was last sent for *space_id* (UTC ISO
-        8601); ``None``: none since this household started."""
-        return self._helper.get(space_id)
+    def is_silent(self, space_id: str) -> bool:
+        """Whether *space_id*'s host left its last round unanswered and has
+        not been heard since."""
+        return space_id in self._silent

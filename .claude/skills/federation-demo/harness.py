@@ -7938,15 +7938,17 @@ def cmd_gfs_space_healing() -> None:
        it) and e's own copy goes. e views it (``GET /api/media/<sc-name>``):
        a miss → ``SPACE_MEDIA_WANTED`` to the host a → a ships it (push) →
        e holds it byte-identical.
-    3. **Old picture, host OFFLINE.** a posts a second picture; d and e hold
-       it. Same expiry on the GFS and on e, then a is killed. e's view asks
-       a (unanswered) and, after ``PROVIDER_WAIT_S``, the helper d — d's log
-       shows it served e — and e holds the bytes.
-    4. **Missed event, host offline.** e is killed too; d creates a calendar
-       event; the frames queued for e's mailbox at the GFS are dropped (what
-       a full mailbox or the TTL would do). e boots: its BEGIN to a goes
-       unanswered for ``HOST_ANSWER_WAIT_S`` and e asks ONE helper, d, for a
+    3. **Missed event, host OFFLINE.** a posts a second picture; d and e
+       hold it; the same expiry on the GFS and on e. a is killed, then e;
+       d creates a calendar event; the frames queued for e's mailbox at the
+       GFS are dropped (what a full mailbox or the TTL would do). e boots:
+       its BEGIN to a goes unanswered for ``HOST_ANSWER_WAIT_S`` — the host
+       is now silent for e — and e asks ONE helper, d, for a
        ``SPACE_SYNC_RESUME``; d replays its own rows → e shows the event.
+    4. **Old picture, host offline.** e views the second picture: the
+       request goes to a's mailbox and — a being silent — to the helper d;
+       d's log shows it served e, and e holds the bytes. (While a answers,
+       a helper is never asked.)
     5. The GFS log over the whole step: mailbox deliveries, and no line
        names an instance id, a mailbox id or the space.
 
@@ -8065,8 +8067,9 @@ def cmd_gfs_space_healing() -> None:
         (_instance_dir("e") / "media" / name1).unlink()
         a_off, e_off = _log_size("a"), _log_size("e")
         _, first = _view_until(post1, pic1, 90.0)
-        asked = _log_lines_matching(
-            "e", f"space media wanted: asked {a['instance_id']}", offset=e_off
+        asked = _log_lines_matching("e", f"to {a['instance_id']}: sent", offset=e_off)
+        helper_asked = _log_lines_matching(
+            "e", f"to {d['instance_id']}:", offset=e_off
         )
         served = _log_lines_matching(
             "a", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=a_off
@@ -8076,13 +8079,19 @@ def cmd_gfs_space_healing() -> None:
                 f"{step}: no SPACE_MEDIA_WANTED round-trip with the host "
                 f"(e: {asked!r}, a: {served!r})"
             )
+        if helper_asked:
+            raise SystemExit(
+                f"{step}: e asked the helper d while the host answered: "
+                f"{helper_asked!r}"
+            )
         print(
             f"  old picture {name1[:15]}… (GFS copies dropped: {dropped}, e's copy "
-            f"gone): e's view → HTTP {first}, SPACE_MEDIA_WANTED to the host a, "
-            "a served it, e holds it byte-identical ✓"
+            f"gone): e's view → HTTP {first}, SPACE_MEDIA_WANTED to the host a "
+            "only, a served it, e holds it byte-identical ✓"
         )
 
-        # 3. Old picture, host OFFLINE → the helper d serves it.
+        # 3. A second picture both hold, gone from the GFS and from e; then
+        # the host goes offline.
         post2, pic2 = _post_picture("second")
         _await_space_post(state, "e", space_id, post2)
         name2 = _poll(
@@ -8100,33 +8109,8 @@ def cmd_gfs_space_healing() -> None:
         (_instance_dir("e") / "media" / name2).unlink()
         _kill_household("a", a)
         a_down = True
-        d_off, e_off = _log_size("d"), _log_size("e")
-        t0 = time.time()
-        _, first = _view_until(post2, pic2, 180.0)
-        took = time.time() - t0
-        to_d = _log_lines_matching(
-            "e", f"space media wanted: asked {d['instance_id']}", offset=e_off
-        )
-        served = [
-            x
-            for x in _log_lines_matching(
-                "d", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=d_off
-            )
-            if "1 file(s) queued" in x
-        ]
-        if not to_d or not served:
-            raise SystemExit(
-                f"{step}: the helper d did not serve e's request with the host "
-                f"offline (e asked d: {to_d!r}; d served: {served!r})"
-            )
-        print(
-            f"  host a offline; old picture {name2[:15]}… (GFS copies dropped: "
-            f"{dropped}; d holds it as {d_name2[:15]}…): e's view → HTTP {first}, "
-            f"asked a, then the helper d, which served it — byte-identical after "
-            f"{took:.0f} s ✓"
-        )
 
-        # 4. A missed event while the host is offline → a helper resume.
+        # A missed event while the host is offline → a helper resume.
         _kill_household("e", e)
         e_down = True
         top = _gfs_rows("SELECT COALESCE(MAX(id), 0) FROM gfs_envelope_queue")[0][0]
@@ -8202,6 +8186,33 @@ def cmd_gfs_space_healing() -> None:
             f"  e back (host still offline): its BEGIN to a went unanswered, it "
             f"asked the helper d for a resume and shows d's missed event after "
             f"{time.time() - t0:.0f} s ✓"
+        )
+
+        # 4. Old picture, host silent → the helper d serves it.
+        d_off, e_off = _log_size("d"), _log_size("e")
+        t0 = time.time()
+        _, first = _view_until(post2, pic2, 180.0)
+        took = time.time() - t0
+        to_d = _log_lines_matching(
+            "e", f"to {d['instance_id']}: sent", offset=e_off
+        )
+        served = [
+            x
+            for x in _log_lines_matching(
+                "d", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=d_off
+            )
+            if "1 file(s) queued" in x
+        ]
+        if not to_d or not served:
+            raise SystemExit(
+                f"{step}: the helper d did not serve e's request with the host "
+                f"silent (e asked d: {to_d!r}; d served: {served!r})"
+            )
+        print(
+            f"  host a silent; old picture {name2[:15]}… (GFS copies dropped: "
+            f"{dropped}; d holds it as {d_name2[:15]}…): e's view → HTTP {first}, "
+            f"asked a, and — a being silent — the helper d, which served it; "
+            f"byte-identical after {took:.0f} s ✓"
         )
 
         # 5. What the GFS saw over the whole step.

@@ -25,7 +25,9 @@ from socialhome.domain.task import (
     TaskTombstone,
 )
 from socialhome.domain.tombstone import SpaceRowTombstone
+from socialhome.federation.sync.space import file_gate as file_gate_mod
 from socialhome.federation.sync.space import resume as resume_mod
+from socialhome.federation.sync.space.file_gate import SpaceFileBudget
 from socialhome.federation.sync.space.resume import (
     MAX_PER_RESOURCE,
     SpaceSyncResumeProvider,
@@ -1249,7 +1251,7 @@ def _image_post(i: int, at: datetime, *names: str) -> Post:
     )
 
 
-def _bounded_provider(tmp_path, posts, outbox, clock=lambda: 0.0):
+def _bounded_provider(tmp_path, posts, outbox, clock=lambda: 0.0, budget=None):
     return SpaceSyncResumeProvider(
         federation_service=_FakeFederation(),
         space_repo=_FakeSpaceRepo(["peer-a"]),
@@ -1257,15 +1259,16 @@ def _bounded_provider(tmp_path, posts, outbox, clock=lambda: 0.0):
         media_sync=outbox,
         media_dir=tmp_path,
         clock=clock,
+        budget=budget,
     )
 
 
 async def test_a_resumes_files_are_bounded_in_bytes_and_count(tmp_path, monkeypatch):
-    """The requester picks ``since``: one request pushes at most
-    RESUME_MEDIA_MAX_FILES files and RESUME_MEDIA_MAX_BYTES bytes of what
-    is here — a file past the budget, or not here, is skipped."""
-    monkeypatch.setattr(resume_mod, "RESUME_MEDIA_MAX_BYTES", 100)
-    monkeypatch.setattr(resume_mod, "RESUME_MEDIA_MAX_FILES", 3)
+    """The requester picks ``since``: one request pushes at most the shared
+    (requester, space) budget's files and bytes of what is here — a file
+    past the budget, or not here, is skipped."""
+    monkeypatch.setattr(file_gate_mod, "BUDGET_MAX_BYTES", 100)
+    monkeypatch.setattr(file_gate_mod, "BUDGET_MAX_FILES", 3)
     for name, size in (("a", 40), ("big", 500), ("b", 40), ("c", 10), ("d", 1)):
         (tmp_path / f"{name}.webp").write_bytes(b"x" * size)
     base = datetime(2026, 4, 1, tzinfo=UTC)
@@ -1283,6 +1286,31 @@ async def test_a_resumes_files_are_bounded_in_bytes_and_count(tmp_path, monkeypa
     # 40 + 40 + 10 bytes, three files: "big" is over the bytes, "gone" is
     # missing, "d" is over the count.
     assert shipped == ["api/media/a.webp", "api/media/b.webp", "api/media/c.webp"]
+
+
+async def test_a_resume_and_space_media_wanted_share_one_budget(tmp_path):
+    """ONE budget per (requester, space): files the household was already
+    sent on request (``SPACE_MEDIA_WANTED``) this window count against a
+    resume's files too."""
+    (tmp_path / "a.webp").write_bytes(b"x")
+    budget = SpaceFileBudget(clock=lambda: 0.0)
+    for _ in range(file_gate_mod.BUDGET_MAX_FILES):
+        assert budget.take("peer-a", "sp-1", 1)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    outbox = _FakeMediaOutbox()
+    provider = _bounded_provider(
+        tmp_path,
+        [_image_post(0, base + timedelta(minutes=1), "a.webp")],
+        outbox,
+        budget=budget,
+    )
+    assert (
+        await provider.handle_request(
+            _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+        )
+        == 1
+    )
+    assert outbox.rows == []
 
 
 async def test_a_resume_is_served_once_per_household_and_space_per_cooldown(
@@ -1359,53 +1387,6 @@ async def test_concurrent_resumes_are_served_once(tmp_path):
     sent = await asyncio.gather(*(provider.handle_request(request) for _ in range(5)))
     assert sorted(sent) == [0, 0, 0, 0, 1]
     assert len(outbox.rows) == 1
-
-
-class _Gate:
-    """A moderator household's gate: our people's files, others' sc- only."""
-
-    async def for_requester(self, space_id, requester):
-        assert (space_id, requester) == ("sp-1", "peer-a")
-        return self
-
-    async def ship(self, owner, urls):
-        if owner == "alice":
-            return list(urls)
-        return [u for u in urls if u.rsplit("/", 1)[-1].startswith("sc-")]
-
-
-async def test_a_trusted_non_host_resume_ships_others_hashed_files_only():
-    """v_86: a non-host resume ships every file of its own people's rows
-    and, through the file gate, only the hashed files of other people's
-    rows — the receiver refuses the rest from it."""
-    base = datetime(2026, 4, 1, tzinfo=UTC)
-    at = base + timedelta(minutes=1)
-    ours = replace(
-        _image_post(0, at, "sd-a.webp", "sc-a.webp"),
-    )
-    theirs = replace(
-        _image_post(1, at, "sd-b.webp", "sc-b.webp"),
-        author="bob",
-    )
-    event = replace(
-        _cal_event(0, at), cover_url="api/media/sd-c.webp", created_by="bob"
-    )
-    outbox = _FakeMediaOutbox()
-    provider = SpaceSyncResumeProvider(
-        federation_service=_FakeFederation(),
-        space_repo=_FakeSpaceRepo(["peer-a"]),
-        space_post_repo=_FakePostRepo(posts=[ours, theirs]),
-        space_calendar_repo=_FakeListSinceRepo([event]),
-        media_sync=outbox,
-    )
-    provider.attach_file_gates(_Gate())
-    await provider.handle_request(
-        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
-    )
-    assert outbox.rows == [
-        ("sp-1", "p-0", ("peer-a",), ("api/media/sd-a.webp", "api/media/sc-a.webp")),
-        ("sp-1", "p-1", ("peer-a",), ("api/media/sc-b.webp",)),
-    ]
 
 
 # ── v_92: the v_87 refill bridge is gone ─────────────────────────────────
@@ -1521,12 +1502,13 @@ def _helper_provider(*, authority: bool):
     outbox = _FakeMediaOutbox()
     provider = SpaceSyncResumeProvider(
         federation_service=fed,
-        space_repo=_FakeSpaceRepo(["peer-a"]),
+        # "peer-a" holds a member seat; "follower" only follows (its
+        # household is in ``space_instances`` all the same).
+        space_repo=_FakeSpaceRepo(["peer-a", "follower"]),
         space_post_repo=_FakePostRepo(posts=[ours, theirs], comments=comments),
         space_task_repo=tasks,
         media_sync=outbox,
     )
-    provider.attach_file_gates(_Gate())
 
     async def _authority(space_id: str) -> bool:
         return authority
@@ -1534,15 +1516,17 @@ def _helper_provider(*, authority: bool):
     async def _own(space_id: str) -> set[str]:
         return {"alice"}
 
-    provider.attach_row_scope(_authority, own_members=_own)
+    async def _writer_seat(space_id: str, instance_id: str) -> bool:
+        return instance_id == "peer-a"
+
+    provider.attach_row_scope(_authority, own_members=_own, member_gate=_writer_seat)
     return provider, fed, outbox, base
 
 
 async def test_a_non_authority_resume_sends_only_its_own_peoples_rows():
     """A helper (not the roster authority) replays only its own people's
-    rows — the receiver refuses the rest from it — but still ships the
-    hashed files of every replayed row, so a member that holds a row from
-    the host gets its picture (v_86 fill, the gate's bound)."""
+    rows — the receiver refuses the rest from it — and ships only those
+    rows' files: other people's files come on view (SPACE_MEDIA_WANTED)."""
     provider, fed, outbox, base = _helper_provider(authority=False)
     await provider.handle_request(
         _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
@@ -1559,9 +1543,22 @@ async def test_a_non_authority_resume_sends_only_its_own_peoples_rows():
     ]
     assert outbox.rows == [
         ("sp-1", "p-0", ("peer-a",), ("api/media/sd-a.webp", "api/media/sc-a.webp")),
-        ("sp-1", "p-1", ("peer-a",), ("api/media/sc-b.webp",)),
-        ("sp-1", "c-1", ("peer-a",), ("api/media/sc-c.webp",)),
     ]
+
+
+@pytest.mark.parametrize("authority", [False, True])
+async def test_a_follower_only_household_gets_nothing_from_a_helper(authority):
+    """A helper gates on a writer (member) seat — the §25.6 provider's and
+    SPACE_MEDIA_WANTED's ``may_receive`` — so a household that only follows
+    gets nothing from it. The roster authority keeps its own gate (a
+    follower gets its subset there)."""
+    provider, fed, outbox, base = _helper_provider(authority=authority)
+    sent = await provider.handle_request(
+        _event("follower", {"space_id": "sp-1", "since": base.isoformat()})
+    )
+    assert (sent > 0) is authority
+    if not authority:
+        assert fed.sent == [] and outbox.rows == []
 
 
 async def test_the_roster_authority_resume_replays_every_row():

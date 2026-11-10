@@ -59,22 +59,26 @@ def test_memory_stays_bounded(monkeypatch) -> None:
     assert contact.last_heard_iso("c") is None
 
 
-def test_a_helper_ask_is_remembered_per_space() -> None:
-    """The scheduler's next helper resume starts from the last one it sent
-    (minus an overlap), not from the host's last answer again."""
+def test_a_host_is_silent_from_an_unanswered_round_until_heard() -> None:
+    """The scheduler marks a space silent when the host left a round's BEGIN
+    unanswered (``went_silent``); the host's next answer clears it. Before
+    any unanswered round the host is not silent (``SPACE_MEDIA_WANTED``
+    asks a helper only while it is)."""
     contact = HostContact(clock=_Clock(), wall=_wall)
-    assert contact.last_helper_ask_iso("sp") is None
-    contact.helper_asked("sp")
-    assert contact.last_helper_ask_iso("sp") == "2026-11-10T12:00:00+00:00"
-    assert contact.last_helper_ask_iso("other") is None
-    contact.helper_asked("")
-    assert contact.last_helper_ask_iso("") is None
+    assert contact.is_silent("sp") is False
+    contact.went_silent("sp")
+    assert contact.is_silent("sp") is True
+    assert contact.is_silent("other") is False
+    contact.heard("sp")
+    assert contact.is_silent("sp") is False
+    contact.went_silent("")
+    assert contact.is_silent("") is False
 
 
-def test_helper_asks_stay_bounded(monkeypatch) -> None:
+def test_silent_spaces_stay_bounded(monkeypatch) -> None:
     monkeypatch.setattr(host_contact_mod, "MAX_SPACES_TRACKED", 2)
     contact = HostContact(clock=_Clock(), wall=_wall)
     for space in ("a", "b", "c"):
-        contact.helper_asked(space)
-    assert contact.last_helper_ask_iso("a") is None
-    assert contact.last_helper_ask_iso("c") is not None
+        contact.went_silent(space)
+    assert contact.is_silent("a") is False
+    assert contact.is_silent("c") is True

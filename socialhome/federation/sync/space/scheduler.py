@@ -24,7 +24,8 @@ Triggers:
    in the mode the refused BEGIN asked for — a periodic sync stays
    ``"incremental"``. A stream whose DataChannel closed before its
    sentinel (the provider restarted mid-stream) is asked again the same
-   way (``reason="interrupted"``).
+   way (``reason="interrupted"``). A rate-limited BEGIN (``rate_limited``)
+   is left to the periodic tick.
 6. **Authority epoch echo** (v_46) — a BEGIN to a space's owner carries
    the ``authority_epoch_echo`` the attached builder returns
    (:meth:`attach_authority_echo`), and :class:`SpaceAuthorityEchoDue`
@@ -50,16 +51,19 @@ Triggers:
     moment it actually goes out (not when queued; a parked or skipped BEGIN
     expects no answer) — waits :data:`HOST_ANSWER_WAIT_S` (fixed) for its
     answer (:class:`~.host_contact.HostContact`, marked by the receiver — an
-    empty session's sentinel counts — and by a capacity deferral). No
+    empty session's sentinel counts — and by any signed refusal of the BEGIN). No
     answer: ONE trusted helper (:mod:`.trusted_helpers`: a live ``admin`` /
     ``moderator`` seat household at v_92 other than us and the host,
     sorted, starting at a stable per-household offset so a space's members
     spread over its helpers, one step further each round; none at v_92 →
     wait for the host) gets
     ``SPACE_SYNC_RESUME`` since the newest of: the host last heard, the
-    previous helper ask minus :data:`HELPER_OVERLAP_S` (a silent host's
-    rounds replay only what is new), ``RESUME_MAX_AGE_S`` ago: its own
-    people's rows and the hashed files of the rest. The host is still
+    newest row this household holds from that helper's people minus
+    :data:`HELPER_OVERLAP_S` (read from the database, so a restart or a
+    rotation to another helper never replays more than that helper's gap),
+    ``RESUME_MAX_AGE_S`` ago: its own people's rows and their files. The
+    round also marks the host silent (``HostContact.went_silent``) until it
+    is heard again. The host is still
     asked first every tick — a mesh-only host too, with the small
     incremental BEGIN once its full catch-up completed or hit its cap
     (:meth:`SpaceSyncScheduler._mesh_incremental`). Every member alike —
@@ -177,8 +181,8 @@ STARTUP_MESH_CATCHUP_RETRY_DELAYS_S: tuple[float, ...] = (15.0, 30.0, 60.0, 120.
 #: Fixed — never random: a stream that is answered begins in seconds.
 HOST_ANSWER_WAIT_S: float = 120.0
 
-#: A helper resume after an earlier one (the host still silent) reaches back
-#: to that ask minus this overlap — rows written while it was in flight are
+#: A helper resume reaches back to the newest row this household holds from
+#: that helper's people minus this overlap — rows written around it are
 #: replayed again, everything older is not. Files the requester still lacks
 #: arrive when someone opens them (``SPACE_MEDIA_WANTED``).
 HELPER_OVERLAP_S: float = 5 * 60.0
@@ -193,9 +197,7 @@ class _HostContact(Protocol):
 
     def last_heard_iso(self, space_id: str) -> str | None: ...
 
-    def helper_asked(self, space_id: str) -> None: ...
-
-    def last_helper_ask_iso(self, space_id: str) -> str | None: ...
+    def went_silent(self, space_id: str) -> None: ...
 
 
 class _ResumeSender(Protocol):
@@ -214,17 +216,17 @@ def _parse_utc(iso: str | None) -> datetime | None:
     return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
 
 
-def _resume_since(last_heard_iso: str | None, last_helper_iso: str | None) -> str:
+def _resume_since(last_heard_iso: str | None, newest_row_iso: str | None) -> str:
     """Where a helper resume starts: the newest of when the host was last
-    heard, the previous helper ask minus :data:`HELPER_OVERLAP_S` (while the
-    host stays silent each round replays only what is new), and
+    heard, the newest row held here from the helper's people minus
+    :data:`HELPER_OVERLAP_S` (it replays only its own people's rows), and
     ``RESUME_MAX_AGE_S`` ago (the provider clamps to the same floor)."""
     floor = datetime.now(UTC) - timedelta(seconds=RESUME_MAX_AGE_S)
     heard = _parse_utc(last_heard_iso)
-    helper = _parse_utc(last_helper_iso)
+    newest = _parse_utc(newest_row_iso)
     since = floor
-    if helper is not None:
-        since = max(since, helper - timedelta(seconds=HELPER_OVERLAP_S))
+    if newest is not None:
+        since = max(since, newest - timedelta(seconds=HELPER_OVERLAP_S))
     if heard is not None and heard > since:
         return last_heard_iso or since.isoformat()
     return since.isoformat()
@@ -253,6 +255,7 @@ class SpaceSyncScheduler:
         "_mesh_announced",
         "_mesh_catchup_attempts",
         "_mesh_catchup_done",
+        "_newest_from",
         "_own_instance_id",
         "_parked",
         "_queue",
@@ -339,6 +342,8 @@ class SpaceSyncScheduler:
         self._host_contact: _HostContact | None = None
         self._resume: _ResumeSender | None = None
         self._roster_authority: Callable[[str], Awaitable[bool]] | None = None
+        #: ``(space, household) →`` the newest row held here from its people.
+        self._newest_from: Callable[[str, str], Awaitable[str | None]] | None = None
         #: space → the households acting as its host whose answer this
         #: round's BEGIN awaits: set by the tick, consumed when the BEGIN to
         #: one of them actually goes out (a parked one keeps it until sent).
@@ -354,14 +359,18 @@ class SpaceSyncScheduler:
         host_contact: _HostContact,
         resume: _ResumeSender,
         roster_authority: Callable[[str], Awaitable[bool]],
+        newest_from: Callable[[str, str], Awaitable[str | None]],
     ) -> None:
         """Wire trigger 10 (v_92): the host contact the receiver marks, the
-        ``SPACE_SYNC_RESUME`` sender, and whether we hold a space's roster
-        authority (then we are host-equivalent: nothing to fall back from).
-        Needs the roster mirror (``seat_repo``) for the helpers."""
+        ``SPACE_SYNC_RESUME`` sender, whether we hold a space's roster
+        authority (then we are host-equivalent: nothing to fall back from),
+        and ``newest_from(space, household)`` — the newest row held here
+        from that household's people, where its resume starts. Needs the
+        roster mirror (``seat_repo``) for the helpers."""
         self._host_contact = host_contact
         self._resume = resume
         self._roster_authority = roster_authority
+        self._newest_from = newest_from
 
     def attach_roster_refresh(self, refresh: Callable[[], Awaitable[object]]) -> None:
         """Run ``refresh`` on every periodic tick — the host re-sending each
@@ -545,15 +554,17 @@ class SpaceSyncScheduler:
             )
 
     async def _on_sync_deferred(self, event: SpaceSyncDeferred) -> None:
-        """A provider had no free slot for our BEGIN: ask again shortly —
-        the sync was never served (trigger 5). The retry asks for the same
-        mode the refused BEGIN did."""
+        """A provider refused our BEGIN (or its stream broke off): ask again
+        shortly — the sync was never served (trigger 5). The retry asks for
+        the same mode the refused BEGIN did; a rate-limited BEGIN is left to
+        the periodic tick (asked again now, it is refused again)."""
         # The refused BEGIN holds no session there, so its slot is free for
         # its own retry below. Nothing waiting is pulled in on a refusal:
         # the host has just said it is full.
         self._release_slot(event.provider_instance_id, event.sync_id, event.space_id)
-        # Trigger 10: "no free slot" is the host's answer — it is online.
-        if self._host_contact is not None and event.reason == "capacity":
+        # Trigger 10: any refusal from the host is its answer — it is online.
+        # A cut stream is noticed here, not said by the host.
+        if self._host_contact is not None and event.reason != "interrupted":
             try:
                 space = await self._space_repo.get(event.space_id)
                 if space is not None and event.provider_instance_id in (
@@ -562,6 +573,8 @@ class SpaceSyncScheduler:
                     self._host_contact.heard(event.space_id)
             except Exception:  # pragma: no cover — defensive
                 log.exception("noting the host's deferral failed")
+        if event.reason == "rate_limited":
+            return
         key = (event.space_id, event.provider_instance_id)
         attempts = self._deferred_attempts.get(key, 0)
         if attempts >= MAX_DEFERRED_SYNC_RETRIES:
@@ -995,10 +1008,12 @@ class SpaceSyncScheduler:
         except TimeoutError:
             pass
         contact, resume, seats = self._host_contact, self._resume, self._seat_repo
-        if contact is None or resume is None or seats is None:
+        newest_from = self._newest_from
+        if contact is None or resume is None or seats is None or newest_from is None:
             return
         if contact.heard_since(space_id, asked):
             return
+        contact.went_silent(space_id)
         try:
             rounds = self._helper_round.get(space_id, 0)
             helpers = await trusted_helpers(
@@ -1020,8 +1035,7 @@ class SpaceSyncScheduler:
             self._helper_round[space_id] = rounds + 1
             helper = helpers[0]
             since = _resume_since(
-                contact.last_heard_iso(space_id),
-                contact.last_helper_ask_iso(space_id),
+                contact.last_heard_iso(space_id), await newest_from(space_id, helper)
             )
             log.info(
                 "space %s: the host did not answer within %.0f s — asking "
@@ -1034,7 +1048,6 @@ class SpaceSyncScheduler:
             await resume.send_request(
                 space_id=space_id, instance_id=helper, since=since
             )
-            contact.helper_asked(space_id)
         except Exception:
             log.exception("space %s: asking a trusted helper failed", space_id)
 

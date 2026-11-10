@@ -228,9 +228,12 @@ _MESH_CATCHUP_TRANSIENT: frozenset[str] = frozenset(
 #: past its lookup) rather than a send to a household we never knew.
 UNPAIR_SEND_RACE_S: float = 300.0
 
-#: ``SPACE_SYNC_DIRECT_FAILED`` reasons that mean "no free slot now": the
-#: BEGIN was never served, so the requester asks again (``SpaceSyncDeferred``).
-_CAPACITY_REFUSALS = frozenset({"too_many_sessions", "node_capacity"})
+#: ``SPACE_SYNC_DIRECT_FAILED`` reasons a provider refuses a BEGIN with before
+#: any session exists (S-6 / S-8): no free slot now, or the hourly budget is
+#: spent. The BEGIN was never served — ``SpaceSyncDeferred`` with the reason;
+#: the scheduler asks again after a capacity refusal and takes any of them
+#: as the host's answer (v_92 trigger 10).
+_BEGIN_REFUSALS = frozenset({"too_many_sessions", "node_capacity", "rate_limited"})
 
 #: Maximum allowed clock skew for inbound envelopes (§24.11 §5).
 _TIMESTAMP_SKEW_SECONDS = 300
@@ -5385,9 +5388,9 @@ class FederationService:
                 # against us with ``prefer_direct=False``.
                 self._sync_manager.close_session(sync_id)
                 return
-        elif event.payload.get("reason") in _CAPACITY_REFUSALS:
-            # The provider had no free slot for a BEGIN we sent (S-6 / S-8:
-            # it caps concurrent syncs per household). No session was ever
+        elif event.payload.get("reason") in _BEGIN_REFUSALS:
+            # The provider refused a BEGIN we sent (S-6 / S-8: it caps
+            # concurrent syncs per household, and BEGINs per hour). No session was ever
             # made, so there is nothing to relay — the sync is simply owed.
             # A household that restarts and asks one host for more spaces
             # than the cap used to lose the rest until the 30-minute tick.
@@ -5409,6 +5412,7 @@ class FederationService:
                         provider_instance_id=event.from_instance,
                         sync_mode=request.sync_mode,
                         sync_id=sync_id,
+                        reason=str(event.payload.get("reason")),
                     )
                 )
                 return

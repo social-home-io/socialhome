@@ -72,6 +72,7 @@ from ....domain.task import (
 from ....services.inbound_media_store import media_basename, media_file_path
 from ....services.page_conflict_service import side_to_wire
 from ....services.space_media_names import space_own_files
+from .file_gate import SpaceFileBudget
 
 if TYPE_CHECKING:
     from ....domain.calendar import CalendarEvent
@@ -116,14 +117,12 @@ MAX_ALBUMS_REPLAYED: int = 200
 #: small HA instance.
 MAX_PER_RESOURCE: int = 500
 
-#: At most this many files of the replayed rows are pushed per request
-#: (posts, covers, gallery items newer than ``since``, newest first in the
-#: order replayed) …
-RESUME_MEDIA_MAX_FILES: int = 50
-#: … and at most this many bytes. A file that would pass it is skipped (it
-#: reaches the household through its author's push, the §25.6 catch-up, or
-#: the host's fill-in), so one request costs at most this much upload.
-RESUME_MEDIA_MAX_BYTES: int = 32 * 1024 * 1024
+#: The replayed rows' files (posts, covers, gallery items newer than
+#: ``since``, in the order replayed) are charged to the ONE (requester,
+#: space) budget ``SPACE_MEDIA_WANTED`` shares (:class:`.file_gate
+#: .SpaceFileBudget`: 50 files / 32 MiB per 30 minutes). A file that would
+#: pass it is skipped (it reaches the household through its author's push,
+#: the §25.6 catch-up, or on view).
 #: One ``SPACE_SYNC_RESUME`` per (household, space) per this many seconds;
 #: a sooner one is dropped (the replay is idempotent — the first one already
 #: sent what was missed).
@@ -170,14 +169,6 @@ def _clamped_since(since: str) -> str:
     return floor.isoformat() if asked < floor else since
 
 
-class _FileGates(Protocol):
-    async def for_requester(self, space_id: str, requester: str) -> _FileGate: ...
-
-
-class _FileGate(Protocol):
-    async def ship(self, owner: str | None, urls: list[str]) -> list[str]: ...
-
-
 class SpaceSyncResumeProvider:
     """Receiver- and provider-side helper for ``SPACE_SYNC_RESUME``.
 
@@ -189,14 +180,15 @@ class SpaceSyncResumeProvider:
     """
 
     __slots__ = (
+        "_budget",
         "_clock",
         "_federation",
-        "_file_gates",
         "_gallery_repo",
         "_last_resume",
         "_media_dir",
         "_media_refs",
         "_media_sync",
+        "_member_gate",
         "_own_members",
         "_page_repo",
         "_roster_authority",
@@ -222,8 +214,11 @@ class SpaceSyncResumeProvider:
         media_dir: pathlib.Path | None = None,
         clock: Callable[[], float] = time.monotonic,
         media_refs: AbstractMediaReferenceRepo | None = None,
+        budget: SpaceFileBudget | None = None,
     ) -> None:
         self._federation = federation_service
+        #: The (requester, space) file budget shared with SPACE_MEDIA_WANTED.
+        self._budget = budget if budget is not None else SpaceFileBudget()
         #: v_82: only a page's files that are the space's own ship.
         self._media_refs = media_refs
         #: Where the replayed files live — their sizes bound a request.
@@ -242,34 +237,30 @@ class SpaceSyncResumeProvider:
         self._sticky_repo = sticky_repo
         self._space_calendar_repo = space_calendar_repo
         self._gallery_repo = gallery_repo
-        #: v_86 — which replayed files we ship (``None``: all of them).
-        self._file_gates: _FileGates | None = None
-        #: v_92 — whose rows we replay (:meth:`attach_row_scope`; ``None``:
-        #: every row).
+        #: v_92 — whose rows we replay, and to whom (:meth:`attach_row_scope`;
+        #: ``None``: every row, to every member household).
         self._roster_authority: Callable[[str], Awaitable[bool]] | None = None
         self._own_members: Callable[[str], Awaitable[set[str]]] | None = None
-
-    def attach_file_gates(self, gates: _FileGates) -> None:
-        """Wire the v_86 file gate (:mod:`.file_gate`): a non-host household
-        ships its own people's files and, holding an admin / moderator
-        seat, the hashed files of other people's rows to a v_86 requester —
-        never another person's unhashed file (the receiver refuses it)."""
-        self._file_gates = gates
+        self._member_gate: Callable[[str, str], Awaitable[bool]] | None = None
 
     def attach_row_scope(
         self,
         roster_authority: Callable[[str], Awaitable[bool]],
         *,
         own_members: Callable[[str], Awaitable[set[str]]],
+        member_gate: Callable[[str, str], Awaitable[bool]],
     ) -> None:
-        """Wire whose rows a replay carries (v_92): the roster authority
-        (``roster_authority(space_id)``, the predicate the file gate uses)
-        replays every row; any other household — a trusted helper asked
-        while the host is offline — only its own people's
-        (``own_members(space_id)``), while still filling the hashed files of
-        every replayed row through the file gate."""
+        """Wire whose rows a replay carries, and to whom (v_92): the roster
+        authority (``roster_authority(space_id)``) replays every row to any
+        household of the space (a follower gets its subset there); any other
+        household — a trusted helper asked while the host is offline —
+        replays only its own people's rows (``own_members(space_id)``) and
+        their files, and only to a household holding a writer seat
+        (``member_gate(space_id, household)``,
+        ``SpaceWriterHouseholds.may_receive``)."""
         self._roster_authority = roster_authority
         self._own_members = own_members
+        self._member_gate = member_gate
 
     # ── Outbound (requester side) ─────────────────────────────────────
 
@@ -373,8 +364,16 @@ class SpaceSyncResumeProvider:
         ``SPACE_SYNC_RESUME`` path (:meth:`handle_request`) and the
         §319.6 resync paths (:meth:`replay_space_to` /
         :meth:`replay_calendar_to`) run this check before any
-        ``_replay_*`` call so a resync request can't bypass it.
+        ``_replay_*`` call so a resync request can't bypass it. A household
+        that is not the roster authority (a v_92 helper) serves only writer
+        seats — the §25.6 provider's gate for member-only data.
         """
+        if (
+            self._member_gate is not None
+            and self._roster_authority is not None
+            and not await self._roster_authority(space_id)
+        ):
+            return await self._member_gate(space_id, instance_id)
         peers = await self._space_repo.list_member_instances(space_id)
         return instance_id in peers
 
@@ -472,33 +471,18 @@ class SpaceSyncResumeProvider:
     ) -> None:
         """Queue the replayed rows' files for ``to``: a receiver binds a
         file to the household that delivered its row, so the bytes must
-        come from us. Bounded per request (:data:`RESUME_MEDIA_MAX_FILES`,
-        :data:`RESUME_MEDIA_MAX_BYTES`); a file over the budget is skipped."""
+        come from us. Charged to the shared (requester, space) budget; a
+        file over it is skipped."""
         if self._media_sync is None or not media:
             return
-        gate = (
-            await self._file_gates.for_requester(space_id, to)
-            if self._file_gates is not None
-            else None
-        )
-        files = 0
-        used = 0
         skipped = 0
-        for correlation_id, owner, urls in media:
-            if gate is not None:
-                urls = await gate.ship(owner, urls)
+        for correlation_id, _owner, urls in media:
             kept: list[str] = []
             for url in urls:
                 size = await self._size(url)
-                if (
-                    size is None
-                    or files >= RESUME_MEDIA_MAX_FILES
-                    or used + size > RESUME_MEDIA_MAX_BYTES
-                ):
+                if size is None or not self._budget.take(to, space_id, size):
                     skipped += 1
                     continue
-                files += 1
-                used += size
                 kept.append(url)
             if kept:
                 await self._media_sync.enqueue_for_blob(
@@ -964,19 +948,19 @@ class SpaceSyncResumeProvider:
         media_of: Callable[[Any], list[str]] | None = None,
         media: _Media | None = None,
     ) -> int:
-        """Send each row as ``event_type``. With *own* (a household that is
-        not the roster authority) only the rows whose person
-        (*owner_of*, default :func:`_owner_of`) is one of ours go out —
-        but every row's files are still collected for :meth:`_ship_media`,
-        whose gate decides which of them we may fill (v_86)."""
+        """Send each row as ``event_type``, collecting its files for
+        :meth:`_ship_media`. With *own* (a household that is not the roster
+        authority) only the rows whose person (*owner_of*, default
+        :func:`_owner_of`) is one of ours go out, with their files only —
+        other people's files come on view (``SPACE_MEDIA_WANTED``)."""
         sent = 0
         for row in rows:
+            if own is not None and (owner_of or _owner_of)(row) not in own:
+                continue
             if media_of is not None and media is not None:
                 urls = media_of(row)
                 if urls:
                     media.append((row.id, _owner_of(row), list(urls)))
-            if own is not None and (owner_of or _owner_of)(row) not in own:
-                continue
             try:
                 await self._federation.send_event(
                     to_instance_id=to,
