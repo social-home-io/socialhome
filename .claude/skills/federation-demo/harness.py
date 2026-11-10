@@ -678,6 +678,22 @@ def _log_lines_matching(label: str, needle: str, *, offset: int = 0) -> list[str
     return [line for line in text.splitlines() if needle in line]
 
 
+def _await_log_lines(
+    label: str, needle: str, *, offset: int = 0, timeout: float = 30.0
+) -> list[str]:
+    """:func:`_log_lines_matching`, polled each second until a line shows
+    up or ``timeout`` passes (then ``[]``). For evidence of a path that
+    races another one: since v_89 a member's post reaches a GFS-seated
+    member over its mailbox AND over the private channel, in either order,
+    so the item can land before the channel frame is logged."""
+    deadline = time.monotonic() + timeout
+    while True:
+        lines = _log_lines_matching(label, needle, offset=offset)
+        if lines or time.monotonic() >= deadline:
+            return lines
+        time.sleep(1.0)
+
+
 def _all_log_lines_matching(label: str, needle: str) -> list[str]:
     """Lines containing ``needle`` across every log ``label`` has written
     this run — the ones earlier processes left (``log.<n>.txt``, kept by
@@ -9295,7 +9311,7 @@ def cmd_gfs_private_channel() -> None:
         lambda r: bool(r) and r[0][0] == b_content,
         what=f"e never received b's post {b_post_id} while a was down",
     )
-    if not _log_lines_matching(
+    if not _await_log_lines(
         "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
     ):
         raise SystemExit(
@@ -9322,7 +9338,7 @@ def cmd_gfs_private_channel() -> None:
         lambda r: bool(r) and r[0][0] == content,
         what=f"b never received e's post {post_id} live while a was down",
     )
-    if not _log_lines_matching(
+    if not _await_log_lines(
         "b", f"gfs.relay.received: channel={channel_id}", offset=b_off
     ):
         raise SystemExit(
@@ -10831,19 +10847,13 @@ def cmd_gfs_private_channel_multi() -> None:
             what=f"e never received d's post {post_id} over GFS B",
             timeout=90.0,
         )
-        # d also reaches e's mailbox directly (v_89 member mesh), so e may
-        # store the post before the channel frame lands: wait for the frame
-        # rather than reading the log once.
-        deadline = time.time() + 30
-        while not _log_lines_matching(
+        if not _await_log_lines(
             "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
         ):
-            if time.time() > deadline:
-                raise SystemExit(
-                    "gfs-private-channel-multi: e logged no channel frame — d's "
-                    "post reached it some other way"
-                )
-            time.sleep(1.0)
+            raise SystemExit(
+                "gfs-private-channel-multi: e logged no channel frame — d's post "
+                "reached it some other way"
+            )
         print("  e (on B only) received d's post over the channel, host offline ✓")
 
         # 6. What B saw.

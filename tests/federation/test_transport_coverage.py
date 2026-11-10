@@ -374,7 +374,7 @@ async def test_peer_send_when_ready_writes_frame():
             self.sent: list = []
             self.buffered_amount = 0
 
-        async def send(self, data):
+        async def send(self, data, *, wait_for_drain: bool = True):
             self.sent.append(data)
 
     ch = _ReadyChannel()
@@ -400,7 +400,7 @@ async def test_peer_send_drops_frame_when_over_hwm():
             self.sent: list = []
             self.buffered_amount = buffered
 
-        async def send(self, data):
+        async def send(self, data, *, wait_for_drain: bool = True):
             self.sent.append(data)
 
     ch = _SaturatedChannel(buffered=peer._send_hwm + 1)
@@ -424,7 +424,7 @@ async def test_peer_send_returns_false_on_rtc_error():
         def __init__(self) -> None:
             self.buffered_amount = 0
 
-        async def send(self, data):
+        async def send(self, data, *, wait_for_drain: bool = True):
             raise rtc.RTCError("nope")
 
     peer._channel = _RaisingChannel()  # type: ignore[attr-defined]
