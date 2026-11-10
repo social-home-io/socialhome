@@ -9,10 +9,12 @@ from socialhome.crypto import (
     generate_space_keypair,
 )
 from socialhome.db.database import AsyncDatabase
+from socialhome.federation.multi_recipient import derive_mr_key
 from socialhome.infrastructure.key_manager import KeyManager, KeyManagerError
 from socialhome.repositories.space_key_repo import (
     SqliteSpaceKeyRepo,
 )
+from socialhome.services import space_crypto_service as scs
 from socialhome.services.space_crypto_service import (
     AUTHORITY_SIG_SUITE_ED25519,
     SUPPORTED_AUTHORITY_SIG_SUITES,
@@ -722,3 +724,101 @@ async def test_media_key_is_derived_per_epoch_never_the_raw_key(crypto_env):
     # An older epoch's key stays reachable — a descriptor names its epoch.
     assert await crypto.media_key("sp-1", epoch=first) == current
     assert await crypto.media_key("sp-1", epoch=999) is None
+
+
+# ─── v_90 multi-recipient keys ───────────────────────────────────────────
+
+
+async def _add_space(repo, space_id: str) -> None:
+    await repo._db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?, 'T', 'inst-1', 'pascal', ?)",
+        (space_id, "ab" * 32),
+    )
+
+
+async def test_mr_key_is_derived_from_the_current_epoch(crypto_env):
+    crypto, _ = crypto_env
+    assert await crypto.mr_key("sp-1") is None
+    await crypto.initialise_for_space("sp-1")
+    await crypto.rotate_epoch("sp-1")
+    epoch, raw = await crypto.export_current_key("sp-1")
+    got = await crypto.mr_key("sp-1")
+    assert got == (epoch, *derive_mr_key(raw))
+    # Only derived material leaves.
+    assert raw not in got
+
+
+async def test_mr_key_for_kid_resolves_recent_epochs_of_every_space(crypto_env):
+    crypto, repo = crypto_env
+    await _add_space(repo, "sp-2")
+    await crypto.initialise_for_space("sp-1")
+    await crypto.initialise_for_space("sp-2")
+    _, kid1, key1 = await crypto.mr_key("sp-1")
+    _, kid2, key2 = await crypto.mr_key("sp-2")
+    assert await crypto.mr_key_for_kid(kid1) == ("sp-1", 0, key1)
+    assert await crypto.mr_key_for_kid(kid2) == ("sp-2", 0, key2)
+    assert await crypto.mr_key_for_kid("nope") is None
+
+
+async def test_mr_key_for_kid_keeps_only_the_three_newest_epochs(crypto_env):
+    crypto, _ = crypto_env
+    kids = []
+    for _ in range(4):
+        await crypto.rotate_epoch("sp-1")
+        kids.append((await crypto.mr_key("sp-1"))[1])
+    assert await crypto.mr_key_for_kid(kids[0]) is None
+    for epoch, kid in enumerate(kids[1:], start=1):
+        assert (await crypto.mr_key_for_kid(kid))[:2] == ("sp-1", epoch)
+
+
+async def test_the_kid_cache_follows_rotation_import_and_reset(crypto_env):
+    crypto, _ = crypto_env
+    await crypto.initialise_for_space("sp-1")
+    _, kid0, _ = await crypto.mr_key("sp-1")
+    assert await crypto.mr_key_for_kid(kid0) is not None  # cache built
+    await crypto.rotate_epoch("sp-1")
+    _, kid1, _ = await crypto.mr_key("sp-1")
+    assert (await crypto.mr_key_for_kid(kid1))[:2] == ("sp-1", 1)
+    imported = b"\x07" * 32
+    await crypto.import_key("sp-1", 2, imported)
+    kid2, key2 = derive_mr_key(imported)
+    assert await crypto.mr_key_for_kid(kid2) == ("sp-1", 2, key2)
+    reset = b"\x08" * 32
+    await crypto.reset_to_key("sp-1", 3, reset, rotated_by=None, authority_epoch=0)
+    kid3, key3 = derive_mr_key(reset)
+    assert await crypto.mr_key_for_kid(kid3) == ("sp-1", 3, key3)
+
+
+async def test_a_miss_rebuilds_the_cache_at_most_once_a_minute(crypto_env, monkeypatch):
+    """A key written behind the service's back is found by the backstop
+    rebuild — but a flood of unknown kids costs one rebuild a minute, not
+    one query per frame."""
+    crypto, repo = crypto_env
+    now = [1000.0]
+    monkeypatch.setattr(scs, "_monotonic", lambda: now[0])
+    await crypto.initialise_for_space("sp-1")
+    assert await crypto.mr_key_for_kid("unknown") is None  # builds
+    calls = []
+    real = repo.list_recent
+
+    async def counting(*, per_space):
+        calls.append(per_space)
+        return await real(per_space=per_space)
+
+    monkeypatch.setattr(repo, "list_recent", counting)
+    raw = b"\x09" * 32
+    await repo.save(
+        scs.SpaceKey(
+            space_id="sp-1",
+            epoch=5,
+            content_key_hex=crypto._kek.encrypt(raw, associated_data=b"sp-1"),
+        )
+    )
+    kid, key = derive_mr_key(raw)
+    for _ in range(5):
+        assert await crypto.mr_key_for_kid(kid) is None
+    assert calls == []
+    now[0] += 61
+    assert await crypto.mr_key_for_kid(kid) == ("sp-1", 5, key)
+    assert calls == [3]

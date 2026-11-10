@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -54,8 +55,9 @@ from ..crypto import (
     verify_ed25519,
 )
 from ..domain.events import SpaceContentKeyImported
+from ..federation.multi_recipient import derive_mr_key
 from ..infrastructure.event_bus import EventBus
-from ..infrastructure.key_manager import KeyManager
+from ..infrastructure.key_manager import KeyManager, KeyManagerError
 from ..repositories.space_key_repo import (
     AbstractSpaceKeyRepo,
     SpaceKey,
@@ -67,6 +69,24 @@ log = logging.getLogger(__name__)
 
 
 _AES_KEY_BYTES = 32
+
+#: v_90 — how many of a space's newest epochs open a multi-recipient frame
+#: (a frame sealed just before a rotation still opens after it).
+MR_RECENT_EPOCHS: int = 3
+
+#: v_90 — a kid the cache does not know triggers a rebuild at most this
+#: often (seconds). Writes through this service invalidate the cache at
+#: once; this is only the backstop for a key written behind its back, and
+#: it keeps a flood of unknown kids at one query a minute.
+MR_KID_REBUILD_INTERVAL_S: float = 60.0
+
+
+def _monotonic() -> float:
+    """The kid cache's clock (a seam tests replace — never the global
+    ``time.monotonic``, which the event loop runs on)."""
+    return time.monotonic()
+
+
 _GCM_NONCE_BYTES = 12
 
 
@@ -120,6 +140,8 @@ class SpaceContentEncryption(BusPublisherMixin):
     __slots__ = (
         "_bus",
         "_kek",
+        "_mr_built_at",
+        "_mr_kids",
         "_own_instance_id",
         "_repo",
     )
@@ -140,6 +162,11 @@ class SpaceContentEncryption(BusPublisherMixin):
         #: key was available (#122, out-of-order key arrival).
         self._bus = bus
         self._own_instance_id = own_instance_id
+        #: v_90 kid → (space_id, epoch, multi-recipient key) over the
+        #: :data:`MR_RECENT_EPOCHS` newest epochs of every space. ``None``
+        #: = rebuild on the next lookup. Never log it.
+        self._mr_kids: dict[str, tuple[str, int, bytes]] | None = None
+        self._mr_built_at: float = 0.0
 
     # ─── Lifecycle ────────────────────────────────────────────────────────
 
@@ -178,6 +205,7 @@ class SpaceContentEncryption(BusPublisherMixin):
                 rotated_by=self._own_instance_id,
             )
         )
+        self._invalidate_mr_kids()
         log.info("space_crypto: rotated %s to epoch %d", space_id, epoch)
         return epoch
 
@@ -248,6 +276,59 @@ class SpaceContentEncryption(BusPublisherMixin):
             associated_data=space_id.encode("utf-8"),
         )
         return key.epoch, derive_space_media_key(raw)
+
+    async def mr_key(self, space_id: str) -> tuple[int, str, bytes] | None:
+        """``(epoch, kid, key)`` of the current epoch's multi-recipient key
+        (v_90, :func:`~socialhome.federation.multi_recipient.derive_mr_key`),
+        or ``None`` when the space has no key. Only derived material leaves —
+        never the content key. Never log it."""
+        latest = await self._repo.get_latest(space_id)
+        if latest is None:
+            return None
+        kid, key = derive_mr_key(self._unwrap(latest))
+        return latest.epoch, kid, key
+
+    async def mr_key_for_kid(self, kid: str) -> tuple[str, int, bytes] | None:
+        """``(space_id, epoch, key)`` for a multi-recipient frame's *kid*,
+        over the :data:`MR_RECENT_EPOCHS` newest epochs of every space we hold
+        a key for — or ``None``. Served from an in-memory cache that writes
+        through this service invalidate; a miss rebuilds it at most every
+        :data:`MR_KID_REBUILD_INTERVAL_S`."""
+        now = _monotonic()
+        kids = self._mr_kids
+        if kids is None:
+            kids = await self._rebuild_mr_kids(now)
+        hit = kids.get(kid)
+        if hit is None and now - self._mr_built_at >= MR_KID_REBUILD_INTERVAL_S:
+            hit = (await self._rebuild_mr_kids(now)).get(kid)
+        return hit
+
+    async def _rebuild_mr_kids(self, now: float) -> dict[str, tuple[str, int, bytes]]:
+        kids: dict[str, tuple[str, int, bytes]] = {}
+        for row in await self._repo.list_recent(per_space=MR_RECENT_EPOCHS):
+            try:
+                kid, key = derive_mr_key(self._unwrap(row))
+            except KeyManagerError, ValueError:
+                # One unreadable row must not hide every other space's keys.
+                log.warning(
+                    "space_crypto: an epoch key of %s does not unwrap — "
+                    "skipped for multi-recipient frames",
+                    row.space_id,
+                )
+                continue
+            kids[kid] = (row.space_id, row.epoch, key)
+        self._mr_kids = kids
+        self._mr_built_at = now
+        return kids
+
+    def _invalidate_mr_kids(self) -> None:
+        self._mr_kids = None
+
+    def _unwrap(self, key: SpaceKey) -> bytes:
+        return self._kek.decrypt(
+            key.content_key_hex,
+            associated_data=key.space_id.encode("utf-8"),
+        )
 
     async def import_key(
         self,
@@ -320,6 +401,7 @@ class SpaceContentEncryption(BusPublisherMixin):
                 space_id,
             )
             return
+        self._invalidate_mr_kids()
         log.info(
             "space_crypto: imported epoch %d for %s from peer (rotated_by=%r)",
             epoch,
@@ -372,6 +454,7 @@ class SpaceContentEncryption(BusPublisherMixin):
             authority_epoch=authority_epoch,
             older_than=older_than,
         )
+        self._invalidate_mr_kids()
         log.info(
             "space_crypto: reset %s to the owner's epoch %d (dropped %d older-key "
             "epoch(s) above it)",

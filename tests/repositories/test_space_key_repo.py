@@ -171,3 +171,16 @@ async def test_latest_channel_grant_before_an_epoch(repo):
     assert await repo.latest_gfs_channel_before("sp-1", 3) == (2, "g2")
     assert await repo.latest_gfs_channel_before("sp-1", 2) == (1, "g1")
     assert await repo.latest_gfs_channel_before("sp-1", 1) is None
+
+
+async def test_list_recent_returns_the_newest_epochs_of_every_space(repo):
+    """v_90: the multi-recipient kid cache reads the newest N epochs of every
+    space in one query, newest first within a space."""
+    for epoch in (0, 1, 2, 3):
+        await repo.save(_key("sp-1", epoch))
+    await repo.save(_key("sp-2", 7))
+    rows = await repo.list_recent(per_space=3)
+    got = sorted((k.space_id, k.epoch) for k in rows)
+    assert got == [("sp-1", 1), ("sp-1", 2), ("sp-1", 3), ("sp-2", 7)]
+    assert all(k.content_key_hex == f"k{k.epoch}" for k in rows)
+    assert [k.epoch for k in await repo.list_recent(per_space=1)] in ([3, 7], [7, 3])

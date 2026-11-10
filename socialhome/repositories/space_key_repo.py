@@ -31,6 +31,7 @@ class AbstractSpaceKeyRepo(Protocol):
     async def get(self, space_id: str, epoch: int) -> SpaceKey | None: ...
     async def get_latest(self, space_id: str) -> SpaceKey | None: ...
     async def list_for_space(self, space_id: str) -> list[SpaceKey]: ...
+    async def list_recent(self, *, per_space: int) -> list[SpaceKey]: ...
     async def next_epoch(self, space_id: str) -> int: ...
     async def reset_to(
         self, key: SpaceKey, *, authority_epoch: int, older_than: int | None = None
@@ -140,6 +141,18 @@ class SqliteSpaceKeyRepo:
         rows = await self._db.fetchall(
             "SELECT * FROM space_keys WHERE space_id=? ORDER BY epoch",
             (space_id,),
+        )
+        return [_row(r) for r in rows_to_dicts(rows)]
+
+    async def list_recent(self, *, per_space: int) -> list[SpaceKey]:
+        """The newest ``per_space`` epoch keys of EVERY space (v_90 — the
+        multi-recipient kid cache), newest first within a space."""
+        rows = await self._db.fetchall(
+            "SELECT * FROM ("
+            " SELECT *, ROW_NUMBER() OVER ("
+            "  PARTITION BY space_id ORDER BY epoch DESC) AS rn"
+            " FROM space_keys) WHERE rn <= ? ORDER BY space_id, epoch DESC",
+            (per_space,),
         )
         return [_row(r) for r in rows_to_dicts(rows)]
 
