@@ -138,7 +138,7 @@ async def test_a_ready_datachannel_wins_over_https_and_relay():
     class _Ch:
         buffered_amount = 0
 
-        async def send(self, data):
+        async def send(self, data, *, wait_for_drain: bool = True):
             return None
 
     peer._channel = _Ch()  # type: ignore[attr-defined]

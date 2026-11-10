@@ -416,7 +416,7 @@ async def test_send_uses_rtc_when_peer_is_ready():
             self.sent = []
             self.buffered_amount = 0
 
-        async def send(self, data):
+        async def send(self, data, *, wait_for_drain: bool = True):
             self.sent.append(data)
 
     fake_ch = _FakeChannel()
@@ -544,7 +544,7 @@ async def test_unpair_skips_open_datachannel_for_the_inbox_receipt(inbox_ok):
             self.sent = []
             self.buffered_amount = 0
 
-        async def send(self, data):
+        async def send(self, data, *, wait_for_drain: bool = True):
             self.sent.append(data)
 
     ch = _BufferingChannel()
@@ -1692,7 +1692,7 @@ async def test_set_ice_servers_leaves_connected_peers_alone():
     class _Chan:
         buffered_amount = 0
 
-        async def send(self, _data):
+        async def send(self, _data, *, wait_for_drain: bool = True):
             return None
 
     peer._channel = _Chan()
@@ -3072,3 +3072,66 @@ async def test_https_inbox_transport_follows_one_same_host_redirect(
     ok, status = await wt.send(instance=_at(srv, "/slash"), envelope_dict={})
     assert ok is True and status == 202
     assert hits == ["slash", "inbox"]
+
+
+# ─── a send never waits on the library's drain event ─────────────────────
+
+
+class _DrainEventChannel:
+    """A DataChannel with aiolibdatachannel's ``send`` semantics.
+
+    ``send(wait_for_drain=True)`` awaits the ``buffered_amount_low`` event,
+    which the library clears whenever bytes are still buffered after a send
+    and sets again only when libdatachannel fires ``buffered_amount_low`` —
+    on the buffer crossing the low threshold FROM ABOVE. Our threshold is
+    half the HWM (512 KiB) and federation frames are small, so a buffer that
+    rose a few KiB and drained to zero never crosses it: the event stays
+    clear and the next waiting send never returns. Here the buffer keeps
+    ``held`` bytes after every send and never reaches the threshold.
+    """
+
+    def __init__(self, held: int) -> None:
+        self.held = held
+        self.buffered_amount = 0
+        self.sent: list[bytes] = []
+        self._low = asyncio.Event()
+        self._low.set()
+
+    def set_buffered_amount_low_threshold(self, amount: int) -> None:
+        pass
+
+    async def send(self, data, *, wait_for_drain: bool = True) -> None:
+        if wait_for_drain and not self._low.is_set():
+            await self._low.wait()  # never set: no threshold crossing
+        self.sent.append(data)
+        self.buffered_amount = self.held
+        if self.buffered_amount > 0:
+            self._low.clear()
+
+
+@pytest.mark.parametrize("held", [1, 64 * 1024])
+async def test_peer_sends_never_wait_on_the_drain_event(held: int) -> None:
+    """Regression: a household's moderator DELETE hung after a restart.
+
+    The DELETE broadcasts SPACE_POST_DELETED; the send to a member went over
+    the just-opened DataChannel, whose previous frame was still buffered.
+    ``send`` waited for a drain event that never comes, so the HTTP request
+    never answered. Our HWM gate is the backpressure policy: a frame is
+    either written at once or refused (the caller falls back to HTTPS)."""
+    peer = _RtcPeer(instance_id="p", signaling=_noop_signaling, inbound=_noop_inbound)
+    json_ch, media_ch, app_ch = (_DrainEventChannel(held) for _ in range(3))
+    peer._channel = json_ch
+    peer._media_channel = media_ch
+    peer._app_channel = app_ch
+    peer._open.set()
+    peer._media_open.set()
+    peer._app_open.set()
+
+    async def _twice() -> None:
+        for _ in range(2):
+            assert await peer.send({"event_type": "space_post_deleted"}) is True
+            assert await peer.send_media(b'{"h":1}', b"chunk") is True
+            assert await peer.send_app(b'{"h":1}', b"app") is True
+
+    await asyncio.wait_for(_twice(), timeout=2.0)
+    assert len(json_ch.sent) == len(media_ch.sent) == len(app_ch.sent) == 2

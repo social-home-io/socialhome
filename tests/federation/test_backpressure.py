@@ -38,7 +38,7 @@ class _Channel:
         self.buffered_amount = buffered
         self.sent: list = []
 
-    async def send(self, data):
+    async def send(self, data, *, wait_for_drain: bool = True):
         self.sent.append(data)
 
 
