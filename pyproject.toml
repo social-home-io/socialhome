@@ -194,6 +194,10 @@ testpaths = ["tests"]
 # rare case where a module-level fixture isn't reset between runs.
 # Disable with ``-p no:xdist`` for noisier output during debugging.
 addopts = "-n auto --dist=loadfile"
+# A test still running after 5 minutes dumps every thread's stack to the
+# output (pytest's built-in faulthandler) — a hung test in a CI shard then
+# names itself in the log instead of dying silently as an orphan.
+faulthandler_timeout = 300
 # Every async fixture is function-scoped; say so rather than lean on
 # pytest-asyncio's default (it warns that the default will change).
 asyncio_default_fixture_loop_scope = "function"
