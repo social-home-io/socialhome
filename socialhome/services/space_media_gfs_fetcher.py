@@ -89,6 +89,7 @@ from ..space_media_seal import (
     open_space_media,
     require_space_media_suite,
 )
+from ..task_drain import wait_tasks_done
 from .inbound_media_store import (
     gfs_space_media_name,
     is_gfs_space_media_name,
@@ -543,8 +544,7 @@ class SpaceMediaGfsFetcher:
 
     async def drain(self) -> None:
         """Wait for every prefetch and fetch running now (tests, the demo)."""
-        while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        await wait_tasks_done(lambda: self._tasks)
 
     async def stop(self) -> None:
         """Let running fetches finish (bounded), then cancel the rest."""

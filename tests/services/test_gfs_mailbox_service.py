@@ -478,3 +478,15 @@ async def test_mint_soon_runs_one_mint_at_a_time_and_paces_a_refusing_gfs(
     await asyncio.gather(*mints())
     assert len(calls) == 3
     await svc.stop()
+
+
+async def test_settle_releases_returns_while_a_done_release_awaits_its_discard():
+    """A release task that finished but whose done-callback (the
+    ``discard``) has not run yet must not make :meth:`settle_releases` spin:
+    awaiting finished tasks never yields to the loop, so the callback would
+    never run and the loop never end (the CI shard-4 hang)."""
+    svc = gms.GfsMailboxService.__new__(gms.GfsMailboxService)
+    done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    done.set_result(None)
+    svc._releases = {done}  # finished, never discarded
+    await svc.settle_releases()

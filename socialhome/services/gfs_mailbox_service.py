@@ -76,6 +76,7 @@ from ..federation.gfs_mailbox import (
 from ..infrastructure.key_manager import KeyManager
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
+from ..task_drain import wait_tasks_done
 from .gfs_connection_service import GfsConnectionService
 from .gfs_envelope_sender import normalize_gfs_base
 
@@ -1037,8 +1038,10 @@ class GfsMailboxService:
 
     async def settle_releases(self) -> None:
         """Wait for every release waiting out its delay (tests)."""
-        while self._releases:
-            await asyncio.gather(*list(self._releases), return_exceptions=True)
+        # Only the unfinished ones: a finished task leaves the set by a
+        # done-callback the loop runs later, and awaiting finished tasks
+        # never yields to the loop, so waiting on "the set is empty" spins.
+        await wait_tasks_done(lambda: self._releases)
 
     def open_claims(self) -> int:
         return len(self._claims)

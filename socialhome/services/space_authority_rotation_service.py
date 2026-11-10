@@ -94,6 +94,7 @@ from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole, mirrorable_remote_role
 from ..infrastructure.event_bus import EventBus
+from ..task_drain import wait_tasks_done
 from .space_authority_pin import (
     apply_authority_cert,
     owner_authority_cert,
@@ -1007,8 +1008,7 @@ class SpaceAuthorityRotationService:
 
     async def wait_idle(self) -> None:
         """Wait for echo-triggered rotations / re-sends still running."""
-        while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        await wait_tasks_done(lambda: self._tasks)
 
     @staticmethod
     def _parse_echo(echo: object) -> tuple[int, int, int, int] | None:
