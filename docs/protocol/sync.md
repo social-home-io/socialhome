@@ -176,24 +176,30 @@ through the v_86 file gate.
 Every member heals from its host first. While the host is offline nothing
 used to heal: the §25.6 sync and the resume both came from it. Now the
 periodic tick (`scheduler.SpaceSyncScheduler`, trigger 10) — which asks the
-host first every round, as before — notes when it sent this round's BEGIN to
-the household acting as a space's host (the owner, or the delegated admin
-that invited us). The receiver marks the space **heard** whenever that
-household answers: any signed chunk of the space it verifies from it,
-including the bare `__complete__` sentinel an up-to-date incremental session
+host first every round, as before — notes when this round's BEGIN to the
+household acting as a space's host (the owner, or the delegated admin that
+invited us) actually goes out: not when it is queued, and never for a BEGIN
+that waits for a free slot (trigger 8) or is skipped because the host's row
+is gone — no answer is due for a BEGIN that was not sent. The receiver
+marks the space **heard** whenever that household answers: any signed
+chunk of the space it verifies from it, including the bare `__complete__` sentinel an up-to-date incremental session
 sends back (a quiet space must count, or it would always fall back), and the
-scheduler counts a host's `too_many_sessions` deferral too
+scheduler counts a host's capacity deferral too (`SpaceSyncDeferred` with
+`reason="capacity"`: the host refused with `too_many_sessions` or
+`node_capacity`, so it is online; an `interrupted` stream does not count)
 (`federation/sync/space/host_contact.py`, in memory, baseline = boot). If
 `HOST_ANSWER_WAIT_S` (120 s, fixed — never random) after that BEGIN the host
 has not answered, the member sends `SPACE_SYNC_RESUME` to **one** trusted
 helper — a household holding a live `admin` or `moderator` seat in the
-roster mirror, never us or the host, sorted, one step further each silent
-round — with `since` = the newest of: when the host was last heard, the
-previous helper ask for the space minus a fixed 5-minute overlap
-(`HELPER_OVERLAP_S`; remembered in memory per space, bounded like the
-heard marks), and 30 days ago. So while the host stays silent each round
-replays only what is new since the last ask; a file the member still lacks
-arrives when someone opens it (`SPACE_MEDIA_WANTED`).
+roster mirror, never us or the host, sorted; each household starts at its
+own stable offset (`sha256(own instance id ‖ space id) mod k`, never random)
+so a space's members spread over its k helpers instead of all asking the
+first, then one step further each silent round — with `since` = the newest
+of: when the host was last heard, the previous helper ask for the space
+minus a fixed 5-minute overlap (`HELPER_OVERLAP_S`; remembered in memory per
+space, bounded like the heard marks), and 30 days ago. So while the host
+stays silent each round replays only what is new since the last ask; a file
+the member still lacks arrives when someone opens it (`SPACE_MEDIA_WANTED`).
 No helper → nothing (logged once per round). A space we host, or hold the
 roster authority of, never falls back; neither does a round with no BEGIN to
 the host (a mesh-only host whose catch-up already completed).
@@ -218,25 +224,32 @@ sequenceDiagram
     participant A as Helper (admin / moderator)
     M->>H: SPACE_SYNC_BEGIN (periodic tick)
     Note over M,H: no chunk, no sentinel, no deferral
-    Note over M: HOST_ANSWER_WAIT_S (120 s) later, host not heard
-    M->>A: SPACE_SYNC_RESUME (space_id, since = max(host heard, last ask − 5 min, now − 30 d))
+    Note over M: HOST_ANSWER_WAIT_S (120 s) after the BEGIN went out, host not heard
+    M->>A: SPACE_SYNC_RESUME to helper (offset + round) mod k (since = max(host heard, last ask − 5 min, now − 30 d))
     A->>M: SPACE_*_CREATED (its own people's rows only)
     A->>M: SPACE_MEDIA_BLOB (its own files + hashed files of others' rows, ≤ 50 / 32 MiB)
     Note over M: next round asks the host first again
 ```
 
-**Cost.** Per silent space and member household: one BEGIN to the host (as
-before) plus one resume request (< 1 KiB) to ONE helper per 30-minute tick;
-the helper serves at most one replay per (requester, space) per 30 min
-(`RESUME_COOLDOWN_S`), ≤ 500 rows per resource of its own people and ≤ 50
-files / 32 MiB per (requester, space, helper) per 30 min. A space with 50
-member households and the host offline for a day: 50 × 48 = 2 400 requests
-a day spread over the helpers. Nothing fans out: one requester, one helper,
-one space per round. Steady state while the host stays silent: each round's
-resume carries only the rows written since the previous ask (plus the
-5-minute overlap, deduped by id) and their files — the first round after a
-boot reaches back to the host's last answer (≤ 30 days) once, since the
-helper-ask mark is in memory.
+**Cost.** Per silent space and round (the 30-minute tick): each of the M
+member households sends its host one BEGIN (as before) and, 120 s after it
+went out, one resume request (< 1 KiB) to ONE helper. The per-household
+offsets spread the M requests over the k helpers — about M/k each, never M
+on one. A helper serves at most one replay per (requester, space) per 30 min
+(`RESUME_COOLDOWN_S`), each ≤ 500 rows per resource of its own people plus
+≤ 50 files / 32 MiB. Worst case per helper and round: (M/k) × (≤ 500 rows
+per resource + ≤ 50 files / 32 MiB) on the **first** round of an outage;
+after that `since` advances to the previous ask (minus the 5-minute overlap,
+deduped by id), so each later round carries only the rows written since and
+their files — a quiet space's replays are near empty. Global space, 200
+member households, 2 helpers, host offline: ~100 requests per helper per
+round; the first round is bounded by 100 × 32 MiB ≈ 3.2 GiB of files per
+helper (only if each requester lacked 50 recent files; the files are the
+hashed pictures the member does not hold yet), every later round only the
+new rows' bytes — 200 × 48 = 9 600 small requests a day in all, ~4 800 per
+helper. Nothing fans out: one requester, one helper, one space per round.
+The first round after a boot reaches back to the host's last answer
+(≤ 30 days) once, since the helper-ask mark is in memory.
 
 ## What a sync streams
 

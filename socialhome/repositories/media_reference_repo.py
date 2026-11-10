@@ -122,6 +122,17 @@ _JSON_FIELD_COLUMNS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+#: A space-album item is live while it and its album are, and it is the
+#: item's own file: never a gallery mirror of a post's media
+#: (``source_post_id``, the system "Posts" album) — that file is the post's,
+#: which the post sources already cover, so a mirror would count it twice
+#: (the catch-up's file budget, a ``SPACE_MEDIA_WANTED`` item list). The
+#: §25.6 gallery stream skips the same rows (``list_items_sync_page``).
+_GALLERY_ITEM_LIVE = (
+    "t.deleted_at IS NULL AND a.space_id IS NOT NULL AND a.deleted_at IS NULL"
+    " AND a.is_system = 0 AND t.source_post_id IS NULL"
+)
+
 #: Every file a space ITEM shows — a post (its images, its attachment, its
 #: link card's thumbnail: ``record_media_urls``), a comment, a calendar cover, a space-album item (file and
 #: thumbnail), a bazaar listing (by its wrapper post's id) — one list for
@@ -199,7 +210,7 @@ _SPACE_ITEM_FILES: tuple[tuple[str, str, str, str, str, str, str], ...] = (
         "a.space_id",
         "t.filename",
         "one",
-        "t.deleted_at IS NULL AND a.space_id IS NOT NULL",
+        _GALLERY_ITEM_LIVE,
         "t.uploaded_by",
     ),
     (
@@ -208,7 +219,7 @@ _SPACE_ITEM_FILES: tuple[tuple[str, str, str, str, str, str, str], ...] = (
         "a.space_id",
         "t.thumbnail_filename",
         "one",
-        "t.deleted_at IS NULL AND a.space_id IS NOT NULL",
+        _GALLERY_ITEM_LIVE,
         "t.uploaded_by",
     ),
     (
@@ -899,9 +910,13 @@ class SqliteMediaReferenceRepo:
                 f"SELECT {key} AS i, datetime(t.created_at) AS c, {owner} AS o,"
                 f" {value} AS v FROM {source}"
                 f" WHERE {space} = ? AND {live} AND {value} IS NOT NULL"
+                # Raw text first (indexable: ``idx_space_posts_created``):
+                # every stored form of a day at or after the cutoff's day
+                # sorts at or above that day — then exact across forms.
+                " AND t.created_at >= ?"
                 " AND datetime(t.created_at) >= datetime(?)"
                 " ORDER BY datetime(t.created_at) DESC LIMIT ?",
-                (space_id, cutoff, int(limit)),
+                (space_id, cutoff[:10], cutoff, int(limit)),
             )
             for r in rows_to_dicts(rows):
                 raw = r.get("v")

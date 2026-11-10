@@ -1182,6 +1182,67 @@ async def test_recent_item_files_are_a_spaces_newest_live_items_with_files(db):
     assert await repo.recent_item_files("sp2", cutoff="2026-10-11", limit=9) == []
 
 
+async def test_post_mirrors_and_deleted_albums_are_not_space_items(db):
+    """A gallery mirror of a post's media (``source_post_id``, in the
+    system "Posts" album or not) shows the post's own file — the post
+    source covers it, so it never counts twice against the catch-up
+    budget — and an item of a deleted album is not live."""
+    await _item_rows(db)
+    await db.enqueue(
+        "INSERT INTO gallery_albums(id, space_id, name, is_system)"
+        " VALUES('al-sys', 'sp1', 'Posts', 1)"
+    )
+    await db.enqueue(
+        "INSERT INTO gallery_albums(id, space_id, name, deleted_at)"
+        " VALUES('al-gone', 'sp1', 'Gone', '2026-11-06 00:00:00')"
+    )
+    for item_id, album, src in (
+        ("g-mirror-sys", "al-sys", "p1"),
+        ("g-mirror", "al-s", "p-link"),
+        ("g-in-gone", "al-gone", None),
+        ("g-sys", "al-sys", None),
+    ):
+        await db.enqueue(
+            "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type,"
+            " filename, thumbnail_filename, width, height, source_post_id,"
+            " created_at) VALUES(?, ?, 'u1', 'photo', 'sc-x.webp', 'sc-x.webp',"
+            " 1, 1, ?, '2026-11-05 09:00:00')",
+            (item_id, album, src),
+        )
+    repo = SqliteMediaReferenceRepo(db)
+    ids = {"g-mirror-sys", "g-mirror", "g-in-gone", "g-sys"}
+    assert not ids & {r[1] for r in await repo.space_rows_of("sc-x.webp")}
+    for item_id in ids:
+        assert await repo.live_item_files("sp1", item_id) == []
+    recent = await repo.recent_item_files("sp1", cutoff="2026-10-11 00:00:00", limit=99)
+    assert not ids & {r[1] for r in recent}
+    # The ordinary space-album item still counts.
+    assert "g1" in {r[1] for r in recent}
+
+
+async def test_recent_item_files_cutoff_is_exact_across_timestamp_forms(db):
+    """``created_at`` is stored naive (``YYYY-MM-DD HH:MM:SS``) or ISO
+    (``…T…+00:00``); the cutoff holds to the second for both — an ISO row on
+    the cutoff's day but before its time is out (raw text would compare it
+    in: ``T`` sorts after a space)."""
+    await _two_spaces(db)
+    for post_id, at in (
+        ("p-iso-before", "2026-11-01T09:00:00+00:00"),
+        ("p-iso-after", "2026-11-01T11:00:00+00:00"),
+        ("p-naive-before", "2026-11-01 09:30:00"),
+        ("p-naive-after", "2026-11-01 10:30:00"),
+    ):
+        await db.enqueue(
+            "INSERT INTO space_posts(id, space_id, author, type, media_url,"
+            " created_at) VALUES(?, 'sp1', 'u1', 'image', 'api/media/a.webp', ?)",
+            (post_id, at),
+        )
+    repo = SqliteMediaReferenceRepo(db)
+    for cutoff in ("2026-11-01 10:00:00", "2026-11-01T10:00:00+00:00"):
+        rows = await repo.recent_item_files("sp1", cutoff=cutoff, limit=9)
+        assert [r[1] for r in rows] == ["p-iso-after", "p-naive-after"]
+
+
 async def test_a_posts_attachment_is_one_of_its_item_files(db):
     """A post's file attachment (``file_meta``) is a file the item shows —
     the record rule's (``record_media_urls``) — on every item read."""
