@@ -1,6 +1,6 @@
 -- GFS 0031 — multi-recipient frame bodies, stored once. Follows 0030.
 --
--- ``POST /gfs/envelope/multi`` (v_90) hands this server ONE sealed body for
+-- ``POST /gfs/envelope/multi`` (v_91) hands this server ONE sealed body for
 -- up to 500 mailboxes (every member household of a space reached over this
 -- GFS), each with its own ``wrap`` (the body key sealed to that mailbox's
 -- key-wrap key, ~150 bytes). Each mailbox drains it from its own queue, so it

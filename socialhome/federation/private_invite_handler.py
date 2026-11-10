@@ -1475,7 +1475,7 @@ class PrivateSpaceInviteHandler:
             and self._writer_certs is not None
         ):
             await self._writer_certs.accept(space_id, event.payload.get("writer_cert"))
-        # v_50 — and, in a strict space, the new epoch's writer group key
+        # v_50 — and the new epoch's writer group key (a v_90 publisher)
         # (verified against the pinned space key on its own).
         if (
             event.payload.get("writer_key") is not None

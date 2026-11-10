@@ -80,7 +80,7 @@ PAIR_WINDOW_404_ATTEMPTS: int = 4
 #: order).
 PARALLEL_RECIPIENTS: int = 8
 
-#: Most multi uploads in flight at once (v_90). They go to a GFS, not to a
+#: Most multi uploads in flight at once (v_91). They go to a GFS, not to a
 #: peer, so they never wait for a :data:`PARALLEL_RECIPIENTS` slot — a hung
 #: peer cannot hold back a queued broadcast.
 MULTI_PARALLEL: int = 4
@@ -134,7 +134,7 @@ Deliver = Callable[[OutboxEntry], Awaitable["DeliveryOutcome | RetryAfter"]]
 
 class OutboxMulti(Protocol):
     """Sends due rows of one multi payload as ONE multi-recipient upload
-    (v_90; implemented by ``FederationService`` — the only multi sender).
+    (v_91; implemented by ``FederationService`` — the only multi sender).
 
     ``outbox_multi_groups`` returns groups (≥ 2 rows each, every row's
     recipient at most once) that may go up together; rows in no group go
@@ -296,7 +296,7 @@ class OutboxProcessor:
 
     def wake(self) -> None:
         """Run a drain pass now instead of at the next poll — a broadcast
-        just queued a multi payload (v_90). A wake during a pass runs one
+        just queued a multi payload (v_91). A wake during a pass runs one
         more pass after it."""
         self._wake.set()
 

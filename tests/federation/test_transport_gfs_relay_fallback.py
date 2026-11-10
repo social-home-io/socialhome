@@ -850,7 +850,7 @@ async def test_a_directory_seat_never_goes_instance_addressed():
     assert await t2.mailbox_reachable(lazy, "sp-1")
 
 
-# ── v_90: one upload for many mailboxes ───────────────────────────────────
+# ── v_91: one upload for many mailboxes ───────────────────────────────────
 
 
 class _MultiRelay(_MailboxRelay):

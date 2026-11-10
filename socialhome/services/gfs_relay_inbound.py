@@ -265,7 +265,7 @@ class GfsRelayInbound:
         id, opened with the same key. Same budgets as the instance-addressed
         relay.
 
-        v_90: a ``sealed`` that names an ``mr_suite`` is a multi-recipient
+        v_91: a ``sealed`` that names an ``mr_suite`` is a multi-recipient
         frame (one body the GFS fanned out to many mailboxes, plus this
         mailbox's ``wrap`` of its key). Charged to the same bucket first;
         the wrap opens under the same mailbox key to the body key *K*, which

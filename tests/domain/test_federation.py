@@ -386,7 +386,7 @@ def test_pending_kind_names_each_handshake():
     assert pending_kind(provisional) == "request"
 
 
-# ─── v_90: multi-recipient frames ────────────────────────────────────────
+# ─── v_91: multi-recipient frames ────────────────────────────────────────
 
 
 def test_multi_event_types_are_the_seat_vocabulary_minus_the_exclusions():

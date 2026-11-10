@@ -274,7 +274,7 @@ async def test_start_stop_lifecycle():
 
 
 async def test_wake_runs_a_pass_before_the_poll_interval():
-    """A broadcast that queued a multi payload wakes the loop (v_90)."""
+    """A broadcast that queued a multi payload wakes the loop (v_91)."""
     repo = MagicMock()
     passes = asyncio.Event()
     calls = 0

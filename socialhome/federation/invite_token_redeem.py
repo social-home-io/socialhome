@@ -585,7 +585,7 @@ class SpaceInviteTokenRedeemCoordinator:
         if cert is None:
             return
         meta["writer_cert"] = cert
-        # v_50 — in a strict space, the epoch's writer group key too.
+        # v_50 — the epoch's writer group key too (a v_90 publisher).
         try:
             key = await self._writer_certs.writer_key_for_peer(
                 str(ack_body.get("space_id") or ""),

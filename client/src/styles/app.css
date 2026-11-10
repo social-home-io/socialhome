@@ -27101,20 +27101,6 @@ button.sh-page-editor-status {
   min-height: 36px;
 }
 
-/* Space settings — connection server publish mode (v_50): the two options'
- * plain-language explanations under the chip group. */
-.sh-gfs-publish-mode__help {
-  margin: var(--sh-space-sm) 0 0;
-  font-size: var(--sh-font-size-sm);
-}
-.sh-gfs-publish-mode__help dt {
-  font-weight: 600;
-}
-.sh-gfs-publish-mode__help dd {
-  margin: 0 0 var(--sh-space-sm);
-  color: var(--sh-text-muted);
-  overflow-wrap: anywhere;
-}
 
 /* Space settings — whether a PRIVATE space uses the connection server.
  * The 409 refusal lists the link-joined households on a danger tint. */

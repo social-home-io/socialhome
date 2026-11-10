@@ -324,7 +324,7 @@ class SpacePublicInbound:
         """A member item relayed through a PRIVATE space's opaque channel
         (v_51). The channel frame names no space — the caller mapped its
         channel id to ``space_id`` locally — and carries no cert; the item
-        then gets exactly the checks of a strict-mode ``space_item`` (the
+        then gets exactly the checks of a ``space_item`` (the
         writer cert from inside the ciphertext against the pinned space key,
         the inner's signed ``space_id`` equal to this space, epoch
         freshness, the author signature, the roster)."""
@@ -617,7 +617,7 @@ class SpacePublicInbound:
             space.id,
         )
 
-    # ── Member-published items (v_49 trusted mode) ───────────────────────
+    # ── Member-published items (v_49) ────────────────────────────────────
 
     async def _on_space_item(self, frame: dict[str, Any]) -> None:
         """A ``space_item`` a member household published itself over the GFS.
@@ -631,9 +631,8 @@ class SpacePublicInbound:
         other type its own domain and suite); require the author-bound
         ``item_type`` (and for a post-shaped inner ``item_target ==
         post_id``); require the origin to be the author's household and the
-        inner cert (identical to the frame's) valid for this space, the
-        frame's epoch (a strict-mode frame, v_50, carries no plaintext cert —
-        the inner one is then the only one), the inner's ``author_pk`` and
+        inner cert (the only one — a frame carries none) valid for this
+        space, the frame's epoch, the inner's ``author_pk`` and
         :func:`~socialhome.domain.space_item.required_scope`, at an epoch
         still open here, with a v2 user binding naming the author. Then
         apply by type: a post dedupes by id; a post edit lands last-writer-
@@ -701,7 +700,6 @@ class SpacePublicInbound:
             epoch=item.epoch,
             item_type=item_type,
             inner=inner,
-            frame_cert=item.writer_cert,
         )
         if verified is None:
             return
@@ -768,7 +766,6 @@ class SpacePublicInbound:
         epoch: int,
         item_type: str,
         inner: dict[str, Any],
-        frame_cert: object | None,
         fresh_epoch: bool = True,
     ) -> tuple[WriterCert, str, str, str] | None:
         """Every check a member-published item gets before it is applied
@@ -824,16 +821,11 @@ class SpacePublicInbound:
             inner_cert = WriterCert.from_wire(raw_cert)
         except ValueError:
             inner_cert = None
-        # A trusted-mode frame carries only the v1 fields (the binding never
-        # leaves the ciphertext): they must be exactly the inner cert's. A
-        # strict-mode frame (v_50) carries no cert at all — the inner one is
-        # the only one, and it gets every check below either way.
-        if inner_cert is None or (
-            frame_cert is not None and inner_cert.v1() != frame_cert
-        ):
+        # The frame carries no cert: the inner one is the only one, and it
+        # gets every check below.
+        if inner_cert is None:
             log.warning(
-                "space_public.inbound: space_item %s cert differs from the frame's "
-                "— dropped",
+                "space_public.inbound: space_item %s carries no valid cert — dropped",
                 item_id,
             )
             return None
@@ -930,7 +922,6 @@ class SpacePublicInbound:
                     epoch=epoch,
                     item_type=ITEM_TYPE_AUTHOR_PROFILE,
                     inner=raw,
-                    frame_cert=None,
                     fresh_epoch=False,
                 )
                 if verified is None:

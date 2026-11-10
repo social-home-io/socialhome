@@ -1,4 +1,4 @@
-"""``POST /gfs/envelope/multi`` (v_90): ONE sealed body for many mailboxes,
+"""``POST /gfs/envelope/multi`` (v_91): ONE sealed body for many mailboxes,
 each with its own ``wrap``. The body is stored once (GFS migration 0031),
 each wrap in its mailbox's reference row, and every registered mailbox's
 claim socket gets the SAME body with ITS OWN wrap. Real GFS app, real
@@ -169,7 +169,7 @@ _BAD = [
     {"to": [], "body": BODY},
     {"to": A_ENTRY, "body": BODY},
     {"to": [A_ENTRY], "body": BODY, "extra": 1},
-    # The previous v_90 shape is gone.
+    # The previous v_91 shape is gone.
     {"to_mailboxes": ["a" * 32], "sealed": BODY},
     # Entries.
     {"to": ["a" * 32], "body": BODY},

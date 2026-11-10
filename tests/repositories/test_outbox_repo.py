@@ -1224,7 +1224,7 @@ async def test_a_legacy_envelope_row_still_lists(env):
 
 
 async def test_a_multi_payload_and_its_refs_go_in_together(env):
-    """v_90: a broadcast's multi payload — stored once with its ``msg_id``,
+    """v_91: a broadcast's multi payload — stored once with its ``msg_id``,
     one ref row per household still paired, in one transaction."""
     multi = dataclasses.replace(_stored("p-m"), msg_id="wire-1")
     written = await env.outbox_repo.enqueue_refs(
@@ -1265,7 +1265,7 @@ async def test_list_due_leaves_out_busy_households(env):
 
 
 async def test_pending_multi_due_names_only_a_pending_multi_row(env):
-    """v_90 FIFO: the latest due time of a household's pending rows of a
+    """v_91 FIFO: the latest due time of a household's pending rows of a
     multi payload; a failed send's payload (no ``msg_id``) and a delivered
     row do not count."""
     assert await env.outbox_repo.pending_multi_due("peer-a") is None

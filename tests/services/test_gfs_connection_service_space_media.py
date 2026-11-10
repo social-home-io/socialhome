@@ -4,7 +4,6 @@ and where a space's follower copies go."""
 
 from __future__ import annotations
 
-from dataclasses import replace
 from types import SimpleNamespace
 
 import aiohttp
@@ -161,23 +160,6 @@ async def test_put_transport_error_is_none(env):
     assert (
         await svc.put_space_media(conn, blob_id=BID, blob=b"x", auth_header="h") is None
     )
-
-
-async def test_an_identified_put_never_goes_to_a_listing_target(env):
-    session = _MediaSession()
-    svc = await _svc(env, session)
-    listing = replace(await env[1].get("g1"), registered=False)
-    assert (
-        await svc.put_space_media(
-            listing,
-            blob_id=BID,
-            blob=b"x",
-            auth_header="h",
-            identified=True,
-        )
-        is None
-    )
-    assert session.puts == []
 
 
 async def test_fetch_reads_the_blob(env):
@@ -611,7 +593,7 @@ async def test_envelope_mailbox_unsigned_or_unreachable_is_off(env):
     assert not await svc2.envelope_mailbox_supported(conn)
 
 
-# ── v_90: envelope_multi from the signed block ───────────────────────────
+# ── v_91: envelope_multi from the signed block ───────────────────────────
 
 
 def _multi_info(multi, *, mailbox=True) -> dict:

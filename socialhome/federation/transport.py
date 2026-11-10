@@ -2189,7 +2189,7 @@ class FederationTransport:
         GFS mailbox (v_89) — the host-hop decision for a directory seat."""
         return await self._mailbox_target(instance, space_id, media=False) is not None
 
-    # ── v_90: one upload for many mailboxes ──────────────────────────────
+    # ── v_91: one upload for many mailboxes ──────────────────────────────
 
     async def multi_mailbox_target(
         self,

@@ -464,7 +464,7 @@ class InMemoryOutboxRepo:
         return []
 
     async def pending_multi_due(self, instance_id: str) -> str | None:
-        """v_90 — a seat's pending multi-payload row (every queued row
+        """v_91 — a seat's pending multi-payload row (every queued row
         counts as pending here): due at :attr:`multi_due`."""
         for e in self.enqueued:
             pid = e["payload_id"]

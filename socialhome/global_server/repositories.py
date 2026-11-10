@@ -45,7 +45,7 @@ from .domain import (
     GfsSpaceEpoch,
     GfsSpaceMedia,
     GfsSpaceMediaDemand,
-    GfsSpaceStrictState,
+    GfsSpaceWriterKeys,
     GfsSubscriber,
     GfsSubscriberWithKeys,
     GfsUserPicture,
@@ -1598,9 +1598,6 @@ def _row_to_space(row: dict | None) -> GlobalSpace | None:
         authority_cert=_load_cert(row.get("authority_cert")),
         authority_rotation_seq=int(row.get("authority_rotation_seq") or 0),
         withdrawn=bool(row.get("withdrawn") or 0),
-        member_publish_mode=(
-            "strict" if row.get("member_publish_mode") == "strict" else "trusted"
-        ),
         place_lat=row.get("place_lat"),
         place_lon=row.get("place_lon"),
         place_radius_km=row.get("place_radius_km"),
@@ -3421,7 +3418,7 @@ class SqliteGfsEnvelopeQueueRepo:
         max_total_bytes: int,
         ceiling_bytes: int,
     ) -> list[str]:
-        """Queue ONE multi-recipient frame (v_90) — *body_json* for every
+        """Queue ONE multi-recipient frame (v_91) — *body_json* for every
         ``(mailbox, wrap_json)`` in *recipients* that has room; return the
         mailboxes admitted, in order (a repeated mailbox keeps its first wrap).
 
@@ -4243,9 +4240,7 @@ class AbstractGfsSpaceEpochRepo(Protocol):
         self, space_id: str, epoch: int, *, now: int, min_interval_s: int
     ) -> bool: ...
 
-    async def get_strict(self, space_id: str) -> GfsSpaceStrictState | None: ...
-
-    async def set_publish_mode(self, space_id: str, mode: str, *, at: int) -> bool: ...
+    async def get_writer_keys(self, space_id: str) -> GfsSpaceWriterKeys | None: ...
 
     async def pin_writer_key(
         self, space_id: str, epoch: int, writer_pk: str, *, replace: bool
@@ -4319,15 +4314,14 @@ class SqliteGfsSpaceEpochRepo:
         )
         return changed > 0
 
-    # ── Strict mode (v_50, migration 0015) ───────────────────────────────
+    # ── Writer keys (member publish, migration 0015) ─────────────────────
 
-    async def get_strict(self, space_id: str) -> GfsSpaceStrictState | None:
-        """The space's publish mode and writer-key pins, or ``None`` for a
-        space this server does not list."""
+    async def get_writer_keys(self, space_id: str) -> GfsSpaceWriterKeys | None:
+        """The space's writer-key pins, or ``None`` for a space this server
+        does not list."""
         row = _as_dict(
             await self._db.fetchone(
-                "SELECT member_publish_mode, member_publish_mode_at,"
-                " writer_key_epoch, writer_key_pk,"
+                "SELECT writer_key_epoch, writer_key_pk,"
                 " writer_key_prev_epoch, writer_key_prev_pk"
                 " FROM global_spaces WHERE space_id=?",
                 (space_id,),
@@ -4340,29 +4334,13 @@ class SqliteGfsSpaceEpochRepo:
             value = row.get(name)
             return int(value) if value is not None else None
 
-        return GfsSpaceStrictState(
+        return GfsSpaceWriterKeys(
             space_id=space_id,
-            publish_mode=str(row.get("member_publish_mode") or "trusted"),
-            mode_at=_int("member_publish_mode_at"),
             writer_key_epoch=_int("writer_key_epoch"),
             writer_key_pk=row.get("writer_key_pk"),
             writer_key_prev_epoch=_int("writer_key_prev_epoch"),
             writer_key_prev_pk=row.get("writer_key_prev_pk"),
         )
-
-    async def set_publish_mode(self, space_id: str, mode: str, *, at: int) -> bool:
-        """The OWNER's notice states ``mode`` at ``at`` (its signed ``ts``, unix
-        seconds). Lands only when no older-or-equal statement is newer — a
-        replayed older notice never moves the mode back. The CHECK constraint
-        refuses any other value. Returns whether the row changed."""
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE global_spaces SET member_publish_mode=?,"
-            " member_publish_mode_at=?"
-            " WHERE space_id=?"
-            " AND (member_publish_mode_at IS NULL OR member_publish_mode_at <= ?)",
-            (mode, at, space_id, at),
-        )
-        return changed > 0
 
     async def pin_writer_key(
         self, space_id: str, epoch: int, writer_pk: str, *, replace: bool
@@ -4417,10 +4395,6 @@ class AbstractGfsChannelRepo(Protocol):
 
     async def set_epoch(
         self, channel_id: str, epoch: int, *, expected: int | None, now: int
-    ) -> bool: ...
-
-    async def set_publish_mode(
-        self, channel_id: str, mode: str, *, at: int
     ) -> bool: ...
 
     async def pin_writer_key(
@@ -4484,8 +4458,6 @@ class SqliteGfsChannelRepo:
             epoch=_int("content_epoch"),
             epoch_prev=_int("content_epoch_prev"),
             epoch_raised_at=_int("content_epoch_raised_at"),
-            publish_mode=str(row.get("publish_mode") or "trusted"),
-            publish_mode_at=_int("publish_mode_at"),
             writer_key_epoch=_int("writer_key_epoch"),
             writer_key_pk=row.get("writer_key_pk"),
             writer_key_prev_epoch=_int("writer_key_prev_epoch"),
@@ -4533,16 +4505,6 @@ class SqliteGfsChannelRepo:
             )
             params = (epoch, now, now, channel_id, expected, epoch)
         return await self._db.enqueue_rowcount(sql, params) > 0
-
-    async def set_publish_mode(self, channel_id: str, mode: str, *, at: int) -> bool:
-        """Lands only when no newer statement is stored — a replayed older
-        notice never moves the mode back. The CHECK refuses other values."""
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE gfs_channels SET publish_mode=?, publish_mode_at=?"
-            " WHERE channel_id=? AND (publish_mode_at IS NULL OR publish_mode_at <= ?)",
-            (mode, at, channel_id, at),
-        )
-        return changed > 0
 
     async def pin_writer_key(self, channel_id: str, epoch: int, writer_pk: str) -> bool:
         """Pin ``writer_pk`` as the writer key of ``epoch``: the first pin of

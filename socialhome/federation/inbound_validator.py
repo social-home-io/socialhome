@@ -193,7 +193,7 @@ class InboundContext:
     #: the bytes may legitimately be up to a day old.
     transport: str = ""
 
-    #: v_90 — the body key *K* of a multi-recipient frame, opened from its
+    #: v_91 — the body key *K* of a multi-recipient frame, opened from its
     #: wrap under our mailbox key (set by the mailbox leg, never by a wire
     #: field). The payload is decrypted under it instead of the pair's
     #: session key. ``None`` for every ordinary envelope; see
@@ -554,7 +554,7 @@ def make_check_relay_opt_in() -> InboundStep:
 
 
 def make_check_multi_recipient(*, own_instance_id: str) -> InboundStep:
-    """Step 1b (v_90): hold ``to_instance = "*…"`` to multi-recipient frames.
+    """Step 1b (v_91): hold ``to_instance = "*…"`` to multi-recipient frames.
 
     A multi-recipient envelope is addressed to the member households its
     sender listed (``"*:" + tags``, :func:`~socialhome.federation

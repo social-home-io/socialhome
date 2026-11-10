@@ -142,23 +142,17 @@ class GfsInfoView(GfsBaseView):
         # key from an owner-signed cert on publish. Signed like its siblings:
         # a stripped flag only makes a household warn that a revoked admin's
         # old key may keep authorizing relays here.
-        # ``member_publish_trusted`` (v_49): this GFS carries
-        # ``POST /gfs/member-publish`` (identified, writer-cert-authorized
-        # member items under the generic ``space_item`` type) and the
-        # authority-signed ``POST /gfs/spaces/{id}/epoch`` notice. Signed
-        # because a household sends an IDENTIFIED body only to a server that
-        # opted in — a forged flag must not be able to make it reveal itself
-        # to a server that never agreed to the trusted-mode contract.
-        # ``member_publish_strict`` (v_50): this GFS carries the anonymous
-        # ``POST /gfs/member-publish-anon`` (writer-group-key-signed), takes
-        # ``publish_mode`` / ``writer_key_cert`` on the epoch notice, and
-        # refuses identified publishes into a strict space. Signed because a
-        # household only adds those notice fields for a server that verifies
-        # them (an older one would refuse the owner's notice outright).
+        # ``member_publish_strict`` (v_50; the name is historical — since
+        # v_90 it is the ONLY member publish): this GFS carries the anonymous
+        # ``POST /gfs/member-publish-anon`` (writer-group-key-signed) and the
+        # ``POST /gfs/spaces/{id}/epoch`` notice that pins the writer key
+        # (``writer_key_cert``). Signed because a household only adds that
+        # notice field for a server that verifies it (an older one would
+        # refuse the owner's notice outright).
         # ``private_channels`` (v_51): this GFS carries the opaque
         # ``/gfs/channels/*`` routes — anonymous channel-key-signed
-        # registration and epoch notices, pass-gated member seats, trusted
-        # and strict channel publishes. Signed because a household creates a
+        # registration and epoch notices, pass-gated member seats and the
+        # anonymous channel publish. Signed because a household creates a
         # private space's channel (and its members subscribe, identified)
         # only against a server that agreed to never learn the space.
         # ``open_signup``: this GFS hands out pairing tokens over
@@ -178,7 +172,6 @@ class GfsInfoView(GfsBaseView):
             "envelope_relay": True,
             "invite_links": True,
             "authority_rotation": True,
-            "member_publish_trusted": True,
             "member_publish_strict": True,
             "private_channels": True,
             "open_signup": bool(cfg.open_signup),
@@ -307,7 +300,7 @@ class GfsInfoView(GfsBaseView):
         mailbox = self.svc(K.gfs_mailbox_service_key).capability()
         if mailbox is not None:
             capabilities[ENVELOPE_MAILBOX_CAPABILITY] = mailbox
-            # v_90 — ``POST /gfs/envelope/multi``: ONE sealed frame for up to
+            # v_91 — ``POST /gfs/envelope/multi``: ONE sealed frame for up to
             # this many mailboxes, stored once and pushed to each. Signed: a
             # household uploads a space's frame once only to a server that
             # proved it takes it; otherwise it sends one envelope per member.

@@ -12,7 +12,7 @@
 -- sealed envelope in ``payload_json`` and drain as before. Local-only.
 --
 -- ``msg_id`` (NULL for a failed send's payload) marks a *multi payload*: a
--- space broadcast to two or more v_90 mailbox seats behind one GFS is
+-- space broadcast to two or more v_91 mailbox seats behind one GFS is
 -- written here at once (random ``id``, uuid4 ``msg_id``) and the outbox
 -- uploads it ONCE for all of them. Every envelope built from it — the multi
 -- frame and any per-row fallback — carries that ``msg_id``, so a retry

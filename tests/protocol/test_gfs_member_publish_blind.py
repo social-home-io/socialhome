@@ -2,8 +2,8 @@
 server as ciphertext under a generic type — never content, never the real
 item type.
 
-Trusted mode lets the GFS learn WHICH household published (owner decision,
-``docs/principles.md``); it must still learn nothing about WHAT. This drives
+The publish is anonymous (one mode since v_90, ``docs/principles.md``): the
+GFS learns neither WHO published nor WHAT. This drives
 a real GFS app end to end and checks every place the server could see or
 keep the item: the request it receives, its logs, the queued row and the
 frame it fans out. It also pins that the wire shape has no room for a
@@ -28,15 +28,13 @@ from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
     ed25519_public_key,
-    sign_ed25519,
 )
 from socialhome.domain.federation import GfsConnection
 from socialhome.domain.gfs_member_publish import (
-    MEMBER_PUBLISH_FRAME_KEYS,
-    MEMBER_PUBLISH_REQUEST_KEYS,
-    PLAINTEXT_CERT_KEYS,
+    MEMBER_PUBLISH_ANON_FRAME_KEYS,
+    MEMBER_PUBLISH_ANON_REQUEST_KEYS,
     SPACE_ITEM_EVENT_TYPE,
-    MemberPublishRequest,
+    MemberPublishAnonRequest,
 )
 from socialhome.domain.space_author_profile import (
     PROFILE_PICTURE_FIELD,
@@ -49,12 +47,18 @@ from socialhome.global_server.app_keys import (
     gfs_envelope_queue_repo_key,
     gfs_fed_repo_key,
     gfs_member_publish_key,
+    gfs_space_epoch_repo_key,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.server import create_gfs_app
 from socialhome.services.gfs_member_publish_service import GfsMemberPublishService
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
+from socialhome.writer_key import (
+    derive_writer_seed,
+    issue_writer_key_grant,
+    sign_with_writer_key,
+)
 
 pytestmark = pytest.mark.security
 
@@ -82,24 +86,21 @@ class _Household:
 
 
 def _request(publisher: _Household) -> dict:
-    req = MemberPublishRequest(
-        instance_id=publisher.instance_id,
+    """An anonymous publish: nothing in it names *publisher*."""
+    req = MemberPublishAnonRequest(
         gfs_instance_id="gfs-node-a",
         ts=datetime.now(UTC).isoformat(),
-        signature="",
+        nonce=b64url_encode(os.urandom(16)),
         target=SPACE_ID,
         epoch=1,
-        writer_cert=sign_writer_cert(
-            space_seed=SPACE_SEED,
-            space_id=SPACE_ID,
-            epoch=1,
-            instance_pk=publisher.pk,
-            scope="write",
-        ),
         payload=_ciphertext(),
+        writer_sig="",
+        writer_sig_suite="ed25519",
     )
-    sig = sign_ed25519(publisher.seed, req.signing_bytes())
-    return replace(req, signature=b64url_encode(sig)).to_wire()
+    seed = derive_writer_seed(SPACE_SEED, SPACE_ID, 1)
+    return replace(
+        req, writer_sig=sign_with_writer_key(seed, req.signing_bytes())
+    ).to_wire()
 
 
 @pytest.fixture
@@ -142,6 +143,17 @@ async def gfs(tmp_dir):
             space_id=SPACE_ID, instance_id=tc.subscriber.instance_id
         )
         await fed.mark_relay_seen(tc.subscriber.instance_id, at=int(time.time()))
+        # The owner confirmed epoch 1 and pinned its writer key.
+        epochs = app[gfs_space_epoch_repo_key]
+        await epochs.confirm(SPACE_ID, 1, now=int(time.time()))
+        await epochs.pin_writer_key(
+            SPACE_ID,
+            1,
+            issue_writer_key_grant(
+                space_seed=SPACE_SEED, space_id=SPACE_ID, epoch=1
+            ).writer_key_cert.writer_pk,
+            replace=True,
+        )
         yield tc
 
 
@@ -153,12 +165,13 @@ def _assert_blind(text: str, where: str) -> None:
 async def test_the_gfs_never_sees_content_or_the_real_item_type(gfs, caplog):
     body = _request(gfs.publisher)
     # What the GFS receives.
-    assert set(body) == MEMBER_PUBLISH_REQUEST_KEYS
+    assert set(body) == MEMBER_PUBLISH_ANON_REQUEST_KEYS
+    assert gfs.publisher.instance_id not in json.dumps(body)
     assert body["event_type"] == SPACE_ITEM_EVENT_TYPE
     _assert_blind(json.dumps(body), "the request")
 
     with caplog.at_level(logging.DEBUG):
-        resp = await gfs.post("/gfs/member-publish", json=body)
+        resp = await gfs.post("/gfs/member-publish-anon", json=body)
         assert resp.status == 200
         await gfs.app_[gfs_member_publish_key].wait_idle()
     _assert_blind(caplog.text, "the GFS logs")
@@ -169,7 +182,7 @@ async def test_the_gfs_never_sees_content_or_the_real_item_type(gfs, caplog):
     )
     assert len(queued) == 1
     frame = queued[0].sealed
-    assert set(frame) == MEMBER_PUBLISH_FRAME_KEYS
+    assert set(frame) == MEMBER_PUBLISH_ANON_FRAME_KEYS
     assert frame["event_type"] == SPACE_ITEM_EVENT_TYPE
     _assert_blind(json.dumps(frame), "the fan-out frame")
     assert "from_instance" not in frame
@@ -186,7 +199,7 @@ async def test_the_gfs_never_sees_content_or_the_real_item_type(gfs, caplog):
 )
 async def test_the_wire_shape_has_no_room_for_a_plaintext_side_channel(gfs, smuggle):
     body = {**_request(gfs.publisher), **smuggle}
-    resp = await gfs.post("/gfs/member-publish", json=body)
+    resp = await gfs.post("/gfs/member-publish-anon", json=body)
     assert resp.status == 400
     assert (
         await gfs.app_[gfs_envelope_queue_repo_key].list_for(
@@ -198,8 +211,8 @@ async def test_the_wire_shape_has_no_room_for_a_plaintext_side_channel(gfs, smug
 
 async def test_the_user_binding_never_reaches_the_gfs(gfs, caplog):
     """U1: the household's real publish path (the v2 cert with its user
-    binding) hands the connection server the v1 cert fields only — in the
-    request, the fan-out frame and the queued row."""
+    binding) hands the connection server no cert at all — in the request,
+    the fan-out frame and the queued row it stays inside the ciphertext."""
     publisher = gfs.publisher
     cert = bind_writer_users(
         sign_writer_cert(
@@ -254,7 +267,8 @@ async def test_the_user_binding_never_reaches_the_gfs(gfs, caplog):
     ):
         for leak in ("alice-user-id", "bob-user-id", "writer_user_ids", "users_sig"):
             assert leak not in blob, f"{where} carries {leak!r}"
-    assert set(queued[0].sealed["writer_cert"]) == PLAINTEXT_CERT_KEYS
+    assert "writer_cert" not in queued[0].sealed
+    assert all("writer_cert" not in body for body in sent)
 
 
 class _HouseholdGfs:
@@ -282,14 +296,15 @@ class _HouseholdGfs:
     async def server_targets(self, space_id):
         return None
 
+    async def member_publish_strict_supported(self, conn):
+        return True
+
 
 class _TrustedSpaces:
-    """A space repo holding the one (trusted-mode) public space."""
+    """A space repo holding the one public space."""
 
     async def get(self, space_id):
-        return SimpleNamespace(
-            id=space_id, features=SimpleNamespace(gfs_publish_mode="trusted")
-        )
+        return SimpleNamespace(id=space_id, features=SimpleNamespace())
 
 
 class _OneKey:
@@ -313,8 +328,8 @@ class _FixedCert:
         return self.cert
 
     async def own_writer_key(self, space_id, epoch):
-        # Trusted mode: no writer group key held (v_50 strict is its own test).
-        return None
+        # The epoch's writer group key, as every v_90 publisher holds it.
+        return derive_writer_seed(SPACE_SEED, space_id, epoch)
 
 
 ITEM_TYPES = (
@@ -394,7 +409,7 @@ async def test_no_member_item_type_ever_reaches_the_gfs_in_plaintext(
         gfs.subscriber.instance_id, now=0
     )
     assert len(queued) == 1
-    assert set(queued[0].sealed) == MEMBER_PUBLISH_FRAME_KEYS
+    assert set(queued[0].sealed) == MEMBER_PUBLISH_ANON_FRAME_KEYS
     assert queued[0].sealed["event_type"] == SPACE_ITEM_EVENT_TYPE
     # Size padding: every small item — a reaction or a post alike — is one
     # 1 KiB bucket inside the AEAD (12-byte nonce + 16-byte tag around it),

@@ -288,13 +288,13 @@ class RelayEnvelopeSender(Protocol):
         ...
 
     def multi_max_recipients(self, conn: Any) -> int:
-        """v_90 — most mailbox ids one upload to *conn* may name."""
+        """v_91 — most mailbox ids one upload to *conn* may name."""
         ...
 
     async def send_to_mailboxes(
         self, *, entries: list[tuple[str, dict]], gfs_url: str, body: dict
     ) -> int | None:
-        """v_90 — POST one multi-recipient frame (``(mailbox_id, wrap)``
+        """v_91 — POST one multi-recipient frame (``(mailbox_id, wrap)``
         entries + the body) over the anonymous session; the HTTP status, or
         ``None`` when not reached."""
         ...

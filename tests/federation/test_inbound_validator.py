@@ -1882,7 +1882,7 @@ async def test_check_event_types_refuses_any_other_type():
         await step(ctx)
 
 
-# ─── v_90: multi-recipient mailbox frames ────────────────────────────────
+# ─── v_91: multi-recipient mailbox frames ────────────────────────────────
 
 
 _MULTI_KEY = b"\x07" * 32

@@ -35,10 +35,8 @@ local user — enforced below — so this household always holds the author's
 identity seed and can produce ``author_sig``). Since v_49 a plain member
 household publishes its own items itself, over the member relay
 (``space_item``, :mod:`socialhome.services.gfs_member_publish_service`:
-anonymous under the writer group key in a strict space, and since v_57 in a
-publicly readable trusted one too, to every GFS the owner listed; a member
-household without the group key publishes identified to the servers it is
-registered on). Its posts are still also relayed by every seed-holder
+always anonymous under the writer group key, to every GFS the owner listed;
+a member household without the group key publishes nothing there). Its posts are still also relayed by every seed-holder
 (the remote-author path below), because a follower on an older build reads
 only ``space_post_public``. Followers dedupe the two copies by post id.
 Authors' own edits and deletes travel over the member relay only; see below

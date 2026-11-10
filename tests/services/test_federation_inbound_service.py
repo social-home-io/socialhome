@@ -3238,42 +3238,9 @@ async def test_config_changed_applies_owner_only_flags_on_a_member_household(
     assert space.name == "OwnerOpenedIt"
 
 
-@pytest.mark.security
-@pytest.mark.parametrize("we_host", [True, False])
-async def test_config_changed_never_takes_gfs_publish_mode_from_a_non_owner(
-    db, bus, inbound, we_host
-):
-    """v_50 SECURITY: ``gfs_publish_mode`` is the owner's alone on EVERY
-    household. A seed-holding delegated admin flipping a strict space back to
-    trusted on member mirrors would make them send identified requests to the
-    connection server — the leak strict mode prevents."""
-    kp = generate_space_keypair()
-    await _seed_signed_space(
-        db,
-        space_id="sp-strict",
-        owner_instance="owner-i",
-        space_pub_hex=kp.public_key.hex(),
-        seq=5,
-    )
-    await db.enqueue("UPDATE spaces SET gfs_publish_mode='strict' WHERE id='sp-strict'")
-    _own_instance(inbound, "owner-i" if we_host else "own-i")
-    await inbound._on_space_config_changed(
-        _signed_cfg_event(
-            space_id="sp-strict",
-            from_instance="admin-i",
-            owner_instance="owner-i",
-            sequence=9,
-            name="RenamedByAdmin",
-            seed=kp.private_key,
-            features={**_OWNER_ONLY_FEATURES_ON, "gfs_publish_mode": "trusted"},
-        )
-    )
-    space = await SqliteSpaceRepo(db).get("sp-strict")
-    assert space.features.gfs_publish_mode == "strict"
-    assert space.name == "RenamedByAdmin"
-
-
-async def test_config_changed_takes_gfs_publish_mode_from_the_owner(db, bus, inbound):
+async def test_config_changed_ignores_a_pre_v90_gfs_publish_mode(db, bus, inbound):
+    """v_90 — one mode: an older owner's config still carrying
+    ``gfs_publish_mode`` applies, and the field is simply ignored."""
     kp = generate_space_keypair()
     await _seed_signed_space(
         db,
@@ -3289,13 +3256,14 @@ async def test_config_changed_takes_gfs_publish_mode_from_the_owner(db, bus, inb
             from_instance="owner-i",
             owner_instance="owner-i",
             sequence=9,
-            name="OwnerWentStrict",
+            name="OwnerRenamed",
             seed=kp.private_key,
             features={**_OWNER_ONLY_FEATURES_ON, "gfs_publish_mode": "strict"},
         )
     )
     space = await SqliteSpaceRepo(db).get("sp-strict2")
-    assert space.features.gfs_publish_mode == "strict"
+    assert space.name == "OwnerRenamed"
+    assert not hasattr(space.features, "gfs_publish_mode")
 
 
 @pytest.mark.security

@@ -51,7 +51,7 @@ class OutboxPayload:
     send's payload has an HMAC ``id`` under a per-process key (one
     broadcast's failed recipients share the row, nothing guessable is
     stored) and no ``msg_id``. A *multi payload* — a broadcast to mailbox
-    seats behind one GFS, uploaded once by the outbox (v_90) — has a random
+    seats behind one GFS, uploaded once by the outbox (v_91) — has a random
     ``id`` and a uuid4 ``msg_id`` that every envelope built from it carries.
     """
 

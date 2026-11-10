@@ -201,7 +201,7 @@ class SqliteOutboxRepo:
         payload_ref: OutboxPayload,
     ) -> dict[str, str]:
         """Store *payload_ref* once and one ref row per household of
-        *instance_ids* in ONE transaction (v_90: a broadcast's multi
+        *instance_ids* in ONE transaction (v_91: a broadcast's multi
         payload). Each row is prepared as :meth:`enqueue` prepares one
         (supersede, per-peer cap); a household no longer paired gets none.
         Returns ``{instance_id: row id}`` of the rows written."""
@@ -378,7 +378,7 @@ class SqliteOutboxRepo:
 
     async def pending_multi_due(self, instance_id: str) -> str | None:
         """The latest ``next_attempt_at`` of *instance_id*'s pending rows of
-        a multi payload (v_90, its ``msg_id`` set), or ``None`` when it has
+        a multi payload (v_91, its ``msg_id`` set), or ``None`` when it has
         none — a live send to it must queue behind them, not overtake."""
         row = await self._db.fetchone(
             "SELECT MAX(datetime(o.next_attempt_at)) AS due"

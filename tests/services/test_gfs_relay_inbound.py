@@ -678,7 +678,7 @@ async def test_a_flood_on_one_mailbox_shuts_only_that_mailbox(keys, monkeypatch)
     assert [c[0] for c in federation.calls] == ["x" * 32] * 2 + ["y" * 32]
 
 
-# ── v_90: multi-recipient frames, through the real §24.11 pipeline ───────
+# ── v_91: multi-recipient frames, through the real §24.11 pipeline ───────
 
 _SPACE = "sp-multi"
 _OTHER_SPACE = "sp-other"

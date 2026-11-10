@@ -1,4 +1,4 @@
-"""Multi-recipient mailbox frames (v_90): one sealed body, many mailboxes.
+"""Multi-recipient mailbox frames (v_91): one sealed body, many mailboxes.
 
 A space event whose bytes are identical for every member household that
 reaches the space through the same GFS is uploaded ONCE

@@ -1,6 +1,6 @@
 """Migration 0145 — a failed send stores the event payload ONCE (KEK-wrapped)
 plus one ref row per recipient; a ref row is sealed for its one peer when it
-is sent. A broadcast's multi payload (v_90, its ``msg_id`` set) goes up as ONE
+is sent. A broadcast's multi payload (v_91, its ``msg_id`` set) goes up as ONE
 multi upload for the due rows whose peers are mailbox seats on one GFS, and
 every envelope built from it carries that ``msg_id``."""
 

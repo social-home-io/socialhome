@@ -1,4 +1,4 @@
-"""Tests for :mod:`socialhome.federation.multi_recipient` (v_90).
+"""Tests for :mod:`socialhome.federation.multi_recipient` (v_91).
 
 Real crypto end to end: the per-recipient wrap of the body key, the signed
 inner envelope, the body seal and every refusal a receiver must make.

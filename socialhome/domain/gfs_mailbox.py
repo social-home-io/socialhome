@@ -53,7 +53,7 @@ SUPPORTED_MAILBOX_SIG_SUITES: frozenset[str] = frozenset({MAILBOX_SIG_SUITE_ED25
 ENVELOPE_MAILBOX_CAPABILITY: str = "envelope_mailbox"
 
 #: The signed ``/gfs/info`` capability of a GFS that takes ONE sealed frame
-#: for many mailboxes (``POST /gfs/envelope/multi``, v_90):
+#: for many mailboxes (``POST /gfs/envelope/multi``, v_91):
 #: ``{"max_recipients": MULTI_MAX_RECIPIENTS}``. Advertised whenever
 #: :data:`ENVELOPE_MAILBOX_CAPABILITY` is.
 ENVELOPE_MULTI_CAPABILITY: str = "envelope_multi"

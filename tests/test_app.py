@@ -706,7 +706,7 @@ async def test_gfs_route_resolver_maps_routes_to_active_connection_urls(tmp_dir)
 
 
 def test_build_outbox_processor_hands_its_wake_to_the_federation_service():
-    """v_90: the outbox is the only multi sender — a broadcast that queued
+    """v_91: the outbox is the only multi sender — a broadcast that queued
     a multi payload wakes it."""
 
     class _Fed:

@@ -701,7 +701,7 @@ body sealed once under a fresh key wrapped to each mailbox — on its own 4
 slots, so a hung peer never delays it. A throttled, timed-out or `5xx`
 upload is retried as a whole; a `4xx` refusal goes per row. A live send to
 a seat with a multi row pending is queued behind it
-([gfs-relay](protocol/gfs-relay.md#one-upload-for-many-mailboxes-v_90)). Structural /
+([gfs-relay](protocol/gfs-relay.md#one-upload-for-many-mailboxes-v_91)). Structural /
 security-critical events have `expires_at = NULL` and never age out;
 ordinary events have a 7-day TTL (§4.4.7), and a moment's delete
 (`LONG_LIVED`, v_66) 30 days of retries on the ceiling backoff. A delivered envelope's row is

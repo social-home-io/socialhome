@@ -559,7 +559,7 @@ def _build_outbox_processor(
     0145, has the stored payload sealed for its peer). ``after_prune``: once
     the retention sweep has failed an UNPAIR past its max age, that peer's
     unpair tombstone is purged. ``multi``: due ref rows of one multi
-    payload to mailbox seats on one GFS go up as ONE upload (v_90); rows the
+    payload to mailbox seats on one GFS go up as ONE upload (v_91); rows the
     moderation check refuses stay single. The federation service wakes it
     when a broadcast queued a multi payload — it is the only multi sender.
     """
@@ -2462,7 +2462,6 @@ def _build_space_media_gfs(
         writer_certs=writer_certs,
     )
     uploader.attach_federation(federation_service)
-    uploader.attach_identity(own_identity_seed=identity_seed)
     fetcher = SpaceMediaGfsFetcher(
         refs_repo=repos.space_media_ref,
         space_crypto=space_crypto,
@@ -4603,8 +4602,9 @@ def create_app(config: Config | None = None) -> web.Application:
         nonlocal space_public_outbound, space_public_inbound
         nonlocal space_subscriber_key_outbound, space_subscriber_key_inbound
         nonlocal gfs_member_publish, gfs_channels
-        # v_49 trusted-mode member publish (household side): our own posts
-        # to each capable GFS, epoch notices on rotation, member subscriptions.
+        # v_49 member publish (household side, anonymous since v_90): our
+        # own items to each capable GFS, epoch notices on rotation, member
+        # subscriptions.
         gfs_member_publish = GfsMemberPublishService(
             gfs=gfs_connection_service,
             conn_repo=repos.gfs_connection,

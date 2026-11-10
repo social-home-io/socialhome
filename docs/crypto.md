@@ -70,7 +70,7 @@ addresses. See the last section of this document.
 | Symmetric AEAD (public moment media, v_63) | AES-256-GCM over a padded plaintext | 256-bit | A public moment's photo / video, sealed once under `HKDF(item_key, "sh-moment-media:v1|" + role)`; plaintext `u32 length ‖ file ‖ zeros` up to a 64 KB…8 MB bucket; AAD binds suite, author, moment id and role; the blob is addressed by its SHA-256 (suite `media_suite: "aesgcm-256-pad"`, unknown refused — `UnsupportedMediaSuite`). Role `share` is a moment's **share copy** (text, timestamps, author name, media descriptor; 4 KB bucket) that a per-moment share link opens; the link's fragment carries the moment's item key — never the generation or step key — so it opens that one moment | `socialhome/moment_public_media.py`, `client/gfs/moment_seal.ts` |
 | Symmetric AEAD (space media in a GFS cache, v_80) | AES-256-GCM over a padded plaintext, deterministic nonce | 256-bit | A space file (post picture, calendar cover, gallery item) for households that read the space through a GFS, sealed once under `HKDF(epoch content key, "sh-space-media:v1")`; nonce derived from the file name and the file's SHA-256 (a re-seal is the byte-identical blob); same padding buckets as moment media; AAD binds suite, space id, epoch and file name; addressed by its scope-bound `sm1` hash (suite `aesgcm-256-pad-det`, unknown refused — `UnsupportedSpaceMediaSuite`). See [Space media in a GFS cache](#space-media-in-a-gfs-cache-aesgcm-256-pad-det) | `socialhome/space_media_seal.py` |
 | Symmetric AEAD (public moments, v_62) | AES-256-GCM, 96-bit random nonce; HKDF-SHA256 ratchet + item keys | 256-bit | A public moment sealed before it reaches a GFS under its **item key** `HKDF(step key, "sh-moment-item:v1|" + moment_id)`; the step key ratchets daily `K(g, s+1) = HKDF(K(g, s), "sh-moment-ratchet:v1")` from a random per-author generation root (holders keep only the newest step). Suite `seal_suite: "aesgcm-256"`, AAD `socialhome/moment-public/v2\|suite\|author\|key_gen\|key_step\|moment_id`; the author's household signs the envelope (ciphertext + key id + moment id). The step key reaches each follower household through the static key-wrap seal (`kem_suite: "x25519"`) with `key_suite: "aesgcm-256"` (the space content-key tag). Unknown suites refused (`UnsupportedMomentSealSuite`) | `socialhome/moment_public_seal.py`, `socialhome/services/moment_public_key_outbound.py`, `socialhome/services/moment_public_key_inbound.py` |
-| Symmetric AEAD (multi-recipient mailbox frames, v_90) | AES-256-GCM under a fresh random key, wrapped per recipient with the static-recipient seal (X25519 ECIES); SHA-256 audience tags | 256-bit | One space event uploaded once for many member households' GFS mailboxes. A fresh random 32-byte key *K* per upload attempt seals the body `{mr_suite: "mr-wrap-aesgcm-256", ciphertext}` (the relay plaintext padded to a size bucket, AAD `"sh-mr-body:v1\n" + mr_suite`) and the inner envelope's payload (AAD `sh-mr-payload:v1`); *K* is wrapped to each recipient mailbox's key-wrap key with `seal_to_keywrap` (`kem_suite: "x25519"`). Unknown `mr_suite` refused (`UnsupportedMrSuite`), unknown wrap `kem_suite` refused (`UnsupportedKemSuite`). No space key involved. See [Multi-recipient mailbox frames](#multi-recipient-mailbox-frames-mr-wrap-aesgcm-256-v_90) | `socialhome/federation/multi_recipient.py`, `socialhome/federation/keywrap_seal.py` |
+| Symmetric AEAD (multi-recipient mailbox frames, v_91) | AES-256-GCM under a fresh random key, wrapped per recipient with the static-recipient seal (X25519 ECIES); SHA-256 audience tags | 256-bit | One space event uploaded once for many member households' GFS mailboxes. A fresh random 32-byte key *K* per upload attempt seals the body `{mr_suite: "mr-wrap-aesgcm-256", ciphertext}` (the relay plaintext padded to a size bucket, AAD `"sh-mr-body:v1\n" + mr_suite`) and the inner envelope's payload (AAD `sh-mr-payload:v1`); *K* is wrapped to each recipient mailbox's key-wrap key with `seal_to_keywrap` (`kem_suite: "x25519"`). Unknown `mr_suite` refused (`UnsupportedMrSuite`), unknown wrap `kem_suite` refused (`UnsupportedKemSuite`). No space key involved. See [Multi-recipient mailbox frames](#multi-recipient-mailbox-frames-mr-wrap-aesgcm-256-v_91) | `socialhome/federation/multi_recipient.py`, `socialhome/federation/keywrap_seal.py` |
 | Blind signature (Privacy Pass) | RSA blind signatures, RFC 9474 `RSABSSA-SHA384-PSS-Deterministic` (Privacy Pass token type 0x0002, RFC 9578 §6) | 2048-bit modulus | Anonymous GFS mailbox registration tickets (suite `privacypass-blindrsa2048-sha384-pss`): a registered household fetches blind-signed tokens, a new mailbox spends one. See [Mailbox registration tickets](#mailbox-registration-tickets-privacypass-blindrsa2048-sha384-pss) | `socialhome/privacy_pass.py`, `socialhome/global_server/mailbox_tickets.py` |
 | KDF | HKDF-SHA256 | 32-byte output | Session-key derivation, KEK derivation | `cryptography.hazmat.primitives.kdf.hkdf` |
 | File hash (space content, v_85) | SHA-256 | 128-bit collision (PQ: Grover-bounded preimage) | Every space item with files carries `files: {name: {h}}` + `files_suite: "sha256"` inside its encrypted payload / §25.6 record; `SPACE_MEDIA_BLOB` carries `h` + `h_suite`. Receivers store a hashed file as `sc-` + `sha256("space-content" ‖ space ‖ h)[:40]` and refuse bytes that do not hash to `h`; an unknown or missing suite rejects the map whole (`UnsupportedFileHashSuite`) and the item keeps the legacy sender-bound names. A new hash ships as a sibling suite | `socialhome/domain/file_hashes.py`, `socialhome/services/media_file_hasher.py` |
@@ -182,7 +182,7 @@ caught by replay rather than applied twice. The re-sign uses the sender's
 own signing key — an attacker who captures the bytes still cannot move the
 timestamp window themselves (the signature covers `timestamp`).
 
-### Multi-recipient mailbox frames (`mr-wrap-aesgcm-256`, v_90)
+### Multi-recipient mailbox frames (`mr-wrap-aesgcm-256`, v_91)
 
 A space event whose bytes are identical for every member household that
 reaches the space through the same GFS goes up **once**
@@ -212,7 +212,7 @@ is involved, so holding a space's content key opens nothing.
   multi frame carries only `MULTI_EVENT_TYPES` (the seat vocabulary minus
   single-recipient, key-carrying, pairwise-stream and routing types).
 - **Signed `ed25519` only.** One body serves every recipient, so it cannot
-  follow a per-pair negotiated `sig_suite`: v_90 multi frames are signed
+  follow a per-pair negotiated `sig_suite`: v_91 multi frames are signed
   `sig_suite: "ed25519"`. When the hybrid suite (`ed25519+mldsa65`) ships, a
   sender holding a PQ key MUST sign its multi frames hybrid, and receivers
   MUST refuse an ed25519-only multi frame from a sender whose PQ key they
@@ -947,19 +947,12 @@ Suite tag `author_sig_suite` (`ITEM_AUTHOR_SIG_SUITE_ED25519 = "ed25519"`,
 `derive_user_id(author_pk, identity_anchor or author_username) ==
 author_user_id`. No new key: the household identity key every peer pins.
 
-**Trusted-mode member publish** (`domain/gfs_member_publish.py`,
-`global_server/member_publish.py`, v_49) — `POST /gfs/member-publish`. The
-household signs canonical JSON (sorted keys, compact — the encoding every
-signed household→GFS request uses) of `{action: "gfs-member-publish:v1",
-instance_id, gfs_instance_id, ts, target, event_type: "space_item", epoch, writer_cert,
-payload}` with its Ed25519 identity seed; the GFS verifies it against the
-registered `client_instances.public_key` with the ±300 s `ts` window. The
-`action` value is the domain separator — distinct from `subscribe` /
-`unsubscribe` / `unpublish` — so the signature cannot be replayed as any
-other request, and `gfs_instance_id` (the server id the household pinned from `/gfs/info`, refused unless it is the receiving server's) binds it to one server so it cannot be replayed to another; no new key or suite (it is the household identity signature,
-`ed25519`). The GFS then runs `verify_writer_cert` against the pinned space
-key with `author_pk` = that same registered key and scope `comment` (the
-item type is hidden in the ciphertext; receivers enforce the real scope).
+**Member publish** (`domain/gfs_member_publish.py`,
+`global_server/member_publish.py`, v_49; one anonymous mode since v_90 — the
+household-signed `POST /gfs/member-publish` and its `gfs-member-publish:v1`
+action are gone) — `POST /gfs/member-publish-anon`, authorized by the writer
+group key below; the GFS checks the scope `comment` at most (the item type
+is hidden in the ciphertext; receivers enforce the real scope).
 `payload` is AES-256-GCM under the existing per-space epoch content key —
 the GFS holds no key. Its plaintext is padded to a size bucket (1 / 4 / 16 /
 64 / 128 KiB, a `_pad` JSON field) before encryption, so the padding is
@@ -978,7 +971,7 @@ after it, so a member holding the content key cannot make followers inflate
 a decompression bomb. Compression runs inside the encryption, on content the
 attacker already chose; the bucket padding still hides the length, so a
 compression-ratio side channel only shows the bucket. The fan-out frame's
-label is outside the ciphertext and unsigned on the member path: a GFS that
+label is outside the ciphertext and unsigned in the fan-out frame: a GFS that
 flips it only makes the item undecodable (the author signature inside still
 decides), which it could do by dropping the frame anyway. `"zlib1+dict1"` is
 `zlib1` with a preset dictionary (`domain/item_zdict.ZDICT_V1`: the item
@@ -992,7 +985,8 @@ inflation cap and padding rules are the same. **Content-epoch notice** — `POST
 /gfs/spaces/{id}/epoch`, two forms. The OWNER's: its household identity
 signature (Ed25519, the registered key) over canonical JSON of `{action:
 "gfs-owner-epoch-notice:v1", owning_instance, gfs_instance_id, space_id,
-epoch, ts}` — only this form may move the epoch by more than one. A
+epoch, ts, writer_key_cert?}` — only this form may move the epoch by more
+than one. A
 delegated admin's: a space-authority signature (`authority_sig.py`, suite
 `authority_sig_suite`) over `{space_id, epoch}` under the new event type
 `space_epoch_notice`, which is deliberately outside
@@ -1001,10 +995,9 @@ lifted onto the other path; it raises the epoch by +1 at most. No new key
 or suite.
 
 **Writer group key + anonymous member publish** (`writer_key.py`,
-`domain/writer_key.py`, `domain/gfs_member_publish.py`, v_50; trusted spaces
-v_57) — in a space whose owner set `gfs_publish_mode = "strict"` (and, since
-v_57, in every trusted publicly readable space), a member household publishes
-WITHOUT identifying itself to the connection server, authorized by the
+`domain/writer_key.py`, `domain/gfs_member_publish.py`, v_50; every publicly
+readable space, the only member publish since v_90) — a member household
+publishes WITHOUT identifying itself to the connection server, authorized by the
 space's per-epoch **writer group key**: one Ed25519 key per (space, content
 epoch), shared by every household allowed to publish anything there (both
 `write` and `comment` scopes, so the GFS cannot tell them apart).
@@ -1027,12 +1020,9 @@ epoch), shared by every household allowed to publish anything there (both
   writer_seed, writer_key_cert}` — SECRET, so it rides only inside the
   per-peer encrypted payload of the four channels that carry the writer
   cert (rekey `per_peer`, roster snapshot, redeem ACK `space_meta`, v_44
-  rotation bundle), only to a household holding a publishing scope: in a
-  strict space at v_50, and — since v_57, so a member can publish
-  anonymously to every GFS on the owner's list — in a TRUSTED publicly
-  readable space at v_57 (`writer_key_min_version`). The key, its pin and
-  its wire shape are the same in every mode; the owner's epoch notice pins
-  `writer_key_cert` in both. The receiver verifies the cert against its pinned space key
+  rotation bundle), only to a household holding a publishing scope, in
+  every publicly readable space, at v_90 (`writer_key_min_version`). The
+  owner's epoch notice pins `writer_key_cert`. The receiver verifies the cert against its pinned space key
   and that the seed's public half is `writer_pk`, then stores the grant
   KEK-wrapped (AES-GCM, AAD `socialhome-writer-key:<space_id>:<epoch>`) on
   that epoch's `space_keys.writer_key`. Rotates with every content epoch, so
@@ -1046,7 +1036,7 @@ epoch), shared by every household allowed to publish anything there (both
   whole seconds with up to ±60 s of random jitter, so it carries no clock
   fingerprint. No household key, no
   household signature, no plaintext cert: the writer cert stays inside the
-  AES-GCM payload, where receivers check it exactly as in trusted mode.
+  AES-GCM payload, where receivers check it.
 - **Suite.** `writer_key_suite` / `writer_sig_suite` =
   `WRITER_KEY_SUITE_ED25519 = "ed25519"` (`SUPPORTED_WRITER_KEY_SUITES`,
   unknown → `UnsupportedWriterKeySuite`, never a default) — the algorithm of
@@ -1055,7 +1045,7 @@ epoch), shared by every household allowed to publish anything there (both
 - **Why a new key** (the "no new key" rule): the content key is held by every
   reader including GFS followers, so it cannot authorize a write; the
   authority seed must not spread to every publisher; the household identity
-  key is exactly what strict mode withholds from the server.
+  key is exactly what member publish withholds from the server.
 
 **Opaque channels for private spaces** (`gfs_channel.py`, wire shapes in
 `domain/gfs_channel.py`, v_51) — a PRIVATE space with link-joined members
@@ -1070,10 +1060,10 @@ holder derives them and nobody stores them:
   bytes)`;
 - `channel_writer_seed = HKDF-SHA256(ikm = space seed, salt =
   b"socialhome-gfs-channel-writer-key:v1", info =
-  b"<space_id>:<channel_id>:<channel epoch>", 32 bytes)` (strict mode;
-  since v_57 in every mode — pinned by every notice and handed to v_57
-  writers in trusted spaces too, so they publish anonymously to every
-  channel server the owner chose, including ones they never connected to);
+  b"<space_id>:<channel_id>:<channel epoch>", 32 bytes)` — pinned by every
+  notice and handed to every v_90 writer, so it publishes anonymously to
+  every channel server the owner chose, including ones it never connected
+  to (the only channel publish since v_90);
 - `epoch_offset = int(HKDF-SHA256(ikm = space seed, salt =
   b"socialhome-gfs-channel-epoch-offset:v1", info =
   b"<space_id>:<channel_id>", 5 bytes))` — every epoch on the wire is
@@ -1098,9 +1088,8 @@ be lifted onto another, and carries a suite tag:
 | Statement | Signed by | Prefix |
 |---|---|---|
 | registration `{channel_suite, channel_id, channel_pk, gfs_instance_id, ts, nonce}` | the key being registered (proof of possession) | `gfs-channel-register:v1:` |
-| epoch notice `{channel_suite, channel_id, gfs_instance_id, ts, nonce, epoch, publish_mode, writer_key_cert?}` | channel key | `gfs-channel-epoch:v1:` |
+| epoch notice `{channel_suite, channel_id, gfs_instance_id, ts, nonce, epoch, writer_key_cert?}` | channel key | `gfs-channel-epoch:v1:` |
 | unregister `{channel_suite, channel_id, gfs_instance_id, ts, nonce}` | channel key | `gfs-channel-unregister:v1:` |
-| `ChannelCert {channel_suite, channel_id, epoch, instance_pk, scope, issued_at}` | channel key | `gfs-channel-cert:v1:` |
 | `ChannelPass {channel_suite, channel_id, epoch, instance_pk, issued_at}` (scope-free) | channel key | `gfs-channel-pass:v1:` |
 | `ChannelWriterKeyCert {writer_key_suite, channel_suite, channel_id, epoch, writer_pk}` | channel key (suite `channel_suite`) | `gfs-channel-writer-key-cert:v1:` |
 | anonymous publish `{gfs_instance_id, channel_id, ts, nonce, event_type, epoch, payload, writer_sig_suite}` | channel writer key | `gfs-channel-publish-anon:v1:` |
@@ -1111,14 +1100,15 @@ Suites: `channel_suite` = `CHANNEL_SUITE_ED25519 = "ed25519"`
 default) for the channel key and everything it signs; `binding_sig_suite` =
 `CHANNEL_BINDING_SUITE_ED25519` (`SUPPORTED_CHANNEL_BINDING_SUITES`) for the
 space authority's binding; the writer key reuses `WRITER_KEY_SUITE_ED25519`.
-The household-signed channel requests (subscribe / unsubscribe / trusted
-publish) are the ordinary household identity signature over canonical JSON
-with an `action` domain separator (`gfs-channel-subscribe:v1`,
-`gfs-channel-unsubscribe:v1`, `gfs-channel-publish:v1`) — no new key.
+The household-signed channel requests (subscribe / unsubscribe) are the
+ordinary household identity signature over canonical JSON with an `action`
+domain separator (`gfs-channel-subscribe:v1`, `gfs-channel-unsubscribe:v1`)
+— no new key. (The channel cert, `gfs-channel-cert:v1:`, and the identified
+channel publish, `gfs-channel-publish:v1`, are gone since v_90.)
 
 **Delivery: the grant** (`gfs_channel`) — `{channel_suite, space_id,
 channel_id, channel_pk, epoch, gfs_ids, binding_sig_suite, binding_sig,
-channel_pass?, channel_cert?, writer_key?}` (`channel_pass` only for a link-joined household — a paired member's grant is publish-only), issued per member household per
+channel_pass?, writer_key?}` (`channel_pass` only for a seated household — a paired member's grant without the owner's `private_gfs` is publish-only; `writer_key` only for a v_90 writer), issued per member household per
 epoch by a seed holder whose seed matches the pin, riding only inside the
 per-peer encrypted payloads of the four writer-cert channels, only to v_51
 households. The member verifies the binding against the space key it

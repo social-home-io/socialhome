@@ -23,8 +23,9 @@ def test_ours_is_v31_with_routed_origin_signature_capability():
     signing-seed share, v_21 authenticated mesh route discovery, v_20
     SPACE_SYNC_REJECTED)."""
     assert FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS == 86
-    assert OURS == 90
-    assert FederationCapability.MIN_FOR_MULTI_MAILBOX == 90
+    assert OURS == 91
+    assert FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY == 90
+    assert FederationCapability.MIN_FOR_MULTI_MAILBOX == 91
     assert FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH == 89
     assert FederationCapability.MIN_FOR_CONTENT_FILE_HASHES == 85
     assert FederationCapability.MIN_FOR_GFS_JOIN_REQUEST == 84

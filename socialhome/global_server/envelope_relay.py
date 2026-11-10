@@ -91,7 +91,7 @@ an envelope: the node holding the socket drains it (the hint carries the
 recipient id only, never the bytes). Caps: ``[envelope_relay]`` in the GFS
 TOML (:class:`~socialhome.global_server.config.EnvelopeMediaConfig`).
 
-**Multi-recipient frames (v_90).** ``POST /gfs/envelope/multi`` carries ONE
+**Multi-recipient frames (v_91).** ``POST /gfs/envelope/multi`` carries ONE
 sealed body for up to 500 mailboxes (a space's member households reached
 over this server), each named with its own ``wrap`` — the body key sealed
 to that mailbox's key-wrap key. Only registered mailboxes are addressed; the
@@ -357,7 +357,7 @@ def queued_relay_push(row: dict) -> dict:
 
 
 #: Per-recipient caps for queued RELAY items (member-published space items,
-#: ``POST /gfs/member-publish``). Counted separately from the envelope caps
+#: ``POST /gfs/member-publish-anon``). Counted separately from the envelope caps
 #: above so a busy public space can never crowd out a household's sealed
 #: invite / link-federation envelopes. Past either cap the recipient's OWN
 #: oldest relay item is evicted (``enqueue_relay``) — only authenticated
@@ -692,7 +692,7 @@ class GfsEnvelopeRelay:
         #: v_87 — binary relay media frames, budgeted apart from envelopes.
         self._media = media if media is not None else EnvelopeMediaConfig()
         self._media_budget = SlidingByteBudget(self._media.media_ip_bytes_per_minute)
-        #: v_90 — distinct recipients per address a minute on the multi route,
+        #: v_91 — distinct recipients per address a minute on the multi route,
         #: on this node only.
         self._multi_budget = SlidingByteBudget(ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE)
         self._media_inflight: set[asyncio.Task[None]] = set()
@@ -802,7 +802,7 @@ class GfsEnvelopeRelay:
         task.add_done_callback(self._inflight.discard)
         task.add_done_callback(lambda _t: self._release_pending(to_instance))
 
-    # ── Multi-recipient frames (v_90) ──────────────────────────────────
+    # ── Multi-recipient frames (v_91) ──────────────────────────────────
 
     def multi_recipients_allow(
         self, client_key: str, entries: list[tuple[str, dict[str, str]]]
@@ -1497,7 +1497,7 @@ def build_envelope_rate_limit(resolver: ClientIpResolver):
 
 def build_envelope_multi_rate_limit(resolver: ClientIpResolver):
     """Per-IP, per-node rate limiter middleware for ``POST
-    /gfs/envelope/multi`` (v_90), apart from the single route's budget — the same shedding handle
+    /gfs/envelope/multi`` (v_91), apart from the single route's budget — the same shedding handle
     for the same anonymous reason."""
     return build_window_limiter(
         resolver,

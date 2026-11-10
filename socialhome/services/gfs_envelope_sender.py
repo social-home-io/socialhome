@@ -325,7 +325,7 @@ class GfsEnvelopeSender:
 
     async def multi_connection(self, gfs_url: str) -> GfsConnection | None:
         """The active connection at *gfs_url* whose server proved both
-        ``envelope_mailbox`` and ``envelope_multi`` (v_90), or ``None``."""
+        ``envelope_mailbox`` and ``envelope_multi`` (v_91), or ``None``."""
         conn = await self.mailbox_connection(gfs_url)
         if conn is None or not await self._gfs.envelope_multi_supported(conn):
             return None
@@ -343,7 +343,7 @@ class GfsEnvelopeSender:
         gfs_url: str,
         body: dict,
     ) -> int | None:
-        """POST ONE multi-recipient frame for many mailboxes (v_90) to the
+        """POST ONE multi-recipient frame for many mailboxes (v_91) to the
         GFS at *gfs_url*: ``{"to": [{"mailbox", "wrap"}], "body"}`` to
         ``/gfs/envelope/multi``, one ``(mailbox_id, wrap)`` per *entries*.
         Returns the HTTP status (``None`` when the GFS was not reached).

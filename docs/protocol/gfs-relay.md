@@ -1070,21 +1070,21 @@ hop), `GfsRelayInbound.handle_mailbox_frame`,
 `inbound_validator.make_check_mailbox_sender`,
 `federation/sync/space/scheduler.py` (no sync with directory seats).
 
-## One upload for many mailboxes (v_90)
+## One upload for many mailboxes (v_91)
 
 GFS redesign PR 3b (owner sign-off 2026-11-09; wrap per recipient, owner
 decision 2026-11-10). Space content that goes to two or more households at
 their mailboxes on the same GFS is sealed ONCE, signed ONCE and uploaded
 ONCE, with one small key wrap per mailbox. The GFS stores the body once and
 pushes it, with that mailbox's wrap, to each listed mailbox. Gated on
-`FederationCapability.MIN_FOR_MULTI_MAILBOX` (v_90, slug `multi_mailbox`)
+`FederationCapability.MIN_FOR_MULTI_MAILBOX` (v_91, slug `multi_mailbox`)
 and the signed GFS capability `envelope_multi: {"max_recipients": 500}`.
 Not space-scoped, no sync-stream change.
 
 **What goes multi — one path.** `broadcast_to_space_members` computes
 every target's final payload as before (legacy / relay variants,
 `per_peer`, file maps). Targets that are mailbox seats (`space_session`
-rows with a card mailbox) at v_90, on a GFS that proves `envelope_multi`,
+rows with a card mailbox) at v_91, on a GFS that proves `envelope_multi`,
 with no deferred mesh queue and an event type in `MULTI_EVENT_TYPES` are
 grouped by ONE key: the normalized GFS URL and the payload content (key
 order aside, `OPT_SORT_KEYS`). Each group of two or more is written to the
@@ -1217,7 +1217,7 @@ GFS gets no burst. A group's rows go per row — pair-sealed, under the multi
 payload's `msg_id` — when the GFS refused the upload with any other `4xx`
 (the same frame would be refused again), when no frame can be built (over
 the top size bucket, a seat no longer multi-capable) or when the group has
-shrunk to one. A peer below v_90, a GFS without `envelope_multi` or a seat
+shrunk to one. A peer below v_91, a GFS without `envelope_multi` or a seat
 alone on its GFS: per-recipient frames, as in v_89.
 
 **Residuals.** What the earlier space-key design left open is gone: no
@@ -1248,7 +1248,7 @@ sequenceDiagram
 **Cost** (a ~1 KiB calendar event; measured with the real code —
 `build_multi_envelope` / `seal_multi` / `wrap_mr_key`):
 
-| Case | Before (v_89) | After (v_90) |
+| Case | Before (v_90) | After (v_91) |
 |---|---|---|
 | Per recipient on the upload | one 5.65 KB POST | one `to` entry: 229 B (32-char mailbox id + a 174 B wrap) |
 | Uplink, 200 mailbox recipients on one GFS | 200 POSTs × 5.65 KB = 1.13 MB | 1 POST, 51.4 KB (5.5 KB body + 200 × 229 B) |

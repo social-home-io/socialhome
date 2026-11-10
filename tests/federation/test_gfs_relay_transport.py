@@ -542,7 +542,7 @@ async def test_media_ready_needs_a_key_a_relay_and_a_proving_server():
     ).media_ready(_instance(kp))
 
 
-# ─── v_90: one upload for many mailboxes ──────────────────────────────────
+# ─── v_91: one upload for many mailboxes ──────────────────────────────────
 
 MULTI_BODY = {"mr_suite": "mr-wrap-aesgcm-256", "ciphertext": "cc"}
 WRAP = {"kem_suite": "x25519", "eph_pk": "ee", "ciphertext": "ww"}

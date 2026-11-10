@@ -52,12 +52,6 @@ ACCEPTS_PAYLOAD_ZLIB1_DICT1: str = "payload_zlib1_dict1"
 #: choice is per connection, so it never rides a subscribe.
 ACCEPTS_WS_BINARY1: str = "ws_binary1"
 
-#: The household takes member items (``space_item``) without the plaintext
-#: ``writer_cert`` the GFS authorized the publish with: it verifies the
-#: cert inside the ciphertext either way, as it does for a strict-mode
-#: frame (which never carries one). A HELLO-only label, per connection.
-ACCEPTS_SPACE_ITEM_NO_CERT: str = "space_item_no_cert"
-
 #: The household answers a GFS's ``space_media_request`` (v_83): it
 #: re-uploads or streams a space blob a reader missed, when it holds the
 #: file. A HELLO-only label, per connection: the GFS asks only sockets that
@@ -115,7 +109,6 @@ def seat_bits(accepts: tuple[str, ...]) -> int:
 OUR_HELLO_ACCEPTS: tuple[str, ...] = (
     *OUR_ACCEPTS,
     ACCEPTS_WS_BINARY1,
-    ACCEPTS_SPACE_ITEM_NO_CERT,
     ACCEPTS_SPACE_MEDIA_SERVE,
     ACCEPTS_ENVELOPE_MEDIA,
 )

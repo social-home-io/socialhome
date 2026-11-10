@@ -570,7 +570,7 @@ class GfsRelayTransport:
             return False, RELAY_STATUS_TOO_LARGE if too_big else None
         return await self._deliver_mailbox(instance, target, media_body=body)
 
-    # ── v_90: one upload for many mailboxes ───────────────────────
+    # ── v_91: one upload for many mailboxes ───────────────────────
 
     async def multi_capacity(self, gfs_url: str) -> int:
         """Most mailbox ids one multi-recipient upload to the GFS at

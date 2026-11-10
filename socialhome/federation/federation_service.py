@@ -188,7 +188,7 @@ def _group_key(obj: dict) -> bytes:
 def _multi_group_key(
     target: MailboxTarget, content: bytes | str
 ) -> tuple[str, bytes | str]:
-    """The one grouping key of a multi frame (v_90): the recipient's GFS
+    """The one grouping key of a multi frame (v_91): the recipient's GFS
     (normalized) and the content every recipient shares — the payload's
     :func:`_group_key` bytes in a broadcast, its stored payload id in the
     outbox."""
@@ -295,7 +295,7 @@ MAX_DEFERRED_MESH_BYTES: int = 16 * 1024 * 1024
 #: item should not eat the shared budget.
 MAX_DEFERRED_MESH_PAYLOAD_BYTES: int = 256 * 1024
 
-#: How long a throttled v_90 multi upload waits when the GFS's ``429`` named
+#: How long a throttled v_91 multi upload waits when the GFS's ``429`` named
 #: no ``Retry-After``: the GFS's per-address, per-node upload and recipient
 #: budgets are a minute wide, and it answers ``Retry-After: 60`` itself.
 #: Coming back sooner only earns another 429. (A named one is capped by the
@@ -540,7 +540,7 @@ class FederationService:
         #: hop, and every mailbox frame with a space is refused.
         self._host_hop: HostHop | None = None
         self._mailbox_sender_check: Callable[[str, str], Awaitable[bool]] | None = None
-        #: v_90 — ``OutboxProcessor.wake``: a queued multi payload goes up
+        #: v_91 — ``OutboxProcessor.wake``: a queued multi payload goes up
         #: on a pass now, not at the next poll (:meth:`attach_outbox_wake`).
         self._outbox_wake: Callable[[], None] | None = None
         # Social Home Apps federation bridge — set via :meth:`attach_apps`.
@@ -721,7 +721,7 @@ class FederationService:
         """Return the shared step list for both inbox and RTC pipelines."""
         steps = [
             make_parse_json(loads=_loads),
-            # v_90: ``to_instance = "*"`` only inside a multi-recipient
+            # v_91: ``to_instance = "*"`` only inside a multi-recipient
             # frame, that frame only for the space whose key opened it and
             # only when its signed audience lists us.
             make_check_multi_recipient(own_instance_id=self._own_instance_id),
@@ -1196,7 +1196,7 @@ class FederationService:
 
     def attach_outbox_wake(self, wake: Callable[[], None]) -> None:
         """Wire ``OutboxProcessor.wake`` — the outbox is the only multi
-        sender (v_90), and a broadcast that queued a multi payload wakes it."""
+        sender (v_91), and a broadcast that queued a multi payload wakes it."""
         self._outbox_wake = wake
 
     def attach_call_signaling(self, call_signaling) -> None:
@@ -2043,7 +2043,7 @@ class FederationService:
         space_id: str | None,
         state_key: str | None,
     ) -> DeliveryResult:
-        """v_90 per-recipient FIFO: a live send to a seat that still has a
+        """v_91 per-recipient FIFO: a live send to a seat that still has a
         multi-payload row pending would overtake it — queue it to the outbox
         instead, due no earlier than that row (*behind*), so the outbox
         sends the seat's rows one at a time in order."""
@@ -2294,7 +2294,7 @@ class FederationService:
         another (:func:`_outbox_payload_ad` binds the event type and space
         too, so a row edited to another event or space does not unwrap).
 
-        With a ``msg_id`` it is a broadcast's multi payload (v_90): a random
+        With a ``msg_id`` it is a broadcast's multi payload (v_91): a random
         id — one broadcast, one row, never shared with another — and the
         ``msg_id`` every envelope built from it carries."""
         payload_json = _dumps(payload)
@@ -2342,7 +2342,7 @@ class FederationService:
         """Seal a ref row (migration 0145) for its one peer: the stored
         payload, encrypted under *instance*'s session key, in an envelope
         with a fresh timestamp + signature and as ``msg_id`` the multi
-        payload's (v_90 — so it and the multi frame are one message to the
+        payload's (v_91 — so it and the multi frame are one message to the
         receiver's replay cache), else the row's id.
 
         Raises :class:`ValueError` when the payload is gone, does not unwrap
@@ -3343,7 +3343,7 @@ class FederationService:
             if per_peer is not None:
                 peer_payload = await per_peer(iid, peer_payload)
             planned.append((iid, peer_payload))
-        # v_90 — the mailbox seats behind one GFS whose bytes are the same go
+        # v_91 — the mailbox seats behind one GFS whose bytes are the same go
         # to the outbox as ONE multi payload, which uploads it once. The
         # audience is exactly these planned targets (the current member set,
         # narrowed by ``only_instances``): the body key is wrapped to each
@@ -3439,7 +3439,7 @@ class FederationService:
         event_type: FederationEventType,
         planned: list[tuple[str, dict]],
     ) -> dict[str, DeliveryResult]:
-        """v_90 — hand the outbox, the only multi sender, every group of two
+        """v_91 — hand the outbox, the only multi sender, every group of two
         or more targets one multi frame may carry: ONE multi payload (random
         id, uuid4 ``msg_id``) and one ref row each, in one transaction; then
         wake it. Returns those targets' results — :data:`DELIVERY_ERROR_QUEUED`,
@@ -4139,7 +4139,7 @@ class FederationService:
         for an envelope the connection server queued and replayed later,
         which widens the timestamp step's skew budget accordingly.
 
-        ``multi_key`` (v_90) is the body key *K* of a multi-recipient frame
+        ``multi_key`` (v_91) is the body key *K* of a multi-recipient frame
         our mailbox opened (its wrap under our mailbox key): the pipeline
         then requires our tag in the ``"*:"`` audience and a named space,
         and decrypts the payload under *K*. Only the mailbox leg sets it.

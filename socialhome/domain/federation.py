@@ -918,7 +918,7 @@ MULTI_SEND_EXCLUDED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
     }
 )
 
-#: v_90 — the event types a multi-recipient frame may carry (the sender
+#: v_91 — the event types a multi-recipient frame may carry (the sender
 #: groups only these; the receiver refuses any other inside one).
 MULTI_EVENT_TYPES: frozenset[FederationEventType] = (
     SPACE_SESSION_ALLOWED_EVENT_TYPES - MULTI_SEND_EXCLUDED_EVENT_TYPES

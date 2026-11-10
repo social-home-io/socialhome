@@ -437,7 +437,7 @@ async def test_media_unreachable_server_is_false(media_gfs, http_session):
     assert not await sender.send_media_body(body=b"\x00SHR", gfs_url=conn.inbox_url)
 
 
-# ── Multi-recipient mailbox frames (v_90) ─────────────────────────────────
+# ── Multi-recipient mailbox frames (v_91) ─────────────────────────────────
 
 MR_BODY = {"mr_suite": "mr-wrap-aesgcm-256", "ciphertext": "cc"}
 WRAP = {"kem_suite": "x25519", "eph_pk": "ee", "ciphertext": "ww"}

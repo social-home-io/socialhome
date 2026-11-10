@@ -8,7 +8,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 90
+    assert fc.OURS == 91
 
 
 def test_local_community_area_capability_threshold():
@@ -51,6 +51,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(59) == [
@@ -83,6 +84,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(60) == [
@@ -114,6 +116,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(61) == [
@@ -144,6 +147,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(62) == [
@@ -173,6 +177,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(63) == [
@@ -201,6 +206,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(64) == [
@@ -228,6 +234,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(65) == [
@@ -254,6 +261,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(66) == [
@@ -279,6 +287,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(67) == [
@@ -303,6 +312,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(68) == [
@@ -326,6 +336,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(69) == [
@@ -348,6 +359,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(70) == [
@@ -369,6 +381,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(71) == [
@@ -389,6 +402,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(72) == [
@@ -408,6 +422,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(73) == [
@@ -426,6 +441,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(74) == [
@@ -443,6 +459,7 @@ def test_local_community_area_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[59] == "local_communities"
@@ -490,6 +507,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(58) == [
@@ -523,6 +541,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[58] == "synced_picture_resets"
@@ -570,6 +589,7 @@ def test_multi_gfs_publish_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert "Posting to every GFS a space is listed on" not in (
@@ -621,6 +641,7 @@ def test_sync_series_rows_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[56] == "synced_recurring_events"
@@ -667,6 +688,7 @@ def test_space_chat_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(55) == [
@@ -703,6 +725,7 @@ def test_space_chat_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.space_features_missing_below(54) == [
@@ -776,6 +799,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(54) == [
@@ -813,6 +837,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
 
@@ -862,6 +887,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(53) == [
@@ -900,6 +926,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
 
@@ -948,6 +975,7 @@ def test_forwarded_invite_link_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
 
@@ -1023,6 +1051,7 @@ def test_space_authority_rotation_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(46) == [
@@ -1068,6 +1097,7 @@ def test_space_authority_rotation_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
 
@@ -1139,6 +1169,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
 
@@ -1752,6 +1783,7 @@ def test_forwarded_role_change_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
 
@@ -1818,6 +1850,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
 
@@ -1870,6 +1903,7 @@ def test_member_gfs_publish_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
 
@@ -1921,6 +1955,7 @@ def test_strict_member_publish_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
 
@@ -1972,6 +2007,7 @@ def test_private_channels_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
 
@@ -2066,7 +2102,8 @@ _PINNED_FEATURE_KEYS = {
     86: "trusted_file_fills",
     87: "relay_media",
     89: "mailbox_member_mesh",
-    90: "multi_mailbox",
+    90: "anonymous_gfs_posting_only",
+    91: "multi_mailbox",
 }
 
 
@@ -2141,6 +2178,7 @@ def test_space_author_profile_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.space_feature_keys_missing_below(59) == [
@@ -2195,6 +2233,7 @@ def test_follower_profile_bundle_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[61] == "follower_names_on_join"
@@ -2237,6 +2276,7 @@ def test_encrypted_public_moments_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[62] == "encrypted_public_moments"
@@ -2277,6 +2317,7 @@ def test_encrypted_moment_media_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[63] == "public_moment_media"
@@ -2327,6 +2368,7 @@ def test_long_lived_moments_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[65] == "follower_moment_retention"
@@ -2404,6 +2446,7 @@ def test_moment_reaction_counts_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[69] == "moment_reaction_counts"
@@ -2439,6 +2482,7 @@ def test_highlight_audience_change_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[70] == "highlight_audience_change"
@@ -2472,6 +2516,7 @@ def test_remote_report_answer_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(71) == [
@@ -2492,6 +2537,7 @@ def test_remote_report_answer_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(72) == [
@@ -2511,6 +2557,7 @@ def test_remote_report_answer_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(73) == [
@@ -2529,6 +2576,7 @@ def test_remote_report_answer_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(74) == [
@@ -2546,6 +2594,7 @@ def test_remote_report_answer_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[71] == "remote_report_answers"
@@ -2573,6 +2622,7 @@ def test_app_session_ended_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[72] == "app_games_end_on_uninstall"
@@ -2602,6 +2652,7 @@ def test_bazaar_offers_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[73] == "bazaar_offers"
@@ -2640,6 +2691,7 @@ def test_bazaar_thread_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(74) == [
@@ -2657,6 +2709,7 @@ def test_bazaar_thread_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[74] == "bazaar_ask_the_seller"
@@ -2684,6 +2737,7 @@ def test_bazaar_faq_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(75) == [
@@ -2700,6 +2754,7 @@ def test_bazaar_faq_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[75] == "bazaar_listing_faq"
@@ -2735,6 +2790,7 @@ def test_app_groups_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(76) == [
@@ -2750,6 +2806,7 @@ def test_app_groups_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[76] == "app_groups"
@@ -2775,6 +2832,7 @@ def test_space_app_tables_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(77) == [
@@ -2789,6 +2847,7 @@ def test_space_app_tables_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.FederationCapability.MIN_FOR_SPACE_APP_TABLES in (
@@ -2822,6 +2881,7 @@ def test_app_draw_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(78) == [
@@ -2835,6 +2895,7 @@ def test_app_draw_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[78] == "app_engines"
@@ -2865,6 +2926,7 @@ def test_space_gallery_item_edit_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[79] == "space_gallery_item_edits"
@@ -2934,6 +2996,7 @@ def test_media_https_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.features_missing_below(81) == [
@@ -2944,6 +3007,7 @@ def test_media_https_capability_threshold():
         "Admins and moderators fill in missing space pictures",
         "Members reached through a GFS get pictures in full-size pieces",
         "Every member reaches households that reach a space through a GFS",
+        "Posting over a GFS without naming the household",
         "Space updates reach households behind a GFS in one upload",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[81] == "lighter_media_transfers"
@@ -3010,9 +3074,17 @@ def test_content_file_hashes_capability_threshold():
     fills = "Admins and moderators fill in missing space pictures"
     relay = "Members reached through a GFS get pictures in full-size pieces"
     mailbox = "Every member reaches households that reach a space through a GFS"
+    anon = "Posting over a GFS without naming the household"
     multi = "Space updates reach households behind a GFS in one upload"
-    assert fc.features_missing_below(84) == [label, fills, relay, mailbox, multi]
-    assert fc.features_missing_below(85) == [fills, relay, mailbox, multi]
+    assert fc.features_missing_below(84) == [
+        label,
+        fills,
+        relay,
+        mailbox,
+        anon,
+        multi,
+    ]
+    assert fc.features_missing_below(85) == [fills, relay, mailbox, anon, multi]
     assert fc.space_features_missing_below(84) == [label, fills]
     assert fc.CAPABILITY_FEATURE_KEYS[85] == "content_file_hashes"
 
@@ -3066,17 +3138,35 @@ def test_mailbox_member_mesh_capability_threshold():
     assert 88 not in fc.CAPABILITY_FEATURE_KEYS
 
 
+def test_anon_member_publish_only_capability_threshold():
+    """v_90 — one GFS publish mode, always anonymous (BREAKING, no compat
+    path): the writer key goes only to a household at or above it, and a
+    seed holder skips its relay copy only for such an author. Not
+    space-scoped (a lagging household still posts, through the host), no
+    sync line, labelled."""
+    assert fc.FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY == 90
+    assert fc.FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    label = "Posting over a GFS without naming the household"
+    multi = "Space updates reach households behind a GFS in one upload"
+    assert fc.features_missing_below(89) == [label, multi]
+    assert fc.features_missing_below(90) == [multi]
+    assert fc.CAPABILITY_FEATURE_KEYS[90] == "anonymous_gfs_posting_only"
+
+
 def test_multi_mailbox_capability_threshold():
-    """v_90 — one multi-recipient upload for every mailbox seat of a space
+    """v_91 — one multi-recipient upload for every mailbox seat of a space
     behind one GFS. Gated per member household (``space_member_supports``),
     not space-scoped (an older member keeps per-recipient frames), no sync
     line, labelled."""
-    assert fc.FederationCapability.MIN_FOR_MULTI_MAILBOX == 90
+    assert fc.FederationCapability.MIN_FOR_MULTI_MAILBOX == 91
     assert fc.FederationCapability.MIN_FOR_MULTI_MAILBOX <= fc.OURS
     assert fc.FederationCapability.MIN_FOR_MULTI_MAILBOX not in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     label = "Space updates reach households behind a GFS in one upload"
-    assert fc.features_missing_below(89) == [label]
-    assert fc.features_missing_below(90) == []
-    assert fc.CAPABILITY_FEATURE_KEYS[90] == "multi_mailbox"
+    assert fc.features_missing_below(90) == [label]
+    assert fc.features_missing_below(91) == []
+    assert fc.CAPABILITY_FEATURE_KEYS[91] == "multi_mailbox"

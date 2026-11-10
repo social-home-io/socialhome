@@ -1,9 +1,11 @@
-"""Integration tests for trusted-mode member publish (v_49).
+"""Integration tests for member publish (anonymous — the one mode, v_90).
 
 Real GFS app, real SQLite, real aiohttp client + WebSocket: ``POST
-/gfs/member-publish`` authorizes a member household by its registered
-identity + a space-authority-signed writer cert, and fans the opaque item out
-to the space's subscribers (live or queued) without naming the publisher.
+/gfs/member-publish-anon`` authorizes a publish by the space's per-epoch
+writer group key, pinned by the space authority on the epoch notice, and
+fans the opaque item out to the space's subscribers (live or queued). Nothing
+in the request or the frame names a household. The identified
+``POST /gfs/member-publish`` is gone.
 """
 
 from __future__ import annotations
@@ -39,7 +41,6 @@ from socialhome.domain.gfs_member_publish import (
     MEMBER_PUBLISH_EPOCH_GRACE_S,
     SPACE_ITEM_EVENT_TYPE,
     MemberPublishAnonRequest,
-    MemberPublishRequest,
     owner_epoch_notice_signing_payload,
 )
 from socialhome.domain.writer_cert import MAX_WRITER_CERT_EPOCH
@@ -58,13 +59,9 @@ from socialhome.global_server.app_keys import (
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
-from socialhome.global_server.member_publish import (
-    MEMBER_PUBLISH_MAX_PER_MINUTE,
-    _is_member_publish_path,
-)
+from socialhome.global_server.member_publish import _is_member_publish_path
 from socialhome.global_server.routes import ws as ws_mod
 from socialhome.global_server.server import create_gfs_app
-from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 from socialhome.writer_key import (
     derive_writer_seed,
     sign_with_writer_key,
@@ -115,49 +112,47 @@ def _now_iso(delta_s: int = 0) -> str:
     return (datetime.now(UTC) + timedelta(seconds=delta_s)).isoformat()
 
 
-def _cert(holder: _Household, *, epoch=3, space_id=SPACE_ID, seed=SPACE_SEED):
-    return sign_writer_cert(
-        space_seed=seed,
-        space_id=space_id,
-        epoch=epoch,
-        instance_pk=holder.pk,
-        scope="comment",
-    )
-
-
 def _body(
-    publisher: _Household,
+    _publisher: _Household | None = None,
     *,
-    cert=None,
     epoch: int = 3,
     target: str = SPACE_ID,
     payload: str = CIPHERTEXT,
     ts: str | None = None,
-    signer: _Household | None = None,
     gfs_instance_id: str = GFS_ID,
     gfs_key: str | None = None,
     payload_suite: str | None = None,
+    seed: bytes = SPACE_SEED,
 ) -> dict:
-    req = MemberPublishRequest(
-        instance_id=publisher.instance_id,
+    """An anonymous publish signed with the writer key of *target* at
+    *epoch*. The (ignored) household argument keeps the call sites saying
+    who publishes — the request itself never names it."""
+    req = MemberPublishAnonRequest(
         gfs_instance_id=gfs_instance_id,
         ts=ts or _now_iso(),
-        signature="",
+        nonce=b64url_encode(os.urandom(16)),
         target=target,
         epoch=epoch,
-        writer_cert=cert if cert is not None else _cert(publisher, epoch=epoch),
         payload=payload,
+        writer_sig="",
+        writer_sig_suite="ed25519",
         gfs_key=gfs_key,
         payload_suite=payload_suite,
     )
-    sig = sign_ed25519((signer or publisher).seed, req.signing_bytes())
-    return replace(req, signature=b64url_encode(sig)).to_wire()
+    writer_seed = derive_writer_seed(seed, target, epoch)
+    return replace(
+        req, writer_sig=sign_with_writer_key(writer_seed, req.signing_bytes())
+    ).to_wire()
+
+
+ROUTE = "/gfs/member-publish-anon"
 
 
 @pytest.fixture
 async def gfs(tmp_dir, request):
     # ``indirect`` params override config fields (e.g. instance_id_aliases).
     overrides = getattr(request, "param", None) or {}
+    ready = overrides.get("ready", True)
     cfg = GfsConfig(
         host="127.0.0.1",
         port=0,
@@ -195,7 +190,23 @@ async def gfs(tmp_dir, request):
         # Seen recently (a WS session held long enough): offline items
         # queue for it.
         await fed.mark_relay_seen(tc.subscriber.instance_id, at=int(time.time()))
+        # Requests from the test client all come from one address: lift the
+        # per-address bound (its own tests lower it again).
+        app[gfs_member_publish_key]._anon_ip_limiter._limit = 10_000
+        if ready:
+            # The owner confirmed epoch 3 and pinned its writer key, in both
+            # spaces — what every household does on (re)connect.
+            for sid in (SPACE_ID, OTHER_SPACE):
+                resp = await tc.post(
+                    f"/gfs/spaces/{sid}/epoch",
+                    json=_owner_notice(tc, 3, space_id=sid),
+                )
+                assert resp.status == 200, await resp.text()
         yield tc
+
+
+#: A fixture whose space has no confirmed epoch and no pinned writer key.
+_FRESH = {"ready": False}
 
 
 async def _wait_connected(app, instance_id: str) -> None:
@@ -227,7 +238,7 @@ async def _assert_refused(resp) -> None:
 # ── Accept + fan-out ─────────────────────────────────────────────────────
 
 
-async def test_a_valid_cert_is_relayed_live_without_naming_the_publisher(gfs):
+async def test_an_item_is_relayed_live_without_naming_the_publisher(gfs):
     async with (
         gfs.ws_connect("/gfs/ws") as sub_ws,
         gfs.ws_connect("/gfs/ws") as pub_ws,
@@ -238,29 +249,32 @@ async def test_a_valid_cert_is_relayed_live_without_naming_the_publisher(gfs):
         await _wait_connected(gfs.app_, gfs.publisher.instance_id)
 
         body = _body(gfs.publisher)
-        resp = await gfs.post("/gfs/member-publish", json=body)
+        resp = await gfs.post(ROUTE, json=body)
         assert resp.status == 200
         assert await resp.json() == {"status": "published"}
 
         frame = await asyncio.wait_for(sub_ws.receive_json(), timeout=5)
-        # The publisher's own socket stays silent (no self-echo).
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(pub_ws.receive_json(), timeout=0.3)
+        # Nobody is named, so the publisher's own seat gets the echo too
+        # (the household drops it: the origin is inside the ciphertext).
+        echo = await asyncio.wait_for(pub_ws.receive_json(), timeout=5)
 
-    assert frame == {
-        "type": "relay",
-        "space_id": SPACE_ID,
-        "event_type": SPACE_ITEM_EVENT_TYPE,
-        "epoch": 3,
-        "writer_cert": body["writer_cert"],
-        "payload": CIPHERTEXT,
-    }
+    assert (
+        frame
+        == echo
+        == {
+            "type": "relay",
+            "space_id": SPACE_ID,
+            "event_type": SPACE_ITEM_EVENT_TYPE,
+            "epoch": 3,
+            "payload": CIPHERTEXT,
+        }
+    )
     assert "from_instance" not in frame
     assert gfs.publisher.instance_id not in json.dumps(frame)
 
 
 async def test_an_offline_subscriber_gets_the_item_queued_then_drained(gfs):
-    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
+    resp = await gfs.post(ROUTE, json=_body(gfs.publisher))
     assert resp.status == 200
 
     queued = await _queued(gfs, gfs.subscriber)
@@ -276,90 +290,28 @@ async def test_an_offline_subscriber_gets_the_item_queued_then_drained(gfs):
     assert "from_instance" not in frame
 
 
-# ── Refusals: certs ──────────────────────────────────────────────────────
+# ── The identified publish is gone (v_90) ────────────────────────────────
 
 
 @pytest.mark.security
-async def test_a_forged_cert_is_refused(gfs):
-    forged = _cert(gfs.publisher, seed=os.urandom(32))
-    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher, cert=forged))
-    await _assert_refused(resp)
+async def test_the_identified_member_publish_route_is_gone(gfs):
+    """No ``POST /gfs/member-publish``: a household-signed body naming its
+    instance and carrying a plaintext writer cert has nowhere to go."""
+    resp = await gfs.post(
+        "/gfs/member-publish",
+        json={
+            "instance_id": gfs.publisher.instance_id,
+            "target": SPACE_ID,
+            "writer_cert": {"cert_suite": "ed25519"},
+        },
+    )
+    assert resp.status in (404, 405)
     assert await _queued(gfs, gfs.subscriber) == []
 
 
 @pytest.mark.security
-async def test_someone_elses_cert_is_refused(gfs):
-    """A household can only publish with a cert issued to its own key."""
-    resp = await gfs.post(
-        "/gfs/member-publish",
-        json=_body(gfs.publisher, cert=_cert(gfs.subscriber)),
-    )
-    await _assert_refused(resp)
-
-
-@pytest.mark.security
-async def test_a_cert_for_another_space_is_refused(gfs):
-    resp = await gfs.post(
-        "/gfs/member-publish",
-        json=_body(gfs.publisher, cert=_cert(gfs.publisher, space_id=OTHER_SPACE)),
-    )
-    await _assert_refused(resp)
-
-
-@pytest.mark.security
-async def test_a_cert_for_another_epoch_than_the_request_is_refused(gfs):
-    resp = await gfs.post(
-        "/gfs/member-publish",
-        json=_body(gfs.publisher, epoch=3, cert=_cert(gfs.publisher, epoch=2)),
-    )
-    await _assert_refused(resp)
-
-
-@pytest.mark.security
-async def test_an_unknown_cert_suite_is_refused(gfs):
-    cert = replace(_cert(gfs.publisher), cert_suite="ed25519+mldsa65")
-    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher, cert=cert))
-    await _assert_refused(resp)
-
-
-# ── Refusals: household identity ─────────────────────────────────────────
-
-
-@pytest.mark.security
-async def test_a_bad_household_signature_is_refused(gfs):
-    body = _body(gfs.publisher, signer=gfs.subscriber)
-    resp = await gfs.post("/gfs/member-publish", json=body)
-    await _assert_refused(resp)
-
-
-@pytest.mark.security
-async def test_a_tampered_field_breaks_the_household_signature(gfs):
-    body = _body(gfs.publisher)
-    body["payload"] = "dGFtcGVyZWQ"
-    resp = await gfs.post("/gfs/member-publish", json=body)
-    await _assert_refused(resp)
-
-
-@pytest.mark.security
 async def test_a_stale_ts_is_refused(gfs):
-    body = _body(gfs.publisher, ts=_now_iso(-400))
-    resp = await gfs.post("/gfs/member-publish", json=body)
-    await _assert_refused(resp)
-
-
-@pytest.mark.security
-async def test_an_unregistered_household_is_refused(gfs):
-    stranger = _Household()
-    resp = await gfs.post("/gfs/member-publish", json=_body(stranger))
-    await _assert_refused(resp)
-
-
-@pytest.mark.security
-@pytest.mark.parametrize("status", ["banned", "pending"])
-async def test_a_non_active_household_is_refused(gfs, status):
-    await gfs.app_[gfs_fed_repo_key].upsert_instance(gfs.publisher.instance(status))
-    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
-    await _assert_refused(resp)
+    await _assert_refused(await gfs.post(ROUTE, json=_body(ts=_now_iso(-400))))
 
 
 # ── Refusals: space ──────────────────────────────────────────────────────
@@ -368,12 +320,8 @@ async def test_a_non_active_household_is_refused(gfs, status):
 @pytest.mark.security
 async def test_an_unknown_space_is_refused(gfs):
     resp = await gfs.post(
-        "/gfs/member-publish",
-        json=_body(
-            gfs.publisher,
-            target="sp-nope",
-            cert=_cert(gfs.publisher, space_id="sp-nope"),
-        ),
+        ROUTE,
+        json=_body(gfs.publisher, target="sp-nope"),
     )
     await _assert_refused(resp)
 
@@ -394,14 +342,14 @@ async def test_a_banned_unreadable_or_unpinned_space_is_refused(gfs, change):
         # The upsert never clears a set pin — build the row unpinned.
         await fed.delete_space(SPACE_ID)
     await fed.upsert_space(replace(space, **change))
-    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
+    resp = await gfs.post(ROUTE, json=_body(gfs.publisher))
     await _assert_refused(resp)
 
 
 async def test_a_withdrawn_space_still_relays_to_existing_subscribers(gfs):
     fed = gfs.app_[gfs_fed_repo_key]
     await fed.set_space_withdrawn(SPACE_ID, True)
-    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
+    resp = await gfs.post(ROUTE, json=_body(gfs.publisher))
     assert resp.status == 200
 
 
@@ -411,43 +359,9 @@ async def test_a_withdrawn_space_still_relays_to_existing_subscribers(gfs):
 @pytest.mark.security
 async def test_a_replayed_request_is_not_fanned_out_twice(gfs):
     body = _body(gfs.publisher)
-    for _ in range(2):
-        resp = await gfs.post("/gfs/member-publish", json=body)
-        assert resp.status == 200
+    assert (await gfs.post(ROUTE, json=body)).status == 200
+    await _assert_refused(await gfs.post(ROUTE, json=body))
     assert len(await _queued(gfs, gfs.subscriber)) == 1
-
-
-@pytest.mark.security
-async def test_the_per_household_space_rate_limit_answers_429(gfs):
-    for i in range(MEMBER_PUBLISH_MAX_PER_MINUTE):
-        resp = await gfs.post(
-            "/gfs/member-publish", json=_body(gfs.publisher, payload=f"ct-{i}")
-        )
-        assert resp.status == 200, i
-    resp = await gfs.post(
-        "/gfs/member-publish", json=_body(gfs.publisher, payload="ct-over")
-    )
-    assert resp.status == 429
-    assert resp.headers["Retry-After"] == "60"
-    assert len(await _queued(gfs, gfs.subscriber)) == MEMBER_PUBLISH_MAX_PER_MINUTE
-
-
-async def test_the_rate_limit_is_per_space(gfs, monkeypatch):
-    svc_limiter = gfs.app_[gfs_member_publish_key]._limiter
-    monkeypatch.setattr(svc_limiter, "_limit", 1, raising=False)
-    fed = gfs.app_[gfs_fed_repo_key]
-    await fed.add_subscriber(
-        space_id=OTHER_SPACE, instance_id=gfs.subscriber.instance_id
-    )
-    assert (
-        await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
-    ).status == 200
-    other = _body(
-        gfs.publisher,
-        target=OTHER_SPACE,
-        cert=_cert(gfs.publisher, space_id=OTHER_SPACE),
-    )
-    assert (await gfs.post("/gfs/member-publish", json=other)).status == 200
 
 
 # ── Malformed bodies ─────────────────────────────────────────────────────
@@ -458,19 +372,21 @@ async def test_the_rate_limit_is_per_space(gfs, monkeypatch):
     [
         lambda b: b.update(event_type="space_post_created"),
         lambda b: b.update(from_instance="x"),
-        lambda b: b.pop("writer_cert"),
+        lambda b: b.pop("writer_sig"),
+        lambda b: b.update(instance_id="x"),
+        lambda b: b.update(writer_cert={}),
         lambda b: b.update(payload={"content": "plaintext"}),
     ],
 )
 async def test_a_malformed_body_is_a_400(gfs, mutate):
     body = _body(gfs.publisher)
     mutate(body)
-    resp = await gfs.post("/gfs/member-publish", json=body)
+    resp = await gfs.post(ROUTE, json=body)
     assert resp.status == 400
 
 
 async def test_a_non_object_body_is_a_400(gfs):
-    resp = await gfs.post("/gfs/member-publish", data=b"[1, 2]")
+    resp = await gfs.post(ROUTE, data=b"[1, 2]")
     assert resp.status == 400
 
 
@@ -500,6 +416,7 @@ def _notice(epoch, *, seed=SPACE_SEED, space_id=SPACE_ID) -> dict:
         {**_notice(5), "epoch": -1},
     ],
 )
+@pytest.mark.parametrize("gfs", [_FRESH], indirect=True)
 async def test_a_bad_epoch_notice_is_refused(gfs, body):
     resp = await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=body)
     assert resp.status == 403
@@ -545,10 +462,13 @@ async def test_an_epoch_notice_missing_a_field_is_a_400(gfs):
 # ── Capability + limiter wiring ──────────────────────────────────────────
 
 
-async def test_info_advertises_member_publish_trusted_in_the_signed_block(gfs):
+async def test_info_advertises_member_publish_in_the_signed_block(gfs):
+    """One mode: ``member_publish_strict`` (the anonymous publish, its v_50
+    name kept), never ``member_publish_trusted`` (the identified one)."""
     resp = await gfs.get("/gfs/info")
     body = await resp.json()
-    assert body["capabilities"]["member_publish_trusted"] is True
+    assert body["capabilities"]["member_publish_strict"] is True
+    assert "member_publish_trusted" not in body["capabilities"]
     assert verify_capabilities(
         body["public_key"],
         body["gfs_instance_id"],
@@ -561,7 +481,8 @@ async def test_info_advertises_member_publish_trusted_in_the_signed_block(gfs):
 @pytest.mark.parametrize(
     ("path", "limited"),
     [
-        ("/gfs/member-publish", True),
+        (ROUTE, True),
+        ("/gfs/member-publish", False),
         ("/gfs/spaces/abc/epoch", True),
         ("/gfs/publish", False),
         ("/gfs/spaces/abc/publish", False),
@@ -574,16 +495,16 @@ def test_the_per_ip_limiter_covers_exactly_the_member_publish_routes(path, limit
 @pytest.mark.security
 async def test_no_log_line_carries_the_ciphertext(gfs, caplog):
     with caplog.at_level(logging.DEBUG, logger="socialhome"):
-        await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
+        await gfs.post(ROUTE, json=_body(gfs.publisher))
         await gfs.post(
-            "/gfs/member-publish",
-            json=_body(gfs.publisher, signer=gfs.subscriber, payload="x" + CIPHERTEXT),
+            ROUTE,
+            json=_body(gfs.publisher, seed=os.urandom(32), payload="x" + CIPHERTEXT),
         )
     assert CIPHERTEXT not in caplog.text
 
 
 def test_module_constants():
-    assert mp_mod.MEMBER_PUBLISH_MAX_PER_MINUTE == 30
+    assert not hasattr(mp_mod, "MEMBER_PUBLISH_MAX_PER_MINUTE")
     assert mp_mod.EPOCH_NOTICE_ROUTE == "/gfs/spaces/{space_id}/epoch"
 
 
@@ -596,7 +517,7 @@ async def test_a_tail_dropped_subscriber_does_not_fail_the_publish(gfs, monkeypa
     monkeypatch.setattr(
         "socialhome.global_server.envelope_relay.RELAY_QUEUE_MAX_PER_RECIPIENT", 0
     )
-    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
+    resp = await gfs.post(ROUTE, json=_body(gfs.publisher))
     assert resp.status == 200
     assert await _queued(gfs, gfs.subscriber) == []
 
@@ -624,7 +545,7 @@ async def test_never_seen_offline_subscribers_get_no_queue_rows(gfs):
     sybils = await _add_sybils(gfs, 200)
     big = "A" * (200 * 1024)
     started = asyncio.get_running_loop().time()
-    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher, payload=big))
+    resp = await gfs.post(ROUTE, json=_body(gfs.publisher, payload=big))
     elapsed = asyncio.get_running_loop().time() - started
     assert resp.status == 200
     assert elapsed < 2.0
@@ -638,11 +559,9 @@ async def test_never_seen_offline_subscribers_get_no_queue_rows(gfs):
 async def test_the_per_space_aggregate_rate_limit_answers_429(gfs, monkeypatch):
     svc = gfs.app_[gfs_member_publish_key]
     monkeypatch.setattr(svc._space_limiter, "_limit", 1)
-    assert (
-        await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
-    ).status == 200
-    # A different household, same space: the space budget is spent.
-    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.subscriber))
+    assert (await gfs.post(ROUTE, json=_body(gfs.publisher))).status == 200
+    # Another writer, same space: the space budget is spent.
+    resp = await gfs.post(ROUTE, json=_body(gfs.subscriber))
     assert resp.status == 429
 
 
@@ -650,7 +569,7 @@ async def test_stop_drains_the_workers_and_refuses_new_jobs(gfs):
     svc = gfs.app_[gfs_member_publish_key]
     await svc.stop()
     assert svc._tasks == []
-    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
+    resp = await gfs.post(ROUTE, json=_body(gfs.publisher))
     assert resp.status == 503
     await svc.start()
 
@@ -661,7 +580,7 @@ async def test_stop_drains_the_workers_and_refuses_new_jobs(gfs):
 @pytest.mark.security
 async def test_a_request_signed_for_another_gfs_is_refused(gfs):
     resp = await gfs.post(
-        "/gfs/member-publish",
+        ROUTE,
         json=_body(gfs.publisher, gfs_instance_id="gfs-node-b"),
     )
     await _assert_refused(resp)
@@ -675,15 +594,15 @@ _ALIASED = {"instance_id": "gfs-shared", "instance_id_aliases": (GFS_ID,)}
 
 @pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
 async def test_a_publish_addressed_to_an_alias_is_accepted_and_logged(gfs, caplog):
+    # The fixture's own notice already used the alias: log it afresh.
+    gfs.app_[gfs_member_publish_key]._addressee._logged_at.clear()
     with caplog.at_level(logging.INFO, logger="socialhome.global_server.addressee"):
-        resp = await gfs.post(
-            "/gfs/member-publish", json=_body(gfs.publisher, gfs_instance_id=GFS_ID)
-        )
+        resp = await gfs.post(ROUTE, json=_body(gfs.publisher, gfs_instance_id=GFS_ID))
     assert resp.status == 200
     assert any("alias 'gfs-node-a'" in r.getMessage() for r in caplog.records)
     # The new public id is accepted too.
     resp = await gfs.post(
-        "/gfs/member-publish",
+        ROUTE,
         json=_body(gfs.publisher, gfs_instance_id="gfs-shared", payload="x2"),
     )
     assert resp.status == 200
@@ -694,7 +613,7 @@ async def test_a_publish_addressed_to_an_alias_is_accepted_and_logged(gfs, caplo
 async def test_an_id_that_is_neither_the_id_nor_an_alias_is_still_refused(gfs):
     await _assert_refused(
         await gfs.post(
-            "/gfs/member-publish",
+            ROUTE,
             json=_body(gfs.publisher, gfs_instance_id="gfs-node-b"),
         )
     )
@@ -757,15 +676,23 @@ def _owner_notice(
     owning: _Household | None = None,
     gfs_instance_id: str = GFS_ID,
     gfs_key: str | None = None,
+    space_id: str = SPACE_ID,
+    wkc: dict | None = None,
+    pin: bool = True,
 ) -> dict:
+    """The owner's household-signed notice; like a household's, it pins
+    the epoch's writer key (``pin=False``: a bare notice)."""
     owner = owning or gfs.owner
     ts = ts or _now_iso()
+    if wkc is None and pin and isinstance(epoch, int) and epoch <= 2**31:
+        wkc = _wkc(epoch, space_id=space_id)
     payload = owner_epoch_notice_signing_payload(
         owning_instance=owner.instance_id,
         gfs_instance_id=gfs_instance_id,
-        space_id=SPACE_ID,
+        space_id=space_id,
         epoch=epoch,
         ts=ts,
+        writer_key_cert=wkc,
         gfs_key=gfs_key,
     )
     sig = sign_ed25519(
@@ -781,6 +708,8 @@ def _owner_notice(
     }
     if gfs_key is not None:
         body["gfs_key"] = gfs_key
+    if wkc is not None:
+        body["writer_key_cert"] = wkc
     return body
 
 
@@ -797,20 +726,14 @@ async def test_the_owner_confirms_an_epoch_and_retires_the_old_one(gfs):
     state = await _state(gfs)
     assert (state.confirmed, state.previous, state.current) == (4, 3, 4)
     # The old epoch rides the grace …
-    assert (
-        await gfs.post("/gfs/member-publish", json=_body(gfs.publisher, epoch=3))
-    ).status == 200
+    assert (await gfs.post(ROUTE, json=_body(gfs.publisher, epoch=3))).status == 200
     # … and is retired once it runs out; older ones never pass.
     svc = gfs.app_[gfs_member_publish_key]
     svc._clock = lambda: time.time() + MEMBER_PUBLISH_EPOCH_GRACE_S + 5
     await _assert_refused(
-        await gfs.post(
-            "/gfs/member-publish", json=_body(gfs.publisher, epoch=3, payload="x1")
-        )
+        await gfs.post(ROUTE, json=_body(gfs.publisher, epoch=3, payload="x1"))
     )
-    await _assert_refused(
-        await gfs.post("/gfs/member-publish", json=_body(gfs.publisher, epoch=2))
-    )
+    await _assert_refused(await gfs.post(ROUTE, json=_body(gfs.publisher, epoch=2)))
 
 
 async def test_the_owner_may_jump_to_wall_clock_after_a_restore(gfs):
@@ -822,6 +745,7 @@ async def test_the_owner_may_jump_to_wall_clock_after_a_restore(gfs):
 
 @pytest.mark.security
 @pytest.mark.parametrize("epoch", [MAX_WRITER_CERT_EPOCH, 10**12])
+@pytest.mark.parametrize("gfs", [_FRESH], indirect=True)
 async def test_an_owner_notice_beyond_the_ceiling_is_refused(gfs, epoch):
     resp = await gfs.post(
         f"/gfs/spaces/{SPACE_ID}/epoch", json=_owner_notice(gfs, epoch)
@@ -844,6 +768,7 @@ async def test_an_owner_notice_beyond_the_ceiling_is_refused(gfs, epoch):
         {"ts": "stale"},
     ],
 )
+@pytest.mark.parametrize("gfs", [_FRESH], indirect=True)
 async def test_only_a_fresh_owner_signature_confirms(gfs, kwargs):
     kw = dict(kwargs)
     if kw.get("owning") == "publisher":
@@ -869,9 +794,10 @@ async def test_a_seed_only_notice_cannot_jump_to_wall_clock(gfs):
     assert (await _state(gfs)).current == 3
     svc = gfs.app_[gfs_member_publish_key]
     svc._clock = lambda: time.time() + 601
-    assert (
-        await gfs.post("/gfs/member-publish", json=_body(gfs.subscriber, epoch=4))
-    ).status == 200
+    # The next epoch stays open (+1 over ``current``) once its key is pinned.
+    await _pin(gfs, 4)
+    body = _body(gfs.subscriber, epoch=4, ts=_now_iso(601))
+    assert (await gfs.post(ROUTE, json=body)).status == 200
 
 
 @pytest.mark.security
@@ -887,6 +813,7 @@ async def test_seed_only_notices_step_by_one_at_most_once_a_minute(gfs):
     assert (state.current, state.confirmed) == (11, 10)
 
 
+@pytest.mark.parametrize("gfs", [_FRESH], indirect=True)
 async def test_a_seed_only_notice_never_initialises_the_state(gfs):
     await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=_notice(4))
     assert await _state(gfs) is None
@@ -902,36 +829,35 @@ async def test_seed_only_raises_never_strand_writers_on_the_confirmed_epoch(gfs)
         await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=_notice(3 + step))
     assert (await _state(gfs)).current == 6
     svc._clock = lambda: t + 10_000
-    assert (
-        await gfs.post("/gfs/member-publish", json=_body(gfs.publisher, epoch=3))
-    ).status == 200
+    body = _body(gfs.publisher, epoch=3, ts=_now_iso(10_000))
+    assert (await gfs.post(ROUTE, json=body)).status == 200
 
 
 @pytest.mark.security
-async def test_certs_never_raise_the_epoch(gfs):
-    """Two +1 certs used to raise ``previous`` past the real writers."""
+async def test_publishes_never_raise_the_epoch(gfs):
+    """A publish at +1 (a pinned key) never moves ``current`` or
+    ``previous`` past the real writers."""
     await _confirm(gfs, 3)
-    assert (
-        await gfs.post("/gfs/member-publish", json=_body(gfs.publisher, epoch=4))
-    ).status == 200
+    await _pin(gfs, 4)
+    assert (await gfs.post(ROUTE, json=_body(gfs.publisher, epoch=4))).status == 200
     state = await _state(gfs)
     assert (state.current, state.confirmed) == (3, 3)
-    await _assert_refused(
-        await gfs.post("/gfs/member-publish", json=_body(gfs.publisher, epoch=5))
-    )
     svc = gfs.app_[gfs_member_publish_key]
     svc._clock = lambda: time.time() + 10_000
-    assert (
-        await gfs.post("/gfs/member-publish", json=_body(gfs.subscriber, epoch=3))
-    ).status == 200
+    body = _body(gfs.subscriber, epoch=3, ts=_now_iso(10_000))
+    assert (await gfs.post(ROUTE, json=body)).status == 200
+    # +2 stays closed, even with a key pinned for it.
+    await _pin(gfs, 5)
+    body = _body(gfs.publisher, epoch=5, ts=_now_iso(10_000))
+    await _assert_refused(await gfs.post(ROUTE, json=body))
 
 
 @pytest.mark.security
-async def test_a_cert_far_ahead_is_refused_once_an_epoch_is_confirmed(gfs):
+async def test_an_epoch_far_ahead_is_refused_once_one_is_confirmed(gfs):
     await _confirm(gfs, 3)
     await _assert_refused(
         await gfs.post(
-            "/gfs/member-publish",
+            ROUTE,
             json=_body(gfs.publisher, epoch=MAX_WRITER_CERT_EPOCH),
         )
     )
@@ -983,12 +909,12 @@ async def test_a_malformed_relay_epoch_teaches_nothing(gfs):
     assert (await _state(gfs)).current == 3
 
 
+@pytest.mark.parametrize("gfs", [_FRESH], indirect=True)
 async def test_the_first_confirmed_epoch_gives_its_predecessor_the_grace(gfs):
+    await _pin(gfs, 3)
     await _confirm(gfs, 4)
     assert (await _state(gfs)).previous == 3
-    assert (
-        await gfs.post("/gfs/member-publish", json=_body(gfs.publisher, epoch=3))
-    ).status == 200
+    assert (await gfs.post(ROUTE, json=_body(gfs.publisher, epoch=3))).status == 200
 
 
 async def test_a_missing_owner_notice_field_is_a_400(gfs):
@@ -1010,7 +936,7 @@ async def test_bare_hello_sybils_get_no_rows_and_cannot_starve_the_seen(
     sybils = await _add_sybils(gfs, 5)
     for i in range(3):
         resp = await gfs.post(
-            "/gfs/member-publish",
+            ROUTE,
             json=_body(gfs.publisher, payload="B" * 900 + str(i)),
         )
         assert resp.status == 200
@@ -1023,7 +949,7 @@ async def test_bare_hello_sybils_get_no_rows_and_cannot_starve_the_seen(
 async def test_the_global_cap_evicts_from_the_largest_holder(gfs, monkeypatch):
     one = len(
         orjson.dumps(
-            MemberPublishRequest.from_wire(
+            MemberPublishAnonRequest.from_wire(
                 _body(gfs.publisher, payload="L" * 900 + "0")
             ).fan_out_frame()
         )
@@ -1037,18 +963,17 @@ async def test_the_global_cap_evicts_from_the_largest_holder(gfs, monkeypatch):
     await fed.remove_subscriber(space_id=SPACE_ID, instance_id=hog.instance_id)
     for i in range(4):
         await gfs.post(
-            "/gfs/member-publish",
+            ROUTE,
             json=_body(
                 gfs.publisher,
                 target=OTHER_SPACE,
-                cert=_cert(gfs.publisher, space_id=OTHER_SPACE),
                 payload="H" * 900 + str(i),
             ),
         )
     await _settle(gfs)
     for i in range(2):
         await gfs.post(
-            "/gfs/member-publish",
+            ROUTE,
             json=_body(gfs.publisher, payload="L" * 900 + str(i)),
         )
     legit = await _queued(gfs, gfs.subscriber)
@@ -1065,9 +990,7 @@ async def test_a_subscriber_seen_beyond_the_queue_ttl_gets_no_row(gfs):
     await fed.mark_relay_seen(
         gfs.subscriber.instance_id, at=int(time.time()) - 2 * 86400
     )
-    assert (
-        await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
-    ).status == 200
+    assert (await gfs.post(ROUTE, json=_body(gfs.publisher))).status == 200
     assert await _queued(gfs, gfs.subscriber) == []
 
 
@@ -1152,9 +1075,7 @@ async def test_a_space_s_items_arrive_in_publish_order(gfs):
         await ws.send_json(gfs.subscriber.hello())
         await _wait_connected(gfs.app_, gfs.subscriber.instance_id)
         for i in range(6):
-            resp = await gfs.post(
-                "/gfs/member-publish", json=_body(gfs.publisher, payload=f"ct-{i}")
-            )
+            resp = await gfs.post(ROUTE, json=_body(gfs.publisher, payload=f"ct-{i}"))
             assert resp.status == 200
         got = [
             (await asyncio.wait_for(ws.receive_json(), timeout=5))["payload"]
@@ -1166,15 +1087,14 @@ async def test_a_space_s_items_arrive_in_publish_order(gfs):
 async def test_one_busy_space_cannot_refuse_another(gfs, monkeypatch):
     svc = gfs.app_[gfs_member_publish_key]
     monkeypatch.setitem(svc._pending, SPACE_ID, mp_mod.FAN_OUT_BACKLOG_PER_SPACE)
-    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
+    resp = await gfs.post(ROUTE, json=_body(gfs.publisher))
     assert resp.status == 503
     assert resp.headers["Retry-After"] == "5"
     other = _body(
         gfs.publisher,
         target=OTHER_SPACE,
-        cert=_cert(gfs.publisher, space_id=OTHER_SPACE),
     )
-    assert (await gfs.post("/gfs/member-publish", json=other)).status == 200
+    assert (await gfs.post(ROUTE, json=other)).status == 200
     monkeypatch.delitem(svc._pending, SPACE_ID)
 
 
@@ -1182,9 +1102,7 @@ async def test_stop_drains_accepted_items_before_returning(gfs):
     svc = gfs.app_[gfs_member_publish_key]
     for i in range(4):
         assert (
-            await gfs.post(
-                "/gfs/member-publish", json=_body(gfs.publisher, payload=f"s-{i}")
-            )
+            await gfs.post(ROUTE, json=_body(gfs.publisher, payload=f"s-{i}"))
         ).status == 200
     await svc.stop()
     rows = await gfs.app_[gfs_envelope_queue_repo_key].list_for(
@@ -1205,9 +1123,7 @@ async def test_stop_warns_with_the_count_it_could_not_drain(gfs, monkeypatch, ca
 
     monkeypatch.setattr(type(svc._relay), "fan_out_relay", _stuck_relay)
     for i in range(3):
-        await gfs.post(
-            "/gfs/member-publish", json=_body(gfs.publisher, payload=f"w-{i}")
-        )
+        await gfs.post(ROUTE, json=_body(gfs.publisher, payload=f"w-{i}"))
     with caplog.at_level(logging.WARNING, logger="socialhome.global_server"):
         stopping = asyncio.create_task(svc.stop())
         await asyncio.sleep(0.2)
@@ -1218,21 +1134,18 @@ async def test_stop_warns_with_the_count_it_could_not_drain(gfs, monkeypatch, ca
 
 
 @pytest.mark.security
-async def test_a_writer_cert_carrying_a_user_binding_is_a_400(gfs):
-    """The v2 binding names the household's users: it must never reach the
-    connection server, so a request carrying it is refused outright (and
-    nothing of it can reach a fan-out frame or the queue)."""
-    bound = bind_writer_users(
-        _cert(gfs.publisher), space_seed=SPACE_SEED, user_ids=["u-1", "u-2"]
-    )
+async def test_a_request_carrying_a_writer_cert_is_a_400(gfs):
+    """A writer cert (and its user binding) lives inside the ciphertext
+    only: a request carrying one in the clear is refused outright, and
+    nothing of it can reach a fan-out frame or the queue."""
     body = _body(gfs.publisher)
-    body["writer_cert"] = bound.to_wire()
-    resp = await gfs.post("/gfs/member-publish", json=body)
+    body["writer_cert"] = {"cert_suite": "ed25519", "writer_user_ids": ["u-1"]}
+    resp = await gfs.post(ROUTE, json=body)
     assert resp.status == 400
     assert await _queued(gfs, gfs.subscriber) == []
 
 
-# ── Strict mode (v_50): anonymous publish under the writer group key ─────
+# ── The writer key: pinning and checks ───────────────────────────────────
 
 
 def _wkc(epoch: int, *, seed: bytes = SPACE_SEED, space_id: str = SPACE_ID) -> dict:
@@ -1244,48 +1157,12 @@ def _wkc(epoch: int, *, seed: bytes = SPACE_SEED, space_id: str = SPACE_ID) -> d
     ).to_wire()
 
 
-def _strict_notice(
-    gfs,
-    epoch: int,
-    *,
-    mode: str | None = "strict",
-    wkc: dict | None = None,
-    ts: str | None = None,
-    tamper_mode: str | None = None,
-) -> dict:
-    ts = ts or _now_iso()
-    wkc = wkc if wkc is not None else _wkc(epoch)
-    payload = owner_epoch_notice_signing_payload(
-        owning_instance=gfs.owner.instance_id,
-        gfs_instance_id=GFS_ID,
-        space_id=SPACE_ID,
-        epoch=epoch,
-        ts=ts,
-        publish_mode=mode,
-        writer_key_cert=wkc,
+async def _pin(gfs, epoch: int) -> None:
+    """Pin the writer key of *epoch* directly (what a delegated admin's +1
+    notice, or an owner's, leaves behind) without moving the epoch tiers."""
+    await gfs.app_[gfs_space_epoch_repo_key].pin_writer_key(
+        SPACE_ID, epoch, _wkc(epoch)["writer_pk"], replace=True
     )
-    sig = sign_ed25519(
-        gfs.owner.seed,
-        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"),
-    )
-    body = {
-        "owning_instance": gfs.owner.instance_id,
-        "gfs_instance_id": GFS_ID,
-        "epoch": epoch,
-        "ts": ts,
-        "signature": b64url_encode(sig),
-        "writer_key_cert": wkc,
-    }
-    if mode is not None:
-        body["publish_mode"] = tamper_mode or mode
-    return body
-
-
-async def _go_strict(gfs, epoch: int = 3, mode: str = "strict") -> None:
-    resp = await gfs.post(
-        f"/gfs/spaces/{SPACE_ID}/epoch", json=_strict_notice(gfs, epoch, mode=mode)
-    )
-    assert resp.status == 200
 
 
 def _anon(
@@ -1317,13 +1194,12 @@ def _anon(
     ).to_wire()
 
 
-async def _strict_state(gfs):
-    return await gfs.app_[gfs_space_epoch_repo_key].get_strict(SPACE_ID)
+async def _keys(gfs):
+    return await gfs.app_[gfs_space_epoch_repo_key].get_writer_keys(SPACE_ID)
 
 
 @pytest.mark.security
-async def test_strict_a_valid_writer_sig_is_relayed_without_any_identity(gfs):
-    await _go_strict(gfs)
+async def test_a_valid_writer_sig_is_relayed_without_any_identity(gfs):
     async with gfs.ws_connect("/gfs/ws") as sub_ws:
         await sub_ws.send_json(gfs.subscriber.hello())
         await _wait_connected(gfs.app_, gfs.subscriber.instance_id)
@@ -1341,38 +1217,40 @@ async def test_strict_a_valid_writer_sig_is_relayed_without_any_identity(gfs):
     assert set(frame) == {"type"} | MEMBER_PUBLISH_ANON_FRAME_KEYS
 
 
-async def test_strict_the_owner_notice_sets_mode_and_pins_the_key(gfs):
-    await _go_strict(gfs)
-    state = await _strict_state(gfs)
-    assert state.strict
+async def test_the_owner_notice_pins_the_key(gfs):
+    state = await _keys(gfs)
     assert state.writer_pk_for(3) == _wkc(3)["writer_pk"]
+    assert not hasattr(state, "publish_mode")
 
 
 @pytest.mark.security
-async def test_strict_a_wrong_epoch_key_is_refused(gfs):
-    await _go_strict(gfs, 3)
+async def test_a_wrong_epoch_key_is_refused(gfs):
+    await _confirm(gfs, 3)
     await _assert_refused(
         await gfs.post("/gfs/member-publish-anon", json=_anon(epoch=3, key_epoch=4))
     )
 
 
 @pytest.mark.security
-async def test_strict_a_missing_pin_is_refused(gfs):
-    await _confirm(gfs, 3)  # v_49-shaped owner notice: no writer key pinned
-    await _assert_refused(await gfs.post("/gfs/member-publish-anon", json=_anon()))
+@pytest.mark.parametrize("gfs", [_FRESH], indirect=True)
+async def test_a_missing_pin_is_refused(gfs):
+    resp = await gfs.post(
+        f"/gfs/spaces/{SPACE_ID}/epoch", json=_owner_notice(gfs, 3, pin=False)
+    )
+    assert resp.status == 200
+    await _assert_refused(await gfs.post(ROUTE, json=_anon()))
 
 
 @pytest.mark.security
-async def test_strict_a_key_from_another_space_seed_is_refused(gfs):
-    await _go_strict(gfs, 3)
+async def test_a_key_from_another_space_seed_is_refused(gfs):
+    await _confirm(gfs, 3)
     await _assert_refused(
         await gfs.post("/gfs/member-publish-anon", json=_anon(seed=os.urandom(32)))
     )
 
 
 @pytest.mark.security
-async def test_strict_a_replay_is_refused(gfs):
-    await _go_strict(gfs)
+async def test_a_replay_is_refused(gfs):
     body = _anon()
     assert (await gfs.post("/gfs/member-publish-anon", json=body)).status == 200
     await _assert_refused(await gfs.post("/gfs/member-publish-anon", json=body))
@@ -1390,16 +1268,14 @@ async def test_strict_a_replay_is_refused(gfs):
         {"suite": "ed25519+mldsa65"},
     ],
 )
-async def test_strict_stale_foreign_or_unknown_suite_is_refused(gfs, over):
-    await _go_strict(gfs)
+async def test_stale_foreign_or_unknown_suite_is_refused(gfs, over):
     await _assert_refused(
         await gfs.post("/gfs/member-publish-anon", json=_anon(**over))
     )
 
 
 @pytest.mark.security
-async def test_strict_a_tampered_signed_body_is_refused(gfs):
-    await _go_strict(gfs)
+async def test_a_tampered_signed_body_is_refused(gfs):
     body = _anon()
     body["payload"] = "dGFtcGVyZWQ:Y3Q"
     await _assert_refused(await gfs.post("/gfs/member-publish-anon", json=body))
@@ -1407,71 +1283,68 @@ async def test_strict_a_tampered_signed_body_is_refused(gfs):
 
 @pytest.mark.security
 @pytest.mark.parametrize("field", ["instance_id", "signature", "writer_cert"])
-async def test_strict_anything_identifying_is_a_400(gfs, field):
-    await _go_strict(gfs)
+async def test_anything_identifying_is_a_400(gfs, field):
     body = _anon()
     body[field] = "x"
     assert (await gfs.post("/gfs/member-publish-anon", json=body)).status == 400
 
 
 @pytest.mark.security
-async def test_strict_an_identified_publish_into_a_strict_space_is_refused(gfs):
-    await _go_strict(gfs)
-    await _assert_refused(
-        await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
+@pytest.mark.parametrize("gfs", [_FRESH], indirect=True)
+async def test_an_owner_notice_carrying_a_publish_mode_is_refused(gfs):
+    """There is one mode (v_90): a pre-v_90 owner signed ``publish_mode``
+    into its notice; this server verifies without it, so the signature does
+    not hold and nothing is written."""
+    ts = _now_iso()
+    wkc = _wkc(3)
+    payload = {
+        **owner_epoch_notice_signing_payload(
+            owning_instance=gfs.owner.instance_id,
+            gfs_instance_id=GFS_ID,
+            space_id=SPACE_ID,
+            epoch=3,
+            ts=ts,
+            writer_key_cert=wkc,
+        ),
+        "publish_mode": "strict",
+    }
+    sig = sign_ed25519(
+        gfs.owner.seed,
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"),
     )
-    assert await _queued(gfs, gfs.subscriber) == []
-
-
-async def test_trusted_mode_takes_both_paths(gfs):
-    await _go_strict(gfs, mode="trusted")
-    assert not (await _strict_state(gfs)).strict
-    assert (
-        await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
-    ).status == 200
-    assert (await gfs.post("/gfs/member-publish-anon", json=_anon())).status == 200
-
-
-async def test_strict_an_older_notice_never_moves_the_mode_back(gfs):
-    await _go_strict(gfs, 3)
-    older = _strict_notice(gfs, 3, mode="trusted", ts=_now_iso(-60))
-    assert (await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=older)).status == 200
-    assert (await _strict_state(gfs)).strict
-
-
-@pytest.mark.security
-async def test_strict_a_mode_outside_the_owner_signature_is_refused(gfs):
-    body = _strict_notice(gfs, 3, mode="strict", tamper_mode="trusted")
+    body = {
+        "owning_instance": gfs.owner.instance_id,
+        "gfs_instance_id": GFS_ID,
+        "epoch": 3,
+        "ts": ts,
+        "signature": b64url_encode(sig),
+        "writer_key_cert": wkc,
+        "publish_mode": "strict",
+    }
     resp = await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=body)
     assert resp.status == 403
-    # Nothing was written.
     assert await _state(gfs) is None
 
 
 @pytest.mark.security
-async def test_strict_an_unknown_mode_is_refused(gfs):
-    body = _strict_notice(gfs, 3, mode="open")
-    assert (await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=body)).status == 403
-
-
-@pytest.mark.security
-async def test_strict_a_writer_key_cert_by_another_authority_is_refused(gfs):
-    body = _strict_notice(gfs, 3, wkc=_wkc(3, seed=os.urandom(32)))
+@pytest.mark.parametrize("gfs", [_FRESH], indirect=True)
+async def test_a_writer_key_cert_by_another_authority_is_refused(gfs):
+    body = _owner_notice(gfs, 3, wkc=_wkc(3, seed=os.urandom(32)))
     assert (await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=body)).status == 403
     assert await _state(gfs) is None
 
 
 @pytest.mark.security
-async def test_strict_a_writer_key_cert_for_another_epoch_is_refused(gfs):
-    body = _strict_notice(gfs, 3, wkc=_wkc(4))
+async def test_a_writer_key_cert_for_another_epoch_is_refused(gfs):
+    body = _owner_notice(gfs, 3, wkc=_wkc(4))
     assert (await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=body)).status == 403
 
 
-async def test_strict_a_stale_owner_notice_pins_nothing(gfs):
-    await _go_strict(gfs, 5)
-    stale = _strict_notice(gfs, 4)
+async def test_a_stale_owner_notice_pins_nothing(gfs):
+    await _confirm(gfs, 5)
+    stale = _owner_notice(gfs, 4)
     assert (await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=stale)).status == 200
-    state = await _strict_state(gfs)
+    state = await _keys(gfs)
     assert state.writer_pk_for(4) is None
     assert state.writer_key_epoch == 5
 
@@ -1484,12 +1357,12 @@ def _delegated_notice(epoch: int, *, wkc: dict | None = None) -> dict:
 
 
 @pytest.mark.security
-async def test_strict_a_delegated_admin_pins_only_at_plus_one(gfs):
-    await _go_strict(gfs, 3)
+async def test_a_delegated_admin_pins_only_at_plus_one(gfs):
+    await _confirm(gfs, 3)
     # Beyond +1: neither the epoch nor the key moves.
     resp = await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=_delegated_notice(5))
     assert resp.status == 200
-    assert (await _strict_state(gfs)).writer_pk_for(5) is None
+    assert (await _keys(gfs)).writer_pk_for(5) is None
     await _assert_refused(
         await gfs.post("/gfs/member-publish-anon", json=_anon(epoch=5))
     )
@@ -1498,14 +1371,14 @@ async def test_strict_a_delegated_admin_pins_only_at_plus_one(gfs):
     svc._clock = lambda: time.time() + 120
     resp = await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=_delegated_notice(4))
     assert resp.status == 200
-    state = await _strict_state(gfs)
+    state = await _keys(gfs)
     assert state.writer_pk_for(4) == _wkc(4)["writer_pk"]
     assert state.writer_pk_for(3) == _wkc(3)["writer_pk"]
 
 
 @pytest.mark.security
-async def test_strict_a_delegated_admin_cannot_replace_the_owners_pin(gfs):
-    await _go_strict(gfs, 3)
+async def test_a_delegated_admin_cannot_replace_the_owners_pin(gfs):
+    await _confirm(gfs, 3)
     other = sign_writer_key_cert(
         space_seed=SPACE_SEED,
         space_id=SPACE_ID,
@@ -1516,25 +1389,26 @@ async def test_strict_a_delegated_admin_cannot_replace_the_owners_pin(gfs):
         f"/gfs/spaces/{SPACE_ID}/epoch", json=_delegated_notice(3, wkc=other)
     )
     assert resp.status == 200
-    assert (await _strict_state(gfs)).writer_pk_for(3) == _wkc(3)["writer_pk"]
+    assert (await _keys(gfs)).writer_pk_for(3) == _wkc(3)["writer_pk"]
 
 
 @pytest.mark.security
-async def test_strict_a_delegated_pin_needs_an_owner_confirmed_epoch(gfs):
+@pytest.mark.parametrize("gfs", [_FRESH], indirect=True)
+async def test_a_delegated_pin_needs_an_owner_confirmed_epoch(gfs):
     resp = await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=_delegated_notice(1))
     assert resp.status == 200
-    assert (await _strict_state(gfs)).writer_pk_for(1) is None
+    assert (await _keys(gfs)).writer_pk_for(1) is None
 
 
 @pytest.mark.security
-async def test_strict_a_delegated_writer_key_cert_by_another_authority_is_refused(gfs):
-    await _go_strict(gfs, 3)
+async def test_a_delegated_writer_key_cert_by_another_authority_is_refused(gfs):
+    await _confirm(gfs, 3)
     body = _delegated_notice(4, wkc=_wkc(4, seed=os.urandom(32)))
     assert (await gfs.post(f"/gfs/spaces/{SPACE_ID}/epoch", json=body)).status == 403
 
 
-async def test_strict_the_owner_replaces_a_delegated_pin(gfs):
-    await _go_strict(gfs, 3)
+async def test_the_owner_replaces_a_delegated_pin(gfs):
+    await _confirm(gfs, 3)
     svc = gfs.app_[gfs_member_publish_key]
     svc._clock = lambda: time.time() + 120
     rogue = sign_writer_key_cert(
@@ -1546,14 +1420,14 @@ async def test_strict_the_owner_replaces_a_delegated_pin(gfs):
     await gfs.post(
         f"/gfs/spaces/{SPACE_ID}/epoch", json=_delegated_notice(4, wkc=rogue)
     )
-    assert (await _strict_state(gfs)).writer_pk_for(4) == rogue["writer_pk"]
-    await _go_strict(gfs, 4)
-    assert (await _strict_state(gfs)).writer_pk_for(4) == _wkc(4)["writer_pk"]
+    assert (await _keys(gfs)).writer_pk_for(4) == rogue["writer_pk"]
+    await _confirm(gfs, 4)
+    assert (await _keys(gfs)).writer_pk_for(4) == _wkc(4)["writer_pk"]
 
 
-async def test_strict_the_previous_key_rides_the_grace_then_retires(gfs):
-    await _go_strict(gfs, 3)
-    await _go_strict(gfs, 4)
+async def test_the_previous_key_rides_the_grace_then_retires(gfs):
+    await _confirm(gfs, 3)
+    await _confirm(gfs, 4)
     assert (
         await gfs.post("/gfs/member-publish-anon", json=_anon(epoch=3))
     ).status == 200
@@ -1567,8 +1441,8 @@ async def test_strict_the_previous_key_rides_the_grace_then_retires(gfs):
     )
 
 
-async def test_strict_keys_are_forgotten_on_an_authority_repin(gfs):
-    await _go_strict(gfs, 3)
+async def test_keys_are_forgotten_on_an_authority_repin(gfs):
+    await _confirm(gfs, 3)
     fed = gfs.app_[gfs_fed_repo_key]
     assert await fed.set_space_authority(
         SPACE_ID,
@@ -1581,8 +1455,7 @@ async def test_strict_keys_are_forgotten_on_an_authority_repin(gfs):
 
 
 @pytest.mark.security
-async def test_strict_the_per_writer_key_limit_answers_429(gfs, monkeypatch):
-    await _go_strict(gfs)
+async def test_the_per_writer_key_limit_answers_429(gfs, monkeypatch):
     svc = gfs.app_[gfs_member_publish_key]
     monkeypatch.setattr(svc._writer_key_limiter, "_limit", 1, raising=False)
     assert (await gfs.post("/gfs/member-publish-anon", json=_anon())).status == 200
@@ -1590,8 +1463,7 @@ async def test_strict_the_per_writer_key_limit_answers_429(gfs, monkeypatch):
     assert resp.status == 429
 
 
-async def test_strict_a_banned_or_unreadable_space_is_refused(gfs):
-    await _go_strict(gfs)
+async def test_a_banned_or_unreadable_space_is_refused(gfs):
     fed = gfs.app_[gfs_fed_repo_key]
     await fed.set_space_status(SPACE_ID, "banned")
     await _assert_refused(await gfs.post("/gfs/member-publish-anon", json=_anon()))
@@ -1604,19 +1476,20 @@ def test_the_anon_route_is_ip_limited():
 async def test_the_info_block_advertises_member_publish_strict(gfs):
     body = await (await gfs.get("/gfs/info")).json()
     assert body["capabilities"]["member_publish_strict"] is True
+    assert "member_publish_trusted" not in body["capabilities"]
 
 
 # ── X1: one writer-key holder must not starve anonymous publishing ───────
 
 
 @pytest.mark.security
-async def test_strict_one_key_holder_cannot_starve_the_space(gfs):
+async def test_one_key_holder_cannot_starve_the_space(gfs):
     """Every publish-capable household shares the writer key, so the per-key
     and per-space limits can't tell an abuser from the rest. A per-(space,
     client IP) limit stops one household's flood long before the space-wide
     budget, so writers from other addresses keep publishing."""
-    await _go_strict(gfs)
     svc = gfs.app_[gfs_member_publish_key]
+    svc._anon_ip_limiter._limit = mp_mod.MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP
     for i in range(mp_mod.MEMBER_PUBLISH_ANON_MAX_PER_MINUTE_PER_SPACE_IP):
         await svc.publish_anon(
             MemberPublishAnonRequest.from_wire(_anon(payload=f"Z2FyYmFnZS0{i}")),
@@ -1638,8 +1511,7 @@ async def test_strict_one_key_holder_cannot_starve_the_space(gfs):
     )
 
 
-async def test_strict_the_route_applies_the_per_address_limit(gfs, monkeypatch):
-    await _go_strict(gfs)
+async def test_the_route_applies_the_per_address_limit(gfs, monkeypatch):
     svc = gfs.app_[gfs_member_publish_key]
     monkeypatch.setattr(svc._anon_ip_limiter, "_limit", 1, raising=False)
     assert (await gfs.post("/gfs/member-publish-anon", json=_anon())).status == 200
@@ -1647,8 +1519,7 @@ async def test_strict_the_route_applies_the_per_address_limit(gfs, monkeypatch):
     assert resp.status == 429
 
 
-async def test_strict_a_refused_signature_costs_no_address_budget(gfs, monkeypatch):
-    await _go_strict(gfs)
+async def test_a_refused_signature_costs_no_address_budget(gfs, monkeypatch):
     svc = gfs.app_[gfs_member_publish_key]
     monkeypatch.setattr(svc._anon_ip_limiter, "_limit", 1, raising=False)
     await _assert_refused(
@@ -1657,19 +1528,14 @@ async def test_strict_a_refused_signature_costs_no_address_budget(gfs, monkeypat
     assert (await gfs.post("/gfs/member-publish-anon", json=_anon())).status == 200
 
 
-async def test_the_public_listing_carries_the_publish_mode(gfs):
-    """v_50: households read the mode off the directory they already fetch
-    (cookie-less) and never send an identified publish into a strict space."""
+async def test_the_public_listing_carries_no_publish_mode(gfs):
+    """v_90: there is one mode, so the directory names none — and the
+    writer keys never reach it."""
     listing = await (await gfs.get("/gfs/spaces")).json()
     row = next(sp for sp in listing["spaces"] if sp["space_id"] == SPACE_ID)
-    assert row["member_publish_mode"] == "trusted"
-    await _go_strict(gfs)
-    listing = await (await gfs.get("/gfs/spaces")).json()
-    row = next(sp for sp in listing["spaces"] if sp["space_id"] == SPACE_ID)
-    assert row["member_publish_mode"] == "strict"
+    assert "member_publish_mode" not in row
     detail = await (await gfs.get(f"/gfs/spaces/{SPACE_ID}")).json()
-    assert detail["member_publish_mode"] == "strict"
-    # The writer keys never reach the public directory.
+    assert "member_publish_mode" not in detail
     assert "writer_key" not in json.dumps(listing)
 
 
@@ -1687,7 +1553,7 @@ async def test_info_advertises_the_addressee_key_capability(gfs):
 
 async def test_a_publish_bound_to_this_servers_key_is_accepted(gfs):
     resp = await gfs.post(
-        "/gfs/member-publish",
+        ROUTE,
         json=_body(gfs.publisher, gfs_key=await _own_key(gfs)),
     )
     assert resp.status == 200
@@ -1702,7 +1568,7 @@ async def test_an_alias_request_bound_to_another_servers_key_is_refused(gfs):
     other = "ab" * 32
     await _assert_refused(
         await gfs.post(
-            "/gfs/member-publish",
+            ROUTE,
             json=_body(gfs.publisher, gfs_instance_id=GFS_ID, gfs_key=other),
         )
     )
@@ -1722,11 +1588,11 @@ async def test_an_owner_notice_bound_to_this_servers_key_is_accepted(gfs):
 
 
 @pytest.mark.security
-async def test_the_gfs_key_is_inside_the_household_signature(gfs):
+async def test_the_gfs_key_is_inside_the_writer_signature(gfs):
     """Stripping or swapping the bound key breaks the signature."""
     body = _body(gfs.publisher, gfs_key=await _own_key(gfs))
     del body["gfs_key"]
-    await _assert_refused(await gfs.post("/gfs/member-publish", json=body))
+    await _assert_refused(await gfs.post(ROUTE, json=body))
 
 
 @pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
@@ -1735,7 +1601,7 @@ async def test_a_connection_left_on_the_old_id_is_still_served_with_the_key(gfs)
     the old id (the UNIQUE new id belongs to the first). Its requests name the
     old id — an alias — bound to this server's own key: accepted."""
     resp = await gfs.post(
-        "/gfs/member-publish",
+        ROUTE,
         json=_body(gfs.publisher, gfs_instance_id=GFS_ID, gfs_key=await _own_key(gfs)),
     )
     assert resp.status == 200
@@ -1791,23 +1657,19 @@ async def test_a_compressed_item_is_refused_while_a_seat_lacks_the_label(gfs):
     ``payload_zlib1`` (here: an older household, NULL) refuses it for all —
     409, and nothing is fanned out or queued."""
     await _label_seats(gfs, 3, gfs.publisher)
-    resp = await gfs.post(
-        "/gfs/member-publish", json=_body(gfs.publisher, payload_suite="zlib1")
-    )
+    resp = await gfs.post(ROUTE, json=_body(gfs.publisher, payload_suite="zlib1"))
     assert resp.status == 409
     assert await resp.json() == {"error": "payload_suite_unsupported"}
     assert await _queued(gfs, gfs.subscriber) == []
     # The same item as JSON goes through.
-    resp = await gfs.post("/gfs/member-publish", json=_body(gfs.publisher))
+    resp = await gfs.post(ROUTE, json=_body(gfs.publisher))
     assert resp.status == 200
 
 
 async def test_a_seat_that_reads_space_item_only_still_lacks_zlib(gfs):
     await _label_seats(gfs, 3, gfs.publisher)
     await _label_seats(gfs, 1, gfs.subscriber)
-    resp = await gfs.post(
-        "/gfs/member-publish", json=_body(gfs.publisher, payload_suite="zlib1")
-    )
+    resp = await gfs.post(ROUTE, json=_body(gfs.publisher, payload_suite="zlib1"))
     assert resp.status == 409
 
 
@@ -1818,13 +1680,11 @@ async def test_a_dictionary_item_needs_the_dictionary_label_on_every_seat(gfs):
     await _label_seats(gfs, 7, gfs.publisher)
     await _label_seats(gfs, 3, gfs.subscriber)
     body = _body(gfs.publisher, payload_suite="zlib1+dict1")
-    resp = await gfs.post("/gfs/member-publish", json=body)
+    resp = await gfs.post(ROUTE, json=body)
     assert resp.status == 409
     assert await resp.json() == {"error": "payload_suite_unsupported"}
     await _label_seats(gfs, 7, gfs.subscriber)
-    resp = await gfs.post(
-        "/gfs/member-publish", json=_body(gfs.publisher, payload_suite="zlib1+dict1")
-    )
+    resp = await gfs.post(ROUTE, json=_body(gfs.publisher, payload_suite="zlib1+dict1"))
     assert resp.status == 200
     queued = await _queued(gfs, gfs.subscriber)
     assert [q.sealed.get("payload_suite") for q in queued] == ["zlib1+dict1"]
@@ -1833,7 +1693,7 @@ async def test_a_dictionary_item_needs_the_dictionary_label_on_every_seat(gfs):
 async def test_a_compressed_item_is_relayed_when_every_seat_reads_it(gfs):
     await _label_seats(gfs, 3, gfs.publisher, gfs.subscriber)
     body = _body(gfs.publisher, payload_suite="zlib1")
-    resp = await gfs.post("/gfs/member-publish", json=body)
+    resp = await gfs.post(ROUTE, json=body)
     assert resp.status == 200
     queued = await _queued(gfs, gfs.subscriber)
     assert [q.sealed.get("payload_suite") for q in queued] == ["zlib1"]
@@ -1841,13 +1701,13 @@ async def test_a_compressed_item_is_relayed_when_every_seat_reads_it(gfs):
 
 async def test_the_suite_refusal_comes_only_after_authorization(gfs):
     """A forged request never learns whether the space has old followers."""
-    body = _body(gfs.publisher, payload_suite="zlib1", signer=gfs.subscriber)
-    await _assert_refused(await gfs.post("/gfs/member-publish", json=body))
+    body = _body(gfs.publisher, payload_suite="zlib1", seed=os.urandom(32))
+    await _assert_refused(await gfs.post(ROUTE, json=body))
 
 
 async def test_an_unknown_suite_is_a_400(gfs):
     body = {**_body(gfs.publisher), "payload_suite": "zlib9"}
-    resp = await gfs.post("/gfs/member-publish", json=body)
+    resp = await gfs.post(ROUTE, json=body)
     assert resp.status == 400
 
 
@@ -1894,9 +1754,7 @@ async def test_a_binary_and_a_text_follower_get_the_same_item(gfs):
         await binary_ws.send_json(gfs.owner.hello(["space_key_pull", "ws_binary1"]))
         await _wait_connected(gfs.app_, gfs.subscriber.instance_id)
         await _wait_connected(gfs.app_, gfs.owner.instance_id)
-        resp = await gfs.post(
-            "/gfs/member-publish", json=_body(gfs.publisher, payload=ciphertext)
-        )
+        resp = await gfs.post(ROUTE, json=_body(gfs.publisher, payload=ciphertext))
         assert resp.status == 200
         text_msg = await _next_item(text_ws)
         binary_msg = await _next_item(binary_ws)
@@ -1907,33 +1765,3 @@ async def test_a_binary_and_a_text_follower_get_the_same_item(gfs):
     assert text_frame["payload"] == ciphertext
     # A quarter of the ciphertext saved: it travels raw, not as base64.
     assert len(binary_msg.data) < len(text_msg.data.encode()) - 300
-
-
-async def test_a_follower_that_asked_gets_the_item_without_the_frame_cert(gfs):
-    """``space_item_no_cert``: the server verified the plaintext writer cert
-    to authorize the publish; the follower that listed the label gets the
-    same item without it (it verifies the cert inside the ciphertext), the
-    other follower still gets it."""
-    fed = gfs.app_[gfs_fed_repo_key]
-    await fed.add_subscriber(space_id=SPACE_ID, instance_id=gfs.owner.instance_id)
-    async with (
-        gfs.ws_connect("/gfs/ws") as full_ws,
-        gfs.ws_connect("/gfs/ws") as lean_ws,
-    ):
-        await full_ws.send_json(gfs.subscriber.hello())
-        await lean_ws.send_json(
-            gfs.owner.hello(["space_key_pull", "ws_binary1", "space_item_no_cert"])
-        )
-        await _wait_connected(gfs.app_, gfs.subscriber.instance_id)
-        await _wait_connected(gfs.app_, gfs.owner.instance_id)
-        ciphertext = (
-            f"{b64url_encode(os.urandom(12))}:{b64url_encode(os.urandom(1040))}"
-        )
-        resp = await gfs.post(
-            "/gfs/member-publish", json=_body(gfs.publisher, payload=ciphertext)
-        )
-        assert resp.status == 200
-        full = orjson.loads((await _next_item(full_ws)).data)
-        lean = decode_binary_frame((await _next_item(lean_ws)).data)
-    assert "writer_cert" in full
-    assert lean == {k: v for k, v in full.items() if k != "writer_cert"}
