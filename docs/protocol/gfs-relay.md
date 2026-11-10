@@ -1138,7 +1138,13 @@ that is alone on its GFS, an epoch under 10 minutes old or a frame that
 cannot be built: per-recipient frames, as in v_89. A refused upload: each
 target is tried per recipient. A throttled upload (`429`): each target is
 queued in the outbox (one stored payload), with no live per-recipient
-burst at the busy GFS.
+burst at the busy GFS. A multi upload the GFS accepted but whose answer was
+lost (a timeout) is retried with a new `msg_id` — from the outbox, or per
+recipient on the live path — so a recipient can get that one item twice.
+That is safe: a multi frame carries only `MULTI_EVENT_TYPES`, whose inbound
+handlers apply by content id (a re-sent post or calendar event is an upsert
+of the same row, a held comment id is ignored, a chat reaction is
+`INSERT OR IGNORE`, a poll vote replaces the voter's vote).
 
 ```mermaid
 sequenceDiagram

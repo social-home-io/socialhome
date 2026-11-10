@@ -53,13 +53,12 @@ async def test_three_failed_recipients_store_one_payload_and_three_refs():
     [stored] = s.outbox.payloads.values()
     assert {r["payload_id"] for r in rows} == {stored.id}
     assert stored.event_type is POST and stored.space_id == _SPACE
-    # KEK-wrapped, bound to its id: nothing readable in the database.
+    # KEK-wrapped, bound to its id, event type and space: nothing readable
+    # in the database.
     assert b"secret" not in stored.payload_enc.encode()
-    assert (
-        orjson.loads(
-            s.km.decrypt(stored.payload_enc, associated_data=stored.id.encode())
-        )
-        == _PAYLOAD
+    ad = f"sh-outbox-payload:v1\n{stored.id}\n{POST.value}\n{_SPACE}".encode()
+    assert orjson.loads(s.km.decrypt(stored.payload_enc, associated_data=ad)) == (
+        _PAYLOAD
     )
     # The id is a keyed MAC, not a digest anyone can recompute.
     assert len(stored.id) == 64 and _PAYLOAD["post_id"] not in stored.id
@@ -140,6 +139,25 @@ async def test_a_ref_row_whose_payload_is_gone_cannot_be_sealed():
         pass
     else:  # pragma: no cover
         raise AssertionError("sealed a row without its payload")
+
+
+async def test_a_stored_payload_moved_to_another_event_or_space_does_not_unwrap():
+    s = _Sender()
+    await _failing_broadcast(s, paired=1)
+    [entry] = s.outbox.entries()
+    [stored] = s.outbox.payloads.values()
+    instance = await s.repo.get_instance(entry.instance_id)
+    for swapped in (
+        dataclasses.replace(stored, event_type=FederationEventType.SPACE_POST_DELETED),
+        dataclasses.replace(stored, space_id="sp-other"),
+    ):
+        s.outbox.payloads[stored.id] = swapped
+        try:
+            await s.svc.seal_outbox_entry(entry, instance)
+        except ValueError:
+            pass
+        else:  # pragma: no cover
+            raise AssertionError(f"unwrapped a payload moved to {swapped}")
 
 
 async def test_due_ref_rows_on_one_gfs_go_up_as_one_multi_upload():

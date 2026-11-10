@@ -12,7 +12,6 @@ import pytest
 from socialhome.app import (
     _aiohttp_timeout,
     _deliver_outbox_entry,
-    _GatedOutboxMulti,
     _redeliver_envelope,
 )
 from socialhome.crypto import (
@@ -1479,30 +1478,3 @@ async def test_redeliver_a_ref_row_without_its_payload_is_permanent(env):
 
     assert await _redeliver_envelope(svc, fed_repo, gone) is DeliveryOutcome.PERMANENT
     assert client.bodies == []
-
-
-async def test_outbox_multi_keeps_rows_moderation_refuses_out_of_groups():
-    asked: list[list[str]] = []
-
-    class _Fed:
-        async def outbox_multi_groups(self, entries):
-            asked.append([e.id for e in entries])
-            return [entries]
-
-        async def deliver_outbox_multi(self, group):
-            return DeliveryOutcome.SUCCESS
-
-    async def _wanted(entry):
-        return entry.id != "refused"
-
-    rows = [
-        _OutboxEntry(id=i, instance_id=f"peer-{i}", payload_json="")
-        for i in ("a", "refused", "b")
-    ]
-    gate = _GatedOutboxMulti(_Fed(), lambda: _wanted)
-    assert [[e.id for e in g] for g in await gate.outbox_multi_groups(rows)] == [
-        ["a", "b"]
-    ]
-    assert await gate.deliver_outbox_multi(rows) is DeliveryOutcome.SUCCESS
-    ungated = _GatedOutboxMulti(_Fed(), lambda: None)
-    assert len((await ungated.outbox_multi_groups(rows))[0]) == 3

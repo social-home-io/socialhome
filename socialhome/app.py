@@ -69,7 +69,6 @@ from .domain.federation import (
     PairingStatus,
 )
 from .domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
-from .domain.outbox import OutboxEntry
 from .domain.space import ContentAction
 from .exception_text import describe_exception
 from .federation.auto_pair_coordinator import AutoPairCoordinator
@@ -180,7 +179,7 @@ from .infrastructure.moment_retention_scheduler import MomentRetentionScheduler
 from .infrastructure.notification_cleanup_scheduler import (
     NotificationCleanupScheduler,
 )
-from .infrastructure.outbox_processor import OutboxMulti
+from .infrastructure.outbox_processor import GatedOutboxMulti
 from .infrastructure.page_lock_scheduler import PageLockExpiryScheduler
 from .infrastructure.pairing_relay_scheduler import PairingRelayRetentionScheduler
 from .infrastructure.pairing_session_prune_scheduler import (
@@ -544,36 +543,6 @@ async def _deliver_outbox_entry(
     ):
         await peer_unpair.finish_unpair(entry.instance_id)
     return outcome
-
-
-class _GatedOutboxMulti:
-    """The :class:`OutboxProcessor`'s multi sender: the federation service's
-    grouping, minus the rows the moderation check (``still_wanted_of()``,
-    resolved per pass) refuses — those stay single, and the delivery
-    callback drops them (PERMANENT)."""
-
-    __slots__ = ("_federation", "_still_wanted_of")
-
-    def __init__(
-        self,
-        federation: OutboxMulti,
-        still_wanted_of: Callable[[], Callable[[OutboxEntry], Awaitable[bool]] | None],
-    ) -> None:
-        self._federation = federation
-        self._still_wanted_of = still_wanted_of
-
-    async def outbox_multi_groups(
-        self, entries: list[OutboxEntry]
-    ) -> list[list[OutboxEntry]]:
-        still_wanted = self._still_wanted_of()
-        if still_wanted is not None:
-            entries = [e for e in entries if await still_wanted(e)]
-        return await self._federation.outbox_multi_groups(entries)
-
-    async def deliver_outbox_multi(
-        self, group: list[OutboxEntry]
-    ) -> DeliveryOutcome | RetryAfter | None:
-        return await self._federation.deliver_outbox_multi(group)
 
 
 def _parse_retry_after_s(value: str | None) -> float | None:
@@ -5840,7 +5809,7 @@ def create_app(config: Config | None = None) -> web.Application:
             outbox_repo,
             _deliver,
             after_prune=peer_unpair_service.sweep_tombstones,
-            multi=_GatedOutboxMulti(federation_service, _still_wanted),
+            multi=GatedOutboxMulti(federation_service, _still_wanted),
         )
         await outbox_processor.start()
         app[K.outbox_processor_key] = outbox_processor

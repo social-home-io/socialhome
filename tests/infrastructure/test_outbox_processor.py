@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
@@ -16,6 +17,7 @@ from socialhome.infrastructure.outbox_processor import (
     MAX_RETRY_AFTER_S,
     PARALLEL_RECIPIENTS,
     DeliveryOutcome,
+    GatedOutboxMulti,
     OutboxProcessor,
     RetryAfter,
 )
@@ -784,3 +786,143 @@ async def test_a_failing_grouper_leaves_every_row_per_recipient():
     single = AsyncMock(return_value=DeliveryOutcome.SUCCESS)
     await OutboxProcessor(repo, single, multi=multi).drain_once()
     assert single.await_count == 2
+
+
+async def test_a_hung_peer_costs_one_timeout_per_pass(monkeypatch):
+    monkeypatch.setattr(outbox_processor_mod, "SEND_IDLE_TIMEOUT_S", 0.01)
+    hung = [_row(f"h{i}", "HUNG") for i in range(50)]
+    others = [_row(f"o{i}", "OK") for i in range(3)]
+    repo = _repo_for(hung + others)
+    calls: list[str] = []
+    never = asyncio.Event()
+
+    async def _deliver(e):
+        calls.append(e.id)
+        if e.instance_id == "HUNG":
+            await never.wait()
+        return DeliveryOutcome.SUCCESS
+
+    proc = OutboxProcessor(repo, _deliver, rng=lambda: 0.5)
+    assert await proc.drain_once() == 53
+    assert [c for c in calls if c.startswith("h")] == ["h0"]
+    # Only the timed-out row spends an attempt; the rest stay pending.
+    assert [c.args[0] for c in repo.reschedule.await_args_list] == ["h0"]
+    assert sorted(c.args[0] for c in repo.mark_delivered.await_args_list) == [
+        "o0",
+        "o1",
+        "o2",
+    ]
+
+
+async def test_a_throttled_peer_s_later_rows_wait_for_the_next_pass():
+    a1, a2, b1 = _row("a1", "A"), _row("a2", "A"), _row("b1", "B")
+    repo = _repo_for([a1, a2, b1])
+    calls: list[str] = []
+
+    async def _deliver(e):
+        calls.append(e.id)
+        return (
+            RetryAfter(seconds=30)
+            if e.instance_id == "A"
+            else (DeliveryOutcome.SUCCESS)
+        )
+
+    await OutboxProcessor(repo, _deliver, rng=lambda: 0.0).drain_once()
+    assert sorted(calls) == ["a1", "b1"]
+    assert [c.args[0] for c in repo.reschedule.await_args_list] == ["a1"]
+
+
+async def test_a_transient_group_stalls_each_of_its_recipients():
+    a, b, a2, b2, c2 = (
+        _row("a", "A"),
+        _row("b", "B"),
+        _row("a2", "A"),
+        _row("b2", "B"),
+        _row("c2", "C"),
+    )
+    repo = _repo_for([a, b, a2, b2, c2])
+    multi = _Multi([[a, b]], outcome=DeliveryOutcome.TRANSIENT)
+    seen: list[str] = []
+
+    async def _deliver(e):
+        seen.append(e.id)
+        return DeliveryOutcome.SUCCESS
+
+    await OutboxProcessor(repo, _deliver, multi=multi, rng=lambda: 0.0).drain_once()
+    assert multi.delivered == [["a", "b"]]
+    assert seen == ["c2"]
+    assert sorted(c.args[0] for c in repo.reschedule.await_args_list) == ["a", "b"]
+
+
+async def test_a_group_drops_a_recipient_stalled_earlier_in_the_pass():
+    a1, a2, b2, c2 = _row("a1", "A"), _row("a2", "A"), _row("b2", "B"), _row("c2", "C")
+    repo = _repo_for([a1, a2, b2, c2])
+    multi = _Multi([[a2, b2, c2]])
+    seen: list[str] = []
+
+    async def _deliver(e):
+        seen.append(e.id)
+        return DeliveryOutcome.TRANSIENT if e.id == "a1" else DeliveryOutcome.SUCCESS
+
+    await OutboxProcessor(repo, _deliver, multi=multi, rng=lambda: 0.0).drain_once()
+    assert seen == ["a1"]
+    assert multi.delivered == [["b2", "c2"]]
+    assert sorted(c.args[0] for c in repo.mark_delivered.await_args_list) == [
+        "b2",
+        "c2",
+    ]
+
+
+# ── GatedOutboxMulti ──────────────────────────────────────────────────────
+
+
+class _Fed:
+    def __init__(self) -> None:
+        self.asked: list[list[str]] = []
+
+    async def outbox_multi_groups(self, entries):
+        self.asked.append([e.id for e in entries])
+        return [entries]
+
+    async def deliver_outbox_multi(self, group):
+        return DeliveryOutcome.SUCCESS
+
+
+async def test_gated_multi_keeps_rows_moderation_refuses_out_of_groups():
+    checked: list[str] = []
+
+    async def _wanted(entry):
+        checked.append(entry.id)
+        return entry.id != "refused"
+
+    rows = [_row(i, f"peer-{i}") for i in ("a", "refused", "b")]
+    gate = GatedOutboxMulti(_Fed(), lambda: _wanted)
+    assert [[e.id for e in g] for g in await gate.outbox_multi_groups(rows)] == [
+        ["a", "b"]
+    ]
+    assert checked == ["a", "refused", "b"]
+    assert await gate.deliver_outbox_multi(rows) is DeliveryOutcome.SUCCESS
+    ungated = GatedOutboxMulti(_Fed(), lambda: None)
+    assert len((await ungated.outbox_multi_groups(rows))[0]) == 3
+
+
+async def test_gated_multi_checks_only_rows_that_could_be_grouped():
+    checked: list[str] = []
+
+    async def _wanted(entry):
+        checked.append(entry.id)
+        return True
+
+    grouped = _row("grouped", "A")
+    single_rows = [
+        dataclasses.replace(_row("no-ref", "B"), payload_id=None, payload_json="{}"),
+        dataclasses.replace(_row("no-space", "C"), space_id=None),
+        dataclasses.replace(
+            _row("not-multi", "D"), event_type=FederationEventType.PAIRING_INTRO
+        ),
+    ]
+    fed = _Fed()
+    gate = GatedOutboxMulti(fed, lambda: _wanted)
+    await gate.outbox_multi_groups([grouped, *single_rows])
+    assert checked == ["grouped"]
+    assert fed.asked == [["grouped"]]

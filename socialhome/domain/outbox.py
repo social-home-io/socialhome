@@ -44,7 +44,7 @@ class OutboxPayload:
     payload stored ONCE for every recipient it failed to reach.
 
     ``payload_enc`` is the payload JSON wrapped under the local KEK with
-    ``id`` as associated data; ``id`` is an HMAC under a per-process key, so
+    ``id``, ``event_type`` and ``space_id`` as associated data; ``id`` is an HMAC under a per-process key, so
     one broadcast's failed recipients share the row and nothing guessable is
     stored.
     """

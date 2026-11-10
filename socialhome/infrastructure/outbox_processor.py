@@ -26,6 +26,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from ..domain.federation import MULTI_EVENT_TYPES
 from ..domain.federation_retention import NEVER_DROP, TERMINAL_GRACE, is_long_lived
 from ..domain.outbox import DeliveryOutcome, RetryAfter
 from ..repositories.outbox_repo import (
@@ -117,6 +118,12 @@ class OutboxMulti(Protocol):
     one by one. ``deliver_outbox_multi`` returns the outcome that applies to
     every row of *group*, or ``None`` when the group could not go up as one
     (each row is then delivered on its own).
+
+    A multi upload the GFS accepted but whose answer was lost (a timeout) is
+    retried with a new ``msg_id``, so a recipient can get that one item
+    twice — as with the live path's per-recipient fallback after a timed-out
+    multi upload. Multi frames carry only ``MULTI_EVENT_TYPES``, whose
+    inbound handlers apply by content id, so the second copy is a no-op.
     """
 
     async def outbox_multi_groups(
@@ -126,6 +133,51 @@ class OutboxMulti(Protocol):
     async def deliver_outbox_multi(
         self, group: list[OutboxEntry]
     ) -> DeliveryOutcome | RetryAfter | None: ...
+
+
+#: The moderation queue's per-row check (``still_wanted``), or a resolver of
+#: it that answers ``None`` until the moderation service is wired.
+StillWanted = Callable[[OutboxEntry], Awaitable[bool]]
+
+
+class GatedOutboxMulti:
+    """An :class:`OutboxMulti` that keeps rows the moderation check refuses
+    out of every group: those stay single, and the delivery callback drops
+    them (PERMANENT). The check (``still_wanted_of()``, resolved per pass)
+    runs only on rows that could be grouped — a ref row with a space, of a
+    :data:`MULTI_EVENT_TYPES` type — so a single row is not checked twice."""
+
+    __slots__ = ("_inner", "_still_wanted_of")
+
+    def __init__(
+        self,
+        inner: OutboxMulti,
+        still_wanted_of: Callable[[], StillWanted | None],
+    ) -> None:
+        self._inner = inner
+        self._still_wanted_of = still_wanted_of
+
+    async def outbox_multi_groups(
+        self, entries: list[OutboxEntry]
+    ) -> list[list[OutboxEntry]]:
+        still_wanted = self._still_wanted_of()
+        if still_wanted is not None:
+            entries = [e for e in entries if _groupable(e) and await still_wanted(e)]
+        return await self._inner.outbox_multi_groups(entries)
+
+    async def deliver_outbox_multi(
+        self, group: list[OutboxEntry]
+    ) -> DeliveryOutcome | RetryAfter | None:
+        return await self._inner.deliver_outbox_multi(group)
+
+
+def _groupable(entry: OutboxEntry) -> bool:
+    """Whether *entry* could ride a multi upload at all."""
+    return (
+        entry.payload_id is not None
+        and entry.space_id is not None
+        and entry.event_type in MULTI_EVENT_TYPES
+    )
 
 
 #: Optional follow-up to the retention sweep. Runs after expired rows have
@@ -254,6 +306,13 @@ class OutboxProcessor:
         across passes: a crash or a stop mid-pass leaves the unfinished rows
         ``pending``, and the next pass picks them up.
 
+        Once a recipient's delivery ends TRANSIENT, :class:`RetryAfter` or in
+        a timeout, its remaining units in this pass are not attempted: they
+        stay ``pending`` for the next pass, with no attempt counted — one dead
+        peer costs one timeout per pass, not one per queued row. A group that
+        fails so stalls each of its recipients; a later group drops a stalled
+        recipient (and goes per row when fewer than two are left).
+
         Errors raised by the deliver callback (and timeouts) are treated as
         :attr:`DeliveryOutcome.TRANSIENT`. Rows whose ``attempts`` would
         exceed :data:`MAX_ATTEMPTS` are marked failed rather than
@@ -271,6 +330,8 @@ class OutboxProcessor:
                 queues.setdefault(entry.instance_id, deque()).append(idx)
         slots = asyncio.Semaphore(PARALLEL_RECIPIENTS)
         started: set[int] = set()
+        #: Recipients whose delivery this pass ended transient — skipped.
+        stalled: set[str] = set()
 
         def _ready(idx: int) -> bool:
             return idx not in started and all(
@@ -284,8 +345,13 @@ class OutboxProcessor:
                 tg.create_task(_run(idx))
 
             async def _run(idx: int) -> None:
-                async with slots:
-                    await self._run_unit(units[idx])
+                if any(e.instance_id not in stalled for e in units[idx]):
+                    async with slots:
+                        # Re-read once a slot is ours: a recipient may have
+                        # stalled while this unit waited for it.
+                        live = [e for e in units[idx] if e.instance_id not in stalled]
+                        if live:
+                            await self._run_unit(live, stalled)
                 heads: list[int] = []
                 for entry in units[idx]:
                     queue = queues[entry.instance_id]
@@ -310,20 +376,26 @@ class OutboxProcessor:
             log.warning("OutboxProcessor: grouping failed", exc_info=True)
             return []
 
-    async def _run_unit(self, unit: list[OutboxEntry]) -> None:
-        """Deliver one row, or one multi group; never raises."""
+    async def _run_unit(self, unit: list[OutboxEntry], stalled: set[str]) -> None:
+        """Deliver one row, or one multi group; never raises. A recipient
+        whose delivery ends transient joins *stalled*."""
         try:
             if len(unit) > 1 and self._multi is not None:
                 group = await self._attempt(
                     unit[0].id, self._multi.deliver_outbox_multi(unit)
                 )
                 if group is not None:
+                    if _is_transient(group):
+                        stalled.update(e.instance_id for e in unit)
                     for entry in unit:
                         await self._settle(entry, group)
                     return
             for entry in unit:
                 outcome = await self._attempt(entry.id, self._deliver(entry))
-                await self._settle(entry, outcome or DeliveryOutcome.TRANSIENT)
+                outcome = outcome or DeliveryOutcome.TRANSIENT
+                if _is_transient(outcome):
+                    stalled.add(entry.instance_id)
+                await self._settle(entry, outcome)
         except Exception:
             log.exception("OutboxProcessor: delivery bookkeeping failed")
 
@@ -484,6 +556,11 @@ class OutboxProcessor:
         sample = self._jitter()
         signed = (sample * 2.0) - 1.0
         return max(1.0, base * (1.0 + signed * JITTER_RATIO))
+
+
+def _is_transient(outcome: DeliveryOutcome | RetryAfter) -> bool:
+    """TRANSIENT (a timeout included) or a :class:`RetryAfter`."""
+    return isinstance(outcome, RetryAfter) or outcome is DeliveryOutcome.TRANSIENT
 
 
 def _order_units(

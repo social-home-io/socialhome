@@ -327,6 +327,17 @@ class _DeferredMeshSend:
     size: int
 
 
+def _outbox_payload_ad(
+    payload_id: str, event_type: FederationEventType, space_id: str | None
+) -> bytes:
+    """KEK associated data of a stored outbox payload (migration 0145): its
+    id, event type and space, so its ciphertext unwraps only as the row it
+    was stored as."""
+    return (
+        f"sh-outbox-payload:v1\n{payload_id}\n{event_type.value}\n{space_id or ''}"
+    ).encode()
+
+
 class FederationService:
     """Core federation handler — outbound delivery and inbound dispatch.
 
@@ -2207,7 +2218,8 @@ class FederationService:
         of one broadcast references ONE row; the payload is wrapped under the
         local KEK with that id as associated data, so the database never
         holds it in the clear and a row's ciphertext cannot be swapped into
-        another."""
+        another (:func:`_outbox_payload_ad` binds the event type and space
+        too, so a row edited to another event or space does not unwrap)."""
         payload_json = _dumps(payload)
         mac = hmac.new(self._outbox_payload_key, digestmod=hashlib.sha256)
         for part in (event_type.value, space_id or "", payload_json):
@@ -2220,7 +2232,7 @@ class FederationService:
             space_id=space_id,
             payload_enc=self._key_manager.encrypt(
                 payload_json.encode("utf-8"),
-                associated_data=payload_id.encode("utf-8"),
+                associated_data=_outbox_payload_ad(payload_id, event_type, space_id),
             ),
         )
 
@@ -2234,7 +2246,10 @@ class FederationService:
             raise ValueError(f"outbox payload {payload_id} is gone")
         try:
             raw = self._key_manager.decrypt(
-                stored.payload_enc, associated_data=stored.id.encode("utf-8")
+                stored.payload_enc,
+                associated_data=_outbox_payload_ad(
+                    stored.id, stored.event_type, stored.space_id
+                ),
             )
         except Exception as exc:
             raise ValueError(f"outbox payload {payload_id} does not unwrap") from exc
