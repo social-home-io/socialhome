@@ -41,7 +41,6 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from ..canonical_json import canonical_bytes
 from ..crypto import b64url_encode, sign_ed25519
-from ..federation.channel_pacing import wait_for_send_room
 from ..media.profile_picture import PublicPictureCache
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.highlight_repo import AbstractHighlightRepo
@@ -796,16 +795,9 @@ class _AiolibAnswererPeer:
         await self._channel.wait_open()
 
     async def send(self, frame_bytes: bytes) -> None:
-        # Pace on the HWM ourselves and write with ``wait_for_drain=False``:
-        # the library's drain event is only re-armed when the buffer crosses
-        # its low threshold from above, so a waiting send can hang forever.
-        # A viewer that stays over the HWM past the bound raises
-        # ``ConnectionError`` and ``_serve`` ends the stream.
-        channel = self._channel
-        if channel is None:
+        if self._channel is None:
             raise rtc.ConnectionClosedError("channel not yet open")
-        await wait_for_send_room(channel, high_water=framing.SEND_HWM_BYTES)
-        await channel.send(frame_bytes, wait_for_drain=False)
+        await self._channel.send(frame_bytes)
 
     async def close(self) -> None:
         # ``aclose`` drains the spawn_task we registered, releases the

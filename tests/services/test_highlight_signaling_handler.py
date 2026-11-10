@@ -22,7 +22,6 @@ from PIL import Image
 
 from socialhome.crypto import b64url_encode
 from socialhome.domain.highlight import HighlightAudience, HighlightFrameType
-from socialhome.federation import channel_pacing
 from socialhome.media import profile_picture as profile_picture_mod
 from socialhome.media.profile_picture import PublicPictureCache
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
@@ -1428,19 +1427,20 @@ async def test_a_token_revoked_mid_stream_setup_is_rechecked_before_streaming(
     ]
 
 
-# ── Sending never waits on the library's drain event ──────────────────
+# ── Sending paces on the library's drain event ─────────────────────────
 
 
-class _NeverDrainChannel:
-    """Mimics aiolibdatachannel 2026.9.8's drain bookkeeping: a send that
-    leaves bytes buffered clears the drain event, and only a crossing of the
-    low threshold from above sets it again. A ``wait_for_drain=True`` send
-    after the first can therefore wait forever."""
+class _FixedDrainChannel:
+    """Drain bookkeeping of aiolibdatachannel 2026.11.10
+    (social-home-io/aiolibdatachannel#25): a send clears the drain event only
+    when the buffer is above the low threshold, and it is set again once the
+    buffer drains to it. The highlight channel keeps libdatachannel's
+    default threshold of 0."""
 
-    def __init__(self, buffered: int = 64 * 1024) -> None:
+    def __init__(self, *, buffered: int, threshold: int = 0) -> None:
         self.sent: list[bytes] = []
         self.buffered_amount = buffered
-        self.is_closed = False
+        self._threshold = threshold
         self._drained = asyncio.Event()
         self._drained.set()
 
@@ -1448,50 +1448,26 @@ class _NeverDrainChannel:
         if wait_for_drain:
             await self._drained.wait()
         self.sent.append(data)
-        if self.buffered_amount > 0:
+        if self.buffered_amount > self._threshold:
             self._drained.clear()
 
+    def drain_to(self, amount: int) -> None:
+        self.buffered_amount = amount
+        if amount <= self._threshold:
+            self._drained.set()
 
-async def test_aiolib_answerer_peer_send_does_not_hang_when_drain_never_fires():
-    """Every highlight frame goes out while the buffer sits under the HWM,
-    even though the library's drain event never fires again."""
+
+async def test_aiolib_answerer_peer_send_goes_out_once_the_viewer_drains():
+    """A frame still buffered holds the next one until the viewer drains it,
+    then the next frame goes out — the stream never parks forever."""
     peer = _AiolibAnswererPeer([])
-    ch = _NeverDrainChannel()
+    ch = _FixedDrainChannel(buffered=64 * 1024)
     peer._channel = ch  # type: ignore[assignment]
-    for i in range(5):
-        await asyncio.wait_for(peer.send(f"f{i}".encode()), timeout=1.0)
-    assert ch.sent == [b"f0", b"f1", b"f2", b"f3", b"f4"]
-    await peer.close()
-
-
-async def test_aiolib_answerer_peer_send_waits_for_room_under_hwm(monkeypatch):
-    """Over the HWM the frame waits until the viewer drains the buffer —
-    a large highlight keeps its backpressure."""
-    monkeypatch.setattr(channel_pacing, "SEND_ROOM_POLL_S", 0.005)
-    peer = _AiolibAnswererPeer([])
-    ch = _NeverDrainChannel(buffered=framing.SEND_HWM_BYTES + 1)
-    peer._channel = ch  # type: ignore[assignment]
-
-    async def _drain() -> None:
-        await asyncio.sleep(0.05)
-        ch.buffered_amount = 0
-
-    drain = asyncio.create_task(_drain())
-    await asyncio.wait_for(peer.send(b"late"), timeout=1.0)
-    await drain
-    assert ch.sent == [b"late"]
-    await peer.close()
-
-
-async def test_aiolib_answerer_peer_send_fails_on_stalled_viewer(monkeypatch):
-    """A viewer that never drains fails the stream after the bounded wait
-    (``_serve`` logs it and closes the peer) instead of hanging."""
-    monkeypatch.setattr(channel_pacing, "SEND_ROOM_POLL_S", 0.005)
-    monkeypatch.setattr(channel_pacing, "SEND_ROOM_TIMEOUT_S", 0.05)
-    peer = _AiolibAnswererPeer([])
-    ch = _NeverDrainChannel(buffered=framing.SEND_HWM_BYTES + 1)
-    peer._channel = ch  # type: ignore[assignment]
-    with pytest.raises(ConnectionError):
-        await asyncio.wait_for(peer.send(b"x"), timeout=1.0)
-    assert ch.sent == []
+    await peer.send(b"f0")
+    nxt = asyncio.create_task(peer.send(b"f1"))
+    await asyncio.sleep(0.02)
+    assert not nxt.done()
+    ch.drain_to(0)
+    await asyncio.wait_for(nxt, timeout=1.0)
+    assert ch.sent == [b"f0", b"f1"]
     await peer.close()

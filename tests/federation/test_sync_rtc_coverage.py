@@ -7,7 +7,6 @@ import asyncio
 import aiolibdatachannel as rtc
 import pytest
 
-from socialhome.federation import channel_pacing
 from socialhome.federation.sync_rtc import (
     CHANNEL_LABEL,
     SEND_HWM_BYTES,
@@ -116,7 +115,7 @@ async def test_send_chunk_writes_to_channel():
             self.sent: list = []
             self.buffered_amount = 0
 
-        async def send(self, data, *, wait_for_drain: bool = True):
+        async def send(self, data):
             self.sent.append(data)
 
     ch = _FakeCh()
@@ -125,10 +124,8 @@ async def test_send_chunk_writes_to_channel():
     assert ch.sent == [b"hello"]
 
 
-async def test_send_chunk_raises_when_over_hwm(monkeypatch):
+async def test_send_chunk_raises_when_over_hwm():
     """Backpressured channel → ConnectionError so sync falls back to relay."""
-    monkeypatch.setattr(channel_pacing, "SEND_ROOM_POLL_S", 0.005)
-    monkeypatch.setattr(channel_pacing, "SEND_ROOM_TIMEOUT_S", 0.02)
     s = SyncRtcSession(
         sync_id="sid",
         space_id="sp",
@@ -142,9 +139,8 @@ async def test_send_chunk_raises_when_over_hwm(monkeypatch):
         def __init__(self) -> None:
             self.sent: list = []
             self.buffered_amount = SEND_HWM_BYTES + 1
-            self.is_closed = False
 
-        async def send(self, data, *, wait_for_drain: bool = True):
+        async def send(self, data):
             self.sent.append(data)
 
     ch = _FullCh()
@@ -244,19 +240,21 @@ async def test_watch_incoming_ignores_wrong_label():
     assert s._channel is good
 
 
-# ─── send_chunk never waits on the library's drain event ────────────────
+# ─── send_chunk paces on the library's drain event (aiolibdatachannel ≥ 2026.11.10) ─
 
 
-class _NeverDrainChannel:
-    """Mimics aiolibdatachannel 2026.9.8's drain bookkeeping: a send that
-    leaves bytes buffered clears the drain event, and only a crossing of the
-    low threshold from above sets it again — which small frames never cause.
-    A ``wait_for_drain=True`` send after the first therefore waits forever."""
+class _FixedDrainChannel:
+    """Drain bookkeeping of aiolibdatachannel 2026.11.10
+    (social-home-io/aiolibdatachannel#25): a send clears the drain event
+    only when the buffer is ABOVE the low threshold, and the event is set
+    again once the buffer drains to the threshold. Before that release a
+    send cleared it whenever any bytes stayed buffered, so a stream of
+    small chunks parked the next send forever (#1347)."""
 
-    def __init__(self, buffered: int = 4096) -> None:
+    def __init__(self, *, buffered: int, threshold: int) -> None:
         self.sent: list = []
         self.buffered_amount = buffered
-        self.is_closed = False
+        self._threshold = threshold
         self._drained = asyncio.Event()
         self._drained.set()
 
@@ -264,8 +262,13 @@ class _NeverDrainChannel:
         if wait_for_drain:
             await self._drained.wait()
         self.sent.append(data)
-        if self.buffered_amount > 0:
+        if self.buffered_amount > self._threshold:
             self._drained.clear()
+
+    def drain_to(self, amount: int) -> None:
+        self.buffered_amount = amount
+        if amount <= self._threshold:
+            self._drained.set()
 
 
 async def _provider_session() -> SyncRtcSession:
@@ -280,78 +283,30 @@ async def _provider_session() -> SyncRtcSession:
     return s
 
 
-async def test_send_chunk_does_not_hang_when_drain_event_never_fires():
-    """Small chunks keep a few KiB buffered: the library's drain event is
-    cleared after the first send and never set again. Every later chunk of
-    a space sync stream must still go out instead of waiting forever."""
+async def test_send_chunk_stream_of_small_chunks_never_waits():
+    """A few KiB stay buffered after every chunk — under the channel's low
+    threshold (half the HWM), so no chunk of a space sync stream waits."""
     s = await _provider_session()
-    ch = _NeverDrainChannel()
+    ch = _FixedDrainChannel(buffered=4096, threshold=SEND_HWM_BYTES // 2)
     s._channel = ch  # type: ignore[attr-defined]
     for i in range(5):
         await asyncio.wait_for(s.send_chunk(f"c{i}".encode()), timeout=1.0)
     assert ch.sent == [b"c0", b"c1", b"c2", b"c3", b"c4"]
 
 
-async def test_send_chunk_waits_for_room_under_the_hwm(monkeypatch):
-    """Over the HWM the chunk waits (bounded) until the buffer drains under
-    it, then goes out — large streams keep their backpressure."""
-    monkeypatch.setattr(channel_pacing, "SEND_ROOM_POLL_S", 0.005)
+async def test_send_chunk_waits_for_the_drain_above_the_low_threshold():
+    """Over the low threshold (still under the HWM) the next chunk waits for
+    the library's drain event and goes out once the requester catches up —
+    the backpressure a large stream relies on."""
     s = await _provider_session()
-    ch = _NeverDrainChannel(buffered=SEND_HWM_BYTES + 1)
+    ch = _FixedDrainChannel(
+        buffered=SEND_HWM_BYTES // 2 + 1, threshold=SEND_HWM_BYTES // 2
+    )
     s._channel = ch  # type: ignore[attr-defined]
-
-    async def _drain() -> None:
-        await asyncio.sleep(0.05)
-        ch.buffered_amount = 0
-
-    drain = asyncio.create_task(_drain())
-    await asyncio.wait_for(s.send_chunk(b"late"), timeout=1.0)
-    await drain
-    assert ch.sent == [b"late"]
-
-
-async def test_send_chunk_fails_after_bounded_wait_on_stalled_channel(monkeypatch):
-    """A buffer that never drains fails the chunk with ConnectionError (a
-    strike for the provider) after the bounded wait, never hanging."""
-    monkeypatch.setattr(channel_pacing, "SEND_ROOM_POLL_S", 0.005)
-    monkeypatch.setattr(channel_pacing, "SEND_ROOM_TIMEOUT_S", 0.05)
-    s = await _provider_session()
-    ch = _NeverDrainChannel(buffered=SEND_HWM_BYTES + 1)
-    s._channel = ch  # type: ignore[attr-defined]
-    with pytest.raises(ConnectionError):
-        await asyncio.wait_for(s.send_chunk(b"x"), timeout=1.0)
-    assert ch.sent == []
-
-
-async def test_send_chunk_maps_library_close_error_to_connection_error():
-    """A channel that closes under the send surfaces as ConnectionError,
-    the documented contract the provider handles as a failed chunk."""
-    s = await _provider_session()
-
-    class _ClosingCh(_NeverDrainChannel):
-        async def send(self, data, *, wait_for_drain: bool = True) -> None:
-            raise rtc.ConnectionClosedError("closed")
-
-    s._channel = _ClosingCh()  # type: ignore[attr-defined]
-    with pytest.raises(ConnectionError):
-        await s.send_chunk(b"x")
-
-
-async def test_send_chunk_does_not_write_after_close_during_the_wait(monkeypatch):
-    """The session closing while a chunk waits for room fails the chunk
-    instead of writing into a torn-down channel."""
-    monkeypatch.setattr(channel_pacing, "SEND_ROOM_POLL_S", 0.005)
-    s = await _provider_session()
-    ch = _NeverDrainChannel(buffered=SEND_HWM_BYTES + 1)
-    s._channel = ch  # type: ignore[attr-defined]
-
-    async def _close_then_drain() -> None:
-        await asyncio.sleep(0.02)
-        s.close()
-        ch.buffered_amount = 0
-
-    closer = asyncio.create_task(_close_then_drain())
-    with pytest.raises(ConnectionError, match="closed"):
-        await asyncio.wait_for(s.send_chunk(b"x"), timeout=1.0)
-    await closer
-    assert ch.sent == []
+    await s.send_chunk(b"first")
+    second = asyncio.create_task(s.send_chunk(b"second"))
+    await asyncio.sleep(0.02)
+    assert not second.done()
+    ch.drain_to(0)
+    await asyncio.wait_for(second, timeout=1.0)
+    assert ch.sent == [b"first", b"second"]

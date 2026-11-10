@@ -63,7 +63,13 @@ dependencies = [
     # "never block the loop" rule this project applies to its own code.
     # It also vendors libdatachannel v0.24.5
     # (social-home-io/aiolibdatachannel#21).
-    "aiolibdatachannel==2026.10.15",
+    # 2026.11.10 fixes a hang in ``DataChannel.send(wait_for_drain=True)``
+    # with small frames: the drain event was cleared whenever any bytes
+    # stayed buffered but only set again when the buffer crossed the low
+    # threshold from above, so the next waiting send parked forever (space
+    # sync streams, #1347). It now clears only above the threshold
+    # (social-home-io/aiolibdatachannel#25).
+    "aiolibdatachannel==2026.11.10",
     # mDNS announcement of the household dashboard to wall panels
     # (``socialhome/dashboard/advertiser.py``). LGPL-2.1-or-later, used as
     # an unmodified, dynamically imported library — compatible with

@@ -4,8 +4,8 @@
   frame under backpressure, returns ``False`` so the facade falls back
   to HTTPS inbox.
 * :class:`~socialhome.federation.sync_rtc.SyncRtcSession.send_chunk` —
-  waits (bounded) for the buffer to drain under the HWM, then raises
-  :class:`ConnectionError` so the provider counts a failed chunk.
+  raises :class:`ConnectionError` so :class:`SyncSessionManager` falls
+  back to relay chunks.
 
 These complement the happy-path tests in ``test_transport_coverage.py``
 and ``test_sync_rtc_coverage.py`` — here we exclusively exercise the
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import pytest
 
-from socialhome.federation import channel_pacing
 from socialhome.federation.sync_rtc import SEND_HWM_BYTES, SyncRtcSession
 from socialhome.federation.transport import SEND_HWM_BYTES as FED_HWM
 from socialhome.federation.transport import _RtcPeer
@@ -100,9 +99,8 @@ async def test_sync_send_chunk_under_hwm_succeeds():
         def __init__(self) -> None:
             self.sent: list = []
             self.buffered_amount = SEND_HWM_BYTES - 1
-            self.is_closed = False
 
-        async def send(self, data, *, wait_for_drain: bool = True):
+        async def send(self, data):
             self.sent.append(data)
 
     ch = _Ch()
@@ -111,11 +109,7 @@ async def test_sync_send_chunk_under_hwm_succeeds():
     assert ch.sent == [b"chunk"]
 
 
-async def test_sync_send_chunk_raises_when_stalled_at_hwm(monkeypatch):
-    """At the HWM the chunk waits for room; a buffer that never drains fails
-    it with ConnectionError after the bounded wait."""
-    monkeypatch.setattr(channel_pacing, "SEND_ROOM_POLL_S", 0.005)
-    monkeypatch.setattr(channel_pacing, "SEND_ROOM_TIMEOUT_S", 0.02)
+async def test_sync_send_chunk_raises_at_hwm():
     s = SyncRtcSession(
         sync_id="s2",
         space_id="sp",
@@ -129,14 +123,13 @@ async def test_sync_send_chunk_raises_when_stalled_at_hwm(monkeypatch):
         def __init__(self) -> None:
             self.sent: list = []
             self.buffered_amount = SEND_HWM_BYTES
-            self.is_closed = False
 
-        async def send(self, data, *, wait_for_drain: bool = True):
+        async def send(self, data):
             self.sent.append(data)
 
     ch = _Ch()
     s._channel = ch  # type: ignore[attr-defined]
-    with pytest.raises(ConnectionError, match="stalled"):
+    with pytest.raises(ConnectionError, match="backpressured"):
         await s.send_chunk(b"chunk")
     assert ch.sent == []
 
