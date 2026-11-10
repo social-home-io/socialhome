@@ -54,8 +54,9 @@ import orjson
 CHUNK_SIZE: int = 64 * 1024
 
 #: High-water mark for ``RTCDataChannel.bufferedAmount``. Mirrors
-#: ``federation/sync_rtc.SEND_HWM_BYTES``. Author-side waits for
-#: ``buffered_amount_low`` before pushing the next chunk.
+#: ``federation/sync_rtc.SEND_HWM_BYTES``. Author-side polls
+#: ``buffered_amount`` under it (``federation/channel_pacing``) before
+#: pushing the next chunk.
 SEND_HWM_BYTES: int = 1 << 20
 
 #: Wire label for the public-viewer DataChannel. Authoritative — both

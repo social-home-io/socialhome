@@ -34,6 +34,7 @@ from typing import Any
 import aiolibdatachannel as rtc
 
 from ..webrtc_ice import rtc_configuration
+from .channel_pacing import wait_for_send_room
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +61,9 @@ MAX_SIGNALING_SESSIONS: int = 200
 #: High-water mark for a sync DataChannel's send buffer. Chunks are
 #: capped at CHUNK_SIZE_BUDGET_BYTES (§exporter.py), so 1 MiB keeps
 #: roughly 128 chunks buffered before we pause — plenty of headroom
-#: while still bounding memory growth on a stalled peer.
+#: while still bounding memory growth on a stalled peer. ``send_chunk``
+#: polls against it (``channel_pacing``) rather than awaiting the
+#: library's drain event, which small chunks never re-arm.
 SEND_HWM_BYTES: int = 1 << 20
 
 
@@ -378,19 +381,27 @@ class SyncRtcSession:
     async def send_chunk(self, chunk_payload: bytes | str) -> None:
         """Send a ``SPACE_SYNC_CHUNK`` frame over the DataChannel.
 
-        Raises :class:`ConnectionError` if the channel is not open or
-        if the send buffer is over the high-water mark — the sync
-        manager handles the latter by falling back to relay chunks.
+        Over the high-water mark the chunk waits (bounded, see
+        :func:`~socialhome.federation.channel_pacing.wait_for_send_room`)
+        for the requester to drain the buffer. Raises
+        :class:`ConnectionError` if the channel is not open, closes, or
+        stays over the high-water mark past that bound — the provider
+        counts it as a failed chunk.
+
+        The write itself never waits on the library's drain event
+        (``wait_for_drain=False``): that event is never set again by a
+        buffer of small chunks, so a waiting send hung the stream forever.
         """
-        if self._channel is None or self._closed:
+        channel = self._channel
+        if channel is None or self._closed:
             raise ConnectionError("DataChannel not open")
-        if self._channel.buffered_amount >= SEND_HWM_BYTES:
-            raise ConnectionError(
-                f"DataChannel backpressured "
-                f"(buffered={self._channel.buffered_amount}, "
-                f"hwm={SEND_HWM_BYTES})",
-            )
-        await self._channel.send(chunk_payload)
+        try:
+            await wait_for_send_room(channel, high_water=SEND_HWM_BYTES)
+            if self._closed:  # close() ran while we waited
+                raise ConnectionError("DataChannel closed while waiting to send")
+            await channel.send(chunk_payload, wait_for_drain=False)
+        except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
+            raise ConnectionError(str(exc)) from exc
 
     @property
     def is_ready(self) -> bool:
