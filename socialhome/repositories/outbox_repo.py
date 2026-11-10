@@ -22,8 +22,11 @@ from __future__ import annotations
 import logging
 import sqlite3
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
+
+import orjson
 
 from ..db import AsyncDatabase
 from ..domain import federation_retention
@@ -82,7 +85,10 @@ class AbstractOutboxRepo(Protocol):
     async def drop_pending_with_key_prefix(
         self, instance_id: str, prefix: str
     ) -> int: ...
-    async def list_due(self, limit: int = 50) -> list[OutboxEntry]: ...
+    async def list_due(
+        self, limit: int = 50, *, exclude: Collection[str] = ()
+    ) -> list[OutboxEntry]: ...
+    async def pending_multi_due(self, instance_id: str) -> str | None: ...
     async def mark_delivered(self, entry_id: str) -> None: ...
     async def mark_failed(self, entry_id: str) -> None: ...
     async def reschedule(
@@ -333,12 +339,16 @@ class SqliteOutboxRepo:
             (instance_id, supersede_key),
         )
 
-    async def list_due(self, limit: int = 50) -> list[OutboxEntry]:
+    async def list_due(
+        self, limit: int = 50, *, exclude: Collection[str] = ()
+    ) -> list[OutboxEntry]:
         """Return pending entries whose ``next_attempt_at`` is due.
 
-        Excludes entries past their retention window (``expires_at``).
-        The caller is responsible for filtering entries whose destination
-        instance is banned or unreachable.
+        Excludes entries past their retention window (``expires_at``) and
+        those of the households in *exclude* (the processor's busy
+        recipients, so their backlog never fills the batch). The caller is
+        responsible for filtering entries whose destination instance is
+        banned or unreachable.
         """
         # ``next_attempt_at`` and ``expires_at`` are stored as ISO-8601
         # with a ``T`` separator and a timezone suffix (``...+00:00``).
@@ -358,12 +368,27 @@ class SqliteOutboxRepo:
                    o.expires_at IS NULL
                    OR datetime(o.expires_at) > datetime('now')
                )
+               AND o.instance_id NOT IN (SELECT value FROM json_each(?))
              ORDER BY datetime(o.next_attempt_at) ASC
              LIMIT ?
             """,
-            (int(limit),),
+            (orjson.dumps(sorted(exclude)).decode(), int(limit)),
         )
         return [_row_to_entry(d) for d in rows_to_dicts(rows)]
+
+    async def pending_multi_due(self, instance_id: str) -> str | None:
+        """The latest ``next_attempt_at`` of *instance_id*'s pending rows of
+        a multi payload (v_90, its ``msg_id`` set), or ``None`` when it has
+        none — a live send to it must queue behind them, not overtake."""
+        row = await self._db.fetchone(
+            "SELECT MAX(datetime(o.next_attempt_at)) AS due"
+            "  FROM federation_outbox o"
+            "  JOIN federation_outbox_payloads p ON p.id = o.payload_id"
+            " WHERE o.instance_id=? AND o.status='pending'"
+            "   AND p.msg_id IS NOT NULL",
+            (instance_id,),
+        )
+        return None if row is None else row["due"]
 
     async def get_payload(self, payload_id: str) -> OutboxPayload | None:
         """The stored payload a ref row points at (migration 0145)."""

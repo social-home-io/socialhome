@@ -65,7 +65,6 @@ the same server (a route probe's ack) reads it; nothing puts it on a wire.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
@@ -83,13 +82,7 @@ from ..federation.invite_token_redeem import (
     BOOTSTRAP_INBOUND_WINDOW_S,
     RELAY_ENVELOPE_INBOUND_LIMIT,
 )
-from ..federation.multi_recipient import (
-    MrKeys,
-    is_multi_sealed,
-    is_valid_kid,
-    open_multi,
-    require_mr_suite,
-)
+from ..federation.multi_recipient import is_multi_sealed, open_multi
 from ..federation.peer_pairing_client import (
     KIND_PAIRING_PEER_ACCEPT,
     is_pairing_relay_body,
@@ -104,14 +97,8 @@ if TYPE_CHECKING:
     from ..federation.gfs_join_request import GfsJoinRequestCoordinator
     from ..federation.invite_token_redeem import SpaceInviteTokenRedeemCoordinator
     from ..rate_limiter import RateLimiter
-    from .pending_decrypts_cache import PendingDecryptsCache
 
 log = logging.getLogger(__name__)
-
-#: v_90 — resolves a multi-recipient frame's ``kid`` to ``(space_id, epoch,
-#: keys)`` over our recent space epochs, or ``None``
-#: (``SpaceContentEncryption.mr_key_for_kid``).
-MrKeyForKid = Callable[[str], Awaitable[tuple[str, int, MrKeys] | None]]
 
 
 #: The ``gfs_connections.id`` of the connection server that delivered the
@@ -177,8 +164,6 @@ class GfsRelayInbound:
         "_invite",
         "_join",
         "_keywrap_private_key",
-        "_mr_key_for_kid",
-        "_pending",
         "_rate_limiter",
     )
 
@@ -190,22 +175,12 @@ class GfsRelayInbound:
         invite_coordinator: SpaceInviteTokenRedeemCoordinator,
         gfs_connection_repo: AbstractGfsConnectionRepo,
         rate_limiter: RateLimiter | None = None,
-        mr_key_for_kid: MrKeyForKid | None = None,
-        pending_decrypts: PendingDecryptsCache | None = None,
     ) -> None:
         self._federation = federation
         self._keywrap_private_key = keywrap_private_key
         self._invite = invite_coordinator
         self._gfs_repo = gfs_connection_repo
         self._rate_limiter = rate_limiter
-        #: v_90 — kid → ``(space_id, epoch, keys)`` of a multi-recipient
-        #: frame (``SpaceContentEncryption.mr_key_for_kid``). Unwired, multi
-        #: frames are refused.
-        self._mr_key_for_kid = mr_key_for_kid
-        #: v_90 — where a multi frame under a kid we hold no key for yet is
-        #: parked (``stash_kid``) until that key is imported. Unwired, such
-        #: a frame is refused.
-        self._pending = pending_decrypts
         self._join: GfsJoinRequestCoordinator | None = None
 
     def attach_join_requests(self, coordinator: GfsJoinRequestCoordinator) -> None:
@@ -291,15 +266,12 @@ class GfsRelayInbound:
         relay.
 
         v_90: a ``sealed`` that names an ``mr_suite`` is a multi-recipient
-        frame (one body the GFS fanned out to many mailboxes). Charged to the
-        same bucket first; its ``kid`` resolves to one of our space epochs'
-        multi-recipient keys, which open it, and the pipeline then requires
-        our tag in the ``"*:"`` audience and that space, and decrypts under
-        that key. A well-shaped kid we hold no key for yet (a member offline
-        across a rotation, draining before the new epoch's key handoff) is
-        parked in the pending-decrypts cache and replayed through this
-        method once that key is imported — the frame is answered like an
-        accepted one. Raises :class:`ValueError` on any refusal."""
+        frame (one body the GFS fanned out to many mailboxes, plus this
+        mailbox's ``wrap`` of its key). Charged to the same bucket first;
+        the wrap opens under the same mailbox key to the body key *K*, which
+        opens the body; the pipeline then requires our tag in the ``"*:"``
+        audience and a named space, and decrypts the payload under *K*.
+        Raises :class:`ValueError` on any refusal."""
         if isinstance(frame, bytes | bytearray):
             return await self._handle_media(frame, keys=keys)
         if not isinstance(frame, dict) or frame.get("type") != "envelope":
@@ -313,12 +285,9 @@ class GfsRelayInbound:
         ):
             raise MailboxFlooded("mailbox rate limit exceeded — frame dropped")
         sealed = frame.get("sealed")
-        multi: tuple[str, MrKeys] | None = None
+        multi_key: bytes | None = None
         if is_multi_sealed(sealed):
-            opened = await self._open_multi(sealed)
-            if opened is None:
-                return self._park_multi(frame, sealed["kid"], keys=keys)
-            body, multi = opened
+            body, multi_key = open_multi(sealed, keys.kem_private)
         else:
             body = unseal_envelope_body(
                 envelope={"sealed": sealed},
@@ -337,7 +306,7 @@ class GfsRelayInbound:
                 from_instance,
                 orjson.dumps(inner),
                 transport=TRANSPORT_GFS_MAILBOX,
-                multi=multi,
+                multi_key=multi_key,
             )
         except ValueError as exc:
             # The routing facts only — never the payload, never the mailbox.
@@ -348,45 +317,6 @@ class GfsRelayInbound:
                 exc,
             )
             raise
-
-    async def _open_multi(self, sealed: dict) -> tuple[dict, tuple[str, MrKeys]] | None:
-        """Open a v_90 multi-recipient seal → ``(relay body, (space_id,
-        keys))``, or ``None`` for a well-shaped kid we hold no key for. The
-        suite is judged first (no lookup for an unknown one), then the
-        kid's shape, then it resolves over our recent space epochs."""
-        require_mr_suite(sealed)
-        if self._mr_key_for_kid is None:
-            raise ValueError("multi-recipient frames are not wired on this household")
-        kid = sealed.get("kid")
-        if not is_valid_kid(kid):
-            # The shape first: a junk kid never costs a lookup (or a cache
-            # rebuild).
-            raise ValueError("multi-recipient frame with a malformed kid")
-        hit = await self._mr_key_for_kid(kid)
-        if hit is None:
-            return None
-        space_id, _epoch, keys = hit
-        return open_multi(sealed, keys.key), (space_id, keys)
-
-    def _park_multi(self, frame: dict, kid: str, *, keys: MailboxKeys) -> dict:
-        """Park a multi frame under *kid* (no key held yet) until a key
-        import resolves to it, then re-run :meth:`handle_mailbox_frame` on
-        it (charged to the mailbox's bucket again). Unwired, refused. Logs
-        the outcome only — never the kid or the mailbox."""
-        if self._pending is None:
-            log.info(
-                "gfs_mailbox: dropped a multi-recipient frame under no key we hold"
-            )
-            raise ValueError("multi-recipient frame under no space key we hold")
-
-        async def _replay() -> None:
-            await self.handle_mailbox_frame(frame, keys=keys)
-
-        self._pending.stash_kid(kid, _replay)
-        log.info(
-            "gfs_mailbox: parked a multi-recipient frame under a key we do not hold yet"
-        )
-        return {"status": "ok"}
 
     async def _handle_media(
         self, raw: object, *, keys: MailboxKeys | None = None

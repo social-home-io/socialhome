@@ -339,44 +339,56 @@ class GfsEnvelopeSender:
     async def send_to_mailboxes(
         self,
         *,
-        mailbox_ids: list[str],
+        entries: list[tuple[str, dict]],
         gfs_url: str,
-        sealed: dict,
-    ) -> bool:
+        body: dict,
+    ) -> int | None:
         """POST ONE multi-recipient frame for many mailboxes (v_90) to the
-        GFS at *gfs_url*: ``{to_mailboxes: [...], sealed}`` to
-        ``/gfs/envelope/multi``. ``True`` when the relay accepted it.
+        GFS at *gfs_url*: ``{"to": [{"mailbox", "wrap"}], "body"}`` to
+        ``/gfs/envelope/multi``, one ``(mailbox_id, wrap)`` per *entries*.
+        Returns the HTTP status (``None`` when the GFS was not reached).
 
-        Same anonymous cookie-less session and same contract as
-        :meth:`send_to_mailbox`: raises
+        Same anonymous cookie-less session as :meth:`send_to_mailbox`:
+        raises
         :class:`~socialhome.federation.invite_bootstrap.EnvelopeRelayThrottled`
         on ``429`` (the GFS's per-IP, per-node upload or recipient budget) and
         :class:`EnvelopeRelayUnavailable` when no connection at *gfs_url*
-        proved ``envelope_multi``; an empty list, one over the server's
-        ``max_recipients`` or any other refusal is ``False``. Never logs a
-        mailbox id."""
+        proved ``envelope_multi``; an empty list or one over the server's
+        ``max_recipients`` is never sent (``None``). Never logs a mailbox
+        id."""
         conn = await self.multi_connection(gfs_url)
         if conn is None:
             raise EnvelopeRelayUnavailable(
                 "no GFS connection here takes one frame for many mailboxes",
             )
-        if not isinstance(sealed, dict) or not (
-            1 <= len(mailbox_ids) <= self.multi_max_recipients(conn)
-        ):
-            return False
+        if not 1 <= len(entries) <= self.multi_max_recipients(conn):
+            return None
         url = f"{conn.inbox_url.rstrip('/')}{ENVELOPE_MULTI_PATH}"
-        # Rebuilt, two fields only: the mailbox list and the seal.
+        # Rebuilt, two fields only: the recipient list and the body.
         kwargs: dict[str, Any] = {
-            "json": {"to_mailboxes": list(mailbox_ids), "sealed": sealed},
+            "json": {
+                "to": [{"mailbox": m, "wrap": w} for m, w in entries],
+                "body": body,
+            },
             "timeout": aiohttp.ClientTimeout(total=GFS_ENVELOPE_TIMEOUT_S),
         }
-        return await self._post_anon(conn, url, kwargs, what="a multi-recipient frame")
+        return await self._post_anon_status(
+            conn, url, kwargs, what="a multi-recipient frame"
+        )
 
     async def _post_anon(
         self, conn: GfsConnection, url: str, kwargs: dict[str, Any], *, what: str
     ) -> bool:
         """POST one mailbox upload over the anonymous session: ``True`` on
         2xx, :class:`EnvelopeRelayThrottled` on 429, ``False`` otherwise."""
+        status = await self._post_anon_status(conn, url, kwargs, what=what)
+        return status is not None and status < 300
+
+    async def _post_anon_status(
+        self, conn: GfsConnection, url: str, kwargs: dict[str, Any], *, what: str
+    ) -> int | None:
+        """:meth:`_post_anon`, answering the HTTP status (``None`` when the
+        GFS was not reached or no anonymous session exists)."""
         try:
             async with self._mailbox_anon(conn) as session:
                 if session is None:
@@ -385,10 +397,10 @@ class GfsEnvelopeSender:
                         "over the identified one",
                         what,
                     )
-                    return False
+                    return None
                 async with session.post(url, allow_redirects=False, **kwargs) as resp:
                     if resp.status < 300:
-                        return True
+                        return resp.status
                     if resp.status == 429:
                         raise EnvelopeRelayThrottled(
                             "the GFS is busy — try again in a moment",
@@ -403,7 +415,7 @@ class GfsEnvelopeSender:
                         what,
                         resp.status,
                     )
-                    return False
+                    return resp.status
         except (TimeoutError, aiohttp.ClientError, RuntimeError) as exc:
             log.info(
                 "gfs.envelope: could not reach %r (%s) with %s: %s",
@@ -412,7 +424,7 @@ class GfsEnvelopeSender:
                 what,
                 exc,
             )
-            return False
+            return None
 
     @contextlib.asynccontextmanager
     async def _mailbox_anon(

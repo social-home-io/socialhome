@@ -15,11 +15,7 @@ from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.domain.federation import FederationEventType
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.gfs_relay_transport import RELAY_STATUS_THROTTLED
-from socialhome.federation.multi_recipient import (
-    decrypt_mr_payload,
-    derive_mr_key,
-    open_multi,
-)
+from socialhome.federation.multi_recipient import decrypt_mr_payload
 from socialhome.infrastructure import DeliveryOutcome, EventBus, RetryAfter
 from tests.federation.test_federation_service import (
     InMemoryFederationRepo,
@@ -28,10 +24,12 @@ from tests.federation.test_federation_service import (
     _make_remote_instance,
 )
 from tests.federation.test_federation_service_multi_mailbox import (
+    GFS_A,
     POST,
+    _opened,
     _Sender,
 )
-from tests.services.test_gfs_relay_inbound import _CONTENT_KEYS, _SPACE
+from tests.services.test_gfs_relay_inbound import _SPACE
 
 _PAYLOAD = {"post_id": "p-1", "body": "the secret recipe"}
 
@@ -173,22 +171,22 @@ async def test_due_ref_rows_on_one_gfs_go_up_as_one_multi_upload():
 
     s.transport.multi_result = (True, None, None)
     assert await s.svc.deliver_outbox_multi(group) is DeliveryOutcome.SUCCESS
-    [(targets, sealed)] = s.transport.multi
-    assert sorted(t.mailbox_id for t in targets) == sorted(
+    [upload] = s.transport.multi
+    assert sorted(t.mailbox_id for t, _wrap in upload[0]) == sorted(
         s.transport.targets[i].mailbox_id for i in seats
     )
-    key = derive_mr_key(_CONTENT_KEYS[_SPACE]).key
-    envelope = open_multi(sealed, key)["envelope"]
+    [(body, key), *_] = _opened(s, upload)
+    envelope = body["envelope"]
     assert orjson.loads(decrypt_mr_payload(envelope["encrypted_payload"], key)) == (
         _PAYLOAD
     )
     assert all(s.svc.last_relay_accepted_at(i) for i in seats)
 
 
-async def test_a_throttled_or_refused_upload_is_retried_never_fanned_out():
-    """A 429 waits the GFS's Retry-After (60 s when it named none); any other
-    failed upload is TRANSIENT — the rows are retried as one, never sent per
-    recipient in a burst."""
+async def test_a_throttled_or_unreachable_upload_is_retried_as_one():
+    """A 429 waits the GFS's Retry-After (60 s when it named none); a 5xx,
+    a timeout or a transport error is TRANSIENT — the rows are retried as
+    one group, never sent per recipient in a burst."""
     s = _Sender()
     await _failing_broadcast(s, seats=2)
     [group] = await s.svc.outbox_multi_groups(s.outbox.entries())
@@ -196,12 +194,29 @@ async def test_a_throttled_or_refused_upload_is_retried_never_fanned_out():
     assert await s.svc.deliver_outbox_multi(group) == RetryAfter(seconds=60.0)
     s.transport.multi_result = (False, RELAY_STATUS_THROTTLED, 90.0)
     assert await s.svc.deliver_outbox_multi(group) == RetryAfter(seconds=90.0)
-    s.transport.multi_result = (False, 503, None)
-    assert await s.svc.deliver_outbox_multi(group) is DeliveryOutcome.TRANSIENT
+    for result in ((False, 503, None), (False, 500, None), (False, None, None)):
+        s.transport.multi_result = result
+        assert await s.svc.deliver_outbox_multi(group) is DeliveryOutcome.TRANSIENT
     assert s.transport.sends == []
 
 
-async def test_an_oversize_frame_or_a_lost_key_goes_per_row_under_the_msg_id():
+async def test_a_refused_upload_goes_per_row_under_the_msg_id():
+    """Any other 4xx refuses the same frame again on every retry: the rows
+    go on their own (``None``), each envelope under the payload's stable
+    ``msg_id``."""
+    s = _Sender()
+    await _failing_broadcast(s, seats=2)
+    [group] = await s.svc.outbox_multi_groups(s.outbox.entries())
+    for status in (400, 404, 413):
+        s.transport.multi_result = (False, status, None)
+        assert await s.svc.deliver_outbox_multi(group) is None
+    [stored] = s.outbox.payloads.values()
+    instance = await s.repo.get_instance(group[0].instance_id)
+    envelope = orjson.loads(await s.svc.seal_outbox_entry(group[0], instance))
+    assert envelope["msg_id"] == stored.msg_id
+
+
+async def test_an_oversize_frame_goes_per_row_under_the_msg_id():
     """Only a frame that cannot be built goes per row — and each row's
     envelope carries the multi payload's ``msg_id``, so a receiver that got
     the frame earlier drops it."""
@@ -222,10 +237,11 @@ async def test_an_oversize_frame_or_a_lost_key_goes_per_row_under_the_msg_id():
 async def test_a_failed_sends_payload_is_never_grouped():
     """A per-recipient send that failed stores its payload without a
     ``msg_id`` — it only ever goes per row."""
-    s = _Sender(mr=False)
+    s = _Sender()
+    s.transport.capacity[GFS_A] = 0  # no multi at broadcast time
     await _failing_broadcast(s, seats=3)
     assert {p.msg_id for p in s.outbox.payloads.values()} == {None}
-    s.svc._mr_key = _Sender().svc._mr_key  # keys now held
+    s.transport.capacity[GFS_A] = 500  # the GFS proves envelope_multi now
     assert await s.svc.outbox_multi_groups(s.outbox.entries()) == []
 
 

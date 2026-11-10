@@ -15,12 +15,17 @@ from __future__ import annotations
 import dataclasses
 import os
 from collections import deque
-from unittest.mock import AsyncMock, MagicMock
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import orjson
 import pytest
 
-from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.crypto import (
+    derive_instance_id,
+    generate_identity_keypair,
+    generate_x25519_keypair,
+)
 from socialhome.domain.federation import (
     DELIVERY_ERROR_QUEUED,
     FederationEventType,
@@ -36,7 +41,6 @@ from socialhome.federation.gfs_relay_transport import (
 )
 from socialhome.federation.multi_recipient import (
     MULTI_TO_INSTANCE,
-    derive_mr_key,
     multi_audience_includes,
     open_multi,
 )
@@ -49,11 +53,7 @@ from tests.federation.test_federation_service import (
     _make_remote_instance,
     _make_service,
 )
-from tests.services.test_gfs_relay_inbound import (
-    _CONTENT_KEYS,
-    _SPACE,
-    _MultiHousehold,
-)
+from tests.services.test_gfs_relay_inbound import _SPACE, _MultiHousehold
 
 GFS_A = "https://gfs-a.example.org"
 GFS_B = "https://gfs-b.example.org"
@@ -68,7 +68,9 @@ class _Transport:
         self.targets: dict[str, MailboxTarget] = {}
         self.capacity: dict[str, int] = {}
         self.sends: list[tuple[str, dict]] = []
-        self.multi: list[tuple[list[MailboxTarget], dict]] = []
+        self.multi: list[tuple[list[tuple[MailboxTarget, dict]], dict]] = []
+        #: mailbox id → its key-wrap private key (to open an upload).
+        self.kem_private: dict[str, bytes] = {}
         self.multi_result: tuple[bool, int | None, float | None] | Exception = (
             True,
             None,
@@ -104,8 +106,8 @@ class _Transport:
         self.capacity_asks.append(gfs_url)
         return self.capacity.get(gfs_url, 500)
 
-    async def send_multi_mailbox(self, *, targets, sealed):
-        self.multi.append((list(targets), sealed))
+    async def send_multi_mailbox(self, *, to, body):
+        self.multi.append((list(to), body))
         if isinstance(self.multi_result, Exception):
             raise self.multi_result
         return self.multi_result
@@ -117,7 +119,7 @@ class _Transport:
 class _Sender:
     """A sending household: FederationService + recording transport."""
 
-    def __init__(self, *, mr: bool = True) -> None:
+    def __init__(self) -> None:
         self.km = _make_kek_manager()
         self.repo = InMemoryFederationRepo()
         self.outbox = InMemoryOutboxRepo()
@@ -126,25 +128,12 @@ class _Sender:
         )
         self.transport = _Transport()
         self.svc.attach_transport(self.transport)
-        self.mr_asks: list[str] = []
         self.wakes = 0
 
         def _wake() -> None:
             self.wakes += 1
 
         self.svc.attach_outbox_wake(_wake)
-
-        async def _mr_key(space_id: str):
-            self.mr_asks.append(space_id)
-            if not mr or space_id not in _CONTENT_KEYS:
-                return None
-            return 7, derive_mr_key(_CONTENT_KEYS[space_id])
-
-        self.svc.attach_member_mesh(
-            host_hop=None,  # type: ignore[arg-type]
-            mailbox_sender_check=_never,
-            mr_key=_mr_key,
-        )
 
     async def seat(
         self, *, gfs: str | None = GFS_A, version: int = V90, mailbox: bool = True
@@ -161,9 +150,11 @@ class _Sender:
         await self.repo.save_instance(inst)
         self.repo.add_space_member(_SPACE, inst.id)
         if mailbox and gfs is not None:
+            kem = generate_x25519_keypair()
             self.transport.targets[inst.id] = MailboxTarget(
-                mailbox_id=inst.id[::-1], kem_pk=b"k" * 32, gfs_url=gfs
+                mailbox_id=inst.id[::-1], kem_pk=kem.public_key, gfs_url=gfs
             )
+            self.transport.kem_private[inst.id[::-1]] = kem.private_key
         return inst.id
 
     async def paired(self) -> str:
@@ -184,7 +175,16 @@ async def _never(_sender: str, _space: str) -> bool:
 
 
 def _mailboxes(upload) -> list[str]:
-    return sorted(t.mailbox_id for t in upload[0])
+    return sorted(t.mailbox_id for t, _wrap in upload[0])
+
+
+def _opened(s: _Sender, upload) -> list[tuple[dict, bytes]]:
+    """Every listed mailbox opens the one body with its own wrap."""
+    to, body = upload
+    return [
+        open_multi({**body, "wrap": wrap}, s.transport.kem_private[t.mailbox_id])
+        for t, wrap in to
+    ]
 
 
 def _boxes(s: _Sender, ids) -> list[str]:
@@ -233,9 +233,10 @@ async def test_three_seats_on_one_gfs_are_one_payload_and_one_upload():
     repo = await _drain(s.svc, s.outbox)
     [upload] = s.transport.multi
     assert _mailboxes(upload) == _boxes(s, seats)
-    assert set(upload[1]) == {"mr_suite", "kid", "ciphertext"}
-    keys = derive_mr_key(_CONTENT_KEYS[_SPACE])
-    envelope = open_multi(upload[1], keys.key)["envelope"]
+    assert set(upload[1]) == {"mr_suite", "ciphertext"}
+    opened = _opened(s, upload)
+    assert len({key for _body, key in opened}) == 1  # one K, wrapped three times
+    envelope = opened[0][0]["envelope"]
     assert envelope["msg_id"] == s.outbox.payloads[payload_id].msg_id
     assert repo.mark_delivered.await_count == 3
     repo.single.assert_not_awaited()
@@ -260,7 +261,6 @@ async def test_a_gfs_without_envelope_multi_goes_per_recipient():
     await s.broadcast()
     assert _queued(s) == {} and s.wakes == 0
     assert sorted(s.transport.per_recipient_ids()) == sorted(seats)
-    assert s.mr_asks == []  # no group, no key lookup
 
 
 async def test_a_single_seat_is_never_a_multi_of_one():
@@ -315,16 +315,22 @@ async def test_event_types_outside_the_multi_set_never_go_multi(event_type):
     assert len(s.transport.sends) == 3
 
 
-async def test_a_narrowed_broadcast_never_writes_a_multi_payload():
-    """Multi only when the audience is every member household — a follower
-    household holding the content key gets every multi frame's content
-    anyway. A space-chat-style ``only_instances`` goes per recipient."""
+async def test_a_narrowed_broadcast_goes_multi_to_its_narrowed_audience():
+    """The audience is exactly the planned targets: a space-chat-style
+    ``only_instances`` goes multi to those households only — the body key
+    is wrapped to their mailboxes and the left-out one is not in the signed
+    audience."""
     s = _Sender()
     seats = [await s.seat() for _ in range(3)]
     await s.broadcast(only_instances=frozenset(seats[:2]))
-    assert _queued(s) == {} and s.wakes == 0
-    assert sorted(s.transport.per_recipient_ids()) == sorted(seats[:2])
-    assert s.mr_asks == []
+    assert list(_queued(s).values()) == [sorted(seats[:2])]
+    assert s.transport.sends == []
+    await _drain(s.svc, s.outbox)
+    [upload] = s.transport.multi
+    assert _mailboxes(upload) == _boxes(s, seats[:2])
+    to = _opened(s, upload)[0][0]["envelope"]["to_instance"]
+    assert all(multi_audience_includes(to, i) for i in seats[:2])
+    assert not multi_audience_includes(to, seats[2])
 
 
 async def test_a_failing_multi_queue_goes_per_recipient():
@@ -374,22 +380,25 @@ def _count_reads(s: _Sender) -> dict[str, int]:
 
 
 async def test_a_paired_only_space_pays_no_per_target_reads_for_multi():
-    """Multi wired or not, a paired-only space costs the same per-target
-    reads; the grouping adds one batched read and no capability or key
+    """With the grouping or without it, a paired-only space costs the same
+    per-target reads; the grouping adds one batched read and no capability
     lookup."""
     costs = []
-    for wired in (False, True):
-        s = _Sender(mr=wired)
-        if not wired:
-            s.svc._mr_key = None
+    for grouped in (False, True):
+        s = _Sender()
         for _ in range(4):
             await s.paired()
         counts = _count_reads(s)
-        await s.broadcast()
+        if grouped:
+            await s.broadcast()
+        else:
+            with patch.object(
+                type(s.svc), "_queue_multi_groups", AsyncMock(return_value={})
+            ):
+                await s.broadcast()
         costs.append(counts)
-        if wired:
+        if grouped:
             assert s.transport.capacity_asks == []
-            assert s.mr_asks == []
     unwired, wired_counts = costs
     extra = {
         k: wired_counts.get(k, 0) - unwired.get(k, 0)
@@ -412,14 +421,6 @@ async def test_a_seat_row_is_read_once_and_each_gfs_probed_once():
     assert counts.get("list_instances_in_space") == 1
     # No per-target row read by the grouping.
     assert counts.get("get_instance", 0) == 0
-
-
-async def test_no_space_key_means_per_recipient():
-    s = _Sender(mr=False)
-    seats = [await s.seat() for _ in range(2)]
-    await s.broadcast()
-    assert _queued(s) == {}
-    assert sorted(s.transport.per_recipient_ids()) == sorted(seats)
 
 
 async def test_two_gfss_are_two_payloads_and_two_uploads():
@@ -473,17 +474,11 @@ async def test_the_audience_tags_name_exactly_the_group():
     outsider = await s.paired()
     await s.broadcast()
     await _drain(s.svc, s.outbox)
-    [(_targets, sealed)] = s.transport.multi
-    keys = derive_mr_key(_CONTENT_KEYS[_SPACE])
-    env = open_multi(sealed, keys.key)["envelope"]
+    [upload] = s.transport.multi
+    env = _opened(s, upload)[0][0]["envelope"]
     assert env["to_instance"].startswith(MULTI_TO_INSTANCE + ":")
-    tag_key = keys.tag_key
-    assert all(multi_audience_includes(env["to_instance"], tag_key, i) for i in seats)
-    assert not multi_audience_includes(env["to_instance"], tag_key, outsider)
-    # The tags are never HMACs under the AES-GCM key.
-    assert not any(
-        multi_audience_includes(env["to_instance"], keys.key, i) for i in seats
-    )
+    assert all(multi_audience_includes(env["to_instance"], i) for i in seats)
+    assert not multi_audience_includes(env["to_instance"], outsider)
 
 
 # ── End to end: real sending transport, real receivers ──────────────────
@@ -493,7 +488,7 @@ class _MultiSender:
     """The ``RelayEnvelopeSender`` seam: a GFS proving ``envelope_multi``."""
 
     def __init__(self) -> None:
-        self.uploads: list[tuple[list[str], str, dict]] = []
+        self.uploads: list[tuple[list[tuple[str, dict]], str, dict]] = []
 
     async def mailbox_connection(self, gfs_url):
         return object()
@@ -504,9 +499,9 @@ class _MultiSender:
     def multi_max_recipients(self, conn) -> int:
         return 500
 
-    async def send_to_mailboxes(self, *, mailbox_ids, gfs_url, sealed):
-        self.uploads.append((list(mailbox_ids), gfs_url, sealed))
-        return True
+    async def send_to_mailboxes(self, *, entries, gfs_url, body):
+        self.uploads.append((list(entries), gfs_url, body))
+        return 202
 
     async def send_to_mailbox(self, **_kw):  # pragma: no cover - not reached
         raise AssertionError("per-recipient send in a multi test")
@@ -556,7 +551,9 @@ async def test_a_frame_built_from_the_broadcast_is_taken_by_every_receiver_once(
 
     targets = {
         rx.own_id: MailboxTarget(
-            mailbox_id=rx.mailbox.mailbox_id, kem_pk=b"k" * 32, gfs_url=GFS_A
+            mailbox_id=rx.mailbox.mailbox_id,
+            kem_pk=rx.mailbox.kem_public,
+            gfs_url=GFS_A,
         )
         for rx in receivers
     }
@@ -577,28 +574,26 @@ async def test_a_frame_built_from_the_broadcast_is_taken_by_every_receiver_once(
     )
     svc.attach_transport(transport)
 
-    async def _mr_key(space_id: str):
-        return 7, derive_mr_key(_CONTENT_KEYS[space_id])
-
-    svc.attach_member_mesh(
-        host_hop=None,  # type: ignore[arg-type]
-        mailbox_sender_check=_never,
-        mr_key=_mr_key,
-    )
-
     result = await svc.broadcast_to_space_members(
         _SPACE, POST, {"post_id": "p-9", "content": "hi all"}
     )
     assert {r.error for r in result.results} == {DELIVERY_ERROR_QUEUED}
     assert gfs.uploads == []
     await _drain(svc, outbox)
-    [(ids, url, sealed)] = gfs.uploads
-    assert sorted(ids) == sorted(t.mailbox_id for t in targets.values())
+    [(entries, url, body)] = gfs.uploads
+    assert sorted(m for m, _wrap in entries) == sorted(
+        t.mailbox_id for t in targets.values()
+    )
     assert url == GFS_A
+
+    def _pushed(upload, rx) -> dict:
+        """What the GFS pushes to *rx*'s mailbox: body + its own wrap."""
+        entries, _url, body = upload
+        wrap = dict(entries)[rx.mailbox.mailbox_id]
+        return {"type": "envelope", "sealed": {**body, "wrap": wrap}}
+
     for rx in receivers:
-        assert await rx.frame({"type": "envelope", "sealed": sealed}) == {
-            "status": "ok"
-        }
+        assert await rx.frame(_pushed(gfs.uploads[0], rx)) == {"status": "ok"}
         [event] = rx.dispatched
         assert event.from_instance == sender_id
         assert event.payload == {"post_id": "p-9", "content": "hi all"}
@@ -606,9 +601,57 @@ async def test_a_frame_built_from_the_broadcast_is_taken_by_every_receiver_once(
     # The GFS took it but the answer was lost: the retry is a new frame of
     # the same message.
     await _drain(svc, outbox)
-    retry = gfs.uploads[-1][2]
-    assert retry != sealed
+    assert gfs.uploads[-1][2] != body  # a fresh K, a fresh body
     for rx in receivers:
         with pytest.raises(ValueError, match="Replay"):
-            await rx.frame({"type": "envelope", "sealed": retry})
+            await rx.frame(_pushed(gfs.uploads[-1], rx))
         assert len(rx.dispatched) == 1
+
+
+# ── Per-recipient FIFO: a live send never overtakes a queued multi row ───
+
+
+async def test_a_live_send_to_a_seat_behind_a_multi_row_is_queued_after_it():
+    """A seat with a multi-payload row still pending: a live send would
+    reach it before that row's upload — it goes to the outbox instead, due
+    no earlier than the multi row."""
+    s = _Sender()
+    seats = [await s.seat() for _ in range(2)]
+    await s.broadcast()
+    later = datetime.now(UTC) + timedelta(minutes=5)
+    s.outbox.multi_due = later.strftime("%Y-%m-%d %H:%M:%S")
+    result = await s.svc.send_event(
+        to_instance_id=seats[0],
+        event_type=POST,
+        payload={"post_id": "p-2"},
+        space_id=_SPACE,
+    )
+    assert result.error == DELIVERY_ERROR_QUEUED and not result.ok
+    assert s.transport.sends == []
+    row = s.outbox.enqueued[-1]
+    assert row["instance_id"] == seats[0]
+    assert s.outbox.payloads[row["payload_id"]].msg_id is None  # per recipient
+    [(row_id, due, attempts)] = s.outbox.rescheduled
+    assert row_id == row["id"] and attempts == 0
+    assert datetime.fromisoformat(due) == later.replace(microsecond=0)
+
+
+async def test_a_live_send_with_nothing_queued_goes_live_and_paired_pay_no_read():
+    s = _Sender()
+    seat = await s.seat()
+    peer = await s.paired()
+    asked: list[str] = []
+    real = s.outbox.pending_multi_due
+
+    async def _counted(instance_id: str):
+        asked.append(instance_id)
+        return await real(instance_id)
+
+    s.outbox.pending_multi_due = _counted
+    for iid in (seat, peer):
+        await s.svc.send_event(
+            to_instance_id=iid, event_type=POST, payload={"p": 1}, space_id=_SPACE
+        )
+    assert s.transport.per_recipient_ids() == [seat, peer]
+    assert asked == [seat]  # one query, only for a space_session seat
+    assert s.outbox.rescheduled == []

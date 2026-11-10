@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -55,15 +54,12 @@ from ..crypto import (
     verify_ed25519,
 )
 from ..domain.events import SpaceContentKeyImported
-from ..domain.space import PUBLIC_SPACE_TIERS
-from ..federation.multi_recipient import MrKeys, derive_mr_key, is_valid_kid
 from ..infrastructure.event_bus import EventBus
-from ..infrastructure.key_manager import KeyManager, KeyManagerError
+from ..infrastructure.key_manager import KeyManager
 from ..repositories.space_key_repo import (
     AbstractSpaceKeyRepo,
     SpaceKey,
 )
-from ..repositories.space_repo import AbstractSpaceRepo
 from ..space_media_seal import derive_space_media_key
 from .bus_publisher import BusPublisherMixin
 
@@ -71,37 +67,6 @@ log = logging.getLogger(__name__)
 
 
 _AES_KEY_BYTES = 32
-
-#: v_90 — how many of a space's newest epochs open a multi-recipient frame
-#: (a frame sealed just before a rotation still opens after it).
-MR_RECENT_EPOCHS: int = 3
-
-#: v_90 — a kid the cache does not know triggers a rebuild at most this
-#: often (seconds). Writes through this service invalidate the cache at
-#: once; this is only the backstop for a key written behind its back, and
-#: it keeps a flood of unknown kids at one query a minute.
-MR_KID_REBUILD_INTERVAL_S: float = 60.0
-
-#: v_90 — the kid cache is rebuilt once it is this old (seconds), hits
-#: included, so a key removed outside this service (a space delete cascade,
-#: a restore) stops opening frames within ten minutes.
-MR_KID_CACHE_MAX_AGE_S: float = 600.0
-
-
-#: v_90 — longest a removal hold (:meth:`SpaceContentEncryption.hold_multi`)
-#: keeps a space per recipient while no newer epoch arrives (seconds). The
-#: post-removal rekey follows the removal in the same per-peer queue, so it
-#: is normally lifted within seconds; the cap only bounds a rekey that never
-#: comes (an owner that went away) — after it, the newest key is used again.
-MULTI_REMOVAL_HOLD_S: float = 3600.0
-
-
-def _monotonic() -> float:
-    """The kid cache's and removal hold's clock (a seam tests replace — never the global
-    ``time.monotonic``, which the event loop runs on)."""
-    return time.monotonic()
-
-
 _GCM_NONCE_BYTES = 12
 
 
@@ -155,12 +120,8 @@ class SpaceContentEncryption(BusPublisherMixin):
     __slots__ = (
         "_bus",
         "_kek",
-        "_mr_built_at",
-        "_mr_kids",
-        "_multi_holds",
         "_own_instance_id",
         "_repo",
-        "_spaces",
     )
 
     def __init__(
@@ -170,16 +131,8 @@ class SpaceContentEncryption(BusPublisherMixin):
         *,
         bus: EventBus | None = None,
         own_instance_id: str | None = None,
-        space_repo: AbstractSpaceRepo | None = None,
     ) -> None:
         self._repo = space_key_repo
-        #: The space's pinned ``authority_key_epoch`` (v_90 :meth:`mr_key`);
-        #: unwired → no multi-recipient keys at all.
-        self._spaces = space_repo
-        #: v_90 space → (newest local epoch, monotonic time) of a removal
-        #: hold (:meth:`hold_multi`). In memory: the rekey follows the
-        #: removal in the same per-peer queue.
-        self._multi_holds: dict[str, tuple[int, float]] = {}
         self._kek = key_manager
         #: Optional — when wired, ``import_key`` publishes
         #: :class:`SpaceContentKeyImported` so :class:`PendingDecryptsCache`
@@ -187,11 +140,6 @@ class SpaceContentEncryption(BusPublisherMixin):
         #: key was available (#122, out-of-order key arrival).
         self._bus = bus
         self._own_instance_id = own_instance_id
-        #: v_90 kid → (space_id, epoch, multi-recipient keys) over the
-        #: :data:`MR_RECENT_EPOCHS` newest epochs of every space. ``None``
-        #: = rebuild on the next lookup. Never log it.
-        self._mr_kids: dict[str, tuple[str, int, MrKeys]] | None = None
-        self._mr_built_at: float = 0.0
 
     # ─── Lifecycle ────────────────────────────────────────────────────────
 
@@ -230,7 +178,6 @@ class SpaceContentEncryption(BusPublisherMixin):
                 rotated_by=self._own_instance_id,
             )
         )
-        self._invalidate_mr_kids()
         log.info("space_crypto: rotated %s to epoch %d", space_id, epoch)
         return epoch
 
@@ -301,113 +248,6 @@ class SpaceContentEncryption(BusPublisherMixin):
             associated_data=space_id.encode("utf-8"),
         )
         return key.epoch, derive_space_media_key(raw)
-
-    async def mr_key(self, space_id: str) -> tuple[int, MrKeys] | None:
-        """``(epoch, keys)`` of the current epoch's multi-recipient keys
-        (v_90, :func:`~socialhome.federation.multi_recipient.derive_mr_key`),
-        or ``None`` — the caller then sends per recipient, pair-sealed — when
-        the space has no key, or this household may be behind on a removal:
-
-        * the newest key was not stored under the space's pinned authority
-          key (its ``authority_epoch`` is not ``authority_key_epoch``): an
-          authority rotation's rekey has not reached us yet;
-        * a removal hold is on (:meth:`hold_multi`): we learned a household
-          left but hold no epoch newer than the one it holds;
-        * the space's content key reaches GFS subscribers (a public / global
-          space with ``allow_subscribers``): a GFS operator could subscribe
-          with a household of its own and open every frame it relays.
-
-        Never an older epoch's key instead. Only derived material leaves —
-        never the content key. Never log it."""
-        latest = await self._repo.get_latest(space_id)
-        if latest is None or self._spaces is None or self._held(space_id, latest):
-            return None
-        space = await self._spaces.get(space_id)
-        if space is None or latest.authority_epoch != space.authority_key_epoch:
-            return None
-        if space.space_type in PUBLIC_SPACE_TIERS and space.features.allow_subscribers:
-            return None
-        return latest.epoch, derive_mr_key(self._unwrap(latest))
-
-    async def hold_multi(self, space_id: str) -> None:
-        """A household left *space_id*: no multi-recipient frame until an
-        epoch newer than our newest one arrives (its post-removal rekey), or
-        for at most :data:`MULTI_REMOVAL_HOLD_S` — the leaver holds every
-        epoch we hold now."""
-        latest = await self._repo.get_latest(space_id)
-        self._multi_holds[space_id] = (
-            latest.epoch if latest is not None else -1,
-            _monotonic(),
-        )
-
-    def _held(self, space_id: str, latest: SpaceKey) -> bool:
-        hold = self._multi_holds.get(space_id)
-        if hold is None:
-            return False
-        epoch, since = hold
-        if latest.epoch > epoch or _monotonic() - since >= MULTI_REMOVAL_HOLD_S:
-            del self._multi_holds[space_id]
-            return False
-        return True
-
-    async def mr_kid(self, space_id: str, epoch: int) -> str | None:
-        """The multi-recipient kid of *space_id*'s *epoch* key, or ``None``
-        when that key is not held (or does not unwrap). Only the kid
-        leaves — it is what a parked multi frame waits for
-        (:meth:`PendingDecryptsCache.stash_kid`)."""
-        row = await self._repo.get(space_id, epoch)
-        if row is None:
-            return None
-        try:
-            return derive_mr_key(self._unwrap(row)).kid
-        except KeyManagerError, ValueError:
-            return None
-
-    async def mr_key_for_kid(self, kid: str) -> tuple[str, int, MrKeys] | None:
-        """``(space_id, epoch, keys)`` for a multi-recipient frame's *kid*,
-        over the :data:`MR_RECENT_EPOCHS` newest epochs of every space we hold
-        a key for — or ``None``. Served from an in-memory cache that writes
-        through this service invalidate; a miss rebuilds it at most every
-        :data:`MR_KID_REBUILD_INTERVAL_S`, and any lookup once it is
-        :data:`MR_KID_CACHE_MAX_AGE_S` old. A kid of any other shape than
-        :func:`derive_mr_key` makes is ``None`` with no lookup at all."""
-        if not is_valid_kid(kid):
-            return None
-        now = _monotonic()
-        kids = self._mr_kids
-        if kids is None or now - self._mr_built_at >= MR_KID_CACHE_MAX_AGE_S:
-            kids = await self._rebuild_mr_kids(now)
-        hit = kids.get(kid)
-        if hit is None and now - self._mr_built_at >= MR_KID_REBUILD_INTERVAL_S:
-            hit = (await self._rebuild_mr_kids(now)).get(kid)
-        return hit
-
-    async def _rebuild_mr_kids(self, now: float) -> dict[str, tuple[str, int, MrKeys]]:
-        kids: dict[str, tuple[str, int, MrKeys]] = {}
-        for row in await self._repo.list_recent(per_space=MR_RECENT_EPOCHS):
-            try:
-                keys = derive_mr_key(self._unwrap(row))
-            except KeyManagerError, ValueError:
-                # One unreadable row must not hide every other space's keys.
-                log.warning(
-                    "space_crypto: an epoch key of %s does not unwrap — "
-                    "skipped for multi-recipient frames",
-                    row.space_id,
-                )
-                continue
-            kids[keys.kid] = (row.space_id, row.epoch, keys)
-        self._mr_kids = kids
-        self._mr_built_at = now
-        return kids
-
-    def _invalidate_mr_kids(self) -> None:
-        self._mr_kids = None
-
-    def _unwrap(self, key: SpaceKey) -> bytes:
-        return self._kek.decrypt(
-            key.content_key_hex,
-            associated_data=key.space_id.encode("utf-8"),
-        )
 
     async def import_key(
         self,
@@ -480,7 +320,6 @@ class SpaceContentEncryption(BusPublisherMixin):
                 space_id,
             )
             return
-        self._invalidate_mr_kids()
         log.info(
             "space_crypto: imported epoch %d for %s from peer (rotated_by=%r)",
             epoch,
@@ -533,7 +372,6 @@ class SpaceContentEncryption(BusPublisherMixin):
             authority_epoch=authority_epoch,
             older_than=older_than,
         )
-        self._invalidate_mr_kids()
         log.info(
             "space_crypto: reset %s to the owner's epoch %d (dropped %d older-key "
             "epoch(s) above it)",

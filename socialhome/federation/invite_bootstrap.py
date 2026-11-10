@@ -292,9 +292,11 @@ class RelayEnvelopeSender(Protocol):
         ...
 
     async def send_to_mailboxes(
-        self, *, mailbox_ids: list[str], gfs_url: str, sealed: dict
-    ) -> bool:
-        """v_90 — POST one multi-recipient frame over the anonymous session."""
+        self, *, entries: list[tuple[str, dict]], gfs_url: str, body: dict
+    ) -> int | None:
+        """v_90 — POST one multi-recipient frame (``(mailbox_id, wrap)``
+        entries + the body) over the anonymous session; the HTTP status, or
+        ``None`` when not reached."""
         ...
 
 

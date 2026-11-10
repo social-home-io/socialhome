@@ -586,23 +586,27 @@ class GfsRelayTransport:
             return 0
 
     async def send_multi_mailbox(
-        self, *, targets: list[MailboxTarget], sealed: dict
+        self, *, to: list[tuple[MailboxTarget, dict]], body: dict
     ) -> tuple[bool, int | None, float | None]:
-        """Hand ONE multi-recipient frame (already sealed,
-        :func:`~socialhome.federation.multi_recipient.seal_multi`) to the GFS
-        of *targets* — all on that one GFS, grouped by the caller — for
-        every target's mailbox. The GFS sees the mailbox list and the seal,
-        nothing that names a household. Same contract as :meth:`send`
-        (:data:`RELAY_STATUS_THROTTLED` on a full window), plus the GFS's
-        ``Retry-After`` in seconds when a throttle named one (else
-        ``None``); never logs a mailbox id."""
-        if not targets:
+        """Hand ONE multi-recipient frame to the GFS of the targets in *to*
+        — all on that one GFS, grouped by the caller — as its ``body``
+        (:func:`~socialhome.federation.multi_recipient.seal_multi`) plus one
+        ``wrap`` of the body key per target mailbox. The GFS sees the
+        mailbox list, the opaque wraps and the body, nothing that names a
+        household.
+
+        ``(ok, status, retry_after_s)``: *status* is
+        :data:`RELAY_STATUS_THROTTLED` on a full window (with the GFS's
+        ``Retry-After`` in seconds when it named one), the GFS's HTTP status
+        when it refused the upload, ``None`` when it was not reached. Never
+        logs a mailbox id."""
+        if not to:
             return False, None, None
         try:
-            ok = await self._sender.send_to_mailboxes(
-                mailbox_ids=[t.mailbox_id for t in targets],
-                gfs_url=targets[0].gfs_url,
-                sealed=sealed,
+            status = await self._sender.send_to_mailboxes(
+                entries=[(t.mailbox_id, wrap) for t, wrap in to],
+                gfs_url=to[0][0].gfs_url,
+                body=body,
             )
         except EnvelopeRelayThrottled as exc:
             log.info("gfs relay: a multi-recipient frame was throttled")
@@ -617,7 +621,9 @@ class GfsRelayTransport:
                 exc_info=True,
             )
             return False, None, None
-        return bool(ok), None, None
+        if status is not None and status < 300:
+            return True, None, None
+        return False, status, None
 
     async def _deliver_mailbox(
         self,

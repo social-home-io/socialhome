@@ -1006,23 +1006,14 @@ def _build_gfs_relay_inbound(
     invite_coordinator: SpaceInviteTokenRedeemCoordinator,
     gfs_connection_repo: AbstractGfsConnectionRepo,
     rate_limiter: RateLimiter,
-    space_crypto: SpaceContentEncryption,
-    pending_decrypts: PendingDecryptsCache,
 ) -> GfsRelayInbound:
-    """Build the inbound leg of the connection-server envelope relay. v_90
-    multi-recipient frames resolve their kid over our space keys; one under
-    a kid we hold no key for yet parks in the shared pending-decrypts cache
-    (its own bounded kid deque), which resolves each imported key's kid
-    through the store and replays it."""
-    pending_decrypts.attach_kid_resolver(space_crypto.mr_kid)
+    """Build the inbound leg of the connection-server envelope relay."""
     return GfsRelayInbound(
         federation=federation_service,
         keywrap_private_key=keywrap_private_key,
         invite_coordinator=invite_coordinator,
         gfs_connection_repo=gfs_connection_repo,
         rate_limiter=rate_limiter,
-        mr_key_for_kid=space_crypto.mr_key_for_kid,
-        pending_decrypts=pending_decrypts,
     )
 
 
@@ -4581,8 +4572,6 @@ def create_app(config: Config | None = None) -> web.Application:
             # Phase 4b — stamp every locally-minted epoch with this household's
             # id so concurrent delegated-admin rotations converge deterministically.
             own_instance_id=identity.instance_id,
-            # v_90 — a multi-recipient key only under the pinned authority key.
-            space_repo=space_repo,
         )
         app[K.space_crypto_service_key] = space_crypto
         pending_decrypts_cache = PendingDecryptsCache(bus=bus)
@@ -5140,8 +5129,6 @@ def create_app(config: Config | None = None) -> web.Application:
             invite_coordinator=invite_redeem_coordinator,
             gfs_connection_repo=repos.gfs_connection,
             rate_limiter=limiter,
-            space_crypto=space_crypto,
-            pending_decrypts=pending_decrypts_cache,
         )
         # v_84 — "Ask to join" a global space found in a GFS directory from
         # a household its host never paired with: sealed both ways over the
@@ -5176,8 +5163,6 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         member_directory.attach_to(federation_service)
         member_directory.wire(bus)
-        # v_90 — a household left: no multi frame until its rekey arrives.
-        member_directory.attach_multi_hold(space_crypto.hold_multi)
         if gfs_channels is not None:
             # A joiner's "seated" card re-sends its private-channel grant:
             # the one sent when its seat went live can beat its seat.
@@ -5200,10 +5185,7 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         routed_handler.attach_host_hop(host_hop)
         federation_service.attach_member_mesh(
-            host_hop=host_hop,
-            mailbox_sender_check=member_directory.sender_allowed,
-            # v_90 — one upload for the mailbox seats behind one GFS.
-            mr_key=space_crypto.mr_key,
+            host_hop=host_hop, mailbox_sender_check=member_directory.sender_allowed
         )
         await space_mailboxes.start()
         app[K.space_mailbox_service_key] = space_mailboxes

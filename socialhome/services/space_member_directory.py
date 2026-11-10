@@ -167,7 +167,6 @@ class SpaceMemberDirectory:
         "_keywrap_sig",
         "_lost_mailbox",
         "_mailboxes",
-        "_multi_hold",
         "_on_seated",
         "_seat_ender",
         "_seater",
@@ -204,7 +203,6 @@ class SpaceMemberDirectory:
         self._federation: FederationService | None = None
         self._seater: Seater | None = None
         self._seat_ender: Callable[[str], Awaitable[object]] | None = None
-        self._multi_hold: Callable[[str], Awaitable[object]] | None = None
         self._on_seated: SeatedHook | None = None
         self._clock = clock
         self._wall_clock = wall_clock
@@ -259,13 +257,6 @@ class SpaceMemberDirectory:
         shared space justifies it (``SpaceService
         .end_space_session_if_unused``)."""
         self._seat_ender = ender
-
-    def attach_multi_hold(self, hold: Callable[[str], Awaitable[object]]) -> None:
-        """How a household dropped from a space's directory holds that
-        space's multi-recipient frames until the post-removal rekey arrives
-        (``SpaceContentEncryption.hold_multi``, v_90): the leaver holds every
-        epoch we hold now."""
-        self._multi_hold = hold
 
     def attach_seater(self, seater: Seater) -> None:
         """How a directory card becomes a lazy ``space_session`` seat (the
@@ -689,8 +680,6 @@ class SpaceMemberDirectory:
             listed = set(members) | set(cards)
             gone |= {i for i in await self._space_cards(space_id) if i not in listed}
         gone -= {host, self._instance_id}
-        if gone and self._multi_hold is not None:
-            await self._multi_hold(space_id)
         for inst in sorted(gone):
             await self._forget(space_id, inst)
         for card in cards.values():

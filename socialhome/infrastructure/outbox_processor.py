@@ -75,15 +75,20 @@ BACKOFF_SECONDS: tuple[int, ...] = (
 #: says what an operator should check.
 PAIR_WINDOW_404_ATTEMPTS: int = 4
 
-#: Most deliveries one drain pass runs at once, across recipients. One
-#: recipient never has more than one in flight (its rows go in order).
+#: Most per-recipient deliveries in flight at once, across recipients and
+#: passes. One recipient never has more than one in flight (its rows go in
+#: order).
 PARALLEL_RECIPIENTS: int = 8
 
-#: Due rows one drain pass reads. As large as one multi-recipient group
-#: (``MULTI_MAX_RECIPIENTS``), so a broadcast to 500 mailbox seats goes up
-#: as ONE upload in one pass, not in 50-row chunks over ten passes. Rows
-#: are small (a ref row is ~230 B); at most PARALLEL_RECIPIENTS deliver at
-#: once, and a stalled recipient costs one timeout per pass.
+#: Most multi uploads in flight at once (v_90). They go to a GFS, not to a
+#: peer, so they never wait for a :data:`PARALLEL_RECIPIENTS` slot — a hung
+#: peer cannot hold back a queued broadcast.
+MULTI_PARALLEL: int = 4
+
+#: Due rows one drain pass reads (rows of busy recipients left out). As
+#: large as one multi-recipient group (``MULTI_MAX_RECIPIENTS``), so a
+#: broadcast to 500 mailbox seats goes up as ONE upload in one pass, not in
+#: 50-row chunks over ten passes. Rows are small (a ref row is ~230 B).
 DRAIN_BATCH: int = MULTI_MAX_RECIPIENTS
 
 #: Longest one delivery (one row, or one multi upload) may take before it
@@ -92,10 +97,14 @@ DRAIN_BATCH: int = MULTI_MAX_RECIPIENTS
 SEND_IDLE_TIMEOUT_S: float = 120.0
 
 #: A failed delivery that took at least this long (or timed out, or was
-#: throttled) stalls its recipient for the rest of the pass. A fast failure
+#: throttled) stalls its recipient for the rest of its pass's rows. A fast failure
 #: (a refused connection) costs nothing, so the recipient's next rows are
 #: still tried and every row keeps counting its attempts.
 STALL_AFTER_S: float = 10.0
+
+#: How long :meth:`OutboxProcessor.stop` waits for the loop and the
+#: deliveries in flight before cancelling them (their rows stay pending).
+STOP_DEADLINE_S: float = 5.0
 
 #: How far to perturb the base delay — ±30%.
 JITTER_RATIO: float = 0.30
@@ -206,16 +215,27 @@ class OutboxProcessor:
     Follows the same ``_stop: asyncio.Event`` lifecycle as every other
     scheduler in :mod:`socialhome.infrastructure` (see
     :class:`ReplayCachePruneScheduler`). ``start()`` kicks off the
-    loop, ``stop()`` sets the event and awaits graceful shutdown up
-    to a 5-second deadline before cancelling.
+    loop, ``stop()`` sets the event and awaits the loop and the deliveries
+    in flight up to a 5-second deadline before cancelling.
+
+    A pass never waits for its deliveries (:meth:`_start_pass`): it starts
+    them and returns, so a hung peer cannot delay the next pass — or a
+    multi upload a broadcast just queued. Recipients with a delivery in
+    flight are *busy* (in memory only): their rows are left out of every
+    pass until it ends, so each recipient's rows still go one at a time in
+    due order. Nothing is persisted, so a crash leaves those rows pending.
     """
 
     __slots__ = (
         "_after_prune",
+        "_busy",
         "_deliver",
+        "_inflight",
         "_jitter",
         "_last_prune",
         "_multi",
+        "_multi_slots",
+        "_peer_slots",
         "_poll_interval",
         "_prune_interval",
         "_repo",
@@ -257,6 +277,14 @@ class OutboxProcessor:
         # ``rng`` is injectable for deterministic tests. Default uses
         # ``random.random`` — uniform in [0, 1).
         self._jitter = rng or random.random
+        #: Recipients whose rows a running pass owns (in flight or next in
+        #: its line) — left out of every other pass until they are done.
+        self._busy: set[str] = set()
+        #: Delivery tasks still running (:meth:`stop` and
+        #: :meth:`drain_once` wait for them).
+        self._inflight: set[asyncio.Task] = set()
+        self._peer_slots = asyncio.Semaphore(PARALLEL_RECIPIENTS)
+        self._multi_slots = asyncio.Semaphore(MULTI_PARALLEL)
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -275,18 +303,27 @@ class OutboxProcessor:
     async def stop(self) -> None:
         self._stop.set()
         self._wake.set()
+        deadline = time.monotonic() + STOP_DEADLINE_S
         if self._task is not None:
             try:
-                await asyncio.wait_for(self._task, timeout=5.0)
+                await asyncio.wait_for(self._task, timeout=STOP_DEADLINE_S)
             except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
+        if self._inflight:
+            # Deliveries in flight finish (or are cancelled — their rows
+            # stay pending) within the same deadline.
+            _done, late = await asyncio.wait(
+                set(self._inflight), timeout=max(deadline - time.monotonic(), 0.0)
+            )
+            for task in late:
+                task.cancel()
 
     async def _loop(self) -> None:
         while not self._stop.is_set():
             self._wake.clear()
             try:
-                await self.drain_once()
+                await self._start_pass()
             except Exception:
                 log.exception("OutboxProcessor tick failed")
             # §4.4.7 retention sweep — runs on its own (slow) cadence folded
@@ -315,26 +352,37 @@ class OutboxProcessor:
     # ── Single tick ────────────────────────────────────────────────────
 
     async def drain_once(self, *, limit: int = DRAIN_BATCH) -> int:
-        """Process up to ``limit`` due entries. Returns count processed.
+        """One pass (:meth:`_start_pass`), then wait until every delivery in
+        flight has ended. Returns the count of due rows the pass took."""
+        count = await self._start_pass(limit=limit)
+        # A task starts the next unit of its line before it ends, so the
+        # set is complete once every task in it is done.
+        while pending := [t for t in self._inflight if not t.done()]:
+            await asyncio.wait(pending)
+        return count
 
-        Recipients go in parallel — at most :data:`PARALLEL_RECIPIENTS`
-        deliveries at once, one per recipient, its rows in order. Rows of one
-        stored payload the :class:`OutboxMulti` groups go up as ONE upload
-        whose outcome applies to each; a recipient in a group is busy until
-        the group is done. Every delivery runs under
-        :data:`SEND_IDLE_TIMEOUT_S`.
+    async def _start_pass(self, *, limit: int = DRAIN_BATCH) -> int:
+        """Start delivering up to ``limit`` due rows of recipients that are
+        not busy; return without waiting for them. Returns the count taken.
 
-        The pass awaits every delivery it starts, so nothing is "in flight"
-        across passes: a crash or a stop mid-pass leaves the unfinished rows
-        ``pending``, and the next pass picks them up.
+        Each of the pass's recipients is busy until its last row of the pass
+        is done; its rows go one at a time, in due order. Rows of one stored
+        payload the :class:`OutboxMulti` groups go up as ONE upload whose
+        outcome applies to each (a group is formed from recipients that are
+        not busy only — a busy one keeps its row for a later pass, under the
+        same stable ``msg_id``). Per-recipient deliveries share
+        :data:`PARALLEL_RECIPIENTS` slots; multi uploads use their own
+        :data:`MULTI_PARALLEL` slots and never wait for a per-recipient one.
+        Every delivery runs under :data:`SEND_IDLE_TIMEOUT_S`.
 
         Once a recipient's delivery times out, is throttled
         (:class:`RetryAfter`) or fails after :data:`STALL_AFTER_S` or more,
-        its remaining units in this pass are not attempted: they stay
-        ``pending`` for the next pass, with no attempt counted — one dead peer
-        costs one timeout per pass, not one per queued row. A fast failure
-        does not stall. A group that fails so stalls each of its recipients; a later group drops a stalled
-        recipient (and goes per row when fewer than two are left).
+        its remaining rows of the pass are not attempted: they stay
+        ``pending`` for a later pass, with no attempt counted — one dead
+        peer costs one timeout per pass, not one per queued row. A fast
+        failure does not stall. A group that fails so stalls each of its
+        recipients; a later group drops a stalled recipient (and goes per
+        row when fewer than two are left).
 
         Errors raised by the deliver callback (and timeouts) are treated as
         :attr:`DeliveryOutcome.TRANSIENT`. Rows whose ``attempts`` would
@@ -342,7 +390,12 @@ class OutboxProcessor:
         rescheduled. PERMANENT outcomes (4xx other than 429) are dropped
         immediately; a :class:`RetryAfter` is TRANSIENT with a delay floor.
         """
-        entries = await self._repo.list_due(limit)
+        busy = frozenset(self._busy)
+        entries = [
+            e
+            for e in await self._repo.list_due(limit, exclude=busy)
+            if e.instance_id not in self._busy
+        ]
         if not entries:
             return 0
         units = _order_units(entries, await self._groups(entries))
@@ -351,7 +404,7 @@ class OutboxProcessor:
         for idx, unit in enumerate(units):
             for entry in unit:
                 queues.setdefault(entry.instance_id, deque()).append(idx)
-        slots = asyncio.Semaphore(PARALLEL_RECIPIENTS)
+        self._busy.update(queues)
         started: set[int] = set()
         #: Recipients whose delivery this pass ended transient — skipped.
         stalled: set[str] = set()
@@ -361,33 +414,42 @@ class OutboxProcessor:
                 queues[e.instance_id][0] == idx for e in units[idx]
             )
 
-        async with asyncio.TaskGroup() as tg:
+        def _start(idx: int) -> None:
+            started.add(idx)
+            task = asyncio.create_task(_run(idx))
+            self._inflight.add(task)
+            task.add_done_callback(self._inflight.discard)
 
-            def _start(idx: int) -> None:
-                started.add(idx)
-                tg.create_task(_run(idx))
-
-            async def _run(idx: int) -> None:
-                if any(e.instance_id not in stalled for e in units[idx]):
+        async def _run(idx: int) -> None:
+            unit = units[idx]
+            try:
+                if any(e.instance_id not in stalled for e in unit):
+                    slots = self._multi_slots if len(unit) > 1 else self._peer_slots
                     async with slots:
                         # Re-read once a slot is ours: a recipient may have
                         # stalled while this unit waited for it.
-                        live = [e for e in units[idx] if e.instance_id not in stalled]
+                        live = [e for e in unit if e.instance_id not in stalled]
                         if live:
                             await self._run_unit(live, stalled)
+            finally:
                 heads: list[int] = []
-                for entry in units[idx]:
+                for entry in unit:
                     queue = queues[entry.instance_id]
                     queue.popleft()
                     if queue:
                         heads.append(queue[0])
+                    else:
+                        self._busy.discard(entry.instance_id)
+                if self._stop.is_set():
+                    # Stopping: the rest of the line stays pending.
+                    heads = []
                 for head in heads:
                     if _ready(head):
                         _start(head)
 
-            for idx in range(len(units)):
-                if _ready(idx):
-                    _start(idx)
+        for idx in range(len(units)):
+            if _ready(idx):
+                _start(idx)
         return len(entries)
 
     async def _groups(self, entries: list[OutboxEntry]) -> list[list[OutboxEntry]]:

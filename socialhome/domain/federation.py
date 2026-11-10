@@ -863,8 +863,8 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
 
 
 #: v_90 — the members of :data:`SPACE_SESSION_ALLOWED_EVENT_TYPES` that never
-#: ride a multi-recipient mailbox frame (one body sealed under the space
-#: epoch key for many member households). A multi frame is for an event
+#: ride a multi-recipient mailbox frame (one body sealed once, its key
+#: wrapped to many member households' mailboxes). A multi frame is for an event
 #: whose identical bytes every listed member household may read; these are
 #: addressed to ONE household, carry key material, negotiate a pairwise
 #: stream, or route — a receiver refuses any of them inside a multi frame.

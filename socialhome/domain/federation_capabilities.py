@@ -1438,9 +1438,10 @@ from __future__ import annotations
 #:   event whose final bytes are the same for every member household
 #:   seated behind one GFS (``space_session`` mailbox seats) goes up ONCE
 #:   to ``POST /gfs/envelope/multi`` with the list of mailbox ids, when
-#:   that GFS proves the signed ``envelope_multi`` capability. The frame is
-#:   sealed under a key derived from the space content key of the current
-#:   epoch (``mr-aesgcm-256``, ``federation/multi_recipient.py``); its inner
+#:   that GFS proves the signed ``envelope_multi`` capability. The body is
+#:   sealed once under a fresh random key wrapped to each recipient
+#:   mailbox's key-wrap key (``mr-wrap-aesgcm-256``,
+#:   ``federation/multi_recipient.py``); its inner
 #:   envelope is signed by the sender and lists one audience tag per
 #:   intended household (``to_instance = "*:" + tags``). Only
 #:   ``MULTI_EVENT_TYPES`` are grouped; single-recipient items stay

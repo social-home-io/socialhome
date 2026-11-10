@@ -731,37 +731,14 @@ def test_build_outbox_processor_hands_its_wake_to_the_federation_service():
 
 
 def test_build_gfs_relay_inbound_returns_the_service():
-    class _Crypto:
-        async def mr_key_for_kid(self, kid):
-            return None
-
-        async def mr_kid(self, space_id, epoch):
-            return None
-
-    class _Pending:
-        resolver = None
-
-        def attach_kid_resolver(self, fn):
-            self.resolver = fn
-
-    crypto = _Crypto()
-    pending = _Pending()
     svc = _build_gfs_relay_inbound(
         federation_service=object(),  # type: ignore[arg-type]
         keywrap_private_key=b"k" * 32,
         invite_coordinator=object(),  # type: ignore[arg-type]
         gfs_connection_repo=object(),  # type: ignore[arg-type]
         rate_limiter=None,  # type: ignore[arg-type]
-        space_crypto=crypto,  # type: ignore[arg-type]
-        pending_decrypts=pending,  # type: ignore[arg-type]
     )
     assert isinstance(svc, GfsRelayInbound)
-    # v_90: multi-recipient kids resolve over our space keys; a frame under
-    # a kid not held yet parks in the shared cache, which resolves an
-    # imported key's kid through the store.
-    assert svc._mr_key_for_kid == crypto.mr_key_for_kid
-    assert svc._pending is pending
-    assert pending.resolver == crypto.mr_kid
 
 
 def test_build_gfs_route_discovery_registers_the_handlers_and_a_scheduler():

@@ -22,8 +22,6 @@ from socialhome.crypto import (
     generate_identity_keypair,
     generate_x25519_keypair,
 )
-from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import SpaceContentKeyImported
 from socialhome.domain.federation import (
     FederationEventType,
     GfsConnection,
@@ -51,29 +49,20 @@ from socialhome.federation.invite_token_redeem import (
     BOOTSTRAP_INBOUND_WINDOW_S,
     RELAY_ENVELOPE_INBOUND_LIMIT,
 )
-from socialhome.federation.keywrap_seal import seal_to_keywrap
+from socialhome.federation.keywrap_seal import UnsupportedKemSuite, seal_to_keywrap
 from socialhome.federation.multi_recipient import (
     MULTI_TO_INSTANCE,
-    MrKeys,
     UnsupportedMrSuite,
     build_multi_envelope,
-    derive_mr_key,
+    new_mr_key,
     seal_multi,
+    wrap_mr_key,
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.rate_limiter import RateLimiter
-from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
 from socialhome.services import gfs_relay_inbound as gri
 from socialhome.services.gfs_relay_inbound import RELAY_DELIVERED_VIA, GfsRelayInbound
-from socialhome.services.pending_decrypts_cache import (
-    DEFAULT_MAX_KID_ENTRIES,
-    PendingDecryptsCache,
-)
-from socialhome.services.space_crypto_service import (
-    MR_RECENT_EPOCHS,
-    SpaceContentEncryption,
-)
 from tests.federation.test_federation_service import (
     InMemoryFederationRepo,
     InMemoryOutboxRepo,
@@ -520,7 +509,7 @@ class _MailboxFederation:
         self.media: list[tuple[bytes, str]] = []
 
     async def handle_inbound_rtc(
-        self, instance_id, raw_body, *, transport="", multi=None
+        self, instance_id, raw_body, *, transport="", multi_key=None
     ):
         self.calls.append((instance_id, raw_body, transport))
         return {"status": "ok"}
@@ -693,14 +682,13 @@ async def test_a_flood_on_one_mailbox_shuts_only_that_mailbox(keys, monkeypatch)
 
 _SPACE = "sp-multi"
 _OTHER_SPACE = "sp-other"
-_CONTENT_KEYS = {_SPACE: b"\x0a" * 32, _OTHER_SPACE: b"\x0b" * 32}
 
 
 class _MultiHousehold:
-    """A receiver with a real FederationService pipeline, our mailbox, the
-    kid → key lookup over its space keys, and carded senders."""
+    """A receiver with a real FederationService pipeline, our mailbox and
+    carded senders."""
 
-    def __init__(self, *, limiter=None, pending=None, mr_key_for_kid=None) -> None:
+    def __init__(self, *, limiter=None) -> None:
         own = generate_identity_keypair()
         self.own_id = derive_instance_id(own.public_key)
         self.repo = InMemoryFederationRepo()
@@ -729,16 +717,6 @@ class _MultiHousehold:
             return (sender, space_id) in self.cards
 
         self.federation._mailbox_sender_check = _card
-        self.kids: dict[str, tuple[str, int, MrKeys]] = {}
-        for space, raw in _CONTENT_KEYS.items():
-            keys = derive_mr_key(raw)
-            self.kids[keys.kid] = (space, 7, keys)
-        self.lookups: list[str] = []
-
-        async def _for_kid(kid: str):
-            self.lookups.append(kid)
-            return self.kids.get(kid)
-
         self.mailbox = _mailbox_keys()
         self.inbound = GfsRelayInbound(
             federation=self.federation,
@@ -746,8 +724,6 @@ class _MultiHousehold:
             invite_coordinator=_Invite(),
             gfs_connection_repo=_GfsRepo(),
             rate_limiter=limiter,
-            mr_key_for_kid=mr_key_for_kid or _for_kid,
-            pending_decrypts=pending,
         )
 
     async def add_sender(self, *, card_for: str | None = _SPACE):
@@ -780,33 +756,41 @@ class _MultiHousehold:
 
 
 def _multi_frame(
+    h: _MultiHousehold,
     sender_id: str,
     encoder: FederationEncoder,
     *,
     to: Collection[str],
-    key_space: str = _SPACE,
     envelope_space: str = _SPACE,
+    payload_space: str | None = None,
     event_type: FederationEventType = FederationEventType.SPACE_POST_CREATED,
-) -> tuple[dict, dict]:
-    keys = derive_mr_key(_CONTENT_KEYS[key_space])
+) -> tuple[dict, dict, bytes]:
+    """What the GFS pushes to *h*'s mailbox: the body plus its wrap of K."""
+    key = new_mr_key()
+    payload: dict = {"post_id": "p-1", "content": "hello"}
+    if payload_space is not None:
+        payload["space_id"] = payload_space
     env = build_multi_envelope(
         encoder=encoder,
         own_instance_id=sender_id,
         event_type=event_type.value,
-        payload_json='{"post_id": "p-1", "content": "hello"}',
+        payload_json=orjson.dumps(payload).decode(),
         space_id=envelope_space,
-        keys=keys,
+        key=key,
         recipients=to,
         msg_id=str(uuid.uuid4()),
     )
-    sealed = seal_multi(env, kid=keys.kid, key=keys.key)
-    return {"type": "envelope", "sealed": sealed}, env
+    sealed = {
+        **seal_multi(env, key=key),
+        "wrap": wrap_mr_key(key, h.mailbox.kem_public),
+    }
+    return {"type": "envelope", "sealed": sealed}, env, key
 
 
 async def test_a_multi_frame_from_a_carded_member_is_dispatched():
     h = _MultiHousehold()
     sender, enc = await h.add_sender()
-    frame, env = _multi_frame(sender, enc, to=h.audience)
+    frame, env, _ = _multi_frame(h, sender, enc, to=h.audience)
     assert await h.frame(frame) == {"status": "ok"}
     [event] = h.dispatched
     assert event.from_instance == sender
@@ -816,93 +800,41 @@ async def test_a_multi_frame_from_a_carded_member_is_dispatched():
     assert event.msg_id == env["msg_id"]
 
 
-async def test_an_unknown_kid_is_refused_without_naming_it(caplog):
+async def test_a_wrap_for_another_mailbox_is_refused(caplog):
     h = _MultiHousehold()
     sender, enc = await h.add_sender()
-    frame, _ = _multi_frame(sender, enc, to=h.audience)
-    h.kids.clear()
-    with caplog.at_level(logging.DEBUG), pytest.raises(ValueError, match="key"):
+    frame, _, key = _multi_frame(h, sender, enc, to=h.audience)
+    frame["sealed"]["wrap"] = wrap_mr_key(key, _mailbox_keys(gen=1).kem_public)
+    with caplog.at_level(logging.DEBUG), pytest.raises(ValueError, match="wrap"):
         await h.frame(frame)
     assert h.dispatched == []
-    assert frame["sealed"]["kid"] not in caplog.text
     assert h.mailbox.mailbox_id not in caplog.text
 
 
-async def test_an_unknown_kid_is_parked_and_replayed_once_its_key_lands(caplog):
-    """A member offline across a rotation drains frames sealed under an
-    epoch whose key handoff has not arrived: parked by kid (no raise — the
-    sender counted it delivered), dispatched once that key is imported."""
-    bus = EventBus()
-    pending = PendingDecryptsCache(bus=bus)
-    h = _MultiHousehold(pending=pending)
-    sender, enc = await h.add_sender()
-    frame, env = _multi_frame(sender, enc, to=h.audience)
-    held = dict(h.kids)
-    h.kids.clear()
-    with caplog.at_level(logging.DEBUG):
-        assert await h.frame(frame) == {"status": "ok"}
-    assert h.dispatched == [] and pending.kid_depth() == 1
-    assert frame["sealed"]["kid"] not in caplog.text
-    assert h.mailbox.mailbox_id not in caplog.text
-
-    async def _kid_of(space_id: str, epoch: int) -> str | None:
-        return next(
-            (k for k, (s, e, _) in held.items() if (s, e) == (space_id, epoch)),
-            None,
-        )
-
-    pending.attach_kid_resolver(_kid_of)
-    await bus.publish(SpaceContentKeyImported(space_id=_OTHER_SPACE, epoch=7))
-    assert h.dispatched == [] and pending.kid_depth() == 1  # another key
-    h.kids.update(held)
-    await bus.publish(SpaceContentKeyImported(space_id=_SPACE, epoch=7))
-    [event] = h.dispatched
-    assert event.msg_id == env["msg_id"]
-    assert pending.kid_depth() == 0
-
-
-async def test_an_unknown_kid_is_charged_to_the_mailbox_bucket_before_parking(
-    monkeypatch,
-):
-    monkeypatch.setattr(gri, "MAILBOX_INBOUND_LIMIT", 2)
-    pending = PendingDecryptsCache(bus=EventBus())
-    h = _MultiHousehold(limiter=RateLimiter(), pending=pending)
-    sender, enc = await h.add_sender()
-    h.kids.clear()
-    for _ in range(2):
-        frame, _ = _multi_frame(sender, enc, to=h.audience)
-        assert await h.frame(frame) == {"status": "ok"}
-    frame, _ = _multi_frame(sender, enc, to=h.audience)
-    with pytest.raises(MailboxFlooded):
-        await h.frame(frame)
-    assert pending.kid_depth() == 2
-
-
-async def test_a_malformed_kid_is_never_parked():
-    pending = PendingDecryptsCache(bus=EventBus())
-    h = _MultiHousehold(pending=pending)
-    sender, enc = await h.add_sender()
-    frame, _ = _multi_frame(sender, enc, to=h.audience)
-    frame["sealed"]["kid"] = "A" * 21
-    with pytest.raises(ValueError, match="kid"):
-        await h.frame(frame)
-    assert pending.kid_depth() == 0
-
-
-async def test_an_unknown_suite_is_refused_before_the_kid_lookup():
+async def test_an_unknown_suite_is_refused():
     h = _MultiHousehold()
     sender, enc = await h.add_sender()
-    frame, _ = _multi_frame(sender, enc, to=h.audience)
-    frame["sealed"]["mr_suite"] = "mr-chacha-1"
+    frame, _, _ = _multi_frame(h, sender, enc, to=h.audience)
+    frame["sealed"]["mr_suite"] = "mr-aesgcm-256"  # the withdrawn shape
     with pytest.raises(UnsupportedMrSuite):
         await h.frame(frame)
-    assert h.lookups == [] and h.dispatched == []
+    assert h.dispatched == []
+
+
+async def test_an_unknown_wrap_suite_is_refused():
+    h = _MultiHousehold()
+    sender, enc = await h.add_sender()
+    frame, _, _ = _multi_frame(h, sender, enc, to=h.audience)
+    frame["sealed"]["wrap"]["kem_suite"] = "x25519+mlkem768"
+    with pytest.raises(UnsupportedKemSuite):
+        await h.frame(frame)
+    assert h.dispatched == []
 
 
 async def test_a_tampered_multi_ciphertext_is_refused():
     h = _MultiHousehold()
     sender, enc = await h.add_sender()
-    frame, _ = _multi_frame(sender, enc, to=h.audience)
+    frame, _, _ = _multi_frame(h, sender, enc, to=h.audience)
     raw = bytearray(b64url_decode(frame["sealed"]["ciphertext"]))
     raw[-1] ^= 0x01
     frame["sealed"]["ciphertext"] = b64url_encode(bytes(raw))
@@ -916,7 +848,7 @@ async def test_a_star_envelope_in_an_ordinary_mailbox_frame_is_refused():
     no multi context, so the pipeline refuses the star."""
     h = _MultiHousehold()
     sender, enc = await h.add_sender()
-    _, env = _multi_frame(sender, enc, to=h.audience)
+    _, env, _ = _multi_frame(h, sender, enc, to=h.audience)
     frame = {
         "type": "envelope",
         "sealed": seal_relay_envelope(
@@ -928,16 +860,27 @@ async def test_a_star_envelope_in_an_ordinary_mailbox_frame_is_refused():
     assert h.dispatched == []
 
 
-async def test_an_envelope_naming_another_space_than_its_key_is_refused():
-    """Sealed under space A's key but naming space B (where the sender even
-    holds a card): refused, A's key proves nothing about B."""
+async def test_a_payload_naming_another_space_than_its_envelope_is_refused():
+    """The signed envelope names space A, the payload space B (where the
+    sender even holds a card): refused before any handler reads it."""
     h = _MultiHousehold()
     sender, enc = await h.add_sender()
     h.cards.add((sender, _OTHER_SPACE))
-    frame, _ = _multi_frame(
-        sender, enc, to=h.audience, key_space=_SPACE, envelope_space=_OTHER_SPACE
+    frame, _, _ = _multi_frame(
+        h, sender, enc, to=h.audience, payload_space=_OTHER_SPACE
     )
     with pytest.raises(ValueError, match="another space"):
+        await h.frame(frame)
+    assert h.dispatched == []
+    frame, _, _ = _multi_frame(h, sender, enc, to=h.audience, payload_space=_SPACE)
+    assert await h.frame(frame) == {"status": "ok"}
+
+
+async def test_an_envelope_naming_no_space_is_refused():
+    h = _MultiHousehold()
+    sender, enc = await h.add_sender()
+    frame, _, _ = _multi_frame(h, sender, enc, to=h.audience, envelope_space="")
+    with pytest.raises(ValueError, match="names no space"):
         await h.frame(frame)
     assert h.dispatched == []
 
@@ -945,52 +888,29 @@ async def test_an_envelope_naming_another_space_than_its_key_is_refused():
 async def test_a_sender_without_a_card_for_the_space_is_refused():
     h = _MultiHousehold()
     sender, enc = await h.add_sender(card_for=_OTHER_SPACE)
-    frame, _ = _multi_frame(sender, enc, to=h.audience)
+    frame, _, _ = _multi_frame(h, sender, enc, to=h.audience)
     with pytest.raises(ValueError, match="member card"):
         await h.frame(frame)
     assert h.dispatched == []
 
 
 @pytest.mark.parametrize("removal", ["card_dropped", "row_gone"])
-async def test_a_removed_member_with_an_older_epoch_key_is_refused(removal):
-    """A member removed from the space still holds an earlier epoch's
-    content key — one we keep accepting for a while (``MR_RECENT_EPOCHS``),
-    so its frame still opens. The key proves nothing about membership: once
-    the roster drops the member (its card goes, or its seat row with it),
-    the mailbox-sender check refuses the frame before dispatch."""
-    assert MR_RECENT_EPOCHS >= 2  # an older epoch is still in the kid map
+async def test_a_removed_member_is_refused(removal):
+    """A frame from a member is taken; once the roster drops it (its card
+    goes, or its seat row with it), the mailbox-sender check refuses its
+    next frame before dispatch."""
     h = _MultiHousehold()
-    old_raw = b"\x09" * 32
-    old = derive_mr_key(old_raw)
-    h.kids[old.kid] = (_SPACE, 6, old)  # the epoch before the rotation
     sender, enc = await h.add_sender()
-
-    def _frame() -> dict:
-        env = build_multi_envelope(
-            encoder=enc,
-            own_instance_id=sender,
-            event_type=FederationEventType.SPACE_POST_CREATED.value,
-            payload_json='{"post_id": "p-1", "content": "hello"}',
-            space_id=_SPACE,
-            keys=old,
-            recipients=h.audience,
-            msg_id=str(uuid.uuid4()),
-        )
-        return {
-            "type": "envelope",
-            "sealed": seal_multi(env, kid=old.kid, key=old.key),
-        }
-
-    # While a member, the older epoch's frame is taken (the grace window).
-    assert await h.frame(_frame()) == {"status": "ok"}
-    assert len(h.dispatched) == 1
+    frame, _, _ = _multi_frame(h, sender, enc, to=h.audience)
+    assert await h.frame(frame) == {"status": "ok"}
     h.cards.discard((sender, _SPACE))
     match = "member card"
     if removal == "row_gone":
         await h.repo.delete_instance(sender)
         match = "No instance found"
+    frame, _, _ = _multi_frame(h, sender, enc, to=h.audience)
     with pytest.raises(ValueError, match=match):
-        await h.frame(_frame())
+        await h.frame(frame)
     assert len(h.dispatched) == 1
 
 
@@ -998,7 +918,7 @@ async def test_a_bad_signature_is_refused():
     h = _MultiHousehold()
     sender, _ = await h.add_sender()
     _, impostor = await h.add_sender()  # signs with ANOTHER identity key
-    frame, _ = _multi_frame(sender, impostor, to=h.audience)
+    frame, _, _ = _multi_frame(h, sender, impostor, to=h.audience)
     with pytest.raises(ValueError, match="signature"):
         await h.frame(frame)
     assert h.dispatched == []
@@ -1007,7 +927,7 @@ async def test_a_bad_signature_is_refused():
 async def test_a_replayed_multi_frame_is_refused():
     h = _MultiHousehold()
     sender, enc = await h.add_sender()
-    frame, _ = _multi_frame(sender, enc, to=h.audience)
+    frame, _, _ = _multi_frame(h, sender, enc, to=h.audience)
     await h.frame(frame)
     with pytest.raises(ValueError, match="Replay"):
         await h.frame(frame)
@@ -1015,40 +935,29 @@ async def test_a_replayed_multi_frame_is_refused():
 
 
 async def test_a_multi_frame_is_charged_to_the_mailbox_bucket(monkeypatch):
-    """Multi frames share the mailbox's own bucket, charged before the kid
-    lookup — an unknown-kid flood ends in a dropped frame, not a lookup."""
+    """Multi frames share the mailbox's own bucket, charged before the wrap
+    is opened — a junk flood ends in a dropped frame, not an X25519."""
     monkeypatch.setattr(gri, "MAILBOX_INBOUND_LIMIT", 2)
     h = _MultiHousehold(limiter=RateLimiter())
     sender, enc = await h.add_sender()
-    h.kids.clear()
     for _ in range(2):
-        frame, _ = _multi_frame(sender, enc, to=h.audience)
-        with pytest.raises(ValueError, match="key"):
+        frame, _, _ = _multi_frame(h, sender, enc, to=h.audience)
+        frame["sealed"]["wrap"] = {}
+        with pytest.raises(ValueError):
             await h.frame(frame)
-    frame, _ = _multi_frame(sender, enc, to=h.audience)
+    frame, _, _ = _multi_frame(h, sender, enc, to=h.audience)
     with pytest.raises(MailboxFlooded):
         await h.frame(frame)
-    assert len(h.lookups) == 2
-
-
-async def test_without_a_kid_lookup_multi_frames_are_refused():
-    h = _MultiHousehold()
-    sender, enc = await h.add_sender()
-    frame, _ = _multi_frame(sender, enc, to=h.audience)
-    inbound = _inbound(generate_x25519_keypair(), federation=h.federation)
-    with pytest.raises(ValueError, match="multi-recipient"):
-        await inbound.handle_mailbox_frame(frame, keys=h.mailbox)
     assert h.dispatched == []
 
 
 async def test_a_frame_re_pushed_to_a_household_the_sender_left_out_is_refused():
-    """A follower holds the epoch key and captured a frame the sender
-    addressed to two members; it re-pushes the frame to our mailbox (or the
-    GFS does). Our tag is not in the signed audience: refused, nothing
-    dispatched."""
+    """A recipient learned K and re-wraps a frame the sender addressed to
+    two members to our mailbox (or the GFS replays it). Our tag is not in
+    the signed audience: refused, nothing dispatched."""
     h = _MultiHousehold()
     sender, enc = await h.add_sender()
-    frame, _ = _multi_frame(sender, enc, to=("m" * 32, "n" * 32))
+    frame, _, _ = _multi_frame(h, sender, enc, to=("m" * 32, "n" * 32))
     with pytest.raises(ValueError, match="not addressed to us"):
         await h.frame(frame)
     assert h.dispatched == []
@@ -1057,7 +966,7 @@ async def test_a_frame_re_pushed_to_a_household_the_sender_left_out_is_refused()
 async def test_a_frame_whose_audience_lists_only_us_is_taken():
     h = _MultiHousehold()
     sender, enc = await h.add_sender()
-    frame, _ = _multi_frame(sender, enc, to=(h.own_id,))
+    frame, _, _ = _multi_frame(h, sender, enc, to=(h.own_id,))
     assert await h.frame(frame) == {"status": "ok"}
     assert len(h.dispatched) == 1
 
@@ -1065,7 +974,8 @@ async def test_a_frame_whose_audience_lists_only_us_is_taken():
 async def test_an_excluded_event_type_in_a_multi_frame_is_refused():
     h = _MultiHousehold()
     sender, enc = await h.add_sender()
-    frame, _ = _multi_frame(
+    frame, _, _ = _multi_frame(
+        h,
         sender,
         enc,
         to=h.audience,
@@ -1076,98 +986,20 @@ async def test_an_excluded_event_type_in_a_multi_frame_is_refused():
     assert h.dispatched == []
 
 
-@pytest.mark.parametrize(
-    "kid", [None, 5, "", "k", "A" * 21, "A" * 23, "A" * 21 + "=", "A" * 21 + "+"]
-)
-async def test_a_malformed_kid_is_refused_without_a_lookup(kid):
-    h = _MultiHousehold()
-    sender, enc = await h.add_sender()
-    frame, _ = _multi_frame(sender, enc, to=h.audience)
-    frame["sealed"]["kid"] = kid
-    with pytest.raises(ValueError, match="kid"):
-        await h.frame(frame)
-    assert h.lookups == [] and h.dispatched == []
-
-
 async def test_a_multi_context_on_a_non_mailbox_transport_is_refused():
     """Through the real ``FederationService.handle_inbound_rtc``: a multi
     context paired with any transport but the mailbox (a misuse of the
     seam) is refused before anything is dispatched."""
     h = _MultiHousehold()
     sender, enc = await h.add_sender()
-    _, env = _multi_frame(sender, enc, to=h.audience)
-    key = derive_mr_key(_CONTENT_KEYS[_SPACE])
+    _, env, key = _multi_frame(h, sender, enc, to=h.audience)
     for transport in ("", TRANSPORT_GFS_RELAY):
         with pytest.raises(ValueError, match="mailbox only"):
             await h.federation.handle_inbound_rtc(
-                sender,
-                orjson.dumps(env),
-                transport=transport,
-                multi=(_SPACE, key),
+                sender, orjson.dumps(env), transport=transport, multi_key=key
             )
     assert h.dispatched == []
     # The same envelope over the mailbox leg is taken.
     assert await h.federation.handle_inbound_rtc(
-        sender, orjson.dumps(env), transport=TRANSPORT_GFS_MAILBOX, multi=(_SPACE, key)
+        sender, orjson.dumps(env), transport=TRANSPORT_GFS_MAILBOX, multi_key=key
     ) == {"status": "ok"}
-
-
-# ── v_90 integration: parked frames with the real key store ──────────────
-
-
-@pytest.fixture
-async def key_store(tmp_dir):
-    """A real SQLite key store + SpaceContentEncryption on one bus, and the
-    shared pending-decrypts cache wired to its ``mr_kid`` — as in app.py."""
-    db = AsyncDatabase(tmp_dir / "keys.db", batch_timeout_ms=10)
-    await db.startup()
-    await db.enqueue(
-        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
-        " identity_public_key) VALUES(?, 'T', 'inst-1', 'pascal', ?)",
-        (_SPACE, "ab" * 32),
-    )
-    bus = EventBus()
-    crypto = SpaceContentEncryption(
-        SqliteSpaceKeyRepo(db), KeyManager.from_data_dir(tmp_dir), bus=bus
-    )
-    pending = PendingDecryptsCache(bus=bus)
-    pending.attach_kid_resolver(crypto.mr_kid)
-    yield crypto, pending
-    await db.shutdown()
-
-
-async def test_a_frame_under_an_epoch_not_held_yet_is_dispatched_on_its_import(
-    key_store,
-):
-    crypto, pending = key_store
-    await crypto.import_key(_SPACE, 0, b"\x01" * 32)  # an older epoch we hold
-    h = _MultiHousehold(pending=pending, mr_key_for_kid=crypto.mr_key_for_kid)
-    sender, enc = await h.add_sender()
-    frame, env = _multi_frame(sender, enc, to=h.audience)  # epoch 1's key
-    assert await h.frame(frame) == {"status": "ok"}
-    assert h.dispatched == [] and pending.kid_depth() == 1
-    await crypto.import_key(_SPACE, 1, _CONTENT_KEYS[_SPACE])
-    [event] = h.dispatched
-    assert event.msg_id == env["msg_id"]
-    assert pending.kid_depth() == 0
-
-
-async def test_a_junk_kid_flood_evicts_only_kid_entries(key_store):
-    crypto, pending = key_store
-    h = _MultiHousehold(pending=pending, mr_key_for_kid=crypto.mr_key_for_kid)
-    sender, enc = await h.add_sender()
-    synced: list[str] = []
-
-    async def _sync_chunk() -> None:
-        synced.append("chunk")
-
-    pending.stash(_SPACE, 1, _sync_chunk)  # a §25.6 chunk waiting on epoch 1
-    for i in range(DEFAULT_MAX_KID_ENTRIES + 10):
-        frame, _ = _multi_frame(sender, enc, to=h.audience)
-        frame["sealed"]["kid"] = b64url_encode(i.to_bytes(16, "big"))
-        assert await h.frame(frame) == {"status": "ok"}
-    assert pending.kid_depth() == DEFAULT_MAX_KID_ENTRIES
-    assert len(pending) == 1
-    await crypto.import_key(_SPACE, 1, _CONTENT_KEYS[_SPACE])
-    assert synced == ["chunk"]
-    assert h.dispatched == []  # junk never opens

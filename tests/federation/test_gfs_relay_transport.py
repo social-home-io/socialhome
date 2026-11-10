@@ -544,7 +544,8 @@ async def test_media_ready_needs_a_key_a_relay_and_a_proving_server():
 
 # ─── v_90: one upload for many mailboxes ──────────────────────────────────
 
-MULTI_SEALED = {"mr_suite": "mr-aesgcm-256", "kid": "k" * 22, "ciphertext": "cc"}
+MULTI_BODY = {"mr_suite": "mr-wrap-aesgcm-256", "ciphertext": "cc"}
+WRAP = {"kem_suite": "x25519", "eph_pk": "ee", "ciphertext": "ww"}
 
 
 class _FakeMultiRelay:
@@ -553,11 +554,11 @@ class _FakeMultiRelay:
         *,
         conn: object = object(),
         cap: int = 500,
-        ok: bool = True,
+        status: int | None = 202,
         raises: Exception | None = None,
     ) -> None:
-        self.conn, self.cap, self.ok, self.raises = conn, cap, ok, raises
-        self.calls: list[tuple[list[str], str, dict]] = []
+        self.conn, self.cap, self.status, self.raises = conn, cap, status, raises
+        self.calls: list[tuple[list[tuple[str, dict]], str, dict]] = []
 
     async def multi_connection(self, gfs_url):
         if isinstance(self.raises, RuntimeError):
@@ -567,16 +568,21 @@ class _FakeMultiRelay:
     def multi_max_recipients(self, conn):
         return self.cap
 
-    async def send_to_mailboxes(self, *, mailbox_ids, gfs_url, sealed):
+    async def send_to_mailboxes(self, *, entries, gfs_url, body):
         if self.raises is not None:
             raise self.raises
-        self.calls.append((list(mailbox_ids), gfs_url, sealed))
-        return self.ok
+        self.calls.append((list(entries), gfs_url, body))
+        return self.status
 
 
 def _targets(n: int, url: str = "https://gfs.example.org"):
     return [
-        MailboxTarget(mailbox_id=chr(ord("m") + i) * 32, kem_pk=b"k" * 32, gfs_url=url)
+        (
+            MailboxTarget(
+                mailbox_id=chr(ord("m") + i) * 32, kem_pk=b"k" * 32, gfs_url=url
+            ),
+            WRAP,
+        )
         for i in range(n)
     ]
 
@@ -584,28 +590,37 @@ def _targets(n: int, url: str = "https://gfs.example.org"):
 async def test_multi_frame_names_every_mailbox_once_on_their_gfs():
     relay = _FakeMultiRelay()
     transport = GfsRelayTransport(relay_sender=relay)
-    targets = _targets(3)
-    assert await transport.send_multi_mailbox(targets=targets, sealed=MULTI_SEALED) == (
+    to = _targets(3)
+    assert await transport.send_multi_mailbox(to=to, body=MULTI_BODY) == (
         True,
         None,
         None,
     )
     assert relay.calls == [
-        ([t.mailbox_id for t in targets], "https://gfs.example.org", MULTI_SEALED)
+        (
+            [(t.mailbox_id, WRAP) for t, _ in to],
+            "https://gfs.example.org",
+            MULTI_BODY,
+        )
     ]
 
 
-async def test_multi_frame_refused_by_the_relay_is_false():
-    transport = GfsRelayTransport(relay_sender=_FakeMultiRelay(ok=False))
-    assert await transport.send_multi_mailbox(
-        targets=_targets(2), sealed=MULTI_SEALED
-    ) == (False, None, None)
+@pytest.mark.parametrize("status", [400, 413, 503, None])
+async def test_multi_frame_refused_by_the_relay_names_the_status(status):
+    """A refusal carries the GFS's status (``None``: not reached), so the
+    caller tells a 4xx (per row) from a 5xx / timeout (retry)."""
+    transport = GfsRelayTransport(relay_sender=_FakeMultiRelay(status=status))
+    assert await transport.send_multi_mailbox(to=_targets(2), body=MULTI_BODY) == (
+        False,
+        status,
+        None,
+    )
 
 
 async def test_multi_frame_needs_at_least_one_target():
     relay = _FakeMultiRelay()
     transport = GfsRelayTransport(relay_sender=relay)
-    assert await transport.send_multi_mailbox(targets=[], sealed=MULTI_SEALED) == (
+    assert await transport.send_multi_mailbox(to=[], body=MULTI_BODY) == (
         False,
         None,
         None,
@@ -628,9 +643,10 @@ async def test_multi_frame_needs_at_least_one_target():
 async def test_multi_frame_failures_never_raise(raises, want):
     """A throttle carries the GFS's ``Retry-After`` up to the caller."""
     transport = GfsRelayTransport(relay_sender=_FakeMultiRelay(raises=raises))
-    assert await transport.send_multi_mailbox(
-        targets=_targets(2), sealed=MULTI_SEALED
-    ) == (False, *want)
+    assert await transport.send_multi_mailbox(to=_targets(2), body=MULTI_BODY) == (
+        False,
+        *want,
+    )
 
 
 async def test_multi_capacity_is_the_proving_servers_cap_or_zero():

@@ -1251,3 +1251,35 @@ async def test_a_multi_payload_nobody_can_take_is_not_kept(env):
     )
     assert written == {}
     assert await _payload_ids(env) == []
+
+
+async def test_list_due_leaves_out_busy_households(env):
+    """The processor's busy recipients never fill a batch with their
+    backlog: their rows are left out in SQL, not after the LIMIT."""
+    for i in range(3):
+        await _enqueue_ref(env, "peer-a", f"a-{i}")
+    await _enqueue_ref(env, "peer-b", "b-0")
+    due = await env.outbox_repo.list_due(1, exclude=frozenset({"peer-a"}))
+    assert [e.id for e in due] == ["b-0"]
+    assert len(await env.outbox_repo.list_due(10)) == 4
+
+
+async def test_pending_multi_due_names_only_a_pending_multi_row(env):
+    """v_90 FIFO: the latest due time of a household's pending rows of a
+    multi payload; a failed send's payload (no ``msg_id``) and a delivered
+    row do not count."""
+    assert await env.outbox_repo.pending_multi_due("peer-a") is None
+    await _enqueue_ref(env, "peer-a", "single")  # no msg_id on its payload
+    assert await env.outbox_repo.pending_multi_due("peer-a") is None
+    written = await env.outbox_repo.enqueue_refs(
+        instance_ids=["peer-a", "peer-b"],
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        supersede_key=None,
+        payload_ref=dataclasses.replace(_stored("p-m"), msg_id="wire-1"),
+    )
+    later = datetime.now(UTC) + timedelta(minutes=5)
+    await env.outbox_repo.reschedule(written["peer-a"], later.isoformat(), 1)
+    due = await env.outbox_repo.pending_multi_due("peer-a")
+    assert due == later.strftime("%Y-%m-%d %H:%M:%S")
+    await env.outbox_repo.mark_delivered(written["peer-b"])
+    assert await env.outbox_repo.pending_multi_due("peer-b") is None
