@@ -25,7 +25,8 @@ import os
 import time
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable, Collection, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -355,6 +356,17 @@ class _DeferredMeshSend:
     size: int
 
 
+class _SeatTurn:
+    """One ``space_session`` seat's turn for live multi-type sends: the lock
+    and how many sends hold or wait on it (the entry goes when none do)."""
+
+    __slots__ = ("lock", "users")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.users = 0
+
+
 def _outbox_payload_ad(
     payload_id: str, event_type: FederationEventType, space_id: str | None
 ) -> bytes:
@@ -439,6 +451,7 @@ class FederationService:
         "_route_service",
         "_routed_handler",
         "_rtc_inbound_pipeline",
+        "_seat_send_locks",
         "_sig_suite",
         "_space_remote_member_repo",
         "_space_repo",
@@ -555,6 +568,9 @@ class FederationService:
         #: v_91 — ``OutboxProcessor.wake``: a queued multi payload goes up
         #: on a pass now, not at the next poll (:meth:`attach_outbox_wake`).
         self._outbox_wake: Callable[[], None] | None = None
+        #: v_91 — one turn per ``space_session`` seat with a live multi-type
+        #: send under way (:meth:`_seat_turn`); empty when none is.
+        self._seat_send_locks: dict[str, _SeatTurn] = {}
         self._outbox_still_wanted: StillWantedOf | None = None
         # Social Home Apps federation bridge — set via :meth:`attach_apps`.
         # When unset, inbound APP_SESSION / APP_MESSAGE events are silently
@@ -1850,6 +1866,27 @@ class FederationService:
                 ok=False,
                 error="unknown_instance",
             )
+        async with self._seat_turn(instance, event_type):
+            return await self._send_live(
+                instance,
+                event_type=event_type,
+                payload=payload,
+                space_id=space_id,
+                outbox_key=outbox_key,
+            )
+
+    async def _send_live(
+        self,
+        instance: RemoteInstance,
+        *,
+        event_type: FederationEventType,
+        payload: dict,
+        space_id: str | None,
+        outbox_key: str | None,
+    ) -> DeliveryResult:
+        """:meth:`send_event` past the lookup: live, or queued on failure
+        (or behind a seat's pending row)."""
+        to_instance_id = instance.id
         if await self._must_queue_behind(instance, event_type):
             return await self._queue_behind(
                 to_instance_id,
@@ -2050,6 +2087,33 @@ class FederationService:
             status_code=status_code if isinstance(status_code, int) else None,
             error=DELIVERY_ERROR_QUEUED,
         )
+
+    @asynccontextmanager
+    async def _seat_turn(
+        self, instance: RemoteInstance, event_type: FederationEventType
+    ) -> AsyncIterator[None]:
+        """Serialise live :data:`MULTI_EVENT_TYPES` sends to one
+        ``space_session`` seat around "check pending row → live send →
+        queue on failure": a send that starts while another is still in
+        flight (a slow GFS) waits for it, then finds its queued row and
+        queues behind it — never overtakes it. Every other send passes."""
+        if (
+            event_type not in MULTI_EVENT_TYPES
+            or instance.source is not InstanceSource.SPACE_SESSION
+        ):
+            yield
+            return
+        turn = self._seat_send_locks.get(instance.id)
+        if turn is None:
+            turn = self._seat_send_locks[instance.id] = _SeatTurn()
+        turn.users += 1
+        try:
+            async with turn.lock:
+                yield
+        finally:
+            turn.users -= 1
+            if turn.users == 0:
+                del self._seat_send_locks[instance.id]
 
     async def _must_queue_behind(
         self, instance: RemoteInstance, event_type: FederationEventType
@@ -2518,21 +2582,22 @@ class FederationService:
                 # cannot reach at its GFS mailbox (no connection to that GFS,
                 # or it has none): the space's host is the one hop. Never
                 # past a row it still has queued: the same rule as a live
-                # send (:meth:`_must_queue_behind`).
-                if await self._must_queue_behind(instance, event_type):
-                    return await self._queue_behind(
-                        to_instance_id,
+                # send (:meth:`_must_queue_behind`), in the seat's turn.
+                async with self._seat_turn(instance, event_type):
+                    if await self._must_queue_behind(instance, event_type):
+                        return await self._queue_behind(
+                            to_instance_id,
+                            event_type=event_type,
+                            payload=payload,
+                            space_id=space_id,
+                            state_key=self._state_key(event_type, space_id, payload),
+                        )
+                    return await self._host_hop.send(
+                        to_instance_id=to_instance_id,
                         event_type=event_type,
                         payload=payload,
                         space_id=space_id,
-                        state_key=self._state_key(event_type, space_id, payload),
                     )
-                return await self._host_hop.send(
-                    to_instance_id=to_instance_id,
-                    event_type=event_type,
-                    payload=payload,
-                    space_id=space_id,
-                )
             return await self.send_event(
                 to_instance_id=to_instance_id,
                 event_type=event_type,

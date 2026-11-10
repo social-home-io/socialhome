@@ -1234,7 +1234,11 @@ pass. A live send (`send_event`, and the v_89 host hop to a seat we cannot
 reach at its mailbox) of a `MULTI_EVENT_TYPES` event to a seat with any
 pending, unexpired row would overtake it, so it is queued to the outbox
 instead (due now; the gate orders it) — the same rule, one indexed read,
-only for such an event to a seat.
+only for such an event to a seat. Such live sends to one seat take turns
+(a per-seat lock, held from that read through the live send to queueing it
+on failure; dropped when nobody holds or waits on it): a delete started
+while its create is still in flight on a slow GFS waits for it, then finds
+the create's queued row and queues behind it.
 
 **Failures.** A `429` waits the GFS's `Retry-After` (60 s when it names
 none); a timeout, a `5xx` or a transport error is TRANSIENT. Either way the

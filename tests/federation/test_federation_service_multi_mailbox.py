@@ -12,6 +12,7 @@ and the real receive path (``GfsRelayInbound`` + the §24.11 pipeline, from
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import dataclasses
 import os
@@ -667,6 +668,69 @@ async def test_a_live_send_with_nothing_queued_goes_live_and_paired_pay_no_read(
     assert s.transport.per_recipient_ids() == [seat, peer]
     assert asked == [seat]  # one query, only for a space_session seat
     assert s.outbox.rescheduled == []
+
+
+async def test_a_send_racing_a_slow_live_send_to_one_seat_queues_behind_it():
+    """A create still in flight on a slow GFS, then a delete to the same
+    seat: the delete must not go out live before the create fails and is
+    queued — it waits for the create's live send, finds its row and queues
+    behind it (else the queued create lands after the delete)."""
+    s = _Sender()
+    seat = await s.seat()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    record = s.transport.send
+
+    async def _slow_then_fail(*, instance, envelope_dict):
+        if not started.is_set():
+            started.set()
+            await release.wait()
+            await record(instance=instance, envelope_dict=envelope_dict)
+            return _TransportSendResult(ok=False, via="gfs_relay")
+        return await record(instance=instance, envelope_dict=envelope_dict)
+
+    s.transport.send = _slow_then_fail  # type: ignore[method-assign]
+    create = asyncio.create_task(
+        s.svc.send_event(
+            to_instance_id=seat,
+            event_type=POST,
+            payload={"post_id": "p-1"},
+            space_id=_SPACE,
+        )
+    )
+    await started.wait()
+    delete = asyncio.create_task(
+        s.svc.send_event(
+            to_instance_id=seat,
+            event_type=FederationEventType.SPACE_POST_DELETED,
+            payload={"post_id": "p-1"},
+            space_id=_SPACE,
+        )
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert len(s.transport.sends) == 0  # the delete did not overtake
+    release.set()
+    first, second = await asyncio.gather(create, delete)
+    assert first.error == DELIVERY_ERROR_QUEUED
+    assert second.error == DELIVERY_ERROR_QUEUED
+    assert len(s.transport.sends) == 1  # only the create went live
+    assert [r["event_type"] for r in s.outbox.enqueued] == [
+        POST,
+        FederationEventType.SPACE_POST_DELETED,
+    ]
+    assert s.svc._seat_send_locks == {}
+
+
+async def test_seat_send_locks_are_dropped_after_each_send():
+    s = _Sender()
+    seat = await s.seat()
+    peer = await s.paired()
+    for iid in (seat, peer):
+        await s.svc.send_event(
+            to_instance_id=iid, event_type=POST, payload={"p": 1}, space_id=_SPACE
+        )
+    assert s.svc._seat_send_locks == {}
 
 
 async def test_the_host_hop_queues_behind_a_seat_s_pending_multi_row():
