@@ -1134,21 +1134,24 @@ wrap}}` — the body fields plus that mailbox's wrap — on each listed
 mailbox's claim socket.
 
 Inside is the ordinary §24.11 envelope, signed once with `ed25519` by the
-sending household's identity key. Its `encrypted_payload` is under *K*
-(AAD `sh-mr-payload:v1`), and its signed `to_instance` is `"*:"` + the
+sending household's identity key. The whole envelope rides inside the
+body sealed under *K*, so its `encrypted_payload` carries the payload JSON
+as-is — no second seal (still covered by the signature, never visible to
+the GFS). Its signed `to_instance` is `"*:"` + the
 sorted audience tags: one `b64url(SHA-256("sh-mr-to:v1\n" +
 instance_id)[:4])` per intended household. The tags are unkeyed: they sit
 inside the body, which the GFS cannot open, and every recipient learns *K*
 anyway — the tags only stop a recipient from re-wrapping *K* and pushing
 the frame to a household the sender left out. The signature covers the
-ciphertext, the audience list and `space_id`; `msg_id` is the stored
+payload, the audience list and `space_id`; `msg_id` is the stored
 payload's stable one.
 
 **Receiving.** A frame on our mailbox whose `sealed` names an `mr_suite`
 is charged to the mailbox's bucket, its suite checked, its wrap opened with
 the mailbox's key-wrap private key (a 32-byte *K*, else refused), then the
 body, and run through the unchanged §24.11 pipeline with transport
-`gfs_mailbox` and *K* as the multi context (`make_check_multi_recipient`):
+`gfs_mailbox`, marked a multi frame (`InboundContext.multi_frame`, set
+only by the mailbox leg; `make_check_multi_recipient`):
 
 - `to_instance` starting with `*` is refused on every other path;
 - the event type must be in `MULTI_EVENT_TYPES`;
@@ -1158,7 +1161,9 @@ body, and run through the unchanged §24.11 pipeline with transport
 
 Then `make_check_mailbox_sender` (we hold the sender's card for that
 space), the signature against the sender's row (the card's identity key),
-replay, and decryption under *K*. Rights do not grow. Nothing is parked:
+replay, and the payload taken as-is — only on a frame marked multi; an
+unencrypted payload on any other envelope fails to decrypt and is refused.
+Rights do not grow. Nothing is parked:
 the wrap is for this mailbox's own key, which it always holds.
 
 **The GFS stores the body once** (GFS migration 0031). The body goes to

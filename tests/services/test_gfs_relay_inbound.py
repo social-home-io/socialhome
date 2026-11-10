@@ -509,7 +509,7 @@ class _MailboxFederation:
         self.media: list[tuple[bytes, str]] = []
 
     async def handle_inbound_rtc(
-        self, instance_id, raw_body, *, transport="", multi_key=None
+        self, instance_id, raw_body, *, transport="", multi=False
     ):
         self.calls.append((instance_id, raw_body, transport))
         return {"status": "ok"}
@@ -776,7 +776,6 @@ def _multi_frame(
         event_type=event_type.value,
         payload_json=orjson.dumps(payload).decode(),
         space_id=envelope_space,
-        key=key,
         recipients=to,
         msg_id=str(uuid.uuid4()),
     )
@@ -992,14 +991,14 @@ async def test_a_multi_context_on_a_non_mailbox_transport_is_refused():
     seam) is refused before anything is dispatched."""
     h = _MultiHousehold()
     sender, enc = await h.add_sender()
-    _, env, key = _multi_frame(h, sender, enc, to=h.audience)
+    _, env, _ = _multi_frame(h, sender, enc, to=h.audience)
     for transport in ("", TRANSPORT_GFS_RELAY):
         with pytest.raises(ValueError, match="mailbox only"):
             await h.federation.handle_inbound_rtc(
-                sender, orjson.dumps(env), transport=transport, multi_key=key
+                sender, orjson.dumps(env), transport=transport, multi=True
             )
     assert h.dispatched == []
     # The same envelope over the mailbox leg is taken.
     assert await h.federation.handle_inbound_rtc(
-        sender, orjson.dumps(env), transport=TRANSPORT_GFS_MAILBOX, multi_key=key
+        sender, orjson.dumps(env), transport=TRANSPORT_GFS_MAILBOX, multi=True
     ) == {"status": "ok"}

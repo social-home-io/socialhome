@@ -183,7 +183,7 @@ def _mailboxes(upload) -> list[str]:
     return sorted(t.mailbox_id for t, _wrap in upload[0])
 
 
-def _opened(s: _Sender, upload) -> list[tuple[dict, bytes]]:
+def _opened(s: _Sender, upload) -> list[dict]:
     """Every listed mailbox opens the one body with its own wrap."""
     to, body = upload
     return [
@@ -240,8 +240,9 @@ async def test_three_seats_on_one_gfs_are_one_payload_and_one_upload():
     assert _mailboxes(upload) == _boxes(s, seats)
     assert set(upload[1]) == {"mr_suite", "ciphertext"}
     opened = _opened(s, upload)
-    assert len({key for _body, key in opened}) == 1  # one K, wrapped three times
-    envelope = opened[0][0]["envelope"]
+    # One body, its key wrapped three times: every wrap opens the same one.
+    assert len(opened) == 3 and all(b == opened[0] for b in opened)
+    envelope = opened[0]["envelope"]
     assert envelope["msg_id"] == s.outbox.payloads[payload_id].msg_id
     assert repo.mark_delivered.await_count == 3
     repo.single.assert_not_awaited()
@@ -333,7 +334,7 @@ async def test_a_narrowed_broadcast_goes_multi_to_its_narrowed_audience():
     await _drain(s.svc, s.outbox)
     [upload] = s.transport.multi
     assert _mailboxes(upload) == _boxes(s, seats[:2])
-    to = _opened(s, upload)[0][0]["envelope"]["to_instance"]
+    to = _opened(s, upload)[0]["envelope"]["to_instance"]
     assert all(multi_audience_includes(to, i) for i in seats[:2])
     assert not multi_audience_includes(to, seats[2])
 
@@ -480,7 +481,7 @@ async def test_the_audience_tags_name_exactly_the_group():
     await s.broadcast()
     await _drain(s.svc, s.outbox)
     [upload] = s.transport.multi
-    env = _opened(s, upload)[0][0]["envelope"]
+    env = _opened(s, upload)[0]["envelope"]
     assert env["to_instance"].startswith(MULTI_TO_INSTANCE + ":")
     assert all(multi_audience_includes(env["to_instance"], i) for i in seats)
     assert not multi_audience_includes(env["to_instance"], outsider)

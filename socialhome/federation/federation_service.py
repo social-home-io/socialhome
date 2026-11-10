@@ -3707,7 +3707,6 @@ class FederationService:
                     event_type=stored.event_type.value,
                     payload_json=payload_json,
                     space_id=space_id,
-                    key=key,
                     recipients=recipients,
                     msg_id=stored.msg_id,
                 ),
@@ -4143,7 +4142,7 @@ class FederationService:
         raw_body: bytes,
         *,
         transport: str = "",
-        multi_key: bytes | None = None,
+        multi: bool = False,
     ) -> InboundContext:
         """Run the §24.11 RTC validation pipeline WITHOUT dispatching.
 
@@ -4169,7 +4168,7 @@ class FederationService:
             instance_id=instance_id,
             transport=transport,
         )
-        ctx.multi_key = multi_key
+        ctx.multi_frame = multi
         await pipeline.run(ctx)
         return ctx
 
@@ -4179,7 +4178,7 @@ class FederationService:
         raw_body: bytes,
         *,
         transport: str = "",
-        multi_key: bytes | None = None,
+        multi: bool = False,
     ) -> dict:
         """§24.11 validation pipeline for a WebRTC DataChannel frame.
 
@@ -4192,16 +4191,17 @@ class FederationService:
         for an envelope the connection server queued and replayed later,
         which widens the timestamp step's skew budget accordingly.
 
-        ``multi_key`` (v_91) is the body key *K* of a multi-recipient frame
-        our mailbox opened (its wrap under our mailbox key): the pipeline
-        then requires our tag in the ``"*:"`` audience and a named space,
-        and decrypts the payload under *K*. Only the mailbox leg sets it.
+        ``multi`` (v_91) marks a multi-recipient frame our mailbox opened
+        (its wrap under our mailbox key, then the body): the pipeline then
+        requires our tag in the ``"*:"`` audience and a named space, and
+        takes the payload as-is (the body seal covered it). Only the mailbox
+        leg sets it.
         """
         ctx = await self.validate_inbound_rtc(
             instance_id,
             raw_body,
             transport=transport,
-            multi_key=multi_key,
+            multi=multi,
         )
 
         if ctx.early_response is not None:

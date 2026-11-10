@@ -32,7 +32,6 @@ from socialhome.federation.multi_recipient import (
     SUPPORTED_MR_SUITES,
     UnsupportedMrSuite,
     build_multi_envelope,
-    decrypt_mr_payload,
     is_multi_sealed,
     multi_audience_includes,
     new_mr_key,
@@ -62,7 +61,6 @@ def _envelope(
         event_type="space_post_created",
         payload_json=payload,
         space_id="sp-1",
-        key=key,
         recipients=RECIPIENTS,
         msg_id="m-1",
     )
@@ -87,7 +85,7 @@ def test_each_upload_gets_a_fresh_key():
 
 
 def test_the_inner_envelope_is_signed_in_the_canonical_order():
-    env, key, pk = _envelope()
+    env, _, pk = _envelope()
     assert env["to_instance"].startswith(MULTI_TO_INSTANCE + ":")
     assert env["sig_suite"] == "ed25519"
     assert env["space_id"] == "sp-1"
@@ -112,7 +110,8 @@ def test_the_inner_envelope_is_signed_in_the_canonical_order():
         ed_public_key=pk,
         pq_public_key=None,
     )
-    assert decrypt_mr_payload(env["encrypted_payload"], key) == '{"text":"hi"}'
+    # As-is: the whole envelope rides inside the body sealed under K.
+    assert env["encrypted_payload"] == '{"text":"hi"}'
 
 
 def test_round_trip_through_the_mailbox_key():
@@ -124,8 +123,7 @@ def test_round_trip_through_the_mailbox_key():
     assert set(wrap) == {"kem_suite", "eph_pk", "ciphertext"}
     sealed = {**body, "wrap": wrap}
     assert is_multi_sealed(sealed)
-    opened, got_key = open_multi(sealed, MAILBOX.private_key)
-    assert got_key == key
+    opened = open_multi(sealed, MAILBOX.private_key)
     assert is_relay_envelope_body(opened)
     assert opened["envelope"] == env
 
@@ -135,7 +133,7 @@ def test_every_recipient_opens_the_same_body_with_its_own_key():
     body = seal_multi(env, key=key)
     for mailbox in (generate_x25519_keypair(), generate_x25519_keypair()):
         sealed = {**body, "wrap": wrap_mr_key(key, mailbox.public_key)}
-        assert open_multi(sealed, mailbox.private_key)[0]["envelope"] == env
+        assert open_multi(sealed, mailbox.private_key)["envelope"] == env
 
 
 def test_another_mailboxs_key_does_not_open_the_wrap():
@@ -156,7 +154,7 @@ def test_the_wire_names_nothing():
 def test_the_plaintext_is_padded_to_a_bucket():
     key = new_mr_key()
     sizes = set()
-    for n in (1, 200, 3000):
+    for n in (1, 200, 6000):
         env, _, _ = _envelope('{"t":"' + "x" * n + '"}', key)
         raw = b64url_decode(seal_multi(env, key=key)["ciphertext"])
         bucket = len(raw) - 12 - 16
@@ -191,8 +189,6 @@ def test_a_body_under_another_key_does_not_open():
     }
     with pytest.raises(ValueError, match="body"):
         open_multi(sealed, MAILBOX.private_key)
-    with pytest.raises(ValueError):
-        decrypt_mr_payload(env["encrypted_payload"], new_mr_key())
 
 
 def test_an_unknown_suite_is_refused_before_anything_else():
@@ -281,11 +277,6 @@ def test_is_multi_sealed_only_for_an_mr_shape(value):
     assert is_multi_sealed(value) is (isinstance(value, dict) and "mr_suite" in value)
 
 
-def test_decrypt_mr_payload_refuses_a_malformed_string():
-    with pytest.raises(ValueError):
-        decrypt_mr_payload("no-colon", b"\x00" * 32)
-
-
 # ─── Audience binding ────────────────────────────────────────────────────
 
 
@@ -352,7 +343,6 @@ def test_build_refuses_an_empty_or_oversize_audience(recipients):
             event_type="space_post_created",
             payload_json="{}",
             space_id="sp-1",
-            key=new_mr_key(),
             recipients=recipients,
             msg_id="m-1",
         )
@@ -368,9 +358,8 @@ def test_the_largest_audience_still_seals():
         event_type="space_post_created",
         payload_json="{}",
         space_id="sp-1",
-        key=key,
         recipients=recipients,
         msg_id="m-1",
     )
     assert multi_audience_includes(env["to_instance"], recipients[-1])
-    assert open_multi(_frame(env, key), MAILBOX.private_key)[0]["envelope"] == env
+    assert open_multi(_frame(env, key), MAILBOX.private_key)["envelope"] == env

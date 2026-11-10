@@ -16,8 +16,9 @@ to each listed mailbox.
 Keys
 ----
 A fresh random 32-byte key *K* per upload attempt seals the body (AES-256-GCM,
-AAD ``b"sh-mr-body:v1\\n" + mr_suite``) and the inner envelope's
-``encrypted_payload`` (AAD ``b"sh-mr-payload:v1"``). *K* is wrapped to each
+AAD ``b"sh-mr-body:v1\\n" + mr_suite``) — the whole inner envelope, so its
+``encrypted_payload`` carries the payload JSON as-is (covered by the
+signature, never visible to the GFS). *K* is wrapped to each
 recipient mailbox's ``kem_pk`` with the existing static-recipient seal
 (:func:`~socialhome.federation.keywrap_seal.seal_to_keywrap` — the same
 ``{kem_suite, eph_pk, ciphertext}`` dict a single mailbox frame's ``sealed``
@@ -85,7 +86,6 @@ MULTI_TO_INSTANCE: str = "*"
 MR_SIG_SUITE: str = "ed25519"
 
 _BODY_AAD_PREFIX = b"sh-mr-body:v1\n"
-_PAYLOAD_AAD = b"sh-mr-payload:v1"
 _TAG_PREFIX = b"sh-mr-to:v1\n"
 _TAG_BYTES_TRUNC = 4
 _AUDIENCE_PREFIX = MULTI_TO_INSTANCE + ":"
@@ -154,28 +154,6 @@ def multi_audience_includes(to_instance: object, own_instance_id: str) -> bool:
     return recipient_tag(own_instance_id) in tags
 
 
-def encrypt_mr_payload(payload_json: str, key: bytes) -> str:
-    """AES-256-GCM → ``b64url(nonce):b64url(ct)`` (the encoder's shape)."""
-    nonce = os.urandom(_NONCE_BYTES)
-    ct = AESGCM(key).encrypt(nonce, payload_json.encode("utf-8"), _PAYLOAD_AAD)
-    return b64url_encode(nonce) + ":" + b64url_encode(ct)
-
-
-def decrypt_mr_payload(enc: str, key: bytes) -> str:
-    """Inverse of :func:`encrypt_mr_payload`. :class:`ValueError` on any
-    failure (malformed, wrong key, tampered)."""
-    if not isinstance(enc, str) or ":" not in enc:
-        raise ValueError("malformed multi-recipient payload")
-    nonce_b64, ct_b64 = enc.split(":", 1)
-    try:
-        plaintext = AESGCM(key).decrypt(
-            b64url_decode(nonce_b64), b64url_decode(ct_b64), _PAYLOAD_AAD
-        )
-    except Exception as exc:  # InvalidTag, binascii.Error, ValueError
-        raise ValueError("multi-recipient payload does not decrypt") from exc
-    return plaintext.decode("utf-8")
-
-
 def build_multi_envelope(
     *,
     encoder: FederationEncoder,
@@ -183,7 +161,6 @@ def build_multi_envelope(
     event_type: str,
     payload_json: str,
     space_id: str,
-    key: bytes,
     recipients: Collection[str],
     msg_id: str,
 ) -> dict:
@@ -193,7 +170,10 @@ def build_multi_envelope(
     (1..:data:`MULTI_MAX_RECIPIENTS`); their tags become the signed
     ``to_instance`` (:func:`multi_to_instance`). *msg_id* is the stored
     multi payload's, the same on every retry and per-row fallback, so the
-    receivers' replay cache takes one copy.
+    receivers' replay cache takes one copy. ``encrypted_payload`` is
+    *payload_json* as-is: the whole envelope rides inside the body sealed
+    under *K* (:func:`seal_multi`), and only the multi mailbox path takes an
+    unencrypted payload.
 
     CANONICAL FIELD ORDER — byte-identical to ``_seal_envelope`` and
     ``make_verify_signature``; the signature covers everything but
@@ -205,7 +185,7 @@ def build_multi_envelope(
         "from_instance": own_instance_id,
         "to_instance": multi_to_instance(recipients),
         "timestamp": datetime.now(UTC).isoformat(),
-        "encrypted_payload": encrypt_mr_payload(payload_json, key),
+        "encrypted_payload": payload_json,
         "space_id": space_id,
         "proto_version": 1,
         "sig_suite": MR_SIG_SUITE,
@@ -255,9 +235,9 @@ def require_mr_suite(sealed: dict) -> str:
     return suite
 
 
-def open_multi(sealed: dict, kem_private: bytes) -> tuple[dict, bytes]:
+def open_multi(sealed: dict, kem_private: bytes) -> dict:
     """Open a multi-recipient frame ``{mr_suite, ciphertext, wrap}`` with
-    our mailbox's key-wrap private key → ``(relay body, K)``.
+    our mailbox's key-wrap private key → the relay body.
 
     The suite is judged first, then the wrap (its own ``kem_suite`` check,
     :class:`~socialhome.federation.keywrap_seal.UnsupportedKemSuite`) opens
@@ -296,7 +276,7 @@ def open_multi(sealed: dict, kem_private: bytes) -> tuple[dict, bytes]:
         raise ValueError("multi-recipient body is not JSON") from exc
     if not isinstance(body, dict):
         raise WrongTypeError("multi-recipient body is not an object")
-    return body, key
+    return body
 
 
 __all__ = [
@@ -307,8 +287,6 @@ __all__ = [
     "SUPPORTED_MR_SUITES",
     "UnsupportedMrSuite",
     "build_multi_envelope",
-    "decrypt_mr_payload",
-    "encrypt_mr_payload",
     "is_multi_sealed",
     "multi_audience_includes",
     "multi_to_instance",

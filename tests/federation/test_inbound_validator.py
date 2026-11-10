@@ -55,7 +55,6 @@ from socialhome.federation.inbound_validator import (
 )
 from socialhome.federation.multi_recipient import (
     MULTI_TO_INSTANCE,
-    encrypt_mr_payload,
     multi_to_instance,
 )
 
@@ -1885,14 +1884,13 @@ async def test_check_event_types_refuses_any_other_type():
 # ─── v_91: multi-recipient mailbox frames ────────────────────────────────
 
 
-_MULTI_KEY = b"\x07" * 32
 _SELF = "self-iid"
 
 
 def _multi_ctx(
     *,
     transport=TRANSPORT_GFS_MAILBOX,
-    multi_key: bytes | None = _MULTI_KEY,
+    multi: bool = True,
     audience=(_SELF, "other-iid"),
     **env,
 ):
@@ -1906,7 +1904,7 @@ def _multi_ctx(
         ),
         transport=transport,
     )
-    ctx.multi_key = multi_key
+    ctx.multi_frame = multi
     return ctx
 
 
@@ -1925,7 +1923,7 @@ async def test_a_star_envelope_without_a_multi_context_is_refused():
     step = _multi_step()
     for transport in ("", TRANSPORT_GFS_RELAY, TRANSPORT_GFS_MAILBOX):
         with pytest.raises(ValueError, match="multi-recipient"):
-            await step(_multi_ctx(transport=transport, multi_key=None))
+            await step(_multi_ctx(transport=transport, multi=False))
         for to in (MULTI_TO_INSTANCE, "*x", "*:"):
             with pytest.raises(ValueError, match="multi-recipient"):
                 await step(
@@ -1988,14 +1986,10 @@ async def test_a_multi_frame_of_an_excluded_type_is_refused(event_type):
         await _multi_step()(_multi_ctx(event_type=event_type))
 
 
-def test_the_multi_key_is_kept_out_of_the_context_repr():
-    shown = repr(_multi_ctx())
-    assert repr(_MULTI_KEY) not in shown and _MULTI_KEY.hex() not in shown
-
-
-async def test_decrypt_and_parse_uses_the_multi_key_for_a_multi_frame():
-    """With a multi context the payload opens under the body key K, never
-    the pair's session key (the sender row may have none we share)."""
+async def test_decrypt_and_parse_takes_a_multi_frame_s_payload_as_is():
+    """A multi frame's payload rides inside the body sealed under K, so it
+    is taken as-is — never under the pair's session key (the sender row may
+    have none we share)."""
 
     class _NoSessionKey:
         def decrypt(self, *_a, **_kw):
@@ -2006,15 +2000,33 @@ async def test_decrypt_and_parse_uses_the_multi_key_for_a_multi_frame():
         encoder=FederationEncoder(b"\x02" * 32),
         loads=_loads,
     )
-    ctx = _multi_ctx(encrypted_payload=encrypt_mr_payload('{"x": 1}', _MULTI_KEY))
+    ctx = _multi_ctx(encrypted_payload='{"x": 1}')
     ctx.instance = SimpleNamespace(key_remote_to_self="unused")
     await step(ctx)
     assert ctx.event is not None and ctx.event.payload == {"x": 1}
     assert ctx.event.space_id == "sp-1"
-    bad = _multi_ctx(encrypted_payload=encrypt_mr_payload('{"x": 1}', b"\x03" * 32))
-    bad.instance = ctx.instance
-    with pytest.raises(ValueError, match="decrypt"):
-        await step(bad)
+    with pytest.raises(ValueError, match="not a JSON string"):
+        await step(_multi_ctx(encrypted_payload={"x": 1}))
+
+
+async def test_an_unencrypted_payload_is_refused_outside_a_multi_frame():
+    """Only the multi mailbox path takes a payload as-is: the same plaintext
+    on any other envelope must open under the pair's session key, and does
+    not."""
+
+    class _SessionKey:
+        def decrypt(self, *_a, **_kw):
+            return b"\x01" * 32
+
+    step = make_decrypt_and_parse(
+        key_manager=_SessionKey(),
+        encoder=FederationEncoder(b"\x02" * 32),
+        loads=_loads,
+    )
+    ctx = _multi_ctx(encrypted_payload='{"x": 1}', multi=False)
+    ctx.instance = SimpleNamespace(key_remote_to_self="wrapped")
+    with pytest.raises(ValueError, match="Failed to decrypt payload"):
+        await step(ctx)
 
 
 async def test_a_multi_payload_naming_another_space_is_refused():
@@ -2030,7 +2042,7 @@ async def test_a_multi_payload_naming_another_space_is_refused():
         ('{"x": 1}', True),
         ('{"space_id": "sp-other"}', False),
     ):
-        ctx = _multi_ctx(encrypted_payload=encrypt_mr_payload(payload, _MULTI_KEY))
+        ctx = _multi_ctx(encrypted_payload=payload)
         if ok:
             await step(ctx)
             assert ctx.event is not None

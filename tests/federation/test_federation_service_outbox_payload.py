@@ -15,7 +15,6 @@ from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.domain.federation import FederationEventType
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.gfs_relay_transport import RELAY_STATUS_THROTTLED
-from socialhome.federation.multi_recipient import decrypt_mr_payload
 from socialhome.infrastructure import DeliveryOutcome, EventBus, RetryAfter
 from tests.federation.test_federation_service import (
     InMemoryFederationRepo,
@@ -175,11 +174,9 @@ async def test_due_ref_rows_on_one_gfs_go_up_as_one_multi_upload():
     assert sorted(t.mailbox_id for t, _wrap in upload[0]) == sorted(
         s.transport.targets[i].mailbox_id for i in seats
     )
-    [(body, key), *_] = _opened(s, upload)
+    [body, *_] = _opened(s, upload)
     envelope = body["envelope"]
-    assert orjson.loads(decrypt_mr_payload(envelope["encrypted_payload"], key)) == (
-        _PAYLOAD
-    )
+    assert orjson.loads(envelope["encrypted_payload"]) == _PAYLOAD
     assert all(s.svc.last_relay_accepted_at(i) for i in seats)
 
 

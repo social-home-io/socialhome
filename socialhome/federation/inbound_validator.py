@@ -72,7 +72,6 @@ from ..domain.space import WRITER_ROLES, SpaceRole
 from .host_equivalence import acts_as_host
 from .multi_recipient import (
     MULTI_TO_INSTANCE,
-    decrypt_mr_payload,
     multi_audience_includes,
 )
 from .space_scope import archive_refusal
@@ -193,12 +192,12 @@ class InboundContext:
     #: the bytes may legitimately be up to a day old.
     transport: str = ""
 
-    #: v_91 — the body key *K* of a multi-recipient frame, opened from its
-    #: wrap under our mailbox key (set by the mailbox leg, never by a wire
-    #: field). The payload is decrypted under it instead of the pair's
-    #: session key. ``None`` for every ordinary envelope; see
-    #: :func:`make_check_multi_recipient`. Never logged.
-    multi_key: bytes | None = field(default=None, repr=False)
+    #: v_91 — a multi-recipient frame our mailbox opened (its wrap under our
+    #: mailbox key, then the body; set by the mailbox leg, never by a wire
+    #: field). Its payload is taken as-is — the body seal covered it — and
+    #: an unencrypted payload is refused everywhere else; see
+    #: :func:`make_check_multi_recipient`.
+    multi_frame: bool = False
 
 
 #: Middleware shape: async callable that takes context + raises or returns.
@@ -558,13 +557,14 @@ def make_check_multi_recipient(*, own_instance_id: str) -> InboundStep:
 
     A multi-recipient envelope is addressed to the member households its
     sender listed (``"*:" + tags``, :func:`~socialhome.federation
-    .multi_recipient.multi_audience_includes`) and its payload opens only
-    under the body key wrapped to their mailboxes, so:
+    .multi_recipient.multi_audience_includes`) inside a body sealed under
+    a key wrapped to their mailboxes, its payload as-is, so:
 
-    * without a multi context (every RTC, HTTPS and ordinary relay frame)
-      any ``to_instance`` starting with ``"*"`` is refused — the star must
-      not ride a path that never opened a wrap;
-    * with one (set by the mailbox leg after the wrap and body opened), the
+    * outside a multi frame (every RTC, HTTPS and ordinary relay frame) any
+      ``to_instance`` starting with ``"*"`` is refused — the star must not
+      ride a path that never opened a wrap;
+    * in one (:attr:`InboundContext.multi_frame`, set by the mailbox leg
+      after the wrap and body opened), the
       frame must have come over our mailbox, carry an event type of
       :data:`~socialhome.domain.federation.MULTI_EVENT_TYPES`, list OUR tag
       in its signed audience (a recipient cannot re-push a captured frame
@@ -580,7 +580,7 @@ def make_check_multi_recipient(*, own_instance_id: str) -> InboundStep:
         star = isinstance(to_instance, str) and to_instance.startswith(
             MULTI_TO_INSTANCE
         )
-        if ctx.multi_key is None:
+        if not ctx.multi_frame:
             if star:
                 raise ValueError(
                     "a multi-recipient envelope outside a multi-recipient frame"
@@ -854,15 +854,12 @@ def make_decrypt_and_parse(*, key_manager, encoder, loads) -> InboundStep:
 
     async def decrypt_and_parse(ctx: InboundContext) -> None:
         data = ctx.envelope
-        if ctx.multi_key is not None:
-            # v_91: one body for every recipient — sealed under the body
-            # key its wrap delivered, never a pair session key.
-            try:
-                decrypted_json = decrypt_mr_payload(
-                    data["encrypted_payload"], ctx.multi_key
-                )
-            except ValueError as exc:
-                raise ValueError(f"Failed to decrypt payload: {exc}") from exc
+        if ctx.multi_frame:
+            # v_91: one body for every recipient, sealed whole under the
+            # body key its wrap delivered — the payload inside is as-is.
+            decrypted_json = data["encrypted_payload"]
+            if not isinstance(decrypted_json, str):
+                raise ValueError("multi-recipient payload is not a JSON string")
         else:
             try:
                 session_key = key_manager.decrypt(ctx.instance.key_remote_to_self)
@@ -883,7 +880,7 @@ def make_decrypt_and_parse(*, key_manager, encoder, loads) -> InboundStep:
             raise ValueError(f"Decrypted payload is not valid JSON: {exc}") from exc
 
         if (
-            ctx.multi_key is not None
+            ctx.multi_frame
             and isinstance(inner, dict)
             and "space_id" in inner
             and inner["space_id"] != data.get("space_id")

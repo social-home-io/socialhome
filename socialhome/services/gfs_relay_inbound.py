@@ -270,7 +270,7 @@ class GfsRelayInbound:
         mailbox's ``wrap`` of its key). Charged to the same bucket first;
         the wrap opens under the same mailbox key to the body key *K*, which
         opens the body; the pipeline then requires our tag in the ``"*:"``
-        audience and a named space, and decrypts the payload under *K*.
+        audience and a named space, and takes the payload as-is.
         Raises :class:`ValueError` on any refusal."""
         if isinstance(frame, bytes | bytearray):
             return await self._handle_media(frame, keys=keys)
@@ -285,9 +285,10 @@ class GfsRelayInbound:
         ):
             raise MailboxFlooded("mailbox rate limit exceeded — frame dropped")
         sealed = frame.get("sealed")
-        multi_key: bytes | None = None
+        multi = False
         if is_multi_sealed(sealed):
-            body, multi_key = open_multi(sealed, keys.kem_private)
+            multi = True
+            body = open_multi(sealed, keys.kem_private)
         else:
             body = unseal_envelope_body(
                 envelope={"sealed": sealed},
@@ -306,7 +307,7 @@ class GfsRelayInbound:
                 from_instance,
                 orjson.dumps(inner),
                 transport=TRANSPORT_GFS_MAILBOX,
-                multi_key=multi_key,
+                multi=multi,
             )
         except ValueError as exc:
             # The routing facts only — never the payload, never the mailbox.
