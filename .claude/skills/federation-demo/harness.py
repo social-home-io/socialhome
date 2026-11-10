@@ -11901,6 +11901,16 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_89 member mesh (cards, directory, one mailbox) gate in place ✓")
+    # v_90 — one multi-recipient upload for the mailbox seats behind one GFS:
+    # a seat joins a group only at >= v_90, so the OURS round-trip above is
+    # what proves every pair opens a multi frame.
+    if int(_Cap.MIN_FOR_MULTI_MAILBOX) != 90 or _OURS < 90:
+        failures.append(
+            "MIN_FOR_MULTI_MAILBOX moved off v_90 (or OURS fell below it) — "
+            "households behind a GFS would never get one upload for many"
+        )
+    else:
+        print("  v_90 multi-recipient mailbox upload gate in place ✓")
     # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
     # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
     # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key

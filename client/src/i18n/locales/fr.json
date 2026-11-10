@@ -2689,6 +2689,7 @@
   "capability.synced_recurring_events": "Événements récurrents au rattrapage des espaces",
   "capability.multi_gfs_posting": "Publication sur chaque GFS où un espace est listé",
   "capability.synced_picture_resets": "Photos de profil retirées au rattrapage des espaces",
+  "capability.multi_mailbox": "Mises à jour des espaces via un GFS en un seul envoi",
   "settings.tab.security": "Sécurité",
   "settings.security.signing_in": "Connexion",
   "settings.security.signing_in_hint": "Vous seul l'utilisez. Personne d'autre ne voit votre identifiant de connexion.",

@@ -1434,7 +1434,22 @@ from __future__ import annotations
 #:   no directory and no mailbox; the host keeps today's instance-addressed
 #:   relay to it. No sync-stream record change. Labelled "Every member
 #:   reaches households that reach a space through a GFS".
-OURS: int = 89
+#: * **v_90** (2026-11-10) — **one upload for many GFS mailboxes**. A space
+#:   event whose final bytes are the same for every member household
+#:   seated behind one GFS (``space_session`` mailbox seats) goes up ONCE
+#:   to ``POST /gfs/envelope/multi`` with the list of mailbox ids, when
+#:   that GFS proves the signed ``envelope_multi`` capability. The frame is
+#:   sealed under a key derived from the space content key of the current
+#:   epoch (``mr-aesgcm-256``, ``federation/multi_recipient.py``); its inner
+#:   envelope is signed by the sender and lists one audience tag per
+#:   intended household (``to_instance = "*:" + tags``). Only
+#:   ``MULTI_EVENT_TYPES`` are grouped; single-recipient items stay
+#:   individually sealed. **Fallback**: a member below v_90, a GFS without
+#:   ``envelope_multi``, a group of one or a failed upload gets today's
+#:   per-recipient mailbox frame. Not space-scoped, no sync-stream record
+#:   change. Labelled "Space updates reach households behind a GFS in one
+#:   upload".
+OURS: int = 90
 
 
 class FederationCapability:
@@ -2090,6 +2105,11 @@ class FederationCapability:
     #: members lazily and takes a three-hop host ``SPACE_ROUTED``. Cards and
     #: directories go only to a household at or above it.
     MIN_FOR_MAILBOX_MEMBER_MESH = 89
+    #: v_90 — a household at or above it opens multi-recipient mailbox
+    #: frames (``mr_suite`` seal, audience-tagged ``to_instance``): a
+    #: sender groups its mailbox seats behind one GFS proving
+    #: ``envelope_multi`` into ONE ``POST /gfs/envelope/multi`` upload.
+    MIN_FOR_MULTI_MAILBOX = 90
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2428,6 +2448,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH,
         "Every member reaches households that reach a space through a GFS",
     ),
+    (
+        FederationCapability.MIN_FOR_MULTI_MAILBOX,
+        "Space updates reach households behind a GFS in one upload",
+    ),
 ]
 
 
@@ -2527,6 +2551,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS: "trusted_file_fills",
     FederationCapability.MIN_FOR_RELAY_MEDIA: "relay_media",
     FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH: "mailbox_member_mesh",
+    FederationCapability.MIN_FOR_MULTI_MAILBOX: "multi_mailbox",
 }
 
 

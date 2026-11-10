@@ -2716,6 +2716,7 @@
   "capability.synced_recurring_events": "Eventos periódicos al ponerse al día en espacios",
   "capability.multi_gfs_posting": "Publicar en cada GFS donde aparece un espacio",
   "capability.synced_picture_resets": "Fotos de perfil quitadas al sincronizar espacios",
+  "capability.multi_mailbox": "Novedades de espacios por un GFS en un solo envío",
   "settings.tab.security": "Seguridad",
   "settings.security.signing_in": "Inicio de sesión",
   "settings.security.signing_in_hint": "Solo lo usas tú. Nadie más ve tu usuario de acceso.",

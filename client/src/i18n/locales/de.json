@@ -2694,6 +2694,7 @@
   "capability.synced_recurring_events": "Wiederkehrende Termine beim Space-Abgleich",
   "capability.multi_gfs_posting": "Beiträge an jeden GFS, auf dem ein Space gelistet ist",
   "capability.synced_picture_resets": "Entfernte Profilbilder beim Space-Abgleich",
+  "capability.multi_mailbox": "Space-Updates über einen GFS in einem Upload",
   "settings.tab.security": "Sicherheit",
   "settings.security.signing_in": "Anmelden",
   "settings.security.signing_in_hint": "Das nutzt nur du. Niemand sonst sieht deinen Anmeldenamen.",
