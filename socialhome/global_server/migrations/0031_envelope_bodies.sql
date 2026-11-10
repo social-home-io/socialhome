@@ -6,7 +6,8 @@
 -- but the body is the same for all of them. It is stored once in
 -- ``gfs_envelope_bodies``; each recipient's ``gfs_envelope_queue`` row holds
 -- only a reference (``body_id``, ``sealed_json = ''``, ``size_bytes`` = the
--- body's size so every per-recipient cap still charges the full frame).
+-- body's size so every per-recipient cap still charges the full frame). The
+-- mailbox pool total counts the body once plus 64 bytes per reference row.
 --
 -- Migration audit (mandatory 3 points, CLAUDE.md).
 --
@@ -38,9 +39,10 @@
 --   (3) Smallest possible change: one new table, one nullable ADD COLUMN on
 --       the queue (no existing row rewritten — every existing row keeps
 --       ``body_id = NULL`` and behaves exactly as before), two indexes, the
---       two 0029 envelope total triggers recreated with ``AND body_id IS
---       NULL`` (a reference row adds nothing; the body adds its size once),
---       two body total triggers and one cleanup trigger. No backfill.
+--       two 0029 envelope total triggers recreated so a reference row adds
+--       a fixed 64 bytes (``REF_ROW_BYTES``) instead of its size (the body
+--       adds its size once, so the pool bounds the reference rows too), two
+--       body total triggers and one cleanup trigger. No backfill.
 --
 -- Value domain:
 --   sealed_json  the verbatim ``{"mr_suite", "kid", "ciphertext"}`` dict as
@@ -68,27 +70,35 @@ ALTER TABLE gfs_envelope_queue ADD COLUMN body_id INTEGER
 CREATE INDEX IF NOT EXISTS idx_gfs_envelope_queue_body
     ON gfs_envelope_queue(body_id) WHERE body_id IS NOT NULL;
 
--- ── Pool totals: a reference adds nothing, the body adds its size once ──
+-- ── Pool totals: the body adds its size once, a reference 64 bytes ──────
+--
+-- 64 is ``REF_ROW_BYTES`` in ``global_server/repositories.py`` (the pool
+-- admission in ``enqueue_multi`` and ``recompute_pool_totals`` use it): a
+-- reference row holds no copy of the body, but it is still a row, and a pool
+-- that never saw it could be filled with any number of them under one tiny
+-- body.
 
 DROP TRIGGER IF EXISTS trg_gfs_envelope_queue_total_ins;
 DROP TRIGGER IF EXISTS trg_gfs_envelope_queue_total_del;
 
 CREATE TRIGGER IF NOT EXISTS trg_gfs_envelope_queue_total_ins
 AFTER INSERT ON gfs_envelope_queue
-WHEN NEW.frame_type = 'envelope' AND NEW.body_id IS NULL
+WHEN NEW.frame_type = 'envelope'
 BEGIN
     UPDATE gfs_queue_totals
-       SET bytes = bytes + CASE WHEN NEW.size_bytes > 0 THEN NEW.size_bytes
+       SET bytes = bytes + CASE WHEN NEW.body_id IS NOT NULL THEN 64
+                                WHEN NEW.size_bytes > 0 THEN NEW.size_bytes
                                 ELSE LENGTH(NEW.sealed_json) END
      WHERE queue = 'envelope' AND pool = NEW.pool;
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_gfs_envelope_queue_total_del
 AFTER DELETE ON gfs_envelope_queue
-WHEN OLD.frame_type = 'envelope' AND OLD.body_id IS NULL
+WHEN OLD.frame_type = 'envelope'
 BEGIN
     UPDATE gfs_queue_totals
-       SET bytes = MAX(0, bytes - CASE WHEN OLD.size_bytes > 0 THEN OLD.size_bytes
+       SET bytes = MAX(0, bytes - CASE WHEN OLD.body_id IS NOT NULL THEN 64
+                                       WHEN OLD.size_bytes > 0 THEN OLD.size_bytes
                                        ELSE LENGTH(OLD.sealed_json) END)
      WHERE queue = 'envelope' AND pool = OLD.pool;
 END;

@@ -3175,6 +3175,20 @@ POOL_MAILBOX: str = "mailbox"
 #: can never block a recipient's first envelopes.
 QUEUE_RESERVE_ROWS: int = 20
 QUEUE_RESERVE_BYTES: int = 64 * 1024
+#: What one REFERENCE row of a multi-recipient frame (GFS migration 0031)
+#: adds to its pool's running total — the body itself counts once. Without
+#: a row cost a tiny body could park any number of reference rows under a
+#: pool that only ever saw the body. MUST match the literal in the 0031
+#: triggers (``tests/global_server/test_migration_0031_envelope_bodies.py``
+#: pins both).
+REF_ROW_BYTES: int = 64
+#: A queued row's byte charge against its recipient's caps — the same
+#: expression the 0029 / 0031 total triggers use for a plain row. A
+#: reference row's ``size_bytes`` is its body's size, so it charges the
+#: full body.
+_HELD_BYTES_SQL: str = (
+    "CASE WHEN size_bytes > 0 THEN size_bytes ELSE LENGTH(sealed_json) END"
+)
 
 
 @runtime_checkable
@@ -3366,17 +3380,33 @@ class SqliteGfsEnvelopeQueueRepo:
     def _held(conn, to_instance: str, frame_type: str, now: int) -> tuple[int, int]:
         """``(rows, bytes)`` *to_instance* holds unexpired in *frame_type*.
 
-        Summed from ``size_bytes`` (every insert writes it), so a reference
+        Summed from ``size_bytes`` (:data:`_HELD_BYTES_SQL`, the triggers'
+        expression for a plain row), so a reference
         row of a multi frame (GFS migration 0031) charges its recipient the
         FULL body although it holds no copy — no cap can be bypassed by
         addressing a frame to many mailboxes at once."""
         row = conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) "
+            f"SELECT COUNT(*), COALESCE(SUM({_HELD_BYTES_SQL}), 0) "
             "FROM gfs_envelope_queue "
             "WHERE to_instance=? AND frame_type=? AND expires_at > ?",
             (to_instance, frame_type, now),
         ).fetchone()
         return int(row[0] or 0), int(row[1] or 0)
+
+    @staticmethod
+    def _held_many(conn, recipients: list[str], now: int) -> dict[str, tuple[int, int]]:
+        """:meth:`_held` of the ``envelope`` frames of every recipient in
+        *recipients*, in ONE grouped query (a multi upload names up to 500).
+        A recipient holding nothing is absent from the result."""
+        marks = ",".join("?" * len(recipients))
+        rows = conn.execute(
+            f"SELECT to_instance, COUNT(*), COALESCE(SUM({_HELD_BYTES_SQL}), 0) "
+            "FROM gfs_envelope_queue "
+            f"WHERE to_instance IN ({marks}) AND frame_type='envelope'"
+            " AND expires_at > ? GROUP BY to_instance",
+            (*recipients, now),
+        ).fetchall()
+        return {r[0]: (int(r[1] or 0), int(r[2] or 0)) for r in rows}
 
     async def enqueue_multi(
         self,
@@ -3399,39 +3429,44 @@ class SqliteGfsEnvelopeQueueRepo:
         (``sealed_json = ''``, ``size_bytes`` = the body's size, ``body_id``)
         in the mailbox pool. Per recipient the usual tail-drop caps apply,
         charging the full body: a recipient at its row or byte cap is
-        skipped, the others are not. The pool admits the body ONCE (the
-        triggers count it once): under the pool total every recipient that
-        passed its caps is admitted; past it only those under their reserve
+        skipped, the others are not. The pool is charged the body ONCE plus
+        :data:`REF_ROW_BYTES` per admitted reference (what the triggers
+        count): under the pool total every recipient that passed its caps
+        is admitted; past it only those under their reserve
         (:meth:`_pool_admits`), within *ceiling_bytes*. Nothing is evicted.
         The body is freed by a trigger when its last reference goes."""
         size = len(sealed_json)
 
+        def _cost(n: int) -> int:
+            # The pool sees the body once and REF_ROW_BYTES per reference.
+            return size + n * REF_ROW_BYTES
+
         def _run(conn) -> list[str]:
+            unique = list(dict.fromkeys(recipients))
+            held_by = self._held_many(conn, unique, created_at)
             fits: list[tuple[str, int, int]] = []
-            for to in dict.fromkeys(recipients):
-                count, held = self._held(conn, to, "envelope", created_at)
+            for to in unique:
+                count, held = held_by.get(to, (0, 0))
                 if count >= max_per_recipient or held + size > max_bytes_per_recipient:
                     continue
                 fits.append((to, count, held))
             if not fits:
                 return []
             total = self._pool_total(conn, "envelope", POOL_MAILBOX)
-            if total + size > max_total_bytes:
+            if total + _cost(len(fits)) > max_total_bytes:
                 conn.execute(
                     "DELETE FROM gfs_envelope_queue WHERE pool=? AND expires_at <= ?"
                     " AND frame_type='envelope'",
                     (POOL_MAILBOX, created_at),
                 )
                 total = self._pool_total(conn, "envelope", POOL_MAILBOX)
-            if total + size > max_total_bytes:
-                if total + size > ceiling_bytes:
-                    return []
+            if total + _cost(len(fits)) > max_total_bytes:
                 fits = [
                     f
                     for f in fits
                     if f[1] < QUEUE_RESERVE_ROWS and f[2] < QUEUE_RESERVE_BYTES
                 ]
-                if not fits:
+                if not fits or total + _cost(len(fits)) > ceiling_bytes:
                     return []
             body_id = conn.execute(
                 "INSERT INTO gfs_envelope_bodies(sealed_json, size_bytes,"
@@ -3462,20 +3497,21 @@ class SqliteGfsEnvelopeQueueRepo:
     async def recompute_pool_totals(self) -> None:
         """Drift repair (hourly maintenance): set every running total to the
         sum of its unexpired-or-not rows, exactly what the triggers keep —
-        a multi frame's body counted once in the mailbox pool, its
-        reference rows not at all (GFS migration 0031)."""
+        a multi frame's body counted once in the mailbox pool, each of its
+        reference rows :data:`REF_ROW_BYTES` (GFS migration 0031)."""
 
         def _run(conn) -> None:
             conn.execute(
                 "UPDATE gfs_queue_totals SET bytes = (SELECT COALESCE(SUM("
-                "CASE WHEN q.size_bytes > 0 THEN q.size_bytes"
+                "CASE WHEN q.body_id IS NOT NULL THEN ?"
+                " WHEN q.size_bytes > 0 THEN q.size_bytes"
                 " ELSE LENGTH(q.sealed_json) END), 0) FROM gfs_envelope_queue q"
-                " WHERE q.frame_type='envelope' AND q.body_id IS NULL"
+                " WHERE q.frame_type='envelope'"
                 " AND q.pool = gfs_queue_totals.pool)"
                 " + CASE WHEN pool = ? THEN (SELECT COALESCE(SUM(b.size_bytes), 0)"
                 " FROM gfs_envelope_bodies b) ELSE 0 END"
                 " WHERE queue='envelope'",
-                (POOL_MAILBOX,),
+                (REF_ROW_BYTES, POOL_MAILBOX),
             )
             conn.execute(
                 "UPDATE gfs_queue_totals SET bytes = (SELECT COALESCE(SUM("

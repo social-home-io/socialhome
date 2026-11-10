@@ -94,7 +94,10 @@ TOML (:class:`~socialhome.global_server.config.EnvelopeMediaConfig`).
 **Multi-recipient frames (v_90).** ``POST /gfs/envelope/multi`` carries ONE
 sealed frame for up to 500 mailboxes (a space's member households reached
 over this server). Only registered mailboxes are addressed; the answer is the
-same uniform ``202``. The body is stored once (``gfs_envelope_bodies``, GFS
+same uniform ``202``. Each upload charges its distinct ids to a per-IP
+recipient budget equal to the single route's request limit
+(:data:`ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE`), so batching never buys more
+queue work than sending one by one. The body is stored once (``gfs_envelope_bodies``, GFS
 migration 0031) with one reference row per mailbox, each charged the full
 body against that mailbox's caps while the pool counts it once; a trigger
 frees it with its last reference. Each mailbox drains the same
@@ -244,6 +247,14 @@ ENVELOPE_MULTI_MAX_BODY_BYTES: int = ENVELOPE_MAX_BODY_BYTES + MULTI_MAX_RECIPIE
 #: a busy space's fan-out; a catch-up backfill is per recipient and stays on
 #: the single route.
 ENVELOPE_MULTI_MAX_PER_MINUTE: int = 60
+#: Per-IP/minute RECIPIENT budget on ``POST /gfs/envelope/multi``: each
+#: upload charges its number of distinct ids (:meth:`GfsEnvelopeRelay.
+#: multi_recipients_allow`; 429 past it). Equal to
+#: :data:`ENVELOPE_MAX_PER_MINUTE`, so one upload never buys more queue work
+#: than the same recipients sent one by one through ``/gfs/envelope`` —
+#: without it 60 uploads × 500 ids would be 30 000 recipients a minute. Per
+#: node, like the single route's limiter and the media byte budget.
+ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE: int = ENVELOPE_MAX_PER_MINUTE
 
 #: How long an undelivered envelope waits for its recipient, in seconds.
 #: 24 h: the issuing household of an invite link may simply be asleep, and an
@@ -420,8 +431,9 @@ class SlidingByteBudget:
     """Per-key bytes over a sliding window, with a bounded key space.
 
     The byte counterpart of :class:`~.public.SlidingWindowCounter`: one entry
-    per accepted charge (a media frame), pruned to the window on every touch,
-    keys evicted least-recently-seen past *max_keys*."""
+    per accepted charge (a media frame, a multi upload's recipient count),
+    pruned to the window on every touch, keys evicted least-recently-seen
+    past *max_keys*."""
 
     __slots__ = ("_by_key", "_limit", "_max_keys", "_window_s")
 
@@ -589,6 +601,7 @@ class GfsEnvelopeRelay:
         "_media_inflight",
         "_media_inflight_bytes",
         "_media_pending",
+        "_multi_budget",
         "_pending_by_recipient",
         "_queue_repo",
         "_saturated_drops",
@@ -647,6 +660,8 @@ class GfsEnvelopeRelay:
         #: v_87 — binary relay media frames, budgeted apart from envelopes.
         self._media = media if media is not None else EnvelopeMediaConfig()
         self._media_budget = SlidingByteBudget(self._media.media_ip_bytes_per_minute)
+        #: v_90 — distinct recipients per address a minute on the multi route.
+        self._multi_budget = SlidingByteBudget(ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE)
         self._media_inflight: set[asyncio.Task[None]] = set()
         self._media_inflight_bytes = 0
         self._media_pending: dict[str, int] = {}
@@ -756,6 +771,14 @@ class GfsEnvelopeRelay:
 
     # ── Multi-recipient frames (v_90) ──────────────────────────────────
 
+    def multi_recipients_allow(self, client_key: str, mailbox_ids: list[str]) -> bool:
+        """Charge the distinct ids of one multi upload to *client_key* (the
+        caller's address bucket); ``False`` once its per-minute recipient
+        budget (:data:`ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE`) is spent — the
+        route answers 429. A repeated id is one recipient: the relay
+        collapses it to one reference row."""
+        return self._multi_budget.allow(client_key, len(set(mailbox_ids)))
+
     def submit_multi(self, mailbox_ids: list[str], sealed: dict[str, str]) -> None:
         """Hand ONE multi frame for *mailbox_ids* off to a background
         :meth:`accept_multi` and return at once — the same uniform timing as
@@ -824,10 +847,13 @@ class GfsEnvelopeRelay:
             len(ids),
         )
         if len(admitted) < len(targets):
-            log.warning(
-                "gfs.envelope: %d mailbox queue(s) full — a multi frame was "
-                "dropped for them; the mailboxes are offline or being flooded",
+            # INFO, not WARNING: an anonymous caller decides how often this
+            # fires (one line per upload). Counts only, never an id.
+            log.info(
+                "gfs.envelope: multi frame dropped for %d of %d mailbox "
+                "queue(s) (full)",
                 len(targets) - len(admitted),
+                len(targets),
             )
         local = [i for i in admitted if self.holds(i)]
         if self._cluster is not None:

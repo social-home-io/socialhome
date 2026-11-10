@@ -132,8 +132,11 @@ class EnvelopeMultiRelayView(GfsBaseView):
     (``GfsEnvelopeRelay.submit_multi``), so the endpoint is no oracle for
     which ids exist. The body is stored once and each mailbox gets the same
     ``{"type":"envelope","sealed":…}`` frame on its claim socket. Malformed
-    → 400, over the cap → 413, past its own per-IP limit → 429 (middleware),
-    mailboxes off → 404.
+    → 400, over the cap → 413, past its own per-IP request limit → 429
+    (middleware), past the per-IP RECIPIENT budget (distinct ids a minute,
+    equal to ``/gfs/envelope``'s request limit — one upload never buys more
+    queue work than the same recipients sent one by one) → 429 with
+    ``Retry-After: 60``, mailboxes off → 404.
     """
 
     async def post(self) -> web.Response:
@@ -148,5 +151,11 @@ class EnvelopeMultiRelayView(GfsBaseView):
             mailbox_ids, sealed = validate_multi_envelope(parsed)
         except InvalidEnvelope as exc:
             raise web.HTTPBadRequest(reason=str(exc)) from exc
-        self.svc(K.gfs_envelope_relay_key).submit_multi(mailbox_ids, sealed)
+        relay = self.svc(K.gfs_envelope_relay_key)
+        resolver = self.svc(K.gfs_client_ip_key)
+        if not relay.multi_recipients_allow(resolver.bucket(self.request), mailbox_ids):
+            resp = web.json_response({"error": "rate_limited"}, status=429)
+            resp.headers["Retry-After"] = "60"
+            return resp
+        relay.submit_multi(mailbox_ids, sealed)
         return web.json_response(_ACCEPTED_BODY, status=202)

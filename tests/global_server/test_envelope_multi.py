@@ -5,6 +5,7 @@ registered mailbox's claim socket. Real GFS app, real SQLite, real sockets."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 
@@ -34,13 +35,16 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.config import EnvelopeMailboxConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.envelope_relay import (
+    ENVELOPE_MAX_PER_MINUTE,
     ENVELOPE_MULTI_MAX_BODY_BYTES,
     ENVELOPE_MULTI_MAX_CIPHERTEXT_CHARS,
     ENVELOPE_MULTI_MAX_PER_MINUTE,
+    ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE,
     InvalidEnvelope,
     validate_multi_envelope,
 )
 from socialhome.global_server.repositories import (
+    REF_ROW_BYTES,
     SqliteGfsEnvelopeQueueRepo,
     SqliteGfsMailboxRepo,
 )
@@ -223,7 +227,9 @@ async def test_one_body_many_refs_identical_bytes_and_freed_after_delivery(gfs):
     assert await _bodies(app) == 1
     for box in boxes:
         assert await queue.count_for(box.id) == 1  # deduplicated
-    assert await queue.pool_bytes("envelope", "mailbox") == MR_JSON_LEN
+    assert await queue.pool_bytes("envelope", "mailbox") == (
+        MR_JSON_LEN + 3 * REF_ROW_BYTES
+    )
 
     received = []
     for box in boxes:
@@ -308,6 +314,37 @@ async def test_rate_limit_429_after_the_per_minute_budget(gfs):
     await _settle(gfs._app)
 
 
+def _ids(n: int, start: int = 0) -> list[str]:
+    """*n* distinct well-formed (base32, 32-char) recipient ids."""
+    return [
+        base64.b32encode(i.to_bytes(20, "big")).decode().lower()
+        for i in range(start, start + n)
+    ]
+
+
+async def test_recipient_budget_matches_the_single_route(gfs):
+    # One upload must never buy more queue work than the same recipients
+    # sent one by one through ``/gfs/envelope`` (600 a minute per address).
+    assert ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE == ENVELOPE_MAX_PER_MINUTE
+    assert (await _multi(gfs, _ids(MULTI_MAX_RECIPIENTS))).status == 202
+    assert (await _multi(gfs, _ids(100, start=1000))).status == 202
+    over = await _multi(gfs, _ids(1, start=5000))
+    assert over.status == 429
+    assert over.headers["Retry-After"] == "60"
+    await _settle(gfs._app)
+
+
+async def test_recipient_budget_charges_unique_ids_once(gfs):
+    # 500 copies of one id are ONE recipient: charged once per upload.
+    for _ in range(3):
+        resp = await _multi(gfs, ["q" * 32] * MULTI_MAX_RECIPIENTS)
+        assert resp.status == 202
+    assert (await _multi(gfs, _ids(MULTI_MAX_RECIPIENTS))).status == 202  # 503
+    assert (await _multi(gfs, _ids(97, start=1000))).status == 202  # 600
+    assert (await _multi(gfs, _ids(1, start=5000))).status == 429
+    await _settle(gfs._app)
+
+
 async def test_gfs_info_signs_envelope_multi(gfs):
     body = await (await gfs.get("/gfs/info")).json()
     assert body["capabilities"][ENVELOPE_MULTI_CAPABILITY] == {
@@ -362,7 +399,7 @@ async def test_enqueue_multi_stores_one_body_and_a_ref_per_recipient(queue, gfs_
         "SELECT COALESCE(SUM(LENGTH(sealed_json)), 0) AS n FROM gfs_envelope_queue"
     )
     assert dict(row)["n"] == 0  # the refs hold no copy
-    assert await queue.pool_bytes("envelope", "mailbox") == SIZE
+    assert await queue.pool_bytes("envelope", "mailbox") == SIZE + 3 * REF_ROW_BYTES
     for to in (A, B, C):
         (item,) = await queue.list_for(to, now=100)
         assert item.sealed == json.loads(SEALED_JSON)
@@ -374,6 +411,45 @@ async def test_enqueue_multi_stores_one_body_and_a_ref_per_recipient(queue, gfs_
     (item,) = await queue.list_for(C, now=100)
     await queue.delete(item.id)
     assert await _count(gfs_db, "gfs_envelope_bodies") == 0
+    assert await queue.pool_bytes("envelope", "mailbox") == 0
+
+
+async def test_a_repeated_id_gets_one_reference_and_one_charge(queue, gfs_db):
+    assert await queue.enqueue_multi([A] * 50 + [B, A], SEALED_JSON, **_caps()) == [
+        A,
+        B,
+    ]
+    assert await _count(gfs_db, "gfs_envelope_queue") == 2
+    assert len(await queue.list_for(A, now=100)) == 1
+    assert await queue.pool_bytes("envelope", "mailbox") == SIZE + 2 * REF_ROW_BYTES
+
+
+async def test_enqueue_multi_reads_the_caps_in_one_grouped_query(queue, gfs_db):
+    seen: list[str] = []
+    gfs_db._conn.set_trace_callback(seen.append)
+    try:
+        ids = _ids(50)
+        assert await queue.enqueue_multi(ids, SEALED_JSON, **_caps()) == ids
+    finally:
+        gfs_db._conn.set_trace_callback(None)
+    held = [q for q in seen if "COUNT(*)" in q and "gfs_envelope_queue" in q]
+    assert len(held) == 1
+    assert "GROUP BY to_instance" in held[0]
+
+
+async def test_reference_rows_are_bounded_by_the_pool(queue, gfs_db):
+    # Each reference row costs REF_ROW_BYTES of the pool: a tiny body can
+    # not park unbounded rows under a pool that counts the body only once.
+    assert REF_ROW_BYTES == 64
+    ids = _ids(10)
+    caps = _caps(max_total_bytes=SIZE + 9 * REF_ROW_BYTES, ceiling_bytes=SIZE)
+    assert await queue.enqueue_multi(ids, SEALED_JSON, **caps) == []
+    roomy = _caps(max_total_bytes=SIZE + 10 * REF_ROW_BYTES)
+    assert await queue.enqueue_multi(ids, SEALED_JSON, **roomy) == ids
+    assert await queue.pool_bytes("envelope", "mailbox") == SIZE + 10 * REF_ROW_BYTES
+    for to in ids:
+        (item,) = await queue.list_for(to, now=100)
+        await queue.delete(item.id)
     assert await queue.pool_bytes("envelope", "mailbox") == 0
 
 
@@ -416,7 +492,7 @@ async def test_a_full_pool_admits_only_recipients_under_their_reserve(queue, gfs
 async def test_pool_admits_everyone_under_the_total(queue):
     caps = _caps(max_total_bytes=SIZE * 2)
     assert await queue.enqueue_multi([A, B, C], SEALED_JSON, **caps) == [A, B, C]
-    assert await queue.pool_bytes("envelope", "mailbox") == SIZE
+    assert await queue.pool_bytes("envelope", "mailbox") == SIZE + 3 * REF_ROW_BYTES
 
 
 async def test_prune_expired_frees_refs_and_bodies(queue, gfs_db):
@@ -458,7 +534,7 @@ async def test_recompute_pool_totals_agrees_with_the_triggers(queue, gfs_db):
         await queue.pool_bytes("envelope", "mailbox"),
         await queue.pool_bytes("envelope", "household"),
     )
-    assert before == (2 + SIZE, 7)
+    assert before == (2 + SIZE + 3 * REF_ROW_BYTES, 7)
     await gfs_db.enqueue("UPDATE gfs_queue_totals SET bytes = 12345")
     await queue.recompute_pool_totals()
     after = (

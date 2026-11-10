@@ -8,6 +8,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from socialhome.global_server.repositories import REF_ROW_BYTES
 from tests.migration_chain import apply_through
 
 _GFS_MIGRATIONS = (
@@ -18,6 +19,8 @@ _GFS_MIGRATIONS = (
 
 def _conn(tmp_path) -> sqlite3.Connection:
     c = sqlite3.connect(tmp_path / "gfs.db", isolation_level=None)
+    # Like production (``db/database.py``): the body_id reference is enforced.
+    c.execute("PRAGMA foreign_keys=ON")
     c.execute(
         "CREATE TABLE IF NOT EXISTS schema_version ("
         " version INTEGER PRIMARY KEY, description TEXT,"
@@ -74,12 +77,13 @@ def test_body_counts_once_and_is_freed_with_its_last_reference(tmp_path):
     body = _body(c, 1000)
     assert _total(c) == 1000
     refs = [_ref(c, to, body, 1000) for to in ("a" * 32, "b" * 32, "c" * 32)]
-    # The references add nothing: the body is counted once.
-    assert _total(c) == 1000
+    # The body is counted once; each reference row adds its fixed row cost.
+    assert REF_ROW_BYTES == 64
+    assert _total(c) == 1000 + 3 * REF_ROW_BYTES
     c.execute("DELETE FROM gfs_envelope_queue WHERE id=?", (refs[0],))
     c.execute("DELETE FROM gfs_envelope_queue WHERE id=?", (refs[1],))
     assert c.execute("SELECT COUNT(*) FROM gfs_envelope_bodies").fetchone()[0] == 1
-    assert _total(c) == 1000
+    assert _total(c) == 1000 + REF_ROW_BYTES
     c.execute("DELETE FROM gfs_envelope_queue WHERE id=?", (refs[2],))
     assert c.execute("SELECT COUNT(*) FROM gfs_envelope_bodies").fetchone()[0] == 0
     assert _total(c) == 0
@@ -97,10 +101,24 @@ def test_plain_rows_still_count_and_bulk_deletes_free_shared_bodies(tmp_path):
     body = _body(c, 50)
     _ref(c, "a" * 32, body, 50)
     _ref(c, "b" * 32, body, 50)
-    assert _total(c) == 57
+    assert _total(c) == 57 + 2 * REF_ROW_BYTES
     # One statement deleting every reference (the TTL sweep, an idle sweep).
     c.execute("DELETE FROM gfs_envelope_queue")
     assert c.execute("SELECT COUNT(*) FROM gfs_envelope_bodies").fetchone()[0] == 0
     assert _total(c) == 0
     assert _total(c, "household") == 0
+    c.close()
+
+
+def test_a_body_cannot_be_deleted_while_referenced(tmp_path):
+    c = _conn(tmp_path)
+    apply_through(c, 31, directory=_GFS_MIGRATIONS)
+    body = _body(c, 10)
+    _ref(c, "a" * 32, body, 10)
+    try:
+        c.execute("DELETE FROM gfs_envelope_bodies WHERE id=?", (body,))
+    except sqlite3.IntegrityError:
+        pass
+    else:
+        raise AssertionError("foreign key not enforced")
     c.close()
