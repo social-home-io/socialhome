@@ -494,6 +494,9 @@ class OutboxProcessor:
         """Apply one delivery outcome to *entry*'s row."""
         if outcome is DeliveryOutcome.SUCCESS:
             await self._repo.mark_delivered(entry.id)
+            # The ordering gate (``list_due``) may have held the household's
+            # next row behind this one: run the next pass now, not at the poll.
+            self.wake()
             return
         if outcome is DeliveryOutcome.PERMANENT:
             # 4xx — peer will never accept this envelope (replay cache

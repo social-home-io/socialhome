@@ -1130,3 +1130,23 @@ async def test_stop_waits_for_deliveries_then_cancels_them(monkeypatch):
     await proc.stop()
     await _until(lambda: not proc._inflight)
     assert [e.id for e in repo.rows] == ["a1"] and repo.delivered == []
+
+
+async def test_a_delivered_row_wakes_the_next_pass_for_the_rows_it_held():
+    """The ordering gate hands out one content row per seat at a time: once
+    a row is delivered the next pass runs at once (it may free that seat's
+    next row), not at the poll interval. A failed row wakes nothing."""
+    ok = OutboxProcessor(
+        _repo_for([_row("a", "A")]),
+        AsyncMock(return_value=DeliveryOutcome.SUCCESS),
+        rng=lambda: 0.5,
+    )
+    await ok.drain_once()
+    assert ok._wake.is_set()
+    failed = OutboxProcessor(
+        _repo_for([_row("a", "A")]),
+        AsyncMock(return_value=DeliveryOutcome.TRANSIENT),
+        rng=lambda: 0.5,
+    )
+    await failed.drain_once()
+    assert not failed._wake.is_set()
