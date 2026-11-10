@@ -30,7 +30,11 @@ import orjson
 
 from ..db import AsyncDatabase
 from ..domain import federation_retention
-from ..domain.federation import FederationEventType, PairingStatus
+from ..domain.federation import (
+    MULTI_EVENT_TYPES,
+    FederationEventType,
+    PairingStatus,
+)
 from ..domain.federation_retention import (
     ANY_RELAYED_DELETE_KEY_PREFIX,
     MAX_PENDING_PER_PEER,
@@ -53,6 +57,56 @@ log = logging.getLogger(__name__)
 #: per-call limit uses — the "fewer than a full batch ⇒ drained" sentinel must
 #: not drift from the repo's default limit.
 PURGE_BATCH = 5000
+
+
+#: A pending row still inside its retention window (§4.4.7). ``expires_at``
+#: is ISO-8601 with a ``T`` and a timezone suffix; ``datetime(...)`` puts
+#: both sides in one canonical form.
+_LIVE = (
+    "{t}.status='pending'"
+    " AND ({t}.expires_at IS NULL OR datetime({t}.expires_at) > datetime('now'))"
+)
+
+#: The event types the v_91 ordering gate holds (JSON for ``json_each``).
+_GATED_TYPES_JSON = orjson.dumps(sorted(t.value for t in MULTI_EVENT_TYPES)).decode()
+
+#: :meth:`SqliteOutboxRepo.list_due` (exported for the query-plan test).
+#: ``heads`` is each ``space_session`` seat's OLDEST pending, unexpired row
+#: — found once per seat through ``idx_federation_outbox_instance``,
+#: materialized so it is never re-run per outbox row. A gated row
+#: (a multi event type to a seat) is handed out only when it is that head.
+LIST_DUE_SQL = f"""
+WITH heads(instance_id, head) AS MATERIALIZED (
+    SELECT ri.id,
+           (SELECT x.rowid
+              FROM federation_outbox x
+             WHERE x.instance_id = ri.id AND {_LIVE.format(t="x")}
+             ORDER BY x.created_at, x.rowid
+             LIMIT 1)
+      FROM remote_instances ri
+     WHERE ri.source = 'space_session'
+)
+SELECT o.*, p.space_id AS payload_space_id,
+       CASE WHEN p.per_row = 0 THEN p.msg_id END AS payload_msg_id
+  FROM federation_outbox o
+  LEFT JOIN federation_outbox_payloads p ON p.id = o.payload_id
+  LEFT JOIN heads h ON h.instance_id = o.instance_id
+ WHERE {_LIVE.format(t="o")}
+   AND datetime(o.next_attempt_at) <= datetime('now')
+   AND o.instance_id NOT IN (SELECT value FROM json_each(?))
+   AND (
+       h.instance_id IS NULL
+       OR o.rowid = h.head
+       OR o.event_type NOT IN (SELECT value FROM json_each(?))
+   )
+ ORDER BY datetime(o.next_attempt_at) ASC, o.created_at ASC, o.rowid ASC
+ LIMIT ?
+"""
+
+
+def list_due_params(limit: int, exclude: Collection[str]) -> tuple[str, str, int]:
+    """The bind parameters of :data:`LIST_DUE_SQL`."""
+    return (orjson.dumps(sorted(exclude)).decode(), _GATED_TYPES_JSON, int(limit))
 
 
 @runtime_checkable
@@ -88,7 +142,7 @@ class AbstractOutboxRepo(Protocol):
     async def list_due(
         self, limit: int = 50, *, exclude: Collection[str] = ()
     ) -> list[OutboxEntry]: ...
-    async def pending_multi_due(self, instance_id: str) -> str | None: ...
+    async def has_pending_row(self, instance_id: str) -> bool: ...
     async def ungroup_payload(self, payload_id: str) -> None: ...
     async def mark_delivered(self, entry_id: str) -> None: ...
     async def mark_failed(self, entry_id: str) -> None: ...
@@ -346,75 +400,47 @@ class SqliteOutboxRepo:
     async def list_due(
         self, limit: int = 50, *, exclude: Collection[str] = ()
     ) -> list[OutboxEntry]:
-        """Return pending entries whose ``next_attempt_at`` is due.
+        """Return pending entries whose ``next_attempt_at`` is due, oldest
+        due first (ties: creation, then insert order).
 
-        Excludes entries past their retention window (``expires_at``) and
-        those of the households in *exclude* (the processor's busy
-        recipients, so their backlog never fills the batch). Any row — a
-        multi payload's too — is left out while an older row of a multi
-        payload is still pending for its household (v_91 per-recipient
-        FIFO, on every retry: an update never overtakes its create in
-        backoff). Older is ``(created_at, rowid)``; ties on the due time go
-        oldest first, then in insert order. A multi payload taken
-        out of every group (:meth:`ungroup_payload`) lists with no
-        ``msg_id``. The caller is responsible for filtering entries whose
-        destination instance is banned or unreachable.
+        Left out: entries past their retention window (``expires_at``), those
+        of the households in *exclude* (the processor's busy recipients, so
+        their backlog never fills the batch), and the rows the v_91 ordering
+        gate holds. **The gate is one rule:** a row whose event type is in
+        :data:`~socialhome.domain.federation.MULTI_EVENT_TYPES` and whose
+        household is a ``space_session`` seat (the rows a multi upload can
+        carry) waits behind ANY older ``(created_at, rowid)`` pending,
+        unexpired row of that same household — multi or single. Every other
+        row (sync, control, key exchange, any row to a paired peer) is never
+        gated. A household's oldest row is never held, so the gate cannot
+        deadlock; a multi row stuck on transient failures is ungrouped
+        (:meth:`ungroup_payload`) and goes per row like any other.
+
+        A multi payload taken out of every group lists with no ``msg_id``.
+        The caller is responsible for filtering entries whose destination
+        instance is banned or unreachable.
         """
-        # ``next_attempt_at`` and ``expires_at`` are stored as ISO-8601
-        # with a ``T`` separator and a timezone suffix (``...+00:00``).
-        # SQLite's ``datetime('now')`` returns ``YYYY-MM-DD HH:MM:SS``,
-        # so a raw lexical compare disagrees on the separator and
-        # treats no row as due. Wrapping both sides in ``datetime(...)``
-        # normalises them to the same canonical form.
-        rows = await self._db.fetchall(
-            """
-            SELECT o.*, p.space_id AS payload_space_id,
-                   CASE WHEN p.per_row = 0 THEN p.msg_id END AS payload_msg_id
-              FROM federation_outbox o
-              LEFT JOIN federation_outbox_payloads p ON p.id = o.payload_id
-             WHERE o.status='pending'
-               AND datetime(o.next_attempt_at) <= datetime('now')
-               AND (
-                   o.expires_at IS NULL
-                   OR datetime(o.expires_at) > datetime('now')
-               )
-               AND o.instance_id NOT IN (SELECT value FROM json_each(?))
-               AND NOT EXISTS (
-                   SELECT 1
-                     FROM federation_outbox m
-                     JOIN federation_outbox_payloads mp ON mp.id = m.payload_id
-                    WHERE m.instance_id = o.instance_id
-                      AND m.status = 'pending'
-                      AND mp.msg_id IS NOT NULL
-                      AND (m.created_at, m.rowid) < (o.created_at, o.rowid)
-               )
-             ORDER BY datetime(o.next_attempt_at) ASC, o.created_at ASC,
-                      o.rowid ASC
-             LIMIT ?
-            """,
-            (orjson.dumps(sorted(exclude)).decode(), int(limit)),
-        )
+        rows = await self._db.fetchall(LIST_DUE_SQL, list_due_params(limit, exclude))
         return [_row_to_entry(d) for d in rows_to_dicts(rows)]
 
-    async def pending_multi_due(self, instance_id: str) -> str | None:
-        """The latest ``next_attempt_at`` of *instance_id*'s pending rows of
-        a multi payload (v_91, its ``msg_id`` set), or ``None`` when it has
-        none — a live send to it must queue behind them, not overtake."""
+    async def has_pending_row(self, instance_id: str) -> bool:
+        """Whether *instance_id* has any pending, unexpired row — the live
+        send's half of the :meth:`list_due` gate: a multi event type to a
+        seat with one queues behind it instead of overtaking."""
         row = await self._db.fetchone(
-            "SELECT MAX(datetime(o.next_attempt_at)) AS due"
-            "  FROM federation_outbox o"
-            "  JOIN federation_outbox_payloads p ON p.id = o.payload_id"
-            " WHERE o.instance_id=? AND o.status='pending'"
-            "   AND p.msg_id IS NOT NULL",
+            f"SELECT 1 FROM federation_outbox o WHERE o.instance_id=?"
+            f" AND {_LIVE.format(t='o')} LIMIT 1",
             (instance_id,),
         )
-        return None if row is None else row["due"]
+        return row is not None
 
     async def ungroup_payload(self, payload_id: str) -> None:
         """Take the multi payload *payload_id* out of every group for good
-        (the GFS refused its upload, or its frame cannot be built): its rows
-        list with no ``msg_id`` and go one by one, while each per-row
-        envelope still carries the stored ``msg_id``."""
+        (the GFS refused its upload, its frame cannot be built, or it failed
+        transient :data:`~socialhome.federation.federation_service
+        .MULTI_MAX_TRANSIENT` times): its rows list with no ``msg_id`` and go
+        one by one, while each per-row envelope still carries the stored
+        ``msg_id``."""
         await self._db.enqueue(
             "UPDATE federation_outbox_payloads SET per_row=1 WHERE id=?",
             (payload_id,),

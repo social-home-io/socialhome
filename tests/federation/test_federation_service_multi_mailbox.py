@@ -16,7 +16,6 @@ import base64
 import dataclasses
 import os
 from collections import deque
-from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -617,15 +616,13 @@ async def test_a_frame_built_from_the_broadcast_is_taken_by_every_receiver_once(
 # ── Per-recipient FIFO: a live send never overtakes a queued multi row ───
 
 
-async def test_a_live_send_to_a_seat_behind_a_multi_row_is_queued_after_it():
-    """A seat with a multi-payload row still pending: a live send would
-    reach it before that row's upload — it goes to the outbox instead, due
-    no earlier than the multi row."""
+async def test_a_live_send_to_a_seat_behind_a_queued_row_is_queued_after_it():
+    """A seat with any row still pending: a live content send would reach it
+    before that row — it goes to the outbox instead, where the ordering gate
+    hands it out only after every older row of the seat."""
     s = _Sender()
     seats = [await s.seat() for _ in range(2)]
     await s.broadcast()
-    later = datetime.now(UTC) + timedelta(minutes=5)
-    s.outbox.multi_due = later.strftime("%Y-%m-%d %H:%M:%S")
     result = await s.svc.send_event(
         to_instance_id=seats[0],
         event_type=POST,
@@ -637,9 +634,17 @@ async def test_a_live_send_to_a_seat_behind_a_multi_row_is_queued_after_it():
     row = s.outbox.enqueued[-1]
     assert row["instance_id"] == seats[0]
     assert s.outbox.payloads[row["payload_id"]].msg_id is None  # per recipient
-    [(row_id, due, attempts)] = s.outbox.rescheduled
-    assert row_id == row["id"] and attempts == 0
-    assert datetime.fromisoformat(due) == later.replace(microsecond=0)
+    assert s.outbox.rescheduled == []  # due now: the gate holds it
+
+
+async def test_a_live_send_to_a_paired_peer_with_a_queued_row_goes_live():
+    s = _Sender()
+    peer = await s.paired()
+    await s.outbox.enqueue(instance_id=peer, event_type=POST, payload_json="{}")
+    result = await s.svc.send_event(
+        to_instance_id=peer, event_type=POST, payload={"p": 1}, space_id=_SPACE
+    )
+    assert result.ok and s.transport.per_recipient_ids() == [peer]
 
 
 async def test_a_live_send_with_nothing_queued_goes_live_and_paired_pay_no_read():
@@ -647,13 +652,13 @@ async def test_a_live_send_with_nothing_queued_goes_live_and_paired_pay_no_read(
     seat = await s.seat()
     peer = await s.paired()
     asked: list[str] = []
-    real = s.outbox.pending_multi_due
+    real = s.outbox.has_pending_row
 
     async def _counted(instance_id: str):
         asked.append(instance_id)
         return await real(instance_id)
 
-    s.outbox.pending_multi_due = _counted
+    s.outbox.has_pending_row = _counted
     for iid in (seat, peer):
         await s.svc.send_event(
             to_instance_id=iid, event_type=POST, payload={"p": 1}, space_id=_SPACE
@@ -767,9 +772,6 @@ async def test_a_catch_up_stream_to_a_seat_behind_a_multi_row_goes_live():
     s = _Sender()
     seats = [await s.seat() for _ in range(2)]
     await s.broadcast()
-    s.outbox.multi_due = (datetime.now(UTC) + timedelta(minutes=5)).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
     queued_before = len(s.outbox.enqueued)
     provider = SpaceSyncService(
         builder=ChunkBuilder(

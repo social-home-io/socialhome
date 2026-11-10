@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import socialhome.repositories.outbox_repo as outbox_mod
 from socialhome.domain import federation_retention as fr
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.federation_retention import (
@@ -24,6 +26,8 @@ from socialhome.infrastructure.outbox_processor import (
     OutboxProcessor,
 )
 from socialhome.repositories.outbox_repo import SqliteOutboxRepo
+
+POST_CREATED = FederationEventType.SPACE_POST_CREATED
 
 
 async def _seed_peer(db, instance_id: str, *, status: str = "confirmed") -> None:
@@ -1264,50 +1268,6 @@ async def test_list_due_leaves_out_busy_households(env):
     assert len(await env.outbox_repo.list_due(10)) == 4
 
 
-async def test_pending_multi_due_names_only_a_pending_multi_row(env):
-    """v_91 FIFO: the latest due time of a household's pending rows of a
-    multi payload; a failed send's payload (no ``msg_id``) and a delivered
-    row do not count."""
-    assert await env.outbox_repo.pending_multi_due("peer-a") is None
-    await _enqueue_ref(env, "peer-a", "single")  # no msg_id on its payload
-    assert await env.outbox_repo.pending_multi_due("peer-a") is None
-    written = await env.outbox_repo.enqueue_refs(
-        instance_ids=["peer-a", "peer-b"],
-        event_type=FederationEventType.SPACE_POST_CREATED,
-        supersede_key=None,
-        payload_ref=dataclasses.replace(_stored("p-m"), msg_id="wire-1"),
-    )
-    later = datetime.now(UTC) + timedelta(minutes=5)
-    await env.outbox_repo.reschedule(written["peer-a"], later.isoformat(), 1)
-    due = await env.outbox_repo.pending_multi_due("peer-a")
-    assert due == later.strftime("%Y-%m-%d %H:%M:%S")
-    await env.outbox_repo.mark_delivered(written["peer-b"])
-    assert await env.outbox_repo.pending_multi_due("peer-b") is None
-
-
-async def test_a_row_behind_a_pending_multi_row_waits_for_it(env):
-    """v_91 FIFO on every attempt: a household's other row is not handed
-    out while an older multi row of it is still pending — even when that row
-    failed and waits on its backoff while the later row is due."""
-    written = await env.outbox_repo.enqueue_refs(
-        instance_ids=["peer-a", "peer-b"],
-        event_type=FederationEventType.SPACE_POST_CREATED,
-        supersede_key=None,
-        payload_ref=dataclasses.replace(_stored("p-m"), msg_id="wire-1"),
-    )
-    await _enqueue_ref(env, "peer-a", "a-behind")
-    await _enqueue_ref(env, "peer-b", "b-behind")
-    later = datetime.now(UTC) + timedelta(minutes=5)
-    await env.outbox_repo.reschedule(written["peer-a"], later.isoformat(), 1)
-    await env.outbox_repo.mark_delivered(written["peer-b"])
-    assert [e.id for e in await env.outbox_repo.list_due()] == ["b-behind"]
-    await env.outbox_repo.mark_delivered(written["peer-a"])
-    assert [e.id for e in await env.outbox_repo.list_due()] == [
-        "a-behind",
-        "b-behind",
-    ]
-
-
 async def test_due_rows_tie_break_on_creation(env):
     """Rows due at the same instant come out oldest first, then in insert
     order — never in whatever order SQLite happens to scan."""
@@ -1334,34 +1294,189 @@ async def test_an_ungrouped_payload_lists_without_its_multi_id(env):
     await env.outbox_repo.ungroup_payload("p-m")
     assert {e.msg_id for e in await env.outbox_repo.list_due()} == {None}
     assert (await env.outbox_repo.get_payload("p-m")).msg_id == "wire-1"
-    assert await env.outbox_repo.pending_multi_due("peer-a") is not None
     assert sorted(written) == ["peer-a", "peer-b"]
 
 
-async def test_a_newer_multi_row_never_overtakes_an_older_one_in_backoff(env):
-    """v_91 FIFO between multi rows: a create, then an update to the same
-    seats — the create's row in backoff holds the update's back (an update
-    applied before its create is lost), while a seat whose create went
-    through gets its update."""
-    seats = ["peer-a", "peer-b"]
-    create = await env.outbox_repo.enqueue_refs(
-        instance_ids=seats,
-        event_type=FederationEventType.SPACE_POST_CREATED,
-        supersede_key=None,
-        payload_ref=dataclasses.replace(_stored("p-create"), msg_id="wire-c"),
+# ── The v_91 ordering gate (list_due): one rule ─────────────────────────────
+#
+# A multi-event-type row to a space_session seat waits behind ANY older
+# pending, unexpired row of that household; nothing else is ever gated.
+
+
+async def _seat(env, *seats: str) -> None:
+    for seat in seats:
+        await _seed_peer(env.db, seat)
+        await env.db.enqueue(
+            "UPDATE remote_instances SET source='space_session' WHERE id=?", (seat,)
+        )
+
+
+async def _row(
+    env,
+    peer: str,
+    eid: str,
+    event_type: FederationEventType = FederationEventType.SPACE_POST_CREATED,
+    **kw,
+) -> str:
+    """One per-row (single) outbox row of *event_type* to *peer*."""
+    return await env.outbox_repo.enqueue(
+        instance_id=peer,
+        event_type=event_type,
+        payload_json="{}",
+        msg_id=eid,
+        **kw,
     )
-    update = await env.outbox_repo.enqueue_refs(
-        instance_ids=seats,
-        event_type=FederationEventType.SPACE_POST_UPDATED,
+
+
+async def _multi(env, seats, pid: str, event_type) -> dict[str, str]:
+    return await env.outbox_repo.enqueue_refs(
+        instance_ids=list(seats),
+        event_type=event_type,
         supersede_key=None,
-        payload_ref=dataclasses.replace(_stored("p-update"), msg_id="wire-u"),
+        payload_ref=dataclasses.replace(
+            _stored(pid), event_type=event_type, msg_id=f"wire-{pid}"
+        ),
     )
-    later = datetime.now(UTC) + timedelta(minutes=5)
-    await env.outbox_repo.reschedule(create["peer-a"], later.isoformat(), 1)
-    await env.outbox_repo.mark_delivered(create["peer-b"])
-    assert [e.id for e in await env.outbox_repo.list_due()] == [update["peer-b"]]
-    await env.outbox_repo.mark_delivered(create["peer-a"])
-    assert {e.id for e in await env.outbox_repo.list_due()} == set(update.values())
+
+
+async def _backoff(env, eid: str, minutes: int = 5) -> None:
+    later = datetime.now(UTC) + timedelta(minutes=minutes)
+    await env.outbox_repo.reschedule(eid, later.isoformat(), 1)
+
+
+async def _due_ids(env) -> set[str]:
+    return {e.id for e in await env.outbox_repo.list_due(1000)}
+
+
+async def test_sync_and_key_exchange_rows_to_a_seat_are_never_held(env):
+    """Matrix 1: rows outside MULTI_EVENT_TYPES never wait — a newcomer's
+    catch-up chunk and a key exchange pass an older multi row in backoff."""
+    await _seat(env, "seat-a", "seat-b")
+    older = await _multi(env, ["seat-a", "seat-b"], "p-m", POST_CREATED)
+    await _backoff(env, older["seat-a"])
+    chunk = await _row(env, "seat-a", "chunk", FederationEventType.SPACE_SYNC_CHUNK)
+    kex = await _row(env, "seat-a", "kex", FederationEventType.SPACE_KEY_EXCHANGE)
+    assert await _due_ids(env) == {older["seat-b"], chunk, kex}
+
+
+@pytest.mark.parametrize(
+    "later_type",
+    [FederationEventType.SPACE_POST_DELETED, FederationEventType.SPACE_POST_UPDATED],
+)
+async def test_a_multi_row_waits_behind_an_older_single_row_in_backoff(env, later_type):
+    """Matrix 2: a delete (or update) never reaches a seat before its create,
+    even when the create is a single row waiting out its backoff."""
+    await _seat(env, "seat-a", "seat-b")
+    create = await _row(env, "seat-a", "create")
+    await _backoff(env, create)
+    later = await _multi(env, ["seat-a", "seat-b"], "p-later", later_type)
+    assert await _due_ids(env) == {later["seat-b"]}
+    await env.outbox_repo.mark_delivered(create)
+    assert await _due_ids(env) == set(later.values())
+
+
+async def test_a_newer_multi_row_waits_behind_an_older_multi_row(env):
+    await _seat(env, "seat-a", "seat-b")
+    seats = ["seat-a", "seat-b"]
+    create = await _multi(env, seats, "p-c", POST_CREATED)
+    update = await _multi(env, seats, "p-u", FederationEventType.SPACE_POST_UPDATED)
+    await _backoff(env, create["seat-a"])
+    await env.outbox_repo.mark_delivered(create["seat-b"])
+    assert await _due_ids(env) == {update["seat-b"]}
+
+
+async def test_an_expired_older_row_does_not_gate(env):
+    """Matrix 4: a row past its retention is gone for the gate too — the
+    sweep will fail it, and nothing may wait on it until then."""
+    await _seat(env, "seat-a", "seat-b")
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    await _row(env, "seat-a", "stale-single", expires_at=past)
+    stale = await _multi(env, ["seat-a", "seat-b"], "p-old", POST_CREATED)
+    await env.db.enqueue(
+        "UPDATE federation_outbox SET expires_at=? WHERE id=?",
+        (past, stale["seat-a"]),
+    )
+    fresh = await _row(env, "seat-a", "fresh", FederationEventType.SPACE_POST_UPDATED)
+    assert await _due_ids(env) == {stale["seat-b"], fresh}
+
+
+async def test_rows_to_a_paired_peer_are_never_gated(env):
+    """Matrix 5: a paired peer's rows are never held, whatever older row it
+    has pending."""
+    create = await _multi(env, ["peer-a", "peer-b"], "p-c", POST_CREATED)
+    await _backoff(env, create["peer-a"])
+    single = await _row(env, "peer-a", "single-old")
+    await _backoff(env, single)
+    update = await _row(env, "peer-a", "update", FederationEventType.SPACE_POST_UPDATED)
+    assert await _due_ids(env) == {create["peer-b"], update}
+
+
+async def test_a_seat_s_oldest_row_is_always_handed_out(env):
+    """Matrix 6: with every row due, a seat's oldest row goes, its later
+    content rows wait, and each delivery frees the next — the gate can never
+    deadlock."""
+    await _seat(env, "seat-a")
+    ids = [await _row(env, "seat-a", f"c{i}") for i in range(4)]
+    for eid in ids:
+        assert await _due_ids(env) == {eid}
+        await env.outbox_repo.mark_delivered(eid)
+    assert await _due_ids(env) == set()
+
+
+async def test_has_pending_row_counts_any_pending_unexpired_row(env):
+    """The live path's half of the rule: a seat with any pending, unexpired
+    row makes a live content send queue behind it."""
+    await _seat(env, "seat-a")
+    assert not await env.outbox_repo.has_pending_row("seat-a")
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    await _row(env, "seat-a", "stale", expires_at=past)
+    assert not await env.outbox_repo.has_pending_row("seat-a")
+    chunk = await _row(env, "seat-a", "chunk", FederationEventType.SPACE_SYNC_CHUNK)
+    assert await env.outbox_repo.has_pending_row("seat-a")
+    await env.outbox_repo.mark_delivered(chunk)
+    assert not await env.outbox_repo.has_pending_row("seat-a")
+
+
+async def test_list_due_cost_is_bounded_at_10_seats_by_1000_rows(env):
+    """Matrix 6 (cost): each seat's oldest row is found once, through an
+    index — not a NOT EXISTS per row. 10 seats × 1000 due rows list well
+    under 0.5 s (≈ 5 ms measured)."""
+    seats = [f"seat-{i}" for i in range(10)]
+    await _seat(env, *seats)
+    await env.db.transact(
+        lambda conn: conn.executemany(
+            "INSERT INTO federation_outbox(id, instance_id, event_type,"
+            " payload_json, next_attempt_at) VALUES(?,?,?,?,?)",
+            [
+                (
+                    f"{s}-{n}",
+                    s,
+                    POST_CREATED.value,
+                    "{}",
+                    "2000-01-01T00:00:00+00:00",
+                )
+                for s in seats
+                for n in range(1000)
+            ],
+        )
+    )
+    started = time.perf_counter()
+    due = await env.outbox_repo.list_due(500)
+    elapsed = time.perf_counter() - started
+    assert {e.id for e in due} == {f"{s}-0" for s in seats}
+    assert elapsed < 0.5, f"list_due took {elapsed:.3f}s"
+    plan = " | ".join(
+        str(r[-1])
+        for r in await env.db.fetchall(
+            "EXPLAIN QUERY PLAN " + outbox_mod.LIST_DUE_SQL,
+            outbox_mod.list_due_params(500, ()),
+        )
+    )
+    # The heads are materialized once; the only correlated lookup is each
+    # seat's head, an index search — none runs per outbox row.
+    assert "MATERIALIZE heads" in plan, plan
+    assert plan.count("CORRELATED") == 1, plan
+    assert "SEARCH x USING INDEX idx_federation_outbox_instance" in plan, plan
 
 
 async def test_a_500_seat_multi_enqueue_is_one_write_transaction(env):

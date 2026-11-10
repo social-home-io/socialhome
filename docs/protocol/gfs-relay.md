@@ -1214,24 +1214,27 @@ is persisted: a crash leaves the rows pending. `stop()` waits for the loop
 and the deliveries in flight up to its 5 s deadline, then cancels them
 (their rows stay pending); `start()` clears the busy set.
 
-**Per-recipient FIFO behind a multi row — on every attempt.** No row of a
-household — a multi row included — is handed out while an older
-multi-payload row of it is still pending (`list_due`, one `NOT EXISTS`
-on every row), so a row queued behind a multi row waits through that row's
-retries too, and a newer multi row (an update) never overtakes an older one
-(its create) still in backoff. "Older" is creation, then insert order; due
-rows hand out by `next_attempt_at`, then creation, then insert order. A
-multi upload that does not succeed — however fast it failed — stalls each
-of its recipients for the rest of the pass. A live per-recipient send
-(`send_event`) of a `MULTI_EVENT_TYPES` event to a `space_session` seat
-that still has a multi-payload row pending would overtake it, so it is
-queued to the outbox instead, due no earlier than that row (one indexed
-query, only for `space_session` seats) — and so is such a send through the
-space's host (the v_89 host hop) to a seat we cannot reach at its mailbox.
-Sync and control events (`SPACE_SYNC_BEGIN` / `_CHUNK` / `_COMPLETE`, key
-exchange, every type outside `MULTI_EVENT_TYPES`) never queue behind a multi
-row: they are not part of the space's content stream, and a newcomer's
-catch-up counts a queued chunk as a failed one.
+**Order to a seat — one rule, on every attempt.** A row whose event type is
+in `MULTI_EVENT_TYPES` and whose household is a `space_session` seat (the
+rows a multi upload can carry) waits behind ANY older pending, unexpired
+row of that same household — multi or single (`list_due`). Every other row
+(sync, control, key exchange, any row to a paired peer) is never gated. So
+a delete or an update never reaches a seat before its create, even while
+the create waits out its backoff, and a newcomer's catch-up (which counts
+a queued chunk as a failed one) never waits on content. "Older" is
+`(created_at, rowid)`; an expired row (past `expires_at`, the sweep fails it)
+gates nothing. A household's oldest row is never held, so the gate cannot
+deadlock. Cost: each seat's oldest row is found ONCE per pass (a
+materialized CTE, one index search per seat — never a lookup per row):
+~5 ms at 10 seats × 1 000 rows. Due rows hand out by `next_attempt_at`, then
+creation, then insert order; a delivered row wakes the next pass at once
+(it may free that seat's next row). A multi upload that does not succeed —
+however fast it failed — stalls each of its recipients for the rest of the
+pass. A live send (`send_event`, and the v_89 host hop to a seat we cannot
+reach at its mailbox) of a `MULTI_EVENT_TYPES` event to a seat with any
+pending, unexpired row would overtake it, so it is queued to the outbox
+instead (due now; the gate orders it) — the same rule, one indexed read,
+only for such an event to a seat.
 
 **Failures.** A `429` waits the GFS's `Retry-After` (60 s when it names
 none); a timeout, a `5xx` or a transport error is TRANSIENT. Either way the
@@ -1291,7 +1294,7 @@ sequenceDiagram
 Implementation: `socialhome/federation/multi_recipient.py`,
 `federation/keywrap_seal.py` (`seal_to_keywrap` / `open_keywrap`),
 `FederationService._queue_multi_groups` / `_multi_target` /
-`outbox_multi_groups` / `deliver_outbox_multi` / `_queue_behind_multi`,
+`outbox_multi_groups` / `deliver_outbox_multi` / `_must_queue_behind`,
 `OutboxProcessor` (`wake`, `_start_pass`),
 `GfsEnvelopeSender.send_to_mailboxes`, `GfsRelayInbound.handle_mailbox_frame`,
 `inbound_validator.make_check_multi_recipient`,

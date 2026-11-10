@@ -469,21 +469,9 @@ class InMemoryOutboxRepo:
     async def list_due(self, limit: int = 50, *, exclude=()):
         return []
 
-    async def pending_multi_due(self, instance_id: str) -> str | None:
-        """v_91 — a seat's pending multi-payload row (every queued row
-        counts as pending here): due at :attr:`multi_due`."""
-        for e in self.enqueued:
-            pid = e["payload_id"]
-            if (
-                e["instance_id"] == instance_id
-                and pid is not None
-                and self.payloads[pid].msg_id is not None
-            ):
-                return self.multi_due
-        return None
-
-    #: When :meth:`pending_multi_due` says a seat's multi row is due.
-    multi_due: str = "2000-01-01 00:00:00"
+    async def has_pending_row(self, instance_id: str) -> bool:
+        """Every queued row counts as pending and unexpired here."""
+        return any(e["instance_id"] == instance_id for e in self.enqueued)
 
     async def delete_pending_of_types(self, instance_id, event_types) -> int:
         before = len(self.enqueued)

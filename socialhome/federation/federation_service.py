@@ -1843,23 +1843,14 @@ class FederationService:
                 ok=False,
                 error="unknown_instance",
             )
-        if (
-            instance.source is InstanceSource.SPACE_SESSION
-            and event_type in MULTI_EVENT_TYPES
-        ):
-            # v_91 FIFO among the space's content stream only: sync and
-            # control events (a newcomer's catch-up) never wait behind it.
-            behind = await self._outbox_repo.pending_multi_due(to_instance_id)
-            if behind is not None:
-                return await self._queue_behind_multi(
-                    to_instance_id,
-                    behind,
-                    event_type=event_type,
-                    payload=payload,
-                    space_id=space_id,
-                    state_key=outbox_key
-                    or self._state_key(event_type, space_id, payload),
-                )
+        if await self._must_queue_behind(instance, event_type):
+            return await self._queue_behind(
+                to_instance_id,
+                event_type=event_type,
+                payload=payload,
+                space_id=space_id,
+                state_key=outbox_key or self._state_key(event_type, space_id, payload),
+            )
 
         envelope_dict = self._seal_envelope(
             instance,
@@ -2053,20 +2044,32 @@ class FederationService:
             error=DELIVERY_ERROR_QUEUED,
         )
 
-    async def _queue_behind_multi(
+    async def _must_queue_behind(
+        self, instance: RemoteInstance, event_type: FederationEventType
+    ) -> bool:
+        """The live half of the outbox ordering gate
+        (:meth:`~socialhome.repositories.outbox_repo.SqliteOutboxRepo.list_due`):
+        a :data:`MULTI_EVENT_TYPES` event to a ``space_session`` seat that
+        still has any pending, unexpired outbox row would overtake it. One
+        indexed read, only for such an event to a seat."""
+        return (
+            event_type in MULTI_EVENT_TYPES
+            and instance.source is InstanceSource.SPACE_SESSION
+            and await self._outbox_repo.has_pending_row(instance.id)
+        )
+
+    async def _queue_behind(
         self,
         to_instance_id: str,
-        behind: str,
         *,
         event_type: FederationEventType,
         payload: dict,
         space_id: str | None,
         state_key: str | None,
     ) -> DeliveryResult:
-        """v_91 per-recipient FIFO: a live send to a seat that still has a
-        multi-payload row pending would overtake it — queue it to the outbox
-        instead, due no earlier than that row (*behind*), so the outbox
-        sends the seat's rows one at a time in order."""
+        """Queue a live send :meth:`_must_queue_behind` holds to the outbox,
+        due now: the outbox's ordering gate hands it out only once every
+        older row of the seat is gone."""
         self._settle_state_send(
             to_instance_id,
             state_key,
@@ -2083,9 +2086,6 @@ class FederationService:
             return DeliveryResult(
                 instance_id=to_instance_id, ok=False, error="unknown_instance"
             )
-        due = datetime.fromisoformat(behind).replace(tzinfo=UTC)
-        if due > datetime.now(UTC):
-            await self._outbox_repo.reschedule(row_id, due.isoformat(), attempts=0)
         if self._outbox_wake is not None:
             self._outbox_wake()
         return DeliveryResult(
@@ -2510,17 +2510,11 @@ class FederationService:
                 # v_89 — a member seated from the host's directory that we
                 # cannot reach at its GFS mailbox (no connection to that GFS,
                 # or it has none): the space's host is the one hop. Never
-                # past a multi row it still has pending (v_91 FIFO): queue
-                # behind it like a live send (a multi event type only).
-                behind = (
-                    await self._outbox_repo.pending_multi_due(to_instance_id)
-                    if event_type in MULTI_EVENT_TYPES
-                    else None
-                )
-                if behind is not None:
-                    return await self._queue_behind_multi(
+                # past a row it still has queued: the same rule as a live
+                # send (:meth:`_must_queue_behind`).
+                if await self._must_queue_behind(instance, event_type):
+                    return await self._queue_behind(
                         to_instance_id,
-                        behind,
                         event_type=event_type,
                         payload=payload,
                         space_id=space_id,
