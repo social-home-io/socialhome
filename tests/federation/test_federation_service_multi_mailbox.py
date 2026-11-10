@@ -37,6 +37,7 @@ from socialhome.domain.federation import (
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.outbox import DeliveryOutcome
 from socialhome.federation.encoder import FederationEncoder
+from socialhome.federation.federation_service import MULTI_MAX_TRANSIENT
 from socialhome.federation.gfs_relay_transport import (
     GfsRelayTransport,
     MailboxTarget,
@@ -745,6 +746,33 @@ async def test_a_group_left_with_one_seat_does_not_go_up():
     assert s.transport.multi == []
     # Not refused by the GFS: the payload may still be grouped later.
     assert s.outbox.ungrouped == set()
+
+
+async def test_a_multi_upload_failing_transient_three_times_goes_per_row():
+    """Matrix 3: a multi upload that failed TRANSIENT MULTI_MAX_TRANSIENT
+    times (by its rows' attempts) is ungrouped — its rows then go per row,
+    with the host-hop fallback, and can no longer hold their seats."""
+    s = _Sender()
+    seats = [await s.seat() for _ in range(2)]
+    await s.broadcast()
+    s.transport.multi_result = (False, 503, None)
+
+    def _tried(n: int):
+        return [dataclasses.replace(e, attempts=n) for e in s.outbox.entries()]
+
+    for n in range(MULTI_MAX_TRANSIENT):
+        [group] = await s.svc.outbox_multi_groups(_tried(n))
+        outcome, sent = await s.svc.deliver_outbox_multi(group)
+        assert outcome is DeliveryOutcome.TRANSIENT and len(sent) == 2
+    assert s.outbox.ungrouped == set()  # still one upload so far
+    # The next pass after the third failure: ungrouped, no group.
+    assert await s.svc.outbox_multi_groups(_tried(MULTI_MAX_TRANSIENT)) == []
+    assert s.outbox.ungrouped == {group[0].payload_id}
+    # From then on each row takes the per-row path.
+    repo = await _drain(s.svc, s.outbox)
+    assert sorted(c.args[0].instance_id for c in repo.single.await_args_list) == (
+        sorted(seats)
+    )
 
 
 # ── Sync / control events never queue behind a multi row ────────────────

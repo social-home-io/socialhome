@@ -149,8 +149,9 @@ class OutboxMulti(Protocol):
     ``None`` when nothing went up. Rows left out are handed back to the
     per-recipient pool — never sent inside the multi slot: they stay pending
     and due, and their recipients stall for the pass (FIFO). A payload the
-    GFS refused or whose frame cannot be built is marked so it is never
-    grouped again (``ungroup_payload``), so its rows then go one by one.
+    GFS refused, whose frame cannot be built, or whose upload failed
+    transient ``MULTI_MAX_TRANSIENT`` times is marked so it is never grouped
+    again (``ungroup_payload``), so its rows then go one by one.
 
     Every envelope built from a multi payload carries its stored
     ``msg_id``, so an upload the GFS accepted but whose answer was lost is

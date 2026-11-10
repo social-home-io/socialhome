@@ -1246,7 +1246,11 @@ or more remain. When the GFS refused the upload with any other `4xx` (the
 same frame would be refused again) or no frame can be built (over the top
 size bucket), every row is handed back — never sent per row inside the
 multi slot — and the payload is marked `per_row`: its rows go per row once,
-pair-sealed under the multi payload's `msg_id`, and are never regrouped. A
+pair-sealed under the multi payload's `msg_id`, and are never regrouped.
+So is a payload whose upload failed TRANSIENT `MULTI_MAX_TRANSIENT` (3)
+times by its rows' `attempts` (a timeout counts): its rows go per row, with
+the host-hop fallback, so a NEVER_DROP multi row cannot hold its seats'
+later content on the ceiling backoff. A
 peer below v_91, a GFS without `envelope_multi` or a seat alone on its GFS:
 per-recipient frames, as in v_89.
 

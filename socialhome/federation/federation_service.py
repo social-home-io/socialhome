@@ -306,6 +306,13 @@ StillWantedOf = Callable[[], Callable[[OutboxEntry], Awaitable[bool]] | None]
 #: outbox at :data:`~socialhome.infrastructure.outbox_processor.MAX_RETRY_AFTER_S`.)
 MULTI_THROTTLE_RETRY_S: float = 60.0
 
+#: After this many TRANSIENT failures of a v_91 multi upload (counted by its
+#: rows' ``attempts``), its payload is ungrouped and the rows go per row —
+#: with the host-hop fallback a multi upload lacks — so a NEVER_DROP multi
+#: row can never hold its seats' later content (the outbox ordering gate)
+#: on the ceiling backoff.
+MULTI_MAX_TRANSIENT: int = 3
+
 #: Broadcast events whose own effect takes the recipient out of
 #: ``space_instances`` right after the broadcast: ``dissolve_space`` purges
 #: every row once its ``SPACE_DISSOLVED`` fan-out returns, and a leave whose
@@ -3601,7 +3608,12 @@ class FederationService:
         recipient). Each peer row is read once and each GFS probed once per
         pass. A row the moderation queue no longer wants (``still_wanted``,
         :meth:`attach_outbox_wake`) is left out — it goes single, and the
-        delivery callback drops it."""
+        delivery callback drops it. A row whose upload already failed
+        :data:`MULTI_MAX_TRANSIENT` times (its ``attempts`` — a timeout and a
+        raised send count too) ungroups its payload for good
+        (``ungroup_payload``): its rows go per row from now on, with the
+        host-hop fallback, so a NEVER_DROP multi row cannot hold its seats'
+        later content (the outbox ordering gate) on the ceiling backoff."""
         if self._transport is None:
             return []
         still_wanted = (
@@ -3610,9 +3622,16 @@ class FederationService:
         rows: dict[str, RemoteInstance | None] = {}
         caps: dict[str, int] = {}
         buckets: dict[tuple[str, bytes | str], list[list[OutboxEntry]]] = {}
+        ungrouped: set[str] = set()
         for entry in entries:
             space_id = entry.space_id
             if entry.msg_id is None or entry.payload_id is None or space_id is None:
+                continue
+            if entry.payload_id in ungrouped:
+                continue
+            if entry.attempts >= MULTI_MAX_TRANSIENT:
+                ungrouped.add(entry.payload_id)
+                await self._outbox_repo.ungroup_payload(entry.payload_id)
                 continue
             if entry.instance_id not in rows:
                 rows[entry.instance_id] = await self._federation_repo.get_instance(
@@ -3638,7 +3657,12 @@ class FederationService:
                     break
             else:
                 chunks.append([entry])
-        return [c for chunks in buckets.values() for c in chunks if len(c) >= 2]
+        return [
+            c
+            for chunks in buckets.values()
+            for c in chunks
+            if len(c) >= 2 and c[0].payload_id not in ungrouped
+        ]
 
     async def deliver_outbox_multi(
         self, group: list[OutboxEntry]
