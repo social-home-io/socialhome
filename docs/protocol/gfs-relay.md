@@ -1246,7 +1246,7 @@ sequenceDiagram
 | GFS storage while queued (200) | 200 × ~5.6 KB = 1.13 MB | 5.6 KB once + 200 × 64 B |
 | GFS pushes | 200 × 5.6 KB | unchanged: 200 × 5.6 KB (the bytes are duplicated only on push) |
 | Local outbox, 200 recipients failing | 200 × ~1.9 KB sealed envelopes = 420 KB of rows | one ~1.5 KB wrapped payload + 200 × ~230 B = 48 KB |
-| Local outbox per multi broadcast (200 seats) | — | one wrapped payload + 200 ref rows (≈ 48 KB), deleted on the 202; up to 50 rows per pass, so 4 uploads of ≤ 50 |
+| Local outbox per multi broadcast (200 seats) | — | one wrapped payload + 200 ref rows (≈ 48 KB), deleted on the 202; read in one drain pass (`DRAIN_BATCH` = 500), so ONE upload |
 | Retry after a lost `202` (200 seats) | 200 per-recipient re-sends | 1 upload, same `msg_id` — receivers drop it in the replay cache |
 | Followers | 0 | 0 |
 

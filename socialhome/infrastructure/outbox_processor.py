@@ -28,6 +28,7 @@ from typing import Protocol
 
 from ..domain.federation import MULTI_EVENT_TYPES
 from ..domain.federation_retention import NEVER_DROP, TERMINAL_GRACE, is_long_lived
+from ..domain.gfs_mailbox import MULTI_MAX_RECIPIENTS
 from ..domain.outbox import DeliveryOutcome, RetryAfter
 from ..repositories.outbox_repo import (
     PURGE_BATCH,
@@ -77,6 +78,13 @@ PAIR_WINDOW_404_ATTEMPTS: int = 4
 #: Most deliveries one drain pass runs at once, across recipients. One
 #: recipient never has more than one in flight (its rows go in order).
 PARALLEL_RECIPIENTS: int = 8
+
+#: Due rows one drain pass reads. As large as one multi-recipient group
+#: (``MULTI_MAX_RECIPIENTS``), so a broadcast to 500 mailbox seats goes up
+#: as ONE upload in one pass, not in 50-row chunks over ten passes. Rows
+#: are small (a ref row is ~230 B); at most PARALLEL_RECIPIENTS deliver at
+#: once, and a stalled recipient costs one timeout per pass.
+DRAIN_BATCH: int = MULTI_MAX_RECIPIENTS
 
 #: Longest one delivery (one row, or one multi upload) may take before it
 #: counts as :attr:`DeliveryOutcome.TRANSIENT` — a hung peer must not hold a
@@ -306,7 +314,7 @@ class OutboxProcessor:
 
     # ── Single tick ────────────────────────────────────────────────────
 
-    async def drain_once(self, *, limit: int = 50) -> int:
+    async def drain_once(self, *, limit: int = DRAIN_BATCH) -> int:
         """Process up to ``limit`` due entries. Returns count processed.
 
         Recipients go in parallel — at most :data:`PARALLEL_RECIPIENTS`

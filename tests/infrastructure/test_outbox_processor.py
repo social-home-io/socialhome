@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.federation_retention import capped_delete_key
+from socialhome.domain.gfs_mailbox import MULTI_MAX_RECIPIENTS
 from socialhome.infrastructure import outbox_processor as outbox_processor_mod
 from socialhome.infrastructure.outbox_processor import (
     BACKOFF_SECONDS,
@@ -106,6 +107,15 @@ async def test_drain_once_empty_repo():
     proc = OutboxProcessor(repo, AsyncMock())
     result = await proc.drain_once()
     assert result == 0
+
+
+async def test_one_pass_reads_a_whole_multi_group():
+    """A broadcast to 500 mailbox seats is read in ONE pass, so it goes up as
+    one upload — not in 50-row chunks over ten passes."""
+    repo = MagicMock()
+    repo.list_due = AsyncMock(return_value=[])
+    await OutboxProcessor(repo, AsyncMock()).drain_once()
+    repo.list_due.assert_awaited_once_with(MULTI_MAX_RECIPIENTS)
 
 
 async def test_drain_once_success():
