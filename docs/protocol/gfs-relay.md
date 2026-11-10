@@ -1204,7 +1204,9 @@ are *busy* (in memory): a pass leaves their rows out (in the SQL, so a busy
 recipient's backlog never fills the batch) until that delivery ends, so a
 recipient's rows still go one at a time in due order, and a group is formed
 only from recipients that are not busy (a busy one keeps its row, same
-`msg_id`, for a later pass). Per-recipient deliveries share 8 slots
+`msg_id`, for a later pass) and only from each recipient's oldest row of
+the pass (its later rows go after the group, so groups never cross).
+Per-recipient deliveries share 8 slots
 (`PARALLEL_RECIPIENTS`); multi uploads go to the GFS, not to a peer, and
 have their own 4 (`MULTI_PARALLEL`), so a hung peer — even eight — never
 delays a queued broadcast. Each delivery is bounded by 120 s. Nothing busy
