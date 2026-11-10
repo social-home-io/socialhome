@@ -855,7 +855,7 @@ def make_decrypt_and_parse(*, key_manager, encoder, loads) -> InboundStep:
     async def decrypt_and_parse(ctx: InboundContext) -> None:
         data = ctx.envelope
         if ctx.multi_key is not None:
-            # v_90: one body for every recipient — sealed under the body
+            # v_91: one body for every recipient — sealed under the body
             # key its wrap delivered, never a pair session key.
             try:
                 decrypted_json = decrypt_mr_payload(
@@ -888,7 +888,7 @@ def make_decrypt_and_parse(*, key_manager, encoder, loads) -> InboundStep:
             and "space_id" in inner
             and inner["space_id"] != data.get("space_id")
         ):
-            # v_90: the payload must name the space the signed envelope
+            # v_91: the payload must name the space the signed envelope
             # names — a payload pointing elsewhere is refused before any
             # handler reads it. Never the space ids in the log.
             raise ValueError("multi-recipient payload names another space")

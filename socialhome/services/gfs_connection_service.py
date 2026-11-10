@@ -1989,7 +1989,7 @@ class GfsConnectionService:
             self._envelope_mailbox[conn.id] = isinstance(
                 caps.get(ENVELOPE_MAILBOX_CAPABILITY), dict
             )
-            # v_90 — one frame for many mailboxes (a dict of its limits).
+            # v_91 — one frame for many mailboxes (a dict of its limits).
             self._envelope_multi[conn.id] = _envelope_multi_cap(
                 caps.get(ENVELOPE_MULTI_CAPABILITY)
             )

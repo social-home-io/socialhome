@@ -24,7 +24,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from ..domain.federation import MULTI_EVENT_TYPES
 from ..domain.federation_retention import NEVER_DROP, TERMINAL_GRACE, is_long_lived
@@ -131,6 +131,13 @@ MAX_RETRY_AFTER_S: float = float(BACKOFF_SECONDS[-1])
 #: :attr:`DeliveryOutcome.TRANSIENT`.
 Deliver = Callable[[OutboxEntry], Awaitable["DeliveryOutcome | RetryAfter"]]
 
+#: What one multi upload did: the outcome and the rows it applies to (the
+#: rows that went up), or ``None`` when nothing went up. A row of the group
+#: left out is handed back: it stays pending and due, for a later pass.
+MultiDelivery = tuple[DeliveryOutcome | RetryAfter, list[OutboxEntry]] | None
+
+_T = TypeVar("_T")
+
 
 class OutboxMulti(Protocol):
     """Sends due rows of one multi payload as ONE multi-recipient upload
@@ -138,9 +145,13 @@ class OutboxMulti(Protocol):
 
     ``outbox_multi_groups`` returns groups (≥ 2 rows each, every row's
     recipient at most once) that may go up together; rows in no group go
-    one by one. ``deliver_outbox_multi`` returns the outcome that applies to
-    every row of *group*, or ``None`` when the group could not go up as one
-    (each row is then delivered on its own).
+    one by one. ``deliver_outbox_multi`` returns the outcome and the rows of
+    *group* it applies to (a target no longer eligible is left out), or
+    ``None`` when nothing went up. Rows left out are handed back to the
+    per-recipient pool — never sent inside the multi slot: they stay pending
+    and due, and their recipients stall for the pass (FIFO). A payload the
+    GFS refused or whose frame cannot be built is marked so it is never
+    grouped again (``ungroup_payload``), so its rows then go one by one.
 
     Every envelope built from a multi payload carries its stored
     ``msg_id``, so an upload the GFS accepted but whose answer was lost is
@@ -152,9 +163,7 @@ class OutboxMulti(Protocol):
         self, entries: list[OutboxEntry]
     ) -> list[list[OutboxEntry]]: ...
 
-    async def deliver_outbox_multi(
-        self, group: list[OutboxEntry]
-    ) -> DeliveryOutcome | RetryAfter | None: ...
+    async def deliver_outbox_multi(self, group: list[OutboxEntry]) -> MultiDelivery: ...
 
 
 #: The moderation queue's per-row check (``still_wanted``), or a resolver of
@@ -188,9 +197,7 @@ class GatedOutboxMulti:
             entries = [e for e in entries if _groupable(e) and await still_wanted(e)]
         return await self._inner.outbox_multi_groups(entries)
 
-    async def deliver_outbox_multi(
-        self, group: list[OutboxEntry]
-    ) -> DeliveryOutcome | RetryAfter | None:
+    async def deliver_outbox_multi(self, group: list[OutboxEntry]) -> MultiDelivery:
         return await self._inner.deliver_outbox_multi(group)
 
 
@@ -292,6 +299,9 @@ class OutboxProcessor:
         if self._task is not None and not self._task.done():
             return
         self._stop.clear()
+        # A stop may have cut a delivery's bookkeeping short: nothing is in
+        # flight now, so no recipient is busy.
+        self._busy.clear()
         self._task = asyncio.create_task(self._loop(), name="OutboxProcessor")
 
     def wake(self) -> None:
@@ -380,9 +390,11 @@ class OutboxProcessor:
         its remaining rows of the pass are not attempted: they stay
         ``pending`` for a later pass, with no attempt counted — one dead
         peer costs one timeout per pass, not one per queued row. A fast
-        failure does not stall. A group that fails so stalls each of its
-        recipients; a later group drops a stalled recipient (and goes per
-        row when fewer than two are left).
+        failure does not stall. A group that does not succeed — however fast
+        it failed — stalls each of its recipients (a row queued behind a
+        multi row never overtakes it), and so does a row handed back from a
+        group; a later group drops a stalled recipient (and goes per row
+        when fewer than two are left).
 
         Errors raised by the deliver callback (and timeouts) are treated as
         :attr:`DeliveryOutcome.TRANSIENT`. Rows whose ``attempts`` would
@@ -466,16 +478,27 @@ class OutboxProcessor:
         whose delivery is slow to fail or throttled joins *stalled*."""
         try:
             if len(unit) > 1 and self._multi is not None:
-                started = time.monotonic()
-                group = await self._attempt(
+                result = await self._attempt(
                     unit[0].id, self._multi.deliver_outbox_multi(unit)
                 )
-                if group is not None:
-                    if _stalls(group, time.monotonic() - started):
-                        stalled.update(e.instance_id for e in unit)
-                    for entry in unit:
-                        await self._settle(entry, group)
-                    return
+                outcome, sent = (
+                    (result, unit)
+                    if isinstance(result, DeliveryOutcome)
+                    else result or (DeliveryOutcome.TRANSIENT, [])
+                )
+                for entry in sent:
+                    await self._settle(entry, outcome)
+                # Every recipient whose row did not go through stalls for the
+                # pass, and a row handed back goes per row in a later one.
+                done = (
+                    {e.id for e in sent}
+                    if outcome is DeliveryOutcome.SUCCESS
+                    else set()
+                )
+                stalled.update(e.instance_id for e in unit if e.id not in done)
+                if len(sent) < len(unit):
+                    self.wake()
+                return
             for entry in unit:
                 started = time.monotonic()
                 outcome = await self._attempt(entry.id, self._deliver(entry))
@@ -487,10 +510,8 @@ class OutboxProcessor:
             log.exception("OutboxProcessor: delivery bookkeeping failed")
 
     async def _attempt(
-        self,
-        label: str,
-        delivery: Awaitable[DeliveryOutcome | RetryAfter | None],
-    ) -> DeliveryOutcome | RetryAfter | None:
+        self, label: str, delivery: Awaitable[_T]
+    ) -> _T | DeliveryOutcome:
         try:
             return await asyncio.wait_for(delivery, timeout=SEND_IDLE_TIMEOUT_S)
         except TimeoutError:

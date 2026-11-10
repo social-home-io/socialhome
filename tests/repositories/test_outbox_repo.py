@@ -1283,3 +1283,56 @@ async def test_pending_multi_due_names_only_a_pending_multi_row(env):
     assert due == later.strftime("%Y-%m-%d %H:%M:%S")
     await env.outbox_repo.mark_delivered(written["peer-b"])
     assert await env.outbox_repo.pending_multi_due("peer-b") is None
+
+
+async def test_a_row_behind_a_pending_multi_row_waits_for_it(env):
+    """v_91 FIFO on every attempt: a household's other row is not handed
+    out while an older multi row of it is still pending — even when that row
+    failed and waits on its backoff while the later row is due."""
+    written = await env.outbox_repo.enqueue_refs(
+        instance_ids=["peer-a", "peer-b"],
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        supersede_key=None,
+        payload_ref=dataclasses.replace(_stored("p-m"), msg_id="wire-1"),
+    )
+    await _enqueue_ref(env, "peer-a", "a-behind")
+    await _enqueue_ref(env, "peer-b", "b-behind")
+    later = datetime.now(UTC) + timedelta(minutes=5)
+    await env.outbox_repo.reschedule(written["peer-a"], later.isoformat(), 1)
+    await env.outbox_repo.mark_delivered(written["peer-b"])
+    assert [e.id for e in await env.outbox_repo.list_due()] == ["b-behind"]
+    await env.outbox_repo.mark_delivered(written["peer-a"])
+    assert [e.id for e in await env.outbox_repo.list_due()] == [
+        "a-behind",
+        "b-behind",
+    ]
+
+
+async def test_due_rows_tie_break_on_creation(env):
+    """Rows due at the same instant come out oldest first, then in insert
+    order — never in whatever order SQLite happens to scan."""
+    for eid in ("x1", "x2", "x3"):
+        await _enqueue_ref(env, "peer-a", eid)
+    await env.db.enqueue(
+        "UPDATE federation_outbox SET next_attempt_at='2000-01-01T00:00:00+00:00',"
+        " created_at=CASE id WHEN 'x3' THEN '1999-01-01 00:00:00'"
+        " ELSE '1999-06-01 00:00:00' END"
+    )
+    assert [e.id for e in await env.outbox_repo.list_due()] == ["x3", "x1", "x2"]
+
+
+async def test_an_ungrouped_payload_lists_without_its_multi_id(env):
+    """A multi payload the GFS refused goes per row: its rows list with no
+    ``msg_id`` (never grouped again), while the stored payload keeps it for
+    every per-row envelope and the FIFO."""
+    written = await env.outbox_repo.enqueue_refs(
+        instance_ids=["peer-a", "peer-b"],
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        supersede_key=None,
+        payload_ref=dataclasses.replace(_stored("p-m"), msg_id="wire-1"),
+    )
+    await env.outbox_repo.ungroup_payload("p-m")
+    assert {e.msg_id for e in await env.outbox_repo.list_due()} == {None}
+    assert (await env.outbox_repo.get_payload("p-m")).msg_id == "wire-1"
+    assert await env.outbox_repo.pending_multi_due("peer-a") is not None
+    assert sorted(written) == ["peer-a", "peer-b"]

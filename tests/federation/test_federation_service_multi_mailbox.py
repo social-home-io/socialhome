@@ -655,3 +655,61 @@ async def test_a_live_send_with_nothing_queued_goes_live_and_paired_pay_no_read(
     assert s.transport.per_recipient_ids() == [seat, peer]
     assert asked == [seat]  # one query, only for a space_session seat
     assert s.outbox.rescheduled == []
+
+
+async def test_the_host_hop_queues_behind_a_seat_s_pending_multi_row():
+    """A seat we cannot reach at its mailbox goes through the space's host —
+    but not past a multi row it still has pending: that send is queued
+    behind the row like a live one."""
+    s = _Sender()
+    seats = [await s.seat() for _ in range(2)]
+    await s.broadcast()
+    hop = MagicMock()
+    hop.send = AsyncMock()
+    s.svc.attach_member_mesh(host_hop=hop, mailbox_sender_check=_never)
+
+    async def _unreachable(instance, space_id) -> bool:
+        return False
+
+    s.transport.mailbox_reachable = _unreachable  # type: ignore[method-assign]
+    # A directory seat with no GFS relay of ours: the host hop is its path.
+    seat = await s.repo.get_instance(seats[0])
+    await s.repo.save_instance(dataclasses.replace(seat, relay_via=None))
+    result = await s.svc.send_with_mesh_fallback(
+        to_instance_id=seats[0],
+        event_type=POST,
+        payload={"post_id": "p-2"},
+        space_id=_SPACE,
+    )
+    assert result.error == DELIVERY_ERROR_QUEUED and not result.ok
+    hop.send.assert_not_awaited()
+    assert s.outbox.enqueued[-1]["instance_id"] == seats[0]
+
+
+async def test_one_ineligible_seat_is_dropped_from_the_upload():
+    """A seat that lost its mailbox since the rows were grouped is left out
+    (its row goes per row later); the other two still go up as one."""
+    s = _Sender()
+    seats = [await s.seat() for _ in range(3)]
+    await s.broadcast()
+    s.transport.multi.clear()
+    [group] = await s.svc.outbox_multi_groups(s.outbox.entries())
+    del s.transport.targets[seats[0]]
+    outcome, sent = await s.svc.deliver_outbox_multi(group)
+    assert outcome is DeliveryOutcome.SUCCESS
+    assert sorted(e.instance_id for e in sent) == sorted(seats[1:])
+    [upload] = s.transport.multi
+    assert _mailboxes(upload) == _boxes(s, seats[1:])
+
+
+async def test_a_group_left_with_one_seat_does_not_go_up():
+    s = _Sender()
+    seats = [await s.seat() for _ in range(2)]
+    await s.broadcast()
+    s.transport.multi.clear()
+    [group] = await s.svc.outbox_multi_groups(s.outbox.entries())
+    del s.transport.targets[seats[0]]
+    assert await s.svc.deliver_outbox_multi(group) is None
+    assert s.transport.multi == []
+    # Not refused by the GFS: the payload may still be grouped later.
+    assert s.outbox.ungrouped == set()

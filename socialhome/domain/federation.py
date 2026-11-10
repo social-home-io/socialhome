@@ -862,7 +862,7 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
 #: envelope); and the four mesh-routing types above.
 
 
-#: v_90 — the members of :data:`SPACE_SESSION_ALLOWED_EVENT_TYPES` that never
+#: v_91 — the members of :data:`SPACE_SESSION_ALLOWED_EVENT_TYPES` that never
 #: ride a multi-recipient mailbox frame (one body sealed once, its key
 #: wrapped to many member households' mailboxes). A multi frame is for an event
 #: whose identical bytes every listed member household may read; these are

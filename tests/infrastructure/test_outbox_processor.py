@@ -662,6 +662,8 @@ class _Multi:
     def __init__(self, groups, outcome=DeliveryOutcome.SUCCESS) -> None:
         self._groups = groups
         self.outcome = outcome
+        #: Row ids the upload leaves out (handed back), if any.
+        self.left_out: set[str] = set()
         self.delivered: list[list[str]] = []
         self.gate: asyncio.Event | None = None
 
@@ -672,7 +674,9 @@ class _Multi:
         self.delivered.append([e.id for e in group])
         if self.gate is not None:
             await self.gate.wait()
-        return self.outcome
+        if self.outcome is None:
+            return None
+        return self.outcome, [e for e in group if e.id not in self.left_out]
 
 
 async def test_drain_runs_recipients_in_parallel_up_to_the_cap():
@@ -788,14 +792,68 @@ async def test_a_group_member_s_other_rows_wait_for_the_group():
     assert seen == ["c1", "a2"]
 
 
-async def test_a_group_that_could_not_go_up_goes_per_recipient():
-    a, b = _row("a", "A"), _row("b", "B")
-    repo = _repo_for([a, b])
+async def test_a_group_that_could_not_go_up_is_handed_back_per_recipient():
+    """Refused or oversize: the rows are not sent inside the multi slot.
+    They stay pending and due (no attempt counted) for a later pass, which
+    sends them per row; their recipients' later rows wait (FIFO)."""
+    a, b, a2, c = _row("a", "A"), _row("b", "B"), _row("a2", "A"), _row("c", "C")
+    repo = _repo_for([a, b, a2, c])
     multi = _Multi([[a, b]], outcome=None)
     single = AsyncMock(return_value=DeliveryOutcome.SUCCESS)
+    proc = OutboxProcessor(repo, single, multi=multi)
+    await proc.drain_once()
+    assert [c.args[0].id for c in single.await_args_list] == ["c"]
+    repo.reschedule.assert_not_awaited()
+    assert [c.args[0] for c in repo.mark_delivered.await_args_list] == ["c"]
+    assert proc._wake.is_set()  # the next pass comes at once, not at the poll
+
+
+async def test_rows_left_out_of_an_upload_are_handed_back():
+    """An upload that left a target out (no mailbox any more) settles only
+    the rows that went up; the other stays pending and its recipient's later
+    rows wait for it."""
+    a, b, c, c2 = _row("a", "A"), _row("b", "B"), _row("c", "C"), _row("c2", "C")
+    repo = _repo_for([a, b, c, c2])
+    multi = _Multi([[a, b, c]])
+    multi.left_out = {"c"}
+    single = AsyncMock(return_value=DeliveryOutcome.SUCCESS)
     await OutboxProcessor(repo, single, multi=multi).drain_once()
-    assert sorted(c.args[0].id for c in single.await_args_list) == ["a", "b"]
-    assert repo.mark_delivered.await_count == 2
+    assert sorted(c.args[0] for c in repo.mark_delivered.await_args_list) == [
+        "a",
+        "b",
+    ]
+    single.assert_not_awaited()
+    repo.reschedule.assert_not_awaited()
+
+
+async def test_a_fast_failed_group_stalls_each_of_its_recipients():
+    """A 5xx answered at once still stalls the group's recipients: a row
+    queued behind the multi row must not overtake it on its retry."""
+    a, b, a2 = _row("a", "A"), _row("b", "B"), _row("a2", "A")
+    repo = _repo_for([a, b, a2])
+    multi = _Multi([[a, b]], outcome=DeliveryOutcome.TRANSIENT)
+    single = AsyncMock(return_value=DeliveryOutcome.SUCCESS)
+    await OutboxProcessor(repo, single, multi=multi, rng=lambda: 0.0).drain_once()
+    single.assert_not_awaited()
+    assert sorted(c.args[0] for c in repo.reschedule.await_args_list) == ["a", "b"]
+
+
+async def test_start_after_a_stop_mid_delivery_drains_the_recipient():
+    """A stop that cut a delivery short (its bookkeeping never ran) leaves
+    no recipient busy for the next start."""
+    repo = _LiveRepo([_row("a1", "A")])
+    proc = OutboxProcessor(
+        repo,
+        AsyncMock(return_value=DeliveryOutcome.SUCCESS),
+        poll_interval_seconds=0.01,
+    )
+    proc._busy.add("A")
+    await proc.stop()
+    await proc.start()
+    try:
+        await _until(lambda: repo.delivered == ["a1"])
+    finally:
+        await proc.stop()
 
 
 async def test_groups_that_would_reorder_a_recipient_are_dissolved():
@@ -942,7 +1000,7 @@ class _Fed:
         return [entries]
 
     async def deliver_outbox_multi(self, group):
-        return DeliveryOutcome.SUCCESS
+        return DeliveryOutcome.SUCCESS, group
 
 
 async def test_gated_multi_keeps_rows_moderation_refuses_out_of_groups():
@@ -958,7 +1016,7 @@ async def test_gated_multi_keeps_rows_moderation_refuses_out_of_groups():
         ["a", "b"]
     ]
     assert checked == ["a", "refused", "b"]
-    assert await gate.deliver_outbox_multi(rows) is DeliveryOutcome.SUCCESS
+    assert await gate.deliver_outbox_multi(rows) == (DeliveryOutcome.SUCCESS, rows)
     ungated = GatedOutboxMulti(_Fed(), lambda: None)
     assert len((await ungated.outbox_multi_groups(rows))[0]) == 3
 

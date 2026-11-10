@@ -170,7 +170,7 @@ async def test_due_ref_rows_on_one_gfs_go_up_as_one_multi_upload():
     assert sorted(e.instance_id for e in group) == sorted(seats)
 
     s.transport.multi_result = (True, None, None)
-    assert await s.svc.deliver_outbox_multi(group) is DeliveryOutcome.SUCCESS
+    assert await s.svc.deliver_outbox_multi(group) == (DeliveryOutcome.SUCCESS, group)
     [upload] = s.transport.multi
     assert sorted(t.mailbox_id for t, _wrap in upload[0]) == sorted(
         s.transport.targets[i].mailbox_id for i in seats
@@ -191,25 +191,30 @@ async def test_a_throttled_or_unreachable_upload_is_retried_as_one():
     await _failing_broadcast(s, seats=2)
     [group] = await s.svc.outbox_multi_groups(s.outbox.entries())
     s.transport.multi_result = (False, RELAY_STATUS_THROTTLED, None)
-    assert await s.svc.deliver_outbox_multi(group) == RetryAfter(seconds=60.0)
+    assert await s.svc.deliver_outbox_multi(group) == (RetryAfter(seconds=60.0), group)
     s.transport.multi_result = (False, RELAY_STATUS_THROTTLED, 90.0)
-    assert await s.svc.deliver_outbox_multi(group) == RetryAfter(seconds=90.0)
+    assert await s.svc.deliver_outbox_multi(group) == (RetryAfter(seconds=90.0), group)
     for result in ((False, 503, None), (False, 500, None), (False, None, None)):
         s.transport.multi_result = result
-        assert await s.svc.deliver_outbox_multi(group) is DeliveryOutcome.TRANSIENT
+        assert await s.svc.deliver_outbox_multi(group) == (
+            DeliveryOutcome.TRANSIENT,
+            group,
+        )
+    assert s.outbox.ungrouped == set()
     assert s.transport.sends == []
 
 
 async def test_a_refused_upload_goes_per_row_under_the_msg_id():
     """Any other 4xx refuses the same frame again on every retry: the rows
-    go on their own (``None``), each envelope under the payload's stable
-    ``msg_id``."""
-    s = _Sender()
-    await _failing_broadcast(s, seats=2)
-    [group] = await s.svc.outbox_multi_groups(s.outbox.entries())
+    go on their own (``None``) and the payload is never grouped again, each
+    envelope under the payload's stable ``msg_id``."""
     for status in (400, 404, 413):
+        s = _Sender()
+        await _failing_broadcast(s, seats=2)
+        [group] = await s.svc.outbox_multi_groups(s.outbox.entries())
         s.transport.multi_result = (False, status, None)
         assert await s.svc.deliver_outbox_multi(group) is None
+        assert await s.svc.outbox_multi_groups(s.outbox.entries()) == []
     [stored] = s.outbox.payloads.values()
     instance = await s.repo.get_instance(group[0].instance_id)
     envelope = orjson.loads(await s.svc.seal_outbox_entry(group[0], instance))
@@ -227,6 +232,7 @@ async def test_an_oversize_frame_goes_per_row_under_the_msg_id():
     [group] = await s.svc.outbox_multi_groups(s.outbox.entries())
     assert await s.svc.deliver_outbox_multi(group) is None
     assert s.transport.multi == []
+    assert await s.svc.outbox_multi_groups(s.outbox.entries()) == []
     [stored] = s.outbox.payloads.values()
     assert stored.msg_id is not None
     instance = await s.repo.get_instance(group[0].instance_id)

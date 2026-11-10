@@ -1205,20 +1205,34 @@ have their own 4 (`MULTI_PARALLEL`), so a hung peer — even eight — never
 delays a queued broadcast. Each delivery is bounded by 120 s. Nothing busy
 is persisted: a crash leaves the rows pending. `stop()` waits for the loop
 and the deliveries in flight up to its 5 s deadline, then cancels them
-(their rows stay pending). A live per-recipient send (`send_event`) to a
-`space_session` seat that still has a multi-payload row pending would
+(their rows stay pending); `start()` clears the busy set.
+
+**Per-recipient FIFO behind a multi row — on every attempt.** A
+household's other rows are not handed out while an older multi-payload
+row of it is still pending (`list_due`, one `NOT EXISTS`), so a row queued
+behind a multi row waits through that row's retries too. A multi upload
+that does not succeed — however fast it failed — stalls each of its
+recipients for the rest of the pass. Due rows order by `next_attempt_at`,
+then creation, then insert order. A live per-recipient send (`send_event`)
+to a `space_session` seat that still has a multi-payload row pending would
 overtake it, so it is queued to the outbox instead, due no earlier than
-that row (one indexed query, only for `space_session` seats).
+that row (one indexed query, only for `space_session` seats) — and so is a
+send through the space's host (the v_89 host hop) to a seat we cannot
+reach at its mailbox.
 
 **Failures.** A `429` waits the GFS's `Retry-After` (60 s when it names
 none); a timeout, a `5xx` or a transport error is TRANSIENT. Either way the
 rows are rescheduled together and never fanned out per recipient, so a busy
-GFS gets no burst. A group's rows go per row — pair-sealed, under the multi
-payload's `msg_id` — when the GFS refused the upload with any other `4xx`
-(the same frame would be refused again), when no frame can be built (over
-the top size bucket, a seat no longer multi-capable) or when the group has
-shrunk to one. A peer below v_91, a GFS without `envelope_multi` or a seat
-alone on its GFS: per-recipient frames, as in v_89.
+GFS gets no burst. A target no longer eligible when the upload is built
+(removed, no mailbox, an older peer) is dropped from it — its row is handed
+back and goes per row in a later pass — and the rest still go up while two
+or more remain. When the GFS refused the upload with any other `4xx` (the
+same frame would be refused again) or no frame can be built (over the top
+size bucket), every row is handed back — never sent per row inside the
+multi slot — and the payload is marked `per_row`: its rows go per row once,
+pair-sealed under the multi payload's `msg_id`, and are never regrouped. A
+peer below v_91, a GFS without `envelope_multi` or a seat alone on its GFS:
+per-recipient frames, as in v_89.
 
 **Residuals.** What the earlier space-key design left open is gone: no
 frame waits for a key handoff (nothing is parked), no sender can be "behind

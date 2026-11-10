@@ -17,6 +17,9 @@
 -- uploads it ONCE for all of them. Every envelope built from it — the multi
 -- frame and any per-row fallback — carries that ``msg_id``, so a retry
 -- after a lost answer is dropped by the receivers' replay cache.
+-- ``per_row`` = 1 takes a multi payload out of every group for good: the
+-- GFS refused its upload (a non-429 4xx) or the frame could not be built
+-- (oversize), so its rows go one by one — still under that ``msg_id``.
 --
 -- Invariants live in the database, not in the repository:
 --   * a ref row may only point at a stored payload (BEFORE INSERT trigger);
@@ -61,6 +64,7 @@ CREATE TABLE IF NOT EXISTS federation_outbox_payloads (
     space_id    TEXT,
     payload_enc TEXT NOT NULL,
     msg_id      TEXT,
+    per_row     INTEGER NOT NULL DEFAULT 0 CHECK (per_row IN (0, 1)),
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

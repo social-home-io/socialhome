@@ -89,6 +89,7 @@ class AbstractOutboxRepo(Protocol):
         self, limit: int = 50, *, exclude: Collection[str] = ()
     ) -> list[OutboxEntry]: ...
     async def pending_multi_due(self, instance_id: str) -> str | None: ...
+    async def ungroup_payload(self, payload_id: str) -> None: ...
     async def mark_delivered(self, entry_id: str) -> None: ...
     async def mark_failed(self, entry_id: str) -> None: ...
     async def reschedule(
@@ -346,9 +347,14 @@ class SqliteOutboxRepo:
 
         Excludes entries past their retention window (``expires_at``) and
         those of the households in *exclude* (the processor's busy
-        recipients, so their backlog never fills the batch). The caller is
-        responsible for filtering entries whose destination instance is
-        banned or unreachable.
+        recipients, so their backlog never fills the batch). A row that is
+        not of a multi payload is left out while an older row of a multi
+        payload is still pending for its household (v_91 per-recipient
+        FIFO — on every retry, not only the first attempt). Ties on the due
+        time go oldest first, then in insert order. A multi payload taken
+        out of every group (:meth:`ungroup_payload`) lists with no
+        ``msg_id``. The caller is responsible for filtering entries whose
+        destination instance is banned or unreachable.
         """
         # ``next_attempt_at`` and ``expires_at`` are stored as ISO-8601
         # with a ``T`` separator and a timezone suffix (``...+00:00``).
@@ -359,7 +365,7 @@ class SqliteOutboxRepo:
         rows = await self._db.fetchall(
             """
             SELECT o.*, p.space_id AS payload_space_id,
-                   p.msg_id AS payload_msg_id
+                   CASE WHEN p.per_row = 0 THEN p.msg_id END AS payload_msg_id
               FROM federation_outbox o
               LEFT JOIN federation_outbox_payloads p ON p.id = o.payload_id
              WHERE o.status='pending'
@@ -369,7 +375,20 @@ class SqliteOutboxRepo:
                    OR datetime(o.expires_at) > datetime('now')
                )
                AND o.instance_id NOT IN (SELECT value FROM json_each(?))
-             ORDER BY datetime(o.next_attempt_at) ASC
+               AND (
+                   p.msg_id IS NOT NULL
+                   OR NOT EXISTS (
+                       SELECT 1
+                         FROM federation_outbox m
+                         JOIN federation_outbox_payloads mp ON mp.id = m.payload_id
+                        WHERE m.instance_id = o.instance_id
+                          AND m.status = 'pending'
+                          AND mp.msg_id IS NOT NULL
+                          AND (m.created_at, m.rowid) < (o.created_at, o.rowid)
+                   )
+               )
+             ORDER BY datetime(o.next_attempt_at) ASC, o.created_at ASC,
+                      o.rowid ASC
              LIMIT ?
             """,
             (orjson.dumps(sorted(exclude)).decode(), int(limit)),
@@ -389,6 +408,16 @@ class SqliteOutboxRepo:
             (instance_id,),
         )
         return None if row is None else row["due"]
+
+    async def ungroup_payload(self, payload_id: str) -> None:
+        """Take the multi payload *payload_id* out of every group for good
+        (the GFS refused its upload, or its frame cannot be built): its rows
+        list with no ``msg_id`` and go one by one, while each per-row
+        envelope still carries the stored ``msg_id``."""
+        await self._db.enqueue(
+            "UPDATE federation_outbox_payloads SET per_row=1 WHERE id=?",
+            (payload_id,),
+        )
 
     async def get_payload(self, payload_id: str) -> OutboxPayload | None:
         """The stored payload a ref row points at (migration 0145)."""

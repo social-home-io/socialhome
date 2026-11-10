@@ -2489,7 +2489,19 @@ class FederationService:
             ):
                 # v_89 — a member seated from the host's directory that we
                 # cannot reach at its GFS mailbox (no connection to that GFS,
-                # or it has none): the space's host is the one hop.
+                # or it has none): the space's host is the one hop. Never
+                # past a multi row it still has pending (v_91 FIFO): queue
+                # behind it like a live send.
+                behind = await self._outbox_repo.pending_multi_due(to_instance_id)
+                if behind is not None:
+                    return await self._queue_behind_multi(
+                        to_instance_id,
+                        behind,
+                        event_type=event_type,
+                        payload=payload,
+                        space_id=space_id,
+                        state_key=self._state_key(event_type, space_id, payload),
+                    )
                 return await self._host_hop.send(
                     to_instance_id=to_instance_id,
                     event_type=event_type,
@@ -3605,10 +3617,14 @@ class FederationService:
 
     async def deliver_outbox_multi(
         self, group: list[OutboxEntry]
-    ) -> DeliveryOutcome | RetryAfter | None:
+    ) -> tuple[DeliveryOutcome | RetryAfter, list[OutboxEntry]] | None:
         """:class:`~socialhome.infrastructure.outbox_processor.OutboxMulti` —
         ONE multi upload of *group*'s stored payload, under its ``msg_id``;
-        the outcome applies to every row.
+        returns the outcome and the rows it applies to.
+
+        A row whose peer is no longer a multi target (removed, no mailbox,
+        an older peer) is left out — handed back to go per row — and the
+        rest still go up while two or more remain.
 
         SUCCESS on the relay's acceptance (recorded per household as such,
         never as reachability). A fresh body key *K* per attempt seals the
@@ -3617,10 +3633,12 @@ class FederationService:
         (:data:`MULTI_THROTTLE_RETRY_S` when it named none); a timeout, a
         ``5xx`` or a transport error is TRANSIENT — the group is retried as
         it is. A payload that is gone or does not unwrap is PERMANENT.
-        ``None`` (each row then goes on its own, under the same ``msg_id``)
-        when the GFS refused the upload with any other ``4xx``, or no frame
-        can be built: a seat no longer multi-capable, a frame over the top
-        size bucket."""
+        ``None`` (nothing went up; every row is handed back to go on its own,
+        under the same ``msg_id``) when fewer than two targets remain, or
+        the GFS refused the upload with any other ``4xx``, or no frame can
+        be built (over the top size bucket). The last two mark the payload
+        so it is never grouped again (``ungroup_payload``) — the same frame
+        would only be refused again."""
         assert self._transport is not None
         first = group[0]
         space_id = first.space_id
@@ -3632,8 +3650,9 @@ class FederationService:
             log.warning(
                 "outbox: multi payload %s unusable — dropping", first.payload_id
             )
-            return DeliveryOutcome.PERMANENT
+            return DeliveryOutcome.PERMANENT, group
         caps: dict[str, int] = {}
+        sent: list[OutboxEntry] = []
         targets: list[MailboxTarget] = []
         for entry in group:
             row = await self._federation_repo.get_instance(entry.instance_id)
@@ -3642,12 +3661,12 @@ class FederationService:
                 if row is None
                 else await self._multi_target(row, stored.event_type, space_id, caps)
             )
-            if target is None:
-                return None
-            targets.append(target)
-        if stored.msg_id is None:
+            if target is not None:
+                sent.append(entry)
+                targets.append(target)
+        if stored.msg_id is None or len(sent) < 2:
             return None
-        recipients = [e.instance_id for e in group]
+        recipients = [e.instance_id for e in sent]
         key = new_mr_key()
         try:
             body = seal_multi(
@@ -3668,6 +3687,7 @@ class FederationService:
             log.info(
                 "outbox: multi frame for space=%s goes per row (%s)", space_id, exc
             )
+            await self._outbox_repo.ungroup_payload(stored.id)
             return None
         ok, status, retry_after_s = await self._transport.send_multi_mailbox(
             to=to, body=body
@@ -3675,12 +3695,12 @@ class FederationService:
         if ok:
             for iid in recipients:
                 self.note_relay_accepted(iid)
-            return DeliveryOutcome.SUCCESS
+            return DeliveryOutcome.SUCCESS, sent
         # Instance-level context only — never a mailbox id.
         log.info(
             "outbox: multi upload for %d household(s) of space=%s not taken "
             "(status=%s)",
-            len(group),
+            len(sent),
             space_id,
             status,
         )
@@ -3689,12 +3709,14 @@ class FederationService:
                 seconds=MULTI_THROTTLE_RETRY_S
                 if retry_after_s is None
                 else retry_after_s
-            )
+            ), sent
         if status is not None and 400 <= status < 500:
             # Refused for good (a malformed or oversize upload): the same
-            # frame would be refused again — each row goes on its own.
+            # frame would be refused again — each row goes on its own, and
+            # the payload is never grouped again.
+            await self._outbox_repo.ungroup_payload(stored.id)
             return None
-        return DeliveryOutcome.TRANSIENT
+        return DeliveryOutcome.TRANSIENT, sent
 
     def _defer_mesh_send(
         self,

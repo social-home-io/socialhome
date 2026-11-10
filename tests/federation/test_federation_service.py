@@ -360,6 +360,8 @@ class InMemoryOutboxRepo:
         self.payloads: dict = {}
         #: ``(entry_id, next_attempt_at, attempts)`` per reschedule.
         self.rescheduled: list[tuple[str, str, int]] = []
+        #: Multi payloads :meth:`ungroup_payload` took out of every group.
+        self.ungrouped: set[str] = set()
 
     async def enqueue(
         self,
@@ -430,11 +432,15 @@ class InMemoryOutboxRepo:
                 msg_id=(
                     self.payloads[e["payload_id"]].msg_id
                     if e["payload_id"] is not None
+                    and e["payload_id"] not in self.ungrouped
                     else None
                 ),
             )
             for e in self.enqueued
         ]
+
+    async def ungroup_payload(self, payload_id: str) -> None:
+        self.ungrouped.add(payload_id)
 
     async def drop_superseded(self, instance_id: str, supersede_key: str) -> int:
         before = len(self.enqueued)

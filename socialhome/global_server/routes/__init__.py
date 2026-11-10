@@ -212,7 +212,7 @@ def register_routes(
     # by design: the body names only the recipient, the payload is sealed
     # end-to-end, and every well-formed request gets the same 202.
     app.router.add_view("/gfs/envelope", EnvelopeRelayView)
-    # ONE sealed frame for many mailboxes (v_90): the body is stored once and
+    # ONE sealed frame for many mailboxes (v_91): the body is stored once and
     # pushed byte-identical to each; the same uniform 202.
     app.router.add_view(ENVELOPE_MULTI_PATH, EnvelopeMultiRelayView)
     # Anonymous per-space mailboxes (GFS redesign PR 1): register a mailbox
