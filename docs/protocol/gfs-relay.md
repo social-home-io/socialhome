@@ -1083,8 +1083,10 @@ instance_id)` per intended household. The content key never leaves
 `SpaceContentEncryption` (like the media key). A sender uses multi only
 once its newest epoch key is at least 10 minutes old
 (`MULTI_EPOCH_GRACE_S`): right after a rotation a member may not hold the
-new key yet, so the fan-out goes per recipient. It never falls back to an
-older epoch.
+new key yet, so the fan-out goes per recipient. The age is the key's
+LOCAL store time (nothing on the wire says when an epoch was minted), so a
+household that has just joined a space also sends per recipient for its
+first 10 minutes there. It never falls back to an older epoch.
 
 **Receiving.** A frame on our mailbox whose `sealed` names an `mr_suite`
 is charged to the mailbox's bucket, its suite and kid shape checked, the
