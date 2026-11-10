@@ -77,7 +77,11 @@ from ..capabilities_sig import UnsupportedCapsSigSuite, verify_capabilities
 from ..crypto import b64url_encode, ed25519_public_key, sign_ed25519
 from ..domain.errors import SpaceNotPublishableError, TierChangeRequiredError
 from ..domain.federation import GfsConnection, GfsSpacePublication
-from ..domain.gfs_mailbox import ENVELOPE_MAILBOX_CAPABILITY
+from ..domain.gfs_mailbox import (
+    ENVELOPE_MAILBOX_CAPABILITY,
+    ENVELOPE_MULTI_CAPABILITY,
+    MULTI_MAX_RECIPIENTS,
+)
 from ..domain.gfs_server import GfsServer
 from ..domain.gfs_space_media import (
     MEDIA_SCOPES,
@@ -143,6 +147,19 @@ SPACE_MEDIA_PUT_TIMEOUT_S: float = 120.0
 #: Longest wait a GFS may advertise for an on-demand request (v_83); a
 #: larger (or malformed) value reads as "no on-demand support".
 MAX_ON_DEMAND_WAIT_S: int = 60
+
+
+def _envelope_multi_cap(entry: object) -> int:
+    """The usable per-upload recipient cap of a verified ``envelope_multi``
+    entry: ``0`` when it is absent or not a dict, else the server's
+    ``max_recipients`` (a positive int) capped at ours, or ours when the
+    entry names none."""
+    if not isinstance(entry, dict):
+        return 0
+    cap = entry.get("max_recipients")
+    if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0:
+        return min(cap, MULTI_MAX_RECIPIENTS)
+    return MULTI_MAX_RECIPIENTS
 
 
 def _space_media_limit(
@@ -422,6 +439,7 @@ class GfsConnectionService:
         "_encrypted_moments",
         "_envelope_mailbox",
         "_envelope_media",
+        "_envelope_multi",
         "_envelope_relay",
         "_http_client",
         "_icon_repo",
@@ -540,6 +558,12 @@ class GfsConnectionService:
         # delivers to anonymous per-space mailboxes. Same rule as
         # ``_envelope_media`` — recorded only from a VERIFIED block.
         self._envelope_mailbox: dict[str, bool] = {}
+        # …and ``envelope_multi`` (v_90): ``POST /gfs/envelope/multi`` takes
+        # one sealed frame for many mailboxes. Holds the usable recipient
+        # cap per upload (the server's ``max_recipients``, never above ours);
+        # ``0`` = the verified block said no. Recorded only from a VERIFIED
+        # block; a missing entry is unknown, re-probed.
+        self._envelope_multi: dict[str, int] = {}
         # Same discipline again, for the ``invite_links`` capability
         # (``POST /gfs/spaces/{id}/invite`` + the public ``/join`` page).
         self._invite_links: dict[str, bool] = {}
@@ -824,6 +848,7 @@ class GfsConnectionService:
             self._envelope_relay,
             self._envelope_media,
             self._envelope_mailbox,
+            self._envelope_multi,
             self._invite_links,
             self._place_pin,
             self._targeted_publish,
@@ -1970,6 +1995,10 @@ class GfsConnectionService:
             self._envelope_mailbox[conn.id] = isinstance(
                 caps.get(ENVELOPE_MAILBOX_CAPABILITY), dict
             )
+            # v_90 — one frame for many mailboxes (a dict of its limits).
+            self._envelope_multi[conn.id] = _envelope_multi_cap(
+                caps.get(ENVELOPE_MULTI_CAPABILITY)
+            )
             if _space_media_limit(caps) is None:
                 self._space_media.pop(conn.id, None)
         if caps is not None and caps.get("addressee_key") is True:
@@ -2225,6 +2254,26 @@ class GfsConnectionService:
             ):
                 await self._fetch_gfs_info(conn)
         return self._envelope_mailbox.get(conn.id, False)
+
+    async def envelope_multi_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS proved ``envelope_multi`` (v_90) under a
+        valid signature: ``POST /gfs/envelope/multi`` takes one sealed frame
+        for many mailbox ids. Probed once on a cold miss."""
+        if self._listing_failed(conn):
+            return False
+        if conn.id not in self._envelope_multi:
+            failed_at = self._info_failed_at.get(conn.id)
+            if failed_at is None or time.monotonic() - failed_at >= (
+                GFS_INFO_NEGATIVE_TTL_S
+            ):
+                await self._fetch_gfs_info(conn)
+        return self._envelope_multi.get(conn.id, 0) > 0
+
+    def envelope_multi_max_recipients(self, conn: GfsConnection) -> int:
+        """Most mailbox ids one multi upload to *conn* may name: the
+        verified ``max_recipients`` capped at :data:`MULTI_MAX_RECIPIENTS`;
+        ``0`` while unproven (read :meth:`envelope_multi_supported` first)."""
+        return self._envelope_multi.get(conn.id, 0)
 
     def space_media_cache_off(self, conn: GfsConnection) -> bool:
         """Whether the last VERIFIED capability block of *conn*'s GFS proved

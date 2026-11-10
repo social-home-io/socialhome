@@ -609,3 +609,64 @@ async def test_envelope_mailbox_unsigned_or_unreachable_is_off(env):
     info["capabilities_sig"] = "AAAA"  # forged
     svc2 = await _svc(env, _MediaSession(info=info))
     assert not await svc2.envelope_mailbox_supported(conn)
+
+
+# ── v_90: envelope_multi from the signed block ───────────────────────────
+
+
+def _multi_info(multi, *, mailbox=True) -> dict:
+    caps: dict = {"anonymous_publish": True}
+    if mailbox:
+        caps["envelope_mailbox"] = {"sig_suites": ["ed25519"], "idle_days": 30}
+    if multi is not None:
+        caps["envelope_multi"] = multi
+    return _base._signed_info(capabilities=caps, gfs_instance_id="inst-g1")
+
+
+async def test_envelope_multi_comes_from_the_signed_block_only(env):
+    session = _MediaSession(info=_multi_info({"max_recipients": 500}))
+    svc = await _svc(env, session)
+    conn = await env[1].get("g1")
+    assert svc.envelope_multi_max_recipients(conn) == 0  # not read yet
+    assert await svc.envelope_multi_supported(conn)
+    assert svc.envelope_multi_max_recipients(conn) == 500
+    probes = len(session.gets)
+    assert await svc.envelope_multi_supported(conn)  # cached
+    assert len(session.gets) == probes
+    # A smaller advertised cap is honoured; a bigger one is capped at ours.
+    svc._record_capabilities(conn, _multi_info({"max_recipients": 40}))
+    assert svc.envelope_multi_max_recipients(conn) == 40
+    svc._record_capabilities(conn, _multi_info({"max_recipients": 10_000}))
+    assert svc.envelope_multi_max_recipients(conn) == 500
+    # A dict without a usable cap still proves the route; ours applies.
+    svc._record_capabilities(conn, _multi_info({"max_recipients": "many"}))
+    assert await svc.envelope_multi_supported(conn)
+    assert svc.envelope_multi_max_recipients(conn) == 500
+    svc._record_capabilities(conn, _multi_info({"max_recipients": True}))
+    assert svc.envelope_multi_max_recipients(conn) == 500
+    # The operator switches it off: the next verified block says so.
+    svc._record_capabilities(conn, _multi_info(None))
+    assert not await svc.envelope_multi_supported(conn)
+    assert svc.envelope_multi_max_recipients(conn) == 0
+    # A bare ``true`` is not the capability's shape.
+    svc._record_capabilities(conn, _multi_info(True))
+    assert not await svc.envelope_multi_supported(conn)
+
+
+async def test_envelope_multi_unsigned_or_unreachable_is_off(env):
+    svc = await _svc(env, _MediaSession(raise_on="GET"))
+    conn = await env[1].get("g1")
+    assert not await svc.envelope_multi_supported(conn)
+    info = _multi_info({"max_recipients": 500})
+    info["capabilities_sig"] = "AAAA"  # forged
+    svc2 = await _svc(env, _MediaSession(info=info))
+    assert not await svc2.envelope_multi_supported(conn)
+    assert svc2.envelope_multi_max_recipients(conn) == 0
+
+
+async def test_envelope_multi_is_forgotten_with_the_listing(env):
+    svc = await _svc(env, _MediaSession(info=_multi_info({"max_recipients": 500})))
+    conn = await env[1].get("g1")
+    assert await svc.envelope_multi_supported(conn)
+    svc._forget_listing(conn.id)
+    assert svc.envelope_multi_max_recipients(conn) == 0

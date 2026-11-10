@@ -2189,6 +2189,39 @@ class FederationTransport:
         GFS mailbox (v_89) — the host-hop decision for a directory seat."""
         return await self._mailbox_target(instance, space_id, media=False) is not None
 
+    # ── v_90: one upload for many mailboxes ──────────────────────────────
+
+    async def multi_mailbox_target(
+        self, instance: RemoteInstance, space_id: str
+    ) -> MailboxTarget | None:
+        """*instance*'s GFS mailbox for *space_id* when a multi-recipient
+        upload can reach it (v_90): a :data:`InstanceSource.SPACE_SESSION`
+        seat whose mailbox sits on a GFS of ours that proved
+        ``envelope_mailbox`` and ``envelope_multi``. ``None`` → the caller
+        sends to it per recipient. Never raises."""
+        if instance.source is not InstanceSource.SPACE_SESSION:
+            return None
+        target = await self._mailbox_target(instance, space_id, media=False)
+        if target is None or await self.multi_capacity(target.gfs_url) < 1:
+            return None
+        return target
+
+    async def multi_capacity(self, gfs_url: str) -> int:
+        """Most mailbox ids one upload to the GFS at *gfs_url* may name;
+        ``0`` when no connection of ours there proved ``envelope_multi``."""
+        if self._gfs_relay is None:
+            return 0
+        return await self._gfs_relay.multi_capacity(gfs_url)
+
+    async def send_multi_mailbox(
+        self, *, targets: list[MailboxTarget], sealed: dict
+    ) -> tuple[bool, int | None]:
+        """Hand ONE multi-recipient frame for *targets* (all on one GFS) to
+        the relay. Same never-raise contract as the relay's ``send``."""
+        if self._gfs_relay is None:
+            return False, None
+        return await self._gfs_relay.send_multi_mailbox(targets=targets, sealed=sealed)
+
     async def send_via_gfs_url(
         self,
         *,

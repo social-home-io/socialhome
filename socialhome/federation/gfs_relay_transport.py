@@ -554,6 +554,54 @@ class GfsRelayTransport:
             return False, RELAY_STATUS_TOO_LARGE if too_big else None
         return await self._deliver_mailbox(instance, target, media_body=body)
 
+    # ── v_90: one upload for many mailboxes ───────────────────────
+
+    async def multi_capacity(self, gfs_url: str) -> int:
+        """Most mailbox ids one multi-recipient upload to the GFS at
+        *gfs_url* may name: ``0`` unless one of our connections there proved
+        ``envelope_mailbox`` and ``envelope_multi``. Never raises."""
+        try:
+            conn = await self._sender.multi_connection(gfs_url)
+            if conn is None:
+                return 0
+            return self._sender.multi_max_recipients(conn)
+        except Exception as exc:  # a capability probe must never raise here
+            log.info("gfs relay: multi capability check failed: %s", exc, exc_info=True)
+            return 0
+
+    async def send_multi_mailbox(
+        self, *, targets: list[MailboxTarget], sealed: dict
+    ) -> tuple[bool, int | None]:
+        """Hand ONE multi-recipient frame (already sealed,
+        :func:`~socialhome.federation.multi_recipient.seal_multi`) to the GFS
+        of *targets* — all on that one GFS, grouped by the caller — for
+        every target's mailbox. The GFS sees the mailbox list and the seal,
+        nothing that names a household. Same contract as :meth:`send`
+        (:data:`RELAY_STATUS_THROTTLED` on a full window); never logs a
+        mailbox id."""
+        if not targets:
+            return False, None
+        try:
+            ok = await self._sender.send_to_mailboxes(
+                mailbox_ids=[t.mailbox_id for t in targets],
+                gfs_url=targets[0].gfs_url,
+                sealed=sealed,
+            )
+        except EnvelopeRelayThrottled:
+            log.info("gfs relay: a multi-recipient frame was throttled")
+            return False, RELAY_STATUS_THROTTLED
+        except SpacePermissionError as exc:
+            log.info("gfs relay: no GFS could carry a multi-recipient frame: %s", exc)
+            return False, None
+        except Exception as exc:
+            log.warning(
+                "gfs relay: sending a multi-recipient frame failed: %s",
+                exc,
+                exc_info=True,
+            )
+            return False, None
+        return bool(ok), None
+
     async def _deliver_mailbox(
         self,
         instance: RemoteInstance,

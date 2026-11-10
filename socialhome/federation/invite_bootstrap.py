@@ -274,6 +274,21 @@ class RelayEnvelopeSender(Protocol):
         """v_88 — POST one frame for a mailbox over the anonymous session."""
         ...
 
+    async def multi_connection(self, gfs_url: str) -> Any:
+        """v_90 — the connection at *gfs_url* that takes one frame for many
+        mailboxes (proved ``envelope_multi``), or ``None``."""
+        ...
+
+    def multi_max_recipients(self, conn: Any) -> int:
+        """v_90 — most mailbox ids one upload to *conn* may name."""
+        ...
+
+    async def send_to_mailboxes(
+        self, *, mailbox_ids: list[str], gfs_url: str, sealed: dict
+    ) -> bool:
+        """v_90 — POST one multi-recipient frame over the anonymous session."""
+        ...
+
 
 @dataclass(slots=True, frozen=True)
 class InviteBootstrapHint:

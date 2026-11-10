@@ -71,6 +71,7 @@ from ..domain.federation import (
     DELIVERY_ERROR_ROUTE_COOLDOWN,
     DELIVERY_ERROR_ROUTED_SEND_FAILED,
     DELIVERY_ERROR_SUPERSEDED,
+    MULTI_EVENT_TYPES,
     PAIRING_REACH_URL,
     PENDING_KIND_APPROVAL,
     BroadcastResult,
@@ -100,6 +101,7 @@ from ..infrastructure.key_manager import KeyManager
 from ..peer_http import post_to_peer
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.outbox_repo import AbstractOutboxRepo
+from ..services.gfs_envelope_sender import normalize_gfs_base
 from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from .app_framing import (
     APP_AEAD_SUITE_AESGCM_256,
@@ -108,7 +110,11 @@ from .app_framing import (
 )
 from .encoder import FederationEncoder
 from .event_dispatch_registry import EventDispatchRegistry
-from .gfs_relay_transport import RELAY_STATUS_THROTTLED, RELAY_STATUS_TOO_LARGE
+from .gfs_relay_transport import (
+    RELAY_STATUS_THROTTLED,
+    RELAY_STATUS_TOO_LARGE,
+    MailboxTarget,
+)
 from .inbound_validator import (
     TRANSPORT_GFS_RELAY,
     InboundContext,
@@ -153,6 +159,7 @@ from .mesh_member_claim import (
     MESH_CLAIM_VERSION_FIELD,
     parse_mesh_member_claim,
 )
+from .multi_recipient import build_multi_envelope, seal_multi
 from .pairing_coordinator import PairingCoordinator
 from .pairing_gfs_reach import PairingGfsReach
 from .peer_pairing_client import PeerPairingClient
@@ -162,6 +169,11 @@ from .pq_signer import PqSigner
 def _dumps(obj: dict) -> str:
     """Compact UTF-8 JSON — the wire format for every federation envelope."""
     return _orjson.dumps(obj).decode("utf-8")
+
+
+#: v_90 — ``space_id`` → ``(epoch, kid, key)`` of the space's current
+#: multi-recipient key, or ``None`` (``SpaceContentEncryption.mr_key``).
+MrKeyForSpace = Callable[[str], Awaitable[tuple[int, str, bytes] | None]]
 
 
 def _loads(s: str | bytes) -> dict:
@@ -361,6 +373,7 @@ class FederationService:
         "_media_https_backoff",
         "_media_https_inbound_pipeline",
         "_media_relay_inbound_pipeline",
+        "_mr_key",
         "_online_status_service",
         "_outbox_repo",
         "_own_identity_pk",
@@ -484,6 +497,10 @@ class FederationService:
         #: hop, and every mailbox frame with a space is refused.
         self._host_hop: HostHop | None = None
         self._mailbox_sender_check: Callable[[str, str], Awaitable[bool]] | None = None
+        #: v_90 — ``space_id`` → ``(epoch, kid, key)`` of the multi-recipient
+        #: key of the space's current epoch
+        #: (``SpaceContentEncryption.mr_key``). Unwired → no multi uploads.
+        self._mr_key: MrKeyForSpace | None = None
         # Social Home Apps federation bridge — set via :meth:`attach_apps`.
         # When unset, inbound APP_SESSION / APP_MESSAGE events are silently
         # dropped (no app bridge wired on this instance).
@@ -745,6 +762,18 @@ class FederationService:
         removal drops the frames still queued for it (they would land after
         the removal and bring it back)."""
         return await self._outbox_repo.drop_pending_with_key_prefix(instance_id, prefix)
+
+    def _state_key(
+        self, event_type: FederationEventType, space_id: str | None, payload: dict
+    ) -> str | None:
+        """The latest-only key of a send (:func:`supersede_key`, else a
+        moment delete's :func:`moment_delete_key`), ``None`` for an ordinary
+        event."""
+        return supersede_key(
+            event_type, space_id=space_id, payload=payload
+        ) or moment_delete_key(
+            event_type, payload, own_instance_id=self._own_instance_id
+        )
 
     def _claim_state_send(self, instance_id: str, state_key: str | None) -> int | None:
         """Mark this send as the newest one of a latest-only state to
@@ -1116,12 +1145,16 @@ class FederationService:
         *,
         host_hop: HostHop,
         mailbox_sender_check: Callable[[str, str], Awaitable[bool]],
+        mr_key: MrKeyForSpace | None = None,
     ) -> None:
         """Wire the v_89 member mesh: the host hop
         (:meth:`send_with_mesh_fallback` toward a directory seat with no
-        usable mailbox) and the check of a sender on our GFS mailbox."""
+        usable mailbox) and the check of a sender on our GFS mailbox; and
+        the v_90 multi-recipient key of a space (*mr_key*), which turns on
+        one upload for many mailbox seats in :meth:`broadcast_to_space_members`."""
         self._host_hop = host_hop
         self._mailbox_sender_check = mailbox_sender_check
+        self._mr_key = mr_key
 
     def attach_call_signaling(self, call_signaling) -> None:
         """Attach a :class:`CallSignalingService` after construction."""
@@ -1770,13 +1803,7 @@ class FederationService:
         # at most one queued row per person (and space) for this peer.
         # A moment's delete is keyed by who signed it, so the outbox can cap
         # how many it keeps 30 days per relayed origin (adversarial review F2).
-        state_key = (
-            outbox_key
-            or supersede_key(event_type, space_id=space_id, payload=payload)
-            or moment_delete_key(
-                event_type, payload, own_instance_id=self._own_instance_id
-            )
-        )
+        state_key = outbox_key or self._state_key(event_type, space_id, payload)
         state_ticket = self._claim_state_send(to_instance_id, state_key)
 
         # Dispatch the envelope. When a FederationTransport facade is
@@ -3051,6 +3078,8 @@ class FederationService:
             space_id,
         )
         results: list[DeliveryResult] = []
+        #: ``(instance_id, final payload)`` per target, in member order.
+        planned: list[tuple[str, dict]] = []
         for iid in instance_ids:
             if iid == self._own_instance_id:
                 # ``create_space`` puts the host's OWN row in ``space_instances``,
@@ -3104,6 +3133,17 @@ class FederationService:
                 }
             if per_peer is not None:
                 peer_payload = await per_peer(iid, peer_payload)
+            planned.append((iid, peer_payload))
+        # v_90 — the mailbox seats behind one GFS whose bytes are the same
+        # go up ONCE; everyone else (and any group whose upload failed) goes
+        # per recipient below, in the original order.
+        multi_done = await self._send_multi_mailbox_groups(
+            space_id, event_type, planned
+        )
+        for iid, peer_payload in planned:
+            if iid in multi_done:
+                results.append(multi_done[iid])
+                continue
             if iid in self._deferred_mesh_queues:
                 # A deferred send to this target is still pending: queue
                 # behind it rather than overtake it, so the target sees
@@ -3182,6 +3222,149 @@ class FederationService:
                 ", ".join(f"{r.instance_id}={r.error}" for r in terminal),
             )
         return broadcast
+
+    async def _send_multi_mailbox_groups(
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        planned: list[tuple[str, dict]],
+    ) -> dict[str, DeliveryResult]:
+        """v_90 — send ONE multi-recipient frame per group of mailbox seats
+        and return the result of every target it carried.
+
+        A target joins a group when the event type is one a receiver takes
+        in a multi frame (:data:`MULTI_EVENT_TYPES`), it has no deferred
+        mesh queue, its household is at
+        :attr:`FederationCapability.MIN_FOR_MULTI_MAILBOX` or above and is a
+        confirmed ``space_session`` seat whose mailbox sits on a GFS of ours
+        that proved ``envelope_multi``
+        (:meth:`FederationTransport.multi_mailbox_target`). Groups are keyed
+        by that GFS and the exact payload bytes, so nothing addressed to one
+        member (a ``per_peer`` copy) rides another's frame. A group of one —
+        or the remainder of one after chunking at the GFS's
+        ``max_recipients`` — stays per recipient. Any failure (no key for
+        the space, a frame over the top size bucket, a refused or throttled
+        upload) leaves the whole group to the per-recipient path, which
+        queues in the outbox on failure. Never raises.
+        """
+        if (
+            event_type not in MULTI_EVENT_TYPES
+            or self._transport is None
+            or self._mr_key is None
+            or len(planned) < 2
+        ):
+            return {}
+        groups: dict[tuple[str, str], list[tuple[str, MailboxTarget, dict]]] = {}
+        for iid, peer_payload in planned:
+            if iid in self._deferred_mesh_queues:
+                continue
+            if not await self.space_member_supports(
+                iid, min_version=FederationCapability.MIN_FOR_MULTI_MAILBOX
+            ):
+                continue
+            instance = await self._federation_repo.get_instance(iid)
+            if (
+                instance is None
+                or instance.status is not PairingStatus.CONFIRMED
+                or instance.source is not InstanceSource.SPACE_SESSION
+            ):
+                continue
+            target = await self._transport.multi_mailbox_target(instance, space_id)
+            if target is None:
+                continue
+            key = (normalize_gfs_base(target.gfs_url), _dumps(peer_payload))
+            groups.setdefault(key, []).append((iid, target, peer_payload))
+        if not any(len(members) >= 2 for members in groups.values()):
+            return {}
+        try:
+            mr = await self._mr_key(space_id)
+        except Exception:
+            log.warning("broadcast: multi-recipient key lookup failed", exc_info=True)
+            return {}
+        if mr is None:
+            return {}
+        _epoch, kid, mr_key = mr
+        done: dict[str, DeliveryResult] = {}
+        for (gfs_base, payload_json), members in groups.items():
+            if len(members) < 2:
+                continue
+            cap = await self._transport.multi_capacity(members[0][1].gfs_url)
+            for start in range(0, len(members), max(cap, 1)):
+                chunk = members[start : start + cap]
+                if len(chunk) < 2:
+                    continue  # a group of one goes per recipient
+                done.update(
+                    await self._send_multi_chunk(
+                        space_id,
+                        event_type,
+                        chunk,
+                        payload_json=payload_json,
+                        kid=kid,
+                        key=mr_key,
+                    )
+                )
+        return done
+
+    async def _send_multi_chunk(
+        self,
+        space_id: str,
+        event_type: FederationEventType,
+        chunk: list[tuple[str, MailboxTarget, dict]],
+        *,
+        payload_json: str,
+        kid: str,
+        key: bytes,
+    ) -> dict[str, DeliveryResult]:
+        """Build, seal and upload ONE multi frame for *chunk* (≥ 2 seats on
+        one GFS, same payload). ``{}`` on any failure."""
+        assert self._transport is not None
+        recipients = [iid for iid, _t, _p in chunk]
+        try:
+            envelope = build_multi_envelope(
+                encoder=self._encoder,
+                own_instance_id=self._own_instance_id,
+                event_type=event_type.value,
+                payload_json=payload_json,
+                space_id=space_id,
+                key=key,
+                recipients=recipients,
+            )
+            sealed = seal_multi(envelope, kid=kid, key=key)
+        except ValueError as exc:
+            log.info(
+                "broadcast: space=%s event=%s goes per recipient (%s)",
+                space_id,
+                event_type.value,
+                exc,
+            )
+            return {}
+        # Latest-only state: claim per recipient like :meth:`send_event`, so
+        # a delivered frame drops the older one still queued for each.
+        state_key = self._state_key(event_type, space_id, chunk[0][2])
+        tickets = {iid: self._claim_state_send(iid, state_key) for iid in recipients}
+        ok, status = await self._transport.send_multi_mailbox(
+            targets=[t for _iid, t, _p in chunk], sealed=sealed
+        )
+        if not ok:
+            for iid in recipients:
+                self._settle_state_send(iid, state_key, tickets[iid])
+            log.info(
+                "broadcast: space=%s event=%s multi upload for %d household(s) "
+                "failed (%s) — per recipient instead",
+                space_id,
+                event_type.value,
+                len(recipients),
+                "throttled" if status == RELAY_STATUS_THROTTLED else "refused",
+            )
+            return {}
+        done: dict[str, DeliveryResult] = {}
+        for iid in recipients:
+            # An ACCEPTANCE by the relay, never proof of delivery — the same
+            # as a per-recipient relay send (see :meth:`send_event`).
+            self.note_relay_accepted(iid)
+            await self._settle_delivered_state(iid, state_key, tickets[iid])
+            done[iid] = DeliveryResult(instance_id=iid, ok=True, via="gfs_relay")
+        return done
 
     def _defer_mesh_send(
         self,

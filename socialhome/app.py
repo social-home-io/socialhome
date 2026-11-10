@@ -5135,7 +5135,10 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         routed_handler.attach_host_hop(host_hop)
         federation_service.attach_member_mesh(
-            host_hop=host_hop, mailbox_sender_check=member_directory.sender_allowed
+            host_hop=host_hop,
+            mailbox_sender_check=member_directory.sender_allowed,
+            # v_90 — one upload for the mailbox seats behind one GFS.
+            mr_key=space_crypto.mr_key,
         )
         await space_mailboxes.start()
         app[K.space_mailbox_service_key] = space_mailboxes
