@@ -361,7 +361,12 @@ chat streamed by `created_at`, which can differ for a message relayed
 late).
 
 **Periodic re-syncs ship no media.** The scheduler re-syncs every
-(confirmed peer × shared space) every 30 minutes. Those BEGINs carry
+(confirmed peer × shared space) every 30 minutes — household, public,
+private and **global** spaces alike (a global space only where one of our
+own people holds a non-follower seat: a household that only follows it
+never contacts its host; before v_92's helpers it was left out entirely,
+so a global space's members never caught up and never fell back to a
+helper). Those BEGINs carry
 `sync_mode: "incremental"`; the provider then re-streams the rows but
 skips the catch-up media walk — the live media outbox already delivered
 every blob created since, and re-enqueueing every post / gallery /

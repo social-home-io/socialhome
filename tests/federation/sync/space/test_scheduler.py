@@ -1781,6 +1781,7 @@ def _helper_sched(
     owner: str = "host",
     authority: bool = False,
     own_instance_id: str = "self",
+    space_type: SpaceType = SpaceType.PRIVATE,
 ):
     from socialhome.federation.sync.space.host_contact import HostContact
 
@@ -1790,9 +1791,7 @@ def _helper_sched(
         federation=fed,
         federation_repo=_FakeFedRepo([_peer("host")]),
         space_repo=_HelperSpaceRepo(
-            spaces_by_type={
-                SpaceType.PRIVATE: [_space("sp-1", owner_instance_id=owner)]
-            },
+            spaces_by_type={space_type: [_space("sp-1", owner_instance_id=owner)]},
             members_by_space={"sp-1": ["host"]},
         ),
         queue=queue,
@@ -1850,6 +1849,36 @@ async def test_a_silent_host_sends_one_helper_the_bounded_resume(
     assert sched._seat_repo.asked == [
         ("sp-1", frozenset({SpaceRole.ADMIN.value, SpaceRole.MODERATOR.value}))
     ]
+
+
+async def test_a_global_spaces_member_syncs_and_falls_back_to_a_helper(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """A GLOBAL space is a space like any other for its members (a household
+    seated from an invite link included): the tick asks its host, and a
+    silent host sends one helper the resume."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["mod-d"], space_type=SpaceType.GLOBAL
+    )
+    await _round(sched)
+    await _wait_checks(sched)
+    assert [s["to"] for s in sched._federation.sent] == ["host"]
+    assert [r["instance_id"] for r in resume.requests] == ["mod-d"]
+
+
+async def test_a_followed_global_space_never_reaches_its_host(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """The GFS shields followers from hosts: a GLOBAL space we only follow
+    gets no BEGIN to its host (even a paired one) and no helper resume."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["mod-d"], space_type=SpaceType.GLOBAL
+    )
+    sched._space_repo.local_roles["sp-1"] = [SpaceRole.SUBSCRIBER.value]
+    await _round(sched)
+    await _wait_checks(sched)
+    assert sched._federation.sent == []
+    assert resume.requests == []
 
 
 async def test_a_host_that_answered_gets_no_fallback(

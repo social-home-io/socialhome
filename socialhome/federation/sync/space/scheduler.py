@@ -1235,17 +1235,21 @@ class SpaceSyncScheduler:
             host = space.owner_instance_id
             if not host or host == self._own_instance_id:
                 continue
-            # Our own people only: ``space_members`` also mirrors the
-            # host's (the ``members`` resource), whose seats are no
-            # membership of ours.
-            ours = set(await self._space_repo.list_local_member_user_ids(space.id))
-            members = await self._space_repo.list_members(space.id)
-            if any(
-                m.user_id in ours and str(m.role) != SpaceRole.SUBSCRIBER.value
-                for m in members
-            ):
+            if await self._holds_member_seat(space):
                 out.append(space)
         return out
+
+    async def _holds_member_seat(self, space: Space) -> bool:
+        """Whether one of our own people holds a seat other than a follower
+        (``subscriber``) one in *space*."""
+        # Our own people only: ``space_members`` also mirrors the host's
+        # (the ``members`` resource), whose seats are no membership of ours.
+        ours = set(await self._space_repo.list_local_member_user_ids(space.id))
+        members = await self._space_repo.list_members(space.id)
+        return any(
+            m.user_id in ours and str(m.role) != SpaceRole.SUBSCRIBER.value
+            for m in members
+        )
 
     async def _list_local_spaces(self) -> list[Space]:
         spaces = (
@@ -1253,6 +1257,13 @@ class SpaceSyncScheduler:
             + await self._space_repo.list_by_type(SpaceType.PUBLIC)
             + await self._space_repo.list_by_type(SpaceType.PRIVATE)
         )
+        # A GLOBAL space is synced like any other for its members (a
+        # household seated from an invite link included) — but never for a
+        # household that only follows it: the GFS shields followers from
+        # hosts, so a follower must not BEGIN the host or ask a helper.
+        for space in await self._space_repo.list_by_type(SpaceType.GLOBAL):
+            if await self._holds_member_seat(space):
+                spaces.append(space)
         return [s for s in spaces if not s.dissolved]
 
     async def _list_local_space_ids(self) -> list[str]:
