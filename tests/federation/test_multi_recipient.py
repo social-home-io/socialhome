@@ -248,11 +248,11 @@ def test_decrypt_mr_payload_refuses_a_malformed_string():
 # ─── Audience binding ────────────────────────────────────────────────────
 
 
-def test_recipient_tag_is_an_11_char_hmac_of_the_instance_id():
+def test_recipient_tag_is_a_6_char_hmac_of_the_instance_id():
     _, key = derive_mr_key(CONTENT_KEY)
     tag = recipient_tag(key, "b" * 32)
-    assert len(tag) == 11
-    assert len(b64url_decode(tag)) == 8
+    assert len(tag) == 6
+    assert len(b64url_decode(tag)) == 4
     assert tag == recipient_tag(key, "b" * 32)
     assert tag != recipient_tag(key, "c" * 32)
     _, other = derive_mr_key(b"\x22" * 32)
@@ -295,7 +295,7 @@ def _to(*tags: str) -> str:
         lambda good: good + ".!!!!!!!!!!!",
         lambda good: good + "." + good[2:],  # duplicate tag
         lambda good: _to(*reversed(good[2:].split("."))),  # unsorted
-        lambda good: _to(*(["A" * 11] * 0), *[f"{i:011d}" for i in range(501)]),
+        lambda good: _to(*(["A" * 6] * 0), *[f"{i:06d}" for i in range(501)]),
     ],
 )
 def test_a_malformed_audience_is_refused(mangle):

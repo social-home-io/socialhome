@@ -194,7 +194,7 @@ bucket and IP — never the space, an instance id, the event type or content.
 
 - **Audience binding.** The inner envelope's signed `to_instance` is
   `"*:" + ".".join(tags)`, one tag per intended recipient household, sorted:
-  `tag = b64url(HMAC-SHA256(key, "sh-mr-to:v1\n" + instance_id)[:8])`. A
+  `tag = b64url(HMAC-SHA256(key, "sh-mr-to:v1\n" + instance_id)[:4])`. A
   receiver takes the frame only when its own tag is listed, so a key holder
   (a follower, a member) cannot re-push a captured frame to a household the
   sender left out. The tags sit inside the seal; the GFS never sees them.

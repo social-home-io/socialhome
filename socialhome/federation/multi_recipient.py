@@ -43,7 +43,7 @@ a receiver takes it only when its own tag is listed
 — the GFS cannot, but a member or a follower can — could re-push a captured
 frame to a mailbox the sender left out (a follower, a household on the
 per-pair hide list). A tag is ``b64url(HMAC-SHA256(key, "sh-mr-to:v1\n" +
-instance_id)[:8])``: it sits inside the seal, so the GFS never sees it, and
+instance_id)[:4])``: it sits inside the seal, so the GFS never sees it, and
 only a key holder who already knows an instance id can test for it.
 
 The GFS sees the mailbox list, the time, the size bucket and the sender's
@@ -92,10 +92,12 @@ _KID_INFO = b"sh-mr-kid:v1"
 _KEY_INFO = b"sh-mr-key:v1"
 _AAD_PREFIX = b"sh-mr-seal:v1\n"
 _TAG_PREFIX = b"sh-mr-to:v1\n"
-_TAG_BYTES_TRUNC = 8
+_TAG_BYTES_TRUNC = 4
 _AUDIENCE_PREFIX = MULTI_TO_INSTANCE + ":"
-#: An 8-byte tag in unpadded b64url.
-_TAG_RE = re.compile(r"[A-Za-z0-9_-]{11}")
+#: A 4-byte tag in unpadded b64url (4 bytes keep a 200-recipient frame in
+#: the 4 KiB bucket; a non-listed household matches a listed tag with
+#: probability N / 2**32, ~5e-8 at N = 200).
+_TAG_RE = re.compile(r"[A-Za-z0-9_-]{6}")
 #: A 16-byte kid in unpadded b64url.
 _KID_RE = re.compile(r"[A-Za-z0-9_-]{22}")
 _KID_BYTES = 16
@@ -137,7 +139,7 @@ def is_valid_kid(kid: object) -> TypeGuard[str]:
 
 def recipient_tag(key: bytes, instance_id: str) -> str:
     """The audience tag of one recipient household under the
-    multi-recipient *key* (11 chars). Never log it."""
+    multi-recipient *key* (6 chars). Never log it."""
     mac = hmac.new(key, _TAG_PREFIX + instance_id.encode("utf-8"), hashlib.sha256)
     return b64url_encode(mac.digest()[:_TAG_BYTES_TRUNC])
 
