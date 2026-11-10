@@ -55,7 +55,7 @@ from ..crypto import (
     verify_ed25519,
 )
 from ..domain.events import SpaceContentKeyImported
-from ..federation.multi_recipient import derive_mr_key
+from ..federation.multi_recipient import derive_mr_key, is_valid_kid
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager, KeyManagerError
 from ..repositories.space_key_repo import (
@@ -79,6 +79,11 @@ MR_RECENT_EPOCHS: int = 3
 #: once; this is only the backstop for a key written behind its back, and
 #: it keeps a flood of unknown kids at one query a minute.
 MR_KID_REBUILD_INTERVAL_S: float = 60.0
+
+#: v_90 — the kid cache is rebuilt once it is this old (seconds), hits
+#: included, so a key removed outside this service (a space delete cascade,
+#: a restore) stops opening frames within ten minutes.
+MR_KID_CACHE_MAX_AGE_S: float = 600.0
 
 
 def _monotonic() -> float:
@@ -293,10 +298,14 @@ class SpaceContentEncryption(BusPublisherMixin):
         over the :data:`MR_RECENT_EPOCHS` newest epochs of every space we hold
         a key for — or ``None``. Served from an in-memory cache that writes
         through this service invalidate; a miss rebuilds it at most every
-        :data:`MR_KID_REBUILD_INTERVAL_S`."""
+        :data:`MR_KID_REBUILD_INTERVAL_S`, and any lookup once it is
+        :data:`MR_KID_CACHE_MAX_AGE_S` old. A kid of any other shape than
+        :func:`derive_mr_key` makes is ``None`` with no lookup at all."""
+        if not is_valid_kid(kid):
+            return None
         now = _monotonic()
         kids = self._mr_kids
-        if kids is None:
+        if kids is None or now - self._mr_built_at >= MR_KID_CACHE_MAX_AGE_S:
             kids = await self._rebuild_mr_kids(now)
         hit = kids.get(kid)
         if hit is None and now - self._mr_built_at >= MR_KID_REBUILD_INTERVAL_S:

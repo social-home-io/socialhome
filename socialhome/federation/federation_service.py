@@ -663,8 +663,9 @@ class FederationService:
         steps = [
             make_parse_json(loads=_loads),
             # v_90: ``to_instance = "*"`` only inside a multi-recipient
-            # frame, and that frame only for the space whose key opened it.
-            make_check_multi_recipient(),
+            # frame, that frame only for the space whose key opened it and
+            # only when its signed audience lists us.
+            make_check_multi_recipient(own_instance_id=self._own_instance_id),
             lookup_step,
             # v_89: a frame on our GFS mailbox (or relayed from a directory
             # seat) is taken only from a sender whose member card we hold

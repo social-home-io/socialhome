@@ -59,6 +59,7 @@ import orjson
 from ..domain.errors import WrongTypeError
 from ..domain.federation import (
     ARCHIVED_ALLOWED_REMOVAL_TYPES,
+    MULTI_EVENT_TYPES,
     SPACE_SESSION_ALLOWED_EVENT_TYPES,
     SPACE_WRITE_EVENT_TYPES,
     FederationEvent,
@@ -69,7 +70,11 @@ from ..domain.federation import (
 )
 from ..domain.space import WRITER_ROLES, SpaceRole
 from .host_equivalence import acts_as_host
-from .multi_recipient import MULTI_TO_INSTANCE, decrypt_mr_payload
+from .multi_recipient import (
+    MULTI_TO_INSTANCE,
+    decrypt_mr_payload,
+    multi_audience_includes,
+)
 from .space_scope import archive_refusal
 
 if TYPE_CHECKING:
@@ -550,27 +555,35 @@ def make_check_relay_opt_in() -> InboundStep:
     return check_relay_opt_in
 
 
-def make_check_multi_recipient() -> InboundStep:
-    """Step 1b (v_90): hold ``to_instance = "*"`` to multi-recipient frames.
+def make_check_multi_recipient(*, own_instance_id: str) -> InboundStep:
+    """Step 1b (v_90): hold ``to_instance = "*…"`` to multi-recipient frames.
 
-    A multi-recipient envelope is addressed to every member household
-    holding one space's key (:data:`~socialhome.federation.multi_recipient
-    .MULTI_TO_INSTANCE`) and opens only under that key, so:
+    A multi-recipient envelope is addressed to the member households its
+    sender listed (``"*:" + tags``, :func:`~socialhome.federation
+    .multi_recipient.multi_audience_includes`) and opens only under one
+    space epoch's key, so:
 
     * without a multi context (every RTC, HTTPS and ordinary relay frame)
-      ``to_instance == "*"`` is refused — the star must not ride a path
-      that never proved the space key;
+      any ``to_instance`` starting with ``"*"`` is refused — the star must
+      not ride a path that never proved the space key;
     * with one (set by the mailbox leg after the kid resolved and the seal
-      opened), the frame must have come over our mailbox, be addressed to
-      ``"*"`` and name exactly the space whose key opened it — a member of
-      space A cannot pass a frame off as space B's.
+      opened), the frame must have come over our mailbox, carry an event
+      type of :data:`~socialhome.domain.federation.MULTI_EVENT_TYPES`, list
+      OUR tag in its signed audience (a key holder — a follower, a member —
+      cannot re-push a captured frame to a household the sender left out)
+      and name exactly the space whose key opened it — a member of space A
+      cannot pass a frame off as space B's.
 
-    Straight after the JSON parse: a pure field compare, before any lookup.
+    Straight after the JSON parse: field compares and one HMAC, before any
+    lookup.
     """
 
     async def check_multi_recipient(ctx: InboundContext) -> None:
-        star = ctx.envelope.get("to_instance") == MULTI_TO_INSTANCE
-        if ctx.multi_space is None:
+        to_instance = ctx.envelope.get("to_instance")
+        star = isinstance(to_instance, str) and to_instance.startswith(
+            MULTI_TO_INSTANCE
+        )
+        if ctx.multi_space is None or ctx.multi_key is None:
             if star:
                 raise ValueError(
                     "a multi-recipient envelope outside a multi-recipient frame"
@@ -578,14 +591,30 @@ def make_check_multi_recipient() -> InboundStep:
             return
         if ctx.transport != TRANSPORT_GFS_MAILBOX:
             raise ValueError("a multi-recipient frame rides a mailbox only")
-        if not star:
-            raise ValueError("a multi-recipient frame must be addressed to '*'")
+        try:
+            event_type = FederationEventType(ctx.envelope.get("event_type"))
+        except ValueError:
+            raise ValueError(
+                "a multi-recipient frame of an unknown event type"
+            ) from None
+        if event_type not in MULTI_EVENT_TYPES:
+            raise ValueError(
+                f"{event_type.value!r} never rides a multi-recipient frame"
+            )
+        if not multi_audience_includes(to_instance, ctx.multi_key, own_instance_id):
+            # Type only — never the tags or a mailbox.
+            log.info(
+                "inbound: refusing a %r multi-recipient envelope not addressed "
+                "to this household",
+                event_type.value,
+            )
+            raise ValueError("multi-recipient envelope not addressed to us")
         if ctx.envelope.get("space_id") != ctx.multi_space:
             # Type only — never the space id.
             log.info(
                 "inbound: refusing a %r multi-recipient envelope whose space "
                 "is not the one its key belongs to",
-                ctx.envelope.get("event_type"),
+                event_type.value,
             )
             raise ValueError("multi-recipient envelope names another space")
 
@@ -860,6 +889,17 @@ def make_decrypt_and_parse(*, key_manager, encoder, loads) -> InboundStep:
             inner = loads(decrypted_json)
         except Exception as exc:
             raise ValueError(f"Decrypted payload is not valid JSON: {exc}") from exc
+
+        if (
+            ctx.multi_key is not None
+            and isinstance(inner, dict)
+            and "space_id" in inner
+            and inner["space_id"] != ctx.multi_space
+        ):
+            # v_90: one space's key proves nothing about another space — a
+            # payload pointing elsewhere is refused before any handler
+            # reads it. Never the space ids in the log.
+            raise ValueError("multi-recipient payload names another space")
 
         ctx.event = FederationEvent(
             msg_id=data["msg_id"],

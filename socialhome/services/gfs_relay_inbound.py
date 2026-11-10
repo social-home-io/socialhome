@@ -83,7 +83,12 @@ from ..federation.invite_token_redeem import (
     BOOTSTRAP_INBOUND_WINDOW_S,
     RELAY_ENVELOPE_INBOUND_LIMIT,
 )
-from ..federation.multi_recipient import is_multi_sealed, open_multi, require_mr_suite
+from ..federation.multi_recipient import (
+    is_multi_sealed,
+    is_valid_kid,
+    open_multi,
+    require_mr_suite,
+)
 from ..federation.peer_pairing_client import (
     KIND_PAIRING_PEER_ACCEPT,
     is_pairing_relay_body,
@@ -339,7 +344,11 @@ class GfsRelayInbound:
         if self._mr_key_for_kid is None:
             raise ValueError("multi-recipient frames are not wired on this household")
         kid = sealed.get("kid")
-        hit = await self._mr_key_for_kid(kid) if isinstance(kid, str) else None
+        if not is_valid_kid(kid):
+            # The shape first: a junk kid never costs a lookup (or a cache
+            # rebuild).
+            raise ValueError("multi-recipient frame with a malformed kid")
+        hit = await self._mr_key_for_kid(kid)
         if hit is None:
             log.info(
                 "gfs_mailbox: dropped a multi-recipient frame under no key we hold"

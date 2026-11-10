@@ -25,13 +25,26 @@ per-recipient envelope.
 
 Wire
 ----
-The inner envelope is the ordinary §24.11 shape with ``to_instance = "*"``
-(:data:`MULTI_TO_INSTANCE`), signed in the canonical field order of
+The inner envelope is the ordinary §24.11 shape with ``to_instance =
+"*:" + ".".join(tags)`` — :data:`MULTI_TO_INSTANCE` as the marker, then one
+:func:`recipient_tag` per intended recipient household, sorted — signed in
+the canonical field order of
 ``FederationService._seal_envelope`` / ``make_verify_signature``. The outer
 seal's plaintext is :func:`~socialhome.federation.gfs_relay_transport
 .build_relay_plaintext` (the relay ``kind`` wrapper padded to one of
 ``RELAY_SIZE_BUCKETS``), sealed under ``key`` with AAD
 ``b"sh-mr-seal:v1\\n" + mr_suite + "\\n" + kid``.
+
+Audience
+--------
+The signed tag list binds the frame to the households the sender meant:
+a receiver takes it only when its own tag is listed
+(:func:`multi_audience_includes`). Without it, anyone holding the epoch key
+— the GFS cannot, but a member or a follower can — could re-push a captured
+frame to a mailbox the sender left out (a follower, a household on the
+per-pair hide list). A tag is ``b64url(HMAC-SHA256(key, "sh-mr-to:v1\n" +
+instance_id)[:8])``: it sits inside the seal, so the GFS never sees it, and
+only a key holder who already knows an instance id can test for it.
 
 The GFS sees the mailbox list, the time, the size bucket and the sender's
 IP — never the space, an instance id, the event type or the content.
@@ -39,8 +52,13 @@ IP — never the space, an instance id, the event type or the content.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import itertools
 import os
+import re
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Any, TypeGuard
 
@@ -51,6 +69,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from ..crypto import b64url_decode, b64url_encode
 from ..domain.errors import WrongTypeError
+from ..domain.gfs_mailbox import MULTI_MAX_RECIPIENTS
 from .encoder import FederationEncoder
 from .gfs_relay_transport import RELAY_SIZE_BUCKETS, build_relay_plaintext
 
@@ -59,8 +78,9 @@ from .gfs_relay_transport import RELAY_SIZE_BUCKETS, build_relay_plaintext
 MR_SUITE_AESGCM_256: str = "mr-aesgcm-256"
 SUPPORTED_MR_SUITES: frozenset[str] = frozenset({MR_SUITE_AESGCM_256})
 
-#: ``to_instance`` of a multi-recipient envelope — addressed to every
-#: member household holding the space key, never to one instance id.
+#: The marker every multi-recipient ``to_instance`` starts with — followed
+#: by ``":"`` and the recipient tag list. No ordinary envelope's
+#: ``to_instance`` (an instance id) ever starts with it.
 MULTI_TO_INSTANCE: str = "*"
 
 #: The signature suite of a multi-recipient envelope. One body serves every
@@ -71,6 +91,13 @@ _HKDF_SALT = b"sh-mr-v1"
 _KID_INFO = b"sh-mr-kid:v1"
 _KEY_INFO = b"sh-mr-key:v1"
 _AAD_PREFIX = b"sh-mr-seal:v1\n"
+_TAG_PREFIX = b"sh-mr-to:v1\n"
+_TAG_BYTES_TRUNC = 8
+_AUDIENCE_PREFIX = MULTI_TO_INSTANCE + ":"
+#: An 8-byte tag in unpadded b64url.
+_TAG_RE = re.compile(r"[A-Za-z0-9_-]{11}")
+#: A 16-byte kid in unpadded b64url.
+_KID_RE = re.compile(r"[A-Za-z0-9_-]{22}")
 _KID_BYTES = 16
 _KEY_BYTES = 32
 _NONCE_BYTES = 12
@@ -100,6 +127,51 @@ def derive_mr_key(content_key: bytes) -> tuple[str, bytes]:
         raise ValueError("space content key must be 32 bytes")
     kid = b64url_encode(_hkdf(content_key, length=_KID_BYTES, info=_KID_INFO))
     return kid, _hkdf(content_key, length=_KEY_BYTES, info=_KEY_INFO)
+
+
+def is_valid_kid(kid: object) -> TypeGuard[str]:
+    """True when *kid* has the one shape :func:`derive_mr_key` makes (16
+    bytes in unpadded b64url, 22 chars). Checked before any key lookup."""
+    return isinstance(kid, str) and _KID_RE.fullmatch(kid) is not None
+
+
+def recipient_tag(key: bytes, instance_id: str) -> str:
+    """The audience tag of one recipient household under the
+    multi-recipient *key* (11 chars). Never log it."""
+    mac = hmac.new(key, _TAG_PREFIX + instance_id.encode("utf-8"), hashlib.sha256)
+    return b64url_encode(mac.digest()[:_TAG_BYTES_TRUNC])
+
+
+def multi_to_instance(key: bytes, recipients: Collection[str]) -> str:
+    """The signed ``to_instance`` of a multi frame for *recipients*:
+    ``"*:" + ".".join(sorted tags)``. :class:`ValueError` for an empty
+    audience or one over :data:`MULTI_MAX_RECIPIENTS`."""
+    tags = sorted({recipient_tag(key, r) for r in recipients})
+    if not 1 <= len(tags) <= MULTI_MAX_RECIPIENTS:
+        raise ValueError(
+            f"a multi-recipient frame names 1..{MULTI_MAX_RECIPIENTS} "
+            f"recipient households, not {len(tags)}"
+        )
+    return _AUDIENCE_PREFIX + ".".join(tags)
+
+
+def multi_audience_includes(
+    to_instance: object, key: bytes, own_instance_id: str
+) -> bool:
+    """True when *to_instance* is a well-formed audience (1..
+    :data:`MULTI_MAX_RECIPIENTS` valid tags, sorted, no repeats) that lists
+    *own_instance_id*'s tag under *key*. False for anything else."""
+    if not isinstance(to_instance, str) or not to_instance.startswith(_AUDIENCE_PREFIX):
+        return False
+    tags = to_instance[len(_AUDIENCE_PREFIX) :].split(".")
+    if not 1 <= len(tags) <= MULTI_MAX_RECIPIENTS:
+        return False
+    if any(_TAG_RE.fullmatch(t) is None for t in tags):
+        return False
+    if any(a >= b for a, b in itertools.pairwise(tags)):
+        return False  # unsorted or repeated: not the shape a sender makes
+    own = recipient_tag(key, own_instance_id)
+    return any(hmac.compare_digest(own, t) for t in tags)
 
 
 def _aad(suite: str, kid: str) -> bytes:
@@ -136,8 +208,13 @@ def build_multi_envelope(
     payload_json: str,
     space_id: str,
     key: bytes,
+    recipients: Collection[str],
 ) -> dict:
     """The signed §24.11 envelope every recipient of one multi frame gets.
+
+    *recipients* are the instance ids of the households the frame is for
+    (1..:data:`MULTI_MAX_RECIPIENTS`); their tags become the signed
+    ``to_instance`` (:func:`multi_to_instance`).
 
     CANONICAL FIELD ORDER — byte-identical to ``_seal_envelope`` and
     ``make_verify_signature``; the signature covers everything but
@@ -147,7 +224,7 @@ def build_multi_envelope(
         "msg_id": str(uuid.uuid4()),
         "event_type": event_type,
         "from_instance": own_instance_id,
-        "to_instance": MULTI_TO_INSTANCE,
+        "to_instance": multi_to_instance(key, recipients),
         "timestamp": datetime.now(UTC).isoformat(),
         "encrypted_payload": encrypt_mr_payload(payload_json, key),
         "space_id": space_id,
@@ -202,8 +279,8 @@ def open_multi(sealed: dict, key: bytes) -> dict:
     suite = require_mr_suite(sealed)
     kid = sealed.get("kid")
     ciphertext = sealed.get("ciphertext")
-    if not isinstance(kid, str) or not kid:
-        raise ValueError("multi-recipient seal missing kid")
+    if not is_valid_kid(kid):
+        raise ValueError("multi-recipient seal has a malformed kid")
     if not isinstance(ciphertext, str) or not ciphertext:
         raise ValueError("multi-recipient seal missing ciphertext")
     if len(ciphertext) > MAX_MR_CIPHERTEXT_CHARS:
@@ -241,7 +318,11 @@ __all__ = [
     "derive_mr_key",
     "encrypt_mr_payload",
     "is_multi_sealed",
+    "is_valid_kid",
+    "multi_audience_includes",
+    "multi_to_instance",
     "open_multi",
+    "recipient_tag",
     "require_mr_suite",
     "seal_multi",
 ]

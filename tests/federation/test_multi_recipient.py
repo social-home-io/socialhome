@@ -17,6 +17,7 @@ from socialhome.crypto import (
     b64url_encode,
     generate_identity_keypair,
 )
+from socialhome.domain.gfs_mailbox import MULTI_MAX_RECIPIENTS
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.gfs_relay_transport import (
     RELAY_SIZE_BUCKETS,
@@ -31,11 +32,15 @@ from socialhome.federation.multi_recipient import (
     decrypt_mr_payload,
     derive_mr_key,
     is_multi_sealed,
+    is_valid_kid,
+    multi_audience_includes,
     open_multi,
+    recipient_tag,
     seal_multi,
 )
 
 CONTENT_KEY = b"\x11" * 32
+RECIPIENTS = ("b" * 32, "c" * 32)
 
 
 def _encoder() -> tuple[FederationEncoder, bytes]:
@@ -53,6 +58,7 @@ def _envelope(payload: str = '{"text":"hi"}') -> tuple[dict, bytes, bytes]:
         payload_json=payload,
         space_id="sp-1",
         key=key,
+        recipients=RECIPIENTS,
     )
     return env, key, pk
 
@@ -79,7 +85,7 @@ def test_kid_is_stable_per_key_and_differs_between_keys():
 
 def test_the_inner_envelope_is_signed_in_the_canonical_order():
     env, key, pk = _envelope()
-    assert env["to_instance"] == MULTI_TO_INSTANCE
+    assert env["to_instance"].startswith(MULTI_TO_INSTANCE + ":")
     assert env["sig_suite"] == "ed25519"
     assert env["space_id"] == "sp-1"
     assert list(env) == [
@@ -237,3 +243,108 @@ def test_is_multi_sealed_only_for_an_mr_shape(value):
 def test_decrypt_mr_payload_refuses_a_malformed_string():
     with pytest.raises(ValueError):
         decrypt_mr_payload("no-colon", b"\x00" * 32)
+
+
+# ─── Audience binding ────────────────────────────────────────────────────
+
+
+def test_recipient_tag_is_an_11_char_hmac_of_the_instance_id():
+    _, key = derive_mr_key(CONTENT_KEY)
+    tag = recipient_tag(key, "b" * 32)
+    assert len(tag) == 11
+    assert len(b64url_decode(tag)) == 8
+    assert tag == recipient_tag(key, "b" * 32)
+    assert tag != recipient_tag(key, "c" * 32)
+    _, other = derive_mr_key(b"\x22" * 32)
+    assert tag != recipient_tag(other, "b" * 32)
+
+
+def test_the_envelope_names_one_sorted_tag_per_recipient():
+    env, key, _ = _envelope()
+    tags = sorted(recipient_tag(key, r) for r in RECIPIENTS)
+    assert env["to_instance"] == "*:" + ".".join(tags)
+    # The instance ids themselves never appear.
+    for r in RECIPIENTS:
+        assert r not in env["to_instance"]
+
+
+def test_the_audience_includes_the_listed_recipients_only():
+    env, key, _ = _envelope()
+    for r in RECIPIENTS:
+        assert multi_audience_includes(env["to_instance"], key, r)
+    assert not multi_audience_includes(env["to_instance"], key, "d" * 32)
+    _, other = derive_mr_key(b"\x22" * 32)
+    assert not multi_audience_includes(env["to_instance"], other, RECIPIENTS[0])
+
+
+def _to(*tags: str) -> str:
+    return "*:" + ".".join(tags)
+
+
+@pytest.mark.parametrize(
+    "mangle",
+    [
+        lambda good: None,
+        lambda good: 5,
+        lambda good: "*",
+        lambda good: "*:",
+        lambda good: good[1:],
+        lambda good: "*;" + good[2:],
+        lambda good: good + ".",
+        lambda good: good + ".short",
+        lambda good: good + ".!!!!!!!!!!!",
+        lambda good: good + "." + good[2:],  # duplicate tag
+        lambda good: _to(*reversed(good[2:].split("."))),  # unsorted
+        lambda good: _to(*(["A" * 11] * 0), *[f"{i:011d}" for i in range(501)]),
+    ],
+)
+def test_a_malformed_audience_is_refused(mangle):
+    env, key, _ = _envelope()
+    good = env["to_instance"]
+    assert multi_audience_includes(good, key, RECIPIENTS[0])
+    assert not multi_audience_includes(mangle(good), key, RECIPIENTS[0])
+
+
+@pytest.mark.parametrize("recipients", [(), tuple(f"{i:032d}" for i in range(501))])
+def test_build_refuses_an_empty_or_oversize_audience(recipients):
+    encoder, _ = _encoder()
+    _, key = derive_mr_key(CONTENT_KEY)
+    with pytest.raises(ValueError, match="recipient"):
+        build_multi_envelope(
+            encoder=encoder,
+            own_instance_id="a" * 32,
+            event_type="space_post_created",
+            payload_json="{}",
+            space_id="sp-1",
+            key=key,
+            recipients=recipients,
+        )
+
+
+def test_the_largest_audience_still_seals():
+    encoder, _ = _encoder()
+    kid, key = derive_mr_key(CONTENT_KEY)
+    recipients = [f"{i:032d}" for i in range(MULTI_MAX_RECIPIENTS)]
+    env = build_multi_envelope(
+        encoder=encoder,
+        own_instance_id="a" * 32,
+        event_type="space_post_created",
+        payload_json="{}",
+        space_id="sp-1",
+        key=key,
+        recipients=recipients,
+    )
+    assert multi_audience_includes(env["to_instance"], key, recipients[-1])
+    assert open_multi(seal_multi(env, kid=kid, key=key), key)["envelope"] == env
+
+
+@pytest.mark.parametrize(
+    "kid", [None, 5, "", "k", "A" * 21, "A" * 23, "A" * 21 + "=", "A" * 21 + "!"]
+)
+def test_is_valid_kid_refuses_any_other_shape(kid):
+    assert not is_valid_kid(kid)
+
+
+def test_is_valid_kid_takes_a_derived_kid():
+    kid, _ = derive_mr_key(CONTENT_KEY)
+    assert is_valid_kid(kid)

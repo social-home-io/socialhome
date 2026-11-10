@@ -798,7 +798,7 @@ async def test_a_miss_rebuilds_the_cache_at_most_once_a_minute(crypto_env, monke
     now = [1000.0]
     monkeypatch.setattr(scs, "_monotonic", lambda: now[0])
     await crypto.initialise_for_space("sp-1")
-    assert await crypto.mr_key_for_kid("unknown") is None  # builds
+    assert await crypto.mr_key_for_kid("A" * 22) is None  # builds
     calls = []
     real = repo.list_recent
 
@@ -822,3 +822,40 @@ async def test_a_miss_rebuilds_the_cache_at_most_once_a_minute(crypto_env, monke
     now[0] += 61
     assert await crypto.mr_key_for_kid(kid) == ("sp-1", 5, key)
     assert calls == [3]
+
+
+@pytest.mark.parametrize("kid", ["", "nope", "A" * 21, "A" * 23, "A" * 21 + "="])
+async def test_a_malformed_kid_costs_no_lookup_and_no_rebuild(
+    crypto_env, monkeypatch, kid
+):
+    crypto, repo = crypto_env
+    await crypto.initialise_for_space("sp-1")
+    calls = []
+
+    async def counting(*, per_space):
+        calls.append(per_space)
+        return []
+
+    monkeypatch.setattr(repo, "list_recent", counting)
+    # Cold cache (never built) and a stale one alike.
+    assert await crypto.mr_key_for_kid(kid) is None
+    assert calls == []
+
+
+async def test_the_kid_cache_drops_keys_removed_behind_its_back_after_ten_minutes(
+    crypto_env, monkeypatch
+):
+    """A key deleted outside the service (a space delete cascade, a restore)
+    stops opening frames once the cache is older than ten minutes — even
+    when every lookup in between was a hit."""
+    crypto, repo = crypto_env
+    now = [1000.0]
+    monkeypatch.setattr(scs, "_monotonic", lambda: now[0])
+    await crypto.initialise_for_space("sp-1")
+    _, kid, _ = await crypto.mr_key("sp-1")
+    assert await crypto.mr_key_for_kid(kid) is not None  # builds
+    await repo._db.enqueue("DELETE FROM space_keys WHERE space_id='sp-1'")
+    now[0] += scs.MR_KID_CACHE_MAX_AGE_S - 1
+    assert await crypto.mr_key_for_kid(kid) is not None  # still cached
+    now[0] += 2
+    assert await crypto.mr_key_for_kid(kid) is None

@@ -859,6 +859,69 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
 #: envelope); and the four mesh-routing types above.
 
 
+#: v_90 — the members of :data:`SPACE_SESSION_ALLOWED_EVENT_TYPES` that never
+#: ride a multi-recipient mailbox frame (one body sealed under the space
+#: epoch key for many member households). A multi frame is for an event
+#: whose identical bytes every listed member household may read; these are
+#: addressed to ONE household, carry key material, negotiate a pairwise
+#: stream, or route — a receiver refuses any of them inside a multi frame.
+MULTI_SEND_EXCLUDED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
+    {
+        # ── Single recipient by design ──
+        #: The host's member directory and a member's card: per-household
+        #: (the directory is filtered per recipient, the card goes to the
+        #: host only).
+        FederationEventType.SPACE_MAILBOX_DIRECTORY,
+        FederationEventType.SPACE_MEMBER_CARD,
+        #: Host → the kicked household / → the requesting admin / → the
+        #: reporter; member → host admin commands.
+        FederationEventType.SPACE_REMOTE_MEMBER_REMOVED,
+        FederationEventType.SPACE_INVITE_LINK_FORWARD_RESULT,
+        FederationEventType.SPACE_REPORT_ANSWERED,
+        FederationEventType.SPACE_REMOTE_ADMIN_KICK,
+        FederationEventType.SPACE_REMOTE_ADMIN_ACTION,
+        #: Pairwise teardown of one space session.
+        FederationEventType.SPACE_SESSION_CLEANUP,
+        #: A private seller ↔ asker thread, and an offer to the seller only.
+        FederationEventType.BAZAAR_THREAD_MESSAGE,
+        FederationEventType.BAZAAR_OFFER_MADE,
+        #: Invite-token redeem and its answer: one household, one token.
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM_ACK,
+        FederationEventType.SPACE_INVITE_TOKEN_REDEEM_DENY,
+        # ── Key material ──
+        #: The content-key handshake and rekey are sealed to one household;
+        #: a multi frame opens under the very key they deliver.
+        FederationEventType.SPACE_KEY_EXCHANGE,
+        FederationEventType.SPACE_KEY_EXCHANGE_ACK,
+        FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+        # ── Pairwise streams ──
+        #: Catch-up backfill to one newcomer and its acks/flow control, the
+        #: config catch-up answer, and partition repair between two peers.
+        FederationEventType.SPACE_CONFIG_CATCH_UP,
+        FederationEventType.SPACE_SYNC_BEGIN,
+        FederationEventType.SPACE_SYNC_CHUNK,
+        FederationEventType.SPACE_SYNC_CHUNK_ACK,
+        FederationEventType.SPACE_SYNC_RESUME,
+        FederationEventType.SPACE_SYNC_COMPLETE,
+        FederationEventType.SPACE_SYNC_REQUEST_MORE,
+        FederationEventType.SPACE_SYNC_REJECTED,
+        FederationEventType.SPACE_PARTITION_GAP,
+        # ── Not one space's content ──
+        #: Mesh routing (an inner envelope sealed to one target) and the
+        #: per-peer protocol version, which names no space.
+        FederationEventType.SPACE_ROUTED,
+        FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+    }
+)
+
+#: v_90 — the event types a multi-recipient frame may carry (the sender
+#: groups only these; the receiver refuses any other inside one).
+MULTI_EVENT_TYPES: frozenset[FederationEventType] = (
+    SPACE_SESSION_ALLOWED_EVENT_TYPES - MULTI_SEND_EXCLUDED_EVENT_TYPES
+)
+
+
 #: Space-content **writes** — every event type that mutates content inside
 #: a space (create, update or delete of a post, comment, page, task, poll,
 #: sticky, calendar event, RSVP, schedule, gallery album or item, bazaar listing /
