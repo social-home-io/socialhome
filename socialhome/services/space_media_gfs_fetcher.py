@@ -57,7 +57,10 @@ the file name — nothing about this household). The GFS has a holder
 re-upload or stream the same ciphertext, which is checked and stored exactly
 like a fetched blob; a miss there is a miss (the view's miss cache applies).
 A prefetch never asks — only a person looking at the item makes a holder
-send anything.
+send anything. Since v_92 it is a follower's path: a household holding a
+member seat asks its host or a trusted helper with ``SPACE_MEDIA_WANTED``
+instead — unless the space's host is below v_92 (rollout: that host answers
+no ``SPACE_MEDIA_WANTED``, so its members keep this ask).
 """
 
 from __future__ import annotations
@@ -70,13 +73,14 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import aiofiles
 import aiofiles.os
 from cryptography.exceptions import InvalidTag
 
 from ..domain.federation import InstanceSource
+from ..domain.federation_capabilities import FederationCapability
 from ..domain.file_hashes import (
     FileHash,
     is_space_content_media_name,
@@ -171,12 +175,19 @@ def _monotonic() -> float:
     return time.monotonic()
 
 
+class _MemberVersions(Protocol):
+    async def space_member_supports(
+        self, instance_id: str, *, min_version: int
+    ) -> bool: ...
+
+
 class SpaceMediaGfsFetcher:
     """Keep ``media_refs`` and turn them into local files."""
 
     __slots__ = (
         "_crypto",
         "_dir",
+        "_federation",
         "_federation_repo",
         "_fetch_sem",
         "_gfs",
@@ -202,6 +213,7 @@ class SpaceMediaGfsFetcher:
         gfs_repo: AbstractGfsConnectionRepo,
         federation_repo: AbstractFederationRepo,
         space_repo: AbstractSpaceRepo,
+        federation: _MemberVersions,
         media_dir: pathlib.Path,
     ) -> None:
         self._refs = refs_repo
@@ -212,6 +224,8 @@ class SpaceMediaGfsFetcher:
         #: This household's own channel id of a private space, and whether
         #: it holds a member seat (only a follower asks its GFS, v_92).
         self._spaces = space_repo
+        #: Whether the space's host answers ``SPACE_MEDIA_WANTED`` (v_92).
+        self._federation = federation
         self._dir = pathlib.Path(media_dir)
         #: (filename, asks on a miss) → the one fetch running for it.
         self._inflight: dict[tuple[str, bool], asyncio.Task[str]] = {}
@@ -651,20 +665,29 @@ class SpaceMediaGfsFetcher:
             if got != _MISS:
                 return got
             outcome = _REFUSED
-        if (
-            outcome == _MISS
-            and want
-            and not await holds_member_seat(self._spaces, ref.space_id)
-        ):
-            # v_83 on-demand is a FOLLOWER's path (v_92): a member household
-            # asks its host or a helper with ``SPACE_MEDIA_WANTED``
-            # (:class:`~.space_media_wanted.SpaceMediaWanted`) instead.
+        if outcome == _MISS and want and await self._asks_its_gfs(ref.space_id):
             return await self._want(ref, scope_id, current[1], path, sources)
         if outcome == _MISS:
             log.info(
                 "space media %s: no GFS holds blob %s (yet)", filename, ref.blob_id[:12]
             )
         return outcome
+
+    async def _asks_its_gfs(self, space_id: str) -> bool:
+        """v_83 on-demand is a FOLLOWER's path (v_92): a member household
+        asks its host or a helper with ``SPACE_MEDIA_WANTED``
+        (:class:`~.space_media_wanted.SpaceMediaWanted`) instead — unless
+        the space's host is below v_92 and would answer no such request
+        (rollout: the member keeps the ask it had)."""
+        if not await holds_member_seat(self._spaces, space_id):
+            return True
+        space = await self._spaces.get(space_id)
+        host = space.owner_instance_id if space is not None else ""
+        if not host:
+            return False
+        return not await self._federation.space_member_supports(
+            host, min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
+        )
 
     async def _want(
         self,

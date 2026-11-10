@@ -656,7 +656,9 @@ row's author household only, bytes checked against the row's `h`.
   seat** (a writer role). A follower household keeps the v_83 GFS
   on-demand path.
 - Names of one space are collected for 2 s (`COALESCE_S`, fixed) or until
-  50, then ONE request goes.
+  50, then ONE request goes. A batch that reaches 50 goes at once and the
+  next name opens a new batch (its own one request), so a gallery grid with
+  more than 50 missing pictures asks for all of them.
 - **Provider order:** the space's host first; after 60 s
   (`PROVIDER_WAIT_S`, fixed) the names still not stored here go to the
   next provider — a trusted household (a live `owner` / `admin` /
@@ -668,13 +670,16 @@ row's author household only, bytes checked against the row's `h`.
   mailbox seat or the host hop, whichever reaches the provider (the type is
   in `SPACE_SESSION_ALLOWED_EVENT_TYPES`).
 - One name is asked again only after 10 min (`NAME_COOLDOWN_S`); lookups
-  and batches in flight are bounded.
+  and batches in flight are bounded. A name that was never queued (no live
+  row yet, a follower seat, the batch cap, a failed lookup) is not held on
+  that cooldown: the next view asks again.
 
 **Provider** (`SpaceMediaWantedProvider`, registered for the event).
 
-1. The requester must be a member household of the space
-   (`list_member_instances`, the §S-1 gate a resume uses), else the whole
-   request is dropped; so is a request with no list or more than 50
+1. The requester must hold a **writer (member) seat** in the space in this
+   household's roster mirror — the predicate the §25.6 provider uses for
+   member-only data (`SpaceWriterHouseholds.may_receive`) — else the whole
+   request is dropped (a follower-only household asks its GFS, v_83); so is a request with no list or more than 50
    entries. A malformed entry (no item, an item id over 200 chars, a name
    that is not a safe `sc-` name) is skipped alone.
 2. The item must be a **live item of that space** showing a file whose
@@ -690,11 +695,15 @@ row's author household only, bytes checked against the row's `h`.
    people's files.
 4. A **budget** per (requester, space): at most 50 files / 32 MiB per
    30 min — the resume's `RESUME_MEDIA_MAX_FILES` / `_BYTES` /
-   `RESUME_COOLDOWN_S`. Over it: skipped (logged at INFO with counts).
+   `RESUME_COOLDOWN_S` values, but a budget of its own: a provider that
+   also serves that requester a resume may ship up to 32 MiB for each in
+   the same 30 min. Over it: skipped (logged at INFO with counts).
 5. Queued with `enqueue_for_blob(..., push=True)`: the media outbox never
    drops such a row for "reads from its GFS" — the requester already
-   missed it. The mark is in memory: lost on a restart, the requester asks
-   again on its next view.
+   missed it. The mark is in memory and LRU-bounded (`MAX_PUSHED_MARKS`,
+   4096 rows): a mark lost to a restart or to eviction only means the push
+   may be skipped while the reader's GFS cache holds the file — the member
+   asks again on its next view after the cooldown.
 
 ```mermaid
 sequenceDiagram
@@ -713,14 +722,18 @@ sequenceDiagram
 
 **Fallback.** A provider below v_92 is skipped; when none is left the
 file waits for the §25.6 catch-up. A requester below v_92 never asks (a
-v_83–v_91 relay reader still asks its GFS).
+v_83–v_91 relay reader still asks its GFS). A member of a space whose
+**host** is below v_92 keeps the v_83 GFS on-demand ask during the rollout
+(`SpaceMediaGfsFetcher`, `space_member_supports(host, v_92)`); a member
+with a v_92 host never uses it.
 
 **Cost (recipients × files × bytes per trigger).** One old file on view:
 1 request (< 1 KiB) to 1 provider and the file's bytes once (+ at most
 `MAX_PROVIDERS − 1` = 2 more requests when the host is offline or does
 not have it). A batch of 50 files: 1 request, ≤ 32 MiB once. Per
-(requester, space) ≤ 32 MiB per 30 min per provider, so a worst case of
-3 providers is ≤ 96 MiB per 30 min for one household scrolling a whole
+(requester, space) ≤ 32 MiB per 30 min per provider (separate from the
+same provider's resume budget), so a worst case of 3 providers is ≤ 96 MiB
+per 30 min for one household scrolling a whole
 space's old pictures — and only bytes it is missing. Nothing fans out: the
 request goes to one provider at a time and the answer to the one
 requester; a global space with 10 000 followers adds nothing (followers
@@ -939,7 +952,8 @@ the file sends it again. GFS side, routes, settings and bounds:
 **Who.** Followers of a global space reached through a GFS. Since v_92
 a household holding a member seat (link-joined included) asks its host or
 a helper with [`SPACE_MEDIA_WANTED`](#older-files-on-view--space_media_wanted-v_92)
-instead, and the uploader counts a reader as one that asks its GFS only in
+instead — unless the space's host is below v_92 (rollout), then it keeps
+this ask — and the uploader counts a reader as one that asks its GFS only in
 [v_83, v_92). Paired and mesh members never use it.
 
 **Reader** (`SpaceMediaGfsFetcher`). Only a **view**

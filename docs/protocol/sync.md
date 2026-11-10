@@ -188,7 +188,12 @@ scheduler counts a host's `too_many_sessions` deferral too
 has not answered, the member sends `SPACE_SYNC_RESUME` to **one** trusted
 helper — a household holding a live `admin` or `moderator` seat in the
 roster mirror, never us or the host, sorted, one step further each silent
-round — with `since` = when the host was last heard (at most 30 days back).
+round — with `since` = the newest of: when the host was last heard, the
+previous helper ask for the space minus a fixed 5-minute overlap
+(`HELPER_OVERLAP_S`; remembered in memory per space, bounded like the
+heard marks), and 30 days ago. So while the host stays silent each round
+replays only what is new since the last ask; a file the member still lacks
+arrives when someone opens it (`SPACE_MEDIA_WANTED`).
 No helper → nothing (logged once per round). A space we host, or hold the
 roster authority of, never falls back; neither does a round with no BEGIN to
 the host (a mesh-only host whose catch-up already completed).
@@ -214,7 +219,7 @@ sequenceDiagram
     M->>H: SPACE_SYNC_BEGIN (periodic tick)
     Note over M,H: no chunk, no sentinel, no deferral
     Note over M: HOST_ANSWER_WAIT_S (120 s) later, host not heard
-    M->>A: SPACE_SYNC_RESUME (space_id, since = host last heard, ≤ 30 d)
+    M->>A: SPACE_SYNC_RESUME (space_id, since = max(host heard, last ask − 5 min, now − 30 d))
     A->>M: SPACE_*_CREATED (its own people's rows only)
     A->>M: SPACE_MEDIA_BLOB (its own files + hashed files of others' rows, ≤ 50 / 32 MiB)
     Note over M: next round asks the host first again
@@ -227,10 +232,11 @@ the helper serves at most one replay per (requester, space) per 30 min
 files / 32 MiB per (requester, space, helper) per 30 min. A space with 50
 member households and the host offline for a day: 50 × 48 = 2 400 requests
 a day spread over the helpers. Nothing fans out: one requester, one helper,
-one space per round. Known gap: while the host stays silent, `since` stays
-at the host's last answer, so later rounds re-send rows (deduped by id) and
-may re-push files the member already took — bounded by the per-request
-budget above.
+one space per round. Steady state while the host stays silent: each round's
+resume carries only the rows written since the previous ask (plus the
+5-minute overlap, deduped by id) and their files — the first round after a
+boot reaches back to the host's last answer (≤ 30 days) once, since the
+helper-ask mark is in memory.
 
 ## What a sync streams
 

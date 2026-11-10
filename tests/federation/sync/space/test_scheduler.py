@@ -1868,6 +1868,45 @@ async def test_the_resume_asks_since_the_host_was_last_heard(
     assert [r["since"] for r in resume.requests] == [last]
 
 
+async def test_the_next_round_asks_only_since_the_last_helper_ask(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """While the host stays silent, round 2 does not replay round 1's rows
+    again: its ``since`` is the previous helper ask minus the fixed overlap
+    (the host's last answer and the 30-day floor are older)."""
+    from datetime import timedelta
+
+    sched, contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    await sched._tick_once()
+    await _wait_checks(sched)
+    first_ask = datetime.fromisoformat(contact.last_helper_ask_iso("sp-1"))
+    await sched._tick_once()
+    await _wait_checks(sched)
+    first, second = (datetime.fromisoformat(r["since"]) for r in resume.requests)
+    assert first < datetime.now(UTC) - timedelta(days=29)
+    assert second == first_ask - timedelta(seconds=scheduler_mod.HELPER_OVERLAP_S)
+    assert scheduler_mod.HELPER_OVERLAP_S == 5 * 60
+
+
+async def test_a_host_heard_after_the_helper_ask_moves_since_forward(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """``since`` = the newest of: the host's last answer, the last helper
+    ask minus the overlap, 30 days ago."""
+    sched, contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    await sched._tick_once()
+    await _wait_checks(sched)
+    contact.heard("sp-1")  # the host came back once, then went silent again
+    last = contact.last_heard_iso("sp-1")
+    await sched._tick_once()
+    await _wait_checks(sched)
+    assert resume.requests[-1]["since"] == last
+
+
 async def test_the_helper_rotates_one_step_per_round(
     bus, queue, sync_manager, quick_answer_wait
 ):

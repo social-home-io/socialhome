@@ -31,6 +31,7 @@ from socialhome.services.space_media_wanted import (
     SpaceMediaWanted,
     SpaceMediaWantedProvider,
 )
+from socialhome.services.space_writer_households import SpaceWriterHouseholds
 
 V92 = FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
 SPACE = "sp-1"
@@ -186,18 +187,91 @@ async def test_names_of_one_space_are_coalesced_into_one_request(tmp_path):
 
 
 async def test_a_full_batch_goes_at_once_and_the_rest_waits_for_the_next(tmp_path):
-    names = [_sc_n(i) for i in range(MAX_WANTED_FILES + 1)]
+    """A gallery grid with more than 50 missing pictures: the first 50 go
+    at once in one request; the next names open a new batch (its own one
+    request) instead of being dropped while on their cooldown."""
+    names = [_sc_n(i) for i in range(MAX_WANTED_FILES + 5)]
     refs = _Refs({n: [(SPACE, f"p{i}", "t")] for i, n in enumerate(names)})
     fed = _Fed({HOST: V92})
-    w = _wanted(tmp_path, refs=refs, fed=fed, coalesce_s=30.0)
+    w = _wanted(tmp_path, refs=refs, fed=fed, coalesce_s=0.3)
     for n in names:
         w.schedule(n)
         await asyncio.sleep(0)  # let each lookup run (≤ 8 at once)
     await asyncio.sleep(0.05)
-    # The first 50 went without waiting the 30 s window.
+    # The first 50 went without waiting the coalescing window.
     assert len(fed.sent) == 1
-    assert len(fed.sent[0][2]["files"]) == MAX_WANTED_FILES
-    await w.stop()
+    assert _names(fed.sent[0]) == names[:MAX_WANTED_FILES]
+    await w.drain()
+    # The 51st..55th were not lost: one more request, after its window.
+    assert len(fed.sent) == 2
+    assert _names(fed.sent[1]) == names[MAX_WANTED_FILES:]
+
+
+async def test_a_name_without_a_space_row_is_not_left_on_cooldown(tmp_path):
+    """Dropped before it is queued (no live row yet) → asked again on the
+    next view, not 10 minutes later."""
+    a = _sc("a")
+    refs = _Refs()
+    fed = _Fed({HOST: V92})
+    w = _wanted(tmp_path, refs=refs, fed=fed)
+    w.schedule(a)
+    await w.drain()
+    assert fed.sent == []
+    refs.rows[a] = [(SPACE, "p1", "t")]  # the item arrived since
+    w.schedule(a)
+    await w.drain()
+    assert [_names(s) for s in fed.sent] == [[a]]
+
+
+async def test_a_name_a_follower_household_skipped_is_not_left_on_cooldown(tmp_path):
+    a = _sc("a")
+    spaces = _Spaces(role=SpaceRole.SUBSCRIBER)
+    fed = _Fed({HOST: V92})
+    w = _wanted(tmp_path, refs=_Refs({a: [(SPACE, "p1", "t")]}), spaces=spaces, fed=fed)
+    w.schedule(a)
+    await w.drain()
+    assert fed.sent == []
+    spaces.role = SpaceRole.MEMBER  # joined as a member since
+    w.schedule(a)
+    await w.drain()
+    assert len(fed.sent) == 1
+
+
+async def test_a_name_dropped_at_the_batch_cap_is_not_left_on_cooldown(
+    tmp_path, monkeypatch
+):
+    a = _sc("a")
+    fed = _Fed({HOST: V92})
+    w = _wanted(tmp_path, refs=_Refs({a: [(SPACE, "p1", "t")]}), fed=fed)
+    monkeypatch.setattr(mod, "MAX_BATCH_TASKS", 0)
+    w.schedule(a)
+    await w.drain()
+    assert fed.sent == []
+    monkeypatch.setattr(mod, "MAX_BATCH_TASKS", 64)
+    w.schedule(a)
+    await w.drain()
+    assert len(fed.sent) == 1
+
+
+async def test_a_name_whose_lookup_failed_is_not_left_on_cooldown(tmp_path):
+    a = _sc("a")
+
+    class _Flaky(_Refs):
+        calls = 0
+
+        async def space_rows_of(self, basename):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("db busy")
+            return await super().space_rows_of(basename)
+
+    fed = _Fed({HOST: V92})
+    w = _wanted(tmp_path, refs=_Flaky({a: [(SPACE, "p1", "t")]}), fed=fed)
+    w.schedule(a)
+    await w.drain()
+    w.schedule(a)
+    await w.drain()
+    assert len(fed.sent) == 1
 
 
 async def test_a_follower_household_never_asks(tmp_path):
@@ -389,11 +463,24 @@ class _Outbox:
         self.queued.append(kw)
 
 
-def _provider(tmp_path, items, *, gate=None, members=("req",), clock=None):
+class _Roster:
+    """The roster mirror: household → its seat roles in SPACE."""
+
+    def __init__(self, seats):
+        self.seats: dict[str, str] = dict(seats)
+
+    async def list_instances_with_roles(self, space_id, roles):
+        if space_id != SPACE:
+            return []
+        return [iid for iid, role in self.seats.items() if role in roles]
+
+
+def _provider(tmp_path, items, *, gate=None, roster=None, clock=None):
     outbox = _Outbox()
     kw = {} if clock is None else {"clock": clock}
+    roster = roster or _Roster({"req": "member"})
     p = SpaceMediaWantedProvider(
-        space_repo=_Spaces(members=members),
+        member_gate=SpaceWriterHouseholds(roster, own_instance_id=SELF).may_receive,
         media_refs=_ItemFiles(items),
         file_gates=_Gates(gate or _Gate(all_files=True)),
         hasher=MediaFileHasher(tmp_path),
@@ -452,9 +539,27 @@ async def test_an_unhashed_local_file_matches_by_its_computed_content_name(tmp_p
 async def test_a_non_member_household_gets_nothing(tmp_path):
     a = _sc("a")
     (tmp_path / a).write_bytes(b"x")
-    p, outbox = _provider(tmp_path, {(SPACE, "p1"): [(a, "u1")]}, members=("other",))
+    p, outbox = _provider(
+        tmp_path, {(SPACE, "p1"): [(a, "u1")]}, roster=_Roster({"other": "member"})
+    )
     assert await p.handle(_event([{"item": "p1", "name": a}])) == 0
     assert outbox.queued == []
+
+
+async def test_a_follower_only_household_gets_nothing(tmp_path):
+    """Only a household holding a writer seat asks with SPACE_MEDIA_WANTED
+    (the same predicate as the §25.6 member-only data): a follower-only
+    household keeps its GFS's v_83 on-demand path."""
+    a = _sc("a")
+    (tmp_path / a).write_bytes(b"x")
+    roster = _Roster({"req": "subscriber"})
+    p, outbox = _provider(tmp_path, {(SPACE, "p1"): [(a, "u1")]}, roster=roster)
+    assert await p.handle(_event([{"item": "p1", "name": a}])) == 0
+    assert outbox.queued == []
+    for role in ("member", "moderator", "admin", "owner"):
+        roster.seats["req"] = role
+        p._budget.clear()
+        assert await p.handle(_event([{"item": "p1", "name": a}])) == 1, role
 
 
 async def test_wrong_space_unshown_deleted_or_missing_entries_are_skipped(tmp_path):
@@ -530,7 +635,8 @@ async def test_the_budget_is_50_files_and_32_mib_per_requester_and_space(
     for n in names:
         (tmp_path / n).write_bytes(b"x")
     items = {(SPACE, f"p{i}"): [(n, "u1")] for i, n in enumerate(names)}
-    p, _outbox = _provider(tmp_path, items, clock=lambda: now[0])
+    roster = _Roster({"req": "member"})
+    p, _outbox = _provider(tmp_path, items, roster=roster, clock=lambda: now[0])
     first = [
         {"item": f"p{i}", "name": n} for i, n in enumerate(names[:MAX_WANTED_FILES])
     ]
@@ -539,7 +645,7 @@ async def test_the_budget_is_50_files_and_32_mib_per_requester_and_space(
         assert await p.handle(_event([{"item": "p50", "name": names[50]}])) == 0
     assert "budget" in caplog.text
     # Another requester has its own budget; after the window, so does this one.
-    p._spaces.members.add("req-2")
+    roster.seats["req-2"] = "member"
     assert await p.handle(_event([{"item": "p50", "name": names[50]}], sender="req-2"))
     now[0] += RESUME_COOLDOWN_S
     assert await p.handle(_event([{"item": "p50", "name": names[50]}])) == 1

@@ -52,10 +52,12 @@ Triggers:
     session's sentinel counts — and by a capacity deferral). No answer:
     ONE trusted helper (a live ``admin`` / ``moderator`` seat household
     other than us and the host, sorted, one step further each round) gets
-    ``SPACE_SYNC_RESUME`` since the host was last heard (at most
-    ``RESUME_MAX_AGE_S`` ago): its own people's rows and the hashed files
-    of the rest. The host is still asked first every tick. Every member
-    alike — paired, mesh or GFS-reached.
+    ``SPACE_SYNC_RESUME`` since the newest of: the host last heard, the
+    previous helper ask minus :data:`HELPER_OVERLAP_S` (a silent host's
+    rounds replay only what is new), ``RESUME_MAX_AGE_S`` ago: its own
+    people's rows and the hashed files of the rest. The host is still
+    asked first every tick. Every member alike — paired, mesh or
+    GFS-reached.
 
 Follows the `_stop: asyncio.Event` lifecycle (CLAUDE.md "Schedulers").
 """
@@ -167,6 +169,12 @@ STARTUP_MESH_CATCHUP_RETRY_DELAYS_S: tuple[float, ...] = (15.0, 30.0, 60.0, 120.
 #: Fixed — never random: a stream that is answered begins in seconds.
 HOST_ANSWER_WAIT_S: float = 120.0
 
+#: A helper resume after an earlier one (the host still silent) reaches back
+#: to that ask minus this overlap — rows written while it was in flight are
+#: replayed again, everything older is not. Files the requester still lacks
+#: arrive when someone opens them (``SPACE_MEDIA_WANTED``).
+HELPER_OVERLAP_S: float = 5 * 60.0
+
 #: The seats a trusted helper holds (the v_86 file fills' content
 #: authority; the owner is the host itself).
 HELPER_ROLES: frozenset[str] = frozenset(
@@ -183,6 +191,10 @@ class _HostContact(Protocol):
 
     def last_heard_iso(self, space_id: str) -> str | None: ...
 
+    def helper_asked(self, space_id: str) -> None: ...
+
+    def last_helper_ask_iso(self, space_id: str) -> str | None: ...
+
 
 class _ResumeSender(Protocol):
     async def send_request(
@@ -190,20 +202,30 @@ class _ResumeSender(Protocol):
     ) -> None: ...
 
 
-def _resume_since(last_heard_iso: str | None) -> str:
-    """A helper resume reaches back to when the host was last heard, and at
-    most ``RESUME_MAX_AGE_S`` (the provider clamps to the same floor)."""
+def _parse_utc(iso: str | None) -> datetime | None:
+    if not iso:
+        return None
+    try:
+        at = datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
+
+
+def _resume_since(last_heard_iso: str | None, last_helper_iso: str | None) -> str:
+    """Where a helper resume starts: the newest of when the host was last
+    heard, the previous helper ask minus :data:`HELPER_OVERLAP_S` (while the
+    host stays silent each round replays only what is new), and
+    ``RESUME_MAX_AGE_S`` ago (the provider clamps to the same floor)."""
     floor = datetime.now(UTC) - timedelta(seconds=RESUME_MAX_AGE_S)
-    if last_heard_iso:
-        try:
-            heard = datetime.fromisoformat(last_heard_iso)
-        except ValueError:
-            return floor.isoformat()
-        if heard.tzinfo is None:
-            heard = heard.replace(tzinfo=UTC)
-        if heard > floor:
-            return last_heard_iso
-    return floor.isoformat()
+    heard = _parse_utc(last_heard_iso)
+    helper = _parse_utc(last_helper_iso)
+    since = floor
+    if helper is not None:
+        since = max(since, helper - timedelta(seconds=HELPER_OVERLAP_S))
+    if heard is not None and heard > since:
+        return last_heard_iso or since.isoformat()
+    return since.isoformat()
 
 
 class SpaceSyncScheduler:
@@ -1005,7 +1027,10 @@ class SpaceSyncScheduler:
             rounds = self._helper_round.get(space_id, 0)
             self._helper_round[space_id] = rounds + 1
             helper = helpers[rounds % len(helpers)]
-            since = _resume_since(contact.last_heard_iso(space_id))
+            since = _resume_since(
+                contact.last_heard_iso(space_id),
+                contact.last_helper_ask_iso(space_id),
+            )
             log.info(
                 "space %s: the host did not answer within %.0f s — asking "
                 "trusted helper %s for a resume since %s",
@@ -1017,6 +1042,7 @@ class SpaceSyncScheduler:
             await resume.send_request(
                 space_id=space_id, instance_id=helper, since=since
             )
+            contact.helper_asked(space_id)
         except Exception:
             log.exception("space %s: asking a trusted helper failed", space_id)
 

@@ -2443,7 +2443,11 @@ def _build_space_media_wanted(
     file gate decides what we ship, the media outbox pushes it)."""
     media_dir = pathlib.Path(config.media_path)
     provider = SpaceMediaWantedProvider(
-        space_repo=space_repo,
+        # Member households only — the §25.6 gate for member-only data; a
+        # follower-only household asks its GFS (v_83).
+        member_gate=SpaceWriterHouseholds(
+            space_remote_member_repo, own_instance_id=own_instance_id
+        ).may_receive,
         media_refs=media_reference_repo,
         file_gates=file_gates,
         hasher=space_media_sync_service.file_hasher,
@@ -2523,6 +2527,7 @@ def _build_space_media_gfs(
         gfs_repo=repos.gfs_connection,
         federation_repo=repos.federation,
         space_repo=space_repo,
+        federation=federation_service,
         media_dir=media_dir,
     )
     # v_83 — the holder side of on demand: a GFS asks this household for a

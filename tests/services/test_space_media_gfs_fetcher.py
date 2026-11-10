@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass
 
 from socialhome.domain.federation import InstanceSource
+from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.file_hashes import (
     FileHash,
     sha256_hex,
@@ -216,6 +217,16 @@ class _Seat:
     role: SpaceRole
 
 
+V92 = FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
+SPACE_HOST = "host-h"
+
+
+@dataclass
+class _Space:
+    id: str
+    owner_instance_id: str
+
+
 class _Spaces:
     """The reader's own channel id of a private space, and its seat: a
     follower household by default (v_92: only a follower asks its GFS)."""
@@ -223,6 +234,9 @@ class _Spaces:
     def __init__(self, channel_id: str | None = None, *, member: bool = False):
         self.channel_id = channel_id
         self.role = SpaceRole.MEMBER if member else SpaceRole.SUBSCRIBER
+
+    async def get(self, space_id):
+        return _Space(space_id, SPACE_HOST)
 
     async def get_gfs_channel(self, space_id):
         return (self.channel_id, "pk") if self.channel_id else None
@@ -234,7 +248,26 @@ class _Spaces:
         return [_Seat("u-me", self.role)]
 
 
-def _fetcher(tmp_path, gfs, *, conns=(), insts=(HOST,), channel_id=None, member=False):
+class _Fed:
+    """``space_member_supports`` over fixed household versions."""
+
+    def __init__(self, versions):
+        self.versions = dict(versions)
+
+    async def space_member_supports(self, instance_id, *, min_version):
+        return self.versions.get(instance_id, 0) >= min_version
+
+
+def _fetcher(
+    tmp_path,
+    gfs,
+    *,
+    conns=(),
+    insts=(HOST,),
+    channel_id=None,
+    member=False,
+    host_version=V92,
+):
     return SpaceMediaGfsFetcher(
         refs_repo=_Refs(),
         space_crypto=_Crypto(),
@@ -242,6 +275,7 @@ def _fetcher(tmp_path, gfs, *, conns=(), insts=(HOST,), channel_id=None, member=
         gfs_repo=_GfsRepo(conns),
         federation_repo=_FedRepo(insts),
         space_repo=_Spaces(channel_id, member=member),
+        federation=_Fed({SPACE_HOST: host_version}),
         media_dir=tmp_path,
     )
 
@@ -1146,15 +1180,28 @@ async def test_a_view_that_misses_asks_once_and_gets_the_bytes(tmp_path):
 
 
 async def test_a_member_household_never_asks_its_gfs(tmp_path):
-    """v_92: a household holding a member seat asks its host or a helper
-    with ``SPACE_MEDIA_WANTED`` — never its GFS's on-demand path, which is
-    for followers only."""
+    """v_92: a household holding a member seat in a space whose host is at
+    v_92 asks its host or a helper with ``SPACE_MEDIA_WANTED`` — never its
+    GFS's on-demand path, which is for followers only."""
     blob = _blob("a.webp", b"x")
     gfs = _OnDemandGfs({}, served={_addr(blob): blob})
     f = _fetcher(tmp_path, gfs, member=True)
     await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
     assert await f.ensure_local(_L("a.webp")) is False
     assert gfs.wanted == []
+
+
+async def test_a_member_whose_host_is_below_v92_still_asks_its_gfs(tmp_path):
+    """Rollout: a host below v_92 answers no ``SPACE_MEDIA_WANTED``, so a
+    member of its space keeps the v_83 on-demand ask it had before."""
+    data = os.urandom(300)
+    blob = _blob("a.webp", data)
+    gfs = _OnDemandGfs({}, served={_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs, member=True, host_version=V92 - 1)
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
+    assert await f.ensure_local(_L("a.webp")) is True
+    assert (tmp_path / _L("a.webp")).read_bytes() == data
+    assert len(gfs.wanted) == 1
 
 
 async def test_a_wanted_answer_is_checked_like_a_fetch(tmp_path, caplog):

@@ -14,16 +14,21 @@ up the LIVE items of this household that show it
 .space_rows_of`) and, for each space where this household holds a MEMBER
 seat (a follower keeps the GFS's v_83 on-demand path), collects the
 ``(item, name)`` pair. Names of one space are coalesced for
-:data:`COALESCE_S` (or until :data:`MAX_WANTED_FILES`) into ONE request
-``{space_id, files: [{item, name}]}`` sent to the space's host first; after
+:data:`COALESCE_S` into ONE request ``{space_id, files: [{item, name}]}``
+(a batch that reaches :data:`MAX_WANTED_FILES` goes at once and the next
+name opens a new batch), sent to the space's host first; after
 :data:`PROVIDER_WAIT_S` the names still not stored here go to the next
 provider — a trusted (admin / moderator) household of the roster mirror, in
 sorted order — at most :data:`MAX_PROVIDERS` providers per batch, only
 providers at v_92 (a failed send moves on at once). A name is asked again
-only after :data:`NAME_COOLDOWN_S`. Fixed delays, never random.
+only after :data:`NAME_COOLDOWN_S` — unless it was never queued (no live
+row, a follower seat, the batch cap, a failed lookup): then the next view
+asks again. Fixed delays, never random.
 
-**Provider** (:class:`SpaceMediaWantedProvider`). The requester must be a
-member household of the space (the §S-1 gate a resume uses); each entry must
+**Provider** (:class:`SpaceMediaWantedProvider`). The requester must hold a
+writer (member) seat in the space — the predicate the §25.6 provider uses
+for member-only data (:meth:`SpaceWriterHouseholds.may_receive`), so a
+follower-only household gets nothing (it asks its GFS); each entry must
 name a LIVE item of THAT space showing a file whose content name is the
 requested one (a stored ``sc-`` name directly; an unhashed local file by
 ``space_content_media_name(space, sha256(file), basename)``); the v_86 file
@@ -52,7 +57,7 @@ import logging
 import pathlib
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Protocol
 
 import aiofiles.os
@@ -261,6 +266,7 @@ class SpaceMediaWanted:
         await self.drain()
 
     async def _lookup(self, basename: str) -> None:
+        queued = False
         try:
             rows = await self._refs.space_rows_of(basename)
             seen: set[str] = set()
@@ -270,13 +276,19 @@ class SpaceMediaWanted:
                 seen.add(space_id)
                 if not await holds_member_seat(self._spaces, space_id):
                     continue  # a follower reads through its GFS (v_83)
-                self._add(space_id, item_id, basename)
+                queued = self._add(space_id, item_id, basename) or queued
         except Exception:
             log.warning(
                 "space media wanted: lookup of %s failed", basename, exc_info=True
             )
+        if not queued:
+            # Nothing asked for it: the next view may try again at once.
+            self._asked.pop(basename, None)
 
-    def _add(self, space_id: str, item_id: str, name: str) -> None:
+    def _add(self, space_id: str, item_id: str, name: str) -> bool:
+        """Queue *name* in the space's collecting batch (a new one when
+        none is collecting); whether it was queued. A batch that fills is
+        detached at once, so the next name opens a new batch."""
         batch = self._pending.get(space_id)
         if batch is None:
             if self._stop.is_set() or len(self._batches) >= MAX_BATCH_TASKS:
@@ -285,7 +297,7 @@ class SpaceMediaWanted:
                     len(self._batches),
                     name,
                 )
-                return
+                return False
             batch = _Batch()
             self._pending[space_id] = batch
             task = asyncio.get_running_loop().create_task(
@@ -293,10 +305,11 @@ class SpaceMediaWanted:
             )
             self._batches.add(task)
             task.add_done_callback(self._batches.discard)
-        if len(batch.files) < MAX_WANTED_FILES:
-            batch.files.setdefault(name, item_id)
+        batch.files.setdefault(name, item_id)
         if len(batch.files) >= MAX_WANTED_FILES:
+            del self._pending[space_id]
             batch.full.set()
+        return True
 
     async def _run(self, space_id: str, batch: _Batch) -> None:
         try:
@@ -410,15 +423,15 @@ class SpaceMediaWantedProvider:
         "_dir",
         "_gates",
         "_hasher",
+        "_member_gate",
         "_outbox",
         "_refs",
-        "_spaces",
     )
 
     def __init__(
         self,
         *,
-        space_repo: AbstractSpaceRepo,
+        member_gate: Callable[[str, str], Awaitable[bool]],
         media_refs: _ItemFiles,
         file_gates: _FileGates,
         hasher: MediaFileHasher,
@@ -426,7 +439,9 @@ class SpaceMediaWantedProvider:
         media_dir: pathlib.Path,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._spaces = space_repo
+        #: ``(space, household) → holds a writer seat`` — the §25.6 gate for
+        #: member-only data (:meth:`SpaceWriterHouseholds.may_receive`).
+        self._member_gate = member_gate
         self._refs = media_refs
         self._gates = file_gates
         self._hasher = hasher
@@ -450,9 +465,11 @@ class SpaceMediaWantedProvider:
         ):
             log.info("SPACE_MEDIA_WANTED from %s: malformed — dropped", requester)
             return 0
-        if requester not in await self._spaces.list_member_instances(space_id):
+        if not await self._member_gate(space_id, requester):
+            # A follower-only household reads through its GFS (v_83).
             log.info(
-                "SPACE_MEDIA_WANTED from %s: no member of space %s — dropped",
+                "SPACE_MEDIA_WANTED from %s: holds no member seat in space %s "
+                "— dropped",
                 requester,
                 space_id,
             )

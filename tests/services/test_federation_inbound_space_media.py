@@ -1194,6 +1194,7 @@ async def test_a_gfs_described_hashed_file_is_filled_by_the_hosts_push(env, db):
         gfs_repo=_NoGfs(),  # type: ignore[arg-type]
         federation_repo=_NoInstances(),  # type: ignore[arg-type]
         space_repo=SqliteSpaceRepo(db),
+        federation=_NoInstances(),  # type: ignore[arg-type]
         media_dir=media,
     )
     svc.attach_gfs_media(fetcher)

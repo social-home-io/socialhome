@@ -11,9 +11,16 @@ since then means the host is offline (or has no path to us), and ONE
 trusted helper is asked for the bounded ``SPACE_SYNC_RESUME`` instead
 (``scheduler.SpaceSyncScheduler``).
 
+It also remembers when the scheduler last sent a helper resume for a space
+(:meth:`HostContact.helper_asked`): while the host stays silent, the next
+round asks only since that ask (minus a fixed overlap) instead of replaying
+the same rows and files again.
+
 In memory only: a restart starts every space silent from the construction
 time, so a household that just booted waits a full window before it falls
-back. Bounded: at most :data:`MAX_SPACES_TRACKED` spaces, oldest dropped.
+back (and its first helper resume reaches back to the host's last answer
+again). Bounded: at most :data:`MAX_SPACES_TRACKED` spaces per map, oldest
+dropped.
 """
 
 from __future__ import annotations
@@ -35,7 +42,7 @@ class HostContact:
     """Per space: the monotonic and the UTC wall-clock time its host was
     last heard."""
 
-    __slots__ = ("_clock", "_heard", "_since", "_wall")
+    __slots__ = ("_clock", "_heard", "_helper", "_since", "_wall")
 
     def __init__(
         self,
@@ -47,6 +54,8 @@ class HostContact:
         self._wall = wall
         self._since = clock()
         self._heard: OrderedDict[str, tuple[float, str]] = OrderedDict()
+        #: space → when (UTC ISO 8601) a helper resume was last sent.
+        self._helper: OrderedDict[str, str] = OrderedDict()
 
     def now(self) -> float:
         """The clock :meth:`heard_since` compares against."""
@@ -76,3 +85,17 @@ class HostContact:
         """When the host was last heard (UTC ISO 8601); ``None``: not yet."""
         held = self._heard.get(space_id)
         return held[1] if held is not None else None
+
+    def helper_asked(self, space_id: str) -> None:
+        """The scheduler just sent *space_id*'s helper resume."""
+        if not space_id:
+            return
+        self._helper[space_id] = self._wall().isoformat()
+        self._helper.move_to_end(space_id)
+        while len(self._helper) > MAX_SPACES_TRACKED:
+            self._helper.popitem(last=False)
+
+    def last_helper_ask_iso(self, space_id: str) -> str | None:
+        """When a helper resume was last sent for *space_id* (UTC ISO
+        8601); ``None``: none since this household started."""
+        return self._helper.get(space_id)
