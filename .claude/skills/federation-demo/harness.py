@@ -10831,13 +10831,19 @@ def cmd_gfs_private_channel_multi() -> None:
             what=f"e never received d's post {post_id} over GFS B",
             timeout=90.0,
         )
-        if not _log_lines_matching(
+        # d also reaches e's mailbox directly (v_89 member mesh), so e may
+        # store the post before the channel frame lands: wait for the frame
+        # rather than reading the log once.
+        deadline = time.time() + 30
+        while not _log_lines_matching(
             "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
         ):
-            raise SystemExit(
-                "gfs-private-channel-multi: e logged no channel frame — d's post "
-                "reached it some other way"
-            )
+            if time.time() > deadline:
+                raise SystemExit(
+                    "gfs-private-channel-multi: e logged no channel frame — d's "
+                    "post reached it some other way"
+                )
+            time.sleep(1.0)
         print("  e (on B only) received d's post over the channel, host offline ✓")
 
         # 6. What B saw.
