@@ -377,7 +377,8 @@ class OutboxProcessor:
 
         Each of the pass's recipients is busy until its last row of the pass
         is done; its rows go one at a time, in due order. Rows of one stored
-        payload the :class:`OutboxMulti` groups go up as ONE upload whose
+        payload the :class:`OutboxMulti` groups (only each recipient's
+        oldest row of the pass is offered) go up as ONE upload whose
         outcome applies to each (a group is formed from recipients that are
         not busy only — a busy one keeps its row for a later pass, under the
         same stable ``msg_id``). Per-recipient deliveries share
@@ -410,7 +411,9 @@ class OutboxProcessor:
         ]
         if not entries:
             return 0
-        units = _order_units(entries, await self._groups(entries))
+        units = _order_units(
+            entries, await self._groups(_oldest_per_recipient(entries))
+        )
         #: Per recipient, the indexes of the units it is in, in run order.
         queues: dict[str, deque[int]] = {}
         for idx, unit in enumerate(units):
@@ -678,37 +681,33 @@ def _stalls(outcome: DeliveryOutcome | RetryAfter, elapsed_s: float) -> bool:
 def _order_units(
     entries: list[OutboxEntry], groups: list[list[OutboxEntry]]
 ) -> list[list[OutboxEntry]]:
-    """The pass's delivery units — each multi group, and every other row on
-    its own — in run order (by their first row's place in *entries*).
-
-    A unit starts at its first row's place, so a group can run one
-    recipient's row ahead of that recipient's earlier rows when two groups
-    cross. Such a group is dissolved into single rows (a single row never
-    can be the one out of order), so every recipient's rows still go in
-    their due order and the run order can never deadlock.
-    """
+    """The pass's delivery units — each multi group (two or more of the
+    recipients' OLDEST rows of the pass, :func:`_oldest_per_recipient`), and
+    every other row on its own — in run order (by their first row's place in
+    *entries*). A grouped row has no earlier row of its recipient in the
+    pass, so a group never runs a row ahead of one; a recipient's later rows
+    go after it."""
     position = {entry.id: i for i, entry in enumerate(entries)}
+    heads = {e.id for e in _oldest_per_recipient(entries)}
     live = [
         g
-        for g in ([e for e in group if e.id in position] for group in groups)
-        if len(g) >= 2 and len({e.instance_id for e in g}) == len(g)
+        for g in ([e for e in group if e.id in heads] for group in groups)
+        if len(g) >= 2
     ]
-    while True:
-        grouped = {e.id: g_idx for g_idx, g in enumerate(live) for e in g}
-        start = [min(position[e.id] for e in g) for g in live]
-        last: dict[str, int] = {}
-        crossing: int | None = None
-        for entry in entries:
-            g_idx = grouped.get(entry.id)
-            at = start[g_idx] if g_idx is not None else position[entry.id]
-            if g_idx is not None and at < last.get(entry.instance_id, -1):
-                crossing = g_idx
-                break
-            last[entry.instance_id] = at
-        if crossing is None:
-            break
-        del live[crossing]
+    grouped = {e.id for g in live for e in g}
     units = [(min(position[e.id] for e in g), g) for g in live]
     units += [(position[e.id], [e]) for e in entries if e.id not in grouped]
     units.sort(key=lambda u: u[0])
     return [unit for _at, unit in units]
+
+
+def _oldest_per_recipient(entries: list[OutboxEntry]) -> list[OutboxEntry]:
+    """Each recipient's first row of *entries* — the only rows offered for
+    a multi group."""
+    seen: set[str] = set()
+    out: list[OutboxEntry] = []
+    for entry in entries:
+        if entry.instance_id not in seen:
+            seen.add(entry.instance_id)
+            out.append(entry)
+    return out

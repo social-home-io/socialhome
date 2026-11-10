@@ -665,10 +665,17 @@ class _Multi:
         #: Row ids the upload leaves out (handed back), if any.
         self.left_out: set[str] = set()
         self.delivered: list[list[str]] = []
+        self.asked: list[list[str]] = []
         self.gate: asyncio.Event | None = None
 
     async def outbox_multi_groups(self, entries):
-        return self._groups
+        """The fixed groups, cut to the rows offered (all of them in one
+        group when none were fixed)."""
+        self.asked.append([e.id for e in entries])
+        if self._groups is None:
+            return [entries]
+        ids = {e.id for e in entries}
+        return [[e for e in g if e.id in ids] for g in self._groups]
 
     async def deliver_outbox_multi(self, group):
         self.delivered.append([e.id for e in group])
@@ -856,11 +863,13 @@ async def test_start_after_a_stop_mid_delivery_drains_the_recipient():
         await proc.stop()
 
 
-async def test_groups_that_would_reorder_a_recipient_are_dissolved():
-    # A: x before y; B: y before x — both groups cannot keep both orders.
-    ax, ay, by, bx = _row("ax", "A"), _row("ay", "A"), _row("by", "B"), _row("bx", "B")
-    repo = _repo_for([ax, ay, by, bx])
-    multi = _Multi([[ax, bx], [ay, by]])
+async def test_only_each_recipient_s_oldest_row_of_the_pass_is_grouped():
+    """A recipient's later rows are never offered for a group, so no group
+    can run a row ahead of that recipient's earlier one: they go after it,
+    one by one."""
+    a1, b1, a2, b2 = _row("a1", "A"), _row("b1", "B"), _row("a2", "A"), _row("b2", "B")
+    repo = _repo_for([a1, b1, a2, b2])
+    multi = _Multi(None)
     seen: list[str] = []
 
     async def _deliver(e):
@@ -868,8 +877,9 @@ async def test_groups_that_would_reorder_a_recipient_are_dissolved():
         return DeliveryOutcome.SUCCESS
 
     assert await OutboxProcessor(repo, _deliver, multi=multi).drain_once() == 4
-    assert multi.delivered == [["ay", "by"]]
-    assert seen == ["ax", "bx"]
+    assert multi.asked == [["a1", "b1"]]
+    assert multi.delivered == [["a1", "b1"]]
+    assert sorted(seen) == ["a2", "b2"]
     assert repo.mark_delivered.await_count == 4
 
 
