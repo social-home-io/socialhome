@@ -45,12 +45,15 @@ HOST_HOP_UNAVAILABLE: str = "host_hop_unavailable"
 
 CardLookup = Callable[[str, str], Awaitable[MemberCard | None]]
 HostLookup = Callable[[str], Awaitable[str | None]]
+#: Asks a space's host for its member directory again (``space_id``).
+AskHost = Callable[[str], Awaitable[None]]
 
 
 class HostHop:
     """See the module docstring."""
 
     __slots__ = (
+        "_ask_host",
         "_card_of",
         "_host_of",
         "_keywrap_private",
@@ -67,10 +70,12 @@ class HostHop:
         host_of: HostLookup,
         keywrap_private_key: bytes,
         keywrap_public_key: bytes,
+        ask_host: AskHost | None = None,
     ) -> None:
         self._own_instance_id = own_instance_id
         self._card_of = card_of
         self._host_of = host_of
+        self._ask_host = ask_host
         self._keywrap_private = keywrap_private_key
         self._keywrap_public_b64 = b64url_encode(keywrap_public_key)
         self._routed: SpaceRoutedHandler | None = None
@@ -158,6 +163,11 @@ class HostHop:
         for end in ends:
             if await self._card_of(space_id, end) is None:
                 log.info("host hop: no card for an end of the route — dropping")
+                if me == path[2] and self._ask_host is not None:
+                    # The host holds both ends' cards, so it has the one we
+                    # lack: our directory is incomplete (a first snapshot we
+                    # never got). Ask for it now, not at the next sync.
+                    await self._ask_host(space_id)
                 return False
         return True
 

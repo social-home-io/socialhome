@@ -93,6 +93,9 @@ REMOVED_MAX: int = 500
 
 #: Seats a household lazily from its verified card.
 Seater = Callable[[MemberCard], Awaitable[None]]
+#: Told ``(space_id, instance_id)`` on the host when a member household says
+#: it is seated (its "seated" card, or its first sync).
+SeatedHook = Callable[[str, str], Awaitable[object]]
 
 
 def _loads(raw: str | None) -> dict[str, Any]:
@@ -151,6 +154,7 @@ class SpaceMemberDirectory:
     """See the module docstring."""
 
     __slots__ = (
+        "_asked_at",
         "_clock",
         "_early_hello",
         "_federation",
@@ -163,6 +167,7 @@ class SpaceMemberDirectory:
         "_keywrap_sig",
         "_lost_mailbox",
         "_mailboxes",
+        "_on_seated",
         "_seat_ender",
         "_seater",
         "_snap_in",
@@ -198,6 +203,7 @@ class SpaceMemberDirectory:
         self._federation: FederationService | None = None
         self._seater: Seater | None = None
         self._seat_ender: Callable[[str], Awaitable[object]] | None = None
+        self._on_seated: SeatedHook | None = None
         self._clock = clock
         self._wall_clock = wall_clock
         #: (space, household) → when its last "seated" card re-sent its
@@ -211,6 +217,9 @@ class SpaceMemberDirectory:
         #: space → (``dir_seq``, part indices taken) of the snapshot coming
         #: in: it moves our ``dir_seq`` only once every part arrived.
         self._snap_in: dict[str, tuple[int, frozenset[int]]] = {}
+        #: space → when we last asked its host for the directory again
+        #: (:meth:`ask_host`, :data:`HELLO_RESNAPSHOT_S`).
+        self._asked_at: dict[str, float] = {}
         mailboxes.attach_needed(self.needed_gfs)
         mailboxes.attach_after_sweep(self.sweep_once)
         mailboxes.attach_on_change(self.on_own_change)
@@ -253,6 +262,23 @@ class SpaceMemberDirectory:
         """How a directory card becomes a lazy ``space_session`` seat (the
         redeem coordinator's seat path)."""
         self._seater = seater
+
+    def attach_on_seated(self, hook: SeatedHook) -> None:
+        """Who else answers a member household's "I am seated" on the host
+        (``GfsChannelService.on_member_seated``). Before it, the household's
+        mailbox gate refuses the host's frames for the space (its person is
+        not seated yet), so anything sent when its seat went live may be
+        lost — the private channel grant is sent again."""
+        self._on_seated = hook
+
+    async def _seated(self, space_id: str, instance_id: str) -> None:
+        """Tell the seated hook. Fail-soft."""
+        if self._on_seated is None:
+            return
+        try:
+            await self._on_seated(space_id, instance_id)
+        except Exception:
+            log.warning("directory: the seated hook failed", exc_info=True)
 
     # ── Rows ─────────────────────────────────────────────────────────────
 
@@ -479,6 +505,8 @@ class SpaceMemberDirectory:
                     changed=[card],
                     snapshot_to={card.instance_id} if early else set(),
                 )
+                if early:
+                    await self._seated(space_id, card.instance_id)
         except Exception:
             log.warning("directory: storing a seat card failed", exc_info=True)
 
@@ -524,21 +552,28 @@ class SpaceMemberDirectory:
         return sent
 
     async def _publish_to_host(
-        self, space_id: str, host: str, *, host_is_v89: bool = False
+        self,
+        space_id: str,
+        host: str,
+        *,
+        host_is_v89: bool = False,
+        again: bool = False,
     ) -> bool:
         """*host_is_v89*: the host just sent us its directory (a mesh-only
-        host has no row we could read its version from)."""
+        host has no row we could read its version from). *again*: send our
+        card even when the host has it (:meth:`ask_host`)."""
         assert self._federation is not None
         doc = await self._doc(space_id, host)
         sent = _count(doc.get("sent"))
         card = await self.own_card(space_id)
         if sent >= card.rev:
-            if doc.get("sent_digest") == _content_digest(card):
+            if doc.get("sent_digest") != _content_digest(card):
+                # Same mailbox ``rev``, other content (a mailbox we hold for
+                # another space now applies here): a newer rev, or the host
+                # keeps the old card.
+                card = await self.own_card(space_id, rev=sent + 1)
+            elif not again:
                 return False
-            # Same mailbox ``rev``, other content (a mailbox we hold for
-            # another space now applies here): a newer rev, or the host
-            # keeps the old card.
-            card = await self.own_card(space_id, rev=sent + 1)
         v89 = FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH
         known = doc.get("host_proto")
         if host_is_v89:
@@ -599,8 +634,10 @@ class SpaceMemberDirectory:
         if not snapshot and payload.get("base_seq") != held:
             # A delta builds on one version: taken on another (a snapshot
             # still coming in, or lost) it would move us past what we never
-            # got. We stay behind; our next sync echo gets a snapshot.
+            # got. We stay behind and ask the host again (a snapshot still
+            # coming in: the host does not answer twice in a row).
             log.info("directory: ignoring a delta on a version we do not hold")
+            await self.ask_host(space_id)
             return
         coming = self._snap_in.get(space_id)
         if snapshot and coming is not None and seq < coming[0]:
@@ -768,6 +805,8 @@ class SpaceMemberDirectory:
         await self.reconcile(
             space_id, changed=[card] if changed else [], snapshot_to=snapshot_to
         )
+        if snapshot_to:
+            await self._seated(space_id, sender)
 
     def _may_resnapshot(self, space_id: str, instance_id: str) -> bool:
         key = (space_id, instance_id)
@@ -786,10 +825,36 @@ class SpaceMemberDirectory:
         seq = (await self._doc(space_id, host_id)).get("dir_seq")
         if _is_count(seq):
             return seq
-        # No directory yet: echo 0 only where the space has one at all (we
-        # hold a card of it) — a space with no GFS-reached member costs no
-        # periodic echo.
-        return 0 if await self._space_cards(space_id) else None
+        # No complete directory yet: echo 0 wherever we hold a writer seat
+        # (the host answers only where it keeps a directory). A paired
+        # joiner holds no card of the space at all — it gets no host card —
+        # so this echo is what repairs a first snapshot it never got.
+        return 0 if await holds_member_seat(self._spaces, space_id) else None
+
+    async def ask_host(self, space_id: str) -> None:
+        """Our directory of *space_id* misses something its host has (a
+        delta on a version we do not hold, a host hop from a member whose
+        card we lack): give the host our card again now — the "seated" it
+        answers with a snapshot — rather than wait for the next §25.6
+        sync. A writer seat only, at most once per
+        :data:`HELLO_RESNAPSHOT_S` a space (the host answers at most that
+        often too). Never raises."""
+        if self._federation is None:
+            return
+        try:
+            host = await self.host_of(space_id)
+            if host is None or host == self._instance_id:
+                return
+            now = self._clock()
+            last = self._asked_at.get(space_id, float("-inf"))
+            if now - last < HELLO_RESNAPSHOT_S:
+                return
+            if not await holds_member_seat(self._spaces, space_id):
+                return
+            self._asked_at[space_id] = now
+            await self._publish_to_host(space_id, host, again=True)
+        except Exception:
+            log.warning("directory: asking the host again failed", exc_info=True)
 
     async def on_sync_begin(self, event: FederationEvent) -> None:
         """Host side of the repair: a member household's periodic §25.6
@@ -815,6 +880,8 @@ class SpaceMemberDirectory:
         behind = news or (_is_count(current) and echo < current)
         if behind and self._may_resnapshot(space_id, sender):
             await self.reconcile(space_id, snapshot_to={sender})
+        if news:
+            await self._seated(space_id, sender)
 
     async def _writers_v89(self, space_id: str) -> list[str]:
         """Writer-seat member households at v_89 (never a follower)."""

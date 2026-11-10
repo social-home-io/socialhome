@@ -1037,6 +1037,24 @@ class GfsChannelService:
         except Exception:
             log.exception("gfs.channel: reconcile after a seat failed")
 
+    async def on_member_seated(self, space_id: str, instance_id: str) -> bool:
+        """A member household of a space we own just said it is seated (its
+        "seated" card, :meth:`SpaceMemberDirectory.attach_on_seated`): send
+        its grant again in a roster snapshot. The one :meth:`distribute`
+        sent when its seat went live can beat its own seat — a joiner over
+        an existing seat is seated only after the ACK it awaits — and its
+        mailbox gate refuses a frame for a space it is not seated in yet.
+        Only where there is a grant for it. Returns whether one was sent."""
+        space = await self._spaces.get(space_id)
+        if space is None or space.owner_instance_id != self._own_instance_id:
+            return False
+        if await self.grant_for_peer(space_id, instance_id) is None:
+            return False
+        sender = getattr(self._space_service, "send_roster_snapshot", None)
+        if sender is None:
+            return False
+        return bool(await sender(space_id, to_instance_id=instance_id))
+
     async def on_rotation(self, space_id: str) -> int:
         """At every content-key rotation, BEFORE the member rekey: the owner
         reconciles (so a space that lost its last remote member, or whose

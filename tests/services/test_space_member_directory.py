@@ -1083,6 +1083,87 @@ async def test_the_host_answers_a_joiner_seated_by_link_at_once():
     assert [d for d in w.fed.to(k["id"]) if d["payload"].get("snapshot")] == []
 
 
+def _seated_log(w: World) -> list[tuple[str, str]]:
+    calls: list[tuple[str, str]] = []
+
+    async def hook(space_id: str, instance_id: str) -> None:
+        calls.append((space_id, instance_id))
+
+    w.dir.attach_on_seated(hook)
+    return calls
+
+
+async def test_a_seated_card_tells_the_seated_hook():
+    """The demo's ``gfs-private-channel`` (#1336 regression): the host's
+    channel-grant roster snapshot, sent when the joiner's seat went live,
+    beat the joiner's own seat and was refused by its mailbox gate. The
+    joiner's "seated" card is the moment its gate takes the host's frames:
+    the host hears of it through the seated hook (the grant goes again)."""
+    now = [1000.0]
+    w = World()
+    w.dir._clock = lambda: now[0]
+    calls = _seated_log(w)
+    a = _hh()
+    w.member(a)
+    w.writers.writers[SPACE] = {a["id"]}
+    await w.card_from(a, _card(a, gfs=GFS, rev=1))
+    assert calls == [(SPACE, a["id"])]
+    # A rotation (a newer card) is not a "seated".
+    await w.card_from(a, _card(a, gfs=GFS, rev=2))
+    assert calls == [(SPACE, a["id"])]
+    # The same card again: rarely, like the directory snapshot.
+    await w.card_from(a, _card(a, gfs=GFS, rev=2))
+    assert calls == [(SPACE, a["id"])]
+    now[0] += HELLO_RESNAPSHOT_S
+    await w.card_from(a, _card(a, gfs=GFS, rev=2))
+    assert calls == [(SPACE, a["id"])] * 2
+
+
+async def test_an_early_seated_card_tells_the_hook_once_its_seat_commits():
+    """A "seated" card that beat the host's seat row is answered at commit
+    (:meth:`store_seat_card`) — the hook with it; a seat card stored with
+    no "seated" before it tells nobody (the joiner is not seated yet)."""
+    w = World()
+    calls = _seated_log(w)
+    j, k = _hh(), _hh()
+    w.writers.writers[SPACE] = {j["id"], k["id"]}
+    await w.card_from(j, _card(j, gfs=GFS))  # before the row: kept aside
+    assert calls == []
+    w.member(j, k)
+    await w.dir.store_seat_card(SPACE, _card(j, gfs=GFS))
+    assert calls == [(SPACE, j["id"])]
+    await w.dir.store_seat_card(SPACE, _card(k, gfs=GFS))
+    assert calls == [(SPACE, j["id"])]
+
+
+async def test_a_first_sync_from_a_household_tells_the_seated_hook():
+    w = World()
+    calls = _seated_log(w)
+    a = _hh()
+    w.member(a)
+    w.writers.writers[SPACE] = {a["id"]}
+    await w.dir.on_sync_begin(_begin(a, w.me["id"], 0))
+    assert calls == [(SPACE, a["id"])]
+    # Already seated: a later sync is no news.
+    await w.dir.on_sync_begin(_begin(a, w.me["id"], 0))
+    assert calls == [(SPACE, a["id"])]
+
+
+async def test_a_failing_seated_hook_never_breaks_the_card():
+    w = World()
+
+    async def boom(space_id: str, instance_id: str) -> None:
+        raise RuntimeError("down")
+
+    w.dir.attach_on_seated(boom)
+    a = _hh()
+    w.member(a)
+    w.writers.writers[SPACE] = {a["id"]}
+    await w.card_from(a, _card(a, gfs=GFS))
+    assert w.spaces.doc(SPACE, a["id"])["card"]["instance_id"] == a["id"]
+    assert [d["payload"].get("snapshot") for d in w.fed.to(a["id"])] == [True]
+
+
 async def test_a_member_behind_on_dir_seq_gets_a_snapshot_on_its_sync():
     """Findings 1 + 2: repair rides the periodic §25.6 sync — a BEGIN that
     echoes an older ``dir_seq`` (a lost delta, a snapshot that raced the
@@ -1513,6 +1594,74 @@ async def test_a_joiner_whose_snapshot_was_lost_is_repaired(monkeypatch):
     host.dir._hello_at.clear()
     await host.dir.on_sync_begin(_begin(member, host.me["id"], echo))
     assert host.fed.raw_to(member["id"])
+
+
+async def test_a_paired_joiner_whose_first_snapshot_was_lost_is_repaired():
+    """The demo's ``gfs-private-channel``: b (paired with the host, no
+    mailbox) joins after the GFS-only e. The host decides b's first
+    snapshot, then stops before it leaves; restarted, it holds b as seated
+    and never sends it again. b holds NO card of the space — a paired
+    joiner gets no host card — so it used to echo nothing on its §25.6
+    sync and was never repaired: it never held e's card and dropped e's
+    host hops. A writer seat with no directory echoes 0."""
+    host = World()
+    e, b = _hh(), _hh()
+    host.member(e, b)
+    host.spaces.put_card(SPACE, _card(e, gfs=GFS))
+    host.writers.writers[SPACE] = {e["id"], b["id"]}
+    await host.dir.store_seat_card(SPACE, _card(b, gfs=None))
+    await host.card_from(b, _card(b, gfs=None))  # its "seated": snapshot
+    assert host.fed.to(b["id"])  # ... which never arrives
+    host.fed.directories.clear()
+    host.dir._hello_at.clear()  # the host restarted
+
+    m = World(host=host.me)
+    m.member(e)
+    assert m.spaces.doc(SPACE, host.me["id"]) == {}
+    echo = await m.dir.directory_seq(SPACE, host.me["id"])
+    assert echo == 0
+    await host.dir.on_sync_begin(_begin(b, host.me["id"], echo))
+    (snap,) = host.fed.to(b["id"])
+    for part in host.fed.raw_to(b["id"]):
+        await m.directory(part["payload"])
+    assert _ids(snap) == {e["id"]}
+    assert m.spaces.doc(SPACE, e["id"])["card"]["instance_id"] == e["id"]
+
+
+async def test_a_follower_or_a_space_we_left_echoes_no_directory():
+    w, host = _member_world()
+    w.spaces.local[SPACE] = []  # no person of ours holds a writer seat
+    assert await w.dir.directory_seq(SPACE, host["id"]) is None
+    assert await w.dir.directory_seq(SPACE, _hh()["id"]) is None  # not the host
+
+
+async def test_a_member_missing_its_directory_asks_the_host_at_once():
+    """A delta on a version we do not hold (our snapshot was lost): we give
+    the host our card again — the "seated" it answers with a snapshot —
+    at most once per :data:`HELLO_RESNAPSHOT_S` for the space."""
+    now = [1000.0]
+    w, host = _member_world()
+    w.dir._clock = lambda: now[0]
+    await w.dir.seated(SPACE, host["id"], host_proto=89)
+    assert len(w.fed.cards) == 1
+    a = _hh()
+    delta = {"cards": [_card(a, gfs=GFS).to_wire()], "dir_seq": 5, "base_seq": 4}
+    await w.directory(delta)
+    assert [c["to"] for c in w.fed.cards] == [host["id"]] * 2
+    assert w.fed.cards[-1]["payload"]["card"] == w.fed.cards[0]["payload"]["card"]
+    await w.directory({**delta, "dir_seq": 6, "base_seq": 5})
+    await w.dir.ask_host(SPACE)
+    assert len(w.fed.cards) == 2  # rate-limited
+    now[0] += HELLO_RESNAPSHOT_S
+    await w.dir.ask_host(SPACE)
+    assert len(w.fed.cards) == 3
+
+
+async def test_asking_the_host_is_a_no_op_where_we_are_the_host_or_not_in_it():
+    w = World()  # we host SPACE
+    await w.dir.ask_host(SPACE)
+    await w.dir.ask_host("no-such-space")
+    assert w.fed.cards == []
 
 
 async def test_a_repeated_part_never_stands_in_for_a_lost_one(monkeypatch):

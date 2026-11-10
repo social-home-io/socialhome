@@ -827,8 +827,11 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: ``SPACE_ROUTE_STALE`` have no meaning coming from one
         #: (``SPACE_ROUTE_FOUND`` carries ``path`` — every relay household's
         #: id — so answering a stranger's probe would hand them a map of our
-        #: social graph). ``SPACE_ROUTED`` is let through for ONE shape only
-        #: (v_89, :mod:`socialhome.federation.host_hop`): a three-hop
+        #: social graph) — nor going to one: a host hop is sealed to the
+        #: target's static key-wrap key, so nothing on it goes stale, and no
+        #: household nacks or forwards a nack to a seat
+        #: (``SpaceRoutedHandler``). ``SPACE_ROUTED`` is let through for ONE
+        #: shape only (v_89, :mod:`socialhome.federation.host_hop`): a three-hop
         #: ``[member, host, member]`` route of one space, between two member
         #: households whose cards the host holds — so a member with no
         #: connection to a GFS still reaches a household that reaches the
