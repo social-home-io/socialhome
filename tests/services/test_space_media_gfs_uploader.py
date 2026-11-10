@@ -184,9 +184,6 @@ class _Cert:
     scope: str = "write"
     instance_pk: str = ""
 
-    def v1(self):
-        return self
-
     def to_wire(self):
         return {
             "cert_suite": "ed25519",
