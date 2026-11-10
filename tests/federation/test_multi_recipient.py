@@ -6,6 +6,8 @@ outer seal and every refusal a receiver must make.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 
 import orjson
@@ -27,6 +29,7 @@ from socialhome.federation.multi_recipient import (
     MR_SUITE_AESGCM_256,
     MULTI_TO_INSTANCE,
     SUPPORTED_MR_SUITES,
+    MrKeys,
     UnsupportedMrSuite,
     build_multi_envelope,
     decrypt_mr_payload,
@@ -40,6 +43,7 @@ from socialhome.federation.multi_recipient import (
 )
 
 CONTENT_KEY = b"\x11" * 32
+TAG_KEY = derive_mr_key(CONTENT_KEY).tag_key
 RECIPIENTS = ("b" * 32, "c" * 32)
 
 
@@ -50,14 +54,15 @@ def _encoder() -> tuple[FederationEncoder, bytes]:
 
 def _envelope(payload: str = '{"text":"hi"}') -> tuple[dict, bytes, bytes]:
     encoder, pk = _encoder()
-    _, key = derive_mr_key(CONTENT_KEY)
+    keys = derive_mr_key(CONTENT_KEY)
+    key = keys.key
     env = build_multi_envelope(
         encoder=encoder,
         own_instance_id="a" * 32,
         event_type="space_post_created",
         payload_json=payload,
         space_id="sp-1",
-        key=key,
+        keys=keys,
         recipients=RECIPIENTS,
     )
     return env, key, pk
@@ -71,10 +76,9 @@ def test_suite_constants():
 
 
 def test_kid_is_stable_per_key_and_differs_between_keys():
-    kid_a, key_a = derive_mr_key(CONTENT_KEY)
-    kid_a2, key_a2 = derive_mr_key(CONTENT_KEY)
-    kid_b, key_b = derive_mr_key(b"\x22" * 32)
-    assert (kid_a, key_a) == (kid_a2, key_a2)
+    a, a2, b = (derive_mr_key(k) for k in (CONTENT_KEY, CONTENT_KEY, b"\x22" * 32))
+    kid_a, key_a, kid_b, key_b = a.kid, a.key, b.kid, b.key
+    assert a == a2
     assert kid_a != kid_b and key_a != key_b
     assert len(b64url_decode(kid_a)) == 16
     assert len(key_a) == 32
@@ -114,7 +118,7 @@ def test_the_inner_envelope_is_signed_in_the_canonical_order():
 
 def test_round_trip():
     env, key, _ = _envelope()
-    kid, _ = derive_mr_key(CONTENT_KEY)
+    kid = derive_mr_key(CONTENT_KEY).kid
     sealed = seal_multi(env, kid=kid, key=key)
     assert set(sealed) == {"mr_suite", "kid", "ciphertext"}
     assert sealed["mr_suite"] == MR_SUITE_AESGCM_256
@@ -127,7 +131,7 @@ def test_round_trip():
 
 def test_the_seal_names_nothing_but_the_kid():
     env, key, _ = _envelope()
-    kid, _ = derive_mr_key(CONTENT_KEY)
+    kid = derive_mr_key(CONTENT_KEY).kid
     wire = orjson.dumps(seal_multi(env, kid=kid, key=key))
     # Long markers only: a short one can turn up in random b64url.
     for secret in (b"a" * 32, b"space_post_created", b'"space_id"'):
@@ -135,7 +139,8 @@ def test_the_seal_names_nothing_but_the_kid():
 
 
 def test_the_plaintext_is_padded_to_a_bucket():
-    kid, key = derive_mr_key(CONTENT_KEY)
+    _mrk = derive_mr_key(CONTENT_KEY)
+    kid, key = _mrk.kid, _mrk.key
     sizes = set()
     for n in (1, 200, 3000):
         env, _, _ = _envelope('{"t":"' + "x" * n + '"}')
@@ -148,7 +153,8 @@ def test_the_plaintext_is_padded_to_a_bucket():
 
 
 def test_an_oversize_envelope_is_refused():
-    kid, key = derive_mr_key(CONTENT_KEY)
+    _mrk = derive_mr_key(CONTENT_KEY)
+    kid, key = _mrk.kid, _mrk.key
     env, _, _ = _envelope('{"t":"' + "x" * (RELAY_SIZE_BUCKETS[-1] + 10) + '"}')
     with pytest.raises(ValueError, match="bucket"):
         seal_multi(env, kid=kid, key=key)
@@ -156,7 +162,7 @@ def test_an_oversize_envelope_is_refused():
 
 def test_a_tampered_ciphertext_does_not_open():
     env, key, _ = _envelope()
-    kid, _ = derive_mr_key(CONTENT_KEY)
+    kid = derive_mr_key(CONTENT_KEY).kid
     sealed = seal_multi(env, kid=kid, key=key)
     raw = bytearray(b64url_decode(sealed["ciphertext"]))
     raw[20] ^= 0x01
@@ -167,8 +173,8 @@ def test_a_tampered_ciphertext_does_not_open():
 def test_a_relabelled_kid_does_not_open():
     """The kid is bound as associated data."""
     env, key, _ = _envelope()
-    kid, _ = derive_mr_key(CONTENT_KEY)
-    other_kid, _ = derive_mr_key(b"\x33" * 32)
+    kid = derive_mr_key(CONTENT_KEY).kid
+    other_kid = derive_mr_key(b"\x33" * 32).kid
     sealed = seal_multi(env, kid=kid, key=key)
     with pytest.raises(ValueError):
         open_multi({**sealed, "kid": other_kid}, key)
@@ -176,9 +182,9 @@ def test_a_relabelled_kid_does_not_open():
 
 def test_the_wrong_key_does_not_open():
     env, key, _ = _envelope()
-    kid, _ = derive_mr_key(CONTENT_KEY)
+    kid = derive_mr_key(CONTENT_KEY).kid
     sealed = seal_multi(env, kid=kid, key=key)
-    _, other = derive_mr_key(b"\x44" * 32)
+    other = derive_mr_key(b"\x44" * 32).key
     with pytest.raises(ValueError):
         open_multi(sealed, other)
     with pytest.raises(ValueError):
@@ -187,7 +193,7 @@ def test_the_wrong_key_does_not_open():
 
 def test_an_unknown_suite_is_refused_before_anything_else():
     env, key, _ = _envelope()
-    kid, _ = derive_mr_key(CONTENT_KEY)
+    kid = derive_mr_key(CONTENT_KEY).kid
     sealed = seal_multi(env, kid=kid, key=key)
     with pytest.raises(UnsupportedMrSuite):
         open_multi({**sealed, "mr_suite": "mr-chacha"}, key)
@@ -214,7 +220,8 @@ def test_malformed_seals_are_refused(sealed):
 
 
 def test_a_seal_whose_plaintext_is_not_an_object_is_refused():
-    kid, key = derive_mr_key(CONTENT_KEY)
+    _mrk = derive_mr_key(CONTENT_KEY)
+    kid, key = _mrk.kid, _mrk.key
     nonce = os.urandom(12)
     aad = b"sh-mr-seal:v1\n" + MR_SUITE_AESGCM_256.encode() + b"\n" + kid.encode()
     ct = AESGCM(key).encrypt(nonce, b"[1, 2]", aad)
@@ -249,19 +256,19 @@ def test_decrypt_mr_payload_refuses_a_malformed_string():
 
 
 def test_recipient_tag_is_a_6_char_hmac_of_the_instance_id():
-    _, key = derive_mr_key(CONTENT_KEY)
+    key = derive_mr_key(CONTENT_KEY).key
     tag = recipient_tag(key, "b" * 32)
     assert len(tag) == 6
     assert len(b64url_decode(tag)) == 4
     assert tag == recipient_tag(key, "b" * 32)
     assert tag != recipient_tag(key, "c" * 32)
-    _, other = derive_mr_key(b"\x22" * 32)
+    other = derive_mr_key(b"\x22" * 32).key
     assert tag != recipient_tag(other, "b" * 32)
 
 
 def test_the_envelope_names_one_sorted_tag_per_recipient():
-    env, key, _ = _envelope()
-    tags = sorted(recipient_tag(key, r) for r in RECIPIENTS)
+    env, _key, _ = _envelope()
+    tags = sorted(recipient_tag(TAG_KEY, r) for r in RECIPIENTS)
     assert env["to_instance"] == "*:" + ".".join(tags)
     # The instance ids themselves never appear.
     for r in RECIPIENTS:
@@ -269,11 +276,11 @@ def test_the_envelope_names_one_sorted_tag_per_recipient():
 
 
 def test_the_audience_includes_the_listed_recipients_only():
-    env, key, _ = _envelope()
+    env, _key, _ = _envelope()
     for r in RECIPIENTS:
-        assert multi_audience_includes(env["to_instance"], key, r)
-    assert not multi_audience_includes(env["to_instance"], key, "d" * 32)
-    _, other = derive_mr_key(b"\x22" * 32)
+        assert multi_audience_includes(env["to_instance"], TAG_KEY, r)
+    assert not multi_audience_includes(env["to_instance"], TAG_KEY, "d" * 32)
+    other = derive_mr_key(b"\x22" * 32).tag_key
     assert not multi_audience_includes(env["to_instance"], other, RECIPIENTS[0])
 
 
@@ -299,16 +306,16 @@ def _to(*tags: str) -> str:
     ],
 )
 def test_a_malformed_audience_is_refused(mangle):
-    env, key, _ = _envelope()
+    env, _key, _ = _envelope()
     good = env["to_instance"]
-    assert multi_audience_includes(good, key, RECIPIENTS[0])
-    assert not multi_audience_includes(mangle(good), key, RECIPIENTS[0])
+    assert multi_audience_includes(good, TAG_KEY, RECIPIENTS[0])
+    assert not multi_audience_includes(mangle(good), TAG_KEY, RECIPIENTS[0])
 
 
 @pytest.mark.parametrize("recipients", [(), tuple(f"{i:032d}" for i in range(501))])
 def test_build_refuses_an_empty_or_oversize_audience(recipients):
     encoder, _ = _encoder()
-    _, key = derive_mr_key(CONTENT_KEY)
+    keys = derive_mr_key(CONTENT_KEY)
     with pytest.raises(ValueError, match="recipient"):
         build_multi_envelope(
             encoder=encoder,
@@ -316,14 +323,15 @@ def test_build_refuses_an_empty_or_oversize_audience(recipients):
             event_type="space_post_created",
             payload_json="{}",
             space_id="sp-1",
-            key=key,
+            keys=keys,
             recipients=recipients,
         )
 
 
 def test_the_largest_audience_still_seals():
     encoder, _ = _encoder()
-    kid, key = derive_mr_key(CONTENT_KEY)
+    keys = derive_mr_key(CONTENT_KEY)
+    kid, key = keys.kid, keys.key
     recipients = [f"{i:032d}" for i in range(MULTI_MAX_RECIPIENTS)]
     env = build_multi_envelope(
         encoder=encoder,
@@ -331,10 +339,10 @@ def test_the_largest_audience_still_seals():
         event_type="space_post_created",
         payload_json="{}",
         space_id="sp-1",
-        key=key,
+        keys=keys,
         recipients=recipients,
     )
-    assert multi_audience_includes(env["to_instance"], key, recipients[-1])
+    assert multi_audience_includes(env["to_instance"], TAG_KEY, recipients[-1])
     assert open_multi(seal_multi(env, kid=kid, key=key), key)["envelope"] == env
 
 
@@ -346,5 +354,40 @@ def test_is_valid_kid_refuses_any_other_shape(kid):
 
 
 def test_is_valid_kid_takes_a_derived_kid():
-    kid, _ = derive_mr_key(CONTENT_KEY)
+    kid = derive_mr_key(CONTENT_KEY).kid
     assert is_valid_kid(kid)
+
+
+# ─── Separate tag key ────────────────────────────────────────────────────
+
+
+def test_derive_mr_key_returns_three_distinct_keys_and_hides_them_in_repr():
+    keys = derive_mr_key(CONTENT_KEY)
+    assert isinstance(keys, MrKeys)
+    assert len(keys.key) == 32 and len(keys.tag_key) == 32
+    assert keys.tag_key != keys.key
+    assert keys.tag_key != CONTENT_KEY
+    assert keys == derive_mr_key(CONTENT_KEY)
+    with pytest.raises(AttributeError):
+        keys.key = b"\x00" * 32  # type: ignore[misc]
+    shown = repr(keys)
+    assert keys.kid in shown
+    assert keys.key.hex() not in shown and repr(keys.key) not in shown
+    assert keys.tag_key.hex() not in shown and repr(keys.tag_key) not in shown
+
+
+def test_the_audience_tag_is_an_hmac_under_the_tag_key_not_the_aes_key():
+    keys = derive_mr_key(CONTENT_KEY)
+    iid = "b" * 32
+    under_aes = b64url_encode(
+        hmac.new(keys.key, b"sh-mr-to:v1\n" + iid.encode(), hashlib.sha256).digest()[:4]
+    )
+    under_tag = b64url_encode(
+        hmac.new(
+            keys.tag_key, b"sh-mr-to:v1\n" + iid.encode(), hashlib.sha256
+        ).digest()[:4]
+    )
+    assert recipient_tag(keys.tag_key, iid) == under_tag != under_aes
+    env, _, _ = _envelope()
+    assert multi_audience_includes(env["to_instance"], keys.tag_key, RECIPIENTS[0])
+    assert not multi_audience_includes(env["to_instance"], keys.key, RECIPIENTS[0])

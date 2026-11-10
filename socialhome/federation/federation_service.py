@@ -161,7 +161,7 @@ from .mesh_member_claim import (
     MESH_CLAIM_VERSION_FIELD,
     parse_mesh_member_claim,
 )
-from .multi_recipient import build_multi_envelope, seal_multi
+from .multi_recipient import MrKeys, build_multi_envelope, seal_multi
 from .pairing_coordinator import PairingCoordinator
 from .pairing_gfs_reach import PairingGfsReach
 from .peer_pairing_client import PeerPairingClient
@@ -180,9 +180,9 @@ def _group_key(obj: dict) -> bytes:
     return _orjson.dumps(obj, option=_orjson.OPT_SORT_KEYS)
 
 
-#: v_90 — ``space_id`` → ``(epoch, kid, key)`` of the space's current
-#: multi-recipient key, or ``None`` (``SpaceContentEncryption.mr_key``).
-MrKeyForSpace = Callable[[str], Awaitable[tuple[int, str, bytes] | None]]
+#: v_90 — ``space_id`` → ``(epoch, keys)`` of the space's current
+#: multi-recipient keys, or ``None`` (``SpaceContentEncryption.mr_key``).
+MrKeyForSpace = Callable[[str], Awaitable[tuple[int, MrKeys] | None]]
 
 
 def _loads(s: str | bytes) -> dict:
@@ -544,8 +544,8 @@ class FederationService:
         #: hop, and every mailbox frame with a space is refused.
         self._host_hop: HostHop | None = None
         self._mailbox_sender_check: Callable[[str, str], Awaitable[bool]] | None = None
-        #: v_90 — ``space_id`` → ``(epoch, kid, key)`` of the multi-recipient
-        #: key of the space's current epoch
+        #: v_90 — ``space_id`` → ``(epoch, keys)`` of the multi-recipient
+        #: keys of the space's current epoch
         #: (``SpaceContentEncryption.mr_key``). Unwired → no multi uploads.
         self._mr_key: MrKeyForSpace | None = None
         # Social Home Apps federation bridge — set via :meth:`attach_apps`.
@@ -3440,7 +3440,6 @@ class FederationService:
         mr = await self._multi_key(space_id)
         if mr is None:
             return {}
-        kid, mr_key = mr
         done: dict[str, DeliveryResult] = {}
         for members in groups.values():
             if len(members) < 2:
@@ -3455,8 +3454,7 @@ class FederationService:
                         space_id,
                         event_type,
                         chunk,
-                        kid=kid,
-                        key=mr_key,
+                        keys=mr,
                     )
                 )
         return done
@@ -3467,8 +3465,7 @@ class FederationService:
         event_type: FederationEventType,
         chunk: list[tuple[str, MailboxTarget, dict]],
         *,
-        kid: str,
-        key: bytes,
+        keys: MrKeys,
     ) -> dict[str, DeliveryResult]:
         """Build, seal and upload ONE multi frame for *chunk* (≥ 2 seats on
         one GFS, same payload). A throttled upload queues every seat
@@ -3485,8 +3482,7 @@ class FederationService:
                 event_type,
                 recipients,
                 payload_json=_dumps(payload),
-                kid=kid,
-                key=key,
+                keys=keys,
             )
             if sealed is None:
                 return {}
@@ -3660,8 +3656,7 @@ class FederationService:
         recipients: list[str],
         *,
         payload_json: str,
-        kid: str,
-        key: bytes,
+        keys: MrKeys,
     ) -> dict | None:
         """Build and seal ONE audience-tagged multi frame; ``None`` (logged)
         when it cannot be built — e.g. over the top size bucket."""
@@ -3672,10 +3667,10 @@ class FederationService:
                 event_type=event_type.value,
                 payload_json=payload_json,
                 space_id=space_id,
-                key=key,
+                keys=keys,
                 recipients=recipients,
             )
-            return seal_multi(envelope, kid=kid, key=key)
+            return seal_multi(envelope, kid=keys.kid, key=keys.key)
         except ValueError as exc:
             log.info(
                 "multi: space=%s event=%s goes per recipient (%s)",
@@ -3820,15 +3815,13 @@ class FederationService:
         mr = await self._multi_key(space_id)
         if mr is None:
             return None
-        kid, key = mr
         recipients = [e.instance_id for e in group]
         sealed = self._seal_multi_frame(
             space_id,
             event_type,
             recipients,
             payload_json=payload_json,
-            kid=kid,
-            key=key,
+            keys=mr,
         )
         if sealed is None:
             return None
@@ -3843,8 +3836,8 @@ class FederationService:
             return RetryAfter(seconds=_multi_retry_after_s(retry_after_s))
         return None
 
-    async def _multi_key(self, space_id: str) -> tuple[str, bytes] | None:
-        """The space's current ``(kid, mr key)``; ``None`` when there is none
+    async def _multi_key(self, space_id: str) -> MrKeys | None:
+        """The space's current multi-recipient keys; ``None`` when there is none
         or the lookup fails."""
         if self._mr_key is None:
             return None
@@ -3855,8 +3848,7 @@ class FederationService:
             return None
         if mr is None:
             return None
-        _epoch, kid, key = mr
-        return kid, key
+        return mr[1]
 
     def _defer_mesh_send(
         self,
@@ -4252,7 +4244,7 @@ class FederationService:
         raw_body: bytes,
         *,
         transport: str = "",
-        multi: tuple[str, bytes] | None = None,
+        multi: tuple[str, MrKeys] | None = None,
     ) -> InboundContext:
         """Run the §24.11 RTC validation pipeline WITHOUT dispatching.
 
@@ -4279,7 +4271,9 @@ class FederationService:
             transport=transport,
         )
         if multi is not None:
-            ctx.multi_space, ctx.multi_key = multi
+            ctx.multi_space = multi[0]
+            ctx.multi_key = multi[1].key
+            ctx.multi_tag_key = multi[1].tag_key
         await pipeline.run(ctx)
         return ctx
 
@@ -4289,7 +4283,7 @@ class FederationService:
         raw_body: bytes,
         *,
         transport: str = "",
-        multi: tuple[str, bytes] | None = None,
+        multi: tuple[str, MrKeys] | None = None,
     ) -> dict:
         """§24.11 validation pipeline for a WebRTC DataChannel frame.
 
@@ -4302,10 +4296,11 @@ class FederationService:
         for an envelope the connection server queued and replayed later,
         which widens the timestamp step's skew budget accordingly.
 
-        ``multi`` (v_90) is ``(space_id, key)`` of a multi-recipient frame
-        our mailbox opened under that space epoch's multi-recipient key:
-        the pipeline then requires ``to_instance == "*"`` and that space,
-        and decrypts the payload under *key*. Only the mailbox leg sets it.
+        ``multi`` (v_90) is ``(space_id, keys)`` of a multi-recipient frame
+        our mailbox opened under that space epoch's multi-recipient keys:
+        the pipeline then requires our tag in the ``"*:"`` audience (under
+        ``keys.tag_key``) and that space, and decrypts the payload under
+        ``keys.key``. Only the mailbox leg sets it.
         """
         ctx = await self.validate_inbound_rtc(
             instance_id,

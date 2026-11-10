@@ -56,7 +56,7 @@ from ..crypto import (
     verify_ed25519,
 )
 from ..domain.events import SpaceContentKeyImported
-from ..federation.multi_recipient import derive_mr_key, is_valid_kid
+from ..federation.multi_recipient import MrKeys, derive_mr_key, is_valid_kid
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager, KeyManagerError
 from ..repositories.space_key_repo import (
@@ -194,10 +194,10 @@ class SpaceContentEncryption(BusPublisherMixin):
         #: key was available (#122, out-of-order key arrival).
         self._bus = bus
         self._own_instance_id = own_instance_id
-        #: v_90 kid → (space_id, epoch, multi-recipient key) over the
+        #: v_90 kid → (space_id, epoch, multi-recipient keys) over the
         #: :data:`MR_RECENT_EPOCHS` newest epochs of every space. ``None``
         #: = rebuild on the next lookup. Never log it.
-        self._mr_kids: dict[str, tuple[str, int, bytes]] | None = None
+        self._mr_kids: dict[str, tuple[str, int, MrKeys]] | None = None
         self._mr_built_at: float = 0.0
 
     # ─── Lifecycle ────────────────────────────────────────────────────────
@@ -309,8 +309,8 @@ class SpaceContentEncryption(BusPublisherMixin):
         )
         return key.epoch, derive_space_media_key(raw)
 
-    async def mr_key(self, space_id: str) -> tuple[int, str, bytes] | None:
-        """``(epoch, kid, key)`` of the current epoch's multi-recipient key
+    async def mr_key(self, space_id: str) -> tuple[int, MrKeys] | None:
+        """``(epoch, keys)`` of the current epoch's multi-recipient keys
         (v_90, :func:`~socialhome.federation.multi_recipient.derive_mr_key`),
         or ``None`` when the space has no key — or while that key is younger
         than :data:`MULTI_EPOCH_GRACE_S` (or its store time is unreadable):
@@ -326,11 +326,23 @@ class SpaceContentEncryption(BusPublisherMixin):
             or (_utcnow() - stored_at).total_seconds() < MULTI_EPOCH_GRACE_S
         ):
             return None
-        kid, key = derive_mr_key(self._unwrap(latest))
-        return latest.epoch, kid, key
+        return latest.epoch, derive_mr_key(self._unwrap(latest))
 
-    async def mr_key_for_kid(self, kid: str) -> tuple[str, int, bytes] | None:
-        """``(space_id, epoch, key)`` for a multi-recipient frame's *kid*,
+    async def mr_kid(self, space_id: str, epoch: int) -> str | None:
+        """The multi-recipient kid of *space_id*'s *epoch* key, or ``None``
+        when that key is not held (or does not unwrap). Only the kid
+        leaves — it is what a parked multi frame waits for
+        (:meth:`PendingDecryptsCache.stash_kid`)."""
+        row = await self._repo.get(space_id, epoch)
+        if row is None:
+            return None
+        try:
+            return derive_mr_key(self._unwrap(row)).kid
+        except KeyManagerError, ValueError:
+            return None
+
+    async def mr_key_for_kid(self, kid: str) -> tuple[str, int, MrKeys] | None:
+        """``(space_id, epoch, keys)`` for a multi-recipient frame's *kid*,
         over the :data:`MR_RECENT_EPOCHS` newest epochs of every space we hold
         a key for — or ``None``. Served from an in-memory cache that writes
         through this service invalidate; a miss rebuilds it at most every
@@ -348,11 +360,11 @@ class SpaceContentEncryption(BusPublisherMixin):
             hit = (await self._rebuild_mr_kids(now)).get(kid)
         return hit
 
-    async def _rebuild_mr_kids(self, now: float) -> dict[str, tuple[str, int, bytes]]:
-        kids: dict[str, tuple[str, int, bytes]] = {}
+    async def _rebuild_mr_kids(self, now: float) -> dict[str, tuple[str, int, MrKeys]]:
+        kids: dict[str, tuple[str, int, MrKeys]] = {}
         for row in await self._repo.list_recent(per_space=MR_RECENT_EPOCHS):
             try:
-                kid, key = derive_mr_key(self._unwrap(row))
+                keys = derive_mr_key(self._unwrap(row))
             except KeyManagerError, ValueError:
                 # One unreadable row must not hide every other space's keys.
                 log.warning(
@@ -361,7 +373,7 @@ class SpaceContentEncryption(BusPublisherMixin):
                     row.space_id,
                 )
                 continue
-            kids[kid] = (row.space_id, row.epoch, key)
+            kids[keys.kid] = (row.space_id, row.epoch, keys)
         self._mr_kids = kids
         self._mr_built_at = now
         return kids

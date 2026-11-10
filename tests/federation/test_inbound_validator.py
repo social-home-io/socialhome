@@ -1886,22 +1886,22 @@ async def test_check_event_types_refuses_any_other_type():
 # ─── v_90: multi-recipient mailbox frames ────────────────────────────────
 
 
-_MULTI_KEY = derive_mr_key(b"\x07" * 32)[1]
+_MULTI_KEYS = derive_mr_key(b"\x07" * 32)
 _SELF = "self-iid"
 
 
 def _multi_ctx(
     *,
     transport=TRANSPORT_GFS_MAILBOX,
-    multi=("sp-1", _MULTI_KEY),
+    multi=("sp-1", _MULTI_KEYS),
     audience=(_SELF, "other-iid"),
     **env,
 ):
-    key = multi[1] if multi is not None else _MULTI_KEY
+    keys = multi[1] if multi is not None else _MULTI_KEYS
     ctx = InboundContext(
         envelope=_minimal_envelope(
             **{
-                "to_instance": multi_to_instance(key, audience),
+                "to_instance": multi_to_instance(keys.tag_key, audience),
                 "space_id": "sp-1",
                 **env,
             }
@@ -1909,7 +1909,9 @@ def _multi_ctx(
         transport=transport,
     )
     if multi is not None:
-        ctx.multi_space, ctx.multi_key = multi
+        ctx.multi_space = multi[0]
+        ctx.multi_key = multi[1].key
+        ctx.multi_tag_key = multi[1].tag_key
     return ctx
 
 
@@ -1968,6 +1970,22 @@ async def test_a_multi_frame_re_pushed_to_a_household_it_does_not_list_is_refuse
     await _multi_step()(_multi_ctx(audience=("member-1", _SELF)))
 
 
+async def test_a_multi_audience_tagged_under_the_aes_key_is_refused():
+    """The audience tags are HMACs under the separate tag key — a list built
+    with the AES-GCM key (the pre-split shape) names nobody."""
+    with pytest.raises(ValueError, match="not addressed to us"):
+        await _multi_step()(
+            _multi_ctx(to_instance=multi_to_instance(_MULTI_KEYS.key, (_SELF,)))
+        )
+
+
+async def test_a_multi_context_without_its_tag_key_is_no_multi_context():
+    ctx = _multi_ctx()
+    ctx.multi_tag_key = None
+    with pytest.raises(ValueError, match="outside a multi-recipient frame"):
+        await _multi_step()(ctx)
+
+
 @pytest.mark.parametrize("to", ["*:", "*:short", "*:" + "!" * 11, "*:A"])
 async def test_a_multi_frame_with_a_malformed_audience_is_refused(to):
     with pytest.raises(ValueError, match="not addressed to us"):
@@ -1990,15 +2008,18 @@ async def test_a_multi_frame_of_an_excluded_type_is_refused(event_type):
         await _multi_step()(_multi_ctx(event_type=event_type))
 
 
-def test_the_multi_key_is_kept_out_of_the_context_repr():
+def test_the_multi_keys_are_kept_out_of_the_context_repr():
     ctx = _multi_ctx()
-    assert "kkkk" not in repr(ctx)
+    shown = repr(ctx)
+    for secret in (_MULTI_KEYS.key, _MULTI_KEYS.tag_key):
+        assert repr(secret) not in shown and secret.hex() not in shown
 
 
 async def test_decrypt_and_parse_uses_the_multi_key_for_a_multi_frame():
     """With a multi context the payload opens under the multi-recipient key,
     never the pair's session key (the sender row may have none we share)."""
-    _, key = derive_mr_key(b"\x01" * 32)
+    keys = derive_mr_key(b"\x01" * 32)
+    key = keys.key
 
     class _NoSessionKey:
         def decrypt(self, *_a, **_kw):
@@ -2010,16 +2031,16 @@ async def test_decrypt_and_parse_uses_the_multi_key_for_a_multi_frame():
         loads=_loads,
     )
     ctx = _multi_ctx(
-        multi=("sp-1", key),
+        multi=("sp-1", keys),
         encrypted_payload=encrypt_mr_payload('{"x": 1}', key),
     )
     ctx.instance = SimpleNamespace(key_remote_to_self="unused")
     await step(ctx)
     assert ctx.event is not None and ctx.event.payload == {"x": 1}
     assert ctx.event.space_id == "sp-1"
-    _, other = derive_mr_key(b"\x03" * 32)
+    other = derive_mr_key(b"\x03" * 32).key
     bad = _multi_ctx(
-        multi=("sp-1", key),
+        multi=("sp-1", keys),
         encrypted_payload=encrypt_mr_payload('{"x": 1}', other),
     )
     bad.instance = ctx.instance
@@ -2040,7 +2061,7 @@ async def test_a_multi_payload_naming_another_space_is_refused():
         ('{"x": 1}', True),
         ('{"space_id": "sp-other"}', False),
     ):
-        ctx = _multi_ctx(encrypted_payload=encrypt_mr_payload(payload, _MULTI_KEY))
+        ctx = _multi_ctx(encrypted_payload=encrypt_mr_payload(payload, _MULTI_KEYS.key))
         if ok:
             await step(ctx)
             assert ctx.event is not None

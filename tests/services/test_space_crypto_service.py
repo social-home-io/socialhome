@@ -11,7 +11,7 @@ from socialhome.crypto import (
     generate_space_keypair,
 )
 from socialhome.db.database import AsyncDatabase
-from socialhome.federation.multi_recipient import derive_mr_key
+from socialhome.federation.multi_recipient import MrKeys, derive_mr_key
 from socialhome.infrastructure.key_manager import KeyManager, KeyManagerError
 from socialhome.repositories.space_key_repo import (
     SqliteSpaceKeyRepo,
@@ -739,10 +739,11 @@ async def _add_space(repo, space_id: str) -> None:
     )
 
 
-async def _current_mr(crypto, space_id: str) -> tuple[int, str, bytes]:
-    """The current epoch's ``(epoch, kid, key)``, whatever its age."""
+async def _current_mr(crypto, space_id: str) -> tuple[int, str, MrKeys]:
+    """The current epoch's ``(epoch, kid, keys)``, whatever its age."""
     epoch, raw = await crypto.export_current_key(space_id)
-    return (epoch, *derive_mr_key(raw))
+    keys = derive_mr_key(raw)
+    return epoch, keys.kid, keys
 
 
 def _clock_after(monkeypatch, seconds: float) -> None:
@@ -759,9 +760,9 @@ async def test_mr_key_is_derived_from_the_current_epoch(crypto_env, monkeypatch)
     _clock_after(monkeypatch, scs.MULTI_EPOCH_GRACE_S + 1)
     epoch, raw = await crypto.export_current_key("sp-1")
     got = await crypto.mr_key("sp-1")
-    assert got == (epoch, *derive_mr_key(raw))
+    assert got == (epoch, derive_mr_key(raw))
     # Only derived material leaves.
-    assert raw not in got
+    assert raw not in (got[1].key, got[1].tag_key)
 
 
 async def test_no_mr_key_while_the_newest_epoch_is_in_its_grace(
@@ -782,7 +783,8 @@ async def test_no_mr_key_while_the_newest_epoch_is_in_its_grace(
     _clock_after(monkeypatch, scs.MULTI_EPOCH_GRACE_S - 5)
     assert await crypto.mr_key("sp-1") is None
     _clock_after(monkeypatch, scs.MULTI_EPOCH_GRACE_S + 5)
-    assert await crypto.mr_key("sp-1") == await _current_mr(crypto, "sp-1")
+    epoch, _kid, keys = await _current_mr(crypto, "sp-1")
+    assert await crypto.mr_key("sp-1") == (epoch, keys)
     assert (await crypto.mr_key("sp-1"))[0] == 1
 
 
@@ -837,12 +839,38 @@ async def test_the_kid_cache_follows_rotation_import_and_reset(crypto_env):
     assert (await crypto.mr_key_for_kid(kid1))[:2] == ("sp-1", 1)
     imported = b"\x07" * 32
     await crypto.import_key("sp-1", 2, imported)
-    kid2, key2 = derive_mr_key(imported)
-    assert await crypto.mr_key_for_kid(kid2) == ("sp-1", 2, key2)
+    keys2 = derive_mr_key(imported)
+    assert await crypto.mr_key_for_kid(keys2.kid) == ("sp-1", 2, keys2)
     reset = b"\x08" * 32
     await crypto.reset_to_key("sp-1", 3, reset, rotated_by=None, authority_epoch=0)
-    kid3, key3 = derive_mr_key(reset)
-    assert await crypto.mr_key_for_kid(kid3) == ("sp-1", 3, key3)
+    keys3 = derive_mr_key(reset)
+    assert await crypto.mr_key_for_kid(keys3.kid) == ("sp-1", 3, keys3)
+
+
+async def test_mr_kid_names_one_held_epoch_and_nothing_else(crypto_env):
+    """``mr_kid`` — the kid of one held ``(space, epoch)`` for the parked
+    multi frames (no key leaves); ``None`` for an epoch we do not hold."""
+    crypto, _ = crypto_env
+    await crypto.initialise_for_space("sp-1")
+    raw = b"\x0a" * 32
+    await crypto.import_key("sp-1", 4, raw)
+    assert await crypto.mr_kid("sp-1", 4) == derive_mr_key(raw).kid
+    assert await crypto.mr_kid("sp-1", 0) == (await _current_mr_of(crypto, 0)).kid
+    assert await crypto.mr_kid("sp-1", 9) is None
+    assert await crypto.mr_kid("sp-x", 0) is None
+
+
+async def test_mr_kid_is_none_for_a_key_that_does_not_unwrap(crypto_env):
+    crypto, repo = crypto_env
+    await repo.save(
+        scs.SpaceKey(space_id="sp-1", epoch=3, content_key_hex="not-wrapped")
+    )
+    assert await crypto.mr_kid("sp-1", 3) is None
+
+
+async def _current_mr_of(crypto, epoch: int) -> MrKeys:
+    row = await crypto._repo.get("sp-1", epoch)
+    return derive_mr_key(crypto._unwrap(row))
 
 
 async def test_a_miss_rebuilds_the_cache_at_most_once_a_minute(crypto_env, monkeypatch):
@@ -870,12 +898,13 @@ async def test_a_miss_rebuilds_the_cache_at_most_once_a_minute(crypto_env, monke
             content_key_hex=crypto._kek.encrypt(raw, associated_data=b"sp-1"),
         )
     )
-    kid, key = derive_mr_key(raw)
+    keys = derive_mr_key(raw)
+    kid = keys.kid
     for _ in range(5):
         assert await crypto.mr_key_for_kid(kid) is None
     assert calls == []
     now[0] += 61
-    assert await crypto.mr_key_for_kid(kid) == ("sp-1", 5, key)
+    assert await crypto.mr_key_for_kid(kid) == ("sp-1", 5, keys)
     assert calls == [3]
 
 

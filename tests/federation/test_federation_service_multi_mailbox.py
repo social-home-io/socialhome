@@ -139,8 +139,7 @@ class _Sender:
             self.mr_asks.append(space_id)
             if not mr or space_id not in _CONTENT_KEYS:
                 return None
-            kid, key = derive_mr_key(_CONTENT_KEYS[space_id])
-            return 7, kid, key
+            return 7, derive_mr_key(_CONTENT_KEYS[space_id])
 
         self.svc.attach_member_mesh(
             host_hop=None,  # type: ignore[arg-type]
@@ -501,11 +500,16 @@ async def test_the_audience_tags_name_exactly_the_group():
     outsider = await s.paired()
     await s.broadcast()
     [(_targets, sealed)] = s.transport.multi
-    _kid, key = derive_mr_key(_CONTENT_KEYS[_SPACE])
-    env = open_multi(sealed, key)["envelope"]
+    keys = derive_mr_key(_CONTENT_KEYS[_SPACE])
+    env = open_multi(sealed, keys.key)["envelope"]
     assert env["to_instance"].startswith(MULTI_TO_INSTANCE + ":")
-    assert all(multi_audience_includes(env["to_instance"], key, i) for i in seats)
-    assert not multi_audience_includes(env["to_instance"], key, outsider)
+    tag_key = keys.tag_key
+    assert all(multi_audience_includes(env["to_instance"], tag_key, i) for i in seats)
+    assert not multi_audience_includes(env["to_instance"], tag_key, outsider)
+    # The tags are never HMACs under the AES-GCM key.
+    assert not any(
+        multi_audience_includes(env["to_instance"], keys.key, i) for i in seats
+    )
 
 
 # ── End to end: real sending transport, real receivers ──────────────────
@@ -596,8 +600,7 @@ async def test_a_frame_built_by_the_broadcast_is_taken_by_every_receiver():
     svc.attach_transport(transport)
 
     async def _mr_key(space_id: str):
-        kid, key = derive_mr_key(_CONTENT_KEYS[space_id])
-        return 7, kid, key
+        return 7, derive_mr_key(_CONTENT_KEYS[space_id])
 
     svc.attach_member_mesh(
         host_hop=None,  # type: ignore[arg-type]

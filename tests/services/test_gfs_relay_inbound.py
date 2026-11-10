@@ -51,6 +51,7 @@ from socialhome.federation.invite_token_redeem import (
 from socialhome.federation.keywrap_seal import seal_to_keywrap
 from socialhome.federation.multi_recipient import (
     MULTI_TO_INSTANCE,
+    MrKeys,
     UnsupportedMrSuite,
     build_multi_envelope,
     derive_mr_key,
@@ -717,10 +718,10 @@ class _MultiHousehold:
             return (sender, space_id) in self.cards
 
         self.federation._mailbox_sender_check = _card
-        self.kids: dict[str, tuple[str, int, bytes]] = {}
+        self.kids: dict[str, tuple[str, int, MrKeys]] = {}
         for space, raw in _CONTENT_KEYS.items():
-            kid, key = derive_mr_key(raw)
-            self.kids[kid] = (space, 7, key)
+            keys = derive_mr_key(raw)
+            self.kids[keys.kid] = (space, 7, keys)
         self.lookups: list[str] = []
 
         async def _for_kid(kid: str):
@@ -775,17 +776,18 @@ def _multi_frame(
     envelope_space: str = _SPACE,
     event_type: FederationEventType = FederationEventType.SPACE_POST_CREATED,
 ) -> tuple[dict, dict]:
-    kid, key = derive_mr_key(_CONTENT_KEYS[key_space])
+    keys = derive_mr_key(_CONTENT_KEYS[key_space])
     env = build_multi_envelope(
         encoder=encoder,
         own_instance_id=sender_id,
         event_type=event_type.value,
         payload_json='{"post_id": "p-1", "content": "hello"}',
         space_id=envelope_space,
-        key=key,
+        keys=keys,
         recipients=to,
     )
-    return {"type": "envelope", "sealed": seal_multi(env, kid=kid, key=key)}, env
+    sealed = seal_multi(env, kid=keys.kid, key=keys.key)
+    return {"type": "envelope", "sealed": sealed}, env
 
 
 async def test_a_multi_frame_from_a_carded_member_is_dispatched():
@@ -885,8 +887,8 @@ async def test_a_removed_member_with_an_older_epoch_key_is_refused(removal):
     assert MR_RECENT_EPOCHS >= 2  # an older epoch is still in the kid map
     h = _MultiHousehold()
     old_raw = b"\x09" * 32
-    old_kid, old_key = derive_mr_key(old_raw)
-    h.kids[old_kid] = (_SPACE, 6, old_key)  # the epoch before the rotation
+    old = derive_mr_key(old_raw)
+    h.kids[old.kid] = (_SPACE, 6, old)  # the epoch before the rotation
     sender, enc = await h.add_sender()
 
     def _frame() -> dict:
@@ -896,10 +898,13 @@ async def test_a_removed_member_with_an_older_epoch_key_is_refused(removal):
             event_type=FederationEventType.SPACE_POST_CREATED.value,
             payload_json='{"post_id": "p-1", "content": "hello"}',
             space_id=_SPACE,
-            key=old_key,
+            keys=old,
             recipients=h.audience,
         )
-        return {"type": "envelope", "sealed": seal_multi(env, kid=old_kid, key=old_key)}
+        return {
+            "type": "envelope",
+            "sealed": seal_multi(env, kid=old.kid, key=old.key),
+        }
 
     # While a member, the older epoch's frame is taken (the grace window).
     assert await h.frame(_frame()) == {"status": "ok"}
@@ -1016,7 +1021,7 @@ async def test_a_multi_context_on_a_non_mailbox_transport_is_refused():
     h = _MultiHousehold()
     sender, enc = await h.add_sender()
     _, env = _multi_frame(sender, enc, to=h.audience)
-    _, key = derive_mr_key(_CONTENT_KEYS[_SPACE])
+    key = derive_mr_key(_CONTENT_KEYS[_SPACE])
     for transport in ("", TRANSPORT_GFS_RELAY):
         with pytest.raises(ValueError, match="mailbox only"):
             await h.federation.handle_inbound_rtc(

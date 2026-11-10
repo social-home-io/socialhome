@@ -8,7 +8,7 @@ mailbox. The GFS pushes the same frame ``{"type": "envelope", "sealed":
 
 Keys
 ----
-Both keys come from the space content key of one ``(space, epoch)`` — the
+All three come from the space content key of one ``(space, epoch)`` — the
 content key itself never leaves
 :class:`~socialhome.services.space_crypto_service.SpaceContentEncryption`
 (same rule as its ``media_key``):
@@ -17,6 +17,10 @@ content key itself never leaves
   receiver which of its space keys opens the frame; reveals nothing else.
 * ``key`` — 32 HKDF-SHA256 bytes (info ``sh-mr-key:v1``), the AES-256-GCM
   key for both the outer seal and the inner ``encrypted_payload``.
+* ``tag_key`` — 32 HKDF-SHA256 bytes (info ``sh-mr-tag:v1``), the HMAC key
+  of the audience tags only — the AES-GCM key is never also an HMAC key.
+
+All three travel together as one :class:`MrKeys`.
 
 Every member holds the content key, so every member can open the frame; a
 non-member (the GFS, a relay) cannot. The sender is proved by the inner
@@ -42,7 +46,7 @@ a receiver takes it only when its own tag is listed
 (:func:`multi_audience_includes`). Without it, anyone holding the epoch key
 — the GFS cannot, but a member or a follower can — could re-push a captured
 frame to a mailbox the sender left out (a follower, a household on the
-per-pair hide list). A tag is ``b64url(HMAC-SHA256(key, "sh-mr-to:v1\n" +
+per-pair hide list). A tag is ``b64url(HMAC-SHA256(tag_key, "sh-mr-to:v1\n" +
 instance_id)[:4])``: it sits inside the seal, so the GFS never sees it, and
 only a key holder who already knows an instance id can test for it.
 
@@ -59,6 +63,7 @@ import os
 import re
 import uuid
 from collections.abc import Collection
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, TypeGuard
 
@@ -90,6 +95,7 @@ MR_SIG_SUITE: str = "ed25519"
 _HKDF_SALT = b"sh-mr-v1"
 _KID_INFO = b"sh-mr-kid:v1"
 _KEY_INFO = b"sh-mr-key:v1"
+_TAG_KEY_INFO = b"sh-mr-tag:v1"
 _AAD_PREFIX = b"sh-mr-seal:v1\n"
 _TAG_PREFIX = b"sh-mr-to:v1\n"
 _TAG_BYTES_TRUNC = 4
@@ -123,12 +129,27 @@ def _hkdf(content_key: bytes, *, length: int, info: bytes) -> bytes:
     ).derive(content_key)
 
 
-def derive_mr_key(content_key: bytes) -> tuple[str, bytes]:
-    """``(kid, key)`` of one epoch's content key. Never log either."""
+@dataclass(slots=True, frozen=True)
+class MrKeys:
+    """The multi-recipient material of one ``(space, epoch)``: its ``kid``,
+    the AES-256-GCM ``key`` and the audience-tag HMAC ``tag_key``. The repr
+    names the kid only. Never log either key."""
+
+    kid: str
+    key: bytes = field(repr=False)
+    tag_key: bytes = field(repr=False)
+
+
+def derive_mr_key(content_key: bytes) -> MrKeys:
+    """The :class:`MrKeys` of one epoch's content key (HKDF-SHA256, one
+    ``info`` label each). Never log the keys."""
     if len(content_key) != 32:
         raise ValueError("space content key must be 32 bytes")
-    kid = b64url_encode(_hkdf(content_key, length=_KID_BYTES, info=_KID_INFO))
-    return kid, _hkdf(content_key, length=_KEY_BYTES, info=_KEY_INFO)
+    return MrKeys(
+        kid=b64url_encode(_hkdf(content_key, length=_KID_BYTES, info=_KID_INFO)),
+        key=_hkdf(content_key, length=_KEY_BYTES, info=_KEY_INFO),
+        tag_key=_hkdf(content_key, length=_KEY_BYTES, info=_TAG_KEY_INFO),
+    )
 
 
 def is_valid_kid(kid: object) -> TypeGuard[str]:
@@ -137,18 +158,19 @@ def is_valid_kid(kid: object) -> TypeGuard[str]:
     return isinstance(kid, str) and _KID_RE.fullmatch(kid) is not None
 
 
-def recipient_tag(key: bytes, instance_id: str) -> str:
+def recipient_tag(tag_key: bytes, instance_id: str) -> str:
     """The audience tag of one recipient household under the
-    multi-recipient *key* (6 chars). Never log it."""
-    mac = hmac.new(key, _TAG_PREFIX + instance_id.encode("utf-8"), hashlib.sha256)
+    multi-recipient *tag_key* (:attr:`MrKeys.tag_key`, 6 chars). Never log
+    it."""
+    mac = hmac.new(tag_key, _TAG_PREFIX + instance_id.encode("utf-8"), hashlib.sha256)
     return b64url_encode(mac.digest()[:_TAG_BYTES_TRUNC])
 
 
-def multi_to_instance(key: bytes, recipients: Collection[str]) -> str:
+def multi_to_instance(tag_key: bytes, recipients: Collection[str]) -> str:
     """The signed ``to_instance`` of a multi frame for *recipients*:
     ``"*:" + ".".join(sorted tags)``. :class:`ValueError` for an empty
     audience or one over :data:`MULTI_MAX_RECIPIENTS`."""
-    tags = sorted({recipient_tag(key, r) for r in recipients})
+    tags = sorted({recipient_tag(tag_key, r) for r in recipients})
     if not 1 <= len(tags) <= MULTI_MAX_RECIPIENTS:
         raise ValueError(
             f"a multi-recipient frame names 1..{MULTI_MAX_RECIPIENTS} "
@@ -158,11 +180,11 @@ def multi_to_instance(key: bytes, recipients: Collection[str]) -> str:
 
 
 def multi_audience_includes(
-    to_instance: object, key: bytes, own_instance_id: str
+    to_instance: object, tag_key: bytes, own_instance_id: str
 ) -> bool:
     """True when *to_instance* is a well-formed audience (1..
     :data:`MULTI_MAX_RECIPIENTS` valid tags, sorted, no repeats) that lists
-    *own_instance_id*'s tag under *key*. False for anything else."""
+    *own_instance_id*'s tag under *tag_key*. False for anything else."""
     if not isinstance(to_instance, str) or not to_instance.startswith(_AUDIENCE_PREFIX):
         return False
     tags = to_instance[len(_AUDIENCE_PREFIX) :].split(".")
@@ -172,7 +194,7 @@ def multi_audience_includes(
         return False
     if any(a >= b for a, b in itertools.pairwise(tags)):
         return False  # unsorted or repeated: not the shape a sender makes
-    own = recipient_tag(key, own_instance_id)
+    own = recipient_tag(tag_key, own_instance_id)
     return any(hmac.compare_digest(own, t) for t in tags)
 
 
@@ -209,7 +231,7 @@ def build_multi_envelope(
     event_type: str,
     payload_json: str,
     space_id: str,
-    key: bytes,
+    keys: MrKeys,
     recipients: Collection[str],
 ) -> dict:
     """The signed §24.11 envelope every recipient of one multi frame gets.
@@ -226,9 +248,9 @@ def build_multi_envelope(
         "msg_id": str(uuid.uuid4()),
         "event_type": event_type,
         "from_instance": own_instance_id,
-        "to_instance": multi_to_instance(key, recipients),
+        "to_instance": multi_to_instance(keys.tag_key, recipients),
         "timestamp": datetime.now(UTC).isoformat(),
-        "encrypted_payload": encrypt_mr_payload(payload_json, key),
+        "encrypted_payload": encrypt_mr_payload(payload_json, keys.key),
         "space_id": space_id,
         "proto_version": 1,
         "sig_suite": MR_SIG_SUITE,
@@ -314,6 +336,7 @@ __all__ = [
     "MR_SUITE_AESGCM_256",
     "MULTI_TO_INSTANCE",
     "SUPPORTED_MR_SUITES",
+    "MrKeys",
     "UnsupportedMrSuite",
     "build_multi_envelope",
     "decrypt_mr_payload",

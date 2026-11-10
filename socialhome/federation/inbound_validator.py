@@ -202,6 +202,11 @@ class InboundContext:
     #: decrypted under it instead of the pair's session key. Never logged.
     multi_key: bytes | None = field(default=None, repr=False)
 
+    #: v_90 — the audience-tag HMAC key of that space epoch
+    #: (:attr:`~socialhome.federation.multi_recipient.MrKeys.tag_key`), never
+    #: the AES-GCM key above. Never logged.
+    multi_tag_key: bytes | None = field(default=None, repr=False)
+
 
 #: Middleware shape: async callable that takes context + raises or returns.
 InboundStep = Callable[[InboundContext], Awaitable[None]]
@@ -583,7 +588,11 @@ def make_check_multi_recipient(*, own_instance_id: str) -> InboundStep:
         star = isinstance(to_instance, str) and to_instance.startswith(
             MULTI_TO_INSTANCE
         )
-        if ctx.multi_space is None or ctx.multi_key is None:
+        if (
+            ctx.multi_space is None
+            or ctx.multi_key is None
+            or ctx.multi_tag_key is None
+        ):
             if star:
                 raise ValueError(
                     "a multi-recipient envelope outside a multi-recipient frame"
@@ -601,7 +610,7 @@ def make_check_multi_recipient(*, own_instance_id: str) -> InboundStep:
             raise ValueError(
                 f"{event_type.value!r} never rides a multi-recipient frame"
             )
-        if not multi_audience_includes(to_instance, ctx.multi_key, own_instance_id):
+        if not multi_audience_includes(to_instance, ctx.multi_tag_key, own_instance_id):
             # Type only — never the tags or a mailbox.
             log.info(
                 "inbound: refusing a %r multi-recipient envelope not addressed "

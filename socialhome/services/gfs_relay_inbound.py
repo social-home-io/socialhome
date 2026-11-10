@@ -84,6 +84,7 @@ from ..federation.invite_token_redeem import (
     RELAY_ENVELOPE_INBOUND_LIMIT,
 )
 from ..federation.multi_recipient import (
+    MrKeys,
     is_multi_sealed,
     is_valid_kid,
     open_multi,
@@ -107,9 +108,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 #: v_90 — resolves a multi-recipient frame's ``kid`` to ``(space_id, epoch,
-#: key)`` over our recent space epochs, or ``None``
+#: keys)`` over our recent space epochs, or ``None``
 #: (``SpaceContentEncryption.mr_key_for_kid``).
-MrKeyForKid = Callable[[str], Awaitable[tuple[str, int, bytes] | None]]
+MrKeyForKid = Callable[[str], Awaitable[tuple[str, int, MrKeys] | None]]
 
 
 #: The ``gfs_connections.id`` of the connection server that delivered the
@@ -194,7 +195,7 @@ class GfsRelayInbound:
         self._invite = invite_coordinator
         self._gfs_repo = gfs_connection_repo
         self._rate_limiter = rate_limiter
-        #: v_90 — kid → ``(space_id, epoch, key)`` of a multi-recipient
+        #: v_90 — kid → ``(space_id, epoch, keys)`` of a multi-recipient
         #: frame (``SpaceContentEncryption.mr_key_for_kid``). Unwired, multi
         #: frames are refused.
         self._mr_key_for_kid = mr_key_for_kid
@@ -301,7 +302,7 @@ class GfsRelayInbound:
         ):
             raise MailboxFlooded("mailbox rate limit exceeded — frame dropped")
         sealed = frame.get("sealed")
-        multi: tuple[str, bytes] | None = None
+        multi: tuple[str, MrKeys] | None = None
         if is_multi_sealed(sealed):
             body, multi = await self._open_multi(sealed)
         else:
@@ -334,9 +335,9 @@ class GfsRelayInbound:
             )
             raise
 
-    async def _open_multi(self, sealed: dict) -> tuple[dict, tuple[str, bytes]]:
+    async def _open_multi(self, sealed: dict) -> tuple[dict, tuple[str, MrKeys]]:
         """Open a v_90 multi-recipient seal → ``(relay body, (space_id,
-        key))``. The suite is judged first (no lookup for an unknown one),
+        keys))``. The suite is judged first (no lookup for an unknown one),
         then the kid resolves over our recent space epochs; an unknown kid
         is refused. Logs the refusal type only — never the kid or the
         mailbox."""
@@ -354,8 +355,8 @@ class GfsRelayInbound:
                 "gfs_mailbox: dropped a multi-recipient frame under no key we hold"
             )
             raise ValueError("multi-recipient frame under no space key we hold")
-        space_id, _epoch, key = hit
-        return open_multi(sealed, key), (space_id, key)
+        space_id, _epoch, keys = hit
+        return open_multi(sealed, keys.key), (space_id, keys)
 
     async def _handle_media(
         self, raw: object, *, keys: MailboxKeys | None = None

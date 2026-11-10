@@ -176,7 +176,7 @@ async def test_due_ref_rows_on_one_gfs_go_up_as_one_multi_upload():
     assert sorted(t.mailbox_id for t in targets) == sorted(
         s.transport.targets[i].mailbox_id for i in seats
     )
-    _kid, key = derive_mr_key(_CONTENT_KEYS[_SPACE])
+    key = derive_mr_key(_CONTENT_KEYS[_SPACE]).key
     envelope = open_multi(sealed, key)["envelope"]
     assert orjson.loads(decrypt_mr_payload(envelope["encrypted_payload"], key)) == (
         _PAYLOAD
