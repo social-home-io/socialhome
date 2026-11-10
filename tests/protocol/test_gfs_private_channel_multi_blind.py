@@ -4,7 +4,8 @@ anonymously at the servers it never connected to.
 
 Three real GFS apps: A and B are the owner's chosen channel servers, C is a
 connection of the owner it did NOT choose. Member household ``a`` is
-connected to A only, member ``b`` to B only (both v_57, trusted mode). The
+connected to A only, member ``b`` to B only (both v_90 — one anonymous
+mode). The
 owner registers the channel on A and B; ``a`` publishes an item; ``b``'s
 seat on B receives it — with the host out of the loop.
 
@@ -106,9 +107,6 @@ class _Gfs:
         yield self._anon
 
     async def private_channels_supported(self, conn):
-        return True
-
-    async def member_publish_trusted_supported(self, conn):
         return True
 
     async def member_publish_strict_supported(self, conn):
@@ -244,13 +242,13 @@ class _FedRepo:
 
 
 class _Federation:
-    """Every household is v_57."""
+    """Every household is v_90."""
 
     async def peer_supports(self, instance_id, *, min_version):
-        return min_version <= 57
+        return min_version <= 90
 
     async def space_member_supports(self, instance_id, *, min_version):
-        return min_version <= 57
+        return min_version <= 90
 
 
 class _Conns:
@@ -304,7 +302,7 @@ def _space(chosen: list[GfsConnection]) -> Space:
         owner_username="o",
         identity_public_key=SPACE_PK.hex(),
         config_sequence=0,
-        features=SpaceFeatures(gfs_publish_mode="trusted", private_gfs=True),
+        features=SpaceFeatures(private_gfs=True),
         space_type=SpaceType.PRIVATE,
         join_mode=JoinMode.INVITE_ONLY,
         gfs_servers=signed,
@@ -445,7 +443,7 @@ async def world(tmp_dir):
 async def _grant(world, node) -> None:
     raw = await world.owner.channels.grant_for_peer(SPACE_ID, node.h.instance_id)
     assert raw is not None
-    assert "writer_key" in raw  # v_57: the channel writer key, trusted mode
+    assert "writer_key" in raw  # the channel writer key (v_90: every writer)
     assert await node.channels.accept_grant(SPACE_ID, raw)
     await node.channels.wait_idle()
 

@@ -25,7 +25,6 @@ from aiohttp import web
 from ...domain.gfs_channel import (
     CHANNEL_EPOCH_ROUTE,
     CHANNEL_PUBLISH_ANON_ROUTE,
-    CHANNEL_PUBLISH_ROUTE,
     CHANNEL_REGISTER_ROUTE,
     CHANNEL_SUBSCRIBE_ROUTE,
     CHANNEL_UNREGISTER_ROUTE,
@@ -65,7 +64,6 @@ from .admin import (
 from .channels import (
     ChannelEpochView,
     ChannelPublishAnonView,
-    ChannelPublishView,
     ChannelRegisterView,
     ChannelSubscribeView,
     ChannelUnregisterView,
@@ -104,7 +102,6 @@ from .mailbox import (
 )
 from .member_publish import (
     MemberPublishAnonView,
-    MemberPublishView,
     SpaceEpochNoticeView,
 )
 from .moments_public import (
@@ -224,10 +221,9 @@ def register_routes(
     # A registered household's daily batch of anonymous registration
     # tickets (Privacy Pass): signed by the household, blind-signed here.
     app.router.add_view(MAILBOX_TICKETS_ROUTE, MailboxTicketsView)
-    # Trusted-mode member publish (v_49): identified by the household
-    # signature, authorized by a space-authority-signed writer cert; plus the
-    # authority-signed content-epoch notice the freshness check relies on.
-    app.router.add_view("/gfs/member-publish", MemberPublishView)
+    # Member publish: anonymous, authorized by the space's per-epoch writer
+    # group key; plus the content-epoch notice that pins the key and that the
+    # freshness check relies on.
     app.router.add_view("/gfs/member-publish-anon", MemberPublishAnonView)
     app.router.add_view("/gfs/spaces/{space_id}/epoch", SpaceEpochNoticeView)
     # The encrypted, short-lived space media cache: ONE scope-free path —
@@ -248,7 +244,6 @@ def register_routes(
     app.router.add_view(CHANNEL_UNREGISTER_ROUTE, ChannelUnregisterView)
     app.router.add_view(CHANNEL_SUBSCRIBE_ROUTE, ChannelSubscribeView)
     app.router.add_view(CHANNEL_UNSUBSCRIBE_ROUTE, ChannelUnsubscribeView)
-    app.router.add_view(CHANNEL_PUBLISH_ROUTE, ChannelPublishView)
     app.router.add_view(CHANNEL_PUBLISH_ANON_ROUTE, ChannelPublishAnonView)
     app.router.add_view("/gfs/report", ReportView)
     app.router.add_view("/gfs/appeal", AppealView)

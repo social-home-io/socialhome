@@ -20,20 +20,14 @@ public key ever appears in channel traffic.
 Every statement the channel key signs carries ``channel_suite`` and its own
 domain-separation prefix (see :mod:`socialhome.gfs_channel`):
 
-* :class:`ChannelCert` — "household ``instance_pk`` may publish at ``scope``
-  in this channel during epoch ``epoch``" (trusted mode; the server checks it
-  against the pinned ``channel_pk``)::
-
-      {channel_suite, channel_id, epoch, instance_pk, scope, issued_at, cert_sig}
-
 * :class:`ChannelPass` — "household ``instance_pk`` is a member at epoch
-  ``epoch``" (no scope, so strict mode never tells the server who may
-  write); a subscribe must present one::
+  ``epoch``" (no scope, so the server never learns who may write); a
+  subscribe must present one::
 
       {channel_suite, channel_id, epoch, instance_pk, issued_at, pass_sig}
 
 * :class:`ChannelWriterKeyCert` — the pin of one epoch's channel writer group
-  key (strict mode)::
+  key::
 
       {writer_key_suite, channel_suite, channel_id, epoch, writer_pk, cert_sig}
 
@@ -43,10 +37,9 @@ encrypted payload, and is stored KEK-wrapped), :class:`GfsChannelGrant`::
     {channel_suite, space_id, channel_id, channel_pk, epoch, epoch_offset,
      gfs_ids: [...],
      binding_sig_suite, binding_sig,            # the SPACE authority key
-     channel_pass?: {...},                      # link-joined households only
-     channel_cert?: {...},                      # writers, trusted spaces
+     channel_pass?: {...},                      # seated households only
      writer_key?: {writer_key_suite, channel_id, epoch, writer_seed,
-                   writer_key_cert}}            # strict spaces, writers only
+                   writer_key_cert}}            # writers only (v_90+)
 
 The ``binding_sig`` (space authority key over ``{channel_suite, space_id,
 channel_id, channel_pk, epoch, epoch_offset, gfs_ids, binding_sig_suite}``)
@@ -55,7 +48,7 @@ other member can hand it a channel of their choosing.
 
 **Epochs on the wire are channel epochs**: ``epoch`` (the space content
 epoch, local) plus a per-channel ``epoch_offset`` (40 bits, HKDF-derived
-from the seed). Every pass, cert, writer key, notice, request and frame
+from the seed). Every pass, writer key, notice, request and frame
 carries the channel epoch, so a server that saw the space's content epochs
 elsewhere (a space that was public once, a post-restore epoch in unix
 seconds) cannot match them to the channel.
@@ -72,12 +65,11 @@ in the URL path, so an access log holds no channel ids:
 * ``POST /gfs/channels/subscribe`` / ``unsubscribe`` (household-signed, with a
   :class:`ChannelPass`) — :class:`ChannelSubscribeRequest` /
   :class:`ChannelUnsubscribeRequest`;
-* ``POST /gfs/channels/publish`` (trusted: household-signed + channel cert) —
-  :class:`ChannelPublishRequest`;
-* ``POST /gfs/channels/publish-anon`` (strict: channel writer key) —
+* ``POST /gfs/channels/publish-anon`` (the channel writer key, no household
+  identity — the only channel publish since v_90) —
   :class:`ChannelPublishAnonRequest`.
 
-Fan-out frame (``{"type": "relay", **frame}``), identical in both modes::
+Fan-out frame (``{"type": "relay", **frame}``)::
 
     {"channel_id", "event_type": "space_item", "epoch", "payload"}
 
@@ -92,17 +84,16 @@ from dataclasses import dataclass, field
 
 from ..canonical_json import canonical_bytes
 from .gfs_member_publish import (
-    GFS_PUBLISH_MODES,
     MAX_NONCE_CHARS,
     MEMBER_PUBLISH_MAX_PAYLOAD_CHARS,
     MIN_NONCE_CHARS,
     SPACE_ITEM_EVENT_TYPE,
 )
-from .writer_cert import MAX_WRITER_CERT_EPOCH, WRITER_SCOPES
+from .writer_cert import MAX_WRITER_CERT_EPOCH
 
 #: Suite of the channel key — of ``channel_pk`` and of every statement it
-#: signs (registration, notice, unregister, cert, pass, writer key cert,
-#: ). Phase-2 of ``docs/crypto.md`` adds ``"ed25519+mldsa65"``.
+#: signs (registration, notice, unregister, pass, writer key cert).
+#: Phase-2 of ``docs/crypto.md`` adds ``"ed25519+mldsa65"``.
 CHANNEL_SUITE_ED25519: str = "ed25519"
 SUPPORTED_CHANNEL_SUITES: frozenset[str] = frozenset({CHANNEL_SUITE_ED25519})
 
@@ -124,7 +115,6 @@ CHANNEL_EPOCH_ROUTE: str = "/gfs/channels/epoch"
 CHANNEL_UNREGISTER_ROUTE: str = "/gfs/channels/unregister"
 CHANNEL_SUBSCRIBE_ROUTE: str = "/gfs/channels/subscribe"
 CHANNEL_UNSUBSCRIBE_ROUTE: str = "/gfs/channels/unsubscribe"
-CHANNEL_PUBLISH_ROUTE: str = "/gfs/channels/publish"
 CHANNEL_PUBLISH_ANON_ROUTE: str = "/gfs/channels/publish-anon"
 CHANNEL_ROUTES: frozenset[str] = frozenset(
     {
@@ -133,7 +123,6 @@ CHANNEL_ROUTES: frozenset[str] = frozenset(
         CHANNEL_UNREGISTER_ROUTE,
         CHANNEL_SUBSCRIBE_ROUTE,
         CHANNEL_UNSUBSCRIBE_ROUTE,
-        CHANNEL_PUBLISH_ROUTE,
         CHANNEL_PUBLISH_ANON_ROUTE,
     }
 )
@@ -142,7 +131,6 @@ CHANNEL_ROUTES: frozenset[str] = frozenset(
 #: canonical-JSON scheme as every signed household→GFS request).
 CHANNEL_SUBSCRIBE_ACTION: str = "gfs-channel-subscribe:v1"
 CHANNEL_UNSUBSCRIBE_ACTION: str = "gfs-channel-unsubscribe:v1"
-CHANNEL_PUBLISH_ACTION: str = "gfs-channel-publish:v1"
 
 #: Largest number of connection servers one grant may name.
 MAX_GRANT_GFS_IDS: int = 16
@@ -157,7 +145,7 @@ _HEX_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
 class InvalidChannelWire(ValueError):
-    """A channel body, cert, pass, grant or frame is malformed."""
+    """A channel body, pass, grant or frame is malformed."""
 
 
 class UnsupportedChannelSuite(ValueError):
@@ -263,64 +251,6 @@ def _payload(raw: dict) -> str:
 
 
 # ─── Channel-key statements ──────────────────────────────────────────────
-
-CHANNEL_CERT_KEYS: frozenset[str] = frozenset(
-    {
-        "channel_suite",
-        "channel_id",
-        "epoch",
-        "instance_pk",
-        "scope",
-        "issued_at",
-        "cert_sig",
-    }
-)
-
-
-@dataclass(slots=True, frozen=True)
-class ChannelCert:
-    """The channel key's per-epoch writer statement for one household."""
-
-    channel_suite: str
-    channel_id: str
-    epoch: int
-    instance_pk: str
-    scope: str
-    issued_at: int
-    cert_sig: str
-
-    def signing_body(self) -> dict:
-        return {
-            "channel_suite": self.channel_suite,
-            "channel_id": self.channel_id,
-            "epoch": self.epoch,
-            "instance_pk": self.instance_pk,
-            "scope": self.scope,
-            "issued_at": self.issued_at,
-        }
-
-    def to_wire(self) -> dict:
-        return {**self.signing_body(), "cert_sig": self.cert_sig}
-
-    @classmethod
-    def from_wire(cls, raw: object) -> ChannelCert:
-        body = _exact(raw, CHANNEL_CERT_KEYS, "channel cert")
-        scope = body.get("scope")
-        if scope not in WRITER_SCOPES:
-            raise InvalidChannelWire("channel cert: bad scope")
-        issued_at = body.get("issued_at")
-        if not _is_int(issued_at):
-            raise InvalidChannelWire("channel cert: bad issued_at")
-        return cls(
-            channel_suite=_str(body, "channel_suite", _MAX_ID_CHARS),
-            channel_id=valid_channel_id(body.get("channel_id")),
-            epoch=_epoch(body),
-            instance_pk=_b64(body, "instance_pk"),
-            scope=str(scope),
-            issued_at=int(issued_at),  # type: ignore[arg-type]
-            cert_sig=_b64(body, "cert_sig"),
-        )
-
 
 CHANNEL_PASS_KEYS: frozenset[str] = frozenset(
     {"channel_suite", "channel_id", "epoch", "instance_pk", "issued_at", "pass_sig"}
@@ -473,9 +403,7 @@ GRANT_REQUIRED_KEYS: frozenset[str] = frozenset(
 #: Largest per-channel epoch offset (40 bits): wire epochs stay far below
 #: the signed 64-bit ceiling.
 MAX_CHANNEL_EPOCH_OFFSET: int = 2**40
-GRANT_OPTIONAL_KEYS: frozenset[str] = frozenset(
-    {"channel_pass", "channel_cert", "writer_key"}
-)
+GRANT_OPTIONAL_KEYS: frozenset[str] = frozenset({"channel_pass", "writer_key"})
 
 
 @dataclass(slots=True, frozen=True)
@@ -495,12 +423,11 @@ class GfsChannelGrant:
     #: Only for a link-joined (``space_session``) household: the seats are
     #: exactly those. A paired member's grant is publish-only.
     channel_pass: ChannelPass | None = None
-    channel_cert: ChannelCert | None = None
     writer_key: ChannelWriterKeyGrant | None = field(default=None)
 
     @property
     def channel_epoch(self) -> int:
-        """The epoch on the wire (pass, cert, writer key, requests, frames):
+        """The epoch on the wire (pass, writer key, requests, frames):
         the content epoch shifted by the channel's secret offset, so the
         server cannot match it to an epoch it saw for the space elsewhere."""
         return self.epoch + self.epoch_offset
@@ -522,8 +449,6 @@ class GfsChannelGrant:
         wire: dict = {**self.binding_body(), "binding_sig": self.binding_sig}
         if self.channel_pass is not None:
             wire["channel_pass"] = self.channel_pass.to_wire()
-        if self.channel_cert is not None:
-            wire["channel_cert"] = self.channel_cert.to_wire()
         if self.writer_key is not None:
             wire["writer_key"] = self.writer_key.to_wire()
         return wire
@@ -540,7 +465,6 @@ class GfsChannelGrant:
             )
         ):
             raise InvalidChannelWire("grant: bad gfs_ids")
-        cert = body.get("channel_cert")
         key = body.get("writer_key")
         passport = body.get("channel_pass")
         offset = body.get("epoch_offset")
@@ -559,7 +483,6 @@ class GfsChannelGrant:
             channel_pass=(
                 ChannelPass.from_wire(passport) if passport is not None else None
             ),
-            channel_cert=ChannelCert.from_wire(cert) if cert is not None else None,
             writer_key=(
                 ChannelWriterKeyGrant.from_wire(key) if key is not None else None
             ),
@@ -642,7 +565,6 @@ NOTICE_REQUIRED_KEYS: frozenset[str] = frozenset(
         "ts",
         "nonce",
         "epoch",
-        "publish_mode",
         "channel_sig",
     }
 )
@@ -650,8 +572,8 @@ NOTICE_REQUIRED_KEYS: frozenset[str] = frozenset(
 
 @dataclass(slots=True, frozen=True)
 class ChannelEpochNotice:
-    """``POST /gfs/channels/epoch`` — the channel's content epoch and publish
-    mode, and optionally the channel writer key pin of that epoch, signed by
+    """``POST /gfs/channels/epoch`` — the channel's content epoch, and
+    optionally the channel writer key pin of that epoch, signed by
     the channel key. There is no owner/delegated distinction: the server
     cannot tell (and must not learn) which household holds the seed."""
 
@@ -661,7 +583,6 @@ class ChannelEpochNotice:
     ts: str
     nonce: str
     epoch: int
-    publish_mode: str
     channel_sig: str
     writer_key_cert: ChannelWriterKeyCert | None = None
     #: The PINNED key of the addressed server (hex), signed — an
@@ -677,7 +598,6 @@ class ChannelEpochNotice:
             "ts": self.ts,
             "nonce": self.nonce,
             "epoch": self.epoch,
-            "publish_mode": self.publish_mode,
         }
         if self.writer_key_cert is not None:
             body["writer_key_cert"] = self.writer_key_cert.to_wire()
@@ -694,9 +614,6 @@ class ChannelEpochNotice:
             frozenset({"writer_key_cert"}) | GFS_KEY_FIELD,
             "notice",
         )
-        mode = body.get("publish_mode")
-        if mode not in GFS_PUBLISH_MODES:
-            raise InvalidChannelWire("invalid field: publish_mode")
         wkc = body.get("writer_key_cert")
         return cls(
             gfs_key=_gfs_key(body),
@@ -706,7 +623,6 @@ class ChannelEpochNotice:
             ts=_str(body, "ts"),
             nonce=_nonce(body),
             epoch=_epoch(body),
-            publish_mode=str(mode),
             channel_sig=_b64(body, "channel_sig"),
             writer_key_cert=(
                 ChannelWriterKeyCert.from_wire(wkc) if wkc is not None else None
@@ -871,85 +787,6 @@ class ChannelUnsubscribeRequest:
         )
 
 
-PUBLISH_KEYS: frozenset[str] = frozenset(
-    {
-        "instance_id",
-        "gfs_instance_id",
-        "channel_id",
-        "ts",
-        "signature",
-        "event_type",
-        "epoch",
-        "channel_cert",
-        "payload",
-    }
-)
-
-
-@dataclass(slots=True, frozen=True)
-class ChannelPublishRequest:
-    """``POST /gfs/channels/publish`` — trusted mode: identified by the
-    household signature, authorized by a :class:`ChannelCert` for this
-    channel — which names no space."""
-
-    instance_id: str
-    gfs_instance_id: str
-    channel_id: str
-    ts: str
-    signature: str
-    epoch: int
-    channel_cert: ChannelCert
-    payload: str
-    #: The PINNED key of the addressed server (hex), signed — an
-    #: additive bind beyond the id (``None`` = omitted, older
-    #: households). The server refuses a mismatch.
-    gfs_key: str | None = None
-
-    def signing_payload(self) -> dict:
-        return _with_gfs_key(
-            self.gfs_key,
-            {
-                "action": CHANNEL_PUBLISH_ACTION,
-                "instance_id": self.instance_id,
-                "gfs_instance_id": self.gfs_instance_id,
-                "channel_id": self.channel_id,
-                "ts": self.ts,
-                "event_type": SPACE_ITEM_EVENT_TYPE,
-                "epoch": self.epoch,
-                "channel_cert": self.channel_cert.to_wire(),
-                "payload": self.payload,
-            },
-        )
-
-    def signing_bytes(self) -> bytes:
-        return canonical(self.signing_payload())
-
-    def to_wire(self) -> dict:
-        body = self.signing_payload()
-        del body["action"]
-        body["signature"] = self.signature
-        return body
-
-    def fan_out_frame(self) -> dict:
-        return channel_frame(self.channel_id, self.epoch, self.payload)
-
-    @classmethod
-    def from_wire(cls, raw: object) -> ChannelPublishRequest:
-        body = _exact_optional(raw, PUBLISH_KEYS, GFS_KEY_FIELD, "publish")
-        _event_type(body)
-        return cls(
-            gfs_key=_gfs_key(body),
-            instance_id=_str(body, "instance_id", _MAX_ID_CHARS),
-            gfs_instance_id=_str(body, "gfs_instance_id", _MAX_ID_CHARS),
-            channel_id=valid_channel_id(body.get("channel_id")),
-            ts=_str(body, "ts"),
-            signature=_str(body, "signature"),
-            epoch=_epoch(body),
-            channel_cert=ChannelCert.from_wire(body.get("channel_cert")),
-            payload=_payload(body),
-        )
-
-
 PUBLISH_ANON_KEYS: frozenset[str] = frozenset(
     {
         "gfs_instance_id",
@@ -967,8 +804,8 @@ PUBLISH_ANON_KEYS: frozenset[str] = frozenset(
 
 @dataclass(slots=True, frozen=True)
 class ChannelPublishAnonRequest:
-    """``POST /gfs/channels/publish-anon`` — strict mode: no household
-    identity, signed with the channel's per-epoch writer group key."""
+    """``POST /gfs/channels/publish-anon`` — no household identity, signed
+    with the channel's per-epoch writer group key."""
 
     gfs_instance_id: str
     channel_id: str
@@ -1030,8 +867,8 @@ CHANNEL_FRAME_KEYS: frozenset[str] = frozenset(
 
 
 def channel_frame(channel_id: str, epoch: int, payload: str) -> dict:
-    """The identity-free frame the server fans out — the same in both
-    modes: no cert, no household, no space."""
+    """The identity-free frame the server fans out: no cert, no household,
+    no space."""
     return {
         "channel_id": channel_id,
         "event_type": SPACE_ITEM_EVENT_TYPE,

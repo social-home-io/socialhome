@@ -2790,7 +2790,6 @@ def _gfs_cluster_channel_media(
         gfs_instance_id=gfs_id,
         ts=datetime.now(timezone.utc).isoformat(),
         epoch=epoch,
-        publish_mode="trusted",
     )
     code, resp = _request(
         f"{urls[1]}/gfs/channels/epoch", method="POST", body=notice.to_wire()
@@ -6003,8 +6002,8 @@ def _check_writer_key_on_e(state: dict, failures: list[str], cap) -> None:
         kek = KeyManager.from_data_dir(_instance_dir("e"))
         if not pin or not row or row[0][0] is None:
             failures.append(
-                f"e: holds no writer key for strict epoch {epoch} (v_"
-                f"{int(cap.MIN_FOR_STRICT_MEMBER_PUBLISH)})"
+                f"e: holds no writer key for epoch {epoch} (v_"
+                f"{int(cap.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY)})"
             )
             return
         raw = kek.decrypt(
@@ -8241,8 +8240,9 @@ def cmd_gfs_media_on_demand() -> None:
 
 @_offline_step
 def cmd_gfs_member_publish() -> None:
-    """v_49 trusted-mode member publish: a link-joined member posts while
-    the HOST is offline, and the space's followers still get it live.
+    """v_49 member publish (anonymous — the one mode since v_90): a
+    link-joined member posts while the HOST is offline, and the space's
+    followers still get it live.
 
     Prereqs: ``gfs-space-subscribe`` (d follows a's global space over the
     GFS) and ``gfs-invite-link`` (+ ``-content``) — e holds a link-joined
@@ -8252,14 +8252,15 @@ def cmd_gfs_member_publish() -> None:
     1. Stop **a** — the host, the only seed holder. Before v_49 nothing e
        posted could reach a follower now: only a seed holder could put an
        item on the relay.
-    2. e posts and publishes the post ITSELF — ``POST /gfs/member-publish``,
-       signed by e's household key, authorized by e's writer cert.
+    2. e posts and publishes the post ITSELF — ``POST
+       /gfs/member-publish-anon``, signed with the space's writer group key
+       (e's writer cert rides inside the ciphertext).
     3. d (a follower that is NOT a member) receives the post decrypted
        within the poll window. The GFS log shows the member-publish fan-out
        for the space, and no line carries the post text.
     4. Restart a. a receives e's post over the normal member path (the
        relay envelope queue) and sends NO copy to the GFS (step 12): e is
-       v_57, the GFS proved member publish and ``space_item_followers``,
+       v_90, the GFS proved member publish and ``space_item_followers``,
        and every follower there reads ``space_item``.
     5. d holds exactly ONE copy of e's post.
 
@@ -8361,7 +8362,7 @@ def cmd_gfs_member_publish() -> None:
     #     no other path ever carried them to a follower.
     second_id, edited = _member_publish_items(state, space_id, post_id, gfs_off)
 
-    # 4. The host comes back. Step 12: e is a v_57 household that published
+    # 4. The host comes back. Step 12: e is a v_90 household that published
     #    the post itself to every listed GFS, the GFS proved member publish
     #    and ``space_item_followers``, and every follower there (d) said it
     #    reads ``space_item`` — so a sends NO copy of e's post to that GFS
@@ -8772,18 +8773,18 @@ def _moderation_outcomes_reach_followers(state: dict, space_id: str) -> None:
 
 @_offline_step
 def cmd_gfs_member_publish_strict() -> None:
-    """v_50 strict (anonymous) member publish: the owner switches the space
-    to strict, and a link-joined member's post reaches a follower over the
-    GFS while the host is offline — with nothing identifying on the wire.
+    """Anonymous member publish — the one mode since v_90 (the step keeps
+    its v_50 name for the chain): a link-joined member's post reaches a
+    follower over the GFS while the host is offline, with nothing
+    identifying on the wire, and the identified route is gone.
 
     Prereqs: ``gfs-member-publish`` (and everything it needs) — a is back
     up, e holds a writer seat in a's global space, d follows it.
 
     Sequence:
-    1. a (the owner) PATCHes ``features.gfs_publish_mode = "strict"``. That
-       rotates the content key: e gets the new epoch's writer GROUP key with
-       its cert (over the relay — e is paired with nobody), and the GFS gets
-       the owner's notice with ``publish_mode`` + the ``writer_key_cert``.
+    1. Wait until the GFS has the writer key of the space's current epoch
+       pinned (the owner's notice) and e holds that key (no publish-mode
+       switch any more: every publicly readable space has one).
     2. Stop **a** (host) and **d** (so the GFS has to STORE the item for d).
     3. e posts. Its publisher signs ``POST /gfs/member-publish-anon`` with
        the writer key, over its cookie-less session.
@@ -8793,25 +8794,16 @@ def cmd_gfs_member_publish_strict() -> None:
        of e's (instance id, identity key).
     5. Restart d: it drains the queue and decrypts e's post (the cert came
        from inside the ciphertext).
-    6. An IDENTIFIED publish into the strict space — signed with e's real
-       household key and e's real writer cert, exactly what a v_49 or
-       misconfigured household would send — is refused (403).
-    7. Restart a, switch the space back to trusted (the chain's later steps
-       expect it), and record the strict epoch for ``verify``'s v_50 check.
+    6. The identified ``POST /gfs/member-publish`` — what a pre-v_90
+       household would send — has no route any more (404 / 405).
+    7. Restart a and record the epoch for ``verify``'s writer-key check.
 
     Polls every 3 s; backs off on 429. GFS / household logs are bookmarked
     before each respawn.
     """
-    import base64 as _b64
     import json as _json
-    from dataclasses import replace as _replace
-    from datetime import datetime as _dt
-    from datetime import timezone as _tz
 
-    from socialhome.crypto import b64url_encode, sign_ed25519
-    from socialhome.domain.gfs_member_publish import MemberPublishRequest
-    from socialhome.domain.writer_cert import WriterCert
-    from socialhome.infrastructure.key_manager import KeyManager
+    from socialhome.crypto import b64url_encode
 
     state = _load()
     if not state or not _gfs_alive(state):
@@ -8824,28 +8816,12 @@ def cmd_gfs_member_publish_strict() -> None:
     a = state["instances"]["a"]
     d = state["instances"]["d"]
     e = state["instances"]["e"]
-    a_base = f"http://127.0.0.1:{a['port']}"
     gfs_base = state["gfs"]["base_url"]
     e_iid = e["instance_id"]
     e_pk_hex = _rows("e", "SELECT identity_public_key FROM instance_identity")[0][0]
     e_leaks = (e_iid, e_pk_hex, b64url_encode(bytes.fromhex(e_pk_hex)))
 
-    def _patch_mode(mode: str) -> None:
-        for _attempt in range(4):
-            st, body = _request(
-                f"{a_base}/api/spaces/{space_id}",
-                token=a["token"],
-                method="PATCH",
-                body={"features": {"gfs_publish_mode": mode}},
-            )
-            if st != 429:
-                break
-            time.sleep(15.0)
-        _must(f"a sets gfs_publish_mode={mode}", st, body)
-
-    # 1. The owner goes strict; wait for the GFS pin and e's writer key.
-    _patch_mode("strict")
-    print("  a switched the space to strict (owner-only setting) ✓")
+    # 1. The GFS pin and e's writer key for the current epoch.
     deadline = time.monotonic() + 90.0
     epoch = None
     gfs_row: list = []
@@ -8856,8 +8832,7 @@ def cmd_gfs_member_publish_strict() -> None:
         )
         epoch = latest[0][0] if latest else None
         gfs_row = _gfs_rows(
-            "SELECT member_publish_mode, writer_key_epoch FROM global_spaces"
-            " WHERE space_id=?",
+            "SELECT writer_key_epoch FROM global_spaces WHERE space_id=?",
             (space_id,),
         )
         e_key = _rows(
@@ -8866,21 +8841,18 @@ def cmd_gfs_member_publish_strict() -> None:
             " AND writer_key IS NOT NULL",
             (space_id, epoch),
         )
-        if gfs_row and gfs_row[0] == ("strict", epoch) and e_key:
+        if gfs_row and gfs_row[0] == (epoch,) and e_key:
             break
         time.sleep(3.0)
     else:
         raise SystemExit(
-            f"gfs-member-publish-strict: after the switch, GFS row={gfs_row!r} "
-            f"(want ('strict', {epoch})) and e's writer key for epoch {epoch} "
+            f"gfs-member-publish-strict: GFS writer-key pin={gfs_row!r} (want "
+            f"epoch {epoch}) and e's writer key for epoch {epoch} "
             f"present={bool(e_key)} within 90 s. Check "
             f"{_instance_dir('a') / 'log.txt'} for 'GFS epoch notice' and "
             f"{_instance_dir('e') / 'log.txt'} for 'writer key'."
         )
-    print(
-        f"  GFS: mode=strict, writer key pinned for epoch {epoch}; e holds the "
-        "writer key for it ✓"
-    )
+    print(f"  GFS: writer key pinned for epoch {epoch}; e holds it (one mode) ✓")
 
     # 2. Host and follower offline (d must get the item from the GFS queue).
     _kill_household("a", a)
@@ -8888,14 +8860,14 @@ def cmd_gfs_member_publish_strict() -> None:
     gfs_off = _gfs_log_size()
 
     # 3. e posts.
-    content = f"Strict: posted anonymously with the host offline — {time.time_ns()}"
+    content = f"Anonymous: posted with the host offline — {time.time_ns()}"
     st, post = _e_request(
         state,
         "POST",
         f"/api/spaces/{space_id}/posts",
         {"type": "text", "content": content},
     )
-    post_id = _must("e posts in the strict space", st, post, ok=(201,))["id"]
+    post_id = _must("e posts in the space", st, post, ok=(201,))["id"]
 
     # 4. What the GFS saw and stored.
     deadline = time.monotonic() + 60.0
@@ -8927,16 +8899,13 @@ def cmd_gfs_member_publish_strict() -> None:
     print(
         f"  the GFS took e's item on the anonymous route ({anon_lines[-1].strip()}) ✓"
     )
-    identified = [
-        line
-        for line in _gfs_log_lines_matching(
-            "POST /gfs/member-publish HTTP", offset=gfs_off
-        )
-    ]
+    identified = list(
+        _gfs_log_lines_matching("POST /gfs/member-publish HTTP", offset=gfs_off)
+    )
     if identified:
         raise SystemExit(
             f"gfs-member-publish-strict: an IDENTIFIED member publish reached the "
-            f"GFS in strict mode: {identified[:1]!r}"
+            f"GFS: {identified[:1]!r}"
         )
     about = [
         line
@@ -8975,55 +8944,26 @@ def cmd_gfs_member_publish_strict() -> None:
         "SELECT content FROM space_posts WHERE id = ?",
         (post_id,),
         lambda rows: bool(rows) and rows[0][0] == content,
-        what=f"d never decrypted e's strict-mode post {post_id}",
+        what=f"d never decrypted e's anonymous post {post_id}",
         timeout=90.0,
     )
     print("  d (follower) drained and decrypted e's anonymous post ✓")
 
-    # 6. An identified publish into the strict space is refused — signed with
-    #    e's real household key and real writer cert (what a v_49 or
-    #    misconfigured household would send). The harness reads e's seed
-    #    (KEK-unwrapped from e's own data dir) only to build the request.
-    kek = KeyManager.from_data_dir(_instance_dir("e"))
-    wrapped = _rows("e", "SELECT identity_private_key FROM instance_identity")[0][0]
-    e_seed = kek.decrypt(wrapped)
-    cert_row = _rows(
-        "e",
-        "SELECT writer_cert FROM space_keys WHERE space_id=? AND epoch=?",
-        (space_id, epoch),
-    )
-    cert = WriterCert.from_wire(_json.loads(cert_row[0][0])).v1()
-    st, info = _request(f"{gfs_base}/gfs/info")
-    _must("GFS /gfs/info", st, info)
-    req = MemberPublishRequest(
-        instance_id=e_iid,
-        gfs_instance_id=str(info["gfs_instance_id"]),
-        ts=_dt.now(_tz.utc).isoformat(),
-        signature="",
-        target=space_id,
-        epoch=int(epoch),
-        writer_cert=cert,
-        payload=_b64.urlsafe_b64encode(os.urandom(48)).decode().rstrip("="),
-    )
-    req = _replace(
-        req, signature=b64url_encode(sign_ed25519(e_seed, req.signing_bytes()))
-    )
-    ref_off = _gfs_log_size()
+    # 6. The identified route is gone (v_90): what a pre-v_90 household
+    #    would send has nowhere to go.
     st, body = _request(
-        f"{gfs_base}/gfs/member-publish", method="POST", body=req.to_wire()
+        f"{gfs_base}/gfs/member-publish",
+        method="POST",
+        body={"instance_id": e_iid, "target": space_id, "epoch": int(epoch)},
     )
-    if st != 403:
+    if st not in (404, 405):
         raise SystemExit(
-            f"gfs-member-publish-strict: an identified publish into the strict "
-            f"space answered HTTP {st} {body!r}, expected 403"
+            f"gfs-member-publish-strict: the identified route answered HTTP {st} "
+            f"{body!r}, expected 404 / 405 (gone since v_90)"
         )
-    why = _gfs_log_lines_matching("strict mode", offset=ref_off)
-    print(
-        "  an identified publish (e's real key + cert) into the strict space is "
-        f"refused 403{' — ' + why[-1].split(':', 3)[-1].strip() if why else ''} ✓"
-    )
+    print(f"  the identified POST /gfs/member-publish is gone (HTTP {st}) ✓")
 
-    # 7. a back, space back to trusted, record for verify.
+    # 7. a back; record for verify.
     a_off = _log_size("a")
     new_a = _spawn("a", a["port"])
     state["instances"]["a"]["pid"] = new_a
@@ -9032,27 +8972,11 @@ def cmd_gfs_member_publish_strict() -> None:
     print(f"  a respawned: pid={new_a} (log bookmark {a_off})")
     _await_space_post(state, "a", space_id, post_id)
     print("  a (host) caught e's post up over the member path ✓")
-    _patch_mode("trusted")
-    deadline = time.monotonic() + 60.0
-    while time.monotonic() < deadline:
-        row = _gfs_rows(
-            "SELECT member_publish_mode FROM global_spaces WHERE space_id=?",
-            (space_id,),
-        )
-        if row and row[0][0] == "trusted":
-            break
-        time.sleep(3.0)
-    else:
-        raise SystemExit(
-            "gfs-member-publish-strict: the GFS never learned the switch back to "
-            "trusted within 60 s"
-        )
-    print("  a switched the space back to trusted; the GFS followed ✓")
     state["gfs_member_publish_strict_epoch"] = int(epoch)
     _save(state)
     print(
-        "gfs-member-publish-strict: ok (anonymous member publish in a strict "
-        "space; identified refused)"
+        "gfs-member-publish-strict: ok (anonymous member publish, the one mode; "
+        "the identified route is gone)"
     )
 
 
@@ -10279,13 +10203,13 @@ def cmd_gfs_multi_listing() -> None:
     ``gfs-b-up``. Runs after the rest of the gfs chain (it moves e off A for
     a while and restarts a and d), before ``verify``.
 
-    1. a and e connect to B. a creates a TRUSTED global space, publicly
+    1. a and e connect to B. a creates a global space, publicly
        readable, and lists it on A and on B (owner selection, ``PUT
        /api/spaces/{id}/gfs-servers``). Both servers
        list it and pin the epoch's writer key (the first-listing notice).
     2. a invites d (paired, registered on A only); d accepts. d holds the
-       owner's signed list naming A and B, and the writer key (trusted
-       space, v_57).
+       owner's signed list naming A and B, and the writer key (every v_90
+       writer of a publicly readable space).
     3. d restarts with loopback treated as public (the demo's B is on
        127.0.0.1 — see :data:`_LOOPBACK_IS_PUBLIC_PRELUDE`).
     4. e leaves A, discovers the space on B and follows it there only.
@@ -10311,7 +10235,7 @@ def cmd_gfs_multi_listing() -> None:
         base64.urlsafe_b64encode(bytes.fromhex(d_pk)).decode().rstrip("="),
     )
 
-    # 1. a and e connect to B; a lists a new trusted global space on A and B.
+    # 1. a and e connect to B; a lists a new global space on A and B.
     a_b = _pair_with(state, "a", b_url)
     e_b = _pair_with(state, "e", b_url)
     print(f"  a and e connected to GFS B ({b_url}) ✓")
@@ -10422,7 +10346,7 @@ def cmd_gfs_multi_listing() -> None:
         "SELECT 1 FROM space_keys WHERE space_id=? AND writer_key IS NOT NULL",
         (space_id,),
         bool,
-        what="d never got the writer key of the trusted space (v_57)",
+        what="d never got the writer key of the space (v_90)",
         timeout=90.0,
     )
     print("  d joined: holds the owner's list (A + B) and the writer key ✓")
@@ -10569,7 +10493,7 @@ def cmd_gfs_multi_listing() -> None:
 
 
 def _check_multi_listing(state: dict, failures: list[str]) -> None:
-    """v_57 tripwire for ``verify``: d still holds the trusted space's writer
+    """v_57 tripwire for ``verify``: d still holds the space's writer
     key and the owner's two-server list; e still holds d's post."""
     info = state["gfs_multi_listing"]
     space_id = info["space_id"]
@@ -10578,7 +10502,7 @@ def _check_multi_listing(state: dict, failures: list[str]) -> None:
         "SELECT 1 FROM space_keys WHERE space_id=? AND writer_key IS NOT NULL",
         (space_id,),
     ):
-        failures.append("d: no writer key for the trusted multi-GFS space (v_57)")
+        failures.append("d: no writer key for the multi-GFS space (v_57 / v_90)")
     rows = _rows("d", "SELECT gfs_servers FROM spaces WHERE id=?", (space_id,))
     if not rows or not rows[0][0] or rows[0][0].count("inbox_url") != 2:
         failures.append("d: the owner's GFS list does not name both servers")
@@ -10660,8 +10584,8 @@ def cmd_gfs_private_channel_multi() -> None:
     2. e joins through a gfs link, d (paired) through an internal one. a
        registers the channel on A — B holds NO row for it, though a is
        connected to B and B can carry channels.
-    3. a picks **A and B**. B now holds the channel, its trusted-mode writer
-       key pinned (v_57); d holds the owner's two-server list.
+    3. a picks **A and B**. B now holds the channel, its writer key pinned;
+       d holds the owner's two-server list.
     4. d restarts with loopback treated as public (B is on 127.0.0.1, see
        :data:`_LOOPBACK_IS_PUBLIC_PRELUDE`). e leaves A — it now reaches the
        channel over B only — and holds its seat on B.
@@ -10787,11 +10711,10 @@ def cmd_gfs_private_channel_multi() -> None:
                 f"gfs-private-channel-multi: owner choice answered {body!r}"
             )
         _poll_gfs_b_rows(
-            "SELECT writer_key_pk FROM gfs_channels WHERE channel_id=? "
-            "AND publish_mode='trusted'",
+            "SELECT writer_key_pk FROM gfs_channels WHERE channel_id=?",
             (channel_id,),
             lambda r: bool(r) and bool(r[0][0]),
-            what="GFS B never got the channel with its trusted writer key pinned",
+            what="GFS B never got the channel with its writer key pinned",
         )
         _poll_rows(
             "d",
@@ -10815,7 +10738,7 @@ def cmd_gfs_private_channel_multi() -> None:
             timeout=90.0,
         )
         print(
-            "  the channel lives on A and B (writer key pinned, trusted); d holds "
+            "  the channel lives on A and B (writer key pinned); d holds "
             "the two-server list and the grant naming both ✓"
         )
 
@@ -11942,8 +11865,8 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_56 space-sync series rows gate in place ✓")
-    # v_57 — members publish to every GFS on the owner's list (writer key in
-    # trusted spaces, anonymous to servers they never joined). The OURS
+    # v_57 — members publish to every GFS on the owner's list (anonymous to
+    # servers they never joined; since v_90 the only member publish). The OURS
     # round-trip above proves every pair advertises >= v_57. Pin it, and when
     # ``gfs-multi-listing`` ran, check what it left behind.
     # v_64 — a public moment's sealed, signed ``sent_at``: followers refuse a
@@ -12327,10 +12250,20 @@ def cmd_verify() -> None:
     if int(_Cap.MIN_FOR_MULTI_GFS_PUBLISH) != 57 or _OURS < 57:
         failures.append(
             "MIN_FOR_MULTI_GFS_PUBLISH moved off v_57 (or OURS fell below it) — "
-            "members would get no writer key in a trusted space"
+            "members would publish to fewer listed GFSs"
         )
     else:
         print("  v_57 multi-GFS member publish gate in place ✓")
+    # v_90 — one GFS publish mode, always anonymous: the writer key goes to
+    # every v_90 publisher and no identified publish exists. The OURS
+    # round-trip above proves every pair advertises >= v_90; pin the gate.
+    if int(_Cap.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY) != 90 or _OURS < 90:
+        failures.append(
+            "MIN_FOR_ANON_MEMBER_PUBLISH_ONLY moved off v_90 (or OURS fell below "
+            "it) — members would get no writer key and publish nothing over a GFS"
+        )
+    else:
+        print("  v_90 one anonymous GFS publish mode gate in place ✓")
     if state.get("gfs_multi_listing"):
         before = len(failures)
         _check_multi_listing(state, failures)

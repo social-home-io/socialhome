@@ -29,8 +29,6 @@ from socialhome.crypto import (
 from socialhome.domain.gfs_space_media import (
     AUTH_AUTHORITY,
     AUTH_CHANNEL,
-    AUTH_CHANNEL_CERT,
-    AUTH_WRITER_CERT,
     AUTH_WRITER_KEY,
     CHANNEL_MEDIA_DELETE_PREFIX,
     SCOPE_CHANNEL,
@@ -39,11 +37,7 @@ from socialhome.domain.gfs_space_media import (
     SpaceMediaUploadAuth,
     media_delete_payload,
 )
-from socialhome.gfs_channel import (
-    channel_pk_of,
-    issue_channel_cert,
-    signing_bytes,
-)
+from socialhome.gfs_channel import channel_pk_of, signing_bytes
 from socialhome.global_server.channels import GfsChannelService
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.federation import GfsFederationService
@@ -60,7 +54,6 @@ from socialhome.global_server.space_media_auth import (
     build_space_media_rate_limit,
     is_space_media_write,
 )
-from socialhome.writer_cert import sign_writer_cert
 from socialhome.writer_key import derive_writer_seed, sign_with_writer_key
 
 SPACE = "sp-1"
@@ -181,55 +174,9 @@ def _channel_key(
     )
 
 
-def _writer_cert(claim, *, epoch=3, holder=None, signer=None, cert_seed=SEED):
-    holder = holder or os.urandom(32)
-    cert = sign_writer_cert(
-        space_seed=cert_seed,
-        space_id=claim.scope_id,
-        epoch=epoch,
-        instance_pk=ed25519_public_key(holder),
-        scope="comment",
-    )
-    sig = sign_ed25519(
-        signer or holder, claim.writer_signing_bytes(kind=AUTH_WRITER_CERT, epoch=epoch)
-    )
-    return SpaceMediaUploadAuth(
-        claim=claim,
-        kind=AUTH_WRITER_CERT,
-        sig=b64url_encode(sig),
-        sig_suite="ed25519",
-        epoch=epoch,
-        writer_cert=cert,
-    )
-
-
-def _channel_cert(claim, *, epoch=3, signer=None, cert_seed=CHANNEL_SEED):
-    holder = os.urandom(32)
-    cert = issue_channel_cert(
-        channel_seed=cert_seed,
-        channel_id=claim.scope_id,
-        epoch=epoch,
-        instance_pk=ed25519_public_key(holder),
-        scope="comment",
-    )
-    sig = sign_ed25519(
-        signer or holder,
-        claim.writer_signing_bytes(kind=AUTH_CHANNEL_CERT, epoch=epoch),
-    )
-    return SpaceMediaUploadAuth(
-        claim=claim,
-        kind=AUTH_CHANNEL_CERT,
-        sig=b64url_encode(sig),
-        sig_suite="ed25519",
-        epoch=epoch,
-        channel_cert=cert,
-    )
-
-
 async def _pin_writer_key(epoch_repo, epoch: int = 3) -> bytes:
     writer_seed = derive_writer_seed(SEED, SPACE, epoch)
     await epoch_repo.confirm(SPACE, epoch, now=NOW)
-    await epoch_repo.set_publish_mode(SPACE, "strict", at=NOW)
     await epoch_repo.pin_writer_key(
         SPACE, epoch, b64url_encode(ed25519_public_key(writer_seed)), replace=True
     )
@@ -238,7 +185,6 @@ async def _pin_writer_key(epoch_repo, epoch: int = 3) -> bytes:
 
 async def _pin_channel_writer_key(channel_repo, epoch: int = 3) -> bytes:
     writer_seed = os.urandom(32)
-    await channel_repo.set_publish_mode(CHANNEL, "strict", at=NOW)
     await channel_repo.pin_writer_key(CHANNEL, epoch, channel_pk_of(writer_seed))
     return writer_seed
 
@@ -334,46 +280,24 @@ async def test_a_kind_from_the_other_scope_is_refused(env):
         )
 
 
-# ── Space scope: trusted-mode writer cert ────────────────────────────────
+# ── Space scope: no identified kind (v_90) ───────────────────────────────
 
 
-async def test_a_writer_cert_holder_is_authorized(env):
+@pytest.mark.parametrize("scope", [SCOPE_SPACE, SCOPE_CHANNEL])
+@pytest.mark.parametrize("kind", ["writer_cert", "channel_cert"])
+async def test_an_identified_kind_is_refused(env, scope, kind):
+    """The writer-cert / channel-cert kinds left with the identified member
+    publish: a header naming one never authorizes."""
     auth, _, _ = env
-    await _upload(auth, _writer_cert(_claim()))
-
-
-@pytest.mark.parametrize("case", ["other_signer", "foreign_cert", "suite", "strict"])
-async def test_writer_cert_refusals(env, case):
-    auth, epoch_repo, _ = env
-    if case == "other_signer":
-        a = _writer_cert(_claim(), signer=os.urandom(32))
-    elif case == "foreign_cert":
-        a = _writer_cert(_claim(), cert_seed=os.urandom(32))
-    elif case == "suite":
-        good = _writer_cert(_claim())
-        a = SpaceMediaUploadAuth(
-            claim=good.claim,
-            kind=good.kind,
-            sig=good.sig,
-            sig_suite="ed25519+mldsa65",
-            epoch=good.epoch,
-            writer_cert=good.writer_cert,
-        )
-    else:
-        await _pin_writer_key(epoch_repo)
-        a = _writer_cert(_claim())
+    claim = _claim() if scope == SCOPE_SPACE else _ch_claim()
+    a = SpaceMediaUploadAuth(
+        claim=claim, kind=kind, sig="x" * 86, sig_suite="ed25519", epoch=3
+    )
     with pytest.raises(PermissionError):
         await _upload(auth, a)
 
 
-async def test_a_writer_cert_of_a_closed_epoch_is_refused(env):
-    auth, epoch_repo, _ = env
-    await epoch_repo.confirm(SPACE, 9, now=NOW)
-    with pytest.raises(PermissionError):
-        await _upload(auth, _writer_cert(_claim(), epoch=3))
-
-
-# ── Space scope: strict-mode writer key ──────────────────────────────────
+# ── Space scope: writer key ──────────────────────────────────────────────
 
 
 async def test_a_writer_key_holder_is_authorized(env):
@@ -422,32 +346,6 @@ async def test_channel_key_refusals(env, case):
         a = _channel_key(_claim(scope_id="1e" * 16, scope=SCOPE_CHANNEL))
     else:
         a = _channel_key(_ch_claim(), suite="ed25519+mldsa65")
-    with pytest.raises(PermissionError):
-        await _upload(auth, a)
-
-
-# ── Channel scope: channel cert ──────────────────────────────────────────
-
-
-async def test_a_channel_cert_holder_is_authorized(env):
-    auth, _, _ = env
-    await _upload(auth, _channel_cert(_ch_claim()))
-
-
-@pytest.mark.parametrize(
-    "case", ["other_signer", "foreign_cert", "closed_epoch", "strict"]
-)
-async def test_channel_cert_refusals(env, case):
-    auth, _, channel_repo = env
-    if case == "other_signer":
-        a = _channel_cert(_ch_claim(), signer=os.urandom(32))
-    elif case == "foreign_cert":
-        a = _channel_cert(_ch_claim(), cert_seed=os.urandom(32))
-    elif case == "closed_epoch":
-        a = _channel_cert(_ch_claim(), epoch=9)
-    else:
-        await _pin_channel_writer_key(channel_repo)
-        a = _channel_cert(_ch_claim())
     with pytest.raises(PermissionError):
         await _upload(auth, a)
 
@@ -610,10 +508,8 @@ def test_the_real_clock_is_the_default():
 #: Ed25519 verifications a successful upload of each kind makes.
 _VERIFIES = {
     "authority": 1,
-    "writer_cert": 2,
     "writer_key": 1,
     "channel": 1,
-    "channel_cert": 2,
     "channel_writer_key": 1,
 }
 
@@ -632,40 +528,6 @@ async def _case(env, kind: str, case: str) -> SpaceMediaUploadAuth:
             "suite": lambda: SpaceMediaUploadAuth(
                 claim=_claim(), kind=AUTH_AUTHORITY, sig="x" * 86, sig_suite="pq"
             ),
-        }[case]()
-    if kind == "writer_cert":
-        if case == "strict":
-            await _pin_writer_key(epoch_repo)
-        if case == "closed_epoch":
-            await epoch_repo.confirm(SPACE, 9, now=NOW)
-        if case == "suite":
-            good = _writer_cert(_claim())
-            return SpaceMediaUploadAuth(
-                claim=good.claim,
-                kind=good.kind,
-                sig=good.sig,
-                sig_suite="pq",
-                epoch=good.epoch,
-                writer_cert=good.writer_cert,
-            )
-        if case == "bad_sig_encoding":
-            good = _writer_cert(_claim())
-            return SpaceMediaUploadAuth(
-                claim=good.claim,
-                kind=good.kind,
-                sig="!!!",
-                sig_suite=good.sig_suite,
-                epoch=good.epoch,
-                writer_cert=good.writer_cert,
-            )
-        return {
-            "ok": lambda: _writer_cert(_claim()),
-            "other_signer": lambda: _writer_cert(_claim(), signer=os.urandom(32)),
-            "foreign_cert": lambda: _writer_cert(_claim(), cert_seed=os.urandom(32)),
-            "strict": lambda: _writer_cert(_claim()),
-            "closed_epoch": lambda: _writer_cert(_claim(), epoch=3),
-            "unlisted": lambda: _writer_cert(_claim("sp-nope")),
-            "banned": lambda: _writer_cert(_claim("sp-banned")),
         }[case]()
     if kind == "writer_key":
         seed = os.urandom(32)
@@ -696,19 +558,6 @@ async def _case(env, kind: str, case: str) -> SpaceMediaUploadAuth:
             "unknown": lambda: _channel_key(_claim(other, scope=SCOPE_CHANNEL)),
             "suite": lambda: _channel_key(_ch_claim(), suite="pq"),
         }[case]()
-    if kind == "channel_cert":
-        if case == "strict":
-            await _pin_channel_writer_key(channel_repo)
-        return {
-            "ok": lambda: _channel_cert(_ch_claim()),
-            "other_signer": lambda: _channel_cert(_ch_claim(), signer=os.urandom(32)),
-            "foreign_cert": lambda: _channel_cert(
-                _ch_claim(), cert_seed=os.urandom(32)
-            ),
-            "closed_epoch": lambda: _channel_cert(_ch_claim(), epoch=9),
-            "strict": lambda: _channel_cert(_ch_claim()),
-            "unknown": lambda: _channel_cert(_claim(other, scope=SCOPE_CHANNEL)),
-        }[case]()
     # channel_writer_key
     seed = os.urandom(32)
     if case in ("ok", "wrong_key", "wrong_epoch", "suite"):
@@ -729,20 +578,6 @@ _CASES = (
         for c in ("ok", "wrong_key", "unlisted", "banned", "no_pinned_key", "suite")
     ]
     + [
-        ("writer_cert", c)
-        for c in (
-            "ok",
-            "other_signer",
-            "foreign_cert",
-            "suite",
-            "bad_sig_encoding",
-            "strict",
-            "closed_epoch",
-            "unlisted",
-            "banned",
-        )
-    ]
-    + [
         ("writer_key", c)
         for c in (
             "ok",
@@ -757,17 +592,6 @@ _CASES = (
     ]
     + [("channel", c) for c in ("ok", "wrong_key", "unknown", "suite")]
     + [
-        ("channel_cert", c)
-        for c in (
-            "ok",
-            "other_signer",
-            "foreign_cert",
-            "closed_epoch",
-            "strict",
-            "unknown",
-        )
-    ]
-    + [
         ("channel_writer_key", c)
         for c in ("ok", "no_pin", "wrong_key", "wrong_epoch", "suite", "unknown")
     ]
@@ -777,7 +601,7 @@ _CASES = (
 @pytest.mark.parametrize(("kind", "case"), _CASES, ids=[f"{k}-{c}" for k, c in _CASES])
 async def test_every_outcome_of_a_kind_costs_the_same_verifications(env, kind, case):
     """Timing must not tell which spaces are listed or banned, which channels
-    exist, which keys are pinned or which mode a space is in: a refusal at
+    exist or which keys are pinned: a refusal at
     any step costs the Ed25519 verifications a success does."""
     auth, _, _ = env
     a = await _case(env, kind, case)

@@ -696,9 +696,8 @@ once, computes its scope-bound address and `PUT`s it once per GFS to the one
 scope-free path `PUT /gfs/media/{blob_id}` — the scope rides only inside the
 signed claim header (`scope`, `scope_id`, `addr_suite`), never in a URL. Authorization, strongest first: the
 **space authority** signature (this household holds the space seed — host
-or delegated admin), else the **writer group key** (strict mode), else our
-household's **writer cert** (trusted mode — the one identified kind, never
-sent to a listing target we are not registered on). A **private** space that
+or delegated admin), else the **writer group key** (both anonymous; the
+identified writer-cert kind is gone since v_90). A **private** space that
 uses an opaque channel (v_51, `private_gfs` on) uploads under the GFS's
 **channel scope** instead (the claim names the channel), only to a GFS whose
 signed `space_media.scopes` lists `channel` — so the GFS learns the random
@@ -799,9 +798,8 @@ out anyway; reads are served by the GFS and its CDN. A global space with
 
 **Privacy residuals.** The GFS sees ciphertext, its size bucket, the space
 id on upload, the upload time and the uploader's address, and fetch times
-at one-hour resolution; never who fetched. The `writer_cert` kind tells it
-the uploader household's key (the trusted-mode trade-off of
-`/gfs/member-publish`). The deterministic nonce reveals only "the same file
+at one-hour resolution; never who fetched, and never which household
+uploaded (no upload kind names one since v_90). The deterministic nonce reveals only "the same file
 was sealed twice under the same key", which the content address shows
 anyway.
 

@@ -1,8 +1,9 @@
-"""Space writer group key — the domain shape (v_50, strict member publish).
+"""Space writer group key — the domain shape (v_50; the one publish mode
+since v_90).
 
-In a space whose owner chose **strict** GFS publishing
-(``SpaceFeatures.gfs_publish_mode == "strict"``), a member household
-publishes over the connection server WITHOUT identifying itself: it signs the
+In a publicly readable space (and, as the channel writer key, in a private
+space's opaque channel) a member household publishes over the connection
+server WITHOUT identifying itself: it signs the
 request with the space's **writer group key** for the content epoch, one
 Ed25519 key shared by every household allowed to publish anything there (both
 ``write`` and ``comment`` scopes, so the server cannot tell them apart). The

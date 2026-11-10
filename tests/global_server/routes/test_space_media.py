@@ -10,10 +10,12 @@ the signed body).
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import time
 from datetime import UTC, datetime
 
+import orjson
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -26,8 +28,6 @@ from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
 from socialhome.domain.gfs_space_media import (
     AUTH_AUTHORITY,
     AUTH_CHANNEL,
-    AUTH_CHANNEL_CERT,
-    AUTH_WRITER_CERT,
     CHANNEL_MEDIA_DELETE_PREFIX,
     SCOPE_CHANNEL,
     SCOPE_SPACE,
@@ -39,7 +39,6 @@ from socialhome.domain.gfs_space_media import (
 )
 from socialhome.gfs_channel import (
     channel_pk_of,
-    issue_channel_cert,
     new_channel_id,
     sign_register,
     signing_bytes,
@@ -61,7 +60,6 @@ from socialhome.global_server.space_media_auth import (
     is_space_media_write,
 )
 from socialhome.moment_public_media import MAX_BLOB_BYTES, PAD_BUCKETS
-from socialhome.writer_cert import sign_writer_cert
 
 SPACE = "sp-media"
 SEED = os.urandom(32)
@@ -173,27 +171,19 @@ def _authority_header(claim: SpaceMediaClaim, seed: bytes = SEED) -> dict:
     }
 
 
-def _writer_header(claim: SpaceMediaClaim, *, epoch: int = 3) -> dict:
-    holder = os.urandom(32)
-    cert = sign_writer_cert(
-        space_seed=SEED,
-        space_id=claim.scope_id,
-        epoch=epoch,
-        instance_pk=ed25519_public_key(holder),
-        scope="comment",
-    )
-    sig = sign_ed25519(
-        holder, claim.writer_signing_bytes(kind=AUTH_WRITER_CERT, epoch=epoch)
-    )
-    auth = SpaceMediaUploadAuth(
-        claim=claim,
-        kind=AUTH_WRITER_CERT,
-        sig=b64url_encode(sig),
-        sig_suite="ed25519",
-        epoch=epoch,
-        writer_cert=cert,
-    )
-    return {SPACE_MEDIA_AUTH_HEADER: auth.to_header()}
+def _identified_header(claim: SpaceMediaClaim, kind: str) -> dict:
+    """A header naming one of the identified kinds that left with the
+    identified member publish (v_90): ``writer_cert`` / ``channel_cert``."""
+    body = {
+        **claim.signing_body(),
+        "auth": kind,
+        "sig": "x" * 86,
+        "sig_suite": "ed25519",
+        "epoch": 3,
+        kind: {"cert_suite": "ed25519"},
+    }
+    raw = base64.urlsafe_b64encode(orjson.dumps(body)).rstrip(b"=").decode()
+    return {SPACE_MEDIA_AUTH_HEADER: raw}
 
 
 def _put_url(data: bytes, space: str = SPACE) -> str:
@@ -218,29 +208,6 @@ def _channel_header(claim: SpaceMediaClaim, seed: bytes = CHANNEL_SEED) -> dict:
     sig = sign_ed25519(seed, claim.channel_signing_bytes())
     auth = SpaceMediaUploadAuth(
         claim=claim, kind=AUTH_CHANNEL, sig=b64url_encode(sig), sig_suite="ed25519"
-    )
-    return {SPACE_MEDIA_AUTH_HEADER: auth.to_header()}
-
-
-def _channel_cert_header(claim: SpaceMediaClaim, *, epoch: int = 3) -> dict:
-    holder = os.urandom(32)
-    cert = issue_channel_cert(
-        channel_seed=CHANNEL_SEED,
-        channel_id=claim.scope_id,
-        epoch=epoch,
-        instance_pk=ed25519_public_key(holder),
-        scope="comment",
-    )
-    sig = sign_ed25519(
-        holder, claim.writer_signing_bytes(kind=AUTH_CHANNEL_CERT, epoch=epoch)
-    )
-    auth = SpaceMediaUploadAuth(
-        claim=claim,
-        kind=AUTH_CHANNEL_CERT,
-        sig=b64url_encode(sig),
-        sig_suite="ed25519",
-        epoch=epoch,
-        channel_cert=cert,
     )
     return {SPACE_MEDIA_AUTH_HEADER: auth.to_header()}
 
@@ -275,10 +242,15 @@ async def test_a_re_upload_is_200_already_stored(gfs):
     assert await r.json() == {"stored": False, "status": "already_stored"}
 
 
-async def test_a_writer_cert_holder_uploads(gfs):
+async def test_an_identified_writer_cert_upload_is_refused(gfs):
     data = os.urandom(SMALL)
-    r = await gfs.put(_put_url(data), data=data, headers=_writer_header(_claim(data)))
-    assert r.status == 201
+    r = await gfs.put(
+        _put_url(data),
+        data=data,
+        headers=_identified_header(_claim(data), "writer_cert"),
+    )
+    assert r.status == 400
+    assert (await gfs.get(_get_url(data))).status == 404
 
 
 async def test_a_miss_is_404_no_store(gfs):
@@ -606,12 +578,14 @@ async def test_a_channel_key_upload_is_fetched_by_address(gfs):
     assert (held.scope_kind, held.scope_id) == ("channel", CHANNEL)
 
 
-async def test_a_channel_cert_holder_uploads(gfs):
+async def test_an_identified_channel_cert_upload_is_refused(gfs):
     data = os.urandom(SMALL)
     r = await gfs.put(
-        _ch_url(data), data=data, headers=_channel_cert_header(_ch_claim(data))
+        _ch_url(data),
+        data=data,
+        headers=_identified_header(_ch_claim(data), "channel_cert"),
     )
-    assert r.status == 201
+    assert r.status == 400
 
 
 @pytest.mark.parametrize("case", ["wrong_key", "unknown_channel"])

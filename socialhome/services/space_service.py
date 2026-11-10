@@ -1718,8 +1718,7 @@ class SpaceService(
     async def uses_gfs_private_channel(self, space: Space) -> bool:
         """Whether this PRIVATE space uses an opaque connection-server
         channel (v_51): created by its owner once it turned ``private_gfs``
-        on and the space has a remote member household. Its owner's
-        ``gfs_publish_mode`` choice then applies."""
+        on and the space has a remote member household."""
         if space.space_type is not SpaceType.PRIVATE:
             return False
         return await self._spaces.get_gfs_channel(space.id) is not None
@@ -1835,7 +1834,8 @@ class SpaceService(
         if self._writer_certs is not None:
             if writer_cert is not None:
                 payload["writer_cert"] = writer_cert
-                # v_50 — in a strict space, the epoch's writer group key too.
+                # v_50 — the epoch's writer group key too (a v_90 publisher of a
+                # publicly readable space).
                 try:
                     writer_key = await self._writer_certs.writer_key_for_peer(
                         space.id, to_instance_id, epoch=writer_cert.get("epoch")
@@ -2084,15 +2084,13 @@ class SpaceService(
             return event.old_version < line <= event.new_version
 
         # v_32 — the first snapshot it can take. v_49 — the snapshot now
-        # carries its writer cert, which it could not hold before. v_50 — and,
-        # in a strict space, its writer group key. v_57 — and in a trusted,
-        # publicly readable space too (so it publishes to every listed GFS
-        # without waiting for the next rotation).
+        # carries its writer cert, which it could not hold before. v_90 — and
+        # its writer group key (so it publishes over the GFS without waiting
+        # for the next rotation).
         if not (
             _crossed(FederationCapability.MIN_FOR_ROSTER_SNAPSHOT)
             or _crossed(FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH)
-            or _crossed(FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH)
-            or _crossed(FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH)
+            or _crossed(FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY)
         ):
             return
         own = self._own_instance_id
@@ -2670,14 +2668,6 @@ class SpaceService(
             and features.allow_subscribers != space.features.allow_subscribers
         ):
             await self._require_owner(space, actor_username)
-        # SECURITY: and so is how members publish over a connection server
-        # (v_50 ``gfs_publish_mode``): whether the server learns which
-        # household posted is a privacy decision for the whole space.
-        if (
-            features is not None
-            and features.gfs_publish_mode != space.features.gfs_publish_mode
-        ):
-            await self._require_owner(space, actor_username)
         # SECURITY: and so is whether a PRIVATE space uses a connection server
         # at all (``private_gfs``): ON tells the server every member household
         # connected to it (never the space). Turning it OFF while households
@@ -3126,12 +3116,6 @@ class SpaceService(
         ):
             await self._writer_certs_after_posts_access_change(space, updated)
         if (
-            features is not None
-            and features.gfs_publish_mode != space.features.gfs_publish_mode
-            and space.owner_instance_id == self._own_instance_id
-        ):
-            await self._after_gfs_publish_mode_change(updated)
-        elif (
             space.owner_instance_id == self._own_instance_id
             and writer_key_min_version(updated) is not None
             and writer_key_min_version(updated) != writer_key_min_version(space)
@@ -3178,7 +3162,7 @@ class SpaceService(
         )
 
     async def _after_writer_key_scope_change(self, space: Space) -> None:
-        """v_57 — a config change gave the space we host a writer group key it
+        """A config change gave the space we host a writer group key it
         did not have (followers turned on, or the space entered a public
         tier): pin the current epoch's key at every GFS listing it (the
         owner's epoch notice) and hand it to the member households (their
@@ -3199,33 +3183,6 @@ class SpaceService(
                 log.exception(
                     "writer key: roster snapshot to %s failed for %s", inst, space.id
                 )
-
-    async def _after_gfs_publish_mode_change(self, space: Space) -> None:
-        """v_50 — the owner switched ``gfs_publish_mode`` on the space we host.
-
-        * → ``strict``: rotate the content key. The rotation mints the new
-          epoch's writer group key, delivers it with each publisher's cert,
-          and tells every GFS the new epoch, the mode and the key's pin in the
-          owner's notice (see :meth:`_rotate_and_distribute_space_key`) — so
-          members never sit in a strict space without a key, and the epoch
-          before the switch (whose key nobody was handed) is left behind.
-        * → ``trusted``: no new key is needed; tell every GFS the new mode in
-          the owner's notice right away (members holding a key for the current
-          epoch keep publishing anonymously, which the server accepts in
-          either mode, until the next rotation hands out no key)."""
-        # A private space's channel (v_51) takes a mode change only with an
-        # epoch raise, so either direction rotates there.
-        channel_space = self._member_gfs is not None and (
-            await self._member_gfs.channel_space(space.id)
-        )
-        if space.features.gfs_publish_mode == "strict" or channel_space:
-            await self._rotate_and_distribute_space_key(space.id)
-            return
-        if self._member_gfs is not None:
-            try:
-                await self._member_gfs.announce_epoch(space.id)
-            except Exception:
-                log.exception("gfs publish mode: GFS notice failed for %s", space.id)
 
     async def enable_private_gfs_for_legacy_link(
         self, space_id: str, *, gfs_id: str | None = None
@@ -4777,10 +4734,6 @@ class SpaceService(
                     #   on a connection server (or withdraw it), which is the
                     #   owner's call alone.
                     #
-                    # * ``gfs_publish_mode`` (v_50) — whether the connection
-                    #   server learns which household posted is the owner's
-                    #   privacy decision for the whole space.
-                    #
                     # * ``private_gfs`` — whether a private space uses a
                     #   connection server at all, likewise.
                     kwargs["features"] = replace(
@@ -4789,7 +4742,6 @@ class SpaceService(
                             space.features.delegated_admin_authority
                         ),
                         allow_subscribers=space.features.allow_subscribers,
-                        gfs_publish_mode=space.features.gfs_publish_mode,
                         private_gfs=space.features.private_gfs,
                     )
                 # The host re-runs the PEERS_TOO_OLD check with its own view

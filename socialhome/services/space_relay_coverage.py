@@ -1,7 +1,7 @@
 """When a seed holder's relay copy of a member's public post is redundant.
 
 A member household publishes its own post over the GFS (``space_item``,
-v_49; to every GFS the owner listed since v_57). Every seed holder of the
+v_49; anonymously to every GFS the owner listed, v_57 / v_90). Every seed holder of the
 space also relays the same post as ``space_post_public``
 (:meth:`SpacePublicOutbound._relay_remote_authored`), because a follower on
 an older build reads only that copy. That is one extra fan-out of every
@@ -10,12 +10,11 @@ post per seed holder.
 On a given GFS the copy can be skipped only when all of these hold
 (owner decision 2026-10-23, option A of finding #3):
 
-* the author's household is at v_57 or later (it publishes to every
-  listed server, anonymously under the writer group key);
+* the author's household is at v_90 or later (it holds the writer group
+  key and publishes to every listed server, anonymously);
 * the server is on the owner's signed list for the space (where the
   author publishes);
-* the server proved ``member_publish_trusted`` and ``member_publish_strict``
-  (it carries that publish) and ``space_item_followers`` (it answers the
+* the server proved ``member_publish_strict`` (it carries that publish) and ``space_item_followers`` (it answers the
   question below) under its signed capability block;
 * the server says no follower there lacks ``space_item``: the authority-
   signed ``GET /gfs/spaces/{id}/subscribers?summary=1`` reports
@@ -91,17 +90,17 @@ class SpaceRelayCoverage:
         self, space_id: str, author_instance_id: str | None
     ) -> SkipTarget | None:
         """The per-server test for this post, or ``None`` when the copy
-        must go everywhere (an author below v_57 or unknown, no owner list,
+        must go everywhere (an author below v_90 or unknown, no owner list,
         no seed). Never raises."""
         if not author_instance_id or self._peer_supports is None:
             return None
         try:
             if not await self._peer_supports(
                 author_instance_id,
-                min_version=FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH,
+                min_version=FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY,
             ):
                 log.debug(
-                    "relay coverage: %s is below v_57 or unknown — copy kept",
+                    "relay coverage: %s is below v_90 or unknown — copy kept",
                     author_instance_id,
                 )
                 return None
@@ -138,8 +137,7 @@ class SpaceRelayCoverage:
             log.debug("relay coverage: %s is not on the owner's list", conn.id)
             return False
         if not (
-            await self._gfs.member_publish_trusted_supported(conn)
-            and await self._gfs.member_publish_strict_supported(conn)
+            await self._gfs.member_publish_strict_supported(conn)
             and await self._gfs.space_item_followers_supported(conn)
         ):
             log.debug(

@@ -26,7 +26,7 @@ It covers CONTENT and admin actions — the full §25.6 stream (roster and bans
 included), role changes, live bans / unbans, remote-member removals,
 proposal mirrors, the
 signing-seed share, the host writer exemption. It never covers owner-only
-settings: the owner-signed GFS list, ``private_gfs``, ``gfs_publish_mode``,
+settings: the owner-signed GFS list, ``private_gfs``,
 the authority cert / ``host_identity_pk``, the config, dissolve and the age
 gate keep comparing against ``owner_instance_id`` alone, and even a trusted
 inviter never acts on a user of the owner household

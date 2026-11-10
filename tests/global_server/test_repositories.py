@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 import time
 from dataclasses import replace
 
@@ -1008,46 +1007,30 @@ async def test_the_first_epoch_zero_has_predecessor_zero(gfs_db):
     assert (await epochs.get("sp")).previous == 0
 
 
-# ── Strict mode (v_50, migration 0015) ──────────────────────────────
+# ── Writer-key pins (migration 0015) ──────────────────────────────
 
 
-async def test_strict_state_defaults_to_trusted_without_keys(gfs_db):
+async def test_writer_keys_start_empty_and_carry_no_mode(gfs_db):
     _repo, epochs = await _epochs(gfs_db)
-    state = await epochs.get_strict("sp")
-    assert state is not None
-    assert state.publish_mode == "trusted" and not state.strict
-    assert state.writer_pk_for(0) is None
-    assert await epochs.get_strict("unknown") is None
-
-
-async def test_publish_mode_moves_only_forward_in_time(gfs_db):
-    _repo, epochs = await _epochs(gfs_db)
-    assert await epochs.set_publish_mode("sp", "strict", at=100)
-    assert (await epochs.get_strict("sp")).strict
-    # An older notice (a replay) never moves it back.
-    assert not await epochs.set_publish_mode("sp", "trusted", at=99)
-    assert (await epochs.get_strict("sp")).strict
-    assert await epochs.set_publish_mode("sp", "trusted", at=101)
-    state = await epochs.get_strict("sp")
-    assert (state.publish_mode, state.mode_at) == ("trusted", 101)
-
-
-async def test_publish_mode_check_constraint(gfs_db):
-    _repo, epochs = await _epochs(gfs_db)
-    with pytest.raises(sqlite3.IntegrityError):
-        await epochs.set_publish_mode("sp", "open", at=1)
+    keys = await epochs.get_writer_keys("sp")
+    assert keys is not None
+    assert keys.writer_pk_for(0) is None
+    # One publish mode since v_90: no mode is read or written any more.
+    assert not hasattr(keys, "publish_mode")
+    assert not hasattr(epochs, "set_publish_mode")
+    assert await epochs.get_writer_keys("unknown") is None
 
 
 async def test_writer_key_pins_keep_current_and_previous(gfs_db):
     _repo, epochs = await _epochs(gfs_db)
     assert await epochs.pin_writer_key("sp", 3, "k3", replace=False)
     assert await epochs.pin_writer_key("sp", 4, "k4", replace=False)
-    state = await epochs.get_strict("sp")
+    state = await epochs.get_writer_keys("sp")
     assert state.writer_pk_for(4) == "k4"
     assert state.writer_pk_for(3) == "k3"
     assert state.writer_pk_for(2) is None
     assert await epochs.pin_writer_key("sp", 6, "k6", replace=False)
-    state = await epochs.get_strict("sp")
+    state = await epochs.get_writer_keys("sp")
     assert (state.writer_key_epoch, state.writer_key_prev_epoch) == (6, 4)
     assert state.writer_pk_for(3) is None
 
@@ -1056,20 +1039,19 @@ async def test_writer_key_same_epoch_only_with_replace(gfs_db):
     _repo, epochs = await _epochs(gfs_db)
     await epochs.pin_writer_key("sp", 3, "k3", replace=False)
     assert not await epochs.pin_writer_key("sp", 3, "evil", replace=False)
-    assert (await epochs.get_strict("sp")).writer_pk_for(3) == "k3"
+    assert (await epochs.get_writer_keys("sp")).writer_pk_for(3) == "k3"
     # Older never lands.
     assert not await epochs.pin_writer_key("sp", 2, "old", replace=True)
     assert await epochs.pin_writer_key("sp", 3, "owner", replace=True)
-    state = await epochs.get_strict("sp")
+    state = await epochs.get_writer_keys("sp")
     assert state.writer_pk_for(3) == "owner"
     # Replacing the same epoch keeps the previous slot untouched.
     assert state.writer_key_prev_epoch is None
 
 
-async def test_writer_keys_are_forgotten_on_repin_but_mode_stays(gfs_db):
+async def test_writer_keys_are_forgotten_on_repin(gfs_db):
     repo, epochs = await _epochs(gfs_db, identity_public_key="aa" * 32)
     await epochs.pin_writer_key("sp", 3, "k3", replace=False)
-    await epochs.set_publish_mode("sp", "strict", at=5)
     assert await repo.set_space_authority(
         "sp",
         expected_pk="aa" * 32,
@@ -1077,18 +1059,16 @@ async def test_writer_keys_are_forgotten_on_repin_but_mode_stays(gfs_db):
         new_pk="bb" * 32,
         cert={"key_epoch": 1},
     )
-    state = await epochs.get_strict("sp")
+    state = await epochs.get_writer_keys("sp")
     assert state.writer_pk_for(3) is None
-    assert state.strict
 
 
-async def test_upsert_keeps_strict_state(gfs_db):
+async def test_upsert_keeps_the_writer_key_pins(gfs_db):
     repo, epochs = await _epochs(gfs_db)
     await epochs.pin_writer_key("sp", 3, "k3", replace=False)
-    await epochs.set_publish_mode("sp", "strict", at=5)
     await repo.upsert_space(GlobalSpace(space_id="sp", owning_instance="o", name="x"))
-    state = await epochs.get_strict("sp")
-    assert state.strict and state.writer_pk_for(3) == "k3"
+    state = await epochs.get_writer_keys("sp")
+    assert state.writer_pk_for(3) == "k3"
 
 
 async def test_relay_bytes_sums_only_unexpired_relay_rows(gfs_db):

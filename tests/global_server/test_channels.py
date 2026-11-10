@@ -28,14 +28,12 @@ from socialhome.domain.gfs_channel import (
     CHANNEL_FRAME_KEYS,
     CHANNEL_ROUTES,
     ChannelPublishAnonRequest,
-    ChannelPublishRequest,
     ChannelSubscribeRequest,
     ChannelUnsubscribeRequest,
 )
 from socialhome.gfs_channel import (
     channel_pk_of,
     derive_channel_seed,
-    issue_channel_cert,
     issue_channel_pass,
     issue_channel_writer_key,
     new_channel_id,
@@ -111,29 +109,23 @@ class _Channel:
             **kw,
         ).to_wire()
 
-    def notice(self, epoch: int, mode: str = "trusted", wkc=None, **kw) -> dict:
+    def notice(self, epoch: int, wkc=None, *, pin: bool = True, **kw) -> dict:
+        """A channel-key-signed notice; like a household's, it pins the
+        epoch's channel writer key unless ``pin=False``."""
+        if wkc is None and pin:
+            wkc = self.writer(epoch).writer_key_cert
         return sign_notice(
             channel_seed=kw.pop("seed", self.seed),
             channel_id=self.id,
             gfs_instance_id=GFS_ID,
             ts=kw.pop("ts", _now()),
             epoch=epoch,
-            publish_mode=mode,
             writer_key_cert=wkc,
         ).to_wire()
 
     def passport(self, h: _Household, epoch: int):
         return issue_channel_pass(
             channel_seed=self.seed, channel_id=self.id, epoch=epoch, instance_pk=h.pk
-        )
-
-    def cert(self, h: _Household, epoch: int, *, seed=None, channel_id=None):
-        return issue_channel_cert(
-            channel_seed=seed or self.seed,
-            channel_id=channel_id or self.id,
-            epoch=epoch,
-            instance_pk=h.pk,
-            scope="write",
         )
 
     def writer(self, epoch: int):
@@ -159,28 +151,15 @@ def _subscribe_body(ch: _Channel, h: _Household, epoch: int, *, passport=None) -
     ).to_wire()
 
 
-def _publish_body(ch: _Channel, h: _Household, epoch: int, *, cert=None) -> dict:
-    req = ChannelPublishRequest(
-        instance_id=h.instance_id,
-        gfs_instance_id=GFS_ID,
-        channel_id=ch.id,
-        ts=_now(),
-        signature="",
-        epoch=epoch,
-        channel_cert=cert or ch.cert(h, epoch),
-        payload=CT,
-    )
-    sig = sign_ed25519(h.seed, req.signing_bytes())
-    return replace(req, signature=b64url_encode(sig)).to_wire()
-
-
-def _anon_body(ch: _Channel, epoch: int, *, writer_seed: bytes | None = None) -> dict:
+def _anon_body(
+    ch: _Channel, epoch: int, *, writer_seed: bytes | None = None, ts: str = ""
+) -> dict:
     grant = ch.writer(epoch)
     seed = writer_seed or b64url_decode(grant.writer_seed)
     req = ChannelPublishAnonRequest(
         gfs_instance_id=GFS_ID,
         channel_id=ch.id,
-        ts=_now(),
+        ts=ts or _now(),
         nonce=b64url_encode(os.urandom(16)),
         epoch=epoch,
         payload=CT,
@@ -219,10 +198,10 @@ async def gfs(tmp_dir, request):
         yield tc
 
 
-async def _ready(gfs, epoch: int = 3, mode: str = "trusted", wkc=None) -> None:
+async def _ready(gfs, epoch: int = 3, wkc=None) -> None:
     resp = await gfs.post("/gfs/channels/register", json=gfs.ch.register())
     assert resp.status == 201, await resp.text()
-    resp = await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(epoch, mode, wkc))
+    resp = await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(epoch, wkc))
     assert resp.status == 200, await resp.text()
 
 
@@ -411,25 +390,14 @@ async def test_first_notice_is_bounded_by_the_ceiling(gfs) -> None:
     await _refused(await gfs.post("/gfs/channels/epoch", json=other.notice(2**62 + 1)))
 
 
-async def test_mode_moves_only_with_a_higher_epoch(gfs) -> None:
-    """A mode switch rotates: only a notice that raises the epoch moves the
-    mode — a replay or a lagging seed holder at the current epoch never
-    flips it."""
+async def test_a_notice_carrying_a_publish_mode_is_malformed(gfs) -> None:
+    """v_90 — there is one publish mode: a pre-v_90 notice that still names
+    one is a 400, and the channel keeps its epoch."""
     await _ready(gfs)
-    repo = gfs.app_[gfs_channel_repo_key]
-    resp = await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(3, "strict"))
-    assert resp.status == 200
-    assert not (await repo.get(gfs.ch.id)).strict
-    _advance(gfs, 61)
-    resp = await gfs.post(
-        "/gfs/channels/epoch", json=gfs.ch.notice(4, "strict", ts=_now(61))
-    )
-    assert resp.status == 200
-    assert (await repo.get(gfs.ch.id)).strict
-    resp = await gfs.post(
-        "/gfs/channels/epoch", json=gfs.ch.notice(4, "trusted", ts=_now(61))
-    )
-    assert (await repo.get(gfs.ch.id)).strict
+    body = {**gfs.ch.notice(3), "publish_mode": "strict"}
+    resp = await gfs.post("/gfs/channels/epoch", json=body)
+    assert resp.status == 400
+    assert (await gfs.app_[gfs_channel_repo_key].get(gfs.ch.id)).epoch == 3
 
 
 @pytest.mark.security
@@ -450,23 +418,24 @@ async def test_a_notice_reports_what_the_server_holds(gfs) -> None:
     assert resp.status == 200
     body = await resp.json()
     assert body["epoch"] == 5 and body["writer_pk"] is None
-    # Members' certs at 3 are refused now — the lock-out the owner heals.
+    # Members' publishes at 3 are refused now — the lock-out the owner heals.
     await _refused(
-        await gfs.post(
-            "/gfs/channels/publish", json=_publish_body(gfs.ch, gfs.member, 3)
-        )
+        await gfs.post("/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 3))
     )
 
 
 async def test_writer_key_is_pinned_only_at_the_current_epoch(gfs) -> None:
-    await _ready(gfs, epoch=3)
+    resp = await gfs.post("/gfs/channels/register", json=gfs.ch.register())
+    assert resp.status == 201
+    resp = await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(3, pin=False))
+    assert resp.status == 200
     repo = gfs.app_[gfs_channel_repo_key]
     ahead = gfs.ch.writer(5).writer_key_cert
-    resp = await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(5, "strict", ahead))
+    resp = await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(5, ahead))
     assert resp.status == 429
     assert (await repo.get(gfs.ch.id)).writer_pk_for(5) is None
     now = gfs.ch.writer(3).writer_key_cert
-    resp = await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(3, "strict", now))
+    resp = await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(3, now))
     assert resp.status == 200
     assert (await repo.get(gfs.ch.id)).writer_pk_for(3) == now.writer_pk
 
@@ -536,9 +505,7 @@ async def test_every_channel_request_addressed_to_an_alias_is_accepted(gfs) -> N
     while a request for an unrelated id is still refused."""
     await _ready(gfs)
     await _seat(gfs, gfs.other)
-    resp = await gfs.post(
-        "/gfs/channels/publish", json=_publish_body(gfs.ch, gfs.member, 3)
-    )
+    resp = await gfs.post("/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 3))
     assert resp.status == 200, await resp.text()
     assert len(await _queued(gfs, gfs.other)) == 1
     await _refused(
@@ -551,10 +518,19 @@ async def test_every_channel_request_addressed_to_an_alias_is_accepted(gfs) -> N
     assert info["capabilities"]["replaces"] == [GFS_ID]
 
 
-# ── Trusted publish ──────────────────────────────────────────────────────
+# ── Publish (anonymous, the one mode) ────────────────────────────────────
 
 
-async def test_trusted_publish_fans_out_an_identity_free_frame(gfs) -> None:
+async def test_the_identified_channel_publish_route_is_gone(gfs) -> None:
+    """v_90 — ``/gfs/channels/publish`` (household-signed + channel cert) is
+    gone; only the anonymous route stays."""
+    await _ready(gfs)
+    resp = await gfs.post("/gfs/channels/publish", json={"channel_id": gfs.ch.id})
+    assert resp.status in (404, 405)
+    assert "/gfs/channels/publish" not in CHANNEL_ROUTES
+
+
+async def test_publish_fans_out_an_identity_free_frame(gfs) -> None:
     await _ready(gfs)
     await _seat(gfs, gfs.member)
     await _seat(gfs, gfs.other)
@@ -566,20 +542,23 @@ async def test_trusted_publish_fans_out_an_identity_free_frame(gfs) -> None:
         await pub_ws.send_json(gfs.member.hello())
         await _wait_connected(gfs.app_, gfs.other.instance_id)
         await _wait_connected(gfs.app_, gfs.member.instance_id)
-        resp = await gfs.post(
-            "/gfs/channels/publish", json=_publish_body(gfs.ch, gfs.member, 3)
-        )
+        resp = await gfs.post("/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 3))
         assert resp.status == 200
         frame = await asyncio.wait_for(other_ws.receive_json(), timeout=5)
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(pub_ws.receive_json(), timeout=0.3)
-    assert frame == {
-        "type": "relay",
-        "channel_id": gfs.ch.id,
-        "event_type": "space_item",
-        "epoch": 3,
-        "payload": CT,
-    }
+        # No publisher is known, so every seat — the publisher's too — gets
+        # it (the household drops its own echo).
+        echo = await asyncio.wait_for(pub_ws.receive_json(), timeout=5)
+    assert (
+        frame
+        == echo
+        == {
+            "type": "relay",
+            "channel_id": gfs.ch.id,
+            "event_type": "space_item",
+            "epoch": 3,
+            "payload": CT,
+        }
+    )
     assert set(frame) - {"type"} == CHANNEL_FRAME_KEYS
     for leak in (gfs.member.instance_id, SPACE_ID, SPACE_PK.hex()):
         assert leak not in json.dumps(frame)
@@ -588,9 +567,7 @@ async def test_trusted_publish_fans_out_an_identity_free_frame(gfs) -> None:
 async def test_an_offline_seat_gets_the_item_queued(gfs) -> None:
     await _ready(gfs)
     await _seat(gfs, gfs.other)
-    resp = await gfs.post(
-        "/gfs/channels/publish", json=_publish_body(gfs.ch, gfs.member, 3)
-    )
+    resp = await gfs.post("/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 3))
     assert resp.status == 200
     queued = await _queued(gfs, gfs.other)
     assert [q.frame_type for q in queued] == ["relay"]
@@ -600,47 +577,25 @@ async def test_an_offline_seat_gets_the_item_queued(gfs) -> None:
 
 
 @pytest.mark.security
-@pytest.mark.parametrize(
-    "case", ["forged", "other_channel", "stale_epoch", "other_household"]
-)
-async def test_trusted_publish_refusals(gfs, case: str) -> None:
-    await _ready(gfs, epoch=3)
-    await _seat(gfs, gfs.other)
-    if case == "forged":
-        body = _publish_body(
-            gfs.ch, gfs.member, 3, cert=gfs.ch.cert(gfs.member, 3, seed=os.urandom(32))
-        )
-    elif case == "other_channel":
-        body = _publish_body(
-            gfs.ch,
-            gfs.member,
-            3,
-            cert=gfs.ch.cert(gfs.member, 3, channel_id=new_channel_id()),
-        )
-    elif case == "stale_epoch":
-        body = _publish_body(gfs.ch, gfs.member, 1)
-    else:
-        body = _publish_body(gfs.ch, gfs.member, 3, cert=gfs.ch.cert(gfs.other, 3))
-    await _refused(await gfs.post("/gfs/channels/publish", json=body))
-    assert await _queued(gfs, gfs.other) == []
-
-
-@pytest.mark.security
 async def test_the_previous_epoch_closes_after_the_grace(gfs) -> None:
     await _ready(gfs, epoch=3)
     _advance(gfs, 61)
     resp = await gfs.post("/gfs/channels/epoch", json=gfs.ch.notice(4, ts=_now(61)))
     assert resp.status == 200
-    resp = await gfs.post(
-        "/gfs/channels/publish", json=_publish_body(gfs.ch, gfs.member, 3)
-    )
+    resp = await gfs.post("/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 3))
     assert resp.status == 200  # within the grace
     _advance(gfs, 61 + 601)
     await _refused(
         await gfs.post(
-            "/gfs/channels/publish", json=_publish_body(gfs.ch, gfs.other, 3)
+            "/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 3, ts=_now(662))
         )
     )
+    # The current epoch still publishes at that time (so the refusal above
+    # is the closed epoch, not the clock).
+    resp = await gfs.post(
+        "/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 4, ts=_now(662))
+    )
+    assert resp.status == 200
 
 
 @pytest.mark.security
@@ -654,27 +609,17 @@ async def test_a_seat_whose_pass_epoch_closed_receives_nothing(gfs) -> None:
     assert resp.status == 200
     _advance(gfs, 61 + 601)
     resp = await gfs.post(
-        "/gfs/channels/publish", json=_publish_body(gfs.ch, gfs.member, 4)
+        "/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 4, ts=_now(662))
     )
     assert resp.status == 200
     assert await _queued(gfs, gfs.outsider) == []
 
 
-@pytest.mark.security
-async def test_identified_publish_into_a_strict_channel_is_refused(gfs) -> None:
-    await _ready(gfs, epoch=3, mode="strict")
-    await _refused(
-        await gfs.post(
-            "/gfs/channels/publish", json=_publish_body(gfs.ch, gfs.member, 3)
-        )
-    )
-
-
-# ── Strict publish ───────────────────────────────────────────────────────
+# ── Anonymous publish: the pin ───────────────────────────────────────────
 
 
 async def test_anonymous_publish_under_the_pinned_writer_key(gfs) -> None:
-    await _ready(gfs, epoch=3, mode="strict", wkc=gfs.ch.writer(3).writer_key_cert)
+    await _ready(gfs, epoch=3)
     await _seat(gfs, gfs.other)
     body = _anon_body(gfs.ch, 3)
     resp = await gfs.post("/gfs/channels/publish-anon", json=body)
@@ -688,7 +633,7 @@ async def test_anonymous_publish_under_the_pinned_writer_key(gfs) -> None:
 
 @pytest.mark.security
 async def test_anonymous_publish_refusals(gfs) -> None:
-    await _ready(gfs, epoch=3, mode="strict", wkc=gfs.ch.writer(3).writer_key_cert)
+    await _ready(gfs, epoch=3)
     # Another key than the pinned one.
     await _refused(
         await gfs.post(
@@ -741,7 +686,7 @@ async def test_unregister_drops_channel_and_seats(gfs) -> None:
 
 @pytest.mark.security
 async def test_the_server_stores_nothing_that_names_the_space(gfs, tmp_dir) -> None:
-    await _ready(gfs, epoch=3, mode="strict", wkc=gfs.ch.writer(3).writer_key_cert)
+    await _ready(gfs, epoch=3)
     await _seat(gfs, gfs.other)
     resp = await gfs.post("/gfs/channels/publish-anon", json=_anon_body(gfs.ch, 3))
     assert resp.status == 200

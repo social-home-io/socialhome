@@ -3691,35 +3691,11 @@ class FederationInboundService(ProtectionGateMixin):
                     event.from_instance,
                 )
             refreshed = replace(refreshed, features=pinned)
-        # v_50 — ``gfs_publish_mode`` is the OWNER's alone on EVERY household,
-        # not only the host: a member that mirrored a delegated admin's
-        # strict → trusted flip would start publishing IDENTIFIED requests to
-        # the connection server — the very leak strict mode prevents (the
-        # server refuses them, but it has seen them). Only the owner
-        # household's own word moves it; otherwise keep what we store.
-        if (
-            not is_owner
-            and refreshed.features.gfs_publish_mode
-            != existing.features.gfs_publish_mode
-        ):
-            log.info(
-                "SPACE_CONFIG_CHANGED for %s from %s tried to change the "
-                "owner-only gfs_publish_mode — kept the stored value",
-                space_id,
-                event.from_instance,
-            )
-            refreshed = replace(
-                refreshed,
-                features=replace(
-                    refreshed.features,
-                    gfs_publish_mode=existing.features.gfs_publish_mode,
-                ),
-            )
-        # ``private_gfs`` likewise: whether a private space uses a connection
-        # server at all is the OWNER's call on every household. On the host a
-        # delegated admin's flip would register (or drop) the channel and
-        # reveal the member households to the server; elsewhere the mirror
-        # must show the owner's word, not a seed holder's.
+        # ``private_gfs`` is the OWNER's alone on EVERY household: whether a
+        # private space uses a connection server at all is its call. On the
+        # host a delegated admin's flip would register (or drop) the channel
+        # and reveal the member households to the server; elsewhere the
+        # mirror must show the owner's word, not a seed holder's.
         if (
             not is_owner
             and refreshed.features.private_gfs != existing.features.private_gfs

@@ -407,98 +407,69 @@ peer we opted in with could post a probe through a server it is not
 registered on; our ack, queued there for it, tells it that we use that server
 once it connects to collect it.
 
-### Sign-off: in trusted mode the connection server learns who published (v_49)
+### Member publish is anonymous to the connection server — one mode (v_49; v_90)
 
-**Owner decision (2026-10-03), the default for every public/global space.**
-A space member household can publish its own posts over the connection
-server without the host signing them (`POST /gfs/member-publish`), so the
-host is no longer a single point of failure and a link-joined member reaches
-every subscriber live. In the default **trusted** mode that request is
-*identified*: the household signs it with its registered GFS identity and
-carries its writer cert in plaintext. **What it concedes, exactly:**
+**Owner decisions (2026-10-03, 2026-11-09).** A space member household can
+publish its own items over the connection server without the host signing
+them, so the host is no longer a single point of failure and a link-joined
+member reaches every subscriber live. **There is one mode, and it is
+anonymous** (owner decision 2026-11-09, v_90): the trusted / strict
+`gfs_publish_mode` and the identified `POST /gfs/member-publish` are gone.
+The request (`POST /gfs/member-publish-anon`) carries no household id, no
+household signature and no plaintext writer cert — it is authorized by the
+epoch's writer group key, which every household allowed to publish anything
+in the space shares (posters and commenters alike) and nobody else holds.
+This keeps, for publishing, the invariant the identity-free `/gfs/publish`
+relay keeps: **the GFS must not learn which household published.**
 
-- **The GFS learns which household published into which listed space, at
-  which content epoch, and when** — per item. That is the publishing
-  household's identity tied to a space and a timing, which the
-  identity-free `/gfs/publish` relay above deliberately withholds. It is
-  the reason this mode needs a sign-off at all.
-- **It never learns content, and never the item type outright.** The
-  payload is ciphertext under the space content key; the outer type is
-  always the generic `space_item`, with the real type (post, comment,
-  reaction, edit, delete) inside the ciphertext, padded to a size bucket
-  (1 / 4 / 16 / 64 / 128 KiB) inside the AEAD so a reaction and a short
-  post are the same length. The request has an exact key set, so nothing
-  can ride alongside the ciphertext in plaintext (pinned by
-  `tests/protocol/test_gfs_member_publish_blind.py`).
-- **Trusted-mode residuals about the type — for owner sign-off** (strict
-  mode, PR 4, removes them by moving the cert into the ciphertext):
-  - the plaintext writer cert names its **scope**. A `comment`-scope
-    publisher cannot post, so its items are visibly *not posts* (comments,
-    reactions, comment edits / deletes — not which);
-  - the same scope reveals the household's **role**: a follower (with
-    follower comments on), or a plain member under a restricted posts
-    level (`MODERATED` / `ADMIN_ONLY`);
-  - the **size bucket** still separates a long post or comment (4 KiB and
-    up) from everything short, and an item above 128 KiB is not padded at
-    all (its exact size shows).
-- **Subscribers learn nothing new from the frame.** The fan-out frame names
-  no publisher id; it carries the writer cert (the author's household key,
-  which every receiver needs anyway to verify the author signature inside).
-- **It learns every writer household's membership, even one that never
-  posts.** A household with a writer seat auto-subscribes to the fan-out of
-  each of its public/global spaces on every capable server (so other
-  members' items reach it live), and a subscribe is household-signed — so
-  the server learns which households subscribe to which spaces. In trusted
-  mode their publishes then tell it which of them write; in strict mode
-  (below) nothing does.
+**What it concedes, exactly:**
+
+- **The GFS learns that *some* publisher of the space posted**, at which
+  content epoch, when and in which size bucket — never which household,
+  never content, never the item type. The payload is ciphertext under the
+  space content key; the outer type is always the generic `space_item`,
+  with the real type (post, comment, reaction, edit, delete) inside the
+  ciphertext, padded to a size bucket (1 / 4 / 16 / 64 / 128 KiB) inside the
+  AEAD so a reaction and a short post are the same length (an item above
+  128 KiB is not padded at all, so its exact size shows). The request has an
+  exact key set, so nothing can ride alongside the ciphertext in plaintext;
+  the writer cert (which names the household and its scope) never leaves
+  the ciphertext (pinned by
+  `tests/protocol/test_gfs_member_publish_blind.py` and
+  `tests/protocol/test_gfs_member_publish_strict_blind.py`).
+- **It learns the space's subscriber set**, in which writers look exactly
+  like followers: a household with a writer seat auto-subscribes to the
+  fan-out of each of its public/global spaces on every capable server, with
+  the very same signed request a follower sends.
 - **It learns when the space content key rotates** — from the owner's
   (household-signed) and delegated admins' (authority-signed) epoch notices
   — as it already could from the `epoch` of authority-signed post relays.
 - **It is trusted with metadata, not with authenticity.** It can drop or
   delay items; it cannot forge one, because every receiver re-verifies the
-  cert against its own pinned space key and the author's signature.
+  writer cert inside the ciphertext against its own pinned space key, and
+  the author's signature.
 
-**Why this is accepted:** the owner judged that a host-independent space is
-worth the GFS knowing the publisher, never the content. Owners who disagree
-get the opt-in **strict** mode below. Until a household's GFS advertises
-`member_publish_trusted` in its signed capability block, nothing identified
-is sent to it at all and posts take today's host path.
-
-### Strict mode: anonymous to the connection server among the space's publishers (v_50)
-
-An owner who sets `gfs_publish_mode = "strict"` gets member publishing over
-the connection server that is **anonymous among the space's publishers**:
-the request (`POST /gfs/member-publish-anon`) carries no household id, no
-household signature and no plaintext writer cert — it is authorized by the
-epoch's writer group key, which every household allowed to publish anything
-in the space shares (posters and commenters alike) and nobody else holds.
-The GFS learns that *some* publisher of the space posted, at which epoch,
-when and in which size bucket — and the space's subscriber set, in which
-writers look exactly like followers (the member auto-subscribe is the same
-signed request a follower sends). It refuses identified publishes into a
-strict space. This restores, for publishing, the invariant the identity-free
-`/gfs/publish` relay keeps: **the GFS must not learn which household
-published** — and it removes the trusted-mode scope / role residuals,
-because the cert never leaves the ciphertext.
-
-What strict mode does **not** hide, stated so nobody reads more into it: the
+What it does **not** hide, stated so nobody reads more into it: the
 publish arrives from the household's IP address, like its identified WS, so
 IP and timing correlation with the household's authenticated connection
 remains the accepted limit of every anonymous GFS path (the server also
 limits anonymous publishes per space and client address, the only handle
-on abuse it has); a household never sends an identified publish to a
-server whose public listing says the space is strict, so only one caught
-between the owner's switch and its next look at that listing could still
-send one (refused, but seen). **Abuse inside a strict space is
-unattributable**: every publisher holds the same key, so the owner cannot
-tell who floods it, and rotating the key does not help (the abuser gets the
-new one). The remedy is switching the space back to trusted mode, which
-attributes every publish, or removing households. Revocation is by rotation, as
-for certs: a removed publisher keeps the old key until the next content
-epoch, plus the 600 s grace. A household that cannot publish anonymously
-(older build, no key yet, no strict-capable server) never falls back to the
-identified path — its items take the host path. Pinned by
-`tests/protocol/test_gfs_member_publish_strict_blind.py`.
+on abuse it has). **Abuse is unattributable**: every publisher holds the
+same key, so the owner cannot tell who floods the space, and rotating the
+key does not help (the abuser gets the new one); the remedy is removing
+households. **A GFS loses per-household bans and limits for publishers** —
+it keeps the per-IP, per-space and per-key limits, and receivers still
+enforce writer-cert scope and the author signature on every item.
+Revocation is by rotation: a removed publisher keeps the old key until the
+next content epoch, plus the 600 s grace. A household that cannot publish
+anonymously (below v_90, no key yet, no capable server) never falls back to
+an identified request — its items take the host path, and it can no longer
+publish over a GFS at all (BREAKING, no compat path).
+
+**Why this is accepted:** a host-independent space is worth the GFS
+learning that a publisher posted, never which household or what. Until a
+household's GFS advertises `member_publish_strict` in its signed capability
+block, nothing is published to it and posts take today's host path.
 
 ### Sign-off: a member publishes to GFSs it never connected to (v_57)
 
@@ -520,20 +491,10 @@ connected to. **What that concedes, exactly:**
   are the same accepted limit as every anonymous GFS path above; a member
   that does not want any server it never chose to see its address has to
   route its traffic through something that hides it.
-- **Trusted mode becomes anonymous everywhere once a member holds the
-  writer key.** To reach a server it is not registered on, a member needs
-  the writer group key, so a v_57 seed holder now hands it out in trusted
-  publicly readable spaces too. A member holding it sends every item
-  anonymously to every listed server, the ones it is registered on
-  included: one ciphertext sent identified to one server and anonymously to
-  another would let two colluding servers name the anonymous copy. The
-  consequence for operators: **a GFS loses per-household bans and limits
-  for that member** — it can no longer tell which household published. It
-  keeps the per-IP limit (and the per-space and per-key budgets of strict
-  mode), receivers still enforce writer-cert scope and the author signature
-  on every item, and the owner revokes a writer by rotating the content key
-  (the writer key rotates with it). A member below v_57 gets no key in a
-  trusted space and keeps publishing identified — to its own servers only.
+- **Every publish is anonymous, everywhere.** A member holding the writer
+  group key sends every item anonymously to every listed server, the ones
+  it is registered on included (since v_90 there is no identified publish
+  at all). A member without the key publishes nothing over any GFS.
 - **Only servers the owner signed.** Targets come only from the owner's
   signed list (a delegated admin cannot change it). A listed URL that names
   a private or local address is dropped unless this household holds the
@@ -567,8 +528,8 @@ connected to. **What that concedes, exactly:**
   the list that adds it reaches members, so a member's first anonymous
   publish there is not refused.
 
-Pinned by `tests/protocol/test_gfs_multi_listing_blind.py` and the trusted
-case in `tests/protocol/test_gfs_member_publish_strict_blind.py`.
+Pinned by `tests/protocol/test_gfs_multi_listing_blind.py` and
+`tests/protocol/test_gfs_member_publish_strict_blind.py`.
 
 ### Sign-off: a private space's opaque channel shows the server its link-joined households (v_51)
 
@@ -607,11 +568,9 @@ turned OFF or the last remote member leaves. **What it concedes, exactly:**
   paired and mesh-only members too** (the next sign-off). It learns that
   set, its size, when it changes (a removed household's seat dies at the
   next rotation), and the timing and size bucket of every item.
-- **In trusted mode (the default) it learns which member household
-  published each item into the channel** — a paired member included, as a
-  publisher only — the same concession as the trusted public-space sign-off
-  above, keyed by an opaque channel instead of a named space. In strict mode
-  it learns only that some publisher of the channel posted.
+- **It learns only that some publisher of the channel posted each item** —
+  never which household (one anonymous mode since v_90, as for public
+  spaces above).
 - **The owner is not named, but is inferable.** The owner holds no grant
   and never subscribes or publishes; its registration and notices are
   anonymous. But the server already sees the owner's instance id as the
@@ -621,8 +580,7 @@ turned OFF or the last remote member leaves. **What it concedes, exactly:**
   and its envelope to the host leave at the same moment — so IP and timing
   correlation can tie the owner to the channel. A household signature on
   notices would have named it outright; the channel-key signature does not.
-- **It learns when the space content key rotates** (channel epoch notices),
-  and that the owner chose strict or trusted.
+- **It learns when the space content key rotates** (channel epoch notices).
 - **It is trusted with metadata, not with authenticity.** It can drop or
   delay items; it cannot forge one — every member re-verifies the space
   writer cert inside the ciphertext against its own pinned space key, and
@@ -643,12 +601,11 @@ turned OFF or the last remote member leaves. **What it concedes, exactly:**
 quo — a link-joined member's posts reach nobody while the host is offline,
 which the owner decided (2026-10-03) is the single point of failure member
 publishing exists to remove. The disclosure is the same *kind* the
-link-pair relay already concedes (recipient households, timing, size),
-plus — in trusted mode — the publisher. A household that would rather not appear on the
-channel can decline to upgrade (a v_50 member gets no grant and keeps the
-host path); an owner who does not want a channel at all leaves the
-space's connection-server option OFF (the default for a new private
-space), or picks strict mode to hide the publisher.
+link-pair relay already concedes (recipient households, timing, size). A
+household that would rather not appear on the channel can decline to
+upgrade (a v_50 member gets no grant and keeps the host path); an owner who
+does not want a channel at all leaves the space's connection-server option
+OFF (the default for a new private space).
 
 ### Sign-off: the owner may let a private space use the connection server — then it learns every subscribed member household (2026-10-04)
 
@@ -732,14 +689,14 @@ prove `private_channels`), and members send each item to every one of them.
   register, notice, unregister, grant or seat, even when the owner holds an
   active, capable connection to it (pinned by
   `tests/protocol/test_gfs_private_channel_multi_blind.py`).
-- **Trusted channels go anonymous for v_57 members.** The channel writer
-  key, strict-only before, is handed to every v_57 writer, and the owner's
-  channel notice pins it in trusted mode too; a member holding it publishes
-  anonymously to every chosen server. As for global spaces, a channel GFS
-  loses per-household bans and limits for that member (it keeps the per-IP,
-  per-channel and per-key limits); receivers still enforce the space writer
-  cert inside the ciphertext, and the owner revokes a writer by rotating.
-  Older members keep publishing identified, to their own servers only.
+- **Channel publishes are anonymous.** The channel writer key is handed to
+  every v_90 writer, and the owner's channel notice pins it; a member
+  holding it publishes anonymously to every chosen server. As for global
+  spaces, a channel GFS has no per-household bans and limits for publishers
+  (it keeps the per-IP, per-channel and per-key limits); receivers still
+  enforce the space writer cert inside the ciphertext, and the owner
+  revokes a writer by rotating. Older members publish nothing over the
+  channel.
 - **What it does not change:** seats (identified subscribes) are still taken
   only on servers a member household is registered on — the owner's
   `private_gfs` opt-in above; the owner still never subscribes to or

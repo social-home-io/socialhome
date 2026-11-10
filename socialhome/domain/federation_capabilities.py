@@ -1434,7 +1434,21 @@ from __future__ import annotations
 #:   no directory and no mailbox; the host keeps today's instance-addressed
 #:   relay to it. No sync-stream record change. Labelled "Every member
 #:   reaches households that reach a space through a GFS".
-OURS: int = 89
+#: * **v_90** (2026-11-09) — **one GFS publish mode: always anonymous**
+#:   (owner decision 2026-11-09, BREAKING, no compat path). The trusted /
+#:   strict ``SpaceFeatures.gfs_publish_mode`` is gone, with the identified
+#:   ``POST /gfs/member-publish`` and ``POST /gfs/channels/publish``, the
+#:   ``publish_mode`` on both epoch notices, the channel cert and the
+#:   identified space-media upload kinds. A seed holder delivers the
+#:   per-epoch writer group key (``writer_key``, unchanged shape) in EVERY
+#:   publicly readable space and the channel writer key in EVERY private
+#:   channel grant — only to a v_90 household holding a publishing scope —
+#:   and a member publishes ANONYMOUSLY or not at all. **Breaking**:
+#:   households below v_90 can no longer publish over the GFS; their posts
+#:   still reach members directly and followers via the host relay. No
+#:   sync-stream record change. Labelled "Posting over a GFS without naming
+#:   the household".
+OURS: int = 90
 
 
 class FederationCapability:
@@ -1856,7 +1870,8 @@ class FederationCapability:
     #: Strict member publish (v_50): a seed holder delivers the space's
     #: per-epoch writer group key next to the writer cert, only to a v_50
     #: publish-capable household of a strict space. Older households get no
-    #: key, so their items take the host path.
+    #: key, so their items take the host path. (Historical: strict mode is
+    #: gone since v_90 — the key now goes to v_90 households only.)
     MIN_FOR_STRICT_MEMBER_PUBLISH = 50
 
     #: Private-space channels (v_51): a seed holder delivers each member
@@ -1906,6 +1921,8 @@ class FederationCapability:
     #: connected to). Below it a member gets no key in a trusted space and
     #: keeps publishing identified to its own servers. Not space-scoped (as
     #: v_50): a lagging household still publishes, through fewer servers.
+    #: (Historical: since v_90 the key, and the anonymous publish, need
+    #: :attr:`MIN_FOR_ANON_MEMBER_PUBLISH_ONLY`.)
     MIN_FOR_MULTI_GFS_PUBLISH = 57
 
     #: v_58 — a §25.6 ``members`` record's ``picture_hash: null`` is an
@@ -2090,6 +2107,14 @@ class FederationCapability:
     #: members lazily and takes a three-hop host ``SPACE_ROUTED``. Cards and
     #: directories go only to a household at or above it.
     MIN_FOR_MAILBOX_MEMBER_MESH = 89
+    #: v_90 — one GFS publish mode, always anonymous: a seed holder hands
+    #: the writer group key (publicly readable spaces) and the channel
+    #: writer key (private channels) only to a household at or above it,
+    #: and a seed holder skips its relay copy of a post only for an author
+    #: at or above it. Below it a household publishes nothing over a GFS
+    #: (members get its posts directly, followers via the host relay). Not
+    #: space-scoped: a lagging household still posts, through the host.
+    MIN_FOR_ANON_MEMBER_PUBLISH_ONLY = 90
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2428,6 +2453,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH,
         "Every member reaches households that reach a space through a GFS",
     ),
+    (
+        FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY,
+        "Posting over a GFS without naming the household",
+    ),
 ]
 
 
@@ -2527,6 +2556,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS: "trusted_file_fills",
     FederationCapability.MIN_FOR_RELAY_MEDIA: "relay_media",
     FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH: "mailbox_member_mesh",
+    FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY: "anonymous_gfs_posting_only",
 }
 
 

@@ -118,7 +118,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         #: cert for the current epoch (a seed holder re-checks + re-stamps it).
         self._writer_certs: SpaceWriterCertService | None = None
         #: v_49 — when wired, a non-seed-holding writer household publishes
-        #: its own public/global post to the GFS itself (trusted mode).
+        #: its own public/global post to the GFS itself (anonymously).
         self._member_gfs: GfsMemberPublishService | None = None
         #: Optional — when wired, ``SPACE_POST_CREATED`` broadcasts
         #: are followed by per-peer outbox enqueues for every
@@ -156,7 +156,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         self._writer_certs = writer_certs
 
     def attach_member_gfs(self, member_gfs: GfsMemberPublishService) -> None:
-        """Wire the v_49 trusted-mode member publisher."""
+        """Wire the v_49 member publisher."""
         self._member_gfs = member_gfs
 
     def attach_identity(
@@ -177,7 +177,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         self, space_id: str, post: Post, *, media_refs: dict | None = None
     ) -> None:
         """Build the GFS inner of our own post and hand it to the member
-        publisher's background queue (v_49 trusted mode). ``media_refs``
+        publisher's background queue (v_49). ``media_refs``
         (v_80) rides the inner under the author's separate signature over
         the descriptor (``media_refs_sig`` — not part of the main author
         bytes), so followers find the pictures in their GFS's media cache and

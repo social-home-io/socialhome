@@ -347,7 +347,6 @@ async def test_owner_only_settings_from_the_inviting_admin_stay_ignored(joiner):
         features={
             "delegated_admin_authority": True,
             "private_gfs": True,
-            "gfs_publish_mode": "strict",
         },
     )
     meta.pop("roster")
@@ -375,7 +374,6 @@ async def test_owner_only_settings_from_the_inviting_admin_stay_ignored(joiner):
     space = await joiner.spaces.get(SPACE)
     assert space.name == "RenamedByAdmin"
     assert space.features.private_gfs is False
-    assert space.features.gfs_publish_mode == "trusted"
     assert space.owner_instance_id == OWNER
     assert await joiner.spaces.get_host_identity_pk(SPACE) is None
 
