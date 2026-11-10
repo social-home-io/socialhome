@@ -10,7 +10,9 @@ from aiohttp import web
 
 from ...domain.gfs_mailbox import (
     ENVELOPE_MAILBOX_CAPABILITY,
+    ENVELOPE_MULTI_CAPABILITY,
     MAILBOX_TICKETS_CAPABILITY,
+    MULTI_MAX_RECIPIENTS,
 )
 from ...domain.gfs_space_media import SPACE_MEDIA_CAPABILITY
 from ...domain.gfs_space_media_on_demand import ON_DEMAND_CAPABILITY_KEY
@@ -305,6 +307,13 @@ class GfsInfoView(GfsBaseView):
         mailbox = self.svc(K.gfs_mailbox_service_key).capability()
         if mailbox is not None:
             capabilities[ENVELOPE_MAILBOX_CAPABILITY] = mailbox
+            # v_90 — ``POST /gfs/envelope/multi``: ONE sealed frame for up to
+            # this many mailboxes, stored once and pushed to each. Signed: a
+            # household uploads a space's frame once only to a server that
+            # proved it takes it; otherwise it sends one envelope per member.
+            capabilities[ENVELOPE_MULTI_CAPABILITY] = {
+                "max_recipients": MULTI_MAX_RECIPIENTS
+            }
         # Anonymous registration tickets for those mailboxes (Privacy Pass,
         # RFC 9578 type 0x0002): the current issuer key, SIGNED here so a
         # household blinds only under the key every household sees.

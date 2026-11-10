@@ -52,6 +52,19 @@ SUPPORTED_MAILBOX_SIG_SUITES: frozenset[str] = frozenset({MAILBOX_SIG_SUITE_ED25
 #: The signed ``/gfs/info`` capability a GFS with mailboxes advertises.
 ENVELOPE_MAILBOX_CAPABILITY: str = "envelope_mailbox"
 
+#: The signed ``/gfs/info`` capability of a GFS that takes ONE sealed frame
+#: for many mailboxes (``POST /gfs/envelope/multi``, v_90):
+#: ``{"max_recipients": MULTI_MAX_RECIPIENTS}``. Advertised whenever
+#: :data:`ENVELOPE_MAILBOX_CAPABILITY` is.
+ENVELOPE_MULTI_CAPABILITY: str = "envelope_multi"
+#: The multi-recipient upload route.
+ENVELOPE_MULTI_PATH: str = "/gfs/envelope/multi"
+#: Most mailbox ids one multi upload may name.
+MULTI_MAX_RECIPIENTS: int = 500
+#: The exact key set of a multi frame's ``sealed`` dict (the values are
+#: opaque to the GFS; the receiver validates ``mr_suite``).
+MULTI_SEALED_KEYS: frozenset[str] = frozenset({"mr_suite", "kid", "ciphertext"})
+
 #: Routes.
 MAILBOX_REGISTER_ROUTE: str = "/gfs/mailbox/register"
 MAILBOX_WS_ROUTE: str = "/gfs/mailbox/ws"
@@ -211,6 +224,8 @@ def claim_signed_bytes(gfs_instance_id: str, mailbox_id: str, challenge: str) ->
 
 __all__ = [
     "ENVELOPE_MAILBOX_CAPABILITY",
+    "ENVELOPE_MULTI_CAPABILITY",
+    "ENVELOPE_MULTI_PATH",
     "FRAME_MAILBOX_CHALLENGE",
     "FRAME_MAILBOX_CLAIM",
     "FRAME_MAILBOX_CLAIMED",
@@ -223,6 +238,8 @@ __all__ = [
     "MAILBOX_UNREGISTER_CONTEXT",
     "MAILBOX_UNREGISTER_ROUTE",
     "MAILBOX_WS_ROUTE",
+    "MULTI_MAX_RECIPIENTS",
+    "MULTI_SEALED_KEYS",
     "SUPPORTED_MAILBOX_SIG_SUITES",
     "GfsMailbox",
     "InvalidMailboxField",

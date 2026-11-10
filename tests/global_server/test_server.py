@@ -350,6 +350,8 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         "envelope_media": True,
         # GFS redesign PR 1 — anonymous per-space mailboxes.
         "envelope_mailbox": {"sig_suites": ["ed25519"], "idle_days": 30},
+        # v_90 — ``POST /gfs/envelope/multi``: one frame for many mailboxes.
+        "envelope_multi": {"max_recipients": 500},
         # Anonymous registration tickets for those mailboxes (Privacy Pass):
         # the issuer key every household blinds under, signed here.
         "mailbox_tickets": body["capabilities"]["mailbox_tickets"],

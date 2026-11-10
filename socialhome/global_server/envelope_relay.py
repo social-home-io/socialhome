@@ -90,6 +90,16 @@ a stalled media push is dropped without evicting the socket
 an envelope: the node holding the socket drains it (the hint carries the
 recipient id only, never the bytes). Caps: ``[envelope_relay]`` in the GFS
 TOML (:class:`~socialhome.global_server.config.EnvelopeMediaConfig`).
+
+**Multi-recipient frames (v_90).** ``POST /gfs/envelope/multi`` carries ONE
+sealed frame for up to 500 mailboxes (a space's member households reached
+over this server). Only registered mailboxes are addressed; the answer is the
+same uniform ``202``. The body is stored once (``gfs_envelope_bodies``, GFS
+migration 0031) with one reference row per mailbox, each charged the full
+body against that mailbox's caps while the pool counts it once; a trigger
+frees it with its last reference. Each mailbox drains the same
+``{"type": "envelope", "sealed": …}`` frame through the ordinary drain
+(:meth:`GfsEnvelopeRelay.accept_multi`).
 """
 
 from __future__ import annotations
@@ -107,10 +117,13 @@ from typing import TYPE_CHECKING, Any
 import orjson
 
 from ..domain.gfs_mailbox import (
+    ENVELOPE_MULTI_PATH,
     MAILBOX_REGISTER_ROUTE,
     MAILBOX_TICKETS_ROUTE,
     MAILBOX_UNREGISTER_ROUTE,
     MAILBOX_WS_ROUTE,
+    MULTI_MAX_RECIPIENTS,
+    MULTI_SEALED_KEYS,
 )
 from ..moment_public_seal import (
     FRAME_MOMENT_REACTION,
@@ -210,6 +223,27 @@ ENVELOPE_MAX_BODY_BYTES: int = 320 * 1024
 #: Like every limiter in :mod:`.public` this sheds ONE noisy source; it is not
 #: DDoS protection (see ``RATE_LIMIT_MAX_TRACKED_IPS``).
 ENVELOPE_MAX_PER_MINUTE: int = 600
+
+#: Longest ``ciphertext`` of a multi frame (``POST /gfs/envelope/multi``,
+#: v_90), in characters: the b64url of the household's largest padded relay
+#: plaintext (``RELAY_SIZE_BUCKETS[-1]``, 191 KiB) plus nonce and tag fits
+#: well inside, the same bound as a KEM-sealed blob
+#: (``invite_bootstrap.MAX_SEALED_BLOB_BYTES``).
+ENVELOPE_MULTI_MAX_CIPHERTEXT_CHARS: int = 256 * 1024
+#: Longest ``mr_suite`` / ``kid`` (a suite tag, a 22-char b64url key id).
+ENVELOPE_MULTI_MAX_FIELD_CHARS: int = 64
+#: Hard body cap on ``POST /gfs/envelope/multi``: the single envelope's cap
+#: plus the mailbox list (``MULTI_MAX_RECIPIENTS`` × 32 chars, quotes and a
+#: separator).
+ENVELOPE_MULTI_MAX_BODY_BYTES: int = ENVELOPE_MAX_BODY_BYTES + MULTI_MAX_RECIPIENTS * (
+    ENVELOPE_INSTANCE_ID_CHARS + 4
+)
+#: Per-IP/minute cap on ``POST /gfs/envelope/multi``, apart from
+#: ``/gfs/envelope``'s. One upload replaces up to 500 single envelopes (one
+#: space post to every member mailbox here), so 60/min (one a second) covers
+#: a busy space's fan-out; a catch-up backfill is per recipient and stays on
+#: the single route.
+ENVELOPE_MULTI_MAX_PER_MINUTE: int = 60
 
 #: How long an undelivered envelope waits for its recipient, in seconds.
 #: 24 h: the issuing household of an invite link may simply be asleep, and an
@@ -460,6 +494,43 @@ def validate_envelope(body: Any) -> tuple[str, dict[str, str]]:
     return to_instance, dict(sealed)
 
 
+def validate_multi_envelope(body: Any) -> tuple[list[str], dict[str, str]]:
+    """Return ``(to_mailboxes, sealed)`` of a multi upload or raise
+    :class:`InvalidEnvelope`.
+
+    Exactly ``{"to_mailboxes": [...], "sealed": {...}}``: 1 to
+    :data:`MULTI_MAX_RECIPIENTS` ids, each of the exact id shape
+    (:data:`ENVELOPE_INSTANCE_ID_RE` — the ids reach SQLite binds, so no
+    junk rides along), and a ``sealed`` dict of exactly
+    :data:`MULTI_SEALED_KEYS`, non-empty bounded strings. The values stay
+    opaque: the receiver validates the suite, not this server. Duplicates
+    are allowed here and collapsed by the relay."""
+    if not isinstance(body, dict) or set(body) != {"to_mailboxes", "sealed"}:
+        raise InvalidEnvelope("expected {to_mailboxes, sealed}")
+    ids = body["to_mailboxes"]
+    if (
+        not isinstance(ids, list)
+        or not 1 <= len(ids) <= MULTI_MAX_RECIPIENTS
+        or not all(
+            isinstance(i, str) and ENVELOPE_INSTANCE_ID_RE.fullmatch(i) for i in ids
+        )
+    ):
+        raise InvalidEnvelope("invalid field: to_mailboxes")
+    sealed = body["sealed"]
+    if not isinstance(sealed, dict) or set(sealed) != MULTI_SEALED_KEYS:
+        raise InvalidEnvelope("invalid field: sealed")
+    for key in MULTI_SEALED_KEYS:
+        value = sealed[key]
+        limit = (
+            ENVELOPE_MULTI_MAX_CIPHERTEXT_CHARS
+            if key == "ciphertext"
+            else ENVELOPE_MULTI_MAX_FIELD_CHARS
+        )
+        if not isinstance(value, str) or not 0 < len(value) <= limit:
+            raise InvalidEnvelope("invalid field: sealed")
+    return list(ids), dict(sealed)
+
+
 class KeyedLocks:
     """One :class:`asyncio.Lock` per key, dropped once nobody holds or waits.
 
@@ -682,6 +753,96 @@ class GfsEnvelopeRelay:
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
         task.add_done_callback(lambda _t: self._release_pending(to_instance))
+
+    # ── Multi-recipient frames (v_90) ──────────────────────────────────
+
+    def submit_multi(self, mailbox_ids: list[str], sealed: dict[str, str]) -> None:
+        """Hand ONE multi frame for *mailbox_ids* off to a background
+        :meth:`accept_multi` and return at once — the same uniform timing as
+        :meth:`submit`. The upload takes ONE slot of
+        :data:`ENVELOPE_MAX_INFLIGHT` however many mailboxes it names (it is
+        one queue transaction); at saturation it is dropped, still answered
+        with the same ``202``."""
+        if len(self._inflight) >= self._max_inflight:
+            self._note_saturated()
+            return
+        task = asyncio.get_running_loop().create_task(
+            self._accept_multi_in_background(list(mailbox_ids), sealed),
+            name="gfs-envelope-multi-accept",
+        )
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+
+    async def _accept_multi_in_background(
+        self, mailbox_ids: list[str], sealed: dict[str, str]
+    ) -> None:
+        try:
+            await self.accept_multi(mailbox_ids, sealed)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # No ids in the line: they are mailboxes (see ``_who``).
+            log.warning("gfs.envelope: background multi accept failed", exc_info=True)
+
+    async def accept_multi(
+        self, mailbox_ids: list[str], sealed: dict[str, str]
+    ) -> None:
+        """Queue *sealed* once for every registered mailbox in *mailbox_ids*
+        and get it to them.
+
+        Only REGISTERED MAILBOXES are addressed: an instance id, an unknown
+        id and an id held by both are skipped silently (the caller got the
+        same ``202`` either way). The frame is queued first — one body, one
+        reference per admitted mailbox (:meth:`enqueue_multi`) — then each
+        admitted mailbox whose claim socket is on this node is drained
+        (under its drain lock, so queue order holds and no row goes twice),
+        and the others are hinted to the sibling nodes. Logged with counts
+        only — never a mailbox id."""
+        if self._mailbox_repo is None:
+            return
+        ids = list(dict.fromkeys(mailbox_ids))
+        known = await self._mailbox_repo.mailboxes_among(ids)
+        targets = [i for i in ids if i in known]
+        if not targets:
+            log.debug("gfs.envelope: multi frame for no registered mailbox here")
+            return
+        cfg = self._mailbox_cfg
+        now = int(time.time())
+        admitted = await self._queue_repo.enqueue_multi(
+            targets,
+            orjson.dumps(sealed).decode(),
+            created_at=now,
+            expires_at=now + self._ttl,
+            max_per_recipient=cfg.mailbox_queue_max_per_recipient,
+            max_bytes_per_recipient=cfg.mailbox_queue_bytes_per_recipient,
+            max_total_bytes=cfg.mailbox_queue_max_total_bytes,
+            ceiling_bytes=cfg.mailbox_queue_ceiling_bytes,
+        )
+        log.debug(
+            "gfs.envelope: multi frame queued for %d of %d mailboxes",
+            len(admitted),
+            len(ids),
+        )
+        if len(admitted) < len(targets):
+            log.warning(
+                "gfs.envelope: %d mailbox queue(s) full — a multi frame was "
+                "dropped for them; the mailboxes are offline or being flooded",
+                len(targets) - len(admitted),
+            )
+        local = [i for i in admitted if self.holds(i)]
+        if self._cluster is not None:
+            for mailbox_id in admitted:
+                if mailbox_id not in local:
+                    self._cluster.hint_drain(mailbox_id)
+        if not local:
+            return
+        gate = asyncio.Semaphore(RELAY_FAN_OUT_CONCURRENCY)
+
+        async def _drain(mailbox_id: str) -> None:
+            async with gate:
+                await self.drain(mailbox_id)
+
+        await asyncio.gather(*(_drain(i) for i in local), return_exceptions=True)
 
     # ── Binary relay media frames (v_87) ───────────────────────────────
 
@@ -1262,4 +1423,15 @@ def build_envelope_rate_limit(resolver: ClientIpResolver):
         resolver,
         ENVELOPE_MAX_PER_MINUTE,
         lambda path: path == ENVELOPE_ROUTE_PATH,
+    )
+
+
+def build_envelope_multi_rate_limit(resolver: ClientIpResolver):
+    """Per-IP rate limiter middleware for ``POST /gfs/envelope/multi``
+    (v_90), apart from the single route's budget — the same shedding handle
+    for the same anonymous reason."""
+    return build_window_limiter(
+        resolver,
+        ENVELOPE_MULTI_MAX_PER_MINUTE,
+        lambda path: path == ENVELOPE_MULTI_PATH,
     )

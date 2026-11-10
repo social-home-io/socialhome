@@ -19,7 +19,13 @@ from ...domain.relay_media_frame import (
     parse_relay_media_body,
 )
 from .. import app_keys as K
-from ..envelope_relay import ENVELOPE_MAX_BODY_BYTES, InvalidEnvelope, validate_envelope
+from ..envelope_relay import (
+    ENVELOPE_MAX_BODY_BYTES,
+    ENVELOPE_MULTI_MAX_BODY_BYTES,
+    InvalidEnvelope,
+    validate_envelope,
+    validate_multi_envelope,
+)
 from .base import GfsBaseView
 
 log = logging.getLogger(__name__)
@@ -107,4 +113,40 @@ class EnvelopeRelayView(GfsBaseView):
             resp.headers["Retry-After"] = "60"
             return resp
         relay.submit_media(to_instance, bytes(raw))
+        return web.json_response(_ACCEPTED_BODY, status=202)
+
+
+class EnvelopeMultiRelayView(GfsBaseView):
+    """``POST /gfs/envelope/multi`` — ONE sealed frame for many mailboxes
+    (v_90).
+
+    Body: exactly ``{"to_mailboxes": [<mailbox id>, ...], "sealed":
+    {"mr_suite": …, "kid": …, "ciphertext": …}}`` — 1 to 500 ids. The
+    ``sealed`` dict is opaque, as on ``/gfs/envelope``: sealed under a key
+    only the space's members derive, so this server learns the mailbox list,
+    the time and the size, never the space, the sender or the content.
+
+    Delivered only to REGISTERED MAILBOXES — an instance id or an unknown id
+    is skipped — and the answer is the same uniform ``202
+    {"status":"accepted"}`` before anything is looked up
+    (``GfsEnvelopeRelay.submit_multi``), so the endpoint is no oracle for
+    which ids exist. The body is stored once and each mailbox gets the same
+    ``{"type":"envelope","sealed":…}`` frame on its claim socket. Malformed
+    → 400, over the cap → 413, past its own per-IP limit → 429 (middleware),
+    mailboxes off → 404.
+    """
+
+    async def post(self) -> web.Response:
+        if not self.svc(K.gfs_mailbox_service_key).enabled:
+            raise web.HTTPNotFound()
+        raw = await self.bounded_raw(ENVELOPE_MULTI_MAX_BODY_BYTES)
+        try:
+            parsed = orjson.loads(raw)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(reason=f"Invalid JSON body: {exc}") from exc
+        try:
+            mailbox_ids, sealed = validate_multi_envelope(parsed)
+        except InvalidEnvelope as exc:
+            raise web.HTTPBadRequest(reason=str(exc)) from exc
+        self.svc(K.gfs_envelope_relay_key).submit_multi(mailbox_ids, sealed)
         return web.json_response(_ACCEPTED_BODY, status=202)
