@@ -848,3 +848,77 @@ async def test_a_directory_seat_never_goes_instance_addressed():
     assert result.ok and relay2.mailbox_calls == [(_TARGET, env)]
     assert relay2.calls == []
     assert await t2.mailbox_reachable(lazy, "sp-1")
+
+
+# ── v_91: one upload for many mailboxes ───────────────────────────────────
+
+
+class _MultiRelay(_MailboxRelay):
+    def __init__(self, *, capacity: int = 500, mailbox_ready: bool = True) -> None:
+        super().__init__(mailbox_ready=mailbox_ready)
+        self.capacity = capacity
+        self.capacity_asks: list[str] = []
+        self.multi_calls: list[tuple[list[tuple[MailboxTarget, dict]], dict]] = []
+        self.multi_result: tuple[bool, int | None, float | None] = (True, None, None)
+
+    async def multi_capacity(self, gfs_url):
+        self.capacity_asks.append(gfs_url)
+        return self.capacity
+
+    async def send_multi_mailbox(self, *, to, body):
+        self.multi_calls.append((list(to), body))
+        return self.multi_result
+
+
+async def test_a_seat_with_a_mailbox_on_a_multi_gfs_is_a_multi_target():
+    relay = _MultiRelay()
+    t = _mailbox_transport(relay, [], targets={"sp-1": _TARGET})
+    assert await t.multi_mailbox_target(_seat(), "sp-1") is _TARGET
+    assert await t.multi_capacity(ROUTE_A) == 500
+    assert await t.send_multi_mailbox(to=[(_TARGET, {"w": 1})], body={"x": 1}) == (
+        True,
+        None,
+        None,
+    )
+    assert relay.multi_calls == [([(_TARGET, {"w": 1})], {"x": 1})]
+
+
+async def test_a_capacity_cache_probes_each_gfs_once_per_broadcast():
+    relay = _MultiRelay(capacity=40)
+    t = _mailbox_transport(relay, [], targets={"sp-1": _TARGET})
+    caps: dict[str, int] = {}
+    for _ in range(3):
+        assert await t.multi_mailbox_target(_seat(), "sp-1", caps=caps) is _TARGET
+    assert len(relay.capacity_asks) == 1
+    assert list(caps.values()) == [40]
+
+
+async def test_no_multi_target_without_a_mailbox_a_multi_gfs_or_a_seat():
+    # No mailbox for that space.
+    t = _mailbox_transport(_MultiRelay(), [], targets={"sp-1": _TARGET})
+    assert await t.multi_mailbox_target(_seat(), "sp-2") is None
+    # The GFS did not prove envelope_mailbox.
+    t = _mailbox_transport(
+        _MultiRelay(mailbox_ready=False), [], targets={"sp-1": _TARGET}
+    )
+    assert await t.multi_mailbox_target(_seat(), "sp-1") is None
+    # The GFS proves mailboxes but not envelope_multi.
+    t = _mailbox_transport(_MultiRelay(capacity=0), [], targets={"sp-1": _TARGET})
+    assert await t.multi_mailbox_target(_seat(), "sp-1") is None
+    # A paired peer is never a mailbox seat.
+    lookups: list = []
+    t = _mailbox_transport(_MultiRelay(), lookups, targets={"sp-1": _TARGET})
+    assert await t.multi_mailbox_target(_paired(), "sp-1") is None
+    assert lookups == []
+
+
+async def test_multi_without_a_relay_tier_is_off():
+    t = _transport(relay=None)
+    t._gfs_relay = None
+    assert await t.multi_mailbox_target(_seat(), "sp-1") is None
+    assert await t.multi_capacity(ROUTE_A) == 0
+    assert await t.send_multi_mailbox(to=[(_TARGET, {})], body={}) == (
+        False,
+        None,
+        None,
+    )

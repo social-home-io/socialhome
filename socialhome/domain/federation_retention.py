@@ -14,6 +14,30 @@ from datetime import UTC, datetime, timedelta
 from .federation import FederationEventType
 from .moment import MOMENT_MAX_LIFETIME_DAYS
 
+#: The outbox's base retry schedule in seconds — index == attempt number
+#: after the first failure. The last entry is the ceiling.
+BACKOFF_SECONDS: tuple[int, ...] = (
+    5,
+    10,
+    20,
+    40,
+    80,
+    160,
+    320,
+    640,
+    1280,
+    2560,
+    5120,
+    10240,
+    14400,
+)
+
+#: Max attempts before an outbox entry is moved to ``failed`` (or, for
+#: :data:`NEVER_DROP` / long-lived, pinned at the ceiling backoff — and left
+#: out of the v_91 seat ordering). Matches the length of
+#: :data:`BACKOFF_SECONDS`.
+MAX_ATTEMPTS: int = len(BACKOFF_SECONDS)
+
 #: Event types that must NEVER be marked ``failed`` regardless of attempt
 #: count (§4.4.7).  These carry security or structural state — admin key
 #: shares, bans, unpair signals, key revocations — that the receiver

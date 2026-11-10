@@ -581,10 +581,15 @@ class SpaceModerationService(BusPublisherMixin):
             return True
         if self._federated is None:
             return False
-        try:
-            space_id = str(orjson.loads(entry.payload_json).get("space_id") or "")
-        except TypeError, ValueError:
-            return False
+        if entry.payload_id is not None:
+            # A ref row (migration 0145) carries no envelope: its space is
+            # the stored payload's.
+            space_id = entry.space_id or ""
+        else:
+            try:
+                space_id = str(orjson.loads(entry.payload_json).get("space_id") or "")
+            except TypeError, ValueError:
+                return False
         space = await self._spaces.get(space_id) if space_id else None
         wanted = space is not None and entry.instance_id in (
             await self._federated.reviewer_households(space)

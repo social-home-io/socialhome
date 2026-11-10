@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import socialhome.repositories.outbox_repo as outbox_mod
 from socialhome.domain import federation_retention as fr
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.federation_retention import (
@@ -15,6 +18,7 @@ from socialhome.domain.federation_retention import (
     moment_delete_key,
     relayed_delete_prefix,
 )
+from socialhome.domain.outbox import OutboxPayload
 from socialhome.infrastructure.outbox_processor import (
     BACKOFF_SECONDS,
     MAX_ATTEMPTS,
@@ -22,6 +26,8 @@ from socialhome.infrastructure.outbox_processor import (
     OutboxProcessor,
 )
 from socialhome.repositories.outbox_repo import SqliteOutboxRepo
+
+POST_CREATED = FederationEventType.SPACE_POST_CREATED
 
 
 async def _seed_peer(db, instance_id: str, *, status: str = "confirmed") -> None:
@@ -1134,3 +1140,448 @@ async def test_pending_rows_are_dropped_by_key_prefix(env):
     assert await repo.drop_pending_with_key_prefix("peer", "highlight:h1:") == 0
     assert await repo.drop_pending_with_key_prefix("other-peer", "highlight:h") == 0
     assert await _pending_ids(env, "peer") == {"other"}
+
+
+# ── Migration 0145: one stored payload, per-recipient ref rows ─────────────
+
+
+def _stored(pid: str = "p-1") -> OutboxPayload:
+    return OutboxPayload(
+        id=pid,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        space_id="sp-1",
+        payload_enc="nonce:ciphertext",
+    )
+
+
+async def _enqueue_ref(env, peer: str, msg_id: str, pid: str = "p-1"):
+    return await env.outbox_repo.enqueue(
+        instance_id=peer,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="",
+        msg_id=msg_id,
+        payload_ref=_stored(pid),
+    )
+
+
+async def _payload_ids(env) -> list[str]:
+    rows = await env.db.fetchall("SELECT id FROM federation_outbox_payloads")
+    return sorted(r["id"] for r in rows)
+
+
+async def test_n_refs_share_one_stored_payload(env):
+    for i, peer in enumerate(("peer-a", "peer-b", "peer-x")):
+        assert await _enqueue_ref(env, peer, f"m-{i}") == f"m-{i}"
+    assert await _payload_ids(env) == ["p-1"]
+    due = await env.outbox_repo.list_due()
+    assert {(e.instance_id, e.payload_id, e.space_id, e.payload_json) for e in due} == {
+        ("peer-a", "p-1", "sp-1", ""),
+        ("peer-b", "p-1", "sp-1", ""),
+        ("peer-x", "p-1", "sp-1", ""),
+    }
+    assert await env.outbox_repo.get_payload("p-1") == _stored()
+    assert await env.outbox_repo.get_payload("nope") is None
+
+
+async def test_the_payload_goes_when_its_last_ref_is_delivered(env):
+    await _enqueue_ref(env, "peer-a", "m-a")
+    await _enqueue_ref(env, "peer-b", "m-b")
+    await env.outbox_repo.mark_delivered("m-a")
+    assert await _payload_ids(env) == ["p-1"]
+    await env.outbox_repo.mark_delivered("m-b")
+    assert await _payload_ids(env) == []
+
+
+async def test_the_payload_goes_when_its_refs_are_purged(env):
+    await _enqueue_ref(env, "peer-a", "m-a")
+    await env.outbox_repo.mark_failed("m-a")
+    assert await _payload_ids(env) == ["p-1"]  # kept for the 24 h grace
+    future = (datetime.now(UTC) + timedelta(days=2)).isoformat()
+    assert await env.outbox_repo.purge_terminal(future) == 1
+    assert await _payload_ids(env) == []
+
+
+async def test_the_payload_goes_when_its_peer_is_deleted(env):
+    await _enqueue_ref(env, "peer-a", "m-a")
+    await _enqueue_ref(env, "gone", "m-g", pid="p-2")
+    await env.outbox_repo.delete_for_instance("peer-a")
+    await env.db.enqueue("DELETE FROM remote_instances WHERE id='gone'")
+    assert await env.outbox_repo.purge_orphaned() == 1
+    assert await _payload_ids(env) == []
+
+
+async def test_a_ref_refused_for_an_unpaired_peer_stores_no_payload(env):
+    assert await _enqueue_ref(env, "never-paired", "m-n") is None
+    assert await _payload_ids(env) == []
+
+
+async def test_a_legacy_envelope_row_still_lists(env):
+    await env.outbox_repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.DM_MESSAGE,
+        payload_json='{"msg_id":"legacy"}',
+        msg_id="legacy",
+    )
+    [entry] = await env.outbox_repo.list_due()
+    assert entry.payload_id is None and entry.space_id is None
+    assert entry.payload_json == '{"msg_id":"legacy"}'
+
+
+async def test_a_multi_payload_and_its_refs_go_in_together(env):
+    """v_91: a broadcast's multi payload — stored once with its ``msg_id``,
+    one ref row per household still paired, in one transaction."""
+    multi = dataclasses.replace(_stored("p-m"), msg_id="wire-1")
+    written = await env.outbox_repo.enqueue_refs(
+        instance_ids=["peer-a", "never-paired", "peer-b"],
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        supersede_key=None,
+        payload_ref=multi,
+    )
+    assert sorted(written) == ["peer-a", "peer-b"]
+    assert await env.outbox_repo.get_payload("p-m") == multi
+    due = await env.outbox_repo.list_due()
+    assert {(e.id, e.instance_id, e.msg_id) for e in due} == {
+        (written["peer-a"], "peer-a", "wire-1"),
+        (written["peer-b"], "peer-b", "wire-1"),
+    }
+
+
+async def test_a_multi_payload_nobody_can_take_is_not_kept(env):
+    written = await env.outbox_repo.enqueue_refs(
+        instance_ids=["never-paired"],
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        supersede_key=None,
+        payload_ref=_stored("p-m"),
+    )
+    assert written == {}
+    assert await _payload_ids(env) == []
+
+
+async def test_list_due_leaves_out_busy_households(env):
+    """The processor's busy recipients never fill a batch with their
+    backlog: their rows are left out in SQL, not after the LIMIT."""
+    for i in range(3):
+        await _enqueue_ref(env, "peer-a", f"a-{i}")
+    await _enqueue_ref(env, "peer-b", "b-0")
+    due = await env.outbox_repo.list_due(1, exclude=frozenset({"peer-a"}))
+    assert [e.id for e in due] == ["b-0"]
+    assert len(await env.outbox_repo.list_due(10)) == 4
+
+
+async def test_due_rows_tie_break_on_creation(env):
+    """Rows due at the same instant come out oldest first, then in insert
+    order — never in whatever order SQLite happens to scan."""
+    for eid in ("x1", "x2", "x3"):
+        await _enqueue_ref(env, "peer-a", eid)
+    await env.db.enqueue(
+        "UPDATE federation_outbox SET next_attempt_at='2000-01-01T00:00:00+00:00',"
+        " created_at=CASE id WHEN 'x3' THEN '1999-01-01 00:00:00'"
+        " ELSE '1999-06-01 00:00:00' END"
+    )
+    assert [e.id for e in await env.outbox_repo.list_due()] == ["x3", "x1", "x2"]
+
+
+async def test_an_ungrouped_payload_lists_without_its_multi_id(env):
+    """A multi payload the GFS refused goes per row: its rows list with no
+    ``msg_id`` (never grouped again), while the stored payload keeps it for
+    every per-row envelope and the FIFO."""
+    written = await env.outbox_repo.enqueue_refs(
+        instance_ids=["peer-a", "peer-b"],
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        supersede_key=None,
+        payload_ref=dataclasses.replace(_stored("p-m"), msg_id="wire-1"),
+    )
+    await env.outbox_repo.ungroup_payload("p-m")
+    assert {e.msg_id for e in await env.outbox_repo.list_due()} == {None}
+    assert (await env.outbox_repo.get_payload("p-m")).msg_id == "wire-1"
+    assert sorted(written) == ["peer-a", "peer-b"]
+
+
+# ── The v_91 ordering gate (list_due): one rule ─────────────────────────────
+#
+# A multi-event-type row to a space_session seat waits behind ANY older
+# pending, unexpired row of that household; nothing else is ever gated.
+
+
+async def _seat(env, *seats: str) -> None:
+    for seat in seats:
+        await _seed_peer(env.db, seat)
+        await env.db.enqueue(
+            "UPDATE remote_instances SET source='space_session' WHERE id=?", (seat,)
+        )
+
+
+async def _row(
+    env,
+    peer: str,
+    eid: str,
+    event_type: FederationEventType = FederationEventType.SPACE_POST_CREATED,
+    **kw,
+) -> str:
+    """One per-row (single) outbox row of *event_type* to *peer*."""
+    return await env.outbox_repo.enqueue(
+        instance_id=peer,
+        event_type=event_type,
+        payload_json="{}",
+        msg_id=eid,
+        **kw,
+    )
+
+
+async def _multi(env, seats, pid: str, event_type) -> dict[str, str]:
+    return await env.outbox_repo.enqueue_refs(
+        instance_ids=list(seats),
+        event_type=event_type,
+        supersede_key=None,
+        payload_ref=dataclasses.replace(
+            _stored(pid), event_type=event_type, msg_id=f"wire-{pid}"
+        ),
+    )
+
+
+async def _backoff(env, eid: str, minutes: int = 5) -> None:
+    later = datetime.now(UTC) + timedelta(minutes=minutes)
+    await env.outbox_repo.reschedule(eid, later.isoformat(), 1)
+
+
+async def _due_ids(env) -> set[str]:
+    return {e.id for e in await env.outbox_repo.list_due(1000)}
+
+
+async def test_sync_and_key_exchange_rows_to_a_seat_are_never_held(env):
+    """Matrix 1: rows outside MULTI_EVENT_TYPES never wait — a newcomer's
+    catch-up chunk and a key exchange pass an older multi row in backoff."""
+    await _seat(env, "seat-a", "seat-b")
+    older = await _multi(env, ["seat-a", "seat-b"], "p-m", POST_CREATED)
+    await _backoff(env, older["seat-a"])
+    chunk = await _row(env, "seat-a", "chunk", FederationEventType.SPACE_SYNC_CHUNK)
+    kex = await _row(env, "seat-a", "kex", FederationEventType.SPACE_KEY_EXCHANGE)
+    assert await _due_ids(env) == {older["seat-b"], chunk, kex}
+
+
+@pytest.mark.parametrize(
+    "later_type",
+    [FederationEventType.SPACE_POST_DELETED, FederationEventType.SPACE_POST_UPDATED],
+)
+async def test_a_multi_row_waits_behind_an_older_single_row_in_backoff(env, later_type):
+    """Matrix 2: a delete (or update) never reaches a seat before its create,
+    even when the create is a single row waiting out its backoff."""
+    await _seat(env, "seat-a", "seat-b")
+    create = await _row(env, "seat-a", "create")
+    await _backoff(env, create)
+    later = await _multi(env, ["seat-a", "seat-b"], "p-later", later_type)
+    assert await _due_ids(env) == {later["seat-b"]}
+    await env.outbox_repo.mark_delivered(create)
+    assert await _due_ids(env) == set(later.values())
+
+
+async def test_a_newer_multi_row_waits_behind_an_older_multi_row(env):
+    await _seat(env, "seat-a", "seat-b")
+    seats = ["seat-a", "seat-b"]
+    create = await _multi(env, seats, "p-c", POST_CREATED)
+    update = await _multi(env, seats, "p-u", FederationEventType.SPACE_POST_UPDATED)
+    await _backoff(env, create["seat-a"])
+    await env.outbox_repo.mark_delivered(create["seat-b"])
+    assert await _due_ids(env) == {update["seat-b"]}
+
+
+async def test_an_expired_older_row_does_not_gate(env):
+    """Matrix 4: a row past its retention is gone for the gate too — the
+    sweep will fail it, and nothing may wait on it until then."""
+    await _seat(env, "seat-a", "seat-b")
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    await _row(env, "seat-a", "stale-single", expires_at=past)
+    stale = await _multi(env, ["seat-a", "seat-b"], "p-old", POST_CREATED)
+    await env.db.enqueue(
+        "UPDATE federation_outbox SET expires_at=? WHERE id=?",
+        (past, stale["seat-a"]),
+    )
+    fresh = await _row(env, "seat-a", "fresh", FederationEventType.SPACE_POST_UPDATED)
+    assert await _due_ids(env) == {stale["seat-b"], fresh}
+
+
+async def test_rows_to_a_paired_peer_are_never_gated(env):
+    """Matrix 5: a paired peer's rows are never held, whatever older row it
+    has pending."""
+    create = await _multi(env, ["peer-a", "peer-b"], "p-c", POST_CREATED)
+    await _backoff(env, create["peer-a"])
+    single = await _row(env, "peer-a", "single-old")
+    await _backoff(env, single)
+    update = await _row(env, "peer-a", "update", FederationEventType.SPACE_POST_UPDATED)
+    assert await _due_ids(env) == {create["peer-b"], update}
+
+
+async def test_a_seat_s_oldest_row_is_always_handed_out(env):
+    """Matrix 6: with every row due, a seat's oldest row goes, its later
+    content rows wait, and each delivery frees the next — the gate can never
+    deadlock."""
+    await _seat(env, "seat-a")
+    ids = [await _row(env, "seat-a", f"c{i}") for i in range(4)]
+    for eid in ids:
+        assert await _due_ids(env) == {eid}
+        await env.outbox_repo.mark_delivered(eid)
+    assert await _due_ids(env) == set()
+
+
+async def test_a_pinned_never_drop_row_past_max_attempts_does_not_hold_the_seat(env):
+    """A key exchange failing transient past MAX_ATTEMPTS is pinned at the
+    ceiling backoff forever: it must not stay the seat's head, or every
+    newer content row waits until it expires (7 days) and is lost."""
+    await _seat(env, "seat-a")
+    kex = await _row(env, "seat-a", "kex", FederationEventType.SPACE_KEY_EXCHANGE)
+    later = datetime.now(UTC) + timedelta(hours=4)
+    await env.outbox_repo.reschedule(kex, later.isoformat(), MAX_ATTEMPTS)
+    assert not await env.outbox_repo.has_pending_row("seat-a")  # live goes live
+    post = await _row(env, "seat-a", "post")
+    assert await _due_ids(env) == {post}
+
+
+async def test_a_pinned_multi_type_row_is_handed_out_behind_newer_rows(env):
+    """A pinned NEVER_DROP multi type (a ban) left out of the heads is never
+    held either — out of the ordering both ways, so it cannot deadlock."""
+    await _seat(env, "seat-a")
+    ban = await _row(env, "seat-a", "ban", FederationEventType.SPACE_MEMBER_BANNED)
+    await env.outbox_repo.reschedule(
+        ban, datetime.now(UTC).isoformat(), MAX_ATTEMPTS + 2
+    )
+    post = await _row(env, "seat-a", "post")
+    assert await _due_ids(env) == {ban, post}
+
+
+async def test_has_pending_row_counts_any_pending_unexpired_row(env):
+    """The live path's half of the rule: a seat with any pending, unexpired
+    row makes a live content send queue behind it."""
+    await _seat(env, "seat-a")
+    assert not await env.outbox_repo.has_pending_row("seat-a")
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    await _row(env, "seat-a", "stale", expires_at=past)
+    assert not await env.outbox_repo.has_pending_row("seat-a")
+    chunk = await _row(env, "seat-a", "chunk", FederationEventType.SPACE_SYNC_CHUNK)
+    assert await env.outbox_repo.has_pending_row("seat-a")
+    await env.outbox_repo.mark_delivered(chunk)
+    assert not await env.outbox_repo.has_pending_row("seat-a")
+
+
+async def test_list_due_cost_is_bounded_at_10_seats_by_1000_rows(env):
+    """Matrix 6 (cost): each seat's oldest row is found once, through an
+    index — not a NOT EXISTS per row. 10 seats × 1000 due rows list well
+    under 0.5 s (≈ 5 ms measured)."""
+    seats = [f"seat-{i}" for i in range(10)]
+    await _seat(env, *seats)
+    await env.db.transact(
+        lambda conn: conn.executemany(
+            "INSERT INTO federation_outbox(id, instance_id, event_type,"
+            " payload_json, next_attempt_at) VALUES(?,?,?,?,?)",
+            [
+                (
+                    f"{s}-{n}",
+                    s,
+                    POST_CREATED.value,
+                    "{}",
+                    "2000-01-01T00:00:00+00:00",
+                )
+                for s in seats
+                for n in range(1000)
+            ],
+        )
+    )
+    started = time.perf_counter()
+    due = await env.outbox_repo.list_due(500)
+    elapsed = time.perf_counter() - started
+    assert {e.id for e in due} == {f"{s}-0" for s in seats}
+    assert elapsed < 0.5, f"list_due took {elapsed:.3f}s"
+    plan = " | ".join(
+        str(r[-1])
+        for r in await env.db.fetchall(
+            "EXPLAIN QUERY PLAN " + outbox_mod.LIST_DUE_SQL,
+            outbox_mod.list_due_params(500, ()),
+        )
+    )
+    # The heads are materialized once; the only correlated lookup is each
+    # seat's head, an index search — none runs per outbox row.
+    assert "MATERIALIZE heads" in plan, plan
+    assert plan.count("CORRELATED") == 1, plan
+    assert "SEARCH x USING INDEX idx_federation_outbox_instance" in plan, plan
+
+
+async def test_a_500_seat_multi_enqueue_is_one_write_transaction(env):
+    """v_91: room for 500 ref rows (supersede, per-peer cap) is made in the
+    same one transaction that writes them — no read or write round trip per
+    seat."""
+    seats = [f"seat-{i:03d}" for i in range(500)]
+    await env.db.transact(
+        lambda conn: conn.executemany(
+            "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+            " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+            " local_inbox_id, status) VALUES(?,?,?,?,?,?,?, 'confirmed')",
+            [(s, s, "00" * 32, "k1", "k2", "", f"inbox-{s}") for s in seats],
+        )
+    )
+    writes: list[str] = []
+    for name in (
+        "enqueue",
+        "enqueue_rowcount",
+        "transact",
+        "fetchone",
+        "fetchall",
+        "fetchval",
+    ):
+        real = getattr(env.db, name)
+
+        def _counted(*a, _real=real, _name=name, **kw):
+            writes.append(_name)
+            return _real(*a, **kw)
+
+        setattr(env.db, name, _counted)
+    written = await env.outbox_repo.enqueue_refs(
+        instance_ids=seats,
+        event_type=FederationEventType.SPACE_LOCATION_UPDATED,
+        supersede_key="location:s1:u1",
+        payload_ref=dataclasses.replace(_stored("p-m"), msg_id="wire-1"),
+    )
+    assert len(written) == 500
+    assert writes == ["transact"]
+
+
+async def test_a_multi_enqueue_supersedes_and_makes_room_per_seat(env, monkeypatch):
+    """The same room-making as :meth:`enqueue`, per seat: a seat's row of
+    the same latest-only key is replaced; a seat at the cap loses its oldest
+    droppable row; a seat whose backlog is all NEVER_DROP goes over it."""
+    import socialhome.repositories.outbox_repo as outbox_mod
+
+    monkeypatch.setattr(outbox_mod, "MAX_PENDING_PER_PEER", 2)
+    repo = env.outbox_repo
+    key = "location:s1:u1"
+    stale = await repo.enqueue(
+        instance_id="peer-x",
+        event_type=FederationEventType.SPACE_LOCATION_UPDATED,
+        payload_json="{}",
+        supersede_key=key,
+    )
+    for i in range(2):
+        await repo.enqueue(
+            instance_id="peer-a",
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload_json="{}",
+            msg_id=f"a{i}",
+        )
+        await env.db.enqueue(
+            "UPDATE federation_outbox SET created_at=? WHERE id=?",
+            (f"2026-01-0{i + 1}T00:00:00+00:00", f"a{i}"),
+        )
+        await repo.enqueue(
+            instance_id="peer-b",
+            event_type=FederationEventType.SPACE_MEMBER_BANNED,
+            payload_json="{}",
+            msg_id=f"b{i}",
+        )
+    written = await repo.enqueue_refs(
+        instance_ids=["peer-a", "peer-b", "peer-x"],
+        event_type=FederationEventType.SPACE_LOCATION_UPDATED,
+        supersede_key=key,
+        payload_ref=dataclasses.replace(_stored("p-m"), msg_id="wire-1"),
+    )
+    assert stale not in await _pending_ids(env, "peer-x")
+    assert await _pending_ids(env, "peer-x") == {written["peer-x"]}
+    assert await _pending_ids(env, "peer-a") == {"a1", written["peer-a"]}
+    assert await _pending_ids(env, "peer-b") == {"b0", "b1", written["peer-b"]}

@@ -31,6 +31,7 @@ from ...domain.gfs_channel import (
     CHANNEL_UNSUBSCRIBE_ROUTE,
 )
 from ...domain.gfs_mailbox import (
+    ENVELOPE_MULTI_PATH,
     MAILBOX_REGISTER_ROUTE,
     MAILBOX_TICKETS_ROUTE,
     MAILBOX_UNREGISTER_ROUTE,
@@ -75,7 +76,7 @@ from .cluster import (
     ClusterSignalingEndView,
     ClusterSyncView,
 )
-from .envelope import EnvelopeRelayView
+from .envelope import EnvelopeMultiRelayView, EnvelopeRelayView
 from .highlight_rtc import (
     HighlightIceServersView,
     HighlightRelayStreamView,
@@ -211,6 +212,9 @@ def register_routes(
     # by design: the body names only the recipient, the payload is sealed
     # end-to-end, and every well-formed request gets the same 202.
     app.router.add_view("/gfs/envelope", EnvelopeRelayView)
+    # ONE sealed frame for many mailboxes (v_91): the body is stored once and
+    # pushed byte-identical to each; the same uniform 202.
+    app.router.add_view(ENVELOPE_MULTI_PATH, EnvelopeMultiRelayView)
     # Anonymous per-space mailboxes (GFS redesign PR 1): register a mailbox
     # key with proof of possession, claim its frames on a socket of its own.
     app.router.add_view(MAILBOX_REGISTER_ROUTE, MailboxRegisterView)

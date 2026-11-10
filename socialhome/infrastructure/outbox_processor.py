@@ -18,15 +18,23 @@ handful of attempts per hour instead of thousands.
 from __future__ import annotations
 
 import asyncio
-import enum
 import logging
 import random
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Protocol, TypeVar
 
-from ..domain.federation_retention import NEVER_DROP, TERMINAL_GRACE, is_long_lived
+from ..domain.federation_retention import (
+    BACKOFF_SECONDS,
+    MAX_ATTEMPTS,
+    NEVER_DROP,
+    TERMINAL_GRACE,
+    is_long_lived,
+)
+from ..domain.gfs_mailbox import MULTI_MAX_RECIPIENTS
+from ..domain.outbox import DeliveryOutcome, RetryAfter
 from ..repositories.outbox_repo import (
     PURGE_BATCH,
     AbstractOutboxRepo,
@@ -35,24 +43,6 @@ from ..repositories.outbox_repo import (
 
 log = logging.getLogger(__name__)
 
-
-#: Base retry schedule in seconds — index == attempt number after the
-#: first failure. The last entry is the ceiling.
-BACKOFF_SECONDS: tuple[int, ...] = (
-    5,
-    10,
-    20,
-    40,
-    80,
-    160,
-    320,
-    640,
-    1280,
-    2560,
-    5120,
-    10240,
-    14400,
-)
 
 #: Attempts a 404 ``No instance found`` is treated as *transient* for.
 #:
@@ -72,12 +62,39 @@ BACKOFF_SECONDS: tuple[int, ...] = (
 #: says what an operator should check.
 PAIR_WINDOW_404_ATTEMPTS: int = 4
 
+#: Most per-recipient deliveries in flight at once, across recipients and
+#: passes. One recipient never has more than one in flight (its rows go in
+#: order).
+PARALLEL_RECIPIENTS: int = 8
+
+#: Most multi uploads in flight at once (v_91). They go to a GFS, not to a
+#: peer, so they never wait for a :data:`PARALLEL_RECIPIENTS` slot — a hung
+#: peer cannot hold back a queued broadcast.
+MULTI_PARALLEL: int = 4
+
+#: Due rows one drain pass reads (rows of busy recipients left out). As
+#: large as one multi-recipient group (``MULTI_MAX_RECIPIENTS``), so a
+#: broadcast to 500 mailbox seats goes up as ONE upload in one pass, not in
+#: 50-row chunks over ten passes. Rows are small (a ref row is ~230 B).
+DRAIN_BATCH: int = MULTI_MAX_RECIPIENTS
+
+#: Longest one delivery (one row, or one multi upload) may take before it
+#: counts as :attr:`DeliveryOutcome.TRANSIENT` — a hung peer must not hold a
+#: slot (and its recipients) for the rest of the pass.
+SEND_IDLE_TIMEOUT_S: float = 120.0
+
+#: A failed delivery that took at least this long (or timed out, or was
+#: throttled) stalls its recipient for the rest of its pass's rows. A fast failure
+#: (a refused connection) costs nothing, so the recipient's next rows are
+#: still tried and every row keeps counting its attempts.
+STALL_AFTER_S: float = 10.0
+
+#: How long :meth:`OutboxProcessor.stop` waits for the loop and the
+#: deliveries in flight before cancelling them (their rows stay pending).
+STOP_DEADLINE_S: float = 5.0
+
 #: How far to perturb the base delay — ±30%.
 JITTER_RATIO: float = 0.30
-
-#: Max attempts before an entry is moved to ``failed``. Matches the length
-#: of :data:`BACKOFF_SECONDS`.
-MAX_ATTEMPTS: int = len(BACKOFF_SECONDS)
 
 # ``NEVER_DROP`` is imported from :mod:`socialhome.domain.federation_retention`
 # (the single source of truth) and re-exported under this name so the
@@ -86,54 +103,52 @@ MAX_ATTEMPTS: int = len(BACKOFF_SECONDS)
 # the ceiling backoff instead of marking them failed.
 
 
-class DeliveryOutcome(enum.Enum):
-    """Result of a single outbound delivery attempt.
-
-    The processor uses the outcome to decide between three terminal
-    paths:
-
-    * :attr:`SUCCESS` — receiver returned 2xx. Row is marked delivered.
-    * :attr:`PERMANENT` — receiver returned 4xx (already seen via
-      replay cache, timestamp too old, banned, malformed envelope).
-      Retrying will never succeed; row is marked failed immediately
-      regardless of attempt count or :data:`NEVER_DROP` membership.
-    * :attr:`TRANSIENT` — 5xx, 429, timeout, DNS failure, connection
-      reset. Row is rescheduled with jittered backoff, respecting
-      :data:`NEVER_DROP` past :data:`MAX_ATTEMPTS`. A 429 that carries a
-      ``Retry-After`` comes back as a :class:`RetryAfter` instead.
-    """
-
-    SUCCESS = "success"
-    PERMANENT = "permanent"
-    TRANSIENT = "transient"
-
-
 #: Ceiling on how long a :class:`RetryAfter` may push one retry out — the
 #: backoff ceiling. A peer's ``Retry-After`` is a hint about its own window;
 #: honouring an arbitrary value would let it park an entry indefinitely.
 MAX_RETRY_AFTER_S: float = float(BACKOFF_SECONDS[-1])
 
 
-@dataclass(slots=True, frozen=True)
-class RetryAfter:
-    """A :attr:`DeliveryOutcome.TRANSIENT` that names the earliest retry.
-
-    Returned when the receiver throttled us (HTTP 429) and said how long
-    its window has left (``Retry-After``). The processor treats it exactly
-    like TRANSIENT — it costs an attempt, respects :data:`MAX_ATTEMPTS` and
-    :data:`NEVER_DROP` — except that ``seconds`` is a floor on the next
-    delay (capped at :data:`MAX_RETRY_AFTER_S`, then jittered upward by up
-    to :data:`JITTER_RATIO`): never sooner than the peer asked, and spread so
-    a burst it throttled does not return on one tick.
-    """
-
-    seconds: float
-
-
 #: Delivery callback signature. Return one of the :class:`DeliveryOutcome`
 #: values or a :class:`RetryAfter`; raising is treated the same as
 #: :attr:`DeliveryOutcome.TRANSIENT`.
 Deliver = Callable[[OutboxEntry], Awaitable["DeliveryOutcome | RetryAfter"]]
+
+#: What one multi upload did: the outcome and the rows it applies to (the
+#: rows that went up), or ``None`` when nothing went up. A row of the group
+#: left out is handed back: it stays pending and due, for a later pass.
+MultiDelivery = tuple[DeliveryOutcome | RetryAfter, list[OutboxEntry]] | None
+
+_T = TypeVar("_T")
+
+
+class OutboxMulti(Protocol):
+    """Sends due rows of one multi payload as ONE multi-recipient upload
+    (v_91; implemented by ``FederationService`` — the only multi sender).
+
+    ``outbox_multi_groups`` returns groups (≥ 2 rows each, every row's
+    recipient at most once) that may go up together; rows in no group go
+    one by one. ``deliver_outbox_multi`` returns the outcome and the rows of
+    *group* it applies to (a target no longer eligible is left out), or
+    ``None`` when nothing went up. Rows left out are handed back to the
+    per-recipient pool — never sent inside the multi slot: they stay pending
+    and due, and their recipients stall for the pass (FIFO). A payload the
+    GFS refused, whose frame cannot be built, or whose upload failed
+    transient ``MULTI_MAX_TRANSIENT`` times is marked so it is never grouped
+    again (``ungroup_payload``), so its rows then go one by one.
+
+    Every envelope built from a multi payload carries its stored
+    ``msg_id``, so an upload the GFS accepted but whose answer was lost is
+    retried under the same id and the receivers' replay cache drops the
+    second copy.
+    """
+
+    async def outbox_multi_groups(
+        self, entries: list[OutboxEntry]
+    ) -> list[list[OutboxEntry]]: ...
+
+    async def deliver_outbox_multi(self, group: list[OutboxEntry]) -> MultiDelivery: ...
+
 
 #: Optional follow-up to the retention sweep. Runs after expired rows have
 #: been flipped to ``failed``, so it sees the outbox as the sweep left it
@@ -147,20 +162,33 @@ class OutboxProcessor:
     Follows the same ``_stop: asyncio.Event`` lifecycle as every other
     scheduler in :mod:`socialhome.infrastructure` (see
     :class:`ReplayCachePruneScheduler`). ``start()`` kicks off the
-    loop, ``stop()`` sets the event and awaits graceful shutdown up
-    to a 5-second deadline before cancelling.
+    loop, ``stop()`` sets the event and awaits the loop and the deliveries
+    in flight up to a 5-second deadline before cancelling.
+
+    A pass never waits for its deliveries (:meth:`_start_pass`): it starts
+    them and returns, so a hung peer cannot delay the next pass — or a
+    multi upload a broadcast just queued. Recipients with a delivery in
+    flight are *busy* (in memory only): their rows are left out of every
+    pass until it ends, so each recipient's rows still go one at a time in
+    due order. Nothing is persisted, so a crash leaves those rows pending.
     """
 
     __slots__ = (
         "_after_prune",
+        "_busy",
         "_deliver",
+        "_inflight",
         "_jitter",
         "_last_prune",
+        "_multi",
+        "_multi_slots",
+        "_peer_slots",
         "_poll_interval",
         "_prune_interval",
         "_repo",
         "_stop",
         "_task",
+        "_wake",
     )
 
     def __init__(
@@ -172,8 +200,10 @@ class OutboxProcessor:
         prune_interval_seconds: float = 3600.0,
         rng: Callable[[], float] | None = None,
         after_prune: AfterPrune | None = None,
+        multi: OutboxMulti | None = None,
     ) -> None:
         self._repo = repo
+        self._multi = multi
         self._after_prune = after_prune
         self._deliver = deliver
         self._poll_interval = poll_interval_seconds
@@ -189,9 +219,19 @@ class OutboxProcessor:
         self._last_prune: float | None = None
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        #: Set by :meth:`wake` (or :meth:`stop`): the loop's wait ends early.
+        self._wake = asyncio.Event()
         # ``rng`` is injectable for deterministic tests. Default uses
         # ``random.random`` — uniform in [0, 1).
         self._jitter = rng or random.random
+        #: Recipients whose rows a running pass owns (in flight or next in
+        #: its line) — left out of every other pass until they are done.
+        self._busy: set[str] = set()
+        #: Delivery tasks still running (:meth:`stop` and
+        #: :meth:`drain_once` wait for them).
+        self._inflight: set[asyncio.Task] = set()
+        self._peer_slots = asyncio.Semaphore(PARALLEL_RECIPIENTS)
+        self._multi_slots = asyncio.Semaphore(MULTI_PARALLEL)
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -199,21 +239,41 @@ class OutboxProcessor:
         if self._task is not None and not self._task.done():
             return
         self._stop.clear()
+        # A stop may have cut a delivery's bookkeeping short: nothing is in
+        # flight now, so no recipient is busy.
+        self._busy.clear()
         self._task = asyncio.create_task(self._loop(), name="OutboxProcessor")
+
+    def wake(self) -> None:
+        """Run a drain pass now instead of at the next poll — a broadcast
+        just queued a multi payload (v_91). A wake during a pass runs one
+        more pass after it."""
+        self._wake.set()
 
     async def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
+        deadline = time.monotonic() + STOP_DEADLINE_S
         if self._task is not None:
             try:
-                await asyncio.wait_for(self._task, timeout=5.0)
+                await asyncio.wait_for(self._task, timeout=STOP_DEADLINE_S)
             except TimeoutError, asyncio.CancelledError:
                 self._task.cancel()
             self._task = None
+        if self._inflight:
+            # Deliveries in flight finish (or are cancelled — their rows
+            # stay pending) within the same deadline.
+            _done, late = await asyncio.wait(
+                set(self._inflight), timeout=max(deadline - time.monotonic(), 0.0)
+            )
+            for task in late:
+                task.cancel()
 
     async def _loop(self) -> None:
         while not self._stop.is_set():
+            self._wake.clear()
             try:
-                await self.drain_once()
+                await self._start_pass()
             except Exception:
                 log.exception("OutboxProcessor tick failed")
             # §4.4.7 retention sweep — runs on its own (slow) cadence folded
@@ -235,102 +295,252 @@ class OutboxProcessor:
                 except Exception:
                     log.exception("OutboxProcessor prune tick failed")
             try:
-                await asyncio.wait_for(
-                    self._stop.wait(),
-                    timeout=self._poll_interval,
-                )
+                await asyncio.wait_for(self._wake.wait(), timeout=self._poll_interval)
             except TimeoutError:
                 continue
 
     # ── Single tick ────────────────────────────────────────────────────
 
-    async def drain_once(self, *, limit: int = 50) -> int:
-        """Process up to ``limit`` due entries. Returns count processed.
+    async def drain_once(self, *, limit: int = DRAIN_BATCH) -> int:
+        """One pass (:meth:`_start_pass`), then wait until every delivery in
+        flight has ended. Returns the count of due rows the pass took."""
+        count = await self._start_pass(limit=limit)
+        # A task starts the next unit of its line before it ends, so the
+        # set is complete once every task in it is done.
+        while pending := [t for t in self._inflight if not t.done()]:
+            await asyncio.wait(pending)
+        return count
 
-        Errors raised by the deliver callback are caught and treated as
+    async def _start_pass(self, *, limit: int = DRAIN_BATCH) -> int:
+        """Start delivering up to ``limit`` due rows of recipients that are
+        not busy; return without waiting for them. Returns the count taken.
+
+        Each of the pass's recipients is busy until its last row of the pass
+        is done; its rows go one at a time, in due order. Rows of one stored
+        payload the :class:`OutboxMulti` groups (only each recipient's
+        oldest row of the pass is offered) go up as ONE upload whose
+        outcome applies to each (a group is formed from recipients that are
+        not busy only — a busy one keeps its row for a later pass, under the
+        same stable ``msg_id``). Per-recipient deliveries share
+        :data:`PARALLEL_RECIPIENTS` slots; multi uploads use their own
+        :data:`MULTI_PARALLEL` slots and never wait for a per-recipient one.
+        Every delivery runs under :data:`SEND_IDLE_TIMEOUT_S`.
+
+        Once a recipient's delivery times out, is throttled
+        (:class:`RetryAfter`) or fails after :data:`STALL_AFTER_S` or more,
+        its remaining rows of the pass are not attempted: they stay
+        ``pending`` for a later pass, with no attempt counted — one dead
+        peer costs one timeout per pass, not one per queued row. A fast
+        failure does not stall. A group that does not succeed — however fast
+        it failed — stalls each of its recipients (a row queued behind a
+        multi row never overtakes it), and so does a row handed back from a
+        group; a later group drops a stalled recipient (and goes per row
+        when fewer than two are left).
+
+        Errors raised by the deliver callback (and timeouts) are treated as
         :attr:`DeliveryOutcome.TRANSIENT`. Rows whose ``attempts`` would
         exceed :data:`MAX_ATTEMPTS` are marked failed rather than
         rescheduled. PERMANENT outcomes (4xx other than 429) are dropped
         immediately; a :class:`RetryAfter` is TRANSIENT with a delay floor.
         """
-        entries = await self._repo.list_due(limit)
+        busy = frozenset(self._busy)
+        entries = [
+            e
+            for e in await self._repo.list_due(limit, exclude=busy)
+            if e.instance_id not in self._busy
+        ]
         if not entries:
             return 0
-        for entry in entries:
-            outcome: DeliveryOutcome | RetryAfter
-            try:
-                outcome = await self._deliver(entry)
-            except Exception as exc:
-                log.warning(
-                    "OutboxProcessor delivery raised for %s: %s",
-                    entry.id,
-                    exc,
-                    exc_info=True,
-                )
-                outcome = DeliveryOutcome.TRANSIENT
-            if outcome is DeliveryOutcome.SUCCESS:
-                await self._repo.mark_delivered(entry.id)
-                continue
-            if outcome is DeliveryOutcome.PERMANENT:
-                # 4xx — peer will never accept this envelope (replay cache
-                # hit, expired timestamp, banned sender, malformed body).
-                # Drop the row even for :data:`NEVER_DROP` events: a
-                # 410 ``Replay detected`` means the receiver already has
-                # the event, so the security invariant is satisfied.
-                log.warning(
-                    "OutboxProcessor: peer permanently rejected %s — dropping",
-                    entry.id,
-                )
-                await self._repo.mark_failed(entry.id)
-                continue
+        units = _order_units(
+            entries, await self._groups(_oldest_per_recipient(entries))
+        )
+        #: Per recipient, the indexes of the units it is in, in run order.
+        queues: dict[str, deque[int]] = {}
+        for idx, unit in enumerate(units):
+            for entry in unit:
+                queues.setdefault(entry.instance_id, deque()).append(idx)
+        self._busy.update(queues)
+        started: set[int] = set()
+        #: Recipients whose delivery this pass ended transient — skipped.
+        stalled: set[str] = set()
 
-            # TRANSIENT, or a RetryAfter (a 429 that named its window).
-            floor_s = (
-                self._retry_after_floor(outcome.seconds)
-                if isinstance(outcome, RetryAfter)
-                else 0.0
+        def _ready(idx: int) -> bool:
+            return idx not in started and all(
+                queues[e.instance_id][0] == idx for e in units[idx]
             )
-            new_attempts = entry.attempts + 1
-            if new_attempts >= MAX_ATTEMPTS:
-                # §4.4.7: structural / security events keep retrying on
-                # the ceiling backoff — losing a ban or key revocation
-                # silently would create an attacker-friendly window. A
-                # LONG_LIVED event (v_66: a moment's delete) does the same
-                # until its 30-day ``expires_at``, when the retention sweep
-                # marks it failed — unless it was relayed past its origin's
-                # cap (F2), which gives up like any ordinary event.
-                if entry.event_type in NEVER_DROP or is_long_lived(
-                    entry.event_type, entry.supersede_key
-                ):
-                    log.info(
-                        "OutboxProcessor: %s entry %s past MAX_ATTEMPTS"
-                        " — pinning at ceiling backoff",
-                        entry.event_type,
-                        entry.id,
-                    )
-                    delay = max(self._delay_for(MAX_ATTEMPTS), floor_s)
-                    next_at = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()
-                    await self._repo.reschedule(
-                        entry.id,
-                        next_at,
-                        attempts=new_attempts,
-                    )
-                    continue
-                log.warning(
-                    "OutboxProcessor giving up on %s after %d attempts",
-                    entry.id,
-                    new_attempts,
-                )
-                await self._repo.mark_failed(entry.id)
-                continue
-            delay = max(self._delay_for(new_attempts), floor_s)
-            next_at = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()
-            await self._repo.reschedule(
-                entry.id,
-                next_at,
-                attempts=new_attempts,
-            )
+
+        def _start(idx: int) -> None:
+            started.add(idx)
+            task = asyncio.create_task(_run(idx))
+            self._inflight.add(task)
+            task.add_done_callback(self._inflight.discard)
+
+        async def _run(idx: int) -> None:
+            unit = units[idx]
+            try:
+                if any(e.instance_id not in stalled for e in unit):
+                    slots = self._multi_slots if len(unit) > 1 else self._peer_slots
+                    async with slots:
+                        # Re-read once a slot is ours: a recipient may have
+                        # stalled while this unit waited for it.
+                        live = [e for e in unit if e.instance_id not in stalled]
+                        if live:
+                            await self._run_unit(live, stalled)
+            finally:
+                heads: list[int] = []
+                for entry in unit:
+                    queue = queues[entry.instance_id]
+                    queue.popleft()
+                    if queue:
+                        heads.append(queue[0])
+                    else:
+                        self._busy.discard(entry.instance_id)
+                if self._stop.is_set():
+                    # Stopping: the rest of the line stays pending.
+                    heads = []
+                for head in heads:
+                    if _ready(head):
+                        _start(head)
+
+        for idx in range(len(units)):
+            if _ready(idx):
+                _start(idx)
         return len(entries)
+
+    async def _groups(self, entries: list[OutboxEntry]) -> list[list[OutboxEntry]]:
+        if self._multi is None:
+            return []
+        try:
+            return await self._multi.outbox_multi_groups(entries)
+        except Exception:
+            log.warning("OutboxProcessor: grouping failed", exc_info=True)
+            return []
+
+    async def _run_unit(self, unit: list[OutboxEntry], stalled: set[str]) -> None:
+        """Deliver one row, or one multi group; never raises. A recipient
+        whose delivery is slow to fail or throttled joins *stalled*."""
+        try:
+            if len(unit) > 1 and self._multi is not None:
+                result = await self._attempt(
+                    unit[0].id, self._multi.deliver_outbox_multi(unit)
+                )
+                outcome, sent = (
+                    (result, unit)
+                    if isinstance(result, DeliveryOutcome)
+                    else result or (DeliveryOutcome.TRANSIENT, [])
+                )
+                for entry in sent:
+                    await self._settle(entry, outcome)
+                # Every recipient whose row did not go through stalls for the
+                # pass, and a row handed back goes per row in a later one.
+                done = (
+                    {e.id for e in sent}
+                    if outcome is DeliveryOutcome.SUCCESS
+                    else set()
+                )
+                stalled.update(e.instance_id for e in unit if e.id not in done)
+                if len(sent) < len(unit):
+                    self.wake()
+                return
+            for entry in unit:
+                started = time.monotonic()
+                outcome = await self._attempt(entry.id, self._deliver(entry))
+                outcome = outcome or DeliveryOutcome.TRANSIENT
+                if _stalls(outcome, time.monotonic() - started):
+                    stalled.add(entry.instance_id)
+                await self._settle(entry, outcome)
+        except Exception:
+            log.exception("OutboxProcessor: delivery bookkeeping failed")
+
+    async def _attempt(
+        self, label: str, delivery: Awaitable[_T]
+    ) -> _T | DeliveryOutcome:
+        try:
+            return await asyncio.wait_for(delivery, timeout=SEND_IDLE_TIMEOUT_S)
+        except TimeoutError:
+            log.warning(
+                "OutboxProcessor delivery of %s timed out after %ss",
+                label,
+                SEND_IDLE_TIMEOUT_S,
+            )
+        except Exception as exc:
+            log.warning(
+                "OutboxProcessor delivery raised for %s: %s",
+                label,
+                exc,
+                exc_info=True,
+            )
+        return DeliveryOutcome.TRANSIENT
+
+    async def _settle(
+        self, entry: OutboxEntry, outcome: DeliveryOutcome | RetryAfter
+    ) -> None:
+        """Apply one delivery outcome to *entry*'s row."""
+        if outcome is DeliveryOutcome.SUCCESS:
+            await self._repo.mark_delivered(entry.id)
+            # The ordering gate (``list_due``) may have held the household's
+            # next row behind this one: run the next pass now, not at the poll.
+            self.wake()
+            return
+        if outcome is DeliveryOutcome.PERMANENT:
+            # 4xx — peer will never accept this envelope (replay cache
+            # hit, expired timestamp, banned sender, malformed body).
+            # Drop the row even for :data:`NEVER_DROP` events: a
+            # 410 ``Replay detected`` means the receiver already has
+            # the event, so the security invariant is satisfied.
+            log.warning(
+                "OutboxProcessor: peer permanently rejected %s — dropping",
+                entry.id,
+            )
+            await self._repo.mark_failed(entry.id)
+            return
+
+        # TRANSIENT, or a RetryAfter (a 429 that named its window).
+        floor_s = (
+            self._retry_after_floor(outcome.seconds)
+            if isinstance(outcome, RetryAfter)
+            else 0.0
+        )
+        new_attempts = entry.attempts + 1
+        if new_attempts >= MAX_ATTEMPTS:
+            # §4.4.7: structural / security events keep retrying on
+            # the ceiling backoff — losing a ban or key revocation
+            # silently would create an attacker-friendly window. A
+            # LONG_LIVED event (v_66: a moment's delete) does the same
+            # until its 30-day ``expires_at``, when the retention sweep
+            # marks it failed — unless it was relayed past its origin's
+            # cap (F2), which gives up like any ordinary event.
+            if entry.event_type in NEVER_DROP or is_long_lived(
+                entry.event_type, entry.supersede_key
+            ):
+                log.info(
+                    "OutboxProcessor: %s entry %s past MAX_ATTEMPTS"
+                    " — pinning at ceiling backoff",
+                    entry.event_type,
+                    entry.id,
+                )
+                delay = max(self._delay_for(MAX_ATTEMPTS), floor_s)
+                next_at = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()
+                await self._repo.reschedule(
+                    entry.id,
+                    next_at,
+                    attempts=new_attempts,
+                )
+                return
+            log.warning(
+                "OutboxProcessor giving up on %s after %d attempts",
+                entry.id,
+                new_attempts,
+            )
+            await self._repo.mark_failed(entry.id)
+            return
+        delay = max(self._delay_for(new_attempts), floor_s)
+        next_at = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()
+        await self._repo.reschedule(
+            entry.id,
+            next_at,
+            attempts=new_attempts,
+        )
 
     async def prune_once(self) -> int:
         """Retention sweep (§4.4.7). First, drop rows addressed to a
@@ -400,3 +610,47 @@ class OutboxProcessor:
         sample = self._jitter()
         signed = (sample * 2.0) - 1.0
         return max(1.0, base * (1.0 + signed * JITTER_RATIO))
+
+
+def _stalls(outcome: DeliveryOutcome | RetryAfter, elapsed_s: float) -> bool:
+    """Whether a delivery leaves its recipient stalled for the pass: it was
+    throttled (:class:`RetryAfter`), or failed TRANSIENT after
+    :data:`STALL_AFTER_S` or more (a timeout always does)."""
+    if isinstance(outcome, RetryAfter):
+        return True
+    return outcome is DeliveryOutcome.TRANSIENT and elapsed_s >= STALL_AFTER_S
+
+
+def _order_units(
+    entries: list[OutboxEntry], groups: list[list[OutboxEntry]]
+) -> list[list[OutboxEntry]]:
+    """The pass's delivery units — each multi group (two or more of the
+    recipients' OLDEST rows of the pass, :func:`_oldest_per_recipient`), and
+    every other row on its own — in run order (by their first row's place in
+    *entries*). A grouped row has no earlier row of its recipient in the
+    pass, so a group never runs a row ahead of one; a recipient's later rows
+    go after it."""
+    position = {entry.id: i for i, entry in enumerate(entries)}
+    heads = {e.id for e in _oldest_per_recipient(entries)}
+    live = [
+        g
+        for g in ([e for e in group if e.id in heads] for group in groups)
+        if len(g) >= 2
+    ]
+    grouped = {e.id for g in live for e in g}
+    units = [(min(position[e.id] for e in g), g) for g in live]
+    units += [(position[e.id], [e]) for e in entries if e.id not in grouped]
+    units.sort(key=lambda u: u[0])
+    return [unit for _at, unit in units]
+
+
+def _oldest_per_recipient(entries: list[OutboxEntry]) -> list[OutboxEntry]:
+    """Each recipient's first row of *entries* — the only rows offered for
+    a multi group."""
+    seen: set[str] = set()
+    out: list[OutboxEntry] = []
+    for entry in entries:
+        if entry.instance_id not in seen:
+            seen.add(entry.instance_id)
+            out.append(entry)
+    return out

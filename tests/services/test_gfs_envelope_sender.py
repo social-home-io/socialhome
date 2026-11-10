@@ -435,3 +435,178 @@ async def test_media_unreachable_server_is_false(media_gfs, http_session):
     assert await sender.media_connection(conn.inbox_url) is not None
     await http_session.close()
     assert not await sender.send_media_body(body=b"\x00SHR", gfs_url=conn.inbox_url)
+
+
+# ── Multi-recipient mailbox frames (v_91) ─────────────────────────────────
+
+MR_BODY = {"mr_suite": "mr-wrap-aesgcm-256", "ciphertext": "cc"}
+WRAP = {"kem_suite": "x25519", "eph_pk": "ee", "ciphertext": "ww"}
+
+
+def _entries(*ids: str) -> list[tuple[str, dict]]:
+    return [(i, WRAP) for i in ids]
+
+
+_MAILBOX_CAP = {"sig_suites": ["ed25519"], "idle_days": 30}
+
+
+class _MultiGfs(_FakeGfs):
+    """``envelope_mailbox`` + ``envelope_multi``; records multi uploads and
+    the cookies each request carried."""
+
+    def __init__(self, *, multi: object = None, **kw) -> None:
+        caps: dict = {"envelope_relay": True, "envelope_mailbox": _MAILBOX_CAP}
+        if multi is not None:
+            caps["envelope_multi"] = multi
+        super().__init__(capabilities=caps, **kw)
+        self.multi: list[dict] = []
+        self.multi_status = 202
+        self.multi_retry_after: str | None = None
+
+    def app(self) -> web.Application:
+        app = super().app()
+        app.router.add_post("/gfs/envelope/multi", self._multi)
+        return app
+
+    async def _multi(self, request: web.Request) -> web.Response:
+        self.multi.append(await request.json())
+        if self.multi_status >= 300:
+            resp = web.json_response({"error": "nope"}, status=self.multi_status)
+            if self.multi_retry_after is not None:
+                resp.headers["Retry-After"] = self.multi_retry_after
+            return resp
+        return web.json_response({"status": "accepted"}, status=202)
+
+
+async def _multi_gfs(**kw):
+    fake = _MultiGfs(**kw)
+    server = TestServer(fake.app())
+    await server.start_server()
+    fake.url = str(server.make_url("")).rstrip("/")
+    return fake, server
+
+
+def _wire_multi(fake, http_session):
+    sender, conn = _wire(fake, http_session)
+    sender.attach_mailbox_session(http_session)
+    return sender, conn
+
+
+async def test_multi_posts_only_the_recipient_list_and_the_body(http_session):
+    fake, server = await _multi_gfs(multi={"max_recipients": 500})
+    try:
+        sender, conn = _wire_multi(fake, http_session)
+        assert await sender.multi_connection(conn.inbox_url + "/") is not None
+        ids = ["m" * 32, "n" * 32, "o" * 32]
+        assert (
+            await sender.send_to_mailboxes(
+                entries=_entries(*ids), gfs_url=conn.inbox_url, body=MR_BODY
+            )
+            == 202
+        )
+        assert fake.multi == [
+            {"to": [{"mailbox": i, "wrap": WRAP} for i in ids], "body": MR_BODY}
+        ]
+        assert fake.received == []  # never the single-recipient route
+    finally:
+        await server.close()
+
+
+async def test_multi_needs_a_server_that_proved_envelope_multi(http_session):
+    fake, server = await _multi_gfs(multi=None)  # mailbox only
+    try:
+        sender, conn = _wire_multi(fake, http_session)
+        assert await sender.mailbox_connection(conn.inbox_url) is not None
+        assert await sender.multi_connection(conn.inbox_url) is None
+        assert await sender.multi_connection("") is None
+        with pytest.raises(EnvelopeRelayUnavailable):
+            await sender.send_to_mailboxes(
+                entries=_entries(*["m" * 32, "n" * 32]),
+                gfs_url=conn.inbox_url,
+                body=MR_BODY,
+            )
+        assert fake.multi == []
+    finally:
+        await server.close()
+
+
+async def test_multi_429_is_throttled_and_other_refusals_answer_the_status(
+    http_session, caplog
+):
+    fake, server = await _multi_gfs(multi={"max_recipients": 500})
+    try:
+        sender, conn = _wire_multi(fake, http_session)
+        ids = ["m" * 32, "n" * 32]
+        fake.multi_status = 429
+        with pytest.raises(EnvelopeRelayThrottled):
+            await sender.send_to_mailboxes(
+                entries=_entries(*ids), gfs_url=conn.inbox_url, body=MR_BODY
+            )
+        fake.multi_status = 400
+        caplog.set_level("DEBUG")
+        assert (
+            await sender.send_to_mailboxes(
+                entries=_entries(*ids), gfs_url=conn.inbox_url, body=MR_BODY
+            )
+            == 400
+        )
+        assert "m" * 32 not in caplog.text  # never a mailbox id in a log
+    finally:
+        await server.close()
+
+
+@pytest.mark.parametrize(
+    ("header", "want"),
+    [("60", 60.0), (None, None), ("soon", None), ("-5", None), ("inf", None)],
+)
+async def test_multi_429_carries_the_gfs_retry_after(http_session, header, want):
+    """The GFS's ``Retry-After`` (delta-seconds) rides on the throttle, so
+    a queued multi upload waits the window the GFS named, not 5 s."""
+    fake, server = await _multi_gfs(multi={"max_recipients": 500})
+    try:
+        sender, conn = _wire_multi(fake, http_session)
+        fake.multi_status = 429
+        fake.multi_retry_after = header
+        with pytest.raises(EnvelopeRelayThrottled) as exc:
+            await sender.send_to_mailboxes(
+                entries=_entries(*["m" * 32, "n" * 32]),
+                gfs_url=conn.inbox_url,
+                body=MR_BODY,
+            )
+        assert exc.value.retry_after_s == want
+    finally:
+        await server.close()
+
+
+def test_throttled_without_a_window_names_none():
+    assert EnvelopeRelayThrottled("busy").retry_after_s is None
+
+
+async def test_multi_refuses_an_empty_or_oversize_list_without_a_post(http_session):
+    fake, server = await _multi_gfs(multi={"max_recipients": 2})
+    try:
+        sender, conn = _wire_multi(fake, http_session)
+        assert None is await sender.send_to_mailboxes(
+            entries=_entries(*[]), gfs_url=conn.inbox_url, body=MR_BODY
+        )
+        assert None is await sender.send_to_mailboxes(
+            entries=_entries(*["m" * 32, "n" * 32, "o" * 32]),
+            gfs_url=conn.inbox_url,
+            body=MR_BODY,
+        )
+        assert fake.multi == []
+        conn_ = await sender.multi_connection(conn.inbox_url)
+        assert conn_ is not None
+        assert sender.multi_max_recipients(conn_) == 2
+    finally:
+        await server.close()
+
+
+async def test_multi_unreachable_server_is_none(http_session):
+    fake, server = await _multi_gfs(multi={"max_recipients": 500})
+    sender, conn = _wire_multi(fake, http_session)
+    assert await sender.multi_connection(conn.inbox_url) is not None
+    await server.close()
+    assert None is await sender.send_to_mailboxes(
+        entries=_entries(*["m" * 32, "n" * 32]), gfs_url=conn.inbox_url, body=MR_BODY
+    )

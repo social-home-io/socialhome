@@ -63,6 +63,7 @@ from .config import (
 )
 from .envelope_relay import (
     GfsEnvelopeRelay,
+    build_envelope_multi_rate_limit,
     build_envelope_rate_limit,
     build_mailbox_rate_limits,
 )
@@ -649,6 +650,7 @@ class GfsApp:
             build_register_rate_limit(self.client_ip),
             build_proof_rate_limit(self.client_ip),
             build_envelope_rate_limit(self.client_ip),
+            build_envelope_multi_rate_limit(self.client_ip),
             *build_mailbox_rate_limits(self.client_ip, nodes=live_nodes),
             build_member_publish_rate_limit(self.client_ip),
             build_channel_rate_limit(self.client_ip),

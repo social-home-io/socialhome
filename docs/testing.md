@@ -437,6 +437,13 @@ pin together, plus the Home Assistant App's), ruff (its pin moves with
 `.pre-commit-config.yaml` and CI, and a new minor re-lints the tree), and
 the `python:3.14-slim` image base.
 
+## A hung test names itself
+
+`[tool.pytest.ini_options] faulthandler_timeout = 300`: a test still
+running after 5 minutes dumps every thread's stack to the output, so a
+CI shard that hangs shows which test and which `await` it is stuck on
+instead of being killed as an orphan process with no clue.
+
 ## Warnings are errors
 
 `[tool.pytest.ini_options] filterwarnings = ["error", …]` turns every

@@ -70,6 +70,7 @@ addresses. See the last section of this document.
 | Symmetric AEAD (public moment media, v_63) | AES-256-GCM over a padded plaintext | 256-bit | A public moment's photo / video, sealed once under `HKDF(item_key, "sh-moment-media:v1|" + role)`; plaintext `u32 length ‖ file ‖ zeros` up to a 64 KB…8 MB bucket; AAD binds suite, author, moment id and role; the blob is addressed by its SHA-256 (suite `media_suite: "aesgcm-256-pad"`, unknown refused — `UnsupportedMediaSuite`). Role `share` is a moment's **share copy** (text, timestamps, author name, media descriptor; 4 KB bucket) that a per-moment share link opens; the link's fragment carries the moment's item key — never the generation or step key — so it opens that one moment | `socialhome/moment_public_media.py`, `client/gfs/moment_seal.ts` |
 | Symmetric AEAD (space media in a GFS cache, v_80) | AES-256-GCM over a padded plaintext, deterministic nonce | 256-bit | A space file (post picture, calendar cover, gallery item) for households that read the space through a GFS, sealed once under `HKDF(epoch content key, "sh-space-media:v1")`; nonce derived from the file name and the file's SHA-256 (a re-seal is the byte-identical blob); same padding buckets as moment media; AAD binds suite, space id, epoch and file name; addressed by its scope-bound `sm1` hash (suite `aesgcm-256-pad-det`, unknown refused — `UnsupportedSpaceMediaSuite`). See [Space media in a GFS cache](#space-media-in-a-gfs-cache-aesgcm-256-pad-det) | `socialhome/space_media_seal.py` |
 | Symmetric AEAD (public moments, v_62) | AES-256-GCM, 96-bit random nonce; HKDF-SHA256 ratchet + item keys | 256-bit | A public moment sealed before it reaches a GFS under its **item key** `HKDF(step key, "sh-moment-item:v1|" + moment_id)`; the step key ratchets daily `K(g, s+1) = HKDF(K(g, s), "sh-moment-ratchet:v1")` from a random per-author generation root (holders keep only the newest step). Suite `seal_suite: "aesgcm-256"`, AAD `socialhome/moment-public/v2\|suite\|author\|key_gen\|key_step\|moment_id`; the author's household signs the envelope (ciphertext + key id + moment id). The step key reaches each follower household through the static key-wrap seal (`kem_suite: "x25519"`) with `key_suite: "aesgcm-256"` (the space content-key tag). Unknown suites refused (`UnsupportedMomentSealSuite`) | `socialhome/moment_public_seal.py`, `socialhome/services/moment_public_key_outbound.py`, `socialhome/services/moment_public_key_inbound.py` |
+| Symmetric AEAD (multi-recipient mailbox frames, v_91) | AES-256-GCM under a fresh random key, wrapped per recipient with the static-recipient seal (X25519 ECIES); SHA-256 audience tags | 256-bit | One space event uploaded once for many member households' GFS mailboxes. A fresh random 32-byte key *K* per upload attempt seals the body `{mr_suite: "mr-wrap-aesgcm-256", ciphertext}` (the relay plaintext padded to a size bucket, AAD `"sh-mr-body:v1\n" + mr_suite`) — the whole signed inner envelope, whose payload rides inside as-is (no second seal; a receiver takes an unencrypted payload only on a frame its mailbox opened as multi); *K* is wrapped to each recipient mailbox's key-wrap key with `seal_to_keywrap` (`kem_suite: "x25519"`). Unknown `mr_suite` refused (`UnsupportedMrSuite`), unknown wrap `kem_suite` refused (`UnsupportedKemSuite`). No space key involved. See [Multi-recipient mailbox frames](#multi-recipient-mailbox-frames-mr-wrap-aesgcm-256-v_91) | `socialhome/federation/multi_recipient.py`, `socialhome/federation/keywrap_seal.py` |
 | Blind signature (Privacy Pass) | RSA blind signatures, RFC 9474 `RSABSSA-SHA384-PSS-Deterministic` (Privacy Pass token type 0x0002, RFC 9578 §6) | 2048-bit modulus | Anonymous GFS mailbox registration tickets (suite `privacypass-blindrsa2048-sha384-pss`): a registered household fetches blind-signed tokens, a new mailbox spends one. See [Mailbox registration tickets](#mailbox-registration-tickets-privacypass-blindrsa2048-sha384-pss) | `socialhome/privacy_pass.py`, `socialhome/global_server/mailbox_tickets.py` |
 | KDF | HKDF-SHA256 | 32-byte output | Session-key derivation, KEK derivation | `cryptography.hazmat.primitives.kdf.hkdf` |
 | File hash (space content, v_85) | SHA-256 | 128-bit collision (PQ: Grover-bounded preimage) | Every space item with files carries `files: {name: {h}}` + `files_suite: "sha256"` inside its encrypted payload / §25.6 record; `SPACE_MEDIA_BLOB` carries `h` + `h_suite`. Receivers store a hashed file as `sc-` + `sha256("space-content" ‖ space ‖ h)[:40]` and refuse bytes that do not hash to `h`; an unknown or missing suite rejects the map whole (`UnsupportedFileHashSuite`) and the item keeps the legacy sender-bound names. A new hash ships as a sibling suite | `socialhome/domain/file_hashes.py`, `socialhome/services/media_file_hasher.py` |
@@ -180,6 +181,42 @@ outbox's max jittered redelivery interval (~5.2 h) so a lost-ack retry is
 caught by replay rather than applied twice. The re-sign uses the sender's
 own signing key — an attacker who captures the bytes still cannot move the
 timestamp window themselves (the signature covers `timestamp`).
+
+### Multi-recipient mailbox frames (`mr-wrap-aesgcm-256`, v_91)
+
+A space event whose bytes are identical for every member household that
+reaches the space through the same GFS goes up **once**
+(`POST /gfs/envelope/multi`). The body is sealed once under a fresh random
+32-byte key *K* (AES-256-GCM, AAD `"sh-mr-body:v1\n" + mr_suite`), and *K*
+is wrapped to each recipient mailbox's key-wrap key with the same
+static-recipient seal a single mailbox frame uses (`seal_to_keywrap`:
+ephemeral X25519, HKDF-SHA256, AES-GCM; its own `kem_suite`). The GFS keeps
+each wrap with that mailbox's reference and pushes body + wrap; it sees the
+mailbox list, one opaque wrap per mailbox, time, size bucket and IP — never
+the space, an instance id, the event type or content. No space key or epoch
+is involved, so holding a space's content key opens nothing.
+
+- **Two suite checks.** A receiver refuses an unknown `mr_suite`
+  (`UnsupportedMrSuite`) before anything else, and an unknown wrap
+  `kem_suite` (`UnsupportedKemSuite`, the seal's own check). The PQ
+  migration swaps the wrap's `kem_suite` (`x25519+mlkem768`); the body
+  suite is symmetric and stays.
+- **Audience binding.** Every recipient learns *K*, so the inner envelope's
+  signed `to_instance` is `"*:" + ".".join(tags)`, one tag per intended
+  recipient household, sorted:
+  `tag = b64url(SHA-256("sh-mr-to:v1\n" + instance_id)[:4])` — unkeyed,
+  because it sits inside the body the GFS cannot open. A receiver takes the
+  frame only when its own tag is listed, so a recipient cannot re-wrap *K*
+  and push the frame to a household the sender left out. An envelope whose
+  `to_instance` starts with `*` is refused on every other path, and a
+  multi frame carries only `MULTI_EVENT_TYPES` (the seat vocabulary minus
+  single-recipient, key-carrying, pairwise-stream and routing types).
+- **Signed `ed25519` only.** One body serves every recipient, so it cannot
+  follow a per-pair negotiated `sig_suite`: v_91 multi frames are signed
+  `sig_suite: "ed25519"`. When the hybrid suite (`ed25519+mldsa65`) ships, a
+  sender holding a PQ key MUST sign its multi frames hybrid, and receivers
+  MUST refuse an ed25519-only multi frame from a sender whose PQ key they
+  hold — otherwise the multi path is a downgrade around the hybrid.
 
 **Pairing** — `PairingCoordinator.initiate/accept/confirm` runs a QR-
 flow with an ephemeral X25519 ECDH. Two directional keys fall out via

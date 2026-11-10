@@ -20,15 +20,24 @@ Retention tiers follow §4.4.7:
 from __future__ import annotations
 
 import logging
+import sqlite3
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
+import orjson
+
 from ..db import AsyncDatabase
 from ..domain import federation_retention
-from ..domain.federation import FederationEventType, PairingStatus
+from ..domain.federation import (
+    MULTI_EVENT_TYPES,
+    FederationEventType,
+    PairingStatus,
+)
 from ..domain.federation_retention import (
     ANY_RELAYED_DELETE_KEY_PREFIX,
+    MAX_ATTEMPTS,
     MAX_PENDING_PER_PEER,
     NEVER_DROP,
     RELAYED_DELETE_KEY_PREFIX,
@@ -36,19 +45,76 @@ from ..domain.federation_retention import (
     capped_delete_key,
     retention_expires_at,
 )
+
+# Domain dataclasses live in ``socialhome/domain/outbox.py``; re-exported
+# here so existing repo-level imports keep working.
+from ..domain.outbox import OutboxEntry, OutboxPayload
 from .base import rows_to_dicts
 
 log = logging.getLogger(__name__)
-
-# Domain dataclass lives in ``socialhome/domain/outbox.py``;
-# re-exported here so existing repo-level imports keep working.
-from ..domain.outbox import OutboxEntry
 
 #: Default batch size for :meth:`SqliteOutboxRepo.purge_terminal`. Exported so
 #: the OutboxProcessor's batch-drain loop compares against the SAME value its
 #: per-call limit uses — the "fewer than a full batch ⇒ drained" sentinel must
 #: not drift from the repo's default limit.
 PURGE_BATCH = 5000
+
+
+#: A pending row still inside its retention window (§4.4.7). ``expires_at``
+#: is ISO-8601 with a ``T`` and a timezone suffix; ``datetime(...)`` puts
+#: both sides in one canonical form.
+_LIVE = (
+    "{t}.status='pending'"
+    " AND ({t}.expires_at IS NULL OR datetime({t}.expires_at) > datetime('now'))"
+)
+
+#: A pending row the v_91 seat ordering counts: inside its retention window
+#: and not pinned past :data:`MAX_ATTEMPTS` (a NEVER_DROP / long-lived row
+#: failing transient forever must not hold its household).
+_ORDERED = _LIVE + f" AND {{t}}.attempts < {MAX_ATTEMPTS:d}"
+
+#: The event types the v_91 ordering gate holds (JSON for ``json_each``).
+_GATED_TYPES_JSON = orjson.dumps(sorted(t.value for t in MULTI_EVENT_TYPES)).decode()
+
+#: :meth:`SqliteOutboxRepo.list_due` (exported for the query-plan test).
+#: ``heads`` is each ``space_session`` seat's OLDEST pending, unexpired,
+#: unpinned row (:data:`_ORDERED`) — found once per seat through ``idx_federation_outbox_instance``,
+#: materialized so it is never re-run per outbox row. A gated row
+#: (a multi event type to a seat) is handed out only when it is that head
+#: — or pinned itself (out of the ordering both ways, so never deadlocked).
+LIST_DUE_SQL = f"""
+WITH heads(instance_id, head) AS MATERIALIZED (
+    SELECT ri.id,
+           (SELECT x.rowid
+              FROM federation_outbox x
+             WHERE x.instance_id = ri.id AND {_ORDERED.format(t="x")}
+             ORDER BY x.created_at, x.rowid
+             LIMIT 1)
+      FROM remote_instances ri
+     WHERE ri.source = 'space_session'
+)
+SELECT o.*, p.space_id AS payload_space_id,
+       CASE WHEN p.per_row = 0 THEN p.msg_id END AS payload_msg_id
+  FROM federation_outbox o
+  LEFT JOIN federation_outbox_payloads p ON p.id = o.payload_id
+  LEFT JOIN heads h ON h.instance_id = o.instance_id
+ WHERE {_LIVE.format(t="o")}
+   AND datetime(o.next_attempt_at) <= datetime('now')
+   AND o.instance_id NOT IN (SELECT value FROM json_each(?))
+   AND (
+       h.instance_id IS NULL
+       OR o.rowid = h.head
+       OR o.attempts >= {MAX_ATTEMPTS:d}
+       OR o.event_type NOT IN (SELECT value FROM json_each(?))
+   )
+ ORDER BY datetime(o.next_attempt_at) ASC, o.created_at ASC, o.rowid ASC
+ LIMIT ?
+"""
+
+
+def list_due_params(limit: int, exclude: Collection[str]) -> tuple[str, str, int]:
+    """The bind parameters of :data:`LIST_DUE_SQL`."""
+    return (orjson.dumps(sorted(exclude)).decode(), _GATED_TYPES_JSON, int(limit))
 
 
 @runtime_checkable
@@ -63,13 +129,29 @@ class AbstractOutboxRepo(Protocol):
         authority_json: str | None = None,
         expires_at: str | None = None,
         supersede_key: str | None = None,
+        payload_ref: OutboxPayload | None = None,
     ) -> str | None: ...
+
+    async def enqueue_refs(
+        self,
+        *,
+        instance_ids: list[str],
+        event_type: FederationEventType,
+        supersede_key: str | None,
+        payload_ref: OutboxPayload,
+    ) -> dict[str, str]: ...
+
+    async def get_payload(self, payload_id: str) -> OutboxPayload | None: ...
 
     async def drop_superseded(self, instance_id: str, supersede_key: str) -> int: ...
     async def drop_pending_with_key_prefix(
         self, instance_id: str, prefix: str
     ) -> int: ...
-    async def list_due(self, limit: int = 50) -> list[OutboxEntry]: ...
+    async def list_due(
+        self, limit: int = 50, *, exclude: Collection[str] = ()
+    ) -> list[OutboxEntry]: ...
+    async def has_pending_row(self, instance_id: str) -> bool: ...
+    async def ungroup_payload(self, payload_id: str) -> None: ...
     async def mark_delivered(self, entry_id: str) -> None: ...
     async def mark_failed(self, entry_id: str) -> None: ...
     async def reschedule(
@@ -118,8 +200,17 @@ class SqliteOutboxRepo:
         authority_json: str | None = None,
         expires_at: str | None = None,
         supersede_key: str | None = None,
+        payload_ref: OutboxPayload | None = None,
     ) -> str | None:
         """Queue one signed envelope for ``instance_id``; return its id.
+
+        With a ``payload_ref`` (migration 0145) the row stores no envelope
+        (``payload_json`` is ``''``): it references *payload_ref*, stored
+        once — ``INSERT OR IGNORE``, so every recipient of one broadcast
+        shares it — and sealed for this peer when it is sent. The payload
+        and the row go in in one transaction; a row refused below takes an
+        unreferenced payload with it, and a trigger deletes the payload when
+        its last row goes.
 
         With a ``supersede_key`` (latest-only state, see
         :func:`~socialhome.domain.federation_retention.supersede_key`) the
@@ -136,6 +227,82 @@ class SqliteOutboxRepo:
         reached here can no longer strand a row behind the purge.
         """
         entry_id = msg_id or uuid.uuid4().hex
+        supersede_key, expires_at = await self._make_room(
+            instance_id, event_type, supersede_key, expires_at
+        )
+        params = _row_params(
+            entry_id,
+            instance_id,
+            event_type,
+            payload_json,
+            authority_json,
+            expires_at,
+            supersede_key,
+            payload_ref,
+        )
+        if payload_ref is None:
+            inserted = await self._db.enqueue_rowcount(_INSERT_ROW, params)
+        else:
+            inserted = await self._db.transact(
+                lambda conn: _insert_refs(conn, payload_ref, [params])
+            )
+        if not inserted:
+            log.info(
+                "outbox: %s is no longer paired — not queueing %s",
+                instance_id,
+                event_type.value,
+            )
+            return None
+        return entry_id
+
+    async def enqueue_refs(
+        self,
+        *,
+        instance_ids: list[str],
+        event_type: FederationEventType,
+        supersede_key: str | None,
+        payload_ref: OutboxPayload,
+    ) -> dict[str, str]:
+        """Store *payload_ref* once and one ref row per household of
+        *instance_ids* in ONE transaction (v_91: a broadcast's multi
+        payload), room made in it set-based (:func:`_make_room_for`: the
+        supersede and the per-peer cap, as :meth:`enqueue` makes it per
+        row). A household no longer paired gets none. A multi event type
+        never carries a relayed delete's key, so its retention class is the
+        event type's. Returns ``{instance_id: row id}`` of the rows
+        written."""
+        expires_at = retention_expires_at(event_type)
+        rows = [
+            _row_params(
+                uuid.uuid4().hex,
+                instance_id,
+                event_type,
+                "",
+                None,
+                expires_at,
+                supersede_key,
+                payload_ref,
+            )
+            for instance_id in instance_ids
+        ]
+
+        def _write(conn: sqlite3.Connection) -> list[tuple]:
+            _make_room_for(conn, instance_ids, supersede_key)
+            return _insert_refs(conn, payload_ref, rows)
+
+        written = await self._db.transact(_write)
+        return {params[1]: params[0] for params in written}
+
+    async def _make_room(
+        self,
+        instance_id: str,
+        event_type: FederationEventType,
+        supersede_key: str | None,
+        expires_at: str | None,
+    ) -> tuple[str | None, str | None]:
+        """Before a row for *instance_id* goes in: its retention class and
+        deadline, the pending row it supersedes dropped, and room made under
+        the per-peer cap. Returns the row's ``(supersede_key, expires_at)``."""
         if (
             supersede_key is not None
             and supersede_key.startswith(RELAYED_DELETE_KEY_PREFIX)
@@ -169,40 +336,7 @@ class SqliteOutboxRepo:
                     "(all NEVER_DROP) — inserting over cap",
                     instance_id,
                 )
-        inserted = await self._db.enqueue_rowcount(
-            """
-            INSERT INTO federation_outbox(
-                id, instance_id, event_type, payload_json,
-                authority_json, expires_at, supersede_key
-            )
-            SELECT ?,?,?,?,?,?,?
-             WHERE EXISTS (
-                SELECT 1 FROM remote_instances
-                 WHERE id=? AND (status<>? OR ?=?)
-             )
-            """,
-            (
-                entry_id,
-                instance_id,
-                event_type.value,
-                payload_json,
-                authority_json,
-                expires_at,
-                supersede_key,
-                instance_id,
-                PairingStatus.UNPAIRING.value,
-                event_type.value,
-                FederationEventType.UNPAIR.value,
-            ),
-        )
-        if not inserted:
-            log.info(
-                "outbox: %s is no longer paired — not queueing %s",
-                instance_id,
-                event_type.value,
-            )
-            return None
-        return entry_id
+        return supersede_key, expires_at
 
     async def _relayed_delete_class(
         self, instance_id: str, key: str
@@ -271,34 +405,74 @@ class SqliteOutboxRepo:
             (instance_id, supersede_key),
         )
 
-    async def list_due(self, limit: int = 50) -> list[OutboxEntry]:
-        """Return pending entries whose ``next_attempt_at`` is due.
+    async def list_due(
+        self, limit: int = 50, *, exclude: Collection[str] = ()
+    ) -> list[OutboxEntry]:
+        """Return pending entries whose ``next_attempt_at`` is due, oldest
+        due first (ties: creation, then insert order).
 
-        Excludes entries past their retention window (``expires_at``).
+        Left out: entries past their retention window (``expires_at``), those
+        of the households in *exclude* (the processor's busy recipients, so
+        their backlog never fills the batch), and the rows the v_91 ordering
+        gate holds. **The gate is one rule:** a row whose event type is in
+        :data:`~socialhome.domain.federation.MULTI_EVENT_TYPES` and whose
+        household is a ``space_session`` seat (the rows a multi upload can
+        carry) waits behind ANY older ``(created_at, rowid)`` pending,
+        unexpired row of that same household — multi or single. Every other
+        row (sync, control, key exchange, any row to a paired peer) is never
+        gated. A row pinned past ``MAX_ATTEMPTS`` (a NEVER_DROP or
+        long-lived row on the ceiling backoff) is out of the ordering both
+        ways: it holds no newer row and is never held. A household's oldest
+        row is never held, so the gate cannot deadlock; a multi row stuck on transient failures is ungrouped
+        (:meth:`ungroup_payload`) and goes per row like any other.
+
+        A multi payload taken out of every group lists with no ``msg_id``.
         The caller is responsible for filtering entries whose destination
         instance is banned or unreachable.
         """
-        # ``next_attempt_at`` and ``expires_at`` are stored as ISO-8601
-        # with a ``T`` separator and a timezone suffix (``...+00:00``).
-        # SQLite's ``datetime('now')`` returns ``YYYY-MM-DD HH:MM:SS``,
-        # so a raw lexical compare disagrees on the separator and
-        # treats no row as due. Wrapping both sides in ``datetime(...)``
-        # normalises them to the same canonical form.
-        rows = await self._db.fetchall(
-            """
-            SELECT * FROM federation_outbox
-             WHERE status='pending'
-               AND datetime(next_attempt_at) <= datetime('now')
-               AND (
-                   expires_at IS NULL
-                   OR datetime(expires_at) > datetime('now')
-               )
-             ORDER BY datetime(next_attempt_at) ASC
-             LIMIT ?
-            """,
-            (int(limit),),
-        )
+        rows = await self._db.fetchall(LIST_DUE_SQL, list_due_params(limit, exclude))
         return [_row_to_entry(d) for d in rows_to_dicts(rows)]
+
+    async def has_pending_row(self, instance_id: str) -> bool:
+        """Whether *instance_id* has any pending, unexpired row not pinned
+        past ``MAX_ATTEMPTS`` — the live send's half of the :meth:`list_due`
+        gate: a multi event type to a seat with one queues behind it instead
+        of overtaking."""
+        row = await self._db.fetchone(
+            f"SELECT 1 FROM federation_outbox o WHERE o.instance_id=?"
+            f" AND {_ORDERED.format(t='o')} LIMIT 1",
+            (instance_id,),
+        )
+        return row is not None
+
+    async def ungroup_payload(self, payload_id: str) -> None:
+        """Take the multi payload *payload_id* out of every group for good
+        (the GFS refused its upload, its frame cannot be built, or it failed
+        transient :data:`~socialhome.federation.federation_service
+        .MULTI_MAX_TRANSIENT` times): its rows list with no ``msg_id`` and go
+        one by one, while each per-row envelope still carries the stored
+        ``msg_id``."""
+        await self._db.enqueue(
+            "UPDATE federation_outbox_payloads SET per_row=1 WHERE id=?",
+            (payload_id,),
+        )
+
+    async def get_payload(self, payload_id: str) -> OutboxPayload | None:
+        """The stored payload a ref row points at (migration 0145)."""
+        row = await self._db.fetchone(
+            "SELECT id, event_type, space_id, payload_enc, msg_id"
+            " FROM federation_outbox_payloads WHERE id=?",
+            (payload_id,),
+        )
+        if row is None:
+            return None
+        return OutboxPayload(
+            id=row["id"],
+            event_type=FederationEventType(row["event_type"]),
+            space_id=row["space_id"],
+            payload_enc=row["payload_enc"],
+            msg_id=row["msg_id"],
+        )
 
     async def mark_delivered(self, entry_id: str) -> None:
         # A delivered entry's job is done — remove it so the queue doesn't
@@ -565,4 +739,134 @@ def _row_to_entry(row: dict) -> OutboxEntry:
         delivered_at=row.get("delivered_at"),
         failed_at=row.get("failed_at"),
         supersede_key=row.get("supersede_key"),
+        payload_id=row.get("payload_id"),
+        space_id=row.get("payload_space_id"),
+        msg_id=row.get("payload_msg_id"),
     )
+
+
+#: One outbox row, inserted only for a household we still hold (and for an
+#: unpair tombstone only its ``UNPAIR``) — see :meth:`SqliteOutboxRepo.enqueue`.
+_INSERT_ROW = """
+    INSERT INTO federation_outbox(
+        id, instance_id, event_type, payload_json,
+        authority_json, expires_at, supersede_key, payload_id
+    )
+    SELECT ?,?,?,?,?,?,?,?
+     WHERE EXISTS (
+        SELECT 1 FROM remote_instances
+         WHERE id=? AND (status<>? OR ?=?)
+     )
+"""
+
+
+def _row_params(
+    entry_id: str,
+    instance_id: str,
+    event_type: FederationEventType,
+    payload_json: str,
+    authority_json: str | None,
+    expires_at: str | None,
+    supersede_key: str | None,
+    payload_ref: OutboxPayload | None,
+) -> tuple:
+    """The parameters of one :data:`_INSERT_ROW`."""
+    return (
+        entry_id,
+        instance_id,
+        event_type.value,
+        payload_json,
+        authority_json,
+        expires_at,
+        supersede_key,
+        payload_ref.id if payload_ref is not None else None,
+        instance_id,
+        PairingStatus.UNPAIRING.value,
+        event_type.value,
+        FederationEventType.UNPAIR.value,
+    )
+
+
+def _make_room_for(
+    conn: sqlite3.Connection, instance_ids: list[str], supersede_key: str | None
+) -> None:
+    """Inside the caller's transaction, before one row each for
+    *instance_ids* goes in: their pending rows with *supersede_key* dropped,
+    then the oldest droppable pending row (relayed deletes first, as
+    :meth:`SqliteOutboxRepo.evict_oldest_droppable`) of each one at or over
+    :data:`MAX_PENDING_PER_PEER` evicted — one statement each, whatever the
+    number of households."""
+    ids = orjson.dumps(instance_ids).decode()
+    if supersede_key is not None:
+        conn.execute(
+            "DELETE FROM federation_outbox WHERE status='pending'"
+            " AND supersede_key=? AND instance_id IN (SELECT value FROM json_each(?))",
+            (supersede_key, ids),
+        )
+    full = [
+        row[0]
+        for row in conn.execute(
+            "SELECT instance_id FROM federation_outbox WHERE status='pending'"
+            " AND instance_id IN (SELECT value FROM json_each(?))"
+            " GROUP BY instance_id HAVING COUNT(*) >= ?",
+            (ids, MAX_PENDING_PER_PEER),
+        )
+    ]
+    if not full:
+        return
+    never = sorted(e.value for e in NEVER_DROP)
+    evicted = conn.execute(
+        f"""
+        DELETE FROM federation_outbox WHERE id IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY instance_id
+                    ORDER BY COALESCE(substr(supersede_key, 1, ?) = ?, 0) DESC,
+                             datetime(created_at) ASC, id ASC
+                ) AS rn
+                  FROM federation_outbox
+                 WHERE status='pending'
+                   AND instance_id IN (SELECT value FROM json_each(?))
+                   AND event_type NOT IN ({",".join("?" * len(never))})
+            ) WHERE rn = 1
+        )
+        """,
+        (
+            len(ANY_RELAYED_DELETE_KEY_PREFIX),
+            ANY_RELAYED_DELETE_KEY_PREFIX,
+            orjson.dumps(full).decode(),
+            *never,
+        ),
+    ).rowcount
+    if evicted < len(full):
+        log.warning(
+            "outbox: %d peer(s) at pending cap with no droppable rows "
+            "(all NEVER_DROP) — inserting over cap",
+            len(full) - evicted,
+        )
+
+
+def _insert_refs(
+    conn: sqlite3.Connection, payload: OutboxPayload, rows: list[tuple]
+) -> list[tuple]:
+    """Store *payload* (once) and its ref *rows* in one transaction; return
+    the rows written. A payload no row references is dropped again."""
+    conn.execute(
+        "INSERT OR IGNORE INTO federation_outbox_payloads"
+        "(id, event_type, space_id, payload_enc, msg_id) VALUES(?,?,?,?,?)",
+        (
+            payload.id,
+            payload.event_type.value,
+            payload.space_id,
+            payload.payload_enc,
+            payload.msg_id,
+        ),
+    )
+    written = [params for params in rows if conn.execute(_INSERT_ROW, params).rowcount]
+    if not written:
+        conn.execute(
+            "DELETE FROM federation_outbox_payloads WHERE id=? AND NOT EXISTS"
+            " (SELECT 1 FROM federation_outbox WHERE payload_id=?)",
+            (payload.id, payload.id),
+        )
+    return written

@@ -54,6 +54,7 @@ from socialhome.domain.media_chunking import (
     ROUTED_CHUNK_BYTES,
     media_chunk_bytes,
 )
+from socialhome.domain.outbox import OutboxEntry
 from socialhome.federation import FederationService, routed_crypto
 from socialhome.federation import federation_service as federation_service_mod
 from socialhome.federation import media_framing as _mf
@@ -355,6 +356,12 @@ class InMemoryOutboxRepo:
 
     def __init__(self):
         self.enqueued: list[dict] = []
+        #: Migration 0145 — stored payloads by id (``OutboxPayload``).
+        self.payloads: dict = {}
+        #: ``(entry_id, next_attempt_at, attempts)`` per reschedule.
+        self.rescheduled: list[tuple[str, str, int]] = []
+        #: Multi payloads :meth:`ungroup_payload` took out of every group.
+        self.ungrouped: set[str] = set()
 
     async def enqueue(
         self,
@@ -366,10 +373,13 @@ class InMemoryOutboxRepo:
         authority_json: str | None = None,
         expires_at: str | None = None,
         supersede_key: str | None = None,
+        payload_ref=None,
     ) -> str:
         entry_id = msg_id or str(uuid.uuid4())
         if supersede_key is not None:
             await self.drop_superseded(instance_id, supersede_key)
+        if payload_ref is not None:
+            self.payloads.setdefault(payload_ref.id, payload_ref)
         self.enqueued.append(
             {
                 "id": entry_id,
@@ -378,9 +388,59 @@ class InMemoryOutboxRepo:
                 "payload_json": payload_json,
                 "expires_at": expires_at,
                 "supersede_key": supersede_key,
+                "payload_id": payload_ref.id if payload_ref is not None else None,
             }
         )
         return entry_id
+
+    async def enqueue_refs(
+        self, *, instance_ids, event_type, supersede_key, payload_ref
+    ) -> dict[str, str]:
+        return {
+            iid: await self.enqueue(
+                instance_id=iid,
+                event_type=event_type,
+                payload_json="",
+                supersede_key=supersede_key,
+                payload_ref=payload_ref,
+            )
+            for iid in instance_ids
+        }
+
+    async def get_payload(self, payload_id: str):
+        return self.payloads.get(payload_id)
+
+    def entries(self) -> list[OutboxEntry]:
+        """The queued rows as ``list_due`` would return them (test helper)."""
+        return [
+            OutboxEntry(
+                id=e["id"],
+                instance_id=e["instance_id"],
+                event_type=e["event_type"],
+                payload_json=e["payload_json"],
+                status="pending",
+                attempts=0,
+                next_attempt_at="",
+                created_at="",
+                supersede_key=e["supersede_key"],
+                payload_id=e["payload_id"],
+                space_id=(
+                    self.payloads[e["payload_id"]].space_id
+                    if e["payload_id"] is not None
+                    else None
+                ),
+                msg_id=(
+                    self.payloads[e["payload_id"]].msg_id
+                    if e["payload_id"] is not None
+                    and e["payload_id"] not in self.ungrouped
+                    else None
+                ),
+            )
+            for e in self.enqueued
+        ]
+
+    async def ungroup_payload(self, payload_id: str) -> None:
+        self.ungrouped.add(payload_id)
 
     async def drop_superseded(self, instance_id: str, supersede_key: str) -> int:
         before = len(self.enqueued)
@@ -406,8 +466,12 @@ class InMemoryOutboxRepo:
         ]
         return before - len(self.enqueued)
 
-    async def list_due(self, limit: int = 50):
+    async def list_due(self, limit: int = 50, *, exclude=()):
         return []
+
+    async def has_pending_row(self, instance_id: str) -> bool:
+        """Every queued row counts as pending and unexpired here."""
+        return any(e["instance_id"] == instance_id for e in self.enqueued)
 
     async def delete_pending_of_types(self, instance_id, event_types) -> int:
         before = len(self.enqueued)
@@ -427,7 +491,7 @@ class InMemoryOutboxRepo:
     async def reschedule(
         self, entry_id: str, next_attempt_at: str, attempts: int
     ) -> None:
-        pass
+        self.rescheduled.append((entry_id, next_attempt_at, attempts))
 
     async def expire_past_retention(self, now_iso: str) -> int:
         return 0

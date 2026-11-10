@@ -82,6 +82,7 @@ from ..federation.invite_token_redeem import (
     BOOTSTRAP_INBOUND_WINDOW_S,
     RELAY_ENVELOPE_INBOUND_LIMIT,
 )
+from ..federation.multi_recipient import is_multi_sealed, open_multi
 from ..federation.peer_pairing_client import (
     KIND_PAIRING_PEER_ACCEPT,
     is_pairing_relay_body,
@@ -262,7 +263,15 @@ class GfsRelayInbound:
         from a sender whose member card we hold for its space. A
         binary ``\x00SHR`` frame is a media chunk addressed to the mailbox
         id, opened with the same key. Same budgets as the instance-addressed
-        relay. Raises :class:`ValueError` on any refusal."""
+        relay.
+
+        v_91: a ``sealed`` that names an ``mr_suite`` is a multi-recipient
+        frame (one body the GFS fanned out to many mailboxes, plus this
+        mailbox's ``wrap`` of its key). Charged to the same bucket first;
+        the wrap opens under the same mailbox key to the body key *K*, which
+        opens the body; the pipeline then requires our tag in the ``"*:"``
+        audience and a named space, and takes the payload as-is.
+        Raises :class:`ValueError` on any refusal."""
         if isinstance(frame, bytes | bytearray):
             return await self._handle_media(frame, keys=keys)
         if not isinstance(frame, dict) or frame.get("type") != "envelope":
@@ -275,10 +284,16 @@ class GfsRelayInbound:
             window_s=BOOTSTRAP_INBOUND_WINDOW_S,
         ):
             raise MailboxFlooded("mailbox rate limit exceeded — frame dropped")
-        body = unseal_envelope_body(
-            envelope={"sealed": frame.get("sealed")},
-            keywrap_private_key=keys.kem_private,
-        )
+        sealed = frame.get("sealed")
+        multi = False
+        if is_multi_sealed(sealed):
+            multi = True
+            body = open_multi(sealed, keys.kem_private)
+        else:
+            body = unseal_envelope_body(
+                envelope={"sealed": sealed},
+                keywrap_private_key=keys.kem_private,
+            )
         if not is_relay_envelope_body(body):
             raise ValueError("a mailbox carries relayed envelopes only")
         inner = body.get("envelope")
@@ -292,6 +307,7 @@ class GfsRelayInbound:
                 from_instance,
                 orjson.dumps(inner),
                 transport=TRANSPORT_GFS_MAILBOX,
+                multi=multi,
             )
         except ValueError as exc:
             # The routing facts only — never the payload, never the mailbox.

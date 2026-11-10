@@ -46,7 +46,7 @@ from ..domain.federation import (
     PairingReachInvalidError,
 )
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
-from ..services.gfs_envelope_sender import normalize_gfs_base
+from .gfs_relay_transport import normalize_gfs_base
 from .invite_bootstrap import RelayEnvelopeSender, verify_peer_keywrap
 from .keywrap_seal import SUPPORTED_KEM_SUITES, keywrap_wire_fields
 

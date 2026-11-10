@@ -216,7 +216,15 @@ class EnvelopeRelayThrottled(SpacePermissionError):
     :class:`~socialhome.domain.space.SpacePermissionError` and reaches
     ``POST /api/spaces/join`` as a 422 with a sentence worth reading
     instead of an opaque "could not deliver".
+
+    ``retry_after_s`` is the server's ``Retry-After`` (delta-seconds) when
+    it named one, else ``None`` — a caller that queues the frame waits at
+    least that long instead of its own short cooldown.
     """
+
+    def __init__(self, message: str, *, retry_after_s: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
 
 
 class RelayEnvelopeSender(Protocol):
@@ -272,6 +280,23 @@ class RelayEnvelopeSender(Protocol):
         media_body: bytes | None = None,
     ) -> bool:
         """v_88 — POST one frame for a mailbox over the anonymous session."""
+        ...
+
+    async def multi_connection(self, gfs_url: str) -> Any:
+        """v_90 — the connection at *gfs_url* that takes one frame for many
+        mailboxes (proved ``envelope_multi``), or ``None``."""
+        ...
+
+    def multi_max_recipients(self, conn: Any) -> int:
+        """v_91 — most mailbox ids one upload to *conn* may name."""
+        ...
+
+    async def send_to_mailboxes(
+        self, *, entries: list[tuple[str, dict]], gfs_url: str, body: dict
+    ) -> int | None:
+        """v_91 — POST one multi-recipient frame (``(mailbox_id, wrap)``
+        entries + the body) over the anonymous session; the HTTP status, or
+        ``None`` when not reached."""
         ...
 
 

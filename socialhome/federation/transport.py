@@ -2198,6 +2198,53 @@ class FederationTransport:
         GFS mailbox (v_89) — the host-hop decision for a directory seat."""
         return await self._mailbox_target(instance, space_id, media=False) is not None
 
+    # ── v_91: one upload for many mailboxes ──────────────────────────────
+
+    async def multi_mailbox_target(
+        self,
+        instance: RemoteInstance,
+        space_id: str,
+        *,
+        caps: dict[str, int] | None = None,
+    ) -> MailboxTarget | None:
+        """*instance*'s GFS mailbox for *space_id* when a multi-recipient
+        upload can reach it (v_90): a :data:`InstanceSource.SPACE_SESSION`
+        seat whose mailbox sits on a GFS of ours that proved
+        ``envelope_mailbox`` and ``envelope_multi``. ``None`` → the caller
+        sends to it per recipient. *caps*, when given, caches
+        :meth:`multi_capacity` by GFS URL across the calls of one pass (one
+        broadcast, one outbox drain), so each GFS is probed once. Never
+        raises."""
+        if instance.source is not InstanceSource.SPACE_SESSION:
+            return None
+        target = await self._mailbox_target(instance, space_id, media=False)
+        if target is None:
+            return None
+        cap = caps.get(target.gfs_url) if caps is not None else None
+        if cap is None:
+            cap = await self.multi_capacity(target.gfs_url)
+            if caps is not None:
+                caps[target.gfs_url] = cap
+        return target if cap >= 1 else None
+
+    async def multi_capacity(self, gfs_url: str) -> int:
+        """Most mailbox ids one upload to the GFS at *gfs_url* may name;
+        ``0`` when no connection of ours there proved ``envelope_multi``."""
+        if self._gfs_relay is None:
+            return 0
+        return await self._gfs_relay.multi_capacity(gfs_url)
+
+    async def send_multi_mailbox(
+        self, *, to: list[tuple[MailboxTarget, dict]], body: dict
+    ) -> tuple[bool, int | None, float | None]:
+        """Hand ONE multi-recipient frame — *body* plus one key wrap per
+        target in *to* (all on one GFS) — to the relay: ``(ok, status,
+        retry_after_s)``. Same never-raise contract as the relay's
+        ``send``."""
+        if self._gfs_relay is None:
+            return False, None, None
+        return await self._gfs_relay.send_multi_mailbox(to=to, body=body)
+
     async def send_via_gfs_url(
         self,
         *,

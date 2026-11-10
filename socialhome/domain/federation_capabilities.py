@@ -1448,7 +1448,23 @@ from __future__ import annotations
 #:   still reach members directly and followers via the host relay. No
 #:   sync-stream record change. Labelled "Posting over a GFS without naming
 #:   the household".
-OURS: int = 90
+#: * **v_91** (2026-11-10) — **one upload for many GFS mailboxes**. A space
+#:   event whose final bytes are the same for every member household
+#:   seated behind one GFS (``space_session`` mailbox seats) goes up ONCE
+#:   to ``POST /gfs/envelope/multi`` with the list of mailbox ids, when
+#:   that GFS proves the signed ``envelope_multi`` capability. The body is
+#:   sealed once under a fresh random key wrapped to each recipient
+#:   mailbox's key-wrap key (``mr-wrap-aesgcm-256``,
+#:   ``federation/multi_recipient.py``); its inner
+#:   envelope is signed by the sender and lists one audience tag per
+#:   intended household (``to_instance = "*:" + tags``). Only
+#:   ``MULTI_EVENT_TYPES`` are grouped; single-recipient items stay
+#:   individually sealed. **Fallback**: a member below v_91, a GFS without
+#:   ``envelope_multi``, a group of one or a failed upload gets today's
+#:   per-recipient mailbox frame. Not space-scoped, no sync-stream record
+#:   change. Labelled "Space updates reach households behind a GFS in one
+#:   upload".
+OURS: int = 91
 
 
 class FederationCapability:
@@ -2115,6 +2131,11 @@ class FederationCapability:
     #: (members get its posts directly, followers via the host relay). Not
     #: space-scoped: a lagging household still posts, through the host.
     MIN_FOR_ANON_MEMBER_PUBLISH_ONLY = 90
+    #: v_91 — a household at or above it opens multi-recipient mailbox
+    #: frames (``mr_suite`` seal, audience-tagged ``to_instance``): a
+    #: sender groups its mailbox seats behind one GFS proving
+    #: ``envelope_multi`` into ONE ``POST /gfs/envelope/multi`` upload.
+    MIN_FOR_MULTI_MAILBOX = 91
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2457,6 +2478,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY,
         "Posting over a GFS without naming the household",
     ),
+    (
+        FederationCapability.MIN_FOR_MULTI_MAILBOX,
+        "Space updates reach households behind a GFS in one upload",
+    ),
 ]
 
 
@@ -2557,6 +2582,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_RELAY_MEDIA: "relay_media",
     FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH: "mailbox_member_mesh",
     FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY: "anonymous_gfs_posting_only",
+    FederationCapability.MIN_FOR_MULTI_MAILBOX: "multi_mailbox",
 }
 
 

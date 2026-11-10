@@ -544,6 +544,49 @@ async def _deliver_outbox_entry(
     return outcome
 
 
+def _build_outbox_processor(
+    app: web.Application,
+    outbox_repo,
+    federation_service: FederationService,
+    federation_repo,
+    peer_unpair: PeerUnpairService,
+) -> OutboxProcessor:
+    """The :class:`OutboxProcessor` that drains ``federation_outbox``.
+
+    Each row is re-delivered by :func:`_deliver_outbox_entry` (a row queued
+    with its sealed envelope is re-stamped + re-signed; a ref row, migration
+    0145, has the stored payload sealed for its peer). ``after_prune``: once
+    the retention sweep has failed an UNPAIR past its max age, that peer's
+    unpair tombstone is purged. ``multi``: due ref rows of one multi
+    payload to mailbox seats on one GFS go up as ONE upload (v_91); rows the
+    moderation check refuses stay single. The federation service wakes it
+    when a broadcast queued a multi payload — it is the only multi sender.
+    """
+
+    def _still_wanted():
+        """The moderation queue's check, once its service is wired."""
+        moderation = app.get(K.space_moderation_service_key)
+        return moderation.outbox_entry_wanted if moderation is not None else None
+
+    async def _deliver(entry):
+        return await _deliver_outbox_entry(
+            federation_service,
+            federation_repo,
+            peer_unpair,
+            entry,
+            still_wanted=_still_wanted(),
+        )
+
+    processor = OutboxProcessor(
+        outbox_repo,
+        _deliver,
+        after_prune=peer_unpair.sweep_tombstones,
+        multi=federation_service,
+    )
+    federation_service.attach_outbox_wake(processor.wake, still_wanted=_still_wanted)
+    return processor
+
+
 def _parse_retry_after_s(value: str | None) -> float | None:
     """``Retry-After`` as delta-seconds, or ``None`` when absent/unusable.
 
@@ -675,7 +718,12 @@ async def _redeliver_envelope(
     # correct: the node that originally signed it had the signer, so a missing
     # one is misconfiguration, not a transient condition.)
     try:
-        body = federation_service.resign_for_redelivery(entry.payload_json)
+        if entry.payload_id is not None:
+            # Migration 0145: a ref row stores no envelope — seal the stored
+            # payload for this one peer now (its id as ``msg_id``).
+            body = await federation_service.seal_outbox_entry(entry, instance)
+        else:
+            body = federation_service.resign_for_redelivery(entry.payload_json)
     except Exception as exc:
         log.warning(
             "outbox: undecodable entry %s — dropping: %s", entry.id, exc, exc_info=True
@@ -5773,30 +5821,8 @@ def create_app(config: Config | None = None) -> web.Application:
         # 6. OutboxProcessor — drains federation_outbox in the background.
         peer_unpair_service = app[K.peer_unpair_service_key]
 
-        async def _deliver(entry):
-            """Re-deliver an outbox entry via FederationService.
-
-            The outbox stores the full envelope JSON (signed + encrypted)
-            from the original send_event() call. On retry we POST the same
-            bytes verbatim — no re-encryption.
-            """
-            moderation = app.get(K.space_moderation_service_key)
-            return await _deliver_outbox_entry(
-                federation_service,
-                federation_repo,
-                peer_unpair_service,
-                entry,
-                still_wanted=(
-                    moderation.outbox_entry_wanted if moderation is not None else None
-                ),
-            )
-
-        # ``after_prune``: once the retention sweep has failed an UNPAIR
-        # past its max age, purge that peer's unpair tombstone.
-        outbox_processor = OutboxProcessor(
-            outbox_repo,
-            _deliver,
-            after_prune=peer_unpair_service.sweep_tombstones,
+        outbox_processor = _build_outbox_processor(
+            app, outbox_repo, federation_service, federation_repo, peer_unpair_service
         )
         await outbox_processor.start()
         app[K.outbox_processor_key] = outbox_processor

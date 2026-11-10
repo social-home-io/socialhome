@@ -1070,6 +1070,249 @@ hop), `GfsRelayInbound.handle_mailbox_frame`,
 `inbound_validator.make_check_mailbox_sender`,
 `federation/sync/space/scheduler.py` (no sync with directory seats).
 
+## One upload for many mailboxes (v_91)
+
+GFS redesign PR 3b (owner sign-off 2026-11-09; wrap per recipient, owner
+decision 2026-11-10). Space content that goes to two or more households at
+their mailboxes on the same GFS is sealed ONCE, signed ONCE and uploaded
+ONCE, with one small key wrap per mailbox. The GFS stores the body once and
+pushes it, with that mailbox's wrap, to each listed mailbox. Gated on
+`FederationCapability.MIN_FOR_MULTI_MAILBOX` (v_91, slug `multi_mailbox`)
+and the signed GFS capability `envelope_multi: {"max_recipients": 500}`.
+Not space-scoped, no sync-stream change.
+
+**What goes multi — one path.** `broadcast_to_space_members` computes
+every target's final payload as before (legacy / relay variants,
+`per_peer`, file maps). Targets that are mailbox seats (`space_session`
+rows with a card mailbox) at v_91, on a GFS that proves `envelope_multi`,
+with no deferred mesh queue and an event type in `MULTI_EVENT_TYPES` are
+grouped by ONE key: the normalized GFS URL and the payload content (key
+order aside, `OPT_SORT_KEYS`). Each group of two or more is written to the
+local outbox as ONE multi payload plus one ref row per target, in one
+transaction, and the outbox is woken (`OutboxProcessor.wake`). Those
+targets report `DELIVERY_ERROR_QUEUED` (self-healing, never a terminal
+failure). The **outbox is the only multi sender**: its next pass groups the
+due rows of one multi payload with the same eligibility rule and grouping
+key, chunks them at the GFS's `max_recipients`, and makes one upload per
+chunk. A lone seat, a paired peer, an older peer and every other event type
+keep the per-recipient path.
+
+**The audience is the current member set.** The targets are exactly the
+ones `broadcast_to_space_members` plans: the `space_instances` households
+of the space as they are now (minus bans, narrowed by `only_instances`
+when given). The body key is wrapped to those mailboxes and nobody else's,
+so a narrowed broadcast (the v_55 space chat to writer seats only) goes
+multi to its narrowed audience, and a public / global space with GFS
+subscribers may go multi too: no space key is involved, so holding the
+space's content key opens nothing. Nothing depends on space epochs, so
+there is no freshness rule and no hold after a removal — a household
+removed from the space is no longer a target and gets no wrap.
+
+`MULTI_EVENT_TYPES` is the seat vocabulary minus
+everything single-recipient (member cards, directory frames, redeems,
+member→host requests, bazaar threads and offers), everything that carries
+key material (`SPACE_KEY_EXCHANGE*`), the pairwise sync streams, and
+routing / space-less types (`domain/federation.py`). Those stay sealed to
+one mailbox.
+
+**Wire.** `POST /gfs/envelope/multi` on the anonymous session, body
+exactly:
+
+```
+{"to":   [{"mailbox": "<id>", "wrap": {"kem_suite", "eph_pk", "ciphertext"}}, ...],
+ "body": {"mr_suite": "mr-wrap-aesgcm-256", "ciphertext": "<b64url nonce || ct>"}}
+```
+
+| Field | Meaning |
+|---|---|
+| `body.mr_suite` | `mr-wrap-aesgcm-256`; receivers refuse any other (no default) |
+| `body.ciphertext` | AES-256-GCM under a fresh random 32-byte key *K* (one per upload attempt), AAD `sh-mr-body:v1\n` + suite; the plaintext is the relay `kind` wrapper padded to the same size buckets as a single frame |
+| `to[].wrap` | *K* sealed to that mailbox's key-wrap key with the static-recipient seal single mailbox frames use (`seal_to_keywrap`: ephemeral X25519 + HKDF + AES-GCM, `kem_suite: "x25519"`); receivers refuse an unknown `kem_suite` |
+
+The GFS pushes `{"type": "envelope", "sealed": {mr_suite, ciphertext,
+wrap}}` — the body fields plus that mailbox's wrap — on each listed
+mailbox's claim socket.
+
+Inside is the ordinary §24.11 envelope, signed once with `ed25519` by the
+sending household's identity key. The whole envelope rides inside the
+body sealed under *K*, so its `encrypted_payload` carries the payload JSON
+as-is — no second seal (still covered by the signature, never visible to
+the GFS). Its signed `to_instance` is `"*:"` + the
+sorted audience tags: one `b64url(SHA-256("sh-mr-to:v1\n" +
+instance_id)[:4])` per intended household. The tags are unkeyed: they sit
+inside the body, which the GFS cannot open, and every recipient learns *K*
+anyway — the tags only stop a recipient from re-wrapping *K* and pushing
+the frame to a household the sender left out. The signature covers the
+payload, the audience list and `space_id`; `msg_id` is the stored
+payload's stable one.
+
+**Receiving.** A frame on our mailbox whose `sealed` names an `mr_suite`
+is charged to the mailbox's bucket, its suite checked, its wrap opened with
+the mailbox's key-wrap private key (a 32-byte *K*, else refused), then the
+body, and run through the unchanged §24.11 pipeline with transport
+`gfs_mailbox`, marked a multi frame (`InboundContext.multi_frame`, set
+only by the mailbox leg; `make_check_multi_recipient`):
+
+- `to_instance` starting with `*` is refused on every other path;
+- the event type must be in `MULTI_EVENT_TYPES`;
+- our own tag must be in the signed audience;
+- the envelope must name its space, and the payload's `space_id` (when it
+  has one) must equal it.
+
+Then `make_check_mailbox_sender` (we hold the sender's card for that
+space), the signature against the sender's row (the card's identity key),
+replay, and the payload taken as-is — only on a frame marked multi; an
+unencrypted payload on any other envelope fails to decrypt and is refused.
+Rights do not grow. Nothing is parked:
+the wrap is for this mailbox's own key, which it always holds.
+
+**The GFS stores the body once** (GFS migration 0031). The body goes to
+`gfs_envelope_bodies`. Each listed **registered mailbox** gets one
+`gfs_envelope_queue` row holding `body_id` and its own wrap (instance ids
+and unknown ids are skipped). A trigger frees the body when its last row is
+deleted — delivered, tail-dropped, unregistered, idle-swept or expired.
+The frame is composed only when pushed to a claim socket.
+
+- **Per-recipient caps** charge every reference the full body size, so a
+  multi frame cannot get past a mailbox's 2 000 / 32 MiB.
+- **Limits.** 1–500 recipients. 60 uploads per minute per address **per
+  node**, plus a per-address, per-node budget of 600 recipients per minute
+  (the same queue work as 600 single frames; `429` with `Retry-After: 60`).
+  Both are this node's, like `/gfs/envelope`'s limiter: a 4-node cluster
+  allows one address 4× (240 uploads, 2 400 recipients a minute).
+  Uniform `202`.
+- **Cluster.** The upload is queued on the receiving node; a node holding
+  a claim socket drains it, the others get `NODE_DRAIN_HINT`.
+
+**The local outbox stores the payload once** (household migration 0145).
+A payload is stored ONCE, KEK-wrapped, in `federation_outbox_payloads`,
+with one `federation_outbox` row per recipient referencing it
+(`payload_id`); a trigger frees it with its last row. Two kinds:
+
+- a **failed send's payload** (`send_event`): id an HMAC under a
+  per-process key, `msg_id` NULL. Each row is sealed for its one peer at
+  send time with the row's id as `msg_id`, and is never grouped;
+- a **multi payload** (the broadcast above): a random id and a uuid4
+  `msg_id`. Every envelope built from it — the multi frame on every retry
+  (a fresh *K* and fresh wraps each time), and any per-row fallback for its
+  rows — carries that `msg_id`, so a retry after a lost `202` or a timeout
+  is dropped by each receiver's replay cache.
+
+**Latency and order — non-blocking passes.** A pass starts its deliveries
+and returns; it never waits for them. Recipients with a delivery in flight
+are *busy* (in memory): a pass leaves their rows out (in the SQL, so a busy
+recipient's backlog never fills the batch) until that delivery ends, so a
+recipient's rows still go one at a time in due order, and a group is formed
+only from recipients that are not busy (a busy one keeps its row, same
+`msg_id`, for a later pass) and only from each recipient's oldest row of
+the pass (its later rows go after the group, so groups never cross).
+Per-recipient deliveries share 8 slots
+(`PARALLEL_RECIPIENTS`); multi uploads go to the GFS, not to a peer, and
+have their own 4 (`MULTI_PARALLEL`), so a hung peer — even eight — never
+delays a queued broadcast. Each delivery is bounded by 120 s. Nothing busy
+is persisted: a crash leaves the rows pending. `stop()` waits for the loop
+and the deliveries in flight up to its 5 s deadline, then cancels them
+(their rows stay pending); `start()` clears the busy set.
+
+**Order to a seat — one rule, on every attempt.** A row whose event type is
+in `MULTI_EVENT_TYPES` and whose household is a `space_session` seat (the
+rows a multi upload can carry) waits behind ANY older pending, unexpired
+row of that same household — multi or single (`list_due`). Every other row
+(sync, control, key exchange, any row to a paired peer) is never gated. So
+a delete or an update never reaches a seat before its create, even while
+the create waits out its backoff, and a newcomer's catch-up (which counts
+a queued chunk as a failed one) never waits on content. "Older" is
+`(created_at, rowid)`; an expired row (past `expires_at`, the sweep fails it)
+gates nothing, and neither does a row pinned past `MAX_ATTEMPTS` (a
+`NEVER_DROP` or long-lived row, e.g. a key exchange, retrying on the ceiling
+backoff forever) — it is out of the ordering both ways: it holds no newer
+row (which would otherwise wait until it expired and be lost) and is never
+held itself. A household's oldest row is never held, so the gate cannot
+deadlock. Cost: each seat's oldest row is found ONCE per pass (a
+materialized CTE, one index search per seat — never a lookup per row):
+~5 ms at 10 seats × 1 000 rows. Due rows hand out by `next_attempt_at`, then
+creation, then insert order; a delivered row wakes the next pass at once
+(it may free that seat's next row). A multi upload that does not succeed —
+however fast it failed — stalls each of its recipients for the rest of the
+pass. A live send (`send_event`, and the v_89 host hop to a seat we cannot
+reach at its mailbox) of a `MULTI_EVENT_TYPES` event to a seat with any
+pending, unexpired row would overtake it, so it is queued to the outbox
+instead (due now; the gate orders it) — the same rule, one indexed read,
+only for such an event to a seat. Such live sends to one seat take turns
+(a per-seat lock, held from that read through the live send to queueing it
+on failure; dropped when nobody holds or waits on it): a delete started
+while its create is still in flight on a slow GFS waits for it, then finds
+the create's queued row and queues behind it.
+
+**Failures.** A `429` waits the GFS's `Retry-After` (60 s when it names
+none); a timeout, a `5xx` or a transport error is TRANSIENT. Either way the
+rows are rescheduled together and never fanned out per recipient, so a busy
+GFS gets no burst. A target no longer eligible when the upload is built
+(removed, no mailbox, an older peer) is dropped from it — its row is handed
+back and goes per row in a later pass — and the rest still go up while two
+or more remain. When the GFS refused the upload with any other `4xx` (the
+same frame would be refused again) or no frame can be built (over the top
+size bucket), every row is handed back — never sent per row inside the
+multi slot — and the payload is marked `per_row`: its rows go per row once,
+pair-sealed under the multi payload's `msg_id`, and are never regrouped.
+So is a payload whose upload failed TRANSIENT `MULTI_MAX_TRANSIENT` (3)
+times by its rows' `attempts` (a timeout counts): its rows go per row, with
+the host-hop fallback, so a NEVER_DROP multi row cannot hold its seats'
+later content on the ceiling backoff. A
+peer below v_91, a GFS without `envelope_multi` or a seat alone on its GFS:
+per-recipient frames, as in v_89.
+
+**Residuals.** What the earlier space-key design left open is gone: no
+frame waits for a key handoff (nothing is parked), no sender can be "behind
+on a removal" (a removed household is not a target), and a household that
+holds the space key — a follower, a GFS that subscribed — cannot open a
+frame not wrapped to its mailbox. What remains is what the GFS sees: the
+recipient list of each upload (see [principles](../principles.md)).
+
+```mermaid
+sequenceDiagram
+    participant E as Member E (GFS only)
+    participant G as GFS
+    participant D as Member D (mailbox)
+    participant A as Host A (mailbox, offline)
+    E->>E: broadcast: one multi payload + ref rows A, D in the outbox; wake
+    E->>E: outbox pass: fresh K; body sealed once (tags [A, D], msg_id of the payload); K wrapped to mbx A and mbx D
+    E->>G: POST /gfs/envelope/multi {to: [{mbx A, wrap A}, {mbx D, wrap D}], body}
+    G-->>E: 202 (uniform)
+    G->>G: one body row + 2 reference rows with their wraps (caps charged per mailbox)
+    G->>D: {body, wrap D} on D's claim socket
+    D->>D: open wrap D → K; open body; our tag listed; card of E; §24.11
+    Note over A: offline — its reference waits (24 h TTL)
+    A->>G: claim mailbox (back online)
+    G->>A: {body, wrap A}; last reference gone → body freed
+```
+
+**Cost** (a ~1 KiB calendar event; measured with the real code —
+`build_multi_envelope` / `seal_multi` / `wrap_mr_key`):
+
+| Case | Before (v_90) | After (v_91) |
+|---|---|---|
+| Per recipient on the upload | one 5.65 KB POST | one `to` entry: 229 B (32-char mailbox id + a 174 B wrap) |
+| Uplink, 200 mailbox recipients on one GFS | 200 POSTs × 5.65 KB = 1.13 MB | 1 POST, 51.4 KB (5.5 KB body + 200 × 229 B) |
+| Uplink, 500 recipients | 2.83 MB | 136 KB (the 3.5 KB tag list moves the body to the 16 KiB bucket) |
+| GFS storage while queued (200) | 200 × ~5.6 KB = 1.13 MB | 5.5 KB once + 200 × (64 B + 174 B wrap) |
+| GFS pushes | 200 × 5.6 KB | 200 × 5.76 KB (body + that mailbox's wrap) |
+| Sender CPU per upload | 200 X25519 seals of 5.6 KB | 1 AES-GCM seal + 200 X25519 wraps of 32 B |
+| Local outbox, 200 recipients failing | 200 × ~1.9 KB sealed envelopes = 420 KB of rows | one ~1.5 KB wrapped payload + 200 × ~230 B = 48 KB |
+| Local outbox per multi broadcast (200 seats) | — | one wrapped payload + 200 ref rows (≈ 48 KB), deleted on the 202; read in one drain pass (`DRAIN_BATCH` = 500), so ONE upload |
+| Retry after a lost `202` (200 seats) | 200 per-recipient re-sends | 1 upload, same `msg_id` — receivers drop it in the replay cache |
+| Followers | 0 | 0 |
+
+Implementation: `socialhome/federation/multi_recipient.py`,
+`federation/keywrap_seal.py` (`seal_to_keywrap` / `open_keywrap`),
+`FederationService._queue_multi_groups` / `_multi_target` /
+`outbox_multi_groups` / `deliver_outbox_multi` / `_must_queue_behind`,
+`OutboxProcessor` (`wake`, `_start_pass`),
+`GfsEnvelopeSender.send_to_mailboxes`, `GfsRelayInbound.handle_mailbox_frame`,
+`inbound_validator.make_check_multi_recipient`,
+`socialhome/global_server/envelope_relay.py`, GFS migration 0031,
+household migration 0145.
+
 ## Privacy — who learns what
 
 | Party | Learns |

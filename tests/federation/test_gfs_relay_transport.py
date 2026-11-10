@@ -33,6 +33,7 @@ from socialhome.federation.gfs_relay_transport import (
     RELAY_STATUS_THROTTLED,
     RELAY_STATUS_TOO_LARGE,
     GfsRelayTransport,
+    MailboxTarget,
     build_relay_plaintext,
     is_relay_envelope_body,
     seal_relay_envelope,
@@ -539,3 +540,131 @@ async def test_media_ready_needs_a_key_a_relay_and_a_proving_server():
     assert not await GfsRelayTransport(
         relay_sender=_FakeMediaRelay(raises=RuntimeError("probe"))
     ).media_ready(_instance(kp))
+
+
+# ─── v_91: one upload for many mailboxes ──────────────────────────────────
+
+MULTI_BODY = {"mr_suite": "mr-wrap-aesgcm-256", "ciphertext": "cc"}
+WRAP = {"kem_suite": "x25519", "eph_pk": "ee", "ciphertext": "ww"}
+
+
+class _FakeMultiRelay:
+    def __init__(
+        self,
+        *,
+        conn: object = object(),
+        cap: int = 500,
+        status: int | None = 202,
+        raises: Exception | None = None,
+    ) -> None:
+        self.conn, self.cap, self.status, self.raises = conn, cap, status, raises
+        self.calls: list[tuple[list[tuple[str, dict]], str, dict]] = []
+
+    async def multi_connection(self, gfs_url):
+        if isinstance(self.raises, RuntimeError):
+            raise self.raises
+        return self.conn
+
+    def multi_max_recipients(self, conn):
+        return self.cap
+
+    async def send_to_mailboxes(self, *, entries, gfs_url, body):
+        if self.raises is not None:
+            raise self.raises
+        self.calls.append((list(entries), gfs_url, body))
+        return self.status
+
+
+def _targets(n: int, url: str = "https://gfs.example.org"):
+    return [
+        (
+            MailboxTarget(
+                mailbox_id=chr(ord("m") + i) * 32, kem_pk=b"k" * 32, gfs_url=url
+            ),
+            WRAP,
+        )
+        for i in range(n)
+    ]
+
+
+async def test_multi_frame_names_every_mailbox_once_on_their_gfs():
+    relay = _FakeMultiRelay()
+    transport = GfsRelayTransport(relay_sender=relay)
+    to = _targets(3)
+    assert await transport.send_multi_mailbox(to=to, body=MULTI_BODY) == (
+        True,
+        None,
+        None,
+    )
+    assert relay.calls == [
+        (
+            [(t.mailbox_id, WRAP) for t, _ in to],
+            "https://gfs.example.org",
+            MULTI_BODY,
+        )
+    ]
+
+
+@pytest.mark.parametrize("status", [400, 413, 503, None])
+async def test_multi_frame_refused_by_the_relay_names_the_status(status):
+    """A refusal carries the GFS's status (``None``: not reached), so the
+    caller tells a 4xx (per row) from a 5xx / timeout (retry)."""
+    transport = GfsRelayTransport(relay_sender=_FakeMultiRelay(status=status))
+    assert await transport.send_multi_mailbox(to=_targets(2), body=MULTI_BODY) == (
+        False,
+        status,
+        None,
+    )
+
+
+async def test_multi_frame_needs_at_least_one_target():
+    relay = _FakeMultiRelay()
+    transport = GfsRelayTransport(relay_sender=relay)
+    assert await transport.send_multi_mailbox(to=[], body=MULTI_BODY) == (
+        False,
+        None,
+        None,
+    )
+    assert relay.calls == []
+
+
+@pytest.mark.parametrize(
+    ("raises", "want"),
+    [
+        (EnvelopeRelayThrottled("busy"), (RELAY_STATUS_THROTTLED, None)),
+        (
+            EnvelopeRelayThrottled("busy", retry_after_s=60.0),
+            (RELAY_STATUS_THROTTLED, 60.0),
+        ),
+        (EnvelopeRelayUnavailable("none"), (None, None)),
+        (RuntimeError("boom"), (None, None)),
+    ],
+)
+async def test_multi_frame_failures_never_raise(raises, want):
+    """A throttle carries the GFS's ``Retry-After`` up to the caller."""
+    transport = GfsRelayTransport(relay_sender=_FakeMultiRelay(raises=raises))
+    assert await transport.send_multi_mailbox(to=_targets(2), body=MULTI_BODY) == (
+        False,
+        *want,
+    )
+
+
+async def test_multi_capacity_is_the_proving_servers_cap_or_zero():
+    assert (
+        await GfsRelayTransport(relay_sender=_FakeMultiRelay(cap=40)).multi_capacity(
+            "https://gfs.example.org"
+        )
+        == 40
+    )
+    assert (
+        await GfsRelayTransport(relay_sender=_FakeMultiRelay(conn=None)).multi_capacity(
+            "https://gfs.example.org"
+        )
+        == 0
+    )
+    assert (
+        await GfsRelayTransport(
+            relay_sender=_FakeMultiRelay(raises=RuntimeError("probe"))
+        ).multi_capacity("https://gfs.example.org")
+        == 0
+    )

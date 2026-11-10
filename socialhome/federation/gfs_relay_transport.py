@@ -117,6 +117,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import orjson
 
@@ -128,6 +129,21 @@ from .invite_bootstrap import EnvelopeRelayThrottled, RelayEnvelopeSender
 from .keywrap_seal import seal_to_keywrap
 
 log = logging.getLogger(__name__)
+
+
+def normalize_gfs_base(url: str) -> str:
+    """Compare-able form of a GFS base URL — scheme + host(+port), no path.
+
+    The invite blob's ``gfs_url`` is typed by whoever published it and
+    pasted through a chat client; the local pairing row is typed by the
+    admin. ``https://gfs.example.org/`` and ``https://GFS.example.org``
+    are the same server, so casing, a trailing slash and a trailing path
+    must not decide whether a redeem works.
+    """
+    parsed = urlparse(url.strip().rstrip("/"))
+    if not parsed.scheme or not parsed.netloc:
+        return url.strip().rstrip("/").lower()
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
 
 
 #: ``kind`` discriminator on the sealed plaintext. Distinct from every
@@ -554,6 +570,61 @@ class GfsRelayTransport:
             return False, RELAY_STATUS_TOO_LARGE if too_big else None
         return await self._deliver_mailbox(instance, target, media_body=body)
 
+    # ── v_91: one upload for many mailboxes ───────────────────────
+
+    async def multi_capacity(self, gfs_url: str) -> int:
+        """Most mailbox ids one multi-recipient upload to the GFS at
+        *gfs_url* may name: ``0`` unless one of our connections there proved
+        ``envelope_mailbox`` and ``envelope_multi``. Never raises."""
+        try:
+            conn = await self._sender.multi_connection(gfs_url)
+            if conn is None:
+                return 0
+            return self._sender.multi_max_recipients(conn)
+        except Exception as exc:  # a capability probe must never raise here
+            log.info("gfs relay: multi capability check failed: %s", exc, exc_info=True)
+            return 0
+
+    async def send_multi_mailbox(
+        self, *, to: list[tuple[MailboxTarget, dict]], body: dict
+    ) -> tuple[bool, int | None, float | None]:
+        """Hand ONE multi-recipient frame to the GFS of the targets in *to*
+        — all on that one GFS, grouped by the caller — as its ``body``
+        (:func:`~socialhome.federation.multi_recipient.seal_multi`) plus one
+        ``wrap`` of the body key per target mailbox. The GFS sees the
+        mailbox list, the opaque wraps and the body, nothing that names a
+        household.
+
+        ``(ok, status, retry_after_s)``: *status* is
+        :data:`RELAY_STATUS_THROTTLED` on a full window (with the GFS's
+        ``Retry-After`` in seconds when it named one), the GFS's HTTP status
+        when it refused the upload, ``None`` when it was not reached. Never
+        logs a mailbox id."""
+        if not to:
+            return False, None, None
+        try:
+            status = await self._sender.send_to_mailboxes(
+                entries=[(t.mailbox_id, wrap) for t, wrap in to],
+                gfs_url=to[0][0].gfs_url,
+                body=body,
+            )
+        except EnvelopeRelayThrottled as exc:
+            log.info("gfs relay: a multi-recipient frame was throttled")
+            return False, RELAY_STATUS_THROTTLED, exc.retry_after_s
+        except SpacePermissionError as exc:
+            log.info("gfs relay: no GFS could carry a multi-recipient frame: %s", exc)
+            return False, None, None
+        except Exception as exc:
+            log.warning(
+                "gfs relay: sending a multi-recipient frame failed: %s",
+                exc,
+                exc_info=True,
+            )
+            return False, None, None
+        if status is not None and status < 300:
+            return True, None, None
+        return False, status, None
+
     async def _deliver_mailbox(
         self,
         instance: RemoteInstance,
@@ -601,5 +672,6 @@ __all__ = [
     "MailboxTarget",
     "build_relay_plaintext",
     "is_relay_envelope_body",
+    "normalize_gfs_base",
     "seal_relay_envelope",
 ]

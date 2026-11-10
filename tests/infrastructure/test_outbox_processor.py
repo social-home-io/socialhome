@@ -8,11 +8,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.federation_retention import capped_delete_key
+from socialhome.domain.gfs_mailbox import MULTI_MAX_RECIPIENTS
+from socialhome.infrastructure import outbox_processor as outbox_processor_mod
 from socialhome.infrastructure.outbox_processor import (
     BACKOFF_SECONDS,
     JITTER_RATIO,
     MAX_ATTEMPTS,
     MAX_RETRY_AFTER_S,
+    PARALLEL_RECIPIENTS,
     DeliveryOutcome,
     OutboxProcessor,
     RetryAfter,
@@ -102,6 +105,15 @@ async def test_drain_once_empty_repo():
     proc = OutboxProcessor(repo, AsyncMock())
     result = await proc.drain_once()
     assert result == 0
+
+
+async def test_one_pass_reads_a_whole_multi_group():
+    """A broadcast to 500 mailbox seats is read in ONE pass, so it goes up as
+    one upload — not in 50-row chunks over ten passes."""
+    repo = MagicMock()
+    repo.list_due = AsyncMock(return_value=[])
+    await OutboxProcessor(repo, AsyncMock()).drain_once()
+    repo.list_due.assert_awaited_once_with(MULTI_MAX_RECIPIENTS, exclude=frozenset())
 
 
 async def test_drain_once_success():
@@ -257,6 +269,32 @@ async def test_start_stop_lifecycle():
     await proc.stop()
     assert proc._task is None
     assert proc._stop.is_set()
+
+
+async def test_wake_runs_a_pass_before_the_poll_interval():
+    """A broadcast that queued a multi payload wakes the loop (v_91)."""
+    repo = MagicMock()
+    passes = asyncio.Event()
+    calls = 0
+
+    async def _due(_limit, *, exclude=()):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            passes.set()
+        return []
+
+    repo.list_due = _due
+    repo.purge_orphaned = AsyncMock(return_value=0)
+    repo.expire_past_retention = AsyncMock(return_value=0)
+    repo.purge_terminal = AsyncMock(return_value=0)
+    proc = OutboxProcessor(repo, AsyncMock(), poll_interval_seconds=3600)
+    await proc.start()
+    await _until(lambda: calls == 1)
+    proc.wake()
+    await asyncio.wait_for(passes.wait(), timeout=2)
+    await proc.stop()
+    assert proc._task is None
 
 
 async def test_start_idempotent():
@@ -579,3 +617,536 @@ async def test_a_capped_relayed_delete_gives_up_like_an_ordinary_event():
     await proc.drain_once()
     repo.mark_failed.assert_awaited_once_with(entry.id)
     repo.reschedule.assert_not_called()
+
+
+# ── Parallel drain + multi groups (migration 0145) ─────────────────────────
+
+
+def _row(entry_id: str, instance_id: str) -> OutboxEntry:
+    return OutboxEntry(
+        id=entry_id,
+        instance_id=instance_id,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="",
+        status="pending",
+        attempts=0,
+        next_attempt_at=datetime.now(UTC).isoformat(),
+        created_at=datetime.now(UTC).isoformat(),
+        payload_id="p-1",
+        space_id="sp-1",
+        msg_id="m-1",
+    )
+
+
+def _repo_for(entries: list[OutboxEntry]) -> MagicMock:
+    repo = MagicMock()
+    repo.list_due = AsyncMock(return_value=entries)
+    repo.mark_delivered = AsyncMock()
+    repo.mark_failed = AsyncMock()
+    repo.reschedule = AsyncMock()
+    return repo
+
+
+async def _until(cond, *, timeout: float = 2.0) -> None:
+    """Yield to the loop until *cond()* holds (no wall-clock sleeps)."""
+    async with asyncio.timeout(timeout):
+        while not cond():
+            await asyncio.sleep(0)
+
+
+class _Multi:
+    """A recording :class:`OutboxMulti`."""
+
+    def __init__(self, groups, outcome=DeliveryOutcome.SUCCESS) -> None:
+        self._groups = groups
+        self.outcome = outcome
+        #: Row ids the upload leaves out (handed back), if any.
+        self.left_out: set[str] = set()
+        self.delivered: list[list[str]] = []
+        self.asked: list[list[str]] = []
+        self.gate: asyncio.Event | None = None
+
+    async def outbox_multi_groups(self, entries):
+        """The fixed groups, cut to the rows offered (all of them in one
+        group when none were fixed)."""
+        self.asked.append([e.id for e in entries])
+        if self._groups is None:
+            return [entries]
+        ids = {e.id for e in entries}
+        return [[e for e in g if e.id in ids] for g in self._groups]
+
+    async def deliver_outbox_multi(self, group):
+        self.delivered.append([e.id for e in group])
+        if self.gate is not None:
+            await self.gate.wait()
+        if self.outcome is None:
+            return None
+        return self.outcome, [e for e in group if e.id not in self.left_out]
+
+
+async def test_drain_runs_recipients_in_parallel_up_to_the_cap():
+    entries = [_row(f"e{i}", f"peer-{i}") for i in range(PARALLEL_RECIPIENTS + 2)]
+    repo = _repo_for(entries)
+    gate = asyncio.Event()
+    in_flight: set[str] = set()
+    peak = 0
+
+    async def _deliver(e):
+        nonlocal peak
+        in_flight.add(e.id)
+        peak = max(peak, len(in_flight))
+        await gate.wait()
+        in_flight.discard(e.id)
+        return DeliveryOutcome.SUCCESS
+
+    drain = asyncio.create_task(OutboxProcessor(repo, _deliver).drain_once())
+    await _until(lambda: len(in_flight) == PARALLEL_RECIPIENTS)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert len(in_flight) == PARALLEL_RECIPIENTS  # the cap holds
+    gate.set()
+    assert await drain == len(entries)
+    assert peak == PARALLEL_RECIPIENTS
+    assert repo.mark_delivered.await_count == len(entries)
+
+
+async def test_one_recipient_has_one_row_in_flight_in_order():
+    entries = [_row("a1", "A"), _row("a2", "A"), _row("b1", "B"), _row("a3", "A")]
+    repo = _repo_for(entries)
+    order: list[str] = []
+    gates = {e.id: asyncio.Event() for e in entries}
+    started: set[str] = set()
+
+    async def _deliver(e):
+        started.add(e.id)
+        await gates[e.id].wait()
+        order.append(e.id)
+        return DeliveryOutcome.SUCCESS
+
+    drain = asyncio.create_task(OutboxProcessor(repo, _deliver).drain_once())
+    await _until(lambda: started == {"a1", "b1"})  # B does not wait for A
+    gates["b1"].set()
+    gates["a1"].set()
+    await _until(lambda: "a2" in started)
+    assert "a3" not in started
+    gates["a2"].set()
+    gates["a3"].set()
+    await drain
+    assert [i for i in order if i.startswith("a")] == ["a1", "a2", "a3"]
+
+
+async def test_a_send_past_the_idle_timeout_is_transient(monkeypatch):
+    monkeypatch.setattr(outbox_processor_mod, "SEND_IDLE_TIMEOUT_S", 0.01)
+    repo = _repo_for([_row("e1", "A")])
+
+    async def _hang(e):
+        await asyncio.Event().wait()
+
+    assert await OutboxProcessor(repo, _hang, rng=lambda: 0.5).drain_once() == 1
+    repo.reschedule.assert_awaited_once()
+    assert repo.reschedule.await_args.kwargs["attempts"] == 1
+    repo.mark_delivered.assert_not_awaited()
+
+
+async def test_a_group_outcome_applies_to_every_row():
+    a, b, c = _row("a", "A"), _row("b", "B"), _row("c", "C")
+    repo = _repo_for([a, b, c])
+    multi = _Multi([[a, b]])
+    single = AsyncMock(return_value=DeliveryOutcome.SUCCESS)
+    proc = OutboxProcessor(repo, single, multi=multi)
+    assert await proc.drain_once() == 3
+    assert multi.delivered == [["a", "b"]]
+    assert [call.args[0].id for call in single.await_args_list] == ["c"]
+    assert sorted(c.args[0] for c in repo.mark_delivered.await_args_list) == [
+        "a",
+        "b",
+        "c",
+    ]
+
+
+async def test_a_transient_group_reschedules_every_row():
+    a, b = _row("a", "A"), _row("b", "B")
+    repo = _repo_for([a, b])
+    multi = _Multi([[a, b]], outcome=RetryAfter(seconds=30))
+    proc = OutboxProcessor(repo, AsyncMock(), multi=multi, rng=lambda: 0.0)
+    await proc.drain_once()
+    assert sorted(c.args[0] for c in repo.reschedule.await_args_list) == ["a", "b"]
+    repo.mark_delivered.assert_not_awaited()
+
+
+async def test_a_group_member_s_other_rows_wait_for_the_group():
+    a1, b1, a2, c1 = _row("a1", "A"), _row("b1", "B"), _row("a2", "A"), _row("c1", "C")
+    repo = _repo_for([a1, b1, a2, c1])
+    multi = _Multi([[a1, b1]])
+    multi.gate = asyncio.Event()
+    seen: list[str] = []
+
+    async def _deliver(e):
+        seen.append(e.id)
+        return DeliveryOutcome.SUCCESS
+
+    drain = asyncio.create_task(
+        OutboxProcessor(repo, _deliver, multi=multi).drain_once()
+    )
+    await _until(lambda: multi.delivered and "c1" in seen)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert "a2" not in seen  # A is busy in the group
+    multi.gate.set()
+    await drain
+    assert seen == ["c1", "a2"]
+
+
+async def test_a_group_that_could_not_go_up_is_handed_back_per_recipient():
+    """Refused or oversize: the rows are not sent inside the multi slot.
+    They stay pending and due (no attempt counted) for a later pass, which
+    sends them per row; their recipients' later rows wait (FIFO)."""
+    a, b, a2, c = _row("a", "A"), _row("b", "B"), _row("a2", "A"), _row("c", "C")
+    repo = _repo_for([a, b, a2, c])
+    multi = _Multi([[a, b]], outcome=None)
+    single = AsyncMock(return_value=DeliveryOutcome.SUCCESS)
+    proc = OutboxProcessor(repo, single, multi=multi)
+    await proc.drain_once()
+    assert [c.args[0].id for c in single.await_args_list] == ["c"]
+    repo.reschedule.assert_not_awaited()
+    assert [c.args[0] for c in repo.mark_delivered.await_args_list] == ["c"]
+    assert proc._wake.is_set()  # the next pass comes at once, not at the poll
+
+
+async def test_rows_left_out_of_an_upload_are_handed_back():
+    """An upload that left a target out (no mailbox any more) settles only
+    the rows that went up; the other stays pending and its recipient's later
+    rows wait for it."""
+    a, b, c, c2 = _row("a", "A"), _row("b", "B"), _row("c", "C"), _row("c2", "C")
+    repo = _repo_for([a, b, c, c2])
+    multi = _Multi([[a, b, c]])
+    multi.left_out = {"c"}
+    single = AsyncMock(return_value=DeliveryOutcome.SUCCESS)
+    await OutboxProcessor(repo, single, multi=multi).drain_once()
+    assert sorted(c.args[0] for c in repo.mark_delivered.await_args_list) == [
+        "a",
+        "b",
+    ]
+    single.assert_not_awaited()
+    repo.reschedule.assert_not_awaited()
+
+
+async def test_a_fast_failed_group_stalls_each_of_its_recipients():
+    """A 5xx answered at once still stalls the group's recipients: a row
+    queued behind the multi row must not overtake it on its retry."""
+    a, b, a2 = _row("a", "A"), _row("b", "B"), _row("a2", "A")
+    repo = _repo_for([a, b, a2])
+    multi = _Multi([[a, b]], outcome=DeliveryOutcome.TRANSIENT)
+    single = AsyncMock(return_value=DeliveryOutcome.SUCCESS)
+    await OutboxProcessor(repo, single, multi=multi, rng=lambda: 0.0).drain_once()
+    single.assert_not_awaited()
+    assert sorted(c.args[0] for c in repo.reschedule.await_args_list) == ["a", "b"]
+
+
+async def test_start_after_a_stop_mid_delivery_drains_the_recipient():
+    """A stop that cut a delivery short (its bookkeeping never ran) leaves
+    no recipient busy for the next start."""
+    repo = _LiveRepo([_row("a1", "A")])
+    proc = OutboxProcessor(
+        repo,
+        AsyncMock(return_value=DeliveryOutcome.SUCCESS),
+        poll_interval_seconds=0.01,
+    )
+    proc._busy.add("A")
+    await proc.stop()
+    await proc.start()
+    try:
+        await _until(lambda: repo.delivered == ["a1"])
+    finally:
+        await proc.stop()
+
+
+async def test_only_each_recipient_s_oldest_row_of_the_pass_is_grouped():
+    """A recipient's later rows are never offered for a group, so no group
+    can run a row ahead of that recipient's earlier one: they go after it,
+    one by one."""
+    a1, b1, a2, b2 = _row("a1", "A"), _row("b1", "B"), _row("a2", "A"), _row("b2", "B")
+    repo = _repo_for([a1, b1, a2, b2])
+    multi = _Multi(None)
+    seen: list[str] = []
+
+    async def _deliver(e):
+        seen.append(e.id)
+        return DeliveryOutcome.SUCCESS
+
+    assert await OutboxProcessor(repo, _deliver, multi=multi).drain_once() == 4
+    assert multi.asked == [["a1", "b1"]]
+    assert multi.delivered == [["a1", "b1"]]
+    assert sorted(seen) == ["a2", "b2"]
+    assert repo.mark_delivered.await_count == 4
+
+
+async def test_a_failing_grouper_leaves_every_row_per_recipient():
+    a, b = _row("a", "A"), _row("b", "B")
+    repo = _repo_for([a, b])
+    multi = MagicMock()
+    multi.outbox_multi_groups = AsyncMock(side_effect=RuntimeError("boom"))
+    single = AsyncMock(return_value=DeliveryOutcome.SUCCESS)
+    await OutboxProcessor(repo, single, multi=multi).drain_once()
+    assert single.await_count == 2
+
+
+async def test_a_hung_peer_costs_one_timeout_per_pass(monkeypatch):
+    monkeypatch.setattr(outbox_processor_mod, "SEND_IDLE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(outbox_processor_mod, "STALL_AFTER_S", 0.0)
+    hung = [_row(f"h{i}", "HUNG") for i in range(50)]
+    others = [_row(f"o{i}", "OK") for i in range(3)]
+    repo = _repo_for(hung + others)
+    calls: list[str] = []
+    never = asyncio.Event()
+
+    async def _deliver(e):
+        calls.append(e.id)
+        if e.instance_id == "HUNG":
+            await never.wait()
+        return DeliveryOutcome.SUCCESS
+
+    proc = OutboxProcessor(repo, _deliver, rng=lambda: 0.5)
+    assert await proc.drain_once() == 53
+    assert [c for c in calls if c.startswith("h")] == ["h0"]
+    # Only the timed-out row spends an attempt; the rest stay pending.
+    assert [c.args[0] for c in repo.reschedule.await_args_list] == ["h0"]
+    assert sorted(c.args[0] for c in repo.mark_delivered.await_args_list) == [
+        "o0",
+        "o1",
+        "o2",
+    ]
+
+
+async def test_a_throttled_peer_s_later_rows_wait_for_the_next_pass():
+    a1, a2, b1 = _row("a1", "A"), _row("a2", "A"), _row("b1", "B")
+    repo = _repo_for([a1, a2, b1])
+    calls: list[str] = []
+
+    async def _deliver(e):
+        calls.append(e.id)
+        return (
+            RetryAfter(seconds=30)
+            if e.instance_id == "A"
+            else (DeliveryOutcome.SUCCESS)
+        )
+
+    await OutboxProcessor(repo, _deliver, rng=lambda: 0.0).drain_once()
+    assert sorted(calls) == ["a1", "b1"]
+    assert [c.args[0] for c in repo.reschedule.await_args_list] == ["a1"]
+
+
+async def test_a_slow_transient_group_stalls_each_of_its_recipients(monkeypatch):
+    monkeypatch.setattr(outbox_processor_mod, "STALL_AFTER_S", 0.0)
+    a, b, a2, b2, c2 = (
+        _row("a", "A"),
+        _row("b", "B"),
+        _row("a2", "A"),
+        _row("b2", "B"),
+        _row("c2", "C"),
+    )
+    repo = _repo_for([a, b, a2, b2, c2])
+    multi = _Multi([[a, b]], outcome=DeliveryOutcome.TRANSIENT)
+    seen: list[str] = []
+
+    async def _deliver(e):
+        seen.append(e.id)
+        return DeliveryOutcome.SUCCESS
+
+    await OutboxProcessor(repo, _deliver, multi=multi, rng=lambda: 0.0).drain_once()
+    assert multi.delivered == [["a", "b"]]
+    assert seen == ["c2"]
+    assert sorted(c.args[0] for c in repo.reschedule.await_args_list) == ["a", "b"]
+
+
+async def test_a_group_drops_a_recipient_stalled_earlier_in_the_pass(monkeypatch):
+    monkeypatch.setattr(outbox_processor_mod, "STALL_AFTER_S", 0.0)
+    a1, a2, b2, c2 = _row("a1", "A"), _row("a2", "A"), _row("b2", "B"), _row("c2", "C")
+    repo = _repo_for([a1, a2, b2, c2])
+    multi = _Multi([[a2, b2, c2]])
+    seen: list[str] = []
+
+    async def _deliver(e):
+        seen.append(e.id)
+        return DeliveryOutcome.TRANSIENT if e.id == "a1" else DeliveryOutcome.SUCCESS
+
+    await OutboxProcessor(repo, _deliver, multi=multi, rng=lambda: 0.0).drain_once()
+    assert seen == ["a1"]
+    assert multi.delivered == [["b2", "c2"]]
+    assert sorted(c.args[0] for c in repo.mark_delivered.await_args_list) == [
+        "b2",
+        "c2",
+    ]
+
+
+async def test_a_fast_failure_does_not_stall_the_recipient():
+    """A refused connection costs nothing: the recipient's next rows are
+    still tried, and each row counts its own attempt (a NEVER_DROP row that
+    always fails must not starve the rows behind it)."""
+    a1, a2, a3 = _row("a1", "A"), _row("a2", "A"), _row("a3", "A")
+    repo = _repo_for([a1, a2, a3])
+    calls: list[str] = []
+
+    async def _deliver(e):
+        calls.append(e.id)
+        return DeliveryOutcome.TRANSIENT
+
+    await OutboxProcessor(repo, _deliver, rng=lambda: 0.0).drain_once()
+    assert calls == ["a1", "a2", "a3"]
+    assert [c.args[0] for c in repo.reschedule.await_args_list] == ["a1", "a2", "a3"]
+
+
+# ── Non-blocking passes: a hung peer never delays a queued multi ──────────
+
+
+class _LiveRepo:
+    """Pending rows that honour ``exclude`` like the SQL does."""
+
+    def __init__(self, rows: list[OutboxEntry]) -> None:
+        self.rows = list(rows)
+        self.excluded: list[frozenset[str]] = []
+        self.delivered: list[str] = []
+
+    async def list_due(self, limit=50, *, exclude=()):
+        self.excluded.append(frozenset(exclude))
+        return [e for e in self.rows if e.instance_id not in exclude][:limit]
+
+    async def mark_delivered(self, entry_id):
+        self.delivered.append(entry_id)
+        self.rows = [e for e in self.rows if e.id != entry_id]
+
+    async def mark_failed(self, entry_id):
+        self.rows = [e for e in self.rows if e.id != entry_id]
+
+    async def reschedule(self, entry_id, next_at, attempts):
+        self.rows = [e for e in self.rows if e.id != entry_id]
+
+
+async def test_a_pass_returns_while_a_hung_peer_s_delivery_runs():
+    hung = asyncio.Event()
+    repo = _LiveRepo([_row("a1", "A")])
+
+    async def _deliver(e):
+        await hung.wait()
+        return DeliveryOutcome.SUCCESS
+
+    proc = OutboxProcessor(repo, _deliver)
+    assert await asyncio.wait_for(proc._start_pass(), timeout=1) == 1
+    assert proc._busy == {"A"} and len(proc._inflight) == 1
+    hung.set()
+    await proc.drain_once()
+    assert repo.delivered == ["a1"] and proc._busy == set()
+
+
+async def test_a_hung_peer_never_delays_a_multi_queued_after_it():
+    """Pass 1 starts A's delivery, which hangs. A broadcast then queues a
+    multi payload for A, B and C: the next pass leaves busy A out (its row
+    keeps for later under the same msg_id), groups B and C and uploads them
+    while A still hangs."""
+    hung = asyncio.Event()
+    repo = _LiveRepo([_row("a0", "A")])
+
+    async def _deliver(e):
+        await hung.wait()
+        return DeliveryOutcome.SUCCESS
+
+    class _Grouper(_Multi):
+        async def outbox_multi_groups(self, entries):
+            rows = [e for e in entries if e.id.endswith("-m")]
+            return [rows] if len(rows) >= 2 else []
+
+    multi = _Grouper([])
+    proc = OutboxProcessor(repo, _deliver, multi=multi)
+    await proc._start_pass()
+    repo.rows += [_row("a-m", "A"), _row("b-m", "B"), _row("c-m", "C")]
+    await proc._start_pass()
+    assert repo.excluded[-1] == frozenset({"A"})
+    await _until(lambda: multi.delivered == [["b-m", "c-m"]])
+    assert sorted(repo.delivered) == ["b-m", "c-m"]
+    assert [e.id for e in repo.rows] == ["a0", "a-m"]  # A's line waits
+    hung.set()
+    await _until(lambda: "A" not in proc._busy)  # a0's delivery ended
+    await proc.drain_once()  # the next pass takes A's kept row
+    assert "a0" in repo.delivered and "a-m" in repo.delivered
+    assert repo.delivered.index("a0") < repo.delivered.index("a-m")
+
+
+async def test_a_multi_upload_never_waits_for_a_peer_slot():
+    """Every per-recipient slot held by a hung peer: a multi group still goes
+    on its own slots."""
+    hung = asyncio.Event()
+    peers = [_row(f"p{i}", f"peer-{i}") for i in range(PARALLEL_RECIPIENTS)]
+    group = [_row("b-m", "B"), _row("c-m", "C")]
+    repo = _LiveRepo([*peers, *group])
+
+    async def _deliver(e):
+        await hung.wait()
+        return DeliveryOutcome.SUCCESS
+
+    multi = _Multi([group])
+    proc = OutboxProcessor(repo, _deliver, multi=multi)
+    await proc._start_pass()
+    await _until(lambda: multi.delivered == [["b-m", "c-m"]])
+    assert sorted(repo.delivered) == ["b-m", "c-m"]
+    hung.set()
+    await proc.drain_once()
+
+
+async def test_multi_uploads_share_their_own_small_cap():
+    gate = asyncio.Event()
+    groups = [
+        [_row(f"g{i}-a", f"A{i}"), _row(f"g{i}-b", f"B{i}")]
+        for i in range(outbox_processor_mod.MULTI_PARALLEL + 1)
+    ]
+    multi = _Multi(groups)
+    multi.gate = gate
+    proc = OutboxProcessor(
+        _LiveRepo([e for g in groups for e in g]), AsyncMock(), multi=multi
+    )
+    await proc._start_pass()
+    await _until(lambda: len(multi.delivered) == outbox_processor_mod.MULTI_PARALLEL)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert len(multi.delivered) == outbox_processor_mod.MULTI_PARALLEL
+    gate.set()
+    await proc.drain_once()
+    assert len(multi.delivered) == len(groups)
+
+
+async def test_stop_waits_for_deliveries_then_cancels_them(monkeypatch):
+    """``stop()`` gives a delivery in flight until its deadline, then cancels
+    it — the row is left pending (nothing settled)."""
+    repo = _LiveRepo([_row("a1", "A")])
+    started = asyncio.Event()
+
+    async def _hang(e):
+        started.set()
+        await asyncio.Event().wait()
+
+    proc = OutboxProcessor(repo, _hang)
+    await proc._start_pass()
+    await started.wait()
+    monkeypatch.setattr(outbox_processor_mod, "STOP_DEADLINE_S", 0.01)
+    await proc.stop()
+    await _until(lambda: not proc._inflight)
+    assert [e.id for e in repo.rows] == ["a1"] and repo.delivered == []
+
+
+async def test_a_delivered_row_wakes_the_next_pass_for_the_rows_it_held():
+    """The ordering gate hands out one content row per seat at a time: once
+    a row is delivered the next pass runs at once (it may free that seat's
+    next row), not at the poll interval. A failed row wakes nothing."""
+    ok = OutboxProcessor(
+        _repo_for([_row("a", "A")]),
+        AsyncMock(return_value=DeliveryOutcome.SUCCESS),
+        rng=lambda: 0.5,
+    )
+    await ok.drain_once()
+    assert ok._wake.is_set()
+    failed = OutboxProcessor(
+        _repo_for([_row("a", "A")]),
+        AsyncMock(return_value=DeliveryOutcome.TRANSIENT),
+        rng=lambda: 0.5,
+    )
+    await failed.drain_once()
+    assert not failed._wake.is_set()
