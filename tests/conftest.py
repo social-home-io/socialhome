@@ -116,7 +116,7 @@ class _FakeDataChannel:
     async def wait_closed(self) -> None:
         await self._closed.wait()
 
-    async def send(self, data) -> None:
+    async def send(self, data, *, wait_for_drain: bool = True) -> None:
         self.sent.append(data)
 
     async def recv(self):
