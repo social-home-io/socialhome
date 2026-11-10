@@ -505,14 +505,22 @@ encrypted payload (live events) and in each §25.6 record:
   without a map: the host matches that copy's file names against the files
   it holds by their sender-bound names (`approved_relay_for`). The host's
   release carries the hashes of its own copies either way.
-* **GFS media cache (v_80 / v_83):** a file a household reads from a GFS
-  keeps its reader-derived `sg-` name — the sealed blob already binds the
-  item and its origin (AAD), the descriptor is author-signed for
-  followers, and the cache's re-upload / streaming address files by those
-  names. The descriptor's names take precedence over content names
-  (`SpaceMediaNamer.combine`). A holder asked to re-upload a file it
-  stores content-addressed tries the item's `sc-` files; the sealed
-  address picks the right one.
+* **GFS media cache (v_80 / v_83):** a described file the item's valid
+  hash map covers (the same map the direct names take: a live event's, or a
+  §25.6 record's only from the host) is **content-named too** — one name on
+  every path, so a host's or helper's hashed push lands under the very name
+  the row shows. Its `space_media_refs` row keeps `local_name` = the `sc-`
+  name (item and origin unchanged: the blob's AAD still names them), and a
+  fetch (or v_83 on-demand answer) of it hashes the decrypted bytes and
+  refuses them (WARNING, nothing written) unless they are that content
+  name's hash (`write_once` writes an `sc-` name only with the hash that
+  binds it). Two households describing the same hashed file land on the
+  same name; the first row stays. An **unhashed** described file keeps its
+  reader-derived `sg-` name — the sealed blob binds the item and its origin
+  (AAD), the descriptor is author-signed for followers (whose relayed post
+  carries no map). A holder asked to re-upload a file it stores
+  content-addressed tries the item's `sc-` files; the sealed address picks
+  the right one.
 * **Sync line 85:** a household crossing it gets one full stream of rows,
   but no catch-up media (it holds the files; `shape_crossed`). Only a
   newcomer or a reset gets the space's files again.
@@ -732,6 +740,10 @@ envelope's sender; for followers, the author household the signed inner
 proves; for §25.6, the provider), never a descriptor field. A member naming
 another item's file in its own item therefore only ever gets its own copy,
 in either order; it can never take over the picture another item shows.
+The exception is a file the item's valid v_85 hash map covers: it takes its
+content name (`sc-`, see [File hashes](#file-hashes-and-content-addressed-names-v_85)),
+which names the bytes themselves — so the fetch verifies them against it
+(a mismatch is refused, nothing written).
 `sg-` is a reserved prefix: no received item and no `SPACE_MEDIA_BLOB` may
 name it. The blob's AAD names the item and the delivering household, and
 the fetch opens it with the row's values. A file the same item already has
@@ -761,7 +773,7 @@ fetched: `GET /gfs/media/{blob_id}` (anonymous), bounded by the
 descriptor's `size`, checks that the blob sits
 at its scope-bound address for the scope id this household knows,
 decrypts with the epoch's media key and writes the file write-once under
-its `sg-` name. An unknown suite, a
+its `sg-` name (an `sc-` name only once the bytes hash to it). An unknown suite, a
 blob not at its address (or a channel scope with no channel id known here)
 or a failed decrypt is refused with a WARNING and writes nothing.
 

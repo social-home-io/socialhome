@@ -328,13 +328,14 @@ class SpaceContentInboundHandlers:
         (it reached a link-joined member without its bytes). Apply it
         before the item is saved; :meth:`_keep_media` once it is."""
         present = [u for u in urls if u]
+        hashes = parse_file_hashes(event.payload)
         direct = self._media_names.localize(
             space_id,
             event.from_instance,
             present,
             held=held or (),
             # v_85 — vouched for by the sender's envelope signature.
-            hashes=parse_file_hashes(event.payload),
+            hashes=hashes,
         )
         if self._gfs_media is None:
             return direct
@@ -346,6 +347,7 @@ class SpaceContentInboundHandlers:
                 present,
                 item_id=item_id,
                 origin=event.from_instance,
+                hashes=hashes,
             ),
         )
 

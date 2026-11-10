@@ -670,3 +670,21 @@ async def test_write_once_never_writes_a_content_name(tmp_path):
     target = tmp_path / space_content_media_name("sp", "a" * 64, "x.webp")
     assert await store.write_once(target, b"x", tmp_path / "tmp" / "t") is False
     assert not target.exists()
+
+
+async def test_write_once_writes_a_content_name_only_under_its_hash(tmp_path):
+    """v_85 — a GFS-fetched content-named file: written only when the
+    caller's hash of the bytes is the name's hash in that space."""
+    h = hashlib.sha256(b"x").hexdigest()
+    target = tmp_path / space_content_media_name("sp", h, "x.webp")
+    tmp = tmp_path / "tmp" / "t"
+    assert (
+        await store.write_once(target, b"x", tmp, space_id="other", sha256=h) is False
+    )
+    assert (
+        await store.write_once(target, b"x", tmp, space_id="sp", sha256="b" * 64)
+        is False
+    )
+    assert not target.exists()
+    assert await store.write_once(target, b"x", tmp, space_id="sp", sha256=h) is True
+    assert target.read_bytes() == b"x"

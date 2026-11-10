@@ -497,13 +497,21 @@ async def read_bounded(stream: _ByteStream, max_bytes: int) -> bytes | None:
     return b"".join(parts)
 
 
-async def write_once(target: pathlib.Path, data: bytes, tmp: pathlib.Path) -> bool:
+async def write_once(
+    target: pathlib.Path,
+    data: bytes,
+    tmp: pathlib.Path,
+    *,
+    space_id: str = "",
+    sha256: str | None = None,
+) -> bool:
     """Write *data* to *tmp* (its directory created), then move it to
     *target* write-once (:func:`publish_once`). ``True`` when stored,
     ``False`` when *target* already existed — or is a content name
-    (``sc-``), which only a verified :func:`store_chunk` writes. *tmp*
-    never survives."""
-    if is_space_content_media_name(target.name):
+    (``sc-``) that is not the content name of *sha256* (the hash of *data*
+    the CALLER computed, off the event loop) in *space_id*
+    (:func:`content_name_binds`). *tmp* never survives."""
+    if not content_name_binds(target.name, space_id, sha256):
         log.warning(
             "%s: a content name is only written verified — refused", target.name
         )

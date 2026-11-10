@@ -2143,8 +2143,13 @@ class _GfsMediaSink:
         self.received: list[tuple] = []
         self.kept: list[dict] = []
         self.as_shown: list[tuple] = []
+        #: item → the hash map the receiver passed (v_85).
+        self.hashes: dict[str, object] = {}
 
-    async def localize(self, space_id, raw_refs, media_urls, *, item_id, origin):
+    async def localize(
+        self, space_id, raw_refs, media_urls, *, item_id, origin, hashes=None
+    ):
+        self.hashes[item_id] = hashes
         urls = [u for u in media_urls if u]
         if isinstance(raw_refs, dict):
             self.received.append((space_id, raw_refs, urls, item_id, origin))
@@ -2478,3 +2483,59 @@ async def test_a_hashed_record_with_an_unknown_suite_stays_legacy(setup):
     )
     _sid, post = c.posts[0]
     assert post.image_urls == (_here("a.webp"),)
+
+
+async def test_the_hosts_hash_map_reaches_the_gfs_namer(setup):
+    """A hashed file the host's record also describes keeps its one content
+    name: the GFS namer gets the same map the direct names took."""
+    r, c, kp = setup
+    r._space_post_repo = _SavingPostRepo(c)
+    sink = _GfsMediaSink()
+    r.attach_gfs_media(sink)
+    await _send(
+        r,
+        kp,
+        "posts",
+        [
+            {
+                "id": "p-h",
+                "author": "u-1",
+                "type": "image",
+                "image_urls": ["api/media/a.webp"],
+                "media_refs": _SYNC_REFS,
+                **_hashed(a_webp="a" * 64),
+            }
+        ],
+    )
+    assert {n: fh.h for n, fh in sink.hashes["p-h"].items()} == {"a.webp": "a" * 64}
+
+
+async def test_a_non_host_providers_hash_map_never_reaches_the_gfs_namer(
+    setup, monkeypatch
+):
+    r, c, kp = setup
+    r._space_post_repo = _SavingPostRepo(c)
+
+    async def _not_host(self, space_id, provider):
+        return False
+
+    monkeypatch.setattr(type(r), "_is_host", _not_host)
+    sink = _GfsMediaSink()
+    r.attach_gfs_media(sink)
+    await _send(
+        r,
+        kp,
+        "posts",
+        [
+            {
+                "id": "p-n",
+                "author": "u-1",
+                "type": "image",
+                "image_urls": ["api/media/a.webp"],
+                "media_refs": _SYNC_REFS,
+                **_hashed(a_webp="a" * 64),
+            }
+        ],
+    )
+    assert "p-n" in sink.hashes
+    assert sink.hashes["p-n"] is None

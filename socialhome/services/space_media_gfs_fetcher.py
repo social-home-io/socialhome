@@ -13,8 +13,12 @@ This service:
   envelope, the signed inner, the §25.6 stream) and the author's file name.
   So a member naming another item's file in its own item only ever gets
   its own copy; it can never take over the name another item shows. A file
-  the same item already has here keeps the name it has (an update without
-  a descriptor, a second household re-describing it);
+  the item's valid v_85 hash map covers takes its content name
+  (``space_content_media_name``) instead — the one name it has on every
+  path, so a host's or helper's push lands where the row points — and its
+  fetched bytes must hash to it. A file the same item already has here
+  keeps the name it has (an update without a descriptor, a second household
+  re-describing it);
 * **keeps** the new entries as ``space_media_refs`` rows once the item is
   stored (:meth:`SpaceMediaGfsFetcher.keep`);
 * **prefetches** the pictures on arrival, at most
@@ -73,6 +77,12 @@ import aiofiles.os
 from cryptography.exceptions import InvalidTag
 
 from ..domain.federation import InstanceSource
+from ..domain.file_hashes import (
+    FileHash,
+    is_space_content_media_name,
+    sha256_hex,
+    space_content_media_name,
+)
 from ..domain.gfs_space_media import SCOPE_CHANNEL, SCOPE_SPACE, space_media_address
 from ..domain.space_media_ref import (
     MAX_PAGE_DESCRIPTOR_ENTRIES,
@@ -233,15 +243,21 @@ class SpaceMediaGfsFetcher:
         *,
         item_id: str,
         origin: str,
+        hashes: Mapping[str, FileHash] | None = None,
     ) -> SpaceMediaLocalization:
         """This household's names for the files item *item_id* of
         *space_id* shows (*media_urls*), as delivered by household *origin*
         — which the CALLER authenticated (the envelope's sender, the signed
         inner's origin, the §25.6 provider), never a descriptor field.
+        *hashes* is the item's valid v_85 hash map (by the author's file
+        names) as the caller already trusts it, or ``None``.
 
-        * A described file the item has no row for yet → its reader name
-          (:func:`gfs_space_media_name` of space, *origin*, file name) and a
-          row to :meth:`keep` once the item is saved.
+        * A described file the item has no row for yet → its content name
+          (:func:`space_content_media_name` of space, its hash, file name)
+          when *hashes* covers it — the one name the file has on every path,
+          verified against the hash on fetch — else its reader name
+          (:func:`gfs_space_media_name` of space, *origin*, file name); and
+          a row to :meth:`keep` once the item is saved.
         * A file the item already has a row for → the name it has (the
           first household to describe it for this item keeps it; the same
           household's newer epoch moves the row in :meth:`keep`).
@@ -272,8 +288,23 @@ class SpaceMediaGfsFetcher:
                 item_id=item_id,
                 origin=origin,
             ):
-                local = gfs_space_media_name(space_id, origin, item_id, ref.filename)
+                fh = hashes.get(ref.filename) if hashes else None
+                local = (
+                    space_content_media_name(space_id, fh.h, ref.filename)
+                    if fh is not None
+                    else gfs_space_media_name(space_id, origin, item_id, ref.filename)
+                )
                 first = held.get(ref.filename)
+                if (
+                    first is not None
+                    and first.local_name == local
+                    and first.origin != origin
+                ):
+                    # The same hashed file another household described
+                    # already: one name, its row (and the blob its AAD
+                    # names) stays — the bytes must hash to h either way.
+                    names[ref.filename] = local
+                    continue
                 if first is not None and first.local_name != local:
                     log.info(
                         "space media %s of %s: described by %s already — "
@@ -454,7 +485,10 @@ class SpaceMediaGfsFetcher:
             is_gfs_space_media_name(filename)
             or (self._pages is not None and is_space_page_media_name(filename))
             or (
-                is_space_direct_media_name(filename)
+                (
+                    is_space_direct_media_name(filename)
+                    or is_space_content_media_name(filename)
+                )
                 and await self._refs.get(filename) is not None
             )
         ):
@@ -570,6 +604,7 @@ class SpaceMediaGfsFetcher:
                 and await self._shown_by_its_page(ref)
             )
             or _bound_to_its_origin(ref)
+            or is_space_content_media_name(filename)
         ):
             log.warning(
                 "space media %s: neither a GFS space media name nor a file its "
@@ -698,13 +733,25 @@ class SpaceMediaGfsFetcher:
             )
             return _MISS
         try:
-            data = await asyncio.to_thread(_open_sync, blob, key, ref)
+            data, h = await asyncio.to_thread(_open_sync, blob, key, ref)
         except ValueError, InvalidTag:
             log.warning(
                 "space media %s: cannot decrypt the blob — refused", ref.local_name
             )
             return _REFUSED
-        await self._write(path, data)
+        if h is not None and ref.local_name != space_content_media_name(
+            ref.space_id, h, ref.filename
+        ):
+            log.warning(
+                "space media %s (%s of %s) from %s: the file does not hash to "
+                "its content name — refused",
+                ref.local_name,
+                ref.filename,
+                ref.item_id,
+                base_url,
+            )
+            return _REFUSED
+        await self._write(path, data, space_id=ref.space_id, sha256=h)
         log.info(
             "space media %s (%s of %s): fetched blob %s (%d bytes) from GFS %s",
             ref.local_name,
@@ -753,9 +800,15 @@ class SpaceMediaGfsFetcher:
                 conns.append(conn)
         return conns[:MAX_SOURCES]
 
-    async def _write(self, path: pathlib.Path, data: bytes) -> None:
+    async def _write(
+        self, path: pathlib.Path, data: bytes, *, space_id: str, sha256: str | None
+    ) -> None:
         await write_once(
-            path, data, self._dir / _PARTIAL_DIR / f"gfs-{uuid.uuid4().hex}"
+            path,
+            data,
+            self._dir / _PARTIAL_DIR / f"gfs-{uuid.uuid4().hex}",
+            space_id=space_id,
+            sha256=sha256,
         )
 
 
@@ -772,7 +825,16 @@ def _is_picture(filename: str) -> bool:
     return filename.rpartition(".")[2].lower() in PREFETCH_EXTENSIONS
 
 
-def _open_sync(blob: bytes, key: bytes, ref: SpaceMediaRef) -> bytes:
+def _open_sync(blob: bytes, key: bytes, ref: SpaceMediaRef) -> tuple[bytes, str | None]:
+    """The file *blob* seals, and — for a content-named (``sc-``) row —
+    its bytes' SHA-256 (``None`` otherwise)."""
+    data = _open_blob(blob, key, ref)
+    if not is_space_content_media_name(ref.local_name):
+        return data, None
+    return data, sha256_hex(data)
+
+
+def _open_blob(blob: bytes, key: bytes, ref: SpaceMediaRef) -> bytes:
     return open_space_media(
         blob=blob,
         media_key=key,

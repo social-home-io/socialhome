@@ -9,6 +9,11 @@ import os
 from dataclasses import dataclass
 
 from socialhome.domain.federation import InstanceSource
+from socialhome.domain.file_hashes import (
+    FileHash,
+    sha256_hex,
+    space_content_media_name,
+)
 from socialhome.domain.gfs_space_media import space_media_address
 from socialhome.domain.space_media_ref import SpaceMediaRef, space_page_media_name
 from socialhome.services import space_media_gfs_fetcher as fetch_mod
@@ -1194,3 +1199,115 @@ async def test_a_follower_asks_through_its_own_gfs_connection(tmp_path):
     assert await f.ensure_local(_L("a.webp")) is True
     assert (tmp_path / _L("a.webp")).read_bytes() == data
     assert gfs.wanted[0][0] == "https://g9.example"
+
+
+# ── v_85 hashed files: one content name on every path ───────────────────
+
+
+def _sc(name: str, data: bytes) -> str:
+    return space_content_media_name(SPACE, sha256_hex(data), name)
+
+
+def _hashes(name: str, data: bytes) -> dict[str, FileHash]:
+    return {name: FileHash(sha256_hex(data))}
+
+
+async def _recv_hashed(f, raw, data, *, origin: str = ORIGIN, names=("a.webp",)):
+    loc = await f.localize(
+        SPACE,
+        raw,
+        [f"api/media/{n}" for n in names],
+        item_id=ITEM,
+        origin=origin,
+        hashes=_hashes("a.webp", data),
+    )
+    await f.keep(loc, prefetch=False)
+    return loc
+
+
+async def test_a_hashed_described_file_takes_its_content_name(tmp_path):
+    """A file the item's hash map covers is named ``sc-`` even when a GFS
+    describes it: the same name a host's or helper's push lands under."""
+    data = b"picture"
+    blob = _blob("a.webp", data)
+    f = _fetcher(tmp_path, _Gfs({}))
+    loc = await _recv_hashed(
+        f,
+        {**_wire("a.webp", blob), **_wire("b.webp", blob)},
+        data,
+        names=("a.webp", "b.webp"),
+    )
+    assert loc.names == {"a.webp": _sc("a.webp", data), "b.webp": _L("b.webp")}
+    by_name = {r.filename: r for r in loc.refs}
+    assert by_name["a.webp"].local_name == _sc("a.webp", data)
+    # The blob's AAD still names the item and the sealing household.
+    assert (by_name["a.webp"].item_id, by_name["a.webp"].origin) == (ITEM, ORIGIN)
+    assert by_name["b.webp"].local_name == _L("b.webp")  # unhashed: unchanged
+    assert (await f._refs.get(_sc("a.webp", data))).blob_id == _addr(blob)
+
+
+async def test_the_same_hashed_file_described_by_two_households_is_one_name(
+    tmp_path, caplog
+):
+    data = b"picture"
+    f = _fetcher(tmp_path, _Gfs({}))
+    await _recv_hashed(f, _wire("a.webp", _blob("a.webp", data)), data)
+    with caplog.at_level("INFO"):
+        second = await _recv_hashed(
+            f,
+            _wire("a.webp", _blob("a.webp", data, origin="peer-b")),
+            data,
+            origin="peer-b",
+        )
+    assert second.names == {"a.webp": _sc("a.webp", data)}
+    assert "described by" not in caplog.text
+    # The row keeps the household whose blob it names (its AAD).
+    assert (await f._refs.get(_sc("a.webp", data))).origin == ORIGIN
+
+
+async def test_a_content_named_described_file_is_fetched_and_verified(tmp_path):
+    data = os.urandom(3000)
+    blob = _blob("a.webp", data)
+    f = _fetcher(tmp_path, _Gfs({_addr(blob): blob}))
+    await _recv_hashed(f, _wire("a.webp", blob), data)
+    assert await f.ensure_local(_sc("a.webp", data)) is True
+    assert (tmp_path / _sc("a.webp", data)).read_bytes() == data
+
+
+async def test_a_content_named_file_whose_bytes_do_not_hash_is_refused(
+    tmp_path, caplog
+):
+    """The author's map says h; the sealed bytes hash to something else —
+    nothing is written under the content name."""
+    data = b"the real picture"
+    blob = _blob("a.webp", b"something else")
+    f = _fetcher(tmp_path, _Gfs({_addr(blob): blob}))
+    await _recv_hashed(f, _wire("a.webp", blob), data)
+    with caplog.at_level("WARNING"):
+        assert await f.ensure_local(_sc("a.webp", data)) is False
+    assert not (tmp_path / _sc("a.webp", data)).exists()
+    assert "does not hash" in caplog.text
+
+
+async def test_a_wanted_content_named_file_is_verified_too(tmp_path, caplog):
+    data = b"the real picture"
+    wrong = _blob("a.webp", b"another picture")
+    gfs = _OnDemandGfs({}, served={_addr(wrong): wrong})
+    f = _fetcher(tmp_path, gfs)
+    await _recv_hashed(f, _wire("a.webp", wrong), data)
+    with caplog.at_level("WARNING"):
+        assert await f.ensure_local(_sc("a.webp", data)) is False
+    assert len(gfs.wanted) == 1
+    assert not (tmp_path / _sc("a.webp", data)).exists()
+    assert "does not hash" in caplog.text
+
+
+async def test_a_content_name_without_a_ref_row_is_never_fetched(tmp_path, caplog):
+    """An ``sc-`` file a household pushes (no descriptor) that is not here
+    yet stays quiet — never a GFS fetch."""
+    gfs = _Gfs({})
+    f = _fetcher(tmp_path, gfs)
+    with caplog.at_level("WARNING"):
+        assert await f.ensure_local(_sc("a.webp", b"x")) is False
+    assert gfs.fetches == []
+    assert caplog.text == ""

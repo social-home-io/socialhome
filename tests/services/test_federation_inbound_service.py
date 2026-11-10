@@ -5390,7 +5390,11 @@ class _GfsMediaSink:
         self.items: list[tuple] = []
         self.kept: list[dict] = []
 
-    async def localize(self, space_id, raw_refs, media_urls, *, item_id, origin):
+    async def localize(
+        self, space_id, raw_refs, media_urls, *, item_id, origin, hashes=None
+    ):
+        #: v_85 — the hash map the handler passed (by the author's names).
+        self.hashes = hashes
         urls = [u for u in media_urls if u]
         if isinstance(raw_refs, dict):
             self.received.append((space_id, raw_refs, urls))
@@ -5648,3 +5652,35 @@ async def test_a_comments_picture_takes_its_content_name(
         "SELECT media_url FROM space_post_comments WHERE id=?", ("c-cm",)
     )
     assert row is not None and row["media_url"] == stored
+
+
+async def test_a_space_posts_hash_map_reaches_the_gfs_namer(db, bus, inbound):
+    """v_85: a hashed picture the post also describes keeps its one content
+    name — the GFS namer gets the map the envelope's signature vouches for."""
+    await db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+                              identity_public_key, space_type, join_mode)
+           VALUES(?,?,?,?,?,?,?)""",
+        ("sp-h", "S", "peer-a", "owner", "aa" * 32, "global", "open"),
+    )
+    await _seat(db, "sp-h", "user-remote")
+    sink = _GfsMediaSink()
+    inbound.attach_gfs_media(sink)
+    refs = {"a.webp": {"blob_id": "a" * 64, "suite": "s", "epoch": 0, "size": 9}}
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {
+                "id": "post-h",
+                "author": "user-remote",
+                "type": "image",
+                "content": "pic",
+                "image_urls": ["api/media/a.webp"],
+                "media_refs": refs,
+                "files": {"a.webp": {"h": "a" * 64}},
+                "files_suite": "sha256",
+            },
+            space_id="sp-h",
+        )
+    )
+    assert {n: fh.h for n, fh in sink.hashes.items()} == {"a.webp": "a" * 64}

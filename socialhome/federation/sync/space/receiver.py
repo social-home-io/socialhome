@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -54,7 +54,7 @@ from ....domain.events import (
 )
 from ....domain.federation import FederationEvent, FederationEventType
 from ....domain.federation_capabilities import FederationCapability
-from ....domain.file_hashes import parse_file_hashes
+from ....domain.file_hashes import FileHash, parse_file_hashes
 from ....domain.gallery import GalleryAlbum, GalleryItem, valid_taken_day
 from ....domain.media_constraints import CAPTION_MAX
 from ....domain.page import Page
@@ -487,6 +487,7 @@ class _GfsMediaSink(Protocol):
         *,
         item_id: str,
         origin: str,
+        hashes: Mapping[str, FileHash] | None = None,
     ) -> SpaceMediaLocalization: ...
 
     def localize_as_shown(
@@ -690,12 +691,9 @@ class SpaceSyncReceiver:
         rows whole and may hash content from before v_85 from its own copy
         (owner decision B); another provider's map is ignored (legacy
         names)."""
+        hashes = parse_file_hashes(record) if from_host else None
         direct = self._media_names.localize(
-            space_id,
-            provider,
-            urls,
-            held=held or (),
-            hashes=parse_file_hashes(record) if from_host else None,
+            space_id, provider, urls, held=held or (), hashes=hashes
         )
         if self._gfs_media is None:
             return direct
@@ -707,6 +705,9 @@ class SpaceSyncReceiver:
                 urls,
                 item_id=item_id,
                 origin=provider,
+                # The same map the direct names took: a hashed described
+                # file keeps its one content name, verified on fetch.
+                hashes=hashes,
             ),
         )
 
