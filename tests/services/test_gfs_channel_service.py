@@ -174,7 +174,7 @@ class _Federation:
         self.mesh: dict[str, int] = {}
 
     async def peer_supports(self, instance_id, *, min_version):
-        return self.versions.get(instance_id, 51) >= min_version
+        return self.versions.get(instance_id, 90) >= min_version
 
     async def space_member_supports(self, instance_id, *, min_version):
         if instance_id in self.mesh:
@@ -290,9 +290,7 @@ def _space(owner: str, *, strict: bool = False, kind=SpaceType.PRIVATE) -> Space
         config_sequence=0,
         join_mode=JoinMode.INVITE_ONLY,
         space_type=kind,
-        features=SpaceFeatures(
-            gfs_publish_mode="strict" if strict else "trusted", private_gfs=True
-        ),
+        features=SpaceFeatures(private_gfs=True),
     )
 
 
@@ -598,7 +596,9 @@ async def test_a_mesh_only_member_at_v51_gets_its_grant(env):
     env.owner.federation.mesh[other] = 51
     grant = await env.owner.svc.grant_for_peer(SPACE_ID, other)
     assert grant is not None
-    assert "channel_cert" in grant and "channel_pass" in grant
+    # A v_51 claim: a pass, but no channel writer key (that needs v_90).
+    assert "channel_pass" in grant and "writer_key" not in grant
+    assert "channel_cert" not in grant
     assert await env.other.svc.accept_grant(SPACE_ID, grant)
 
 
@@ -612,7 +612,7 @@ async def test_a_mesh_only_member_of_unknown_or_old_version_gets_no_grant(env):
     assert await env.owner.svc.grant_for_peer(SPACE_ID, other) is None
 
 
-async def test_a_reader_gets_a_pass_but_no_cert(env):
+async def test_a_reader_gets_a_pass_but_no_writer_key(env):
     await _channel_ready(env)
     env.owner.certs.scopes[env.member.h.instance_id] = None
     grant = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
@@ -648,12 +648,13 @@ async def test_every_member_household_takes_a_seat_with_the_option_on(env):
     assert await repo.has_subscription(channel_id, env.other.h.instance_id)
     assert not await repo.has_subscription(channel_id, env.owner.h.instance_id)
     paired = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
-    assert "channel_pass" in paired and "channel_cert" in paired
+    assert "channel_pass" in paired and "writer_key" in paired
+    assert "channel_cert" not in paired
     linked = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
     assert "channel_pass" in linked
     env.owner.certs.scopes[env.other.h.instance_id] = None
     reader = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
-    assert "channel_pass" in reader and "channel_cert" not in reader
+    assert "channel_pass" in reader and "writer_key" not in reader
 
 
 async def test_a_paired_member_publishes_and_the_link_joined_one_receives(env):
@@ -674,8 +675,9 @@ async def test_a_paired_member_publishes_and_the_link_joined_one_receives(env):
         "epoch": _wire(env, channel_id),
         "payload": "Y2lwaGVy",
     }
-    # The publisher gets its own item back from nobody.
-    assert await _queued(env, env.other) == []
+    # No publisher is known, so its own seat gets the echo too (the
+    # household drops it: the origin is inside the ciphertext).
+    assert [q.sealed for q in await _queued(env, env.other)] == [frame]
     # The receiving household routes it to its space locally.
     await env.member.svc.handle_frame({"type": "relay", **frame})
     assert env.member.inbound.items == [(SPACE_ID, 3, "Y2lwaGVy")]
@@ -684,21 +686,20 @@ async def test_a_paired_member_publishes_and_the_link_joined_one_receives(env):
     targets = await env.member.svc.plan(SPACE_ID)
     assert await env.member.svc.publish_sealed(SPACE_ID, 3, "b3RoZXI", targets)
     back = await _queued(env, env.other)
-    assert len(back) == 1 and back[0].sealed["payload"] == "b3RoZXI"
+    # Its own earlier echo, then the link-joined member's item.
+    assert [q.sealed["payload"] for q in back] == ["Y2lwaGVy", "b3RoZXI"]
 
 
-async def test_strict_member_publish_is_anonymous(env):
-    strict = replace(
-        env.space, features=SpaceFeatures(gfs_publish_mode="strict", private_gfs=True)
-    )
+async def test_member_publish_is_anonymous(env):
+    strict = replace(env.space, features=SpaceFeatures(private_gfs=True))
     for node in (env.owner, env.member, env.other):
         node.spaces.spaces[SPACE_ID] = strict
     channel_id = await _channel_ready(env)
     await _hand_grants(env, env.member, env.other)
     row = await env.app[gfs_channel_repo_key].get(channel_id)
-    assert row.strict and row.writer_pk_for(_wire(env, channel_id)) is not None
+    assert row.writer_pk_for(_wire(env, channel_id)) is not None
     grant = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
-    # Strict: the writer key, no identified channel cert.
+    # The writer key, never an identified channel cert.
     assert "writer_key" in grant and "channel_cert" not in grant
     targets = await env.other.svc.plan(SPACE_ID)
     accepted = await env.other.svc.publish_sealed(SPACE_ID, 3, "YW5vbg", targets)
@@ -707,14 +708,13 @@ async def test_strict_member_publish_is_anonymous(env):
 
 
 @pytest.mark.security
-async def test_strict_space_without_a_writer_key_sends_nothing(env):
+async def test_a_member_without_a_writer_key_sends_nothing(env):
+    """A member below v_90 is handed no channel writer key: nothing goes to
+    any server — never an identified request — the host path carries it."""
+    env.owner.federation.versions[env.member.h.instance_id] = 89
     channel_id = await _channel_ready(env)
     await _hand_grants(env, env.member)
-    # The owner switches to strict; the member's (trusted) grant has no key.
-    strict = replace(
-        env.space, features=SpaceFeatures(gfs_publish_mode="strict", private_gfs=True)
-    )
-    env.member.spaces.spaces[SPACE_ID] = strict
+    assert (await env.member.svc.current_grant(SPACE_ID)).writer_key is None
     assert await env.member.svc.plan(SPACE_ID) == []
     conn = (await env.member.svc._capable())[0]
     assert await env.member.svc.publish_sealed(SPACE_ID, 3, "eA", [conn]) == []
@@ -949,9 +949,7 @@ async def test_owner_replaces_a_channel_whose_writer_key_pin_is_not_its_own(
     env, monkeypatch
 ):
     monkeypatch.setattr(chan_mod, "HEAL_GRACE_S", 0.0)
-    strict = replace(
-        env.space, features=SpaceFeatures(gfs_publish_mode="strict", private_gfs=True)
-    )
+    strict = replace(env.space, features=SpaceFeatures(private_gfs=True))
     env.owner.spaces.spaces[SPACE_ID] = strict
     assert await env.owner.svc.reconcile(SPACE_ID) == "created"
     first = env.owner.spaces.channels[SPACE_ID][0]
@@ -1081,9 +1079,7 @@ async def test_malformed_notice_answers_never_heal(env, monkeypatch, answer):
     no information — never evidence of a take-over (strict space, where the
     writer key pin is compared)."""
     monkeypatch.setattr(chan_mod, "HEAL_GRACE_S", 0.0)
-    strict = replace(
-        env.space, features=SpaceFeatures(gfs_publish_mode="strict", private_gfs=True)
-    )
+    strict = replace(env.space, features=SpaceFeatures(private_gfs=True))
     env.owner.spaces.spaces[SPACE_ID] = strict
     first = await _channel_ready(env)
     _lying_gfs(monkeypatch, answer)
@@ -1096,9 +1092,7 @@ async def test_malformed_notice_answers_never_heal(env, monkeypatch, answer):
 @pytest.mark.security
 async def test_a_writer_key_pin_for_another_epoch_is_not_a_take_over(env, monkeypatch):
     monkeypatch.setattr(chan_mod, "HEAL_GRACE_S", 0.0)
-    strict = replace(
-        env.space, features=SpaceFeatures(gfs_publish_mode="strict", private_gfs=True)
-    )
+    strict = replace(env.space, features=SpaceFeatures(private_gfs=True))
     env.owner.spaces.spaces[SPACE_ID] = strict
     first = await _channel_ready(env)
     _lying_gfs(monkeypatch, {"epoch": _wire(env, first) - 1, "writer_pk": "x" * 43})
@@ -1271,7 +1265,7 @@ async def test_a_member_never_uses_the_channel_while_the_stored_option_is_off(en
     conn = (await env.other.svc._capable())[0]
     assert await env.other.svc.publish_sealed(SPACE_ID, 3, "eA", [conn]) == []
     outcome = await env.other.svc._post_item(
-        conn, SPACE_ID, {"epoch": 3, "payload": "eA"}, anon=False
+        conn, SPACE_ID, {"epoch": 3, "payload": "eA"}
     )
     assert outcome.kind == "permanent"
     assert await _queued(env, env.member) == []
@@ -1436,26 +1430,25 @@ async def test_servers_changed_is_owner_only_and_never_raises(env):
     assert await env.owner.svc.on_servers_changed(SPACE_ID) == set()
 
 
-async def test_trusted_writer_key_goes_to_v57_members_only(env):
-    env.owner.federation.versions[env.other.h.instance_id] = 57
-    env.owner.federation.versions[env.member.h.instance_id] = 56
+async def test_the_writer_key_goes_to_v90_members_only(env):
+    """One mode (v_90): the channel writer key is pinned on every notice and
+    handed to a v_90 writer; an older member gets no key (and, since there
+    is no identified path any more, no cert either)."""
+    env.owner.federation.versions[env.member.h.instance_id] = 89
     channel_id = await _channel_ready(env)
     row = await env.app[gfs_channel_repo_key].get(channel_id)
-    # Trusted channel, but its writer key is pinned for anonymous sends.
-    assert not row.strict
     assert row.writer_pk_for(_wire(env, channel_id)) is not None
-    v57 = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
-    v56 = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
-    assert "writer_key" in v57 and "channel_cert" in v57
-    assert "writer_key" not in v56 and "channel_cert" in v56
+    v90 = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
+    v89 = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
+    assert "writer_key" in v90 and "channel_cert" not in v90
+    assert "writer_key" not in v89 and "channel_cert" not in v89
 
 
 @pytest.mark.security
-async def test_a_v57_member_sends_anonymously_to_every_chosen_server(env):
+async def test_a_member_sends_anonymously_to_every_chosen_server(env):
     """A member connected to one channel server publishes to a second one it
     never connected to — anonymously: no instance id, no household
     signature, no cookie session; never the space id."""
-    env.owner.federation.versions[env.other.h.instance_id] = 57
     await _channel_ready(env)
     await _hand_grants(env, env.member, env.other)
     member_conn = env.other.svc._conn_repo.conn
@@ -1479,7 +1472,6 @@ async def test_a_v57_member_sends_anonymously_to_every_chosen_server(env):
 
 @pytest.mark.security
 async def test_a_server_the_grant_does_not_name_gets_nothing(env):
-    env.owner.federation.versions[env.other.h.instance_id] = 57
     await _channel_ready(env)
     await _hand_grants(env, env.other)
     stranger = _unconnected(env, env.other, gfs_instance_id="gfs-not-named")
@@ -1492,7 +1484,6 @@ async def test_a_server_the_grant_does_not_name_gets_nothing(env):
 
 
 async def test_an_unproven_channel_server_is_skipped(env):
-    env.owner.federation.versions[env.other.h.instance_id] = 57
     await _channel_ready(env)
     await _hand_grants(env, env.other)
     unconnected = _unconnected(env, env.other)
@@ -1502,39 +1493,7 @@ async def test_an_unproven_channel_server_is_skipped(env):
 
 
 @pytest.mark.security
-async def test_identified_channel_items_never_reach_an_unconnected_server(env):
-    """A member without the channel writer key (below v_57) publishes with
-    its channel cert — only where it is registered."""
-    await _channel_ready(env)
-    await _hand_grants(env, env.other)
-    unconnected = _unconnected(env, env.other)
-    env.other.gfs.targets = [env.other.svc._conn_repo.conn, unconnected]
-    env.other.gfs.sent = []
-    targets = await env.other.svc.plan(SPACE_ID)
-    assert [t.id for t in targets] == ["conn-1"]
-    accepted = await env.other.svc.publish_sealed(
-        SPACE_ID, 3, "eA", [*targets, unconnected]
-    )
-    assert [c.id for c in accepted] == ["conn-1"]
-    assert env.other.gfs.sent == []
-    # Even a queued identified item addressed to it is refused outright.
-    outcome = await env.other.svc._post_item(
-        unconnected, SPACE_ID, {"epoch": 3, "payload": "eA"}, anon=False
-    )
-    assert outcome.kind == "permanent"
-    assert env.other.gfs.sent == []
-
-
-async def test_identified_targets_follow_the_owners_list(env):
-    await _channel_ready(env)
-    await _hand_grants(env, env.other)
-    # The owner's list no longer names our connection.
-    env.other.gfs.targets = [_unconnected(env, env.other)]
-    assert await env.other.svc.plan(SPACE_ID) == []
-
-
 async def test_retry_to_an_unconnected_server(env):
-    env.owner.federation.versions[env.other.h.instance_id] = 57
     await _channel_ready(env)
     await _hand_grants(env, env.other)
     unconnected = _unconnected(env, env.other)
@@ -1555,15 +1514,12 @@ async def test_retry_to_an_unconnected_server(env):
     assert (await svc._retry_send(unconnected.id, item)).kind == "permanent"
     gfs.incapable = set()
     assert (await svc._retry_send(unconnected.id, item)).kind == "delivered"
-    # Never an identified item, never without a grant for the epoch.
-    ident = replace(item, event_type=chan_mod._KIND_ITEM)
-    assert (await svc._retry_send(unconnected.id, ident)).kind == "permanent"
+    # Never without a grant for the epoch.
     stale = replace(item, payload={"epoch": 1, "payload": "eA"})
     assert (await svc._retry_send(unconnected.id, stale)).kind == "permanent"
 
 
 async def test_a_refused_listing_address_is_classified(env):
-    env.owner.federation.versions[env.other.h.instance_id] = 57
     await _channel_ready(env)
     await _hand_grants(env, env.other)
     unconnected = _unconnected(env, env.other)
@@ -1575,7 +1531,7 @@ async def test_a_refused_listing_address_is_classified(env):
 
     env.other.gfs.anon_session = refused  # type: ignore[method-assign]
     outcome = await env.other.svc._post_item(
-        unconnected, SPACE_ID, {"epoch": 3, "payload": "eA"}, anon=True
+        unconnected, SPACE_ID, {"epoch": 3, "payload": "eA"}
     )
     assert outcome.kind == "permanent"
 

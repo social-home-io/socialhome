@@ -1442,27 +1442,25 @@ sends each follower household its `comment` cert at once.
 receiver, plus the 10-minute grace — and if no seed holder is online to
 rotate, until one is. Before this release demotion did not rotate at all.
 
-**Writer group key (v_50, strict spaces).** Where the owner set
-`gfs_publish_mode = "strict"`, the same four channels also carry
-`writer_key` — the epoch's writer group key (`{writer_key_suite, space_id,
-epoch, writer_seed, writer_key_cert}`, derived from the space seed per epoch)
-— next to the cert, only to a v_50 household holding a publishing scope
+**Writer group key (v_50; every publicly readable space, v_90).** In a
+publicly readable space the same four channels also carry `writer_key` —
+the epoch's writer group key (`{writer_key_suite, space_id, epoch,
+writer_seed, writer_key_cert}`, derived from the space seed per epoch) —
+next to the cert, only to a v_90 household holding a publishing scope
 (`write` and `comment` get the same key). The receiver verifies it against
 the pinned space key and keeps it KEK-wrapped on `space_keys.writer_key`; it
 signs the household's anonymous publishes to the connection server (see
-[`discovery.md`](./discovery.md#member-publish-strict-mode-v_50)). It
-rotates with the epoch, so revocation = rotation covers it too; the switch
-to strict rotates once so the key arrives with a fresh epoch. The setting is
-owner-only: a member household takes it only from the owner household's own
-`SPACE_CONFIG_CHANGED` (a delegated admin's signed config can't flip it), and
-the host pins it like `allow_subscribers`.
+[`discovery.md`](./discovery.md#the-writer-group-key-v_50-every-publicly-readable-space-since-v_90)). It
+rotates with the epoch, so revocation = rotation covers it too. There is
+no publish-mode setting any more (v_90: the trusted / strict
+`gfs_publish_mode` is gone — every member publish is anonymous).
 
 **Private spaces and the connection server (`private_gfs`, 2026-10-04).**
 Whether a PRIVATE space touches a connection server at all is an
 **owner-only** feature flag, `SpaceFeatures.private_gfs` — OFF for every new
 private space, federated in `SPACE_CONFIG_CHANGED`, taken by a member
 household only from the owner household's own config and pinned on the host
-(like `gfs_publish_mode`; a forwarded `update_config` is pinned too). OFF:
+(like `allow_subscribers`; a forwarded `update_config` is pinned too). OFF:
 no `gfs`-type invite link (only `internal` links — see
 [`invites.md`](./invites.md#the-link-type-gfs-or-internal)), no channel, no
 grant. ON: `gfs` links are allowed and the space gets the channel below,
@@ -1476,9 +1474,10 @@ channel and rotates the content key.
 channels also carry `gfs_channel` — the household's per-epoch grant for the
 space's opaque connection-server channel (`{channel_suite, space_id,
 channel_id, channel_pk, epoch, epoch_offset, gfs_ids, binding_sig_suite,
-binding_sig, channel_pass, channel_cert?, writer_key?}`), to every v_51
-member household with a live seat — a pass for every member household (a
-reader gets a pass-only grant), a cert or writer key for writers. It is bound
+binding_sig, channel_pass, writer_key?}`), to every v_51 member household
+with a live seat — a pass for every member household (a reader gets a
+pass-only grant), the channel writer key for a v_90 writer (no channel cert
+since v_90). It is bound
 to the space by the authority key, verified against the pinned space key and
 kept KEK-wrapped on `space_keys.gfs_channel`; a snapshot's grant is taken
 only from the host. See
@@ -2261,7 +2260,7 @@ be the invitee's only way into the space:
   exemption of the space-writer gate covers it.
 
 **Owner-only stays owner-only**: the owner-signed GFS list, `private_gfs`,
-`gfs_publish_mode`, the authority cert / `host_identity_pk`, the config
+the authority cert / `host_identity_pk`, the config
 last-writer-wins owner path, dissolve, sync-rejected and the age gate
 compare against `owner_instance_id` alone. Any other
 admin household gets the member-provider rules. Turning delegation off — or

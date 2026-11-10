@@ -910,19 +910,12 @@ Suite tag `author_sig_suite` (`ITEM_AUTHOR_SIG_SUITE_ED25519 = "ed25519"`,
 `derive_user_id(author_pk, identity_anchor or author_username) ==
 author_user_id`. No new key: the household identity key every peer pins.
 
-**Trusted-mode member publish** (`domain/gfs_member_publish.py`,
-`global_server/member_publish.py`, v_49) — `POST /gfs/member-publish`. The
-household signs canonical JSON (sorted keys, compact — the encoding every
-signed household→GFS request uses) of `{action: "gfs-member-publish:v1",
-instance_id, gfs_instance_id, ts, target, event_type: "space_item", epoch, writer_cert,
-payload}` with its Ed25519 identity seed; the GFS verifies it against the
-registered `client_instances.public_key` with the ±300 s `ts` window. The
-`action` value is the domain separator — distinct from `subscribe` /
-`unsubscribe` / `unpublish` — so the signature cannot be replayed as any
-other request, and `gfs_instance_id` (the server id the household pinned from `/gfs/info`, refused unless it is the receiving server's) binds it to one server so it cannot be replayed to another; no new key or suite (it is the household identity signature,
-`ed25519`). The GFS then runs `verify_writer_cert` against the pinned space
-key with `author_pk` = that same registered key and scope `comment` (the
-item type is hidden in the ciphertext; receivers enforce the real scope).
+**Member publish** (`domain/gfs_member_publish.py`,
+`global_server/member_publish.py`, v_49; one anonymous mode since v_90 — the
+household-signed `POST /gfs/member-publish` and its `gfs-member-publish:v1`
+action are gone) — `POST /gfs/member-publish-anon`, authorized by the writer
+group key below; the GFS checks the scope `comment` at most (the item type
+is hidden in the ciphertext; receivers enforce the real scope).
 `payload` is AES-256-GCM under the existing per-space epoch content key —
 the GFS holds no key. Its plaintext is padded to a size bucket (1 / 4 / 16 /
 64 / 128 KiB, a `_pad` JSON field) before encryption, so the padding is
@@ -941,7 +934,7 @@ after it, so a member holding the content key cannot make followers inflate
 a decompression bomb. Compression runs inside the encryption, on content the
 attacker already chose; the bucket padding still hides the length, so a
 compression-ratio side channel only shows the bucket. The fan-out frame's
-label is outside the ciphertext and unsigned on the member path: a GFS that
+label is outside the ciphertext and unsigned in the fan-out frame: a GFS that
 flips it only makes the item undecodable (the author signature inside still
 decides), which it could do by dropping the frame anyway. `"zlib1+dict1"` is
 `zlib1` with a preset dictionary (`domain/item_zdict.ZDICT_V1`: the item
@@ -955,7 +948,8 @@ inflation cap and padding rules are the same. **Content-epoch notice** — `POST
 /gfs/spaces/{id}/epoch`, two forms. The OWNER's: its household identity
 signature (Ed25519, the registered key) over canonical JSON of `{action:
 "gfs-owner-epoch-notice:v1", owning_instance, gfs_instance_id, space_id,
-epoch, ts}` — only this form may move the epoch by more than one. A
+epoch, ts, writer_key_cert?}` — only this form may move the epoch by more
+than one. A
 delegated admin's: a space-authority signature (`authority_sig.py`, suite
 `authority_sig_suite`) over `{space_id, epoch}` under the new event type
 `space_epoch_notice`, which is deliberately outside
@@ -964,10 +958,9 @@ lifted onto the other path; it raises the epoch by +1 at most. No new key
 or suite.
 
 **Writer group key + anonymous member publish** (`writer_key.py`,
-`domain/writer_key.py`, `domain/gfs_member_publish.py`, v_50; trusted spaces
-v_57) — in a space whose owner set `gfs_publish_mode = "strict"` (and, since
-v_57, in every trusted publicly readable space), a member household publishes
-WITHOUT identifying itself to the connection server, authorized by the
+`domain/writer_key.py`, `domain/gfs_member_publish.py`, v_50; every publicly
+readable space, the only member publish since v_90) — a member household
+publishes WITHOUT identifying itself to the connection server, authorized by the
 space's per-epoch **writer group key**: one Ed25519 key per (space, content
 epoch), shared by every household allowed to publish anything there (both
 `write` and `comment` scopes, so the GFS cannot tell them apart).
@@ -990,12 +983,9 @@ epoch), shared by every household allowed to publish anything there (both
   writer_seed, writer_key_cert}` — SECRET, so it rides only inside the
   per-peer encrypted payload of the four channels that carry the writer
   cert (rekey `per_peer`, roster snapshot, redeem ACK `space_meta`, v_44
-  rotation bundle), only to a household holding a publishing scope: in a
-  strict space at v_50, and — since v_57, so a member can publish
-  anonymously to every GFS on the owner's list — in a TRUSTED publicly
-  readable space at v_57 (`writer_key_min_version`). The key, its pin and
-  its wire shape are the same in every mode; the owner's epoch notice pins
-  `writer_key_cert` in both. The receiver verifies the cert against its pinned space key
+  rotation bundle), only to a household holding a publishing scope, in
+  every publicly readable space, at v_90 (`writer_key_min_version`). The
+  owner's epoch notice pins `writer_key_cert`. The receiver verifies the cert against its pinned space key
   and that the seed's public half is `writer_pk`, then stores the grant
   KEK-wrapped (AES-GCM, AAD `socialhome-writer-key:<space_id>:<epoch>`) on
   that epoch's `space_keys.writer_key`. Rotates with every content epoch, so
@@ -1009,7 +999,7 @@ epoch), shared by every household allowed to publish anything there (both
   whole seconds with up to ±60 s of random jitter, so it carries no clock
   fingerprint. No household key, no
   household signature, no plaintext cert: the writer cert stays inside the
-  AES-GCM payload, where receivers check it exactly as in trusted mode.
+  AES-GCM payload, where receivers check it.
 - **Suite.** `writer_key_suite` / `writer_sig_suite` =
   `WRITER_KEY_SUITE_ED25519 = "ed25519"` (`SUPPORTED_WRITER_KEY_SUITES`,
   unknown → `UnsupportedWriterKeySuite`, never a default) — the algorithm of
@@ -1018,7 +1008,7 @@ epoch), shared by every household allowed to publish anything there (both
 - **Why a new key** (the "no new key" rule): the content key is held by every
   reader including GFS followers, so it cannot authorize a write; the
   authority seed must not spread to every publisher; the household identity
-  key is exactly what strict mode withholds from the server.
+  key is exactly what member publish withholds from the server.
 
 **Opaque channels for private spaces** (`gfs_channel.py`, wire shapes in
 `domain/gfs_channel.py`, v_51) — a PRIVATE space with link-joined members
@@ -1033,10 +1023,10 @@ holder derives them and nobody stores them:
   bytes)`;
 - `channel_writer_seed = HKDF-SHA256(ikm = space seed, salt =
   b"socialhome-gfs-channel-writer-key:v1", info =
-  b"<space_id>:<channel_id>:<channel epoch>", 32 bytes)` (strict mode;
-  since v_57 in every mode — pinned by every notice and handed to v_57
-  writers in trusted spaces too, so they publish anonymously to every
-  channel server the owner chose, including ones they never connected to);
+  b"<space_id>:<channel_id>:<channel epoch>", 32 bytes)` — pinned by every
+  notice and handed to every v_90 writer, so it publishes anonymously to
+  every channel server the owner chose, including ones it never connected
+  to (the only channel publish since v_90);
 - `epoch_offset = int(HKDF-SHA256(ikm = space seed, salt =
   b"socialhome-gfs-channel-epoch-offset:v1", info =
   b"<space_id>:<channel_id>", 5 bytes))` — every epoch on the wire is
@@ -1061,9 +1051,8 @@ be lifted onto another, and carries a suite tag:
 | Statement | Signed by | Prefix |
 |---|---|---|
 | registration `{channel_suite, channel_id, channel_pk, gfs_instance_id, ts, nonce}` | the key being registered (proof of possession) | `gfs-channel-register:v1:` |
-| epoch notice `{channel_suite, channel_id, gfs_instance_id, ts, nonce, epoch, publish_mode, writer_key_cert?}` | channel key | `gfs-channel-epoch:v1:` |
+| epoch notice `{channel_suite, channel_id, gfs_instance_id, ts, nonce, epoch, writer_key_cert?}` | channel key | `gfs-channel-epoch:v1:` |
 | unregister `{channel_suite, channel_id, gfs_instance_id, ts, nonce}` | channel key | `gfs-channel-unregister:v1:` |
-| `ChannelCert {channel_suite, channel_id, epoch, instance_pk, scope, issued_at}` | channel key | `gfs-channel-cert:v1:` |
 | `ChannelPass {channel_suite, channel_id, epoch, instance_pk, issued_at}` (scope-free) | channel key | `gfs-channel-pass:v1:` |
 | `ChannelWriterKeyCert {writer_key_suite, channel_suite, channel_id, epoch, writer_pk}` | channel key (suite `channel_suite`) | `gfs-channel-writer-key-cert:v1:` |
 | anonymous publish `{gfs_instance_id, channel_id, ts, nonce, event_type, epoch, payload, writer_sig_suite}` | channel writer key | `gfs-channel-publish-anon:v1:` |
@@ -1074,14 +1063,15 @@ Suites: `channel_suite` = `CHANNEL_SUITE_ED25519 = "ed25519"`
 default) for the channel key and everything it signs; `binding_sig_suite` =
 `CHANNEL_BINDING_SUITE_ED25519` (`SUPPORTED_CHANNEL_BINDING_SUITES`) for the
 space authority's binding; the writer key reuses `WRITER_KEY_SUITE_ED25519`.
-The household-signed channel requests (subscribe / unsubscribe / trusted
-publish) are the ordinary household identity signature over canonical JSON
-with an `action` domain separator (`gfs-channel-subscribe:v1`,
-`gfs-channel-unsubscribe:v1`, `gfs-channel-publish:v1`) — no new key.
+The household-signed channel requests (subscribe / unsubscribe) are the
+ordinary household identity signature over canonical JSON with an `action`
+domain separator (`gfs-channel-subscribe:v1`, `gfs-channel-unsubscribe:v1`)
+— no new key. (The channel cert, `gfs-channel-cert:v1:`, and the identified
+channel publish, `gfs-channel-publish:v1`, are gone since v_90.)
 
 **Delivery: the grant** (`gfs_channel`) — `{channel_suite, space_id,
 channel_id, channel_pk, epoch, gfs_ids, binding_sig_suite, binding_sig,
-channel_pass?, channel_cert?, writer_key?}` (`channel_pass` only for a link-joined household — a paired member's grant is publish-only), issued per member household per
+channel_pass?, writer_key?}` (`channel_pass` only for a seated household — a paired member's grant without the owner's `private_gfs` is publish-only; `writer_key` only for a v_90 writer), issued per member household per
 epoch by a seed holder whose seed matches the pin, riding only inside the
 per-peer encrypted payloads of the four writer-cert channels, only to v_51
 households. The member verifies the binding against the space key it

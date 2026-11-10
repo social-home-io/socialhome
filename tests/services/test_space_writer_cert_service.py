@@ -786,24 +786,30 @@ async def test_a_truncated_binding_warns_once_per_space_and_household(caplog):
     assert len(warnings) == 1
 
 
-# ── Writer group key (v_50, strict mode) ─────────────────────────────────
+# ── Writer group key: every publicly readable space, v_90 ────────────────
 
-_V50 = FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH
+_V90 = FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY
 
 
-def _strict_svc(**kw):
-    kw.setdefault("space", _space(gfs_publish_mode="strict"))
+def _key_svc(**kw):
+    kw.setdefault("space", _space(allow_subscribers=True))
     kw.setdefault(
         "versions",
-        {"peer": _V50, "fol": _V50, "none": _V50, "old": _V50 - 1},
+        {
+            "peer": _V90,
+            "fol": _V90,
+            "none": _V90,
+            "old": _V90 - 1,
+            "v57": FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH,
+        },
     )
     kw.setdefault("kek", KeyManager(os.urandom(32)))
     return _svc(**kw)
 
 
 async def test_writer_key_goes_to_every_publisher_alike():
-    svc, _ = _strict_svc(
-        space=_space(gfs_publish_mode="strict", allow_subscriber_comment=True),
+    svc, _ = _key_svc(
+        space=_space(allow_subscribers=True, allow_subscriber_comment=True),
         remote_rows=[
             _remote("peer", "member"),
             _remote("fol", SpaceRole.SUBSCRIBER.value),
@@ -820,66 +826,30 @@ async def test_writer_key_goes_to_every_publisher_alike():
 
 
 async def test_writer_key_never_goes_to_a_non_publisher():
-    svc, _ = _strict_svc(remote_rows=[_remote("fol", SpaceRole.SUBSCRIBER.value)])
+    svc, _ = _key_svc(remote_rows=[_remote("fol", SpaceRole.SUBSCRIBER.value)])
     # A follower without comment rights publishes nothing → no key.
     assert await svc.writer_key_for_peer("sp-1", "fol") is None
     assert await svc.writer_key_for_peer("sp-1", "none") is None
 
 
 async def test_writer_key_never_goes_to_an_older_household():
-    svc, _ = _strict_svc(remote_rows=[_remote("old", "member")])
+    """v_90 — one mode, no compat path: a household below it (a v_57
+    household too, which used to get the key) is handed none and publishes
+    nothing over the GFS."""
+    svc, _ = _key_svc(remote_rows=[_remote("old", "member"), _remote("v57", "member")])
     assert await svc.writer_key_for_peer("sp-1", "old") is None
+    assert await svc.writer_key_for_peer("sp-1", "v57") is None
 
 
-async def test_writer_key_not_in_a_trusted_space_nobody_may_follow():
-    svc, _ = _strict_svc(space=_space(), remote_rows=[_remote("peer", "member")])
+async def test_writer_key_not_in_a_space_nobody_may_follow():
+    svc, _ = _key_svc(space=_space(), remote_rows=[_remote("peer", "member")])
     assert await svc.writer_key_for_peer("sp-1", "peer") is None
     assert await svc.writer_key_cert_wire("sp-1", 2) is None
     assert await svc.own_writer_key("sp-1", 2) is None
 
 
-# ── v_57: the writer key in a trusted, publicly readable space ────────────
-
-_V57 = FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH
-
-
-def _trusted_svc(**kw):
-    kw.setdefault("space", _space(allow_subscribers=True))
-    kw.setdefault("versions", {"peer": _V57, "v56": _V57 - 1, "v50": _V50})
-    kw.setdefault("kek", KeyManager(os.urandom(32)))
-    return _svc(**kw)
-
-
-async def test_trusted_publicly_readable_space_hands_the_key_to_a_v57_writer():
-    svc, _ = _trusted_svc(remote_rows=[_remote("peer", "member")])
-    grant = await svc.writer_key_for_peer("sp-1", "peer")
-    assert grant is not None
-    seed = verify_writer_key_grant(
-        WriterKeyGrant.from_wire(grant), space_pubkey=SPACE_PK, space_id="sp-1"
-    )
-    assert seed == derive_writer_seed(SEED, "sp-1", 2)
-
-
-async def test_trusted_space_key_is_gated_on_v57_not_v50():
-    """A v_50..v_56 household knows the key but would never publish to a
-    server it is not connected to: it keeps its identified path."""
-    svc, _ = _trusted_svc(
-        remote_rows=[_remote("v56", "member"), _remote("v50", "member")]
-    )
-    assert await svc.writer_key_for_peer("sp-1", "v56") is None
-    assert await svc.writer_key_for_peer("sp-1", "v50") is None
-
-
-async def test_strict_space_key_stays_at_v50():
-    svc, _ = _trusted_svc(
-        space=_space(gfs_publish_mode="strict", allow_subscribers=True),
-        remote_rows=[_remote("v50", "member")],
-    )
-    assert await svc.writer_key_for_peer("sp-1", "v50") is not None
-
-
-async def test_trusted_space_seed_holder_derives_and_pins_the_key():
-    svc, _ = _trusted_svc()
+async def test_a_seed_holder_derives_and_pins_the_key():
+    svc, _ = _key_svc()
     assert await svc.own_writer_key("sp-1", 4) == derive_writer_seed(SEED, "sp-1", 4)
     wire = await svc.writer_key_cert_wire("sp-1", 4)
     expected = issue_writer_key_grant(
@@ -898,8 +868,8 @@ async def test_trusted_space_seed_holder_derives_and_pins_the_key():
         replace(_space(allow_subscribers=True), space_type=SpaceType.HOUSEHOLD),
     ],
 )
-async def test_no_trusted_key_outside_the_public_tiers(space):
-    svc, _ = _trusted_svc(space=space, remote_rows=[_remote("peer", "member")])
+async def test_no_key_outside_the_public_tiers(space):
+    svc, _ = _key_svc(space=space, remote_rows=[_remote("peer", "member")])
     assert await svc.writer_key_for_peer("sp-1", "peer") is None
     assert await svc.writer_key_cert_wire("sp-1", 2) is None
     assert await svc.own_writer_key("sp-1", 2) is None
@@ -908,26 +878,25 @@ async def test_no_trusted_key_outside_the_public_tiers(space):
 def test_writer_key_min_version():
     assert writer_key_min_version(None) is None
     assert writer_key_min_version(_space()) is None
-    assert writer_key_min_version(_space(allow_subscribers=True)) == _V57
-    assert writer_key_min_version(_space(gfs_publish_mode="strict")) == _V50
+    assert writer_key_min_version(_space(allow_subscribers=True)) == _V90
     assert (
         writer_key_min_version(
             replace(_space(allow_subscribers=True), space_type=SpaceType.GLOBAL)
         )
-        == _V57
+        == _V90
     )
 
 
 async def test_writer_key_needs_a_matching_seed():
-    svc, _ = _strict_svc(seed=os.urandom(32), remote_rows=[_remote("peer", "member")])
+    svc, _ = _key_svc(seed=os.urandom(32), remote_rows=[_remote("peer", "member")])
     assert await svc.writer_key_for_peer("sp-1", "peer") is None
     assert await svc.writer_key_cert_wire("sp-1", 2) is None
-    svc, _ = _strict_svc(seed=None, remote_rows=[_remote("peer", "member")])
+    svc, _ = _key_svc(seed=None, remote_rows=[_remote("peer", "member")])
     assert await svc.writer_key_for_peer("sp-1", "peer") is None
 
 
 async def test_writer_key_needs_an_epoch_and_federation():
-    svc, _ = _strict_svc(keys=_Keys(None), remote_rows=[_remote("peer", "member")])
+    svc, _ = _key_svc(keys=_Keys(None), remote_rows=[_remote("peer", "member")])
     assert await svc.writer_key_for_peer("sp-1", "peer") is None
     assert await svc.writer_key_for_peer("sp-1", "own") is None
     svc._federation = None
@@ -935,9 +904,7 @@ async def test_writer_key_needs_an_epoch_and_federation():
 
 
 async def test_peer_payload_hook_carries_the_writer_key_next_to_the_cert():
-    svc, _ = _strict_svc(
-        remote_rows=[_remote("peer", "member"), _remote("old", "member")]
-    )
+    svc, _ = _key_svc(remote_rows=[_remote("peer", "member"), _remote("old", "member")])
     hook = svc.peer_payload_hook("sp-1", epoch=2)
     out = await hook("peer", {})
     assert "writer_cert" in out and "writer_key" in out
@@ -948,14 +915,14 @@ async def test_peer_payload_hook_carries_the_writer_key_next_to_the_cert():
 
 
 async def test_writer_key_rotates_with_the_epoch():
-    svc, _ = _strict_svc(remote_rows=[_remote("peer", "member")])
+    svc, _ = _key_svc(remote_rows=[_remote("peer", "member")])
     k2 = await svc.writer_key_for_peer("sp-1", "peer", epoch=2)
     k3 = await svc.writer_key_for_peer("sp-1", "peer", epoch=3)
     assert k2["writer_seed"] != k3["writer_seed"]
 
 
 async def test_writer_key_cert_wire_pins_the_derived_key():
-    svc, _ = _strict_svc()
+    svc, _ = _key_svc()
     wire = await svc.writer_key_cert_wire("sp-1", 4)
     from_cert = verify_writer_key_cert(
         WriterKeyGrant.from_wire(
@@ -973,7 +940,7 @@ async def test_writer_key_cert_wire_pins_the_derived_key():
 
 
 async def test_accept_writer_key_stores_it_wrapped_and_own_writer_key_reads_it():
-    svc, keys = _strict_svc(seed=None)
+    svc, keys = _key_svc(seed=None)
     grant = issue_writer_key_grant(space_seed=SEED, space_id="sp-1", epoch=2).to_wire()
     assert await svc.accept_writer_key("sp-1", grant) is True
     stored = keys.writer_keys[("sp-1", 2)]
@@ -984,7 +951,7 @@ async def test_accept_writer_key_stores_it_wrapped_and_own_writer_key_reads_it()
 
 
 async def test_accept_writer_key_refuses_a_forged_grant():
-    svc, keys = _strict_svc(seed=None)
+    svc, keys = _key_svc(seed=None)
     forged = issue_writer_key_grant(
         space_seed=os.urandom(32), space_id="sp-1", epoch=2
     ).to_wire()
@@ -999,7 +966,7 @@ async def test_accept_writer_key_refuses_a_forged_grant():
 
 
 async def test_accept_writer_key_needs_a_kek():
-    svc, _ = _strict_svc(seed=None, kek=None)
+    svc, _ = _key_svc(seed=None, kek=None)
     svc._kek = None
     grant = issue_writer_key_grant(space_seed=SEED, space_id="sp-1", epoch=2).to_wire()
     assert await svc.accept_writer_key("sp-1", grant) is False
@@ -1007,7 +974,7 @@ async def test_accept_writer_key_needs_a_kek():
 
 
 async def test_a_stored_writer_key_dies_with_an_authority_repin():
-    svc, _keys = _strict_svc(seed=None)
+    svc, _keys = _key_svc(seed=None)
     grant = issue_writer_key_grant(space_seed=SEED, space_id="sp-1", epoch=2).to_wire()
     await svc.accept_writer_key("sp-1", grant)
     svc._spaces.space = replace(
@@ -1017,15 +984,15 @@ async def test_a_stored_writer_key_dies_with_an_authority_repin():
 
 
 async def test_a_corrupt_stored_writer_key_is_ignored():
-    svc, keys = _strict_svc(seed=None)
+    svc, keys = _key_svc(seed=None)
     keys.writer_keys[("sp-1", 2)] = "garbage:garbage"
     assert await svc.own_writer_key("sp-1", 2) is None
 
 
-async def test_a_seed_holder_derives_its_own_writer_key_only_when_strict():
-    svc, _ = _strict_svc()
+async def test_a_seed_holder_derives_its_own_writer_key_only_when_readable():
+    svc, _ = _key_svc()
     assert await svc.own_writer_key("sp-1", 5) == derive_writer_seed(SEED, "sp-1", 5)
-    svc, _ = _strict_svc(space=_space())
+    svc, _ = _key_svc(space=_space())
     assert await svc.own_writer_key("sp-1", 5) is None
     assert await svc.own_writer_key("other", 5) is None
 
@@ -1076,11 +1043,11 @@ async def test_mesh_claim_without_a_seat_gets_nothing():
     assert await svc.cert_for_peer("sp-1", "mesh") is None
 
 
-async def test_mesh_only_member_in_strict_space_gets_the_writer_key():
+async def test_mesh_only_member_at_v90_gets_the_writer_key():
     svc, _ = _svc(
-        space=_space(gfs_publish_mode="strict"),
+        space=_space(allow_subscribers=True),
         remote_rows=[_remote("mesh", "member")],
-        mesh={"mesh": (FederationCapability.MIN_FOR_PRIVATE_CHANNELS, MESH_PK)},
+        mesh={"mesh": (_V90, MESH_PK)},
     )
     out = await svc.peer_payload_hook("sp-1")("mesh", {})
     assert "writer_cert" in out
@@ -1089,11 +1056,11 @@ async def test_mesh_only_member_in_strict_space_gets_the_writer_key():
     assert grant.epoch == 2
 
 
-async def test_mesh_only_member_at_v49_in_strict_space_gets_no_writer_key():
+async def test_mesh_only_member_below_v90_gets_no_writer_key():
     svc, _ = _svc(
-        space=_space(gfs_publish_mode="strict"),
+        space=_space(allow_subscribers=True),
         remote_rows=[_remote("mesh", "member")],
-        mesh={"mesh": (FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH, MESH_PK)},
+        mesh={"mesh": (_V90 - 1, MESH_PK)},
     )
     out = await svc.peer_payload_hook("sp-1")("mesh", {})
     assert "writer_cert" in out and "writer_key" not in out

@@ -57,9 +57,6 @@ class _Gfs:
     def publish_client(self):
         return self.session
 
-    async def member_publish_trusted_supported(self, conn) -> bool:
-        return self.caps
-
     async def member_publish_strict_supported(self, conn) -> bool:
         return self.caps
 
@@ -105,12 +102,15 @@ def _coverage(*, version_ok=True, caps=True, listed=True, session=None):
     return cov, session, skp, asked
 
 
-async def test_a_v57_author_on_a_listed_server_whose_followers_all_read_items_is_skipped():
+async def test_a_v90_author_on_a_listed_server_whose_followers_all_read_items_is_skipped():
     cov, session, skp, asked = _coverage()
     skip = await cov.redundant_on("sp", "author.home")
     assert skip is not None
     assert await skip(_conn()) is True
-    assert asked == [("author.home", FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH)]
+    # Only a v_90 author holds the writer key (and so publishes over the GFS).
+    assert asked == [
+        ("author.home", FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY)
+    ]
     # The question is the authority-signed summary query, nothing else.
     [(url, params)] = session.gets
     assert url == "https://g1.test/gfs/spaces/sp/subscribers"

@@ -1060,10 +1060,11 @@ async def _item_frame(
         "space_id": "sp-1",
         "event_type": "space_item",
         "epoch": sealed_epoch if epoch is None else epoch,
-        # The frame carries only the v1 fields — never the user binding.
-        "writer_cert": frame_cert if frame_cert is not None else _v1(cert),
         "payload": ct,
     }
+    if frame_cert is not None:
+        # An older GFS still forwarding an identified publish's v1 cert.
+        frame["writer_cert"] = frame_cert
     if payload_suite is not None:
         frame["payload_suite"] = payload_suite
     return frame
@@ -1079,10 +1080,10 @@ async def test_a_member_published_post_with_a_valid_cert_is_persisted(item_env):
 
 
 async def test_a_member_item_without_the_frame_cert_is_persisted(item_env):
-    """``space_item_no_cert``: the GFS leaves the plaintext v1 cert out of
-    the frame; the inner cert gets every check and is the one that counts."""
+    """The frame never carries a cert (v_90): the inner cert gets every
+    check and is the one that counts."""
     frame = await _item_frame(item_env)
-    del frame["writer_cert"]
+    assert "writer_cert" not in frame
     await item_env["inbound"].handle(frame)
     got = await item_env["post_repo"].get("post-1")
     assert got is not None and got[1].content == "member-published content"
@@ -1091,7 +1092,6 @@ async def test_a_member_item_without_the_frame_cert_is_persisted(item_env):
 @pytest.mark.security
 async def test_without_the_frame_cert_a_bad_inner_cert_still_drops(item_env):
     frame = await _item_frame(item_env, cert=await _cert(item_env, scope="comment"))
-    del frame["writer_cert"]
     await item_env["inbound"].handle(frame)
     assert await item_env["post_repo"].get("post-1") is None
 
@@ -1174,9 +1174,22 @@ async def test_a_stale_epoch_is_dropped_by_the_freshness_gate(item_env, caplog):
     assert "no longer open" in caplog.text
 
 
-async def test_a_frame_cert_differing_from_the_inner_cert_is_dropped(item_env):
+async def test_an_outer_frame_cert_is_ignored_the_inner_one_decides(item_env):
+    """An older GFS may still put a cert on the frame: it is never trusted or
+    compared — the inner cert alone decides (here it is valid)."""
     other = await _cert(item_env, issued_at=1)
-    frame = await _item_frame(item_env, frame_cert=other)
+    frame = await _item_frame(item_env, frame_cert=_v1(other))
+    await item_env["inbound"].handle(frame)
+    assert await item_env["post_repo"].get("post-1") is not None
+
+
+@pytest.mark.security
+async def test_a_valid_outer_frame_cert_never_rescues_a_bad_inner_one(item_env):
+    frame = await _item_frame(
+        item_env,
+        cert=await _cert(item_env, scope="comment"),
+        frame_cert=_v1(await _cert(item_env)),
+    )
     await item_env["inbound"].handle(frame)
     assert await item_env["post_repo"].get("post-1") is None
 

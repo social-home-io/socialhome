@@ -538,9 +538,6 @@ export interface SpaceGfsServersView {
 /** A space feature's access level (``SpaceFeatureAccess`` server-side). */
 export type SpaceAccessLevel = 'open' | 'moderated' | 'admin_only'
 
-/** ``SpaceFeatures.gfs_publish_mode`` values (v_50). */
-export type GfsPublishMode = 'trusted' | 'strict'
-
 export interface SpaceFeatures {
   calendar: boolean
   /** A shared weekly timetable (e.g. a class schedule) in the Calendar
@@ -597,11 +594,6 @@ export interface SpaceFeatures {
    *  (moderate / invite / publish) while the owner is offline. Defaults
    *  false (least-privilege). Absent → treat as false. */
   delegated_admin_authority?: boolean
-  /** Owner-only (v_50): how members publish over a connection server.
-   *  ``trusted`` — the server learns which household posted (never what);
-   *  ``strict`` — members post anonymously under a writer group key.
-   *  Absent → treat as ``trusted``. */
-  gfs_publish_mode?: GfsPublishMode
   /** Owner-only, PRIVATE spaces: whether the space uses a connection
    *  server at all. On — connection-server invite links work and member
    *  households reach each other through the server while the host is

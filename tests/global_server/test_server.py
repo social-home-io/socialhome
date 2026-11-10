@@ -299,12 +299,9 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         # cert on publish. A household warns when its GFS lacks it: there,
         # a revoked admin's old key keeps authorizing relays.
         "authority_rotation": True,
-        # v_49 — this GFS carries the identified, writer-cert-authorized
-        # ``POST /gfs/member-publish``. A household sends an identified item
-        # body only to a server whose signed block proves it.
-        "member_publish_trusted": True,
-        # v_50 — this GFS carries the anonymous, writer-group-key-signed
-        # ``POST /gfs/member-publish-anon`` and enforces strict mode.
+        # v_50 (the only member publish since v_90) — this GFS carries the
+        # anonymous, writer-group-key-signed ``POST /gfs/member-publish-anon``.
+        # The identified ``member_publish_trusted`` is gone.
         "member_publish_strict": True,
         "private_channels": True,
         # Open sign-up is an operator opt-in, off by default.

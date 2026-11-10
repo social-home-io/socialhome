@@ -3823,27 +3823,10 @@ async def test_publishes_ride_only_the_publish_session(env):
 # ─── v_49: member publish capability + host dedupe skip ────────────────
 
 
-async def test_member_publish_trusted_needs_the_signed_flag(env):
-    _db, repo = env
-    conn = _make_conn("mp-1", public_key=_GFS_KP.public_key.hex())
-    await repo.save(conn)
-    session = _InviteSession(
-        info=_signed_info(
-            gfs_instance_id=conn.gfs_instance_id,
-            capabilities={"anonymous_publish": True, "member_publish_trusted": True},
-        )
-    )
-    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
-    assert await svc.member_publish_trusted_supported(conn)
-
-
-async def test_member_publish_trusted_ignores_the_unsigned_flag(env):
-    _db, repo = env
-    conn = _make_conn("mp-2", public_key=_GFS_KP.public_key.hex())
-    await repo.save(conn)
-    session = _InviteSession(info={"server_name": "x", "member_publish_trusted": True})
-    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
-    assert not await svc.member_publish_trusted_supported(conn)
+async def test_there_is_no_trusted_member_publish_capability_any_more():
+    """v_90 — one mode: the household no longer reads (or acts on) an
+    identified-publish flag."""
+    assert not hasattr(GfsConnectionService, "member_publish_trusted_supported")
 
 
 async def test_member_publish_strict_needs_the_signed_flag(env):
@@ -3853,10 +3836,7 @@ async def test_member_publish_strict_needs_the_signed_flag(env):
     session = _InviteSession(
         info=_signed_info(
             gfs_instance_id=conn.gfs_instance_id,
-            capabilities={
-                "member_publish_trusted": True,
-                "member_publish_strict": True,
-            },
+            capabilities={"member_publish_strict": True},
         )
     )
     svc = GfsConnectionService(repo, http_client=session, publish_client=session)
@@ -3872,7 +3852,9 @@ async def test_member_publish_strict_ignores_the_unsigned_flag(env):
     assert not await svc.member_publish_strict_supported(conn)
 
 
-async def test_member_publish_strict_is_absent_on_a_trusted_only_server(env):
+async def test_a_server_proving_only_the_old_trusted_flag_gets_nothing(env):
+    """A pre-v_50 server signed only ``member_publish_trusted``: it carries
+    no anonymous publish, so a v_90 household publishes nothing there."""
     _db, repo = env
     conn = _make_conn("mp-5", public_key=_GFS_KP.public_key.hex())
     await repo.save(conn)
@@ -3883,7 +3865,6 @@ async def test_member_publish_strict_is_absent_on_a_trusted_only_server(env):
         )
     )
     svc = GfsConnectionService(repo, http_client=session, publish_client=session)
-    assert await svc.member_publish_trusted_supported(conn)
     assert not await svc.member_publish_strict_supported(conn)
 
 

@@ -351,7 +351,7 @@ async def test_the_owners_later_config_reaches_a_household_an_admin_invited(db):
                 space_pk,
                 gfs=ADMIN_LIST.to_wire(),
                 config_sequence=8,
-                features={"private_gfs": True, "gfs_publish_mode": "strict"},
+                features={"private_gfs": True},
             ),
             author=ADMIN,
             space_seed=kp.private_key,
@@ -361,7 +361,6 @@ async def test_the_owners_later_config_reaches_a_household_an_admin_invited(db):
     assert space is not None
     assert space.gfs_servers is None
     assert space.features.private_gfs is False
-    assert space.features.gfs_publish_mode == "trusted"
 
     # The owner's own config applies — owner-only fields included.
     await _config(
@@ -374,7 +373,7 @@ async def test_the_owners_later_config_reaches_a_household_an_admin_invited(db):
                 gfs=OWNER_LIST.to_wire(),
                 name="OwnerRenamed",
                 config_sequence=9,
-                features={"private_gfs": True, "gfs_publish_mode": "strict"},
+                features={"private_gfs": True},
             ),
             author=OWNER,
             space_seed=kp.private_key,
@@ -384,7 +383,6 @@ async def test_the_owners_later_config_reaches_a_household_an_admin_invited(db):
     assert space is not None
     assert space.name == "OwnerRenamed"
     assert space.features.private_gfs is True
-    assert space.features.gfs_publish_mode == "strict"
     assert space.gfs_servers == OWNER_LIST
 
 

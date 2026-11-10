@@ -47,7 +47,7 @@ GFS fan-out event types (connection-server wire, not
 `space_subscriber_key_handoff` (authority-relayed via `/gfs/publish`),
 `space_author_profiles_bundle` (v_61, authority-relayed via `/gfs/publish`
 and **only** with a `to` target — never fanned out), and `space_item` (v_49,
-a member-published item via `/gfs/member-publish` — the real item type is
+a member-published item via `/gfs/member-publish-anon` — the real item type is
 inside the ciphertext). GFS → one household socket: `space_media_request`
 (v_83, [space media on demand](#space-media-on-demand-v_83) — only to a
 socket whose hello listed `space_media_serve`).
@@ -571,14 +571,14 @@ sequenceDiagram
     Note over N0,N1: instance_id = "gfs-shared" on both,<br/>instance_id_aliases = ["gfs-0", "gfs-1"]
     N0->>N1: NODE_HELLO {node_id, url, public_key, instance_id, instance_id_aliases}
     Note over N1: same key, same instance_id → nothing flagged
-    H->>LB: POST /gfs/member-publish {gfs_instance_id: "gfs-1", …}
+    H->>LB: POST /gfs/member-publish-anon {gfs_instance_id: "gfs-1", …}
     LB->>N0: (round robin)
     Note over N0: "gfs-1" is an alias → accepted, INFO
     H->>LB: GET /gfs/info (reconnect / hourly refresh)
     LB->>N1: (round robin)
     N1-->>H: {gfs_instance_id: "gfs-shared", public_key: K,<br/>capabilities: {…, replaces: ["gfs-0","gfs-1"], addressee_key}, capabilities_sig}
     Note over H: key == pinned K, block verifies under (K, "gfs-shared"),<br/>"gfs-1" ∈ replaces → rebind (seats move too)
-    H->>LB: POST /gfs/member-publish {gfs_instance_id: "gfs-shared", gfs_key: K, …}
+    H->>LB: POST /gfs/member-publish-anon {gfs_instance_id: "gfs-shared", gfs_key: K, …}
 ```
 
 ### Connecting a household: QR code or open sign-up
@@ -1474,51 +1474,54 @@ WebSocket. WebRTC stays for §4.2.3 SH↔SH direct sync and §26 calls
 (both genuinely peer-to-peer). See spec §24.12 for the full transport
 specification.
 
-### Member publish, trusted mode (v_49)
+### Member publish (v_49; one anonymous mode since v_90)
 
 Before v_49 only a seed holder (the host or a delegated admin) could put a
 space item on the GFS relay, so a member's post reached subscribers only
 when a seed holder was online to re-sign it, and a link-joined member
 reached nobody but the host live. With a **writer cert** (the space
 authority key's per-epoch statement that a household may write — see
-[`crypto.md`](../crypto.md)) a member household publishes its own items.
+[`crypto.md`](../crypto.md)) and the space's per-epoch **writer group key**
+(see [The writer group key](#the-writer-group-key-v_50-every-publicly-readable-space-since-v_90))
+a member household publishes its own items.
 
-**Trusted mode** is the owner-decided default: the request is identified by
-the household's registered GFS identity, and the GFS authorizes it with the
-plaintext writer cert. The GFS learns *which household published into which
-space, at which epoch, and when* — never the content or the real item type
+**There is one mode: anonymous** (owner decision 2026-11-09, v_90,
+BREAKING). The trusted / strict `SpaceFeatures.gfs_publish_mode` is gone,
+and with it the identified `POST /gfs/member-publish`. The GFS learns that
+*some* publisher of the space posted, at which epoch, when, and the size
+bucket — never which household, never the content or the real item type
 (signed off in [`principles.md`](../principles.md)). A household uses this
 path only against a GFS whose signed `/gfs/info` block carries
-`member_publish_trusted: true`.
+`member_publish_strict: true` (the label keeps its v_50 name).
 
 ```
-POST /gfs/member-publish
-{instance_id, gfs_instance_id, ts, signature, target: <space_id>, event_type: "space_item",
- epoch, writer_cert: {…}, payload: <ciphertext>}
+POST /gfs/member-publish-anon
+{gfs_instance_id, ts, nonce, target: <space_id>, event_type: "space_item",
+ epoch, payload: <ciphertext>, writer_sig, writer_sig_suite: "ed25519"}
 ```
 
 - `payload` is AES-256-GCM under the space's epoch content key and carries
-  the real item type plus the author-signed inner. The outer type is always
-  `space_item`.
-- `signature` is the household identity signature over canonical JSON of
-  the other fields plus `action: "gfs-member-publish:v1"`.
-  `gfs_instance_id` is the server id pinned from `/gfs/info`; the server
-  refuses any other (bar its own transitional `instance_id_aliases`, see
-  "One public identity per GFS"), so a request can't be replayed to another
-  GFS.
-- The GFS checks, in order: the household signature against its registered
-  key (±300 s, instance active, addressed to this server); a
-  per-(household, space) and a per-space rate limit; the
-  space is listed, not banned, publicly readable and pinned;
-  `verify_writer_cert(cert, space_pubkey=pinned, space_id=target,
-  epoch=epoch, author_pk=<registered key>, required_scope="comment")`;
-  epoch freshness. Every refusal is the same 403.
+  the real item type plus the author-signed inner and the author's writer
+  cert. The outer type is always `space_item`.
+- No `instance_id`, no household signature, no plaintext `writer_cert` —
+  a body carrying any of them is a 400. `writer_sig` is the writer key's
+  signature over `b"gfs-member-publish-anon:v1:"` + canonical JSON of every
+  other field. `gfs_instance_id` is the server id pinned from `/gfs/info`;
+  the server refuses any other (bar its own transitional
+  `instance_id_aliases`, see "One public identity per GFS"), so a request
+  can't be replayed to another GFS.
+- The GFS checks: addressed to this server; `ts` within ±300 s; the space
+  listed, not banned, publicly readable, pinned; a writer key pinned for
+  `epoch`; `writer_sig` verifies (unknown suite refused); 30/min per
+  (space, client address), then 120/min per space and 120/min per writer
+  key; epoch freshness; no exact replay within 600 s. Every refusal is the
+  same 403.
 - **Scope is the receivers' job.** The GFS cannot see whether a
-  `space_item` is a post (needs `write`) or a comment (needs `comment`), so
-  it requires only `comment`. Receivers decrypt, read the real type and run
-  the full writer-cert check for it (cert, freshness, scope) plus the author
-  signature; a follower that dresses a post up as a `space_item` is relayed
-  and then dropped everywhere.
+  `space_item` is a post (needs `write`) or a comment (needs `comment`), and
+  the writer key is shared by both scopes. Receivers decrypt, read the real
+  type and run the full writer-cert check for it (cert, freshness, scope)
+  plus the author signature; a follower that dresses a post up as a
+  `space_item` is relayed and then dropped everywhere.
 - **Epoch freshness at the GFS.** Receivers accept only the newest content
   epoch they hold (or the previous one for 600 s). The GFS can tell the
   space **owner** apart (its registered household key) but not a legitimate
@@ -1526,31 +1529,32 @@ POST /gfs/member-publish
   re-pin, so it keeps two tiers (GFS migration `0014`):
   - the **confirmed** epoch moves only on the owner's household-signed
     notice — `POST /gfs/spaces/{id}/epoch` with `{owning_instance,
-    gfs_instance_id, epoch, ts, signature}` — by any amount up to
-    `max(confirmed + 1000, now + 1 day)` (the v_44 post-restore jump to unix
-    seconds lands). The confirmed epoch before it stays open for 600 s;
+    gfs_instance_id, epoch, ts, signature, writer_key_cert}` — by any amount
+    up to `max(confirmed + 1000, now + 1 day)` (the v_44 post-restore jump
+    to unix seconds lands). The confirmed epoch before it stays open for
+    600 s;
   - the **current** epoch is raised by seed-only statements — a delegated
-    admin's notice (`{epoch, authority_sig, authority_sig_suite}`, signed
-    over `{space_id, epoch}` under `space_epoch_notice`) or the plaintext
-    `epoch` of an authorized `space_post_public` relay — by exactly +1, at
-    most once a minute, and only once the owner confirmed an epoch;
-  - **writer certs never raise anything.**
+    admin's notice (`{epoch, authority_sig, authority_sig_suite,
+    writer_key_cert?}`, signed over `{space_id, epoch}` under
+    `space_epoch_notice`) or the plaintext `epoch` of an authorized
+    `space_post_public` relay — by exactly +1, at most once a minute, and
+    only once the owner confirmed an epoch;
+  - **publishes never raise anything.**
 
-  A cert is relayed from the confirmed epoch up to `current + 1`, or back to
-  the previous confirmed epoch during the grace. No seed holder can lock
-  writers out: seed-only raises never move the floor, and certs never move
-  anything (two +1 certs used to raise `previous` past the real writers).
-  **The cost, stated plainly:** a writer removed by a *delegated admin's*
-  rotation stays relayable here — receivers still drop its items — until
-  the owner confirms the new epoch, which an owner household does on every
-  GFS (re)connection. The state is cleared when the space authority key is
-  re-pinned.
+  An item is relayed from the confirmed epoch up to `current + 1` (with a
+  writer key pinned for it), or back to the previous confirmed epoch during
+  the grace. No seed holder can lock writers out: seed-only raises never
+  move the floor. **The cost, stated plainly:** a writer removed by a
+  *delegated admin's* rotation stays relayable here — receivers still drop
+  its items — until the owner confirms the new epoch, which an owner
+  household does on every GFS (re)connection. The state is cleared when the
+  space authority key is re-pinned.
 - **Fan-out** runs in the background after the 200 (bounded workers and
   backlog — `503` when full, at most 8 live pushes in flight) and goes to
-  every active subscriber except the publisher, as
-  `{type:"relay", space_id, event_type:"space_item", epoch, writer_cert,
-  payload}` — no `from_instance`: receivers authenticate the item by the
-  cert and the inner author signature. Each space is pinned to one worker,
+  every active subscriber — the publisher is unknown, so it receives its
+  own echo and drops it by the origin inside the ciphertext — as
+  `{type:"relay", space_id, event_type:"space_item", epoch, payload}`: no
+  `from_instance`, no cert. Each space is pinned to one worker,
   so its items go out in publish order, and one space may hold only a
   bounded share of the backlog. An offline subscriber's frame waits in the
   GFS queue for 24 h (shared with `/gfs/envelope`, separately capped) and is
@@ -1572,41 +1576,54 @@ POST /gfs/member-publish
 **Household side** (`services/gfs_member_publish_service.py`):
 
 - **Who publishes.** A household NOT holding the space seed (seed holders
-  keep relaying with the authority signature) whose cert for the current
-  epoch lets THIS author post — `write` scope and a v2 user binding naming
-  them — the binding itself rides only inside the ciphertext; the plaintext
-  `writer_cert` the server sees is the v1 fields alone, and the server
-  refuses any other key — (so a plain member of a `MODERATED` or `ADMIN_ONLY` space never
-  member-publishes: its post goes to the host, into the queue or refused;
-  an approved one reaches followers on the host's authority — see
-  [Moderation outcomes on the host relay](#moderation-outcomes-on-the-host-relay)) —
-  in a PUBLIC/GLOBAL space with `allow_subscribers`, to every active
-  connection server that lists the space AND proves
-  `member_publish_trusted` in its signed capability block. "Lists" is read
-  from the server's WHOLE public directory (`GET /gfs/spaces`, cached 10 min,
-  over the cookie-less publish session) — never a space-specific probe,
-  which would tell a server which spaces the household cares about. Without the capability nothing identified is
-  sent: the post takes today's path — the member broadcast, from which a
-  seed holder relays it.
+  keep relaying posts with the authority signature) whose cert for the
+  current epoch lets THIS author post — `write` scope and a v2 user binding
+  naming them, both inside the ciphertext only (so a plain member of a
+  `MODERATED` or `ADMIN_ONLY` space never member-publishes: its post goes to
+  the host, into the queue or refused; an approved one reaches followers on
+  the host's authority — see
+  [Moderation outcomes on the host relay](#moderation-outcomes-on-the-host-relay))
+  — AND that holds the writer group key for the epoch it seals under (a
+  v_90 household), in a PUBLIC/GLOBAL space with `allow_subscribers`, to
+  every server on the owner's signed list proving `member_publish_strict`
+  (without a list: its own active connections that list the space). "Lists"
+  is read from the server's WHOLE public directory (`GET /gfs/spaces`,
+  cached 10 min, over the cookie-less publish session) — never a
+  space-specific probe, which would tell a server which spaces the
+  household cares about.
+- **Never identified.** Without the key (a household below v_90, a rekey
+  still in flight) or without a capable server, nothing goes to any server:
+  the item takes the host path. A 403 is final; a retry re-reads the key and
+  is dropped, never downgraded, once it is gone.
 - **What it sends.** The ciphertext of `{"item_type": "post", "inner":
   <an author-signed inner that ALSO binds `item_type` and `item_target` in
-  the author signature, + our writer cert for the sealing epoch>}`. Each attempt is signed afresh (`ts`,
+  the author signature, + our writer cert for the sealing epoch>}`, over the
+  household's **cookie-less publish session** — never the identified WS or
+  the shared session. Each attempt is signed afresh (`ts`, `nonce`,
   `gfs_instance_id` = the id pinned from that server's `/gfs/info`);
   transient failures (transport, 408, 429, 5xx incl. a busy GFS's 503) are
-  retried through a `GfsPublishRetryQueue`.
-- **The host relays as before; receivers dedupe.** The member publish runs
-  in the background after the member broadcast (post creation never waits
-  on a connection server). The host keeps relaying the post to every GFS as
-  `space_post_public`, because followers on an older build ignore
-  `space_item` and read only that copy. A follower that reads both gets the
-  post twice and drops the second by post id — one duplicate frame per
-  post. This can be revisited (the host skipping servers the author
-  published to) once followers advertise `space_item` support.
-- **Auto-subscribe.** A household with a local writer seat (and no seed)
-  subscribes to the fan-out of the space on every capable server listing it
-  — when the seat is created (`SpaceMemberJoined`), when it first
-  publishes, and on every GFS (re)connect — so other members' items arrive
-  live.
+  retried through a `GfsPublishRetryQueue`. An anonymous request's `ts` is
+  whole seconds plus a random offset of up to ±60 s (well inside the
+  server's ±300 s window), so a household's sub-second clock offset can't
+  link its requests.
+- **The host path always carries the item.** The member publish runs in
+  the background after the member broadcast (post creation never waits on a
+  connection server). The member broadcast (members and the host) runs
+  before and independent of any GFS publish, and seed holders keep relaying
+  posts to followers as `space_post_public` (authority-signed, identity-free;
+  see step 12 below for when a copy is skipped). So an older household, a
+  missing key or a refusing GFS costs live delivery while the host is
+  offline — never the post. A follower that reads both copies drops the
+  second by post id.
+- **Auto-subscribe looks like a follower.** A household with a local writer
+  seat (and no seed) subscribes to the fan-out of the space on every
+  capable server listing it — when the seat is created
+  (`SpaceMemberJoined`) and on every GFS (re)connect, never on the spot
+  before a publish — with the very same signed `{action:"subscribe",
+  instance_id, space_id, ts}` a follower sends on follow and on every
+  reconnect; nothing in it says "writer". On a reconnect the writer spaces
+  ride the SAME batch as the followed ones (`resubscribe_all(also=…)`),
+  de-duplicated and shuffled, so neither order nor timing separates them.
 - **Receiving** a `space_item` (`SpacePublicInbound`): decrypt; read the
   real type (one of the item types below — anything else is dropped); drop
   our own echo; verify the author signature and self-cert (the post inner
@@ -1614,11 +1631,12 @@ POST /gfs/member-publish
   of every other type its own domain and suite); require the author-bound
   `item_type` (and `item_target`) to match; require
   `origin_instance_id == derive_instance_id(author_pk)` (also on the host
-  relay path); require the inner cert's v1 fields to equal the frame cert, and run
+  relay path); take the writer cert from inside the ciphertext (an outer
+  one, from an older GFS, is ignored) and run
   `SpaceWriterCertService.check_item` — signature against the pinned space
   key, this space, the frame's epoch, the inner's `author_pk`, the scope the
   REAL type needs (table below) and epoch freshness; require the v2
-  user binding (on the inner copy) to name the author; on a MEMBER household (it holds the
+  user binding to name the author; on a MEMBER household (it holds the
   roster and the access levels) also run the roster check of the table;
   then apply by type — a post dedupes by post id against the federated /
   host-relayed copy.
@@ -1627,11 +1645,13 @@ POST /gfs/member-publish
   ._rotate_and_distribute_space_key` — kick, ban, leave, scope drop), right
   after an authority re-pin (`SpaceAuthorityRotationService._refresh_gfs`),
   and for every seed-held space on each GFS (re)connect. The owner sends the
-  household-signed form, a delegated admin the authority-signed one. Any
-  publish that re-pins the space key at a server (it carries the owner's
-  authority cert) is followed at once by the epoch notice to that server,
-  whichever path made the re-pin land (the rotation, a later retry, the
-  reconnect heal).
+  household-signed form, a delegated admin the authority-signed one; both
+  carry the epoch's `writer_key_cert`. Any publish that re-pins the space
+  key at a server (it carries the owner's authority cert) is followed at
+  once by the epoch notice to that server, whichever path made the re-pin
+  land (the rotation, a later retry, the reconnect heal).
+
+**Operator notes (connection server).**
 
 **Operator notes (connection server).**
 
@@ -1686,14 +1706,11 @@ these; adversarial review of PR 2):
    admin made while the owner was away.
 3. **`gfs_instance_id` in every signed request** — the id pinned from that
    server's `/gfs/info`, never a value from another server.
-4. **Strict mode moves `writer_cert` inside the ciphertext** (done in v_50,
-   see [Member publish, strict mode](#member-publish-strict-mode-v_50)). In
-   trusted mode it is plaintext only because the server authorizes with it;
-   strict mode authorizes with the writer group key, so the cert (which
-   names the household) never leaves the ciphertext. Strict mode never
-   subscribes with a request that differs from a follower's — the member
-   auto-subscribe is the very same signed subscribe a follower sends — and
-   never subscribes on the spot right before an anonymous publish.
+4. **The `writer_cert` never leaves the ciphertext** (it names the
+   household). The server authorizes with the writer group key, and a member
+   never subscribes with a request that differs from a follower's — the
+   member auto-subscribe is the very same signed subscribe a follower
+   sends — nor on the spot right before an anonymous publish.
 5. **Edit and delete over this relay must not depend on arrival
    order.** The GFS delivers one space's items in publish order, but the
    host path, the queue and space sync interleave with it, so a receiver
@@ -1714,11 +1731,12 @@ three extra fan-outs of every post.
 A seed holder now skips its copy **on a given GFS** only when all of these
 hold (`services/space_relay_coverage.py`):
 
-1. the author's household is at v_57 or later
-   (`MIN_FOR_MULTI_GFS_PUBLISH`: it publishes to every listed server);
+1. the author's household is at v_90 or later
+   (`MIN_FOR_ANON_MEMBER_PUBLISH_ONLY`: it holds the writer key and
+   publishes to every listed server);
 2. the server is on the owner's signed list for the space;
-3. the server proved `member_publish_trusted`, `member_publish_strict` and
-   `space_item_followers` in its signed capability block;
+3. the server proved `member_publish_strict` and `space_item_followers` in
+   its signed capability block;
 4. the server says **no follower there lacks `space_item`**: the
    authority-signed `GET /gfs/spaces/{id}/subscribers?summary=1` answers
    `without_space_item: 0`. Each follower says it reads `space_item` in
@@ -1805,7 +1823,7 @@ goes compressed only when every follower on that server can read it:
    taken before, or by an older household, has no bit 2.
 3. The GFS proves `payload_zlib1` in its signed capability block. It answers
    **409 `payload_suite_unsupported`** to a compressed item (on
-   `/gfs/publish`, `/gfs/member-publish` or `/gfs/member-publish-anon`)
+   `/gfs/publish` or `/gfs/member-publish-anon`)
    while any seat of the space lacks the label. It checks this after
    authorization, so the answer is no oracle.
 4. A publisher sends a compressed item only to a server that proved
@@ -1927,41 +1945,22 @@ The same saving applies to every listed relay (`envelope` up to 191 KiB,
 public moments). The household → GFS publish leg is unchanged: it is one
 copy per post.
 
-### Member items without the frame cert (`space_item_no_cert`)
+### No frame cert on member items
 
-A trusted-mode member publish carries the plaintext v1 `writer_cert`: the
-GFS verifies it against the pinned space key to authorize the publish. The
-fan-out frame used to forward that copy to every follower, 279 B of JSON in
-every frame. A follower never relied on it: it verifies the cert **inside
-the ciphertext** (the one with the user binding), and compared the outer
-copy with it only when present — a strict-mode frame never carries one.
-
-A household that lists `space_item_no_cert` in its WS hello `accepts` gets,
-**on that socket only**, `space_item` frames without `writer_cert`
-(`GfsWebSocketRegistry`, text and binary alike; live fan-out, the 24 h
-queue drain and cluster-forwarded items all go through it). The GFS still
-verifies the cert on publish, the 24 h queue still keeps it, and a socket
-without the label still gets it. No publisher change, no capability, no
-version bump: an older GFS ignores the label and keeps sending the cert,
-which the household still checks.
-
-**Measured** (`test_frame_size_budget.py`, `BUDGET_NO_FRAME_CERT`, binary
-frames of compressed items): 1 KiB-bucket post or comment **1 512 → 1 218
-B (−19 %)**; 4 KiB-bucket item 4 584 → 4 290 B. The relay path
-(`space_post_public`) never carried a frame cert.
-
-**Planning case.** 10 000 followers × 400 member-published posts a day:
-294 B × 4 M frames = **~1.2 GB a day less** (~6.0 → ~4.9 GB). Cost: none —
-the frame is built per socket already.
+A member item's frame never carries a writer cert: the cert rides inside
+the ciphertext only (the one with the user binding), and the follower
+verifies it there. (Until v_90 an identified publish forwarded a plaintext
+v1 copy that a follower could opt out of with the hello label
+`space_item_no_cert`; both are gone.)
 
 **Why not move the inner cert to a reference.** Measured on the same
 fixtures: a 300-character post compresses to 865 B with its inner cert and
 592 B without, and both pad to the smallest (1 KiB) bucket — the wire size
 does not move. Only items between buckets gain (Latin posts of ~550–1 050
 characters, posts with a link preview). Resolving a reference on a miss
-through the GFS would let it link one author's posts by timing, which
-strict mode exists to hide; the preset zlib dictionary reaches the same
-items without new state.
+through the GFS would let it link one author's posts by timing, which the
+anonymous publish exists to hide; the preset zlib dictionary reaches the
+same items without new state.
 
 ### Preset zlib dictionary (`zlib1+dict1`)
 
@@ -1981,7 +1980,7 @@ person. The dictionary is part of the suite and pinned by its SHA-256
   migration) and proves `payload_zlib1_dict1` in its signed capability block.
 - **Gate.** The same as `zlib1`: the GFS answers `409
   payload_suite_unsupported` while any seat of the space lacks the label.
-- **Sender.** The publisher (seed holder or member, trusted and strict)
+- **Sender.** The publisher (seed holder or member)
   seals a `zlib1` copy and a dictionary copy whenever each is no larger
   than the next fallback (`compressed_item_plaintexts`: JSON, then `zlib1`)
   — also in the same bucket, so the routing-visible label never tells the GFS that compression or the dictionary helped this item (a content hint); it names only what the followers read. Each server
@@ -2121,8 +2120,8 @@ sequenceDiagram
   A->>A: build generic inner item_type=author_profile, content={name, bio, picture_hash…}, author_sig
   A->>A: + unsigned picture sidecar only when the picture changed
   A->>A: encrypt under the space content key (padded)
-  A->>G: POST /gfs/member-publish {space_item, epoch, writer_cert, payload=ciphertext}
-  G->>F: relay {space_item, epoch, writer_cert, payload}
+  A->>G: POST /gfs/member-publish-anon {space_item, epoch, payload=ciphertext, writer_sig}
+  G->>F: relay {space_item, epoch, payload}
   F->>F: decrypt → author_sig + self-cert → writer cert binds author → about itself?
   F->>F: decode + cap content; sidecar hash = signed picture_hash? → keep in space_author_profiles if ts newer
   F->>F: GET /api/spaces/{id}/authors → post cards show name, picture, bio
@@ -2414,13 +2413,11 @@ the unknown item types — logged, never misapplied). No protocol bump:
 nothing an older receiver could silently mishandle reaches it, and members
 keep the federated copy.
 
-**Residuals, stated plainly** (trusted mode; listed for sign-off in
-[`principles.md`](../principles.md)). The plaintext cert names its scope: a
-`comment`-scope publisher can't post, so the connection server can tell its
-items are comments, reactions or comment edits / deletes (not which), and
-that the household is a follower or a plain member under a restricted posts
-level. The size bucket separates long items from short ones. Strict mode
-(the cert moves inside the ciphertext) removes the scope residuals.
+**Residuals, stated plainly** (listed for sign-off in
+[`principles.md`](../principles.md)). The publish names no household and
+carries no cert in the clear (the writer key is shared by `write` and
+`comment` scopes alike), so the connection server cannot tell a post from a
+comment. The size bucket separates long items from short ones.
 
 **Moderators' removals** of someone else's item stay on the host path
 toward members (`SPACE_POST_DELETED` / `SPACE_COMMENT_DELETED`); they reach
@@ -2433,13 +2430,13 @@ sequenceDiagram
     participant G as GFS
     participant S as Subscriber / member
     participant O as Seed holder
-    O->>G: POST /gfs/spaces/{id}/epoch {owning_instance, epoch, ts, signature}
-    Note over G: owner confirms the epoch (monotonic)
-    M->>M: encrypt {real type, author-signed inner} under epoch key
-    M->>G: POST /gfs/member-publish {instance_id, ts, signature,<br/>target, space_item, epoch, writer_cert, payload}
-    G->>G: household sig, rate limit, space, verify_writer_cert, epoch fresh
+    O->>G: POST /gfs/spaces/{id}/epoch {owning_instance, epoch, ts, writer_key_cert, signature}
+    Note over G: owner confirms the epoch (monotonic), pins the writer key
+    M->>M: encrypt {real type, author-signed inner + writer_cert} under epoch key
+    M->>G: POST /gfs/member-publish-anon {gfs_instance_id, ts, nonce,<br/>target, space_item, epoch, payload, writer_sig}
+    G->>G: writer_sig, rate limits, space, epoch fresh, replay
     alt subscriber online
-        G-->>S: WS {type:relay, space_id, space_item, epoch, writer_cert, payload}
+        G-->>S: WS {type:relay, space_id, space_item, epoch, payload}
     else offline
         G->>G: queue (24 h), drain on next hello
     end
@@ -2544,165 +2541,83 @@ before this release attaches no signed copy; its approved posts still reach
 members only. A host from before this release keeps ignoring the copy
 (older peers ignore unknown payload fields).
 
-### Member publish, strict mode (v_50)
+### The writer group key (v_50; every publicly readable space since v_90)
 
-**Opt-in, per space, owner-only**: `SpaceFeatures.gfs_publish_mode =
-"strict"` (default `"trusted"`). In a strict space a member household
-publishes over the connection server **without identifying itself**: the GFS
-learns that *some* publisher of the space posted, never which household, and
-never the content or the real type (as in trusted mode).
+What authorizes a [member publish](#member-publish-v_49-one-anonymous-mode-since-v_90).
+(Until v_90 it was a per-space opt-in, "strict mode", next to an identified
+"trusted" default; owner decision 2026-11-09: one mode, always anonymous.)
 
-**The writer group key.** One Ed25519 key per (space, content epoch),
-derived from the space authority seed (HKDF, see
-[`crypto.md`](../crypto.md)) — so every seed holder derives the same one and
-no seed holder stores it. It is shared by every household allowed to publish
-anything (`write` and `comment` scopes alike, so the GFS cannot tell a
-poster from a commenter) and by nobody else. A seed holder delivers it as
-`writer_key` next to each publisher's writer cert, sealed per peer, in the
-four channels that carry the cert — the rekey `per_peer` copy, the roster
-snapshot, the redeem ACK and the v_44 rotation bundle — only to v_50
-households in a strict space (a mesh-only member household by the version it
-claimed over the mesh, see [`spaces.md`](spaces.md#writer-certificates-v_49));
-the member verifies it against the pinned
-space key and keeps it KEK-wrapped (`space_keys.writer_key`). Because it is
-per epoch, **every revocation that rotates the content key (kick, ban,
-leave, scope narrowing, user removal, access narrowing) retires it**, and
-the switch to strict itself rotates, so members never sit in a strict space
-without a key.
+**The key.** One Ed25519 key per (space, content epoch), derived from the
+space authority seed (HKDF, see [`crypto.md`](../crypto.md)) — so every seed
+holder derives the same one and no seed holder stores it. It is shared by
+every household allowed to publish anything (`write` and `comment` scopes
+alike, so the GFS cannot tell a poster from a commenter) and by nobody else.
+A seed holder delivers it as `writer_key` next to each publisher's writer
+cert, sealed per peer, in the four channels that carry the cert — the rekey
+`per_peer` copy, the roster snapshot, the redeem ACK and the v_44 rotation
+bundle — in every publicly readable space, only to v_90 households (a
+mesh-only member household by the version it claimed over the mesh, see
+[`spaces.md`](spaces.md#writer-certificates-v_49)); a member household that
+crosses v_90 is re-sent its roster snapshot, which carries it. The member
+verifies it against the pinned space key and keeps it KEK-wrapped
+(`space_keys.writer_key`). Because it is per epoch, **every revocation that
+rotates the content key (kick, ban, leave, scope narrowing, user removal,
+access narrowing) retires it**. A config change that gives the space a key
+it did not have (followers turned on, the space entering a public tier)
+pins and hands out the current epoch's key at once.
 
 **Pinning it at the GFS** — the epoch notice carries an authority-signed
 `writer_key_cert {writer_key_suite, space_id, epoch, writer_pk, cert_sig}`
 (no new endpoint), bound to the epoch tiers so no seed holder can pin a key
 for an inflated epoch:
 
-- the **owner's** notice (household-signed, which also covers the new
-  fields) carries `publish_mode` and the cert of the epoch it confirms, and
-  may correct a pin of that epoch;
+- the **owner's** notice (household-signed, which also covers the cert)
+  carries the cert of the epoch it confirms, and may correct a pin of that
+  epoch;
 - a **delegated admin's** notice (authority-signed) may carry the cert only
   for an epoch the +1 rule already let `current` reach (`confirmed <= epoch
   <= current`), above the newest pin, and never over an existing pin;
 - the current and previous pins are kept (the previous one for the same
-  600 s grace as certs); both are cleared on an authority re-pin, the mode
-  is not;
-- a household adds the v_50 fields only for a server whose signed
-  `/gfs/info` proves `member_publish_strict` (an older server verifies the
-  owner signature without them and would refuse the notice).
+  600 s grace); both are cleared on an authority re-pin;
+- a household sends notices only to a server whose signed `/gfs/info`
+  proves `member_publish_strict` (an older server verifies the owner
+  signature without the cert and would refuse the notice). A pre-v_90
+  owner's notice that still signs `publish_mode` is refused by a v_90 GFS
+  (its signature no longer holds).
 
 **Ordering at a rotation**: mint (derivation, instant) → GFS notice with the
 new pin → member rekey with the new key → subscriber re-seal. The GFS
-notice goes first (as in trusted mode, so a removed writer stops being
-relayed as early as possible), which also means the pin is there before any
-member can sign at the new epoch; members still on the previous epoch keep
-publishing under the previous pin for the 600 s grace.
+notice goes first (so a removed writer stops being relayed as early as
+possible), which also means the pin is there before any member can sign at
+the new epoch; members still on the previous epoch keep publishing under the
+previous pin for the 600 s grace.
 
-```
-POST /gfs/member-publish-anon
-{gfs_instance_id, ts, nonce, target: <space_id>, event_type: "space_item",
- epoch, payload: <ciphertext>, writer_sig, writer_sig_suite: "ed25519"}
-```
+**Abuse is unattributable.** Every publisher holds the same key — a
+comment-scope follower too — so a key holder can send valid garbage, and
+nothing tells the server (or the owner) who. The per-(space, address) limit
+is what keeps one such household from burning the space-wide budget and
+starving the other writers (the address is the only handle there is, and IP
+correlation is already the stated residual). Rotating the key does **not**
+help: the rotation hands the abuser the new key too. The owner's remedy is
+to remove households until it stops (receivers still drop anything whose
+inner cert or author signature fails, and the real author's household is
+named inside the ciphertext to every member).
 
-- No `instance_id`, no household signature, no plaintext `writer_cert` —
-  the cert rides inside the ciphertext. A body carrying any of them is a
-  400.
-- `writer_sig` is the writer key's signature over
-  `b"gfs-member-publish-anon:v1:"` + canonical JSON of every other field.
-- The GFS checks: addressed to this server; `ts` within ±300 s; the space
-  listed, not banned, publicly readable, pinned; a writer key pinned for
-  `epoch`; `writer_sig` verifies (unknown suite refused); 30/min per
-  (space, client address), then 120/min per space and 120/min per writer
-  key; epoch freshness; no exact replay within 600 s. Every refusal is the
-  same 403.
-- **Abuse inside a strict space is unattributable.** Every publisher holds
-  the same key — a comment-scope follower too — so a key holder can send
-  valid garbage, and nothing tells the server (or the owner) who. The
-  per-(space, address) limit is what keeps one such household from burning
-  the space-wide budget and starving the other writers (the address is the
-  only handle there is, and IP correlation is already the stated residual).
-  Rotating the key does **not** help: the rotation hands the abuser the new
-  key too. The owner's remedies are to switch the space back to **trusted**
-  mode, which attributes every publish to its household, or to remove
-  households until it stops.
-- Fan-out as in trusted mode, to every subscriber (the publisher is unknown,
-  so it receives its own echo and drops it by the origin inside the
-  ciphertext), frame `{type:"relay", space_id, event_type:"space_item",
-  epoch, payload}` — no cert.
-
-**Mode enforcement at the GFS.** The owner's notice tells the server the
-mode (stored per space, moved only forward in the notice's `ts`). In a
-**strict** space `POST /gfs/member-publish` is refused, so a v_49 household
-or a misconfigured one can't publish identified into it. In a **trusted**
-space both endpoints are accepted — the anonymous one wherever a writer key
-is pinned — because it never reveals more than the identified one, and a
-member that learned of a switch before the server did is then not refused
-in either direction.
-
-**Household side** (`services/gfs_member_publish_service.py`):
-
-- **Anonymous when the key is held.** A member holding the writer key for
-  the epoch it seals under publishes anonymously — over the household's
-  **cookie-less publish session**, never the identified WS or the shared
-  session — to every server proving `member_publish_strict` that lists the
-  space. The key is only ever handed out in a strict space, so holding one
-  is reason enough even before the config change arrives. Each attempt is
-  signed afresh (`ts`, `nonce`); a retry re-reads the key and is dropped,
-  never downgraded, once it is gone.
-- **Never identified in a strict space.** A strict space without the key for
-  the current epoch (an older household, a rekey still in flight) or
-  without a strict-capable server sends nothing to any server; an
-  identified item queued before the switch is dropped at its next attempt.
-  A 403 is final.
-- **The host path always carries the item.** The member broadcast (members
-  and the host) runs before and independent of any GFS publish, and the host
-  keeps relaying posts to followers as `space_post_public` (authority-signed,
-  identity-free). So a v_49 household, a missing key or a refusing GFS costs
-  live delivery while the host is offline — never the post.
-- **Auto-subscribe looks like a follower.** The member auto-subscribe (on a
-  seat and on every GFS (re)connect) is the very same signed
-  `{action:"subscribe", instance_id, space_id, ts}` a follower sends on
-  follow and on every reconnect — nothing in it says "writer" — and strict
-  publishing never subscribes on the spot. On a reconnect the writer spaces
-  ride the SAME batch as the followed ones (`resubscribe_all(also=…)`),
-  de-duplicated and shuffled, so neither order nor timing separates them.
-- **No clock fingerprint.** An anonymous request's `ts` is whole seconds
-  plus a random jitter of up to ±60 s (well inside the server's ±300 s
-  window), so a household's sub-second clock offset can't link its
-  requests.
-- **The listing says strict.** The public directory a household already
-  fetches over its cookie-less session (`GET /gfs/spaces`) carries each
-  space's `member_publish_mode`. A household never plans or sends an
-  identified publish to a server whose listing says `strict` — whatever its
-  own (possibly lagging) copy of the setting says. Its cached directory is
-  dropped on every content-key import (the switch to strict rotates) and
-  every config change, so the next decision re-reads it. The seed
-  holder's subscriber reconcile seals the content key to every subscriber
-  alike, members included.
-- **Inbound.** A strict frame carries no cert; the receiver takes it from
-  inside the ciphertext and runs the same checks as for a trusted frame
-  (signature against the pinned space key, epoch freshness, the scope the
-  real type needs, the v2 user binding naming the author, the author
-  signature, the roster check on a member household).
-
-**What the GFS learns in strict mode**, stated plainly:
+**What the GFS learns**, stated plainly:
 
 - that some publisher of the space posted, at which content epoch, when, and
   the size bucket of the item;
 - the space's subscriber set — households that follow it *or* write in it,
   indistinguishable from each other;
-- when the space key rotates (epoch notices), and that the owner chose
-  strict mode;
+- when the space key rotates (epoch notices);
 - **residuals**: the anonymous publish comes from the household's IP
   address, as does its identified WS — IP and timing correlation with the
   household's authenticated connection is the accepted, stated limit of
   every anonymous GFS path. A link-joined member's host path is an
   anonymous `/gfs/envelope` to the host sent at the same moment, so the
-  timing of the two can be correlated in the same way. An identified request
-  into a freshly switched space is now possible only in the moment between
-  the owner's switch and the member's next look at the listing — the GFS
-  learns the mode from the owner's notice before the rotation's rekey
-  reaches any member, and that rekey drops the member's cached listing; a
-  request in that moment is refused but seen. **Delegated pin at an
-  unconfirmed epoch — bounded.** A delegated admin can pin the writer key of
-  the next epoch (`current + 1`, through the +1 rule) before the owner
+  timing of the two can be correlated in the same way. **Delegated pin at
+  an unconfirmed epoch — bounded.** A delegated admin can pin the writer key
+  of the next epoch (`current + 1`, through the +1 rule) before the owner
   confirms it; a seed holder whose seed still matches can therefore pin a
   bogus key there. It gains nothing it doesn't already have — any seed
   holder can derive the real key and sign certs — and the owner's notice
@@ -2713,12 +2628,12 @@ in either direction.
 sequenceDiagram
     participant O as Owner (seed holder)
     participant G as GFS
-    participant M as Member household
+    participant M as Member household (v_90)
     participant S as Subscriber / member
-    Note over O: owner sets gfs_publish_mode = strict → rotate
+    Note over O: content-key rotation to epoch N
     O->>O: derive writer key for epoch N (HKDF of the space seed)
-    O->>G: POST /gfs/spaces/{id}/epoch {owning_instance, epoch N, ts,<br/>publish_mode: strict, writer_key_cert, signature}
-    Note over G: confirm N, mode = strict, pin writer_pk(N)
+    O->>G: POST /gfs/spaces/{id}/epoch {owning_instance, epoch N, ts,<br/>writer_key_cert, signature}
+    Note over G: confirm N, pin writer_pk(N)
     O->>M: SPACE_KEY_EXCHANGE_REKEY (per peer: content key, writer_cert, writer_key)
     M->>M: encrypt {real type, author-signed inner + writer_cert} under epoch key
     M->>G: POST /gfs/member-publish-anon (cookie-less)<br/>{gfs_instance_id, ts, nonce, target, space_item, epoch, payload, writer_sig}
@@ -2729,7 +2644,7 @@ sequenceDiagram
         G->>G: queue (24 h), drain on next hello
     end
     S->>S: decrypt, cert from the ciphertext: signature, scope, binding, author_sig
-    Note over M,G: identified POST /gfs/member-publish into this space → 403
+    Note over M,G: a household below v_90 holds no key → nothing to the GFS (host path)
 ```
 
 ### Private spaces: opaque channels (v_51)
@@ -2751,7 +2666,7 @@ touches a connection server only when its owner turned this on. It is
 owner-only (a host-local admin, a remote admin's forwarded edit and a
 delegated admin's authority-signed config all leave it alone — pinned on
 host inbound and taken only from the owner household everywhere else,
-exactly like `gfs_publish_mode`), federated in `SPACE_CONFIG_CHANGED`, and
+exactly like `allow_subscribers`), federated in `SPACE_CONFIG_CHANGED`, and
 OFF for every new private space. Migration 0079 turned it ON only for the
 existing private spaces that already have a link-joined household (or, on
 a member, a stored channel); a space with only live invite links starts OFF
@@ -2838,8 +2753,8 @@ harmless no-op, so it is not cached.
 path tells the owner's household-signed notice apart from a delegated
 admin's; a channel cannot without telling the server which household owns
 it. So channel notices (`POST /gfs/channels/epoch`, `{channel_suite,
-channel_id, gfs_instance_id, ts, nonce, epoch, publish_mode,
-writer_key_cert?, channel_sig}`) are all channel-key-signed and equal, and
+channel_id, gfs_instance_id, ts, nonce, epoch, writer_key_cert?,
+channel_sig}`) are all channel-key-signed and equal, and
 inflation is bounded by **time** instead of identity: the first notice after
 registration sets any epoch up to 2^62 (channel epochs carry a secret offset,
 see below); after that the epoch
@@ -2848,20 +2763,17 @@ allowance gets `429` + `Retry-After`, and the household's retry queue lands
 it). A seed holder — the only party with the channel key — can therefore
 inflate by at most 1 440 epochs a day, and only until an authority rotation
 starts a fresh channel; anything it gains it already had (it can derive
-every writer key). Certs, passes and anonymous publishes are admitted at the
+every writer key). Passes and anonymous publishes are admitted at the
 current epoch, the next one (a rotation whose notice is still on its retry),
-or the previous one for 600 s after the raise. `publish_mode` moves only
-with a notice that RAISES the epoch (every mode switch rotates the content
-key in a channel space, both directions), then forward in its exact `ts`;
-a replay or a lagging seed holder at the current epoch never flips it.
-`writer_key_cert` (`{writer_key_suite, channel_suite, channel_id, epoch,
+or the previous one for 600 s after the raise. (A pre-v_90 notice that still
+carries `publish_mode` is malformed.) `writer_key_cert` (`{writer_key_suite, channel_suite, channel_id, epoch,
 writer_pk, cert_sig}`, channel-key-signed) pins the channel writer key of the
 current epoch, first pin per epoch wins (the key is deterministic, so an
 honest retry repeats it). Notices are still sent at **every rotation, before
 the member rekey**, after every fresh channel, and on every GFS (re)connect.
 
-**Channel epochs, not content epochs, on the wire.** Every pass, cert,
-writer key, notice, request and frame carries `content epoch +
+**Channel epochs, not content epochs, on the wire.** Every pass, writer
+key, notice, request and frame carries `content epoch +
 epoch_offset`, a 40-bit offset HKDF-derived from the seed per channel (and
 bound into the grant). A server that saw the space's content epochs
 elsewhere — the space was public once, or a post-restore epoch in unix
@@ -2903,13 +2815,13 @@ churn, never a leak.
 **Grants — what a member household is handed.** Per member household and
 epoch, a seed holder whose seed matches the pin issues `gfs_channel:
 {channel_suite, space_id, channel_id, channel_pk, epoch, gfs_ids,
-epoch_offset, binding_sig_suite, binding_sig, channel_pass?, channel_cert?,
-writer_key?}` — a channel cert for a household with a writer scope in a
-trusted space (plus, since v_57, the channel writer key for a v_57
-household), the channel writer key (and no cert) in a strict space, and
-a `channel_pass` for **every member household** of a space with
-`private_gfs` ON (a reader gets a pass-only grant). The wire shape is
-unchanged from v_51; only who gets a pass changed. (A v_51 owner — no
+epoch_offset, binding_sig_suite, binding_sig, channel_pass?,
+writer_key?}` — the channel writer key for a v_90 household with a writer
+scope (whatever the space did before: one mode), and a `channel_pass` for
+**every member household** of a space with `private_gfs` ON (a reader gets
+a pass-only grant). Since v_90 a grant carries no `channel_cert` (one that
+does is malformed); an older household gets no writer key and publishes
+nothing over the channel. (A v_51 owner — no
 option — still hands a pass only to link-joined households; their paired
 members' grants are publish-only, as before.)
 `binding_sig` is the space AUTHORITY key over the routing fields, so a member
@@ -2966,29 +2878,19 @@ the periodic sync (30 min) is the backstop. A seated member skips it.
 **Publishing** — a member household with a grant for the current epoch
 whose space writer cert lets this author publish this item type:
 
-- **trusted** (`POST /gfs/channels/publish`): household-signed, with the
-  `channel_cert` — `{channel_suite, channel_id, epoch, instance_pk, scope,
-  issued_at, cert_sig}`, which names no space. The server verifies it
-  against the pinned channel key for this channel, the epoch and the
-  publisher's registered key (scope `comment` at least), refuses it in a
-  strict channel, and fans out to every open seat except the publisher —
-  so a paired member's trusted publish names it to the server as a
-  publisher, never as a subscriber;
-- **strict** (`POST /gfs/channels/publish-anon`): no identity, `writer_sig`
-  under the channel writer key pinned for that epoch; fanned out to every
-  open seat (the publisher drops its own echo). A strict space without the
-  channel writer key sends nothing — never the identified path.
-- **v_57 — any member holding the channel writer key** (strict, or a v_57
-  member in a trusted space) publishes anonymously like strict, to **every**
-  channel server on the owner's list the grant names, including the ones its
-  household never connected to (below).
+- `POST /gfs/channels/publish-anon` (the only channel publish since v_90;
+  the identified `POST /gfs/channels/publish` with a `channel_cert` is
+  gone): no identity, `writer_sig` under the channel writer key pinned for
+  that epoch; fanned out to every open seat (the publisher drops its own
+  echo), to **every** channel server on the owner's list the grant names,
+  including the ones its household never connected to (below). Without the
+  channel writer key a member sends nothing — never an identified request.
 
-Both carry the same `payload` as a strict public-space item: the real type
-and the author-signed inner with the **space** writer cert inside the
-AES-GCM ciphertext under the epoch content key. The fan-out frame is the
-same in both modes — `{type:"relay", channel_id, event_type:"space_item",
-epoch, payload}` — and offline seats are queued 24 h on the member-publish
-queue. The member broadcast to the host still runs first, always.
+It carries the same `payload` as a public-space item: the real type and the
+author-signed inner with the **space** writer cert inside the AES-GCM
+ciphertext under the epoch content key. The fan-out frame is
+`{type:"relay", channel_id, event_type:"space_item", epoch, payload}`, and
+offline seats are queued 24 h on the member-publish queue. The member broadcast to the host still runs first, always.
 
 **Receiving.** The household maps `channel_id` to its local space
 (`spaces.gfs_channel_id`) — several spaces may name one id (no first-come
@@ -2996,7 +2898,7 @@ claim: the owner of another space we belong to must not be able to block
 this space's grant by binding its own to our id), so each candidate whose
 current grant names the channel is tried, and the item decrypts and matches
 its signed `space_id` only in its own space. It drops a frame for an unknown
-channel or a non-private space, and runs exactly the strict-frame checks
+channel or a non-private space, and runs exactly the `space_item` checks
 (`SpacePublicInbound.handle_channel_item`): decrypt, the real type, the
 author signature, the space writer cert from inside the ciphertext against
 the pinned space key, the inner's signed `space_id` equal to the mapped
@@ -3015,9 +2917,7 @@ one that never claimed, or claimed below v_51, gets none and keeps the host
 path. A v_51 member handles a pass in a paired grant correctly (it
 subscribes and receives, exactly like a link-joined member), so the
 option needs no protocol version bump. A server
-without `private_channels` gets no channel. The SPA shows the owner the
-trusted / strict choice on a private space once it uses a channel
-(`GET /api/spaces/{id}` → `gfs_private_channel`).
+without `private_channels` gets no channel.
 
 ```mermaid
 sequenceDiagram
@@ -3027,21 +2927,17 @@ sequenceDiagram
     participant D as Paired member
     Note over O: owner turns private_gfs ON (space has remote members)
     O->>G: POST /gfs/channels/register {channel_id, channel_pk, channel_sig}
-    O->>G: POST /gfs/channels/epoch {channel_id, epoch, publish_mode, channel_sig}
+    O->>G: POST /gfs/channels/epoch {channel_id, epoch, writer_key_cert, channel_sig}
     O-->>E: roster snapshot / rekey (sealed): grant with channel_pass
     O-->>D: roster snapshot / rekey (sealed): grant with channel_pass
     E->>G: POST /gfs/channels/subscribe {instance_id, channel_pass, signature}
     D->>G: POST /gfs/channels/subscribe {instance_id, channel_pass, signature}
     Note over O: host goes offline
     D->>D: seal {real type, author-signed inner + space writer cert}
-    alt trusted
-        D->>G: POST /gfs/channels/publish {instance_id, channel_cert, payload, signature}
-    else strict
-        D->>G: POST /gfs/channels/publish-anon {channel_id, payload, writer_sig}
-    end
+    D->>G: POST /gfs/channels/publish-anon {channel_id, payload, writer_sig}
     G-->>E: WS {type:relay, channel_id, space_item, epoch, payload}
-    E->>E: channel_id → local space; strict-frame checks; apply
-    E->>G: POST /gfs/channels/publish {…} — E's own post
+    E->>E: channel_id → local space; space_item checks; apply
+    E->>G: POST /gfs/channels/publish-anon {…} — E's own post
     G-->>D: WS {type:relay, channel_id, space_item, epoch, payload}
     E->>G: POST /gfs/envelope {to_instance: O, sealed post} (queued for O)
     Note over O: host back online — catches both posts up
@@ -3052,19 +2948,17 @@ sequenceDiagram
 **What the GFS learns for a private channel**, stated plainly (signed off
 in [`principles.md`](../principles.md)):
 
-- that a channel exists, its key, when its epoch moves and its mode;
+- that a channel exists, its key and when its epoch moves;
 - **its member households connected to it** — link-joined, paired and
   mesh-only alike, the owner's `private_gfs` opt-in — the set's size and
   changes, and the timing and size bucket of every item;
-- in trusted mode, which member household published each item; in strict
-  mode, only that some publisher did;
+- only that some publisher posted each item — never which household;
 - for the channel's pictures and files in the space media cache
   (`PUT /gfs/media/{blob_id}`, the channel only inside the signed claim, see "Space media cache
   on a GFS"): the opaque channel id each blob was uploaded for, its size
   bucket, the upload time and fetch times at one-hour resolution — the
-  ciphertext it can't open; with a `channel_cert` upload which member
-  household's key uploaded, with the channel key or the strict writer key
-  nobody. Fetches (`GET /gfs/media/{blob_id}`) carry no channel and no
+  ciphertext it can't open; never which household uploaded (the channel key
+  and the channel writer key name nobody). Fetches (`GET /gfs/media/{blob_id}`) carry no channel and no
   credential;
 - **never** the space id, its name, its authority key or its content.
 
@@ -3074,9 +2968,7 @@ member's `/gfs/envelope`, it registers and announces from the IP of its own
 authenticated WebSocket, and a member's channel publish leaves at the same
 moment as its envelope to the host — IP and timing correlation can tie the
 owner to the channel (the accepted limit of every anonymous GFS path). A
-member's subscribe and its WS share an IP, like everywhere else. A member
-whose own copy of the mode lags a switch to strict may send one identified
-request the server then refuses (but sees). The take-over lock-out above
+member's subscribe and its WS share an IP, like everywhere else. The take-over lock-out above
 lasts until the owner's next notice, and replacements are capped at one per
 space per day. There is no per-address cap on live channel rows: the server
 would have to store the registering address beside each row, which links a
@@ -3172,8 +3064,7 @@ servers the owner's list names; no list (or an empty one) means no channel.
 
 **Members send to every chosen server.** The members get the list in the
 encrypted `space_meta` like any owner list. A member holding the channel
-writer key — strict spaces since v_51, and since v_57 every space for a v_57
-member — sends each item with `POST /gfs/channels/publish-anon` to **every**
+writer key — a v_90 writer — sends each item with `POST /gfs/channels/publish-anon` to **every**
 server on the list that its current grant names: its own connections over
 the cookie-less publish session, and the servers it never connected to as
 in-memory listing targets over a cookie-less session pinned to the listed
@@ -3181,8 +3072,7 @@ address, only after that server proved possession of the listed key (the
 same machinery as [members publishing to every listed
 GFS](#members-publish-to-every-listed-gfs-v_57)). So a member who uses only
 server B receives an item a member published through A while the host is
-offline. The identified channel publish (an older member, trusted mode,
-channel cert) and the seat subscribe go only to servers the household is
+offline. The seat subscribe goes only to servers the household is
 registered on. A retry to a listing target is re-resolved first: a server
 the owner dropped, or the grant no longer names, gets nothing more.
 
@@ -3201,13 +3091,11 @@ not in it, so the admin's notices miss it until the owner is back online
 and re-grants (or announces itself); members' items still reach that server
 only from members holding a newer grant.
 
-**The writer key is pinned in every mode.** Since v_57 the owner's channel
-notice carries `writer_key_cert` in trusted mode too, so the anonymous path
-works there. No new wire field and no protocol bump: the grant shape is
-unchanged since v_51, the notice field already existed (the GFS pins it in
-any mode), and handing the channel writer key to a trusted-mode member is
-gated on v_57 (`FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH`); an older
-member keeps publishing identified to its own servers.
+**The writer key is pinned on every notice.** The owner's channel notice
+always carries `writer_key_cert`, and the channel writer key goes to every
+v_90 writer (`FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY`); an
+older member publishes nothing over the channel (its items take the host
+path).
 
 **What a channel server learns.** A server the owner did NOT choose never
 hears of the channel — no register, notice, unregister, grant or seat. A
@@ -3424,19 +3312,19 @@ older owner), every path keeps its pre-v_57 targets: our own connections.
 | Request | Where it goes |
 |---|---|
 | item, writer key held — `POST /gfs/member-publish-anon` | every target proving `member_publish_strict` (one ciphertext, anonymous everywhere) |
-| item, no writer key (trusted, member below v_57) — `POST /gfs/member-publish` | our own registered connections still on the list |
+| item, no writer key (a member below v_90) | nowhere — the host path carries it |
 | owner's epoch notice (household-signed) | the owner's own connections |
-| delegated admin's epoch notice (authority-signed, anonymous) | every target proving `member_publish_trusted` |
+| delegated admin's epoch notice (authority-signed, anonymous) | every target proving `member_publish_strict` |
 | host relay — `POST /gfs/publish` (identity-free) | every target proving `anonymous_publish` |
 | member auto-subscribe, follower subscribe | our own registered connections only |
 
-**The writer key in trusted spaces.** Publishing to a server it is not
-registered on needs the anonymous path, so a seed holder hands the epoch's
-writer group key to v_57 writer households in a trusted, publicly readable
-space as well (strict spaces: v_50 as before), and the owner's epoch notice
-pins its `writer_key_cert` there; the GFS takes `member-publish-anon` for
-any space with a pinned writer key, whatever its mode. A member that crosses
-v_57 is re-sent the owner's roster snapshot, which carries the key.
+**The writer key.** Publishing to a server it is not registered on needs
+the anonymous path. Since v_57 a seed holder handed the epoch's writer group
+key to writers of every publicly readable space; since v_90 it is the only
+member publish, and the key goes to v_90 writers only (a member that
+crosses v_90 is re-sent the owner's roster snapshot, which carries it). The
+owner's epoch notice pins its `writer_key_cert`; the GFS takes
+`member-publish-anon` for any space with a pinned writer key.
 
 **Ordering.** The owner announces the epoch (pinning the writer key) on a
 server right after its first listing there, before the list naming it goes
@@ -3588,11 +3476,12 @@ registration:
 | Scope | `auth` | Signed by, verified as |
 |---|---|---|
 | `space` | `authority` | The space authority key over the claim under the event type `space_media_put` (kept out of the relay set, so it can never be fanned out, and a relay payload can never authorize an upload), against the space's TOFU-pinned key exactly like `/gfs/publish` (`GfsFederationService.verify_space_authority`). Names nobody. |
-| `space` | `writer_cert` | Trusted mode (v_49): `epoch` + the v1 `writer_cert`; `sig` by the household key the cert names over `b"space-media-put:v1:" + canonical(claim ∪ {auth, epoch})`; the cert checked as `/gfs/member-publish` does (`GfsMemberPublishService.verify_writer_cert`: pinned key, epoch open, refused in a strict space). |
-| `space` | `writer_key` | Strict mode (v_50): the space's writer group key over the same bytes, checked as `/gfs/member-publish-anon` does (`verify_writer_key_sig`, `require_writer_key_epoch`). Names nobody. |
+| `space` | `writer_key` | The space's writer group key over `b"space-media-put:v1:" + canonical(claim ∪ {auth, epoch})`, checked as `/gfs/member-publish-anon` does (`verify_writer_key_sig`, `require_writer_key_epoch`). Names nobody. |
 | `channel` | `channel` | The channel key pinned at registration (what registration, epoch notices and unregister prove) over `b"gfs-channel-media-put:v1:" + canonical(claim)` (`GfsChannelService.verify_channel_key`). Names nobody. |
-| `channel` | `channel_cert` | Trusted channel: `epoch` + the `channel_cert` a trusted channel publish carries; `sig` by the household key it names; checked as `/gfs/channels/publish` does (`verify_cert_holder`: pinned channel key, epoch open, refused in a strict channel). |
-| `channel` | `writer_key` | Strict channel: the channel writer key pinned for `epoch` (`verify_writer_key`). Names nobody. |
+| `channel` | `writer_key` | The channel writer key pinned for `epoch` (`verify_writer_key`). Names nobody. |
+
+The identified kinds `writer_cert` and `channel_cert` are gone since v_90
+(a header naming one is a 400): no upload names a household.
 
 A `space` must be listed and **active** (not pending, not moderator-banned),
 with a pinned authority key; a `channel` must be registered and in use.
@@ -3752,10 +3641,8 @@ was uploaded for — a listed `space_id`, or for a private space only an
 opaque `channel_id` it can't link to any space — its size **bucket** (not
 its size), the upload time, and fetch times at one-hour resolution
 (`last_fetched_at`) — plus, at the network level, the source address of each
-upload and fetch. With a cert kind (`writer_cert`, `channel_cert`) it also
-learns which household key uploaded (as with `/gfs/member-publish` and
-trusted channel publishes); the `authority`, `channel` and `writer_key`
-kinds name nobody. It does not learn who fetched: a fetch carries no
+upload and fetch. No upload kind (`authority`, `channel`, `writer_key`) names
+a household. It does not learn who fetched: a fetch carries no
 credential and no scope.
 
 ```mermaid
@@ -4293,8 +4180,8 @@ contest a ban.
   wire shape); GFS migration `0025`.
 - `socialhome/global_server/member_publish.py`,
   `socialhome/global_server/routes/member_publish.py` — GFS side of
-  `/gfs/member-publish`, `/gfs/member-publish-anon` (v_50) and the epoch
-  notice (mode + writer-key pins); queued delivery via
+  `/gfs/member-publish-anon` (the only member publish since v_90) and the
+  epoch notice (writer-key pins); queued delivery via
   `GfsEnvelopeRelay.fan_out_relay` (`envelope_relay.py`).
 - `socialhome/writer_key.py`, `socialhome/domain/writer_key.py` — v_50
   writer group key (derivation, `writer_key_cert`, grant, `writer_sig`);

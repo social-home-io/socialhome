@@ -962,9 +962,9 @@ channel scope, so the GFS learns only the channel id.
 
 **Posting without the host (v_49).** A link-joined member's own posts in a
 PUBLIC/GLOBAL space no longer depend on the host being online: the member
-publishes them to the space's connection server itself, with its writer
-cert (trusted-mode member publish, see
-[`discovery.md`](./discovery.md#member-publish-trusted-mode-v_49)), and
+publishes them to the space's connection server itself, anonymously under
+the writer group key (member publish, see
+[`discovery.md`](./discovery.md#member-publish-v_49-one-anonymous-mode-since-v_90)), and
 subscribes to the space's fan-out to receive the other members' items.
 The `space_session` relay above still carries everything else.
 
@@ -1020,9 +1020,8 @@ sequenceDiagram
 **What the connection server learns** on top of the link-pair residual
 (recipient ids, timing, size of each envelope): the channel's seats — every
 member household connected to it, paired ones included (the owner's
-`private_gfs` opt-in) — when items flow and their size bucket, and in
-trusted mode which member household published each item. Never the space id, name, key or
-content. The owner is not named by channel traffic but stays inferable by
+`private_gfs` opt-in) — when items flow and their size bucket, never which
+member household published one. Never the space id, name, key or content. The owner is not named by channel traffic but stays inferable by
 IP and timing (it is the `to_instance` of every member's envelope). Signed
 off in [`principles.md`](../principles.md).
 

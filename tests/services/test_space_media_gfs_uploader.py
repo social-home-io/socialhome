@@ -29,8 +29,6 @@ from socialhome.domain.gfs_channel import CHANNEL_SUITE_ED25519
 from socialhome.domain.gfs_space_media import (
     AUTH_AUTHORITY,
     AUTH_CHANNEL,
-    AUTH_CHANNEL_CERT,
-    AUTH_WRITER_CERT,
     AUTH_WRITER_KEY,
     CHANNEL_MEDIA_PUT_PREFIX,
     SpaceMediaUploadAuth,
@@ -104,9 +102,7 @@ class _Gfs:
     async def space_media_follower_targets(self, space_id):
         return self.follower
 
-    async def put_space_media(
-        self, conn, *, blob_id, blob, auth_header, identified=False
-    ):
+    async def put_space_media(self, conn, *, blob_id, blob, auth_header):
         # The claim as the GFS reads it (decoded here without validating a
         # stub cert); the address must be the scope-bound one.
         claim = orjson.loads(
@@ -119,9 +115,7 @@ class _Gfs:
         )
         assert claim["addr_suite"] == "sm1"
         self.put_scopes.append(claim["scope"])
-        self.puts.append(
-            (conn.id, claim["scope_id"], blob_id, blob, auth_header, identified)
-        )
+        self.puts.append((conn.id, claim["scope_id"], blob_id, blob, auth_header))
         status = self.status
         if isinstance(status, list):
             return status.pop(0)
@@ -246,7 +240,6 @@ def _uploader(
     versions=None,
     seed=None,
     certs=None,
-    identity_seed=b"\x01" * 32,
     spaces=None,
     media_refs=None,
 ):
@@ -260,7 +253,6 @@ def _uploader(
         writer_certs=certs,
     )
     u.attach_federation(_Fed(versions or {}))
-    u.attach_identity(own_identity_seed=identity_seed)
     return u
 
 
@@ -421,8 +413,8 @@ async def test_seed_holder_uploads_with_the_space_authority(tmp_path):
     plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
     await _upload(u, plan)
     assert len(gfs.puts) == 1
-    conn_id, space_id, blob_id, blob, header, identified = gfs.puts[0]
-    assert (conn_id, space_id, identified) == ("g1", SPACE, False)
+    conn_id, space_id, blob_id, blob, header = gfs.puts[0]
+    assert (conn_id, space_id) == ("g1", SPACE)
     assert blob_id == space_media_address("space", SPACE, blob) == plan.refs[0].blob_id
     assert auth_claim_addr_suite(header) == "sm1"
     assert (
@@ -466,10 +458,9 @@ async def test_writer_key_holder_uploads_anonymously(tmp_path):
     await _upload(
         u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
     )
-    _c, _s, _b, _blob, header, identified = gfs.puts[0]
+    _c, _s, _b, _blob, header = gfs.puts[0]
     auth = SpaceMediaUploadAuth.from_header(header)
     assert auth.kind == AUTH_WRITER_KEY and auth.epoch == 4
-    assert identified is False
     assert verify_ed25519(
         wk.public_key,
         auth.claim.writer_signing_bytes(kind=AUTH_WRITER_KEY, epoch=4),
@@ -477,32 +468,24 @@ async def test_writer_key_holder_uploads_anonymously(tmp_path):
     )
 
 
-async def test_writer_cert_holder_uploads_identified(tmp_path):
+async def test_a_writer_cert_alone_uploads_nothing(tmp_path):
+    """v_90 — no identified upload: a writer cert without the writer key
+    (an older household) authorizes nothing."""
     _write(tmp_path, "a.webp", 10)
-    ident = generate_identity_keypair()
     g1 = _Conn("g1", "https://g1.example")
     gfs = _Gfs([g1])
-    cert = _Cert(instance_pk="pk")
     u = _uploader(
         tmp_path,
         gfs=gfs,
         instances=[RELAY],
         versions={"e": V},
-        certs=_Certs(cert=cert),
-        identity_seed=ident.private_key,
+        certs=_Certs(cert=_Cert(instance_pk="pk")),
     )
     await _upload(
         u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
     )
-    _c, _s, _b, _blob, header, identified = gfs.puts[0]
-    assert identified is True
-    auth = SpaceMediaUploadAuth.from_header(header)
-    assert auth.kind == AUTH_WRITER_CERT
-    assert verify_ed25519(
-        ident.public_key,
-        auth.claim.writer_signing_bytes(kind=AUTH_WRITER_CERT, epoch=4),
-        b64url_decode(auth.sig),
-    )
+    assert gfs.puts == []
+    assert not await u.can_upload(SPACE)
 
 
 async def test_no_authorization_uploads_nothing(tmp_path, caplog):
@@ -700,7 +683,6 @@ class _Grant:
     epoch: int = 4
     epoch_offset: int = 1000
     writer_key: object | None = None
-    channel_cert: object | None = None
 
     @property
     def channel_epoch(self):
@@ -715,9 +697,7 @@ class _Channels:
         return self.grant
 
 
-def _channel_uploader(
-    tmp_path, gfs, *, seed=None, grant=None, identity_seed=b"\1" * 32
-):
+def _channel_uploader(tmp_path, gfs, *, seed=None, grant=None):
     channel_pk = (
         channel_pk_of(derive_channel_seed(seed, SPACE, CHANNEL_ID)) if seed else "pk"
     )
@@ -726,7 +706,6 @@ def _channel_uploader(
         gfs=gfs,
         instances=[RELAY],
         versions={"e": V},
-        identity_seed=identity_seed,
         spaces=_Spaces(seed, channel=(CHANNEL_ID, channel_pk), private_gfs=True),
     )
     u.attach_channels(_Channels(grant))
@@ -759,8 +738,8 @@ async def test_the_seed_holder_signs_with_the_channel_key(tmp_path):
         u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
     )
     assert gfs.put_scopes == ["channel"]
-    _c, scope_id, _b, _blob, header, identified = gfs.puts[0]
-    assert scope_id == CHANNEL_ID and identified is False
+    _c, scope_id, _b, _blob, header = gfs.puts[0]
+    assert scope_id == CHANNEL_ID
     auth = SpaceMediaUploadAuth.from_header(header)
     assert auth.kind == AUTH_CHANNEL and auth.sig_suite == CHANNEL_SUITE_ED25519
     assert auth.claim.scope == "channel" and auth.claim.scope_id == CHANNEL_ID
@@ -795,24 +774,6 @@ async def test_a_member_signs_with_its_channel_writer_key(tmp_path):
         ),
         b64url_decode(auth.sig),
     )
-
-
-async def test_a_member_without_the_writer_key_uses_its_channel_cert(tmp_path):
-    _write(tmp_path, "a.webp", 10)
-    ident = generate_identity_keypair()
-    cert = SimpleNamespace(to_wire=lambda: {"cert": "x"})
-    grant = _Grant(channel_cert=cert)
-    g1 = _Conn("g1", "https://g1.example")
-    gfs = _Gfs([g1])
-    u = _channel_uploader(tmp_path, gfs, grant=grant, identity_seed=ident.private_key)
-    await _upload(
-        u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
-    )
-    _c, _s, _b, _blob, header, identified = gfs.puts[0]
-    assert identified is True
-    wire = orjson.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
-    assert wire["auth"] == AUTH_CHANNEL_CERT and wire["channel_cert"] == {"cert": "x"}
-    assert wire["epoch"] == grant.channel_epoch
 
 
 async def test_no_channel_material_uploads_nothing(tmp_path):
@@ -955,7 +916,7 @@ async def test_no_authorization_is_not_a_gfs_refusal_and_is_logged_once(
         await _upload(u, plan)
     assert gfs.puts == []
     lines = [r.getMessage() for r in caplog.records]
-    assert sum("no seed, writer key or writer cert" in m for m in lines) == 1
+    assert sum("no seed or writer key" in m for m in lines) == 1
     assert not any("HTTP 403" in m for m in lines)
 
 
@@ -996,9 +957,9 @@ async def test_can_upload_answers_with_the_authorization_a_put_would_use(tmp_pat
     assert await _uploader(tmp_path, gfs=gfs, seed=b"\x02" * 32).can_upload(SPACE)
     key = _uploader(tmp_path, gfs=gfs, certs=_Certs(writer_key=b"\x03" * 32))
     assert await key.can_upload(SPACE)
-    cert = _uploader(tmp_path, gfs=gfs, certs=_Certs(cert=_Cert(scope="write")))
-    assert await cert.can_upload(SPACE)
     for nothing in (
+        # A writer cert alone is no authorization any more (v_90).
+        _uploader(tmp_path, gfs=gfs, certs=_Certs(cert=_Cert(scope="write"))),
         _uploader(tmp_path, gfs=gfs),
         _uploader(tmp_path, gfs=gfs, certs=_Certs()),
         _uploader(tmp_path, gfs=gfs, certs=_Certs(cert=_Cert(scope="comment"))),

@@ -865,7 +865,7 @@ class SpaceMediaGfsUploader:
             if ref.space_id not in self._unauthorized:
                 self._unauthorized.add(ref.space_id)
                 log.warning(
-                    "space media of space %s: this household holds no seed, "
+                    "space media of space %s: this household holds no seed "
                     "or writer key — its files are not uploaded",
                     ref.space_id,
                 )
