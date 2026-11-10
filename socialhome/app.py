@@ -5178,6 +5178,10 @@ def create_app(config: Config | None = None) -> web.Application:
         member_directory.wire(bus)
         # v_90 — a household left: no multi frame until its rekey arrives.
         member_directory.attach_multi_hold(space_crypto.hold_multi)
+        if gfs_channels is not None:
+            # A joiner's "seated" card re-sends its private-channel grant:
+            # the one sent when its seat went live can beat its seat.
+            member_directory.attach_on_seated(gfs_channels.on_member_seated)
         # Repair of a lost directory delta rides the periodic §25.6 sync:
         # the BEGIN echoes the member's ``dir_seq``; a host ahead answers.
         app[K.space_sync_scheduler_key].attach_directory_echo(
@@ -5192,6 +5196,7 @@ def create_app(config: Config | None = None) -> web.Application:
             host_of=member_directory.host_of,
             keywrap_private_key=identity.keywrap_private_key,
             keywrap_public_key=identity.keywrap_public_key,
+            ask_host=member_directory.ask_host,
         )
         routed_handler.attach_host_hop(host_hop)
         federation_service.attach_member_mesh(

@@ -7891,8 +7891,15 @@ def cmd_gfs_relay_media() -> None:
 
     def _restart(env_extra: dict[str, str] | None) -> None:
         offset = _gfs_log_size()
+        # The restart keeps the GFS's data dir, so what earlier steps
+        # recorded about it (``global_space_id`` …) still holds — carry it
+        # over, or every later step that reads it refuses to run.
+        kept = dict(_load().get("gfs") or {})
         cmd_gfs_down()
         cmd_gfs_up(env_extra=env_extra)
+        fresh = _load()
+        fresh["gfs"] = {**kept, **(fresh.get("gfs") or {})}
+        _save(fresh)
         _wait_for_gfs_ws_since(a_iid, offset=offset, timeout=90.0)
         _wait_for_gfs_ws_since(e_iid, offset=offset, timeout=90.0)
         # v_89: EVERY household's mailbox claim comes back too — after its
@@ -18991,6 +18998,28 @@ def _backdate_moment(label: str, moment_id: str, *, minutes: int) -> None:
         conn.close()
 
 
+def _next_mesh_checkpoint_min(label: str, moment_id: str) -> int:
+    """Minutes to backdate ``moment_id`` on ``label`` so the household's next
+    mesh totals checkpoint (+10 min, then +6 h) comes due at its next tick.
+    A checkpoint that already passed in real time was taken (and counted the
+    reactions of then): the GFS chain runs ``verify`` more than 10 min after
+    ``traffic`` made the moment, so backdating to +10 min re-arms nothing and
+    the new reaction's totals would wait for +6 h."""
+    rows = _rows(label, "SELECT created_at FROM moments WHERE id=?", (moment_id,))
+    created = datetime.fromisoformat(rows[0][0]) if rows and rows[0][0] else None
+    if created is not None and created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    age_s = (
+        (datetime.now(timezone.utc) - created).total_seconds()
+        if created is not None
+        else 0.0
+    )
+    for offset_s in (600, 6 * 3600):
+        if age_s < offset_s - 30:
+            return offset_s // 60 + 1
+    raise SystemExit(f"{label}: moment {moment_id!r} is past its +6 h checkpoint")
+
+
 def _verify_moment_totals(state: dict, moment_id: str) -> list[str]:
     """v_69: d reacts 🔥 to c's moment (it reaches c two hops back, v_67);
     c's +10 min checkpoint is brought forward and its signed totals must
@@ -19022,7 +19051,8 @@ def _verify_moment_totals(state: dict, moment_id: str) -> list[str]:
     want = _rows(
         "c", "SELECT COUNT(*) FROM moment_reactions WHERE moment_id=?", (moment_id,)
     )[0][0]
-    _backdate_moment("c", moment_id, minutes=11)
+    minutes = _next_mesh_checkpoint_min("c", moment_id)
+    _backdate_moment("c", moment_id, minutes=minutes)
 
     def _totals(label: str) -> dict | None:
         rows = _rows(

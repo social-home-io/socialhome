@@ -503,6 +503,47 @@ async def test_a_seat_going_live_creates_and_distributes_the_channel(env):
     }
 
 
+async def test_a_seated_member_gets_its_grant_again(env):
+    """The demo's ``gfs-private-channel`` (#1336 regression): the snapshot
+    that carried a joiner's grant when its seat went live beat the joiner's
+    own seat and its mailbox gate refused it. Once the household says it is
+    seated (its card), the owner sends its grant again — only where there is
+    one to send."""
+    env.owner.space_service.snapshots.clear()
+    # No channel yet: nothing to re-send.
+    assert (
+        await env.owner.svc.on_member_seated(SPACE_ID, env.member.h.instance_id)
+        is False
+    )
+    assert env.owner.space_service.snapshots == []
+    await _channel_ready(env)
+    env.owner.space_service.snapshots.clear()
+    assert (
+        await env.owner.svc.on_member_seated(SPACE_ID, env.member.h.instance_id) is True
+    )
+    assert env.owner.space_service.snapshots == [(SPACE_ID, env.member.h.instance_id)]
+    # Never to ourselves, nor to a household with no live seat.
+    env.owner.space_service.snapshots.clear()
+    assert (
+        await env.owner.svc.on_member_seated(SPACE_ID, env.owner.h.instance_id) is False
+    )
+    env.owner.remote.seats.discard((SPACE_ID, env.member.h.instance_id))
+    assert (
+        await env.owner.svc.on_member_seated(SPACE_ID, env.member.h.instance_id)
+        is False
+    )
+    assert env.owner.space_service.snapshots == []
+
+
+async def test_a_member_never_re_sends_a_grant(env):
+    """Only the owner hands out grants: on a member the hook does nothing."""
+    await _channel_ready(env)
+    assert (
+        await env.member.svc.on_member_seated(SPACE_ID, env.other.h.instance_id)
+        is False
+    )
+
+
 async def test_paired_members_alone_get_a_channel_when_the_option_is_on(env):
     """With ``private_gfs`` ON the channel is for every member household,
     not only link-joined ones: a space whose only remote member is paired

@@ -1621,6 +1621,25 @@ async def test_route_stale_relay_stops_at_pre_v28_next_hop(caplog):
     assert not any(r.levelno >= logging.WARNING for r in caplog.records)
 
 
+async def test_route_stale_relay_never_forwards_to_a_seat(caplog):
+    """The hop toward the origin is a ``space_session`` seat of the relay:
+    the nack ends at the relay. A seat is never a mesh origin (it sends
+    host hops only, sealed to a static key) and ``SPACE_ROUTE_STALE`` is
+    not in its vocabulary — so nothing ever sends one to a seat."""
+    a, b, c = _build_identity_chain(3)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    b.repo._instances[a.instance_id] = _FakeInstance(
+        id=a.instance_id, source=InstanceSource.SPACE_SESSION
+    )
+    nack = _signed_nack(target=c, path=path, route_id="r-to-seat", stale_pub="p")
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        await b.handler._on_route_stale(
+            _nack_event(nack, from_instance=c.instance_id, to_instance=b.instance_id)
+        )
+    assert _stale_sends(b) == []
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
 async def test_route_stale_duplicate_is_forwarded_once():
     """Same ``route_id`` delivered twice → forwarded exactly once (dedup)."""
     a, b, c = _build_identity_chain(3)
