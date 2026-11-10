@@ -203,29 +203,32 @@ class SqliteOutboxRepo:
     ) -> dict[str, str]:
         """Store *payload_ref* once and one ref row per household of
         *instance_ids* in ONE transaction (v_91: a broadcast's multi
-        payload). Each row is prepared as :meth:`enqueue` prepares one
-        (supersede, per-peer cap); a household no longer paired gets none.
-        Returns ``{instance_id: row id}`` of the rows written."""
-        rows: list[tuple] = []
-        for instance_id in instance_ids:
-            key, expires_at = await self._make_room(
-                instance_id, event_type, supersede_key, None
+        payload), room made in it set-based (:func:`_make_room_for`: the
+        supersede and the per-peer cap, as :meth:`enqueue` makes it per
+        row). A household no longer paired gets none. A multi event type
+        never carries a relayed delete's key, so its retention class is the
+        event type's. Returns ``{instance_id: row id}`` of the rows
+        written."""
+        expires_at = retention_expires_at(event_type)
+        rows = [
+            _row_params(
+                uuid.uuid4().hex,
+                instance_id,
+                event_type,
+                "",
+                None,
+                expires_at,
+                supersede_key,
+                payload_ref,
             )
-            rows.append(
-                _row_params(
-                    uuid.uuid4().hex,
-                    instance_id,
-                    event_type,
-                    "",
-                    None,
-                    expires_at,
-                    key,
-                    payload_ref,
-                )
-            )
-        written = await self._db.transact(
-            lambda conn: _insert_refs(conn, payload_ref, rows)
-        )
+            for instance_id in instance_ids
+        ]
+
+        def _write(conn: sqlite3.Connection) -> list[tuple]:
+            _make_room_for(conn, instance_ids, supersede_key)
+            return _insert_refs(conn, payload_ref, rows)
+
+        written = await self._db.transact(_write)
         return {params[1]: params[0] for params in written}
 
     async def _make_room(
@@ -745,6 +748,65 @@ def _row_params(
         event_type.value,
         FederationEventType.UNPAIR.value,
     )
+
+
+def _make_room_for(
+    conn: sqlite3.Connection, instance_ids: list[str], supersede_key: str | None
+) -> None:
+    """Inside the caller's transaction, before one row each for
+    *instance_ids* goes in: their pending rows with *supersede_key* dropped,
+    then the oldest droppable pending row (relayed deletes first, as
+    :meth:`SqliteOutboxRepo.evict_oldest_droppable`) of each one at or over
+    :data:`MAX_PENDING_PER_PEER` evicted — one statement each, whatever the
+    number of households."""
+    ids = orjson.dumps(instance_ids).decode()
+    if supersede_key is not None:
+        conn.execute(
+            "DELETE FROM federation_outbox WHERE status='pending'"
+            " AND supersede_key=? AND instance_id IN (SELECT value FROM json_each(?))",
+            (supersede_key, ids),
+        )
+    full = [
+        row[0]
+        for row in conn.execute(
+            "SELECT instance_id FROM federation_outbox WHERE status='pending'"
+            " AND instance_id IN (SELECT value FROM json_each(?))"
+            " GROUP BY instance_id HAVING COUNT(*) >= ?",
+            (ids, MAX_PENDING_PER_PEER),
+        )
+    ]
+    if not full:
+        return
+    never = sorted(e.value for e in NEVER_DROP)
+    evicted = conn.execute(
+        f"""
+        DELETE FROM federation_outbox WHERE id IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY instance_id
+                    ORDER BY COALESCE(substr(supersede_key, 1, ?) = ?, 0) DESC,
+                             datetime(created_at) ASC, id ASC
+                ) AS rn
+                  FROM federation_outbox
+                 WHERE status='pending'
+                   AND instance_id IN (SELECT value FROM json_each(?))
+                   AND event_type NOT IN ({",".join("?" * len(never))})
+            ) WHERE rn = 1
+        )
+        """,
+        (
+            len(ANY_RELAYED_DELETE_KEY_PREFIX),
+            ANY_RELAYED_DELETE_KEY_PREFIX,
+            orjson.dumps(full).decode(),
+            *never,
+        ),
+    ).rowcount
+    if evicted < len(full):
+        log.warning(
+            "outbox: %d peer(s) at pending cap with no droppable rows "
+            "(all NEVER_DROP) — inserting over cap",
+            len(full) - evicted,
+        )
 
 
 def _insert_refs(

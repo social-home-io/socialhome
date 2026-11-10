@@ -1362,3 +1362,86 @@ async def test_a_newer_multi_row_never_overtakes_an_older_one_in_backoff(env):
     assert [e.id for e in await env.outbox_repo.list_due()] == [update["peer-b"]]
     await env.outbox_repo.mark_delivered(create["peer-a"])
     assert {e.id for e in await env.outbox_repo.list_due()} == set(update.values())
+
+
+async def test_a_500_seat_multi_enqueue_is_one_write_transaction(env):
+    """v_91: room for 500 ref rows (supersede, per-peer cap) is made in the
+    same one transaction that writes them — no read or write round trip per
+    seat."""
+    seats = [f"seat-{i:03d}" for i in range(500)]
+    await env.db.transact(
+        lambda conn: conn.executemany(
+            "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+            " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+            " local_inbox_id, status) VALUES(?,?,?,?,?,?,?, 'confirmed')",
+            [(s, s, "00" * 32, "k1", "k2", "", f"inbox-{s}") for s in seats],
+        )
+    )
+    writes: list[str] = []
+    for name in (
+        "enqueue",
+        "enqueue_rowcount",
+        "transact",
+        "fetchone",
+        "fetchall",
+        "fetchval",
+    ):
+        real = getattr(env.db, name)
+
+        def _counted(*a, _real=real, _name=name, **kw):
+            writes.append(_name)
+            return _real(*a, **kw)
+
+        setattr(env.db, name, _counted)
+    written = await env.outbox_repo.enqueue_refs(
+        instance_ids=seats,
+        event_type=FederationEventType.SPACE_LOCATION_UPDATED,
+        supersede_key="location:s1:u1",
+        payload_ref=dataclasses.replace(_stored("p-m"), msg_id="wire-1"),
+    )
+    assert len(written) == 500
+    assert writes == ["transact"]
+
+
+async def test_a_multi_enqueue_supersedes_and_makes_room_per_seat(env, monkeypatch):
+    """The same room-making as :meth:`enqueue`, per seat: a seat's row of
+    the same latest-only key is replaced; a seat at the cap loses its oldest
+    droppable row; a seat whose backlog is all NEVER_DROP goes over it."""
+    import socialhome.repositories.outbox_repo as outbox_mod
+
+    monkeypatch.setattr(outbox_mod, "MAX_PENDING_PER_PEER", 2)
+    repo = env.outbox_repo
+    key = "location:s1:u1"
+    stale = await repo.enqueue(
+        instance_id="peer-x",
+        event_type=FederationEventType.SPACE_LOCATION_UPDATED,
+        payload_json="{}",
+        supersede_key=key,
+    )
+    for i in range(2):
+        await repo.enqueue(
+            instance_id="peer-a",
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload_json="{}",
+            msg_id=f"a{i}",
+        )
+        await env.db.enqueue(
+            "UPDATE federation_outbox SET created_at=? WHERE id=?",
+            (f"2026-01-0{i + 1}T00:00:00+00:00", f"a{i}"),
+        )
+        await repo.enqueue(
+            instance_id="peer-b",
+            event_type=FederationEventType.SPACE_MEMBER_BANNED,
+            payload_json="{}",
+            msg_id=f"b{i}",
+        )
+    written = await repo.enqueue_refs(
+        instance_ids=["peer-a", "peer-b", "peer-x"],
+        event_type=FederationEventType.SPACE_LOCATION_UPDATED,
+        supersede_key=key,
+        payload_ref=dataclasses.replace(_stored("p-m"), msg_id="wire-1"),
+    )
+    assert stale not in await _pending_ids(env, "peer-x")
+    assert await _pending_ids(env, "peer-x") == {written["peer-x"]}
+    assert await _pending_ids(env, "peer-a") == {"a1", written["peer-a"]}
+    assert await _pending_ids(env, "peer-b") == {"b0", "b1", written["peer-b"]}
