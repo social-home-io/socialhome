@@ -1137,3 +1137,63 @@ async def test_live_item_files_are_the_files_a_live_item_of_the_space_shows(db):
     assert await repo.live_item_files("sp1", "g-house") == []
     assert await repo.live_item_files("sp1", "nope") == []
     assert await repo.live_item_files("", "p1") == []
+
+
+async def test_recent_item_files_are_a_spaces_newest_live_items_with_files(db):
+    """The bounded catch-up's candidates: every LIVE item of the space
+    created at or after the cutoff, newest first, with its owner and the
+    files it shows — comments and post attachments included."""
+    await _item_rows(db)
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, file_meta_json,"
+        " created_at) VALUES('p-file', 'sp1', 'u2', 'file', ?,"
+        " '2026-11-07T08:00:00+00:00')",
+        ('{"url": "api/media/doc.pdf", "mime_type": "application/pdf"}',),
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, media_url,"
+        " created_at) VALUES('p-old', 'sp1', 'u1', 'image', 'api/media/old.webp',"
+        " '2026-09-01 10:00:00')",
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    rows = await repo.recent_item_files("sp1", cutoff="2026-10-11 00:00:00", limit=100)
+    assert [(r[1], r[2], r[3]) for r in rows] == [
+        ("p-file", "u2", ["doc.pdf"]),
+        ("p-bz", "u1", ["sc-x.webp"]),
+        ("g1", "u2", ["big.webp", "sc-x.webp"]),
+        ("e1", "u2", ["sc-x.webp"]),
+        ("c1", "u2", ["sc-x.webp"]),
+        ("p-link", "u2", ["sc-x.webp"]),
+        ("p1", "u1", ["sc-x.webp", "plain.webp"]),
+    ]
+    assert rows[0][0] == "2026-11-07 08:00:00"
+    # The bound is per source: the newest ``limit`` rows of each.
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, image_urls_json,"
+        " created_at) VALUES('p2', 'sp1', 'u1', 'image', ?,"
+        " '2026-11-01 10:30:00')",
+        ('["api/media/two.webp"]',),
+    )
+    limited = await repo.recent_item_files("sp1", cutoff="2026-10-11 00:00:00", limit=1)
+    assert "p1" not in [r[1] for r in limited]
+    assert await repo.recent_item_files("sp1", cutoff="2026-11-08", limit=9) == []
+    assert await repo.recent_item_files("", cutoff="2026-10-11", limit=9) == []
+    # A deleted item of another space shows nothing.
+    assert await repo.recent_item_files("sp2", cutoff="2026-10-11", limit=9) == []
+
+
+async def test_a_posts_attachment_is_one_of_its_item_files(db):
+    """A post's file attachment (``file_meta``) is a file the item shows —
+    the record rule's (``record_media_urls``) — on every item read."""
+    await _item_rows(db)
+    doc = space_content_media_name("sp1", "b" * 64, "doc.pdf")
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, file_meta_json,"
+        " created_at) VALUES('p-file', 'sp1', 'u2', 'file', ?,"
+        " '2026-11-07 08:00:00')",
+        (f'{{"url": "api/media/{doc}"}}',),
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.live_item_files("sp1", "p-file") == [(doc, "u2")]
+    assert ("sp1", "p-file", "2026-11-07 08:00:00") in await repo.space_rows_of(doc)
+    assert await repo.content_names_of_item("p-file") == [doc]

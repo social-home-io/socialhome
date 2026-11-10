@@ -221,7 +221,7 @@ async def houses(aiohttp_client, tmp_path):
 
 
 def _posts(app):
-    return app[space_sync_service_key]._space_post_repo
+    return app[space_sync_service_key]._exporters["posts"]._repo
 
 
 def _polls(app):

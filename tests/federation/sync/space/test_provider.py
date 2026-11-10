@@ -227,103 +227,132 @@ async def test_each_shipped_chunk_marks_the_session_active(provider):
     assert session.touches == 2
 
 
-async def test_an_incremental_resync_ships_no_catchup_media(encoder):
-    """The periodic re-sync re-streams rows but never re-enqueues every
-    media blob in the space — that is the joiner's catch-up only."""
-    from unittest.mock import AsyncMock
+class _ItemFiles:
+    """In-memory ``recent_item_files``: ``(created_at, item, owner, names)``
+    rows, served newest first as the repo does."""
 
-    walked: list[str] = []
+    def __init__(self, rows: list[tuple[str, str, str | None, list[str]]]) -> None:
+        self.rows = rows
+        self.asked: list[tuple[str, str, int]] = []
 
-    class _PostRepo:
-        async def list_sync_page(self, space_id, **_kw):
-            walked.append(space_id)
-            return [], None
+    async def recent_item_files(self, space_id, *, cutoff, limit):
+        self.asked.append((space_id, cutoff, limit))
+        return sorted(self.rows, key=lambda r: r[0], reverse=True)
 
+
+def _catchup_provider(encoder, rows, **kw) -> tuple[SpaceSyncService, AsyncMock]:
     media_sync = AsyncMock()
+    media_sync.enqueue_for_blob = AsyncMock()
     svc = SpaceSyncService(
         builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
-        exporters={},
+        exporters=kw.pop("exporters", {}),
         sig_suite="ed25519",
         media_sync=media_sync,
-        space_post_repo=_PostRepo(),
+        item_files=_ItemFiles(rows),
+        **kw,
+    )
+    return svc, media_sync
+
+
+def _shipped(media_sync) -> list[tuple[str, list[str]]]:
+    return [
+        (c.kwargs["correlation_id"], list(c.kwargs["media_urls"]))
+        for c in media_sync.enqueue_for_blob.call_args_list
+    ]
+
+
+async def test_an_incremental_resync_ships_no_catchup_media(encoder):
+    """The periodic re-sync re-streams rows but never re-enqueues the
+    space's media — that is the joiner's catch-up only."""
+    svc, media_sync = _catchup_provider(
+        encoder, [("2026-11-01 10:00:00", "p-1", "u-1", ["a.webp"])]
     )
     session = _FakeSession(sync_mode="incremental")
     await svc.stream_initial(session)
-    assert walked == []
     media_sync.enqueue_for_blob.assert_not_awaited()
-    # An initial (joiner) sync still walks the space for its media.
+    assert svc._item_files.asked == []
+    # An initial (joiner) sync still ships the space's recent media.
     await svc.stream_initial(_FakeSession())
-    assert walked == ["sp-1"]
+    assert _shipped(media_sync) == [("p-1", ["a.webp"])]
     parsed = orjson.loads(session.rtc.sent[-1])
     assert parsed["resource"] == SENTINEL_RESOURCE
 
 
 async def test_stream_initial_enqueues_catchup_media(encoder):
-    """After the metadata sentinel, the provider must also enqueue
-    space_media_outbox rows for every referenced post + gallery
-    media URL, targeted at the requesting peer. Without this a
-    new member sees the post / gallery rows but the images stay
-    broken until someone uploads NEW media."""
-    from dataclasses import dataclass
-    from unittest.mock import AsyncMock
-
-    @dataclass
-    class _Post:
-        id: str
-        media_url: str | None = None
-        image_urls: tuple = ()
-        file_meta: object = None
-
-    @dataclass
-    class _GalleryItem:
-        id: str
-        url: str
-        thumbnail_url: str
-
-    class _PostRepo:
-        async def list_sync_page(self, space_id, **kw):
-            return [
-                _Post(id="post-1", image_urls=("api/media/a.webp",)),
-                _Post(id="post-2", media_url="api/media/v.webm"),
-            ], None
-
-    class _GalleryRepo:
-        async def list_items_sync_page(self, space_id, **_kw):
-            return [
-                _GalleryItem(
-                    id="g-1",
-                    url="api/media/full.webp",
-                    thumbnail_url="api/media/thumb.webp",
-                ),
-            ], None
-
-    media_sync = AsyncMock()
-    media_sync.enqueue_for_blob = AsyncMock()
-    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
-    svc = SpaceSyncService(
-        builder=builder,
-        exporters={},  # the catch-up step doesn't depend on exporters
-        sig_suite="ed25519",
-        media_sync=media_sync,
-        space_post_repo=_PostRepo(),
-        gallery_repo=_GalleryRepo(),
+    """After the metadata sentinel the provider enqueues the files of the
+    space's recent items — posts, comments, gallery items, listings,
+    covers — newest first, each to the requester only."""
+    svc, media_sync = _catchup_provider(
+        encoder,
+        [
+            ("2026-11-01 10:00:00", "post-1", "u-1", ["a.webp"]),
+            ("2026-11-03 10:00:00", "c-1", "u-2", ["comment.webp"]),
+            ("2026-11-02 10:00:00", "g-1", "u-1", ["full.webp", "thumb.webp"]),
+        ],
     )
-    session = _FakeSession(requester="peer-newcomer")
-    await svc.stream_initial(session)
-
-    # One enqueue per post + one per gallery item.
-    assert media_sync.enqueue_for_blob.await_count == 3
-    calls = media_sync.enqueue_for_blob.call_args_list
-    by_correlation = {c.kwargs["correlation_id"]: c.kwargs for c in calls}
-    assert by_correlation["post-1"]["media_urls"] == ["api/media/a.webp"]
-    assert by_correlation["post-2"]["media_urls"] == ["api/media/v.webm"]
-    assert set(by_correlation["g-1"]["media_urls"]) == {
-        "api/media/full.webp",
-        "api/media/thumb.webp",
-    }
-    # All targeted at the newcomer only — not a broadcast.
-    for c in calls:
+    await svc.stream_initial(_FakeSession(requester="peer-newcomer"))
+    assert _shipped(media_sync) == [
+        ("c-1", ["comment.webp"]),
+        ("g-1", ["full.webp", "thumb.webp"]),
+        ("post-1", ["a.webp"]),
+    ]
+    for c in media_sync.enqueue_for_blob.call_args_list:
         assert c.kwargs["target_instance_ids"] == ["peer-newcomer"]
+
+
+async def test_catchup_media_is_bounded_to_the_last_30_days(encoder):
+    """Only items created in the last :data:`CATCHUP_MEDIA_MAX_AGE_S` are
+    candidates (older files arrive on view, ``SPACE_MEDIA_WANTED``)."""
+    from datetime import datetime, timedelta
+
+    svc, _media_sync = _catchup_provider(encoder, [])
+    await svc.stream_initial(_FakeSession())
+    [(space_id, cutoff, limit)] = svc._item_files.asked
+    assert space_id == "sp-1"
+    assert limit == provider_mod.CATCHUP_MEDIA_MAX_FILES
+    expected = datetime.now(UTC).replace(tzinfo=None) - timedelta(
+        seconds=provider_mod.CATCHUP_MEDIA_MAX_AGE_S
+    )
+    assert abs(datetime.fromisoformat(cutoff) - expected) < timedelta(minutes=1)
+
+
+async def test_catchup_media_stops_at_the_file_budget_newest_first(
+    encoder, monkeypatch
+):
+    """At most :data:`CATCHUP_MEDIA_MAX_FILES` files per stream, newest
+    first across every kind of item."""
+    monkeypatch.setattr(provider_mod, "CATCHUP_MEDIA_MAX_FILES", 3)
+    svc, media_sync = _catchup_provider(
+        encoder,
+        [
+            ("2026-11-01 10:00:00", "old", "u-1", ["o.webp"]),
+            ("2026-11-05 10:00:00", "g-new", "u-1", ["f.webp", "t.webp"]),
+            ("2026-11-04 10:00:00", "ev", "u-1", ["cover.webp", "x.webp"]),
+        ],
+    )
+    await svc.stream_initial(_FakeSession())
+    assert _shipped(media_sync) == [
+        ("g-new", ["f.webp", "t.webp"]),
+        ("ev", ["cover.webp"]),
+    ]
+
+
+async def test_catchup_media_reaches_a_link_joined_requester(encoder):
+    """Every member is equal on any path: a member seated from an invite
+    link gets the same bounded catch-up pushes (the outbox drops one at
+    send time while the reader's GFS cache holds the file)."""
+    fed = SimpleNamespace(
+        is_space_session_peer=AsyncMock(return_value=True),
+        peer_supports=AsyncMock(return_value=True),
+        space_member_version=AsyncMock(return_value=92),
+        space_member_supports=AsyncMock(return_value=True),
+    )
+    svc, media_sync = _catchup_provider(
+        encoder, [("2026-11-01 10:00:00", "post-1", "u-1", ["a.webp"])]
+    )
+    svc._federation = fed
+    await svc.stream_initial(_FakeSession(requester="peer-e"))
+    assert _shipped(media_sync) == [("post-1", ["a.webp"])]
 
 
 async def test_stream_initial_no_media_sync_wired_is_noop(encoder):
@@ -343,211 +372,46 @@ async def test_stream_initial_no_media_sync_wired_is_noop(encoder):
     assert parsed["resource"] == SENTINEL_RESOURCE
 
 
-# ─── Bazaar catch-up (#PR445) ─────────────────────────────────────────
+async def test_a_failed_item_read_ships_no_catchup_media(encoder):
+    """A SQLite error reading the candidates is logged, the stream still
+    completes (the next catch-up retries)."""
+    import sqlite3
 
+    class _Broken:
+        async def recent_item_files(self, space_id, *, cutoff, limit):
+            raise sqlite3.OperationalError("locked")
 
-async def test_stream_initial_enqueues_bazaar_catchup_media(encoder):
-    """Catch-up enumerates bazaar listings and ships their image bytes
-    too — the wrapper Post's ``image_urls`` is always empty for
-    ``PostType.BAZAAR``, the photos live on ``BazaarListing.image_urls``.
-    """
-    from dataclasses import dataclass
-    from unittest.mock import AsyncMock
-
-    @dataclass
-    class _Listing:
-        post_id: str
-        image_urls: tuple
-
-    class _BazaarRepo:
-        async def list_sync_page(self, space_id, **_kw):
-            return [
-                _Listing(
-                    post_id="bzr-1",
-                    image_urls=("api/media/chair-1.webp", "api/media/chair-2.webp"),
-                ),
-                _Listing(  # No photos — skipped silently.
-                    post_id="bzr-2",
-                    image_urls=(),
-                ),
-            ], None
-
-    media_sync = AsyncMock()
-    media_sync.enqueue_for_blob = AsyncMock()
-    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
-    svc = SpaceSyncService(
-        builder=builder,
-        exporters={},
-        sig_suite="ed25519",
-        media_sync=media_sync,
-        bazaar_repo=_BazaarRepo(),
-    )
-    session = _FakeSession(requester="peer-bzr")
-    await svc.stream_initial(session)
-
-    # Only the photo-bearing listing got an enqueue.
-    media_sync.enqueue_for_blob.assert_awaited_once()
-    kw = media_sync.enqueue_for_blob.await_args.kwargs
-    assert kw["correlation_id"] == "bzr-1"
-    assert kw["target_instance_ids"] == ["peer-bzr"]
-    assert list(kw["media_urls"]) == [
-        "api/media/chair-1.webp",
-        "api/media/chair-2.webp",
-    ]
-
-
-async def test_catchup_media_ships_calendar_covers(encoder):
-    """A household catching up gets each streamed event's cover file
-    too — the record carries only the ``api/media/…`` reference."""
-    from dataclasses import dataclass
-    from unittest.mock import AsyncMock
-
-    @dataclass
-    class _Event:
-        id: str
-        cover_url: str | None = None
-
-    asked: list[dict] = []
-
-    class _CalRepo:
-        async def list_events_sync_page(self, space_id, **kw):
-            asked.append(kw)
-            if kw["cursor"] is None:
-                return [_Event("ev-1", "api/media/c1.webp"), _Event("ev-2")], 3
-            return [_Event("ev-3", "api/media/c3.webp")], None
-
-    media_sync = AsyncMock()
-    media_sync.enqueue_for_blob = AsyncMock()
-    svc = SpaceSyncService(
-        builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
-        exporters={},
-        sig_suite="ed25519",
-        media_sync=media_sync,
-        space_calendar_repo=_CalRepo(),
-    )
-    await svc.stream_initial(_FakeSession(requester="peer-cal"))
-    calls = [c.kwargs for c in media_sync.enqueue_for_blob.call_args_list]
-    assert [(c["correlation_id"], list(c["media_urls"])) for c in calls] == [
-        ("ev-1", ["api/media/c1.webp"]),
-        ("ev-3", ["api/media/c3.webp"]),
-    ]
-    assert all(c["target_instance_ids"] == ["peer-cal"] for c in calls)
-    # Every page of the full record set the calendar resource streams.
-    assert [kw["cursor"] for kw in asked] == [None, 3]
-    assert all(kw.get("since") is None for kw in asked)
-
-
-async def test_catchup_media_follows_the_spaces_retention_window(encoder):
-    """The catch-up media walks the same window the metadata streamed:
-    every page, each asked with the space's retention cutoff."""
-    from dataclasses import dataclass
-    from unittest.mock import AsyncMock
-
-    from socialhome.federation.sync.space.window import SyncWindow
-
-    @dataclass
-    class _Post:
-        id: str
-        media_url: str | None = None
-
-    asked: list[dict] = []
-
-    class _PostRepo:
-        async def list_sync_page(self, space_id, **kw):
-            asked.append(kw)
-            if kw["cursor"] is None:  # two pages: no fixed count
-                return [_Post(id="p-1", media_url="api/media/1.webp")], 7
-            return [_Post(id="p-2", media_url="api/media/2.webp")], None
-
-    class _GalleryRepo:
-        async def list_items_sync_page(self, space_id, **kw):
-            asked.append(kw)
-            return [], None
-
-    class _BazaarRepo:
-        async def list_sync_page(self, space_id, **kw):
-            asked.append(kw)
-            return [], None
-
-    class _Windows:
-        async def for_space(self, space_id):
-            return SyncWindow(cutoff="2026-10-01 00:00:00", exempt_types=("poll",))
-
-    media_sync = AsyncMock()
-    media_sync.enqueue_for_blob = AsyncMock()
-    svc = SpaceSyncService(
-        builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
-        exporters={},
-        sig_suite="ed25519",
-        media_sync=media_sync,
-        space_post_repo=_PostRepo(),
-        gallery_repo=_GalleryRepo(),
-        bazaar_repo=_BazaarRepo(),
-        windows=_Windows(),  # type: ignore[arg-type]
-    )
-    await svc.stream_initial(_FakeSession(requester="peer-w"))
-    ids = [
-        c.kwargs["correlation_id"] for c in media_sync.enqueue_for_blob.call_args_list
-    ]
-    assert ids == ["p-1", "p-2"]
-    # Posts and listings follow the window; gallery items carry none
-    # (nothing prunes them).
-    assert [kw.get("cutoff") for kw in asked] == [
-        "2026-10-01 00:00:00",
-        "2026-10-01 00:00:00",
-        None,
-        "2026-10-01 00:00:00",
-    ]
-
-
-async def test_stream_initial_no_bazaar_repo_is_noop(encoder):
-    """Without a ``bazaar_repo`` (e.g. older deployments), the catch-up
-    skips the bazaar walk — post + gallery still flow."""
-    from unittest.mock import AsyncMock
-
-    media_sync = AsyncMock()
-    media_sync.enqueue_for_blob = AsyncMock()
-    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
-    svc = SpaceSyncService(
-        builder=builder,
-        exporters={},
-        sig_suite="ed25519",
-        media_sync=media_sync,
-        bazaar_repo=None,
-    )
+    svc, media_sync = _catchup_provider(encoder, [])
+    svc._item_files = _Broken()
     session = _FakeSession()
     await svc.stream_initial(session)
-    # No bazaar enqueues — no other repos wired either.
     media_sync.enqueue_for_blob.assert_not_awaited()
+    assert orjson.loads(session.rtc.sent[-1])["resource"] == SENTINEL_RESOURCE
 
 
-# ─── Integration: real Sqlite repos (#PR444) ──────────────────────────
+# ─── Integration: the real Sqlite repos (#PR444) ──────────────────────
 #
-# Mock-shaped unit tests caught the wire shape but missed that
-# ``list_items_for_space`` / ``list_items_for_album`` were never
-# actual gallery-repo methods (the test fakes happily defined them).
-# This integration test wires ``SpaceSyncService`` to the REAL
-# Sqlite repos so a future API rename surfaces as a test failure
-# rather than a silent runtime skip.
+# Mock-shaped unit tests caught the wire shape but missed that repo
+# methods were never real (#443). This wires ``SpaceSyncService`` to the
+# REAL media reference repo so a future rename surfaces as a test failure.
 
 
 async def test_stream_initial_catchup_real_repos(tmp_dir, encoder):
-    """Catch-up walks the real Sqlite post + gallery repos and enqueues
-    bytes for every referenced media URL."""
-    from datetime import UTC, datetime
-    from unittest.mock import AsyncMock
+    """Catch-up reads the real repo: a recent post, a comment picture and a
+    gallery item ship; a post older than 30 days does not."""
+    from datetime import datetime, timedelta
 
     from socialhome.db.database import AsyncDatabase
-    from socialhome.domain.gallery import GalleryAlbum, GalleryItem
-    from socialhome.domain.post import Post, PostType
-    from socialhome.repositories.gallery_repo import SqliteGalleryRepo
-    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+    from socialhome.repositories.media_reference_repo import (
+        SqliteMediaReferenceRepo,
+    )
+
+    def _ago(days: int) -> str:
+        return (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
 
     db = AsyncDatabase(tmp_dir / "catchup.db", batch_timeout_ms=10)
     await db.startup()
     try:
-        # Seed a user + space so FKs on gallery_items.uploaded_by AND
-        # space_posts.space_id resolve.
         await db.enqueue(
             "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
             ("host", "u-host", "Host"),
@@ -557,118 +421,52 @@ async def test_stream_initial_catchup_real_repos(tmp_dir, encoder):
             "owner_username, identity_public_key) VALUES(?,?,?,?,?)",
             ("sp-int", "Int Space", "inst-host", "host", "00" * 32),
         )
-        post_repo = SqliteSpacePostRepo(db)
-        gallery_repo = SqliteGalleryRepo(db)
-
-        # Post with image_urls — what a feed photo upload produces.
-        p1 = Post(
-            id="p-int-1",
-            author="u-host",
-            type=PostType.IMAGE,
-            created_at=datetime(2026, 1, 1, tzinfo=UTC),
-            image_urls=("api/media/integration.webp",),
+        await db.enqueue(
+            "INSERT INTO space_posts(id, space_id, author, type, image_urls_json,"
+            " created_at) VALUES('p-int-1', 'sp-int', 'u-host', 'image', ?, ?)",
+            ('["api/media/integration.webp"]', _ago(1)),
         )
-        await post_repo.save("sp-int", p1)
-
-        # Gallery album + one item. ``owner_user_id`` is NULL — the
-        # users FK would need a real row otherwise and this test only
-        # exercises the sync path, not user provisioning.
-        album = GalleryAlbum(
-            id="alb-int",
-            space_id="sp-int",
-            owner_user_id=None,
-            name="Integration",
+        await db.enqueue(
+            "INSERT INTO space_posts(id, space_id, author, type, media_url,"
+            " created_at) VALUES('p-old', 'sp-int', 'u-host', 'image',"
+            " 'api/media/old.webp', ?)",
+            (_ago(40),),
         )
-        await gallery_repo.create_album(album)
-        item = GalleryItem(
-            id="g-int-1",
-            album_id="alb-int",
-            uploaded_by="u-host",
-            item_type="photo",
-            url="api/media/integration-full.webp",
-            thumbnail_url="api/media/integration-thumb.webp",
-            width=32,
-            height=32,
+        await db.enqueue(
+            "INSERT INTO space_post_comments(id, post_id, author, type, media_url,"
+            " created_at) VALUES('c-1', 'p-int-1', 'u-host', 'image',"
+            " 'api/media/comment.webp', ?)",
+            (_ago(0),),
         )
-        await gallery_repo.create_item(item)
-
+        await db.enqueue(
+            "INSERT INTO gallery_albums(id, space_id, name) VALUES('alb', 'sp-int', 'A')"
+        )
+        await db.enqueue(
+            "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type,"
+            " filename, thumbnail_filename, width, height, created_at)"
+            " VALUES('g-int-1', 'alb', 'u-host', 'photo', 'full.webp',"
+            " 'thumb.webp', 1, 1, ?)",
+            (_ago(2),),
+        )
         media_sync = AsyncMock()
         media_sync.enqueue_for_blob = AsyncMock()
-        builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
         svc = SpaceSyncService(
-            builder=builder,
+            builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
             exporters={},
             sig_suite="ed25519",
             media_sync=media_sync,
-            space_post_repo=post_repo,
-            gallery_repo=gallery_repo,
+            item_files=SqliteMediaReferenceRepo(db),
         )
-        session = _FakeSession(space_id="sp-int", requester="peer-int")
-        await svc.stream_initial(session)
-
-        # Post enqueue: image_urls flow through with id as correlation_id.
-        calls = media_sync.enqueue_for_blob.call_args_list
-        by_correlation = {c.kwargs["correlation_id"]: c.kwargs for c in calls}
-        assert "p-int-1" in by_correlation, (
-            f"post catch-up didn't fire — calls: {calls}"
-        )
-        assert by_correlation["p-int-1"]["media_urls"] == [
-            "api/media/integration.webp",
+        await svc.stream_initial(_FakeSession(space_id="sp-int", requester="p"))
+        assert _shipped(media_sync) == [
+            ("c-1", ["comment.webp"]),
+            ("p-int-1", ["integration.webp"]),
+            ("g-int-1", ["full.webp", "thumb.webp"]),
         ]
-        # Gallery enqueue: thumb + full both shipped under item id.
-        assert "g-int-1" in by_correlation, (
-            f"gallery catch-up didn't fire (the bug #443 fixed) — calls: {calls}"
-        )
-        assert set(by_correlation["g-int-1"]["media_urls"]) == {
-            "api/media/integration-thumb.webp",
-            "api/media/integration-full.webp",
-        }
-        # All targeted at the requester only.
-        for c in calls:
-            assert c.kwargs["target_instance_ids"] == ["peer-int"]
+        for c in media_sync.enqueue_for_blob.call_args_list:
+            assert c.kwargs["target_instance_ids"] == ["p"]
     finally:
         await db.shutdown()
-
-
-async def test_stream_initial_catchup_logic_bug_propagates(encoder, caplog):
-    """A renamed / missing repo method is a programming bug, not an
-    operational one. The narrowed ``except sqlite3.Error`` in the
-    catch-up path lets ``AttributeError`` propagate to ``stream_initial``'s
-    outer handler — the failure surfaces as a single visible log entry
-    instead of being silently swallowed per-call (which is how the
-    #443 bug landed in main).
-    """
-    import logging
-    from unittest.mock import AsyncMock
-
-    class _BrokenPostRepo:
-        # No ``list_feed`` — simulates the API drift the #443 bug exhibited.
-        pass
-
-    media_sync = AsyncMock()
-    media_sync.enqueue_for_blob = AsyncMock()
-    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
-    svc = SpaceSyncService(
-        builder=builder,
-        exporters={},
-        sig_suite="ed25519",
-        media_sync=media_sync,
-        space_post_repo=_BrokenPostRepo(),
-    )
-    session = _FakeSession(requester="peer-x")
-    with caplog.at_level(logging.ERROR):
-        # The outer ``except Exception`` in stream_initial still logs +
-        # swallows so a buggy catch-up never tears down the whole sync,
-        # but the message comes from the OUTER handler (single visible
-        # entry per session) rather than the per-call masks that hid
-        # the bug in #443.
-        await svc.stream_initial(session)
-    assert any("stream_initial failed" in r.getMessage() for r in caplog.records), (
-        f"outer handler didn't log the propagated AttributeError: {caplog.records}"
-    )
-    # And — critically — no enqueue happened, because the bug short-
-    # circuited before any successful walk.
-    assert media_sync.enqueue_for_blob.await_count == 0
 
 
 # ─── #648: don't push into a broken path forever ──────────────────────
@@ -1094,34 +892,6 @@ async def test_the_two_waitable_reasons_keep_separate_budgets(provider):
 
     federation.close_sync_session.assert_not_called()
     assert federation.send_with_mesh_fallback.await_count == expected + 2
-
-
-def test_catchup_media_includes_the_link_preview_image():
-    """A joiner catching up receives the card image a synced post carries."""
-    from datetime import datetime
-
-    from socialhome.domain.link_preview import LinkPreview
-    from socialhome.domain.post import Post, PostType
-    from socialhome.federation.sync.space.provider import SpaceSyncService
-
-    post = Post(
-        id="p",
-        author="u",
-        type=PostType.TEXT,
-        created_at=datetime(2026, 4, 1, tzinfo=UTC),
-        link_preview=LinkPreview(
-            url="https://example.com/", title="T", thumbnail_url="api/media/lp.webp"
-        ),
-    )
-    assert SpaceSyncService._post_media_urls(post) == ["api/media/lp.webp"]
-    no_image = Post(
-        id="q",
-        author="u",
-        type=PostType.TEXT,
-        created_at=datetime(2026, 4, 1, tzinfo=UTC),
-        link_preview=LinkPreview(url="https://example.com/", title="T"),
-    )
-    assert SpaceSyncService._post_media_urls(no_image) == []
 
 
 # ─── v_41: a pre-moderator requester gets ``member`` for a moderator ────
@@ -2132,43 +1902,6 @@ async def test_catch_up_files_per_stream_are_bounded(encoder, monkeypatch):
     assert len(_streamed_records(session, "posts")) == 3
 
 
-async def test_no_catchup_byte_push_to_a_link_joined_requester(encoder):
-    """The GFS relay refuses ``SPACE_MEDIA_BLOB`` chunks to a member seated
-    from an invite link — queuing them only burns outbox rows and retries.
-    A paired / mesh requester keeps the push."""
-
-    @dataclass
-    class _Post:
-        id: str
-        media_url: str | None = None
-        image_urls: tuple = ()
-        file_meta: object = None
-        link_preview: object = None
-
-    class _PostRepo:
-        async def list_sync_page(self, space_id, **kw):
-            return [_Post(id="post-1", image_urls=("api/media/a.webp",))], None
-
-    fed = SimpleNamespace(
-        is_space_session_peer=AsyncMock(side_effect=lambda iid: iid == "peer-e"),
-        peer_supports=AsyncMock(return_value=True),
-        space_member_version=AsyncMock(return_value=80),
-    )
-    for requester, pushed in (("peer-e", False), ("peer-b", True)):
-        media_sync = AsyncMock()
-        media_sync.enqueue_for_blob = AsyncMock()
-        svc = SpaceSyncService(
-            builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
-            exporters={},
-            sig_suite="ed25519",
-            media_sync=media_sync,
-            space_post_repo=_PostRepo(),
-        )
-        svc._federation = fed
-        await svc.stream_initial(_FakeSession(requester=requester))
-        assert media_sync.enqueue_for_blob.await_count == (1 if pushed else 0)
-
-
 # ── v_82 — a space page's files in the catch-up ─────────────────────────
 
 
@@ -2425,26 +2158,17 @@ async def test_a_sync_line_crossing_ships_no_catchup_media(encoder, crossed, wal
     crossed a sync line (its watermark's shape is older) gets the one full
     stream of rows, not every file of the space again; a genuine newcomer
     (or a reset) still gets the media."""
-    walked: list[str] = []
-
-    class _PostRepo:
-        async def list_sync_page(self, space_id, **_kw):
-            walked.append(space_id)
-            return [], None
-
     marks = _Marks(since=None)
     marks.crossed = crossed
-    svc = SpaceSyncService(
-        builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
+    svc, _media_sync = _catchup_provider(
+        encoder,
+        [],
         exporters={"members": _FakeExporter("members", [{"user_id": "u-1"}])},
-        sig_suite="ed25519",
-        media_sync=AsyncMock(),
-        space_post_repo=_PostRepo(),
         watermarks=marks,
     )
     session = _FakeSession(sync_mode="initial", have_seq=12)
     await svc.stream_initial(session)
-    assert (walked == ["sp-1"]) is walks
+    assert (len(svc._item_files.asked) == 1) is walks
 
 
 # ─── v_86: a trusted non-host provider fills hashed files, not rows ───────
@@ -2461,21 +2185,12 @@ async def test_a_trusted_non_host_full_catch_up_ships_only_its_own_peoples_files
     sc = f"api/media/{space_content_media_name('sp-1', 'a' * 64, 'x.webp')}"
     legacy = "api/media/sd-0123.webp"
 
-    @dataclass
-    class _Post:
-        id: str
-        author: str
-        image_urls: tuple = ()
-        media_url: str | None = None
-        file_meta: object = None
-        link_preview: object = None
-
-    class _PostRepo:
-        async def list_sync_page(self, space_id, **kw):
-            return [
-                _Post("p-ours", "u-ours", (sc, legacy)),
-                _Post("p-theirs", "u-theirs", (sc, legacy)),
-            ], None
+    items = _ItemFiles(
+        [
+            ("2026-11-02 10:00:00", "p-ours", "u-ours", [sc, legacy]),
+            ("2026-11-01 10:00:00", "p-theirs", "u-theirs", [sc, legacy]),
+        ]
+    )
 
     class _Spaces:
         async def list_members(self, space_id):
@@ -2517,7 +2232,7 @@ async def test_a_trusted_non_host_full_catch_up_ships_only_its_own_peoples_files
         },
         sig_suite="ed25519",
         media_sync=media_sync,
-        space_post_repo=_PostRepo(),
+        item_files=items,
     )
     svc.attach_roster_authority(_no, own_members=_ours)
     svc.attach_file_gates(

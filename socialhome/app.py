@@ -128,6 +128,7 @@ from .federation.sync.dm_history import (
     DmHistoryScheduler,
 )
 from .federation.sync.space.file_gate import CatchUpFileGates, local_file_size
+from .federation.sync.space.host_contact import HostContact
 from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .federation.sync.space.watermark import SyncWatermarks
 from .federation.sync_manager import SyncSessionManager, make_sync_reject_reason
@@ -1893,15 +1894,11 @@ def _wire_federation_stack(
         builder=chunk_builder,
         exporters=exporters,
         sig_suite=config.federation_sig_suite,
-        # Catch-up media: after the metadata chunks stream the
-        # requester also gets bytes for every post + gallery item +
-        # bazaar listing + calendar cover in the space via the shared
-        # SpaceMediaSyncService outbox.
+        # Catch-up media: after the metadata chunks stream the requester
+        # also gets the files of the space's recent items (30 days, 200
+        # files) via the shared SpaceMediaSyncService outbox.
         media_sync=space_media_sync_service,
-        space_post_repo=space_post_repo,
-        gallery_repo=gallery_repo,
-        bazaar_repo=bazaar_repo,
-        space_calendar_repo=space_calendar_repo,
+        item_files=media_reference_repo,
         windows=sync_windows,
         # §25.6 incremental sessions: a periodic sync streams only the rows
         # changed since the household's last confirmed stream (0086).
@@ -2315,6 +2312,21 @@ def _wire_federation_stack(
     )
     space_sync_service.attach_file_gates(file_gates)
     space_sync_resume_provider.attach_file_gates(file_gates)
+    # v_92 — a resume from a household that is not the roster authority
+    # (a trusted helper while the host is offline) carries only its own
+    # people's rows; the gate above still fills the hashed files of the rest.
+    space_sync_resume_provider.attach_row_scope(
+        _roster_authority, own_members=_own_members
+    )
+    # v_92 — the receiver notes each answer of a space's acting host; a
+    # member household whose host stays silent asks ONE trusted helper.
+    host_contact = HostContact()
+    space_sync_receiver.attach_host_contact(host_contact)
+    space_sync_scheduler.attach_helpers(
+        host_contact=host_contact,
+        resume=space_sync_resume_provider,
+        roster_authority=_roster_authority,
+    )
     # v_92 — a member household that views a space file it misses asks the
     # host (then a trusted helper) for it; we answer such requests too.
     app[K.space_media_wanted_key] = _build_space_media_wanted(

@@ -44,6 +44,18 @@ Triggers:
    now, not at the next periodic tick, unless a stream from it already
    applied cleanly here. A host reachable only over the mesh is the
    accept's own ``begin_mesh_catchup_sync`` (trigger 4).
+10. **Host offline: trusted helpers** (v_92) — for every space this
+    household holds a member seat in but does not host (nor hold its roster
+    authority), a round whose tick sent a BEGIN to the household acting as
+    host waits :data:`HOST_ANSWER_WAIT_S` (fixed) for its answer
+    (:class:`~.host_contact.HostContact`, marked by the receiver — an empty
+    session's sentinel counts — and by a capacity deferral). No answer:
+    ONE trusted helper (a live ``admin`` / ``moderator`` seat household
+    other than us and the host, sorted, one step further each round) gets
+    ``SPACE_SYNC_RESUME`` since the host was last heard (at most
+    ``RESUME_MAX_AGE_S`` ago): its own people's rows and the hashed files
+    of the rest. The host is still asked first every tick. Every member
+    alike — paired, mesh or GFS-reached.
 
 Follows the `_stop: asyncio.Event` lifecycle (CLAUDE.md "Schedulers").
 """
@@ -56,7 +68,8 @@ import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Protocol
 
 from ....domain.events import (
     PairingConfirmed,
@@ -71,6 +84,7 @@ from ....infrastructure.event_bus import EventBus
 from ....infrastructure.reconnect_queue import P1_SECURITY, P4_DM, P6_PRODUCTIVITY
 from ...host_equivalence import acts_as_host
 from ...sync_manager import MAX_ACTIVE_SESSIONS_PER_INSTANCE
+from .resume import RESUME_MAX_AGE_S
 
 if TYPE_CHECKING:
     from ....infrastructure.reconnect_queue import ReconnectSyncQueue
@@ -148,6 +162,49 @@ _MODE_RANK: dict[str, int] = {"incremental": 0, "initial": 1, "full": 2}
 #: periodic tick is the backstop.
 STARTUP_MESH_CATCHUP_RETRY_DELAYS_S: tuple[float, ...] = (15.0, 30.0, 60.0, 120.0)
 
+#: How long after this round's BEGIN to a space's host the scheduler waits
+#: for its answer (trigger 10) before it asks a trusted helper instead.
+#: Fixed — never random: a stream that is answered begins in seconds.
+HOST_ANSWER_WAIT_S: float = 120.0
+
+#: The seats a trusted helper holds (the v_86 file fills' content
+#: authority; the owner is the host itself).
+HELPER_ROLES: frozenset[str] = frozenset(
+    {SpaceRole.ADMIN.value, SpaceRole.MODERATOR.value}
+)
+
+
+class _HostContact(Protocol):
+    def now(self) -> float: ...
+
+    def heard(self, space_id: str) -> None: ...
+
+    def heard_since(self, space_id: str, t: float) -> bool: ...
+
+    def last_heard_iso(self, space_id: str) -> str | None: ...
+
+
+class _ResumeSender(Protocol):
+    async def send_request(
+        self, *, space_id: str, instance_id: str, since: str
+    ) -> None: ...
+
+
+def _resume_since(last_heard_iso: str | None) -> str:
+    """A helper resume reaches back to when the host was last heard, and at
+    most ``RESUME_MAX_AGE_S`` (the provider clamps to the same floor)."""
+    floor = datetime.now(UTC) - timedelta(seconds=RESUME_MAX_AGE_S)
+    if last_heard_iso:
+        try:
+            heard = datetime.fromisoformat(last_heard_iso)
+        except ValueError:
+            return floor.isoformat()
+        if heard.tzinfo is None:
+            heard = heard.replace(tzinfo=UTC)
+        if heard > floor:
+            return last_heard_iso
+    return floor.isoformat()
+
 
 class SpaceSyncScheduler:
     """Orchestrates sync initiation across pairs + spaces."""
@@ -162,6 +219,10 @@ class SpaceSyncScheduler:
         "_drain_timers",
         "_federation",
         "_federation_repo",
+        "_helper_checks",
+        "_helper_round",
+        "_host_asked",
+        "_host_contact",
         "_inflight",
         "_interval",
         "_mesh_announce",
@@ -171,6 +232,8 @@ class SpaceSyncScheduler:
         "_own_instance_id",
         "_parked",
         "_queue",
+        "_resume",
+        "_roster_authority",
         "_roster_echo",
         "_roster_refresh",
         "_seat_repo",
@@ -248,6 +311,32 @@ class SpaceSyncScheduler:
         self._parked: dict[str, dict[str, tuple[str, int]]] = {}
         #: provider → the timer that reclaims stale slots for its waiters.
         self._drain_timers: dict[str, asyncio.Task] = {}
+        #: v_92 trigger 10 (:meth:`attach_helpers`); ``None``: no fallback.
+        self._host_contact: _HostContact | None = None
+        self._resume: _ResumeSender | None = None
+        self._roster_authority: Callable[[str], Awaitable[bool]] | None = None
+        #: space → when (``HostContact.now``) a BEGIN to its acting host
+        #: last went out.
+        self._host_asked: dict[str, float] = {}
+        #: space → fallback rounds so far (picks the next helper).
+        self._helper_round: dict[str, int] = {}
+        #: space → its pending wait for the host's answer (one at a time).
+        self._helper_checks: dict[str, asyncio.Task] = {}
+
+    def attach_helpers(
+        self,
+        *,
+        host_contact: _HostContact,
+        resume: _ResumeSender,
+        roster_authority: Callable[[str], Awaitable[bool]],
+    ) -> None:
+        """Wire trigger 10 (v_92): the host contact the receiver marks, the
+        ``SPACE_SYNC_RESUME`` sender, and whether we hold a space's roster
+        authority (then we are host-equivalent: nothing to fall back from).
+        Needs the roster mirror (``seat_repo``) for the helpers."""
+        self._host_contact = host_contact
+        self._resume = resume
+        self._roster_authority = roster_authority
 
     def attach_roster_refresh(self, refresh: Callable[[], Awaitable[object]]) -> None:
         """Run ``refresh`` on every periodic tick — the host re-sending each
@@ -438,6 +527,16 @@ class SpaceSyncScheduler:
         # its own retry below. Nothing waiting is pulled in on a refusal:
         # the host has just said it is full.
         self._release_slot(event.provider_instance_id, event.sync_id, event.space_id)
+        # Trigger 10: "no free slot" is the host's answer — it is online.
+        if self._host_contact is not None and event.reason == "capacity":
+            try:
+                space = await self._space_repo.get(event.space_id)
+                if space is not None and event.provider_instance_id in (
+                    await self._mesh_targets(space)
+                ):
+                    self._host_contact.heard(event.space_id)
+            except Exception:  # pragma: no cover — defensive
+                log.exception("noting the host's deferral failed")
         key = (event.space_id, event.provider_instance_id)
         attempts = self._deferred_attempts.get(key, 0)
         if attempts >= MAX_DEFERRED_SYNC_RETRIES:
@@ -580,6 +679,10 @@ class SpaceSyncScheduler:
             # Same: each timer waits on ``_stop`` and returns.
             await asyncio.gather(*self._drain_timers.values(), return_exceptions=True)
             self._drain_timers.clear()
+        if self._helper_checks:
+            # Same: each host-answer wait ends on ``_stop`` without a send.
+            await asyncio.gather(*self._helper_checks.values(), return_exceptions=True)
+            self._helper_checks.clear()
         if self._startup_task is not None:
             # Waits on ``self._stop`` internally, so setting the event above
             # is enough for it to return on its own.
@@ -756,6 +859,29 @@ class SpaceSyncScheduler:
         except Exception:
             log.exception("space-sync-scheduler: reap_stale failed")
 
+        # Trigger 10: which spaces' hosts this round's BEGINs ask (read
+        # first, so the sweeps below can note each BEGIN to a host).
+        round_start = (
+            self._host_contact.now() if self._host_contact is not None else 0.0
+        )
+        try:
+            hosts_of = await self._fallback_spaces()
+        except Exception:
+            log.exception("space-sync-scheduler: listing hosted-elsewhere spaces")
+            hosts_of = {}
+        try:
+            await self._tick_sweeps(hosts_of)
+        finally:
+            # After the sweeps, whatever they did — a failure there never
+            # costs the fallback, nor the fallback the sweeps.
+            try:
+                self._start_host_checks(hosts_of, round_start)
+            except Exception:
+                log.exception("space-sync-scheduler: host fallback failed")
+
+    async def _tick_sweeps(self, hosts_of: dict[str, set[str]]) -> None:
+        """The tick's sync sweeps (mesh-only hosts, confirmed peers)."""
+
         # Mesh-only hosts (#648) — wrapped so a failure here never costs
         # the confirmed-peer sweep below.
         try:
@@ -790,12 +916,109 @@ class SpaceSyncScheduler:
                 members = await self._space_repo.list_member_instances(space_id)
                 if peer_id not in members:
                     continue
+                if peer_id in hosts_of.get(space_id, ()):
+                    self._note_host_asked(space_id)
                 await self.enqueue_sync_for_space(
                     space_id=space_id,
                     peer_instance_id=peer_id,
                     priority=P6_PRODUCTIVITY,
                     sync_mode="incremental",
                 )
+
+    # ─── Host offline: trusted helpers (trigger 10, v_92) ─────────────
+
+    def _note_host_asked(self, space_id: str) -> None:
+        if self._host_contact is not None:
+            self._host_asked[space_id] = self._host_contact.now()
+
+    async def _fallback_spaces(self) -> dict[str, set[str]]:
+        """``space_id -> the households acting as its host here`` for every
+        space we hold a member seat in but neither host nor hold the roster
+        authority of — the spaces whose host could go silent on us. Empty
+        when trigger 10 is not wired."""
+        if (
+            self._host_contact is None
+            or self._resume is None
+            or self._roster_authority is None
+            or self._seat_repo is None
+        ):
+            return {}
+        out: dict[str, set[str]] = {}
+        for space in await self._list_joined_remote_spaces():
+            if await self._roster_authority(space.id):
+                continue
+            out[space.id] = set(await self._mesh_targets(space))
+        return out
+
+    def _start_host_checks(
+        self, hosts_of: dict[str, set[str]], round_start: float
+    ) -> None:
+        """One bounded wait per space whose host this round's BEGIN asked
+        (never two at once for a space)."""
+        for space_id, hosts in hosts_of.items():
+            asked = self._host_asked.get(space_id)
+            if asked is None or asked < round_start:
+                continue  # no BEGIN to its host this round: no answer due
+            pending = self._helper_checks.get(space_id)
+            if pending is not None and not pending.done():
+                continue
+            task = asyncio.create_task(
+                self._await_host_answer(space_id, hosts, asked),
+                name=f"SpaceSyncScheduler-host-answer-{space_id}",
+            )
+            self._helper_checks[space_id] = task
+            task.add_done_callback(self._forget_check)
+
+    def _forget_check(self, task: asyncio.Task) -> None:
+        for space_id, held in list(self._helper_checks.items()):
+            if held is task:
+                del self._helper_checks[space_id]
+
+    async def _await_host_answer(
+        self, space_id: str, hosts: set[str], asked: float
+    ) -> None:
+        """Wait :data:`HOST_ANSWER_WAIT_S` for the host's answer to this
+        round's BEGIN; none (offline, or no path) → ask one helper."""
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=HOST_ANSWER_WAIT_S)
+            return  # stopped while waiting
+        except TimeoutError:
+            pass
+        contact, resume, seats = self._host_contact, self._resume, self._seat_repo
+        if contact is None or resume is None or seats is None:
+            return
+        if contact.heard_since(space_id, asked):
+            return
+        try:
+            helpers = sorted(
+                set(await seats.list_instances_with_roles(space_id, HELPER_ROLES))
+                - hosts
+                - {self._own_instance_id, ""}
+            )
+            if not helpers:
+                log.info(
+                    "space %s: the host did not answer and no trusted helper "
+                    "(admin / moderator household) is known — nothing to ask",
+                    space_id,
+                )
+                return
+            rounds = self._helper_round.get(space_id, 0)
+            self._helper_round[space_id] = rounds + 1
+            helper = helpers[rounds % len(helpers)]
+            since = _resume_since(contact.last_heard_iso(space_id))
+            log.info(
+                "space %s: the host did not answer within %.0f s — asking "
+                "trusted helper %s for a resume since %s",
+                space_id,
+                HOST_ANSWER_WAIT_S,
+                helper,
+                since,
+            )
+            await resume.send_request(
+                space_id=space_id, instance_id=helper, since=since
+            )
+        except Exception:
+            log.exception("space %s: asking a trusted helper failed", space_id)
 
     # ─── Mesh catch-up (#648) ───────────────────────────────────────
 
@@ -872,6 +1095,7 @@ class SpaceSyncScheduler:
                         peer_instance_id=host,
                         sync_mode="incremental",
                     )
+                    self._note_host_asked(space.id)
                     try:
                         await self._federation.begin_mesh_catchup_sync(
                             space_id=space.id,
@@ -893,6 +1117,7 @@ class SpaceSyncScheduler:
             # attempt does. Counted before the send so a shipped-but-doomed
             # stream keeps the retry loop alive.
             pending += 1
+            self._note_host_asked(space.id)
             try:
                 dir_seq = await self._directory_echo_for(space.id, host)
                 shipped = await self._federation.begin_mesh_catchup_sync(

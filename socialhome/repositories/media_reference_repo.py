@@ -122,8 +122,8 @@ _JSON_FIELD_COLUMNS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-#: Every file a space ITEM shows — a post (its images, its link card's
-#: thumbnail), a comment, a calendar cover, a space-album item (file and
+#: Every file a space ITEM shows — a post (its images, its attachment, its
+#: link card's thumbnail: ``record_media_urls``), a comment, a calendar cover, a space-album item (file and
 #: thumbnail), a bazaar listing (by its wrapper post's id) — one list for
 #: every reader by item: :meth:`SqliteMediaReferenceRepo.content_names_of_item`
 #: (v_85), :meth:`~SqliteMediaReferenceRepo.space_rows_of` and
@@ -158,6 +158,18 @@ _SPACE_ITEM_FILES: tuple[tuple[str, str, str, str, str, str, str], ...] = (
         (
             "CASE WHEN json_valid(t.link_preview_json)"
             " THEN json_extract(t.link_preview_json, '$.thumbnail_url') END"
+        ),
+        "one",
+        "t.deleted = 0",
+        "t.author",
+    ),
+    (
+        "space_posts t",
+        "t.id",
+        "t.space_id",
+        (
+            "CASE WHEN json_valid(t.file_meta_json)"
+            " THEN json_extract(t.file_meta_json, '$.url') END"
         ),
         "one",
         "t.deleted = 0",
@@ -560,6 +572,14 @@ class AbstractMediaReferenceRepo(Protocol):
         side)."""
         ...
 
+    async def recent_item_files(
+        self, space_id: str, *, cutoff: str, limit: int
+    ) -> list[tuple[str, str, str | None, list[str]]]:
+        """``(created_at, item_id, owner, basenames)`` of the LIVE items of
+        *space_id* created at or after *cutoff* that show files, newest
+        first (the §25.6 bounded catch-up media)."""
+        ...
+
     async def content_names_of_item(self, item_id: str) -> list[str]:
         """The content-addressed (``sc-``, v_85) files the space item
         *item_id* (a post, comment, calendar event, gallery item or bazaar
@@ -861,6 +881,48 @@ class SqliteMediaReferenceRepo:
                         seen.add(name)
                         out.append((name, str(who) if who else None))
         return out
+
+    async def recent_item_files(
+        self, space_id: str, *, cutoff: str, limit: int
+    ) -> list[tuple[str, str, str | None, list[str]]]:
+        """``(created_at, item_id, owner, basenames)`` of every LIVE item of
+        *space_id* (:data:`_SPACE_ITEM_FILES`) created at or after *cutoff*
+        that shows a file, newest first (ties by item id); ``created_at``
+        normalised to SQLite's naive UTC form (stored values mix it with
+        the ISO ``T`` form). Bounded: the newest *limit* rows of each
+        source — the §25.6 catch-up media cuts them to its file budget."""
+        if not space_id or limit <= 0:
+            return []
+        items: dict[str, tuple[str, str | None, list[str]]] = {}
+        for source, key, space, value, shape, live, owner in _SPACE_ITEM_FILES:
+            rows = await self._db.fetchall(
+                f"SELECT {key} AS i, datetime(t.created_at) AS c, {owner} AS o,"
+                f" {value} AS v FROM {source}"
+                f" WHERE {space} = ? AND {live} AND {value} IS NOT NULL"
+                " AND datetime(t.created_at) >= datetime(?)"
+                " ORDER BY datetime(t.created_at) DESC LIMIT ?",
+                (space_id, cutoff, int(limit)),
+            )
+            for r in rows_to_dicts(rows):
+                raw = r.get("v")
+                names = (
+                    _names_in_list(raw)
+                    if shape == "list"
+                    else [n for n in (media_basename(raw),) if n]
+                )
+                names = [n for n in names if n not in (".", "..")]
+                if not names or not r.get("c"):
+                    continue
+                item_id = str(r["i"])
+                who = r.get("o")
+                held = items.get(item_id)
+                if held is None:
+                    items[item_id] = (str(r["c"]), str(who) if who else None, [])
+                    held = items[item_id]
+                held[2].extend(n for n in names if n not in held[2])
+        ordered = sorted(items.items(), key=lambda kv: kv[0])
+        ordered.sort(key=lambda kv: kv[1][0], reverse=True)
+        return [(c, item_id, who, names) for item_id, (c, who, names) in ordered]
 
     async def _page_names_of(self, space_id: str, *, live: bool) -> set[str]:
         """The page-scoped ``sp-`` names of the files *space_id*'s pages

@@ -1476,7 +1476,13 @@ from __future__ import annotations
 #:   v_87 relay media refill, and the v_83 GFS on-demand ask is now for
 #:   followers only. Every hashed file is stored under its content name on
 #:   every path (GFS-described ones too), which changes how a receiver
-#:   names streamed records' files — a ``SYNC_RECORD_LINES`` entry.
+#:   names streamed records' files — a ``SYNC_RECORD_LINES`` entry. With it
+#:   (no wire change): a full catch-up ships the files of the last 30 days
+#:   only, at most 200 per stream, to every member alike (GFS-reached
+#:   too), and a resume reaches back at most 30 days; while a space's host
+#:   does not answer a round's BEGIN, the member asks ONE trusted helper
+#:   for the existing ``SPACE_SYNC_RESUME`` (its own people's rows + hashed
+#:   fills).
 #:   **Fallback**: a provider below v_92 is skipped (the file waits for the
 #:   §25.6 catch-up); a v_83–v_91 relay reader still asks its GFS. Space-
 #:   scoped. Labelled "Older space pictures arrive when you open them".

@@ -33,9 +33,18 @@ from socialhome.federation.sync.space.resume import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _replays_reach_back_to_the_fixtures(monkeypatch):
+    """The fixtures date from April 2026: lift the 30-day ``since`` floor
+    (its own test sets it back)."""
+    monkeypatch.setattr(resume_mod, "RESUME_MAX_AGE_S", 100 * 365 * 86_400)
+
+
 class _FakeFederation:
     def __init__(self) -> None:
         self.sent: list[dict] = []
+        #: ``send_with_mesh_fallback`` sends (the resume request).
+        self.routed: list[dict] = []
         #: Advertised proto_version per peer (default: current).
         self.versions: dict[str, int] = {}
 
@@ -54,6 +63,19 @@ class _FakeFederation:
                 "space_id": space_id,
             }
         )
+
+    async def send_with_mesh_fallback(
+        self, *, to_instance_id, event_type, payload, space_id=None
+    ):
+        self.routed.append(
+            {
+                "to": to_instance_id,
+                "type": event_type,
+                "payload": payload,
+                "space_id": space_id,
+            }
+        )
+        return SimpleNamespace(ok=True, error=None)
 
 
 class _FakeSpaceRepo:
@@ -451,27 +473,6 @@ async def test_handle_request_payload_matches_inbound_shape(provider_factory):
 # ── Outbound (requester sends RESUME) ───────────────────────────────
 
 
-async def test_send_request_emits_canonical_payload(provider_factory):
-    """``send_request`` posts SPACE_SYNC_RESUME to the right peer."""
-    provider, fed, _ = provider_factory(posts=[], members=[])
-    await provider.send_request(
-        space_id="sp-1",
-        instance_id="peer-b",
-        since="2026-04-01T00:00:00+00:00",
-    )
-    assert fed.sent == [
-        {
-            "to": "peer-b",
-            "type": FederationEventType.SPACE_SYNC_RESUME,
-            "payload": {
-                "space_id": "sp-1",
-                "since": "2026-04-01T00:00:00+00:00",
-            },
-            "space_id": "sp-1",
-        }
-    ]
-
-
 async def test_send_request_validates_inputs(provider_factory):
     """Empty fields produce a no-op, not an error."""
     provider, fed, _ = provider_factory(posts=[], members=[])
@@ -479,6 +480,7 @@ async def test_send_request_validates_inputs(provider_factory):
     await provider.send_request(space_id="sp-1", instance_id="", since="x")
     await provider.send_request(space_id="sp-1", instance_id="peer-b", since="")
     assert fed.sent == []
+    assert fed.routed == []
 
 
 # ── Multi-resource replays ──────────────────────────────────────────
@@ -1427,3 +1429,154 @@ async def test_a_stray_refill_field_is_an_ordinary_resume():
         _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
     )
     assert not hasattr(provider, "replay_refill_to")
+
+
+# ── v_92: bounded on every path; a helper replays only its own people ────
+
+
+async def test_a_resumes_since_is_clamped_to_30_days(monkeypatch):
+    """However far back a requester asks, a replay starts at most
+    :data:`RESUME_MAX_AGE_S` ago — the catch-up is bounded on every path."""
+    monkeypatch.setattr(resume_mod, "RESUME_MAX_AGE_S", 30 * 86_400)
+    post_repo = _FakePostRepo()
+    provider = SpaceSyncResumeProvider(
+        federation_service=_FakeFederation(),
+        space_repo=_FakeSpaceRepo(["peer-a", "peer-b"]),
+        space_post_repo=post_repo,
+    )
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": "2026-01-01T00:00:00+00:00"})
+    )
+    floor = datetime.now(UTC) - timedelta(days=30)
+    assert abs(datetime.fromisoformat(post_repo.last_since) - floor) < timedelta(
+        minutes=1
+    )
+    # A recent ``since`` (naive form too) is kept as asked.
+    recent = (datetime.now(UTC) - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+    await provider.handle_request(
+        _event("peer-b", {"space_id": "sp-1", "since": recent})
+    )
+    assert post_repo.last_since == recent
+
+
+async def test_send_request_reaches_a_helper_over_the_mesh_or_its_mailbox(
+    provider_factory,
+):
+    """A helper may be reached by mesh or a GFS mailbox seat only: the
+    request goes through ``send_with_mesh_fallback`` (space-scoped)."""
+    provider, fed, _ = provider_factory(posts=[], members=[])
+    await provider.send_request(
+        space_id="sp-1", instance_id="helper", since="2026-11-01T00:00:00+00:00"
+    )
+    assert fed.sent == []
+    assert fed.routed == [
+        {
+            "to": "helper",
+            "type": FederationEventType.SPACE_SYNC_RESUME,
+            "payload": {"space_id": "sp-1", "since": "2026-11-01T00:00:00+00:00"},
+            "space_id": "sp-1",
+        }
+    ]
+
+
+def _helper_provider(*, authority: bool):
+    """A moderator household's resume provider over rows of its own person
+    (alice) and of another household's (bob)."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    at = base + timedelta(minutes=1)
+    ours = _image_post(0, at, "sd-a.webp", "sc-a.webp")
+    theirs = replace(_image_post(1, at, "sd-b.webp", "sc-b.webp"), author="bob")
+    comments = [
+        ("p-0", _comment(0, "p-0", at)),
+        (
+            "p-1",
+            replace(
+                _comment(1, "p-1", at),
+                author="bob",
+                type=CommentType.IMAGE,
+                media_url="api/media/sc-c.webp",
+            ),
+        ),
+    ]
+    tasks = _FakeListSinceRepo(
+        [_task(0, at), replace(_task(1, at), created_by="bob")],
+        task_tombstones=[
+            TaskTombstone(
+                id="t-gone-ours",
+                list_id="list-1",
+                deleted_at="2026-04-02 00:00:00",
+                created_by="bob",
+                deleted_by="alice",
+            ),
+            TaskTombstone(
+                id="t-gone-theirs",
+                list_id="list-1",
+                deleted_at="2026-04-02 00:00:00",
+                created_by="alice",
+                deleted_by="bob",
+            ),
+        ],
+    )
+    fed = _FakeFederation()
+    outbox = _FakeMediaOutbox()
+    provider = SpaceSyncResumeProvider(
+        federation_service=fed,
+        space_repo=_FakeSpaceRepo(["peer-a"]),
+        space_post_repo=_FakePostRepo(posts=[ours, theirs], comments=comments),
+        space_task_repo=tasks,
+        media_sync=outbox,
+    )
+    provider.attach_file_gates(_Gate())
+
+    async def _authority(space_id: str) -> bool:
+        return authority
+
+    async def _own(space_id: str) -> set[str]:
+        return {"alice"}
+
+    provider.attach_row_scope(_authority, own_members=_own)
+    return provider, fed, outbox, base
+
+
+async def test_a_non_authority_resume_sends_only_its_own_peoples_rows():
+    """A helper (not the roster authority) replays only its own people's
+    rows — the receiver refuses the rest from it — but still ships the
+    hashed files of every replayed row, so a member that holds a row from
+    the host gets its picture (v_86 fill, the gate's bound)."""
+    provider, fed, outbox, base = _helper_provider(authority=False)
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    )
+    sent = [
+        (s["type"], s["payload"].get("id") or s["payload"].get("comment_id"))
+        for s in fed.sent
+    ]
+    assert sent == [
+        (FederationEventType.SPACE_POST_CREATED, "p-0"),
+        (FederationEventType.SPACE_COMMENT_CREATED, "c-0"),
+        (FederationEventType.SPACE_TASK_DELETED, "t-gone-ours"),
+        (FederationEventType.SPACE_TASK_CREATED, "t-0"),
+    ]
+    assert outbox.rows == [
+        ("sp-1", "p-0", ("peer-a",), ("api/media/sd-a.webp", "api/media/sc-a.webp")),
+        ("sp-1", "p-1", ("peer-a",), ("api/media/sc-b.webp",)),
+        ("sp-1", "c-1", ("peer-a",), ("api/media/sc-c.webp",)),
+    ]
+
+
+async def test_the_roster_authority_resume_replays_every_row():
+    provider, fed, _outbox, base = _helper_provider(authority=True)
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    )
+    ids = [s["payload"].get("id") or s["payload"].get("comment_id") for s in fed.sent]
+    assert ids == [
+        "p-0",
+        "p-1",
+        "c-0",
+        "c-1",
+        "t-gone-ours",
+        "t-gone-theirs",
+        "t-0",
+        "t-1",
+    ]

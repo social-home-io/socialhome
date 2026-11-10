@@ -591,10 +591,10 @@ household ships on a §25.6 catch-up, on a replay (`SPACE_SYNC_RESUME`
 or a §319.6 `space:` resync, `resume.replay_space_to`) and on a
 `SPACE_MEDIA_WANTED`:
 
-| Provider | Full §25.6 catch-up | Replay (resume / resync) and `SPACE_MEDIA_WANTED` |
+| Provider | Full §25.6 catch-up (v_92: items of the last 30 days, ≤ 200 files, every transport) | Replay (resume / resync, v_92: ≤ 30 days back) and `SPACE_MEDIA_WANTED` |
 |---|---|---|
-| Host / delegated admin | every file of every row (as before) | every file (as before) |
-| Admin / moderator household | its own people's files only | its own people's files + the hashed (`sc-`) files of other people's rows to a v_86 requester, at most 50 files / 32 MiB (`FILL_MAX_FILES` / `FILL_MAX_BYTES`) |
+| Host / delegated admin | every file of those rows | every file (≤ 50 files / 32 MiB per replay) |
+| Admin / moderator household | its own people's files only | its own people's files + the hashed (`sc-`) files of other people's rows to a v_86 requester, at most 50 files / 32 MiB (`FILL_MAX_FILES` / `FILL_MAX_BYTES`) — the fallback a member asks while the host is silent ([sync.md](./sync.md#host-offline-trusted-helpers-v_92)); rows: its own people's only |
 | Any other household | its own people's files only | its own people's files only |
 
 Why not on the full catch-up: a full stream is the host's job and the
@@ -606,8 +606,9 @@ targeted: one household asked one provider.
 Rows are unchanged (`_OwnPeopleOnly`): a helper never streams other
 people's rows. A requester below v_86 gets no helper fills (a v_85
 receiver would take them, an older one would store them under a name no
-row shows). Relay-seated requesters still get no catch-up blobs (their GFS
-media cache serves them).
+row shows). Since v_92 relay-seated requesters get the same bounded
+catch-up pushes as everyone; the outbox drops one at send time while their
+GFS media cache holds the file.
 
 **Cost (recipients × files × bytes per trigger):** a replay is asked by
 one household of one provider (`SPACE_SYNC_RESUME` after a long offline,

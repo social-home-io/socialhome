@@ -475,6 +475,10 @@ class ChatSyncSink(Protocol):
     ) -> None: ...
 
 
+class _HostHeard(Protocol):
+    def heard(self, space_id: str) -> None: ...
+
+
 class _GfsMediaSink(Protocol):
     """Where a streamed record's ``media_refs`` go (v_80) — the GFS media
     fetcher: names the record's files for this household, keeps the rows."""
@@ -543,6 +547,7 @@ class SpaceSyncReceiver:
         "_gallery_repo",
         "_gfs_media",
         "_health",
+        "_host_contact",
         "_legacy_album_deletes",
         "_media_dir",
         "_media_names",
@@ -607,6 +612,9 @@ class SpaceSyncReceiver:
         #: handlers, which run each through the live create rule. ``None``
         #: drops the resource (see :meth:`attach_chat_sink`).
         self._chat_sink: ChatSyncSink | None = None
+        #: v_92 — told when the household acting as a space's host answers
+        #: (:meth:`attach_host_contact`). ``None``: nobody is told.
+        self._host_contact: _HostHeard | None = None
         self._health = StreamHealth()
         self._streaks = HeldBackStreaks()
         #: Ids of other households' system albums seen in a stream — never
@@ -722,6 +730,19 @@ class SpaceSyncReceiver:
     def attach_chat_sink(self, sink: ChatSyncSink) -> None:
         """Wire where streamed space-chat messages (v_55) are applied."""
         self._chat_sink = sink
+
+    def attach_host_contact(self, contact: _HostHeard) -> None:
+        """Wire the v_92 host contact (:mod:`.host_contact`): every signed
+        chunk of a space this household verifies from the household acting
+        as its host here (``_acts_as_host``) marks the space heard — the
+        ``__complete__`` sentinel of an empty incremental session included,
+        the only answer a quiet space sends. The scheduler falls back to a
+        trusted helper while the host stays silent."""
+        self._host_contact = contact
+
+    async def _note_host_answer(self, space_id: str, provider: str) -> None:
+        if self._host_contact is not None and await self._is_host(space_id, provider):
+            self._host_contact.heard(space_id)
 
     async def _record_applied(
         self, space_id: str, provider: str, snapshot_seq: object
@@ -900,6 +921,9 @@ class SpaceSyncReceiver:
                 resource,
             )
             return
+        # v_92: a verified chunk (or sentinel) of the space's acting host is
+        # its answer to our BEGIN — the host is not silent.
+        await self._note_host_answer(space_id, from_instance)
 
         # Sentinel path — publish end-of-stream + return.
         if resource == SENTINEL_RESOURCE:

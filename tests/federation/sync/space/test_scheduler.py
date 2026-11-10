@@ -1739,3 +1739,263 @@ async def test_an_interrupted_stream_is_asked_again_in_its_mode(
         await queue.stop()
     (begin,) = fed.sent
     assert (begin["to"], begin["payload"]["sync_mode"]) == ("host", "initial")
+
+
+# ─── v_92: trusted helpers while the host is offline ─────────────────────
+
+
+class _HelperSpaceRepo(_FakeSpaceRepo):
+    async def get_invited_by(self, space_id):
+        return None
+
+
+class _Seats:
+    """``list_instances_with_roles`` over a fixed roster mirror."""
+
+    def __init__(self, helpers: list[str]) -> None:
+        self.helpers = helpers
+        self.asked: list[tuple[str, frozenset[str]]] = []
+
+    async def list_instances_with_roles(self, space_id, roles):
+        self.asked.append((space_id, frozenset(roles)))
+        return list(self.helpers)
+
+
+class _Resume:
+    def __init__(self) -> None:
+        self.requests: list[dict] = []
+
+    async def send_request(self, *, space_id, instance_id, since):
+        self.requests.append(
+            {"space_id": space_id, "instance_id": instance_id, "since": since}
+        )
+
+
+def _helper_sched(
+    bus,
+    queue,
+    sync_manager,
+    *,
+    helpers: list[str],
+    owner: str = "host",
+    authority: bool = False,
+):
+    from socialhome.federation.sync.space.host_contact import HostContact
+
+    fed = _FakeFederation(confirmed={"host"})
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([_peer("host")]),
+        space_repo=_HelperSpaceRepo(
+            spaces_by_type={
+                SpaceType.PRIVATE: [_space("sp-1", owner_instance_id=owner)]
+            },
+            members_by_space={"sp-1": ["host"]},
+        ),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+        seat_repo=_Seats(helpers),
+    )
+    contact = HostContact()
+    resume = _Resume()
+
+    async def _authority(space_id: str) -> bool:
+        return authority
+
+    sched.attach_helpers(
+        host_contact=contact, resume=resume, roster_authority=_authority
+    )
+    return sched, contact, resume
+
+
+async def _wait_checks(sched) -> None:
+    await asyncio.gather(*list(sched._helper_checks.values()))
+
+
+@pytest.fixture
+def quick_answer_wait(monkeypatch):
+    monkeypatch.setattr(scheduler_mod, "HOST_ANSWER_WAIT_S", 0.01)
+
+
+async def test_a_silent_host_sends_one_helper_the_bounded_resume(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """The tick asks the host first (its BEGIN); no answer within
+    HOST_ANSWER_WAIT_S → ONE trusted helper (never us, never the host) gets
+    SPACE_SYNC_RESUME since 30 days ago (nothing heard yet)."""
+    from datetime import timedelta
+
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["self", "host", "mod-b", "admin-a"]
+    )
+    await sched._tick_once()
+    await _wait_checks(sched)
+    [request] = resume.requests
+    assert request["space_id"] == "sp-1"
+    assert request["instance_id"] == "admin-a"
+    floor = datetime.now(UTC) - timedelta(days=30)
+    assert abs(datetime.fromisoformat(request["since"]) - floor) < timedelta(minutes=1)
+    assert sched._seat_repo.asked == [
+        ("sp-1", frozenset({SpaceRole.ADMIN.value, SpaceRole.MODERATOR.value}))
+    ]
+
+
+async def test_a_host_that_answered_gets_no_fallback(
+    bus, queue, sync_manager, monkeypatch
+):
+    monkeypatch.setattr(scheduler_mod, "HOST_ANSWER_WAIT_S", 0.05)
+    sched, contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    await sched._tick_once()
+    contact.heard("sp-1")  # the receiver saw the host's sentinel
+    await _wait_checks(sched)
+    assert resume.requests == []
+
+
+async def test_the_resume_asks_since_the_host_was_last_heard(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    sched, contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    contact.heard("sp-1")  # heard once, before this round's BEGIN
+    last = contact.last_heard_iso("sp-1")
+    await sched._tick_once()
+    await _wait_checks(sched)
+    assert [r["since"] for r in resume.requests] == [last]
+
+
+async def test_the_helper_rotates_one_step_per_round(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["mod-b", "admin-a"]
+    )
+    for _ in range(3):
+        await sched._tick_once()
+        await _wait_checks(sched)
+    assert [r["instance_id"] for r in resume.requests] == [
+        "admin-a",
+        "mod-b",
+        "admin-a",
+    ]
+
+
+async def test_no_helper_means_nothing_is_sent(
+    bus, queue, sync_manager, quick_answer_wait, caplog
+):
+    import logging
+
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["self", "host"]
+    )
+    with caplog.at_level(logging.INFO, logger=scheduler_mod.__name__):
+        await sched._tick_once()
+        await _wait_checks(sched)
+    assert resume.requests == []
+    assert sum("no trusted helper" in r.getMessage() for r in caplog.records) == 1
+
+
+@pytest.mark.parametrize(("owner", "authority"), [("self", False), ("host", True)])
+async def test_a_host_equivalent_household_never_falls_back(
+    bus, queue, sync_manager, quick_answer_wait, owner, authority
+):
+    """We host the space, or hold its roster authority (a seed-holding
+    delegated admin): nobody to fall back from."""
+    sched, _contact, resume = _helper_sched(
+        bus,
+        queue,
+        sync_manager,
+        helpers=["admin-a"],
+        owner=owner,
+        authority=authority,
+    )
+    await sched._tick_once()
+    await _wait_checks(sched)
+    assert resume.requests == []
+    assert sched._helper_checks == {}
+
+
+async def test_a_round_without_a_begin_to_the_host_waits_for_nothing(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """A mesh-only host whose catch-up completed is not asked every tick:
+    no BEGIN this round, so no answer is due and no helper is asked."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    sched._federation.confirmed = set()
+    sched._federation_repo = _FakeFedRepo([])
+    sched._mesh_catchup_done.add(("sp-1", "host"))
+    await sched._tick_once()
+    await _wait_checks(sched)
+    assert resume.requests == []
+
+
+async def test_a_mesh_only_hosts_catch_up_begin_is_waited_for(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    sched._federation.confirmed = set()
+    sched._federation_repo = _FakeFedRepo([])
+    await sched._tick_once()
+    await _wait_checks(sched)
+    assert sched._federation.mesh_catchups == [("sp-1", "host")]
+    assert [r["instance_id"] for r in resume.requests] == ["admin-a"]
+
+
+async def test_stop_ends_a_pending_check_without_a_fallback(
+    bus, queue, sync_manager, monkeypatch
+):
+    monkeypatch.setattr(scheduler_mod, "HOST_ANSWER_WAIT_S", 30.0)
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    await sched._tick_once()
+    assert len(sched._helper_checks) == 1
+    await sched.stop()
+    assert sched._helper_checks == {}
+    assert resume.requests == []
+
+
+async def test_one_check_per_space_at_a_time(bus, queue, sync_manager, monkeypatch):
+    monkeypatch.setattr(scheduler_mod, "HOST_ANSWER_WAIT_S", 0.05)
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    await sched._tick_once()
+    await sched._tick_once()
+    assert len(sched._helper_checks) == 1
+    await _wait_checks(sched)
+    assert len(resume.requests) == 1
+
+
+async def test_a_hosts_capacity_deferral_counts_as_its_answer(bus, queue, sync_manager):
+    sched, contact, _resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    t0 = contact.now()
+    await sched._on_sync_deferred(
+        SpaceSyncDeferred(
+            space_id="sp-1",
+            provider_instance_id="admin-a",
+            sync_mode="incremental",
+            sync_id="s-1",
+        )
+    )
+    assert not contact.heard_since("sp-1", t0)
+    await sched._on_sync_deferred(
+        SpaceSyncDeferred(
+            space_id="sp-1",
+            provider_instance_id="host",
+            sync_mode="incremental",
+            sync_id="s-2",
+        )
+    )
+    assert contact.heard_since("sp-1", t0)
+    await sched.stop()

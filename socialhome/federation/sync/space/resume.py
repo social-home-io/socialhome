@@ -50,9 +50,9 @@ import logging
 import pathlib
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
 import aiofiles.os
@@ -130,19 +130,44 @@ RESUME_MEDIA_MAX_BYTES: int = 32 * 1024 * 1024
 RESUME_COOLDOWN_S: float = 30 * 60.0
 #: How many (household, space) cooldowns are remembered (oldest dropped).
 RESUME_COOLDOWN_TRACKED: int = 4096
+#: A replay reaches back at most this far, whatever ``since`` asks — the
+#: catch-up is bounded on every path (older content arrives on view).
+RESUME_MAX_AGE_S: int = 30 * 86_400
 
 #: The replayed rows' files: ``(row id, the row's author, file urls)``.
 _Media = list[tuple[str, str | None, list[str]]]
 
 
 def _owner_of(row: Any) -> str | None:
-    """The person a replayed row belongs to (a post's / sticky's author, an
-    event's or page's creator, a gallery item's uploader)."""
-    for field in ("author", "created_by", "uploaded_by"):
+    """The person a replayed row belongs to (a post's / comment's / sticky's
+    author, an event's, task's or page's creator, a gallery item's uploader,
+    an album's owner)."""
+    for field in ("author", "created_by", "uploaded_by", "owner_user_id"):
         value = getattr(row, field, None)
         if value:
             return str(value)
     return None
+
+
+def _deleter_of(tombstone: Any) -> str | None:
+    """Whose delete a tombstone replays: its deleter (the replay's
+    ``actor_user_id``, which a receiver binds to the sending household), or
+    — none recorded — the row's creator."""
+    return str(getattr(tombstone, "deleted_by", "") or "") or _owner_of(tombstone)
+
+
+def _clamped_since(since: str) -> str:
+    """``since``, or :data:`RESUME_MAX_AGE_S` ago when it reaches further
+    back — a replay is bounded on every path. An unreadable value is kept
+    (``handle_request`` validated it already)."""
+    try:
+        asked = datetime.fromisoformat(since)
+    except ValueError:
+        return since
+    if asked.tzinfo is None:
+        asked = asked.replace(tzinfo=UTC)
+    floor = datetime.now(UTC) - timedelta(seconds=RESUME_MAX_AGE_S)
+    return floor.isoformat() if asked < floor else since
 
 
 class _FileGates(Protocol):
@@ -172,7 +197,9 @@ class SpaceSyncResumeProvider:
         "_media_dir",
         "_media_refs",
         "_media_sync",
+        "_own_members",
         "_page_repo",
+        "_roster_authority",
         "_space_calendar_repo",
         "_space_post_repo",
         "_space_repo",
@@ -217,6 +244,10 @@ class SpaceSyncResumeProvider:
         self._gallery_repo = gallery_repo
         #: v_86 — which replayed files we ship (``None``: all of them).
         self._file_gates: _FileGates | None = None
+        #: v_92 — whose rows we replay (:meth:`attach_row_scope`; ``None``:
+        #: every row).
+        self._roster_authority: Callable[[str], Awaitable[bool]] | None = None
+        self._own_members: Callable[[str], Awaitable[set[str]]] | None = None
 
     def attach_file_gates(self, gates: _FileGates) -> None:
         """Wire the v_86 file gate (:mod:`.file_gate`): a non-host household
@@ -224,6 +255,21 @@ class SpaceSyncResumeProvider:
         seat, the hashed files of other people's rows to a v_86 requester —
         never another person's unhashed file (the receiver refuses it)."""
         self._file_gates = gates
+
+    def attach_row_scope(
+        self,
+        roster_authority: Callable[[str], Awaitable[bool]],
+        *,
+        own_members: Callable[[str], Awaitable[set[str]]],
+    ) -> None:
+        """Wire whose rows a replay carries (v_92): the roster authority
+        (``roster_authority(space_id)``, the predicate the file gate uses)
+        replays every row; any other household — a trusted helper asked
+        while the host is offline — only its own people's
+        (``own_members(space_id)``), while still filling the hashed files of
+        every replayed row through the file gate."""
+        self._roster_authority = roster_authority
+        self._own_members = own_members
 
     # ── Outbound (requester side) ─────────────────────────────────────
 
@@ -236,20 +282,30 @@ class SpaceSyncResumeProvider:
     ) -> None:
         """Ask ``instance_id`` to replay missed events since ``since``.
 
-        ``since`` is an ISO-8601 timestamp — typically the receiver's
-        local ``MAX(updated_at)`` for the space. Returns immediately;
-        responses arrive as individual ``SPACE_*_CREATED`` events
-        handled by ``federation_inbound_service``.
+        ``since`` is an ISO-8601 timestamp (the provider clamps it to
+        :data:`RESUME_MAX_AGE_S`). Returns immediately; responses arrive as
+        individual ``SPACE_*_CREATED`` events handled by
+        ``federation_inbound_service``. Sent direct to a paired household,
+        over the mesh or to a GFS mailbox seat otherwise (space-scoped,
+        ``send_with_mesh_fallback``) — the trusted helper the scheduler
+        asks while the host is offline may be reached either way (v_92).
         """
         if not space_id or not instance_id or not since:
             return
         payload: dict[str, str] = {"space_id": space_id, "since": since}
-        await self._federation.send_event(
+        result = await self._federation.send_with_mesh_fallback(
             to_instance_id=instance_id,
             event_type=FederationEventType.SPACE_SYNC_RESUME,
             payload=payload,
             space_id=space_id,
         )
+        if not result.ok:
+            log.info(
+                "SPACE_SYNC_RESUME for %s to %s not delivered: %s",
+                space_id,
+                instance_id,
+                result.error,
+            )
 
     # ── Inbound (provider side) ───────────────────────────────────────
 
@@ -341,26 +397,44 @@ class SpaceSyncResumeProvider:
             return 0
         if not self._claim_window(instance_id, space_id):
             return 0
+        since = _clamped_since(since)
+        own = await self._own_rows_only(space_id)
+        to = instance_id
         media: _Media = []
         sent = 0
-        sent += await self._replay_posts(space_id, since, to=instance_id, media=media)
-        sent += await self._replay_comments(space_id, since, to=instance_id)
+        sent += await self._replay_posts(space_id, since, to=to, own=own, media=media)
+        sent += await self._replay_comments(
+            space_id, since, to=to, own=own, media=media
+        )
         # Lists before tasks: a task is only filed under a list held here.
-        sent += await self._replay_task_list_deletes(space_id, since, to=instance_id)
-        sent += await self._replay_task_lists(space_id, since, to=instance_id)
-        sent += await self._replay_task_deletes(space_id, since, to=instance_id)
-        sent += await self._replay_tasks(space_id, since, to=instance_id)
-        sent += await self._replay_page_deletes(space_id, since, to=instance_id)
-        sent += await self._replay_pages(space_id, since, to=instance_id, media=media)
-        sent += await self._replay_stickies(space_id, since, to=instance_id)
+        sent += await self._replay_task_list_deletes(space_id, since, to=to, own=own)
+        sent += await self._replay_task_lists(space_id, since, to=to, own=own)
+        sent += await self._replay_task_deletes(space_id, since, to=to, own=own)
+        sent += await self._replay_tasks(space_id, since, to=to, own=own)
+        sent += await self._replay_page_deletes(space_id, since, to=to, own=own)
+        sent += await self._replay_pages(space_id, since, to=to, own=own, media=media)
+        sent += await self._replay_stickies(space_id, since, to=to, own=own)
         sent += await self._replay_calendar(
-            space_id, since, to=instance_id, media=media
+            space_id, since, to=to, own=own, media=media
         )
         sent += await self._replay_gallery_items(
-            space_id, since, to=instance_id, media=media
+            space_id, since, to=to, own=own, media=media
         )
         await self._ship_media(space_id, instance_id, media)
         return sent
+
+    async def _own_rows_only(self, space_id: str) -> frozenset[str] | None:
+        """The people whose rows we replay: everyone (``None``) as the
+        space's roster authority (the host, or a seed-holding delegated
+        admin), else only our own people — every receiver takes other
+        people's rows only from the household acting as host
+        (``receiver._acts_as_host``), so sending them is wasted bytes. Not
+        wired (``None``): every row, as before."""
+        if self._roster_authority is None or self._own_members is None:
+            return None
+        if await self._roster_authority(space_id):
+            return None
+        return frozenset(await self._own_members(space_id))
 
     async def replay_calendar_to(
         self,
@@ -380,7 +454,13 @@ class SpaceSyncResumeProvider:
         if not self._claim_window(instance_id, space_id):
             return 0
         media: _Media = []
-        sent = await self._replay_calendar(space_id, since, to=instance_id, media=media)
+        sent = await self._replay_calendar(
+            space_id,
+            _clamped_since(since),
+            to=instance_id,
+            own=await self._own_rows_only(space_id),
+            media=media,
+        )
         await self._ship_media(space_id, instance_id, media)
         return sent
 
@@ -457,6 +537,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        own: frozenset[str] | None = None,
         media: _Media | None = None,
     ) -> int:
         posts = await self._space_post_repo.list_since(
@@ -470,6 +551,7 @@ class SpaceSyncResumeProvider:
             _post_to_payload,
             space_id=space_id,
             to=to,
+            own=own,
             media_of=post_media_urls,
             media=media,
         )
@@ -480,30 +562,26 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        own: frozenset[str] | None = None,
+        media: _Media | None = None,
     ) -> int:
         rows = await self._space_post_repo.list_comments_since(
             space_id,
             since,
             limit=MAX_PER_RESOURCE,
         )
-        sent = 0
-        for post_id, comment in rows:
-            try:
-                await self._federation.send_event(
-                    to_instance_id=to,
-                    event_type=FederationEventType.SPACE_COMMENT_CREATED,
-                    payload=_comment_to_payload(post_id, comment),
-                    space_id=space_id,
-                )
-                sent += 1
-            except Exception as exc:  # pragma: no cover — defensive
-                log.debug(
-                    "SPACE_SYNC_RESUME comment replay to %s failed: %s",
-                    to,
-                    exc,
-                    exc_info=True,
-                )
-        return sent
+        post_of = {comment.id: post_id for post_id, comment in rows}
+        return await self._send_each(
+            [comment for _post_id, comment in rows],
+            FederationEventType.SPACE_COMMENT_CREATED,
+            lambda comment: _comment_to_payload(post_of[comment.id], comment),
+            space_id=space_id,
+            to=to,
+            own=own,
+            # A comment's picture (v_92): the same fill as a post's.
+            media_of=lambda comment: [comment.media_url] if comment.media_url else [],
+            media=media,
+        )
 
     async def _replay_task_list_deletes(
         self,
@@ -511,6 +589,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        own: frozenset[str] | None = None,
     ) -> int:
         if self._space_task_repo is None:
             return 0
@@ -525,6 +604,8 @@ class SpaceSyncResumeProvider:
             lambda tombstone: task_list_tombstone_to_wire_dict(tombstone, space_id),
             space_id=space_id,
             to=to,
+            own=own,
+            owner_of=_deleter_of,
         )
 
     async def _replay_task_lists(
@@ -533,6 +614,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        own: frozenset[str] | None = None,
     ) -> int:
         if self._space_task_repo is None:
             return 0
@@ -547,6 +629,7 @@ class SpaceSyncResumeProvider:
             lambda task_list: task_list_to_wire_dict(task_list, space_id),
             space_id=space_id,
             to=to,
+            own=own,
         )
 
     async def _replay_task_deletes(
@@ -555,6 +638,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        own: frozenset[str] | None = None,
     ) -> int:
         if self._space_task_repo is None:
             return 0
@@ -569,6 +653,8 @@ class SpaceSyncResumeProvider:
             lambda tombstone: task_tombstone_to_wire_dict(tombstone, space_id),
             space_id=space_id,
             to=to,
+            own=own,
+            owner_of=_deleter_of,
         )
 
     async def _replay_tasks(
@@ -577,6 +663,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        own: frozenset[str] | None = None,
     ) -> int:
         if self._space_task_repo is None:
             return 0
@@ -591,6 +678,7 @@ class SpaceSyncResumeProvider:
             lambda task: task_to_wire_dict(task, space_id),
             space_id=space_id,
             to=to,
+            own=own,
         )
 
     async def _replay_page_deletes(
@@ -599,6 +687,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        own: frozenset[str] | None = None,
     ) -> int:
         if self._page_repo is None:
             return 0
@@ -613,6 +702,8 @@ class SpaceSyncResumeProvider:
             lambda tombstone: page_tombstone_to_wire_dict(tombstone, space_id),
             space_id=space_id,
             to=to,
+            own=own,
+            owner_of=_deleter_of,
         )
 
     async def _replay_pages(
@@ -621,6 +712,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        own: frozenset[str] | None = None,
         media: _Media | None = None,
     ) -> int:
         if self._page_repo is None:
@@ -694,6 +786,7 @@ class SpaceSyncResumeProvider:
             lambda page: payloads[page.id],
             space_id=space_id,
             to=to,
+            own=own,
         )
         if ships_files and media is not None:
             for page in pages:
@@ -712,6 +805,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        own: frozenset[str] | None = None,
     ) -> int:
         if self._sticky_repo is None:
             return 0
@@ -726,6 +820,7 @@ class SpaceSyncResumeProvider:
             _sticky_to_payload,
             space_id=space_id,
             to=to,
+            own=own,
         )
 
     async def _replay_calendar(
@@ -734,6 +829,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        own: frozenset[str] | None = None,
         media: _Media | None = None,
     ) -> int:
         if self._space_calendar_repo is None:
@@ -749,6 +845,7 @@ class SpaceSyncResumeProvider:
             _calendar_to_payload,
             space_id=space_id,
             to=to,
+            own=own,
             media_of=lambda ev: [ev.cover_url] if ev.cover_url else [],
             media=media,
         )
@@ -759,6 +856,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        own: frozenset[str] | None = None,
         media: _Media | None = None,
     ) -> int:
         """Replay the space's gallery: albums first, then missed items.
@@ -796,6 +894,9 @@ class SpaceSyncResumeProvider:
             dict,
             space_id=space_id,
             to=to,
+            # Kept whole: an album tombstone names no deleter, and a
+            # settings-authority (admin) household's delete is taken
+            # (``may_mutate(settings=True)``) — the replay as before.
         )
         albums = [
             a
@@ -810,6 +911,7 @@ class SpaceSyncResumeProvider:
             _gallery_album_to_payload,
             space_id=space_id,
             to=to,
+            own=own,
         )
         sent += await self._send_each(
             [a for a in albums if _changed_since(a.updated_at, since)],
@@ -817,9 +919,10 @@ class SpaceSyncResumeProvider:
             _gallery_album_to_payload,
             space_id=space_id,
             to=to,
+            own=own,
         )
         return sent + await self._replay_gallery_item_rows(
-            space_id, since, to=to, media=media
+            space_id, since, to=to, own=own, media=media
         )
 
     async def _replay_gallery_item_rows(
@@ -828,6 +931,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        own: frozenset[str] | None = None,
         media: _Media | None = None,
     ) -> int:
         """The gallery items newer than ``since`` (no albums)."""
@@ -842,6 +946,7 @@ class SpaceSyncResumeProvider:
             _gallery_item_to_payload,
             space_id=space_id,
             to=to,
+            own=own,
             media_of=lambda item: [u for u in (item.thumbnail_url, item.url) if u],
             media=media,
         )
@@ -854,11 +959,24 @@ class SpaceSyncResumeProvider:
         *,
         space_id: str,
         to: str,
+        own: frozenset[str] | None = None,
+        owner_of: Callable[[Any], str | None] | None = None,
         media_of: Callable[[Any], list[str]] | None = None,
         media: _Media | None = None,
     ) -> int:
+        """Send each row as ``event_type``. With *own* (a household that is
+        not the roster authority) only the rows whose person
+        (*owner_of*, default :func:`_owner_of`) is one of ours go out —
+        but every row's files are still collected for :meth:`_ship_media`,
+        whose gate decides which of them we may fill (v_86)."""
         sent = 0
         for row in rows:
+            if media_of is not None and media is not None:
+                urls = media_of(row)
+                if urls:
+                    media.append((row.id, _owner_of(row), list(urls)))
+            if own is not None and (owner_of or _owner_of)(row) not in own:
+                continue
             try:
                 await self._federation.send_event(
                     to_instance_id=to,
@@ -867,10 +985,6 @@ class SpaceSyncResumeProvider:
                     space_id=space_id,
                 )
                 sent += 1
-                if media_of is not None and media is not None:
-                    urls = media_of(row)
-                    if urls:
-                        media.append((row.id, _owner_of(row), list(urls)))
             except Exception as exc:  # pragma: no cover — defensive
                 log.debug(
                     "SPACE_SYNC_RESUME %s replay to %s failed: %s",

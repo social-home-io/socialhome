@@ -163,7 +163,74 @@ Implemented by `socialhome/federation/sync/space/resume.py`
 Each resource is capped at `MAX_PER_RESOURCE = 500` events per request.
 Nothing re-issues a request past that cap: a space with more than 500
 rows of one kind missed since `since` gets the 500 oldest; the rest
-arrives through the §25.6 sync.
+arrives through the §25.6 sync. Since v_92 a replay reaches back at most
+`RESUME_MAX_AGE_S` (30 days) whatever `since` asks — the catch-up is
+bounded on every path; an older file arrives on view
+(`SPACE_MEDIA_WANTED`). The replayed rows' files — posts, **comments**,
+covers, gallery items, the host's pages — ship from the replaying household
+within `RESUME_MEDIA_MAX_FILES` (50) / `RESUME_MEDIA_MAX_BYTES` (32 MiB)
+through the v_86 file gate.
+
+### Host offline: trusted helpers (v_92)
+
+Every member heals from its host first. While the host is offline nothing
+used to heal: the §25.6 sync and the resume both came from it. Now the
+periodic tick (`scheduler.SpaceSyncScheduler`, trigger 10) — which asks the
+host first every round, as before — notes when it sent this round's BEGIN to
+the household acting as a space's host (the owner, or the delegated admin
+that invited us). The receiver marks the space **heard** whenever that
+household answers: any signed chunk of the space it verifies from it,
+including the bare `__complete__` sentinel an up-to-date incremental session
+sends back (a quiet space must count, or it would always fall back), and the
+scheduler counts a host's `too_many_sessions` deferral too
+(`federation/sync/space/host_contact.py`, in memory, baseline = boot). If
+`HOST_ANSWER_WAIT_S` (120 s, fixed — never random) after that BEGIN the host
+has not answered, the member sends `SPACE_SYNC_RESUME` to **one** trusted
+helper — a household holding a live `admin` or `moderator` seat in the
+roster mirror, never us or the host, sorted, one step further each silent
+round — with `since` = when the host was last heard (at most 30 days back).
+No helper → nothing (logged once per round). A space we host, or hold the
+roster authority of, never falls back; neither does a round with no BEGIN to
+the host (a mesh-only host whose catch-up already completed).
+
+Rights do not grow. A household that is not the space's roster authority
+(the predicate the file gate uses) replays **only its own people's rows**
+(tombstones by its own people's deletes) — every receiver takes other
+people's rows only from the household acting as host (`_acts_as_host`) —
+but it still ships the **hashed** files of every replayed row through the
+v_86 gate, so a member that holds a row from the host gets its picture,
+verified against the hash its row carries. Album deletes are replayed as
+before (they name no deleter; the receiver judges them by
+`may_mutate(settings=True)`). The request goes with
+`send_with_mesh_fallback`, so a helper reached by mesh or a GFS mailbox seat
+gets it: paired, mesh and GFS-only members fall back alike.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant M as Member
+    participant H as Host (offline)
+    participant A as Helper (admin / moderator)
+    M->>H: SPACE_SYNC_BEGIN (periodic tick)
+    Note over M,H: no chunk, no sentinel, no deferral
+    Note over M: HOST_ANSWER_WAIT_S (120 s) later, host not heard
+    M->>A: SPACE_SYNC_RESUME (space_id, since = host last heard, ≤ 30 d)
+    A->>M: SPACE_*_CREATED (its own people's rows only)
+    A->>M: SPACE_MEDIA_BLOB (its own files + hashed files of others' rows, ≤ 50 / 32 MiB)
+    Note over M: next round asks the host first again
+```
+
+**Cost.** Per silent space and member household: one BEGIN to the host (as
+before) plus one resume request (< 1 KiB) to ONE helper per 30-minute tick;
+the helper serves at most one replay per (requester, space) per 30 min
+(`RESUME_COOLDOWN_S`), ≤ 500 rows per resource of its own people and ≤ 50
+files / 32 MiB per (requester, space, helper) per 30 min. A space with 50
+member households and the host offline for a day: 50 × 48 = 2 400 requests
+a day spread over the helpers. Nothing fans out: one requester, one helper,
+one space per round. Known gap: while the host stays silent, `since` stays
+at the host's last answer, so later rounds re-send rows (deduped by id) and
+may re-push files the member already took — bounded by the per-request
+budget above.
 
 ## What a sync streams
 
@@ -250,9 +317,22 @@ what the space's retention keeps (`federation/sync/space/window.py`):
 the page / task tombstones — so a page never repeats or skips a row, and
 `ChunkBuilder` turns each page into ≤ 8 KB chunks (halving a page until a
 chunk fits) before the next page is read. `seq_start` / `seq_end` run on
-across pages. The provider's catch-up media walks the same rows the same
-way. No export holds a whole resource in memory, however big the space,
-so there is no safety ceiling on the count.
+across pages. No export holds a whole resource in memory, however big the
+space, so there is no safety ceiling on the count of rows.
+
+**Catch-up media is bounded (v_92).** After a full (`initial`) stream the
+provider queues the files of the space's **recent** items only: the live
+posts (images, attachment, link-card thumbnail), **comments**, space-album
+items, bazaar listings and calendar covers created in the last
+`CATCHUP_MEDIA_MAX_AGE_S` (30 days), newest first across every kind, at most
+`CATCHUP_MEDIA_MAX_FILES` (200) files per stream after the v_86 file gate
+(`provider._enqueue_catchup_media`, one bounded read:
+`media_reference_repo.recent_item_files`). An older file arrives when a
+member opens it (`SPACE_MEDIA_WANTED`, [media.md](./media.md#older-files-on-view--space_media_wanted-v_92)).
+Page files keep their own bound (below). **Cost:** a newcomer's catch-up is
+≤ 200 files ≈ 60 MB at ~300 KB a picture, per (newcomer, space); for a
+member behind a GFS mostly served from its GFS cache while a file is ≤ 3
+days old (the outbox drops the push then).
 
 **Order is storage order.** Keyset paging orders by the row id: posts and
 the post tombstones newest-stored first; comments, their tombstones and
@@ -274,11 +354,13 @@ treats `"incremental"` as it always did (a full stream with media).
 Periodic sessions also stream **only what changed** since the last sync
 the household confirmed — see [Incremental sessions](#incremental-sessions-change-stamps--per-household-watermark).
 
-**Members seated from an invite link get descriptors, not bytes (v_80).**
-A link-joined requester (`InstanceSource.SPACE_SESSION`) is reached only
-through the GFS envelope relay, which refuses `SPACE_MEDIA_BLOB` chunks: the
-catch-up media walk queues **nothing** for any link-joined requester (it only
-burned outbox rows and retries). Instead, toward a link-joined requester at
+**Members seated from an invite link get descriptors too (v_80).**
+A link-joined requester (`InstanceSource.SPACE_SESSION`) is reached through
+the GFS. Since v_92 it gets the same bounded catch-up pushes as a paired or
+mesh member (every member is equal on any path); whether a push goes is
+decided at send time — the media outbox drops it while the reader's GFS
+cache holds the file (`SpaceMediaGfsUploader.reads_from_gfs`). Toward a
+link-joined requester at
 v_80 (`FederationCapability.MIN_FOR_SPACE_MEDIA_REFS`), every `posts`,
 `calendar` and `gallery` record that shows files carries `media_refs` — the
 files' addresses in a GFS media cache, computed from the provider's own copy
@@ -290,8 +372,7 @@ newest first, the rest without). The receiver keeps them as
 (`SpaceSyncReceiver.attach_gfs_media`; [`media.md`](./media.md#space-media-via-the-gfs-cache-v_80)).
 It is a version gate in `_exporter_for`, so **sync line 80**
 (`SYNC_RECORD_LINES`): a household crossing v_80 gets one full stream, and
-with it the pictures of content it was sent while older. Paired and mesh
-requesters keep the catch-up push unchanged. Cost: ~150 B of descriptor per
+with it the pictures of content it was sent while older. Cost: ~150 B of descriptor per
 file per record; one upload per file to the requester's GFS (`200
 already_stored` when it is there already).
 
@@ -1275,6 +1356,12 @@ and the sync handlers make no HTTP request.
   `iter_changed` of each covered exporter (`IncrementalExporter`,
   `record_batches(…, since=)` in `exporter.py`) and migration
   `0086_space_sync_change_stamps.sql` — incremental sessions.
+- `socialhome/federation/sync/space/host_contact.py` (`HostContact`),
+  `receiver.py` (`attach_host_contact`), `scheduler.py` (trigger 10,
+  `HOST_ANSWER_WAIT_S`) and `resume.py` (`attach_row_scope`,
+  `RESUME_MAX_AGE_S`) — trusted helpers while the host is offline (v_92);
+  `provider.py` (`CATCHUP_MEDIA_MAX_AGE_S`, `CATCHUP_MEDIA_MAX_FILES`) and
+  `media_reference_repo.recent_item_files` — the bounded catch-up media.
 
 ## Spec references
 
