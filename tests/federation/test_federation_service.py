@@ -358,6 +358,8 @@ class InMemoryOutboxRepo:
         self.enqueued: list[dict] = []
         #: Migration 0145 — stored payloads by id (``OutboxPayload``).
         self.payloads: dict = {}
+        #: ``(entry_id, next_attempt_at, attempts)`` per reschedule.
+        self.rescheduled: list[tuple[str, str, int]] = []
 
     async def enqueue(
         self,
@@ -460,7 +462,7 @@ class InMemoryOutboxRepo:
     async def reschedule(
         self, entry_id: str, next_attempt_at: str, attempts: int
     ) -> None:
-        pass
+        self.rescheduled.append((entry_id, next_attempt_at, attempts))
 
     async def expire_past_retention(self, now_iso: str) -> int:
         return 0

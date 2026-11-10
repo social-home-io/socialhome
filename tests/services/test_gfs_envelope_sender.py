@@ -454,6 +454,7 @@ class _MultiGfs(_FakeGfs):
         super().__init__(capabilities=caps, **kw)
         self.multi: list[dict] = []
         self.multi_status = 202
+        self.multi_retry_after: str | None = None
 
     def app(self) -> web.Application:
         app = super().app()
@@ -463,7 +464,10 @@ class _MultiGfs(_FakeGfs):
     async def _multi(self, request: web.Request) -> web.Response:
         self.multi.append(await request.json())
         if self.multi_status >= 300:
-            return web.json_response({"error": "nope"}, status=self.multi_status)
+            resp = web.json_response({"error": "nope"}, status=self.multi_status)
+            if self.multi_retry_after is not None:
+                resp.headers["Retry-After"] = self.multi_retry_after
+            return resp
         return web.json_response({"status": "accepted"}, status=202)
 
 
@@ -532,6 +536,33 @@ async def test_multi_429_is_throttled_and_other_refusals_false(http_session, cap
         assert "m" * 32 not in caplog.text  # never a mailbox id in a log
     finally:
         await server.close()
+
+
+@pytest.mark.parametrize(
+    ("header", "want"),
+    [("60", 60.0), (None, None), ("soon", None), ("-5", None), ("inf", None)],
+)
+async def test_multi_429_carries_the_gfs_retry_after(http_session, header, want):
+    """The GFS's ``Retry-After`` (delta-seconds) rides on the throttle, so
+    a queued multi upload waits the window the GFS named, not 5 s."""
+    fake, server = await _multi_gfs(multi={"max_recipients": 500})
+    try:
+        sender, conn = _wire_multi(fake, http_session)
+        fake.multi_status = 429
+        fake.multi_retry_after = header
+        with pytest.raises(EnvelopeRelayThrottled) as exc:
+            await sender.send_to_mailboxes(
+                mailbox_ids=["m" * 32, "n" * 32],
+                gfs_url=conn.inbox_url,
+                sealed=MR_SEALED,
+            )
+        assert exc.value.retry_after_s == want
+    finally:
+        await server.close()
+
+
+def test_throttled_without_a_window_names_none():
+    assert EnvelopeRelayThrottled("busy").retry_after_s is None
 
 
 async def test_multi_refuses_an_empty_or_oversize_list_without_a_post(http_session):

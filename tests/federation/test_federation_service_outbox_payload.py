@@ -39,7 +39,7 @@ async def _failing_broadcast(s: _Sender, *, seats: int = 0, paired: int = 0):
     ids = [await s.seat() for _ in range(seats)]
     ids += [await s.paired() for _ in range(paired)]
     s.transport.send_ok = False
-    s.transport.multi_result = (False, None)
+    s.transport.multi_result = (False, None, None)
     await s.broadcast(payload=dict(_PAYLOAD))
     return ids
 
@@ -170,7 +170,7 @@ async def test_due_ref_rows_on_one_gfs_go_up_as_one_multi_upload():
     [group] = await s.svc.outbox_multi_groups(entries)
     assert sorted(e.instance_id for e in group) == sorted(seats)
 
-    s.transport.multi_result = (True, None)
+    s.transport.multi_result = (True, None, None)
     assert await s.svc.deliver_outbox_multi(group) is DeliveryOutcome.SUCCESS
     [(targets, sealed)] = s.transport.multi
     assert sorted(t.mailbox_id for t in targets) == sorted(
@@ -188,9 +188,12 @@ async def test_a_throttled_group_is_retried_and_a_refused_one_goes_per_recipient
     s = _Sender()
     await _failing_broadcast(s, seats=2)
     [group] = await s.svc.outbox_multi_groups(s.outbox.entries())
-    s.transport.multi_result = (False, RELAY_STATUS_THROTTLED)
-    assert isinstance(await s.svc.deliver_outbox_multi(group), RetryAfter)
-    s.transport.multi_result = (False, 400)
+    # The GFS's Retry-After, or its one-minute window when it named none.
+    s.transport.multi_result = (False, RELAY_STATUS_THROTTLED, None)
+    assert await s.svc.deliver_outbox_multi(group) == RetryAfter(seconds=60.0)
+    s.transport.multi_result = (False, RELAY_STATUS_THROTTLED, 90.0)
+    assert await s.svc.deliver_outbox_multi(group) == RetryAfter(seconds=90.0)
+    s.transport.multi_result = (False, 400, None)
     assert await s.svc.deliver_outbox_multi(group) is None
 
 

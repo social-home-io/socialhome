@@ -588,6 +588,7 @@ async def test_multi_frame_names_every_mailbox_once_on_their_gfs():
     assert await transport.send_multi_mailbox(targets=targets, sealed=MULTI_SEALED) == (
         True,
         None,
+        None,
     )
     assert relay.calls == [
         ([t.mailbox_id for t in targets], "https://gfs.example.org", MULTI_SEALED)
@@ -598,7 +599,7 @@ async def test_multi_frame_refused_by_the_relay_is_false():
     transport = GfsRelayTransport(relay_sender=_FakeMultiRelay(ok=False))
     assert await transport.send_multi_mailbox(
         targets=_targets(2), sealed=MULTI_SEALED
-    ) == (False, None)
+    ) == (False, None, None)
 
 
 async def test_multi_frame_needs_at_least_one_target():
@@ -607,6 +608,7 @@ async def test_multi_frame_needs_at_least_one_target():
     assert await transport.send_multi_mailbox(targets=[], sealed=MULTI_SEALED) == (
         False,
         None,
+        None,
     )
     assert relay.calls == []
 
@@ -614,16 +616,21 @@ async def test_multi_frame_needs_at_least_one_target():
 @pytest.mark.parametrize(
     ("raises", "want"),
     [
-        (EnvelopeRelayThrottled("busy"), RELAY_STATUS_THROTTLED),
-        (EnvelopeRelayUnavailable("none"), None),
-        (RuntimeError("boom"), None),
+        (EnvelopeRelayThrottled("busy"), (RELAY_STATUS_THROTTLED, None)),
+        (
+            EnvelopeRelayThrottled("busy", retry_after_s=60.0),
+            (RELAY_STATUS_THROTTLED, 60.0),
+        ),
+        (EnvelopeRelayUnavailable("none"), (None, None)),
+        (RuntimeError("boom"), (None, None)),
     ],
 )
 async def test_multi_frame_failures_never_raise(raises, want):
+    """A throttle carries the GFS's ``Retry-After`` up to the caller."""
     transport = GfsRelayTransport(relay_sender=_FakeMultiRelay(raises=raises))
     assert await transport.send_multi_mailbox(
         targets=_targets(2), sealed=MULTI_SEALED
-    ) == (False, want)
+    ) == (False, *want)
 
 
 async def test_multi_capacity_is_the_proving_servers_cap_or_zero():

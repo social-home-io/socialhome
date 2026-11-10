@@ -13,7 +13,7 @@ from __future__ import annotations
 import dataclasses
 import os
 from collections import deque
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -29,6 +29,10 @@ from socialhome.domain.federation import (
 )
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.federation import federation_service
+from socialhome.federation.federation_service import (
+    MULTI_THROTTLE_MAX_RETRY_S,
+    MULTI_THROTTLE_RETRY_S,
+)
 from socialhome.federation.gfs_relay_transport import (
     RELAY_STATUS_THROTTLED,
     GfsRelayTransport,
@@ -72,7 +76,11 @@ class _Transport:
         self.capacity: dict[str, int] = {}
         self.sends: list[tuple[str, dict]] = []
         self.multi: list[tuple[list[MailboxTarget], dict]] = []
-        self.multi_result: tuple[bool, int | None] | Exception = (True, None)
+        self.multi_result: tuple[bool, int | None, float | None] | Exception = (
+            True,
+            None,
+            None,
+        )
         self.send_ok = True
         self.capacity_asks: list[str] = []
 
@@ -276,7 +284,7 @@ async def test_event_types_outside_the_multi_set_never_go_multi(event_type):
 async def test_a_refused_upload_falls_back_per_recipient_for_each():
     s = _Sender()
     seats = [await s.seat() for _ in range(3)]
-    s.transport.multi_result = (False, 400)
+    s.transport.multi_result = (False, 400, None)
     s.transport.send_ok = False
     result = await s.broadcast()
     assert len(s.transport.multi) == 1
@@ -291,7 +299,7 @@ async def test_a_throttled_upload_queues_every_seat_without_a_live_retry():
     one ref row per seat — and reports the waitable throttle."""
     s = _Sender()
     seats = [await s.seat() for _ in range(3)]
-    s.transport.multi_result = (False, RELAY_STATUS_THROTTLED)
+    s.transport.multi_result = (False, RELAY_STATUS_THROTTLED, None)
     result = await s.broadcast(payload={"post_id": "p-1"})
     assert len(s.transport.multi) == 1
     assert s.transport.sends == []  # no live attempt
@@ -310,6 +318,31 @@ async def test_a_throttled_upload_queues_every_seat_without_a_live_retry():
     assert stored.event_type is POST and stored.space_id == _SPACE
     # Back-pressure on us, not news about the households.
     assert s.repo.unreachable_calls == []
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "want"),
+    [(60.0, 60.0), (None, MULTI_THROTTLE_RETRY_S), (1e9, MULTI_THROTTLE_MAX_RETRY_S)],
+)
+async def test_a_throttled_upload_is_first_due_after_the_gfs_retry_after(
+    retry_after, want
+):
+    """The GFS answered ``429`` + ``Retry-After``: the queued rows wait that
+    window (60 s when it named none, capped) — a pass that came back in 5 s
+    would only hit the same full window again."""
+    s = _Sender()
+    seats = [await s.seat() for _ in range(2)]
+    s.transport.multi_result = (False, RELAY_STATUS_THROTTLED, retry_after)
+    before = datetime.now(UTC)
+    result = await s.broadcast(payload={"post_id": "p-1"})
+    assert all(r.retry_after_s == want for r in result.results)
+    queued = {r["id"] for r in s.outbox.enqueued}
+    assert {e for e, _at, _n in s.outbox.rescheduled} == queued
+    assert len(queued) == len(seats)
+    for _e, at, attempts in s.outbox.rescheduled:
+        assert attempts == 0
+        delay = (datetime.fromisoformat(at) - before).total_seconds()
+        assert want - 1 <= delay <= want + 5
 
 
 @pytest.mark.parametrize("where", ["build", "upload"])

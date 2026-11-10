@@ -61,6 +61,7 @@ from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.rate_limiter import RateLimiter
 from socialhome.services import gfs_relay_inbound as gri
 from socialhome.services.gfs_relay_inbound import RELAY_DELIVERED_VIA, GfsRelayInbound
+from socialhome.services.space_crypto_service import MR_RECENT_EPOCHS
 from tests.federation.test_federation_service import (
     InMemoryFederationRepo,
     InMemoryOutboxRepo,
@@ -872,6 +873,45 @@ async def test_a_sender_without_a_card_for_the_space_is_refused():
     with pytest.raises(ValueError, match="member card"):
         await h.frame(frame)
     assert h.dispatched == []
+
+
+@pytest.mark.parametrize("removal", ["card_dropped", "row_gone"])
+async def test_a_removed_member_with_an_older_epoch_key_is_refused(removal):
+    """A member removed from the space still holds an earlier epoch's
+    content key — one we keep accepting for a while (``MR_RECENT_EPOCHS``),
+    so its frame still opens. The key proves nothing about membership: once
+    the roster drops the member (its card goes, or its seat row with it),
+    the mailbox-sender check refuses the frame before dispatch."""
+    assert MR_RECENT_EPOCHS >= 2  # an older epoch is still in the kid map
+    h = _MultiHousehold()
+    old_raw = b"\x09" * 32
+    old_kid, old_key = derive_mr_key(old_raw)
+    h.kids[old_kid] = (_SPACE, 6, old_key)  # the epoch before the rotation
+    sender, enc = await h.add_sender()
+
+    def _frame() -> dict:
+        env = build_multi_envelope(
+            encoder=enc,
+            own_instance_id=sender,
+            event_type=FederationEventType.SPACE_POST_CREATED.value,
+            payload_json='{"post_id": "p-1", "content": "hello"}',
+            space_id=_SPACE,
+            key=old_key,
+            recipients=h.audience,
+        )
+        return {"type": "envelope", "sealed": seal_multi(env, kid=old_kid, key=old_key)}
+
+    # While a member, the older epoch's frame is taken (the grace window).
+    assert await h.frame(_frame()) == {"status": "ok"}
+    assert len(h.dispatched) == 1
+    h.cards.discard((sender, _SPACE))
+    match = "member card"
+    if removal == "row_gone":
+        await h.repo.delete_instance(sender)
+        match = "No instance found"
+    with pytest.raises(ValueError, match=match):
+        await h.frame(_frame())
+    assert len(h.dispatched) == 1
 
 
 async def test_a_bad_signature_is_refused():

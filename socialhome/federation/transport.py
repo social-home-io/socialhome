@@ -2227,11 +2227,12 @@ class FederationTransport:
 
     async def send_multi_mailbox(
         self, *, targets: list[MailboxTarget], sealed: dict
-    ) -> tuple[bool, int | None]:
+    ) -> tuple[bool, int | None, float | None]:
         """Hand ONE multi-recipient frame for *targets* (all on one GFS) to
-        the relay. Same never-raise contract as the relay's ``send``."""
+        the relay: ``(ok, status, retry_after_s)``. Same never-raise
+        contract as the relay's ``send``."""
         if self._gfs_relay is None:
-            return False, None
+            return False, None, None
         return await self._gfs_relay.send_multi_mailbox(targets=targets, sealed=sealed)
 
     async def send_via_gfs_url(

@@ -1089,7 +1089,8 @@ older epoch.
 **Receiving.** A frame on our mailbox whose `sealed` names an `mr_suite`
 is charged to the mailbox's bucket, its suite and kid shape checked, the
 kid mapped to (space, epoch) over the newest 3 epochs of our spaces (an
-in-memory map, rebuilt on a key change and at most every 10 min), opened,
+in-memory map, dropped on a key change; a miss rebuilds it at most once a
+minute; the whole map is rebuilt once it is 10 minutes old), opened,
 and run through the unchanged §24.11 pipeline with transport
 `gfs_mailbox` plus `make_check_multi_recipient`:
 
@@ -1138,13 +1139,32 @@ that is alone on its GFS, an epoch under 10 minutes old or a frame that
 cannot be built: per-recipient frames, as in v_89. A refused upload: each
 target is tried per recipient. A throttled upload (`429`): each target is
 queued in the outbox (one stored payload), with no live per-recipient
-burst at the busy GFS. A multi upload the GFS accepted but whose answer was
+burst at the busy GFS, first due after the GFS's `Retry-After` (60 s when
+it names none, at most an hour); a throttled multi retry from the outbox
+waits the same. A multi upload the GFS accepted but whose answer was
 lost (a timeout) is retried with a new `msg_id` — from the outbox, or per
 recipient on the live path — so a recipient can get that one item twice.
 That is safe: a multi frame carries only `MULTI_EVENT_TYPES`, whose inbound
 handlers apply by content id (a re-sent post or calendar event is an upsert
 of the same row, a held comment id is ignored, a chat reaction is
 `INSERT OR IGNORE`, a poll vote replaces the voter's vote).
+
+**Residuals.**
+
+- A member that was offline across a key rotation and drains its mailbox
+  before the new key reaches it cannot open frames sealed under the new
+  epoch. They are dropped and healed by the 30-minute §25.6 sync from the
+  host, like any frame lost to tail-drop or TTL (recovery through a helper
+  member while the host is offline is PR 4).
+- A sender that has not yet imported a rotation seals under the epoch it
+  holds. A GFS colluding with a just-removed member (who still has that
+  older key) could read those few frames until the sender catches up.
+  Per-recipient frames had no such window. The removed member itself
+  cannot get a frame accepted: receivers drop its card, so
+  `make_check_mailbox_sender` refuses it whatever key it seals under.
+- A multi upload whose answer was lost is retried with a new `msg_id`, so
+  a recipient can get that item twice; handlers apply by content id (see
+  Fallbacks).
 
 ```mermaid
 sequenceDiagram

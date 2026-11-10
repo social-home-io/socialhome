@@ -47,15 +47,16 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 from collections.abc import AsyncIterator
 from typing import Any
-from urllib.parse import urlparse
 
 import aiohttp
 
 from ..domain.federation import GfsConnection
 from ..domain.gfs_mailbox import ENVELOPE_MULTI_PATH
 from ..domain.space import SpacePermissionError
+from ..federation.gfs_relay_transport import normalize_gfs_base
 from ..federation.invite_bootstrap import EnvelopeRelayThrottled
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from .gfs_connection_service import GfsConnectionService
@@ -86,19 +87,16 @@ class EnvelopeRelayUnavailable(SpacePermissionError):
     """
 
 
-def normalize_gfs_base(url: str) -> str:
-    """Compare-able form of a GFS base URL — scheme + host(+port), no path.
-
-    The invite blob's ``gfs_url`` is typed by whoever published it and
-    pasted through a chat client; the local pairing row is typed by the
-    admin. ``https://gfs.example.org/`` and ``https://GFS.example.org``
-    are the same server, so casing, a trailing slash and a trailing path
-    must not decide whether a redeem works.
-    """
-    parsed = urlparse(url.strip().rstrip("/"))
-    if not parsed.scheme or not parsed.netloc:
-        return url.strip().rstrip("/").lower()
-    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+def _retry_after_s(value: str | None) -> float | None:
+    """A GFS ``Retry-After`` in delta-seconds, or ``None`` when it is
+    missing, an HTTP date, negative or not finite."""
+    try:
+        seconds = float(value) if value else None
+    except ValueError:
+        return None
+    if seconds is None or not math.isfinite(seconds) or seconds < 0:
+        return None
+    return seconds
 
 
 class GfsEnvelopeSender:
@@ -394,6 +392,9 @@ class GfsEnvelopeSender:
                     if resp.status == 429:
                         raise EnvelopeRelayThrottled(
                             "the GFS is busy — try again in a moment",
+                            retry_after_s=_retry_after_s(
+                                resp.headers.get("Retry-After")
+                            ),
                         )
                     log.info(
                         "gfs.envelope: %r (%s) rejected %s — HTTP %d",

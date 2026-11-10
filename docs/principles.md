@@ -358,6 +358,10 @@ exactly:**
     id or content (the kid naming the key is a hash of it). Items for one
     household only — key handoffs, catch-up, member cards and directory
     frames — stay sealed to that mailbox alone.
+    Residual: a sender that has not yet imported a key rotation seals
+    under the epoch it still holds, so a GFS colluding with a just-removed
+    member could read those few frames until the sender catches up
+    (per-recipient frames had no such window).
 
   Nothing that identifies a household across households reaches the GFS:
   no instance id, no space id, no content. A GFS that logs

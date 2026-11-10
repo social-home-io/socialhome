@@ -27,7 +27,7 @@ import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Collection, Iterable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -103,7 +103,6 @@ from ..infrastructure.key_manager import KeyManager
 from ..peer_http import post_to_peer
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.outbox_repo import AbstractOutboxRepo
-from ..services.gfs_envelope_sender import normalize_gfs_base
 from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from .app_framing import (
     APP_AEAD_SUITE_AESGCM_256,
@@ -116,6 +115,7 @@ from .gfs_relay_transport import (
     RELAY_STATUS_THROTTLED,
     RELAY_STATUS_TOO_LARGE,
     MailboxTarget,
+    normalize_gfs_base,
 )
 from .inbound_validator import (
     TRANSPORT_GFS_RELAY,
@@ -284,6 +284,27 @@ MAX_DEFERRED_MESH_BYTES: int = 16 * 1024 * 1024
 #: content has its own recovery (§25.6 sync, media re-fetch) and one such
 #: item should not eat the shared budget.
 MAX_DEFERRED_MESH_PAYLOAD_BYTES: int = 256 * 1024
+
+#: How long a throttled v_90 multi upload waits when the GFS's ``429`` named
+#: no ``Retry-After``: the GFS's per-address upload and recipient budgets
+#: are a minute wide, and it answers ``Retry-After: 60`` itself. Coming back
+#: sooner only earns another 429.
+MULTI_THROTTLE_RETRY_S: float = 60.0
+
+#: Ceiling on a GFS's ``Retry-After`` for a throttled multi upload — the
+#: longest window the GFS itself names (an hour); a larger value is a hint
+#: we do not let park the rows.
+MULTI_THROTTLE_MAX_RETRY_S: float = 3600.0
+
+
+def _multi_retry_after_s(retry_after_s: float | None) -> float:
+    """The wait before a throttled multi upload is tried again: the GFS's
+    ``Retry-After`` (capped at :data:`MULTI_THROTTLE_MAX_RETRY_S`) or
+    :data:`MULTI_THROTTLE_RETRY_S` when it named none."""
+    if retry_after_s is None:
+        return MULTI_THROTTLE_RETRY_S
+    return min(max(retry_after_s, 0.0), MULTI_THROTTLE_MAX_RETRY_S)
+
 
 #: Broadcast events whose own effect takes the recipient out of
 #: ``space_instances`` right after the broadcast: ``dissolve_space`` purges
@@ -3370,10 +3391,11 @@ class FederationService:
         A group of one — or the remainder of one after chunking at the
         GFS's ``max_recipients`` — stays per recipient.
 
-        Cost per broadcast: one batched read of the space's confirmed member
-        rows (no per-target read), and — only when a ``space_session`` seat
-        is among them — one capability probe per GFS and one key lookup. A
-        throttled upload queues the whole chunk in the outbox
+        Cost: one ``list_instances_in_space`` read per broadcast with ≥ 2
+        targets of a multi event type; then, per ``space_session`` seat
+        among them, one card lookup for its mailbox
+        (:meth:`_multi_seat_target`) and one capability probe per GFS, and
+        one key lookup once a group of two forms. A throttled upload queues the whole chunk in the outbox
         (:meth:`_queue_throttled_multi`); any other failure (no key for the
         space or one still in its grace window, a frame over the top size
         bucket, a refused or raising upload) leaves the group to the
@@ -3474,7 +3496,7 @@ class FederationService:
             tickets = {
                 iid: self._claim_state_send(iid, state_key) for iid in recipients
             }
-            ok, status = await self._transport.send_multi_mailbox(
+            ok, status, retry_after_s = await self._transport.send_multi_mailbox(
                 targets=[t for _iid, t, _p in chunk], sealed=sealed
             )
         except Exception as exc:  # noqa: BLE001 — never raises; per recipient
@@ -3492,7 +3514,13 @@ class FederationService:
             return {}
         if not ok and status == RELAY_STATUS_THROTTLED:
             return await self._queue_throttled_multi(
-                space_id, event_type, payload, recipients, state_key, tickets
+                space_id,
+                event_type,
+                payload,
+                recipients,
+                state_key,
+                tickets,
+                retry_after_s=_multi_retry_after_s(retry_after_s),
             )
         if not ok:
             for iid in recipients:
@@ -3529,14 +3557,18 @@ class FederationService:
         recipients: list[str],
         state_key: str | None,
         tickets: dict[str, int | None],
+        *,
+        retry_after_s: float,
     ) -> dict[str, DeliveryResult]:
         """The GFS throttled a multi upload: queue every recipient straight
         to the outbox — ONE stored payload, one ref row each (migration
         0145, as :meth:`send_event`'s failure path) — with no live attempt,
         so a GFS that just said it is busy does not get N per-recipient
-        sends at once. A 429 is back-pressure on us, not news about the
-        households: nobody is marked unreachable. A recipient whose row
-        cannot be queued goes per recipient. Never raises."""
+        sends at once. Each row is first due *retry_after_s* from now (the
+        GFS's ``Retry-After``), so the outbox does not hit the same full
+        window on its next pass. A 429 is back-pressure on us, not news
+        about the households: nobody is marked unreachable. A recipient
+        whose row cannot be queued goes per recipient. Never raises."""
         log.info(
             "broadcast: space=%s event=%s multi upload for %d household(s) "
             "throttled — queued",
@@ -3545,6 +3577,7 @@ class FederationService:
             len(recipients),
         )
         done: dict[str, DeliveryResult] = {}
+        due_at = (datetime.now(UTC) + timedelta(seconds=retry_after_s)).isoformat()
         try:
             ref = self._outbox_payload(event_type, space_id, payload)
         except Exception as exc:  # noqa: BLE001 — never raises; per recipient
@@ -3584,12 +3617,20 @@ class FederationService:
                     instance_id=iid, ok=False, error="unknown_instance"
                 )
                 continue
+            try:
+                await self._outbox_repo.reschedule(queued, due_at, 0)
+            except Exception as exc:  # noqa: BLE001 — queued; due sooner is fine
+                log.warning(
+                    "broadcast: delaying throttled multi for %s failed (%s)",
+                    iid,
+                    type(exc).__name__,
+                )
             done[iid] = DeliveryResult(
                 instance_id=iid,
                 ok=False,
                 error=DELIVERY_ERROR_RELAY_THROTTLED,
                 via="gfs_relay",
-                retry_after_s=RELAY_THROTTLE_COOLDOWN_S,
+                retry_after_s=retry_after_s,
             )
         return done
 
@@ -3720,7 +3761,8 @@ class FederationService:
         every row.
 
         SUCCESS on the relay's acceptance (recorded per household as such,
-        never as reachability); a throttled upload waits its cooldown;
+        never as reachability); a throttled upload waits the GFS's
+        ``Retry-After`` (:data:`MULTI_THROTTLE_RETRY_S` when it named none);
         a payload that is gone or does not unwrap is PERMANENT. ``None`` —
         a seat no longer multi-capable, no mr key (or one in its grace
         window), a frame that cannot be built, a refused upload or anything
@@ -3790,7 +3832,7 @@ class FederationService:
         )
         if sealed is None:
             return None
-        ok, status = await self._transport.send_multi_mailbox(
+        ok, status, retry_after_s = await self._transport.send_multi_mailbox(
             targets=targets, sealed=sealed
         )
         if ok:
@@ -3798,7 +3840,7 @@ class FederationService:
                 self.note_relay_accepted(iid)
             return DeliveryOutcome.SUCCESS
         if status == RELAY_STATUS_THROTTLED:
-            return RetryAfter(seconds=RELAY_THROTTLE_COOLDOWN_S)
+            return RetryAfter(seconds=_multi_retry_after_s(retry_after_s))
         return None
 
     async def _multi_key(self, space_id: str) -> tuple[str, bytes] | None:

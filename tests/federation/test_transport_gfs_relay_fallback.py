@@ -859,7 +859,7 @@ class _MultiRelay(_MailboxRelay):
         self.capacity = capacity
         self.capacity_asks: list[str] = []
         self.multi_calls: list[tuple[list[MailboxTarget], dict]] = []
-        self.multi_result: tuple[bool, int | None] = (True, None)
+        self.multi_result: tuple[bool, int | None, float | None] = (True, None, None)
 
     async def multi_capacity(self, gfs_url):
         self.capacity_asks.append(gfs_url)
@@ -877,6 +877,7 @@ async def test_a_seat_with_a_mailbox_on_a_multi_gfs_is_a_multi_target():
     assert await t.multi_capacity(ROUTE_A) == 500
     assert await t.send_multi_mailbox(targets=[_TARGET], sealed={"x": 1}) == (
         True,
+        None,
         None,
     )
     assert relay.multi_calls == [([_TARGET], {"x": 1})]
@@ -916,4 +917,8 @@ async def test_multi_without_a_relay_tier_is_off():
     t._gfs_relay = None
     assert await t.multi_mailbox_target(_seat(), "sp-1") is None
     assert await t.multi_capacity(ROUTE_A) == 0
-    assert await t.send_multi_mailbox(targets=[_TARGET], sealed={}) == (False, None)
+    assert await t.send_multi_mailbox(targets=[_TARGET], sealed={}) == (
+        False,
+        None,
+        None,
+    )

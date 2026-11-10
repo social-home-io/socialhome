@@ -117,6 +117,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import orjson
 
@@ -128,6 +129,21 @@ from .invite_bootstrap import EnvelopeRelayThrottled, RelayEnvelopeSender
 from .keywrap_seal import seal_to_keywrap
 
 log = logging.getLogger(__name__)
+
+
+def normalize_gfs_base(url: str) -> str:
+    """Compare-able form of a GFS base URL — scheme + host(+port), no path.
+
+    The invite blob's ``gfs_url`` is typed by whoever published it and
+    pasted through a chat client; the local pairing row is typed by the
+    admin. ``https://gfs.example.org/`` and ``https://GFS.example.org``
+    are the same server, so casing, a trailing slash and a trailing path
+    must not decide whether a redeem works.
+    """
+    parsed = urlparse(url.strip().rstrip("/"))
+    if not parsed.scheme or not parsed.netloc:
+        return url.strip().rstrip("/").lower()
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
 
 
 #: ``kind`` discriminator on the sealed plaintext. Distinct from every
@@ -571,36 +587,37 @@ class GfsRelayTransport:
 
     async def send_multi_mailbox(
         self, *, targets: list[MailboxTarget], sealed: dict
-    ) -> tuple[bool, int | None]:
+    ) -> tuple[bool, int | None, float | None]:
         """Hand ONE multi-recipient frame (already sealed,
         :func:`~socialhome.federation.multi_recipient.seal_multi`) to the GFS
         of *targets* — all on that one GFS, grouped by the caller — for
         every target's mailbox. The GFS sees the mailbox list and the seal,
         nothing that names a household. Same contract as :meth:`send`
-        (:data:`RELAY_STATUS_THROTTLED` on a full window); never logs a
-        mailbox id."""
+        (:data:`RELAY_STATUS_THROTTLED` on a full window), plus the GFS's
+        ``Retry-After`` in seconds when a throttle named one (else
+        ``None``); never logs a mailbox id."""
         if not targets:
-            return False, None
+            return False, None, None
         try:
             ok = await self._sender.send_to_mailboxes(
                 mailbox_ids=[t.mailbox_id for t in targets],
                 gfs_url=targets[0].gfs_url,
                 sealed=sealed,
             )
-        except EnvelopeRelayThrottled:
+        except EnvelopeRelayThrottled as exc:
             log.info("gfs relay: a multi-recipient frame was throttled")
-            return False, RELAY_STATUS_THROTTLED
+            return False, RELAY_STATUS_THROTTLED, exc.retry_after_s
         except SpacePermissionError as exc:
             log.info("gfs relay: no GFS could carry a multi-recipient frame: %s", exc)
-            return False, None
+            return False, None, None
         except Exception as exc:
             log.warning(
                 "gfs relay: sending a multi-recipient frame failed: %s",
                 exc,
                 exc_info=True,
             )
-            return False, None
-        return bool(ok), None
+            return False, None, None
+        return bool(ok), None, None
 
     async def _deliver_mailbox(
         self,
@@ -649,5 +666,6 @@ __all__ = [
     "MailboxTarget",
     "build_relay_plaintext",
     "is_relay_envelope_body",
+    "normalize_gfs_base",
     "seal_relay_envelope",
 ]

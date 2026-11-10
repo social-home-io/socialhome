@@ -216,7 +216,15 @@ class EnvelopeRelayThrottled(SpacePermissionError):
     :class:`~socialhome.domain.space.SpacePermissionError` and reaches
     ``POST /api/spaces/join`` as a 422 with a sentence worth reading
     instead of an opaque "could not deliver".
+
+    ``retry_after_s`` is the server's ``Retry-After`` (delta-seconds) when
+    it named one, else ``None`` — a caller that queues the frame waits at
+    least that long instead of its own short cooldown.
     """
+
+    def __init__(self, message: str, *, retry_after_s: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
 
 
 class RelayEnvelopeSender(Protocol):
