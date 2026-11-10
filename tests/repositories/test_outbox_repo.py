@@ -1336,3 +1336,29 @@ async def test_an_ungrouped_payload_lists_without_its_multi_id(env):
     assert (await env.outbox_repo.get_payload("p-m")).msg_id == "wire-1"
     assert await env.outbox_repo.pending_multi_due("peer-a") is not None
     assert sorted(written) == ["peer-a", "peer-b"]
+
+
+async def test_a_newer_multi_row_never_overtakes_an_older_one_in_backoff(env):
+    """v_91 FIFO between multi rows: a create, then an update to the same
+    seats — the create's row in backoff holds the update's back (an update
+    applied before its create is lost), while a seat whose create went
+    through gets its update."""
+    seats = ["peer-a", "peer-b"]
+    create = await env.outbox_repo.enqueue_refs(
+        instance_ids=seats,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        supersede_key=None,
+        payload_ref=dataclasses.replace(_stored("p-create"), msg_id="wire-c"),
+    )
+    update = await env.outbox_repo.enqueue_refs(
+        instance_ids=seats,
+        event_type=FederationEventType.SPACE_POST_UPDATED,
+        supersede_key=None,
+        payload_ref=dataclasses.replace(_stored("p-update"), msg_id="wire-u"),
+    )
+    later = datetime.now(UTC) + timedelta(minutes=5)
+    await env.outbox_repo.reschedule(create["peer-a"], later.isoformat(), 1)
+    await env.outbox_repo.mark_delivered(create["peer-b"])
+    assert [e.id for e in await env.outbox_repo.list_due()] == [update["peer-b"]]
+    await env.outbox_repo.mark_delivered(create["peer-a"])
+    assert {e.id for e in await env.outbox_repo.list_due()} == set(update.values())

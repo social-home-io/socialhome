@@ -347,11 +347,12 @@ class SqliteOutboxRepo:
 
         Excludes entries past their retention window (``expires_at``) and
         those of the households in *exclude* (the processor's busy
-        recipients, so their backlog never fills the batch). A row that is
-        not of a multi payload is left out while an older row of a multi
+        recipients, so their backlog never fills the batch). Any row — a
+        multi payload's too — is left out while an older row of a multi
         payload is still pending for its household (v_91 per-recipient
-        FIFO — on every retry, not only the first attempt). Ties on the due
-        time go oldest first, then in insert order. A multi payload taken
+        FIFO, on every retry: an update never overtakes its create in
+        backoff). Older is ``(created_at, rowid)``; ties on the due time go
+        oldest first, then in insert order. A multi payload taken
         out of every group (:meth:`ungroup_payload`) lists with no
         ``msg_id``. The caller is responsible for filtering entries whose
         destination instance is banned or unreachable.
@@ -375,17 +376,14 @@ class SqliteOutboxRepo:
                    OR datetime(o.expires_at) > datetime('now')
                )
                AND o.instance_id NOT IN (SELECT value FROM json_each(?))
-               AND (
-                   p.msg_id IS NOT NULL
-                   OR NOT EXISTS (
-                       SELECT 1
-                         FROM federation_outbox m
-                         JOIN federation_outbox_payloads mp ON mp.id = m.payload_id
-                        WHERE m.instance_id = o.instance_id
-                          AND m.status = 'pending'
-                          AND mp.msg_id IS NOT NULL
-                          AND (m.created_at, m.rowid) < (o.created_at, o.rowid)
-                   )
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM federation_outbox m
+                     JOIN federation_outbox_payloads mp ON mp.id = m.payload_id
+                    WHERE m.instance_id = o.instance_id
+                      AND m.status = 'pending'
+                      AND mp.msg_id IS NOT NULL
+                      AND (m.created_at, m.rowid) < (o.created_at, o.rowid)
                )
              ORDER BY datetime(o.next_attempt_at) ASC, o.created_at ASC,
                       o.rowid ASC
