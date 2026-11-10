@@ -346,29 +346,24 @@ exactly:**
     through the host hop.
 
   - **A space fan-out shows the GFS its exact recipient list (v_90; owner
-    sign-off 2026-11-09).** Space content for two or more of those
-    mailboxes on one GFS goes up ONCE: sealed under a key derived from
-    the space content key, signed once by the sender, with the list of
-    mailbox ids (`POST /gfs/envelope/multi`). The GFS stores the body
-    once and pushes it to each listed mailbox. It therefore sees exactly
+    sign-off 2026-11-09, wrap per recipient 2026-11-10).** Space content
+    for two or more of those mailboxes on one GFS goes up ONCE: the body
+    sealed once under a fresh random key and signed once by the sender,
+    plus, per recipient mailbox, its id and one opaque wrap of that key to
+    the mailbox's key-wrap key (`POST /gfs/envelope/multi`). The GFS
+    stores the body once and the wrap with each mailbox's reference, and
+    pushes body + wrap to each listed mailbox. It therefore sees exactly
     which mailboxes one item went to — the space's member set as mailbox
     ids, the clustering above made exact — and, because a household's
     one mailbox serves all its spaces, how two spaces' recipient lists
     overlap. It still sees no space id, instance id, event type, sender
-    id or content (the kid naming the key is a hash of it). Items for one
-    household only — key handoffs, catch-up, member cards and directory
-    frames — stay sealed to that mailbox alone. A space whose content key reaches GFS
-    subscribers (public / global with subscribers on) never goes multi:
-    the GFS could subscribe and hold that key.
-    A sender that may be behind on a removal sends per recipient,
-    pair-sealed: while its newest key predates the space's pinned
-    authority key, and from the moment its member directory drops a
-    household until the post-removal rekey arrives (at most an hour).
-    Residual: a sender that missed BOTH the removal and its rekey seals
-    under the epoch the removed household still holds, so a GFS colluding
-    with it could read those frames until the sender catches up — the
-    per-recipient path had the same window (that sender still sent to the
-    removed household directly).
+    id or content, and a wrap opens only under its mailbox's own key. No
+    space key is involved, so a public / global space with GFS
+    subscribers may go multi too (a GFS that subscribed holds the space
+    key, which opens nothing here), and nothing depends on epochs: the
+    audience is the space's current member set, so a removed household
+    gets no wrap. Items for one household only — key handoffs, catch-up,
+    member cards and directory frames — stay sealed to that mailbox alone.
 
   Nothing that identifies a household across households reaches the GFS:
   no instance id, no space id, no content. A GFS that logs
