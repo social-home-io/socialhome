@@ -42,7 +42,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypeGuard
 
 import orjson
 from cryptography.hazmat.primitives import hashes
@@ -180,7 +180,7 @@ def seal_multi(envelope_dict: dict, *, kid: str, key: bytes) -> dict[str, str]:
     }
 
 
-def is_multi_sealed(sealed: object) -> bool:
+def is_multi_sealed(sealed: object) -> TypeGuard[dict]:
     """True when *sealed* is a multi-recipient seal (it names an
     ``mr_suite``) rather than a per-recipient KEM seal."""
     return isinstance(sealed, dict) and "mr_suite" in sealed

@@ -69,6 +69,7 @@ from ..domain.federation import (
 )
 from ..domain.space import WRITER_ROLES, SpaceRole
 from .host_equivalence import acts_as_host
+from .multi_recipient import MULTI_TO_INSTANCE, decrypt_mr_payload
 from .space_scope import archive_refusal
 
 if TYPE_CHECKING:
@@ -186,6 +187,15 @@ class InboundContext:
     #: connection-server relay carried them, which is the one case where
     #: the bytes may legitimately be up to a day old.
     transport: str = ""
+
+    #: v_90 — the space whose multi-recipient key opened this frame (set by
+    #: the mailbox leg, never by a wire field). ``None`` for every ordinary
+    #: envelope; see :func:`make_check_multi_recipient`.
+    multi_space: str | None = None
+
+    #: v_90 — the multi-recipient key of that space epoch; the payload is
+    #: decrypted under it instead of the pair's session key. Never logged.
+    multi_key: bytes | None = field(default=None, repr=False)
 
 
 #: Middleware shape: async callable that takes context + raises or returns.
@@ -540,6 +550,48 @@ def make_check_relay_opt_in() -> InboundStep:
     return check_relay_opt_in
 
 
+def make_check_multi_recipient() -> InboundStep:
+    """Step 1b (v_90): hold ``to_instance = "*"`` to multi-recipient frames.
+
+    A multi-recipient envelope is addressed to every member household
+    holding one space's key (:data:`~socialhome.federation.multi_recipient
+    .MULTI_TO_INSTANCE`) and opens only under that key, so:
+
+    * without a multi context (every RTC, HTTPS and ordinary relay frame)
+      ``to_instance == "*"`` is refused — the star must not ride a path
+      that never proved the space key;
+    * with one (set by the mailbox leg after the kid resolved and the seal
+      opened), the frame must have come over our mailbox, be addressed to
+      ``"*"`` and name exactly the space whose key opened it — a member of
+      space A cannot pass a frame off as space B's.
+
+    Straight after the JSON parse: a pure field compare, before any lookup.
+    """
+
+    async def check_multi_recipient(ctx: InboundContext) -> None:
+        star = ctx.envelope.get("to_instance") == MULTI_TO_INSTANCE
+        if ctx.multi_space is None:
+            if star:
+                raise ValueError(
+                    "a multi-recipient envelope outside a multi-recipient frame"
+                )
+            return
+        if ctx.transport != TRANSPORT_GFS_MAILBOX:
+            raise ValueError("a multi-recipient frame rides a mailbox only")
+        if not star:
+            raise ValueError("a multi-recipient frame must be addressed to '*'")
+        if ctx.envelope.get("space_id") != ctx.multi_space:
+            # Type only — never the space id.
+            log.info(
+                "inbound: refusing a %r multi-recipient envelope whose space "
+                "is not the one its key belongs to",
+                ctx.envelope.get("event_type"),
+            )
+            raise ValueError("multi-recipient envelope names another space")
+
+    return check_multi_recipient
+
+
 def make_check_mailbox_sender(
     allowed: Callable[[], Callable[[str, str], Awaitable[bool]] | None],
 ) -> InboundStep:
@@ -781,18 +833,28 @@ def make_decrypt_and_parse(*, key_manager, encoder, loads) -> InboundStep:
 
     async def decrypt_and_parse(ctx: InboundContext) -> None:
         data = ctx.envelope
-        try:
-            session_key = key_manager.decrypt(ctx.instance.key_remote_to_self)
-        except Exception as exc:
-            raise ValueError(f"Failed to decrypt session key: {exc}") from exc
+        if ctx.multi_key is not None:
+            # v_90: one body for every member — sealed under the space
+            # epoch's multi-recipient key, never a pair session key.
+            try:
+                decrypted_json = decrypt_mr_payload(
+                    data["encrypted_payload"], ctx.multi_key
+                )
+            except ValueError as exc:
+                raise ValueError(f"Failed to decrypt payload: {exc}") from exc
+        else:
+            try:
+                session_key = key_manager.decrypt(ctx.instance.key_remote_to_self)
+            except Exception as exc:
+                raise ValueError(f"Failed to decrypt session key: {exc}") from exc
 
-        try:
-            decrypted_json = encoder.decrypt_payload(
-                data["encrypted_payload"],
-                session_key,
-            )
-        except Exception as exc:
-            raise ValueError(f"Failed to decrypt payload: {exc}") from exc
+            try:
+                decrypted_json = encoder.decrypt_payload(
+                    data["encrypted_payload"],
+                    session_key,
+                )
+            except Exception as exc:
+                raise ValueError(f"Failed to decrypt payload: {exc}") from exc
 
         try:
             inner = loads(decrypted_json)

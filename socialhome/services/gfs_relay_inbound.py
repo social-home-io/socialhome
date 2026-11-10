@@ -65,6 +65,7 @@ the same server (a route probe's ack) reads it; nothing puts it on a wire.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
@@ -82,6 +83,7 @@ from ..federation.invite_token_redeem import (
     BOOTSTRAP_INBOUND_WINDOW_S,
     RELAY_ENVELOPE_INBOUND_LIMIT,
 )
+from ..federation.multi_recipient import is_multi_sealed, open_multi, require_mr_suite
 from ..federation.peer_pairing_client import (
     KIND_PAIRING_PEER_ACCEPT,
     is_pairing_relay_body,
@@ -98,6 +100,11 @@ if TYPE_CHECKING:
     from ..rate_limiter import RateLimiter
 
 log = logging.getLogger(__name__)
+
+#: v_90 — resolves a multi-recipient frame's ``kid`` to ``(space_id, epoch,
+#: key)`` over our recent space epochs, or ``None``
+#: (``SpaceContentEncryption.mr_key_for_kid``).
+MrKeyForKid = Callable[[str], Awaitable[tuple[str, int, bytes] | None]]
 
 
 #: The ``gfs_connections.id`` of the connection server that delivered the
@@ -163,6 +170,7 @@ class GfsRelayInbound:
         "_invite",
         "_join",
         "_keywrap_private_key",
+        "_mr_key_for_kid",
         "_rate_limiter",
     )
 
@@ -174,12 +182,17 @@ class GfsRelayInbound:
         invite_coordinator: SpaceInviteTokenRedeemCoordinator,
         gfs_connection_repo: AbstractGfsConnectionRepo,
         rate_limiter: RateLimiter | None = None,
+        mr_key_for_kid: MrKeyForKid | None = None,
     ) -> None:
         self._federation = federation
         self._keywrap_private_key = keywrap_private_key
         self._invite = invite_coordinator
         self._gfs_repo = gfs_connection_repo
         self._rate_limiter = rate_limiter
+        #: v_90 — kid → ``(space_id, epoch, key)`` of a multi-recipient
+        #: frame (``SpaceContentEncryption.mr_key_for_kid``). Unwired, multi
+        #: frames are refused.
+        self._mr_key_for_kid = mr_key_for_kid
         self._join: GfsJoinRequestCoordinator | None = None
 
     def attach_join_requests(self, coordinator: GfsJoinRequestCoordinator) -> None:
@@ -262,7 +275,14 @@ class GfsRelayInbound:
         from a sender whose member card we hold for its space. A
         binary ``\x00SHR`` frame is a media chunk addressed to the mailbox
         id, opened with the same key. Same budgets as the instance-addressed
-        relay. Raises :class:`ValueError` on any refusal."""
+        relay.
+
+        v_90: a ``sealed`` that names an ``mr_suite`` is a multi-recipient
+        frame (one body the GFS fanned out to many mailboxes). Charged to the
+        same bucket first; its ``kid`` resolves to one of our space epochs'
+        multi-recipient keys, which opens it, and the pipeline then requires
+        ``to_instance == "*"`` and that space, and decrypts under that key.
+        Raises :class:`ValueError` on any refusal."""
         if isinstance(frame, bytes | bytearray):
             return await self._handle_media(frame, keys=keys)
         if not isinstance(frame, dict) or frame.get("type") != "envelope":
@@ -275,10 +295,15 @@ class GfsRelayInbound:
             window_s=BOOTSTRAP_INBOUND_WINDOW_S,
         ):
             raise MailboxFlooded("mailbox rate limit exceeded — frame dropped")
-        body = unseal_envelope_body(
-            envelope={"sealed": frame.get("sealed")},
-            keywrap_private_key=keys.kem_private,
-        )
+        sealed = frame.get("sealed")
+        multi: tuple[str, bytes] | None = None
+        if is_multi_sealed(sealed):
+            body, multi = await self._open_multi(sealed)
+        else:
+            body = unseal_envelope_body(
+                envelope={"sealed": sealed},
+                keywrap_private_key=keys.kem_private,
+            )
         if not is_relay_envelope_body(body):
             raise ValueError("a mailbox carries relayed envelopes only")
         inner = body.get("envelope")
@@ -292,6 +317,7 @@ class GfsRelayInbound:
                 from_instance,
                 orjson.dumps(inner),
                 transport=TRANSPORT_GFS_MAILBOX,
+                multi=multi,
             )
         except ValueError as exc:
             # The routing facts only — never the payload, never the mailbox.
@@ -302,6 +328,25 @@ class GfsRelayInbound:
                 exc,
             )
             raise
+
+    async def _open_multi(self, sealed: dict) -> tuple[dict, tuple[str, bytes]]:
+        """Open a v_90 multi-recipient seal → ``(relay body, (space_id,
+        key))``. The suite is judged first (no lookup for an unknown one),
+        then the kid resolves over our recent space epochs; an unknown kid
+        is refused. Logs the refusal type only — never the kid or the
+        mailbox."""
+        require_mr_suite(sealed)
+        if self._mr_key_for_kid is None:
+            raise ValueError("multi-recipient frames are not wired on this household")
+        kid = sealed.get("kid")
+        hit = await self._mr_key_for_kid(kid) if isinstance(kid, str) else None
+        if hit is None:
+            log.info(
+                "gfs_mailbox: dropped a multi-recipient frame under no key we hold"
+            )
+            raise ValueError("multi-recipient frame under no space key we hold")
+        space_id, _epoch, key = hit
+        return open_multi(sealed, key), (space_id, key)
 
     async def _handle_media(
         self, raw: object, *, keys: MailboxKeys | None = None

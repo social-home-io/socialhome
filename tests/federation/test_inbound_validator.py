@@ -21,6 +21,7 @@ from socialhome.domain.federation import (
     PairingStatus,
 )
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.inbound_validator import (
     RELAY_QUEUE_TTL_SECONDS,
@@ -35,6 +36,7 @@ from socialhome.federation.inbound_validator import (
     make_check_deprovisioned_author,
     make_check_event_types,
     make_check_mailbox_sender,
+    make_check_multi_recipient,
     make_check_peer_class,
     make_check_relay_opt_in,
     make_check_replay,
@@ -43,12 +45,18 @@ from socialhome.federation.inbound_validator import (
     make_check_timestamp,
     make_check_unpairing,
     make_confirm_relay_approval,
+    make_decrypt_and_parse,
     make_idempotency_check,
     make_lookup_instance,
     make_lookup_instance_by_id,
     make_parse_json,
     make_persist_replay,
     run_post_decrypt_gates,
+)
+from socialhome.federation.multi_recipient import (
+    MULTI_TO_INSTANCE,
+    derive_mr_key,
+    encrypt_mr_payload,
 )
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
@@ -1872,3 +1880,87 @@ async def test_check_event_types_refuses_any_other_type():
     ctx = InboundContext(envelope=_minimal_envelope(event_type="dm_message"))
     with pytest.raises(ValueError, match="Event type not allowed"):
         await step(ctx)
+
+
+# ─── v_90: multi-recipient mailbox frames ────────────────────────────────
+
+
+def _multi_ctx(*, transport=TRANSPORT_GFS_MAILBOX, multi=("sp-1", b"k" * 32), **env):
+    ctx = InboundContext(
+        envelope=_minimal_envelope(
+            **{"to_instance": MULTI_TO_INSTANCE, "space_id": "sp-1", **env}
+        ),
+        transport=transport,
+    )
+    if multi is not None:
+        ctx.multi_space, ctx.multi_key = multi
+    return ctx
+
+
+async def test_multi_recipient_step_takes_a_matching_multi_frame():
+    await make_check_multi_recipient()(_multi_ctx())
+
+
+async def test_a_star_envelope_without_a_multi_context_is_refused():
+    """``to_instance = "*"`` only ever arrives inside a multi seal — on any
+    other path (RTC, HTTPS, an ordinary relay/mailbox frame) it is refused."""
+    step = make_check_multi_recipient()
+    for transport in ("", TRANSPORT_GFS_RELAY, TRANSPORT_GFS_MAILBOX):
+        with pytest.raises(ValueError, match="multi-recipient"):
+            await step(_multi_ctx(transport=transport, multi=None))
+    # An ordinary addressed envelope passes untouched.
+    await step(InboundContext(envelope=_minimal_envelope()))
+
+
+@pytest.mark.parametrize(
+    "ctx_kwargs",
+    [
+        {"transport": TRANSPORT_GFS_RELAY},
+        {"transport": ""},
+        {"to_instance": "self-iid"},
+        {"space_id": "sp-other"},
+        {"space_id": None},
+    ],
+)
+async def test_a_multi_frame_must_be_a_mailbox_star_envelope_of_the_kids_space(
+    ctx_kwargs,
+):
+    with pytest.raises(ValueError):
+        await make_check_multi_recipient()(_multi_ctx(**ctx_kwargs))
+
+
+def test_the_multi_key_is_kept_out_of_the_context_repr():
+    ctx = _multi_ctx()
+    assert "kkkk" not in repr(ctx)
+
+
+async def test_decrypt_and_parse_uses_the_multi_key_for_a_multi_frame():
+    """With a multi context the payload opens under the multi-recipient key,
+    never the pair's session key (the sender row may have none we share)."""
+    _, key = derive_mr_key(b"\x01" * 32)
+
+    class _NoSessionKey:
+        def decrypt(self, *_a, **_kw):
+            raise AssertionError("the session key must not be used")
+
+    step = make_decrypt_and_parse(
+        key_manager=_NoSessionKey(),
+        encoder=FederationEncoder(b"\x02" * 32),
+        loads=_loads,
+    )
+    ctx = _multi_ctx(
+        multi=("sp-1", key),
+        encrypted_payload=encrypt_mr_payload('{"x": 1}', key),
+    )
+    ctx.instance = SimpleNamespace(key_remote_to_self="unused")
+    await step(ctx)
+    assert ctx.event is not None and ctx.event.payload == {"x": 1}
+    assert ctx.event.space_id == "sp-1"
+    _, other = derive_mr_key(b"\x03" * 32)
+    bad = _multi_ctx(
+        multi=("sp-1", key),
+        encrypted_payload=encrypt_mr_payload('{"x": 1}', other),
+    )
+    bad.instance = ctx.instance
+    with pytest.raises(ValueError, match="decrypt"):
+        await step(bad)

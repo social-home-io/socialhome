@@ -957,14 +957,17 @@ def _build_gfs_relay_inbound(
     invite_coordinator: SpaceInviteTokenRedeemCoordinator,
     gfs_connection_repo: AbstractGfsConnectionRepo,
     rate_limiter: RateLimiter,
+    space_crypto: SpaceContentEncryption,
 ) -> GfsRelayInbound:
-    """Build the inbound leg of the connection-server envelope relay."""
+    """Build the inbound leg of the connection-server envelope relay. v_90
+    multi-recipient frames resolve their kid over our space keys."""
     return GfsRelayInbound(
         federation=federation_service,
         keywrap_private_key=keywrap_private_key,
         invite_coordinator=invite_coordinator,
         gfs_connection_repo=gfs_connection_repo,
         rate_limiter=rate_limiter,
+        mr_key_for_kid=space_crypto.mr_key_for_kid,
     )
 
 
@@ -5080,6 +5083,7 @@ def create_app(config: Config | None = None) -> web.Application:
             invite_coordinator=invite_redeem_coordinator,
             gfs_connection_repo=repos.gfs_connection,
             rate_limiter=limiter,
+            space_crypto=space_crypto,
         )
         # v_84 — "Ask to join" a global space found in a GFS directory from
         # a household its host never paired with: sealed both ways over the

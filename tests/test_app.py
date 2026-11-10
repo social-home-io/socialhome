@@ -705,14 +705,22 @@ async def test_gfs_route_resolver_maps_routes_to_active_connection_urls(tmp_dir)
 
 
 def test_build_gfs_relay_inbound_returns_the_service():
+    class _Crypto:
+        async def mr_key_for_kid(self, kid):
+            return None
+
+    crypto = _Crypto()
     svc = _build_gfs_relay_inbound(
         federation_service=object(),  # type: ignore[arg-type]
         keywrap_private_key=b"k" * 32,
         invite_coordinator=object(),  # type: ignore[arg-type]
         gfs_connection_repo=object(),  # type: ignore[arg-type]
         rate_limiter=None,  # type: ignore[arg-type]
+        space_crypto=crypto,  # type: ignore[arg-type]
     )
     assert isinstance(svc, GfsRelayInbound)
+    # v_90: multi-recipient kids resolve over our space keys.
+    assert svc._mr_key_for_kid == crypto.mr_key_for_kid
 
 
 def test_build_gfs_route_discovery_registers_the_handlers_and_a_scheduler():

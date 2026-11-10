@@ -118,6 +118,7 @@ from .inbound_validator import (
     make_check_deprovisioned_author,
     make_check_event_types,
     make_check_mailbox_sender,
+    make_check_multi_recipient,
     make_check_peer_class,
     make_check_relay_opt_in,
     make_check_replay,
@@ -661,6 +662,9 @@ class FederationService:
         """Return the shared step list for both inbox and RTC pipelines."""
         steps = [
             make_parse_json(loads=_loads),
+            # v_90: ``to_instance = "*"`` only inside a multi-recipient
+            # frame, and that frame only for the space whose key opened it.
+            make_check_multi_recipient(),
             lookup_step,
             # v_89: a frame on our GFS mailbox (or relayed from a directory
             # seat) is taken only from a sender whose member card we hold
@@ -3572,6 +3576,7 @@ class FederationService:
         raw_body: bytes,
         *,
         transport: str = "",
+        multi: tuple[str, bytes] | None = None,
     ) -> InboundContext:
         """Run the §24.11 RTC validation pipeline WITHOUT dispatching.
 
@@ -3597,6 +3602,8 @@ class FederationService:
             instance_id=instance_id,
             transport=transport,
         )
+        if multi is not None:
+            ctx.multi_space, ctx.multi_key = multi
         await pipeline.run(ctx)
         return ctx
 
@@ -3606,6 +3613,7 @@ class FederationService:
         raw_body: bytes,
         *,
         transport: str = "",
+        multi: tuple[str, bytes] | None = None,
     ) -> dict:
         """§24.11 validation pipeline for a WebRTC DataChannel frame.
 
@@ -3617,11 +3625,17 @@ class FederationService:
         :data:`~socialhome.federation.inbound_validator.TRANSPORT_GFS_RELAY`
         for an envelope the connection server queued and replayed later,
         which widens the timestamp step's skew budget accordingly.
+
+        ``multi`` (v_90) is ``(space_id, key)`` of a multi-recipient frame
+        our mailbox opened under that space epoch's multi-recipient key:
+        the pipeline then requires ``to_instance == "*"`` and that space,
+        and decrypts the payload under *key*. Only the mailbox leg sets it.
         """
         ctx = await self.validate_inbound_rtc(
             instance_id,
             raw_body,
             transport=transport,
+            multi=multi,
         )
 
         if ctx.early_response is not None:

@@ -12,8 +12,22 @@ import logging
 
 import pytest
 
-from socialhome.crypto import generate_x25519_keypair
-from socialhome.domain.federation import GfsConnection, RemoteInstance
+from socialhome.crypto import (
+    b64url_decode,
+    b64url_encode,
+    derive_instance_id,
+    generate_identity_keypair,
+    generate_x25519_keypair,
+)
+from socialhome.domain.federation import (
+    FederationEventType,
+    GfsConnection,
+    InstanceSource,
+    PairingStatus,
+    RemoteInstance,
+)
+from socialhome.federation.encoder import FederationEncoder
+from socialhome.federation.federation_service import FederationService
 from socialhome.federation.gfs_mailbox import MailboxFlooded, derive_mailbox_keys
 from socialhome.federation.gfs_relay_media import seal_relay_media
 from socialhome.federation.gfs_relay_transport import (
@@ -33,9 +47,22 @@ from socialhome.federation.invite_token_redeem import (
     RELAY_ENVELOPE_INBOUND_LIMIT,
 )
 from socialhome.federation.keywrap_seal import seal_to_keywrap
+from socialhome.federation.multi_recipient import (
+    MULTI_TO_INSTANCE,
+    UnsupportedMrSuite,
+    build_multi_envelope,
+    derive_mr_key,
+    seal_multi,
+)
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.rate_limiter import RateLimiter
 from socialhome.services import gfs_relay_inbound as gri
 from socialhome.services.gfs_relay_inbound import RELAY_DELIVERED_VIA, GfsRelayInbound
+from tests.federation.test_federation_service import (
+    InMemoryFederationRepo,
+    InMemoryOutboxRepo,
+)
 
 ENVELOPE = {
     "msg_id": "m-1",
@@ -477,7 +504,9 @@ class _MailboxFederation:
         self.calls: list[tuple[str, bytes, str]] = []
         self.media: list[tuple[bytes, str]] = []
 
-    async def handle_inbound_rtc(self, instance_id, raw_body, *, transport=""):
+    async def handle_inbound_rtc(
+        self, instance_id, raw_body, *, transport="", multi=None
+    ):
         self.calls.append((instance_id, raw_body, transport))
         return {"status": "ok"}
 
@@ -643,3 +672,237 @@ async def test_a_flood_on_one_mailbox_shuts_only_that_mailbox(keys, monkeypatch)
         _sealed_from("y" * 32, mbox_b, "sp-2"), keys=mbox_b
     )
     assert [c[0] for c in federation.calls] == ["x" * 32] * 2 + ["y" * 32]
+
+
+# ── v_90: multi-recipient frames, through the real §24.11 pipeline ───────
+
+_SPACE = "sp-multi"
+_OTHER_SPACE = "sp-other"
+_CONTENT_KEYS = {_SPACE: b"\x0a" * 32, _OTHER_SPACE: b"\x0b" * 32}
+
+
+class _MultiHousehold:
+    """A receiver with a real FederationService pipeline, our mailbox, the
+    kid → key lookup over its space keys, and carded senders."""
+
+    def __init__(self, *, limiter=None) -> None:
+        own = generate_identity_keypair()
+        self.repo = InMemoryFederationRepo()
+        self.federation = FederationService(
+            db=None,  # type: ignore[arg-type]
+            federation_repo=self.repo,
+            outbox_repo=InMemoryOutboxRepo(),
+            key_manager=KeyManager(b"\x01" * 32),
+            bus=EventBus(),
+            own_instance_id=derive_instance_id(own.public_key),
+            own_identity_seed=own.private_key,
+            own_identity_pk=own.public_key,
+        )
+        self.dispatched: list = []
+
+        async def _record(event) -> None:
+            self.dispatched.append(event)
+
+        self.federation._event_registry.register(
+            FederationEventType.SPACE_POST_CREATED, _record
+        )
+        #: (sender, space) pairs whose member card we hold.
+        self.cards: set[tuple[str, str]] = set()
+
+        async def _card(sender: str, space_id: str) -> bool:
+            return (sender, space_id) in self.cards
+
+        self.federation._mailbox_sender_check = _card
+        self.kids: dict[str, tuple[str, int, bytes]] = {}
+        for space, raw in _CONTENT_KEYS.items():
+            kid, key = derive_mr_key(raw)
+            self.kids[kid] = (space, 7, key)
+        self.lookups: list[str] = []
+
+        async def _for_kid(kid: str):
+            self.lookups.append(kid)
+            return self.kids.get(kid)
+
+        self.mailbox = _mailbox_keys()
+        self.inbound = GfsRelayInbound(
+            federation=self.federation,
+            keywrap_private_key=b"\x02" * 32,
+            invite_coordinator=_Invite(),
+            gfs_connection_repo=_GfsRepo(),
+            rate_limiter=limiter,
+            mr_key_for_kid=_for_kid,
+        )
+
+    async def add_sender(self, *, card_for: str | None = _SPACE):
+        kp = generate_identity_keypair()
+        sender_id = derive_instance_id(kp.public_key)
+        await self.repo.save_instance(
+            RemoteInstance(
+                id=sender_id,
+                display_name="sender",
+                remote_identity_pk=kp.public_key.hex(),
+                key_self_to_remote="unused",
+                key_remote_to_self="unused",
+                remote_inbox_url="",
+                local_inbox_id="l-" + sender_id[:8],
+                status=PairingStatus.CONFIRMED,
+                source=InstanceSource.SPACE_SESSION,
+            )
+        )
+        if card_for is not None:
+            self.cards.add((sender_id, card_for))
+        return sender_id, FederationEncoder(kp.private_key)
+
+    async def frame(self, frame: dict) -> dict:
+        return await self.inbound.handle_mailbox_frame(frame, keys=self.mailbox)
+
+
+def _multi_frame(
+    sender_id: str,
+    encoder: FederationEncoder,
+    *,
+    key_space: str = _SPACE,
+    envelope_space: str = _SPACE,
+) -> tuple[dict, dict]:
+    kid, key = derive_mr_key(_CONTENT_KEYS[key_space])
+    env = build_multi_envelope(
+        encoder=encoder,
+        own_instance_id=sender_id,
+        event_type=FederationEventType.SPACE_POST_CREATED.value,
+        payload_json='{"post_id": "p-1", "content": "hello"}',
+        space_id=envelope_space,
+        key=key,
+    )
+    return {"type": "envelope", "sealed": seal_multi(env, kid=kid, key=key)}, env
+
+
+async def test_a_multi_frame_from_a_carded_member_is_dispatched():
+    h = _MultiHousehold()
+    sender, enc = await h.add_sender()
+    frame, env = _multi_frame(sender, enc)
+    assert await h.frame(frame) == {"status": "ok"}
+    [event] = h.dispatched
+    assert event.from_instance == sender
+    assert event.space_id == _SPACE
+    assert event.to_instance == MULTI_TO_INSTANCE
+    assert event.payload == {"post_id": "p-1", "content": "hello"}
+    assert event.msg_id == env["msg_id"]
+
+
+async def test_an_unknown_kid_is_refused_without_naming_it(caplog):
+    h = _MultiHousehold()
+    sender, enc = await h.add_sender()
+    frame, _ = _multi_frame(sender, enc)
+    h.kids.clear()
+    with caplog.at_level(logging.DEBUG), pytest.raises(ValueError, match="key"):
+        await h.frame(frame)
+    assert h.dispatched == []
+    assert frame["sealed"]["kid"] not in caplog.text
+    assert h.mailbox.mailbox_id not in caplog.text
+
+
+async def test_an_unknown_suite_is_refused_before_the_kid_lookup():
+    h = _MultiHousehold()
+    sender, enc = await h.add_sender()
+    frame, _ = _multi_frame(sender, enc)
+    frame["sealed"]["mr_suite"] = "mr-chacha-1"
+    with pytest.raises(UnsupportedMrSuite):
+        await h.frame(frame)
+    assert h.lookups == [] and h.dispatched == []
+
+
+async def test_a_tampered_multi_ciphertext_is_refused():
+    h = _MultiHousehold()
+    sender, enc = await h.add_sender()
+    frame, _ = _multi_frame(sender, enc)
+    raw = bytearray(b64url_decode(frame["sealed"]["ciphertext"]))
+    raw[-1] ^= 0x01
+    frame["sealed"]["ciphertext"] = b64url_encode(bytes(raw))
+    with pytest.raises(ValueError, match="does not open"):
+        await h.frame(frame)
+    assert h.dispatched == []
+
+
+async def test_a_star_envelope_in_an_ordinary_mailbox_frame_is_refused():
+    """A per-recipient seal (our mailbox's KEM key) carrying ``to = "*"``:
+    no multi context, so the pipeline refuses the star."""
+    h = _MultiHousehold()
+    sender, enc = await h.add_sender()
+    _, env = _multi_frame(sender, enc)
+    frame = {
+        "type": "envelope",
+        "sealed": seal_relay_envelope(
+            envelope_dict=env, peer_keywrap_pub=h.mailbox.kem_public
+        ),
+    }
+    with pytest.raises(ValueError, match="multi-recipient"):
+        await h.frame(frame)
+    assert h.dispatched == []
+
+
+async def test_an_envelope_naming_another_space_than_its_key_is_refused():
+    """Sealed under space A's key but naming space B (where the sender even
+    holds a card): refused, A's key proves nothing about B."""
+    h = _MultiHousehold()
+    sender, enc = await h.add_sender()
+    h.cards.add((sender, _OTHER_SPACE))
+    frame, _ = _multi_frame(sender, enc, key_space=_SPACE, envelope_space=_OTHER_SPACE)
+    with pytest.raises(ValueError, match="another space"):
+        await h.frame(frame)
+    assert h.dispatched == []
+
+
+async def test_a_sender_without_a_card_for_the_space_is_refused():
+    h = _MultiHousehold()
+    sender, enc = await h.add_sender(card_for=_OTHER_SPACE)
+    frame, _ = _multi_frame(sender, enc)
+    with pytest.raises(ValueError, match="member card"):
+        await h.frame(frame)
+    assert h.dispatched == []
+
+
+async def test_a_bad_signature_is_refused():
+    h = _MultiHousehold()
+    sender, _ = await h.add_sender()
+    _, impostor = await h.add_sender()  # signs with ANOTHER identity key
+    frame, _ = _multi_frame(sender, impostor)
+    with pytest.raises(ValueError, match="signature"):
+        await h.frame(frame)
+    assert h.dispatched == []
+
+
+async def test_a_replayed_multi_frame_is_refused():
+    h = _MultiHousehold()
+    sender, enc = await h.add_sender()
+    frame, _ = _multi_frame(sender, enc)
+    await h.frame(frame)
+    with pytest.raises(ValueError, match="Replay"):
+        await h.frame(frame)
+    assert len(h.dispatched) == 1
+
+
+async def test_a_multi_frame_is_charged_to_the_mailbox_bucket(monkeypatch):
+    """Multi frames share the mailbox's own bucket, charged before the kid
+    lookup — an unknown-kid flood ends in a dropped frame, not a lookup."""
+    monkeypatch.setattr(gri, "MAILBOX_INBOUND_LIMIT", 2)
+    h = _MultiHousehold(limiter=RateLimiter())
+    sender, enc = await h.add_sender()
+    h.kids.clear()
+    for _ in range(2):
+        frame, _ = _multi_frame(sender, enc)
+        with pytest.raises(ValueError, match="key"):
+            await h.frame(frame)
+    frame, _ = _multi_frame(sender, enc)
+    with pytest.raises(MailboxFlooded):
+        await h.frame(frame)
+    assert len(h.lookups) == 2
+
+
+async def test_without_a_kid_lookup_multi_frames_are_refused():
+    h = _MultiHousehold()
+    sender, enc = await h.add_sender()
+    frame, _ = _multi_frame(sender, enc)
+    inbound = _inbound(generate_x25519_keypair(), federation=h.federation)
+    with pytest.raises(ValueError, match="multi-recipient"):
+        await inbound.handle_mailbox_frame(frame, keys=h.mailbox)
+    assert h.dispatched == []
