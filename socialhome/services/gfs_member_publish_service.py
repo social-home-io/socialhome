@@ -444,8 +444,7 @@ class GfsMemberPublishService:
         if not self._publicly_readable(space):
             return []
         assert space is not None
-        seed_holder = await self._holds_seed(space_id)
-        if item_type == ITEM_TYPE_POST and seed_holder:
+        if item_type == ITEM_TYPE_POST and await self._holds_seed(space_id):
             return []
         cert = await self._writer_certs.current_own_cert_wire(space_id)
         if cert is None or not _cert_lets(cert, author_user_id, item_type):

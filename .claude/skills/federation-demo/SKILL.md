@@ -1044,8 +1044,9 @@ targeted ``space_subscriber_key_handoff`` reaching e's one socket and **no**
 Needs ``gfs-space-subscribe`` (d follows a's global space) and
 ``gfs-invite-link`` + ``-content`` (e holds a link-joined member seat in
 that same space). Stops **a** — the host and only seed holder — and has e
-post. e publishes the post itself (``POST /gfs/member-publish``, signed by
-its household key, authorized by its writer cert), so follower d receives
+post. e publishes the post itself (``POST /gfs/member-publish-anon``,
+signed with the space's writer group key — anonymous, the one mode since
+v_90; its writer cert rides inside the ciphertext), so follower d receives
 it decrypted while a is down; the GFS log shows the member-publish fan-out
 and never the post text. Then a restarts, catches e's post up over the
 member path and sends **no** copy to the GFS (step 12): e is v_57, the GFS
@@ -1085,25 +1086,22 @@ older follower: it clears bits 2 and 4 of d's seat (``space_subscribers
 the compressed item (e logs ``refused a compressed item``), e sent JSON
 (``suite=json``) and d still got the post. The bit is restored afterwards.
 
-### ``gfs-member-publish-strict`` — anonymous member publish (v_50)
+### ``gfs-member-publish-strict`` — anonymous member publish (v_50; the one mode since v_90)
 
-Needs ``gfs-member-publish``. The owner a switches its global space to
-``gfs_publish_mode = "strict"`` (that rotates the content key: e gets the
-new epoch's writer group key over the relay, and the GFS gets the owner's
-notice with the mode and the writer key pin — the step waits for both).
-Then **a** and **d** are stopped and e posts: e's publisher signs ``POST
+Needs ``gfs-member-publish``. There is no publish-mode switch any more
+(v_90): the step waits until the GFS has the writer key of the space's
+current epoch pinned (the owner's notice) and e holds that key. Then **a**
+and **d** are stopped and e posts: e's publisher signs ``POST
 /gfs/member-publish-anon`` with the writer key over its cookie-less session.
 Asserts the GFS access log shows the anonymous route and no identified
 ``/gfs/member-publish``, no GFS log line about the publish names e, and the
 row the GFS stored for offline d carries no ``writer_cert`` and nothing of
 e's (instance id, identity key). d restarts, drains the queue and decrypts
-the post. An IDENTIFIED publish into the strict space — built by the harness
-with e's real household key (KEK-unwrapped from e's data dir) and e's real
-writer cert, i.e. what a v_49 or misconfigured household would send — is
-refused 403. Finally a restarts, catches the post up, and switches the space
-back to trusted (the GFS follows). ``verify`` then checks e's stored writer
-group key for the strict epoch unwraps and verifies (the v_50 tripwire).
-Polls every 3 s, backs off on 429.
+the post. The identified ``POST /gfs/member-publish`` — what a pre-v_90
+household would send — has no route (404 / 405). Finally a restarts and
+catches the post up. ``verify`` then checks e's stored writer group key for
+that epoch unwraps and verifies (the v_90 tripwire). Polls every 3 s, backs
+off on 429. (The step keeps its v_50 name so the chain order is unchanged.)
 
 ### ``gfs-private-channel`` — a private space over an opaque channel (v_51 + ``private_gfs``)
 
@@ -1139,12 +1137,12 @@ the OFF space has no channel. Polls every 3 s, backs off on 429.
 ``gfs-b-up`` boots a SECOND, independent GFS on ``127.0.0.1:18767`` (own data
 dir ``/tmp/sh-demo/gfs-b``, own identity key, public id ``gfs-b``);
 ``gfs-b-down`` stops it. ``gfs-multi-listing`` (after the rest of the gfs
-chain, before ``verify``): a and e connect to B; a creates a TRUSTED global,
+chain, before ``verify``): a and e connect to B; a creates a global,
 publicly readable space and lists it on A and B through the owner's server
 selection (``PUT /api/spaces/{id}/gfs-servers``) — both servers list
 it with the writer key pinned. a invites d (registered on A only); d holds
-the owner's signed two-server list and the writer key (v_57 hands it out in
-trusted spaces). d restarts with loopback treated as public — a
+the owner's signed two-server list and the writer key (handed to every
+v_90 writer of a publicly readable space). d restarts with loopback treated as public — a
 **harness-only** ``-c`` prelude (``_LOOPBACK_IS_PUBLIC_PRELUDE``): a member
 drops an owner-listed private address it never joined and the pinned session
 refuses non-public addresses, both on purpose, and the demo's B is on
@@ -1166,12 +1164,12 @@ so the freshness check passes on the real wire).
 ### ``gfs-private-channel-multi`` — a private channel on the owner's chosen GFSs (v_57)
 
 After ``gfs-multi-listing`` (a ↔ d paired, a and e on A and B), before
-``verify``. a creates a TRUSTED private space, turns ``private_gfs`` on and
+``verify``. a creates a private space, turns ``private_gfs`` on and
 picks **GFS A only** as its channel server (``PUT
 /api/spaces/{id}/gfs-servers``, ``mode: "channel"``); e joins through a gfs
 link, d through an internal one. The channel is registered on A — **B holds
 no row for it**, though a is connected to B. a then picks A **and** B: B gets
-the channel with its trusted-mode writer key pinned, and d stores the
+the channel with its writer key pinned, and d stores the
 owner's two-server list **and** the re-issued channel grant naming both (they
 travel separately; a d restarted between the two keeps a grant naming A only
 and publishes nothing to B). d restarts with the loopback shim, e leaves A —
