@@ -12,10 +12,12 @@ and the real receive path (``GfsRelayInbound`` + the §24.11 pipeline, from
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import os
 from collections import deque
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import orjson
@@ -35,6 +37,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.outbox import DeliveryOutcome
+from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.gfs_relay_transport import (
     GfsRelayTransport,
     MailboxTarget,
@@ -44,6 +47,8 @@ from socialhome.federation.multi_recipient import (
     multi_audience_includes,
     open_multi,
 )
+from socialhome.federation.sync.space.exporter import ChunkBuilder
+from socialhome.federation.sync.space.provider import SpaceSyncService
 from socialhome.federation.transport import FederationTransport, _TransportSendResult
 from socialhome.infrastructure.outbox_processor import OutboxProcessor
 from tests.federation.test_federation_service import (
@@ -713,3 +718,110 @@ async def test_a_group_left_with_one_seat_does_not_go_up():
     assert s.transport.multi == []
     # Not refused by the GFS: the payload may still be grouped later.
     assert s.outbox.ungrouped == set()
+
+
+# ── Sync / control events never queue behind a multi row ────────────────
+
+
+class _SyncExporter:
+    def __init__(self, resource: str, records: list[dict]) -> None:
+        self.resource = resource
+        self._records = records
+
+    async def list_records(self, space_id: str) -> list[dict]:
+        return list(self._records)
+
+
+class _SyncCrypto:
+    async def encrypt_chunk(self, *, space_id, sync_id, plaintext):
+        return 0, base64.urlsafe_b64encode(plaintext).decode("ascii")
+
+
+async def test_a_catch_up_stream_to_a_seat_behind_a_multi_row_goes_live():
+    """Only a multi event type queues behind a seat's pending multi row: a
+    newcomer's catch-up (SPACE_SYNC_CHUNK …) goes live. Queued, every chunk
+    would count a strike and the provider would abandon the stream after
+    three — within milliseconds."""
+    s = _Sender()
+    seats = [await s.seat() for _ in range(2)]
+    await s.broadcast()
+    s.outbox.multi_due = (datetime.now(UTC) + timedelta(minutes=5)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    queued_before = len(s.outbox.enqueued)
+    provider = SpaceSyncService(
+        builder=ChunkBuilder(
+            encoder=FederationEncoder(generate_identity_keypair().private_key),
+            crypto=_SyncCrypto(),
+        ),
+        exporters={
+            name: _SyncExporter(name, [{"id": f"{name}-{i}"} for i in range(4)])
+            for name in ("posts", "members")
+        },
+        sig_suite="ed25519",
+    )
+    provider.attach_federation(s.svc)
+    session = SimpleNamespace(
+        sync_id="sync-1",
+        space_id=_SPACE,
+        requester_instance_id=seats[0],
+        sync_mode="initial",
+        have_seq=None,
+        since_seq=None,
+        rtc=None,
+        transport_mode="https",
+        touch=lambda: None,
+    )
+    await provider.stream_initial(session)
+    chunks = [
+        env
+        for iid, env in s.transport.sends
+        if iid == seats[0]
+        and env["event_type"] == FederationEventType.SPACE_SYNC_CHUNK.value
+    ]
+    assert len(chunks) == 3  # posts, members, then the sentinel
+    assert len(s.outbox.enqueued) == queued_before  # nothing queued behind
+    assert s.outbox.rescheduled == []
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [FederationEventType.SPACE_SYNC_BEGIN, FederationEventType.SPACE_SYNC_COMPLETE],
+)
+async def test_a_sync_control_event_to_a_seat_behind_a_multi_row_goes_live(
+    event_type,
+):
+    s = _Sender()
+    seats = [await s.seat() for _ in range(2)]
+    await s.broadcast()
+    result = await s.svc.send_event(
+        to_instance_id=seats[0],
+        event_type=event_type,
+        payload={"sync_id": "sync-1"},
+        space_id=_SPACE,
+    )
+    assert result.ok
+    assert [iid for iid, _env in s.transport.sends] == [seats[0]]
+
+
+async def test_the_host_hop_carries_a_sync_chunk_past_a_pending_multi_row():
+    s = _Sender()
+    seats = [await s.seat() for _ in range(2)]
+    await s.broadcast()
+    hop = MagicMock()
+    hop.send = AsyncMock(return_value=MagicMock(ok=True))
+    s.svc.attach_member_mesh(host_hop=hop, mailbox_sender_check=_never)
+
+    async def _unreachable(instance, space_id) -> bool:
+        return False
+
+    s.transport.mailbox_reachable = _unreachable  # type: ignore[method-assign]
+    seat = await s.repo.get_instance(seats[0])
+    await s.repo.save_instance(dataclasses.replace(seat, relay_via=None))
+    await s.svc.send_with_mesh_fallback(
+        to_instance_id=seats[0],
+        event_type=FederationEventType.SPACE_SYNC_CHUNK,
+        payload={"sync_id": "sync-1", "chunk": "{}"},
+        space_id=_SPACE,
+    )
+    hop.send.assert_awaited_once()

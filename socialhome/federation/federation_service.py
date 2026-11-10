@@ -1828,7 +1828,12 @@ class FederationService:
                 ok=False,
                 error="unknown_instance",
             )
-        if instance.source is InstanceSource.SPACE_SESSION:
+        if (
+            instance.source is InstanceSource.SPACE_SESSION
+            and event_type in MULTI_EVENT_TYPES
+        ):
+            # v_91 FIFO among the space's content stream only: sync and
+            # control events (a newcomer's catch-up) never wait behind it.
             behind = await self._outbox_repo.pending_multi_due(to_instance_id)
             if behind is not None:
                 return await self._queue_behind_multi(
@@ -2491,8 +2496,12 @@ class FederationService:
                 # cannot reach at its GFS mailbox (no connection to that GFS,
                 # or it has none): the space's host is the one hop. Never
                 # past a multi row it still has pending (v_91 FIFO): queue
-                # behind it like a live send.
-                behind = await self._outbox_repo.pending_multi_due(to_instance_id)
+                # behind it like a live send (a multi event type only).
+                behind = (
+                    await self._outbox_repo.pending_multi_due(to_instance_id)
+                    if event_type in MULTI_EVENT_TYPES
+                    else None
+                )
                 if behind is not None:
                     return await self._queue_behind_multi(
                         to_instance_id,

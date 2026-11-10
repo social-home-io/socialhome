@@ -1207,18 +1207,24 @@ is persisted: a crash leaves the rows pending. `stop()` waits for the loop
 and the deliveries in flight up to its 5 s deadline, then cancels them
 (their rows stay pending); `start()` clears the busy set.
 
-**Per-recipient FIFO behind a multi row — on every attempt.** A
-household's other rows are not handed out while an older multi-payload
-row of it is still pending (`list_due`, one `NOT EXISTS`), so a row queued
-behind a multi row waits through that row's retries too. A multi upload
-that does not succeed — however fast it failed — stalls each of its
-recipients for the rest of the pass. Due rows order by `next_attempt_at`,
-then creation, then insert order. A live per-recipient send (`send_event`)
-to a `space_session` seat that still has a multi-payload row pending would
-overtake it, so it is queued to the outbox instead, due no earlier than
-that row (one indexed query, only for `space_session` seats) — and so is a
-send through the space's host (the v_89 host hop) to a seat we cannot
-reach at its mailbox.
+**Per-recipient FIFO behind a multi row — on every attempt.** No row of a
+household — a multi row included — is handed out while an older
+multi-payload row of it is still pending (`list_due`, one `NOT EXISTS`
+on every row), so a row queued behind a multi row waits through that row's
+retries too, and a newer multi row (an update) never overtakes an older one
+(its create) still in backoff. "Older" is creation, then insert order; due
+rows hand out by `next_attempt_at`, then creation, then insert order. A
+multi upload that does not succeed — however fast it failed — stalls each
+of its recipients for the rest of the pass. A live per-recipient send
+(`send_event`) of a `MULTI_EVENT_TYPES` event to a `space_session` seat
+that still has a multi-payload row pending would overtake it, so it is
+queued to the outbox instead, due no earlier than that row (one indexed
+query, only for `space_session` seats) — and so is such a send through the
+space's host (the v_89 host hop) to a seat we cannot reach at its mailbox.
+Sync and control events (`SPACE_SYNC_BEGIN` / `_CHUNK` / `_COMPLETE`, key
+exchange, every type outside `MULTI_EVENT_TYPES`) never queue behind a multi
+row: they are not part of the space's content stream, and a newcomer's
+catch-up counts a queued chunk as a failed one.
 
 **Failures.** A `429` waits the GFS's `Retry-After` (60 s when it names
 none); a timeout, a `5xx` or a transport error is TRANSIENT. Either way the
