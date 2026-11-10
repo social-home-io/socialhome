@@ -2089,6 +2089,48 @@ async def test_one_mailbox_serves_every_space_of_the_household(mailbox_household
     assert [e.payload["content"] for e in b.received] == ["a-in-2"]
 
 
+async def test_the_host_hears_seated_only_once_the_joiners_gate_takes_its_frames(
+    mailbox_households, gfs
+):
+    """The demo's ``gfs-private-channel`` (#1336 regression): a GFS-only
+    joiner of a second space (over its existing seat) is seated only after
+    the ACK it awaits, so a frame the host sends when the seat goes live —
+    the private channel's grant — reaches its mailbox gate before its person
+    is seated there and is refused. The joiner's "seated" card is the point
+    from which the gate takes the host's frames for that space: the host's
+    seated hook fires then, and what it sends lands."""
+    a, b = mailbox_households
+    for h in (a, b):  # the direct §D2 redeem over the existing seat
+        h.coordinator.attach_to(h.federation)
+    await _join(a, b, gfs)
+    second = await b.space_service.create_space(
+        owner_username=b.username,
+        name="Second club",
+        space_type=SpaceType.PRIVATE,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    await b.db.enqueue("UPDATE spaces SET private_gfs=1 WHERE id=?", (second.id,))
+    # Before a is seated, its gate refuses the host's frames for the space.
+    assert not await a.directory.sender_allowed(b.instance_id, second.id)
+    gate_at_hook: list[bool] = []
+
+    async def on_seated(space_id: str, instance_id: str) -> None:
+        if space_id != second.id:
+            return
+        assert instance_id == a.instance_id
+        gate_at_hook.append(await a.directory.sender_allowed(b.instance_id, space_id))
+        await b.federation.broadcast_to_space_members(
+            space_id, FederationEventType.SPACE_POST_CREATED, _post_payload("again")
+        )
+
+    b.directory.attach_on_seated(on_seated)
+    a.received.clear()
+    await _link_join(a, b, gfs, second, "tok-seated-hook")
+    await gfs.drain()
+    assert gate_at_hook == [True]
+    assert [e.payload["content"] for e in a.received] == ["again"]
+
+
 async def test_a_frame_from_a_sender_without_a_card_is_refused(mailbox_households, gfs):
     """Our ONE mailbox serves every space, so the address authorizes
     nothing: a genuine, signed envelope from the seated host about a space

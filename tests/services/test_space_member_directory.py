@@ -1083,6 +1083,87 @@ async def test_the_host_answers_a_joiner_seated_by_link_at_once():
     assert [d for d in w.fed.to(k["id"]) if d["payload"].get("snapshot")] == []
 
 
+def _seated_log(w: World) -> list[tuple[str, str]]:
+    calls: list[tuple[str, str]] = []
+
+    async def hook(space_id: str, instance_id: str) -> None:
+        calls.append((space_id, instance_id))
+
+    w.dir.attach_on_seated(hook)
+    return calls
+
+
+async def test_a_seated_card_tells_the_seated_hook():
+    """The demo's ``gfs-private-channel`` (#1336 regression): the host's
+    channel-grant roster snapshot, sent when the joiner's seat went live,
+    beat the joiner's own seat and was refused by its mailbox gate. The
+    joiner's "seated" card is the moment its gate takes the host's frames:
+    the host hears of it through the seated hook (the grant goes again)."""
+    now = [1000.0]
+    w = World()
+    w.dir._clock = lambda: now[0]
+    calls = _seated_log(w)
+    a = _hh()
+    w.member(a)
+    w.writers.writers[SPACE] = {a["id"]}
+    await w.card_from(a, _card(a, gfs=GFS, rev=1))
+    assert calls == [(SPACE, a["id"])]
+    # A rotation (a newer card) is not a "seated".
+    await w.card_from(a, _card(a, gfs=GFS, rev=2))
+    assert calls == [(SPACE, a["id"])]
+    # The same card again: rarely, like the directory snapshot.
+    await w.card_from(a, _card(a, gfs=GFS, rev=2))
+    assert calls == [(SPACE, a["id"])]
+    now[0] += HELLO_RESNAPSHOT_S
+    await w.card_from(a, _card(a, gfs=GFS, rev=2))
+    assert calls == [(SPACE, a["id"])] * 2
+
+
+async def test_an_early_seated_card_tells_the_hook_once_its_seat_commits():
+    """A "seated" card that beat the host's seat row is answered at commit
+    (:meth:`store_seat_card`) — the hook with it; a seat card stored with
+    no "seated" before it tells nobody (the joiner is not seated yet)."""
+    w = World()
+    calls = _seated_log(w)
+    j, k = _hh(), _hh()
+    w.writers.writers[SPACE] = {j["id"], k["id"]}
+    await w.card_from(j, _card(j, gfs=GFS))  # before the row: kept aside
+    assert calls == []
+    w.member(j, k)
+    await w.dir.store_seat_card(SPACE, _card(j, gfs=GFS))
+    assert calls == [(SPACE, j["id"])]
+    await w.dir.store_seat_card(SPACE, _card(k, gfs=GFS))
+    assert calls == [(SPACE, j["id"])]
+
+
+async def test_a_first_sync_from_a_household_tells_the_seated_hook():
+    w = World()
+    calls = _seated_log(w)
+    a = _hh()
+    w.member(a)
+    w.writers.writers[SPACE] = {a["id"]}
+    await w.dir.on_sync_begin(_begin(a, w.me["id"], 0))
+    assert calls == [(SPACE, a["id"])]
+    # Already seated: a later sync is no news.
+    await w.dir.on_sync_begin(_begin(a, w.me["id"], 0))
+    assert calls == [(SPACE, a["id"])]
+
+
+async def test_a_failing_seated_hook_never_breaks_the_card():
+    w = World()
+
+    async def boom(space_id: str, instance_id: str) -> None:
+        raise RuntimeError("down")
+
+    w.dir.attach_on_seated(boom)
+    a = _hh()
+    w.member(a)
+    w.writers.writers[SPACE] = {a["id"]}
+    await w.card_from(a, _card(a, gfs=GFS))
+    assert w.spaces.doc(SPACE, a["id"])["card"]["instance_id"] == a["id"]
+    assert [d["payload"].get("snapshot") for d in w.fed.to(a["id"])] == [True]
+
+
 async def test_a_member_behind_on_dir_seq_gets_a_snapshot_on_its_sync():
     """Findings 1 + 2: repair rides the periodic §25.6 sync — a BEGIN that
     echoes an older ``dir_seq`` (a lost delta, a snapshot that raced the
