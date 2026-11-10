@@ -19,6 +19,7 @@ from socialhome.domain.federation import (
     DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
 )
+from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.file_hashes import FileHash, space_content_media_name
 from socialhome.domain.space import SpaceMember
 from socialhome.federation.encoder import FederationEncoder
@@ -926,21 +927,27 @@ def _member_roles(session) -> dict[str, str]:
 
 
 @pytest.mark.parametrize(
-    ("supports", "expected"),
-    [(True, "moderator"), (False, "member")],
+    ("version", "expected"),
+    [
+        (FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE, "moderator"),
+        (FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE - 1, "member"),
+    ],
 )
 async def test_members_stream_degrades_moderator_for_a_v40_requester(
-    encoder, supports, expected
+    encoder, version, expected
 ):
     """A v_40 receiver's ``space_members.role`` CHECK rejects ``moderator``
     and the whole members chunk with it — so a requester below v_41 is
-    streamed the role it knows that grants no more."""
+    streamed the role it knows that grants no more. The gate reads the
+    session's version (``space_member_version``), so a member reached only
+    over the mesh — no paired row, ``peer_supports`` False — at v_41 gets
+    its moderators as moderators."""
     from unittest.mock import AsyncMock
 
     svc = _members_provider(encoder)
     federation = AsyncMock()
-    federation.peer_supports = AsyncMock(return_value=supports)
-    federation.space_member_version = AsyncMock(return_value=40)
+    federation.peer_supports = AsyncMock(return_value=False)  # mesh-only
+    federation.space_member_version = AsyncMock(return_value=version)
     svc.attach_federation(federation)
     session = _FakeSession()
     await svc.stream_initial(session)

@@ -1275,8 +1275,9 @@ picture, never change, plant or hide one. Nothing else moves:
 - **Rows** of other people still come only from the host or a delegated
   admin; a trusted helper sends files only.
 - **Unhashed (legacy) files** keep the owner-only fill.
-- **Non-members never get space bytes:** helpers send only to member
-  households (`list_member_instances`), sealed like every space envelope.
+- **Non-members never get space bytes:** helpers send only to households
+  holding a writer (member) seat in their roster mirror
+  (`SpaceWriterHouseholds.may_receive`), sealed like every space envelope.
 - A plain member household fills nobody else's file.
 
 What it relaxes: an admin or moderator household now sends a member's
@@ -1286,6 +1287,28 @@ receiving household is a member that may see them too. Who is trusted is
 read from the receiver's own roster mirror, the same one every other
 content-authority rule uses (members are equal on every path). See
 [media](protocol/media.md#who-fills-a-hashed-file-v_86).
+
+**Owner sign-off needed (v_92).** v_92 puts these trusted households to
+work when the host does not answer:
+
+- **Catch-up from a helper.** A member household whose host leaves a
+  round's sync request unanswered (120 s) picks ONE trusted helper
+  automatically — an `admin` / `moderator` household at v_92, from the
+  member's roster mirror — and asks it to replay the space since the host
+  was last heard (at most 30 days). The helper sends its own people's rows
+  and the hashed files of the rest.
+- **Files on view.** `SPACE_MEDIA_WANTED` tells the host — and, when the
+  host is offline or lacks the file, an admin / moderator household —
+  which items a member household opens (item ids and content names, sealed
+  like every space envelope). That is new viewing metadata toward helpers:
+  before, only the host learned what a member caught up on.
+
+Rights narrow, they do not grow: a helper that is not the roster authority
+replays only its own people's rows (receivers take other people's rows only
+from the household acting as host), files still pass the v_86 hash checks,
+and only member households are answered. See
+[sync](protocol/sync.md#host-offline-trusted-helpers-v_92) and
+[media](protocol/media.md#older-files-on-view--space_media_wanted-v_92).
 
 ## Plaintext locally, encrypted on the wire
 

@@ -22,6 +22,10 @@ from socialhome.federation.sync.space.resume import (
     RESUME_MEDIA_MAX_BYTES,
     RESUME_MEDIA_MAX_FILES,
 )
+from socialhome.federation.sync.space.trusted_helpers import (
+    HELPER_ROLES,
+    helper_offset,
+)
 from socialhome.services import space_media_wanted as mod
 from socialhome.services.media_file_hasher import MediaFileHasher
 from socialhome.services.space_media_wanted import (
@@ -207,6 +211,41 @@ async def test_a_full_batch_goes_at_once_and_the_rest_waits_for_the_next(tmp_pat
     assert _names(fed.sent[1]) == names[MAX_WANTED_FILES:]
 
 
+async def test_a_burst_of_misses_is_queued_not_dropped(tmp_path):
+    """A gallery grid opening 60 missing pictures at once (no await between
+    the views): every name is looked up — a bounded queue drained by a few
+    workers — and asked for, in two requests."""
+    names = [_sc_n(i) for i in range(60)]
+    refs = _Refs({n: [(SPACE, f"p{i}", "t")] for i, n in enumerate(names)})
+    fed = _Fed({HOST: V92})
+    w = _wanted(tmp_path, refs=refs, fed=fed, coalesce_s=0.2)
+    for n in names:
+        w.schedule(n)
+    await w.drain()
+    assert len(fed.sent) == 2
+    asked = _names(fed.sent[0]) + _names(fed.sent[1])
+    assert sorted(asked) == sorted(names)
+
+
+async def test_names_past_the_queue_bound_are_dropped_without_cooldown(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(mod, "MAX_PENDING_NAMES", 2)
+    names = [_sc_n(i) for i in range(3)]
+    refs = _Refs({n: [(SPACE, f"p{i}", "t")] for i, n in enumerate(names)})
+    fed = _Fed({HOST: V92})
+    w = _wanted(tmp_path, refs=refs, fed=fed)
+    for n in names:
+        w.schedule(n)
+    w.schedule(names[0])  # already queued: once only
+    await w.drain()
+    assert sorted(n for s in fed.sent for n in _names(s)) == sorted(names[:2])
+    # The dropped one is asked on its next view, not 10 minutes later.
+    w.schedule(names[2])
+    await w.drain()
+    assert _names(fed.sent[-1]) == [names[2]]
+
+
 async def test_a_name_without_a_space_row_is_not_left_on_cooldown(tmp_path):
     """Dropped before it is queued (no live row yet) → asked again on the
     next view, not 10 minutes later."""
@@ -319,8 +358,10 @@ async def test_a_name_is_asked_again_only_after_its_cooldown(tmp_path):
 
 async def test_after_the_wait_missing_names_go_to_a_trusted_helper(tmp_path):
     """Host first; after the fixed wait only the names still not stored go
-    to the next provider — trusted helpers in sorted order, never ourselves,
-    at most MAX_PROVIDERS."""
+    to the next provider — the trusted helpers of the one shared picker
+    (``trusted_helpers``: admin / moderator households at v_92, sorted,
+    starting at this household's offset), never ourselves, at most
+    MAX_PROVIDERS."""
     a, b = _sc("a"), _sc("b")
     refs = _Refs({a: [(SPACE, "p1", "t")], b: [(SPACE, "p2", "t")]})
     helpers = ["h-z", "h-a", SELF, HOST, "h-m", "h-b"]
@@ -336,11 +377,14 @@ async def test_after_the_wait_missing_names_go_to_a_trusted_helper(tmp_path):
     w.schedule(a)
     w.schedule(b)
     await w.drain()
-    assert [s[0] for s in fed.sent] == [HOST, "h-a", "h-b"][:MAX_PROVIDERS]
+    ordered = ["h-a", "h-b", "h-m", "h-z"]
+    start = helper_offset(SELF, SPACE) % len(ordered)
+    rotated = ordered[start:] + ordered[:start]
+    assert [s[0] for s in fed.sent] == [HOST, *rotated][:MAX_PROVIDERS]
     assert sorted(_names(fed.sent[0])) == sorted([a, b])
     assert _names(fed.sent[1]) == [b]
-    # Helpers are the content-authority seats.
-    assert seats.asked and {"admin", "moderator"} <= set(seats.asked[0])
+    # Helpers are admin / moderator seats — the owner is the host.
+    assert seats.asked == [HELPER_ROLES]
 
 
 async def test_nothing_more_is_asked_once_every_file_arrived(tmp_path):
@@ -672,6 +716,30 @@ async def test_the_budget_is_50_files_and_32_mib_per_requester_and_space(
     assert await p.handle(_event([{"item": "p50", "name": names[50]}], sender="req-2"))
     now[0] += RESUME_COOLDOWN_S
     assert await p.handle(_event([{"item": "p50", "name": names[50]}])) == 1
+
+
+async def test_an_exhausted_budget_drops_the_request_before_any_lookup(tmp_path):
+    """Over the (requester, space) window: the whole request is dropped
+    before a single item query or hash."""
+    names = [_sc_n(i) for i in range(RESUME_MEDIA_MAX_FILES + 1)]
+    for n in names:
+        (tmp_path / n).write_bytes(b"x")
+    items = {(SPACE, f"p{i}"): [(n, "u1")] for i, n in enumerate(names)}
+    p, _outbox = _provider(tmp_path, items)
+    first = [
+        {"item": f"p{i}", "name": n} for i, n in enumerate(names[:MAX_WANTED_FILES])
+    ]
+    assert await p.handle(_event(first)) == RESUME_MEDIA_MAX_FILES
+    looked: list[tuple[str, str]] = []
+    real = p._refs.live_item_files
+
+    async def _counting(space_id, item_id):
+        looked.append((space_id, item_id))
+        return await real(space_id, item_id)
+
+    p._refs.live_item_files = _counting
+    assert await p.handle(_event([{"item": "p50", "name": names[50]}])) == 0
+    assert looked == []
 
 
 async def test_the_byte_budget_skips_a_file_that_would_pass_it(tmp_path, monkeypatch):

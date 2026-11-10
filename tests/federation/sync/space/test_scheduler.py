@@ -64,6 +64,13 @@ class _FakeFederation:
         self.mesh_extras: list[dict | None] = []
         #: Further BEGIN fields per mesh BEGIN (``sync_mode``, ``dir_seq``).
         self.mesh_fields: list[dict] = []
+        #: Households below v_92 (``space_member_supports``); others at it.
+        self.older: set[str] = set()
+        self.version_asks: list[tuple[str, int]] = []
+
+    async def space_member_supports(self, instance_id, *, min_version):
+        self.version_asks.append((instance_id, min_version))
+        return instance_id not in self.older
 
     def record_sync_request(
         self,
@@ -675,16 +682,22 @@ async def test_a_mesh_only_host_hears_our_directory_version_after_catch_up(
     by_space = dict(zip([c[0] for c in fed.mesh_catchups], fed.mesh_fields))
     assert by_space["sp-mesh"]["dir_seq"] == 41
     assert by_space["sp-plain"].get("dir_seq") is None
-    # Catch-up complete for both: only the space with a directory keeps
-    # echoing, as an incremental BEGIN.
+    # Catch-up complete for both: each periodic tick sends both the small
+    # incremental BEGIN (a paired host's trigger 2), the one with a
+    # directory echoing its version.
     sched._mesh_catchup_done.update({("sp-mesh", "host-x"), ("sp-plain", "host-x")})
     fed.mesh_catchups.clear()
     fed.mesh_fields.clear()
     await sched._tick_once()
-    assert fed.mesh_catchups == [("sp-mesh", "host-x")]
+    assert fed.mesh_catchups == [("sp-mesh", "host-x"), ("sp-plain", "host-x")]
     assert fed.mesh_fields == [
-        {"dir_seq": 41, "sync_mode": "incremental", "have_seq": None}
+        {"dir_seq": 41, "sync_mode": "incremental", "have_seq": None},
+        {"dir_seq": None, "sync_mode": "incremental", "have_seq": None},
     ]
+    # The startup sweep sends it only for the directory echo.
+    fed.mesh_catchups.clear()
+    await sched._tick_mesh_catchup()
+    assert fed.mesh_catchups == [("sp-mesh", "host-x")]
 
 
 async def test_tick_skips_confirmed_host(bus, queue, sync_manager):
@@ -746,7 +759,10 @@ async def test_completion_sentinel_stops_the_retries(bus, queue, sync_manager):
     )
 
     await sched._tick_once()
-    assert fed.mesh_catchups == [("sp-mesh", "host-x")], "re-BEGAN after completing"
+    # No second FULL catch-up — only the periodic incremental BEGIN.
+    assert fed.mesh_catchups == [("sp-mesh", "host-x")] * 2
+    assert "sync_mode" not in fed.mesh_fields[0]
+    assert fed.mesh_fields[1]["sync_mode"] == "incremental", "re-BEGAN in full"
 
 
 async def test_mesh_catchup_attempts_are_capped(bus, queue, sync_manager):
@@ -763,7 +779,13 @@ async def test_mesh_catchup_attempts_are_capped(bus, queue, sync_manager):
     for _ in range(MAX_MESH_CATCHUP_ATTEMPTS + 3):
         await sched._tick_once()
 
-    assert len(fed.mesh_catchups) == MAX_MESH_CATCHUP_ATTEMPTS
+    modes = [f.get("sync_mode") for f in fed.mesh_fields]
+    # The FULL catch-up stops at the cap; past it each tick sends only the
+    # small incremental BEGIN (at most 2/h, under the host's 5/h).
+    assert modes == [None] * MAX_MESH_CATCHUP_ATTEMPTS + ["incremental"] * 3
+    # The startup sweep sends nothing past the cap.
+    await sched._tick_mesh_catchup()
+    assert len(fed.mesh_fields) == MAX_MESH_CATCHUP_ATTEMPTS + 3
 
 
 async def test_mesh_catchup_failure_does_not_kill_the_tick(bus, queue, sync_manager):
@@ -1997,11 +2019,12 @@ async def test_a_host_equivalent_household_never_falls_back(
     assert sched._helper_checks == {}
 
 
-async def test_a_round_without_a_begin_to_the_host_waits_for_nothing(
+async def test_a_caught_up_mesh_only_host_is_asked_every_tick_and_waited_for(
     bus, queue, sync_manager, quick_answer_wait
 ):
-    """A mesh-only host whose catch-up completed is not asked every tick:
-    no BEGIN this round, so no answer is due and no helper is asked."""
+    """Every member is equal: a mesh-only host whose catch-up completed
+    still gets the small incremental BEGIN each tick (as a paired host
+    does), so its silence sends one helper the resume."""
     sched, _contact, resume = _helper_sched(
         bus, queue, sync_manager, helpers=["admin-a"]
     )
@@ -2010,7 +2033,71 @@ async def test_a_round_without_a_begin_to_the_host_waits_for_nothing(
     sched._mesh_catchup_done.add(("sp-1", "host"))
     await _round(sched)
     await _wait_checks(sched)
-    assert resume.requests == []
+    assert sched._federation.mesh_catchups == [("sp-1", "host")]
+    assert sched._federation.mesh_fields[0]["sync_mode"] == "incremental"
+    assert [r["instance_id"] for r in resume.requests] == ["admin-a"]
+
+
+async def test_a_capped_mesh_only_host_still_gets_the_incremental_begin(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """The attempt cap is for the FULL catch-up only: past it the host gets
+    the incremental BEGIN each tick, and its silence reaches a helper."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    sched._federation.confirmed = set()
+    sched._federation_repo = _FakeFedRepo([])
+    sched._mesh_catchup_attempts[("sp-1", "host")] = MAX_MESH_CATCHUP_ATTEMPTS
+    await _round(sched)
+    await _wait_checks(sched)
+    assert sched._federation.mesh_fields == [
+        {"sync_mode": "incremental", "dir_seq": None, "have_seq": None}
+    ]
+    assert sched._mesh_catchup_attempts[("sp-1", "host")] == MAX_MESH_CATCHUP_ATTEMPTS
+    assert [r["instance_id"] for r in resume.requests] == ["admin-a"]
+
+
+async def test_a_mesh_host_with_no_route_still_reaches_a_helper(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """A BEGIN that found no route is never answered: the helper is asked."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    sched._federation.confirmed = set()
+    sched._federation_repo = _FakeFedRepo([])
+    sched._federation.catchup_ships = False
+    sched._mesh_catchup_done.add(("sp-1", "host"))
+    await _round(sched)
+    await _wait_checks(sched)
+    assert [r["instance_id"] for r in resume.requests] == ["admin-a"]
+
+
+async def test_a_helper_below_v92_is_never_asked_for_a_resume(
+    bus, queue, sync_manager, quick_answer_wait, caplog
+):
+    """A helper below v_92 would replay everyone's rows: only v_92 helpers
+    (``space_member_supports``) are picked; none → wait for the host."""
+    import logging
+
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a", "mod-b"]
+    )
+    sched._federation.older = {"admin-a"}
+    await _round(sched)
+    await _wait_checks(sched)
+    assert [r["instance_id"] for r in resume.requests] == ["mod-b"]
+    assert (
+        "admin-a",
+        scheduler_mod.FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
+    ) in sched._federation.version_asks
+    sched._federation.older = {"admin-a", "mod-b"}
+    with caplog.at_level(logging.INFO, logger=scheduler_mod.__name__):
+        await _round(sched)
+        await _wait_checks(sched)
+    assert len(resume.requests) == 1
+    assert any("no trusted helper" in r.getMessage() for r in caplog.records)
 
 
 async def test_a_mesh_only_hosts_catch_up_begin_is_waited_for(

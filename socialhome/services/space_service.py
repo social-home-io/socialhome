@@ -4323,7 +4323,10 @@ class SpaceService(
             and not local
             and (
                 self._federation is None
-                or not await self._federation.peer_supports(
+                # A member household reached only over the mesh has no
+                # paired row: judge it by its space-member version claim,
+                # as the host's own path does (every member is equal).
+                or not await self._federation.space_member_supports(
                     instance_id,
                     min_version=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
                 )

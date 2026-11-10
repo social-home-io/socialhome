@@ -650,8 +650,9 @@ row's author household only, bytes checked against the row's `h`.
 **Requester** (`services/space_media_wanted.py`, `SpaceMediaWanted`).
 
 - A view (`GET /api/media/{name}`) that misses an `sc-` file — after the
-  GFS media cache (followers only, below) — schedules a lookup in the
-  background; the view answers 404 at once.
+  GFS media cache (every reader reached through a GFS reads it; only the
+  v_83 on-demand ask behind it is a follower's, see Fallback) — schedules
+  a lookup in the background; the view answers 404 at once.
 - Only live items of a space in which **this household holds a member
   seat** (a writer role). A follower household keeps the v_83 GFS
   on-demand path.
@@ -661,18 +662,22 @@ row's author household only, bytes checked against the row's `h`.
   more than 50 missing pictures asks for all of them.
 - **Provider order:** the space's host first; after 60 s
   (`PROVIDER_WAIT_S`, fixed) the names still not stored here go to the
-  next provider — a trusted household (a live `owner` / `admin` /
-  `moderator` seat in the roster mirror), sorted by instance id, never
-  ourselves. At most 3 providers per batch (`MAX_PROVIDERS`), only those at
-  v_92 (`space_member_supports`: a paired row's version, else the mesh
-  claim). A failed send moves on to the next provider at once.
+  next provider — a trusted household (a live `admin` / `moderator` seat
+  in the roster mirror; the owner is the host), sorted by instance id and
+  started at this household's stable offset, never ourselves — the one
+  picker the helper resume uses too (`federation/sync/space/trusted_helpers.py`).
+  At most 3 providers per batch (`MAX_PROVIDERS`), only those at v_92
+  (`space_member_supports`: a paired row's version, else the mesh claim). A failed send moves on to the next provider at once.
 - Sent with `send_with_mesh_fallback` — paired, mesh `SPACE_ROUTED`, a
   mailbox seat or the host hop, whichever reaches the provider (the type is
   in `SPACE_SESSION_ALLOWED_EVENT_TYPES`).
-- One name is asked again only after 10 min (`NAME_COOLDOWN_S`); lookups
-  and batches in flight are bounded. A name that was never queued (no live
-  row yet, a follower seat, the batch cap, a failed lookup) is not held on
-  that cooldown: the next view asks again.
+- One name is asked again only after 10 min (`NAME_COOLDOWN_S`). Views
+  queue their names (deduplicated, ≤ 500, `MAX_PENDING_NAMES`) for 8 lookup
+  workers (`MAX_LOOKUP_WORKERS`), so a grid opening many missing pictures at
+  once asks for all of them; batches in flight are bounded. A name that was
+  never queued (past the queue bound, no live row yet, a follower seat, the
+  batch cap, a failed lookup) is not held on that cooldown: the next view
+  asks again.
 
 **Provider** (`SpaceMediaWantedProvider`, registered for the event).
 
@@ -698,7 +703,8 @@ row's author household only, bytes checked against the row's `h`.
    it is sent under the asked-for `sc-` name, read from the local file —
    a receiver refuses a reserved `sg-` filename.
 4. A **budget** per (requester, space): at most 50 files / 32 MiB per
-   30 min — the resume's `RESUME_MEDIA_MAX_FILES` / `_BYTES` /
+   30 min (a request arriving with the window spent is dropped whole,
+   before any query or hash) — the resume's `RESUME_MEDIA_MAX_FILES` / `_BYTES` /
    `RESUME_COOLDOWN_S` values, but a budget of its own: a provider that
    also serves that requester a resume may ship up to 32 MiB for each in
    the same 30 min. Over it: skipped (logged at INFO with counts).
@@ -729,7 +735,15 @@ file waits for the §25.6 catch-up. A requester below v_92 never asks (a
 v_83–v_91 relay reader still asks its GFS). A member of a space whose
 **host** is below v_92 keeps the v_83 GFS on-demand ask during the rollout
 (`SpaceMediaGfsFetcher`, `space_member_supports(host, v_92)`); a member
-with a v_92 host never uses it.
+with a v_92 host uses it only for a file it holds under a name that is
+not an `sc-` content name — an `sg-` name taken from the public GFS copy
+(no hash map) or before v_92. `SPACE_MEDIA_WANTED` carries content names
+only, so that ask is how such a file heals past the GFS cache.
+
+**Known limit (PR 5).** A helper's resume (`SPACE_SYNC_RESUME`, v_86
+fills) still skips `sg-` names: a member's `sg-` file heals only through
+its own GFS ask (above) — while no GFS holder answers, it waits for the
+host's §25.6 catch-up.
 
 **Cost (recipients × files × bytes per trigger).** One old file on view:
 1 request (< 1 KiB) to 1 provider and the file's bytes once (+ at most

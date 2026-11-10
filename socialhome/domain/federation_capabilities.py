@@ -1473,8 +1473,8 @@ from __future__ import annotations
 #:   most three providers; each answers with ordinary ``SPACE_MEDIA_BLOB``
 #:   pushes under the v_86 file gate and a per-(requester, space) budget
 #:   (``services/space_media_wanted.py``). It replaces the never-released
-#:   v_87 relay media refill, and the v_83 GFS on-demand ask is now for
-#:   followers only. Every hashed file is stored under its content name on
+#:   v_87 relay media refill, and a member's v_83 GFS on-demand ask is kept
+#:   only for a file it holds under a non-content (``sg-``) name. Every hashed file is stored under its content name on
 #:   every path (GFS-described ones too), which changes how a receiver
 #:   names streamed records' files — a ``SYNC_RECORD_LINES`` entry. With it
 #:   (no wire change): a full catch-up ships the files of the last 30 days
@@ -1497,7 +1497,9 @@ from __future__ import annotations
 #:   a cut list deletes nothing). A requester below v_92 is sent the older
 #:   record shapes.
 #:   **Fallback**: a provider below v_92 is skipped (the file waits for the
-#:   §25.6 catch-up); a v_83–v_91 relay reader still asks its GFS. Space-
+#:   §25.6 catch-up); a helper below v_92 is never sent a resume (no
+#:   helper at v_92: wait for the host); a v_83–v_91 relay reader still
+#:   asks its GFS. Space-
 #:   scoped. Labelled "Older space pictures arrive when you open them".
 OURS: int = 92
 

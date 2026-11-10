@@ -187,11 +187,14 @@ sends back (a quiet space must count, or it would always fall back), and the
 scheduler counts a host's capacity deferral too (`SpaceSyncDeferred` with
 `reason="capacity"`: the host refused with `too_many_sessions` or
 `node_capacity`, so it is online; an `interrupted` stream does not count)
-(`federation/sync/space/host_contact.py`, in memory, baseline = boot). If
+(`federation/sync/space/host_contact.py`, in memory; a restart forgets it). If
 `HOST_ANSWER_WAIT_S` (120 s, fixed — never random) after that BEGIN the host
 has not answered, the member sends `SPACE_SYNC_RESUME` to **one** trusted
 helper — a household holding a live `admin` or `moderator` seat in the
-roster mirror, never us or the host, sorted; each household starts at its
+roster mirror at v_92 (`space_member_supports`: an older helper would
+replay everyone's rows), never us or the host, sorted
+(`federation/sync/space/trusted_helpers.py`, the one picker
+`SPACE_MEDIA_WANTED` uses too); each household starts at its
 own stable offset (`sha256(own instance id ‖ space id) mod k`, never random)
 so a space's members spread over its k helpers instead of all asking the
 first, then one step further each silent round — with `since` = the newest
@@ -200,9 +203,18 @@ minus a fixed 5-minute overlap (`HELPER_OVERLAP_S`; remembered in memory per
 space, bounded like the heard marks), and 30 days ago. So while the host
 stays silent each round replays only what is new since the last ask; a file
 the member still lacks arrives when someone opens it (`SPACE_MEDIA_WANTED`).
-No helper → nothing (logged once per round). A space we host, or hold the
-roster authority of, never falls back; neither does a round with no BEGIN to
-the host (a mesh-only host whose catch-up already completed).
+No helper at v_92 → nothing: the member waits for the host (logged once
+per round). A space we host, or hold the roster authority of, never falls
+back.
+
+Every member is equal here: a host reached only over the mesh gets the same
+small incremental BEGIN every periodic tick as a paired host (trigger 2) —
+once its full mesh catch-up completed, and also once that full catch-up hit
+its attempt cap (`MAX_MESH_CATCHUP_ATTEMPTS`, which bounds only the FULL
+catch-up). An up-to-date host answers it with only the signed sentinel; a
+BEGIN that found no route is never answered either, so the same 120 s wait
+reaches a helper. One incremental BEGIN per 30-min tick stays under the
+host's 5 / h per (household, space).
 
 Rights do not grow. A household that is not the space's roster authority
 (the predicate the file gate uses) replays **only its own people's rows**

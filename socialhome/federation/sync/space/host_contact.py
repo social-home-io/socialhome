@@ -16,10 +16,10 @@ It also remembers when the scheduler last sent a helper resume for a space
 round asks only since that ask (minus a fixed overlap) instead of replaying
 the same rows and files again.
 
-In memory only: a restart starts every space silent from the construction
-time, so a household that just booted waits a full window before it falls
-back (and its first helper resume reaches back to the host's last answer
-again). Bounded: at most :data:`MAX_SPACES_TRACKED` spaces per map, oldest
+In memory only: a restart forgets every answer, so a household that just
+booted falls back only once a BEGIN it sends goes unanswered for the full
+window (and its first helper resume reaches back no further than
+``RESUME_MAX_AGE_S``). Bounded: at most :data:`MAX_SPACES_TRACKED` spaces per map, oldest
 dropped.
 """
 
@@ -42,7 +42,7 @@ class HostContact:
     """Per space: the monotonic and the UTC wall-clock time its host was
     last heard."""
 
-    __slots__ = ("_clock", "_heard", "_helper", "_since", "_wall")
+    __slots__ = ("_clock", "_heard", "_helper", "_wall")
 
     def __init__(
         self,
@@ -52,7 +52,6 @@ class HostContact:
     ) -> None:
         self._clock = clock
         self._wall = wall
-        self._since = clock()
         self._heard: OrderedDict[str, tuple[float, str]] = OrderedDict()
         #: space → when (UTC ISO 8601) a helper resume was last sent.
         self._helper: OrderedDict[str, str] = OrderedDict()
@@ -74,12 +73,6 @@ class HostContact:
         """Whether the host answered at or after *t* (:meth:`now`)."""
         held = self._heard.get(space_id)
         return held is not None and held[0] >= t
-
-    def silent_for(self, space_id: str) -> float:
-        """Seconds since the host was last heard — since this household
-        started, when it has not been heard yet."""
-        held = self._heard.get(space_id)
-        return self._clock() - (held[0] if held is not None else self._since)
 
     def last_heard_iso(self, space_id: str) -> str | None:
         """When the host was last heard (UTC ISO 8601); ``None``: not yet."""

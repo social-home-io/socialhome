@@ -131,7 +131,10 @@ SYNC_VERSION_HISTORY_THROUGH: int = 64
 #:   described file kept a reader-specific ``sg-`` name nobody else could
 #:   serve), so ``SPACE_MEDIA_WANTED`` can ask any provider for it. A
 #:   household crossing it gets one full stream, so records it took while
-#:   older are named the same way. Also at 92 (``MIN_FOR_SYNC_ITEM_STATE``,
+#:   older are named the same way; a file it keeps under an ``sg-`` name
+#:   (an item it holds from the public GFS copy, no hash map) keeps that
+#:   name and heals through its GFS on-demand ask, not
+#:   ``SPACE_MEDIA_WANTED``. Also at 92 (``MIN_FOR_SYNC_ITEM_STATE``,
 #:   ``provider._without_item_state``): poll ``votes``, schedule
 #:   ``responses`` / ``finalized_slot_id``, calendar ``rsvps``, post
 #:   ``reaction_stamps``, bazaar ``bids`` and the ``timetables_deleted``

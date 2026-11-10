@@ -1179,16 +1179,34 @@ async def test_a_view_that_misses_asks_once_and_gets_the_bytes(tmp_path):
     assert (loc.item_id, loc.origin, loc.filename) == (ITEM, ORIGIN, "a.webp")
 
 
-async def test_a_member_household_never_asks_its_gfs(tmp_path):
+async def test_a_member_household_never_asks_its_gfs_for_a_content_named_file(
+    tmp_path,
+):
     """v_92: a household holding a member seat in a space whose host is at
-    v_92 asks its host or a helper with ``SPACE_MEDIA_WANTED`` — never its
-    GFS's on-demand path, which is for followers only."""
-    blob = _blob("a.webp", b"x")
+    v_92 asks its host or a helper with ``SPACE_MEDIA_WANTED`` for an
+    ``sc-`` file — never its GFS's on-demand path."""
+    data = b"x"
+    blob = _blob("a.webp", data)
+    gfs = _OnDemandGfs({}, served={_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs, member=True)
+    await _recv_hashed(f, _wire("a.webp", blob), data)
+    assert await f.ensure_local(_sc("a.webp", data)) is False
+    assert gfs.wanted == []
+
+
+async def test_a_member_holding_a_gfs_named_file_still_asks_its_gfs(tmp_path):
+    """A member keeps a file under its ``sg-`` name when it took it from the
+    public GFS copy (no hash map, or before v_92) — ``SPACE_MEDIA_WANTED``
+    asks only for ``sc-`` content names, so its GFS on-demand ask is the
+    one way that file heals past the cache."""
+    data = os.urandom(300)
+    blob = _blob("a.webp", data)
     gfs = _OnDemandGfs({}, served={_addr(blob): blob})
     f = _fetcher(tmp_path, gfs, member=True)
     await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
-    assert await f.ensure_local(_L("a.webp")) is False
-    assert gfs.wanted == []
+    assert await f.ensure_local(_L("a.webp")) is True
+    assert (tmp_path / _L("a.webp")).read_bytes() == data
+    assert len(gfs.wanted) == 1
 
 
 async def test_a_member_whose_host_is_below_v92_still_asks_its_gfs(tmp_path):
@@ -1198,9 +1216,9 @@ async def test_a_member_whose_host_is_below_v92_still_asks_its_gfs(tmp_path):
     blob = _blob("a.webp", data)
     gfs = _OnDemandGfs({}, served={_addr(blob): blob})
     f = _fetcher(tmp_path, gfs, member=True, host_version=V92 - 1)
-    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
-    assert await f.ensure_local(_L("a.webp")) is True
-    assert (tmp_path / _L("a.webp")).read_bytes() == data
+    await _recv_hashed(f, _wire("a.webp", blob), data)
+    assert await f.ensure_local(_sc("a.webp", data)) is True
+    assert (tmp_path / _sc("a.webp", data)).read_bytes() == data
     assert len(gfs.wanted) == 1
 
 

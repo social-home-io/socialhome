@@ -57,10 +57,12 @@ the file name — nothing about this household). The GFS has a holder
 re-upload or stream the same ciphertext, which is checked and stored exactly
 like a fetched blob; a miss there is a miss (the view's miss cache applies).
 A prefetch never asks — only a person looking at the item makes a holder
-send anything. Since v_92 it is a follower's path: a household holding a
-member seat asks its host or a trusted helper with ``SPACE_MEDIA_WANTED``
-instead — unless the space's host is below v_92 (rollout: that host answers
-no ``SPACE_MEDIA_WANTED``, so its members keep this ask).
+send anything. Since v_92 a household holding a member seat asks its host or
+a trusted helper with ``SPACE_MEDIA_WANTED`` for an ``sc-`` content-named
+file instead; it keeps this ask for a file it holds under any other name
+(an ``sg-`` name from the public GFS copy — that request carries content
+names only) and while the space's host is below v_92 (rollout: that host
+answers no ``SPACE_MEDIA_WANTED``).
 """
 
 from __future__ import annotations
@@ -665,7 +667,7 @@ class SpaceMediaGfsFetcher:
             if got != _MISS:
                 return got
             outcome = _REFUSED
-        if outcome == _MISS and want and await self._asks_its_gfs(ref.space_id):
+        if outcome == _MISS and want and await self._asks_its_gfs(ref):
             return await self._want(ref, scope_id, current[1], path, sources)
         if outcome == _MISS:
             log.info(
@@ -673,12 +675,18 @@ class SpaceMediaGfsFetcher:
             )
         return outcome
 
-    async def _asks_its_gfs(self, space_id: str) -> bool:
+    async def _asks_its_gfs(self, ref: SpaceMediaRef) -> bool:
         """v_83 on-demand is a FOLLOWER's path (v_92): a member household
         asks its host or a helper with ``SPACE_MEDIA_WANTED``
-        (:class:`~.space_media_wanted.SpaceMediaWanted`) instead — unless
-        the space's host is below v_92 and would answer no such request
-        (rollout: the member keeps the ask it had)."""
+        (:class:`~.space_media_wanted.SpaceMediaWanted`) instead — for an
+        ``sc-`` content name only, the one name that request carries. A
+        member keeps the ask for a file it holds under any other name (an
+        ``sg-`` name taken from the public GFS copy, without a hash map or
+        before v_92), and while the space's host is below v_92 and would
+        answer no such request (rollout)."""
+        if not is_space_content_media_name(ref.local_name):
+            return True
+        space_id = ref.space_id
         if not await holds_member_seat(self._spaces, space_id):
             return True
         space = await self._spaces.get(space_id)

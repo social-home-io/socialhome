@@ -51,16 +51,19 @@ Triggers:
     expects no answer) — waits :data:`HOST_ANSWER_WAIT_S` (fixed) for its
     answer (:class:`~.host_contact.HostContact`, marked by the receiver — an
     empty session's sentinel counts — and by a capacity deferral). No
-    answer: ONE trusted helper (a live ``admin`` / ``moderator`` seat
-    household other than us and the host, sorted, starting at a stable
-    per-household offset so a space's members spread over its helpers, one
-    step further each round) gets
+    answer: ONE trusted helper (:mod:`.trusted_helpers`: a live ``admin`` /
+    ``moderator`` seat household at v_92 other than us and the host,
+    sorted, starting at a stable per-household offset so a space's members
+    spread over its helpers, one step further each round; none at v_92 →
+    wait for the host) gets
     ``SPACE_SYNC_RESUME`` since the newest of: the host last heard, the
     previous helper ask minus :data:`HELPER_OVERLAP_S` (a silent host's
     rounds replay only what is new), ``RESUME_MAX_AGE_S`` ago: its own
     people's rows and the hashed files of the rest. The host is still
-    asked first every tick. Every member alike — paired, mesh or
-    GFS-reached.
+    asked first every tick — a mesh-only host too, with the small
+    incremental BEGIN once its full catch-up completed or hit its cap
+    (:meth:`SpaceSyncScheduler._mesh_incremental`). Every member alike —
+    paired, mesh or GFS-reached.
 
 Follows the `_stop: asyncio.Event` lifecycle (CLAUDE.md "Schedulers").
 """
@@ -68,7 +71,6 @@ Follows the `_stop: asyncio.Event` lifecycle (CLAUDE.md "Schedulers").
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import os
 import time
@@ -85,12 +87,14 @@ from ....domain.events import (
     SpaceSyncDeferred,
 )
 from ....domain.federation import FederationEventType, InstanceSource, PairingStatus
+from ....domain.federation_capabilities import FederationCapability
 from ....domain.space import Space, SpaceRole, SpaceType
 from ....infrastructure.event_bus import EventBus
 from ....infrastructure.reconnect_queue import P1_SECURITY, P4_DM, P6_PRODUCTIVITY
 from ...host_equivalence import acts_as_host
 from ...sync_manager import MAX_ACTIVE_SESSIONS_PER_INSTANCE
 from .resume import RESUME_MAX_AGE_S
+from .trusted_helpers import helper_offset, trusted_helpers
 
 if TYPE_CHECKING:
     from ....infrastructure.reconnect_queue import ReconnectSyncQueue
@@ -178,12 +182,6 @@ HOST_ANSWER_WAIT_S: float = 120.0
 #: replayed again, everything older is not. Files the requester still lacks
 #: arrive when someone opens them (``SPACE_MEDIA_WANTED``).
 HELPER_OVERLAP_S: float = 5 * 60.0
-
-#: The seats a trusted helper holds (the v_86 file fills' content
-#: authority; the owner is the host itself).
-HELPER_ROLES: frozenset[str] = frozenset(
-    {SpaceRole.ADMIN.value, SpaceRole.MODERATOR.value}
-)
 
 
 class _HostContact(Protocol):
@@ -906,7 +904,7 @@ class SpaceSyncScheduler:
         try:
             # Return value (pairs still pending) matters only to the startup
             # sweep's retry loop; the periodic tick just runs again later.
-            await self._tick_mesh_catchup()
+            await self._tick_mesh_catchup(periodic=True)
         except Exception:
             log.exception("space-sync-scheduler: mesh catch-up failed")
         await self._tick_mesh_announce()
@@ -986,15 +984,6 @@ class SpaceSyncScheduler:
             if held is task:
                 del self._helper_checks[space_id]
 
-    def _helper_offset(self, space_id: str) -> int:
-        """Where this household starts in a space's sorted helper list:
-        stable (no randomness) yet different per household, so the members
-        of a silent space spread their resumes over its helpers."""
-        digest = hashlib.sha256(
-            f"{self._own_instance_id}\0{space_id}".encode()
-        ).hexdigest()
-        return int(digest, 16)
-
     async def _await_host_answer(
         self, space_id: str, hosts: set[str], asked: float
     ) -> None:
@@ -1011,21 +1000,25 @@ class SpaceSyncScheduler:
         if contact.heard_since(space_id, asked):
             return
         try:
-            helpers = sorted(
-                set(await seats.list_instances_with_roles(space_id, HELPER_ROLES))
-                - hosts
-                - {self._own_instance_id, ""}
+            rounds = self._helper_round.get(space_id, 0)
+            helpers = await trusted_helpers(
+                seats,
+                self._federation,
+                space_id,
+                exclude={*hosts, self._own_instance_id},
+                offset=helper_offset(self._own_instance_id, space_id) + rounds,
             )
             if not helpers:
                 log.info(
                     "space %s: the host did not answer and no trusted helper "
-                    "(admin / moderator household) is known — nothing to ask",
+                    "(admin / moderator household at v_%d) is known — waiting "
+                    "for the host",
                     space_id,
+                    FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
                 )
                 return
-            rounds = self._helper_round.get(space_id, 0)
             self._helper_round[space_id] = rounds + 1
-            helper = helpers[(self._helper_offset(space_id) + rounds) % len(helpers)]
+            helper = helpers[0]
             since = _resume_since(
                 contact.last_heard_iso(space_id),
                 contact.last_helper_ask_iso(space_id),
@@ -1075,8 +1068,10 @@ class SpaceSyncScheduler:
                 # the periodic tick covers anything that regresses later.
                 return
 
-    async def _tick_mesh_catchup(self) -> int:
-        """Re-issue ``SPACE_SYNC_BEGIN`` for each incomplete mesh-only host.
+    async def _tick_mesh_catchup(self, *, periodic: bool = False) -> int:
+        """Re-issue ``SPACE_SYNC_BEGIN`` for each incomplete mesh-only host;
+        on a *periodic* tick also the incremental one to every caught-up (or
+        capped) mesh-only host (:meth:`_mesh_incremental`).
 
         ``Space.owner_instance_id`` is the host, so the predicate is exact
         rather than a heuristic: a space we don't own whose owner is not a
@@ -1106,37 +1101,22 @@ class SpaceSyncScheduler:
                 pairs.append((joined, target))
         for space, host in pairs:
             key = (space.id, host)
-            if key in self._mesh_catchup_done:
-                # Sentinel observed — this pair is genuinely caught up. v_89:
-                # a space whose member directory we hold still echoes its
-                # version every tick (a small incremental BEGIN), so a host
-                # that is ahead — a delta we lost — answers with a snapshot.
-                dir_seq = await self._directory_echo_for(space.id, host)
-                if dir_seq is not None and not await self._federation.is_confirmed_peer(
-                    host
-                ):
-                    fields = await self.begin_fields(
-                        space_id=space.id,
-                        peer_instance_id=host,
-                        sync_mode="incremental",
-                    )
-                    self._note_host_asked(space.id, host)
-                    try:
-                        await self._federation.begin_mesh_catchup_sync(
-                            space_id=space.id,
-                            host_instance_id=host,
-                            sync_mode="incremental",
-                            dir_seq=dir_seq,
-                            have_seq=fields.get("have_seq"),
-                        )
-                    except Exception:  # pragma: no cover — fail-soft
-                        log.debug("mesh directory echo failed", exc_info=True)
+            attempts = self._mesh_catchup_attempts.get(key, 0)
+            done = key in self._mesh_catchup_done
+            if done or attempts >= MAX_MESH_CATCHUP_ATTEMPTS:
+                # Caught up (sentinel seen), or the FULL catch-up hit its
+                # cap. Every member is equal: like a paired host (trigger
+                # 2) the host gets the small incremental BEGIN each
+                # periodic tick — an up-to-date one answers with only the
+                # signed sentinel — so its silence reaches a helper
+                # (trigger 10) and a host ahead of our ``dir_seq`` (v_89)
+                # answers with a snapshot. The startup sweep sends it only
+                # for that echo. Incremental BEGINs never count against
+                # the cap: one per 30-min tick stays under the host's 5/h.
+                await self._mesh_incremental(space, host, periodic=periodic, done=done)
                 continue
             if await self._federation.is_confirmed_peer(host):
                 # Triggers 1/2 own this peer; nothing to do here.
-                continue
-            attempts = self._mesh_catchup_attempts.get(key, 0)
-            if attempts >= MAX_MESH_CATCHUP_ATTEMPTS:
                 continue
             # Not complete and not capped → still pending, whatever this
             # attempt does. Counted before the send so a shipped-but-doomed
@@ -1169,6 +1149,34 @@ class SpaceSyncScheduler:
                 # touched the host's 5/h budget either.
                 self._mesh_catchup_attempts[key] = attempts + 1
         return pending
+
+    async def _mesh_incremental(
+        self, space: Space, host: str, *, periodic: bool, done: bool
+    ) -> None:
+        """The incremental BEGIN to a mesh-only *host* outside the full
+        catch-up: every periodic tick, else (startup) only to echo a
+        caught-up space's ``dir_seq``. Its answer is waited for (trigger
+        10) whether or not a route was found — a BEGIN that could not go out
+        is never answered either."""
+        if await self._federation.is_confirmed_peer(host):
+            return  # Triggers 1/2 own this peer.
+        dir_seq = await self._directory_echo_for(space.id, host)
+        if not periodic and not (done and dir_seq is not None):
+            return
+        fields = await self.begin_fields(
+            space_id=space.id, peer_instance_id=host, sync_mode="incremental"
+        )
+        self._note_host_asked(space.id, host)
+        try:
+            await self._federation.begin_mesh_catchup_sync(
+                space_id=space.id,
+                host_instance_id=host,
+                sync_mode="incremental",
+                dir_seq=dir_seq,
+                have_seq=fields.get("have_seq"),
+            )
+        except Exception:  # pragma: no cover — fail-soft
+            log.debug("mesh incremental BEGIN failed", exc_info=True)
 
     async def _tick_mesh_announce(self) -> int:
         """Announce our version to each mesh-only space host not yet reached

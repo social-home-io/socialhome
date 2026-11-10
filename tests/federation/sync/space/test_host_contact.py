@@ -20,16 +20,10 @@ def _wall() -> datetime:
     return datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
 
 
-def test_a_fresh_household_counts_silence_from_its_start() -> None:
-    """Baseline = construction time: a household that just booted has
-    heard nobody yet, and waits a full window before it calls it silence."""
-    clock = _Clock()
-    contact = HostContact(clock=clock, wall=_wall)
-    assert contact.silent_for("sp") == 0.0
-    clock.at += 90.0
-    assert contact.silent_for("sp") == 90.0
+def test_a_fresh_household_has_heard_nobody_yet() -> None:
+    contact = HostContact(clock=_Clock(), wall=_wall)
     assert contact.last_heard_iso("sp") is None
-    assert contact.heard_since("sp", 1000.0) is False
+    assert contact.heard_since("sp", 0.0) is False
 
 
 def test_heard_marks_the_space_with_both_clocks() -> None:
@@ -41,10 +35,7 @@ def test_heard_marks_the_space_with_both_clocks() -> None:
     assert contact.heard_since("sp", t0) is True
     assert contact.heard_since("sp", t0 + 1) is False
     assert contact.last_heard_iso("sp") == "2026-11-10T12:00:00+00:00"
-    clock.at = 1530.0
-    assert contact.silent_for("sp") == 30.0
-    # Another space is still silent since the start.
-    assert contact.silent_for("other") == 530.0
+    # Another space is still unheard.
     assert contact.heard_since("other", 0.0) is False
 
 

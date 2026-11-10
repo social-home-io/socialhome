@@ -787,14 +787,11 @@ class SpaceSyncService:
             return exporter if allowed else None
         if exporter is None or resource != "members":
             return exporter
-        supports = (
-            self._federation is not None
-            and await self._federation.peer_supports(
-                session.requester_instance_id,
-                min_version=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
-            )
-        )
-        return exporter if supports else PreModeratorMembersExporter(exporter)
+        # The session's version (a paired row's, else the mesh claim), like
+        # every other gate here: a mesh-only member at v_41 gets moderators.
+        if version >= FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE:
+            return exporter
+        return PreModeratorMembersExporter(exporter)
 
     async def _session_version(self, session: SyncSessionRecord) -> int:
         """The requester's protocol version (a space member household, which

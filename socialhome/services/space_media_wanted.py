@@ -18,12 +18,16 @@ seat (a follower keeps the GFS's v_83 on-demand path), collects the
 (a batch that reaches :data:`MAX_WANTED_FILES` goes at once and the next
 name opens a new batch), sent to the space's host first; after
 :data:`PROVIDER_WAIT_S` the names still not stored here go to the next
-provider — a trusted (admin / moderator) household of the roster mirror, in
-sorted order — at most :data:`MAX_PROVIDERS` providers per batch, only
-providers at v_92 (a failed send moves on at once). A name is asked again
-only after :data:`NAME_COOLDOWN_S` — unless it was never queued (no live
-row, a follower seat, the batch cap, a failed lookup): then the next view
-asks again. Fixed delays, never random.
+provider — a trusted (admin / moderator) household at v_92 from the one
+shared picker (:mod:`socialhome.federation.sync.space.trusted_helpers`:
+sorted, from this household's stable offset) — at most
+:data:`MAX_PROVIDERS` providers per batch, only providers at v_92 (a failed
+send moves on at once). Views queue their names (deduplicated, at most
+:data:`MAX_PENDING_NAMES`) for :data:`MAX_LOOKUP_WORKERS` lookup workers, so
+a burst of misses is asked for in full. A name is asked again only after
+:data:`NAME_COOLDOWN_S` — unless it was never queued (past the queue bound,
+no live row, a follower seat, the batch cap, a failed lookup): then the
+next view asks again. Fixed delays, never random.
 
 **Provider** (:class:`SpaceMediaWantedProvider`). The requester must hold a
 writer (member) seat in the space — the predicate the §25.6 provider uses
@@ -36,7 +40,8 @@ gate (:class:`~socialhome.federation.sync.space.file_gate.CatchUpFileGates`)
 decides what this household may ship (host: all; a trusted household:
 other people's hashed files; anyone: its own people's); and a budget per
 (requester, space) of a resume's 50 files / 32 MiB per 30 minutes bounds the
-upload. The files go out as ordinary ``SPACE_MEDIA_BLOB`` pushes from the
+upload (a request arriving with the window spent is dropped before any
+query or hash). The files go out as ordinary ``SPACE_MEDIA_BLOB`` pushes from the
 media outbox with ``push=True`` (never dropped for "reads from its GFS" —
 the requester already missed it). The receiver checks the bytes against the
 hash its row carries (v_86 fill rule).
@@ -68,7 +73,6 @@ from ..domain.file_hashes import (
     is_space_content_media_name,
     space_content_media_name,
 )
-from ..domain.space import CONTENT_AUTHORITY_ROLES
 from ..federation.sync.space.file_gate import local_file_size
 from ..federation.sync.space.resume import (
     RESUME_COOLDOWN_S,
@@ -76,6 +80,7 @@ from ..federation.sync.space.resume import (
     RESUME_MEDIA_MAX_BYTES,
     RESUME_MEDIA_MAX_FILES,
 )
+from ..federation.sync.space.trusted_helpers import helper_offset, trusted_helpers
 from .inbound_media_store import is_safe_media_name, media_file_path
 from .space_writer_households import holds_member_seat
 
@@ -106,8 +111,12 @@ NAME_COOLDOWN_S: float = 10 * 60.0
 #: Names whose last ask is remembered (oldest dropped).
 MAX_TRACKED_NAMES: int = 4096
 
-#: Lookups in flight at once; past it a view schedules nothing.
-MAX_LOOKUP_TASKS: int = 8
+#: Names waiting for their lookup (deduplicated); past it a view's name is
+#: dropped WITHOUT a cooldown — its next view asks again.
+MAX_PENDING_NAMES: int = 500
+
+#: Workers draining those names (lookups in flight at once).
+MAX_LOOKUP_WORKERS: int = 8
 
 #: Batches waiting or being delivered at once; past it a name is dropped
 #: until its cooldown ends.
@@ -115,8 +124,6 @@ MAX_BATCH_TASKS: int = 64
 
 #: Longest item id a provider looks up.
 MAX_ITEM_ID_LEN: int = 200
-
-_HELPER_ROLES: frozenset[str] = frozenset(r.value for r in CONTENT_AUTHORITY_ROLES)
 
 
 class _SpaceRows(Protocol):
@@ -188,14 +195,15 @@ class SpaceMediaWanted:
         "_coalesce_s",
         "_dir",
         "_federation",
-        "_lookups",
         "_own",
         "_pending",
         "_provider_wait_s",
+        "_queued",
         "_refs",
         "_seats",
         "_spaces",
         "_stop",
+        "_workers",
     )
 
     def __init__(
@@ -224,7 +232,10 @@ class SpaceMediaWanted:
         self._asked: OrderedDict[str, float] = OrderedDict()
         #: space → the batch still collecting names.
         self._pending: dict[str, _Batch] = {}
-        self._lookups: set[asyncio.Task[None]] = set()
+        #: names waiting for their lookup, oldest first (≤ MAX_PENDING_NAMES).
+        self._queued: OrderedDict[str, None] = OrderedDict()
+        #: the lookup workers draining it (≤ MAX_LOOKUP_WORKERS).
+        self._workers: set[asyncio.Task[None]] = set()
         self._batches: set[asyncio.Task[None]] = set()
         self._stop = asyncio.Event()
 
@@ -243,30 +254,53 @@ class SpaceMediaWanted:
         last = self._asked.get(basename)
         if last is not None and now - last < NAME_COOLDOWN_S:
             return
-        if len(self._lookups) >= MAX_LOOKUP_TASKS:
+        if basename in self._queued:
+            return
+        if len(self._queued) >= MAX_PENDING_NAMES:
+            # Dropped without a cooldown: the next view asks again.
+            log.info(
+                "space media wanted: %d names wait for a lookup — %s not asked for now",
+                len(self._queued),
+                basename,
+            )
             return
         self._asked[basename] = now
         self._asked.move_to_end(basename)
         while len(self._asked) > MAX_TRACKED_NAMES:
             self._asked.popitem(last=False)
-        task = asyncio.get_running_loop().create_task(
-            self._lookup(basename), name="space-media-wanted-lookup"
-        )
-        self._lookups.add(task)
-        task.add_done_callback(self._lookups.discard)
+        self._queued[basename] = None
+        if len(self._workers) < MAX_LOOKUP_WORKERS:
+            task = asyncio.get_running_loop().create_task(
+                self._work(), name="space-media-wanted-lookup"
+            )
+            self._workers.add(task)
 
     async def drain(self) -> None:
         """Wait until every lookup and batch scheduled so far is done
         (tests, the demo harness)."""
-        while self._lookups or self._batches:
+        while self._workers or self._batches:
             await asyncio.gather(
-                *list(self._lookups), *list(self._batches), return_exceptions=True
+                *list(self._workers), *list(self._batches), return_exceptions=True
             )
 
     async def stop(self) -> None:
         """Stop: a waiting batch ends without sending; nothing new starts."""
         self._stop.set()
+        self._queued.clear()
         await self.drain()
+
+    async def _work(self) -> None:
+        """Look up the queued names, oldest first, until none is left. The
+        worker leaves the worker set in the same step it finds the queue
+        empty, so a name queued after that always starts a new worker."""
+        try:
+            while self._queued and not self._stop.is_set():
+                basename, _ = self._queued.popitem(last=False)
+                await self._lookup(basename)
+        finally:
+            task = asyncio.current_task()
+            if task is not None:
+                self._workers.discard(task)
 
     async def _lookup(self, basename: str) -> None:
         queued = False
@@ -379,23 +413,29 @@ class SpaceMediaWanted:
                 return
 
     async def _providers(self, space_id: str) -> list[str]:
-        """The space's host, then its trusted households (sorted), never
-        this household — only those at v_92, at most :data:`MAX_PROVIDERS`."""
+        """The space's host, then its trusted helpers (the one shared
+        picker, :func:`trusted_helpers`, from this household's offset),
+        never this household — only those at v_92, at most
+        :data:`MAX_PROVIDERS`."""
         space = await self._spaces.get(space_id)
         host = space.owner_instance_id if space is not None else ""
-        helpers = await self._seats.list_instances_with_roles(space_id, _HELPER_ROLES)
         out: list[str] = []
-        for iid in [host, *sorted(set(helpers))]:
-            if not iid or iid == self._own or iid in out:
-                continue
-            if not await self._federation.space_member_supports(
-                iid, min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
-            ):
-                continue
-            out.append(iid)
-            if len(out) >= MAX_PROVIDERS:
-                break
-        return out
+        if (
+            host
+            and host != self._own
+            and await self._federation.space_member_supports(
+                host, min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
+            )
+        ):
+            out.append(host)
+        helpers = await trusted_helpers(
+            self._seats,
+            self._federation,
+            space_id,
+            exclude={host, self._own},
+            offset=helper_offset(self._own, space_id),
+        )
+        return (out + helpers)[:MAX_PROVIDERS]
 
     async def _have(self, name: str) -> bool:
         path = media_file_path(self._dir, name)
@@ -467,6 +507,14 @@ class SpaceMediaWantedProvider:
             or not 1 <= len(files) <= MAX_WANTED_FILES
         ):
             log.info("SPACE_MEDIA_WANTED from %s: malformed — dropped", requester)
+            return 0
+        if self._exhausted(requester, space_id):
+            # Before any query or hash: the window is spent.
+            log.info(
+                "SPACE_MEDIA_WANTED from %s for space %s: over the budget — dropped",
+                requester,
+                space_id,
+            )
             return 0
         if not await self._member_gate(space_id, requester):
             # A follower-only household reads through its GFS (v_83).
@@ -554,6 +602,15 @@ class SpaceMediaWantedProvider:
             ):
                 return basename, owner
         return None
+
+    def _exhausted(self, requester: str, space_id: str) -> bool:
+        """Whether the (requester, space) window can take no file at all."""
+        window = self._budget.get((requester, space_id))
+        if window is None or self._clock() - window[0] >= RESUME_COOLDOWN_S:
+            return False
+        return (
+            window[1] >= RESUME_MEDIA_MAX_FILES or window[2] >= RESUME_MEDIA_MAX_BYTES
+        )
 
     def _take(self, requester: str, space_id: str, size: int) -> bool:
         """Charge one file of *size* bytes to the (requester, space) budget,
