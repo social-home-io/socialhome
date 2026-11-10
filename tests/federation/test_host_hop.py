@@ -21,6 +21,7 @@ from socialhome.crypto import (
     sign_ed25519,
 )
 from socialhome.domain.federation import (
+    SPACE_SESSION_ALLOWED_EVENT_TYPES,
     FederationEvent,
     FederationEventType,
     InstanceSource,
@@ -375,3 +376,87 @@ async def test_a_directory_seated_origin_keeps_its_vocabulary_on_a_mesh_route():
         )
         await _settle()
         assert len(nodes["c"].dispatched) == expected
+
+
+def _route_stale_sends(node: _Node) -> list[dict]:
+    return [
+        s
+        for s in node.fed.sent
+        if s["event_type"] is FederationEventType.SPACE_ROUTE_STALE
+    ]
+
+
+async def test_a_paired_target_without_the_origins_card_sends_no_route_stale():
+    """A host hop is sealed to the target's static key-wrap key, never to a
+    discovered ephemeral: a target that does not take it (no card for the
+    origin yet) has nothing stale to report. It drops the envelope and
+    sends no ``SPACE_ROUTE_STALE`` — whose way back ends at a seat, which
+    never rediscovers a route and does not take one."""
+    nodes, (origin, host, target) = _wire(
+        cards_at={"origin": {"target"}, "host": {"origin", "target"}}
+    )
+    # The target is PAIRED with the host (the demo's b <-> a), so the
+    # seat-shape check on receipt does not apply: the unwrap decides.
+    nodes[target].repo._instances[host] = _FakeInstance(id=host)
+    result = await _hop(nodes[origin]).send(
+        to_instance_id=target,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload={"x": 1},
+        space_id=SPACE,
+    )
+    await _settle()
+    assert result.ok
+    assert nodes[target].dispatched == []
+    assert _route_stale_sends(nodes[target]) == []
+
+
+async def test_a_target_without_the_origins_card_asks_its_host_for_the_directory():
+    """The card is missing because our directory is (a lost first
+    snapshot): the target asks the space's host for it at once, so the
+    origin's next host hop lands — the drop is not silent forever."""
+    nodes, (origin, host, target) = _wire(
+        cards_at={"origin": {"target"}, "host": {"origin", "target"}}
+    )
+    nodes[target].repo._instances[host] = _FakeInstance(id=host)
+    asked: list[str] = []
+
+    async def ask(space_id: str) -> None:
+        asked.append(space_id)
+
+    _hop(nodes[target])._ask_host = ask
+    _hop(nodes[host])._ask_host = ask  # the host never asks itself
+    await _hop(nodes[origin]).send(
+        to_instance_id=target,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload={"x": 1},
+        space_id=SPACE,
+    )
+    await _settle()
+    assert asked == [SPACE]
+
+
+async def test_a_target_never_nacks_a_seat_as_previous_hop():
+    """The host-hop shape sealed to a key the target does not hold (not
+    its key-wrap key): the previous hop is a seat of the target, so no
+    nack goes out — a seat's vocabulary has no ``SPACE_ROUTE_STALE``."""
+    nodes, (origin, host, target) = _wire(
+        cards_at={
+            "origin": {"target"},
+            "host": {"origin", "target"},
+            "target": {"origin"},
+        }
+    )
+    await nodes[origin].handler.send_routed(
+        path=[origin, host, target],
+        target_eph_pk_b64=b64url_encode(generate_x25519_keypair().public_key),
+        inner_event_type=FederationEventType.SPACE_POST_CREATED,
+        inner_payload={"x": 1},
+        space_id=SPACE,
+    )
+    await _settle()
+    assert nodes[target].dispatched == []
+    assert _route_stale_sends(nodes[target]) == []
+    # And a seat never takes one either: it stays out of its vocabulary.
+    assert (
+        FederationEventType.SPACE_ROUTE_STALE not in SPACE_SESSION_ALLOWED_EVENT_TYPES
+    )

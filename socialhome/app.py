@@ -5132,6 +5132,7 @@ def create_app(config: Config | None = None) -> web.Application:
             host_of=member_directory.host_of,
             keywrap_private_key=identity.keywrap_private_key,
             keywrap_public_key=identity.keywrap_public_key,
+            ask_host=member_directory.ask_host,
         )
         routed_handler.attach_host_hop(host_hop)
         federation_service.attach_member_mesh(
