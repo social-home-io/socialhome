@@ -133,8 +133,8 @@ RESUME_COOLDOWN_TRACKED: int = 4096
 #: catch-up is bounded on every path (older content arrives on view).
 RESUME_MAX_AGE_S: int = 30 * 86_400
 
-#: The replayed rows' files: ``(row id, the row's author, file urls)``.
-_Media = list[tuple[str, str | None, list[str]]]
+#: The replayed rows' files: ``(row id, file urls)``.
+_Media = list[tuple[str, list[str]]]
 
 
 def _owner_of(row: Any) -> str | None:
@@ -476,7 +476,7 @@ class SpaceSyncResumeProvider:
         if self._media_sync is None or not media:
             return
         skipped = 0
-        for correlation_id, _owner, urls in media:
+        for correlation_id, urls in media:
             kept: list[str] = []
             for url in urls:
                 size = await self._size(url)
@@ -780,7 +780,7 @@ class SpaceSyncResumeProvider:
                     page_media_urls(page.cover_image_url, page.content),
                 )
                 if urls:
-                    media.append((page.id, getattr(page, "created_by", None), urls))
+                    media.append((page.id, urls))
         return sent
 
     async def _replay_stickies(
@@ -960,7 +960,7 @@ class SpaceSyncResumeProvider:
             if media_of is not None and media is not None:
                 urls = media_of(row)
                 if urls:
-                    media.append((row.id, _owner_of(row), list(urls)))
+                    media.append((row.id, list(urls)))
             try:
                 await self._federation.send_event(
                     to_instance_id=to,

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import pytest
 
@@ -16,7 +18,14 @@ from socialhome.domain.federation import (
 )
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.file_hashes import space_content_media_name
-from socialhome.domain.space import SpaceRole
+from socialhome.domain.space import (
+    JoinMode,
+    Space,
+    SpaceFeatures,
+    SpaceMember,
+    SpaceRole,
+    SpaceType,
+)
 from socialhome.federation.sync.space import file_gate as file_gate_mod
 from socialhome.federation.sync.space.file_gate import (
     BUDGET_MAX_FILES,
@@ -27,6 +36,10 @@ from socialhome.federation.sync.space.trusted_helpers import (
     HELPER_ROLES,
     helper_offset,
 )
+from socialhome.repositories.space_remote_member_repo import (
+    SqliteSpaceRemoteMemberRepo,
+)
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services import space_media_wanted as mod
 from socialhome.services.media_file_hasher import MediaFileHasher
 from socialhome.services.space_media_wanted import (
@@ -95,6 +108,9 @@ class _Spaces:
 
     async def list_member_instances(self, space_id):
         return sorted(self.members)
+
+    async def get_invited_by(self, space_id):
+        return None
 
 
 class _Seats:
@@ -408,6 +424,99 @@ async def test_we_never_ask_ourselves_as_the_host():
     w.schedule(a)
     await w.drain()
     assert fed.sent == []
+
+
+async def _delegated_space(db) -> tuple[SqliteSpaceRepo, SqliteSpaceRemoteMemberRepo]:
+    """``SPACE`` owned by ``owner-hh``; we were invited by the delegated
+    admin household ``admin-hh`` (host-equivalent here, like the scheduler's
+    BEGIN target); ``mod-hh`` holds a moderator seat (a trusted helper)."""
+    spaces = SqliteSpaceRepo(db)
+    seats = SqliteSpaceRemoteMemberRepo(db)
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES('me','u-me','M')"
+    )
+    await spaces.save(
+        Space(
+            id=SPACE,
+            name="S",
+            owner_instance_id="owner-hh",
+            owner_username="o",
+            identity_public_key="aa" * 32,
+            config_sequence=1,
+            features=SpaceFeatures(delegated_admin_authority=True),
+            space_type=SpaceType.PRIVATE,
+            join_mode=JoinMode.INVITE_ONLY,
+        )
+    )
+    await spaces.save_member(
+        SpaceMember(space_id=SPACE, user_id="u-me", role="member", joined_at="t")
+    )
+    for instance_id, role in (
+        ("admin-hh", SpaceRole.ADMIN),
+        ("mod-hh", SpaceRole.MODERATOR),
+    ):
+        await seats.add(
+            space_id=SPACE,
+            instance_id=instance_id,
+            user_id=f"u-{instance_id}",
+            user_pk=None,
+            display_name="A",
+            role=role.value,
+        )
+    await spaces.set_invited_by(SPACE, "admin-hh", 0)
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    await spaces.set_owner_statement(
+        SPACE,
+        json.dumps(
+            {"authority_pk": "aa" * 32, "authority_key_epoch": 0, "issued_at": now_ms}
+        ),
+    )
+    return spaces, seats
+
+
+async def test_the_inviting_admin_acting_as_host_is_asked_as_the_host(db):
+    """ "The host" is the household acting as host here — the owner, or the
+    delegated admin that invited us (the scheduler BEGINs both): an owner
+    below v_92 cannot answer, the inviting admin can, so it gets the
+    request as the host and no helper learns what we view."""
+    spaces, seats = await _delegated_space(db)
+    a = _sc("a")
+    fed = _Fed({"owner-hh": V92 - 1, "admin-hh": V92, "mod-hh": V92})
+    w = SpaceMediaWanted(
+        media_refs=_Refs({a: [(SPACE, "p1", "t")]}),
+        space_repo=spaces,
+        remote_members=seats,
+        federation=fed,
+        host_contact=_Contact(),
+        own_instance_id=SELF,
+        coalesce_s=0.0,
+    )
+    w.schedule(a)
+    await w.drain()
+    assert [s[0] for s in fed.sent] == ["admin-hh"]
+
+
+async def test_hosts_are_asked_owner_first_and_never_again_as_helpers(db):
+    """Owner first, then the inviting admin; both unreachable → a helper
+    that is not one of them."""
+    spaces, seats = await _delegated_space(db)
+    a = _sc("a")
+    fed = _Fed(
+        {"owner-hh": V92, "admin-hh": V92, "mod-hh": V92},
+        fail={"owner-hh", "admin-hh"},
+    )
+    w = SpaceMediaWanted(
+        media_refs=_Refs({a: [(SPACE, "p1", "t")]}),
+        space_repo=spaces,
+        remote_members=seats,
+        federation=fed,
+        host_contact=_Contact(),
+        own_instance_id=SELF,
+        coalesce_s=0.0,
+    )
+    w.schedule(a)
+    await w.drain()
+    assert [s[0] for s in fed.sent] == ["owner-hh", "admin-hh", "mod-hh"]
 
 
 async def test_stop_ends_a_drain_waiting_for_its_window():

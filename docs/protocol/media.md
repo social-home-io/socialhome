@@ -668,14 +668,18 @@ row's author household only, bytes checked against the row's `h`.
   fixed) it looks the names up, groups them per space and sends one
   request per 50 names of a space, so a gallery grid with more than 50
   missing pictures asks for all of them.
-- **Provider:** the space's host. A trusted household (a live `admin` /
+- **Provider:** the space's host — the households acting as host here,
+  owner first, then the delegated admin that invited us
+  (`host_equivalence.acting_hosts`, the same households the scheduler
+  BEGINs and waits on); the first at v_92 that takes it ends it. A trusted household (a live `admin` /
   `moderator` seat in the roster mirror; the owner is the host), sorted by
   instance id and started at this household's stable offset, never
   ourselves — the one picker the helper resume uses too
   (`federation/sync/space/trusted_helpers.py`) — gets the same request
   ONLY when the send to the host failed or the host is **silent**
   (`HostContact.is_silent`: it left the scheduler's last round unanswered
-  for 120 s and has not been heard since). Never after a wait while the
+  for 120 s and has not been heard since — a sync answer or any verified
+  event of the space from it ends that at once). Never after a wait while the
   host answers, so a helper learns which items a member opens only while
   the host is away. At most 2 helpers are tried (`MAX_HELPERS`); the first
   that takes the request ends it. Only providers at v_92

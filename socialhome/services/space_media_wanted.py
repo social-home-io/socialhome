@@ -16,7 +16,11 @@ LIVE items of this household that show it
 .space_rows_of`), keeps the spaces where this household holds a MEMBER seat
 (a follower keeps the GFS's v_83 on-demand path), and sends one request
 ``{space_id, files: [{item, name}]}`` per :data:`MAX_WANTED_FILES` names of
-a space to the space's host. A trusted helper (an admin / moderator
+a space to the space's host — the households acting as host here, owner
+first, then the delegated admin that invited us
+(:func:`~socialhome.federation.host_equivalence.acting_hosts`, the same
+households the scheduler BEGINs and waits on); the first at v_92 that takes
+it ends it. A trusted helper (an admin / moderator
 household at v_92 from the one shared picker,
 :mod:`socialhome.federation.sync.space.trusted_helpers`) gets the same
 request ONLY when the host cannot be reached (the send failed) or is silent
@@ -72,6 +76,7 @@ from ..domain.file_hashes import (
     is_space_content_media_name,
     space_content_media_name,
 )
+from ..federation.host_equivalence import acting_hosts
 from ..federation.sync.space.file_gate import (
     CatchUpFileGates,
     SpaceFileBudget,
@@ -284,20 +289,38 @@ class SpaceMediaWanted:
         return added
 
     async def _deliver(self, space_id: str, files: list[tuple[str, str]]) -> None:
-        """Ask the host for *files* (``(name, item)``); a helper only when the
-        host cannot be reached or is silent."""
+        """Ask the host for *files* (``(name, item)``) — the households
+        acting as host here, owner first (:func:`acting_hosts`, the same
+        notion the scheduler's silent-host wait uses); a helper only when
+        none of them can be reached or the host is silent."""
         space = await self._spaces.get(space_id)
-        host = space.owner_instance_id if space is not None else ""
-        if not host or host == self._own:
+        if (
+            space is None
+            or not space.owner_instance_id
+            or space.owner_instance_id == self._own
+        ):
             return
+        hosts = [
+            h
+            for h in await acting_hosts(
+                self._spaces, self._seats, space, own_instance_id=self._own
+            )
+            if h and h != self._own
+        ]
         payload = {
             "space_id": space_id,
             "files": [{"item": item, "name": name} for name, item in files],
         }
-        current = await self._federation.space_member_supports(
-            host, min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
-        )
-        sent = current and await self._send(host, space_id, payload)
+        current = sent = False
+        for host in hosts:
+            if not await self._federation.space_member_supports(
+                host, min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
+            ):
+                continue
+            current = True
+            if await self._send(host, space_id, payload):
+                sent = True
+                break
         if not self._contact.is_silent(space_id) and (sent or not current):
             # The host answers (an older one heals through its catch-up).
             return
@@ -305,7 +328,7 @@ class SpaceMediaWanted:
             self._seats,
             self._federation,
             space_id,
-            exclude={host, self._own},
+            exclude={*hosts, self._own},
             offset=helper_offset(self._own, space_id),
         )
         for helper in helpers[:MAX_HELPERS]:

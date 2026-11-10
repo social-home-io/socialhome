@@ -212,11 +212,12 @@ class AbstractSpacePostRepo(Protocol):
         limit: int = 500,
     ) -> list[tuple[str, Comment]]: ...
     async def newest_from_household(
-        self, space_id: str, instance_id: str
+        self, space_id: str, instance_id: str, *, before: str | None = None
     ) -> str | None:
         """The newest ``created_at`` (``YYYY-MM-DD HH:MM:SS``, UTC) of the
         space's posts and comments held here written by the people seated
-        for *instance_id*; ``None``: none (v_92 helper resume)."""
+        for *instance_id*; ``None``: none (v_92 helper resume). With
+        *before* (same shape) only rows created before it count."""
         ...
 
     async def list_comments_sync_page(
@@ -1001,21 +1002,36 @@ class SqliteSpacePostRepo:
         return out
 
     async def newest_from_household(
-        self, space_id: str, instance_id: str
+        self, space_id: str, instance_id: str, *, before: str | None = None
     ) -> str | None:
         people = (
             "SELECT user_id FROM space_remote_members"
             " WHERE space_id=? AND instance_id=?"
         )
+        cut_posts = cut_comments = ""
+        cut: tuple[str, ...] = ()
+        if before is not None:
+            cut_posts = " AND datetime(created_at) < datetime(?)"
+            cut_comments = " AND datetime(c.created_at) < datetime(?)"
+            cut = (before,)
         row = await self._db.fetchone(
             "SELECT MAX(t) AS t FROM ("
             " SELECT MAX(datetime(created_at)) AS t FROM space_posts"
-            f" WHERE space_id=? AND author IN ({people})"
+            f" WHERE space_id=? AND author IN ({people}){cut_posts}"
             " UNION ALL"
             " SELECT MAX(datetime(c.created_at)) FROM space_post_comments c"
             " JOIN space_posts p ON p.id = c.post_id"
-            f" WHERE p.space_id=? AND c.author IN ({people}))",
-            (space_id, space_id, instance_id, space_id, space_id, instance_id),
+            f" WHERE p.space_id=? AND c.author IN ({people}){cut_comments})",
+            (
+                space_id,
+                space_id,
+                instance_id,
+                *cut,
+                space_id,
+                space_id,
+                instance_id,
+                *cut,
+            ),
         )
         return str(row["t"]) if row is not None and row["t"] else None
 

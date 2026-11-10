@@ -58,12 +58,15 @@ Triggers:
     spread over its helpers, one step further each round; none at v_92 →
     wait for the host) gets
     ``SPACE_SYNC_RESUME`` since the newest of: the host last heard, the
-    newest row this household holds from that helper's people minus
-    :data:`HELPER_OVERLAP_S` (read from the database, so a restart or a
-    rotation to another helper never replays more than that helper's gap),
-    ``RESUME_MAX_AGE_S`` ago: its own people's rows and their files. The
-    round also marks the host silent (``HostContact.went_silent``) until it
-    is heard again. The host is still
+    newest row this household held from that helper's people BEFORE this
+    process started minus :data:`HELPER_OVERLAP_S` (read from the database,
+    so a restart or a rotation to another helper never replays more than
+    that helper's gap, and a live post landing after a restart cannot move
+    it past the gap), ``RESUME_MAX_AGE_S`` ago — never later than now: its
+    own people's rows and their files. The round also marks the host silent
+    (``HostContact.went_silent``, with the households it waited on) until
+    one of them answers a BEGIN or sends any verified event of the space.
+    The host is still
     asked first every tick — a mesh-only host too, with the small
     incremental BEGIN once its full catch-up completed or hit its cap
     (:meth:`SpaceSyncScheduler._mesh_incremental`). Every member alike —
@@ -79,7 +82,7 @@ import logging
 import os
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
@@ -95,7 +98,7 @@ from ....domain.federation_capabilities import FederationCapability
 from ....domain.space import Space, SpaceRole, SpaceType
 from ....infrastructure.event_bus import EventBus
 from ....infrastructure.reconnect_queue import P1_SECURITY, P4_DM, P6_PRODUCTIVITY
-from ...host_equivalence import acts_as_host
+from ...host_equivalence import acting_hosts
 from ...sync_manager import MAX_ACTIVE_SESSIONS_PER_INSTANCE
 from .resume import RESUME_MAX_AGE_S
 from .trusted_helpers import helper_offset, trusted_helpers
@@ -191,13 +194,21 @@ HELPER_OVERLAP_S: float = 5 * 60.0
 class _HostContact(Protocol):
     def now(self) -> float: ...
 
+    def started_at(self) -> datetime: ...
+
     def heard(self, space_id: str) -> None: ...
 
     def heard_since(self, space_id: str, t: float) -> bool: ...
 
     def last_heard_iso(self, space_id: str) -> str | None: ...
 
-    def went_silent(self, space_id: str) -> None: ...
+    def went_silent(self, space_id: str, hosts: Iterable[str]) -> None: ...
+
+
+class _NewestFrom(Protocol):
+    async def __call__(
+        self, space_id: str, instance_id: str, *, before: str | None = None
+    ) -> str | None: ...
 
 
 class _ResumeSender(Protocol):
@@ -216,20 +227,35 @@ def _parse_utc(iso: str | None) -> datetime | None:
     return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
 
 
-def _resume_since(last_heard_iso: str | None, newest_row_iso: str | None) -> str:
+def _db_utc(at: datetime) -> str:
+    """*at* in the naive-UTC shape ``created_at`` columns hold."""
+    return at.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _resume_since(
+    last_heard_iso: str | None, newest_row_iso: str | None, started: datetime
+) -> str:
     """Where a helper resume starts: the newest of when the host was last
     heard, the newest row held here from the helper's people minus
     :data:`HELPER_OVERLAP_S` (it replays only its own people's rows), and
-    ``RESUME_MAX_AGE_S`` ago (the provider clamps to the same floor)."""
-    floor = datetime.now(UTC) - timedelta(seconds=RESUME_MAX_AGE_S)
+    ``RESUME_MAX_AGE_S`` ago (the provider clamps to the same floor).
+
+    Only rows held before this process *started* count (the caller asks the
+    database for those; a row stamped later — a helper whose clock runs
+    ahead — is clamped to *started* here): a live post that lands after a
+    restart must not move ``since`` past the day the household was down.
+    ``since`` never lies in the future."""
+    now = datetime.now(UTC)
+    floor = now - timedelta(seconds=RESUME_MAX_AGE_S)
     heard = _parse_utc(last_heard_iso)
     newest = _parse_utc(newest_row_iso)
     since = floor
     if newest is not None:
+        newest = min(newest, started)
         since = max(since, newest - timedelta(seconds=HELPER_OVERLAP_S))
     if heard is not None and heard > since:
-        return last_heard_iso or since.isoformat()
-    return since.isoformat()
+        since = heard
+    return min(since, now).isoformat()
 
 
 class SpaceSyncScheduler:
@@ -343,7 +369,7 @@ class SpaceSyncScheduler:
         self._resume: _ResumeSender | None = None
         self._roster_authority: Callable[[str], Awaitable[bool]] | None = None
         #: ``(space, household) →`` the newest row held here from its people.
-        self._newest_from: Callable[[str, str], Awaitable[str | None]] | None = None
+        self._newest_from: _NewestFrom | None = None
         #: space → the households acting as its host whose answer this
         #: round's BEGIN awaits: set by the tick, consumed when the BEGIN to
         #: one of them actually goes out (a parked one keeps it until sent).
@@ -359,13 +385,14 @@ class SpaceSyncScheduler:
         host_contact: _HostContact,
         resume: _ResumeSender,
         roster_authority: Callable[[str], Awaitable[bool]],
-        newest_from: Callable[[str, str], Awaitable[str | None]],
+        newest_from: _NewestFrom,
     ) -> None:
         """Wire trigger 10 (v_92): the host contact the receiver marks, the
         ``SPACE_SYNC_RESUME`` sender, whether we hold a space's roster
         authority (then we are host-equivalent: nothing to fall back from),
-        and ``newest_from(space, household)`` — the newest row held here
-        from that household's people, where its resume starts. Needs the
+        and ``newest_from(space, household, before=)`` — the newest row held
+        here from that household's people created before this process
+        started, where its resume starts. Needs the
         roster mirror (``seat_repo``) for the helpers."""
         self._host_contact = host_contact
         self._resume = resume
@@ -1013,7 +1040,7 @@ class SpaceSyncScheduler:
             return
         if contact.heard_since(space_id, asked):
             return
-        contact.went_silent(space_id)
+        contact.went_silent(space_id, hosts)
         try:
             rounds = self._helper_round.get(space_id, 0)
             helpers = await trusted_helpers(
@@ -1034,8 +1061,11 @@ class SpaceSyncScheduler:
                 return
             self._helper_round[space_id] = rounds + 1
             helper = helpers[0]
+            started = contact.started_at()
             since = _resume_since(
-                contact.last_heard_iso(space_id), await newest_from(space_id, helper)
+                contact.last_heard_iso(space_id),
+                await newest_from(space_id, helper, before=_db_utc(started)),
+                started,
             )
             log.info(
                 "space %s: the host did not answer within %.0f s — asking "
@@ -1227,19 +1257,12 @@ class SpaceSyncScheduler:
         inviting admin household while it is host-equivalent here
         (:mod:`socialhome.federation.host_equivalence`). The owner may not
         know of us yet, or be offline; the inviter seated us."""
-        targets = [space.owner_instance_id]
-        if self._seat_repo is not None:
-            inviter = await self._space_repo.get_invited_by(space.id)
-            if (
-                inviter
-                and inviter not in targets
-                and inviter != self._own_instance_id
-                and await acts_as_host(
-                    self._space_repo, self._seat_repo, space, inviter
-                )
-            ):
-                targets.append(inviter)
-        return targets
+        return await acting_hosts(
+            self._space_repo,
+            self._seat_repo,
+            space,
+            own_instance_id=self._own_instance_id,
+        )
 
     async def _list_joined_remote_spaces(self) -> list[Space]:
         """Spaces hosted elsewhere in which this household holds a local

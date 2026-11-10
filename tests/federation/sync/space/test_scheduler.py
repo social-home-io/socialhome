@@ -1788,6 +1788,8 @@ class _Resume:
     def __init__(self) -> None:
         self.requests: list[dict] = []
         self.fail = False
+        #: the ``before`` each newest-row lookup was made with.
+        self.asked_before: list[str | None] = []
 
     async def send_request(self, *, space_id, instance_id, since):
         self.requests.append(
@@ -1807,7 +1809,8 @@ def _helper_sched(
     authority: bool = False,
     own_instance_id: str = "self",
     space_type: SpaceType = SpaceType.PRIVATE,
-    newest: dict[str, str] | None = None,
+    newest: dict[str, str | list[str]] | None = None,
+    started: datetime | None = None,
 ):
     from socialhome.federation.sync.space.host_contact import HostContact
 
@@ -1827,14 +1830,29 @@ def _helper_sched(
         sync_manager=sync_manager,
         seat_repo=_Seats(helpers),
     )
-    contact = HostContact()
+    contact = (
+        HostContact() if started is None else HostContact(wall=lambda: started)  # type: ignore[misc]
+    )
     resume = _Resume()
 
     async def _authority(space_id: str) -> bool:
         return authority
 
-    async def _newest(space_id: str, instance_id: str) -> str | None:
-        return held.get(instance_id)
+    async def _newest(
+        space_id: str, instance_id: str, *, before: str | None = None
+    ) -> str | None:
+        """Like ``newest_from_household``: rows at or after *before* never
+        count (naive UTC ``YYYY-MM-DD HH:MM:SS`` strings compare as text)."""
+        resume.asked_before.append(before)
+        rows = held.get(instance_id)
+        if rows is None:
+            return None
+        kept = [
+            r
+            for r in ([rows] if isinstance(rows, str) else rows)
+            if before is None or r < before
+        ]
+        return max(kept) if kept else None
 
     sched.attach_helpers(
         host_contact=contact,
@@ -2002,33 +2020,55 @@ async def test_a_row_older_than_30_days_is_clamped_to_the_floor(
     assert abs(since - floor) < timedelta(minutes=1)
 
 
-async def test_a_failed_helper_send_changes_nothing_for_the_next_round(
+async def test_a_live_post_after_a_restart_never_moves_since_past_the_gap(
     bus, queue, sync_manager, quick_answer_wait
 ):
-    """Nothing is remembered about an ask: a send that failed leaves the
-    next round's start exactly where the rows put it."""
+    """Only rows held before this process started count: a household down
+    for a day that, after its restart, gets one live post from the helper's
+    people still asks the helper from its newest PRE-boot row — not from
+    the live post, which would skip the whole offline day."""
+    boot = datetime.now(UTC) - timedelta(minutes=10)
+    pre_boot = (boot - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+    live = (boot + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
     sched, _contact, resume = _helper_sched(
         bus,
         queue,
         sync_manager,
         helpers=["admin-a"],
-        newest={"admin-a": "2026-11-09 10:00:00"},
+        newest={"admin-a": [pre_boot, live]},
+        started=boot,
     )
-    resume.fail = True
     await _round(sched)
     await _wait_checks(sched)
-    resume.fail = False
-    await _round(sched)
-    await _wait_checks(sched)
-    first, second = (r["since"] for r in resume.requests)
-    assert first == second
+    [request] = resume.requests
+    assert resume.asked_before == [boot.strftime("%Y-%m-%d %H:%M:%S")]
+    assert datetime.fromisoformat(request["since"]) == datetime.fromisoformat(
+        pre_boot
+    ).replace(tzinfo=UTC) - timedelta(seconds=scheduler_mod.HELPER_OVERLAP_S)
+
+
+def test_since_never_passes_this_process_start_nor_now():
+    """A row stamped past the start (a helper whose clock runs ahead) is
+    clamped to the start; ``since`` itself never lies in the future."""
+    now = datetime.now(UTC)
+    started = now - timedelta(hours=1)
+    ahead = (now + timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+    since = datetime.fromisoformat(scheduler_mod._resume_since(None, ahead, started))
+    overlap = timedelta(seconds=scheduler_mod.HELPER_OVERLAP_S)
+    assert abs(since - (started - overlap)) < timedelta(seconds=1)
+    future_start = now + timedelta(days=1)
+    since = datetime.fromisoformat(
+        scheduler_mod._resume_since(None, ahead, future_start)
+    )
+    assert since <= datetime.now(UTC)
 
 
 async def test_an_unanswered_round_marks_the_host_silent(
     bus, queue, sync_manager, quick_answer_wait
 ):
     """The scheduler's notion of a silent host is what SPACE_MEDIA_WANTED
-    reads before it asks a helper; the host's next answer clears it."""
+    reads before it asks a helper; the host's next answer — or any verified
+    event from the household it waited on — clears it; a helper's does not."""
     sched, contact, _resume = _helper_sched(
         bus, queue, sync_manager, helpers=["admin-a"]
     )
@@ -2037,6 +2077,13 @@ async def test_an_unanswered_round_marks_the_host_silent(
     await _wait_checks(sched)
     assert contact.is_silent("sp-1")
     contact.heard("sp-1")
+    assert not contact.is_silent("sp-1")
+    await _round(sched)
+    await _wait_checks(sched)
+    assert contact.is_silent("sp-1")
+    contact.heard_from("sp-1", "admin-a")
+    assert contact.is_silent("sp-1")
+    contact.heard_from("sp-1", "host")
     assert not contact.is_silent("sp-1")
 
 

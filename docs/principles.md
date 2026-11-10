@@ -1295,7 +1295,8 @@ work when the host does not answer:
   round's sync request unanswered (120 s) picks ONE trusted helper
   automatically — an `admin` / `moderator` household at v_92, from the
   member's roster mirror — and asks it to replay the space since that
-  helper's people's newest row it holds (at most 30 days). The helper sends
+  helper's people's newest row it held before its last restart (at most
+  30 days). The helper sends
   its own people's rows and their files only, and only to a household
   holding a member seat.
 - **Files on view.** `SPACE_MEDIA_WANTED` tells the host which items a
@@ -1303,7 +1304,10 @@ work when the host does not answer:
   space envelope). An admin / moderator household learns it **only while
   the host is offline or unreachable** — the send to the host failed, or
   the host left the member's last sync round unanswered and has not been
-  heard since — never while the host answers. That is new viewing metadata
+  heard since (any verified event of the space from the host — not only a
+  sync answer — ends that at once) — never while the host answers. "The
+  host" is the household acting as host here: the owner, or the delegated
+  admin that invited us — the same households the sync round asks. That is new viewing metadata
   toward helpers, limited to the host's absence: before, only the host
   learned what a member caught up on.
 

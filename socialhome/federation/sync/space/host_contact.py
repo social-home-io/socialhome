@@ -13,25 +13,31 @@ trusted helper is asked for the bounded ``SPACE_SYNC_RESUME`` instead
 (``scheduler.SpaceSyncScheduler``).
 
 It also holds whether the host is **silent** now: the scheduler marks a
-space when a round's BEGIN to its host went unanswered for the full wait
-(:meth:`HostContact.went_silent`); the host's next answer clears it. A
-member asks a trusted helper for a file it misses
-(``SPACE_MEDIA_WANTED``) only while the host is silent or cannot be
-reached (``services.space_media_wanted``) — never while it answers.
+space when a round's BEGIN to the households acting as its host went
+unanswered for the full wait (:meth:`HostContact.went_silent`, which keeps
+those households). Their next sync answer clears it — and so does ANY
+verified event one of them sends for that space (a post, a config change;
+``FederationService._dispatch_event`` → :meth:`HostContact.heard_from`), so
+a host that comes back stops helper escalation at once, not only on the
+next 30-minute round. A member asks a trusted helper for a file it misses
+(``SPACE_MEDIA_WANTED``) only while the host is silent or cannot be reached
+(``services.space_media_wanted``) — never while it answers.
 
 In memory only: a restart forgets every answer, so a household that just
 booted falls back only once a BEGIN it sends goes unanswered for the full
 window, and is not silent before that. Where a helper resume starts is not
-kept here: it comes from the rows this household holds
-(``scheduler._resume_since``), so it survives a restart. Bounded: at most :data:`MAX_SPACES_TRACKED` spaces per map, oldest
-dropped.
+kept here: it comes from the rows this household held before this process
+started (:meth:`HostContact.started_at`, ``scheduler._resume_since``), so it
+survives a restart and a live post landing after the restart cannot move it
+past the gap. Bounded: at most :data:`MAX_SPACES_TRACKED` spaces per map,
+oldest dropped.
 """
 
 from __future__ import annotations
 
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 
 #: Spaces remembered (oldest heard dropped first).
@@ -46,7 +52,7 @@ class HostContact:
     """Per space: the monotonic and the UTC wall-clock time its host was
     last heard."""
 
-    __slots__ = ("_clock", "_heard", "_silent", "_wall")
+    __slots__ = ("_clock", "_heard", "_silent", "_started", "_wall")
 
     def __init__(
         self,
@@ -56,9 +62,17 @@ class HostContact:
     ) -> None:
         self._clock = clock
         self._wall = wall
+        #: When this process started (UTC): a helper resume counts only
+        #: rows held before it.
+        self._started = wall()
         self._heard: OrderedDict[str, tuple[float, str]] = OrderedDict()
-        #: spaces whose host left a round unanswered (oldest first).
-        self._silent: OrderedDict[str, None] = OrderedDict()
+        #: spaces whose host left a round unanswered → the households that
+        #: acted as its host for that round (oldest first).
+        self._silent: OrderedDict[str, frozenset[str]] = OrderedDict()
+
+    def started_at(self) -> datetime:
+        """When this process started (UTC wall clock)."""
+        return self._started
 
     def now(self) -> float:
         """The clock :meth:`heard_since` compares against."""
@@ -84,14 +98,24 @@ class HostContact:
         held = self._heard.get(space_id)
         return held[1] if held is not None else None
 
-    def went_silent(self, space_id: str) -> None:
-        """The host left this round's BEGIN for *space_id* unanswered."""
+    def went_silent(self, space_id: str, hosts: Iterable[str]) -> None:
+        """*hosts* — the households acting as *space_id*'s host here — left
+        this round's BEGIN unanswered."""
         if not space_id:
             return
-        self._silent[space_id] = None
+        self._silent[space_id] = frozenset(h for h in hosts if h)
         self._silent.move_to_end(space_id)
         while len(self._silent) > MAX_SPACES_TRACKED:
             self._silent.popitem(last=False)
+
+    def heard_from(self, space_id: str, instance_id: str) -> None:
+        """A verified event of *space_id* arrived from *instance_id*: if it
+        is one of the households the silent round waited on, the host is
+        back. Never moves :meth:`last_heard_iso` — only a sync answer says
+        what the host covered. In memory, O(1): called for every event."""
+        hosts = self._silent.get(space_id) if space_id else None
+        if hosts is not None and instance_id in hosts:
+            del self._silent[space_id]
 
     def is_silent(self, space_id: str) -> bool:
         """Whether *space_id*'s host left its last round unanswered and has

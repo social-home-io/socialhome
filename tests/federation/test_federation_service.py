@@ -41,6 +41,7 @@ from socialhome.domain.federation import (
     DELIVERY_ERROR_SUPERSEDED,
     BroadcastResult,
     DeliveryResult,
+    FederationEvent,
     FederationEventType,
     InstanceSource,
     PairingSession,
@@ -2361,6 +2362,34 @@ async def test_dispatch_space_post_created():
         space_id="s1",
     )
     await svc._dispatch_event(event)
+
+
+async def test_any_dispatched_space_event_tells_the_host_contact():
+    """v_92: every verified event dispatched here tells the host contact who
+    sent it for which space, so a silent host that speaks again (a post, a
+    config change — not only a sync answer) stops helper escalation at once.
+    Events without a space tell it nothing."""
+    svc, _ = _make_service(bus=EventBus())
+    seen: list[tuple[str, str]] = []
+
+    class _Contact:
+        def heard_from(self, space_id: str, instance_id: str) -> None:
+            seen.append((space_id, instance_id))
+
+    svc.attach_host_contact(_Contact())
+    for space_id in ("s1", None):
+        await svc._dispatch_event(
+            FederationEvent(
+                msg_id=f"m-{space_id}",
+                event_type=FederationEventType.SPACE_POST_CREATED,
+                from_instance="host-hh",
+                to_instance="test-instance",
+                timestamp=datetime.now(UTC).isoformat(),
+                payload={"post_id": "p1"},
+                space_id=space_id,
+            )
+        )
+    assert seen == [("s1", "host-hh")]
 
 
 async def test_dispatch_space_member_joined():

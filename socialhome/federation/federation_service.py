@@ -29,7 +29,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iter
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import aiohttp
 import orjson as _orjson
@@ -344,6 +344,10 @@ def _deferred_payload_size(payload: dict) -> int:
     return len(_orjson.dumps(payload, default=str))
 
 
+class _HostSeen(Protocol):
+    def heard_from(self, space_id: str, instance_id: str) -> None: ...
+
+
 @dataclass(slots=True, frozen=True)
 class _DeferredMeshSend:
     """One broadcast waiting in a mesh target's deferred FIFO. Process-local
@@ -425,6 +429,7 @@ class FederationService:
         "_encoder",
         "_event_registry",
         "_federation_repo",
+        "_host_contact",
         "_host_hop",
         "_http_client",
         "_ice_servers",
@@ -510,6 +515,9 @@ class FederationService:
         self._call_signaling = call_signaling
         self._ice_servers = ice_servers or []
         self._idempotency_cache = None
+        #: v_92 — told of every dispatched space event's sender
+        #: (:meth:`attach_host_contact`).
+        self._host_contact: _HostSeen | None = None
         self._typing_service = None
         self._dm_routing_service = None
         self._transport = None
@@ -1116,6 +1124,14 @@ class FederationService:
             reason,
         )
         await self._event_registry.dispatch(held)
+
+    def attach_host_contact(self, contact: _HostSeen) -> None:
+        """Wire the v_92 host contact
+        (:class:`~socialhome.federation.sync.space.host_contact.HostContact`):
+        every verified event dispatched here tells it who sent it for which
+        space, so a silent host that speaks again — any event, not only a
+        sync answer — stops the helper fallback at once."""
+        self._host_contact = contact
 
     def attach_idempotency_cache(self, cache) -> None:
         """Attach an :class:`IdempotencyCache` for inbound dedup."""
@@ -4492,6 +4508,9 @@ class FederationService:
             event.space_id,
         )
 
+        if self._host_contact is not None and event.space_id:
+            # In memory, O(1) — clears a silent host only (v_92).
+            self._host_contact.heard_from(event.space_id, event.from_instance)
         await self._event_registry.dispatch(event)
 
     def _register_default_handlers(self) -> None:

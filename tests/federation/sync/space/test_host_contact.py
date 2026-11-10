@@ -66,12 +66,12 @@ def test_a_host_is_silent_from_an_unanswered_round_until_heard() -> None:
     asks a helper only while it is)."""
     contact = HostContact(clock=_Clock(), wall=_wall)
     assert contact.is_silent("sp") is False
-    contact.went_silent("sp")
+    contact.went_silent("sp", {"host"})
     assert contact.is_silent("sp") is True
     assert contact.is_silent("other") is False
     contact.heard("sp")
     assert contact.is_silent("sp") is False
-    contact.went_silent("")
+    contact.went_silent("", {"host"})
     assert contact.is_silent("") is False
 
 
@@ -79,6 +79,36 @@ def test_silent_spaces_stay_bounded(monkeypatch) -> None:
     monkeypatch.setattr(host_contact_mod, "MAX_SPACES_TRACKED", 2)
     contact = HostContact(clock=_Clock(), wall=_wall)
     for space in ("a", "b", "c"):
-        contact.went_silent(space)
+        contact.went_silent(space, {"host"})
     assert contact.is_silent("a") is False
     assert contact.is_silent("c") is True
+
+
+def test_started_at_is_the_wall_time_this_process_began() -> None:
+    """A helper resume counts only rows held before this process started."""
+    contact = HostContact(clock=_Clock(), wall=_wall)
+    assert contact.started_at() == _wall()
+
+
+def test_any_verified_event_from_a_silent_host_clears_silent() -> None:
+    """``went_silent`` records which households acted as host for the round;
+    any verified event from one of them for that space (``heard_from``)
+    clears the silence at once — another household's event does not, and
+    it never moves ``last_heard_iso`` (only a sync answer says what the host
+    covered)."""
+    contact = HostContact(clock=_Clock(), wall=_wall)
+    contact.heard_from("sp", "host")  # not silent: a no-op
+    assert contact.last_heard_iso("sp") is None
+    contact.went_silent("sp", {"host", "admin-hh"})
+    contact.heard_from("sp", "helper")
+    contact.heard_from("other", "host")
+    assert contact.is_silent("sp") is True
+    contact.heard_from("sp", "admin-hh")
+    assert contact.is_silent("sp") is False
+    assert contact.last_heard_iso("sp") is None
+    contact.went_silent("sp", {"host"})
+    contact.heard_from("", "host")
+    contact.heard_from("sp", "")
+    assert contact.is_silent("sp") is True
+    contact.heard("sp")
+    assert contact.is_silent("sp") is False

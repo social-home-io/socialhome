@@ -1393,7 +1393,11 @@ from __future__ import annotations
 #:   gets no helper fills (the host still fills; a v_85 receiver would take
 #:   them, an older one stores them under a name no row shows); a helper
 #:   below v_86 ships none. No sync-stream record change. Labelled
-#:   "Admins and moderators fill in missing space pictures".
+#:   "Admins and moderators fill in missing space pictures". Since v_92 a
+#:   helper's replay ships only its own people's rows and files; other
+#:   people's files ride only ``SPACE_MEDIA_WANTED`` (v_92 requesters), so
+#:   no code gates on ``MIN_FOR_TRUSTED_FILE_FILLS`` any more (kept for
+#:   history; the receiver's fill rule stands).
 #: * **v_87** (2026-11-08) — **mesh-sized media through the GFS relay**.
 #:   A ``SPACE_MEDIA_BLOB`` / ``DM_MEDIA_BLOB`` chunk to a household seated
 #:   from an invite link (``space_session``) whose GFS proved the signed
@@ -2148,7 +2152,10 @@ class FederationCapability:
     #: v_86 — a household at or above it takes a hashed file of a row it
     #: holds from a trusted household (host, delegated admin, admin or
     #: moderator seat) as well as from the row's author: a trusted non-host
-    #: provider ships other people's hashed files only to it.
+    #: provider ships other people's hashed files only to it. Since v_92 no
+    #: code gates on it: a helper ships other people's files only on a
+    #: ``SPACE_MEDIA_WANTED``, which only a v_92 requester sends (kept for
+    #: history).
     MIN_FOR_TRUSTED_FILE_FILLS = 86
     #: v_87 — a household at or above it opens binary media frames from the
     #: GFS relay (``\x00SHR``): a link-joined peer gets 512 KiB media

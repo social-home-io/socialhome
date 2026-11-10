@@ -1088,3 +1088,40 @@ async def test_newest_from_household_is_its_peoples_newest_post_or_comment(env):
         "2026-11-01 17:00:00"
     )
     assert await env.repo.newest_from_household("sp-other", "inst-b") is None
+
+
+async def test_newest_from_household_before_counts_only_older_rows(env):
+    """``before`` (this process's start): rows written at or after it never
+    count — a live post that lands after a restart must not move a helper
+    resume past the gap the household was down for."""
+    await env.db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES(?,?,?,?)",
+        (env.space_id, "inst-b", "uid-hb", "moderator"),
+    )
+    t0 = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
+    await env.repo.save(env.space_id, replace(_post("p-old", "uid-hb"), created_at=t0))
+    await env.repo.save(
+        env.space_id,
+        replace(_post("p-live", "uid-hb"), created_at=t0 + timedelta(days=1)),
+    )
+    await env.repo.add_comment(
+        replace(
+            _comment("c-live", "p-old", "uid-hb"), created_at=t0 + timedelta(days=1)
+        ),
+        space_id=env.space_id,
+    )
+    boot = "2026-11-02 00:00:00"
+    assert (
+        await env.repo.newest_from_household(env.space_id, "inst-b", before=boot)
+        == "2026-11-01 12:00:00"
+    )
+    assert (
+        await env.repo.newest_from_household(
+            env.space_id, "inst-b", before="2026-11-01 12:00:00"
+        )
+        is None
+    )
+    assert await env.repo.newest_from_household(env.space_id, "inst-b") == (
+        "2026-11-02 12:00:00"
+    )
