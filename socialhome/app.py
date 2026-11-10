@@ -179,7 +179,6 @@ from .infrastructure.moment_retention_scheduler import MomentRetentionScheduler
 from .infrastructure.notification_cleanup_scheduler import (
     NotificationCleanupScheduler,
 )
-from .infrastructure.outbox_processor import GatedOutboxMulti
 from .infrastructure.page_lock_scheduler import PageLockExpiryScheduler
 from .infrastructure.pairing_relay_scheduler import PairingRelayRetentionScheduler
 from .infrastructure.pairing_session_prune_scheduler import (
@@ -582,9 +581,9 @@ def _build_outbox_processor(
         outbox_repo,
         _deliver,
         after_prune=peer_unpair.sweep_tombstones,
-        multi=GatedOutboxMulti(federation_service, _still_wanted),
+        multi=federation_service,
     )
-    federation_service.attach_outbox_wake(processor.wake)
+    federation_service.attach_outbox_wake(processor.wake, still_wanted=_still_wanted)
     return processor
 
 

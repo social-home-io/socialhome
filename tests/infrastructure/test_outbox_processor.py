@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
@@ -18,7 +17,6 @@ from socialhome.infrastructure.outbox_processor import (
     MAX_RETRY_AFTER_S,
     PARALLEL_RECIPIENTS,
     DeliveryOutcome,
-    GatedOutboxMulti,
     OutboxProcessor,
     RetryAfter,
 )
@@ -996,61 +994,6 @@ async def test_a_fast_failure_does_not_stall_the_recipient():
     await OutboxProcessor(repo, _deliver, rng=lambda: 0.0).drain_once()
     assert calls == ["a1", "a2", "a3"]
     assert [c.args[0] for c in repo.reschedule.await_args_list] == ["a1", "a2", "a3"]
-
-
-# ── GatedOutboxMulti ──────────────────────────────────────────────────────
-
-
-class _Fed:
-    def __init__(self) -> None:
-        self.asked: list[list[str]] = []
-
-    async def outbox_multi_groups(self, entries):
-        self.asked.append([e.id for e in entries])
-        return [entries]
-
-    async def deliver_outbox_multi(self, group):
-        return DeliveryOutcome.SUCCESS, group
-
-
-async def test_gated_multi_keeps_rows_moderation_refuses_out_of_groups():
-    checked: list[str] = []
-
-    async def _wanted(entry):
-        checked.append(entry.id)
-        return entry.id != "refused"
-
-    rows = [_row(i, f"peer-{i}") for i in ("a", "refused", "b")]
-    gate = GatedOutboxMulti(_Fed(), lambda: _wanted)
-    assert [[e.id for e in g] for g in await gate.outbox_multi_groups(rows)] == [
-        ["a", "b"]
-    ]
-    assert checked == ["a", "refused", "b"]
-    assert await gate.deliver_outbox_multi(rows) == (DeliveryOutcome.SUCCESS, rows)
-    ungated = GatedOutboxMulti(_Fed(), lambda: None)
-    assert len((await ungated.outbox_multi_groups(rows))[0]) == 3
-
-
-async def test_gated_multi_checks_only_rows_that_could_be_grouped():
-    checked: list[str] = []
-
-    async def _wanted(entry):
-        checked.append(entry.id)
-        return True
-
-    grouped = _row("grouped", "A")
-    single_rows = [
-        dataclasses.replace(_row("no-multi", "B"), msg_id=None),
-        dataclasses.replace(_row("no-space", "C"), space_id=None),
-        dataclasses.replace(
-            _row("not-multi", "D"), event_type=FederationEventType.PAIRING_INTRO
-        ),
-    ]
-    fed = _Fed()
-    gate = GatedOutboxMulti(fed, lambda: _wanted)
-    await gate.outbox_multi_groups([grouped, *single_rows])
-    assert checked == ["grouped"]
-    assert fed.asked == [["grouped"]]
 
 
 # ── Non-blocking passes: a hung peer never delays a queued multi ──────────

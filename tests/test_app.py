@@ -707,13 +707,16 @@ async def test_gfs_route_resolver_maps_routes_to_active_connection_urls(tmp_dir)
 
 def test_build_outbox_processor_hands_its_wake_to_the_federation_service():
     """v_91: the outbox is the only multi sender — a broadcast that queued
-    a multi payload wakes it."""
+    a multi payload wakes it — and it groups rows with the moderation
+    check (unwired here: ``None``)."""
 
     class _Fed:
         wake = None
+        still_wanted = None
 
-        def attach_outbox_wake(self, wake):
+        def attach_outbox_wake(self, wake, *, still_wanted=None):
             self.wake = wake
+            self.still_wanted = still_wanted
 
     class _Unpair:
         async def sweep_tombstones(self):
@@ -728,6 +731,8 @@ def test_build_outbox_processor_hands_its_wake_to_the_federation_service():
         _Unpair(),  # type: ignore[arg-type]
     )
     assert fed.wake == processor.wake
+    assert processor._multi is fed
+    assert fed.still_wanted is not None and fed.still_wanted() is None
 
 
 def test_build_gfs_relay_inbound_returns_the_service():

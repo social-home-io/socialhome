@@ -26,7 +26,6 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, TypeVar
 
-from ..domain.federation import MULTI_EVENT_TYPES
 from ..domain.federation_retention import NEVER_DROP, TERMINAL_GRACE, is_long_lived
 from ..domain.gfs_mailbox import MULTI_MAX_RECIPIENTS
 from ..domain.outbox import DeliveryOutcome, RetryAfter
@@ -164,50 +163,6 @@ class OutboxMulti(Protocol):
     ) -> list[list[OutboxEntry]]: ...
 
     async def deliver_outbox_multi(self, group: list[OutboxEntry]) -> MultiDelivery: ...
-
-
-#: The moderation queue's per-row check (``still_wanted``), or a resolver of
-#: it that answers ``None`` until the moderation service is wired.
-StillWanted = Callable[[OutboxEntry], Awaitable[bool]]
-
-
-class GatedOutboxMulti:
-    """An :class:`OutboxMulti` that keeps rows the moderation check refuses
-    out of every group: those stay single, and the delivery callback drops
-    them (PERMANENT). The check (``still_wanted_of()``, resolved per pass)
-    runs only on rows that could be grouped — a ref row of a multi payload
-    with a space, of a :data:`MULTI_EVENT_TYPES` type — so a single row is
-    not checked twice."""
-
-    __slots__ = ("_inner", "_still_wanted_of")
-
-    def __init__(
-        self,
-        inner: OutboxMulti,
-        still_wanted_of: Callable[[], StillWanted | None],
-    ) -> None:
-        self._inner = inner
-        self._still_wanted_of = still_wanted_of
-
-    async def outbox_multi_groups(
-        self, entries: list[OutboxEntry]
-    ) -> list[list[OutboxEntry]]:
-        still_wanted = self._still_wanted_of()
-        if still_wanted is not None:
-            entries = [e for e in entries if _groupable(e) and await still_wanted(e)]
-        return await self._inner.outbox_multi_groups(entries)
-
-    async def deliver_outbox_multi(self, group: list[OutboxEntry]) -> MultiDelivery:
-        return await self._inner.deliver_outbox_multi(group)
-
-
-def _groupable(entry: OutboxEntry) -> bool:
-    """Whether *entry* could ride a multi upload at all."""
-    return (
-        entry.msg_id is not None
-        and entry.space_id is not None
-        and entry.event_type in MULTI_EVENT_TYPES
-    )
 
 
 #: Optional follow-up to the retention sweep. Runs after expired rows have

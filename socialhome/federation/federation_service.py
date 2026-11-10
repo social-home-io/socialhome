@@ -295,6 +295,10 @@ MAX_DEFERRED_MESH_BYTES: int = 16 * 1024 * 1024
 #: item should not eat the shared budget.
 MAX_DEFERRED_MESH_PAYLOAD_BYTES: int = 256 * 1024
 
+#: The moderation queue's per-row outbox check (``still_wanted``), resolved
+#: per pass — ``None`` until the moderation service is wired.
+StillWantedOf = Callable[[], Callable[[OutboxEntry], Awaitable[bool]] | None]
+
 #: How long a throttled v_91 multi upload waits when the GFS's ``429`` named
 #: no ``Retry-After``: the GFS's per-address, per-node upload and recipient
 #: budgets are a minute wide, and it answers ``Retry-After: 60`` itself.
@@ -413,6 +417,7 @@ class FederationService:
         "_online_status_service",
         "_outbox_payload_key",
         "_outbox_repo",
+        "_outbox_still_wanted",
         "_outbox_wake",
         "_own_identity_pk",
         "_own_identity_seed",
@@ -543,6 +548,7 @@ class FederationService:
         #: v_91 — ``OutboxProcessor.wake``: a queued multi payload goes up
         #: on a pass now, not at the next poll (:meth:`attach_outbox_wake`).
         self._outbox_wake: Callable[[], None] | None = None
+        self._outbox_still_wanted: StillWantedOf | None = None
         # Social Home Apps federation bridge — set via :meth:`attach_apps`.
         # When unset, inbound APP_SESSION / APP_MESSAGE events are silently
         # dropped (no app bridge wired on this instance).
@@ -1194,10 +1200,19 @@ class FederationService:
         self._host_hop = host_hop
         self._mailbox_sender_check = mailbox_sender_check
 
-    def attach_outbox_wake(self, wake: Callable[[], None]) -> None:
+    def attach_outbox_wake(
+        self,
+        wake: Callable[[], None],
+        *,
+        still_wanted: StillWantedOf | None = None,
+    ) -> None:
         """Wire ``OutboxProcessor.wake`` — the outbox is the only multi
-        sender (v_91), and a broadcast that queued a multi payload wakes it."""
+        sender (v_91), and a broadcast that queued a multi payload wakes it.
+        *still_wanted* resolves the moderation queue's per-row check (or
+        ``None`` until it is wired): :meth:`outbox_multi_groups` keeps a row
+        it refuses out of every group (it goes single and is dropped)."""
         self._outbox_wake = wake
+        self._outbox_still_wanted = still_wanted
 
     def attach_call_signaling(self, call_signaling) -> None:
         """Attach a :class:`CallSignalingService` after construction."""
@@ -3590,9 +3605,14 @@ class FederationService:
         stored payload), every recipient at most once per group, chunked at
         the GFS's ``max_recipients``; groups of one are left out (they go per
         recipient). Each peer row is read once and each GFS probed once per
-        pass."""
+        pass. A row the moderation queue no longer wants (``still_wanted``,
+        :meth:`attach_outbox_wake`) is left out — it goes single, and the
+        delivery callback drops it."""
         if self._transport is None:
             return []
+        still_wanted = (
+            self._outbox_still_wanted() if self._outbox_still_wanted else None
+        )
         rows: dict[str, RemoteInstance | None] = {}
         caps: dict[str, int] = {}
         buckets: dict[tuple[str, bytes | str], list[list[OutboxEntry]]] = {}
@@ -3610,7 +3630,9 @@ class FederationService:
                 if row is None
                 else await self._multi_target(row, entry.event_type, space_id, caps)
             )
-            if target is None:
+            if target is None or (
+                still_wanted is not None and not await still_wanted(entry)
+            ):
                 continue
             cap = max(caps.get(target.gfs_url, 1), 1)
             chunks = buckets.setdefault(_multi_group_key(target, entry.payload_id), [])

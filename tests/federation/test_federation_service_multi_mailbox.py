@@ -707,6 +707,27 @@ async def test_one_ineligible_seat_is_dropped_from_the_upload():
     assert _mailboxes(upload) == _boxes(s, seats[1:])
 
 
+async def test_a_row_moderation_no_longer_wants_is_kept_out_of_every_group():
+    """The moderation queue's check runs on rows that would group; a refused
+    one goes single (the delivery callback drops it)."""
+    s = _Sender()
+    seats = [await s.seat() for _ in range(3)]
+    await s.broadcast()
+    checked: list[str] = []
+
+    async def _wanted(entry) -> bool:
+        checked.append(entry.instance_id)
+        return entry.instance_id != seats[0]
+
+    s.svc.attach_outbox_wake(lambda: None, still_wanted=lambda: _wanted)
+    [group] = await s.svc.outbox_multi_groups(s.outbox.entries())
+    assert sorted(e.instance_id for e in group) == sorted(seats[1:])
+    assert sorted(checked) == sorted(seats)
+    s.svc.attach_outbox_wake(lambda: None, still_wanted=lambda: None)
+    [group] = await s.svc.outbox_multi_groups(s.outbox.entries())
+    assert len(group) == 3
+
+
 async def test_a_group_left_with_one_seat_does_not_go_up():
     s = _Sender()
     seats = [await s.seat() for _ in range(2)]
