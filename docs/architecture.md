@@ -685,7 +685,14 @@ Outbound envelopes go to `federation_outbox` first
 (`socialhome/repositories/outbox_repo.py`). The
 `infrastructure/outbox_processor.py` scheduler walks the table on a
 fixed cadence, picks the best transport for each peer (RTC if open,
-HTTPS otherwise), and retries with exponential backoff. Structural /
+HTTPS otherwise), and retries with exponential backoff. Since v_90 a
+failed send stores the event payload ONCE (`federation_outbox_payloads`,
+KEK-wrapped, migration 0145) with one row per recipient referencing it;
+the envelope is sealed per peer only at send time. The drain runs up to
+8 recipients in parallel, one in flight per recipient, each send bounded
+by a 120 s timeout, and due rows of one payload for mailbox seats behind
+one GFS go as one multi-recipient upload
+([gfs-relay](protocol/gfs-relay.md#one-upload-for-many-mailboxes-v_90)). Structural /
 security-critical events have `expires_at = NULL` and never age out;
 ordinary events have a 7-day TTL (§4.4.7), and a moment's delete
 (`LONG_LIVED`, v_66) 30 days of retries on the ceiling backoff. A delivered envelope's row is

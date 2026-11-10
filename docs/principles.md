@@ -345,8 +345,22 @@ exactly:**
     member is left there. A member not connected to that GFS is reached
     through the host hop.
 
+  - **A space fan-out shows the GFS its exact recipient list (v_90; owner
+    sign-off 2026-11-09).** Space content for two or more of those
+    mailboxes on one GFS goes up ONCE: sealed under a key derived from
+    the space content key, signed once by the sender, with the list of
+    mailbox ids (`POST /gfs/envelope/multi`). The GFS stores the body
+    once and pushes it to each listed mailbox. It therefore sees exactly
+    which mailboxes one item went to — the space's member set as mailbox
+    ids, the clustering above made exact — and, because a household's
+    one mailbox serves all its spaces, how two spaces' recipient lists
+    overlap. It still sees no space id, instance id, event type, sender
+    id or content (the kid naming the key is a hash of it). Items for one
+    household only — key handoffs, catch-up, member cards and directory
+    frames — stay sealed to that mailbox alone.
+
   Nothing that identifies a household across households reaches the GFS:
-  no instance id, no space id, no content, no member list. A GFS that logs
+  no instance id, no space id, no content. A GFS that logs
   IPs **can** tell which household owns which mailbox: its identified
   socket and its mailbox come from the same IP (see [No random delays for
   GFS unlinkability](#no-random-delays-for-gfs-unlinkability)). The teardown `SPACE_SESSION_CLEANUP`

@@ -7749,8 +7749,11 @@ def cmd_gfs_member_mesh() -> None:
         print("  host a offline; d created an event and e shows it ✓")
 
         # 3b. e (GFS-only) creates one; paired d must show it — e's fan-out
-        #     reaches d's own mailbox, the host is not needed.
+        #     reaches d's own mailbox, the host is not needed. v_90: e's
+        #     fan-out has TWO mailbox recipients behind this GFS (host a's
+        #     and d's), so it goes up as ONE multi-recipient upload.
         summary_e = f"GFS-only member's evening {time.time_ns()}"
+        multi_off = _gfs_log_size()
         s, ev_e = _request(
             f"{e_base}/api/spaces/{space_id}/calendar/events",
             token=e["token"],
@@ -7784,6 +7787,18 @@ def cmd_gfs_member_mesh() -> None:
             )
         print("  host a offline; e created an event and paired d shows it ✓")
 
+        # 3c. v_90 — that event went up ONCE for both mailboxes: one multi
+        #     frame queued for 2 of 2 mailboxes (a's waits, d's drained).
+        multi = _gfs_log_lines_matching(
+            "multi frame queued for", offset=multi_off
+        )
+        if len(multi) != 1 or "for 2 of 2 mailboxes" not in multi[0]:
+            raise SystemExit(
+                f"{step}: e's event did not go up as ONE multi-recipient "
+                f"upload for both mailboxes (GFS lines: {multi!r})"
+            )
+        print("  e's event went up ONCE for 2 mailboxes (v_90 multi upload) ✓")
+
         # 4. What the GFS saw. The identified sockets log their own household
         #    (a going down); the relay's envelope / mailbox lines name nobody.
         env_lines = _gfs_log_lines_matching("gfs.envelope:", offset=gfs_off)
@@ -7811,6 +7826,28 @@ def cmd_gfs_member_mesh() -> None:
         )
     finally:
         _respawn(state, "a")
+    # 5. v_90 — the host was offline during e's multi upload; its mailbox
+    #    reference waited at the GFS. Back online, a shows e's event.
+    seen = None
+    deadline = time.time() + 90
+    while time.time() < deadline and seen is None:
+        s, events = _request(
+            f"{a_base}/api/spaces/{space_id}/calendar/events"
+            "?start=2027-03-01T00:00:00Z&end=2027-03-02T00:00:00Z",
+            token=a["token"],
+        )
+        rows = (
+            events if isinstance(events, list) else (events or {}).get("events")
+        ) or []
+        seen = next((x for x in rows if x.get("id") == ev_e["id"]), None)
+        if seen is None:
+            time.sleep(1.0)
+    if seen is None:
+        raise SystemExit(
+            f"{step}: host a never showed e's event after coming back — the "
+            "multi frame queued for its mailbox was not delivered",
+        )
+    print("  host a back online and shows e's event from its mailbox ✓")
     print(f"{step}: ok")
 
 
