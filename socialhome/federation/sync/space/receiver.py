@@ -35,10 +35,17 @@ from ....domain.bazaar_faq import (
     BazaarFaqEntry,
     entry_from_wire,
 )
-from ....domain.calendar import CalendarEvent, coerce_capacity, is_occurrence_id
+from ....domain.calendar import (
+    CalendarEvent,
+    CalendarRSVP,
+    RSVPStatus,
+    coerce_capacity,
+    is_occurrence_id,
+)
 from ....domain.events import (
     CalendarEventDeleted,
     CommentDeleted,
+    CommentUpdated,
     GalleryAlbumDeleted,
     GalleryItemDeleted,
     PageDeleted,
@@ -83,6 +90,7 @@ from ....domain.space import (
     validate_zone_name,
     validate_zone_radius,
 )
+from ....domain.space_item import item_stamp, stamp_to_db
 from ....domain.space_media_ref import (
     MEDIA_REFS_FIELD,
     SpaceMediaLocalization,
@@ -505,6 +513,23 @@ class _GfsMediaSink(Protocol):
     ) -> SpaceMediaLocalization: ...
 
     async def keep(self, loc: SpaceMediaLocalization) -> Any: ...
+
+
+def _edit_stamp_of(raw: object) -> str | None:
+    """A streamed row's ``edited_at`` in the stored stamp shape
+    (:func:`stamp_to_db`), or ``None`` (none, unparseable, or too far ahead
+    of our clock — it would block every later edit). A naive stamp is UTC,
+    as every stored one is."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    stamp = item_stamp(parsed.isoformat())
+    return stamp_to_db(stamp) if stamp is not None else None
 
 
 def _parse_iso(value: Any) -> datetime:
@@ -1477,6 +1502,34 @@ class SpaceSyncReceiver:
                         space_id,
                     )
                     continue
+                stamps = r.get("reaction_stamps")
+                if from_host and held_post is not None:
+                    # v_92 — the host's reactions, merged last writer wins
+                    # per user and emoji by their stamps: a reaction (or a
+                    # removal) this household missed lands, a newer one it
+                    # holds stays; what no stamp orders any more (older
+                    # than the tombstone horizon) follows the host's sets.
+                    raw_reactions = r.get("reactions")
+                    await self._space_post_repo.merge_reaction_stamps(
+                        post.id,
+                        stamps if isinstance(stamps, dict) else {},
+                        space_id=space_id,
+                        reactions=(
+                            {
+                                str(k): [str(u) for u in v if isinstance(u, str)]
+                                for k, v in raw_reactions.items()
+                                if isinstance(v, list)
+                            }
+                            if isinstance(raw_reactions, dict)
+                            else None
+                        ),
+                    )
+                elif from_host and isinstance(stamps, dict) and stamps:
+                    # A post new here took the host's reactions: keep their
+                    # stamps too, so a stale relayed copy cannot undo them.
+                    await self._space_post_repo.merge_reaction_stamps(
+                        post.id, stamps, space_id=space_id
+                    )
                 await self._keep_media(media)
                 # Derived local state only (the system album's mirror of its
                 # media) — no notification, no fan-out.
@@ -1522,8 +1575,41 @@ class SpaceSyncReceiver:
                     )
                     continue
                 # Not inserted: an id held here already (a member-relayed
-                # copy, or a delete's tombstone) stays as it is …
-                if await self._space_post_repo.get_comment(comment.id) is not None:
+                # copy, or a delete's tombstone) stays as it is — but for
+                # the host's edit of it (v_92): an edit this household
+                # missed lands, last writer wins on ``edited_at`` like the
+                # live ``SPACE_COMMENT_UPDATED`` (the repo refuses a
+                # deleted comment, another space's and an older stamp) …
+                held_comment = await self._space_post_repo.get_comment(comment.id)
+                if held_comment is not None:
+                    stamp = _edit_stamp_of(r.get("edited_at"))
+                    if (
+                        comments_from_host
+                        and stamp is not None
+                        and comment.content is not None
+                        and held_comment.content != comment.content
+                        and await self._space_post_repo.edit_comment(
+                            comment.id,
+                            comment.content,
+                            space_id=space_id,
+                            edited_at=stamp,
+                        )
+                    ):
+                        refreshed = await self._space_post_repo.get_comment(comment.id)
+                        if refreshed is not None:
+                            await self._bus.publish(
+                                # History, not news: the open views refresh
+                                # (no mentions notify), and the provider
+                                # as origin keeps the outbound from
+                                # federating it again.
+                                CommentUpdated(
+                                    post_id=refreshed.post_id,
+                                    comment=refreshed,
+                                    space_id=space_id,
+                                    origin_instance_id=provider,
+                                )
+                            )
+                        continue
                     log.debug("sync: comment %s is held here — skipped", comment.id)
                 else:  # … anything else targets a post outside this space.
                     log.warning(
@@ -1660,6 +1746,8 @@ class SpaceSyncReceiver:
                     _log_sync_refusal("calendar event", event.id, space_id)
                     continue
                 await self._keep_media(media)
+                if from_host and isinstance(r.get("rsvps"), list):
+                    await self._persist_rsvps(event.id, r, space_id)
         elif resource == "gallery_albums_deleted":
             await self._persist_album_tombstones(records, space_id, provider=provider)
         elif resource == "gallery_items_deleted":
@@ -1688,12 +1776,7 @@ class SpaceSyncReceiver:
             for album_id in sorted(recount):
                 await self._gallery_repo.recount_items(album_id)
         elif resource == "polls":
-            # v1: polls ride along with posts (Post.poll field). The
-            # standalone polls stream is informational — nothing to
-            # persist here yet.
-            log.debug(
-                "received %d poll records — skipped (see Post.poll)", len(records)
-            )
+            await self._persist_polls(records, space_id)
         elif resource == "schedules":
             # F5: schedule-poll meta + slot defs catch up so a remote
             # member's slot picker isn't empty after a §25.6 sync. The
@@ -1734,6 +1817,10 @@ class SpaceSyncReceiver:
                         exc,
                         exc_info=True,
                     )
+            # v_92 — the answers and the pick, from the space's host only
+            # (a member household's record only ever adds a poll it lacks).
+            if await self._is_host(space_id, provider):
+                await self._persist_schedule_state(records, space_id)
         elif resource in (
             "space_zones",
             "space_zones_deleted",
@@ -1843,6 +1930,10 @@ class SpaceSyncReceiver:
                             exc_info=True,
                         )
 
+        elif resource == "timetables_deleted":
+            await self._persist_timetable_tombstones(
+                records, space_id, provider=provider
+            )
         elif resource == "timetables":
             await self._persist_timetables(records, space_id, provider=provider)
         elif resource == "chat_messages_deleted":
@@ -1863,6 +1954,183 @@ class SpaceSyncReceiver:
                 )
                 or 0
             )
+
+    async def _local_people(self, space_id: str) -> frozenset[str]:
+        """This household's own people seated in ``space_id`` — the
+        authors of their own votes, answers and RSVPs, which no provider's
+        snapshot replaces."""
+        return frozenset(await self._space_repo.list_local_member_user_ids(space_id))
+
+    async def _persist_polls(
+        self, records: list[dict[str, Any]], space_id: str
+    ) -> None:
+        """Reply polls (v_92) — only the host's records get here (a member
+        household's are refused in :meth:`_authored_record`). Each converges
+        the poll on the host's copy: created with its options when missing
+        (the live ``SPACE_POLL_CREATED`` carries no options), the host's
+        question / deadline, closed when the host's is, and — from a v_92
+        host, which sends ``votes`` — everybody's votes but our own
+        people's. An older host's record (no ``votes``) leaves the votes."""
+        if self._poll_repo is None:
+            log.debug(
+                "received %d poll records — no poll_repo wired, skipping",
+                len(records),
+            )
+            return
+        keep = await self._local_people(space_id)
+        for r in records:
+            post_id = str(r.get("post_id") or "")
+            meta = r.get("meta")
+            options = r.get("options")
+            if (
+                not post_id
+                or not isinstance(meta, dict)
+                or not isinstance(options, list)
+            ):
+                continue
+            question = str(meta.get("question") or "")
+            shaped = [
+                {"id": str(o.get("id") or ""), "text": str(o.get("text") or "")}
+                for o in options
+                if isinstance(o, dict) and o.get("id") and o.get("text")
+            ]
+            if not question or not shaped:
+                continue
+            raw_votes = r.get("votes")
+            votes = (
+                [
+                    (str(v.get("option_id") or ""), str(v.get("voter_user_id") or ""))
+                    for v in raw_votes
+                    if isinstance(v, dict)
+                ]
+                if isinstance(raw_votes, list)
+                else None
+            )
+            closes_at = meta.get("closes_at")
+            if not await self._poll_repo.apply_synced_poll(
+                space_id=space_id,
+                post_id=post_id,
+                question=question,
+                closes_at=str(closes_at) if closes_at else None,
+                allow_multiple=bool(meta.get("allow_multiple")),
+                closed=bool(meta.get("closed")),
+                options=shaped,
+                votes=votes,
+                keep_voters=keep,
+            ):
+                _log_sync_refusal("poll", post_id, space_id)
+
+    async def _persist_rsvps(
+        self, event_id: str, r: dict[str, Any], space_id: str
+    ) -> None:
+        """The host's RSVPs of a held event (v_92): everybody's but our own
+        people's (theirs are authored here) converge on the host's — a
+        changed answer is taken, and an RSVP the host no longer holds is
+        dropped unless the host's list was cut (``rsvps_partial``)."""
+        keep = await self._local_people(space_id)
+        held = {
+            (h.user_id, h.occurrence_at): h
+            for h in await self._space_calendar_repo.list_rsvps(event_id)
+            if h.user_id not in keep
+        }
+        wanted: dict[tuple[str, str], CalendarRSVP] = {}
+        for a in r["rsvps"]:
+            if not isinstance(a, dict):
+                continue
+            user_id = str(a.get("user_id") or "")
+            occurrence_at = str(a.get("occurrence_at") or "")
+            status = str(a.get("status") or "")
+            if (
+                not user_id
+                or user_id in keep
+                or not occurrence_at
+                or status not in RSVPStatus.ALL
+            ):
+                continue
+            wanted[(user_id, occurrence_at)] = CalendarRSVP(
+                event_id=event_id,
+                user_id=user_id,
+                status=status,
+                updated_at=str(a.get("updated_at") or "")
+                or datetime.now(UTC).isoformat(),
+                occurrence_at=occurrence_at,
+            )
+        for key, rsvp in wanted.items():
+            have = held.get(key)
+            if have is not None and have.status == rsvp.status:
+                continue
+            await self._space_calendar_repo.upsert_rsvp(rsvp, space_id=space_id)
+        if r.get("rsvps_partial"):
+            return
+        for user_id, occurrence_at in sorted(held.keys() - wanted.keys()):
+            await self._space_calendar_repo.remove_rsvp(
+                event_id, user_id, occurrence_at=occurrence_at, space_id=space_id
+            )
+
+    async def _persist_schedule_state(
+        self, records: list[dict[str, Any]], space_id: str
+    ) -> None:
+        """A schedule poll's answers and pick from the host's v_92 record:
+        everybody's answers but our own people's, and the chosen slot (a
+        pick never reverts). A record without ``responses`` (an older host)
+        leaves the held answers."""
+        assert self._poll_repo is not None
+        keep = await self._local_people(space_id)
+        for r in records:
+            post_id = str(r.get("post_id") or "")
+            if not post_id or ("responses" not in r and "finalized_slot_id" not in r):
+                continue
+            raw = r.get("responses")
+            finalized = r.get("finalized_slot_id")
+            await self._poll_repo.apply_synced_schedule_state(
+                space_id=space_id,
+                post_id=post_id,
+                finalized_slot_id=str(finalized) if finalized else None,
+                responses=(
+                    [a for a in raw if isinstance(a, dict)]
+                    if isinstance(raw, list)
+                    else None
+                ),
+                keep_users=keep,
+            )
+
+    async def _persist_timetable_tombstones(
+        self, records: list[dict[str, Any]], space_id: str, *, provider: str
+    ) -> None:
+        """Timetable deletes (v_92) — only the host's records get here
+        (:meth:`_authored_record` refuses a member household's). A timetable
+        held live here in this space is tombstoned, as the live
+        ``SPACE_TIMETABLE_DELETED`` does; an id never held gets a stub only
+        when it is owner-bound to its ``created_by`` in THIS space (ids are
+        global — a stub for another space's id would eat its upserts)."""
+        if self._timetable_repo is None:
+            return
+        cross_space: list[str] = []
+        unbound = 0
+        for r in records:
+            tt_id = str(r.get("id") or "")
+            if not tt_id:
+                continue
+            at = _parse_iso(r.get("deleted_at") or r.get("created_at"))
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=UTC)
+            held = await self._timetable_repo.get(tt_id)
+            if held is not None and held[0] != space_id:
+                cross_space.append(tt_id)
+                continue
+            if held is None:
+                if await self._timetable_repo.is_tombstoned(tt_id):
+                    continue
+                if not _bound_here(
+                    SPACE_TIMETABLE_KIND,
+                    tt_id,
+                    space_id,
+                    str(r.get("created_by") or ""),
+                ):
+                    unbound += 1
+                    continue
+            await self._timetable_repo.tombstone(tt_id, space_id=space_id, at=at)
+        _log_tombstone_refusals("timetable", provider, space_id, cross_space, unbound)
 
     async def _persist_timetables(
         self, records: list[dict[str, Any]], space_id: str, *, provider: str
@@ -3174,6 +3442,13 @@ class SpaceSyncReceiver:
                     space_id,
                     str(r.get("uploaded_by") or r.get("uploader") or ""),
                 )
+            case "polls" | "timetables_deleted":
+                # v_92 — the host's alone: a poll's votes, closure and
+                # options are everybody's (no member household may set
+                # them by stream), and a timetable tombstone does not name
+                # the moderator who made it, so no live rule could judge a
+                # member household's copy.
+                return False
             case "schedules":
                 post_id = str(r.get("post_id") or "")
                 if self._poll_repo is None or not post_id:
@@ -3592,6 +3867,7 @@ _BOUND_RESOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
     "gallery_albums_deleted": (GALLERY_ALBUM_KIND, ("owner_user_id",)),
     "gallery_items_deleted": (GALLERY_ITEM_KIND, ("uploaded_by",)),
     "timetables": (SPACE_TIMETABLE_KIND, ("created_by",)),
+    "timetables_deleted": (SPACE_TIMETABLE_KIND, ("created_by",)),
     "chat_messages": (SPACE_CHAT_MESSAGE_KIND, ("author_user_id",)),
     "chat_messages_deleted": (SPACE_CHAT_MESSAGE_KIND, ("author_user_id",)),
 }

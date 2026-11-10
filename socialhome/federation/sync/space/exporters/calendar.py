@@ -8,6 +8,17 @@ calendar events (the retention sweep touches posts and chat only), so a
 window would hide from a member events the space still shows, and one
 relative to the clock would make a full and an incremental session
 disagree as rows drift across its edge. Deletes ride ``calendar_deleted``.
+
+v_92: a record also carries the event's RSVPs (``rsvps``: ``{user_id,
+occurrence_at, status, updated_at}`` — every member household gets each
+RSVP live, through ``SPACE_RSVP_UPDATED``), the latest
+:data:`MAX_RSVPS_PER_EVENT` occurrences' worth; ``rsvps_partial`` marks a
+list that was cut. A v_92 receiver takes them from the space's host:
+everybody's RSVPs but its own people's, and — unless the list was cut —
+drops the ones the host no longer holds. An RSVP changes no row the change
+stamps cover (migration 0086), so a missed one heals on the host's daily
+full stream. A requester below v_92 gets the record without them
+(:meth:`CalendarExporter.without_rsvps`).
 """
 
 from __future__ import annotations
@@ -26,13 +37,25 @@ if TYPE_CHECKING:
     from .....repositories.calendar_repo import AbstractSpaceCalendarRepo
 
 
+#: The most RSVPs one ``calendar`` record carries (a long-running series
+#: with many members): the latest occurrences' first.
+MAX_RSVPS_PER_EVENT: int = 500
+
+
 class CalendarExporter(PagedExporterMixin):
     resource = "calendar"
 
-    __slots__ = ("_repo",)
+    __slots__ = ("_repo", "_rsvps")
 
-    def __init__(self, space_calendar_repo: AbstractSpaceCalendarRepo) -> None:
+    def __init__(
+        self, space_calendar_repo: AbstractSpaceCalendarRepo, *, rsvps: bool = True
+    ) -> None:
         self._repo = space_calendar_repo
+        self._rsvps = rsvps
+
+    def without_rsvps(self) -> CalendarExporter:
+        """The record set of a requester below v_92: no RSVPs."""
+        return CalendarExporter(self._repo, rsvps=False)
 
     def expanded(self) -> ExpandedCalendarExporter:
         """The record set for a requester below v_56 (see there)."""
@@ -45,8 +68,8 @@ class CalendarExporter(PagedExporterMixin):
         self, space_id: str, since: int
     ) -> AsyncIterator[list[dict[str, Any]]]:
         """The events changed after ``since`` (an incremental session).
-        RSVPs are not part of the record, so an RSVP change streams nothing
-        here."""
+        An RSVP stamps nothing, so an RSVP change alone streams nothing
+        here — it rides the host's daily full stream (v_92 ``rsvps``)."""
         return self._pages(space_id, since)
 
     async def _pages(
@@ -58,7 +81,26 @@ class CalendarExporter(PagedExporterMixin):
             )
 
         async for events in iter_pages(page):
-            yield [_event_to_dict(e) for e in events]
+            records = [_event_to_dict(e) for e in events]
+            if self._rsvps:
+                for record in records:
+                    await self._add_rsvps(record)
+            yield records
+
+    async def _add_rsvps(self, record: dict[str, Any]) -> None:
+        held = await self._repo.list_rsvps(record["id"])
+        held.sort(key=lambda r: (r.occurrence_at, r.user_id), reverse=True)
+        record["rsvps"] = [
+            {
+                "user_id": r.user_id,
+                "occurrence_at": r.occurrence_at,
+                "status": r.status,
+                "updated_at": r.updated_at,
+            }
+            for r in held[:MAX_RSVPS_PER_EVENT]
+        ]
+        if len(held) > MAX_RSVPS_PER_EVENT:
+            record["rsvps_partial"] = True
 
 
 #: The window an older requester's record set is expanded in (the shape

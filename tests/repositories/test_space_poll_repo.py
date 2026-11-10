@@ -505,3 +505,140 @@ async def test_only_polls_a_local_user_wrote_are_due_here(env):
     ]
     await env.repo.close("post-1")
     assert await env.repo.list_due_to_close(now) == []
+
+
+# ── §25.6 sync (v_92) ────────────────────────────────────────────────────
+
+
+async def _sync_poll(env, *, space_id="sp-1", closed=False, votes=None, keep=()):
+    return await env.repo.apply_synced_poll(
+        space_id=space_id,
+        post_id="post-1",
+        question="Pizza?",
+        closes_at=None,
+        allow_multiple=False,
+        closed=closed,
+        options=[{"id": "o-y", "text": "Yes"}, {"id": "o-n", "text": "No"}],
+        votes=votes,
+        keep_voters=frozenset(keep),
+    )
+
+
+async def _post_seq(env) -> int:
+    return int(
+        await env.db.fetchval(
+            "SELECT sync_seq FROM space_posts WHERE id='post-1'", (), 0
+        )
+    )
+
+
+async def test_apply_synced_poll_creates_it_and_takes_the_votes(env):
+    assert await _sync_poll(env, votes=[("o-y", "u-b"), ("o-n", "u-c")])
+    assert [o["count"] for o in await env.repo.list_options_with_counts("post-1")] == [
+        1,
+        1,
+    ]
+    assert await _sync_poll(env, votes=[("o-n", "u-b")])
+    assert await env.repo.list_votes("post-1") == [
+        {"option_id": "o-n", "voter_user_id": "u-b"}
+    ]
+
+
+async def test_apply_synced_poll_refuses_another_spaces_post(env):
+    assert not await _sync_poll(env, space_id="sp-other")
+    assert await env.repo.get_meta("post-1") is None
+
+
+async def test_apply_synced_poll_keeps_our_peoples_votes_and_older_hosts_votes(env):
+    await _sync_poll(env, votes=[])
+    await env.repo.cast_vote_in_space(
+        space_id="sp-1", post_id="post-1", option_id="o-y", voter_user_id="u-ours"
+    )
+    await env.repo.cast_vote_in_space(
+        space_id="sp-1", post_id="post-1", option_id="o-n", voter_user_id="u-c"
+    )
+    await _sync_poll(env, votes=[], keep={"u-ours"})
+    assert await env.repo.list_votes("post-1") == [
+        {"option_id": "o-y", "voter_user_id": "u-ours"}
+    ]
+    # An older host sends no votes: the held ones stay.
+    await env.repo.cast_vote_in_space(
+        space_id="sp-1", post_id="post-1", option_id="o-n", voter_user_id="u-c"
+    )
+    await _sync_poll(env, votes=None)
+    assert len(await env.repo.list_votes("post-1")) == 2
+
+
+async def test_apply_synced_poll_never_reopens_and_ignores_foreign_votes(env):
+    await _sync_poll(env, closed=True, votes=[("o-elsewhere", "u-b")])
+    await _sync_poll(env, closed=False, votes=[("o-elsewhere", "u-b")])
+    meta = await env.repo.get_meta("post-1")
+    assert meta is not None and meta["closed"] is True
+    assert await env.repo.list_votes("post-1") == []
+
+
+async def test_reapplying_the_same_poll_stamps_nothing(env):
+    await _sync_poll(env, votes=[("o-y", "u-b")])
+    seq = await _post_seq(env)
+    await _sync_poll(env, votes=[("o-y", "u-b")])
+    assert await _post_seq(env) == seq
+
+
+async def _schedule(env):
+    await env.db.enqueue(
+        "UPDATE space_posts SET type='schedule' WHERE id='post-1'",
+    )
+    await env.repo.create_schedule_poll_in_space(
+        space_id="sp-1",
+        post_id="post-1",
+        title="When?",
+        deadline=None,
+        slots=[
+            {"id": "s-1", "slot_date": "2026-11-20", "position": 0},
+            {"id": "s-2", "slot_date": "2026-11-21", "position": 1},
+        ],
+    )
+
+
+async def test_apply_synced_schedule_state_takes_answers_and_the_pick(env):
+    await _schedule(env)
+    await env.repo.upsert_schedule_response_in_space(
+        space_id="sp-1", slot_id="s-1", user_id="u-c", response="maybe"
+    )
+    await env.repo.upsert_schedule_response_in_space(
+        space_id="sp-1", slot_id="s-1", user_id="u-ours", response="no"
+    )
+    assert await env.repo.apply_synced_schedule_state(
+        space_id="sp-1",
+        post_id="post-1",
+        finalized_slot_id="s-2",
+        responses=[
+            {"slot_id": "s-2", "user_id": "u-c", "availability": "yes"},
+            {"slot_id": "s-2", "user_id": "u-d", "availability": "bogus"},
+            {"slot_id": "s-elsewhere", "user_id": "u-d", "availability": "yes"},
+        ],
+        keep_users=frozenset({"u-ours"}),
+    )
+    got = sorted(
+        (r["slot_id"], r["user_id"], r["availability"])
+        for r in await env.repo.list_schedule_responses("post-1")
+    )
+    assert got == [("s-1", "u-ours", "no"), ("s-2", "u-c", "yes")]
+    meta = await env.repo.get_schedule_meta("post-1")
+    assert meta["finalized_slot_id"] == "s-2" and meta["closed"] is True
+    # A pick never reverts, and another space's poll is refused.
+    await env.repo.apply_synced_schedule_state(
+        space_id="sp-1",
+        post_id="post-1",
+        finalized_slot_id="s-1",
+        responses=None,
+        keep_users=frozenset(),
+    )
+    assert (await env.repo.get_schedule_meta("post-1"))["finalized_slot_id"] == "s-2"
+    assert not await env.repo.apply_synced_schedule_state(
+        space_id="sp-other",
+        post_id="post-1",
+        finalized_slot_id=None,
+        responses=[],
+        keep_users=frozenset(),
+    )

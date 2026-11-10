@@ -131,7 +131,12 @@ SYNC_VERSION_HISTORY_THROUGH: int = 64
 #:   described file kept a reader-specific ``sg-`` name nobody else could
 #:   serve), so ``SPACE_MEDIA_WANTED`` can ask any provider for it. A
 #:   household crossing it gets one full stream, so records it took while
-#:   older are named the same way.
+#:   older are named the same way. Also at 92 (``MIN_FOR_SYNC_ITEM_STATE``,
+#:   ``provider._without_item_state``): poll ``votes``, schedule
+#:   ``responses`` / ``finalized_slot_id``, calendar ``rsvps``, post
+#:   ``reaction_stamps`` and the ``timetables_deleted`` resource, which a
+#:   v_92 receiver takes from the host; the crossing full stream brings the
+#:   state it missed while older.
 SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 82, 85, 92)
 
 

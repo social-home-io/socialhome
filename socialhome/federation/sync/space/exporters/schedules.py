@@ -5,6 +5,17 @@ resource; this exporter ships the matching
 ``space_schedule_poll_meta`` + ``space_schedule_slots`` rows so a new
 joiner sees the slot picker. Without it (F5 gap) the receiver landed
 the wrapper post but the slot picker rendered empty.
+
+v_92: the record also carries the poll's answers (``responses``:
+``{slot_id, user_id, availability}`` — every member household gets each
+answer live, through ``SPACE_SCHEDULE_RESPONSE_UPDATED``) and its pick
+(``finalized_slot_id``); a v_92 receiver takes them from the space's host
+(everybody's answers but its own people's). A requester below v_92 gets
+the slot definitions only (:meth:`SchedulesExporter.slots_only`).
+
+An answer changes no row the change stamps cover (migration 0086), so a
+missed answer heals on the host's daily full stream; a pick (it updates
+the poll) heals on the next incremental one.
 """
 
 from __future__ import annotations
@@ -24,17 +35,26 @@ if TYPE_CHECKING:
 class SchedulesExporter(PagedExporterMixin):
     resource = "schedules"
 
-    __slots__ = ("_poll_repo", "_post_repo", "_windows")
+    __slots__ = ("_answers", "_poll_repo", "_post_repo", "_windows")
 
     def __init__(
         self,
         poll_repo: AbstractPollRepo,
         space_post_repo: AbstractSpacePostRepo,
         windows: SyncWindows,
+        *,
+        answers: bool = True,
     ) -> None:
         self._poll_repo = poll_repo
         self._post_repo = space_post_repo
         self._windows = windows
+        self._answers = answers
+
+    def slots_only(self) -> SchedulesExporter:
+        """The record set of a requester below v_92: no answers, no pick."""
+        return SchedulesExporter(
+            self._poll_repo, self._post_repo, self._windows, answers=False
+        )
 
     def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
         return self._pages(space_id, None)
@@ -62,12 +82,17 @@ class SchedulesExporter(PagedExporterMixin):
             if meta is None:
                 continue
             slots = await self._poll_repo.list_schedule_slots(p.id)
-            out.append(
-                {
-                    "post_id": p.id,
-                    "title": meta["title"],
-                    "deadline": meta.get("deadline"),
-                    "slots": list(slots),
-                },
-            )
+            record: dict[str, Any] = {
+                "post_id": p.id,
+                "title": meta["title"],
+                "deadline": meta.get("deadline"),
+                "slots": list(slots),
+            }
+            if self._answers:
+                record["finalized_slot_id"] = meta.get("finalized_slot_id")
+                record["responses"] = sorted(
+                    await self._poll_repo.list_schedule_responses(p.id),
+                    key=lambda a: (a["slot_id"], a["user_id"]),
+                )
+            out.append(record)
         return out

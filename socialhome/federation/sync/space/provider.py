@@ -57,6 +57,10 @@ from .exporter import (
 )
 from .exporters.calendar import CalendarExporter
 from .exporters.members import PreModeratorMembersExporter
+from .exporters.polls import PollsExporter
+from .exporters.posts import PostsExporter
+from .exporters.schedules import SchedulesExporter
+from .exporters.timetables_deleted import TimetablesDeletedExporter
 from .file_gate import CatchUpFileGates
 from .watermark import session_shape
 from .window import SyncWindows
@@ -756,6 +760,8 @@ class SpaceSyncService:
                 return None
             exporter = _OwnPeopleOnly(exporter, self._own_members)
         version = await self._session_version(session)
+        if exporter is not None and not _item_state(version):
+            exporter = _without_item_state(exporter)
         if exporter is not None and resource == "calendar":
             if isinstance(exporter, CalendarExporter) and not _series_rows(version):
                 return exporter.expanded()
@@ -1456,6 +1462,30 @@ def _series_rows(version: int) -> bool:
     numbered chunks? One we cannot ask (``0``) gets the older shape — never a
     series row an older receiver would flatten."""
     return version >= FederationCapability.MIN_FOR_SYNC_SERIES_ROWS
+
+
+def _item_state(version: int) -> bool:
+    """v_92: does a requester at ``version`` take the item state a lost live
+    event leaves behind (poll votes, schedule answers and picks, RSVPs,
+    reaction stamps, timetable tombstones)? One we cannot ask (``0``) gets
+    the older shapes."""
+    return version >= FederationCapability.MIN_FOR_SYNC_ITEM_STATE
+
+
+def _without_item_state(exporter: ResourceExporter) -> ResourceExporter | None:
+    """``exporter`` in the record shape before v_92 — ``None`` for a
+    resource that did not exist then."""
+    if isinstance(exporter, PostsExporter):
+        return exporter.without_reaction_stamps()
+    if isinstance(exporter, PollsExporter):
+        return exporter.without_votes()
+    if isinstance(exporter, SchedulesExporter):
+        return exporter.slots_only()
+    if isinstance(exporter, CalendarExporter):
+        return exporter.without_rsvps()
+    if isinstance(exporter, TimetablesDeletedExporter):
+        return None
+    return exporter
 
 
 def _allocator(session: SyncSessionRecord) -> Callable[[], int]:

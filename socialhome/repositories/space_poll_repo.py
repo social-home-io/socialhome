@@ -34,6 +34,9 @@ _OPTION_IN_SPACE = """
      WHERE o.id=? AND o.post_id=? AND p.space_id=?
 """
 
+#: The answers a schedule slot takes (the table's CHECK).
+_AVAILABILITIES: frozenset[str] = frozenset({"yes", "no", "maybe"})
+
 #: ``space_schedule_slots`` row ``?`` belongs to a post in space ``?``.
 _SLOT_IN_SPACE = """
     SELECT 1 FROM space_schedule_slots s
@@ -85,6 +88,29 @@ class AbstractSpacePollRepo(AbstractPollRepo, Protocol):
         space_id: str,
         post_id: str,
         slot_id: str,
+    ) -> bool: ...
+    async def list_votes(self, post_id: str) -> list[dict]: ...
+    async def apply_synced_poll(
+        self,
+        *,
+        space_id: str,
+        post_id: str,
+        question: str,
+        closes_at: str | None,
+        allow_multiple: bool,
+        closed: bool,
+        options: list[dict],
+        votes: list[tuple[str, str]] | None,
+        keep_voters: frozenset[str],
+    ) -> bool: ...
+    async def apply_synced_schedule_state(
+        self,
+        *,
+        space_id: str,
+        post_id: str,
+        finalized_slot_id: str | None,
+        responses: list[dict] | None,
+        keep_users: frozenset[str],
     ) -> bool: ...
 
 
@@ -688,3 +714,214 @@ class SqliteSpacePollRepo:
             (slot_id, post_id, slot_id, space_id),
         )
         return n > 0
+
+    # ── §25.6 sync (v_92): the host's poll state onto a held post ──────
+
+    async def list_votes(self, post_id: str) -> list[dict]:
+        """Every vote on ``post_id``'s poll, ``{option_id, voter_user_id}``,
+        in a stable order — what the host's ``polls`` record carries."""
+        rows = await self._db.fetchall(
+            "SELECT pv.option_id, pv.voter_user_id FROM space_poll_votes pv "
+            "JOIN space_poll_options po ON po.id = pv.option_id "
+            "WHERE po.post_id=? ORDER BY pv.voter_user_id, po.position, po.id",
+            (post_id,),
+        )
+        return [
+            {"option_id": r["option_id"], "voter_user_id": r["voter_user_id"]}
+            for r in rows
+        ]
+
+    async def apply_synced_poll(
+        self,
+        *,
+        space_id: str,
+        post_id: str,
+        question: str,
+        closes_at: str | None,
+        allow_multiple: bool,
+        closed: bool,
+        options: list[dict],
+        votes: list[tuple[str, str]] | None,
+        keep_voters: frozenset[str],
+    ) -> bool:
+        """Converge the poll on ``post_id`` on the host's copy, in ONE
+        transaction that first proves the post is a live post of
+        ``space_id`` (``False``: refused, nothing written).
+
+        The poll and its options (``{id, text}`` in order — the list index is
+        the position) are created when missing and take the host's question
+        and deadline; an option id another post owns is left alone. A poll
+        never reopens: ``closed`` only closes. ``votes`` (``(option_id,
+        voter)`` pairs; ``None`` — an older host that sends none — keeps the
+        held votes) replaces the votes of everybody but ``keep_voters``, this
+        household's own people, whose votes it authors itself. Only real
+        differences are written, so re-applying the same snapshot stamps
+        nothing (the migration 0086 touch triggers)."""
+
+        def _run(conn) -> bool:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM space_posts WHERE id=? AND space_id=? AND deleted=0",
+                    (post_id, space_id),
+                ).fetchone()
+                is None
+            ):
+                return False
+            conn.execute(
+                """
+                INSERT INTO space_polls(
+                    post_id, question, closes_at, closed, allow_multiple
+                ) VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(post_id) DO UPDATE SET
+                    question=excluded.question,
+                    closes_at=excluded.closes_at,
+                    allow_multiple=excluded.allow_multiple,
+                    closed=MAX(space_polls.closed, excluded.closed)
+                """,
+                (
+                    post_id,
+                    question,
+                    closes_at,
+                    1 if closed else 0,
+                    1 if allow_multiple else 0,
+                ),
+            )
+            for position, opt in enumerate(options):
+                conn.execute(
+                    """
+                    INSERT INTO space_poll_options(id, post_id, text, position)
+                    VALUES(?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        text=excluded.text,
+                        position=excluded.position
+                     WHERE space_poll_options.post_id = excluded.post_id
+                    """,
+                    (str(opt["id"]), post_id, str(opt["text"]), position),
+                )
+            if votes is None:
+                return True
+            mine = {
+                str(r["id"])
+                for r in conn.execute(
+                    "SELECT id FROM space_poll_options WHERE post_id=?", (post_id,)
+                ).fetchall()
+            }
+            held = {
+                (r["option_id"], r["voter_user_id"])
+                for r in conn.execute(
+                    "SELECT pv.option_id, pv.voter_user_id FROM space_poll_votes pv"
+                    " JOIN space_poll_options po ON po.id = pv.option_id"
+                    " WHERE po.post_id=?",
+                    (post_id,),
+                ).fetchall()
+                if r["voter_user_id"] not in keep_voters
+            }
+            wanted = {
+                (option_id, voter)
+                for option_id, voter in votes
+                if option_id in mine and voter and voter not in keep_voters
+            }
+            for option_id, voter in sorted(held - wanted):
+                conn.execute(
+                    "DELETE FROM space_poll_votes WHERE option_id=? AND voter_user_id=?",
+                    (option_id, voter),
+                )
+            for option_id, voter in sorted(wanted - held):
+                conn.execute(
+                    "INSERT INTO space_poll_votes(option_id, voter_user_id)"
+                    " VALUES(?, ?) ON CONFLICT DO NOTHING",
+                    (option_id, voter),
+                )
+            return True
+
+        return bool(await self._db.transact(_run))
+
+    async def apply_synced_schedule_state(
+        self,
+        *,
+        space_id: str,
+        post_id: str,
+        finalized_slot_id: str | None,
+        responses: list[dict] | None,
+        keep_users: frozenset[str],
+    ) -> bool:
+        """Converge a held schedule poll's answers and its pick on the
+        host's copy, in ONE transaction that first proves the poll's post
+        is a live post of ``space_id`` (``False``: refused, nothing written).
+
+        ``finalized_slot_id`` (a slot of this poll) finalises it; a pick
+        never reverts (``None`` leaves the held one). ``responses``
+        (``{slot_id, user_id, availability}``; ``None`` — an older host —
+        keeps the held answers) replaces the answers of everybody but
+        ``keep_users``, this household's own people. Only real differences
+        are written."""
+
+        def _run(conn) -> bool:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM space_schedule_poll_meta m"
+                    " JOIN space_posts p ON p.id = m.post_id"
+                    " WHERE m.post_id=? AND p.space_id=? AND p.deleted=0",
+                    (post_id, space_id),
+                ).fetchone()
+                is None
+            ):
+                return False
+            slots = {
+                str(r["id"])
+                for r in conn.execute(
+                    "SELECT id FROM space_schedule_slots WHERE post_id=?", (post_id,)
+                ).fetchall()
+            }
+            if finalized_slot_id and finalized_slot_id in slots:
+                conn.execute(
+                    "UPDATE space_schedule_poll_meta"
+                    " SET finalized_slot_id=?, closed=1"
+                    " WHERE post_id=? AND finalized_slot_id IS NULL",
+                    (finalized_slot_id, post_id),
+                )
+            if responses is None:
+                return True
+            held = {
+                (r["slot_id"], r["user_id"]): r["availability"]
+                for r in conn.execute(
+                    "SELECT sr.slot_id, sr.user_id, sr.availability"
+                    " FROM space_schedule_responses sr"
+                    " JOIN space_schedule_slots s ON s.id = sr.slot_id"
+                    " WHERE s.post_id=?",
+                    (post_id,),
+                ).fetchall()
+                if r["user_id"] not in keep_users
+            }
+            wanted: dict[tuple[str, str], str] = {}
+            for resp in responses:
+                slot_id = str(resp.get("slot_id") or "")
+                user_id = str(resp.get("user_id") or "")
+                availability = str(resp.get("availability") or "")
+                if (
+                    slot_id in slots
+                    and user_id
+                    and user_id not in keep_users
+                    and availability in _AVAILABILITIES
+                ):
+                    wanted[(slot_id, user_id)] = availability
+            for slot_id, user_id in sorted(held.keys() - wanted.keys()):
+                conn.execute(
+                    "DELETE FROM space_schedule_responses WHERE slot_id=? AND user_id=?",
+                    (slot_id, user_id),
+                )
+            now = datetime.now(UTC).isoformat()
+            for (slot_id, user_id), availability in sorted(wanted.items()):
+                if held.get((slot_id, user_id)) == availability:
+                    continue
+                conn.execute(
+                    "INSERT INTO space_schedule_responses("
+                    "slot_id, user_id, availability, responded_at) VALUES(?, ?, ?, ?)"
+                    " ON CONFLICT(slot_id, user_id) DO UPDATE SET"
+                    " availability=excluded.availability,"
+                    " responded_at=excluded.responded_at",
+                    (slot_id, user_id, availability, now),
+                )
+            return True
+
+        return bool(await self._db.transact(_run))

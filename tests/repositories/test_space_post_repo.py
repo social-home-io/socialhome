@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -958,3 +958,75 @@ async def test_set_media_rewrites_only_the_files_of_a_live_post(env):
     assert await env.repo.set_media(renamed, space_id="sp-other") is False
     await env.repo.soft_delete("sp-m1", space_id=env.space_id)
     assert await env.repo.set_media(renamed, space_id=env.space_id) is False
+
+
+# ── §25.6 reaction stamps (v_92) ─────────────────────────────────────────
+
+
+def _recent(minutes: int) -> str:
+    return (
+        (datetime.now(UTC) - timedelta(minutes=minutes))
+        .replace(tzinfo=None)
+        .isoformat(sep=" ", timespec="microseconds")
+    )
+
+
+async def _reacted_post(env):
+    await env.repo.save(
+        env.space_id,
+        Post(id="sp-r1", author="u", type=PostType.TEXT, created_at=datetime.now(UTC)),
+    )
+    await env.repo.add_reaction(
+        "sp-r1", "👍", "u-c", space_id=env.space_id, stamp=_recent(10)
+    )
+
+
+async def test_list_reaction_stamps_names_the_posts_with_any(env):
+    await _reacted_post(env)
+    stamps = await env.repo.list_reaction_stamps(["sp-r1", "nope"])
+    assert list(stamps) == ["sp-r1"]
+    assert stamps["sp-r1"]["u-c\x00👍"][1] is True
+
+
+async def test_merge_reaction_stamps_last_writer_wins(env):
+    await _reacted_post(env)
+    # An older removal changes nothing; a newer one removes.
+    assert not await env.repo.merge_reaction_stamps(
+        "sp-r1", {"u-c\x00👍": [_recent(20), False]}, space_id=env.space_id
+    )
+    assert await env.repo.merge_reaction_stamps(
+        "sp-r1",
+        {"u-c\x00👍": [_recent(5), False], "u-d\x00🎉": [_recent(5), True]},
+        space_id=env.space_id,
+    )
+    _sid, got = await env.repo.get("sp-r1")
+    assert got.reactions == {"🎉": frozenset({"u-d"})}
+    # Another space's post is never touched.
+    assert not await env.repo.merge_reaction_stamps(
+        "sp-r1", {"u-e\x00🎉": [_recent(1), True]}, space_id="sp-other"
+    )
+
+
+async def test_merge_reaction_stamps_follows_the_sources_sets_past_the_horizon(env):
+    await env.repo.save(
+        env.space_id,
+        Post(
+            id="sp-r2",
+            author="u",
+            type=PostType.TEXT,
+            created_at=datetime.now(UTC),
+            reactions={"👍": frozenset({"u-old"})},
+        ),
+    )
+    await env.repo.add_reaction(
+        "sp-r2", "❤️", "u-new", space_id=env.space_id, stamp=_recent(1)
+    )
+    # The source holds neither: the unstamped old one goes, the fresh stays.
+    assert await env.repo.merge_reaction_stamps(
+        "sp-r2", {}, space_id=env.space_id, reactions={"🙂": ["u-x"]}
+    )
+    _sid, got = await env.repo.get("sp-r2")
+    assert got.reactions == {
+        "❤️": frozenset({"u-new"}),
+        "🙂": frozenset({"u-x"}),
+    }

@@ -262,8 +262,8 @@ live resource preceded by its tombstones:
 `pages_deleted`, `pages`, `stickies_deleted`, `stickies`,
 `calendar_deleted`, `calendar`, `gallery_albums_deleted`, `gallery`,
 `gallery_items_deleted`, `polls`, `schedules`, `space_zones_deleted`,
-`space_zones`, `bazaar`, `timetables`, `chat_messages_deleted`,
-`chat_messages`.
+`space_zones`, `bazaar`, `timetables_deleted` (v_92), `timetables`,
+`chat_messages_deleted`, `chat_messages`.
 
 (Comment tombstones follow the posts, and gallery-item tombstones the
 gallery, because a host stub for an id never held needs its parent — the
@@ -409,6 +409,93 @@ with it the pictures of pages it was sent while older. The §4.4 resume /
 §319.6 resync replay of a page from the host ships its files too, within
 the replay's file and byte budget. See [`pages.md`](./pages.md#files-v_82).
 
+**Item state a lost event leaves behind (v_92).** Since v_92 the host's
+stream also carries the state that only live events used to set, so a
+household that missed them (offline past the outbox, a mesh drop) converges
+on the host's next stream. Each is taken **from the space's host (or an
+acting host) only** — `receiver._authored_record` refuses a member
+household's `polls` / `timetables_deleted`, and the persist paths apply the
+rest only `from_host` — and never replaces **this household's own people's**
+votes, answers or RSVPs (they are authored here; the host may not have
+heard one yet):
+
+| Record | Field | Receiver |
+|---|---|---|
+| `polls` | `votes`: `{option_id, voter_user_id}` (every member household sees each vote live) | creates the poll and its options when missing (the live `SPACE_POLL_CREATED` never carried options), takes the host's question / deadline, closes a closed poll (never reopens), and replaces everybody's votes but its own people's (`apply_synced_poll`) |
+| `schedules` | `responses`: `{slot_id, user_id, availability}`, `finalized_slot_id` | everybody's answers but its own people's; the pick (never reverts) (`apply_synced_schedule_state`) |
+| `calendar` | `rsvps`: `{user_id, occurrence_at, status, updated_at}`, the latest `MAX_RSVPS_PER_EVENT` (500) occurrences' worth; `rsvps_partial` when cut | everybody's RSVPs but its own people's; one the host no longer holds is dropped unless the list was cut |
+| `posts` | `reaction_stamps`: `{"user\0emoji": [stamp, added]}` | merged last writer wins per user and emoji into a post it holds (a reaction or a removal it missed lands, a newer one it holds stays); what no stamp orders any more (older than the 48 h tombstone horizon) follows the host's reaction sets (`merge_reaction_stamps`) |
+| `comments` | (`edited_at`, unchanged) | a comment held here takes the host's edit when newer (last writer wins on `edited_at`, like `SPACE_COMMENT_UPDATED`) — before, a held comment was skipped |
+| `timetables_deleted` | new resource: `{id, created_by, created_at}` | tombstones a held timetable; an id never held gets a stub only when owner-bound to `created_by` in this space |
+
+All of it is gated on the requester's version
+(`FederationCapability.MIN_FOR_SYNC_ITEM_STATE`, `provider._without_item_state`):
+a requester below v_92 gets the older record shapes and no
+`timetables_deleted`, so it is **sync line 92** (`SYNC_RECORD_LINES`, no
+`SYNC_SHAPE_VERSION` bump: a household crossing v_92 gets one full stream;
+no older one does). **Cost** per full stream: a poll record grows by ~60 B
+per vote, a schedule record by ~60 B per answer, a calendar record by
+~110 B per RSVP (≤ 500 per event, ≤ ~55 KB), a post record by ~50 B per
+stamped reaction (bounded by the repo's per-post stamp cap). Votes and
+picks also re-stamp their post, so they ride incremental sessions; answers
+and RSVPs stamp nothing (no migration — see the table below) and so heal
+on the host's daily full stream.
+
+### Coverage — every space item type
+
+What a household that missed a live event gets back, and from where. "Full"
+= the host's daily full stream (`FULL_RESYNC_INTERVAL_S`), "incremental" =
+every periodic session (30 min); "Resume" = the `SPACE_SYNC_RESUME` replay
+(creates only — also what a v_92 helper replays while the host is silent).
+Each type the stream carries has a heal test in
+`tests/federation/sync/space/test_sync_coverage.py` (chat messages up to
+the chat sink, whose live create / delete rule has its own tests); each type
+out of the stream, a test pinning that.
+
+| Item type | Live events | Stream resource | Resume (§4.4) | Deletes heal | Notes |
+|---|---|---|---|---|---|
+| Roster: members, roles, bans | `SPACE_MEMBER_*`, `SPACE_ROSTER_SNAPSHOT` | `members`, `bans` (host only) | — | removals / unbans via `SPACE_ROSTER_SNAPSHOT` | member households never stream the roster |
+| Member pictures | `SPACE_MEMBER_PROFILE_UPDATED` | `member_pictures` | — | reset via `members` (v_58) | re-encoded on receipt |
+| Posts (create, edit) | `SPACE_POST_CREATED` / `_UPDATED` | `posts` (incremental) | yes | `posts_deleted` | |
+| Post reactions | `SPACE_POST_REACTION_*` | `posts.reaction_stamps` (v_92, incremental) | — | removals as stamps (48 h), then the host's sets | before v_92 a held post kept its own reactions |
+| Comments (create) | `SPACE_COMMENT_CREATED` | `comments` (incremental) | yes | `comments_deleted` | |
+| Comment edits | `SPACE_COMMENT_UPDATED` | `comments` (v_92 receiver, incremental) | — | — | last writer wins on `edited_at` |
+| Polls (poll, options) | inline with the post (no options on the wire) | `polls` (v_92 receiver) | — | with the post | the stream is the only path that carries options |
+| Poll votes, closure | `SPACE_POLL_VOTE_CAST`, `SPACE_POLL_CLOSED` | `polls.votes` / `meta.closed` (v_92, incremental) | — | a retracted vote is absent from the host's list | |
+| Schedule polls (slots) | `SPACE_SCHEDULE_CREATED` | `schedules` | — | with the post | |
+| Schedule answers, pick | `SPACE_SCHEDULE_RESPONSE_UPDATED`, `_FINALIZED` | `schedules.responses` / `finalized_slot_id` (v_92) | — | a retraction is absent from the host's list | answers: full stream only (stamp nothing) |
+| Calendar events | `SPACE_CALENDAR_EVENT_*` | `calendar` (incremental) | yes | `calendar_deleted` | |
+| Calendar RSVPs | `SPACE_RSVP_UPDATED` / `_DELETED` | `calendar.rsvps` (v_92) | — | dropped when absent (unless `rsvps_partial`) | full stream only (stamp nothing) |
+| Task lists, tasks | `SPACE_TASK_*` | `task_lists`, `tasks`, `tasks_archived` (incremental) | yes | `task_lists_deleted`, `tasks_deleted` | |
+| Pages | `SPACE_PAGE_*` | `pages` (incremental) | yes | `pages_deleted` | v_48 host versions |
+| Stickies | `SPACE_STICKY_*` | `stickies` (incremental) | yes | `stickies_deleted` | |
+| Gallery albums, items | `SPACE_GALLERY_*` | `gallery` (incremental) | yes | `gallery_albums_deleted`, `gallery_items_deleted` | |
+| Zones | `SPACE_ZONE_*` | `space_zones` (member households only) | — | `space_zones_deleted` | never to a follower |
+| Timetables | `SPACE_TIMETABLE_UPSERTED` / `_DELETED` | `timetables` (incremental) | — | `timetables_deleted` (v_92, host only) | the tombstone names no moderator, so only the host's counts |
+| Bazaar listings, FAQ | `BAZAAR_LISTING_*`, `BAZAAR_FAQ_*` | `bazaar` (incremental) | — | with the post | |
+| Bazaar bids | `BAZAAR_BID_PLACED`, `BAZAAR_OFFER_ACCEPTED` / `_UPDATED` | **not streamed** | — | — | out of scope (see below) |
+| Bazaar offers, offer answers, Ask-the-seller threads | `BAZAAR_OFFER_*`, `BAZAAR_THREAD_MESSAGE` | **never streamed** | — | — | between the seller's and the buyer's households only ([bazaar.md](./bazaar.md)) — not space-wide state |
+| Space chat messages | `SPACE_CHAT_MESSAGE_*` | `chat_messages` (writer households, v_55) | — | `chat_messages_deleted` | |
+| Space chat reactions | `SPACE_CHAT_REACTION` | **not streamed** | — | — | out of scope (see below) |
+| Space config | `SPACE_CONFIG_*` | `SPACE_CONFIG_CATCH_UP` (not §25.6) | — | — | |
+| Moderation queue | — | **never streamed** | — | — | pending posts wait on the host; member households never hold them |
+
+Out of scope, with the reason:
+
+- **Bazaar bids** are space-wide state (every member household mirrors
+  them), but no record carries them yet, and a bid changes no stamped row.
+  Healing them needs a `bids` field on the `bazaar` record (without the
+  bidder-only decline reason) and a monotonic apply (accepted / declined /
+  withdrawn only ever turn on). Left for a follow-up: the listing's
+  status, end time and winner already converge through `bazaar`, so a
+  missed bid shows as a missing line in the bid history, not as a wrong
+  outcome.
+- **Space chat reactions** carry no order stamp (`conversation_messages`
+  keeps a plain reaction map, shared with DMs): a host snapshot could only
+  overwrite a newer relayed reaction. Healing them needs a per-reaction
+  stamp — a migration on the DM table too — which fails the "smallest
+  change" bar for a retention-windowed, chat-only surface.
+
 **Long streams are not reaped mid-way.** A session's `last_activity` is
 stamped on every chunk (the provider on each shipped chunk, the requester
 on each received one); `SyncSessionManager.reap_stale` closes sessions
@@ -450,17 +537,17 @@ Covered — streamed row by row when changed:
 
 | Resource(s) | Stamped table | Also stamped by |
 |---|---|---|
-| `posts`, `posts_deleted`, `polls`, `schedules`, `bazaar` | `space_posts` | reactions (a column), moderation / soft-delete (an update), and a change to the post's `space_polls` / `space_poll_options` / `space_poll_votes` / `space_schedule_poll_meta` / `space_schedule_slots` / `bazaar_listings` / `bazaar_listing_faq` rows (insert, update, delete), which **touches** the post (`sync_seq = NULL`, re-stamped by the post's trigger) |
+| `posts`, `posts_deleted`, `polls`, `schedules`, `bazaar` | `space_posts` | reactions (a column), moderation / soft-delete (an update), and a change to the post's `space_polls` / `space_poll_options` / `space_poll_votes` / `space_schedule_poll_meta` / `space_schedule_slots` / `bazaar_listings` / `bazaar_listing_faq` rows (insert, update, delete), which **touches** the post (`sync_seq = NULL`, re-stamped by the post's trigger). A schedule answer (`space_schedule_responses`) is in the v_92 `schedules` record but stamps nothing — a missed one heals on the host's daily full stream |
 | `comments`, `comments_deleted` | `space_post_comments` | |
 | `chat_messages`, `chat_messages_deleted` | `conversation_messages` | |
 | `gallery`, `gallery_albums_deleted`, `gallery_items_deleted` | `gallery_albums`, `gallery_items` | the 0085 album trigger that tombstones an album's items |
-| `calendar`, `calendar_deleted` | `space_calendar_events` | the 0085 trigger dropping a tombstoned event's RSVPs needs nothing: RSVPs are not part of the record, the tombstone carries the delete |
+| `calendar`, `calendar_deleted` | `space_calendar_events` | the 0085 trigger dropping a tombstoned event's RSVPs needs nothing: the tombstone carries the delete. An RSVP (part of the v_92 record) stamps nothing — a missed one heals on the host's daily full stream |
 | `stickies`, `stickies_deleted` | `stickies` | |
 | `space_zones`, `space_zones_deleted` | `space_zones` | an `icon` change (0096 recreates the update trigger with the column); a record without an `icon` key (an older provider) keeps the receiver's stored icon, an explicit `null` clears it |
 | `task_lists`, `task_lists_deleted` | `space_task_lists` (0088) | |
 | `tasks`, `tasks_archived`, `tasks_deleted` | `space_tasks` (0088) | an edit, a status / position change, a move to another list, archive and unarchive (`archived_at`), a delete; the 0069 / 0071 list-tombstone trigger tombstones — and so stamps — the list's tasks |
 | `pages`, `pages_deleted` | `space_pages` (0088) | a change to the page's draft base (`side='base'`) or open conflict sides (`conflict=1`) — rows of `space_page_snapshots`, part of the page's record — **touches** the page (insert, update, delete; household snapshots touch nothing). `page_edit_history` is in no record and stamps nothing |
-| `timetables` | `space_timetables` (0088) | a delete stamps too, but `timetables` streams live rows only (deletes ride the live `SPACE_TIMETABLE_DELETED` outbox, as before) |
+| `timetables`, `timetables_deleted` (v_92) | `space_timetables` (0088) | a delete stamps the row; since v_92 the tombstone streams as `timetables_deleted` |
 
 The tombstone resources keep their existing keyset (`(deleted_at, id)`
 for tasks / lists / pages, the row id for the 0085 types) and are filtered
