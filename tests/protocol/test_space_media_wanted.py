@@ -6,7 +6,8 @@ that space whose file's content name matches — computed from our unhashed
 local copy — and only for files the v_86 gate lets us ship: as a plain
 member, our own people's files, never another person's. A household with
 no seat in the space gets nothing. An answer is a media outbox row for the
-requester (a ``SPACE_MEDIA_BLOB`` push).
+requester (a ``SPACE_MEDIA_BLOB`` push), sent under the asked-for
+content name and read from our local copy.
 """
 
 from __future__ import annotations
@@ -54,6 +55,11 @@ async def _queued(db) -> list[tuple[str, str, str]]:
     return [(r["blob_id"], r["target_instance_id"], r["correlation_id"]) for r in rows]
 
 
+async def _sources(db) -> list[str]:
+    rows = await db.fetchall("SELECT bytes_path FROM space_media_outbox")
+    return [r["bytes_path"].rsplit("/", 1)[-1] for r in rows]
+
+
 def _ask(name: str = NAME) -> dict:
     return {"space_id": SP, "files": [{"item": "p-w", "name": name}]}
 
@@ -62,7 +68,9 @@ async def test_a_member_household_gets_our_persons_file(env, tmp_dir):
     app, db = env
     await _seed(db, tmp_dir, author=LOCAL_USER)
     await _deliver(app, FET.SPACE_MEDIA_WANTED, _ask(), sender=OTHER)
-    assert await _queued(db) == [("pic.webp", OTHER, "p-w")]
+    # Sent as the content name the requester asked for, from our own file.
+    assert await _queued(db) == [(NAME, OTHER, "p-w")]
+    assert await _sources(db) == ["pic.webp"]
 
 
 async def test_a_household_without_a_seat_gets_nothing(env, tmp_dir):

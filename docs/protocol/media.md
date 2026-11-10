@@ -692,7 +692,11 @@ row's author household only, bytes checked against the row's `h`.
 3. The **file gate** (`CatchUpFileGates.for_requester`) with the item's
    owner: the host ships every file, an admin / moderator household other
    people's hashed files to a v_86 requester, any household its own
-   people's files.
+   people's files. A file step 2 matched counts as hashed whatever name it
+   is stored under here (a member that got the item first as the public
+   GFS copy, which carries no hash map, keeps it under its `sg-` name);
+   it is sent under the asked-for `sc-` name, read from the local file —
+   a receiver refuses a reserved `sg-` filename.
 4. A **budget** per (requester, space): at most 50 files / 32 MiB per
    30 min — the resume's `RESUME_MEDIA_MAX_FILES` / `_BYTES` /
    `RESUME_COOLDOWN_S` values, but a budget of its own: a provider that

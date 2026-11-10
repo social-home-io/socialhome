@@ -145,7 +145,9 @@ class _Federation(Protocol):
 
 
 class _FileGate(Protocol):
-    async def ship(self, owner: str | None, urls: list[str]) -> list[str]: ...
+    async def ship(
+        self, owner: str | None, urls: list[str], *, hashed: bool = False
+    ) -> list[str]: ...
 
 
 class _FileGates(Protocol):
@@ -161,6 +163,7 @@ class _MediaOutbox(Protocol):
         target_instance_ids: list[str],
         media_urls: list[str],
         push: bool = False,
+        wire_names: dict[str, str] | None = None,
     ) -> None: ...
 
 
@@ -491,7 +494,9 @@ class SpaceMediaWantedProvider:
                 url, owner = found
                 if gate is None:
                     gate = await self._gates.for_requester(space_id, requester)
-                if not await gate.ship(owner, [url]):
+                # ``_match`` proved the bytes' content name is *name*: a
+                # hashed file whatever name it is stored under here.
+                if not await gate.ship(owner, [url], hashed=True):
                     skipped += 1
                     continue
                 size = await local_file_size(self._dir, url)
@@ -507,6 +512,10 @@ class SpaceMediaWantedProvider:
                     target_instance_ids=[requester],
                     media_urls=[url],
                     push=True,
+                    # Sent as the asked-for content name: a helper may store
+                    # it under its own reader name (``sg-``), which the
+                    # requester refuses by name.
+                    wire_names={url: name},
                 )
                 seen.add(name)  # one file is queued once per request
                 queued += 1

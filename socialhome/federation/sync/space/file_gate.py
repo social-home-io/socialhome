@@ -86,16 +86,22 @@ class CatchUpFileGate:
         self._files = 0
         self._bytes = 0
 
-    async def ship(self, owner: str | None, urls: Sequence[str]) -> list[str]:
+    async def ship(
+        self, owner: str | None, urls: Sequence[str], *, hashed: bool = False
+    ) -> list[str]:
         """The files of a row owned by ``owner`` (``None``: names nobody)
-        this household ships to the requester."""
+        this household ships to the requester. *hashed*: the CALLER proved
+        each file's bytes hash to a content name (a v_92
+        ``SPACE_MEDIA_WANTED`` match) — a hashed file even when stored here
+        under a legacy name (a member that got the item first as the public
+        GFS copy, which carries no hash map)."""
         if self._all or (owner is not None and owner in self._own):
             return list(urls)
         if not self._fills:
             return []
         kept: list[str] = []
         for url in urls:
-            if not is_space_content_media_name(media_basename(url)):
+            if not hashed and not is_space_content_media_name(media_basename(url)):
                 continue  # an unhashed file: the host's fill only
             if self._files >= FILL_MAX_FILES:
                 break

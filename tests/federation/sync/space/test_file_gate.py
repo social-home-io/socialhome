@@ -75,6 +75,17 @@ async def test_a_trusted_household_ships_only_others_hashed_files(role):
     assert await gate.ship(None, [SC2]) == [SC2]
 
 
+@pytest.mark.parametrize("role", ["moderator", "admin"])
+async def test_a_trusted_household_ships_a_file_the_caller_verified_as_hashed(role):
+    """A helper may hold a hashed file under its own legacy name (it got the
+    item first as a public copy without a hash map). A caller that proved
+    the bytes hash to the asked-for content name ships it as hashed."""
+    gate = await _gates(role=role).for_requester(SP, "peer-new")
+    assert await gate.ship("u-x", [LEGACY], hashed=True) == [LEGACY]
+    plain = await _gates(role="member").for_requester(SP, "peer-new")
+    assert await plain.ship("u-x", [LEGACY], hashed=True) == []
+
+
 async def test_a_plain_member_household_ships_no_one_elses_file():
     gate = await _gates(role="member").for_requester(SP, "peer-new")
     assert await gate.ship("u-x", [SC, LEGACY]) == []

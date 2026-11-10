@@ -509,6 +509,48 @@ async def test_an_asked_for_file_is_pushed_even_to_a_gfs_reader(db, outbox, tmp_
     assert await svc.flush_once() == 0
 
 
+async def test_a_file_is_sent_under_its_wire_name_with_its_local_bytes(
+    db, outbox, tmp_path
+):
+    """v_92: a helper holding another member's hashed file under its own
+    reader name (``sg-``, reserved — a receiver refuses it by name) ships
+    it under the asked-for content name, read from its local file."""
+    await _seed_space(db)
+    body = b"the helper's copy"
+    (tmp_path / "sg-local.webp").write_bytes(body)
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-e"],
+        media_urls=["sg-local.webp"],
+        push=True,
+        wire_names={"sg-local.webp": "sc-content.webp"},
+    )
+    [row] = await outbox.list_for_correlation("p-1")
+    assert row.blob_id == "sc-content.webp"
+    assert row.bytes_path == str(tmp_path / "sg-local.webp")
+    assert await svc.flush_once() == 1
+    [call] = fed.send_media_chunk.call_args_list
+    assert call.kwargs["payload"]["filename"] == "sc-content.webp"
+    assert call.kwargs["raw_chunk"] == body
+
+
+async def test_an_unsafe_wire_name_is_never_queued(db, outbox, tmp_path):
+    await _seed_space(db)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=None, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-e"],
+        media_urls=["img.webp"],
+        wire_names={"img.webp": "../escape.webp"},
+    )
+    assert await outbox.list_for_correlation("p-1") == []
+
+
 async def _enqueue_many_chunks(db, outbox, tmp_path, fed, *, chunks: int):
     await _seed_space(db)
     (tmp_path / "big.webp").write_bytes(b"\0" * (chunks * 1024))

@@ -439,10 +439,10 @@ class _Gate:
         self.own = set(own)
         self.fills = fills
 
-    async def ship(self, owner, urls):
+    async def ship(self, owner, urls, *, hashed=False):
         if self.all or owner in self.own:
             return list(urls)
-        return [u for u in urls if self.fills and u.startswith("sc-")]
+        return [u for u in urls if self.fills and (hashed or u.startswith("sc-"))]
 
 
 class _Gates:
@@ -515,6 +515,7 @@ async def test_the_provider_ships_a_held_content_named_file(tmp_path):
             "target_instance_ids": ["req"],
             "media_urls": [a],
             "push": True,
+            "wire_names": {a: a},
         }
     ]
 
@@ -532,6 +533,7 @@ async def test_an_unhashed_local_file_matches_by_its_computed_content_name(tmp_p
     )
     assert await p.handle(_event([{"item": "p1", "name": name}])) == 1
     assert outbox.queued[0]["media_urls"] == ["orig.webp"]
+    assert outbox.queued[0]["wire_names"] == {"orig.webp": name}
     # A different file's content name matches nothing.
     assert await p.handle(_event([{"item": "p1", "name": _sc("f")}])) == 0
 
@@ -625,6 +627,27 @@ async def test_the_file_gate_decides_what_a_plain_member_ships(tmp_path):
     assert [q["media_urls"] for q in outbox.queued] == [[a]]
     trusted, outbox = _provider(tmp_path, items, gate=_Gate(own={"u-mine"}, fills=True))
     assert await trusted.handle(_event(files)) == 2
+
+
+async def test_a_helper_ships_another_persons_file_it_holds_under_a_legacy_name(
+    tmp_path,
+):
+    """A trusted helper that got the item first as the public GFS copy (no
+    hash map) keeps the file under its own ``sg-`` name. The bytes hash to
+    the asked-for content name, so it is a hashed file: the helper ships
+    it (the receiver checks the bytes against its row's hash anyway)."""
+    data = b"someone else's picture"
+    legacy = "sg-0123456789abcdef0123456789abcdef01234567.webp"
+    (tmp_path / legacy).write_bytes(data)
+    name = space_content_media_name(SPACE, hashlib.sha256(data).hexdigest(), legacy)
+    items = {(SPACE, "p1"): [(legacy, "u-other")]}
+    helper, outbox = _provider(tmp_path, items, gate=_Gate(fills=True))
+    assert await helper.handle(_event([{"item": "p1", "name": name}])) == 1
+    assert outbox.queued[0]["media_urls"] == [legacy]
+    # Sent under the content name: a receiver refuses a reserved ``sg-`` one.
+    assert outbox.queued[0]["wire_names"] == {legacy: name}
+    plain, outbox = _provider(tmp_path, items, gate=_Gate())
+    assert await plain.handle(_event([{"item": "p1", "name": name}])) == 0
 
 
 async def test_the_budget_is_50_files_and_32_mib_per_requester_and_space(
