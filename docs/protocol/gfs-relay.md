@@ -1223,7 +1223,11 @@ a delete or an update never reaches a seat before its create, even while
 the create waits out its backoff, and a newcomer's catch-up (which counts
 a queued chunk as a failed one) never waits on content. "Older" is
 `(created_at, rowid)`; an expired row (past `expires_at`, the sweep fails it)
-gates nothing. A household's oldest row is never held, so the gate cannot
+gates nothing, and neither does a row pinned past `MAX_ATTEMPTS` (a
+`NEVER_DROP` or long-lived row, e.g. a key exchange, retrying on the ceiling
+backoff forever) — it is out of the ordering both ways: it holds no newer
+row (which would otherwise wait until it expired and be lost) and is never
+held itself. A household's oldest row is never held, so the gate cannot
 deadlock. Cost: each seat's oldest row is found ONCE per pass (a
 materialized CTE, one index search per seat — never a lookup per row):
 ~5 ms at 10 seats × 1 000 rows. Due rows hand out by `next_attempt_at`, then

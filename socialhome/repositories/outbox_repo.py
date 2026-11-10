@@ -37,6 +37,7 @@ from ..domain.federation import (
 )
 from ..domain.federation_retention import (
     ANY_RELAYED_DELETE_KEY_PREFIX,
+    MAX_ATTEMPTS,
     MAX_PENDING_PER_PEER,
     NEVER_DROP,
     RELAYED_DELETE_KEY_PREFIX,
@@ -67,20 +68,26 @@ _LIVE = (
     " AND ({t}.expires_at IS NULL OR datetime({t}.expires_at) > datetime('now'))"
 )
 
+#: A pending row the v_91 seat ordering counts: inside its retention window
+#: and not pinned past :data:`MAX_ATTEMPTS` (a NEVER_DROP / long-lived row
+#: failing transient forever must not hold its household).
+_ORDERED = _LIVE + f" AND {{t}}.attempts < {MAX_ATTEMPTS:d}"
+
 #: The event types the v_91 ordering gate holds (JSON for ``json_each``).
 _GATED_TYPES_JSON = orjson.dumps(sorted(t.value for t in MULTI_EVENT_TYPES)).decode()
 
 #: :meth:`SqliteOutboxRepo.list_due` (exported for the query-plan test).
-#: ``heads`` is each ``space_session`` seat's OLDEST pending, unexpired row
-#: — found once per seat through ``idx_federation_outbox_instance``,
+#: ``heads`` is each ``space_session`` seat's OLDEST pending, unexpired,
+#: unpinned row (:data:`_ORDERED`) — found once per seat through ``idx_federation_outbox_instance``,
 #: materialized so it is never re-run per outbox row. A gated row
-#: (a multi event type to a seat) is handed out only when it is that head.
+#: (a multi event type to a seat) is handed out only when it is that head
+#: — or pinned itself (out of the ordering both ways, so never deadlocked).
 LIST_DUE_SQL = f"""
 WITH heads(instance_id, head) AS MATERIALIZED (
     SELECT ri.id,
            (SELECT x.rowid
               FROM federation_outbox x
-             WHERE x.instance_id = ri.id AND {_LIVE.format(t="x")}
+             WHERE x.instance_id = ri.id AND {_ORDERED.format(t="x")}
              ORDER BY x.created_at, x.rowid
              LIMIT 1)
       FROM remote_instances ri
@@ -97,6 +104,7 @@ SELECT o.*, p.space_id AS payload_space_id,
    AND (
        h.instance_id IS NULL
        OR o.rowid = h.head
+       OR o.attempts >= {MAX_ATTEMPTS:d}
        OR o.event_type NOT IN (SELECT value FROM json_each(?))
    )
  ORDER BY datetime(o.next_attempt_at) ASC, o.created_at ASC, o.rowid ASC
@@ -412,8 +420,10 @@ class SqliteOutboxRepo:
         carry) waits behind ANY older ``(created_at, rowid)`` pending,
         unexpired row of that same household — multi or single. Every other
         row (sync, control, key exchange, any row to a paired peer) is never
-        gated. A household's oldest row is never held, so the gate cannot
-        deadlock; a multi row stuck on transient failures is ungrouped
+        gated. A row pinned past ``MAX_ATTEMPTS`` (a NEVER_DROP or
+        long-lived row on the ceiling backoff) is out of the ordering both
+        ways: it holds no newer row and is never held. A household's oldest
+        row is never held, so the gate cannot deadlock; a multi row stuck on transient failures is ungrouped
         (:meth:`ungroup_payload`) and goes per row like any other.
 
         A multi payload taken out of every group lists with no ``msg_id``.
@@ -424,12 +434,13 @@ class SqliteOutboxRepo:
         return [_row_to_entry(d) for d in rows_to_dicts(rows)]
 
     async def has_pending_row(self, instance_id: str) -> bool:
-        """Whether *instance_id* has any pending, unexpired row — the live
-        send's half of the :meth:`list_due` gate: a multi event type to a
-        seat with one queues behind it instead of overtaking."""
+        """Whether *instance_id* has any pending, unexpired row not pinned
+        past ``MAX_ATTEMPTS`` — the live send's half of the :meth:`list_due`
+        gate: a multi event type to a seat with one queues behind it instead
+        of overtaking."""
         row = await self._db.fetchone(
             f"SELECT 1 FROM federation_outbox o WHERE o.instance_id=?"
-            f" AND {_LIVE.format(t='o')} LIMIT 1",
+            f" AND {_ORDERED.format(t='o')} LIMIT 1",
             (instance_id,),
         )
         return row is not None

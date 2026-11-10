@@ -1423,6 +1423,31 @@ async def test_a_seat_s_oldest_row_is_always_handed_out(env):
     assert await _due_ids(env) == set()
 
 
+async def test_a_pinned_never_drop_row_past_max_attempts_does_not_hold_the_seat(env):
+    """A key exchange failing transient past MAX_ATTEMPTS is pinned at the
+    ceiling backoff forever: it must not stay the seat's head, or every
+    newer content row waits until it expires (7 days) and is lost."""
+    await _seat(env, "seat-a")
+    kex = await _row(env, "seat-a", "kex", FederationEventType.SPACE_KEY_EXCHANGE)
+    later = datetime.now(UTC) + timedelta(hours=4)
+    await env.outbox_repo.reschedule(kex, later.isoformat(), MAX_ATTEMPTS)
+    assert not await env.outbox_repo.has_pending_row("seat-a")  # live goes live
+    post = await _row(env, "seat-a", "post")
+    assert await _due_ids(env) == {post}
+
+
+async def test_a_pinned_multi_type_row_is_handed_out_behind_newer_rows(env):
+    """A pinned NEVER_DROP multi type (a ban) left out of the heads is never
+    held either — out of the ordering both ways, so it cannot deadlock."""
+    await _seat(env, "seat-a")
+    ban = await _row(env, "seat-a", "ban", FederationEventType.SPACE_MEMBER_BANNED)
+    await env.outbox_repo.reschedule(
+        ban, datetime.now(UTC).isoformat(), MAX_ATTEMPTS + 2
+    )
+    post = await _row(env, "seat-a", "post")
+    assert await _due_ids(env) == {ban, post}
+
+
 async def test_has_pending_row_counts_any_pending_unexpired_row(env):
     """The live path's half of the rule: a seat with any pending, unexpired
     row makes a live content send queue behind it."""

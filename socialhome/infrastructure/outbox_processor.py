@@ -26,7 +26,13 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, TypeVar
 
-from ..domain.federation_retention import NEVER_DROP, TERMINAL_GRACE, is_long_lived
+from ..domain.federation_retention import (
+    BACKOFF_SECONDS,
+    MAX_ATTEMPTS,
+    NEVER_DROP,
+    TERMINAL_GRACE,
+    is_long_lived,
+)
 from ..domain.gfs_mailbox import MULTI_MAX_RECIPIENTS
 from ..domain.outbox import DeliveryOutcome, RetryAfter
 from ..repositories.outbox_repo import (
@@ -37,24 +43,6 @@ from ..repositories.outbox_repo import (
 
 log = logging.getLogger(__name__)
 
-
-#: Base retry schedule in seconds — index == attempt number after the
-#: first failure. The last entry is the ceiling.
-BACKOFF_SECONDS: tuple[int, ...] = (
-    5,
-    10,
-    20,
-    40,
-    80,
-    160,
-    320,
-    640,
-    1280,
-    2560,
-    5120,
-    10240,
-    14400,
-)
 
 #: Attempts a 404 ``No instance found`` is treated as *transient* for.
 #:
@@ -107,10 +95,6 @@ STOP_DEADLINE_S: float = 5.0
 
 #: How far to perturb the base delay — ±30%.
 JITTER_RATIO: float = 0.30
-
-#: Max attempts before an entry is moved to ``failed``. Matches the length
-#: of :data:`BACKOFF_SECONDS`.
-MAX_ATTEMPTS: int = len(BACKOFF_SECONDS)
 
 # ``NEVER_DROP`` is imported from :mod:`socialhome.domain.federation_retention`
 # (the single source of truth) and re-exported under this name so the
