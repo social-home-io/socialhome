@@ -718,6 +718,9 @@ async def test_bazaar_exporter_serialises_listings():
         async def list_faq_for_listings(self, post_ids):
             return {}
 
+        async def list_bids_for_listings(self, post_ids, *, per_listing):
+            return {}
+
     recs = await BazaarExporter(_Repo(), _WINDOWS).list_records("sp-1")
     assert len(recs) == 1
     r = recs[0]

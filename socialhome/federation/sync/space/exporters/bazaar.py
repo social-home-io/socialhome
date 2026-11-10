@@ -12,6 +12,16 @@ its live entries and its removal markers (a marker keeps a late edit of a
 removed entry from bringing it back on the receiver). At most 10 live
 entries and 20 markers per listing, so a record grows by ≤ ~8 KB.
 
+v_92: each record also carries the listing's bids (``bids``: the newest
+:data:`MAX_BIDS_PER_LISTING`, as every member household sees them live —
+never the seller's decline reason, which is the bidder's alone). A v_92
+receiver takes them from the space's host: a bid it lacks is added, a held
+one only ever turns accepted / declined / withdrawn on. A bid changes no
+stamped row (migration 0086), so a missed one heals on the host's daily
+full stream. Offers and Ask-the-seller threads are between the seller's
+and the buyer's households only and never stream. A requester below v_92
+gets the record without ``bids`` (:meth:`BazaarExporter.without_bids`).
+
 Without this exporter (#445 shipped realtime + image bytes only),
 a new joiner saw the wrapper post but the ``bazaar_listings`` row
 stayed empty until the seller fired a new ``BAZAAR_LISTING_CREATED``
@@ -29,7 +39,7 @@ from ..window import SYNC_PAGE_SIZE, SyncWindows, iter_pages
 
 if TYPE_CHECKING:
     from .....domain.bazaar_faq import BazaarFaqEntry
-    from .....domain.post import BazaarListing
+    from .....domain.post import BazaarBid, BazaarListing
     from .....repositories.bazaar_repo import AbstractBazaarRepo
 
 
@@ -39,11 +49,22 @@ class BazaarExporter(PagedExporterMixin):
 
     resource = "bazaar"
 
-    __slots__ = ("_repo", "_windows")
+    __slots__ = ("_bids", "_repo", "_windows")
 
-    def __init__(self, bazaar_repo: AbstractBazaarRepo, windows: SyncWindows) -> None:
+    def __init__(
+        self,
+        bazaar_repo: AbstractBazaarRepo,
+        windows: SyncWindows,
+        *,
+        bids: bool = True,
+    ) -> None:
         self._repo = bazaar_repo
         self._windows = windows
+        self._bids = bids
+
+    def without_bids(self) -> BazaarExporter:
+        """The record set of a requester below v_92: no ``bids``."""
+        return BazaarExporter(self._repo, self._windows, bids=False)
 
     def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
         return self._pages(space_id, None)
@@ -71,10 +92,38 @@ class BazaarExporter(PagedExporterMixin):
             )
 
         async for listings in iter_pages(fetch):
-            faq = await self._repo.list_faq_for_listings(
-                [lst.post_id for lst in listings]
-            )
-            yield _records(listings, faq)
+            ids = [lst.post_id for lst in listings]
+            faq = await self._repo.list_faq_for_listings(ids)
+            records = _records(listings, faq)
+            if self._bids:
+                bids = await self._repo.list_bids_for_listings(
+                    ids, per_listing=MAX_BIDS_PER_LISTING
+                )
+                for record in records:
+                    record["bids"] = [
+                        _bid_to_wire(b) for b in bids.get(record["post_id"], ())
+                    ]
+            yield records
+
+
+#: The most bids one ``bazaar`` record carries — the newest (a receiver
+#: never reads a missing bid as a removal, so a cut list is safe).
+MAX_BIDS_PER_LISTING: int = 200
+
+
+def _bid_to_wire(bid: BazaarBid) -> dict[str, Any]:
+    """A bid as every member household sees it live — never the seller's
+    decline reason, which only the bidder's household gets."""
+    return {
+        "id": bid.id,
+        "bidder_user_id": bid.bidder_user_id,
+        "amount": bid.amount,
+        "message": bid.message,
+        "accepted": bid.accepted,
+        "rejected": bid.rejected,
+        "withdrawn": bid.withdrawn,
+        "created_at": bid.created_at,
+    }
 
 
 def _records(

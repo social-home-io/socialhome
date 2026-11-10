@@ -57,6 +57,9 @@ class _Repo:
         self.faq_asked.append(list(post_ids))
         return {pid: self._faq.get(pid, []) for pid in post_ids if pid in self._faq}
 
+    async def list_bids_for_listings(self, post_ids, *, per_listing):
+        return {}
+
 
 async def test_a_record_carries_its_listings_faq_and_removal_markers():
     repo = _Repo([LISTING], {"bzr-1": [LIVE, GONE]})

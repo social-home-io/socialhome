@@ -55,6 +55,7 @@ from .exporter import (
     record_batches,
     serialise_chunk,
 )
+from .exporters.bazaar import BazaarExporter
 from .exporters.calendar import CalendarExporter
 from .exporters.members import PreModeratorMembersExporter
 from .exporters.polls import PollsExporter
@@ -1467,7 +1468,7 @@ def _series_rows(version: int) -> bool:
 def _item_state(version: int) -> bool:
     """v_92: does a requester at ``version`` take the item state a lost live
     event leaves behind (poll votes, schedule answers and picks, RSVPs,
-    reaction stamps, timetable tombstones)? One we cannot ask (``0``) gets
+    reaction stamps, bazaar bids, timetable tombstones)? One we cannot ask (``0``) gets
     the older shapes."""
     return version >= FederationCapability.MIN_FOR_SYNC_ITEM_STATE
 
@@ -1483,6 +1484,8 @@ def _without_item_state(exporter: ResourceExporter) -> ResourceExporter | None:
         return exporter.slots_only()
     if isinstance(exporter, CalendarExporter):
         return exporter.without_rsvps()
+    if isinstance(exporter, BazaarExporter):
+        return exporter.without_bids()
     if isinstance(exporter, TimetablesDeletedExporter):
         return None
     return exporter

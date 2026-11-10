@@ -34,6 +34,7 @@ from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.gallery import GalleryAlbum, GalleryItem
 from socialhome.domain.page import Page
 from socialhome.domain.post import (
+    BazaarBid,
     BazaarListing,
     BazaarMode,
     BazaarStatus,
@@ -732,6 +733,38 @@ async def _view_listing(h: Home) -> Any:
     return None if lst is None else (lst.title, lst.status, lst.price)
 
 
+async def _bid(h: Home, bid_id: str, amount: int) -> None:
+    await h.repos.bazaar.place_bid(
+        BazaarBid(
+            id=bid_id,
+            listing_post_id="post-1",
+            bidder_user_id=CARL,
+            amount=amount,
+            created_at=f"2026-11-0{amount // 10}T10:00:00+00:00",
+            message="mine?",
+        ),
+        space_id=SPACE,
+    )
+
+
+async def _listing_with_bid(h: Home) -> None:
+    await _listing(h)
+    await _bid(h, "bid-1", 40)
+
+
+async def _view_bids(h: Home) -> Any:
+    return [
+        (b.id, b.amount, b.message, b.rejected, b.withdrawn)
+        for b in await h.repos.bazaar.list_bids("post-1")
+    ]
+
+
+async def _more_bids(h: Home) -> None:
+    # A new bid, and the first one declined — neither reached Bob.
+    await _bid(h, "bid-2", 45)
+    await h.repos.bazaar.reject_offer("bid-1", reason="too low")
+
+
 async def _sell(h: Home) -> None:
     got = await h.repos.bazaar.get_listing("post-1")
     assert got is not None
@@ -772,6 +805,7 @@ CASES: tuple[Case, ...] = (
     Case("member picture set", _nothing, _carl_picture, _view_picture),
     Case("bazaar listing created", _post, _listing, _view_listing),
     Case("bazaar listing sold", _listing, _sell, _view_listing),
+    Case("bazaar bids placed and declined", _listing_with_bid, _more_bids, _view_bids),
     Case("post created", _nothing, _post, _view_post),
     Case("post edited", _post, _edit_post, _view_post),
     Case("post deleted", _post, _delete_post, _view_post),
@@ -979,12 +1013,29 @@ async def test_an_older_requester_gets_the_older_record_shapes(homes):
     await _react(host)
     await _timetable(host)
     await _delete_timetable(host)
+    await _post(host, "post-3", type=PostType.BAZAAR, content="Lamp")
+    await host.repos.bazaar.save_listing(
+        BazaarListing(
+            post_id="post-3",
+            space_id=SPACE,
+            seller_user_id=ANNA,
+            mode=BazaarMode.AUCTION,
+            title="Lamp",
+            end_time="2027-01-01T00:00:00+00:00",
+            currency="EUR",
+            status=BazaarStatus.ACTIVE,
+            created_at=T0.isoformat(),
+            start_price=5,
+        ),
+        space_id=SPACE,
+    )
     new = FederationCapability.MIN_FOR_SYNC_ITEM_STATE
     for resource, field in (
         ("polls", "votes"),
         ("schedules", "responses"),
         ("calendar", "rsvps"),
         ("posts", "reaction_stamps"),
+        ("bazaar", "bids"),
     ):
         old = await records(resource, new - 1)
         assert old and all(field not in r for r in old), resource
@@ -1068,6 +1119,22 @@ def test_the_moderation_queue_never_streams():
     """Pending posts wait on the host for a moderator: a member household
     never holds them, so no resource carries them."""
     assert not [r for r in RESOURCE_ORDER if "moderation" in r or "pending" in r]
+
+
+async def test_bazaar_offers_threads_and_decline_reasons_never_stream(homes):
+    """An offer, its answer and an Ask-the-seller thread are between the
+    seller's and the buyer's households only (docs/protocol/bazaar.md), and
+    a declined bid's reason is the bidder's: none rides the space stream,
+    and a member household never stores a reason from it."""
+    host, member = homes
+    await _listing_with_bid(host)
+    await host.repos.bazaar.reject_offer("bid-1", reason="too low")
+    (record,) = await collect_batches(record_batches(host.exporters["bazaar"], SPACE))
+    assert not {"offers", "threads", "messages"} & set(record)
+    assert record["bids"] and "too low" not in repr(record)
+    await _stream(host, member)
+    (bid,) = await member.repos.bazaar.list_bids("post-1")
+    assert bid.rejected and bid.rejection_reason is None
 
 
 def test_space_chat_reactions_are_not_streamed():

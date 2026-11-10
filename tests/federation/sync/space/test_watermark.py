@@ -815,6 +815,7 @@ ITEM_STATE_KEYS_V92: dict[str, set[str]] = {
     "polls": {"votes"},
     "schedules": {"finalized_slot_id", "responses"},
     "calendar": {"rsvps"},
+    "bazaar": {"bids"},
 }
 
 

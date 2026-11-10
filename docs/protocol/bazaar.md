@@ -38,7 +38,10 @@ households only.
 `BAZAAR_OFFER_UPDATED` (v_73), `BAZAAR_THREAD_MESSAGE` (v_74, see [Ask the seller](#ask-the-seller-v_74)),
 `BAZAAR_LISTING_FAQ_UPDATED` (v_75, see [Questions and answers](#questions-and-answers-v_75)),
 plus the `bazaar` resource of the §25.6 space sync (listings and, since
-v_75, their questions and answers).
+v_75, their questions and answers; since v_92 their bids — the newest 200,
+never a decline reason — which a member household takes from the host
+only: a missed bid is added, a held one only ever turns accepted /
+declined / withdrawn on. Offers and threads never ride the sync).
 
 | Event | Sealed payload | Sent by → to |
 |---|---|---|

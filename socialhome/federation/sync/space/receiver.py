@@ -69,6 +69,7 @@ from ....domain.post import (
     BAZAAR_MAX_IMAGES,
     FEED_POST_MAX_IMAGES,
     MAX_DISTINCT_REACTIONS_PER_POST,
+    BazaarBid,
     BazaarListing,
     BazaarMode,
     BazaarStatus,
@@ -1916,6 +1917,16 @@ class SpaceSyncReceiver:
                             await _apply_bazaar_faq(
                                 self._bazaar_repo, listing.post_id, r.get("faq")
                             )
+                            raw_bids = r.get("bids")
+                            if bazaar_from_host and isinstance(raw_bids, list):
+                                # v_92 — the host's bids: a missed one is
+                                # added, a held one only ever turns
+                                # accepted / declined / withdrawn on.
+                                await self._bazaar_repo.apply_synced_bids(
+                                    listing.post_id,
+                                    _bids_from_record(raw_bids, listing.post_id),
+                                    space_id=space_id,
+                                )
                     except Exception as exc:
                         # FK / CHECK violation (anchor post missing,
                         # unknown mode). A listing the joiner cannot store
@@ -4248,6 +4259,41 @@ async def _apply_bazaar_faq(
 #: entry a listing ever holds, all its removal markers included (so a late
 #: joiner never takes a stale edit of a removed entry).
 _FAQ_RECORD_MAX_ITEMS = BAZAAR_FAQ_MAX_ENTRIES_EVER
+
+
+#: The longest bid message a record may carry (the live bid's cap).
+_MAX_BID_MESSAGE = 280
+
+
+def _bids_from_record(raw: list[Any], post_id: str) -> list[BazaarBid]:
+    """The host's ``bids`` of a listing — a malformed entry is skipped; a
+    decline reason is never taken (it is the bidder's alone)."""
+    out: list[BazaarBid] = []
+    for b in raw:
+        if not isinstance(b, dict):
+            continue
+        bid_id = str(b.get("id") or "")
+        bidder = str(b.get("bidder_user_id") or "")
+        amount = b.get("amount")
+        if not bid_id or not bidder or type(amount) is not int or amount < 0:
+            continue
+        message = b.get("message")
+        out.append(
+            BazaarBid(
+                id=bid_id,
+                listing_post_id=post_id,
+                bidder_user_id=bidder,
+                amount=amount,
+                created_at=str(b.get("created_at") or ""),
+                message=(
+                    message[:_MAX_BID_MESSAGE] if isinstance(message, str) else None
+                ),
+                accepted=b.get("accepted") is True,
+                rejected=b.get("rejected") is True,
+                withdrawn=b.get("withdrawn") is True,
+            )
+        )
+    return out
 
 
 def _bazaar_listing_from_record(

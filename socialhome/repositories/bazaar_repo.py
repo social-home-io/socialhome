@@ -129,6 +129,22 @@ class AbstractBazaarRepo(Protocol):
     async def place_bid(self, bid: BazaarBid, *, space_id: str) -> BazaarBid: ...
     async def get_bid(self, bid_id: str) -> BazaarBid | None: ...
     async def list_bids(self, post_id: str) -> list[BazaarBid]: ...
+    async def list_bids_for_listings(
+        self, post_ids: list[str], *, per_listing: int
+    ) -> dict[str, list[BazaarBid]]:
+        """The newest ``per_listing`` bids of each listing (§25.6 v_92: what
+        the host's ``bazaar`` records carry), oldest first."""
+        ...
+
+    async def apply_synced_bids(
+        self, post_id: str, bids: list[BazaarBid], *, space_id: str
+    ) -> bool:
+        """Take the host's bids of a listing of ``space_id``: a bid not held
+        is added (never with a decline reason — that is the bidder's), and a
+        held one only ever turns accepted / declined / withdrawn on. ``True``
+        when anything was written."""
+        ...
+
     async def highest_bid(self, post_id: str) -> BazaarBid | None: ...
     async def accept_offer(self, bid_id: str, *, space_id: str) -> None: ...
     async def reject_offer(
@@ -659,6 +675,92 @@ class SqliteBazaarRepo:
             (post_id,),
         )
         return [b for b in (_row_to_bid(d) for d in rows_to_dicts(rows)) if b]
+
+    async def list_bids_for_listings(
+        self, post_ids: list[str], *, per_listing: int
+    ) -> dict[str, list[BazaarBid]]:
+        ids = list(dict.fromkeys(post_ids))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        rows = await self._db.fetchall(
+            "SELECT * FROM ("
+            " SELECT *, ROW_NUMBER() OVER ("
+            "  PARTITION BY listing_post_id ORDER BY created_at DESC, id DESC"
+            " ) AS newest FROM bazaar_bids"
+            f" WHERE listing_post_id IN ({placeholders})"
+            ") WHERE newest <= ? ORDER BY listing_post_id, created_at, id",
+            (*ids, int(per_listing)),
+        )
+        out: dict[str, list[BazaarBid]] = {}
+        for d in rows_to_dicts(rows):
+            bid = _row_to_bid(d)
+            if bid is not None:
+                out.setdefault(bid.listing_post_id, []).append(bid)
+        return out
+
+    async def apply_synced_bids(
+        self, post_id: str, bids: list[BazaarBid], *, space_id: str
+    ) -> bool:
+        def _run(conn) -> bool:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM bazaar_listings WHERE post_id=? AND space_id=?",
+                    (post_id, space_id),
+                ).fetchone()
+                is None
+            ):
+                return False
+            wrote = False
+            for bid in bids:
+                if bid.listing_post_id != post_id:
+                    continue
+                held = conn.execute(
+                    "SELECT listing_post_id, accepted, rejected, withdrawn"
+                    " FROM bazaar_bids WHERE id=?",
+                    (bid.id,),
+                ).fetchone()
+                if held is None:
+                    conn.execute(
+                        "INSERT INTO bazaar_bids(id, listing_post_id,"
+                        " bidder_user_id, amount, message, accepted, rejected,"
+                        " rejection_reason, withdrawn, created_at)"
+                        " VALUES(?,?,?,?,?,?,?,NULL,?,?)",
+                        (
+                            bid.id,
+                            post_id,
+                            bid.bidder_user_id,
+                            int(bid.amount),
+                            bid.message,
+                            int(bid.accepted),
+                            int(bid.rejected),
+                            int(bid.withdrawn),
+                            bid.created_at or datetime.now(UTC).isoformat(),
+                        ),
+                    )
+                    wrote = True
+                    continue
+                if held["listing_post_id"] != post_id:
+                    continue  # another listing's bid id: never moved
+                flags = (
+                    int(held["accepted"]) or int(bid.accepted),
+                    int(held["rejected"]) or int(bid.rejected),
+                    int(held["withdrawn"]) or int(bid.withdrawn),
+                )
+                if flags != (
+                    int(held["accepted"]),
+                    int(held["rejected"]),
+                    int(held["withdrawn"]),
+                ):
+                    conn.execute(
+                        "UPDATE bazaar_bids SET accepted=?, rejected=?, withdrawn=?"
+                        " WHERE id=?",
+                        (*flags, bid.id),
+                    )
+                    wrote = True
+            return wrote
+
+        return bool(await self._db.transact(_run))
 
     async def highest_bid(self, post_id: str) -> BazaarBid | None:
         """Return the single highest bid still standing — neither withdrawn

@@ -1485,8 +1485,8 @@ from __future__ import annotations
 #:   fills). Also with it (``MIN_FOR_SYNC_ITEM_STATE``, same sync line):
 #:   the host's §25.6 stream carries the item state a lost live event
 #:   leaves behind — poll ``votes``, schedule ``responses`` /
-#:   ``finalized_slot_id``, calendar ``rsvps``, post ``reaction_stamps``, a
-#:   held comment's newer edit, and the new ``timetables_deleted``
+#:   ``finalized_slot_id``, calendar ``rsvps``, post ``reaction_stamps``,
+#:   bazaar ``bids``, a held comment's newer edit, and the new ``timetables_deleted``
 #:   resource; a v_92 receiver takes them from the host only and keeps its
 #:   own people's votes, answers and RSVPs. A requester below v_92 is sent
 #:   the older record shapes.
@@ -2173,7 +2173,7 @@ class FederationCapability:
     MIN_FOR_SPACE_MEDIA_WANTED = 92
     #: v_92 — a §25.6 requester at or above it is streamed the item state
     #: a lost live event leaves behind: poll votes, schedule answers and
-    #: picks, calendar RSVPs, post reaction stamps and timetable
+    #: picks, calendar RSVPs, post reaction stamps, bazaar bids and timetable
     #: tombstones (``timetables_deleted``); below it the provider sends the
     #: older record shapes and no ``timetables_deleted`` (it drops those
     #: fields anyway). A ``SYNC_RECORD_LINES`` entry (92).

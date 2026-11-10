@@ -426,6 +426,7 @@ heard one yet):
 | `calendar` | `rsvps`: `{user_id, occurrence_at, status, updated_at}`, the latest `MAX_RSVPS_PER_EVENT` (500) occurrences' worth; `rsvps_partial` when cut | everybody's RSVPs but its own people's; one the host no longer holds is dropped unless the list was cut |
 | `posts` | `reaction_stamps`: `{"user\0emoji": [stamp, added]}` | merged last writer wins per user and emoji into a post it holds (a reaction or a removal it missed lands, a newer one it holds stays); what no stamp orders any more (older than the 48 h tombstone horizon) follows the host's reaction sets (`merge_reaction_stamps`) |
 | `comments` | (`edited_at`, unchanged) | a comment held here takes the host's edit when newer (last writer wins on `edited_at`, like `SPACE_COMMENT_UPDATED`) — before, a held comment was skipped |
+| `bazaar` | `bids`: `{id, bidder_user_id, amount, message, accepted, rejected, withdrawn, created_at}`, the newest `MAX_BIDS_PER_LISTING` (200) — never the seller's decline reason (the bidder's alone) | a bid it lacks is added (without a reason), a held one only ever turns accepted / declined / withdrawn on (`apply_synced_bids`) |
 | `timetables_deleted` | new resource: `{id, created_by, created_at}` | tombstones a held timetable; an id never held gets a stub only when owner-bound to `created_by` in this space |
 
 All of it is gated on the requester's version
@@ -436,9 +437,10 @@ a requester below v_92 gets the older record shapes and no
 no older one does). **Cost** per full stream: a poll record grows by ~60 B
 per vote, a schedule record by ~60 B per answer, a calendar record by
 ~110 B per RSVP (≤ 500 per event, ≤ ~55 KB), a post record by ~50 B per
-stamped reaction (bounded by the repo's per-post stamp cap). Votes and
+stamped reaction (bounded by the repo's per-post stamp cap), a listing
+record by ~150 B per bid (≤ 200, ≤ ~30 KB). Votes and
 picks also re-stamp their post, so they ride incremental sessions; answers
-and RSVPs stamp nothing (no migration — see the table below) and so heal
+RSVPs and bids stamp nothing (no migration — see the table below) and so heal
 on the host's daily full stream.
 
 ### Coverage — every space item type
@@ -473,7 +475,7 @@ out of the stream, a test pinning that.
 | Zones | `SPACE_ZONE_*` | `space_zones` (member households only) | — | `space_zones_deleted` | never to a follower |
 | Timetables | `SPACE_TIMETABLE_UPSERTED` / `_DELETED` | `timetables` (incremental) | — | `timetables_deleted` (v_92, host only) | the tombstone names no moderator, so only the host's counts |
 | Bazaar listings, FAQ | `BAZAAR_LISTING_*`, `BAZAAR_FAQ_*` | `bazaar` (incremental) | — | with the post | |
-| Bazaar bids | `BAZAAR_BID_PLACED`, `BAZAAR_OFFER_ACCEPTED` / `_UPDATED` | **not streamed** | — | — | out of scope (see below) |
+| Bazaar bids | `BAZAAR_BID_PLACED`, `BAZAAR_OFFER_ACCEPTED` / `_UPDATED` | `bazaar.bids` (v_92) | — | a withdrawal / decline only ever turns on | full stream only (stamp nothing); the decline reason never streams |
 | Bazaar offers, offer answers, Ask-the-seller threads | `BAZAAR_OFFER_*`, `BAZAAR_THREAD_MESSAGE` | **never streamed** | — | — | between the seller's and the buyer's households only ([bazaar.md](./bazaar.md)) — not space-wide state |
 | Space chat messages | `SPACE_CHAT_MESSAGE_*` | `chat_messages` (writer households, v_55) | — | `chat_messages_deleted` | |
 | Space chat reactions | `SPACE_CHAT_REACTION` | **not streamed** | — | — | out of scope (see below) |
@@ -482,14 +484,6 @@ out of the stream, a test pinning that.
 
 Out of scope, with the reason:
 
-- **Bazaar bids** are space-wide state (every member household mirrors
-  them), but no record carries them yet, and a bid changes no stamped row.
-  Healing them needs a `bids` field on the `bazaar` record (without the
-  bidder-only decline reason) and a monotonic apply (accepted / declined /
-  withdrawn only ever turn on). Left for a follow-up: the listing's
-  status, end time and winner already converge through `bazaar`, so a
-  missed bid shows as a missing line in the bid history, not as a wrong
-  outcome.
 - **Space chat reactions** carry no order stamp (`conversation_messages`
   keeps a plain reaction map, shared with DMs): a host snapshot could only
   overwrite a newer relayed reaction. Healing them needs a per-reaction
