@@ -83,6 +83,12 @@ PARALLEL_RECIPIENTS: int = 8
 #: slot (and its recipients) for the rest of the pass.
 SEND_IDLE_TIMEOUT_S: float = 120.0
 
+#: A failed delivery that took at least this long (or timed out, or was
+#: throttled) stalls its recipient for the rest of the pass. A fast failure
+#: (a refused connection) costs nothing, so the recipient's next rows are
+#: still tried and every row keeps counting its attempts.
+STALL_AFTER_S: float = 10.0
+
 #: How far to perturb the base delay — ±30%.
 JITTER_RATIO: float = 0.30
 
@@ -306,11 +312,12 @@ class OutboxProcessor:
         across passes: a crash or a stop mid-pass leaves the unfinished rows
         ``pending``, and the next pass picks them up.
 
-        Once a recipient's delivery ends TRANSIENT, :class:`RetryAfter` or in
-        a timeout, its remaining units in this pass are not attempted: they
-        stay ``pending`` for the next pass, with no attempt counted — one dead
-        peer costs one timeout per pass, not one per queued row. A group that
-        fails so stalls each of its recipients; a later group drops a stalled
+        Once a recipient's delivery times out, is throttled
+        (:class:`RetryAfter`) or fails after :data:`STALL_AFTER_S` or more,
+        its remaining units in this pass are not attempted: they stay
+        ``pending`` for the next pass, with no attempt counted — one dead peer
+        costs one timeout per pass, not one per queued row. A fast failure
+        does not stall. A group that fails so stalls each of its recipients; a later group drops a stalled
         recipient (and goes per row when fewer than two are left).
 
         Errors raised by the deliver callback (and timeouts) are treated as
@@ -378,22 +385,24 @@ class OutboxProcessor:
 
     async def _run_unit(self, unit: list[OutboxEntry], stalled: set[str]) -> None:
         """Deliver one row, or one multi group; never raises. A recipient
-        whose delivery ends transient joins *stalled*."""
+        whose delivery is slow to fail or throttled joins *stalled*."""
         try:
             if len(unit) > 1 and self._multi is not None:
+                started = time.monotonic()
                 group = await self._attempt(
                     unit[0].id, self._multi.deliver_outbox_multi(unit)
                 )
                 if group is not None:
-                    if _is_transient(group):
+                    if _stalls(group, time.monotonic() - started):
                         stalled.update(e.instance_id for e in unit)
                     for entry in unit:
                         await self._settle(entry, group)
                     return
             for entry in unit:
+                started = time.monotonic()
                 outcome = await self._attempt(entry.id, self._deliver(entry))
                 outcome = outcome or DeliveryOutcome.TRANSIENT
-                if _is_transient(outcome):
+                if _stalls(outcome, time.monotonic() - started):
                     stalled.add(entry.instance_id)
                 await self._settle(entry, outcome)
         except Exception:
@@ -558,9 +567,13 @@ class OutboxProcessor:
         return max(1.0, base * (1.0 + signed * JITTER_RATIO))
 
 
-def _is_transient(outcome: DeliveryOutcome | RetryAfter) -> bool:
-    """TRANSIENT (a timeout included) or a :class:`RetryAfter`."""
-    return isinstance(outcome, RetryAfter) or outcome is DeliveryOutcome.TRANSIENT
+def _stalls(outcome: DeliveryOutcome | RetryAfter, elapsed_s: float) -> bool:
+    """Whether a delivery leaves its recipient stalled for the pass: it was
+    throttled (:class:`RetryAfter`), or failed TRANSIENT after
+    :data:`STALL_AFTER_S` or more (a timeout always does)."""
+    if isinstance(outcome, RetryAfter):
+        return True
+    return outcome is DeliveryOutcome.TRANSIENT and elapsed_s >= STALL_AFTER_S
 
 
 def _order_units(

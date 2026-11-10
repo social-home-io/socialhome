@@ -790,6 +790,7 @@ async def test_a_failing_grouper_leaves_every_row_per_recipient():
 
 async def test_a_hung_peer_costs_one_timeout_per_pass(monkeypatch):
     monkeypatch.setattr(outbox_processor_mod, "SEND_IDLE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(outbox_processor_mod, "STALL_AFTER_S", 0.0)
     hung = [_row(f"h{i}", "HUNG") for i in range(50)]
     others = [_row(f"o{i}", "OK") for i in range(3)]
     repo = _repo_for(hung + others)
@@ -832,7 +833,8 @@ async def test_a_throttled_peer_s_later_rows_wait_for_the_next_pass():
     assert [c.args[0] for c in repo.reschedule.await_args_list] == ["a1"]
 
 
-async def test_a_transient_group_stalls_each_of_its_recipients():
+async def test_a_slow_transient_group_stalls_each_of_its_recipients(monkeypatch):
+    monkeypatch.setattr(outbox_processor_mod, "STALL_AFTER_S", 0.0)
     a, b, a2, b2, c2 = (
         _row("a", "A"),
         _row("b", "B"),
@@ -854,7 +856,8 @@ async def test_a_transient_group_stalls_each_of_its_recipients():
     assert sorted(c.args[0] for c in repo.reschedule.await_args_list) == ["a", "b"]
 
 
-async def test_a_group_drops_a_recipient_stalled_earlier_in_the_pass():
+async def test_a_group_drops_a_recipient_stalled_earlier_in_the_pass(monkeypatch):
+    monkeypatch.setattr(outbox_processor_mod, "STALL_AFTER_S", 0.0)
     a1, a2, b2, c2 = _row("a1", "A"), _row("a2", "A"), _row("b2", "B"), _row("c2", "C")
     repo = _repo_for([a1, a2, b2, c2])
     multi = _Multi([[a2, b2, c2]])
@@ -871,6 +874,23 @@ async def test_a_group_drops_a_recipient_stalled_earlier_in_the_pass():
         "b2",
         "c2",
     ]
+
+
+async def test_a_fast_failure_does_not_stall_the_recipient():
+    """A refused connection costs nothing: the recipient's next rows are
+    still tried, and each row counts its own attempt (a NEVER_DROP row that
+    always fails must not starve the rows behind it)."""
+    a1, a2, a3 = _row("a1", "A"), _row("a2", "A"), _row("a3", "A")
+    repo = _repo_for([a1, a2, a3])
+    calls: list[str] = []
+
+    async def _deliver(e):
+        calls.append(e.id)
+        return DeliveryOutcome.TRANSIENT
+
+    await OutboxProcessor(repo, _deliver, rng=lambda: 0.0).drain_once()
+    assert calls == ["a1", "a2", "a3"]
+    assert [c.args[0] for c in repo.reschedule.await_args_list] == ["a1", "a2", "a3"]
 
 
 # ── GatedOutboxMulti ──────────────────────────────────────────────────────
