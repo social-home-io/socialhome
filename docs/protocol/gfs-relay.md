@@ -1055,8 +1055,8 @@ Gated on `FederationCapability.MIN_FOR_MULTI_MAILBOX` (v_90, slug
 **What goes multi.** `broadcast_to_space_members` computes every target's
 final payload as before (legacy / relay variants, `per_peer`, file maps).
 Targets that are mailbox seats (`space_session` rows with a card mailbox)
-at v_90, on a GFS that proves `envelope_multi`, with byte-identical
-payloads and an event type in `MULTI_EVENT_TYPES`, form a group per GFS.
+at v_90, on a GFS that proves `envelope_multi`, with the same
+payload content (key order aside) and an event type in `MULTI_EVENT_TYPES`, form a group per GFS.
 A group of two or more (chunked at `max_recipients`) is one upload. A
 lone seat, a paired peer, an older peer and every other event type keep
 the per-recipient path. `MULTI_EVENT_TYPES` is the seat vocabulary minus

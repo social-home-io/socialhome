@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import UTC, datetime
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -84,6 +85,32 @@ MR_KID_REBUILD_INTERVAL_S: float = 60.0
 #: included, so a key removed outside this service (a space delete cascade,
 #: a restore) stops opening frames within ten minutes.
 MR_KID_CACHE_MAX_AGE_S: float = 600.0
+
+
+#: v_90 — no multi-recipient frame while the space's newest epoch key is
+#: younger than this (seconds, by the local store time). A member whose key
+#: exchange for that epoch is still in flight would drop the frame (unknown
+#: kid) while the GFS's acceptance marks it delivered; per-recipient sends
+#: queue and retry instead. Never an older epoch in the meantime — a member
+#: removed by the rotation must not read.
+MULTI_EPOCH_GRACE_S: float = 600.0
+
+
+def _utcnow() -> datetime:
+    """The multi grace clock (a seam tests replace)."""
+    return datetime.now(UTC)
+
+
+def _stored_at(created_at: str | None) -> datetime | None:
+    """A ``space_keys.created_at`` as an aware UTC time — SQLite's naive
+    ``YYYY-MM-DD HH:MM:SS`` and ISO 8601 both; ``None`` when unreadable."""
+    if not created_at:
+        return None
+    try:
+        at = datetime.fromisoformat(created_at)
+    except ValueError:
+        return None
+    return at.replace(tzinfo=UTC) if at.tzinfo is None else at
 
 
 def _monotonic() -> float:
@@ -285,10 +312,19 @@ class SpaceContentEncryption(BusPublisherMixin):
     async def mr_key(self, space_id: str) -> tuple[int, str, bytes] | None:
         """``(epoch, kid, key)`` of the current epoch's multi-recipient key
         (v_90, :func:`~socialhome.federation.multi_recipient.derive_mr_key`),
-        or ``None`` when the space has no key. Only derived material leaves —
-        never the content key. Never log it."""
+        or ``None`` when the space has no key — or while that key is younger
+        than :data:`MULTI_EPOCH_GRACE_S` (or its store time is unreadable):
+        a member still importing it would drop the frame, so the caller
+        sends per recipient. Never an older epoch's key instead. Only
+        derived material leaves — never the content key. Never log it."""
         latest = await self._repo.get_latest(space_id)
         if latest is None:
+            return None
+        stored_at = _stored_at(latest.created_at)
+        if (
+            stored_at is None
+            or (_utcnow() - stored_at).total_seconds() < MULTI_EPOCH_GRACE_S
+        ):
             return None
         kid, key = derive_mr_key(self._unwrap(latest))
         return latest.epoch, kid, key

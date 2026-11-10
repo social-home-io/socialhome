@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from socialhome.crypto import (
@@ -737,11 +739,24 @@ async def _add_space(repo, space_id: str) -> None:
     )
 
 
-async def test_mr_key_is_derived_from_the_current_epoch(crypto_env):
+async def _current_mr(crypto, space_id: str) -> tuple[int, str, bytes]:
+    """The current epoch's ``(epoch, kid, key)``, whatever its age."""
+    epoch, raw = await crypto.export_current_key(space_id)
+    return (epoch, *derive_mr_key(raw))
+
+
+def _clock_after(monkeypatch, seconds: float) -> None:
+    """Move the multi grace clock *seconds* past the real now."""
+    real = scs._utcnow()
+    monkeypatch.setattr(scs, "_utcnow", lambda: real + timedelta(seconds=seconds))
+
+
+async def test_mr_key_is_derived_from_the_current_epoch(crypto_env, monkeypatch):
     crypto, _ = crypto_env
     assert await crypto.mr_key("sp-1") is None
     await crypto.initialise_for_space("sp-1")
     await crypto.rotate_epoch("sp-1")
+    _clock_after(monkeypatch, scs.MULTI_EPOCH_GRACE_S + 1)
     epoch, raw = await crypto.export_current_key("sp-1")
     got = await crypto.mr_key("sp-1")
     assert got == (epoch, *derive_mr_key(raw))
@@ -749,13 +764,53 @@ async def test_mr_key_is_derived_from_the_current_epoch(crypto_env):
     assert raw not in got
 
 
+async def test_no_mr_key_while_the_newest_epoch_is_in_its_grace(
+    crypto_env, monkeypatch
+):
+    """A member still importing the newest epoch would drop a frame sealed
+    under it while the GFS reports it delivered — so no multi key for
+    MULTI_EPOCH_GRACE_S after a rotation, and never an older epoch's (a
+    removed member must not read)."""
+    crypto, repo = crypto_env
+    await crypto.initialise_for_space("sp-1")
+    await repo._db.enqueue(
+        "UPDATE space_keys SET created_at='2020-01-01 00:00:00' WHERE space_id='sp-1'"
+    )
+    assert await crypto.mr_key("sp-1") is not None  # epoch 0 is old
+    await crypto.rotate_epoch("sp-1")
+    assert await crypto.mr_key("sp-1") is None  # epoch 1 is brand new
+    _clock_after(monkeypatch, scs.MULTI_EPOCH_GRACE_S - 5)
+    assert await crypto.mr_key("sp-1") is None
+    _clock_after(monkeypatch, scs.MULTI_EPOCH_GRACE_S + 5)
+    assert await crypto.mr_key("sp-1") == await _current_mr(crypto, "sp-1")
+    assert (await crypto.mr_key("sp-1"))[0] == 1
+
+
+@pytest.mark.parametrize(
+    ("stored", "usable"),
+    [
+        ("2020-01-01 00:00:00", True),  # SQLite datetime('now') — naive UTC
+        ("2020-01-01T00:00:00+00:00", True),  # tz-aware ISO
+        ("2020-01-01T00:00:00", True),  # naive ISO — UTC
+        ("not a time", False),  # unreadable → fail closed
+    ],
+)
+async def test_mr_key_reads_both_stored_time_shapes(crypto_env, stored, usable):
+    crypto, repo = crypto_env
+    await crypto.initialise_for_space("sp-1")
+    await repo._db.enqueue(
+        "UPDATE space_keys SET created_at=? WHERE space_id='sp-1'", (stored,)
+    )
+    assert (await crypto.mr_key("sp-1") is not None) is usable
+
+
 async def test_mr_key_for_kid_resolves_recent_epochs_of_every_space(crypto_env):
     crypto, repo = crypto_env
     await _add_space(repo, "sp-2")
     await crypto.initialise_for_space("sp-1")
     await crypto.initialise_for_space("sp-2")
-    _, kid1, key1 = await crypto.mr_key("sp-1")
-    _, kid2, key2 = await crypto.mr_key("sp-2")
+    _, kid1, key1 = await _current_mr(crypto, "sp-1")
+    _, kid2, key2 = await _current_mr(crypto, "sp-2")
     assert await crypto.mr_key_for_kid(kid1) == ("sp-1", 0, key1)
     assert await crypto.mr_key_for_kid(kid2) == ("sp-2", 0, key2)
     assert await crypto.mr_key_for_kid("nope") is None
@@ -766,7 +821,7 @@ async def test_mr_key_for_kid_keeps_only_the_three_newest_epochs(crypto_env):
     kids = []
     for _ in range(4):
         await crypto.rotate_epoch("sp-1")
-        kids.append((await crypto.mr_key("sp-1"))[1])
+        kids.append((await _current_mr(crypto, "sp-1"))[1])
     assert await crypto.mr_key_for_kid(kids[0]) is None
     for epoch, kid in enumerate(kids[1:], start=1):
         assert (await crypto.mr_key_for_kid(kid))[:2] == ("sp-1", epoch)
@@ -775,10 +830,10 @@ async def test_mr_key_for_kid_keeps_only_the_three_newest_epochs(crypto_env):
 async def test_the_kid_cache_follows_rotation_import_and_reset(crypto_env):
     crypto, _ = crypto_env
     await crypto.initialise_for_space("sp-1")
-    _, kid0, _ = await crypto.mr_key("sp-1")
+    _, kid0, _ = await _current_mr(crypto, "sp-1")
     assert await crypto.mr_key_for_kid(kid0) is not None  # cache built
     await crypto.rotate_epoch("sp-1")
-    _, kid1, _ = await crypto.mr_key("sp-1")
+    _, kid1, _ = await _current_mr(crypto, "sp-1")
     assert (await crypto.mr_key_for_kid(kid1))[:2] == ("sp-1", 1)
     imported = b"\x07" * 32
     await crypto.import_key("sp-1", 2, imported)
@@ -852,7 +907,7 @@ async def test_the_kid_cache_drops_keys_removed_behind_its_back_after_ten_minute
     now = [1000.0]
     monkeypatch.setattr(scs, "_monotonic", lambda: now[0])
     await crypto.initialise_for_space("sp-1")
-    _, kid, _ = await crypto.mr_key("sp-1")
+    _, kid, _ = await _current_mr(crypto, "sp-1")
     assert await crypto.mr_key_for_kid(kid) is not None  # builds
     await repo._db.enqueue("DELETE FROM space_keys WHERE space_id='sp-1'")
     now[0] += scs.MR_KID_CACHE_MAX_AGE_S - 1

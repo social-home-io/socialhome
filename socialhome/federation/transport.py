@@ -2192,19 +2192,31 @@ class FederationTransport:
     # ── v_90: one upload for many mailboxes ──────────────────────────────
 
     async def multi_mailbox_target(
-        self, instance: RemoteInstance, space_id: str
+        self,
+        instance: RemoteInstance,
+        space_id: str,
+        *,
+        caps: dict[str, int] | None = None,
     ) -> MailboxTarget | None:
         """*instance*'s GFS mailbox for *space_id* when a multi-recipient
         upload can reach it (v_90): a :data:`InstanceSource.SPACE_SESSION`
         seat whose mailbox sits on a GFS of ours that proved
         ``envelope_mailbox`` and ``envelope_multi``. ``None`` → the caller
-        sends to it per recipient. Never raises."""
+        sends to it per recipient. *caps*, when given, caches
+        :meth:`multi_capacity` by GFS URL across the calls of one pass (one
+        broadcast, one outbox drain), so each GFS is probed once. Never
+        raises."""
         if instance.source is not InstanceSource.SPACE_SESSION:
             return None
         target = await self._mailbox_target(instance, space_id, media=False)
-        if target is None or await self.multi_capacity(target.gfs_url) < 1:
+        if target is None:
             return None
-        return target
+        cap = caps.get(target.gfs_url) if caps is not None else None
+        if cap is None:
+            cap = await self.multi_capacity(target.gfs_url)
+            if caps is not None:
+                caps[target.gfs_url] = cap
+        return target if cap >= 1 else None
 
     async def multi_capacity(self, gfs_url: str) -> int:
         """Most mailbox ids one upload to the GFS at *gfs_url* may name;

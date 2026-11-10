@@ -882,6 +882,16 @@ async def test_a_seat_with_a_mailbox_on_a_multi_gfs_is_a_multi_target():
     assert relay.multi_calls == [([_TARGET], {"x": 1})]
 
 
+async def test_a_capacity_cache_probes_each_gfs_once_per_broadcast():
+    relay = _MultiRelay(capacity=40)
+    t = _mailbox_transport(relay, [], targets={"sp-1": _TARGET})
+    caps: dict[str, int] = {}
+    for _ in range(3):
+        assert await t.multi_mailbox_target(_seat(), "sp-1", caps=caps) is _TARGET
+    assert len(relay.capacity_asks) == 1
+    assert list(caps.values()) == [40]
+
+
 async def test_no_multi_target_without_a_mailbox_a_multi_gfs_or_a_seat():
     # No mailbox for that space.
     t = _mailbox_transport(_MultiRelay(), [], targets={"sp-1": _TARGET})
