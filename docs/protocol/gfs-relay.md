@@ -878,11 +878,21 @@ host-signed).
   (an additive BEGIN field; the sync stream itself is unchanged, so no
   `SYNC_RECORD_LINES` entry); a host whose version is newer answers with one
   snapshot. A lost delta, a snapshot that raced the seat, or a joiner at 0
-  is repaired within one sync period (30 min). A member that reaches the
+  is repaired within one sync period (30 min). A writer seat with no
+  complete directory echoes `0` even when it holds no card of the space —
+  a paired joiner gets no host card, and a first snapshot lost on the way
+  (the host stopped after deciding it) is otherwise never sent again. A
+  member that reaches the
   host only over the mesh echoes it on its catch-up BEGIN, and once
   catch-up is complete the periodic tick still sends that host a small
   incremental BEGIN (with its `have_seq`) carrying the echo — only for a
   space whose directory it holds.
+- **Asking at once:** a member that sees its directory is incomplete — a
+  delta on a version it does not hold, or a host hop from a member whose
+  card it lacks — gives the host its card again (`SPACE_MEMBER_CARD`,
+  ~0.7 KiB): the "seated" the host answers with one snapshot. At most once
+  per 10 min a space on each side, so it costs one card and one snapshot
+  per repair, never a loop.
 - Triggers for deltas: a card received, a seat that goes live or ends in a
   space we host, our own card, and the ~10 min sweep (role changes).
 - Nothing is sent while no card of the space carries a mailbox.
@@ -926,6 +936,15 @@ an inner payload that names another space than the route is dropped. On
 ANY routed envelope the origin's own class is checked at the target: an
 origin we hold only as a `space_session` seat keeps the seat vocabulary on
 an ordinary paired mesh route too.
+
+A host hop is sealed to the target's static key-wrap key, never to a
+discovered ephemeral, so nothing on it goes stale: a target that does not
+take one (no card for the origin yet) drops it **without** a
+`SPACE_ROUTE_STALE` nack and asks the host for the directory (above). No
+household sends `SPACE_ROUTE_STALE` to a `space_session` seat — a target
+does not nack one, a relay ends a nack whose next hop is one: a seat is
+never a mesh origin, never rediscovers a route, and the nack stays out of
+its vocabulary.
 
 A directory seat (no `relay_via`) is refused instance-addressed on the GFS
 relay (`make_check_relay_opt_in`): it reaches us only at our mailbox, where
@@ -1027,9 +1046,11 @@ the heal needs the host online (helpers come with PR 4).
 - Any timing cover (a pre-registered pool, jitter, waits): the same IP
   links a household's mailbox to it anyway — see [No random delays for GFS
   unlinkability](../principles.md#no-random-delays-for-gfs-unlinkability).
-- Re-sending a directory that a member lost: a member that missed a delta
-  or a snapshot part is behind on `dir_seq` and gets a fresh snapshot at
-  its next §25.6 sync.
+- Tracking per member which directory frames arrived: a member that
+  missed a delta or a snapshot part is behind on `dir_seq` and gets a
+  fresh snapshot when it asks (above) or at its next §25.6 sync.
+- Holding a host hop the target cannot open yet: it is dropped; the
+  host's §25.6 sync brings its content.
 - Binary media frames to a directory seat: it gets JSON relay chunks (its
   row has no relay of its own to probe); pictures still come from the GFS
   media cache.

@@ -7854,8 +7854,15 @@ def cmd_gfs_relay_media() -> None:
 
     def _restart(env_extra: dict[str, str] | None) -> None:
         offset = _gfs_log_size()
+        # The restart keeps the GFS's data dir, so what earlier steps
+        # recorded about it (``global_space_id`` …) still holds — carry it
+        # over, or every later step that reads it refuses to run.
+        kept = dict(_load().get("gfs") or {})
         cmd_gfs_down()
         cmd_gfs_up(env_extra=env_extra)
+        fresh = _load()
+        fresh["gfs"] = {**kept, **(fresh.get("gfs") or {})}
+        _save(fresh)
         _wait_for_gfs_ws_since(a_iid, offset=offset, timeout=90.0)
         _wait_for_gfs_ws_since(e_iid, offset=offset, timeout=90.0)
         # v_89: EVERY household's mailbox claim comes back too — after its

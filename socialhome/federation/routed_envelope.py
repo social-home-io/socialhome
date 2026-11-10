@@ -817,6 +817,22 @@ class SpaceRoutedHandler:
                 # v_89 host hop: sealed to our static key-wrap key (the key
                 # our card names), not to a discovered ephemeral.
                 target_priv = self._host_hop.static_target_priv(target_pub)
+            if (
+                target_priv is None
+                and self._host_hop is not None
+                and self._host_hop.static_target_priv(target_pub) is not None
+            ):
+                # Sealed to our long-term key-wrap key — a host hop, which
+                # never uses a discovered ephemeral — that we did not take
+                # (no card for its origin yet, or not the host-hop shape).
+                # Nothing on the route is stale, so no SPACE_ROUTE_STALE:
+                # its origin is a seat that never rediscovers a route.
+                log.info(
+                    "SPACE_ROUTED route_id=%s: a host hop to our key-wrap key"
+                    " we do not take; dropping",
+                    route_id[:8],
+                )
+                return
             if target_priv is None:
                 await self._nack_stale_target_eph(
                     event=event,
@@ -1205,6 +1221,16 @@ class SpaceRoutedHandler:
         is the value we trust.
         """
         prev_hop = event.from_instance
+        if await self._touches_seat(prev_hop, None):
+            # Never to a ``space_session`` seat: not its vocabulary, and
+            # nothing it relays is sealed to an ephemeral (host hops only).
+            log.info(
+                "SPACE_ROUTED route_id=%s: no target_eph_priv for pub=%s;"
+                " the previous hop is a seat — dropping without a nack",
+                route_id[:8],
+                target_pub[:8],
+            )
+            return
         if not await self._federation.peer_supports(
             prev_hop, min_version=FederationCapability.MIN_FOR_ROUTE_STALE_NACK
         ):
@@ -1411,6 +1437,15 @@ class SpaceRoutedHandler:
             return
 
         next_hop = path[position - 2]
+        if await self._touches_seat(next_hop, None):
+            # A ``space_session`` seat is never a mesh origin: it sends only
+            # host hops, sealed to a static key, and has no route to repair.
+            # The nack is not in its vocabulary — it ends here.
+            log.info(
+                "SPACE_ROUTE_STALE route_id=%s: the next hop is a seat; nack ends here",
+                route_id[:8],
+            )
+            return
         if not await self._federation.peer_supports(
             next_hop, min_version=FederationCapability.MIN_FOR_ROUTE_STALE_NACK
         ):
