@@ -147,6 +147,7 @@ from ..gfs_channel import (
     verify_grant,
 )
 from ..outbound_fetch import OutboundFetchRefused
+from ..task_drain import wait_tasks_done
 from .gfs_connection_service import GfsConnectionService
 from .gfs_http import refused_gfs_key
 from .gfs_publish_retry import (
@@ -371,10 +372,7 @@ class GfsChannelService:
         await self._retry.stop()
 
     async def wait_idle(self) -> None:
-        # Unfinished only: a finished task leaves by a done-callback the
-        # loop runs later, and awaiting finished tasks never yields.
-        while pending := [t for t in self._tasks if not t.done()]:
-            await asyncio.gather(*pending, return_exceptions=True)
+        await wait_tasks_done(lambda: self._tasks)
 
     def _spawn(self, coro, name: str) -> None:
         if self._stopping or len(self._tasks) >= MAX_PENDING_TASKS:

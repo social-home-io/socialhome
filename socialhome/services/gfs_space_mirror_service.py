@@ -100,6 +100,7 @@ from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.gfs_space_seat_repo import AbstractGfsSpaceSeatRepo
 from ..repositories.public_space_repo import AbstractPublicSpaceRepo
 from ..repositories.space_repo import AbstractSpaceRepo
+from ..task_drain import wait_tasks_done
 from .gfs_connection_service import GfsConnectionError, GfsConnectionService
 from .gfs_directory import GfsDirectoryCache
 from .gfs_http import MAX_GFS_BODY_BYTES, gfs_server_address, read_json_capped
@@ -827,10 +828,7 @@ class GfsSpaceMirrorService:
 
     async def wait_rechecks(self) -> None:
         """Wait for the post-grace re-checks in flight (tests)."""
-        # Unfinished only: a finished task leaves by a done-callback the
-        # loop runs later, and awaiting finished tasks never yields.
-        while pending := [t for t in self._rechecks if not t.done()]:
-            await asyncio.gather(*pending, return_exceptions=True)
+        await wait_tasks_done(lambda: self._rechecks)
 
     async def take_seat(self, space_id: str, conn: GfsConnection) -> None:
         """Subscribe on *conn* and record the seat under the server's own id
@@ -897,10 +895,7 @@ class GfsSpaceMirrorService:
 
     async def wait_idle(self) -> None:
         """Wait for the background seat tasks in flight (tests, shutdown)."""
-        # Unfinished only: a finished task leaves by a done-callback the
-        # loop runs later, and awaiting finished tasks never yields.
-        while pending := [t for t in self._tasks if not t.done()]:
-            await asyncio.gather(*pending, return_exceptions=True)
+        await wait_tasks_done(lambda: self._tasks)
 
     async def stop(self) -> None:
         """Cancel the background seat tasks (app ``on_cleanup``)."""

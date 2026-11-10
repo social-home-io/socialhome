@@ -115,6 +115,7 @@ from ..domain.space_item import (
 from ..domain.writer_cert import scope_permits
 from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
 from ..outbound_fetch import OutboundFetchRefused
+from ..task_drain import wait_tasks_done
 from ..writer_key import sign_with_writer_key
 from .gfs_connection_service import GfsConnectionService
 from .gfs_directory import GfsDirectoryCache
@@ -534,10 +535,7 @@ class GfsMemberPublishService:
 
     async def wait_idle(self) -> None:
         """Wait for every background publish (tests, graceful stop)."""
-        # Unfinished only: a finished task leaves by a done-callback the
-        # loop runs later, and awaiting finished tasks never yields.
-        while pending := [t for t in self._tasks if not t.done()]:
-            await asyncio.gather(*pending, return_exceptions=True)
+        await wait_tasks_done(lambda: self._tasks)
 
     async def publish_post(
         self,
