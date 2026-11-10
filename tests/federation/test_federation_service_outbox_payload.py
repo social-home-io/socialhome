@@ -1,7 +1,8 @@
 """Migration 0145 — a failed send stores the event payload ONCE (KEK-wrapped)
 plus one ref row per recipient; a ref row is sealed for its one peer when it
-is sent, and due ref rows of one payload whose peers are mailbox seats on one
-GFS go up as ONE multi upload (v_90)."""
+is sent. A broadcast's multi payload (v_90, its ``msg_id`` set) goes up as ONE
+multi upload for the due rows whose peers are mailbox seats on one GFS, and
+every envelope built from it carries that ``msg_id``."""
 
 from __future__ import annotations
 
@@ -184,17 +185,48 @@ async def test_due_ref_rows_on_one_gfs_go_up_as_one_multi_upload():
     assert all(s.svc.last_relay_accepted_at(i) for i in seats)
 
 
-async def test_a_throttled_group_is_retried_and_a_refused_one_goes_per_recipient():
+async def test_a_throttled_or_refused_upload_is_retried_never_fanned_out():
+    """A 429 waits the GFS's Retry-After (60 s when it named none); any other
+    failed upload is TRANSIENT — the rows are retried as one, never sent per
+    recipient in a burst."""
     s = _Sender()
     await _failing_broadcast(s, seats=2)
     [group] = await s.svc.outbox_multi_groups(s.outbox.entries())
-    # The GFS's Retry-After, or its one-minute window when it named none.
     s.transport.multi_result = (False, RELAY_STATUS_THROTTLED, None)
     assert await s.svc.deliver_outbox_multi(group) == RetryAfter(seconds=60.0)
     s.transport.multi_result = (False, RELAY_STATUS_THROTTLED, 90.0)
     assert await s.svc.deliver_outbox_multi(group) == RetryAfter(seconds=90.0)
-    s.transport.multi_result = (False, 400, None)
+    s.transport.multi_result = (False, 503, None)
+    assert await s.svc.deliver_outbox_multi(group) is DeliveryOutcome.TRANSIENT
+    assert s.transport.sends == []
+
+
+async def test_an_oversize_frame_or_a_lost_key_goes_per_row_under_the_msg_id():
+    """Only a frame that cannot be built goes per row — and each row's
+    envelope carries the multi payload's ``msg_id``, so a receiver that got
+    the frame earlier drops it."""
+    s = _Sender()
+    await s.seat()
+    await s.seat()
+    await s.broadcast(payload={"blob": os.urandom(400_000).hex()})
+    [group] = await s.svc.outbox_multi_groups(s.outbox.entries())
     assert await s.svc.deliver_outbox_multi(group) is None
+    assert s.transport.multi == []
+    [stored] = s.outbox.payloads.values()
+    assert stored.msg_id is not None
+    instance = await s.repo.get_instance(group[0].instance_id)
+    envelope = orjson.loads(await s.svc.seal_outbox_entry(group[0], instance))
+    assert envelope["msg_id"] == stored.msg_id != group[0].id
+
+
+async def test_a_failed_sends_payload_is_never_grouped():
+    """A per-recipient send that failed stores its payload without a
+    ``msg_id`` — it only ever goes per row."""
+    s = _Sender(mr=False)
+    await _failing_broadcast(s, seats=3)
+    assert {p.msg_id for p in s.outbox.payloads.values()} == {None}
+    s.svc._mr_key = _Sender().svc._mr_key  # keys now held
+    assert await s.svc.outbox_multi_groups(s.outbox.entries()) == []
 
 
 async def test_rows_that_are_not_mailbox_seats_or_not_refs_are_never_grouped():

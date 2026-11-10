@@ -61,7 +61,6 @@ import hmac
 import itertools
 import os
 import re
-import uuid
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -233,19 +232,22 @@ def build_multi_envelope(
     space_id: str,
     keys: MrKeys,
     recipients: Collection[str],
+    msg_id: str,
 ) -> dict:
     """The signed §24.11 envelope every recipient of one multi frame gets.
 
     *recipients* are the instance ids of the households the frame is for
     (1..:data:`MULTI_MAX_RECIPIENTS`); their tags become the signed
-    ``to_instance`` (:func:`multi_to_instance`).
+    ``to_instance`` (:func:`multi_to_instance`). *msg_id* is the stored
+    multi payload's, the same on every retry and per-row fallback, so the
+    receivers' replay cache takes one copy.
 
     CANONICAL FIELD ORDER — byte-identical to ``_seal_envelope`` and
     ``make_verify_signature``; the signature covers everything but
     ``signatures``.
     """
     envelope: dict[str, Any] = {
-        "msg_id": str(uuid.uuid4()),
+        "msg_id": msg_id,
         "event_type": event_type,
         "from_instance": own_instance_id,
         "to_instance": multi_to_instance(keys.tag_key, recipients),

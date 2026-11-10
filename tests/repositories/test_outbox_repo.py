@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -1220,3 +1221,33 @@ async def test_a_legacy_envelope_row_still_lists(env):
     [entry] = await env.outbox_repo.list_due()
     assert entry.payload_id is None and entry.space_id is None
     assert entry.payload_json == '{"msg_id":"legacy"}'
+
+
+async def test_a_multi_payload_and_its_refs_go_in_together(env):
+    """v_90: a broadcast's multi payload — stored once with its ``msg_id``,
+    one ref row per household still paired, in one transaction."""
+    multi = dataclasses.replace(_stored("p-m"), msg_id="wire-1")
+    written = await env.outbox_repo.enqueue_refs(
+        instance_ids=["peer-a", "never-paired", "peer-b"],
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        supersede_key=None,
+        payload_ref=multi,
+    )
+    assert sorted(written) == ["peer-a", "peer-b"]
+    assert await env.outbox_repo.get_payload("p-m") == multi
+    due = await env.outbox_repo.list_due()
+    assert {(e.id, e.instance_id, e.msg_id) for e in due} == {
+        (written["peer-a"], "peer-a", "wire-1"),
+        (written["peer-b"], "peer-b", "wire-1"),
+    }
+
+
+async def test_a_multi_payload_nobody_can_take_is_not_kept(env):
+    written = await env.outbox_repo.enqueue_refs(
+        instance_ids=["never-paired"],
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        supersede_key=None,
+        payload_ref=_stored("p-m"),
+    )
+    assert written == {}
+    assert await _payload_ids(env) == []

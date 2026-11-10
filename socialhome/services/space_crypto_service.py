@@ -25,7 +25,6 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import UTC, datetime
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -63,6 +62,7 @@ from ..repositories.space_key_repo import (
     AbstractSpaceKeyRepo,
     SpaceKey,
 )
+from ..repositories.space_repo import AbstractSpaceRepo
 from ..space_media_seal import derive_space_media_key
 from .bus_publisher import BusPublisherMixin
 
@@ -87,34 +87,16 @@ MR_KID_REBUILD_INTERVAL_S: float = 60.0
 MR_KID_CACHE_MAX_AGE_S: float = 600.0
 
 
-#: v_90 — no multi-recipient frame while the space's newest epoch key is
-#: younger than this (seconds, by the local store time). A member whose key
-#: exchange for that epoch is still in flight would drop the frame (unknown
-#: kid) while the GFS's acceptance marks it delivered; per-recipient sends
-#: queue and retry instead. Never an older epoch in the meantime — a member
-#: removed by the rotation must not read.
-MULTI_EPOCH_GRACE_S: float = 600.0
-
-
-def _utcnow() -> datetime:
-    """The multi grace clock (a seam tests replace)."""
-    return datetime.now(UTC)
-
-
-def _stored_at(created_at: str | None) -> datetime | None:
-    """A ``space_keys.created_at`` as an aware UTC time — SQLite's naive
-    ``YYYY-MM-DD HH:MM:SS`` and ISO 8601 both; ``None`` when unreadable."""
-    if not created_at:
-        return None
-    try:
-        at = datetime.fromisoformat(created_at)
-    except ValueError:
-        return None
-    return at.replace(tzinfo=UTC) if at.tzinfo is None else at
+#: v_90 — longest a removal hold (:meth:`SpaceContentEncryption.hold_multi`)
+#: keeps a space per recipient while no newer epoch arrives (seconds). The
+#: post-removal rekey follows the removal in the same per-peer queue, so it
+#: is normally lifted within seconds; the cap only bounds a rekey that never
+#: comes (an owner that went away) — after it, the newest key is used again.
+MULTI_REMOVAL_HOLD_S: float = 3600.0
 
 
 def _monotonic() -> float:
-    """The kid cache's clock (a seam tests replace — never the global
+    """The kid cache's and removal hold's clock (a seam tests replace — never the global
     ``time.monotonic``, which the event loop runs on)."""
     return time.monotonic()
 
@@ -174,8 +156,10 @@ class SpaceContentEncryption(BusPublisherMixin):
         "_kek",
         "_mr_built_at",
         "_mr_kids",
+        "_multi_holds",
         "_own_instance_id",
         "_repo",
+        "_spaces",
     )
 
     def __init__(
@@ -185,8 +169,16 @@ class SpaceContentEncryption(BusPublisherMixin):
         *,
         bus: EventBus | None = None,
         own_instance_id: str | None = None,
+        space_repo: AbstractSpaceRepo | None = None,
     ) -> None:
         self._repo = space_key_repo
+        #: The space's pinned ``authority_key_epoch`` (v_90 :meth:`mr_key`);
+        #: unwired → no multi-recipient keys at all.
+        self._spaces = space_repo
+        #: v_90 space → (newest local epoch, monotonic time) of a removal
+        #: hold (:meth:`hold_multi`). In memory: the rekey follows the
+        #: removal in the same per-peer queue.
+        self._multi_holds: dict[str, tuple[int, float]] = {}
         self._kek = key_manager
         #: Optional — when wired, ``import_key`` publishes
         #: :class:`SpaceContentKeyImported` so :class:`PendingDecryptsCache`
@@ -312,21 +304,45 @@ class SpaceContentEncryption(BusPublisherMixin):
     async def mr_key(self, space_id: str) -> tuple[int, MrKeys] | None:
         """``(epoch, keys)`` of the current epoch's multi-recipient keys
         (v_90, :func:`~socialhome.federation.multi_recipient.derive_mr_key`),
-        or ``None`` when the space has no key — or while that key is younger
-        than :data:`MULTI_EPOCH_GRACE_S` (or its store time is unreadable):
-        a member still importing it would drop the frame, so the caller
-        sends per recipient. Never an older epoch's key instead. Only
-        derived material leaves — never the content key. Never log it."""
+        or ``None`` — the caller then sends per recipient, pair-sealed — when
+        the space has no key, or this household may be behind on a removal:
+
+        * the newest key was not stored under the space's pinned authority
+          key (its ``authority_epoch`` is not ``authority_key_epoch``): an
+          authority rotation's rekey has not reached us yet;
+        * a removal hold is on (:meth:`hold_multi`): we learned a household
+          left but hold no epoch newer than the one it holds.
+
+        Never an older epoch's key instead. Only derived material leaves —
+        never the content key. Never log it."""
         latest = await self._repo.get_latest(space_id)
-        if latest is None:
+        if latest is None or self._spaces is None or self._held(space_id, latest):
             return None
-        stored_at = _stored_at(latest.created_at)
-        if (
-            stored_at is None
-            or (_utcnow() - stored_at).total_seconds() < MULTI_EPOCH_GRACE_S
-        ):
+        space = await self._spaces.get(space_id)
+        if space is None or latest.authority_epoch != space.authority_key_epoch:
             return None
         return latest.epoch, derive_mr_key(self._unwrap(latest))
+
+    async def hold_multi(self, space_id: str) -> None:
+        """A household left *space_id*: no multi-recipient frame until an
+        epoch newer than our newest one arrives (its post-removal rekey), or
+        for at most :data:`MULTI_REMOVAL_HOLD_S` — the leaver holds every
+        epoch we hold now."""
+        latest = await self._repo.get_latest(space_id)
+        self._multi_holds[space_id] = (
+            latest.epoch if latest is not None else -1,
+            _monotonic(),
+        )
+
+    def _held(self, space_id: str, latest: SpaceKey) -> bool:
+        hold = self._multi_holds.get(space_id)
+        if hold is None:
+            return False
+        epoch, since = hold
+        if latest.epoch > epoch or _monotonic() - since >= MULTI_REMOVAL_HOLD_S:
+            del self._multi_holds[space_id]
+            return False
+        return True
 
     async def mr_kid(self, space_id: str, epoch: int) -> str | None:
         """The multi-recipient kid of *space_id*'s *epoch* key, or ``None``

@@ -64,6 +64,7 @@ def _envelope(payload: str = '{"text":"hi"}') -> tuple[dict, bytes, bytes]:
         space_id="sp-1",
         keys=keys,
         recipients=RECIPIENTS,
+        msg_id="m-1",
     )
     return env, key, pk
 
@@ -325,6 +326,7 @@ def test_build_refuses_an_empty_or_oversize_audience(recipients):
             space_id="sp-1",
             keys=keys,
             recipients=recipients,
+            msg_id="m-1",
         )
 
 
@@ -341,6 +343,7 @@ def test_the_largest_audience_still_seals():
         space_id="sp-1",
         keys=keys,
         recipients=recipients,
+        msg_id="m-1",
     )
     assert multi_audience_includes(env["to_instance"], TAG_KEY, recipients[-1])
     assert open_multi(seal_multi(env, kid=kid, key=key), key)["envelope"] == env

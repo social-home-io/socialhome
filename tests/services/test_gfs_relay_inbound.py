@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from collections.abc import Collection
 
 import orjson
@@ -796,6 +797,7 @@ def _multi_frame(
         space_id=envelope_space,
         keys=keys,
         recipients=to,
+        msg_id=str(uuid.uuid4()),
     )
     sealed = seal_multi(env, kid=keys.kid, key=keys.key)
     return {"type": "envelope", "sealed": sealed}, env
@@ -972,6 +974,7 @@ async def test_a_removed_member_with_an_older_epoch_key_is_refused(removal):
             space_id=_SPACE,
             keys=old,
             recipients=h.audience,
+            msg_id=str(uuid.uuid4()),
         )
         return {
             "type": "envelope",

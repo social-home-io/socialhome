@@ -391,6 +391,20 @@ class InMemoryOutboxRepo:
         )
         return entry_id
 
+    async def enqueue_refs(
+        self, *, instance_ids, event_type, supersede_key, payload_ref
+    ) -> dict[str, str]:
+        return {
+            iid: await self.enqueue(
+                instance_id=iid,
+                event_type=event_type,
+                payload_json="",
+                supersede_key=supersede_key,
+                payload_ref=payload_ref,
+            )
+            for iid in instance_ids
+        }
+
     async def get_payload(self, payload_id: str):
         return self.payloads.get(payload_id)
 
@@ -410,6 +424,11 @@ class InMemoryOutboxRepo:
                 payload_id=e["payload_id"],
                 space_id=(
                     self.payloads[e["payload_id"]].space_id
+                    if e["payload_id"] is not None
+                    else None
+                ),
+                msg_id=(
+                    self.payloads[e["payload_id"]].msg_id
                     if e["payload_id"] is not None
                     else None
                 ),

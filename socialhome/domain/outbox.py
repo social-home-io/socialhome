@@ -36,6 +36,9 @@ class OutboxEntry:
     #: The referenced payload's space (``None`` for a row without one) —
     #: what a gate needs without unwrapping the payload.
     space_id: str | None = None
+    #: The referenced payload's ``msg_id`` — set only on a multi payload
+    #: (:class:`OutboxPayload`), the one kind of row a multi upload carries.
+    msg_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -44,15 +47,19 @@ class OutboxPayload:
     payload stored ONCE for every recipient it failed to reach.
 
     ``payload_enc`` is the payload JSON wrapped under the local KEK with
-    ``id``, ``event_type`` and ``space_id`` as associated data; ``id`` is an HMAC under a per-process key, so
-    one broadcast's failed recipients share the row and nothing guessable is
-    stored.
+    ``id``, ``event_type`` and ``space_id`` as associated data. A failed
+    send's payload has an HMAC ``id`` under a per-process key (one
+    broadcast's failed recipients share the row, nothing guessable is
+    stored) and no ``msg_id``. A *multi payload* — a broadcast to mailbox
+    seats behind one GFS, uploaded once by the outbox (v_90) — has a random
+    ``id`` and a uuid4 ``msg_id`` that every envelope built from it carries.
     """
 
     id: str
     event_type: FederationEventType
     space_id: str | None
     payload_enc: str
+    msg_id: str | None = None
 
 
 class DeliveryOutcome(enum.Enum):

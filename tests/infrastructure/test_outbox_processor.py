@@ -263,6 +263,32 @@ async def test_start_stop_lifecycle():
     assert proc._stop.is_set()
 
 
+async def test_wake_runs_a_pass_before_the_poll_interval():
+    """A broadcast that queued a multi payload wakes the loop (v_90)."""
+    repo = MagicMock()
+    passes = asyncio.Event()
+    calls = 0
+
+    async def _due(_limit):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            passes.set()
+        return []
+
+    repo.list_due = _due
+    repo.purge_orphaned = AsyncMock(return_value=0)
+    repo.expire_past_retention = AsyncMock(return_value=0)
+    repo.purge_terminal = AsyncMock(return_value=0)
+    proc = OutboxProcessor(repo, AsyncMock(), poll_interval_seconds=3600)
+    await proc.start()
+    await _until(lambda: calls == 1)
+    proc.wake()
+    await asyncio.wait_for(passes.wait(), timeout=2)
+    await proc.stop()
+    assert proc._task is None
+
+
 async def test_start_idempotent():
     """Calling start() twice does not create a second task."""
     repo = MagicMock()
@@ -600,6 +626,7 @@ def _row(entry_id: str, instance_id: str) -> OutboxEntry:
         created_at=datetime.now(UTC).isoformat(),
         payload_id="p-1",
         space_id="sp-1",
+        msg_id="m-1",
     )
 
 
@@ -935,7 +962,7 @@ async def test_gated_multi_checks_only_rows_that_could_be_grouped():
 
     grouped = _row("grouped", "A")
     single_rows = [
-        dataclasses.replace(_row("no-ref", "B"), payload_id=None, payload_json="{}"),
+        dataclasses.replace(_row("no-multi", "B"), msg_id=None),
         dataclasses.replace(_row("no-space", "C"), space_id=None),
         dataclasses.replace(
             _row("not-multi", "D"), event_type=FederationEventType.PAIRING_INTRO

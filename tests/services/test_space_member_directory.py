@@ -685,7 +685,18 @@ async def test_a_delta_keeps_unlisted_cards_and_removed_clears():
     w.spaces.put_card(SPACE, host_card)
     w.spaces.put_card(SPACE, _card(keep, gfs=GFS))
     w.spaces.put_card(SPACE, _card(gone, gfs=GFS))
+    held: list[str] = []
+
+    async def hold(space_id):
+        held.append(space_id)
+
+    w.dir.attach_multi_hold(hold)
+    await w.directory({"cards": [], "removed": []})
+    assert held == []
     await w.directory({"cards": [], "removed": [gone["id"], host["id"]]})
+    # v_90: the leaver holds every epoch we hold — no multi frame until
+    # the post-removal rekey arrives.
+    assert held == [SPACE]
     assert gone["id"] not in w.spaces.rows[SPACE]
     assert w.spaces.doc(SPACE, keep["id"])["card"]["instance_id"] == keep["id"]
     assert w.spaces.doc(SPACE, host["id"])["card"] == host_card.to_wire()
@@ -1131,9 +1142,16 @@ async def test_a_lost_removal_is_repaired_by_the_next_sync():
         ended.append(iid)
 
     m.dir.attach_seat_ender(ender)
+    held: list[str] = []
+
+    async def hold(space_id):
+        held.append(space_id)
+
+    m.dir.attach_multi_hold(hold)
     await m.directory(snap["payload"])
     assert gone["id"] not in m.spaces.rows[SPACE]
     assert ended == [gone["id"]]
+    assert held == [SPACE]  # v_90: a snapshot that drops a carded household
 
 
 async def test_a_late_old_delta_never_re_adds_a_removed_household():

@@ -90,3 +90,18 @@ def test_the_ref_lookup_uses_the_partial_index(conn):
         )
     )
     assert "idx_federation_outbox_payload" in plan
+
+
+def test_a_stored_payload_has_a_nullable_msg_id(conn):
+    """NULL for a failed send's payload; set for a broadcast's multi payload,
+    whose every envelope carries it."""
+    _payload(conn)
+    conn.execute(
+        "INSERT INTO federation_outbox_payloads(id, event_type, space_id,"
+        " payload_enc, msg_id) VALUES('p2', 'space_post_created', 's1', 'n:ct',"
+        " 'm-1')"
+    )
+    rows = conn.execute(
+        "SELECT id, msg_id FROM federation_outbox_payloads ORDER BY id"
+    ).fetchall()
+    assert [(r["id"], r["msg_id"]) for r in rows] == [("p1", None), ("p2", "m-1")]

@@ -558,9 +558,10 @@ def _build_outbox_processor(
     with its sealed envelope is re-stamped + re-signed; a ref row, migration
     0145, has the stored payload sealed for its peer). ``after_prune``: once
     the retention sweep has failed an UNPAIR past its max age, that peer's
-    unpair tombstone is purged. ``multi``: due ref rows of one payload to
-    mailbox seats on one GFS go up as ONE upload (v_90); rows the
-    moderation check refuses stay single.
+    unpair tombstone is purged. ``multi``: due ref rows of one multi
+    payload to mailbox seats on one GFS go up as ONE upload (v_90); rows the
+    moderation check refuses stay single. The federation service wakes it
+    when a broadcast queued a multi payload — it is the only multi sender.
     """
 
     def _still_wanted():
@@ -577,12 +578,14 @@ def _build_outbox_processor(
             still_wanted=_still_wanted(),
         )
 
-    return OutboxProcessor(
+    processor = OutboxProcessor(
         outbox_repo,
         _deliver,
         after_prune=peer_unpair.sweep_tombstones,
         multi=GatedOutboxMulti(federation_service, _still_wanted),
     )
+    federation_service.attach_outbox_wake(processor.wake)
+    return processor
 
 
 def _parse_retry_after_s(value: str | None) -> float | None:
@@ -4578,6 +4581,8 @@ def create_app(config: Config | None = None) -> web.Application:
             # Phase 4b — stamp every locally-minted epoch with this household's
             # id so concurrent delegated-admin rotations converge deterministically.
             own_instance_id=identity.instance_id,
+            # v_90 — a multi-recipient key only under the pinned authority key.
+            space_repo=space_repo,
         )
         app[K.space_crypto_service_key] = space_crypto
         pending_decrypts_cache = PendingDecryptsCache(bus=bus)
@@ -5171,6 +5176,8 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         member_directory.attach_to(federation_service)
         member_directory.wire(bus)
+        # v_90 — a household left: no multi frame until its rekey arrives.
+        member_directory.attach_multi_hold(space_crypto.hold_multi)
         # Repair of a lost directory delta rides the periodic §25.6 sync:
         # the BEGIN echoes the member's ``dir_seq``; a host ahead answers.
         app[K.space_sync_scheduler_key].attach_directory_echo(

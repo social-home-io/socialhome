@@ -27,7 +27,7 @@ import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Collection, Iterable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -180,6 +180,16 @@ def _group_key(obj: dict) -> bytes:
     return _orjson.dumps(obj, option=_orjson.OPT_SORT_KEYS)
 
 
+def _multi_group_key(
+    target: MailboxTarget, content: bytes | str
+) -> tuple[str, bytes | str]:
+    """The one grouping key of a multi frame (v_90): the recipient's GFS
+    (normalized) and the content every recipient shares — the payload's
+    :func:`_group_key` bytes in a broadcast, its stored payload id in the
+    outbox."""
+    return normalize_gfs_base(target.gfs_url), content
+
+
 #: v_90 — ``space_id`` → ``(epoch, keys)`` of the space's current
 #: multi-recipient keys, or ``None`` (``SpaceContentEncryption.mr_key``).
 MrKeyForSpace = Callable[[str], Awaitable[tuple[int, MrKeys] | None]]
@@ -286,25 +296,11 @@ MAX_DEFERRED_MESH_BYTES: int = 16 * 1024 * 1024
 MAX_DEFERRED_MESH_PAYLOAD_BYTES: int = 256 * 1024
 
 #: How long a throttled v_90 multi upload waits when the GFS's ``429`` named
-#: no ``Retry-After``: the GFS's per-address, per-node upload and recipient budgets
-#: are a minute wide, and it answers ``Retry-After: 60`` itself. Coming back
-#: sooner only earns another 429.
+#: no ``Retry-After``: the GFS's per-address, per-node upload and recipient
+#: budgets are a minute wide, and it answers ``Retry-After: 60`` itself.
+#: Coming back sooner only earns another 429. (A named one is capped by the
+#: outbox at :data:`~socialhome.infrastructure.outbox_processor.MAX_RETRY_AFTER_S`.)
 MULTI_THROTTLE_RETRY_S: float = 60.0
-
-#: Ceiling on a GFS's ``Retry-After`` for a throttled multi upload — the
-#: longest window the GFS itself names (an hour); a larger value is a hint
-#: we do not let park the rows.
-MULTI_THROTTLE_MAX_RETRY_S: float = 3600.0
-
-
-def _multi_retry_after_s(retry_after_s: float | None) -> float:
-    """The wait before a throttled multi upload is tried again: the GFS's
-    ``Retry-After`` (capped at :data:`MULTI_THROTTLE_MAX_RETRY_S`) or
-    :data:`MULTI_THROTTLE_RETRY_S` when it named none."""
-    if retry_after_s is None:
-        return MULTI_THROTTLE_RETRY_S
-    return min(max(retry_after_s, 0.0), MULTI_THROTTLE_MAX_RETRY_S)
-
 
 #: Broadcast events whose own effect takes the recipient out of
 #: ``space_instances`` right after the broadcast: ``dissolve_space`` purges
@@ -418,6 +414,7 @@ class FederationService:
         "_online_status_service",
         "_outbox_payload_key",
         "_outbox_repo",
+        "_outbox_wake",
         "_own_identity_pk",
         "_own_identity_seed",
         "_own_instance_id",
@@ -548,6 +545,9 @@ class FederationService:
         #: keys of the space's current epoch
         #: (``SpaceContentEncryption.mr_key``). Unwired → no multi uploads.
         self._mr_key: MrKeyForSpace | None = None
+        #: v_90 — ``OutboxProcessor.wake``: a queued multi payload goes up
+        #: on a pass now, not at the next poll (:meth:`attach_outbox_wake`).
+        self._outbox_wake: Callable[[], None] | None = None
         # Social Home Apps federation bridge — set via :meth:`attach_apps`.
         # When unset, inbound APP_SESSION / APP_MESSAGE events are silently
         # dropped (no app bridge wired on this instance).
@@ -1202,6 +1202,11 @@ class FederationService:
         self._host_hop = host_hop
         self._mailbox_sender_check = mailbox_sender_check
         self._mr_key = mr_key
+
+    def attach_outbox_wake(self, wake: Callable[[], None]) -> None:
+        """Wire ``OutboxProcessor.wake`` — the outbox is the only multi
+        sender (v_90), and a broadcast that queued a multi payload wakes it."""
+        self._outbox_wake = wake
 
     def attach_call_signaling(self, call_signaling) -> None:
         """Attach a :class:`CallSignalingService` after construction."""
@@ -2231,6 +2236,8 @@ class FederationService:
         event_type: FederationEventType,
         space_id: str | None,
         payload: dict,
+        *,
+        msg_id: str | None = None,
     ) -> OutboxPayload:
         """The stored form of *payload* for the outbox (migration 0145).
 
@@ -2240,17 +2247,25 @@ class FederationService:
         local KEK with that id as associated data, so the database never
         holds it in the clear and a row's ciphertext cannot be swapped into
         another (:func:`_outbox_payload_ad` binds the event type and space
-        too, so a row edited to another event or space does not unwrap)."""
+        too, so a row edited to another event or space does not unwrap).
+
+        With a ``msg_id`` it is a broadcast's multi payload (v_90): a random
+        id — one broadcast, one row, never shared with another — and the
+        ``msg_id`` every envelope built from it carries."""
         payload_json = _dumps(payload)
-        mac = hmac.new(self._outbox_payload_key, digestmod=hashlib.sha256)
-        for part in (event_type.value, space_id or "", payload_json):
-            mac.update(part.encode("utf-8"))
-            mac.update(b"\x00")
-        payload_id = mac.hexdigest()
+        if msg_id is None:
+            mac = hmac.new(self._outbox_payload_key, digestmod=hashlib.sha256)
+            for part in (event_type.value, space_id or "", payload_json):
+                mac.update(part.encode("utf-8"))
+                mac.update(b"\x00")
+            payload_id = mac.hexdigest()
+        else:
+            payload_id = uuid.uuid4().hex
         return OutboxPayload(
             id=payload_id,
             event_type=event_type,
             space_id=space_id,
+            msg_id=msg_id,
             payload_enc=self._key_manager.encrypt(
                 payload_json.encode("utf-8"),
                 associated_data=_outbox_payload_ad(payload_id, event_type, space_id),
@@ -2281,7 +2296,9 @@ class FederationService:
     ) -> str:
         """Seal a ref row (migration 0145) for its one peer: the stored
         payload, encrypted under *instance*'s session key, in an envelope
-        with the row's id as ``msg_id`` and a fresh timestamp + signature.
+        with a fresh timestamp + signature and as ``msg_id`` the multi
+        payload's (v_90 — so it and the multi frame are one message to the
+        receiver's replay cache), else the row's id.
 
         Raises :class:`ValueError` when the payload is gone, does not unwrap
         or the session key cannot be unwrapped — the outbox drops the row
@@ -2294,7 +2311,7 @@ class FederationService:
             event_type=entry.event_type,
             payload_json=payload_json,
             space_id=stored.space_id,
-            msg_id=entry.id,
+            msg_id=stored.msg_id or entry.id,
         )
         if envelope is None:
             raise ValueError(f"no session key to seal {entry.id} for {instance.id}")
@@ -3281,15 +3298,19 @@ class FederationService:
             if per_peer is not None:
                 peer_payload = await per_peer(iid, peer_payload)
             planned.append((iid, peer_payload))
-        # v_90 — the mailbox seats behind one GFS whose bytes are the same
-        # go up ONCE; everyone else (and any group whose upload failed) goes
-        # per recipient below, in the original order.
-        multi_done = await self._send_multi_mailbox_groups(
-            space_id, event_type, planned
+        # v_90 — the mailbox seats behind one GFS whose bytes are the same go
+        # to the outbox as ONE multi payload, which uploads it once. Only when
+        # the audience is every member household: a follower holding the
+        # content key then gets every frame's content anyway. Everyone else
+        # goes per recipient below, in the original order.
+        queued = (
+            await self._queue_multi_groups(space_id, event_type, planned)
+            if only_instances is None
+            else {}
         )
         for iid, peer_payload in planned:
-            if iid in multi_done:
-                results.append(multi_done[iid])
+            if iid in queued:
+                results.append(queued[iid])
                 continue
             if iid in self._deferred_mesh_queues:
                 # A deferred send to this target is still pending: queue
@@ -3370,374 +3391,176 @@ class FederationService:
             )
         return broadcast
 
-    async def _send_multi_mailbox_groups(
+    async def _queue_multi_groups(
         self,
         space_id: str,
         event_type: FederationEventType,
         planned: list[tuple[str, dict]],
     ) -> dict[str, DeliveryResult]:
-        """v_90 — send ONE multi-recipient frame per group of mailbox seats
-        and return the result of every target it carried.
+        """v_90 — hand the outbox, the only multi sender, every group of two
+        or more targets one multi frame may carry: ONE multi payload (random
+        id, uuid4 ``msg_id``) and one ref row each, in one transaction; then
+        wake it. Returns those targets' results — :data:`DELIVERY_ERROR_QUEUED`,
+        self-healing like a failed :meth:`send_event`. Everyone else goes per
+        recipient.
 
-        A target joins a group when the event type is one a receiver takes
-        in a multi frame (:data:`MULTI_EVENT_TYPES`), it has no deferred
-        mesh queue, its household is at
-        :attr:`FederationCapability.MIN_FOR_MULTI_MAILBOX` or above and is a
-        confirmed ``space_session`` seat whose mailbox sits on a GFS of ours
-        that proved ``envelope_multi``
-        (:meth:`FederationTransport.multi_mailbox_target`). Groups are keyed
-        by that GFS and the payload's content (key order aside), so nothing
-        addressed to one member (a ``per_peer`` copy) rides another's frame.
-        A group of one — or the remainder of one after chunking at the
-        GFS's ``max_recipients`` — stays per recipient.
+        A target is eligible per :meth:`_multi_target`; groups are keyed by
+        :func:`_multi_group_key` on its GFS and the payload's content (key
+        order aside), so nothing addressed to one member (a ``per_peer``
+        copy) rides another's frame. Nothing while the space has no fresh
+        multi-recipient key (:meth:`SpaceContentEncryption.mr_key`).
 
         Cost: one ``list_instances_in_space`` read per broadcast with ≥ 2
-        targets of a multi event type; then, per ``space_session`` seat
-        among them, one card lookup for its mailbox
-        (:meth:`_multi_seat_target`) and one capability probe per GFS, and
-        one key lookup once a group of two forms. A throttled upload queues the whole chunk in the outbox
-        (:meth:`_queue_throttled_multi`); any other failure (no key for the
-        space or one still in its grace window, a frame over the top size
-        bucket, a refused or raising upload) leaves the group to the
-        per-recipient path, which queues in the outbox on failure. Never
-        raises.
-        """
+        targets of a multi event type; one mailbox lookup per
+        ``space_session`` seat among them, one capability probe per GFS, and
+        one key lookup once a group of two forms. Never raises."""
+        done: dict[str, DeliveryResult] = {}
         if (
             event_type not in MULTI_EVENT_TYPES
             or self._transport is None
             or self._mr_key is None
             or len(planned) < 2
         ):
-            return {}
+            return done
         try:
             seats = {
                 row.id: row
                 for row in await self._federation_repo.list_instances_in_space(space_id)
                 if row.source is InstanceSource.SPACE_SESSION
             }
-        except Exception as exc:  # noqa: BLE001 — never raises; per recipient
-            log.warning(
-                "broadcast: space=%s multi seat lookup failed (%s) — per recipient",
-                space_id,
-                type(exc).__name__,
-            )
-            return {}
-        if len(seats) < 2:
-            return {}
-        caps: dict[str, int] = {}
-        groups: dict[tuple[str, bytes], list[tuple[str, MailboxTarget, dict]]] = {}
-        for iid, peer_payload in planned:
-            row = seats.get(iid)
-            if row is None or iid in self._deferred_mesh_queues:
-                continue
-            target = await self._multi_seat_target(row, space_id, caps)
-            if target is None:
-                continue
-            key = (normalize_gfs_base(target.gfs_url), _group_key(peer_payload))
-            groups.setdefault(key, []).append((iid, target, peer_payload))
-        if not any(len(members) >= 2 for members in groups.values()):
-            return {}
-        mr = await self._multi_key(space_id)
-        if mr is None:
-            return {}
-        done: dict[str, DeliveryResult] = {}
-        for members in groups.values():
-            if len(members) < 2:
-                continue
-            cap = max(caps.get(members[0][1].gfs_url, 1), 1)
-            for start in range(0, len(members), cap):
-                chunk = members[start : start + cap]
-                if len(chunk) < 2:
-                    continue  # a group of one goes per recipient
+            caps: dict[str, int] = {}
+            groups: dict[tuple[str, bytes | str], tuple[dict, list[str]]] = {}
+            for iid, peer_payload in planned:
+                row = seats.get(iid) if len(seats) >= 2 else None
+                target = (
+                    None
+                    if row is None
+                    else await self._multi_target(row, event_type, space_id, caps)
+                )
+                if target is not None:
+                    key = _multi_group_key(target, _group_key(peer_payload))
+                    groups.setdefault(key, (peer_payload, []))[1].append(iid)
+            ready = [g for g in groups.values() if len(g[1]) >= 2]
+            if not ready or await self._multi_key(space_id) is None:
+                return done
+            for payload, recipients in ready:
                 done.update(
-                    await self._send_multi_chunk(
-                        space_id,
-                        event_type,
-                        chunk,
-                        keys=mr,
+                    await self._queue_multi_payload(
+                        space_id, event_type, payload, recipients
                     )
                 )
-        return done
-
-    async def _send_multi_chunk(
-        self,
-        space_id: str,
-        event_type: FederationEventType,
-        chunk: list[tuple[str, MailboxTarget, dict]],
-        *,
-        keys: MrKeys,
-    ) -> dict[str, DeliveryResult]:
-        """Build, seal and upload ONE multi frame for *chunk* (≥ 2 seats on
-        one GFS, same payload). A throttled upload queues every seat
-        (:meth:`_queue_throttled_multi`); ``{}`` on any other failure, so
-        each goes per recipient. Never raises."""
-        assert self._transport is not None
-        recipients = [iid for iid, _t, _p in chunk]
-        payload = chunk[0][2]
-        state_key: str | None = None
-        tickets: dict[str, int | None] = {}
-        try:
-            sealed = self._seal_multi_frame(
-                space_id,
-                event_type,
-                recipients,
-                payload_json=_dumps(payload),
-                keys=keys,
-            )
-            if sealed is None:
-                return {}
-            # Latest-only state: claim per recipient like :meth:`send_event`,
-            # so a delivered frame drops the older one still queued for each.
-            state_key = self._state_key(event_type, space_id, payload)
-            tickets = {
-                iid: self._claim_state_send(iid, state_key) for iid in recipients
-            }
-            ok, status, retry_after_s = await self._transport.send_multi_mailbox(
-                targets=[t for _iid, t, _p in chunk], sealed=sealed
-            )
         except Exception as exc:  # noqa: BLE001 — never raises; per recipient
-            # Instance-level context only — never a mailbox id.
-            for iid, ticket in tickets.items():
-                self._settle_state_send(iid, state_key, ticket)
             log.warning(
-                "broadcast: space=%s event=%s multi upload for %d household(s) "
-                "raised %s — per recipient instead",
+                "broadcast: space=%s multi queueing failed (%s) — per recipient",
                 space_id,
-                event_type.value,
-                len(recipients),
                 type(exc).__name__,
             )
-            return {}
-        if not ok and status == RELAY_STATUS_THROTTLED:
-            return await self._queue_throttled_multi(
-                space_id,
-                event_type,
-                payload,
-                recipients,
-                state_key,
-                tickets,
-                retry_after_s=_multi_retry_after_s(retry_after_s),
-            )
-        if not ok:
-            for iid in recipients:
-                self._settle_state_send(iid, state_key, tickets[iid])
-            log.info(
-                "broadcast: space=%s event=%s multi upload for %d household(s) "
-                "refused — per recipient instead",
-                space_id,
-                event_type.value,
-                len(recipients),
-            )
-            return {}
-        done: dict[str, DeliveryResult] = {}
-        for iid in recipients:
-            # An ACCEPTANCE by the relay, never proof of delivery — the same
-            # as a per-recipient relay send (see :meth:`send_event`).
-            self.note_relay_accepted(iid)
-            try:
-                await self._settle_delivered_state(iid, state_key, tickets[iid])
-            except Exception as exc:  # noqa: BLE001 — never raises; per recipient
-                log.warning(
-                    "broadcast: superseded-row cleanup for %s failed (%s)",
-                    iid,
-                    type(exc).__name__,
-                )
-            done[iid] = DeliveryResult(instance_id=iid, ok=True, via="gfs_relay")
         return done
 
-    async def _queue_throttled_multi(
+    async def _queue_multi_payload(
         self,
         space_id: str,
         event_type: FederationEventType,
         payload: dict,
         recipients: list[str],
-        state_key: str | None,
-        tickets: dict[str, int | None],
-        *,
-        retry_after_s: float,
     ) -> dict[str, DeliveryResult]:
-        """The GFS throttled a multi upload: queue every recipient straight
-        to the outbox — ONE stored payload, one ref row each (migration
-        0145, as :meth:`send_event`'s failure path) — with no live attempt,
-        so a GFS that just said it is busy does not get N per-recipient
-        sends at once. Each row is first due *retry_after_s* from now (the
-        GFS's ``Retry-After``), so the outbox does not hit the same full
-        window on its next pass. A 429 is back-pressure on us, not news
-        about the households: nobody is marked unreachable. A recipient
-        whose row cannot be queued goes per recipient. Never raises."""
-        log.info(
-            "broadcast: space=%s event=%s multi upload for %d household(s) "
-            "throttled — queued",
-            space_id,
-            event_type.value,
-            len(recipients),
-        )
-        done: dict[str, DeliveryResult] = {}
-        due_at = (datetime.now(UTC) + timedelta(seconds=retry_after_s)).isoformat()
-        try:
-            ref = self._outbox_payload(event_type, space_id, payload)
-        except Exception as exc:  # noqa: BLE001 — never raises; per recipient
-            log.warning(
-                "broadcast: space=%s throttled multi could not be stored (%s)",
-                space_id,
-                type(exc).__name__,
-            )
-            for iid in recipients:
-                self._settle_state_send(iid, state_key, tickets[iid])
-            return done
+        """One multi payload and its ref rows for *recipients*, then wake the
+        outbox. A latest-only state supersedes each recipient's older row."""
+        state_key = self._state_key(event_type, space_id, payload)
         for iid in recipients:
-            if not self._settle_state_send(iid, state_key, tickets[iid]):
-                # A newer send of this same state is under way and carries it.
-                done[iid] = DeliveryResult(
-                    instance_id=iid, ok=False, error=DELIVERY_ERROR_SUPERSEDED
-                )
-                continue
-            try:
-                queued = await self._outbox_repo.enqueue(
-                    instance_id=iid,
-                    event_type=event_type,
-                    payload_json="",
-                    supersede_key=state_key,
-                    payload_ref=ref,
-                )
-            except Exception as exc:  # noqa: BLE001 — never raises; per recipient
-                log.warning(
-                    "broadcast: queueing throttled multi for %s failed (%s)",
-                    iid,
-                    type(exc).__name__,
-                )
-                continue  # per recipient
-            if queued is None:
-                # The pairing ended meanwhile — nothing was queued.
-                done[iid] = DeliveryResult(
-                    instance_id=iid, ok=False, error="unknown_instance"
-                )
-                continue
-            try:
-                await self._outbox_repo.reschedule(queued, due_at, 0)
-            except Exception as exc:  # noqa: BLE001 — queued; due sooner is fine
-                log.warning(
-                    "broadcast: delaying throttled multi for %s failed (%s)",
-                    iid,
-                    type(exc).__name__,
-                )
-            done[iid] = DeliveryResult(
+            # The newest send of this state: an older one still in flight
+            # must not drop the row below when it lands.
+            self._settle_state_send(
+                iid, state_key, self._claim_state_send(iid, state_key)
+            )
+        written = await self._outbox_repo.enqueue_refs(
+            instance_ids=recipients,
+            event_type=event_type,
+            supersede_key=state_key,
+            payload_ref=self._outbox_payload(
+                event_type, space_id, payload, msg_id=str(uuid.uuid4())
+            ),
+        )
+        if written and self._outbox_wake is not None:
+            self._outbox_wake()
+        return {
+            iid: DeliveryResult(
                 instance_id=iid,
                 ok=False,
-                error=DELIVERY_ERROR_RELAY_THROTTLED,
+                # Not written: the pairing ended meanwhile.
+                error=DELIVERY_ERROR_QUEUED if iid in written else "unknown_instance",
                 via="gfs_relay",
-                retry_after_s=retry_after_s,
             )
-        return done
+            for iid in recipients
+        }
 
-    async def _multi_seat_target(
-        self, row: RemoteInstance, space_id: str, caps: dict[str, int]
+    async def _multi_target(
+        self,
+        row: RemoteInstance,
+        event_type: FederationEventType,
+        space_id: str,
+        caps: dict[str, int],
     ) -> MailboxTarget | None:
-        """*row*'s GFS mailbox for *space_id* when a multi upload may carry
-        it (v_90): a household at
-        :attr:`FederationCapability.MIN_FOR_MULTI_MAILBOX` or above (judged
+        """*row*'s GFS mailbox for *space_id* when a multi frame may carry
+        *event_type* to it (v_90) — the one eligibility rule of the broadcast
+        and the outbox: an event a receiver takes in a multi frame
+        (:data:`MULTI_EVENT_TYPES`), a household with no deferred mesh queue,
+        at :attr:`FederationCapability.MIN_FOR_MULTI_MAILBOX` or above (judged
         from the row itself), a confirmed ``space_session`` seat whose
-        mailbox sits on a GFS of ours that proved ``envelope_multi``.
-        *caps* caches each GFS's capability for the pass. ``None`` → per
-        recipient."""
+        mailbox sits on a GFS of ours that proved ``envelope_multi``. *caps*
+        caches each GFS's capability for the pass. ``None`` → per recipient."""
         assert self._transport is not None
         if (
-            int(row.proto_version) < FederationCapability.MIN_FOR_MULTI_MAILBOX
+            event_type not in MULTI_EVENT_TYPES
+            or row.id in self._deferred_mesh_queues
+            or int(row.proto_version) < FederationCapability.MIN_FOR_MULTI_MAILBOX
             or row.status is not PairingStatus.CONFIRMED
             or row.source is not InstanceSource.SPACE_SESSION
         ):
             return None
         return await self._transport.multi_mailbox_target(row, space_id, caps=caps)
 
-    def _seal_multi_frame(
-        self,
-        space_id: str,
-        event_type: FederationEventType,
-        recipients: list[str],
-        *,
-        payload_json: str,
-        keys: MrKeys,
-    ) -> dict | None:
-        """Build and seal ONE audience-tagged multi frame; ``None`` (logged)
-        when it cannot be built — e.g. over the top size bucket."""
-        try:
-            envelope = build_multi_envelope(
-                encoder=self._encoder,
-                own_instance_id=self._own_instance_id,
-                event_type=event_type.value,
-                payload_json=payload_json,
-                space_id=space_id,
-                keys=keys,
-                recipients=recipients,
-            )
-            return seal_multi(envelope, kid=keys.kid, key=keys.key)
-        except ValueError as exc:
-            log.info(
-                "multi: space=%s event=%s goes per recipient (%s)",
-                space_id,
-                event_type.value,
-                exc,
-            )
-            return None
-
     async def outbox_multi_groups(
         self, entries: list[OutboxEntry]
     ) -> list[list[OutboxEntry]]:
         """:class:`~socialhome.infrastructure.outbox_processor.OutboxMulti` —
-        the due outbox rows that may go up as ONE multi upload each.
+        the due outbox rows that go up as ONE multi upload each.
 
-        Only ref rows (migration 0145) of an event type a receiver takes in a
-        multi frame (:data:`MULTI_EVENT_TYPES` — never ``UNPAIR``), whose
-        peer is a multi-capable mailbox seat (:meth:`_multi_seat_target`)
-        and whose space has a current mr key (none while its newest epoch is
-        in its grace window). Grouped by GFS and stored payload, every
-        recipient at most once per group, chunked at the GFS's
-        ``max_recipients``; groups of one are left out (they go per
+        Only rows of a multi payload (its ``msg_id`` set — never a failed
+        send's payload) whose peer passes :meth:`_multi_target` and whose
+        space has a fresh mr key. Grouped by :func:`_multi_group_key` (GFS +
+        stored payload), every recipient at most once per group, chunked at
+        the GFS's ``max_recipients``; groups of one are left out (they go per
         recipient). Each peer row is read once and each GFS probed once per
-        pass. Never raises (a failure groups nothing)."""
+        pass."""
         if self._transport is None or self._mr_key is None:
             return []
-        try:
-            return await self._outbox_multi_groups(entries)
-        except Exception as exc:  # noqa: BLE001 — never raises; per recipient
-            log.warning(
-                "outbox: multi grouping failed (%s) — per recipient",
-                type(exc).__name__,
-            )
-            return []
-
-    async def _outbox_multi_groups(
-        self, entries: list[OutboxEntry]
-    ) -> list[list[OutboxEntry]]:
         keyed: dict[str, bool] = {}
         rows: dict[str, RemoteInstance | None] = {}
         caps: dict[str, int] = {}
-        buckets: dict[tuple[str, str], list[list[OutboxEntry]]] = {}
+        buckets: dict[tuple[str, bytes | str], list[list[OutboxEntry]]] = {}
         for entry in entries:
-            if (
-                entry.payload_id is None
-                or entry.space_id is None
-                or entry.event_type not in MULTI_EVENT_TYPES
-            ):
-                continue
             space_id = entry.space_id
+            if entry.msg_id is None or entry.payload_id is None or space_id is None:
+                continue
             if entry.instance_id not in rows:
                 rows[entry.instance_id] = await self._federation_repo.get_instance(
                     entry.instance_id
                 )
             row = rows[entry.instance_id]
-            if row is None or row.source is not InstanceSource.SPACE_SESSION:
+            target = (
+                None
+                if row is None
+                else await self._multi_target(row, entry.event_type, space_id, caps)
+            )
+            if target is None:
                 continue
             if space_id not in keyed:
                 keyed[space_id] = await self._multi_key(space_id) is not None
             if not keyed[space_id]:
                 continue
-            target = await self._multi_seat_target(row, space_id, caps)
-            if target is None:
-                continue
-            gfs = normalize_gfs_base(target.gfs_url)
             cap = max(caps.get(target.gfs_url, 1), 1)
-            chunks = buckets.setdefault((gfs, entry.payload_id), [])
+            chunks = buckets.setdefault(_multi_group_key(target, entry.payload_id), [])
             for chunk in chunks:
                 if len(chunk) < cap and all(
                     e.instance_id != entry.instance_id for e in chunk
@@ -3752,78 +3575,65 @@ class FederationService:
         self, group: list[OutboxEntry]
     ) -> DeliveryOutcome | RetryAfter | None:
         """:class:`~socialhome.infrastructure.outbox_processor.OutboxMulti` —
-        ONE multi upload of *group*'s stored payload; the outcome applies to
-        every row.
+        ONE multi upload of *group*'s stored payload, under its ``msg_id``;
+        the outcome applies to every row.
 
         SUCCESS on the relay's acceptance (recorded per household as such,
-        never as reachability); a throttled upload waits the GFS's
+        never as reachability). A throttled upload waits the GFS's
         ``Retry-After`` (:data:`MULTI_THROTTLE_RETRY_S` when it named none);
-        a payload that is gone or does not unwrap is PERMANENT. ``None`` —
-        a seat no longer multi-capable, no mr key (or one in its grace
-        window), a frame that cannot be built, a refused upload or anything
-        raising — sends each row on its own. Never raises."""
+        any other failed upload is TRANSIENT, as is one that raises or times
+        out — the rows are retried as they are, never fanned out per
+        recipient. A payload that is gone or does not unwrap is PERMANENT.
+        ``None`` (each row then goes on its own, under the same ``msg_id``)
+        only when no frame can be built: a seat no longer multi-capable, no
+        fresh mr key, a frame over the top size bucket."""
         assert self._transport is not None
-        payload_id = group[0].payload_id
-        space_id = group[0].space_id
-        if payload_id is None or space_id is None:
+        first = group[0]
+        space_id = first.space_id
+        if first.payload_id is None or space_id is None:
             return None
         try:
-            stored, payload_json = await self._outbox_payload_json(payload_id)
+            stored, payload_json = await self._outbox_payload_json(first.payload_id)
         except ValueError:
-            log.warning("outbox: multi payload %s unusable — dropping", payload_id)
+            log.warning(
+                "outbox: multi payload %s unusable — dropping", first.payload_id
+            )
             return DeliveryOutcome.PERMANENT
-        except Exception as exc:  # noqa: BLE001 — never raises; per recipient
-            log.warning(
-                "outbox: multi payload %s lookup failed (%s) — per recipient",
-                payload_id,
-                type(exc).__name__,
-            )
-            return None
-        try:
-            return await self._deliver_outbox_multi(
-                group, space_id, stored.event_type, payload_json
-            )
-        except Exception as exc:  # noqa: BLE001 — never raises; per recipient
-            # Instance-level context only — never a mailbox id.
-            log.warning(
-                "outbox: multi upload for %d household(s) of space=%s raised "
-                "%s — per recipient",
-                len(group),
-                space_id,
-                type(exc).__name__,
-            )
-            return None
-
-    async def _deliver_outbox_multi(
-        self,
-        group: list[OutboxEntry],
-        space_id: str,
-        event_type: FederationEventType,
-        payload_json: str,
-    ) -> DeliveryOutcome | RetryAfter | None:
-        assert self._transport is not None
         caps: dict[str, int] = {}
         targets: list[MailboxTarget] = []
         for entry in group:
             row = await self._federation_repo.get_instance(entry.instance_id)
-            if row is None:
-                return None
-            target = await self._multi_seat_target(row, space_id, caps)
+            target = (
+                None
+                if row is None
+                else await self._multi_target(row, stored.event_type, space_id, caps)
+            )
             if target is None:
                 return None
             targets.append(target)
         mr = await self._multi_key(space_id)
-        if mr is None:
+        if mr is None or stored.msg_id is None:
             return None
         recipients = [e.instance_id for e in group]
-        sealed = self._seal_multi_frame(
-            space_id,
-            event_type,
-            recipients,
-            payload_json=payload_json,
-            keys=mr,
-        )
-        if sealed is None:
+        try:
+            sealed = seal_multi(
+                build_multi_envelope(
+                    encoder=self._encoder,
+                    own_instance_id=self._own_instance_id,
+                    event_type=stored.event_type.value,
+                    payload_json=payload_json,
+                    space_id=space_id,
+                    keys=mr,
+                    recipients=recipients,
+                    msg_id=stored.msg_id,
+                ),
+                kid=mr.kid,
+                key=mr.key,
+            )
+        except ValueError as exc:
+            log.info(
+                "outbox: multi frame for space=%s goes per row (%s)", space_id, exc
+            )
             return None
         ok, status, retry_after_s = await self._transport.send_multi_mailbox(
             targets=targets, sealed=sealed
@@ -3832,9 +3642,21 @@ class FederationService:
             for iid in recipients:
                 self.note_relay_accepted(iid)
             return DeliveryOutcome.SUCCESS
+        # Instance-level context only — never a mailbox id.
+        log.info(
+            "outbox: multi upload for %d household(s) of space=%s not taken "
+            "(status=%s) — retried",
+            len(group),
+            space_id,
+            status,
+        )
         if status == RELAY_STATUS_THROTTLED:
-            return RetryAfter(seconds=_multi_retry_after_s(retry_after_s))
-        return None
+            return RetryAfter(
+                seconds=MULTI_THROTTLE_RETRY_S
+                if retry_after_s is None
+                else retry_after_s
+            )
+        return DeliveryOutcome.TRANSIENT
 
     async def _multi_key(self, space_id: str) -> MrKeys | None:
         """The space's current multi-recipient keys; ``None`` when there is none

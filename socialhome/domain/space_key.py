@@ -18,3 +18,6 @@ class SpaceKey:
     #: the same epoch concurrently — the smallest ``rotated_by`` wins so every
     #: receiver converges. ``None`` for legacy/owner-minted rows.
     rotated_by: str | None = None
+    #: The space's pinned ``authority_key_epoch`` this key was stored under
+    #: (v_44; read by the v_90 multi-recipient freshness rule).
+    authority_epoch: int = 0

@@ -1,11 +1,13 @@
-"""v_90 — ``broadcast_to_space_members`` uploads ONE multi-recipient frame
-for the mailbox seats of a space behind one GFS.
+"""v_90 — ``broadcast_to_space_members`` hands the mailbox seats of a space
+behind one GFS to the outbox as ONE multi payload, and the outbox uploads it
+ONCE.
 
 The grouping rules (version, seat kind, GFS capability, identical bytes,
-event type, group size) are checked against a recording transport; the last
-test runs the real :class:`FederationTransport` + :class:`GfsRelayTransport`
-on the sending side and the real receive path (``GfsRelayInbound`` + the
-§24.11 pipeline, from ``test_gfs_relay_inbound``) on two receivers.
+event type, audience, group size) are checked against a recording transport;
+the last test runs the real :class:`FederationTransport` +
+:class:`GfsRelayTransport` and :class:`OutboxProcessor` on the sending side
+and the real receive path (``GfsRelayInbound`` + the §24.11 pipeline, from
+``test_gfs_relay_inbound``) on two receivers.
 """
 
 from __future__ import annotations
@@ -13,28 +15,22 @@ from __future__ import annotations
 import dataclasses
 import os
 from collections import deque
-from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
-from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
     DELIVERY_ERROR_QUEUED,
-    DELIVERY_ERROR_RELAY_THROTTLED,
     FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
 from socialhome.domain.federation_capabilities import FederationCapability
-from socialhome.federation import federation_service
-from socialhome.federation.federation_service import (
-    MULTI_THROTTLE_MAX_RETRY_S,
-    MULTI_THROTTLE_RETRY_S,
-)
+from socialhome.domain.outbox import DeliveryOutcome
 from socialhome.federation.gfs_relay_transport import (
-    RELAY_STATUS_THROTTLED,
     GfsRelayTransport,
     MailboxTarget,
 )
@@ -45,10 +41,7 @@ from socialhome.federation.multi_recipient import (
     open_multi,
 )
 from socialhome.federation.transport import FederationTransport, _TransportSendResult
-from socialhome.infrastructure.key_manager import KeyManager
-from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
-from socialhome.services import space_crypto_service as scs
-from socialhome.services.space_crypto_service import SpaceContentEncryption
+from socialhome.infrastructure.outbox_processor import OutboxProcessor
 from tests.federation.test_federation_service import (
     InMemoryFederationRepo,
     InMemoryOutboxRepo,
@@ -134,6 +127,12 @@ class _Sender:
         self.transport = _Transport()
         self.svc.attach_transport(self.transport)
         self.mr_asks: list[str] = []
+        self.wakes = 0
+
+        def _wake() -> None:
+            self.wakes += 1
+
+        self.svc.attach_outbox_wake(_wake)
 
         async def _mr_key(space_id: str):
             self.mr_asks.append(space_id)
@@ -192,18 +191,54 @@ def _boxes(s: _Sender, ids) -> list[str]:
     return sorted(s.transport.targets[i].mailbox_id for i in ids)
 
 
-async def test_three_seats_on_one_gfs_go_up_once_and_the_paired_peer_alone():
+def _queued(s: _Sender) -> dict[str, list[str]]:
+    """Each stored multi payload's id → the households it has a row for."""
+    out: dict[str, list[str]] = {}
+    for row in s.outbox.enqueued:
+        if s.outbox.payloads[row["payload_id"]].msg_id is not None:
+            out.setdefault(row["payload_id"], []).append(row["instance_id"])
+    return {k: sorted(v) for k, v in out.items()}
+
+
+async def _drain(svc, outbox) -> MagicMock:
+    """One pass of the real :class:`OutboxProcessor` over every queued row;
+    a row in no group is 'delivered' by a recording single path."""
+    repo = MagicMock()
+    repo.list_due = AsyncMock(return_value=outbox.entries())
+    repo.mark_delivered = AsyncMock()
+    repo.mark_failed = AsyncMock()
+    repo.reschedule = AsyncMock()
+    repo.single = AsyncMock(return_value=DeliveryOutcome.SUCCESS)
+    await OutboxProcessor(repo, repo.single, multi=svc).drain_once()
+    return repo
+
+
+async def test_three_seats_on_one_gfs_are_one_payload_and_one_upload():
+    """One broadcast to three seats: ONE stored payload + three ref rows and
+    a wake; the outbox's next pass makes ONE upload. The paired peer goes
+    per recipient at once."""
     s = _Sender()
     seats = [await s.seat() for _ in range(3)]
     peer = await s.paired()
     result = await s.broadcast()
-    assert result.attempted == 4 and result.succeeded == 4
+    by_id = {r.instance_id: r for r in result.results}
+    assert all(by_id[i].error == DELIVERY_ERROR_QUEUED for i in seats)
+    assert result.terminal_failures == ()  # self-healing, never a loss
+    assert s.transport.per_recipient_ids() == [peer]
+    assert s.transport.multi == []  # the outbox is the only multi sender
+    [(payload_id, rows)] = _queued(s).items()
+    assert rows == sorted(seats)
+    assert s.wakes == 1
+
+    repo = await _drain(s.svc, s.outbox)
     [upload] = s.transport.multi
     assert _mailboxes(upload) == _boxes(s, seats)
     assert set(upload[1]) == {"mr_suite", "kid", "ciphertext"}
-    assert s.transport.per_recipient_ids() == [peer]
-    by_id = {r.instance_id: r for r in result.results}
-    assert all(by_id[i].ok and by_id[i].via == "gfs_relay" for i in seats)
+    keys = derive_mr_key(_CONTENT_KEYS[_SPACE])
+    envelope = open_multi(upload[1], keys.key)["envelope"]
+    assert envelope["msg_id"] == s.outbox.payloads[payload_id].msg_id
+    assert repo.mark_delivered.await_count == 3
+    repo.single.assert_not_awaited()
     # Accepted by the relay, never "reachable" on that alone.
     assert s.svc.last_relay_accepted_at(seats[0]) is not None
     assert s.repo.reachable_calls == [peer]
@@ -214,8 +249,7 @@ async def test_a_seat_below_v90_goes_per_recipient():
     new = [await s.seat() for _ in range(2)]
     old = await s.seat(version=V90 - 1)
     await s.broadcast()
-    [upload] = s.transport.multi
-    assert _mailboxes(upload) == _boxes(s, new)
+    assert list(_queued(s).values()) == [sorted(new)]
     assert s.transport.per_recipient_ids() == [old]
 
 
@@ -224,7 +258,7 @@ async def test_a_gfs_without_envelope_multi_goes_per_recipient():
     s.transport.capacity[GFS_A] = 0
     seats = [await s.seat() for _ in range(3)]
     await s.broadcast()
-    assert s.transport.multi == []
+    assert _queued(s) == {} and s.wakes == 0
     assert sorted(s.transport.per_recipient_ids()) == sorted(seats)
     assert s.mr_asks == []  # no group, no key lookup
 
@@ -235,7 +269,7 @@ async def test_a_single_seat_is_never_a_multi_of_one():
     await s.seat(gfs=GFS_B)
     await s.paired()
     await s.broadcast()
-    assert s.transport.multi == []
+    assert _queued(s) == {}
     assert seat in s.transport.per_recipient_ids()
 
 
@@ -248,8 +282,7 @@ async def test_different_payload_bytes_split_the_groups():
         return {**payload, "cert": "x" if iid in seats[:2] else "y"}
 
     await s.broadcast(per_peer=_per_peer)
-    assert len(s.transport.multi) == 2
-    assert sorted(len(u[0]) for u in s.transport.multi) == [2, 2]
+    assert sorted(_queued(s).values()) == sorted([sorted(seats[:2]), sorted(seats[2:])])
     assert s.transport.sends == []
 
 
@@ -258,8 +291,10 @@ async def test_a_relay_payload_variant_rides_its_own_group():
     seats = [await s.seat() for _ in range(2)]
     peer = await s.paired()
     await s.broadcast(payload={"big": "x" * 10}, relay_payload={"big": "small"})
-    [upload] = s.transport.multi
-    assert len(upload[0]) == len(seats)
+    [(payload_id, rows)] = _queued(s).items()
+    assert rows == sorted(seats)
+    _stored, payload_json = await s.svc._outbox_payload_json(payload_id)
+    assert orjson.loads(payload_json) == {"big": "small"}
     assert s.transport.per_recipient_ids() == [peer]
 
 
@@ -276,87 +311,30 @@ async def test_event_types_outside_the_multi_set_never_go_multi(event_type):
     for _ in range(3):
         await s.seat()
     await s.broadcast(event_type)
-    assert s.transport.multi == []
+    assert _queued(s) == {}
     assert len(s.transport.sends) == 3
 
 
-async def test_a_refused_upload_falls_back_per_recipient_for_each():
+async def test_a_narrowed_broadcast_never_writes_a_multi_payload():
+    """Multi only when the audience is every member household — a follower
+    household holding the content key gets every multi frame's content
+    anyway. A space-chat-style ``only_instances`` goes per recipient."""
     s = _Sender()
     seats = [await s.seat() for _ in range(3)]
-    s.transport.multi_result = (False, 400, None)
-    s.transport.send_ok = False
-    result = await s.broadcast()
-    assert len(s.transport.multi) == 1
-    assert sorted(s.transport.per_recipient_ids()) == sorted(seats)
-    # The per-recipient path queues each in the outbox.
-    assert {r.error for r in result.results} == {DELIVERY_ERROR_QUEUED}
+    await s.broadcast(only_instances=frozenset(seats[:2]))
+    assert _queued(s) == {} and s.wakes == 0
+    assert sorted(s.transport.per_recipient_ids()) == sorted(seats[:2])
+    assert s.mr_asks == []
 
 
-async def test_a_throttled_upload_queues_every_seat_without_a_live_retry():
-    """The GFS just said it is busy: N per-recipient sends at it now would
-    be a storm. Each seat goes straight to the outbox — ONE stored payload,
-    one ref row per seat — and reports the waitable throttle."""
-    s = _Sender()
-    seats = [await s.seat() for _ in range(3)]
-    s.transport.multi_result = (False, RELAY_STATUS_THROTTLED, None)
-    result = await s.broadcast(payload={"post_id": "p-1"})
-    assert len(s.transport.multi) == 1
-    assert s.transport.sends == []  # no live attempt
-    by_id = {r.instance_id: r for r in result.results}
-    assert sorted(by_id) == sorted(seats)
-    assert all(
-        not r.ok
-        and r.error == DELIVERY_ERROR_RELAY_THROTTLED
-        and r.retry_after_s is not None
-        for r in by_id.values()
-    )
-    rows = s.outbox.enqueued
-    assert sorted(r["instance_id"] for r in rows) == sorted(seats)
-    [stored] = s.outbox.payloads.values()
-    assert {r["payload_id"] for r in rows} == {stored.id}
-    assert stored.event_type is POST and stored.space_id == _SPACE
-    # Back-pressure on us, not news about the households.
-    assert s.repo.unreachable_calls == []
-
-
-@pytest.mark.parametrize(
-    ("retry_after", "want"),
-    [(60.0, 60.0), (None, MULTI_THROTTLE_RETRY_S), (1e9, MULTI_THROTTLE_MAX_RETRY_S)],
-)
-async def test_a_throttled_upload_is_first_due_after_the_gfs_retry_after(
-    retry_after, want
-):
-    """The GFS answered ``429`` + ``Retry-After``: the queued rows wait that
-    window (60 s when it named none, capped) — a pass that came back in 5 s
-    would only hit the same full window again."""
+async def test_a_failing_multi_queue_goes_per_recipient():
     s = _Sender()
     seats = [await s.seat() for _ in range(2)]
-    s.transport.multi_result = (False, RELAY_STATUS_THROTTLED, retry_after)
-    before = datetime.now(UTC)
-    result = await s.broadcast(payload={"post_id": "p-1"})
-    assert all(r.retry_after_s == want for r in result.results)
-    queued = {r["id"] for r in s.outbox.enqueued}
-    assert {e for e, _at, _n in s.outbox.rescheduled} == queued
-    assert len(queued) == len(seats)
-    for _e, at, attempts in s.outbox.rescheduled:
-        assert attempts == 0
-        delay = (datetime.fromisoformat(at) - before).total_seconds()
-        assert want - 1 <= delay <= want + 5
 
+    async def _boom(*_a, **_kw):
+        raise RuntimeError("disk full")
 
-@pytest.mark.parametrize("where", ["build", "upload"])
-async def test_a_raising_multi_chunk_falls_back_per_recipient(where, monkeypatch):
-    s = _Sender()
-    seats = [await s.seat() for _ in range(2)]
-    boom = RuntimeError("boom")
-    if where == "build":
-
-        def _raise(*_a, **_kw):
-            raise boom
-
-        monkeypatch.setattr(federation_service, "build_multi_envelope", _raise)
-    else:
-        s.transport.multi_result = boom
+    s.outbox.enqueue_refs = _boom
     result = await s.broadcast()
     assert result.succeeded == 2
     assert sorted(s.transport.per_recipient_ids()) == sorted(seats)
@@ -372,7 +350,8 @@ async def test_key_order_does_not_split_a_group():
         return {"b": 2, "a": 1}
 
     await s.broadcast(per_peer=_per_peer)
-    assert len(s.transport.multi) == 1 and s.transport.sends == []
+    assert list(_queued(s).values()) == [sorted(seats)]
+    assert s.transport.sends == []
 
 
 def _count_reads(s: _Sender) -> dict[str, int]:
@@ -428,10 +407,10 @@ async def test_a_seat_row_is_read_once_and_each_gfs_probed_once():
     counts = _count_reads(s)
     s.transport.capacity_asks.clear()
     await s.broadcast()
-    assert len(s.transport.multi) == 2
+    assert len(_queued(s)) == 2
     assert sorted(s.transport.capacity_asks) == [GFS_A, GFS_B]
     assert counts.get("list_instances_in_space") == 1
-    # No per-target row read by the grouping (the multi frame needs none).
+    # No per-target row read by the grouping.
     assert counts.get("get_instance", 0) == 0
 
 
@@ -439,23 +418,17 @@ async def test_no_space_key_means_per_recipient():
     s = _Sender(mr=False)
     seats = [await s.seat() for _ in range(2)]
     await s.broadcast()
-    assert s.transport.multi == []
+    assert _queued(s) == {}
     assert sorted(s.transport.per_recipient_ids()) == sorted(seats)
 
 
-async def test_an_oversize_frame_goes_per_recipient():
-    s = _Sender()
-    seats = [await s.seat() for _ in range(2)]
-    await s.broadcast(payload={"blob": os.urandom(400_000).hex()})
-    assert s.transport.multi == []
-    assert sorted(s.transport.per_recipient_ids()) == sorted(seats)
-
-
-async def test_two_gfss_are_two_uploads():
+async def test_two_gfss_are_two_payloads_and_two_uploads():
     s = _Sender()
     a = [await s.seat(gfs=GFS_A) for _ in range(2)]
     b = [await s.seat(gfs=GFS_B) for _ in range(2)]
     await s.broadcast()
+    assert sorted(_queued(s).values()) == sorted([sorted(a), sorted(b)])
+    await _drain(s.svc, s.outbox)
     assert sorted(_mailboxes(u) for u in s.transport.multi) == sorted(
         [_boxes(s, a), _boxes(s, b)]
     )
@@ -467,19 +440,20 @@ async def test_one_gfs_spelled_two_ways_is_one_group():
     await s.seat(gfs=GFS_A)
     await s.seat(gfs=GFS_A.upper() + "/")
     await s.broadcast()
-    assert len(s.transport.multi) == 1 and s.transport.sends == []
+    assert len(_queued(s)) == 1 and s.transport.sends == []
 
 
 async def test_a_group_over_the_gfs_cap_is_chunked_and_a_lone_rest_goes_alone():
     s = _Sender()
-    s.transport.capacity[GFS_A] = 2
     for _ in range(5):
         await s.seat()
-    order = await s.repo.list_member_instance_ids(_SPACE)
     await s.broadcast()
+    s.transport.capacity[GFS_A] = 2
+    groups = await s.svc.outbox_multi_groups(s.outbox.entries())
+    assert sorted(len(g) for g in groups) == [2, 2]
+    repo = await _drain(s.svc, s.outbox)
     assert [len(u[0]) for u in s.transport.multi] == [2, 2]
-    # Member order: the last one is the lone rest.
-    assert s.transport.per_recipient_ids() == [order[4]]
+    assert repo.single.await_count == 1  # the lone rest, per row
 
 
 async def test_a_deferred_member_and_a_mailbox_less_seat_stay_per_recipient():
@@ -488,8 +462,7 @@ async def test_a_deferred_member_and_a_mailbox_less_seat_stay_per_recipient():
     loner = await s.seat(mailbox=False)
     s.svc._deferred_mesh_queues[seats[0]] = deque()
     result = await s.broadcast()
-    [upload] = s.transport.multi
-    assert len(upload[0]) == 2
+    assert list(_queued(s).values()) == [sorted(seats[1:])]
     assert s.transport.per_recipient_ids() == [loner]
     assert len(result.results) == 4
 
@@ -499,6 +472,7 @@ async def test_the_audience_tags_name_exactly_the_group():
     seats = [await s.seat() for _ in range(2)]
     outsider = await s.paired()
     await s.broadcast()
+    await _drain(s.svc, s.outbox)
     [(_targets, sealed)] = s.transport.multi
     keys = derive_mr_key(_CONTENT_KEYS[_SPACE])
     env = open_multi(sealed, keys.key)["envelope"]
@@ -538,13 +512,17 @@ class _MultiSender:
         raise AssertionError("per-recipient send in a multi test")
 
 
-async def test_a_frame_built_by_the_broadcast_is_taken_by_every_receiver():
+async def test_a_frame_built_from_the_broadcast_is_taken_by_every_receiver_once():
+    """Broadcast → outbox → ONE ``send_to_mailboxes``; every receiver takes
+    the frame, and a retry of the same payload (a lost 202) carries the same
+    ``msg_id`` — the receivers' replay cache drops it."""
     receivers = [_MultiHousehold(), _MultiHousehold()]
     kp = generate_identity_keypair()
     sender_id = derive_instance_id(kp.public_key)
     km = _make_kek_manager()
     repo = InMemoryFederationRepo()
-    svc, _ = _make_service(federation_repo=repo, key_manager=km)
+    outbox = InMemoryOutboxRepo()
+    svc, _ = _make_service(federation_repo=repo, outbox_repo=outbox, key_manager=km)
     # The sender's identity as the receivers pinned it, with its card.
     svc._own_instance_id = sender_id
     svc._encoder = type(svc._encoder)(kp.private_key)
@@ -611,7 +589,9 @@ async def test_a_frame_built_by_the_broadcast_is_taken_by_every_receiver():
     result = await svc.broadcast_to_space_members(
         _SPACE, POST, {"post_id": "p-9", "content": "hi all"}
     )
-    assert result.succeeded == 2
+    assert {r.error for r in result.results} == {DELIVERY_ERROR_QUEUED}
+    assert gfs.uploads == []
+    await _drain(svc, outbox)
     [(ids, url, sealed)] = gfs.uploads
     assert sorted(ids) == sorted(t.mailbox_id for t in targets.values())
     assert url == GFS_A
@@ -623,51 +603,12 @@ async def test_a_frame_built_by_the_broadcast_is_taken_by_every_receiver():
         assert event.from_instance == sender_id
         assert event.payload == {"post_id": "p-9", "content": "hi all"}
 
-
-# ── v_90: no multi frame right after a key rotation ──────────────────────
-
-
-async def test_a_broadcast_within_ten_minutes_of_a_rotation_makes_no_multi_upload(
-    tmp_dir, monkeypatch
-):
-    """A member still importing the newest epoch drops a frame sealed under
-    it (unknown kid) while the GFS's 202 marks it delivered. Inside the
-    grace window everything goes per recipient — live and from the outbox."""
-    db = AsyncDatabase(tmp_dir / "keys.db", batch_timeout_ms=10)
-    await db.startup()
-    try:
-        await db.enqueue(
-            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
-            " identity_public_key) VALUES(?, 'T', 'inst-1', 'pascal', ?)",
-            (_SPACE, "ab" * 32),
-        )
-        crypto = SpaceContentEncryption(
-            SqliteSpaceKeyRepo(db), KeyManager.from_data_dir(tmp_dir)
-        )
-        await crypto.initialise_for_space(_SPACE)
-        await crypto.rotate_epoch(_SPACE)
-        s = _Sender()
-        s.svc._mr_key = crypto.mr_key
-        seats = [await s.seat() for _ in range(3)]
-        s.transport.send_ok = False
-        await s.broadcast()
-        assert s.transport.multi == []
-        assert sorted(s.transport.per_recipient_ids()) == sorted(seats)
-        entries = s.outbox.entries()
-        assert len(entries) == 3
-        assert await s.svc.outbox_multi_groups(entries) == []
-
-        # Once the window is over, the same space goes up once again.
-        real = scs._utcnow()
-        monkeypatch.setattr(
-            scs,
-            "_utcnow",
-            lambda: real + timedelta(seconds=scs.MULTI_EPOCH_GRACE_S + 1),
-        )
-        [group] = await s.svc.outbox_multi_groups(entries)
-        assert len(group) == 3
-        s.transport.send_ok = True
-        await s.broadcast(payload={"post_id": "p-2"})
-        assert len(s.transport.multi) == 1
-    finally:
-        await db.shutdown()
+    # The GFS took it but the answer was lost: the retry is a new frame of
+    # the same message.
+    await _drain(svc, outbox)
+    retry = gfs.uploads[-1][2]
+    assert retry != sealed
+    for rx in receivers:
+        with pytest.raises(ValueError, match="Replay"):
+            await rx.frame({"type": "envelope", "sealed": retry})
+        assert len(rx.dispatched) == 1

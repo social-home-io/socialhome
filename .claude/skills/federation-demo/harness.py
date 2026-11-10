@@ -7753,9 +7753,6 @@ def cmd_gfs_member_mesh() -> None:
         #     fan-out has TWO mailbox recipients behind this GFS (host a's
         #     and d's), so it goes up as ONE multi-recipient upload.
         summary_e = f"GFS-only member's evening {time.time_ns()}"
-        # e joined minutes ago: its key is "fresh" by local store time, and
-        # v_90 waits out a fresh epoch (MULTI_EPOCH_GRACE_S) per recipient.
-        _backdate_space_keys("e", space_id, minutes=15)
         multi_off = _gfs_log_size()
         s, ev_e = _request(
             f"{e_base}/api/spaces/{space_id}/calendar/events",
@@ -18975,28 +18972,6 @@ def _verify_routed_moment_reaction(state: dict, moment_id: str) -> list[str]:
     else:
         print("  d's removal reaches c too ✓")
     return failures
-
-
-def _backdate_space_keys(label: str, space_id: str, *, minutes: int) -> None:
-    """Move every ``space_keys`` row of *space_id* on household *label*
-    *minutes* into the past. v_90 sends no multi-recipient frame while the
-    newest epoch key is under ``MULTI_EPOCH_GRACE_S`` (10 min) old by its
-    LOCAL store time — so a household that joined minutes ago (e, in the gfs
-    chain) still sends per recipient. This lets the step exercise the
-    post-grace path without a 10-minute wait. A documented write like
-    :func:`_backdate_moment`: it changes only when the key counts as held,
-    never the key, what was signed or what was sent."""
-    import sqlite3
-
-    when = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
-    conn = sqlite3.connect(_instance_dir(label) / "socialhome.db", timeout=10)
-    try:
-        conn.execute(
-            "UPDATE space_keys SET created_at=? WHERE space_id=?", (when, space_id)
-        )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def _backdate_moment(label: str, moment_id: str, *, minutes: int) -> None:

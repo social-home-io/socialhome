@@ -11,6 +11,13 @@
 -- ``msg_id``). Rows queued before 0145 (``payload_id`` NULL) keep their
 -- sealed envelope in ``payload_json`` and drain as before. Local-only.
 --
+-- ``msg_id`` (NULL for a failed send's payload) marks a *multi payload*: a
+-- space broadcast to two or more v_90 mailbox seats behind one GFS is
+-- written here at once (random ``id``, uuid4 ``msg_id``) and the outbox
+-- uploads it ONCE for all of them. Every envelope built from it — the multi
+-- frame and any per-row fallback — carries that ``msg_id``, so a retry
+-- after a lost answer is dropped by the receivers' replay cache.
+--
 -- Invariants live in the database, not in the repository:
 --   * a ref row may only point at a stored payload (BEFORE INSERT trigger);
 --   * a payload goes when its last ref row goes — delivered, failed and
@@ -19,13 +26,13 @@
 --
 -- CLAUDE.md "audit before a migration":
 --   (1) Audited every path that touches the outbox: ``SqliteOutboxRepo``
---       (enqueue / supersede / cap eviction / list_due / mark_* / reschedule
+--       (enqueue / enqueue_refs / supersede / cap eviction / list_due / mark_* / reschedule
 --       / retention sweep / purge_terminal / purge_orphaned /
 --       delete_for_instance / delete_pending_of_types / expedite),
 --       ``federation_repo`` (the unpair purge's ``DELETE … WHERE
---       instance_id=?``), ``FederationService.send_event`` and
---       ``queue_event`` (the only writers), ``app._redeliver_envelope``
---       (re-signs ``payload_json``), ``SpaceModerationService
+--       instance_id=?``), ``FederationService.send_event``,
+--       ``queue_event`` and ``broadcast_to_space_members`` (the only
+--       writers), ``app._redeliver_envelope`` (re-signs ``payload_json``), ``SpaceModerationService
 --       .outbox_entry_wanted`` (reads ``space_id`` out of ``payload_json``),
 --       ``routes/admin_diagnostics`` (counts only), migration 0049's id
 --       rewrite (deliberately skips ``payload_json``) and the demo harness
@@ -39,9 +46,12 @@
 --       and in the clear; reusing ``authority_json`` — names something else;
 --       an in-memory payload cache — lost on restart, and the outbox exists
 --       to survive one; a JSON blob of recipients on one row — breaks the
---       per-peer cap, backoff and supersede, which are all per row.
---   (3) Smallest change: one new table, one NULL-default ``ADD COLUMN``
---       (metadata-only: no rewrite, no backfill, ``payload_json`` stays NOT
+--       per-peer cap, backoff and supersede, which are all per row; deriving
+--       a multi payload's ``msg_id`` from its id — the id is a local row key,
+--       the ``msg_id`` goes on the wire, and a NULL ``msg_id`` is what keeps
+--       a failed send's payload out of every multi group.
+--   (3) Smallest change: one new table (``msg_id`` nullable), one
+--       NULL-default ``ADD COLUMN`` (metadata-only: no rewrite, no backfill, ``payload_json`` stays NOT
 --       NULL and ref rows store ``''``), one partial index over the ref rows
 --       only, and two triggers.
 
@@ -50,6 +60,7 @@ CREATE TABLE IF NOT EXISTS federation_outbox_payloads (
     event_type  TEXT NOT NULL,
     space_id    TEXT,
     payload_enc TEXT NOT NULL,
+    msg_id      TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

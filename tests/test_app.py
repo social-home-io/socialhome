@@ -27,6 +27,7 @@ from socialhome.app import (
     _build_gfs_route_resolver,
     _build_link_previews,
     _build_middleware,
+    _build_outbox_processor,
     _build_page_files_reach_host,
     create_app,
     dispatch_gfs_relay_frame,
@@ -702,6 +703,31 @@ async def test_gfs_route_resolver_maps_routes_to_active_connection_urls(tmp_dir)
         assert await resolve("nobody") == []
     finally:
         await db.shutdown()
+
+
+def test_build_outbox_processor_hands_its_wake_to_the_federation_service():
+    """v_90: the outbox is the only multi sender — a broadcast that queued
+    a multi payload wakes it."""
+
+    class _Fed:
+        wake = None
+
+        def attach_outbox_wake(self, wake):
+            self.wake = wake
+
+    class _Unpair:
+        async def sweep_tombstones(self):
+            return 0
+
+    fed = _Fed()
+    processor = _build_outbox_processor(
+        web.Application(),
+        object(),
+        fed,  # type: ignore[arg-type]
+        object(),
+        _Unpair(),  # type: ignore[arg-type]
+    )
+    assert fed.wake == processor.wake
 
 
 def test_build_gfs_relay_inbound_returns_the_service():

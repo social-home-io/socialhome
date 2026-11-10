@@ -116,8 +116,8 @@ Deliver = Callable[[OutboxEntry], Awaitable["DeliveryOutcome | RetryAfter"]]
 
 
 class OutboxMulti(Protocol):
-    """Sends due rows of one stored payload as ONE multi-recipient upload
-    (v_90; implemented by ``FederationService``).
+    """Sends due rows of one multi payload as ONE multi-recipient upload
+    (v_90; implemented by ``FederationService`` — the only multi sender).
 
     ``outbox_multi_groups`` returns groups (≥ 2 rows each, every row's
     recipient at most once) that may go up together; rows in no group go
@@ -125,11 +125,10 @@ class OutboxMulti(Protocol):
     every row of *group*, or ``None`` when the group could not go up as one
     (each row is then delivered on its own).
 
-    A multi upload the GFS accepted but whose answer was lost (a timeout) is
-    retried with a new ``msg_id``, so a recipient can get that one item
-    twice — as with the live path's per-recipient fallback after a timed-out
-    multi upload. Multi frames carry only ``MULTI_EVENT_TYPES``, whose
-    inbound handlers apply by content id, so the second copy is a no-op.
+    Every envelope built from a multi payload carries its stored
+    ``msg_id``, so an upload the GFS accepted but whose answer was lost is
+    retried under the same id and the receivers' replay cache drops the
+    second copy.
     """
 
     async def outbox_multi_groups(
@@ -150,8 +149,9 @@ class GatedOutboxMulti:
     """An :class:`OutboxMulti` that keeps rows the moderation check refuses
     out of every group: those stay single, and the delivery callback drops
     them (PERMANENT). The check (``still_wanted_of()``, resolved per pass)
-    runs only on rows that could be grouped — a ref row with a space, of a
-    :data:`MULTI_EVENT_TYPES` type — so a single row is not checked twice."""
+    runs only on rows that could be grouped — a ref row of a multi payload
+    with a space, of a :data:`MULTI_EVENT_TYPES` type — so a single row is
+    not checked twice."""
 
     __slots__ = ("_inner", "_still_wanted_of")
 
@@ -180,7 +180,7 @@ class GatedOutboxMulti:
 def _groupable(entry: OutboxEntry) -> bool:
     """Whether *entry* could ride a multi upload at all."""
     return (
-        entry.payload_id is not None
+        entry.msg_id is not None
         and entry.space_id is not None
         and entry.event_type in MULTI_EVENT_TYPES
     )
@@ -213,6 +213,7 @@ class OutboxProcessor:
         "_repo",
         "_stop",
         "_task",
+        "_wake",
     )
 
     def __init__(
@@ -243,6 +244,8 @@ class OutboxProcessor:
         self._last_prune: float | None = None
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        #: Set by :meth:`wake` (or :meth:`stop`): the loop's wait ends early.
+        self._wake = asyncio.Event()
         # ``rng`` is injectable for deterministic tests. Default uses
         # ``random.random`` — uniform in [0, 1).
         self._jitter = rng or random.random
@@ -255,8 +258,15 @@ class OutboxProcessor:
         self._stop.clear()
         self._task = asyncio.create_task(self._loop(), name="OutboxProcessor")
 
+    def wake(self) -> None:
+        """Run a drain pass now instead of at the next poll — a broadcast
+        just queued a multi payload (v_90). A wake during a pass runs one
+        more pass after it."""
+        self._wake.set()
+
     async def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
@@ -266,6 +276,7 @@ class OutboxProcessor:
 
     async def _loop(self) -> None:
         while not self._stop.is_set():
+            self._wake.clear()
             try:
                 await self.drain_once()
             except Exception:
@@ -289,10 +300,7 @@ class OutboxProcessor:
                 except Exception:
                     log.exception("OutboxProcessor prune tick failed")
             try:
-                await asyncio.wait_for(
-                    self._stop.wait(),
-                    timeout=self._poll_interval,
-                )
+                await asyncio.wait_for(self._wake.wait(), timeout=self._poll_interval)
             except TimeoutError:
                 continue
 

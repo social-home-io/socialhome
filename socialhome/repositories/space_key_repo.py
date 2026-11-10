@@ -305,4 +305,5 @@ def _row(row) -> SpaceKey:
         content_key_hex=row["content_key_hex"],
         created_at=row["created_at"],
         rotated_by=dict(row).get("rotated_by"),
+        authority_epoch=int(dict(row).get("authority_epoch") or 0),
     )

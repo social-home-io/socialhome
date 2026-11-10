@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 import pytest
 
 from socialhome.crypto import (
@@ -16,6 +14,7 @@ from socialhome.infrastructure.key_manager import KeyManager, KeyManagerError
 from socialhome.repositories.space_key_repo import (
     SqliteSpaceKeyRepo,
 )
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services import space_crypto_service as scs
 from socialhome.services.space_crypto_service import (
     AUTHORITY_SIG_SUITE_ED25519,
@@ -89,7 +88,7 @@ async def crypto_env(tmp_dir):
     )
     repo = SqliteSpaceKeyRepo(db)
     kek = KeyManager.from_data_dir(tmp_dir)
-    crypto = SpaceContentEncryption(repo, kek)
+    crypto = SpaceContentEncryption(repo, kek, space_repo=SqliteSpaceRepo(db))
     yield crypto, repo
     await db.shutdown()
 
@@ -746,18 +745,11 @@ async def _current_mr(crypto, space_id: str) -> tuple[int, str, MrKeys]:
     return epoch, keys.kid, keys
 
 
-def _clock_after(monkeypatch, seconds: float) -> None:
-    """Move the multi grace clock *seconds* past the real now."""
-    real = scs._utcnow()
-    monkeypatch.setattr(scs, "_utcnow", lambda: real + timedelta(seconds=seconds))
-
-
-async def test_mr_key_is_derived_from_the_current_epoch(crypto_env, monkeypatch):
+async def test_mr_key_is_derived_from_the_current_epoch(crypto_env):
     crypto, _ = crypto_env
     assert await crypto.mr_key("sp-1") is None
     await crypto.initialise_for_space("sp-1")
     await crypto.rotate_epoch("sp-1")
-    _clock_after(monkeypatch, scs.MULTI_EPOCH_GRACE_S + 1)
     epoch, raw = await crypto.export_current_key("sp-1")
     got = await crypto.mr_key("sp-1")
     assert got == (epoch, derive_mr_key(raw))
@@ -765,45 +757,44 @@ async def test_mr_key_is_derived_from_the_current_epoch(crypto_env, monkeypatch)
     assert raw not in (got[1].key, got[1].tag_key)
 
 
-async def test_no_mr_key_while_the_newest_epoch_is_in_its_grace(
-    crypto_env, monkeypatch
+async def test_no_mr_key_unless_the_newest_key_is_under_the_pinned_authority(
+    crypto_env,
 ):
-    """A member still importing the newest epoch would drop a frame sealed
-    under it while the GFS reports it delivered — so no multi key for
-    MULTI_EPOCH_GRACE_S after a rotation, and never an older epoch's (a
-    removed member must not read)."""
+    """A key stored under an older authority pin means the rotation's rekey
+    has not reached us: a removed household may still hold that epoch, so
+    per recipient (pair-sealed) — never an older epoch instead."""
     crypto, repo = crypto_env
     await crypto.initialise_for_space("sp-1")
-    await repo._db.enqueue(
-        "UPDATE space_keys SET created_at='2020-01-01 00:00:00' WHERE space_id='sp-1'"
-    )
-    assert await crypto.mr_key("sp-1") is not None  # epoch 0 is old
-    await crypto.rotate_epoch("sp-1")
-    assert await crypto.mr_key("sp-1") is None  # epoch 1 is brand new
-    _clock_after(monkeypatch, scs.MULTI_EPOCH_GRACE_S - 5)
+    assert await crypto.mr_key("sp-1") is not None
+    await repo._db.enqueue("UPDATE spaces SET authority_key_epoch=1 WHERE id='sp-1'")
     assert await crypto.mr_key("sp-1") is None
-    _clock_after(monkeypatch, scs.MULTI_EPOCH_GRACE_S + 5)
+    # The rotation's key, stamped with the new pin at save.
+    await crypto.rotate_epoch("sp-1")
     epoch, _kid, keys = await _current_mr(crypto, "sp-1")
     assert await crypto.mr_key("sp-1") == (epoch, keys)
-    assert (await crypto.mr_key("sp-1"))[0] == 1
+    assert await SpaceContentEncryption(repo, crypto._kek).mr_key("sp-1") is None
 
 
-@pytest.mark.parametrize(
-    ("stored", "usable"),
-    [
-        ("2020-01-01 00:00:00", True),  # SQLite datetime('now') — naive UTC
-        ("2020-01-01T00:00:00+00:00", True),  # tz-aware ISO
-        ("2020-01-01T00:00:00", True),  # naive ISO — UTC
-        ("not a time", False),  # unreadable → fail closed
-    ],
-)
-async def test_mr_key_reads_both_stored_time_shapes(crypto_env, stored, usable):
-    crypto, repo = crypto_env
+async def test_a_removal_hold_lasts_until_a_newer_epoch_or_its_cap(
+    crypto_env, monkeypatch
+):
+    """A household left: it holds every epoch we hold, so no multi frame
+    until the post-removal rekey arrives — or MULTI_REMOVAL_HOLD_S passes."""
+    crypto, _ = crypto_env
+    now = [1000.0]
+    monkeypatch.setattr(scs, "_monotonic", lambda: now[0])
     await crypto.initialise_for_space("sp-1")
-    await repo._db.enqueue(
-        "UPDATE space_keys SET created_at=? WHERE space_id='sp-1'", (stored,)
-    )
-    assert (await crypto.mr_key("sp-1") is not None) is usable
+    await crypto.hold_multi("sp-1")
+    assert await crypto.mr_key("sp-1") is None
+    await crypto.rotate_epoch("sp-1")  # the rekey
+    assert (await crypto.mr_key("sp-1"))[0] == 1
+    await crypto.hold_multi("sp-1")
+    now[0] += scs.MULTI_REMOVAL_HOLD_S - 1
+    assert await crypto.mr_key("sp-1") is None
+    now[0] += 2
+    assert (await crypto.mr_key("sp-1"))[0] == 1
+    await crypto.hold_multi("sp-x")  # a space we hold no key for
+    assert await crypto.mr_key("sp-x") is None
 
 
 async def test_mr_key_for_kid_resolves_recent_epochs_of_every_space(crypto_env):

@@ -67,6 +67,15 @@ class AbstractOutboxRepo(Protocol):
         payload_ref: OutboxPayload | None = None,
     ) -> str | None: ...
 
+    async def enqueue_refs(
+        self,
+        *,
+        instance_ids: list[str],
+        event_type: FederationEventType,
+        supersede_key: str | None,
+        payload_ref: OutboxPayload,
+    ) -> dict[str, str]: ...
+
     async def get_payload(self, payload_id: str) -> OutboxPayload | None: ...
 
     async def drop_superseded(self, instance_id: str, supersede_key: str) -> int: ...
@@ -149,6 +158,79 @@ class SqliteOutboxRepo:
         reached here can no longer strand a row behind the purge.
         """
         entry_id = msg_id or uuid.uuid4().hex
+        supersede_key, expires_at = await self._make_room(
+            instance_id, event_type, supersede_key, expires_at
+        )
+        params = _row_params(
+            entry_id,
+            instance_id,
+            event_type,
+            payload_json,
+            authority_json,
+            expires_at,
+            supersede_key,
+            payload_ref,
+        )
+        if payload_ref is None:
+            inserted = await self._db.enqueue_rowcount(_INSERT_ROW, params)
+        else:
+            inserted = await self._db.transact(
+                lambda conn: _insert_refs(conn, payload_ref, [params])
+            )
+        if not inserted:
+            log.info(
+                "outbox: %s is no longer paired — not queueing %s",
+                instance_id,
+                event_type.value,
+            )
+            return None
+        return entry_id
+
+    async def enqueue_refs(
+        self,
+        *,
+        instance_ids: list[str],
+        event_type: FederationEventType,
+        supersede_key: str | None,
+        payload_ref: OutboxPayload,
+    ) -> dict[str, str]:
+        """Store *payload_ref* once and one ref row per household of
+        *instance_ids* in ONE transaction (v_90: a broadcast's multi
+        payload). Each row is prepared as :meth:`enqueue` prepares one
+        (supersede, per-peer cap); a household no longer paired gets none.
+        Returns ``{instance_id: row id}`` of the rows written."""
+        rows: list[tuple] = []
+        for instance_id in instance_ids:
+            key, expires_at = await self._make_room(
+                instance_id, event_type, supersede_key, None
+            )
+            rows.append(
+                _row_params(
+                    uuid.uuid4().hex,
+                    instance_id,
+                    event_type,
+                    "",
+                    None,
+                    expires_at,
+                    key,
+                    payload_ref,
+                )
+            )
+        written = await self._db.transact(
+            lambda conn: _insert_refs(conn, payload_ref, rows)
+        )
+        return {params[1]: params[0] for params in written}
+
+    async def _make_room(
+        self,
+        instance_id: str,
+        event_type: FederationEventType,
+        supersede_key: str | None,
+        expires_at: str | None,
+    ) -> tuple[str | None, str | None]:
+        """Before a row for *instance_id* goes in: its retention class and
+        deadline, the pending row it supersedes dropped, and room made under
+        the per-peer cap. Returns the row's ``(supersede_key, expires_at)``."""
         if (
             supersede_key is not None
             and supersede_key.startswith(RELAYED_DELETE_KEY_PREFIX)
@@ -182,34 +264,7 @@ class SqliteOutboxRepo:
                     "(all NEVER_DROP) — inserting over cap",
                     instance_id,
                 )
-        params = (
-            entry_id,
-            instance_id,
-            event_type.value,
-            payload_json,
-            authority_json,
-            expires_at,
-            supersede_key,
-            payload_ref.id if payload_ref is not None else None,
-            instance_id,
-            PairingStatus.UNPAIRING.value,
-            event_type.value,
-            FederationEventType.UNPAIR.value,
-        )
-        if payload_ref is None:
-            inserted = await self._db.enqueue_rowcount(_INSERT_ROW, params)
-        else:
-            inserted = await self._db.transact(
-                lambda conn: _insert_ref(conn, payload_ref, params)
-            )
-        if not inserted:
-            log.info(
-                "outbox: %s is no longer paired — not queueing %s",
-                instance_id,
-                event_type.value,
-            )
-            return None
-        return entry_id
+        return supersede_key, expires_at
 
     async def _relayed_delete_class(
         self, instance_id: str, key: str
@@ -293,7 +348,8 @@ class SqliteOutboxRepo:
         # normalises them to the same canonical form.
         rows = await self._db.fetchall(
             """
-            SELECT o.*, p.space_id AS payload_space_id
+            SELECT o.*, p.space_id AS payload_space_id,
+                   p.msg_id AS payload_msg_id
               FROM federation_outbox o
               LEFT JOIN federation_outbox_payloads p ON p.id = o.payload_id
              WHERE o.status='pending'
@@ -312,7 +368,7 @@ class SqliteOutboxRepo:
     async def get_payload(self, payload_id: str) -> OutboxPayload | None:
         """The stored payload a ref row points at (migration 0145)."""
         row = await self._db.fetchone(
-            "SELECT id, event_type, space_id, payload_enc"
+            "SELECT id, event_type, space_id, payload_enc, msg_id"
             " FROM federation_outbox_payloads WHERE id=?",
             (payload_id,),
         )
@@ -323,6 +379,7 @@ class SqliteOutboxRepo:
             event_type=FederationEventType(row["event_type"]),
             space_id=row["space_id"],
             payload_enc=row["payload_enc"],
+            msg_id=row["msg_id"],
         )
 
     async def mark_delivered(self, entry_id: str) -> None:
@@ -592,6 +649,7 @@ def _row_to_entry(row: dict) -> OutboxEntry:
         supersede_key=row.get("supersede_key"),
         payload_id=row.get("payload_id"),
         space_id=row.get("payload_space_id"),
+        msg_id=row.get("payload_msg_id"),
     )
 
 
@@ -610,19 +668,54 @@ _INSERT_ROW = """
 """
 
 
-def _insert_ref(conn: sqlite3.Connection, payload: OutboxPayload, params: tuple) -> int:
-    """Store *payload* (once) and the ref row in one transaction; drop the
-    payload again when the row is refused and nothing else references it."""
+def _row_params(
+    entry_id: str,
+    instance_id: str,
+    event_type: FederationEventType,
+    payload_json: str,
+    authority_json: str | None,
+    expires_at: str | None,
+    supersede_key: str | None,
+    payload_ref: OutboxPayload | None,
+) -> tuple:
+    """The parameters of one :data:`_INSERT_ROW`."""
+    return (
+        entry_id,
+        instance_id,
+        event_type.value,
+        payload_json,
+        authority_json,
+        expires_at,
+        supersede_key,
+        payload_ref.id if payload_ref is not None else None,
+        instance_id,
+        PairingStatus.UNPAIRING.value,
+        event_type.value,
+        FederationEventType.UNPAIR.value,
+    )
+
+
+def _insert_refs(
+    conn: sqlite3.Connection, payload: OutboxPayload, rows: list[tuple]
+) -> list[tuple]:
+    """Store *payload* (once) and its ref *rows* in one transaction; return
+    the rows written. A payload no row references is dropped again."""
     conn.execute(
         "INSERT OR IGNORE INTO federation_outbox_payloads"
-        "(id, event_type, space_id, payload_enc) VALUES(?,?,?,?)",
-        (payload.id, payload.event_type.value, payload.space_id, payload.payload_enc),
+        "(id, event_type, space_id, payload_enc, msg_id) VALUES(?,?,?,?,?)",
+        (
+            payload.id,
+            payload.event_type.value,
+            payload.space_id,
+            payload.payload_enc,
+            payload.msg_id,
+        ),
     )
-    inserted = conn.execute(_INSERT_ROW, params).rowcount
-    if not inserted:
+    written = [params for params in rows if conn.execute(_INSERT_ROW, params).rowcount]
+    if not written:
         conn.execute(
             "DELETE FROM federation_outbox_payloads WHERE id=? AND NOT EXISTS"
             " (SELECT 1 FROM federation_outbox WHERE payload_id=?)",
             (payload.id, payload.id),
         )
-    return inserted
+    return written
