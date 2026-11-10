@@ -41,8 +41,10 @@ from socialhome.global_server.envelope_relay import (
     ENVELOPE_MAX_PER_MINUTE,
     ENVELOPE_MULTI_MAX_BODY_BYTES,
     ENVELOPE_MULTI_MAX_CIPHERTEXT_CHARS,
+    ENVELOPE_MULTI_MAX_FIELD_CHARS,
     ENVELOPE_MULTI_MAX_PER_MINUTE,
     ENVELOPE_MULTI_MAX_WRAP_CIPHERTEXT_CHARS,
+    ENVELOPE_MULTI_MAX_WRAP_EPH_PK_CHARS,
     ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE,
     InvalidEnvelope,
     validate_multi_envelope,
@@ -144,6 +146,21 @@ def test_validate_multi_envelope_accepts_the_wire_shape():
     assert body == BODY
 
 
+def test_a_wrap_at_its_bounds_is_taken():
+    """A wrap's suite tag and ``eph_pk`` are bounded, with room for a
+    hybrid post-quantum suite (an X25519 + ML-KEM-768 ``eph_pk`` is ~1.5 k
+    b64url chars)."""
+    wrap = {
+        **_wrap("a" * 32),
+        "kem_suite": "k" * ENVELOPE_MULTI_MAX_FIELD_CHARS,
+        "eph_pk": "e" * ENVELOPE_MULTI_MAX_WRAP_EPH_PK_CHARS,
+    }
+    [(_mailbox, got)], _body = validate_multi_envelope(
+        {"to": [{"mailbox": "a" * 32, "wrap": wrap}], "body": BODY}
+    )
+    assert got == wrap
+
+
 def test_a_repeated_mailbox_keeps_its_first_entry():
     other = {**_wrap("a" * 32), "ciphertext": "second"}
     entries, _body = validate_multi_envelope(
@@ -189,6 +206,27 @@ _BAD = [
     },
     {"to": [{"mailbox": "a" * 32, "wrap": {**W, "eph_pk": ""}}], "body": BODY},
     {"to": [{"mailbox": "a" * 32, "wrap": {**W, "kem_suite": 1}}], "body": BODY},
+    {
+        "to": [
+            {
+                "mailbox": "a" * 32,
+                "wrap": {**W, "kem_suite": "k" * (ENVELOPE_MULTI_MAX_FIELD_CHARS + 1)},
+            }
+        ],
+        "body": BODY,
+    },
+    {
+        "to": [
+            {
+                "mailbox": "a" * 32,
+                "wrap": {
+                    **W,
+                    "eph_pk": "e" * (ENVELOPE_MULTI_MAX_WRAP_EPH_PK_CHARS + 1),
+                },
+            }
+        ],
+        "body": BODY,
+    },
     {
         "to": [
             {

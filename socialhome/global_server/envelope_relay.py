@@ -232,7 +232,7 @@ ENVELOPE_MAX_BODY_BYTES: int = 320 * 1024
 ENVELOPE_MAX_PER_MINUTE: int = 600
 
 #: Longest ``ciphertext`` of a multi frame (``POST /gfs/envelope/multi``,
-#: v_90), in characters: the b64url of the household's largest padded relay
+#: v_91), in characters: the b64url of the household's largest padded relay
 #: plaintext (``RELAY_SIZE_BUCKETS[-1]``, 191 KiB) plus nonce and tag fits
 #: well inside, the same bound as a KEM-sealed blob
 #: (``invite_bootstrap.MAX_SEALED_BLOB_BYTES``).
@@ -242,10 +242,17 @@ ENVELOPE_MULTI_MAX_FIELD_CHARS: int = 64
 #: Longest ``ciphertext`` of one ``wrap`` (a 32-byte key sealed with nonce
 #: and tag is 80 b64url chars; room for a larger suite).
 ENVELOPE_MULTI_MAX_WRAP_CIPHERTEXT_CHARS: int = 256
-#: Room per ``to`` entry in the request cap: the id, a wrap of a suite tag,
-#: an X25519 ``eph_pk`` and a bounded ciphertext, plus JSON framing (~430
-#: bytes at the maxima). Not a per-entry check: every wrap byte is charged
-#: to its mailbox's caps and the pool, and the request cap bounds the sum.
+#: Longest ``eph_pk`` of one ``wrap``: an X25519 key is 44 chars; room for a
+#: hybrid X25519 + ML-KEM-768 one (~1.5 k b64url chars). A wrap's
+#: ``kem_suite`` is bounded by :data:`ENVELOPE_MULTI_MAX_FIELD_CHARS`.
+ENVELOPE_MULTI_MAX_WRAP_EPH_PK_CHARS: int = 2048
+#: Room per ``to`` entry in the request cap, sized for today's suite: the id,
+#: a wrap of a suite tag, an X25519 ``eph_pk`` (44 chars) and an 80-char
+#: ciphertext, plus JSON framing (~250 bytes). Not a per-entry check: every
+#: wrap byte is charged to its mailbox's caps and the pool, and the request
+#: cap bounds the sum. A post-quantum suite's ``eph_pk`` (up to
+#: :data:`ENVELOPE_MULTI_MAX_WRAP_EPH_PK_CHARS`) does not fit: raise this with
+#: that suite, or a full 500-mailbox upload overruns the request cap.
 ENVELOPE_MULTI_MAX_ENTRY_BYTES: int = 512
 #: Hard body cap on ``POST /gfs/envelope/multi``: the single envelope's cap
 #: (covers the body) plus ``MULTI_MAX_RECIPIENTS`` entries.
@@ -538,7 +545,9 @@ def validate_multi_envelope(body: Any) -> MultiUpload:
     ``mailbox`` of the exact id shape (:data:`ENVELOPE_INSTANCE_ID_RE` — the
     ids reach SQLite binds, so no junk rides along) and each ``wrap`` exactly
     a single envelope's ``sealed`` dict (:func:`validate_sealed`, its
-    ``ciphertext`` at most :data:`ENVELOPE_MULTI_MAX_WRAP_CIPHERTEXT_CHARS`);
+    ``ciphertext`` at most :data:`ENVELOPE_MULTI_MAX_WRAP_CIPHERTEXT_CHARS`,
+    ``kem_suite`` at most :data:`ENVELOPE_MULTI_MAX_FIELD_CHARS`, ``eph_pk``
+    at most :data:`ENVELOPE_MULTI_MAX_WRAP_EPH_PK_CHARS`);
     ``body`` exactly :data:`MULTI_BODY_KEYS`, non-empty bounded strings. The
     values stay opaque: the receiver validates the suites, not this server.
     A repeated mailbox keeps its FIRST entry."""
@@ -557,7 +566,11 @@ def validate_multi_envelope(body: Any) -> MultiUpload:
         ):
             raise InvalidEnvelope("invalid field: mailbox")
         wrap = validate_sealed(entry["wrap"], "wrap")
-        if len(wrap["ciphertext"]) > ENVELOPE_MULTI_MAX_WRAP_CIPHERTEXT_CHARS:
+        if (
+            len(wrap["ciphertext"]) > ENVELOPE_MULTI_MAX_WRAP_CIPHERTEXT_CHARS
+            or len(wrap["kem_suite"]) > ENVELOPE_MULTI_MAX_FIELD_CHARS
+            or len(wrap["eph_pk"]) > ENVELOPE_MULTI_MAX_WRAP_EPH_PK_CHARS
+        ):
             raise InvalidEnvelope("invalid field: wrap")
         entries.setdefault(mailbox, wrap)
     sealed = body["body"]
