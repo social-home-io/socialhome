@@ -98,6 +98,14 @@ PING_INTERVAL_S: float = 30.0
 #: caller fall back to HTTPS inbox instead of unbounded SCTP queuing.
 #: 1 MiB is well above a single envelope (~10 KB) but far under the
 #: default libdatachannel message size ceiling.
+#:
+#: This gate IS the backpressure: every ``DataChannel.send`` in
+#: :class:`_RtcPeer` writes at once (``wait_for_drain=False``) and never
+#: awaits the library's drain event. That event is cleared whenever bytes are
+#: still buffered after a send and set again only when the buffer crosses the
+#: low threshold (half the HWM) from above — which a buffer of small frames
+#: never does — so a waiting send hangs forever, and with it whatever awaited
+#: it (an HTTP request broadcasting a space event right after a restart did).
 SEND_HWM_BYTES: int = 1 << 20
 
 #: How long :meth:`FederationTransport.close_peer` lets a DataChannel's
@@ -1421,7 +1429,8 @@ class _RtcPeer:
         Returns ``True`` on success, ``False`` if the channel isn't
         currently open or the send buffer is over the HWM (caller
         should fall back to HTTPS inbox). Dropping under backpressure is
-        preferable to unbounded SCTP queueing.
+        preferable to unbounded SCTP queueing. The write never waits for
+        the buffer to drain (see :data:`SEND_HWM_BYTES`).
         """
         if not self.is_ready or self._channel is None:
             return False
@@ -1435,7 +1444,7 @@ class _RtcPeer:
             )
             return False
         try:
-            await self._channel.send(orjson.dumps(envelope_dict))
+            await self._channel.send(orjson.dumps(envelope_dict), wait_for_drain=False)
             return True
         except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
             log.warning("fed RTC send to %s failed: %s", self.instance_id, exc)
@@ -1472,7 +1481,7 @@ class _RtcPeer:
             )
             return False
         try:
-            await self._media_channel.send(frame)
+            await self._media_channel.send(frame, wait_for_drain=False)
             return True
         except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
             log.warning("fed RTC media send to %s failed: %s", self.instance_id, exc)
@@ -1509,7 +1518,7 @@ class _RtcPeer:
             )
             return False
         try:
-            await self._app_channel.send(frame)
+            await self._app_channel.send(frame, wait_for_drain=False)
             return True
         except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
             log.warning("fed RTC app send to %s failed: %s", self.instance_id, exc)
