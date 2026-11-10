@@ -15,6 +15,7 @@ from socialhome.domain.federation_retention import (
     moment_delete_key,
     relayed_delete_prefix,
 )
+from socialhome.domain.outbox import OutboxPayload
 from socialhome.infrastructure.outbox_processor import (
     BACKOFF_SECONDS,
     MAX_ATTEMPTS,
@@ -1134,3 +1135,88 @@ async def test_pending_rows_are_dropped_by_key_prefix(env):
     assert await repo.drop_pending_with_key_prefix("peer", "highlight:h1:") == 0
     assert await repo.drop_pending_with_key_prefix("other-peer", "highlight:h") == 0
     assert await _pending_ids(env, "peer") == {"other"}
+
+
+# ── Migration 0145: one stored payload, per-recipient ref rows ─────────────
+
+
+def _stored(pid: str = "p-1") -> OutboxPayload:
+    return OutboxPayload(
+        id=pid,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        space_id="sp-1",
+        payload_enc="nonce:ciphertext",
+    )
+
+
+async def _enqueue_ref(env, peer: str, msg_id: str, pid: str = "p-1"):
+    return await env.outbox_repo.enqueue(
+        instance_id=peer,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="",
+        msg_id=msg_id,
+        payload_ref=_stored(pid),
+    )
+
+
+async def _payload_ids(env) -> list[str]:
+    rows = await env.db.fetchall("SELECT id FROM federation_outbox_payloads")
+    return sorted(r["id"] for r in rows)
+
+
+async def test_n_refs_share_one_stored_payload(env):
+    for i, peer in enumerate(("peer-a", "peer-b", "peer-x")):
+        assert await _enqueue_ref(env, peer, f"m-{i}") == f"m-{i}"
+    assert await _payload_ids(env) == ["p-1"]
+    due = await env.outbox_repo.list_due()
+    assert {(e.instance_id, e.payload_id, e.space_id, e.payload_json) for e in due} == {
+        ("peer-a", "p-1", "sp-1", ""),
+        ("peer-b", "p-1", "sp-1", ""),
+        ("peer-x", "p-1", "sp-1", ""),
+    }
+    assert await env.outbox_repo.get_payload("p-1") == _stored()
+    assert await env.outbox_repo.get_payload("nope") is None
+
+
+async def test_the_payload_goes_when_its_last_ref_is_delivered(env):
+    await _enqueue_ref(env, "peer-a", "m-a")
+    await _enqueue_ref(env, "peer-b", "m-b")
+    await env.outbox_repo.mark_delivered("m-a")
+    assert await _payload_ids(env) == ["p-1"]
+    await env.outbox_repo.mark_delivered("m-b")
+    assert await _payload_ids(env) == []
+
+
+async def test_the_payload_goes_when_its_refs_are_purged(env):
+    await _enqueue_ref(env, "peer-a", "m-a")
+    await env.outbox_repo.mark_failed("m-a")
+    assert await _payload_ids(env) == ["p-1"]  # kept for the 24 h grace
+    future = (datetime.now(UTC) + timedelta(days=2)).isoformat()
+    assert await env.outbox_repo.purge_terminal(future) == 1
+    assert await _payload_ids(env) == []
+
+
+async def test_the_payload_goes_when_its_peer_is_deleted(env):
+    await _enqueue_ref(env, "peer-a", "m-a")
+    await _enqueue_ref(env, "gone", "m-g", pid="p-2")
+    await env.outbox_repo.delete_for_instance("peer-a")
+    await env.db.enqueue("DELETE FROM remote_instances WHERE id='gone'")
+    assert await env.outbox_repo.purge_orphaned() == 1
+    assert await _payload_ids(env) == []
+
+
+async def test_a_ref_refused_for_an_unpaired_peer_stores_no_payload(env):
+    assert await _enqueue_ref(env, "never-paired", "m-n") is None
+    assert await _payload_ids(env) == []
+
+
+async def test_a_legacy_envelope_row_still_lists(env):
+    await env.outbox_repo.enqueue(
+        instance_id="peer",
+        event_type=FederationEventType.DM_MESSAGE,
+        payload_json='{"msg_id":"legacy"}',
+        msg_id="legacy",
+    )
+    [entry] = await env.outbox_repo.list_due()
+    assert entry.payload_id is None and entry.space_id is None
+    assert entry.payload_json == '{"msg_id":"legacy"}'

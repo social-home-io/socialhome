@@ -54,6 +54,7 @@ from socialhome.domain.media_chunking import (
     ROUTED_CHUNK_BYTES,
     media_chunk_bytes,
 )
+from socialhome.domain.outbox import OutboxEntry
 from socialhome.federation import FederationService, routed_crypto
 from socialhome.federation import federation_service as federation_service_mod
 from socialhome.federation import media_framing as _mf
@@ -355,6 +356,8 @@ class InMemoryOutboxRepo:
 
     def __init__(self):
         self.enqueued: list[dict] = []
+        #: Migration 0145 — stored payloads by id (``OutboxPayload``).
+        self.payloads: dict = {}
 
     async def enqueue(
         self,
@@ -366,10 +369,13 @@ class InMemoryOutboxRepo:
         authority_json: str | None = None,
         expires_at: str | None = None,
         supersede_key: str | None = None,
+        payload_ref=None,
     ) -> str:
         entry_id = msg_id or str(uuid.uuid4())
         if supersede_key is not None:
             await self.drop_superseded(instance_id, supersede_key)
+        if payload_ref is not None:
+            self.payloads.setdefault(payload_ref.id, payload_ref)
         self.enqueued.append(
             {
                 "id": entry_id,
@@ -378,9 +384,36 @@ class InMemoryOutboxRepo:
                 "payload_json": payload_json,
                 "expires_at": expires_at,
                 "supersede_key": supersede_key,
+                "payload_id": payload_ref.id if payload_ref is not None else None,
             }
         )
         return entry_id
+
+    async def get_payload(self, payload_id: str):
+        return self.payloads.get(payload_id)
+
+    def entries(self) -> list[OutboxEntry]:
+        """The queued rows as ``list_due`` would return them (test helper)."""
+        return [
+            OutboxEntry(
+                id=e["id"],
+                instance_id=e["instance_id"],
+                event_type=e["event_type"],
+                payload_json=e["payload_json"],
+                status="pending",
+                attempts=0,
+                next_attempt_at="",
+                created_at="",
+                supersede_key=e["supersede_key"],
+                payload_id=e["payload_id"],
+                space_id=(
+                    self.payloads[e["payload_id"]].space_id
+                    if e["payload_id"] is not None
+                    else None
+                ),
+            )
+            for e in self.enqueued
+        ]
 
     async def drop_superseded(self, instance_id: str, supersede_key: str) -> int:
         before = len(self.enqueued)

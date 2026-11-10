@@ -69,6 +69,7 @@ from .domain.federation import (
     PairingStatus,
 )
 from .domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
+from .domain.outbox import OutboxEntry
 from .domain.space import ContentAction
 from .exception_text import describe_exception
 from .federation.auto_pair_coordinator import AutoPairCoordinator
@@ -179,6 +180,7 @@ from .infrastructure.moment_retention_scheduler import MomentRetentionScheduler
 from .infrastructure.notification_cleanup_scheduler import (
     NotificationCleanupScheduler,
 )
+from .infrastructure.outbox_processor import OutboxMulti
 from .infrastructure.page_lock_scheduler import PageLockExpiryScheduler
 from .infrastructure.pairing_relay_scheduler import PairingRelayRetentionScheduler
 from .infrastructure.pairing_session_prune_scheduler import (
@@ -544,6 +546,36 @@ async def _deliver_outbox_entry(
     return outcome
 
 
+class _GatedOutboxMulti:
+    """The :class:`OutboxProcessor`'s multi sender: the federation service's
+    grouping, minus the rows the moderation check (``still_wanted_of()``,
+    resolved per pass) refuses — those stay single, and the delivery
+    callback drops them (PERMANENT)."""
+
+    __slots__ = ("_federation", "_still_wanted_of")
+
+    def __init__(
+        self,
+        federation: OutboxMulti,
+        still_wanted_of: Callable[[], Callable[[OutboxEntry], Awaitable[bool]] | None],
+    ) -> None:
+        self._federation = federation
+        self._still_wanted_of = still_wanted_of
+
+    async def outbox_multi_groups(
+        self, entries: list[OutboxEntry]
+    ) -> list[list[OutboxEntry]]:
+        still_wanted = self._still_wanted_of()
+        if still_wanted is not None:
+            entries = [e for e in entries if await still_wanted(e)]
+        return await self._federation.outbox_multi_groups(entries)
+
+    async def deliver_outbox_multi(
+        self, group: list[OutboxEntry]
+    ) -> DeliveryOutcome | RetryAfter | None:
+        return await self._federation.deliver_outbox_multi(group)
+
+
 def _parse_retry_after_s(value: str | None) -> float | None:
     """``Retry-After`` as delta-seconds, or ``None`` when absent/unusable.
 
@@ -675,7 +707,12 @@ async def _redeliver_envelope(
     # correct: the node that originally signed it had the signer, so a missing
     # one is misconfiguration, not a transient condition.)
     try:
-        body = federation_service.resign_for_redelivery(entry.payload_json)
+        if entry.payload_id is not None:
+            # Migration 0145: a ref row stores no envelope — seal the stored
+            # payload for this one peer now (its id as ``msg_id``).
+            body = await federation_service.seal_outbox_entry(entry, instance)
+        else:
+            body = federation_service.resign_for_redelivery(entry.payload_json)
     except Exception as exc:
         log.warning(
             "outbox: undecodable entry %s — dropping: %s", entry.id, exc, exc_info=True
@@ -5775,30 +5812,35 @@ def create_app(config: Config | None = None) -> web.Application:
         # 6. OutboxProcessor — drains federation_outbox in the background.
         peer_unpair_service = app[K.peer_unpair_service_key]
 
+        def _still_wanted():
+            """The moderation queue's check, once its service is wired."""
+            moderation = app.get(K.space_moderation_service_key)
+            return moderation.outbox_entry_wanted if moderation is not None else None
+
         async def _deliver(entry):
             """Re-deliver an outbox entry via FederationService.
 
-            The outbox stores the full envelope JSON (signed + encrypted)
-            from the original send_event() call. On retry we POST the same
-            bytes verbatim — no re-encryption.
+            A row queued with its sealed envelope is re-stamped + re-signed;
+            a ref row (migration 0145) has the stored payload sealed for its
+            peer (:meth:`FederationService.seal_outbox_entry`).
             """
-            moderation = app.get(K.space_moderation_service_key)
             return await _deliver_outbox_entry(
                 federation_service,
                 federation_repo,
                 peer_unpair_service,
                 entry,
-                still_wanted=(
-                    moderation.outbox_entry_wanted if moderation is not None else None
-                ),
+                still_wanted=_still_wanted(),
             )
 
         # ``after_prune``: once the retention sweep has failed an UNPAIR
-        # past its max age, purge that peer's unpair tombstone.
+        # past its max age, purge that peer's unpair tombstone. ``multi``:
+        # due ref rows of one payload to mailbox seats on one GFS go up as
+        # ONE upload (v_90); rows the moderation check refuses stay single.
         outbox_processor = OutboxProcessor(
             outbox_repo,
             _deliver,
             after_prune=peer_unpair_service.sweep_tombstones,
+            multi=_GatedOutboxMulti(federation_service, _still_wanted),
         )
         await outbox_processor.start()
         app[K.outbox_processor_key] = outbox_processor

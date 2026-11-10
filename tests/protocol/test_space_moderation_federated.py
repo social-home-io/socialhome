@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import dataclasses
 import itertools
 import json
 import pathlib
@@ -1544,11 +1545,16 @@ async def test_a_queued_retry_to_a_former_reviewer_is_dropped(mesh):
         next_attempt_at="",
         created_at="",
     )
+    # Migration 0145: a ref row carries no envelope — its space comes from
+    # the stored payload it references.
+    ref = dataclasses.replace(entry, payload_json="", payload_id="p-1", space_id=SID)
     assert await moderation.outbox_entry_wanted(entry)
+    assert await moderation.outbox_entry_wanted(ref)
     await a.db.enqueue(
         "UPDATE space_remote_members SET role='member' WHERE instance_id=?", (c.iid,)
     )
     assert not await moderation.outbox_entry_wanted(entry)
+    assert not await moderation.outbox_entry_wanted(ref)
 
 
 async def test_a_pending_posts_media_goes_to_the_reviewers_only(mesh):

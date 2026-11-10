@@ -20,6 +20,7 @@ Retention tiers follow §4.4.7:
 from __future__ import annotations
 
 import logging
+import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
@@ -36,13 +37,13 @@ from ..domain.federation_retention import (
     capped_delete_key,
     retention_expires_at,
 )
+
+# Domain dataclasses live in ``socialhome/domain/outbox.py``; re-exported
+# here so existing repo-level imports keep working.
+from ..domain.outbox import OutboxEntry, OutboxPayload
 from .base import rows_to_dicts
 
 log = logging.getLogger(__name__)
-
-# Domain dataclass lives in ``socialhome/domain/outbox.py``;
-# re-exported here so existing repo-level imports keep working.
-from ..domain.outbox import OutboxEntry
 
 #: Default batch size for :meth:`SqliteOutboxRepo.purge_terminal`. Exported so
 #: the OutboxProcessor's batch-drain loop compares against the SAME value its
@@ -63,7 +64,10 @@ class AbstractOutboxRepo(Protocol):
         authority_json: str | None = None,
         expires_at: str | None = None,
         supersede_key: str | None = None,
+        payload_ref: OutboxPayload | None = None,
     ) -> str | None: ...
+
+    async def get_payload(self, payload_id: str) -> OutboxPayload | None: ...
 
     async def drop_superseded(self, instance_id: str, supersede_key: str) -> int: ...
     async def drop_pending_with_key_prefix(
@@ -118,8 +122,17 @@ class SqliteOutboxRepo:
         authority_json: str | None = None,
         expires_at: str | None = None,
         supersede_key: str | None = None,
+        payload_ref: OutboxPayload | None = None,
     ) -> str | None:
         """Queue one signed envelope for ``instance_id``; return its id.
+
+        With a ``payload_ref`` (migration 0145) the row stores no envelope
+        (``payload_json`` is ``''``): it references *payload_ref*, stored
+        once — ``INSERT OR IGNORE``, so every recipient of one broadcast
+        shares it — and sealed for this peer when it is sent. The payload
+        and the row go in in one transaction; a row refused below takes an
+        unreferenced payload with it, and a trigger deletes the payload when
+        its last row goes.
 
         With a ``supersede_key`` (latest-only state, see
         :func:`~socialhome.domain.federation_retention.supersede_key`) the
@@ -169,32 +182,26 @@ class SqliteOutboxRepo:
                     "(all NEVER_DROP) — inserting over cap",
                     instance_id,
                 )
-        inserted = await self._db.enqueue_rowcount(
-            """
-            INSERT INTO federation_outbox(
-                id, instance_id, event_type, payload_json,
-                authority_json, expires_at, supersede_key
-            )
-            SELECT ?,?,?,?,?,?,?
-             WHERE EXISTS (
-                SELECT 1 FROM remote_instances
-                 WHERE id=? AND (status<>? OR ?=?)
-             )
-            """,
-            (
-                entry_id,
-                instance_id,
-                event_type.value,
-                payload_json,
-                authority_json,
-                expires_at,
-                supersede_key,
-                instance_id,
-                PairingStatus.UNPAIRING.value,
-                event_type.value,
-                FederationEventType.UNPAIR.value,
-            ),
+        params = (
+            entry_id,
+            instance_id,
+            event_type.value,
+            payload_json,
+            authority_json,
+            expires_at,
+            supersede_key,
+            payload_ref.id if payload_ref is not None else None,
+            instance_id,
+            PairingStatus.UNPAIRING.value,
+            event_type.value,
+            FederationEventType.UNPAIR.value,
         )
+        if payload_ref is None:
+            inserted = await self._db.enqueue_rowcount(_INSERT_ROW, params)
+        else:
+            inserted = await self._db.transact(
+                lambda conn: _insert_ref(conn, payload_ref, params)
+            )
         if not inserted:
             log.info(
                 "outbox: %s is no longer paired — not queueing %s",
@@ -286,19 +293,37 @@ class SqliteOutboxRepo:
         # normalises them to the same canonical form.
         rows = await self._db.fetchall(
             """
-            SELECT * FROM federation_outbox
-             WHERE status='pending'
-               AND datetime(next_attempt_at) <= datetime('now')
+            SELECT o.*, p.space_id AS payload_space_id
+              FROM federation_outbox o
+              LEFT JOIN federation_outbox_payloads p ON p.id = o.payload_id
+             WHERE o.status='pending'
+               AND datetime(o.next_attempt_at) <= datetime('now')
                AND (
-                   expires_at IS NULL
-                   OR datetime(expires_at) > datetime('now')
+                   o.expires_at IS NULL
+                   OR datetime(o.expires_at) > datetime('now')
                )
-             ORDER BY datetime(next_attempt_at) ASC
+             ORDER BY datetime(o.next_attempt_at) ASC
              LIMIT ?
             """,
             (int(limit),),
         )
         return [_row_to_entry(d) for d in rows_to_dicts(rows)]
+
+    async def get_payload(self, payload_id: str) -> OutboxPayload | None:
+        """The stored payload a ref row points at (migration 0145)."""
+        row = await self._db.fetchone(
+            "SELECT id, event_type, space_id, payload_enc"
+            " FROM federation_outbox_payloads WHERE id=?",
+            (payload_id,),
+        )
+        if row is None:
+            return None
+        return OutboxPayload(
+            id=row["id"],
+            event_type=FederationEventType(row["event_type"]),
+            space_id=row["space_id"],
+            payload_enc=row["payload_enc"],
+        )
 
     async def mark_delivered(self, entry_id: str) -> None:
         # A delivered entry's job is done — remove it so the queue doesn't
@@ -565,4 +590,39 @@ def _row_to_entry(row: dict) -> OutboxEntry:
         delivered_at=row.get("delivered_at"),
         failed_at=row.get("failed_at"),
         supersede_key=row.get("supersede_key"),
+        payload_id=row.get("payload_id"),
+        space_id=row.get("payload_space_id"),
     )
+
+
+#: One outbox row, inserted only for a household we still hold (and for an
+#: unpair tombstone only its ``UNPAIR``) — see :meth:`SqliteOutboxRepo.enqueue`.
+_INSERT_ROW = """
+    INSERT INTO federation_outbox(
+        id, instance_id, event_type, payload_json,
+        authority_json, expires_at, supersede_key, payload_id
+    )
+    SELECT ?,?,?,?,?,?,?,?
+     WHERE EXISTS (
+        SELECT 1 FROM remote_instances
+         WHERE id=? AND (status<>? OR ?=?)
+     )
+"""
+
+
+def _insert_ref(conn: sqlite3.Connection, payload: OutboxPayload, params: tuple) -> int:
+    """Store *payload* (once) and the ref row in one transaction; drop the
+    payload again when the row is refused and nothing else references it."""
+    conn.execute(
+        "INSERT OR IGNORE INTO federation_outbox_payloads"
+        "(id, event_type, space_id, payload_enc) VALUES(?,?,?,?)",
+        (payload.id, payload.event_type.value, payload.space_id, payload.payload_enc),
+    )
+    inserted = conn.execute(_INSERT_ROW, params).rowcount
+    if not inserted:
+        conn.execute(
+            "DELETE FROM federation_outbox_payloads WHERE id=? AND NOT EXISTS"
+            " (SELECT 1 FROM federation_outbox WHERE payload_id=?)",
+            (payload.id, payload.id),
+        )
+    return inserted
