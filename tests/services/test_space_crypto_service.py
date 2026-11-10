@@ -775,6 +775,25 @@ async def test_no_mr_key_unless_the_newest_key_is_under_the_pinned_authority(
     assert await SpaceContentEncryption(repo, crypto._kek).mr_key("sp-1") is None
 
 
+async def test_no_mr_key_in_a_space_whose_key_reaches_gfs_subscribers(crypto_env):
+    """A public / global space with ``allow_subscribers`` seals its content
+    key to every GFS subscriber — a GFS operator can subscribe with a
+    household of its own. A multi frame under that key would be readable by
+    it, so such a space sends per recipient, pair-sealed. Turning
+    subscribers off (or a private space) brings multi back."""
+    crypto, repo = crypto_env
+    await crypto.initialise_for_space("sp-1")
+    assert await crypto.mr_key("sp-1") is not None
+    for tier in ("public", "global"):
+        await repo._db.enqueue(
+            "UPDATE spaces SET space_type=?, allow_subscribers=1 WHERE id='sp-1'",
+            (tier,),
+        )
+        assert await crypto.mr_key("sp-1") is None
+    await repo._db.enqueue("UPDATE spaces SET allow_subscribers=0 WHERE id='sp-1'")
+    assert await crypto.mr_key("sp-1") is not None
+
+
 async def test_a_removal_hold_lasts_until_a_newer_epoch_or_its_cap(
     crypto_env, monkeypatch
 ):

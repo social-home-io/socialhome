@@ -55,6 +55,7 @@ from ..crypto import (
     verify_ed25519,
 )
 from ..domain.events import SpaceContentKeyImported
+from ..domain.space import PUBLIC_SPACE_TIERS
 from ..federation.multi_recipient import MrKeys, derive_mr_key, is_valid_kid
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager, KeyManagerError
@@ -311,7 +312,10 @@ class SpaceContentEncryption(BusPublisherMixin):
           key (its ``authority_epoch`` is not ``authority_key_epoch``): an
           authority rotation's rekey has not reached us yet;
         * a removal hold is on (:meth:`hold_multi`): we learned a household
-          left but hold no epoch newer than the one it holds.
+          left but hold no epoch newer than the one it holds;
+        * the space's content key reaches GFS subscribers (a public / global
+          space with ``allow_subscribers``): a GFS operator could subscribe
+          with a household of its own and open every frame it relays.
 
         Never an older epoch's key instead. Only derived material leaves —
         never the content key. Never log it."""
@@ -320,6 +324,8 @@ class SpaceContentEncryption(BusPublisherMixin):
             return None
         space = await self._spaces.get(space_id)
         if space is None or latest.authority_epoch != space.authority_key_epoch:
+            return None
+        if space.space_type in PUBLIC_SPACE_TIERS and space.features.allow_subscribers:
             return None
         return latest.epoch, derive_mr_key(self._unwrap(latest))
 

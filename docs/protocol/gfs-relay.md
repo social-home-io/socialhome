@@ -1078,7 +1078,17 @@ seats). So a follower household that holds the content key already
 receives every un-narrowed broadcast; a frame sealed under the space key
 tells it nothing it was not sent anyway. Member-only content (the v_55
 space chat, whereabouts, governance) is narrowed with `only_instances` and
-always goes per recipient, pair-sealed. `MULTI_EVENT_TYPES` is the seat vocabulary minus
+always goes per recipient, pair-sealed.
+
+**Never where the key reaches GFS subscribers.** A public or global space
+with `allow_subscribers` seals its content key to every GFS subscriber
+(`space_subscriber_key_outbound`), and a GFS operator can subscribe with a
+household of its own. A frame under that key would be readable by the GFS
+that relays it, so such a space never goes multi (`mr_key` is `None`): its
+fan-out stays per recipient, pair-sealed. Multi serves private spaces and
+public / global spaces without subscribers.
+
+`MULTI_EVENT_TYPES` is the seat vocabulary minus
 everything single-recipient (member cards, directory frames, redeems,
 member→host requests, bazaar threads and offers), everything that carries
 key material (`SPACE_KEY_EXCHANGE*`), the pairwise sync streams, and

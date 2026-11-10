@@ -357,7 +357,9 @@ exactly:**
     overlap. It still sees no space id, instance id, event type, sender
     id or content (the kid naming the key is a hash of it). Items for one
     household only — key handoffs, catch-up, member cards and directory
-    frames — stay sealed to that mailbox alone.
+    frames — stay sealed to that mailbox alone. A space whose content key reaches GFS
+    subscribers (public / global with subscribers on) never goes multi:
+    the GFS could subscribe and hold that key.
     A sender that may be behind on a removal sends per recipient,
     pair-sealed: while its newest key predates the space's pinned
     authority key, and from the moment its member directory drops a
