@@ -1030,3 +1030,28 @@ async def test_merge_reaction_stamps_follows_the_sources_sets_past_the_horizon(e
         "❤️": frozenset({"u-new"}),
         "🙂": frozenset({"u-x"}),
     }
+
+
+async def test_merge_reaction_stamps_never_touches_our_own_people(env):
+    await env.repo.save(
+        env.space_id,
+        Post(
+            id="sp-r3",
+            author="u",
+            type=PostType.TEXT,
+            created_at=datetime.now(UTC),
+            reactions={"👋": frozenset({"u-ours"})},
+        ),
+    )
+    keep = frozenset({"u-ours"})
+    # Neither the source's sets (it lacks ours) nor its stamps (one for
+    # ours) change our people's reactions; everybody else's converge.
+    assert await env.repo.merge_reaction_stamps(
+        "sp-r3",
+        {"u-ours\x00🎉": [_recent(1), True], "u-c\x00🎉": [_recent(1), True]},
+        space_id=env.space_id,
+        reactions={"🎉": ["u-c", "u-ours"]},
+        keep_users=keep,
+    )
+    _sid, got = await env.repo.get("sp-r3")
+    assert got.reactions == {"👋": frozenset({"u-ours"}), "🎉": frozenset({"u-c"})}

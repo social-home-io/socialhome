@@ -619,7 +619,7 @@ async def test_polls_exporter_walks_posts_with_polls():
         async def list_options_with_counts(self, post_id):
             return [{"id": "opt-a", "text": "Yes", "count": 3}]
 
-        async def list_votes(self, post_id):
+        async def list_votes(self, post_id, *, limit=None):
             return [{"option_id": "opt-a", "voter_user_id": "u-1"}]
 
     recs = await PollsExporter(_Polls(), _Posts(), _WINDOWS).list_records("sp-1")
@@ -628,6 +628,39 @@ async def test_polls_exporter_walks_posts_with_polls():
     assert recs[0]["options"][0]["id"] == "opt-a"
     # v_92: who voted for what — every member household sees it live.
     assert recs[0]["votes"] == [{"option_id": "opt-a", "voter_user_id": "u-1"}]
+    assert "votes_partial" not in recs[0]
+
+
+async def test_polls_exporter_cuts_votes_at_a_whole_voter(monkeypatch):
+    """One record must fit one chunk: past ``MAX_VOTES_PER_POLL`` the list
+    is cut — never through a voter — and marked partial."""
+    from socialhome.federation.sync.space.exporters import PollsExporter
+    from socialhome.federation.sync.space.exporters import polls as polls_mod
+
+    monkeypatch.setattr(polls_mod, "MAX_VOTES_PER_POLL", 3)
+    post = SimpleNamespace(id="p-1")
+    held = [
+        {"option_id": o, "voter_user_id": v}
+        for o, v in (("a", "u-1"), ("b", "u-1"), ("a", "u-2"), ("b", "u-2"))
+    ]
+
+    class _Posts:
+        async def list_sync_page(self, space_id, **_kw):
+            return [post], None
+
+    class _Polls:
+        async def get_meta(self, post_id):
+            return {"question": "Pizza?"}
+
+        async def list_options_with_counts(self, post_id):
+            return []
+
+        async def list_votes(self, post_id, *, limit=None):
+            return held[:limit]
+
+    (rec,) = await PollsExporter(_Polls(), _Posts(), _WINDOWS).list_records("sp-1")
+    assert rec["votes_partial"] is True
+    assert rec["votes"] == held[:2]
 
 
 async def test_polls_exporter_skips_posts_without_polls():
@@ -900,8 +933,15 @@ async def test_schedules_exporter_emits_slot_defs():
                 },
             ]
 
-        async def list_schedule_responses(self, post_id):
-            return [{"slot_id": "s2", "user_id": "u-2", "availability": "yes"}]
+        async def list_schedule_answers(self, post_id, *, limit):
+            return [
+                {
+                    "slot_id": "s2",
+                    "user_id": "u-2",
+                    "availability": "yes",
+                    "responded_at": "2026-07-01T10:00:00+00:00",
+                }
+            ][:limit]
 
     recs = await SchedulesExporter(_PollRepo(), _PostRepo(), _WINDOWS).list_records(
         "sp-1"
@@ -913,10 +953,17 @@ async def test_schedules_exporter_emits_slot_defs():
     assert len(r["slots"]) == 2
     assert r["slots"][0]["id"] == "s1"
     assert r["slots"][1]["start_time"] is None
-    # v_92: the answers and the pick ride along.
+    # v_92: the answers (with their stamps), when they were read, and the
+    # pick ride along.
     assert r["responses"] == [
-        {"slot_id": "s2", "user_id": "u-2", "availability": "yes"}
+        {
+            "slot_id": "s2",
+            "user_id": "u-2",
+            "availability": "yes",
+            "responded_at": "2026-07-01T10:00:00+00:00",
+        }
     ]
+    assert r["responses_at"] and "responses_partial" not in r
     assert r["finalized_slot_id"] is None
 
 

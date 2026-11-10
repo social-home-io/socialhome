@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..domain.space_item import stored_stamp
 from .poll_repo import AbstractPollRepo
 
 #: ``space_poll_options`` row ``?`` belongs to post ``?`` which lives in
@@ -89,7 +90,12 @@ class AbstractSpacePollRepo(AbstractPollRepo, Protocol):
         post_id: str,
         slot_id: str,
     ) -> bool: ...
-    async def list_votes(self, post_id: str) -> list[dict]: ...
+    async def list_votes(
+        self, post_id: str, *, limit: int | None = None
+    ) -> list[dict]: ...
+    async def list_schedule_answers(
+        self, post_id: str, *, limit: int
+    ) -> list[dict]: ...
     async def apply_synced_poll(
         self,
         *,
@@ -102,6 +108,7 @@ class AbstractSpacePollRepo(AbstractPollRepo, Protocol):
         options: list[dict],
         votes: list[tuple[str, str]] | None,
         keep_voters: frozenset[str],
+        votes_partial: bool = False,
     ) -> bool: ...
     async def apply_synced_schedule_state(
         self,
@@ -111,6 +118,8 @@ class AbstractSpacePollRepo(AbstractPollRepo, Protocol):
         finalized_slot_id: str | None,
         responses: list[dict] | None,
         keep_users: frozenset[str],
+        responses_at: str | None = None,
+        responses_partial: bool = False,
     ) -> bool: ...
 
 
@@ -717,17 +726,51 @@ class SqliteSpacePollRepo:
 
     # ── §25.6 sync (v_92): the host's poll state onto a held post ──────
 
-    async def list_votes(self, post_id: str) -> list[dict]:
+    async def list_votes(self, post_id: str, *, limit: int | None = None) -> list[dict]:
         """Every vote on ``post_id``'s poll, ``{option_id, voter_user_id}``,
-        in a stable order — what the host's ``polls`` record carries."""
-        rows = await self._db.fetchall(
-            "SELECT pv.option_id, pv.voter_user_id FROM space_poll_votes pv "
-            "JOIN space_poll_options po ON po.id = pv.option_id "
-            "WHERE po.post_id=? ORDER BY pv.voter_user_id, po.position, po.id",
-            (post_id,),
-        )
+        in a stable order (voter, option). ``limit`` (what the host's
+        ``polls`` record carries): at most that many, the most recent
+        voters' first, each voter's votes together."""
+        if limit is None:
+            rows = await self._db.fetchall(
+                "SELECT pv.option_id, pv.voter_user_id FROM space_poll_votes pv "
+                "JOIN space_poll_options po ON po.id = pv.option_id "
+                "WHERE po.post_id=? ORDER BY pv.voter_user_id, po.position, po.id",
+                (post_id,),
+            )
+        else:
+            rows = await self._db.fetchall(
+                "SELECT pv.option_id, pv.voter_user_id FROM space_poll_votes pv "
+                "JOIN space_poll_options po ON po.id = pv.option_id "
+                "WHERE po.post_id=? ORDER BY MAX(pv.voted_at) OVER ("
+                " PARTITION BY pv.voter_user_id) DESC,"
+                " pv.voter_user_id, po.position, po.id LIMIT ?",
+                (post_id, int(limit)),
+            )
         return [
             {"option_id": r["option_id"], "voter_user_id": r["voter_user_id"]}
+            for r in rows
+        ]
+
+    async def list_schedule_answers(self, post_id: str, *, limit: int) -> list[dict]:
+        """At most ``limit`` answers on ``post_id``'s schedule poll, the
+        newest first, with their ``responded_at`` — what the host's
+        ``schedules`` record carries (last writer wins on the receiver)."""
+        rows = await self._db.fetchall(
+            "SELECT sr.slot_id, sr.user_id, sr.availability, sr.responded_at"
+            " FROM space_schedule_responses sr"
+            " JOIN space_schedule_slots s ON s.id = sr.slot_id"
+            " WHERE s.post_id=?"
+            " ORDER BY sr.responded_at DESC, sr.slot_id, sr.user_id LIMIT ?",
+            (post_id, int(limit)),
+        )
+        return [
+            {
+                "slot_id": r["slot_id"],
+                "user_id": r["user_id"],
+                "availability": r["availability"],
+                "responded_at": r["responded_at"],
+            }
             for r in rows
         ]
 
@@ -743,6 +786,7 @@ class SqliteSpacePollRepo:
         options: list[dict],
         votes: list[tuple[str, str]] | None,
         keep_voters: frozenset[str],
+        votes_partial: bool = False,
     ) -> bool:
         """Converge the poll on ``post_id`` on the host's copy, in ONE
         transaction that first proves the post is a live post of
@@ -754,9 +798,11 @@ class SqliteSpacePollRepo:
         never reopens: ``closed`` only closes. ``votes`` (``(option_id,
         voter)`` pairs; ``None`` — an older host that sends none — keeps the
         held votes) replaces the votes of everybody but ``keep_voters``, this
-        household's own people, whose votes it authors itself. Only real
-        differences are written, so re-applying the same snapshot stamps
-        nothing (the migration 0086 touch triggers)."""
+        household's own people, whose votes it authors itself;
+        ``votes_partial`` (the host's list was cut) converges only the voters
+        the list names — a voter it could not carry keeps the held votes.
+        Only real differences are written, so re-applying the same snapshot
+        stamps nothing (the migration 0086 touch triggers)."""
 
         def _run(conn) -> bool:
             if (
@@ -821,6 +867,9 @@ class SqliteSpacePollRepo:
                 for option_id, voter in votes
                 if option_id in mine and voter and voter not in keep_voters
             }
+            if votes_partial:
+                named = {voter for _o, voter in votes}
+                held = {(o, v) for o, v in held if v in named}
             for option_id, voter in sorted(held - wanted):
                 conn.execute(
                     "DELETE FROM space_poll_votes WHERE option_id=? AND voter_user_id=?",
@@ -844,6 +893,8 @@ class SqliteSpacePollRepo:
         finalized_slot_id: str | None,
         responses: list[dict] | None,
         keep_users: frozenset[str],
+        responses_at: str | None = None,
+        responses_partial: bool = False,
     ) -> bool:
         """Converge a held schedule poll's answers and its pick on the
         host's copy, in ONE transaction that first proves the poll's post
@@ -851,10 +902,16 @@ class SqliteSpacePollRepo:
 
         ``finalized_slot_id`` (a slot of this poll) finalises it; a pick
         never reverts (``None`` leaves the held one). ``responses``
-        (``{slot_id, user_id, availability}``; ``None`` — an older host —
-        keeps the held answers) replaces the answers of everybody but
-        ``keep_users``, this household's own people. Only real differences
-        are written."""
+        (``{slot_id, user_id, availability, responded_at}``; ``None`` — an
+        older host — keeps the held answers) converges the answers of
+        everybody but ``keep_users``, this household's own people, last
+        writer wins on ``responded_at``: an answer is taken only when newer
+        than the held one, and a held answer the host lacks is dropped only
+        when the host's list is whole (not ``responses_partial``) and the
+        held one is not newer than the host's snapshot (``responses_at``,
+        else the newest answer of the list) — one that reached this
+        household live after the host read its list stays. Only real
+        differences are written."""
 
         def _run(conn) -> bool:
             if (
@@ -883,9 +940,12 @@ class SqliteSpacePollRepo:
             if responses is None:
                 return True
             held = {
-                (r["slot_id"], r["user_id"]): r["availability"]
+                (r["slot_id"], r["user_id"]): (
+                    r["availability"],
+                    stored_stamp(r["responded_at"]),
+                )
                 for r in conn.execute(
-                    "SELECT sr.slot_id, sr.user_id, sr.availability"
+                    "SELECT sr.slot_id, sr.user_id, sr.availability, sr.responded_at"
                     " FROM space_schedule_responses sr"
                     " JOIN space_schedule_slots s ON s.id = sr.slot_id"
                     " WHERE s.post_id=?",
@@ -893,7 +953,7 @@ class SqliteSpacePollRepo:
                 ).fetchall()
                 if r["user_id"] not in keep_users
             }
-            wanted: dict[tuple[str, str], str] = {}
+            wanted: dict[tuple[str, str], tuple[str, datetime | None]] = {}
             for resp in responses:
                 slot_id = str(resp.get("slot_id") or "")
                 user_id = str(resp.get("user_id") or "")
@@ -904,15 +964,29 @@ class SqliteSpacePollRepo:
                     and user_id not in keep_users
                     and availability in _AVAILABILITIES
                 ):
-                    wanted[(slot_id, user_id)] = availability
-            for slot_id, user_id in sorted(held.keys() - wanted.keys()):
-                conn.execute(
-                    "DELETE FROM space_schedule_responses WHERE slot_id=? AND user_id=?",
-                    (slot_id, user_id),
-                )
-            now = datetime.now(UTC).isoformat()
-            for (slot_id, user_id), availability in sorted(wanted.items()):
-                if held.get((slot_id, user_id)) == availability:
+                    wanted[(slot_id, user_id)] = (
+                        availability,
+                        stored_stamp(resp.get("responded_at")),
+                    )
+            newest = [at for _a, at in wanted.values() if at is not None]
+            snapshot = stored_stamp(responses_at) or (max(newest) if newest else None)
+            if not responses_partial and snapshot is not None:
+                for key in sorted(held.keys() - wanted.keys()):
+                    mine = held[key][1]
+                    if mine is not None and mine > snapshot:
+                        continue
+                    conn.execute(
+                        "DELETE FROM space_schedule_responses"
+                        " WHERE slot_id=? AND user_id=?",
+                        key,
+                    )
+            for (slot_id, user_id), (availability, theirs) in sorted(wanted.items()):
+                have = held.get((slot_id, user_id))
+                if have is not None and (
+                    have[0] == availability
+                    or theirs is None
+                    or (have[1] is not None and have[1] >= theirs)
+                ):
                     continue
                 conn.execute(
                     "INSERT INTO space_schedule_responses("
@@ -920,7 +994,12 @@ class SqliteSpacePollRepo:
                     " ON CONFLICT(slot_id, user_id) DO UPDATE SET"
                     " availability=excluded.availability,"
                     " responded_at=excluded.responded_at",
-                    (slot_id, user_id, availability, now),
+                    (
+                        slot_id,
+                        user_id,
+                        availability,
+                        (theirs or datetime.now(UTC)).isoformat(),
+                    ),
                 )
             return True
 

@@ -12,6 +12,11 @@ path never carried the options), takes the votes of everybody but its own
 people and closes a closed poll. A requester below v_92 gets the record
 without ``votes`` (:meth:`PollsExporter.without_votes`) — it drops the
 resource anyway.
+
+A record never splits across chunks, so its votes are bounded:
+:data:`MAX_VOTES_PER_POLL`, the most recent voters' first and each voter's
+votes whole; ``votes_partial`` marks a cut list, and the receiver then
+converges only the voters it names (``docs/protocol/sync.md``).
 """
 
 from __future__ import annotations
@@ -26,6 +31,10 @@ from .posts import iter_post_pages
 if TYPE_CHECKING:
     from .....repositories.space_poll_repo import AbstractSpacePollRepo
     from .....repositories.space_post_repo import AbstractSpacePostRepo
+
+
+#: The most votes one ``polls`` record carries (~100 B each: ≤ ~100 KB).
+MAX_VOTES_PER_POLL: int = 1000
 
 
 class PollsExporter(PagedExporterMixin):
@@ -84,6 +93,18 @@ class PollsExporter(PagedExporterMixin):
                 "options": options,
             }
             if self._votes:
-                record["votes"] = await self._poll_repo.list_votes(p.id)
+                votes = await self._poll_repo.list_votes(
+                    p.id, limit=MAX_VOTES_PER_POLL + 1
+                )
+                if len(votes) > MAX_VOTES_PER_POLL:
+                    # Never half a voter: the one the cut runs through goes.
+                    cut = votes[MAX_VOTES_PER_POLL]["voter_user_id"]
+                    votes = [
+                        v
+                        for v in votes[:MAX_VOTES_PER_POLL]
+                        if v["voter_user_id"] != cut
+                    ]
+                    record["votes_partial"] = True
+                record["votes"] = votes
             out.append(record)
         return out

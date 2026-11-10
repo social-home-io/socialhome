@@ -45,9 +45,11 @@ from socialhome.domain.space_item import (
     open_item_plaintext,
     pad_json_object,
     payload_suite_of,
+    reaction_emoji_ok,
     required_scope,
     seal_item_plaintext,
     stamp_to_db,
+    stored_stamp,
     zlib_item_plaintext,
 )
 from socialhome.domain.writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE
@@ -111,6 +113,36 @@ def test_stamp_to_db_is_naive_utc_and_orders_like_sqlite_now():
     assert stamp_to_db(stamp) == "2026-10-03 12:00:00.250000"
     # Compares as a string against SQLite's datetime('now') shape.
     assert "2026-10-03 12:00:00" < stamp_to_db(stamp)
+
+
+def test_stored_stamp_reads_naive_as_utc_and_keeps_the_skew_rule():
+    now = datetime(2026, 10, 3, 12, tzinfo=UTC)
+    assert stored_stamp("2026-10-03 11:00:00.500000", now=now) == datetime(
+        2026, 10, 3, 11, 0, 0, 500000, tzinfo=UTC
+    )
+    assert stored_stamp("2026-10-03T13:00:00+02:00", now=now) == now - timedelta(
+        hours=1
+    )
+    # Years ahead would win every later write (last writer wins): refused.
+    assert stored_stamp("2036-10-03 12:00:00", now=now) is None
+    for raw in (None, 3, "", "not a date"):
+        assert stored_stamp(raw, now=now) is None
+
+
+@pytest.mark.parametrize(
+    ("emoji", "ok"),
+    [
+        ("👍", True),
+        ("❤️", True),
+        ("", False),
+        (None, False),
+        ("x" * 33, False),
+        (" 👍", False),
+        ("e\u0301", False),  # decomposed: not NFC
+    ],
+)
+def test_reaction_emoji_ok_is_the_live_rule(emoji, ok):
+    assert reaction_emoji_ok(emoji) is ok
 
 
 # ─── Size padding + the authority-only removal notice ────────────────────

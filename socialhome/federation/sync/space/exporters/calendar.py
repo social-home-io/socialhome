@@ -88,6 +88,9 @@ class CalendarExporter(PagedExporterMixin):
             yield records
 
     async def _add_rsvps(self, record: dict[str, Any]) -> None:
+        # When the list was read: an RSVP the receiver got live after this
+        # is never dropped for being absent from it (last writer wins).
+        record["rsvps_at"] = datetime.now(UTC).isoformat()
         held = await self._repo.list_rsvps(record["id"])
         held.sort(key=lambda r: (r.occurrence_at, r.user_id), reverse=True)
         record["rsvps"] = [

@@ -173,14 +173,16 @@ class AbstractSpacePostRepo(Protocol):
         *,
         space_id: str,
         reactions: dict[str, list[str]] | None = None,
+        keep_users: frozenset[str] = frozenset(),
     ) -> bool:
         """Apply every reaction stamp of ``stamps`` newer than the one held
         here (last writer wins per user and emoji, as the live reactions).
         ``reactions`` — the same source's reaction sets — settles what no
         stamp orders any more: a held reaction it lacks whose own stamp is
         gone or older than the tombstone horizon is dropped, and one it
-        has that nothing here stamps is added. ``True`` when anything
-        changed."""
+        has that nothing here stamps is added. ``keep_users`` (this
+        household's own people) are never touched: their reactions are
+        authored here. ``True`` when anything changed."""
         ...
 
     async def increment_comment_count(
@@ -739,8 +741,13 @@ class SqliteSpacePostRepo:
         *,
         space_id: str,
         reactions: dict[str, list[str]] | None = None,
+        keep_users: frozenset[str] = frozenset(),
     ) -> bool:
-        incoming = _decode_stamps(orjson.dumps(stamps).decode())
+        incoming = {
+            k: v
+            for k, v in _decode_stamps(orjson.dumps(stamps).decode()).items()
+            if k.partition("\x00")[0] not in keep_users
+        }
         cutoff = stamp_to_db(
             datetime.now(UTC) - timedelta(seconds=REACTION_TOMBSTONE_HORIZON_S)
         )
@@ -751,7 +758,9 @@ class SqliteSpacePostRepo:
                 f"{user}\x00{emoji}"
                 for emoji, users in reactions.items()
                 for user in users
-                if isinstance(user, str) and isinstance(emoji, str)
+                if isinstance(user, str)
+                and isinstance(emoji, str)
+                and user not in keep_users
             }
         )
 
@@ -793,6 +802,7 @@ class SqliteSpacePostRepo:
                     f"{user}\x00{emoji}"
                     for emoji, users in reactions.items()
                     for user in users
+                    if user not in keep_users
                 }
                 for key in sorted(live - source):
                     prior = held.get(key)

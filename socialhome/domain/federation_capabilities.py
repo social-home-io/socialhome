@@ -1488,8 +1488,14 @@ from __future__ import annotations
 #:   ``finalized_slot_id``, calendar ``rsvps``, post ``reaction_stamps``,
 #:   bazaar ``bids``, a held comment's newer edit, and the new ``timetables_deleted``
 #:   resource; a v_92 receiver takes them from the host only and keeps its
-#:   own people's votes, answers and RSVPs. A requester below v_92 is sent
-#:   the older record shapes.
+#:   own people's votes, answers, RSVPs, reactions and bids (bar what the
+#:   live rule lets another household change). Answers and RSVPs are last
+#:   writer wins (``responded_at`` / ``updated_at``, ``responses_at`` /
+#:   ``rsvps_at``: the host's read time), reaction stamps pass the live
+#:   skew + emoji rules, and every list is capped so one record fits one
+#:   chunk (``votes_partial`` / ``responses_partial`` / ``rsvps_partial``:
+#:   a cut list deletes nothing). A requester below v_92 is sent the older
+#:   record shapes.
 #:   **Fallback**: a provider below v_92 is skipped (the file waits for the
 #:   §25.6 catch-up); a v_83–v_91 relay reader still asks its GFS. Space-
 #:   scoped. Labelled "Older space pictures arrive when you open them".

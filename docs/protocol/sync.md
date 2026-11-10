@@ -416,17 +416,21 @@ on the host's next stream. Each is taken **from the space's host (or an
 acting host) only** — `receiver._authored_record` refuses a member
 household's `polls` / `timetables_deleted`, and the persist paths apply the
 rest only `from_host` — and never replaces **this household's own people's**
-votes, answers or RSVPs (they are authored here; the host may not have
-heard one yet):
+votes, answers, RSVPs, reactions or bids (they are authored here; the host
+may not have heard one yet). The one exception is what the live rule lets
+another household change of theirs: the organiser settling an RSVP request
+(→ going / waitlist, or gone), a waitlisted seat promoted to going while the
+occurrence has room (`_rsvp_allowed`), and the seller's accept / decline of
+a bid:
 
 | Record | Field | Receiver |
 |---|---|---|
-| `polls` | `votes`: `{option_id, voter_user_id}` (every member household sees each vote live) | creates the poll and its options when missing (the live `SPACE_POLL_CREATED` never carried options), takes the host's question / deadline, closes a closed poll (never reopens), and replaces everybody's votes but its own people's (`apply_synced_poll`) |
-| `schedules` | `responses`: `{slot_id, user_id, availability}`, `finalized_slot_id` | everybody's answers but its own people's; the pick (never reverts) (`apply_synced_schedule_state`) |
-| `calendar` | `rsvps`: `{user_id, occurrence_at, status, updated_at}`, the latest `MAX_RSVPS_PER_EVENT` (500) occurrences' worth; `rsvps_partial` when cut | everybody's RSVPs but its own people's; one the host no longer holds is dropped unless the list was cut |
-| `posts` | `reaction_stamps`: `{"user\0emoji": [stamp, added]}` | merged last writer wins per user and emoji into a post it holds (a reaction or a removal it missed lands, a newer one it holds stays); what no stamp orders any more (older than the 48 h tombstone horizon) follows the host's reaction sets (`merge_reaction_stamps`) |
+| `polls` | `votes`: `{option_id, voter_user_id}` (every member household sees each vote live), the most recent `MAX_VOTES_PER_POLL` (1000) voters' first, never half a voter; `votes_partial` when cut | creates the poll and its options when missing (the live `SPACE_POLL_CREATED` never carried options), takes the host's question / deadline, closes a closed poll (never reopens), and replaces everybody's votes but its own people's — of a cut list only the voters it names (`apply_synced_poll`) |
+| `schedules` | `responses`: `{slot_id, user_id, availability, responded_at}`, the newest `MAX_RESPONSES_PER_SCHEDULE` (1000); `responses_partial` when cut; `responses_at` (when the host read them); `finalized_slot_id` | everybody's answers but its own people's, **last writer wins on `responded_at`**: a held answer is replaced only by a newer one, and dropped only when the list is whole and the held one is not newer than `responses_at`; the pick (never reverts) (`apply_synced_schedule_state`) |
+| `calendar` | `rsvps`: `{user_id, occurrence_at, status, updated_at}`, the latest `MAX_RSVPS_PER_EVENT` (500) occurrences' worth; `rsvps_partial` when cut; `rsvps_at` (when the host read them) | everybody's RSVPs but its own people's (bar the organiser transitions above), **last writer wins on `updated_at`**: a held RSVP is replaced only by a newer one, and dropped only when the list is whole and the held one is not newer than `rsvps_at` — an RSVP that reached this household live after the host read its list stays |
+| `posts` | `reaction_stamps`: `{"user\0emoji": [stamp, added]}`, the newest `MAX_SYNCED_REACTION_STAMPS` (1024) | each stamp passes the live rules first — no more than 300 s ahead of the receiver's clock (`stored_stamp`; a stamp years ahead would win every later removal) and the live emoji rule (`reaction_emoji_ok`: NFC, ≤ 32 chars) — or is dropped; then merged last writer wins per user and emoji into a post it holds (a reaction or a removal it missed lands, a newer one it holds stays); what no stamp orders any more (older than the 48 h tombstone horizon) follows the host's reaction sets (`merge_reaction_stamps`); its own people's reactions are never touched |
 | `comments` | (`edited_at`, unchanged) | a comment held here takes the host's edit when newer (last writer wins on `edited_at`, like `SPACE_COMMENT_UPDATED`) — before, a held comment was skipped |
-| `bazaar` | `bids`: `{id, bidder_user_id, amount, message, accepted, rejected, withdrawn, created_at}`, the newest `MAX_BIDS_PER_LISTING` (200) — never the seller's decline reason (the bidder's alone) | a bid it lacks is added (without a reason), a held one only ever turns accepted / declined / withdrawn on (`apply_synced_bids`) |
+| `bazaar` | `bids`: `{id, bidder_user_id, amount, message, accepted, rejected, withdrawn, created_at}`, the newest `MAX_BIDS_PER_LISTING` (200) — never the seller's decline reason (the bidder's alone) | a bid it lacks is added (without a reason, stamped with its arrival here like the live bid — never the host's `created_at`), a held one only ever turns accepted / declined / withdrawn on; its own people's bids are never added or withdrawn from the stream, only accepted / declined (`apply_synced_bids`) |
 | `timetables_deleted` | new resource: `{id, created_by, created_at}` | tombstones a held timetable; an id never held gets a stub only when owner-bound to `created_by` in this space |
 
 All of it is gated on the requester's version
@@ -434,14 +438,36 @@ All of it is gated on the requester's version
 a requester below v_92 gets the older record shapes and no
 `timetables_deleted`, so it is **sync line 92** (`SYNC_RECORD_LINES`, no
 `SYNC_SHAPE_VERSION` bump: a household crossing v_92 gets one full stream;
-no older one does). **Cost** per full stream: a poll record grows by ~60 B
-per vote, a schedule record by ~60 B per answer, a calendar record by
-~110 B per RSVP (≤ 500 per event, ≤ ~55 KB), a post record by ~50 B per
-stamped reaction (bounded by the repo's per-post stamp cap), a listing
-record by ~150 B per bid (≤ 200, ≤ ~30 KB). Votes and
-picks also re-stamp their post, so they ride incremental sessions; answers
-RSVPs and bids stamp nothing (no migration — see the table below) and so heal
-on the host's daily full stream.
+no older one does).
+
+**One record, one chunk.** `ChunkBuilder` halves a page until a chunk fits
+its 8 KB target but never splits a record, so a record's lists are capped
+by what the tightest hop takes: the 1 MiB inbox body
+(`INBOX_MAX_BODY_BYTES`, the HTTPS / mesh tier), with the record JSON
+base64'd twice on the way (the chunk's encrypted payload inside the
+event's), ~1.8× — so one record stays well under ~550 KB. Each capped list
+is sized to ≤ ~150 KB typical (user and option ids are 32 chars):
+
+| List | Per entry | Cap | Record growth |
+|---|---|---|---|
+| `polls.votes` | ~100 B | 1000 | ≤ ~100 KB |
+| `schedules.responses` | ~150 B | 1000 | ≤ ~150 KB |
+| `calendar.rsvps` | ~160 B | 500 | ≤ ~80 KB |
+| `posts.reaction_stamps` | ~85 B (≤ ~205 B with a 32-char emoji) | 1024 (the repo keeps up to 4096 per post — ~350 KB, ~840 KB worst, too big for a record) | ≤ ~90 KB, ≤ ~210 KB worst |
+| `bazaar.bids` | ~150 B + the message (≤ 280 chars) | 200 | ≤ ~90 KB, ≤ ~260 KB with every message full |
+
+A cut list is marked (`votes_partial`, `responses_partial`,
+`rsvps_partial`) and the receiver then deletes nothing it could not see; a
+cut stamp map loses only stamps older than the 1024 newest, which the
+reaction sets settle anyway. Votes and picks also re-stamp their post, so
+they ride incremental sessions; answers, RSVPs and bids stamp nothing (no
+migration — see the table below) and so heal on the host's daily full
+stream.
+
+**Known limits.** Synced item state publishes no bus event (only a comment
+edit does), so an open view shows a healed vote, answer, RSVP, reaction or
+bid on its next load, not live. The receiver reads per item (one query per
+poll, event or listing) — bounded by the stream's page size, not batched.
 
 ### Coverage — every space item type
 

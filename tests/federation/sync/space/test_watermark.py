@@ -813,8 +813,8 @@ async def test_a_shape_crossing_is_told_apart_from_a_newcomer(wm, have_seq, cros
 #: so no ``SYNC_SHAPE_VERSION`` bump (no older household streams in full).
 ITEM_STATE_KEYS_V92: dict[str, set[str]] = {
     "polls": {"votes"},
-    "schedules": {"finalized_slot_id", "responses"},
-    "calendar": {"rsvps"},
+    "schedules": {"finalized_slot_id", "responses", "responses_at"},
+    "calendar": {"rsvps", "rsvps_at"},
     "bazaar": {"bids"},
 }
 

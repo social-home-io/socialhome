@@ -447,8 +447,10 @@ its GFS media cache ([media](./media.md#space-media-via-the-gfs-cache-v_80)):
   cover of every streamed event (incremental re-syncs ship no media).
   Since v_92 the host's `calendar` records also carry each event's RSVPs
   (`rsvps`, ≤ 500), so an RSVP a household missed — or its removal — heals
-  on the host's daily full stream; never over this household's own
-  people's RSVPs ([sync.md](./sync.md#coverage--every-space-item-type)).
+  on the host's daily full stream, last writer wins on `updated_at` (an
+  RSVP newer than the host's read, `rsvps_at`, stays); never over this
+  household's own people's RSVPs but for the organiser settling a request
+  or a waitlist promotion ([sync.md](./sync.md#coverage--every-space-item-type)).
 - The receiver accepts the file only when the event it is correlated to
   lives in that space and names it as its cover.
 

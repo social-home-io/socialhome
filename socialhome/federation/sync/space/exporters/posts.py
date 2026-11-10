@@ -6,10 +6,14 @@ by page so a big space streams in bounded memory.
 
 v_92: a record also carries the post's reaction stamps
 (``reaction_stamps``: ``{"user\\0emoji": [stamp, added]}``, the
-per-reaction last-writer-wins order the live reactions keep, bounded by
-the repo). A v_92 receiver merges the host's stamps into a post it holds,
-so a reaction (or its removal) it missed lands, and a newer one it holds
-stays. A requester below v_92 gets the record without them.
+per-reaction last-writer-wins order the live reactions keep), the newest
+:data:`MAX_SYNCED_REACTION_STAMPS` of them — the repo keeps up to 4096 per
+post, ~85 B each on the wire (~350 KB), more than one record may carry
+(a record never splits across chunks; ``docs/protocol/sync.md``). A cut
+loses only old stamps, which the reaction sets settle anyway. A v_92
+receiver merges the host's stamps into a post it holds, so a reaction (or
+its removal) it missed lands, and a newer one it holds stays. A requester
+below v_92 gets the record without them.
 """
 
 from __future__ import annotations
@@ -24,6 +28,11 @@ from ..window import SYNC_PAGE_SIZE, SyncWindow, SyncWindows, iter_pages
 if TYPE_CHECKING:
     from .....domain.post import Post
     from .....repositories.space_post_repo import AbstractSpacePostRepo
+
+
+#: The most reaction stamps one ``posts`` record carries, newest first
+#: (~85 B each: ≤ ~90 KB, ≤ ~210 KB with every emoji at its 32-char cap).
+MAX_SYNCED_REACTION_STAMPS: int = 1024
 
 
 def iter_post_pages(
@@ -93,7 +102,7 @@ class PostsExporter(PagedExporterMixin):
                 for record in records:
                     held = stamps.get(record["id"])
                     if held:
-                        record["reaction_stamps"] = held
+                        record["reaction_stamps"] = _newest_stamps(held)
             yield records
 
 
@@ -123,3 +132,11 @@ def _post_to_dict(post) -> dict[str, Any]:
     d.pop("poll", None)
     d.pop("schedule", None)
     return d
+
+
+def _newest_stamps(stamps: dict[str, list]) -> dict[str, list]:
+    """The newest :data:`MAX_SYNCED_REACTION_STAMPS` of a post's stamps."""
+    if len(stamps) <= MAX_SYNCED_REACTION_STAMPS:
+        return stamps
+    newest = sorted(stamps, key=lambda k: (stamps[k][0], k), reverse=True)
+    return {k: stamps[k] for k in newest[:MAX_SYNCED_REACTION_STAMPS]}

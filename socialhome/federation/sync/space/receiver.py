@@ -91,7 +91,7 @@ from ....domain.space import (
     validate_zone_name,
     validate_zone_radius,
 )
-from ....domain.space_item import item_stamp, stamp_to_db
+from ....domain.space_item import reaction_emoji_ok, stamp_to_db, stored_stamp
 from ....domain.space_media_ref import (
     MEDIA_REFS_FIELD,
     SpaceMediaLocalization,
@@ -521,16 +521,40 @@ def _edit_stamp_of(raw: object) -> str | None:
     (:func:`stamp_to_db`), or ``None`` (none, unparseable, or too far ahead
     of our clock — it would block every later edit). A naive stamp is UTC,
     as every stored one is."""
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    stamp = item_stamp(parsed.isoformat())
+    stamp = stored_stamp(raw)
     return stamp_to_db(stamp) if stamp is not None else None
+
+
+def _synced_reaction_stamps(raw: object) -> dict[str, list]:
+    """The host's ``reaction_stamps`` that pass the live reaction rules:
+    a stamp no more than the live skew ahead of our clock (one years ahead
+    would win every later removal — last writer wins), re-shaped like a
+    stored one, and an emoji the live path would take. Anything else is
+    dropped — the reaction sets still carry what it said."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, list] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, list) or len(value) != 2:
+            continue
+        user_id, sep, emoji = key.partition("\x00")
+        stamp = stored_stamp(value[0])
+        if not sep or not user_id or stamp is None or not reaction_emoji_ok(emoji):
+            continue
+        out[key] = [stamp_to_db(stamp), value[1] is True]
+    return out
+
+
+def _synced_reactions(raw: object) -> dict[str, list[str]] | None:
+    """The host's reaction sets (``emoji → users``) with only emoji the live
+    path would take; ``None`` when the record carries none."""
+    if not isinstance(raw, dict):
+        return None
+    return {
+        k: [u for u in v if isinstance(u, str) and u]
+        for k, v in raw.items()
+        if reaction_emoji_ok(k) and isinstance(v, list)
+    }
 
 
 def _parse_iso(value: Any) -> datetime:
@@ -1503,29 +1527,26 @@ class SpaceSyncReceiver:
                         space_id,
                     )
                     continue
-                stamps = r.get("reaction_stamps")
+                stamps = (
+                    _synced_reaction_stamps(r.get("reaction_stamps"))
+                    if from_host
+                    else {}
+                )
                 if from_host and held_post is not None:
                     # v_92 — the host's reactions, merged last writer wins
                     # per user and emoji by their stamps: a reaction (or a
                     # removal) this household missed lands, a newer one it
                     # holds stays; what no stamp orders any more (older
                     # than the tombstone horizon) follows the host's sets.
-                    raw_reactions = r.get("reactions")
+                    # Our own people's reactions are authored here.
                     await self._space_post_repo.merge_reaction_stamps(
                         post.id,
-                        stamps if isinstance(stamps, dict) else {},
+                        stamps,
                         space_id=space_id,
-                        reactions=(
-                            {
-                                str(k): [str(u) for u in v if isinstance(u, str)]
-                                for k, v in raw_reactions.items()
-                                if isinstance(v, list)
-                            }
-                            if isinstance(raw_reactions, dict)
-                            else None
-                        ),
+                        reactions=_synced_reactions(r.get("reactions")),
+                        keep_users=await self._local_people(space_id),
                     )
-                elif from_host and isinstance(stamps, dict) and stamps:
+                elif stamps:
                     # A post new here took the host's reactions: keep their
                     # stamps too, so a stale relayed copy cannot undo them.
                     await self._space_post_repo.merge_reaction_stamps(
@@ -1748,7 +1769,7 @@ class SpaceSyncReceiver:
                     continue
                 await self._keep_media(media)
                 if from_host and isinstance(r.get("rsvps"), list):
-                    await self._persist_rsvps(event.id, r, space_id)
+                    await self._persist_rsvps(event, r, space_id)
         elif resource == "gallery_albums_deleted":
             await self._persist_album_tombstones(records, space_id, provider=provider)
         elif resource == "gallery_items_deleted":
@@ -1921,11 +1942,14 @@ class SpaceSyncReceiver:
                             if bazaar_from_host and isinstance(raw_bids, list):
                                 # v_92 — the host's bids: a missed one is
                                 # added, a held one only ever turns
-                                # accepted / declined / withdrawn on.
+                                # accepted / declined / withdrawn on; our
+                                # own people's are never added or
+                                # withdrawn from here.
                                 await self._bazaar_repo.apply_synced_bids(
                                     listing.post_id,
                                     _bids_from_record(raw_bids, listing.post_id),
                                     space_id=space_id,
+                                    keep_bidders=await self._local_people(space_id),
                                 )
                     except Exception as exc:
                         # FK / CHECK violation (anchor post missing,
@@ -2028,63 +2052,110 @@ class SpaceSyncReceiver:
                 options=shaped,
                 votes=votes,
                 keep_voters=keep,
+                votes_partial=r.get("votes_partial") is True,
             ):
                 _log_sync_refusal("poll", post_id, space_id)
 
     async def _persist_rsvps(
-        self, event_id: str, r: dict[str, Any], space_id: str
+        self, event: CalendarEvent, r: dict[str, Any], space_id: str
     ) -> None:
-        """The host's RSVPs of a held event (v_92): everybody's but our own
-        people's (theirs are authored here) converge on the host's — a
-        changed answer is taken, and an RSVP the host no longer holds is
-        dropped unless the host's list was cut (``rsvps_partial``)."""
+        """The host's RSVPs of a held event (v_92), last writer wins on
+        ``updated_at``: an answer is taken only when newer than the one held
+        here, and an RSVP the host no longer holds is dropped only when the
+        host's list is whole (no ``rsvps_partial``) and the held one is not
+        newer than the host's snapshot (``rsvps_at``, else the newest stamp
+        of the list) — one that reached this household live after the host
+        read its list stays.
+
+        Our own people's RSVPs are authored here: of theirs, only the
+        transitions the live rule lets another household make are taken
+        (:meth:`SpaceContentInboundHandlers._rsvp_allowed`) — a request
+        approved (→ going / waitlist) or denied (gone), a waitlisted seat
+        promoted to going while the occurrence has room."""
         keep = await self._local_people(space_id)
         held = {
             (h.user_id, h.occurrence_at): h
-            for h in await self._space_calendar_repo.list_rsvps(event_id)
-            if h.user_id not in keep
+            for h in await self._space_calendar_repo.list_rsvps(event.id)
         }
         wanted: dict[tuple[str, str], CalendarRSVP] = {}
+        stamps: dict[tuple[str, str], datetime | None] = {}
         for a in r["rsvps"]:
             if not isinstance(a, dict):
                 continue
             user_id = str(a.get("user_id") or "")
             occurrence_at = str(a.get("occurrence_at") or "")
             status = str(a.get("status") or "")
-            if (
-                not user_id
-                or user_id in keep
-                or not occurrence_at
-                or status not in RSVPStatus.ALL
-            ):
+            if not user_id or not occurrence_at or status not in RSVPStatus.ALL:
                 continue
-            wanted[(user_id, occurrence_at)] = CalendarRSVP(
-                event_id=event_id,
+            stamp = stored_stamp(a.get("updated_at"))
+            key = (user_id, occurrence_at)
+            stamps[key] = stamp
+            wanted[key] = CalendarRSVP(
+                event_id=event.id,
                 user_id=user_id,
                 status=status,
-                updated_at=str(a.get("updated_at") or "")
-                or datetime.now(UTC).isoformat(),
+                updated_at=(stamp or datetime.now(UTC)).isoformat(),
                 occurrence_at=occurrence_at,
             )
-        for key, rsvp in wanted.items():
+        newest = [t for t in stamps.values() if t is not None]
+        snapshot = stored_stamp(r.get("rsvps_at")) or (max(newest) if newest else None)
+
+        def going(occurrence_at: str) -> int:
+            return sum(
+                1
+                for (_u, occ), h in held.items()
+                if occ == occurrence_at and h.status == RSVPStatus.GOING
+            )
+
+        for key, rsvp in sorted(wanted.items()):
             have = held.get(key)
-            if have is not None and have.status == rsvp.status:
+            if have is not None:
+                if have.status == rsvp.status:
+                    continue
+                theirs = stamps[key]
+                mine = stored_stamp(have.updated_at)
+                if theirs is None or (mine is not None and mine >= theirs):
+                    continue
+            if rsvp.user_id in keep and not (
+                have is not None
+                and (
+                    (
+                        have.status == RSVPStatus.REQUESTED
+                        and rsvp.status in (RSVPStatus.GOING, RSVPStatus.WAITLIST)
+                    )
+                    or (
+                        have.status == RSVPStatus.WAITLIST
+                        and rsvp.status == RSVPStatus.GOING
+                        and event.capacity is not None
+                        and going(rsvp.occurrence_at) < event.capacity
+                    )
+                )
+            ):
                 continue
-            await self._space_calendar_repo.upsert_rsvp(rsvp, space_id=space_id)
-        if r.get("rsvps_partial"):
+            if await self._space_calendar_repo.upsert_rsvp(rsvp, space_id=space_id):
+                held[key] = rsvp
+        if r.get("rsvps_partial") or snapshot is None:
             return
-        for user_id, occurrence_at in sorted(held.keys() - wanted.keys()):
+        for key in sorted(held.keys() - wanted.keys()):
+            have = held[key]
+            if have.user_id in keep and have.status != RSVPStatus.REQUESTED:
+                continue
+            mine = stored_stamp(have.updated_at)
+            if mine is not None and mine > snapshot:
+                continue
             await self._space_calendar_repo.remove_rsvp(
-                event_id, user_id, occurrence_at=occurrence_at, space_id=space_id
+                event.id, key[0], occurrence_at=key[1], space_id=space_id
             )
 
     async def _persist_schedule_state(
         self, records: list[dict[str, Any]], space_id: str
     ) -> None:
         """A schedule poll's answers and pick from the host's v_92 record:
-        everybody's answers but our own people's, and the chosen slot (a
-        pick never reverts). A record without ``responses`` (an older host)
-        leaves the held answers."""
+        everybody's answers but our own people's, last writer wins on
+        ``responded_at`` (a cut list — ``responses_partial`` — deletes
+        nothing, and an answer newer than the host's read, ``responses_at``,
+        stays), and the chosen slot (a pick never reverts). A record without
+        ``responses`` (an older host) leaves the held answers."""
         assert self._poll_repo is not None
         keep = await self._local_people(space_id)
         for r in records:
@@ -2103,6 +2174,10 @@ class SpaceSyncReceiver:
                     else None
                 ),
                 keep_users=keep,
+                responses_at=(
+                    str(r["responses_at"]) if r.get("responses_at") else None
+                ),
+                responses_partial=r.get("responses_partial") is True,
             )
 
     async def _persist_timetable_tombstones(
@@ -4284,7 +4359,9 @@ def _bids_from_record(raw: list[Any], post_id: str) -> list[BazaarBid]:
                 listing_post_id=post_id,
                 bidder_user_id=bidder,
                 amount=amount,
-                created_at=str(b.get("created_at") or ""),
+                # Never the host's clock: a missed bid is stamped with
+                # its arrival here, as the live one (bazaar_repo).
+                created_at="",
                 message=(
                     message[:_MAX_BID_MESSAGE] if isinstance(message, str) else None
                 ),

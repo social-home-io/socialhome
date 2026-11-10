@@ -137,12 +137,20 @@ class AbstractBazaarRepo(Protocol):
         ...
 
     async def apply_synced_bids(
-        self, post_id: str, bids: list[BazaarBid], *, space_id: str
+        self,
+        post_id: str,
+        bids: list[BazaarBid],
+        *,
+        space_id: str,
+        keep_bidders: frozenset[str] = frozenset(),
     ) -> bool:
         """Take the host's bids of a listing of ``space_id``: a bid not held
-        is added (never with a decline reason — that is the bidder's), and a
-        held one only ever turns accepted / declined / withdrawn on. ``True``
-        when anything was written."""
+        is added (never with a decline reason — that is the bidder's —
+        and stamped with its arrival here, as the live bid), and a held one
+        only ever turns accepted / declined / withdrawn on. A bid of
+        ``keep_bidders`` (this household's own people, who author their
+        bids here) is never added nor withdrawn — only the seller's accept /
+        decline is taken. ``True`` when anything was written."""
         ...
 
     async def highest_bid(self, post_id: str) -> BazaarBid | None: ...
@@ -700,7 +708,12 @@ class SqliteBazaarRepo:
         return out
 
     async def apply_synced_bids(
-        self, post_id: str, bids: list[BazaarBid], *, space_id: str
+        self,
+        post_id: str,
+        bids: list[BazaarBid],
+        *,
+        space_id: str,
+        keep_bidders: frozenset[str] = frozenset(),
     ) -> bool:
         def _run(conn) -> bool:
             if (
@@ -715,11 +728,14 @@ class SqliteBazaarRepo:
             for bid in bids:
                 if bid.listing_post_id != post_id:
                     continue
+                ours = bid.bidder_user_id in keep_bidders
                 held = conn.execute(
-                    "SELECT listing_post_id, accepted, rejected, withdrawn"
-                    " FROM bazaar_bids WHERE id=?",
+                    "SELECT listing_post_id, bidder_user_id, accepted, rejected,"
+                    " withdrawn FROM bazaar_bids WHERE id=?",
                     (bid.id,),
                 ).fetchone()
+                if held is None and ours:
+                    continue  # our people's bids are placed here, not synced
                 if held is None:
                     conn.execute(
                         "INSERT INTO bazaar_bids(id, listing_post_id,"
@@ -735,17 +751,21 @@ class SqliteBazaarRepo:
                             int(bid.accepted),
                             int(bid.rejected),
                             int(bid.withdrawn),
-                            bid.created_at or datetime.now(UTC).isoformat(),
+                            # Arrival time, as the live bid: never the
+                            # sender's clock (the highest-bid tie-break).
+                            datetime.now(UTC).isoformat(),
                         ),
                     )
                     wrote = True
                     continue
                 if held["listing_post_id"] != post_id:
                     continue  # another listing's bid id: never moved
+                ours = held["bidder_user_id"] in keep_bidders
                 flags = (
                     int(held["accepted"]) or int(bid.accepted),
                     int(held["rejected"]) or int(bid.rejected),
-                    int(held["withdrawn"]) or int(bid.withdrawn),
+                    # A withdrawal is the bidder's: ours happen here.
+                    int(held["withdrawn"]) or (0 if ours else int(bid.withdrawn)),
                 )
                 if flags != (
                     int(held["accepted"]),

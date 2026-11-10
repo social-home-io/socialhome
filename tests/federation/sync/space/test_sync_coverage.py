@@ -15,6 +15,7 @@ Types that are out of the stream by design get a row asserting that
 
 from __future__ import annotations
 
+import asyncio
 import io
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -101,6 +102,11 @@ from socialhome.federation.sync.space.exporters import (
     TimetablesExporter,
     ZonesDeletedExporter,
     ZonesExporter,
+)
+from socialhome.federation.sync.space.exporters import polls as polls_exporter_mod
+from socialhome.federation.sync.space.exporters import posts as posts_exporter_mod
+from socialhome.federation.sync.space.exporters import (
+    schedules as schedules_exporter_mod,
 )
 from socialhome.federation.sync.space.provider import SpaceSyncService
 from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
@@ -909,6 +915,36 @@ async def test_a_member_household_cannot_set_item_state_by_stream(homes):
         space_id=SPACE,
     )
     await _timetable(host)
+    await _post(host, "post-3", type=PostType.BAZAAR, content="Lamp")
+    await host.repos.bazaar.save_listing(
+        BazaarListing(
+            post_id="post-3",
+            space_id=SPACE,
+            seller_user_id=ANNA,
+            mode=BazaarMode.FIXED,
+            title="Lamp",
+            end_time="2027-01-01T00:00:00+00:00",
+            currency="EUR",
+            status=BazaarStatus.ACTIVE,
+            created_at=T0.isoformat(),
+            price=50,
+        ),
+        space_id=SPACE,
+    )
+
+    async def bid(bid_id: str, amount: int) -> None:
+        await host.repos.bazaar.place_bid(
+            BazaarBid(
+                id=bid_id,
+                listing_post_id="post-3",
+                bidder_user_id=CARL,
+                amount=amount,
+                created_at=T0.isoformat(),
+            ),
+            space_id=SPACE,
+        )
+
+    await bid("bid-1", 40)
     await _stream(host, member)
     # The other household speaks for Carl — an admin of the space — so its
     # records pass every per-author rule a member household's can.
@@ -936,9 +972,15 @@ async def test_a_member_household_cannot_set_item_state_by_stream(homes):
             await _view_comment(member),
             await _view_post(member),
             await _view_timetable(member),
+            [
+                (b.id, b.accepted, b.rejected, b.withdrawn)
+                for b in await member.repos.bazaar.list_bids("post-3")
+            ],
         ]
 
     before = await views()
+    await bid("bid-2", 45)
+    await host.repos.bazaar.reject_offer("bid-1", reason="too low")
     await _vote_and_close(host)
     await host.repos.space_poll.upsert_schedule_response_in_space(
         space_id=SPACE, slot_id="slot-9", user_id=CARL, response="no"
@@ -1142,3 +1184,255 @@ def test_space_chat_reactions_are_not_streamed():
     a newer relayed one: no resource carries them (a missed chat reaction
     is not healed — docs/protocol/sync.md, "Coverage")."""
     assert not [r for r in RESOURCE_ORDER if "reaction" in r]
+
+
+# ── Synced item state: never frozen, never too big, never reverting ──────
+
+
+def _ago(minutes: float) -> str:
+    return stamp_to_db(datetime.now(UTC) - timedelta(minutes=minutes))
+
+
+def _iso_ago(minutes: float) -> str:
+    return (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
+
+
+async def test_a_far_future_reaction_stamp_from_the_host_never_freezes_it(homes):
+    """A host stamp years ahead would win every later removal (last writer
+    wins): the receiver runs each stamp through the live rule (≤ 300 s
+    ahead), so the reaction lands unstamped and the person can still take
+    it back."""
+    host, member = homes
+    await _post(host)
+    future = stamp_to_db(datetime.now(UTC) + timedelta(days=3650))
+    await host.repos.space_post.add_reaction(
+        "post-1", "🎉", CARL, space_id=SPACE, stamp=future
+    )
+    for _ in range(2):  # the post new here, then held here
+        await _stream(host, member)
+        assert (await _view_post(member))[2] == {"🎉": [CARL]}
+        stamps = await member.repos.space_post.list_reaction_stamps(["post-1"])
+        assert future not in repr(stamps)
+    # The removal Carl's household sends next is not stale here …
+    await member.repos.space_post.remove_reaction(
+        "post-1", "🎉", CARL, space_id=SPACE, stamp=_ago(0)
+    )
+    # … and the host's next stream does not put it back.
+    await _stream(host, member)
+    assert (await _view_post(member))[2] == {}
+
+
+async def test_a_reaction_stamp_breaking_the_live_emoji_rule_is_dropped(homes):
+    host, member = homes
+    await _post(host)
+    (record,) = await collect_batches(record_batches(host.exporters["posts"], SPACE))
+    await _stream(host, member)
+    record["reaction_stamps"] = {
+        f"{CARL}\x00{'x' * 40}": [_ago(1), True],  # longer than the live cap
+        f"{CARL}\x00é": [_ago(1), True],  # not NFC
+        f"{CARL}\x00👍": [_ago(1), True],
+    }
+    await member.receiver._apply("posts", SPACE, [record], provider=HOST)
+    assert (await _view_post(member))[2] == {"👍": [CARL]}
+
+
+async def test_our_own_peoples_old_reactions_stay_ours(homes):
+    """Past the tombstone horizon the host's sets settle what no stamp
+    orders — but never for this household's own people: Bob's reaction is
+    authored here, the host may simply not have it."""
+    host, member = homes
+    await _post(host)
+    await _stream(host, member)
+    await member.repos.space_post.add_reaction(
+        "post-1", "👋", BOB, space_id=SPACE, stamp=_ago(3 * 24 * 60)
+    )
+    await _stream(host, member)
+    assert (await _view_post(member))[2] == {"👋": [BOB]}
+
+
+async def test_a_post_record_carries_at_most_the_newest_reaction_stamps(
+    homes, monkeypatch
+):
+    host, _member = homes
+    monkeypatch.setattr(posts_exporter_mod, "MAX_SYNCED_REACTION_STAMPS", 2)
+    await _post(host)
+    for n, user in enumerate(("u-1", "u-2", "u-3")):
+        await host.repos.space_post.add_reaction(
+            "post-1", "👍", user, space_id=SPACE, stamp=_ago(10 - n)
+        )
+    (record,) = await collect_batches(record_batches(host.exporters["posts"], SPACE))
+    assert sorted(record["reaction_stamps"]) == ["u-2\x00👍", "u-3\x00👍"]
+
+
+async def test_a_cut_vote_list_never_deletes(homes, monkeypatch):
+    """A poll record carries at most ``MAX_VOTES_PER_POLL`` votes (one
+    record must fit one chunk); a cut list says so, and the receiver then
+    only adds — it never drops a vote the list could not carry."""
+    host, member = homes
+    monkeypatch.setattr(polls_exporter_mod, "MAX_VOTES_PER_POLL", 2)
+    await _poll(host)
+    await _stream(host, member)
+    for voter in ("u-v1", "u-v2", "u-v3"):
+        await host.repos.space_poll.cast_vote_in_space(
+            space_id=SPACE, post_id="post-1", option_id="opt-b", voter_user_id=voter
+        )
+    (record,) = await collect_batches(record_batches(host.exporters["polls"], SPACE))
+    assert record["votes_partial"] is True and 0 < len(record["votes"]) <= 2
+    await _stream(host, member)
+    held = await member.repos.space_poll.list_votes("post-1")
+    assert {"option_id": "opt-a", "voter_user_id": ANNA} in held
+    assert all(v in held for v in record["votes"])
+
+
+async def test_a_cut_answer_list_never_deletes(homes, monkeypatch):
+    host, member = homes
+    monkeypatch.setattr(schedules_exporter_mod, "MAX_RESPONSES_PER_SCHEDULE", 1)
+    await _schedule(host)
+    await _stream(host, member)
+    await asyncio.sleep(0.01)
+    await host.repos.space_poll.upsert_schedule_response_in_space(
+        space_id=SPACE, slot_id="slot-2", user_id=ANNA, response="yes"
+    )
+    (record,) = await collect_batches(
+        record_batches(host.exporters["schedules"], SPACE)
+    )
+    assert record["responses_partial"] is True and len(record["responses"]) == 1
+    await _stream(host, member)
+    got = (await _view_schedule(member))[4]
+    assert ("slot-1", CARL, "maybe") in got and ("slot-2", ANNA, "yes") in got
+
+
+async def _rsvp(h: Home, user: str, status: str, at: str, occ: str = _OCC) -> None:
+    await h.repos.space_cal.upsert_rsvp(
+        CalendarRSVP(
+            event_id="ev-1",
+            user_id=user,
+            status=status,
+            updated_at=at,
+            occurrence_at=occ,
+        ),
+        space_id=SPACE,
+    )
+
+
+async def test_a_live_rsvp_newer_than_the_hosts_snapshot_survives(homes):
+    """Last writer wins on ``updated_at``: an RSVP that reached this
+    household live after the host read its list is neither overwritten by
+    the host's older answer nor dropped for being absent from it."""
+    host, member = homes
+    await _event(host)
+    await _rsvp(host, CARL, "going", _iso_ago(60))
+    await _stream(host, member)
+    snapshot = await collect_batches(record_batches(host.exporters["calendar"], SPACE))
+    # Live, after the host's snapshot: Carl changes his mind, Dave answers.
+    await _rsvp(member, CARL, "declined", _iso_ago(-1))
+    await _rsvp(member, "u-dave", "maybe", _iso_ago(-1))
+    await member.receiver._apply("calendar", SPACE, snapshot, provider=HOST)
+    assert await _view_rsvps(member) == [
+        (CARL, _OCC, "declined"),
+        ("u-dave", _OCC, "maybe"),
+    ]
+
+
+async def test_a_live_answer_newer_than_the_hosts_snapshot_survives(homes):
+    host, member = homes
+    await _schedule(host)
+    await _stream(host, member)
+    snapshot = await collect_batches(record_batches(host.exporters["schedules"], SPACE))
+    await asyncio.sleep(0.01)
+    await member.repos.space_poll.upsert_schedule_response_in_space(
+        space_id=SPACE, slot_id="slot-1", user_id=CARL, response="no"
+    )
+    await member.repos.space_poll.upsert_schedule_response_in_space(
+        space_id=SPACE, slot_id="slot-2", user_id="u-dave", response="yes"
+    )
+    await member.receiver._apply("schedules", SPACE, snapshot, provider=HOST)
+    assert (await _view_schedule(member))[4] == [
+        ("slot-1", CARL, "no"),
+        ("slot-2", "u-dave", "yes"),
+    ]
+
+
+async def test_the_hosts_organiser_settles_our_peoples_requests(homes):
+    """Our own people's RSVPs are authored here — except for exactly the
+    transitions the live rule lets another household make: a request
+    approved or denied, a waitlisted seat promoted. Anything else of
+    theirs the host holds is not taken."""
+    host, member = homes
+    await host.repos.space_cal.save_event(
+        CalendarEvent(
+            id="ev-1",
+            calendar_id=SPACE,
+            summary="Picnic",
+            start=T0 + timedelta(days=3),
+            end=T0 + timedelta(days=3, hours=2),
+            created_by=ANNA,
+            rsvp_enabled=True,
+            capacity=5,
+        ),
+        space_id=SPACE,
+    )
+    await _stream(host, member)
+    second = (T0 + timedelta(days=10)).isoformat()
+    third = (T0 + timedelta(days=17)).isoformat()
+    # Approved, and promoted from the waitlist, on the host …
+    await _rsvp(member, BOB, "requested", _iso_ago(30))
+    await _rsvp(host, BOB, "going", _iso_ago(20))
+    await _rsvp(member, BOB, "waitlist", _iso_ago(30), second)
+    await _rsvp(host, BOB, "going", _iso_ago(20), second)
+    # … and denied there (gone from the host's list).
+    await _rsvp(member, BOB, "requested", _iso_ago(30), third)
+    await _stream(host, member)
+    assert sorted(
+        (r.occurrence_at, r.status)
+        for r in await member.repos.space_cal.list_rsvps("ev-1")
+    ) == [(_OCC, "going"), (second, "going")]
+    # Bob's own answer is never replaced by the host's.
+    await _rsvp(member, BOB, "going", _iso_ago(10))
+    await _rsvp(host, BOB, "declined", _iso_ago(5))
+    await _stream(host, member)
+    assert (_OCC, "going") in {
+        (r.occurrence_at, r.status)
+        for r in await member.repos.space_cal.list_rsvps("ev-1")
+    }
+
+
+async def test_the_hosts_bids_never_speak_for_our_own_people(homes):
+    """Bob's bids are authored here: the host's copy never adds one, never
+    withdraws one — it only carries the seller's accept / decline. A missed
+    bid of somebody else lands stamped with its arrival time, as live."""
+    host, member = homes
+    await _listing(host)
+    await _stream(host, member)
+    for h in (host, member):
+        await h.repos.bazaar.place_bid(
+            BazaarBid(
+                id="bid-bob",
+                listing_post_id="post-1",
+                bidder_user_id=BOB,
+                amount=30,
+                created_at="2026-11-01T10:00:00+00:00",
+            ),
+            space_id=SPACE,
+        )
+    await host.repos.bazaar.place_bid(
+        BazaarBid(
+            id="bid-bob-2",
+            listing_post_id="post-1",
+            bidder_user_id=BOB,
+            amount=31,
+            created_at="2026-11-01T11:00:00+00:00",
+        ),
+        space_id=SPACE,
+    )
+    await _bid(host, "bid-carl", 35)
+    await host.db.enqueue(
+        "UPDATE bazaar_bids SET withdrawn=1, rejected=1 WHERE id='bid-bob'"
+    )
+    await _stream(host, member)
+    held = {b.id: b for b in await member.repos.bazaar.list_bids("post-1")}
+    assert set(held) == {"bid-bob", "bid-carl"}
+    assert held["bid-bob"].rejected and not held["bid-bob"].withdrawn
+    host_carl = await host.repos.bazaar.get_bid("bid-carl")
+    assert host_carl is not None
+    assert held["bid-carl"].created_at != host_carl.created_at

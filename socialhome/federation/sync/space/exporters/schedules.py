@@ -7,11 +7,15 @@ joiner sees the slot picker. Without it (F5 gap) the receiver landed
 the wrapper post but the slot picker rendered empty.
 
 v_92: the record also carries the poll's answers (``responses``:
-``{slot_id, user_id, availability}`` — every member household gets each
-answer live, through ``SPACE_SCHEDULE_RESPONSE_UPDATED``) and its pick
-(``finalized_slot_id``); a v_92 receiver takes them from the space's host
-(everybody's answers but its own people's). A requester below v_92 gets
-the slot definitions only (:meth:`SchedulesExporter.slots_only`).
+``{slot_id, user_id, availability, responded_at}`` — every member household
+gets each answer live, through ``SPACE_SCHEDULE_RESPONSE_UPDATED``), when
+the host read them (``responses_at``) and its pick (``finalized_slot_id``);
+a v_92 receiver takes them from the space's host (everybody's answers but
+its own people's, last writer wins on ``responded_at``). A record never
+splits across chunks, so the answers are bounded:
+:data:`MAX_RESPONSES_PER_SCHEDULE`, the newest first; ``responses_partial``
+marks a cut list, which the receiver never deletes from. A requester below
+v_92 gets the slot definitions only (:meth:`SchedulesExporter.slots_only`).
 
 An answer changes no row the change stamps cover (migration 0086), so a
 missed answer heals on the host's daily full stream; a pick (it updates
@@ -21,6 +25,7 @@ the poll) heals on the next incremental one.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..exporter import PagedExporterMixin
@@ -28,8 +33,13 @@ from ..window import SyncWindows
 from .posts import iter_post_pages
 
 if TYPE_CHECKING:
-    from .....repositories.poll_repo import AbstractPollRepo
+    from .....repositories.space_poll_repo import AbstractSpacePollRepo
     from .....repositories.space_post_repo import AbstractSpacePostRepo
+
+
+#: The most answers one ``schedules`` record carries (~150 B each:
+#: ≤ ~150 KB).
+MAX_RESPONSES_PER_SCHEDULE: int = 1000
 
 
 class SchedulesExporter(PagedExporterMixin):
@@ -39,7 +49,7 @@ class SchedulesExporter(PagedExporterMixin):
 
     def __init__(
         self,
-        poll_repo: AbstractPollRepo,
+        poll_repo: AbstractSpacePollRepo,
         space_post_repo: AbstractSpacePostRepo,
         windows: SyncWindows,
         *,
@@ -90,9 +100,13 @@ class SchedulesExporter(PagedExporterMixin):
             }
             if self._answers:
                 record["finalized_slot_id"] = meta.get("finalized_slot_id")
-                record["responses"] = sorted(
-                    await self._poll_repo.list_schedule_responses(p.id),
-                    key=lambda a: (a["slot_id"], a["user_id"]),
+                record["responses_at"] = datetime.now(UTC).isoformat()
+                answers = await self._poll_repo.list_schedule_answers(
+                    p.id, limit=MAX_RESPONSES_PER_SCHEDULE + 1
                 )
+                if len(answers) > MAX_RESPONSES_PER_SCHEDULE:
+                    answers = answers[:MAX_RESPONSES_PER_SCHEDULE]
+                    record["responses_partial"] = True
+                record["responses"] = answers
             out.append(record)
         return out
