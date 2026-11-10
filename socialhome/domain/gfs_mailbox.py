@@ -61,9 +61,15 @@ ENVELOPE_MULTI_CAPABILITY: str = "envelope_multi"
 ENVELOPE_MULTI_PATH: str = "/gfs/envelope/multi"
 #: Most mailbox ids one multi upload may name.
 MULTI_MAX_RECIPIENTS: int = 500
-#: The exact key set of a multi frame's ``sealed`` dict (the values are
-#: opaque to the GFS; the receiver validates ``mr_suite``).
-MULTI_SEALED_KEYS: frozenset[str] = frozenset({"mr_suite", "kid", "ciphertext"})
+#: The exact key set of one ``to`` entry of a multi upload: the mailbox id
+#: and ``wrap``, the body key sealed to that mailbox's key-wrap key (the
+#: same ``{kem_suite, eph_pk, ciphertext}`` dict a single envelope's
+#: ``sealed`` is).
+MULTI_ENTRY_KEYS: frozenset[str] = frozenset({"mailbox", "wrap"})
+#: The exact key set of a multi upload's ``body`` (the values are opaque to
+#: the GFS; the receiver validates ``mr_suite``). Each mailbox receives it
+#: as ``sealed`` with its own ``wrap`` added.
+MULTI_BODY_KEYS: frozenset[str] = frozenset({"mr_suite", "ciphertext"})
 
 #: Routes.
 MAILBOX_REGISTER_ROUTE: str = "/gfs/mailbox/register"
@@ -238,8 +244,9 @@ __all__ = [
     "MAILBOX_UNREGISTER_CONTEXT",
     "MAILBOX_UNREGISTER_ROUTE",
     "MAILBOX_WS_ROUTE",
+    "MULTI_BODY_KEYS",
+    "MULTI_ENTRY_KEYS",
     "MULTI_MAX_RECIPIENTS",
-    "MULTI_SEALED_KEYS",
     "SUPPORTED_MAILBOX_SIG_SUITES",
     "GfsMailbox",
     "InvalidMailboxField",

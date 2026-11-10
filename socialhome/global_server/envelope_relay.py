@@ -92,18 +92,20 @@ recipient id only, never the bytes). Caps: ``[envelope_relay]`` in the GFS
 TOML (:class:`~socialhome.global_server.config.EnvelopeMediaConfig`).
 
 **Multi-recipient frames (v_90).** ``POST /gfs/envelope/multi`` carries ONE
-sealed frame for up to 500 mailboxes (a space's member households reached
-over this server). Only registered mailboxes are addressed; the answer is the
-same uniform ``202``. Each upload charges its distinct ids to a per-IP,
-per-node recipient budget equal to the single route's request limit
-(:data:`ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE`), so batching never buys more
-queue work than sending one by one (both budgets are this node's: an
-N-node cluster takes N times as much from one address). The body is stored once (``gfs_envelope_bodies``, GFS
-migration 0031) with one reference row per mailbox, each charged the full
-body against that mailbox's caps while the pool counts it once; a trigger
-frees it with its last reference. Each mailbox drains the same
-``{"type": "envelope", "sealed": …}`` frame through the ordinary drain
-(:meth:`GfsEnvelopeRelay.accept_multi`).
+sealed body for up to 500 mailboxes (a space's member households reached
+over this server), each named with its own ``wrap`` — the body key sealed
+to that mailbox's key-wrap key. Only registered mailboxes are addressed; the
+answer is the same uniform ``202``. Each upload charges its distinct ids to
+a per-IP, per-node recipient budget equal to the single route's request
+limit (:data:`ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE`), so batching never
+buys more queue work than sending one by one (both budgets are this node's:
+an N-node cluster takes N times as much from one address). The body is
+stored once (``gfs_envelope_bodies``, GFS migration 0031) with one
+reference row per mailbox holding that mailbox's wrap, each charged the
+full body plus its wrap against that mailbox's caps while the pool counts
+the body once; a trigger frees it with its last reference. Each mailbox
+drains ``{"type": "envelope", "sealed": {**body, "wrap": its wrap}}``
+through the ordinary drain (:meth:`GfsEnvelopeRelay.accept_multi`).
 """
 
 from __future__ import annotations
@@ -126,8 +128,9 @@ from ..domain.gfs_mailbox import (
     MAILBOX_TICKETS_ROUTE,
     MAILBOX_UNREGISTER_ROUTE,
     MAILBOX_WS_ROUTE,
+    MULTI_BODY_KEYS,
+    MULTI_ENTRY_KEYS,
     MULTI_MAX_RECIPIENTS,
-    MULTI_SEALED_KEYS,
 )
 from ..moment_public_seal import (
     FRAME_MOMENT_REACTION,
@@ -234,13 +237,20 @@ ENVELOPE_MAX_PER_MINUTE: int = 600
 #: well inside, the same bound as a KEM-sealed blob
 #: (``invite_bootstrap.MAX_SEALED_BLOB_BYTES``).
 ENVELOPE_MULTI_MAX_CIPHERTEXT_CHARS: int = 256 * 1024
-#: Longest ``mr_suite`` / ``kid`` (a suite tag, a 22-char b64url key id).
+#: Longest ``mr_suite`` (a suite tag).
 ENVELOPE_MULTI_MAX_FIELD_CHARS: int = 64
+#: Longest ``ciphertext`` of one ``wrap`` (a 32-byte key sealed with nonce
+#: and tag is 80 b64url chars; room for a larger suite).
+ENVELOPE_MULTI_MAX_WRAP_CIPHERTEXT_CHARS: int = 256
+#: Room per ``to`` entry in the request cap: the id, a wrap of a suite tag,
+#: an X25519 ``eph_pk`` and a bounded ciphertext, plus JSON framing (~430
+#: bytes at the maxima). Not a per-entry check: every wrap byte is charged
+#: to its mailbox's caps and the pool, and the request cap bounds the sum.
+ENVELOPE_MULTI_MAX_ENTRY_BYTES: int = 512
 #: Hard body cap on ``POST /gfs/envelope/multi``: the single envelope's cap
-#: plus the mailbox list (``MULTI_MAX_RECIPIENTS`` × 32 chars, quotes and a
-#: separator).
-ENVELOPE_MULTI_MAX_BODY_BYTES: int = ENVELOPE_MAX_BODY_BYTES + MULTI_MAX_RECIPIENTS * (
-    ENVELOPE_INSTANCE_ID_CHARS + 4
+#: (covers the body) plus ``MULTI_MAX_RECIPIENTS`` entries.
+ENVELOPE_MULTI_MAX_BODY_BYTES: int = (
+    ENVELOPE_MAX_BODY_BYTES + MULTI_MAX_RECIPIENTS * ENVELOPE_MULTI_MAX_ENTRY_BYTES
 )
 #: Per-IP/minute cap on ``POST /gfs/envelope/multi`` on THIS node (an N-node
 #: cluster allows N times as much), apart from ``/gfs/envelope``'s. One upload replaces up to 500 single envelopes (one
@@ -499,41 +509,61 @@ def validate_envelope(body: Any) -> tuple[str, dict[str, str]]:
         to_instance
     ):
         raise InvalidEnvelope("invalid field: to_instance")
-    sealed = body.get("sealed")
+    return to_instance, validate_sealed(body.get("sealed"))
+
+
+def validate_sealed(sealed: Any, field: str = "sealed") -> dict[str, str]:
+    """Return *sealed* as a ``{kem_suite, eph_pk, ciphertext}`` dict of
+    non-empty strings (:data:`SEALED_KEYS`, exactly) or raise
+    :class:`InvalidEnvelope` naming *field*. The values stay opaque."""
     if not isinstance(sealed, dict) or set(sealed) != SEALED_KEYS:
-        raise InvalidEnvelope("invalid field: sealed")
+        raise InvalidEnvelope(f"invalid field: {field}")
     for key in SEALED_KEYS:
         if not isinstance(sealed[key], str) or not sealed[key]:
-            raise InvalidEnvelope("invalid field: sealed")
-    return to_instance, dict(sealed)
+            raise InvalidEnvelope(f"invalid field: {field}")
+    return dict(sealed)
 
 
-def validate_multi_envelope(body: Any) -> tuple[list[str], dict[str, str]]:
-    """Return ``(to_mailboxes, sealed)`` of a multi upload or raise
+#: One validated multi upload: ``[(mailbox id, wrap), ...]`` (unique ids, in
+#: first-seen order) and the body.
+MultiUpload = tuple[list[tuple[str, dict[str, str]]], dict[str, str]]
+
+
+def validate_multi_envelope(body: Any) -> MultiUpload:
+    """Return ``(entries, body)`` of a multi upload or raise
     :class:`InvalidEnvelope`.
 
-    Exactly ``{"to_mailboxes": [...], "sealed": {...}}``: 1 to
-    :data:`MULTI_MAX_RECIPIENTS` ids, each of the exact id shape
-    (:data:`ENVELOPE_INSTANCE_ID_RE` — the ids reach SQLite binds, so no
-    junk rides along), and a ``sealed`` dict of exactly
-    :data:`MULTI_SEALED_KEYS`, non-empty bounded strings. The values stay
-    opaque: the receiver validates the suite, not this server. Duplicates
-    are allowed here and collapsed by the relay."""
-    if not isinstance(body, dict) or set(body) != {"to_mailboxes", "sealed"}:
-        raise InvalidEnvelope("expected {to_mailboxes, sealed}")
-    ids = body["to_mailboxes"]
-    if (
-        not isinstance(ids, list)
-        or not 1 <= len(ids) <= MULTI_MAX_RECIPIENTS
-        or not all(
-            isinstance(i, str) and ENVELOPE_INSTANCE_ID_RE.fullmatch(i) for i in ids
-        )
-    ):
-        raise InvalidEnvelope("invalid field: to_mailboxes")
-    sealed = body["sealed"]
-    if not isinstance(sealed, dict) or set(sealed) != MULTI_SEALED_KEYS:
-        raise InvalidEnvelope("invalid field: sealed")
-    for key in MULTI_SEALED_KEYS:
+    Exactly ``{"to": [{"mailbox", "wrap"}, ...], "body": {"mr_suite",
+    "ciphertext"}}``: 1 to :data:`MULTI_MAX_RECIPIENTS` entries, each
+    ``mailbox`` of the exact id shape (:data:`ENVELOPE_INSTANCE_ID_RE` — the
+    ids reach SQLite binds, so no junk rides along) and each ``wrap`` exactly
+    a single envelope's ``sealed`` dict (:func:`validate_sealed`, its
+    ``ciphertext`` at most :data:`ENVELOPE_MULTI_MAX_WRAP_CIPHERTEXT_CHARS`);
+    ``body`` exactly :data:`MULTI_BODY_KEYS`, non-empty bounded strings. The
+    values stay opaque: the receiver validates the suites, not this server.
+    A repeated mailbox keeps its FIRST entry."""
+    if not isinstance(body, dict) or set(body) != {"to", "body"}:
+        raise InvalidEnvelope("expected {to, body}")
+    to = body["to"]
+    if not isinstance(to, list) or not 1 <= len(to) <= MULTI_MAX_RECIPIENTS:
+        raise InvalidEnvelope("invalid field: to")
+    entries: dict[str, dict[str, str]] = {}
+    for entry in to:
+        if not isinstance(entry, dict) or set(entry) != MULTI_ENTRY_KEYS:
+            raise InvalidEnvelope("invalid field: to")
+        mailbox = entry["mailbox"]
+        if not isinstance(mailbox, str) or not ENVELOPE_INSTANCE_ID_RE.fullmatch(
+            mailbox
+        ):
+            raise InvalidEnvelope("invalid field: mailbox")
+        wrap = validate_sealed(entry["wrap"], "wrap")
+        if len(wrap["ciphertext"]) > ENVELOPE_MULTI_MAX_WRAP_CIPHERTEXT_CHARS:
+            raise InvalidEnvelope("invalid field: wrap")
+        entries.setdefault(mailbox, wrap)
+    sealed = body["body"]
+    if not isinstance(sealed, dict) or set(sealed) != MULTI_BODY_KEYS:
+        raise InvalidEnvelope("invalid field: body")
+    for key in MULTI_BODY_KEYS:
         value = sealed[key]
         limit = (
             ENVELOPE_MULTI_MAX_CIPHERTEXT_CHARS
@@ -541,8 +571,8 @@ def validate_multi_envelope(body: Any) -> tuple[list[str], dict[str, str]]:
             else ENVELOPE_MULTI_MAX_FIELD_CHARS
         )
         if not isinstance(value, str) or not 0 < len(value) <= limit:
-            raise InvalidEnvelope("invalid field: sealed")
-    return list(ids), dict(sealed)
+            raise InvalidEnvelope("invalid field: body")
+    return list(entries.items()), dict(sealed)
 
 
 class KeyedLocks:
@@ -774,37 +804,41 @@ class GfsEnvelopeRelay:
 
     # ── Multi-recipient frames (v_90) ──────────────────────────────────
 
-    def multi_recipients_allow(self, client_key: str, mailbox_ids: list[str]) -> bool:
-        """Charge the distinct ids of one multi upload to *client_key* (the
-        caller's address bucket); ``False`` once its per-minute recipient
-        budget on this node (:data:`ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE`) is
-        spent — the
-        route answers 429. A repeated id is one recipient: the relay
-        collapses it to one reference row."""
-        return self._multi_budget.allow(client_key, len(set(mailbox_ids)))
+    def multi_recipients_allow(
+        self, client_key: str, entries: list[tuple[str, dict[str, str]]]
+    ) -> bool:
+        """Charge the distinct mailboxes of one multi upload to *client_key*
+        (the caller's address bucket); ``False`` once its per-minute
+        recipient budget on this node
+        (:data:`ENVELOPE_MULTI_RECIPIENTS_PER_MINUTE`) is spent — the route
+        answers 429. A repeated mailbox is one recipient: it keeps one
+        reference row."""
+        return self._multi_budget.allow(client_key, len({m for m, _w in entries}))
 
-    def submit_multi(self, mailbox_ids: list[str], sealed: dict[str, str]) -> None:
-        """Hand ONE multi frame for *mailbox_ids* off to a background
-        :meth:`accept_multi` and return at once — the same uniform timing as
-        :meth:`submit`. The upload takes ONE slot of
-        :data:`ENVELOPE_MAX_INFLIGHT` however many mailboxes it names (it is
-        one queue transaction); at saturation it is dropped, still answered
-        with the same ``202``."""
+    def submit_multi(
+        self, entries: list[tuple[str, dict[str, str]]], body: dict[str, str]
+    ) -> None:
+        """Hand ONE multi frame — *body* for every ``(mailbox, wrap)`` in
+        *entries* — off to a background :meth:`accept_multi` and return at
+        once, the same uniform timing as :meth:`submit`. The upload takes ONE
+        slot of :data:`ENVELOPE_MAX_INFLIGHT` however many mailboxes it names
+        (it is one queue transaction); at saturation it is dropped, still
+        answered with the same ``202``."""
         if len(self._inflight) >= self._max_inflight:
             self._note_saturated()
             return
         task = asyncio.get_running_loop().create_task(
-            self._accept_multi_in_background(list(mailbox_ids), sealed),
+            self._accept_multi_in_background(list(entries), body),
             name="gfs-envelope-multi-accept",
         )
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
 
     async def _accept_multi_in_background(
-        self, mailbox_ids: list[str], sealed: dict[str, str]
+        self, entries: list[tuple[str, dict[str, str]]], body: dict[str, str]
     ) -> None:
         try:
-            await self.accept_multi(mailbox_ids, sealed)
+            await self.accept_multi(entries, body)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -812,24 +846,29 @@ class GfsEnvelopeRelay:
             log.warning("gfs.envelope: background multi accept failed", exc_info=True)
 
     async def accept_multi(
-        self, mailbox_ids: list[str], sealed: dict[str, str]
+        self, entries: list[tuple[str, dict[str, str]]], body: dict[str, str]
     ) -> None:
-        """Queue *sealed* once for every registered mailbox in *mailbox_ids*
-        and get it to them.
+        """Queue *body* once, with each mailbox's own wrap, for every
+        registered mailbox in *entries* (``(mailbox, wrap)`` pairs) and get it
+        to them.
 
         Only REGISTERED MAILBOXES are addressed: an instance id, an unknown
         id and an id held by both are skipped silently (the caller got the
-        same ``202`` either way). The frame is queued first — one body, one
-        reference per admitted mailbox (:meth:`enqueue_multi`) — then each
-        admitted mailbox whose claim socket is on this node is drained
-        (under its drain lock, so queue order holds and no row goes twice),
-        and the others are hinted to the sibling nodes. Logged with counts
-        only — never a mailbox id."""
+        same ``202`` either way). A repeated mailbox keeps its first wrap.
+        The frame is queued first — one body, one reference holding its wrap
+        per admitted mailbox (:meth:`enqueue_multi`) — then each admitted
+        mailbox whose claim socket is on this node is drained (under its
+        drain lock, so queue order holds and no row goes twice), and the
+        others are hinted to the sibling nodes. Logged with counts only —
+        never a mailbox id."""
         if self._mailbox_repo is None:
             return
-        ids = list(dict.fromkeys(mailbox_ids))
+        wraps: dict[str, dict[str, str]] = {}
+        for mailbox_id, wrap in entries:
+            wraps.setdefault(mailbox_id, wrap)
+        ids = list(wraps)
         known = await self._mailbox_repo.mailboxes_among(ids)
-        targets = [i for i in ids if i in known]
+        targets = [(i, orjson.dumps(wraps[i]).decode()) for i in ids if i in known]
         if not targets:
             log.debug("gfs.envelope: multi frame for no registered mailbox here")
             return
@@ -837,7 +876,7 @@ class GfsEnvelopeRelay:
         now = int(time.time())
         admitted = await self._queue_repo.enqueue_multi(
             targets,
-            orjson.dumps(sealed).decode(),
+            orjson.dumps(body).decode(),
             created_at=now,
             expires_at=now + self._ttl,
             max_per_recipient=cfg.mailbox_queue_max_per_recipient,

@@ -3176,16 +3176,17 @@ POOL_MAILBOX: str = "mailbox"
 QUEUE_RESERVE_ROWS: int = 20
 QUEUE_RESERVE_BYTES: int = 64 * 1024
 #: What one REFERENCE row of a multi-recipient frame (GFS migration 0031)
-#: adds to its pool's running total — the body itself counts once. Without
-#: a row cost a tiny body could park any number of reference rows under a
-#: pool that only ever saw the body. MUST match the literal in the 0031
-#: triggers (``tests/global_server/test_migration_0031_envelope_bodies.py``
-#: pins both).
+#: adds to its pool's running total ON TOP of its wrap (its
+#: ``sealed_json``) — the body itself counts once. Without a row cost a tiny
+#: body could park any number of reference rows under a pool that only ever
+#: saw the body. MUST match the literal in the 0031 triggers
+#: (``tests/global_server/test_migration_0031_envelope_bodies.py`` pins
+#: both).
 REF_ROW_BYTES: int = 64
 #: A queued row's byte charge against its recipient's caps — the same
 #: expression the 0029 / 0031 total triggers use for a plain row. A
-#: reference row's ``size_bytes`` is its body's size, so it charges the
-#: full body.
+#: reference row's ``size_bytes`` is its body's size plus its wrap's, so it
+#: charges the full frame its mailbox receives.
 _HELD_BYTES_SQL: str = (
     "CASE WHEN size_bytes > 0 THEN size_bytes ELSE LENGTH(sealed_json) END"
 )
@@ -3212,8 +3213,8 @@ class AbstractGfsEnvelopeQueueRepo(Protocol):
 
     async def enqueue_multi(
         self,
-        recipients: list[str],
-        sealed_json: str,
+        recipients: list[tuple[str, str]],
+        body_json: str,
         *,
         created_at: int,
         expires_at: int,
@@ -3410,8 +3411,8 @@ class SqliteGfsEnvelopeQueueRepo:
 
     async def enqueue_multi(
         self,
-        recipients: list[str],
-        sealed_json: str,
+        recipients: list[tuple[str, str]],
+        body_json: str,
         *,
         created_at: int,
         expires_at: int,
@@ -3420,69 +3421,85 @@ class SqliteGfsEnvelopeQueueRepo:
         max_total_bytes: int,
         ceiling_bytes: int,
     ) -> list[str]:
-        """Queue ONE multi-recipient frame (v_90) for every mailbox in
-        *recipients* that has room; return those admitted, in order.
+        """Queue ONE multi-recipient frame (v_90) — *body_json* for every
+        ``(mailbox, wrap_json)`` in *recipients* that has room; return the
+        mailboxes admitted, in order (a repeated mailbox keeps its first wrap).
 
         One transaction. The body is stored once (``gfs_envelope_bodies``,
         GFS migration 0031) — and only when at least one recipient is
         admitted — and each admitted recipient gets a reference row
-        (``sealed_json = ''``, ``size_bytes`` = the body's size, ``body_id``)
-        in the mailbox pool. Per recipient the usual tail-drop caps apply,
-        charging the full body: a recipient at its row or byte cap is
-        skipped, the others are not. The pool is charged the body ONCE plus
-        :data:`REF_ROW_BYTES` per admitted reference (what the triggers
-        count): under the pool total every recipient that passed its caps
-        is admitted; past it only those under their reserve
-        (:meth:`_pool_admits`), within *ceiling_bytes*. Nothing is evicted.
-        The body is freed by a trigger when its last reference goes."""
-        size = len(sealed_json)
+        (``sealed_json`` = ITS wrap, ``size_bytes`` = body + wrap,
+        ``body_id``) in the mailbox pool. Per recipient the usual tail-drop
+        caps apply, charging the full body plus its wrap: a recipient at its
+        row or byte cap is skipped, the others are not. The pool is charged
+        the body ONCE plus :data:`REF_ROW_BYTES` and its wrap per admitted
+        reference (what the triggers count): under the pool total every
+        recipient that passed its caps is admitted; past it only those under
+        their reserve (:meth:`_pool_admits`), within *ceiling_bytes*.
+        Nothing is evicted. The body is freed by a trigger when its last
+        reference goes."""
+        size = len(body_json)
 
-        def _cost(n: int) -> int:
-            # The pool sees the body once and REF_ROW_BYTES per reference.
-            return size + n * REF_ROW_BYTES
+        def _cost(fits: list[tuple[str, str, int, int]]) -> int:
+            # The pool sees the body once, then per reference its row cost
+            # and its wrap.
+            return size + sum(REF_ROW_BYTES + len(f[1]) for f in fits)
 
         def _run(conn) -> list[str]:
-            unique = list(dict.fromkeys(recipients))
-            held_by = self._held_many(conn, unique, created_at)
-            fits: list[tuple[str, int, int]] = []
-            for to in unique:
+            wraps: dict[str, str] = {}
+            for to, wrap_json in recipients:
+                wraps.setdefault(to, wrap_json)
+            held_by = self._held_many(conn, list(wraps), created_at)
+            fits: list[tuple[str, str, int, int]] = []
+            for to, wrap_json in wraps.items():
                 count, held = held_by.get(to, (0, 0))
-                if count >= max_per_recipient or held + size > max_bytes_per_recipient:
+                if (
+                    count >= max_per_recipient
+                    or held + size + len(wrap_json) > max_bytes_per_recipient
+                ):
                     continue
-                fits.append((to, count, held))
+                fits.append((to, wrap_json, count, held))
             if not fits:
                 return []
             total = self._pool_total(conn, "envelope", POOL_MAILBOX)
-            if total + _cost(len(fits)) > max_total_bytes:
+            if total + _cost(fits) > max_total_bytes:
                 conn.execute(
                     "DELETE FROM gfs_envelope_queue WHERE pool=? AND expires_at <= ?"
                     " AND frame_type='envelope'",
                     (POOL_MAILBOX, created_at),
                 )
                 total = self._pool_total(conn, "envelope", POOL_MAILBOX)
-            if total + _cost(len(fits)) > max_total_bytes:
+            if total + _cost(fits) > max_total_bytes:
                 fits = [
                     f
                     for f in fits
-                    if f[1] < QUEUE_RESERVE_ROWS and f[2] < QUEUE_RESERVE_BYTES
+                    if f[2] < QUEUE_RESERVE_ROWS and f[3] < QUEUE_RESERVE_BYTES
                 ]
-                if not fits or total + _cost(len(fits)) > ceiling_bytes:
+                if not fits or total + _cost(fits) > ceiling_bytes:
                     return []
             body_id = conn.execute(
                 "INSERT INTO gfs_envelope_bodies(sealed_json, size_bytes,"
                 " created_at, expires_at) VALUES(?,?,?,?)",
-                (sealed_json, size, created_at, expires_at),
+                (body_json, size, created_at, expires_at),
             ).lastrowid
             conn.executemany(
                 "INSERT INTO gfs_envelope_queue(to_instance, sealed_json,"
                 " created_at, expires_at, frame_type, size_bytes, pool, body_id)"
-                " VALUES(?, '', ?, ?, 'envelope', ?, ?, ?)",
+                " VALUES(?, ?, ?, ?, 'envelope', ?, ?, ?)",
                 [
-                    (to, created_at, expires_at, size, POOL_MAILBOX, body_id)
-                    for to, _count, _held in fits
+                    (
+                        to,
+                        wrap_json,
+                        created_at,
+                        expires_at,
+                        size + len(wrap_json),
+                        POOL_MAILBOX,
+                        body_id,
+                    )
+                    for to, wrap_json, _count, _held in fits
                 ],
             )
-            return [to for to, _count, _held in fits]
+            return [f[0] for f in fits]
 
         return await self._db.transact(_run)
 
@@ -3498,12 +3515,13 @@ class SqliteGfsEnvelopeQueueRepo:
         """Drift repair (hourly maintenance): set every running total to the
         sum of its unexpired-or-not rows, exactly what the triggers keep —
         a multi frame's body counted once in the mailbox pool, each of its
-        reference rows :data:`REF_ROW_BYTES` (GFS migration 0031)."""
+        reference rows :data:`REF_ROW_BYTES` plus its wrap (GFS migration
+        0031)."""
 
         def _run(conn) -> None:
             conn.execute(
                 "UPDATE gfs_queue_totals SET bytes = (SELECT COALESCE(SUM("
-                "CASE WHEN q.body_id IS NOT NULL THEN ?"
+                "CASE WHEN q.body_id IS NOT NULL THEN ? + LENGTH(q.sealed_json)"
                 " WHEN q.size_bytes > 0 THEN q.size_bytes"
                 " ELSE LENGTH(q.sealed_json) END), 0) FROM gfs_envelope_queue q"
                 " WHERE q.frame_type='envelope'"
@@ -3585,10 +3603,12 @@ class SqliteGfsEnvelopeQueueRepo:
         blob whose TTL has already run out.
         """
         # A multi frame's reference row (``body_id``, GFS migration 0031)
-        # reads its sealed dict from the one stored body.
+        # holds only its wrap; the sealed dict is the one stored body plus
+        # that wrap, composed here at push time.
         rows = await self._db.fetchall(
             "SELECT q.id AS id, q.to_instance AS to_instance,"
-            " COALESCE(b.sealed_json, q.sealed_json) AS sealed_json,"
+            " q.sealed_json AS sealed_json, q.body_id AS body_id,"
+            " b.sealed_json AS body_json,"
             " q.created_at AS created_at, q.expires_at AS expires_at,"
             " q.frame_type AS frame_type "
             "FROM gfs_envelope_queue q"
@@ -3604,10 +3624,15 @@ class SqliteGfsEnvelopeQueueRepo:
                 continue
             try:
                 sealed = orjson.loads(d["sealed_json"])
+                if d.get("body_id") is not None:
+                    body = orjson.loads(d["body_json"] or "null")
+                    if not isinstance(body, dict):
+                        continue
+                    sealed = {**body, "wrap": sealed}
             except orjson.JSONDecodeError:
-                # Unreachable through the route (the dict is serialised from a
-                # validated shape), but a corrupt row must not wedge the whole
-                # drain — skip it and let the TTL sweep collect it.
+                # Unreachable through the route (the dicts are serialised from
+                # a validated shape), but a corrupt row must not wedge the
+                # whole drain — skip it and let the TTL sweep collect it.
                 continue
             if not isinstance(sealed, dict):
                 continue

@@ -1,13 +1,15 @@
 -- GFS 0031 — multi-recipient frame bodies, stored once. Follows 0030.
 --
--- ``POST /gfs/envelope/multi`` (v_90) hands this server ONE sealed frame for
+-- ``POST /gfs/envelope/multi`` (v_90) hands this server ONE sealed body for
 -- up to 500 mailboxes (every member household of a space reached over this
--- GFS). Each mailbox drains it from its own queue, so it needs a queue row —
--- but the body is the same for all of them. It is stored once in
--- ``gfs_envelope_bodies``; each recipient's ``gfs_envelope_queue`` row holds
--- only a reference (``body_id``, ``sealed_json = ''``, ``size_bytes`` = the
--- body's size so every per-recipient cap still charges the full frame). The
--- mailbox pool total counts the body once plus 64 bytes per reference row.
+-- GFS), each with its own ``wrap`` (the body key sealed to that mailbox's
+-- key-wrap key, ~150 bytes). Each mailbox drains it from its own queue, so it
+-- needs a queue row — but the body is the same for all of them. It is stored
+-- once in ``gfs_envelope_bodies``; each recipient's ``gfs_envelope_queue``
+-- row holds a reference (``body_id``) and ITS wrap (``sealed_json``), with
+-- ``size_bytes`` = body + wrap so every per-recipient cap still charges the
+-- full frame. The drain pushes ``{**body, "wrap": wrap}``. The mailbox pool
+-- total counts the body once plus, per reference row, 64 bytes and its wrap.
 --
 -- Migration audit (mandatory 3 points, CLAUDE.md).
 --
@@ -40,14 +42,18 @@
 --       the queue (no existing row rewritten — every existing row keeps
 --       ``body_id = NULL`` and behaves exactly as before), two indexes, the
 --       two 0029 envelope total triggers recreated so a reference row adds
---       a fixed 64 bytes (``REF_ROW_BYTES``) instead of its size (the body
---       adds its size once, so the pool bounds the reference rows too), two
---       body total triggers and one cleanup trigger. No backfill.
+--       a fixed 64 bytes (``REF_ROW_BYTES``) plus its wrap instead of its
+--       size (the body adds its size once, so the pool bounds the reference
+--       rows too), two body total triggers and one cleanup trigger. The
+--       wraps reuse the queue's existing ``sealed_json`` column. No backfill.
 --
 -- Value domain:
---   sealed_json  the verbatim ``{"mr_suite", "kid", "ciphertext"}`` dict as
---                JSON. Opaque; never parsed, never logged.
+--   sealed_json  the verbatim ``{"mr_suite", "ciphertext"}`` body as JSON.
+--                Opaque; never logged (the drain parses it only to add a
+--                reference's wrap).
 --   size_bytes   ``len(sealed_json)``.
+--   (queue)      a reference row: ``body_id`` set, ``sealed_json`` = its
+--                ``{"kem_suite", "eph_pk", "ciphertext"}`` wrap.
 --   created_at / expires_at  unix seconds; the references carry the same
 --                expiry, so the TTL sweep frees the body with them (the
 --                body sweep in ``prune_expired`` is a backstop only).
@@ -70,13 +76,13 @@ ALTER TABLE gfs_envelope_queue ADD COLUMN body_id INTEGER
 CREATE INDEX IF NOT EXISTS idx_gfs_envelope_queue_body
     ON gfs_envelope_queue(body_id) WHERE body_id IS NOT NULL;
 
--- ── Pool totals: the body adds its size once, a reference 64 bytes ──────
+-- ── Pool totals: the body adds its size once, a reference 64 + its wrap ──
 --
 -- 64 is ``REF_ROW_BYTES`` in ``global_server/repositories.py`` (the pool
 -- admission in ``enqueue_multi`` and ``recompute_pool_totals`` use it): a
 -- reference row holds no copy of the body, but it is still a row, and a pool
 -- that never saw it could be filled with any number of them under one tiny
--- body.
+-- body. Its wrap (``sealed_json``) is its own bytes and counts as such.
 
 DROP TRIGGER IF EXISTS trg_gfs_envelope_queue_total_ins;
 DROP TRIGGER IF EXISTS trg_gfs_envelope_queue_total_del;
@@ -86,7 +92,8 @@ AFTER INSERT ON gfs_envelope_queue
 WHEN NEW.frame_type = 'envelope'
 BEGIN
     UPDATE gfs_queue_totals
-       SET bytes = bytes + CASE WHEN NEW.body_id IS NOT NULL THEN 64
+       SET bytes = bytes + CASE WHEN NEW.body_id IS NOT NULL
+                                THEN 64 + LENGTH(NEW.sealed_json)
                                 WHEN NEW.size_bytes > 0 THEN NEW.size_bytes
                                 ELSE LENGTH(NEW.sealed_json) END
      WHERE queue = 'envelope' AND pool = NEW.pool;
@@ -97,7 +104,8 @@ AFTER DELETE ON gfs_envelope_queue
 WHEN OLD.frame_type = 'envelope'
 BEGIN
     UPDATE gfs_queue_totals
-       SET bytes = MAX(0, bytes - CASE WHEN OLD.body_id IS NOT NULL THEN 64
+       SET bytes = MAX(0, bytes - CASE WHEN OLD.body_id IS NOT NULL
+                                       THEN 64 + LENGTH(OLD.sealed_json)
                                        WHEN OLD.size_bytes > 0 THEN OLD.size_bytes
                                        ELSE LENGTH(OLD.sealed_json) END)
      WHERE queue = 'envelope' AND pool = OLD.pool;
