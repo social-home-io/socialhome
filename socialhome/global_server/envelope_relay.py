@@ -1383,10 +1383,10 @@ class GfsEnvelopeRelay:
 
     async def settle_media(self) -> None:
         """Wait for every running background media drain (tests, shutdown)."""
-        while self._media_drains:
-            await asyncio.gather(
-                *list(self._media_drains.values()), return_exceptions=True
-            )
+        # Unfinished only: a finished drain leaves by a done-callback the
+        # loop runs later, and awaiting finished tasks never yields.
+        while pending := [t for t in self._media_drains.values() if not t.done()]:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def _drain_locked(self, to_instance: str) -> int:
         try:

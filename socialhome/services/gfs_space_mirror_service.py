@@ -827,8 +827,10 @@ class GfsSpaceMirrorService:
 
     async def wait_rechecks(self) -> None:
         """Wait for the post-grace re-checks in flight (tests)."""
-        while self._rechecks:
-            await asyncio.gather(*list(self._rechecks), return_exceptions=True)
+        # Unfinished only: a finished task leaves by a done-callback the
+        # loop runs later, and awaiting finished tasks never yields.
+        while pending := [t for t in self._rechecks if not t.done()]:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def take_seat(self, space_id: str, conn: GfsConnection) -> None:
         """Subscribe on *conn* and record the seat under the server's own id
@@ -895,8 +897,10 @@ class GfsSpaceMirrorService:
 
     async def wait_idle(self) -> None:
         """Wait for the background seat tasks in flight (tests, shutdown)."""
-        while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        # Unfinished only: a finished task leaves by a done-callback the
+        # loop runs later, and awaiting finished tasks never yields.
+        while pending := [t for t in self._tasks if not t.done()]:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def stop(self) -> None:
         """Cancel the background seat tasks (app ``on_cleanup``)."""

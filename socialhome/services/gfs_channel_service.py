@@ -371,8 +371,10 @@ class GfsChannelService:
         await self._retry.stop()
 
     async def wait_idle(self) -> None:
-        while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        # Unfinished only: a finished task leaves by a done-callback the
+        # loop runs later, and awaiting finished tasks never yields.
+        while pending := [t for t in self._tasks if not t.done()]:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     def _spawn(self, coro, name: str) -> None:
         if self._stopping or len(self._tasks) >= MAX_PENDING_TASKS:

@@ -1037,8 +1037,11 @@ class GfsMailboxService:
 
     async def settle_releases(self) -> None:
         """Wait for every release waiting out its delay (tests)."""
-        while self._releases:
-            await asyncio.gather(*list(self._releases), return_exceptions=True)
+        # Only the unfinished ones: a finished task leaves the set by a
+        # done-callback the loop runs later, and awaiting finished tasks
+        # never yields to the loop, so waiting on "the set is empty" spins.
+        while pending := [t for t in self._releases if not t.done()]:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     def open_claims(self) -> int:
         return len(self._claims)
