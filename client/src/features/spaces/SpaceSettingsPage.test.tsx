@@ -423,15 +423,13 @@ describe('SpaceSettingsPage — live config', () => {
     expect(view.queryByText('Space not found')).toBeNull()
   })
 
-  it('shows the GFS publish mode to the owner only', async () => {
+  it('shows no GFS publish mode, not even to the owner (one anonymous mode, v_90)', async () => {
     detail = { ...detail, space_type: 'public', join_mode: 'open', features: { allow_subscribers: true } }
-    role = 'admin'
-    const view = await mount()
-    expect(view.queryByRole('radiogroup', { name: /Posting through the GFS/ })).toBeNull()
     role = 'owner'
+    const view = await mount()
     await act(async () => { emit('space.config.changed', { space_id: 'sp-1', event_type: 'owner_transferred' }) })
-    const group = await view.findByRole('radiogroup', { name: /Posting through the GFS/ })
-    expect(group.querySelector('[aria-checked="true"]')?.textContent).toBe('Trusted')
+    expect(view.queryByRole('radiogroup', { name: /Posting through the GFS/ })).toBeNull()
+    expect(view.queryByText('Trusted')).toBeNull()
   })
 })
 
