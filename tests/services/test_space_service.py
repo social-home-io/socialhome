@@ -9684,6 +9684,7 @@ async def _remote_seat_space(stack, *, supports=True):
         return True
 
     fed.peer_supports = AsyncMock(side_effect=_supports)
+    fed.space_member_supports = AsyncMock(side_effect=_supports)
     stack.space_svc._federation = fed
     remote = await _wire_remote_members(stack)
     await remote.add(
@@ -9738,6 +9739,23 @@ async def test_an_admin_role_change_carries_no_legacy_payload(stack):
     )
     [changed] = _gossip_calls(fed, FederationEventType.SPACE_MEMBER_ROLE_CHANGED)
     assert changed.kwargs.get("legacy_payload") is None
+
+
+async def test_a_mesh_only_members_household_can_become_a_moderator(stack):
+    """A member household the host is not paired with (reached over the
+    mesh or a directory seat) is judged by the version it claimed as a
+    space member, not by a pairing row it does not have — every member is
+    equal whichever way their household is reached."""
+    space, fed, remote = await _remote_seat_space(stack)
+    fed.peer_supports = AsyncMock(return_value=False)  # no paired row
+    await stack.space_svc.set_remote_member_role(
+        space.id,
+        actor_username="anna",
+        instance_id="peer-x",
+        user_id="ru1",
+        role="moderator",
+    )
+    assert (await remote.get(space.id, "peer-x", "ru1")).role == "moderator"
 
 
 async def test_promoting_a_user_whose_household_is_behind_is_refused(stack):

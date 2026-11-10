@@ -4893,9 +4893,15 @@ class SpaceService(
                 role=role,
             )
             return True
-        if role == SpaceRole.MODERATOR and not await self._federation.peer_supports(
-            instance_id,
-            min_version=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
+        # ``space_member_supports``: a member household we are not paired
+        # with (mesh, directory seat) is judged by the version it claimed as
+        # a member — every member is equal whichever way it is reached.
+        if (
+            role == SpaceRole.MODERATOR
+            and not await self._federation.space_member_supports(
+                instance_id,
+                min_version=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
+            )
         ):
             raise HouseholdUpgradeRequiredError(
                 "this member's household must upgrade before they can be a moderator",
