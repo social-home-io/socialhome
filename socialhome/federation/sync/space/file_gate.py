@@ -129,6 +129,12 @@ class CatchUpFileGate:
             return list(urls)
         return []
 
+    def own_only(self, owner: str | None, urls: Sequence[str]) -> list[str]:
+        """The files of a row owned by ``owner`` only when it is one of this
+        household's people — for a sender-bound (``sd-``) name, which only
+        vouches for what we delivered of our own, never a relayed row."""
+        return list(urls) if owner is not None and owner in self._own else []
+
 
 class CatchUpFileGates:
     """Builds the :class:`CatchUpFileGate` for a space."""
@@ -150,9 +156,9 @@ class CatchUpFileGates:
         (``SPACE_MEDIA_WANTED``: the caller proved each file's bytes hash to
         the asked-for content name) lets a trusted household ship other
         people's files too."""
-        if await self._authority(space_id):
-            return CatchUpFileGate(all_files=True, own=frozenset(), fills=False)
         own = frozenset(await self._spaces.list_local_member_user_ids(space_id))
+        if await self._authority(space_id):
+            return CatchUpFileGate(all_files=True, own=own, fills=False)
         trusted = fills and any(
             m.user_id in own and str(m.role) in _CONTENT_ROLES
             for m in await self._spaces.list_members(space_id)

@@ -700,7 +700,13 @@ row's author household only, bytes checked against the row's `h`.
   member alike; no host or helper can match it. That household matches
   `space_direct_media_name(space, its own id, file)` of its own files and
   sends the bytes under the file's own name, so the requester binds them
-  to it again and they land under the name the row shows.
+  to it again and they land under the name the row shows. It ships only
+  its own people's rows' files that way (`CatchUpFileGate.own_only`):
+  never another person's row it merely relayed. **Limit:** a row taken
+  from a §25.6 stream without a hash map (a non-host provider's record)
+  names its files `sd(space, that provider, file)` (`receiver
+  ._localize_record`): asking the author does not match those — they heal
+  only when that provider streams or pushes them again.
 - Sent with `send_with_mesh_fallback` — paired, mesh `SPACE_ROUTED`, a
   mailbox seat or the host hop, whichever reaches the provider (the type is
   in `SPACE_SESSION_ALLOWED_EVENT_TYPES`).

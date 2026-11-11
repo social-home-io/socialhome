@@ -597,6 +597,9 @@ class _Gate:
             return list(urls)
         return []
 
+    def own_only(self, owner, urls):
+        return list(urls) if owner in self.own else []
+
 
 class _Gates:
     def __init__(self, gate):
@@ -931,10 +934,32 @@ async def test_the_author_ships_a_file_under_its_own_sender_bound_name(tmp_path)
     again, so it lands under the very name its row shows."""
     (tmp_path / "orig.webp").write_bytes(b"d's picture")
     sd = space_direct_media_name(SPACE, SELF, "orig.webp")
-    p, outbox = _provider(tmp_path, {(SPACE, "p1"): [("orig.webp", "u1")]})
+    p, outbox = _provider(
+        tmp_path,
+        {(SPACE, "p1"): [("orig.webp", "u1")]},
+        gate=_Gate(all_files=True, own={"u1"}),  # u1 is one of our people
+    )
     assert await p.handle(_event([{"item": "p1", "name": sd}])) == 1
     assert outbox.queued[0]["media_urls"] == ["orig.webp"]
     assert outbox.queued[0].get("wire_names") is None
     # Bound to another household: not ours to deliver.
     other = space_direct_media_name(SPACE, "hh-x", "orig.webp")
     assert await p.handle(_event([{"item": "p1", "name": other}])) == 0
+
+
+async def test_a_sender_bound_file_leaves_only_for_this_households_own_row(
+    tmp_path,
+):
+    """A trusted household (``fills``) or the roster authority may fill
+    other people's CONTENT names; a sender-bound name it delivered for
+    someone else (a row it relayed) is not its file to vouch for: an
+    ``sd-`` entry ships only when the row's owner is one of our people."""
+    (tmp_path / "orig.webp").write_bytes(b"relayed picture")
+    sd = space_direct_media_name(SPACE, SELF, "orig.webp")
+    for owner, want in (("u-other", 0), ("u-me", 1)):
+        p, _outbox = _provider(
+            tmp_path,
+            {(SPACE, "p1"): [("orig.webp", owner)]},
+            gate=_Gate(all_files=True, fills=True, own={"u-me"}),
+        )
+        assert await p.handle(_event([{"item": "p1", "name": sd}])) == want, owner

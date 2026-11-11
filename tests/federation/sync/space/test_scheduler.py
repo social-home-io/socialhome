@@ -1853,16 +1853,14 @@ def _helper_sched(
         kept = [at for rowid, at in listed if upto is None or rowid <= upto[0]]
         return max(kept) if kept else None
 
-    async def _marks() -> tuple[int, int]:
-        return marks if marks is not None else (10**9, 10**9)
-
     sched.attach_helpers(
         host_contact=contact,
         resume=resume,
         roster_authority=_authority,
         newest_from=_newest,
-        row_marks=_marks,
     )
+    # The app sets the boot marks at startup.
+    sched.set_row_marks(marks if marks is not None else (10**9, 10**9))
     return sched, contact, resume
 
 
@@ -2041,7 +2039,6 @@ async def test_only_rows_stored_before_boot_count_whatever_their_stamp(
         newest={"admin-a": [(5, pre_boot), (9, late_gap), (10, live)]},
         marks=(7, 7),
     )
-    await sched._take_row_marks()
     await _round(sched)
     await _wait_checks(sched)
     [request] = resume.requests
@@ -2473,4 +2470,19 @@ async def test_a_skipped_begin_causes_no_fallback(
     await _round(sched)
     await _wait_checks(sched)
     assert sched._federation.sent == []
+    assert resume.requests == []
+
+
+async def test_no_helper_is_asked_when_the_boot_marks_could_not_be_read(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """Without the boot cut a helper resume could start past rows still
+    missing: no marks (the startup read failed, so none were set) → no
+    helper ask at all."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    sched._row_marks = None  # never set: the startup read failed
+    await _round(sched)
+    await _wait_checks(sched)
     assert resume.requests == []

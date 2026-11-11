@@ -215,9 +215,12 @@ first, then one step further each silent round — with `since` = the newest
 of: when the host was last heard; the newest post or comment this household
 **stored** in the space from **that helper's** people **before this process
 started** minus a fixed 5-minute overlap (`HELPER_OVERLAP_S`) — "stored
-before" by row id: the scheduler takes `MAX(rowid)` of posts and comments
-once in `start()` (`space_post_repo.row_marks`) and
-`newest_from_household(…, upto=)` counts only rows at or below it, so a live
+before" by row id: the app reads `MAX(rowid)` of posts and comments right
+after the database opens, before any inbound path (GFS mailboxes, GFS
+websockets, RTC) can store anything (`space_post_repo.row_marks`, handed to
+the scheduler with `set_row_marks`; a failed read sets none, and then no
+helper is asked), and `newest_from_household(…, upto=)` counts only rows at
+or below it, so a live
 post or a late gap row with an older stamp that arrives after a restart
 never moves `since` past rows still missing; this process's last
 **successful** ask to that same helper minus the overlap (in memory, per

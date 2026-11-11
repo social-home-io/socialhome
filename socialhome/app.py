@@ -2335,9 +2335,8 @@ def _wire_federation_stack(
         resume=space_sync_resume_provider,
         roster_authority=_roster_authority,
         # A helper's resume starts at its people's newest row stored here
-        # before this process started (row marks taken in start()).
+        # before this process started (the boot marks, set at startup).
         newest_from=space_post_repo.newest_from_household,
-        row_marks=space_post_repo.row_marks,
     )
     # v_92 — a member household that views a space file it misses asks the
     # host (then a trusted helper) for it; we answer such requests too.
@@ -4371,6 +4370,18 @@ def create_app(config: Config | None = None) -> web.Application:
         nonlocal key_manager, federation_service, outbox_processor
         log.info("socialhome: starting up (mode=%s)", config.mode)
         await db.startup()
+        # v_92 — which rows were stored before this process started, read
+        # before ANY inbound path (GFS mailboxes, GFS websockets, RTC) can
+        # store something queued while we were down: a helper resume counts
+        # only those (handed to the scheduler once it is built). A failed
+        # read leaves none, and then no helper is asked.
+        boot_row_marks: tuple[int, int] | None = None
+        try:
+            boot_row_marks = await space_post_repo.row_marks()
+        except Exception:
+            log.exception(
+                "startup: reading the boot row marks failed — no helper resume"
+            )
         # Notification fan-out runs here from now on, off the publisher.
         await notification_delivery.start()
 
@@ -4879,6 +4890,8 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         federation_service = fed.federation_service
         sync_manager = fed.sync_manager
+        if boot_row_marks is not None:
+            app[K.space_sync_scheduler_key].set_row_marks(boot_row_marks)
         # v_67: ``reactions_reach`` on every moment the API returns; seal /
         # open routed reactions with the existing key-wrap key, and return
         # tokens under a key derived from the existing routing secret.

@@ -121,3 +121,25 @@ def test_the_budget_remembers_a_bounded_number_of_windows(monkeypatch):
     # "a" was dropped (oldest): a fresh window.
     assert not budget.exhausted("a", SP)
     assert budget.exhausted("c", SP)
+
+
+async def test_own_only_ships_this_households_people_even_for_the_authority():
+    """``own_only`` (sender-bound files): only our own people's rows, also
+    when we hold the roster authority (which ships every file otherwise)."""
+
+    class _Spaces:
+        async def list_local_member_user_ids(self, space_id):
+            return ["u-me"]
+
+        async def list_members(self, space_id):
+            return []
+
+    async def _authority(space_id):
+        return True
+
+    gate = await CatchUpFileGates(
+        space_repo=_Spaces(), roster_authority=_authority
+    ).for_space("sp", fills=True)
+    assert gate.ship("u-other", ["a"]) == ["a"]
+    assert gate.own_only("u-other", ["a"]) == []
+    assert gate.own_only("u-me", ["a"]) == ["a"]

@@ -294,7 +294,6 @@ class SpaceSyncScheduler:
         "_startup_task",
         "_stop",
         "_sync_manager",
-        "_take_marks",
         "_task",
     )
 
@@ -374,7 +373,6 @@ class SpaceSyncScheduler:
         #: ``MAX(rowid)`` of the rows ``_newest_from`` reads, taken at
         #: ``start()``: only rows stored before it count.
         self._row_marks: tuple[int, int] | None = None
-        self._take_marks: Callable[[], Awaitable[tuple[int, int]]] | None = None
         #: ``(space, helper) -> when this process last asked it`` (only a
         #: successful send).
         self._helper_asks: OrderedDict[tuple[str, str], datetime] = OrderedDict()
@@ -394,27 +392,28 @@ class SpaceSyncScheduler:
         resume: _ResumeSender,
         roster_authority: Callable[[str], Awaitable[bool]],
         newest_from: _NewestFrom,
-        row_marks: Callable[[], Awaitable[tuple[int, int]]],
     ) -> None:
         """Wire trigger 10 (v_92): the host contact the receiver marks, the
         ``SPACE_SYNC_RESUME`` sender, whether we hold a space's roster
         authority (then we are host-equivalent: nothing to fall back from),
         ``newest_from(space, household, upto=)`` — the newest row held here
-        from that household's people among the rows stored by ``upto`` — and
-        ``row_marks()``, those marks, taken once in :meth:`start`. Needs the
-        roster mirror (``seat_repo``) for the helpers."""
+        from that household's people among the rows stored by ``upto`` (the
+        boot marks, :meth:`set_row_marks`). Needs the roster mirror
+        (``seat_repo``) for the helpers."""
         self._host_contact = host_contact
         self._resume = resume
         self._roster_authority = roster_authority
         self._newest_from = newest_from
-        self._take_marks = row_marks
 
-    async def _take_row_marks(self) -> None:
-        """Note which rows were stored before this process started (once):
-        a row that arrives later — a live post, a late gap row with an older
-        stamp — must not move a helper resume past rows still missing."""
-        if self._take_marks is not None and self._row_marks is None:
-            self._row_marks = await self._take_marks()
+    def set_row_marks(self, marks: tuple[int, int]) -> None:
+        """Which rows were stored before this process started — read by the
+        app at startup BEFORE any inbound path (GFS mailboxes, GFS
+        websockets, RTC) can store anything: a row that arrives later (a
+        live post, a late gap row with an older stamp) must not move a
+        helper resume past rows still missing. Never set (the read failed):
+        no helper is asked (:meth:`_await_host_answer`). Once only."""
+        if self._row_marks is None:
+            self._row_marks = marks
 
     def attach_roster_refresh(self, refresh: Callable[[], Awaitable[object]]) -> None:
         """Run ``refresh`` on every periodic tick — the host re-sending each
@@ -744,10 +743,6 @@ class SpaceSyncScheduler:
         """Begin the periodic tick. Idempotent."""
         if self._task is not None and not self._task.done():
             return
-        try:
-            await self._take_row_marks()
-        except Exception:
-            log.exception("space-sync-scheduler: reading the boot row marks failed")
         self._stop.clear()
         self._task = asyncio.create_task(self._loop(), name="SpaceSyncScheduler")
         if self._startup_task is None or self._startup_task.done():
@@ -1062,6 +1057,15 @@ class SpaceSyncScheduler:
         if contact.heard_since(space_id, asked):
             return
         contact.went_silent(space_id, hosts)
+        if self._row_marks is None:
+            # No boot cut (the startup read failed): a resume could start
+            # past rows still missing — ask no helper rather than guess.
+            log.info(
+                "space %s: the host did not answer; no boot row marks — "
+                "no helper resume",
+                space_id,
+            )
+            return
         try:
             rounds = self._helper_round.get(space_id, 0)
             helpers = await trusted_helpers(

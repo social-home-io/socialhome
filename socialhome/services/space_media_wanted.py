@@ -119,15 +119,12 @@ MAX_PENDING_NAMES: int = 500
 MAX_ITEM_ID_LEN: int = 200
 
 
-class _SpaceRows(Protocol):
+class _SpaceItemFiles(Protocol):
+    """``media_reference_repo``: the live space rows showing a file, and the
+    files (with owners) a live item shows."""
+
     async def space_rows_of(self, basename: str) -> list[tuple[str, str, str]]: ...
 
-    async def live_item_files(
-        self, space_id: str, item_id: str
-    ) -> list[tuple[str, str | None]]: ...
-
-
-class _ItemFiles(Protocol):
     async def live_item_files(
         self, space_id: str, item_id: str
     ) -> list[tuple[str, str | None]]: ...
@@ -187,7 +184,7 @@ class SpaceMediaWanted:
     def __init__(
         self,
         *,
-        media_refs: _SpaceRows,
+        media_refs: _SpaceItemFiles,
         space_repo: AbstractSpaceRepo,
         remote_members: AbstractSpaceRemoteMemberRepo,
         federation: _Federation,
@@ -458,7 +455,7 @@ class SpaceMediaWantedProvider:
         self,
         *,
         member_gate: Callable[[str, str], Awaitable[bool]],
-        media_refs: _ItemFiles,
+        media_refs: _SpaceItemFiles,
         file_gates: CatchUpFileGates,
         hasher: MediaFileHasher,
         media_sync: _MediaOutbox,
@@ -530,7 +527,12 @@ class SpaceMediaWantedProvider:
                     # trusted household may fill it, whatever it is stored as.
                     gate = await self._gates.for_space(space_id, fills=True)
                 size = await local_file_size(self._dir, url)
-                if not gate.ship(owner, [url]) or size is None:
+                shipped = (
+                    gate.own_only(owner, [url])
+                    if is_space_direct_media_name(name)
+                    else gate.ship(owner, [url])
+                )
+                if not shipped or size is None:
                     skipped += 1
                     continue
                 if not self._budget.take(requester, space_id, size):
