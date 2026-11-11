@@ -680,8 +680,9 @@ row's author household only, bytes checked against the row's `h`.
   (`HostContact.is_silent`: it left the scheduler's last round unanswered
   for 120 s and has not been heard since — a sync answer or any verified
   event of the space from it ends that at once). Never after a wait while the
-  host answers, so a helper learns which items a member opens only while
-  the host is away. At most 2 helpers are tried (`MAX_HELPERS`); the first
+  host answers, so the request reaches a helper only while the host is
+  away (like any catch-up, whoever serves it learns which items were asked
+  for — inside the space's members, never the GFS). At most 2 helpers are tried (`MAX_HELPERS`); the first
   that takes the request ends it. Only providers at v_92
   (`space_member_supports`: a paired row's version, else the mesh claim); a
   host below v_92 that answers is left to its catch-up.

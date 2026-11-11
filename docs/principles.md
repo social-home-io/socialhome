@@ -1288,36 +1288,24 @@ read from the receiver's own roster mirror, the same one every other
 content-authority rule uses (members are equal on every path). See
 [media](protocol/media.md#who-fills-a-hashed-file-v_86).
 
-**Owner sign-off needed (v_92).** v_92 puts these trusted households to
-work when the host does not answer:
+**Signed off by the owner on 2026-11-11 (v_92).** Whoever serves a member's
+catch-up or a missing file learns which items that member household asked
+for: the host, or — while the host is away — an owner / admin / moderator
+household. That is the same as ordinary sync; it stays inside the space's
+members and never reaches the GFS. What is specific to helpers:
 
-- **Catch-up from a helper.** A member household whose host leaves a
-  round's sync request unanswered (120 s) picks ONE trusted helper
-  automatically — an `admin` / `moderator` household at v_92, from the
-  member's roster mirror — and asks it to replay the space since that
-  helper's people's newest row it held before its last restart (at most
-  30 days). The helper sends
-  its own people's rows and their files only, and only to a household
-  holding a member seat.
-- **Files on view.** `SPACE_MEDIA_WANTED` tells the host which items a
-  member household opens (item ids and content names, sealed like every
-  space envelope). An admin / moderator household learns it **only while
-  the host is offline or unreachable** — the send to the host failed, or
-  the host left the member's last sync round unanswered and has not been
-  heard since (any verified event of the space from the host — not only a
-  sync answer — ends that at once) — never while the host answers. "The
-  host" is the household acting as host here: the owner, or the delegated
-  admin that invited us — the same households the sync round asks. That is new viewing metadata
-  toward helpers, limited to the host's absence: before, only the host
-  learned what a member caught up on.
+- **Only content-authority households** (a live `owner` / `admin` /
+  `moderator` seat in the member's roster mirror, at v_92), and **only while
+  the host is away** — a round's sync request left unanswered (120 s) or the
+  send to the host failed, until any verified event from the household
+  acting as host (the owner, or the delegated admin that invited us).
+- **Only their own people's rows plus hash-checked files:** a helper replays
+  its own people's rows (at most 30 days back); another person's file leaves
+  it only as one asked-for file whose bytes hash to the content name the
+  member's row shows (`SPACE_MEDIA_WANTED`; the v_86 hash checks still apply
+  on arrival), and only to households holding a member seat.
 
-Rights narrow, they do not grow: a helper that is not the roster authority
-replays only its own people's rows and their files (receivers take other
-people's rows only from the household acting as host), another person's
-file leaves it only for one viewed file whose bytes it proved hash to the
-asked-for content name (the v_86 hash checks still apply on arrival), and
-only member households are answered. See
-[sync](protocol/sync.md#host-offline-trusted-helpers-v_92) and
+See [sync](protocol/sync.md#host-offline-trusted-helpers-v_92) and
 [media](protocol/media.md#older-files-on-view--space_media_wanted-v_92).
 
 ## Plaintext locally, encrypted on the wire
