@@ -221,7 +221,7 @@ async def houses(aiohttp_client, tmp_path):
 
 
 def _posts(app):
-    return app[space_sync_service_key]._space_post_repo
+    return app[space_sync_service_key]._exporters["posts"]._repo
 
 
 def _polls(app):
@@ -376,7 +376,7 @@ async def _baseline(h, c):
         content="a reply",
     )
     assert await _posts(h).add_comment(comment, space_id=SPACE)
-    await _polls(h).create_poll(
+    await _polls(h).create_poll_if_absent(
         post_id=pids[1],
         question="Lunch?",
         closes_at=None,
@@ -417,8 +417,8 @@ async def test_a_periodic_session_streams_only_what_changed_and_converges(houses
     # a comment delete, a new post.
     await _posts(h).edit(pids[2], "edited on H", space_id=SPACE)
     await _posts(h).add_reaction(pids[3], "🎉", CORA, space_id=SPACE)
-    assert await _polls(h).cast_vote_in_space(
-        space_id=SPACE, post_id=pids[1], option_id="opt-yes", voter_user_id=CORA
+    assert await _polls(h).set_votes_in_space(
+        space_id=SPACE, post_id=pids[1], option_ids=["opt-yes"], voter_user_id=CORA
     )
     assert await _posts(h).soft_delete(pids[4], space_id=SPACE, moderated_by=AUTHOR)
     assert await _posts(h).soft_delete_comment(comment.id, space_id=SPACE)

@@ -1515,8 +1515,8 @@ async def test_save_event_stores_offsetless_datetime_as_utc(env):
 async def test_list_events_since_compares_naive_and_iso_as_times(two_space_calendars):
     """A same-day row stamped naive (``datetime('now')``) is newer than a
     tz-aware ISO ``since`` a minute earlier: compared as times, not raw
-    TEXT (where " " sorts below "T" and the row was skipped) — the v_87
-    relay media refill sends exactly such a ``since``."""
+    TEXT (where " " sorts below "T" and the row was skipped) — a resume
+    may send exactly such a ``since``."""
     env = two_space_calendars
     await env.db.enqueue(
         "UPDATE space_calendar_events SET updated_at='2026-11-08 10:00:00'"

@@ -7,6 +7,10 @@ from datetime import UTC, date, datetime, time
 import pytest
 
 from socialhome.domain.post import (
+    MAX_POLL_CLOSES_AT,
+    MAX_POLL_OPTIONS,
+    MAX_POLL_TEXT,
+    POLL_OPTION_ID_PREFIX,
     Availability,
     BazaarListing,
     BazaarMode,
@@ -20,7 +24,11 @@ from socialhome.domain.post import (
     PostType,
     SchedulePoll,
     ScheduleSlot,
+    poll_closes_at_from_wire,
     poll_deadline_passed,
+    poll_option_id,
+    poll_options_from_wire,
+    poll_to_wire_dict,
 )
 
 
@@ -191,3 +199,96 @@ def test_bazaar_listing_is_open(status, end_time, is_open):
         created_at="",
     )
     assert listing.is_open(datetime(2026, 10, 28, 10, 0, tzinfo=UTC)) is is_open
+
+
+# ── Reply poll wire shape ─────────────────────────────────────────────
+
+
+def test_poll_to_wire_dict_keeps_ids_and_order():
+    wire = poll_to_wire_dict(
+        post_id="p",
+        space_id="sp",
+        question="Which?",
+        options=[
+            {"id": "o-1", "text": "Yes", "position": 0, "count": 4},
+            {"id": "o-2", "text": "No", "position": 1, "count": 0},
+        ],
+        allow_multiple=1,
+        closes_at="",
+    )
+    assert wire == {
+        "post_id": "p",
+        "space_id": "sp",
+        "question": "Which?",
+        "allow_multiple": True,
+        "closes_at": None,
+        "options": [{"id": "o-1", "text": "Yes"}, {"id": "o-2", "text": "No"}],
+    }
+    assert poll_options_from_wire(wire["options"]) == wire["options"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        "ab",
+        [{"id": "a", "text": "only"}],
+        [{"id": f"o{i}", "text": "x"} for i in range(MAX_POLL_OPTIONS + 1)],
+        [{"id": "a", "text": "x"}, "b"],
+        [{"id": "a", "text": "x"}, {"id": "a", "text": "y"}],
+        [{"id": "a", "text": "x"}, {"id": "", "text": "y"}],
+        [{"id": "a", "text": "x"}, {"id": "b" * 65, "text": "y"}],
+        [{"id": "a", "text": "x"}, {"id": "b", "text": ""}],
+        [{"id": "a", "text": "x"}, {"id": "b", "text": "y" * (MAX_POLL_TEXT + 1)}],
+        [{"id": "a", "text": "x"}, {"id": 2, "text": "y"}],
+        [{"id": "a", "text": "x"}, {"id": "b", "text": None}],
+    ],
+)
+def test_poll_options_from_wire_refuses_a_malformed_list(raw):
+    assert poll_options_from_wire(raw) is None
+
+
+def test_poll_options_from_wire_takes_the_largest_poll():
+    raw = [{"id": f"o{i}", "text": "x", "extra": 1} for i in range(MAX_POLL_OPTIONS)]
+    got = poll_options_from_wire(raw)
+    assert got is not None and len(got) == MAX_POLL_OPTIONS
+    assert got[0] == {"id": "o0", "text": "x"}
+
+
+def test_poll_option_ids_are_bound_to_their_post():
+    """Distinct per post and position, stable, and checkable on receipt."""
+    ids = [poll_option_id("post-1", i) for i in range(3)]
+    assert len(set(ids)) == 3 and all(len(i) == 32 for i in ids)
+    # Never the shape of an older poll's id (a uuid4 hex).
+    assert all(i.startswith(POLL_OPTION_ID_PREFIX) for i in ids)
+    assert ids == [poll_option_id("post-1", i) for i in range(3)]
+    assert poll_option_id("post-2", 0) not in ids
+    mine = [{"id": i, "text": "x"} for i in ids]
+    assert poll_options_from_wire(mine, post_id="post-1") == mine
+    assert poll_options_from_wire(mine, post_id="post-2") is None
+    assert poll_options_from_wire(mine[::-1], post_id="post-1") is None
+
+
+def test_an_older_polls_ids_are_taken_as_stored():
+    """A poll made before ids were post-bound keeps its uuid ids; only an
+    id of the post-bound shape is checked against the post."""
+    legacy = [{"id": "0f" * 16, "text": "x"}, {"id": "1e" * 16, "text": "y"}]
+    assert poll_options_from_wire(legacy, post_id="post-1") == legacy
+    mixed = [legacy[0], {"id": poll_option_id("post-2", 1), "text": "y"}]
+    assert poll_options_from_wire(mixed, post_id="post-1") is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [
+        (None, (True, None)),
+        ("2030-01-01T00:00:00+00:00", (True, "2030-01-01T00:00:00+00:00")),
+        ("2030-01-01 00:00:00", (True, "2030-01-01 00:00:00")),
+        ("", (False, None)),
+        ("tomorrow", (False, None)),
+        (5, (False, None)),
+        ("2030-01-01T00:00:00+00:00".ljust(MAX_POLL_CLOSES_AT + 1), (False, None)),
+    ],
+)
+def test_poll_closes_at_from_wire(raw, want):
+    assert poll_closes_at_from_wire(raw) == want

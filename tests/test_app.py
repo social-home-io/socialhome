@@ -64,6 +64,7 @@ from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRep
 from socialhome.services.app_federation_service import AppFederationService
 from socialhome.services.gfs_relay_inbound import GfsRelayInbound
 from socialhome.services.gfs_route_discovery_service import GfsRouteDiscoveryService
+from socialhome.services.space_media_wanted import SpaceMediaWanted
 
 
 @pytest.fixture
@@ -1004,3 +1005,89 @@ async def test_page_files_reach_the_host_unless_a_link_seat_lacks_upload_rights(
     assert await _check(PageMode.MEMBER, False, False)
     assert await _check(PageMode.MEMBER, True, True)
     assert not await _check(PageMode.MEMBER, True, False)
+
+
+async def test_space_media_wanted_is_wired_both_ways(cfg):
+    """v_92: the media route's requester sits under its key, the provider
+    answers ``SPACE_MEDIA_WANTED``, and the v_87 refill bridge is gone."""
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)):
+        assert isinstance(app[K.space_media_wanted_key], SpaceMediaWanted)
+        registry = app[K.federation_service_key]._event_registry
+        assert registry.handler_count(FederationEventType.SPACE_MEDIA_WANTED) == 1
+    assert not hasattr(K, "relay_media_refill_key")
+
+
+async def test_the_boot_row_marks_are_taken_before_any_inbound_starts(
+    tmp_dir, monkeypatch
+):
+    """v_92 — a helper resume counts only rows stored before this process
+    started: the marks are read before the GFS mailboxes or the GFS
+    websockets can store anything queued while we were down."""
+    from socialhome.federation.sync.space.scheduler import SpaceSyncScheduler
+    from socialhome.infrastructure.gfs_ws_supervisor import GfsWebSocketSupervisor
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+    from socialhome.services.gfs_mailbox_service import GfsMailboxService
+
+    order: list[str] = []
+    set_marks: list[tuple[int, int]] = []
+    real_marks = SqliteSpacePostRepo.row_marks
+    real_set = SpaceSyncScheduler.set_row_marks
+    real_mailboxes = GfsMailboxService.start
+    real_ws = GfsWebSocketSupervisor.start
+
+    async def _marks(self):
+        order.append("marks")
+        return await real_marks(self)
+
+    def _set(self, marks):
+        set_marks.append(marks)
+        real_set(self, marks)
+
+    async def _mailboxes(self):
+        order.append("mailboxes")
+        await real_mailboxes(self)
+
+    async def _ws(self):
+        order.append("gfs-ws")
+        await real_ws(self)
+
+    monkeypatch.setattr(SqliteSpacePostRepo, "row_marks", _marks)
+    monkeypatch.setattr(SpaceSyncScheduler, "set_row_marks", _set)
+    monkeypatch.setattr(GfsMailboxService, "start", _mailboxes)
+    monkeypatch.setattr(GfsWebSocketSupervisor, "start", _ws)
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+    )
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)):
+        pass
+    assert order[0] == "marks"
+    assert {"mailboxes", "gfs-ws"} <= set(order)
+    assert set_marks == [(0, 0)]  # a fresh database: nothing stored yet
+
+
+async def test_a_failed_boot_marks_read_sets_none(tmp_dir, monkeypatch):
+    """The read failing at startup leaves the scheduler without marks, so
+    it asks no helper (it never runs a resume with no cut)."""
+    from socialhome.app_keys import space_sync_scheduler_key
+    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+
+    async def _broken(self):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(SqliteSpacePostRepo, "row_marks", _broken)
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+    )
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)):
+        assert app[space_sync_scheduler_key]._row_marks is None

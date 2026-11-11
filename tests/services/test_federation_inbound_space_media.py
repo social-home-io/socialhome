@@ -32,6 +32,7 @@ from socialhome.repositories import (
 )
 from socialhome.repositories.bazaar_repo import SqliteBazaarRepo
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
+from socialhome.repositories.space_media_ref_repo import SqliteSpaceMediaRefRepo
 from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
@@ -45,6 +46,7 @@ from socialhome.services.inbound_media_store import (
     partial_key,
     space_direct_media_name,
 )
+from socialhome.services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 
 pytestmark = pytest.mark.asyncio
 
@@ -1156,5 +1158,85 @@ async def test_a_moderator_fills_but_a_plain_member_does_not(env, db):
     assert not (media / SC(data)).exists()
     await svc._on_space_media_blob(
         _blob(_hashed("post-f", "x.webp", data), from_instance="peer-mod", body=data)
+    )
+    assert (media / SC(data)).read_bytes() == data
+
+
+class _NoKeys:
+    async def media_key(self, space_id, *, epoch=None):
+        return None
+
+
+class _NoGfs:
+    async def connection_for_url(self, url):
+        return None
+
+    async def list_active(self):
+        return []
+
+
+class _NoInstances:
+    async def list_member_instance_ids(self, space_id):
+        return []
+
+
+async def test_a_gfs_described_hashed_file_is_filled_by_the_hosts_push(env, db):
+    """One name on every path: a post that reaches a GFS-reached member
+    with a ``media_refs`` descriptor AND a hash map shows the content name
+    — the very name the host's (or a helper's) hashed push lands under."""
+    svc, media = env
+    data = b"THE-PICTURE"
+    await _seat(db, "peer-a", "u-a")
+    fetcher = SpaceMediaGfsFetcher(
+        refs_repo=SqliteSpaceMediaRefRepo(db),
+        space_crypto=_NoKeys(),  # type: ignore[arg-type]
+        gfs_service=_NoGfs(),  # type: ignore[arg-type]
+        gfs_repo=_NoGfs(),  # type: ignore[arg-type]
+        federation_repo=_NoInstances(),  # type: ignore[arg-type]
+        space_repo=SqliteSpaceRepo(db),
+        federation=_NoInstances(),  # type: ignore[arg-type]
+        media_dir=media,
+    )
+    svc.attach_gfs_media(fetcher)
+    await svc._on_space_post_created(
+        FederationEvent(
+            msg_id="m-post",
+            event_type=FET.SPACE_POST_CREATED,
+            from_instance="peer-a",
+            to_instance="self",
+            timestamp=datetime.now(UTC).isoformat(),
+            payload={
+                "id": "post-gfs",
+                "author": "u-a",
+                "type": "image",
+                "content": "",
+                "image_urls": ["api/media/x.webp"],
+                "media_refs": {
+                    "x.webp": {
+                        "blob_id": "a" * 64,
+                        "suite": "aesgcm-256-pad-det",
+                        "epoch": 0,
+                        "size": 99,
+                        "scope": "space",
+                        "addr_suite": "sm1",
+                    }
+                },
+                "files": {"x.webp": {"h": _h(data)}},
+                "files_suite": "sha256",
+            },
+            space_id="sp-a",
+        )
+    )
+    await fetcher.drain()
+    row = await db.fetchone(
+        "SELECT image_urls_json FROM space_posts WHERE id = 'post-gfs'"
+    )
+    assert f"api/media/{SC(data)}" in row["image_urls_json"]
+    ref = await db.fetchone(
+        "SELECT local_name FROM space_media_refs WHERE item_id = 'post-gfs'"
+    )
+    assert ref["local_name"] == SC(data)
+    await svc._on_space_media_blob(
+        _blob(_hashed("post-gfs", "x.webp", data), body=data)
     )
     assert (media / SC(data)).read_bytes() == data

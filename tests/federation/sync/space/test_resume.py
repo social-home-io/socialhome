@@ -25,19 +25,29 @@ from socialhome.domain.task import (
     TaskTombstone,
 )
 from socialhome.domain.tombstone import SpaceRowTombstone
+from socialhome.federation.sync.space import file_gate as file_gate_mod
 from socialhome.federation.sync.space import resume as resume_mod
+from socialhome.federation.sync.space.file_gate import SpaceFileBudget
 from socialhome.federation.sync.space.resume import (
     MAX_PER_RESOURCE,
-    REFILL_MAX_FILES,
-    REFILL_MAX_ROWS,
     SpaceSyncResumeProvider,
     _post_to_payload,
 )
 
 
+@pytest.fixture(autouse=True)
+def _replays_reach_back_to_the_fixtures(monkeypatch):
+    """The fixtures date from April 2026: lift the 30-day ``since`` floor
+    (its own test sets it back)."""
+    monkeypatch.setattr(resume_mod, "RESUME_MAX_AGE_S", 100 * 365 * 86_400)
+
+
 class _FakeFederation:
     def __init__(self) -> None:
         self.sent: list[dict] = []
+        #: ``send_with_mesh_fallback`` sends (the resume request).
+        self.routed: list[dict] = []
+        self.route_ok = True
         #: Advertised proto_version per peer (default: current).
         self.versions: dict[str, int] = {}
 
@@ -56,6 +66,19 @@ class _FakeFederation:
                 "space_id": space_id,
             }
         )
+
+    async def send_with_mesh_fallback(
+        self, *, to_instance_id, event_type, payload, space_id=None
+    ):
+        self.routed.append(
+            {
+                "to": to_instance_id,
+                "type": event_type,
+                "payload": payload,
+                "space_id": space_id,
+            }
+        )
+        return SimpleNamespace(ok=self.route_ok, error=None if self.route_ok else "x")
 
 
 class _FakeSpaceRepo:
@@ -210,6 +233,20 @@ def _ts_attr(row) -> str:
     return ""
 
 
+class _FakePollRepo:
+    """``post_id → (meta, options)`` — the two reads the poll replay makes."""
+
+    def __init__(self, polls: dict[str, tuple[dict, list[dict]]]) -> None:
+        self._polls = polls
+
+    async def get_meta(self, post_id):
+        held = self._polls.get(post_id)
+        return dict(held[0]) if held is not None else None
+
+    async def list_options_with_counts(self, post_id):
+        return [dict(o) for o in self._polls[post_id][1]]
+
+
 def _post(i: int, at: datetime) -> Post:
     return Post(
         id=f"p-{i}",
@@ -319,6 +356,7 @@ def provider_factory():
         gallery_items=None,
         gallery_albums=None,
         gallery_tombstones=None,
+        polls=None,
         members,
     ):
         fed = _FakeFederation()
@@ -342,6 +380,7 @@ def provider_factory():
                 if gallery_items is not None
                 else None
             ),
+            space_poll_repo=_FakePollRepo(polls) if polls is not None else None,
         )
         return provider, fed, post_repo
 
@@ -453,34 +492,16 @@ async def test_handle_request_payload_matches_inbound_shape(provider_factory):
 # ── Outbound (requester sends RESUME) ───────────────────────────────
 
 
-async def test_send_request_emits_canonical_payload(provider_factory):
-    """``send_request`` posts SPACE_SYNC_RESUME to the right peer."""
-    provider, fed, _ = provider_factory(posts=[], members=[])
-    await provider.send_request(
-        space_id="sp-1",
-        instance_id="peer-b",
-        since="2026-04-01T00:00:00+00:00",
-    )
-    assert fed.sent == [
-        {
-            "to": "peer-b",
-            "type": FederationEventType.SPACE_SYNC_RESUME,
-            "payload": {
-                "space_id": "sp-1",
-                "since": "2026-04-01T00:00:00+00:00",
-            },
-            "space_id": "sp-1",
-        }
-    ]
-
-
 async def test_send_request_validates_inputs(provider_factory):
     """Empty fields produce a no-op, not an error."""
     provider, fed, _ = provider_factory(posts=[], members=[])
-    await provider.send_request(space_id="", instance_id="peer-b", since="x")
-    await provider.send_request(space_id="sp-1", instance_id="", since="x")
-    await provider.send_request(space_id="sp-1", instance_id="peer-b", since="")
+    assert not await provider.send_request(space_id="", instance_id="peer-b", since="x")
+    assert not await provider.send_request(space_id="sp-1", instance_id="", since="x")
+    assert not await provider.send_request(
+        space_id="sp-1", instance_id="peer-b", since=""
+    )
     assert fed.sent == []
+    assert fed.routed == []
 
 
 # ── Multi-resource replays ──────────────────────────────────────────
@@ -1249,7 +1270,7 @@ def _image_post(i: int, at: datetime, *names: str) -> Post:
     )
 
 
-def _bounded_provider(tmp_path, posts, outbox, clock=lambda: 0.0):
+def _bounded_provider(tmp_path, posts, outbox, clock=lambda: 0.0, budget=None):
     return SpaceSyncResumeProvider(
         federation_service=_FakeFederation(),
         space_repo=_FakeSpaceRepo(["peer-a"]),
@@ -1257,15 +1278,16 @@ def _bounded_provider(tmp_path, posts, outbox, clock=lambda: 0.0):
         media_sync=outbox,
         media_dir=tmp_path,
         clock=clock,
+        budget=budget,
     )
 
 
 async def test_a_resumes_files_are_bounded_in_bytes_and_count(tmp_path, monkeypatch):
-    """The requester picks ``since``: one request pushes at most
-    RESUME_MEDIA_MAX_FILES files and RESUME_MEDIA_MAX_BYTES bytes of what
-    is here — a file past the budget, or not here, is skipped."""
-    monkeypatch.setattr(resume_mod, "RESUME_MEDIA_MAX_BYTES", 100)
-    monkeypatch.setattr(resume_mod, "RESUME_MEDIA_MAX_FILES", 3)
+    """The requester picks ``since``: one request pushes at most the shared
+    (requester, space) budget's files and bytes of what is here — a file
+    past the budget, or not here, is skipped."""
+    monkeypatch.setattr(file_gate_mod, "BUDGET_MAX_BYTES", 100)
+    monkeypatch.setattr(file_gate_mod, "BUDGET_MAX_FILES", 3)
     for name, size in (("a", 40), ("big", 500), ("b", 40), ("c", 10), ("d", 1)):
         (tmp_path / f"{name}.webp").write_bytes(b"x" * size)
     base = datetime(2026, 4, 1, tzinfo=UTC)
@@ -1283,6 +1305,31 @@ async def test_a_resumes_files_are_bounded_in_bytes_and_count(tmp_path, monkeypa
     # 40 + 40 + 10 bytes, three files: "big" is over the bytes, "gone" is
     # missing, "d" is over the count.
     assert shipped == ["api/media/a.webp", "api/media/b.webp", "api/media/c.webp"]
+
+
+async def test_a_resume_and_space_media_wanted_share_one_budget(tmp_path):
+    """ONE budget per (requester, space): files the household was already
+    sent on request (``SPACE_MEDIA_WANTED``) this window count against a
+    resume's files too."""
+    (tmp_path / "a.webp").write_bytes(b"x")
+    budget = SpaceFileBudget(clock=lambda: 0.0)
+    for _ in range(file_gate_mod.BUDGET_MAX_FILES):
+        assert budget.take("peer-a", "sp-1", 1)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    outbox = _FakeMediaOutbox()
+    provider = _bounded_provider(
+        tmp_path,
+        [_image_post(0, base + timedelta(minutes=1), "a.webp")],
+        outbox,
+        budget=budget,
+    )
+    assert (
+        await provider.handle_request(
+            _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+        )
+        == 1
+    )
+    assert outbox.rows == []
 
 
 async def test_a_resume_is_served_once_per_household_and_space_per_cooldown(
@@ -1361,89 +1408,13 @@ async def test_concurrent_resumes_are_served_once(tmp_path):
     assert len(outbox.rows) == 1
 
 
-class _Gate:
-    """A moderator household's gate: our people's files, others' sc- only."""
-
-    async def for_requester(self, space_id, requester):
-        assert (space_id, requester) == ("sp-1", "peer-a")
-        return self
-
-    async def ship(self, owner, urls):
-        if owner == "alice":
-            return list(urls)
-        return [u for u in urls if u.rsplit("/", 1)[-1].startswith("sc-")]
+# ── v_92: the v_87 refill bridge is gone ─────────────────────────────────
 
 
-async def test_a_trusted_non_host_resume_ships_others_hashed_files_only():
-    """v_86: a non-host resume ships every file of its own people's rows
-    and, through the file gate, only the hashed files of other people's
-    rows — the receiver refuses the rest from it."""
-    base = datetime(2026, 4, 1, tzinfo=UTC)
-    at = base + timedelta(minutes=1)
-    ours = replace(
-        _image_post(0, at, "sd-a.webp", "sc-a.webp"),
-    )
-    theirs = replace(
-        _image_post(1, at, "sd-b.webp", "sc-b.webp"),
-        author="bob",
-    )
-    event = replace(
-        _cal_event(0, at), cover_url="api/media/sd-c.webp", created_by="bob"
-    )
-    outbox = _FakeMediaOutbox()
-    provider = SpaceSyncResumeProvider(
-        federation_service=_FakeFederation(),
-        space_repo=_FakeSpaceRepo(["peer-a"]),
-        space_post_repo=_FakePostRepo(posts=[ours, theirs]),
-        space_calendar_repo=_FakeListSinceRepo([event]),
-        media_sync=outbox,
-    )
-    provider.attach_file_gates(_Gate())
-    await provider.handle_request(
-        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
-    )
-    assert outbox.rows == [
-        ("sp-1", "p-0", ("peer-a",), ("api/media/sd-a.webp", "api/media/sc-a.webp")),
-        ("sp-1", "p-1", ("peer-a",), ("api/media/sc-b.webp",)),
-    ]
-
-
-# ── v_87 relay media refill: one resource, few rows, own window ──────────
-
-
-def _refill_event(resource: str, since: str):
-    return _event("peer-a", {"space_id": "sp-1", "since": since, "refill": resource})
-
-
-async def test_a_refill_replays_only_the_named_resource_and_few_rows():
-    base = datetime(2026, 4, 1, tzinfo=UTC)
-    at = base + timedelta(minutes=1)
-    posts = [_image_post(i, at, f"sc-{i}.webp") for i in range(40)]
-    event = replace(_cal_event(0, at), cover_url="api/media/cover.webp")
-    outbox = _FakeMediaOutbox()
-    fed = _FakeFederation()
-    provider = SpaceSyncResumeProvider(
-        federation_service=fed,
-        space_repo=_FakeSpaceRepo(["peer-a"]),
-        space_post_repo=_FakePostRepo(posts=posts),
-        space_calendar_repo=_FakeListSinceRepo([event]),
-        media_sync=outbox,
-    )
-    sent = await provider.handle_request(_refill_event("calendar", base.isoformat()))
-    assert sent == 1
-    assert [s["type"] for s in fed.sent] == [
-        FederationEventType.SPACE_CALENDAR_EVENT_CREATED
-    ]
-    assert outbox.rows == [("sp-1", "ev-0", ("peer-a",), ("api/media/cover.webp",))]
-    # Posts: at most REFILL_MAX_ROWS rows, files capped too.
-    fed.sent.clear()
-    outbox.rows.clear()
-    await provider.handle_request(_refill_event("posts", base.isoformat()))
-    assert len(fed.sent) == REFILL_MAX_ROWS
-    assert sum(len(r[3]) for r in outbox.rows) <= REFILL_MAX_FILES
-
-
-async def test_a_refill_has_its_own_window_beside_the_reconnect_resume():
+async def test_a_stray_refill_field_is_an_ordinary_resume():
+    """The never-released v_87 ``refill`` narrowing is gone (v_92
+    ``SPACE_MEDIA_WANTED`` replaced it): the field is ignored and the request
+    is the ordinary, once-per-window resume."""
     base = datetime(2026, 4, 1, tzinfo=UTC)
     at = base + timedelta(minutes=1)
     fed = _FakeFederation()
@@ -1452,34 +1423,240 @@ async def test_a_refill_has_its_own_window_beside_the_reconnect_resume():
         space_repo=_FakeSpaceRepo(["peer-a"]),
         space_post_repo=_FakePostRepo(posts=[_post(0, at)]),
     )
-    assert await provider.handle_request(_refill_event("posts", base.isoformat()))
-    # A second refill within the window is dropped…
-    assert not await provider.handle_request(_refill_event("posts", base.isoformat()))
-    # …but the real reconnect resume still runs.
-    assert await provider.handle_request(
+    stray = {"space_id": "sp-1", "since": base.isoformat(), "refill": "posts"}
+    assert await provider.handle_request(_event("peer-a", stray)) == 1
+    assert not await provider.handle_request(
         _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
     )
+    assert not hasattr(provider, "replay_refill_to")
 
 
-async def test_an_unknown_refill_resource_replays_nothing():
+# ── v_92: bounded on every path; a helper replays only its own people ────
+
+
+async def test_a_resumes_since_is_clamped_to_30_days(monkeypatch):
+    """However far back a requester asks, a replay starts at most
+    :data:`RESUME_MAX_AGE_S` ago — the catch-up is bounded on every path."""
+    monkeypatch.setattr(resume_mod, "RESUME_MAX_AGE_S", 30 * 86_400)
+    post_repo = _FakePostRepo()
+    provider = SpaceSyncResumeProvider(
+        federation_service=_FakeFederation(),
+        space_repo=_FakeSpaceRepo(["peer-a", "peer-b"]),
+        space_post_repo=post_repo,
+    )
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": "2026-01-01T00:00:00+00:00"})
+    )
+    floor = datetime.now(UTC) - timedelta(days=30)
+    assert abs(datetime.fromisoformat(post_repo.last_since) - floor) < timedelta(
+        minutes=1
+    )
+    # A recent ``since`` (naive form too) is kept as asked.
+    recent = (datetime.now(UTC) - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+    await provider.handle_request(
+        _event("peer-b", {"space_id": "sp-1", "since": recent})
+    )
+    assert post_repo.last_since == recent
+
+
+async def test_send_request_reaches_a_helper_over_the_mesh_or_its_mailbox(
+    provider_factory,
+):
+    """A helper may be reached by mesh or a GFS mailbox seat only: the
+    request goes through ``send_with_mesh_fallback`` (space-scoped)."""
+    provider, fed, _ = provider_factory(posts=[], members=[])
+    assert await provider.send_request(
+        space_id="sp-1", instance_id="helper", since="2026-11-01T00:00:00+00:00"
+    )
+    fed.route_ok = False
+    assert not await provider.send_request(
+        space_id="sp-1", instance_id="helper", since="2026-11-01T00:00:00+00:00"
+    )
+    fed.routed.pop()
+    assert fed.sent == []
+    assert fed.routed == [
+        {
+            "to": "helper",
+            "type": FederationEventType.SPACE_SYNC_RESUME,
+            "payload": {"space_id": "sp-1", "since": "2026-11-01T00:00:00+00:00"},
+            "space_id": "sp-1",
+        }
+    ]
+
+
+def _helper_provider(*, authority: bool):
+    """A moderator household's resume provider over rows of its own person
+    (alice) and of another household's (bob)."""
     base = datetime(2026, 4, 1, tzinfo=UTC)
+    at = base + timedelta(minutes=1)
+    ours = _image_post(0, at, "sd-a.webp", "sc-a.webp")
+    theirs = replace(_image_post(1, at, "sd-b.webp", "sc-b.webp"), author="bob")
+    comments = [
+        ("p-0", _comment(0, "p-0", at)),
+        (
+            "p-1",
+            replace(
+                _comment(1, "p-1", at),
+                author="bob",
+                type=CommentType.IMAGE,
+                media_url="api/media/sc-c.webp",
+            ),
+        ),
+    ]
+    tasks = _FakeListSinceRepo(
+        [_task(0, at), replace(_task(1, at), created_by="bob")],
+        task_tombstones=[
+            TaskTombstone(
+                id="t-gone-ours",
+                list_id="list-1",
+                deleted_at="2026-04-02 00:00:00",
+                created_by="bob",
+                deleted_by="alice",
+            ),
+            TaskTombstone(
+                id="t-gone-theirs",
+                list_id="list-1",
+                deleted_at="2026-04-02 00:00:00",
+                created_by="alice",
+                deleted_by="bob",
+            ),
+        ],
+    )
     fed = _FakeFederation()
+    outbox = _FakeMediaOutbox()
     provider = SpaceSyncResumeProvider(
         federation_service=fed,
-        space_repo=_FakeSpaceRepo(["peer-a"]),
-        space_post_repo=_FakePostRepo(posts=[_post(0, base + timedelta(minutes=1))]),
+        # "peer-a" holds a member seat; "follower" only follows (its
+        # household is in ``space_instances`` all the same).
+        space_repo=_FakeSpaceRepo(["peer-a", "follower"]),
+        space_post_repo=_FakePostRepo(posts=[ours, theirs], comments=comments),
+        space_task_repo=tasks,
+        media_sync=outbox,
     )
-    assert await provider.handle_request(_refill_event("tasks", base.isoformat())) == 0
-    assert fed.sent == []
+
+    async def _authority(space_id: str) -> bool:
+        return authority
+
+    async def _own(space_id: str) -> set[str]:
+        return {"alice"}
+
+    async def _writer_seat(space_id: str, instance_id: str) -> bool:
+        return instance_id == "peer-a"
+
+    provider.attach_row_scope(_authority, own_members=_own, member_gate=_writer_seat)
+    return provider, fed, outbox, base
 
 
-async def test_a_refill_from_a_non_member_replays_nothing():
+async def test_a_non_authority_resume_sends_only_its_own_peoples_rows():
+    """A helper (not the roster authority) replays only its own people's
+    rows — the receiver refuses the rest from it — and ships only those
+    rows' files: other people's files come on view (SPACE_MEDIA_WANTED)."""
+    provider, fed, outbox, base = _helper_provider(authority=False)
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    )
+    sent = [
+        (s["type"], s["payload"].get("id") or s["payload"].get("comment_id"))
+        for s in fed.sent
+    ]
+    assert sent == [
+        (FederationEventType.SPACE_POST_CREATED, "p-0"),
+        (FederationEventType.SPACE_COMMENT_CREATED, "c-0"),
+        (FederationEventType.SPACE_TASK_DELETED, "t-gone-ours"),
+        (FederationEventType.SPACE_TASK_CREATED, "t-0"),
+    ]
+    assert outbox.rows == [
+        ("sp-1", "p-0", ("peer-a",), ("api/media/sd-a.webp", "api/media/sc-a.webp")),
+    ]
+
+
+@pytest.mark.parametrize("authority", [False, True])
+async def test_a_follower_only_household_gets_nothing_from_a_helper(authority):
+    """A helper gates on a writer (member) seat — the §25.6 provider's and
+    SPACE_MEDIA_WANTED's ``may_receive`` — so a household that only follows
+    gets nothing from it. The roster authority keeps its own gate (a
+    follower gets its subset there)."""
+    provider, fed, outbox, base = _helper_provider(authority=authority)
+    sent = await provider.handle_request(
+        _event("follower", {"space_id": "sp-1", "since": base.isoformat()})
+    )
+    assert (sent > 0) is authority
+    if not authority:
+        assert fed.sent == [] and outbox.rows == []
+
+
+async def test_the_roster_authority_resume_replays_every_row():
+    provider, fed, _outbox, base = _helper_provider(authority=True)
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    )
+    ids = [s["payload"].get("id") or s["payload"].get("comment_id") for s in fed.sent]
+    assert ids == [
+        "p-0",
+        "p-1",
+        "c-0",
+        "c-1",
+        "t-gone-ours",
+        "t-gone-theirs",
+        "t-0",
+        "t-1",
+    ]
+
+
+# ── Reply polls ride behind their posts ───────────────────────────────
+
+
+def _poll_post(i: int, at: datetime, author: str = "alice") -> Post:
+    return Post(
+        id=f"p-{i}", author=author, type=PostType.POLL, created_at=at, content=""
+    )
+
+
+_POLL = (
+    {"question": "Which?", "allow_multiple": True, "closes_at": None, "closed": False},
+    [{"id": "o-1", "text": "Yes", "count": 3}, {"id": "o-2", "text": "No", "count": 0}],
+)
+
+
+async def test_a_replayed_poll_post_is_followed_by_its_poll(provider_factory):
+    """The definition goes out as the live ``SPACE_POLL_CREATED``, after the
+    posts: a text post and a poll post without a poll send none."""
     base = datetime(2026, 4, 1, tzinfo=UTC)
-    fed = _FakeFederation()
-    provider = SpaceSyncResumeProvider(
-        federation_service=fed,
-        space_repo=_FakeSpaceRepo(["someone-else"]),
-        space_post_repo=_FakePostRepo(posts=[_post(0, base + timedelta(minutes=1))]),
+    posts = [
+        _post(0, base + timedelta(minutes=1)),
+        _poll_post(1, base + timedelta(minutes=2)),
+        _poll_post(2, base + timedelta(minutes=3)),
+    ]
+    provider, fed, _ = provider_factory(
+        posts=posts, polls={"p-1": _POLL, "p-0": _POLL}, members=["peer-a"]
     )
-    assert await provider.handle_request(_refill_event("posts", base.isoformat())) == 0
-    assert fed.sent == []
+    sent = await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    )
+    assert sent == 4
+    assert [s["type"] for s in fed.sent] == [
+        *[FederationEventType.SPACE_POST_CREATED] * 3,
+        FederationEventType.SPACE_POLL_CREATED,
+    ]
+    assert fed.sent[-1]["payload"] == {
+        "post_id": "p-1",
+        "space_id": "sp-1",
+        "question": "Which?",
+        "allow_multiple": True,
+        "closes_at": None,
+        "options": [{"id": "o-1", "text": "Yes"}, {"id": "o-2", "text": "No"}],
+    }
+    assert fed.sent[-1]["to"] == "peer-a"
+
+
+async def test_without_a_poll_repo_only_the_posts_replay(provider_factory):
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    provider, _fed, _ = provider_factory(
+        posts=[_poll_post(1, base + timedelta(minutes=1))], members=["peer-a"]
+    )
+    assert (
+        await provider.handle_request(
+            _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+        )
+        == 1
+    )

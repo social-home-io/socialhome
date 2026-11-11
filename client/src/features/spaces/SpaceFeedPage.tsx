@@ -496,9 +496,16 @@ export default function SpaceFeedPage() {
   }
 
   const handleReact = async (postId: string, emoji: string) => {
-    await api.post(
-      `/api/spaces/${spaceId}/posts/${postId}/reactions`, { emoji },
-    )
+    try {
+      await api.post(
+        `/api/spaces/${spaceId}/posts/${postId}/reactions`, { emoji },
+      )
+    } catch (err) {
+      // A refused reaction (a sixth on one post, an archived space…): say
+      // why — the API error carries the translated line.
+      showToast(err instanceof Error ? err.message : String(err), 'error')
+      return
+    }
     void loadSpaceFeed(spaceId)
   }
 

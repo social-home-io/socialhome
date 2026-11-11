@@ -147,8 +147,8 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         self._bus.subscribe(CommentAdded, self._on_comment_added)
         self._bus.subscribe(CommentUpdated, self._on_comment_updated)
         self._bus.subscribe(CommentDeleted, self._on_comment_deleted)
-        # v_49 — a local user's space reaction rides only the member relay
-        # (space reactions are not federated events).
+        # A local user's space reaction: v_93 to every member household,
+        # and (v_49) over the member relay where the space has one.
         self._bus.subscribe(PostReactionChanged, self._on_reaction_changed)
 
     def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
@@ -242,10 +242,12 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         *,
         target: str,
         post_id: str,
+        ts: str | None = None,
         **fields: str | None,
     ) -> None:
         """Sign a generic item inner for our own user and hand it to the
-        member publisher's background queue. Never raises."""
+        member publisher's background queue. ``ts``: the item's signed stamp
+        when the caller already fixed one (default: now). Never raises."""
         assert self._member_gfs is not None
         try:
             author = await self._users.get_by_user_id(author_user_id)
@@ -262,7 +264,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 author_identity_seed=self._own_identity_seed,
                 origin_instance_id=self._own_instance_id,
                 author_identity_anchor=author.identity_anchor,
-                ts=datetime.now(UTC).isoformat(),
+                ts=ts or datetime.now(UTC).isoformat(),
                 **fields,
             )
             self._member_gfs.schedule_item(space_id, author_user_id, item_type, inner)
@@ -315,17 +317,51 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             )
 
     async def _on_reaction_changed(self, event: PostReactionChanged) -> None:
-        if event.origin_instance_id is not None or not event.reactor_user_id:
+        """A local user's reaction on a space post, added or removed.
+
+        v_93: the delta goes to every member household
+        (``SPACE_POST_REACTION``; one at an older version is skipped — it
+        keeps showing its own people's reactions). Where the space is also
+        read through a GFS, the v_49 ``space_item`` follows as before. Both
+        carry the event's own time, so a household that gets both applies
+        one. Never an inbound reaction (no echo), never a household post.
+        """
+        if (
+            event.origin_instance_id is not None
+            or not event.reactor_user_id
+            or not event.space_id
+        ):
             return
+        at = event.occurred_at.astimezone(UTC).isoformat()
+        try:
+            await self._federation.broadcast_to_space_members(
+                event.space_id,
+                FederationEventType.SPACE_POST_REACTION,
+                {
+                    "space_id": event.space_id,
+                    "post_id": event.post.id,
+                    "user_id": event.reactor_user_id,
+                    "emoji": event.emoji,
+                    "action": "add" if event.added else "remove",
+                    "at": at,
+                },
+                min_proto_version=FederationCapability.MIN_FOR_SPACE_POST_REACTIONS,
+            )
+        except Exception:
+            log.exception(
+                "SPACE_POST_REACTION broadcast failed for space=%s post=%s",
+                event.space_id,
+                event.post.id,
+            )
         if not await self._member_publishable(event.space_id):
             return
-        assert event.space_id is not None
         await self._schedule_item(
             event.space_id,
             event.reactor_user_id,
             ITEM_TYPE_REACTION_ADD if event.added else ITEM_TYPE_REACTION_REMOVE,
             target=event.post.id,
             post_id=event.post.id,
+            ts=at,
             emoji=event.emoji,
         )
 

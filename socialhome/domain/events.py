@@ -707,24 +707,37 @@ class SchedulePollResponded(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class PollCreated(DomainEvent):
-    """A reply poll was attached to a post (§9)."""
+    """A reply poll was attached to a post (§9).
+
+    ``options`` (``{id, text}`` in display order) and ``closes_at`` are the
+    rest of the definition: a space poll's goes to the member households
+    whole (``SPACE_POLL_CREATED``), so every household holds the same
+    option ids. ``origin_instance_id`` is set when the poll came from a
+    peer: the outbound bridge does not echo it back.
+    """
 
     post_id: str
     question: str
     allow_multiple: bool
     space_id: str | None = None
+    options: tuple[dict, ...] = ()
+    closes_at: str | None = None
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
 class PollVoted(DomainEvent):
     """A user cast or retracted a vote. ``option_ids`` is the full set
-    after the change (empty = retracted)."""
+    after the change (empty = retracted). ``origin_instance_id`` is set
+    when the vote came from a peer (``SPACE_POLL_VOTE_CAST``): the outbound
+    bridge does not echo it back."""
 
     post_id: str
     voter_user_id: str
     option_ids: tuple[str, ...]
     space_id: str | None = None
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1502,9 +1515,10 @@ class SpaceSyncComplete(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class SpaceSyncDeferred(DomainEvent):
     """A sync we asked a provider for was not served and must be asked for
-    again: the provider refused our ``SPACE_SYNC_BEGIN`` for lack of
-    capacity (``too_many_sessions`` / ``node_capacity``, §25.6 S-6 / S-8),
-    or its stream broke off before the end-of-stream sentinel (the
+    again: the provider refused our ``SPACE_SYNC_BEGIN`` (``reason``: its
+    ``too_many_sessions`` / ``node_capacity`` / ``rate_limited``, §25.6
+    S-6 / S-8 — only a capacity refusal is asked again shortly), or its
+    stream broke off before the end-of-stream sentinel (the
     DataChannel closed under it — the provider restarted; ``reason``
     ``"interrupted"``).
 
@@ -1517,8 +1531,9 @@ class SpaceSyncDeferred(DomainEvent):
     provider_instance_id: str
     sync_mode: str = "initial"
     sync_id: str = ""
-    #: ``"capacity"`` (refused) or ``"interrupted"`` (cut mid-stream).
-    reason: str = "capacity"
+    #: The provider's refusal, or ``"interrupted"`` (cut mid-stream, noticed
+    #: on our side — not an answer from the provider).
+    reason: str = "too_many_sessions"
     occurred_at: datetime = field(default_factory=_now)
 
 

@@ -126,6 +126,34 @@ async def acts_as_host(
     return await is_trusted_inviter(space_repo, seat_repo, space, sender)
 
 
+async def acting_hosts(
+    space_repo: AbstractSpaceRepo,
+    seat_repo: AbstractSpaceRemoteMemberRepo | None,
+    space: Space,
+    *,
+    own_instance_id: str,
+) -> list[str]:
+    """The households acting as *space*'s host HERE, owner first: its owner
+    and — on a household a delegated admin invited — that inviting admin
+    while it is host-equivalent (:func:`is_trusted_inviter`). One notion
+    for everything that talks to "the host": the sync scheduler's BEGINs
+    and its silent-host wait (v_92), and who a ``SPACE_MEDIA_WANTED`` asks
+    before any helper. Without a roster mirror (*seat_repo*) only the
+    owner."""
+    targets = [space.owner_instance_id]
+    if seat_repo is None:
+        return targets
+    inviter = await space_repo.get_invited_by(space.id)
+    if (
+        inviter
+        and inviter not in targets
+        and inviter != own_instance_id
+        and await acts_as_host(space_repo, seat_repo, space, inviter)
+    ):
+        targets.append(inviter)
+    return targets
+
+
 async def touches_owner_household(
     space_repo: AbstractSpaceRepo,
     seat_repo: AbstractSpaceRemoteMemberRepo | None,
@@ -151,6 +179,7 @@ async def touches_owner_household(
 
 
 __all__ = [
+    "acting_hosts",
     "acts_as_host",
     "is_trusted_inviter",
     "owner_statement_current",

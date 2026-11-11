@@ -64,8 +64,11 @@ class AbstractSpaceMediaOutboxRepo(Protocol):
         target_instance_id: str,
         bytes_path: str,
     ) -> None:
-        """Queue one file for one household. A row already queued or in
-        flight is left to the scheduler; a ``failed`` one (out of attempts)
+        """Queue one file for one household. A row in flight is left to the
+        scheduler; a queued one keeps its schedule and correlation but takes the new
+        ``bytes_path`` (v_92: an asked-for file sent under its content name
+        from the reader-named file that exists here); a ``failed`` one (out
+        of attempts)
         is re-armed — a later catch-up / replay is a fresh chance, and a
         receiver binds a file to the household that delivered its row, so
         nobody else can fill it."""
@@ -148,13 +151,21 @@ class SqliteSpaceMediaOutboxRepo:
              )
             ON CONFLICT(blob_id, target_instance_id) DO UPDATE SET
                 status='pending',
-                attempts=0,
-                next_attempt_at=datetime('now'),
-                last_error=NULL,
-                space_id=excluded.space_id,
-                correlation_id=excluded.correlation_id,
+                attempts=CASE WHEN space_media_outbox.status='failed'
+                              THEN 0 ELSE space_media_outbox.attempts END,
+                next_attempt_at=CASE WHEN space_media_outbox.status='failed'
+                                     THEN datetime('now')
+                                     ELSE space_media_outbox.next_attempt_at END,
+                last_error=CASE WHEN space_media_outbox.status='failed'
+                                THEN NULL ELSE space_media_outbox.last_error END,
+                space_id=CASE WHEN space_media_outbox.status='failed'
+                              THEN excluded.space_id
+                              ELSE space_media_outbox.space_id END,
+                correlation_id=CASE WHEN space_media_outbox.status='failed'
+                                    THEN excluded.correlation_id
+                                    ELSE space_media_outbox.correlation_id END,
                 bytes_path=excluded.bytes_path
-             WHERE space_media_outbox.status='failed'
+             WHERE space_media_outbox.status IN ('failed', 'pending')
             """,
             (
                 blob_id,

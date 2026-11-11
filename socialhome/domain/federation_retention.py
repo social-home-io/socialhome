@@ -202,7 +202,10 @@ def supersede_key(
     """The latest-only key of an outbox entry, or ``None`` (kept as is).
 
     Some events carry *state*, not history: a person's online status, a
-    person's pin on a space map. For those a newer send makes every queued
+    person's pin on a space map, a voter's selection in a space poll
+    (``SPACE_POLL_VOTE_CAST`` carries the whole selection; the receiver
+    keeps no stamp, so an older one landing late would win — and, on the
+    host, be spread to everyone by its stream). For those a newer send makes every queued
     older one worthless — and harmful: delivered after it, the older one
     overwrites the newer state at the peer, and every queued copy takes a
     slot of the per-peer cap that a DM or a post would otherwise keep. So
@@ -210,6 +213,17 @@ def supersede_key(
     replaces it, and a newer one delivered directly drops it.
 
     The key is local-only (an outbox column, never on the wire)."""
+    if event_type is FederationEventType.SPACE_POLL_VOTE_CAST:
+        post_id, voter = payload.get("post_id"), payload.get("voter_user_id")
+        if not (
+            space_id
+            and isinstance(post_id, str)
+            and post_id
+            and isinstance(voter, str)
+            and voter
+        ):
+            return None
+        return f"poll-vote:{space_id}:{post_id}:{voter}"
     user_id = payload.get("user_id")
     if not isinstance(user_id, str) or not user_id:
         return None
@@ -217,6 +231,13 @@ def supersede_key(
         return f"online:{user_id}"
     if event_type is FederationEventType.SPACE_LOCATION_UPDATED and space_id:
         return f"location:{space_id}:{user_id}"
+    if event_type is FederationEventType.SPACE_POST_REACTION and space_id:
+        # v_93 — one person's reaction with one emoji on one post: its
+        # latest toggle is all a peer needs (receivers order by the stamp
+        # anyway), so a flood of toggles holds one slot, not one per click.
+        post_id, emoji = payload.get("post_id"), payload.get("emoji")
+        if isinstance(post_id, str) and post_id and isinstance(emoji, str) and emoji:
+            return f"reaction:{space_id}:{post_id}:{user_id}:{emoji}"
     return None
 
 

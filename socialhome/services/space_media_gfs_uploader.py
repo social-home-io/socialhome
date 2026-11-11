@@ -416,11 +416,18 @@ class SpaceMediaGfsUploader:
         return out, all_on_demand
 
     async def _on_demand_reader(self, instance_id: str) -> bool:
+        """Whether *instance_id* asks its GFS for a missed file (v_83) — a
+        reader in [v_83, v_92). From v_92 a member asks its host or a helper
+        with ``SPACE_MEDIA_WANTED`` instead, so its push is dropped only
+        while its GFS is known to hold the file (decision D)."""
         if self._federation is None:
             return False
         return await self._federation.peer_supports(
             instance_id,
             min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND,
+        ) and not await self._federation.peer_supports(
+            instance_id,
+            min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
         )
 
     async def _capable(

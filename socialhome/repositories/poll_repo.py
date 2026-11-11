@@ -25,15 +25,6 @@ from ..db import AsyncDatabase
 
 @runtime_checkable
 class AbstractPollRepo(Protocol):
-    async def create_poll(
-        self,
-        *,
-        post_id: str,
-        question: str,
-        closes_at: str | None,
-        allow_multiple: bool,
-        options: list[dict],
-    ) -> None: ...
     async def create_poll_if_absent(
         self,
         *,
@@ -97,14 +88,6 @@ class AbstractPollRepo(Protocol):
         ...
 
     # Schedule-poll metadata ----------------------------------------------
-    async def create_schedule_poll(
-        self,
-        *,
-        post_id: str,
-        title: str,
-        deadline: str | None,
-        slots: list[dict],
-    ) -> None: ...
     async def get_schedule_meta(self, post_id: str) -> dict | None: ...
     async def list_schedule_slots(self, post_id: str) -> list[dict]: ...
     async def list_schedule_responses(
@@ -143,49 +126,6 @@ class SqlitePollRepo:
         self._db = db
 
     # ── reply polls ────────────────────────────────────────────────────
-
-    async def create_poll(
-        self,
-        *,
-        post_id: str,
-        question: str,
-        closes_at: str | None,
-        allow_multiple: bool,
-        options: list[dict],
-    ) -> None:
-        """Persist meta + options for a new reply poll.
-
-        Each ``options`` entry is ``{id, text, position}``; ids are
-        minted by the caller so the REST response can echo them.
-        """
-        await self._db.enqueue(
-            """
-            INSERT INTO polls(
-                post_id, question, closes_at, closed, allow_multiple
-            ) VALUES(?, ?, ?, 0, ?)
-            ON CONFLICT(post_id) DO UPDATE SET
-                question=excluded.question,
-                closes_at=excluded.closes_at,
-                allow_multiple=excluded.allow_multiple
-            """,
-            (post_id, question, closes_at, 1 if allow_multiple else 0),
-        )
-        for opt in options:
-            await self._db.enqueue(
-                """
-                INSERT INTO poll_options(id, post_id, text, position)
-                VALUES(?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    text=excluded.text,
-                    position=excluded.position
-                """,
-                (
-                    opt["id"],
-                    post_id,
-                    opt["text"],
-                    int(opt.get("position", 0)),
-                ),
-            )
 
     async def create_poll_if_absent(
         self,
@@ -385,53 +325,6 @@ class SqlitePollRepo:
         ]
 
     # ── schedule polls ─────────────────────────────────────────────────
-
-    async def create_schedule_poll(
-        self,
-        *,
-        post_id: str,
-        title: str,
-        deadline: str | None,
-        slots: list[dict],
-    ) -> None:
-        """Persist meta + slot rows for a new schedule poll.
-
-        ``slots`` is a list of ``{id, slot_date, start_time?, end_time?,
-        position}`` dicts — ids are the caller's responsibility so the
-        route can echo them back immediately.
-        """
-        await self._db.enqueue(
-            """
-            INSERT INTO schedule_poll_meta(
-                post_id, title, deadline, finalized_slot_id, closed
-            ) VALUES(?, ?, ?, NULL, 0)
-            ON CONFLICT(post_id) DO UPDATE SET
-                title=excluded.title,
-                deadline=excluded.deadline
-            """,
-            (post_id, title, deadline),
-        )
-        for s in slots:
-            await self._db.enqueue(
-                """
-                INSERT INTO schedule_slots(
-                    id, post_id, slot_date, start_time, end_time, position
-                ) VALUES(?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    slot_date=excluded.slot_date,
-                    start_time=excluded.start_time,
-                    end_time=excluded.end_time,
-                    position=excluded.position
-                """,
-                (
-                    s["id"],
-                    post_id,
-                    s["slot_date"],
-                    s.get("start_time"),
-                    s.get("end_time"),
-                    int(s.get("position", 0)),
-                ),
-            )
 
     async def get_schedule_meta(self, post_id: str) -> dict | None:
         row = await self._db.fetchone(

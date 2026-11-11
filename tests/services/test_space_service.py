@@ -2265,6 +2265,39 @@ async def test_space_reactions(stack):
     assert "👍" not in r2.reactions
 
 
+async def test_a_space_reaction_no_other_household_would_take_is_rejected(stack):
+    """v_93: receivers take an emoji of at most 32 characters, so a longer
+    one would show in this household only."""
+    anna = await stack.provision_user("anna")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    with pytest.raises(ValueError, match="emoji"):
+        await stack.space_svc.add_reaction(
+            p.id, space_id=s.id, user_id=anna.user_id, emoji="x" * 33
+        )
+
+
+async def test_a_reaction_stays_put_in_an_archived_space(stack):
+    """v_93: an archived space is read-only to peers too — they refuse a
+    reaction's removal like its add, so neither is taken here."""
+    anna = await stack.provision_user("anna")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    await stack.space_svc.add_reaction(
+        p.id, space_id=s.id, user_id=anna.user_id, emoji="👍"
+    )
+    await stack.space_svc.archive_space(s.id, actor_username="anna")
+    for change in (stack.space_svc.add_reaction, stack.space_svc.remove_reaction):
+        with pytest.raises(SpacePermissionError, match="(?i)archiv"):
+            await change(p.id, space_id=s.id, user_id=anna.user_id, emoji="👍")
+    held = await stack.space_post_repo.get(p.id)
+    assert held[1].reactions == {"👍": frozenset({anna.user_id})}
+
+
 async def test_space_reaction_empty_rejected(stack):
     """Empty emoji raises ValueError."""
     anna = await stack.provision_user("anna")
@@ -4226,6 +4259,8 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Pictures in a space's pages",
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
+        "Older space pictures arrive when you open them",
+        "Reactions on space posts reach every household",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -4268,6 +4303,8 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Pictures in a space's pages",
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
+        "Older space pictures arrive when you open them",
+        "Reactions on space posts reach every household",
     )
 
 
@@ -4339,6 +4376,8 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Pictures in a space's pages",
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
+        "Older space pictures arrive when you open them",
+        "Reactions on space posts reach every household",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -4408,6 +4447,8 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Pictures in a space's pages",
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
+        "Older space pictures arrive when you open them",
+        "Reactions on space posts reach every household",
     )
     assert "Apps that work across households" not in c.lagging_features
     assert "Apps that reach the right person" not in c.lagging_features
@@ -9680,6 +9721,7 @@ async def _remote_seat_space(stack, *, supports=True):
         return True
 
     fed.peer_supports = AsyncMock(side_effect=_supports)
+    fed.space_member_supports = AsyncMock(side_effect=_supports)
     stack.space_svc._federation = fed
     remote = await _wire_remote_members(stack)
     await remote.add(
@@ -9734,6 +9776,23 @@ async def test_an_admin_role_change_carries_no_legacy_payload(stack):
     )
     [changed] = _gossip_calls(fed, FederationEventType.SPACE_MEMBER_ROLE_CHANGED)
     assert changed.kwargs.get("legacy_payload") is None
+
+
+async def test_a_mesh_only_members_household_can_become_a_moderator(stack):
+    """A member household the host is not paired with (reached over the
+    mesh or a directory seat) is judged by the version it claimed as a
+    space member, not by a pairing row it does not have — every member is
+    equal whichever way their household is reached."""
+    space, fed, remote = await _remote_seat_space(stack)
+    fed.peer_supports = AsyncMock(return_value=False)  # no paired row
+    await stack.space_svc.set_remote_member_role(
+        space.id,
+        actor_username="anna",
+        instance_id="peer-x",
+        user_id="ru1",
+        role="moderator",
+    )
+    assert (await remote.get(space.id, "peer-x", "ru1")).role == "moderator"
 
 
 async def test_promoting_a_user_whose_household_is_behind_is_refused(stack):
@@ -11691,3 +11750,64 @@ def test_an_older_households_snapshot_leaves_the_games_list_alone():
         we_host=False,
     )
     assert newer.features.allowed_apps == ()
+
+
+async def test_a_space_reaction_event_carries_the_stamp_that_was_stored(stack):
+    """v_93: the stamp other households order the reaction by is the one
+    written with it here — and a free-text "emoji" is refused."""
+    from socialhome.domain.events import PostReactionChanged
+    from socialhome.domain.space_item import stamp_to_db
+
+    anna = await stack.provision_user("anna")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    seen: list[PostReactionChanged] = []
+
+    async def _on(event: PostReactionChanged) -> None:
+        seen.append(event)
+
+    stack.bus.subscribe(PostReactionChanged, _on)
+    for change in (stack.space_svc.add_reaction, stack.space_svc.remove_reaction):
+        await change(p.id, space_id=s.id, user_id=anna.user_id, emoji="👍")
+        stamps = await stack.space_post_repo.list_reaction_stamps([p.id])
+        assert (
+            stamp_to_db(seen[-1].occurred_at)
+            == (stamps[p.id][f"{anna.user_id}\x00👍"][0])
+        )
+    assert seen[0].occurred_at < seen[1].occurred_at
+    with pytest.raises(ValueError, match="emoji"):
+        await stack.space_svc.add_reaction(
+            p.id, space_id=s.id, user_id=anna.user_id, emoji="nice"
+        )
+
+
+@pytest.mark.parametrize("emoji", ["x" * 33, "", "   "])
+async def test_removing_a_reaction_no_household_would_take_is_refused(stack, emoji):
+    """v_93: a removal is held to the length rule every receiver applies —
+    nothing is stamped and nothing is sent for one they would all refuse.
+    An old free-text reaction (≤ 32 characters) can still be removed."""
+    from socialhome.domain.events import PostReactionChanged
+
+    anna = await stack.provision_user("anna")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    seen: list[PostReactionChanged] = []
+
+    async def _on(event: PostReactionChanged) -> None:
+        seen.append(event)
+
+    stack.bus.subscribe(PostReactionChanged, _on)
+    with pytest.raises(ValueError, match="32"):
+        await stack.space_svc.remove_reaction(
+            p.id, space_id=s.id, user_id=anna.user_id, emoji=emoji
+        )
+    assert seen == []
+    assert await stack.space_post_repo.list_reaction_stamps([p.id]) == {}
+    await stack.space_svc.remove_reaction(
+        p.id, space_id=s.id, user_id=anna.user_id, emoji="nice"
+    )
+    assert len(seen) == 1

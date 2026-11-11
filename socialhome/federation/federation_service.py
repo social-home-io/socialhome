@@ -29,7 +29,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iter
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import aiohttp
 import orjson as _orjson
@@ -228,9 +228,12 @@ _MESH_CATCHUP_TRANSIENT: frozenset[str] = frozenset(
 #: past its lookup) rather than a send to a household we never knew.
 UNPAIR_SEND_RACE_S: float = 300.0
 
-#: ``SPACE_SYNC_DIRECT_FAILED`` reasons that mean "no free slot now": the
-#: BEGIN was never served, so the requester asks again (``SpaceSyncDeferred``).
-_CAPACITY_REFUSALS = frozenset({"too_many_sessions", "node_capacity"})
+#: ``SPACE_SYNC_DIRECT_FAILED`` reasons a provider refuses a BEGIN with before
+#: any session exists (S-6 / S-8): no free slot now, or the hourly budget is
+#: spent. The BEGIN was never served — ``SpaceSyncDeferred`` with the reason;
+#: the scheduler asks again after a capacity refusal and takes any of them
+#: as the host's answer (v_92 trigger 10).
+_BEGIN_REFUSALS = frozenset({"too_many_sessions", "node_capacity", "rate_limited"})
 
 #: Maximum allowed clock skew for inbound envelopes (§24.11 §5).
 _TIMESTAMP_SKEW_SECONDS = 300
@@ -341,6 +344,10 @@ def _deferred_payload_size(payload: dict) -> int:
     return len(_orjson.dumps(payload, default=str))
 
 
+class _HostSeen(Protocol):
+    def heard_from(self, space_id: str, instance_id: str) -> None: ...
+
+
 @dataclass(slots=True, frozen=True)
 class _DeferredMeshSend:
     """One broadcast waiting in a mesh target's deferred FIFO. Process-local
@@ -422,6 +429,7 @@ class FederationService:
         "_encoder",
         "_event_registry",
         "_federation_repo",
+        "_host_contact",
         "_host_hop",
         "_http_client",
         "_ice_servers",
@@ -507,6 +515,9 @@ class FederationService:
         self._call_signaling = call_signaling
         self._ice_servers = ice_servers or []
         self._idempotency_cache = None
+        #: v_92 — told of every dispatched space event's sender
+        #: (:meth:`attach_host_contact`).
+        self._host_contact: _HostSeen | None = None
         self._typing_service = None
         self._dm_routing_service = None
         self._transport = None
@@ -1113,6 +1124,14 @@ class FederationService:
             reason,
         )
         await self._event_registry.dispatch(held)
+
+    def attach_host_contact(self, contact: _HostSeen) -> None:
+        """Wire the v_92 host contact
+        (:class:`~socialhome.federation.sync.space.host_contact.HostContact`):
+        every verified event dispatched here tells it who sent it for which
+        space, so a silent host that speaks again — any event, not only a
+        sync answer — stops the helper fallback at once."""
+        self._host_contact = contact
 
     def attach_idempotency_cache(self, cache) -> None:
         """Attach an :class:`IdempotencyCache` for inbound dedup."""
@@ -4489,6 +4508,9 @@ class FederationService:
             event.space_id,
         )
 
+        if self._host_contact is not None and event.space_id:
+            # In memory, O(1) — clears a silent host only (v_92).
+            self._host_contact.heard_from(event.space_id, event.from_instance)
         await self._event_registry.dispatch(event)
 
     def _register_default_handlers(self) -> None:
@@ -5385,9 +5407,9 @@ class FederationService:
                 # against us with ``prefer_direct=False``.
                 self._sync_manager.close_session(sync_id)
                 return
-        elif event.payload.get("reason") in _CAPACITY_REFUSALS:
-            # The provider had no free slot for a BEGIN we sent (S-6 / S-8:
-            # it caps concurrent syncs per household). No session was ever
+        elif event.payload.get("reason") in _BEGIN_REFUSALS:
+            # The provider refused a BEGIN we sent (S-6 / S-8: it caps
+            # concurrent syncs per household, and BEGINs per hour). No session was ever
             # made, so there is nothing to relay — the sync is simply owed.
             # A household that restarts and asks one host for more spaces
             # than the cap used to lose the rest until the 30-minute tick.
@@ -5409,6 +5431,7 @@ class FederationService:
                         provider_instance_id=event.from_instance,
                         sync_mode=request.sync_mode,
                         sync_id=sync_id,
+                        reason=str(event.payload.get("reason")),
                     )
                 )
                 return

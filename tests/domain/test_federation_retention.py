@@ -141,6 +141,40 @@ def test_location_and_online_keys_never_collide():
     )
 
 
+def test_a_poll_vote_supersedes_per_space_poll_and_voter():
+    """A vote is the voter's whole selection — state, not history: an older
+    one delivered after a newer one would roll it back."""
+
+    def key(space="s1", post="p1", voter="u1", **over):
+        return supersede_key(
+            FederationEventType.SPACE_POLL_VOTE_CAST,
+            space_id=space,
+            payload={
+                "post_id": post,
+                "voter_user_id": voter,
+                "option_ids": ["a"],
+                **over,
+            },
+        )
+
+    assert key() == "poll-vote:s1:p1:u1"
+    assert key() == key(option_ids=[])
+    assert len({key(), key(space="s2"), key(post="p2"), key(voter="u2")}) == 4
+    for broken in (key(space=None), key(post=""), key(voter=""), key(post=5)):
+        assert broken is None
+    # A poll's definition and its close are not latest-only state.
+    for t in (
+        FederationEventType.SPACE_POLL_CREATED,
+        FederationEventType.SPACE_POLL_CLOSED,
+    ):
+        assert (
+            supersede_key(
+                t, space_id="s1", payload={"post_id": "p1", "voter_user_id": "u1"}
+            )
+            is None
+        )
+
+
 def test_ordinary_events_never_supersede():
     """A DM or a post is never replaced by a later one."""
     for t in (
@@ -238,3 +272,29 @@ def test_only_an_uncapped_moment_delete_is_long_lived():
     assert is_long_lived(MD, f"{RELAYED_DELETE_KEY_PREFIX}them:m1")
     assert not is_long_lived(MD, capped_delete_key("them", "m1"))
     assert not is_long_lived(FederationEventType.MOMENT_CREATED, None)
+
+
+def test_a_space_post_reaction_keeps_only_its_latest_toggle_queued():
+    """v_93 — a reaction is state per (space, post, user, emoji): a newer
+    toggle replaces the queued one, so a flood of toggles holds one outbox
+    slot per reaction, not one per click."""
+    from socialhome.domain.federation import FederationEventType as FET
+    from socialhome.domain.federation_retention import supersede_key
+
+    payload = {"post_id": "p1", "user_id": "u1", "emoji": "👍", "action": "add"}
+    key = supersede_key(FET.SPACE_POST_REACTION, space_id="sp", payload=payload)
+    assert key == "reaction:sp:p1:u1:👍"
+    assert key == supersede_key(
+        FET.SPACE_POST_REACTION, space_id="sp", payload={**payload, "action": "remove"}
+    )
+    assert key != supersede_key(
+        FET.SPACE_POST_REACTION, space_id="sp", payload={**payload, "emoji": "🎉"}
+    )
+    for broken in ({**payload, "post_id": ""}, {**payload, "emoji": None}):
+        assert (
+            supersede_key(FET.SPACE_POST_REACTION, space_id="sp", payload=broken)
+            is None
+        )
+    assert (
+        supersede_key(FET.SPACE_POST_REACTION, space_id=None, payload=payload) is None
+    )

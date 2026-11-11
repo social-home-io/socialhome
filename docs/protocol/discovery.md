@@ -2379,10 +2379,12 @@ acts on bound inside the author signature:
   (`space_posts.reaction_stamps_json`, migration `0075`; local writes stamp
   now). A duplicate `reaction_add` from a second connection server, a
   queued copy drained later, or one arriving after a restart cannot undo a
-  later remove. A removal's tombstone is kept 48 h — past the GFS's 24 h
+  later remove. A removal's tombstone is kept 30 days — past the GFS's 24 h
   queue plus retries — then dropped; a per-user cap keeps one user from
-  pushing out another's. (Space reactions are no federated event — the
-  relay is their only cross-household path. A §25.6 sync carries each
+  pushing out another's. (Since v_93 member households also get each
+  reaction as the federated `SPACE_POST_REACTION`, carrying the SAME
+  stamp — a household that gets both applies one; followers still have
+  only the relay. A §25.6 sync carries each
   post's reactions to a joiner, but never overwrites the reactions of a
   post already held, which the stamps order.) **Clock edge:** stamps come
   from the reactor's clock; if it steps backwards (an NTP correction), that
@@ -3681,7 +3683,10 @@ GFS asks one household that holds the file to send the same deterministic
 ciphertext again — **streamed** straight to the waiting reader(s) with
 nothing stored, or **re-uploaded** into the cache. A prefetch never asks.
 Paired and mesh members never use this (they get the bytes from the
-household); link-joined members and followers ask the same way. The
+household). Since v_92 it is for **followers** only: a household holding a
+member seat (link-joined included) asks its host or a helper with
+`SPACE_MEDIA_WANTED` instead
+([`media.md`](./media.md#older-files-on-view--space_media_wanted-v_92)). The
 household side, both flow diagrams and the cost are in
 [`media.md`](./media.md#space-media-on-demand-v_83).
 

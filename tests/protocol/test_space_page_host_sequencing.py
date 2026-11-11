@@ -1433,7 +1433,9 @@ async def test_r3_2_a_stale_view_members_live_create_reaches_everyone(mesh):
 async def test_r3_2_a_resume_replay_is_marked_as_one(mesh, monkeypatch):
     monkeypatch.setattr(FederationService, "send_event", _fake_send_event)
     a, h = mesh["A"], mesh["H"]
-    await _create(mesh)
+    # A's own person's page: a member household replays only its own
+    # people's rows (v_92 — the receiver takes the rest from the host only).
+    await _create(mesh, by="A")
     VERSIONS[h.iid] = 1
     await _receive(
         a,

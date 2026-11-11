@@ -40,6 +40,7 @@ answer to a card it just received and a member's answer to a directory.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import time
@@ -168,6 +169,7 @@ class SpaceMemberDirectory:
         "_lost_mailbox",
         "_mailboxes",
         "_on_seated",
+        "_reconciling",
         "_seat_ender",
         "_seater",
         "_snap_in",
@@ -220,6 +222,9 @@ class SpaceMemberDirectory:
         #: space → when we last asked its host for the directory again
         #: (:meth:`ask_host`, :data:`HELLO_RESNAPSHOT_S`).
         self._asked_at: dict[str, float] = {}
+        #: space → held while :meth:`reconcile` versions and sends its
+        #: directory, so the frames to a household go out in version order.
+        self._reconciling: dict[str, asyncio.Lock] = {}
         mailboxes.attach_needed(self.needed_gfs)
         mailboxes.attach_after_sweep(self.sweep_once)
         mailboxes.attach_on_change(self.on_own_change)
@@ -957,9 +962,30 @@ class SpaceMemberDirectory:
         *snapshot_to*. Nothing at all while no card of the space carries a
         mailbox. Delivery is not tracked per household: one that missed a
         delta is behind on ``dir_seq`` at its next §25.6 sync and gets a
-        snapshot then (:meth:`on_sync_begin`)."""
+        snapshot then (:meth:`on_sync_begin`).
+
+        One call per space at a time: two at once (a member's "seated"
+        snapshot, a joiner's delta) would interleave their frames — a delta
+        between a snapshot's parts, or ahead of the snapshot it builds on —
+        and the member drops it, while the host, having just answered the
+        "seated", answers no ask for a snapshot again before its next sync;
+        and both would read and write the version at once."""
         if self._federation is None:
             return
+        lock = self._reconciling.setdefault(space_id, asyncio.Lock())
+        async with lock:
+            await self._reconcile_locked(
+                space_id, changed=changed, snapshot_to=snapshot_to
+            )
+
+    async def _reconcile_locked(
+        self,
+        space_id: str,
+        *,
+        changed: list[MemberCard] | None,
+        snapshot_to: set[str] | None,
+    ) -> None:
+        assert self._federation is not None
         if await self.host_of(space_id) != self._instance_id:
             return
         cards = await self._space_cards(space_id)

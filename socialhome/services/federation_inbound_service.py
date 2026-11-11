@@ -60,6 +60,7 @@ from ..domain.events import (
     MomentReactionChanged,
     PostDeleted,
     PostEdited,
+    PostReactionChanged,
     SpaceConfigChanged,
     SpaceFeaturesApplied,
     SpaceMemberProfileUpdated,
@@ -106,7 +107,12 @@ from ..domain.space import (
     SpaceRole,
     role_change_event_type,
 )
-from ..domain.space_item import item_stamp, stamp_to_db
+from ..domain.space_item import (
+    StaleItemStamp,
+    item_stamp,
+    reaction_emoji_ok,
+    stamp_to_db,
+)
 from ..domain.space_media_ref import (
     MEDIA_REFS_FIELD,
     SpaceMediaLocalization,
@@ -151,6 +157,7 @@ from ..media.profile_picture import (
     reencode_peer_picture,
 )
 from ..moment_origin import carries_no_relay, check_relayed_moment_origin
+from ..rate_limiter import RateLimiter
 from ..utils.datetime import parse_iso8601_lenient
 from .dm_audience import local_audience
 from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
@@ -221,6 +228,12 @@ if TYPE_CHECKING:
     from .space_media_gfs_fetcher import SpaceMediaGfsFetcher
 
 log = logging.getLogger(__name__)
+
+#: v_93 — most applied ``SPACE_POST_REACTION`` events ANNOUNCED on the bus
+#: (notifications) from one household in one space per minute; one past it
+#: is still stored. A backstop a reconnect burst passes: an honest
+#: household's queued toggles are coalesced per reaction.
+REACTION_ARRIVALS_PER_MIN: int = 600
 
 
 class HighlightAudienceCheck(Protocol):
@@ -509,6 +522,7 @@ class FederationInboundService(ProtectionGateMixin):
         "_pending",
         "_pending_parents",
         "_profile_picture_repo",
+        "_reaction_arrivals",
         "_realtime",
         "_relay_policy",
         "_report_service",
@@ -623,6 +637,9 @@ class FederationInboundService(ProtectionGateMixin):
         #: another path — and replays it when the parent lands. ``None``
         #: refuses instead.
         self._pending_parents = pending_parent_buffer
+        #: v_93 — when each (sending household, space)'s post reactions
+        #: arrived (:data:`REACTION_ARRIVALS_PER_MIN`).
+        self._reaction_arrivals = RateLimiter()
         self._federation_service = None
         #: Where a member stores the cover / icon a host's
         #: ``SPACE_CONFIG_CHANGED`` ships. Optional so unit-test stacks can
@@ -666,13 +683,14 @@ class FederationInboundService(ProtectionGateMixin):
         (:class:`SpaceMediaNamer`; *held* — the files the stored row shows
         already) under the v_80 GFS reader names (empty without a
         fetcher)."""
+        hashes = parse_file_hashes(event.payload)
         direct = self._media_names.localize(
             space_id,
             event.from_instance,
             urls,
             held=held or (),
             # v_85 — vouched for by the sender's envelope signature.
-            hashes=parse_file_hashes(event.payload),
+            hashes=hashes,
         )
         if self._gfs_media is None:
             return direct
@@ -684,6 +702,7 @@ class FederationInboundService(ProtectionGateMixin):
                 urls,
                 item_id=item_id,
                 origin=event.from_instance,
+                hashes=hashes,
             ),
         )
 
@@ -736,6 +755,7 @@ class FederationInboundService(ProtectionGateMixin):
         registry.register(FET.SPACE_POST_UPDATED, self._on_space_post_updated)
         registry.register(FET.SPACE_POST_DELETED, self._on_space_post_deleted)
         registry.register(FET.SPACE_MEDIA_BLOB, self._on_space_media_blob)
+        registry.register(FET.SPACE_POST_REACTION, self._on_space_post_reaction)
         registry.register(FET.SPACE_COMMENT_CREATED, self._on_space_comment_added)
         registry.register(FET.SPACE_COMMENT_UPDATED, self._on_space_comment_updated)
         registry.register(FET.SPACE_COMMENT_DELETED, self._on_space_comment_deleted)
@@ -2826,6 +2846,137 @@ class FederationInboundService(ProtectionGateMixin):
                 post_id=post_id,
                 space_id=space_id,
                 origin_instance_id=event.from_instance,
+            )
+        )
+
+    async def _on_space_post_reaction(self, event: FederationEvent) -> None:
+        """v_93 — a member's reaction on a space post, added or removed.
+
+        The reactor must hold a live seat on the SENDING household that may
+        react here: a writer seat, or a follower seat while the space has
+        ``allow_subscriber_react`` on (:meth:`SpaceAuthorship.
+        item_seat_admits` — never a local user, a banned one, or somebody
+        seated elsewhere; the host relays nobody's reaction). The payload's
+        ``at`` orders it: applied only over an older stamp held for that
+        (post, user, emoji), in the same transaction as the reaction
+        (``space_posts.reaction_stamps_json``) — so a re-delivery, a copy
+        on a second path (the v_49 ``space_item`` carries the same stamp)
+        and a late add after a removal are all no-ops.
+        """
+        p = event.payload if isinstance(event.payload, dict) else {}
+        post_id = str(p.get("post_id") or "")
+        reactor = str(p.get("user_id") or "")
+        emoji = p.get("emoji")
+        action = p.get("action")
+        stamp = item_stamp(p.get("at"))
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
+        if (
+            not post_id
+            or not reactor
+            or action not in ("add", "remove")
+            # A removal may name an old free-text reaction (pre-v_93).
+            or not reaction_emoji_ok(emoji, legacy=action == "remove")
+            or stamp is None
+        ):
+            log_not_applied(
+                event, what="post reaction", row_id=post_id, reason="malformed"
+            )
+            return
+        authorship = self._space_authorship(event)
+        if authorship is None:
+            return
+        space = await self._space_repo.get(space_id)
+        if space is None or space.dissolved:
+            log_not_applied(
+                event, what="post reaction", row_id=post_id, reason="space not held"
+            )
+            return
+        if not await authorship.item_seat_admits(
+            origin_instance_id=event.from_instance,
+            space_id=space_id,
+            author_user_id=reactor,
+            subscriber_ok=space.features.allow_subscriber_react,
+        ):
+            await authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="post reaction",
+                row_id=post_id,
+                user_id=reactor,
+            )
+            return
+        if await self._space_post_repo.get(post_id) is None:
+            # The reaction overtook its post on another delivery path.
+            if not self._hold_for_parent(
+                event,
+                space_id,
+                PARENT_POST,
+                post_id,
+                what="post reaction",
+                row_id=post_id,
+            ):
+                log_not_applied(
+                    event,
+                    what="post reaction",
+                    row_id=post_id,
+                    reason="post not held here",
+                )
+            return
+        react = (
+            self._space_post_repo.add_reaction
+            if action == "add"
+            else self._space_post_repo.remove_reaction
+        )
+        try:
+            # Scoped to ``space_id``: a post of another space is a KeyError.
+            post = await react(
+                post_id, emoji, reactor, space_id=space_id, stamp=stamp_to_db(stamp)
+            )
+        except StaleItemStamp:
+            log_not_applied(
+                event, what="post reaction", row_id=post_id, reason="not newer"
+            )
+            return
+        except KeyError, ValueError:
+            log_not_applied(
+                event,
+                what="post reaction",
+                row_id=post_id,
+                reason="post not in this space, deleted, or full",
+            )
+            return
+        # The backstop per (sending household, space) bounds the work a
+        # flood triggers here (the bus event behind notifications), never
+        # the state: the reaction above is stored either way, so every
+        # household converges — a drop could not be retried (the registry
+        # swallows handler errors and the replay cache refuses a re-send)
+        # and the host would drop it too. Only an APPLIED reaction counts:
+        # a stale copy, a refusal and a held one returned before here.
+        if not self._reaction_arrivals.is_allowed(
+            f"{event.from_instance}:{space_id}",
+            limit=REACTION_ARRIVALS_PER_MIN,
+            window_s=60,
+        ):
+            log.warning(
+                "%s from %s: over %d reactions a minute in space %s — stored, "
+                "not announced",
+                event.event_type,
+                event.from_instance,
+                REACTION_ARRIVALS_PER_MIN,
+                space_id,
+            )
+            return
+        self._reaction_arrivals.prune(window_s=60)
+        await self._bus.publish(
+            PostReactionChanged(
+                post=post,
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+                reactor_user_id=reactor,
+                emoji=emoji,
+                added=action == "add",
             )
         )
 

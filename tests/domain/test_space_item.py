@@ -45,9 +45,11 @@ from socialhome.domain.space_item import (
     open_item_plaintext,
     pad_json_object,
     payload_suite_of,
+    reaction_emoji_ok,
     required_scope,
     seal_item_plaintext,
     stamp_to_db,
+    stored_stamp,
     zlib_item_plaintext,
 )
 from socialhome.domain.writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE
@@ -111,6 +113,36 @@ def test_stamp_to_db_is_naive_utc_and_orders_like_sqlite_now():
     assert stamp_to_db(stamp) == "2026-10-03 12:00:00.250000"
     # Compares as a string against SQLite's datetime('now') shape.
     assert "2026-10-03 12:00:00" < stamp_to_db(stamp)
+
+
+def test_stored_stamp_reads_naive_as_utc_and_keeps_the_skew_rule():
+    now = datetime(2026, 10, 3, 12, tzinfo=UTC)
+    assert stored_stamp("2026-10-03 11:00:00.500000", now=now) == datetime(
+        2026, 10, 3, 11, 0, 0, 500000, tzinfo=UTC
+    )
+    assert stored_stamp("2026-10-03T13:00:00+02:00", now=now) == now - timedelta(
+        hours=1
+    )
+    # Years ahead would win every later write (last writer wins): refused.
+    assert stored_stamp("2036-10-03 12:00:00", now=now) is None
+    for raw in (None, 3, "", "not a date"):
+        assert stored_stamp(raw, now=now) is None
+
+
+@pytest.mark.parametrize(
+    ("emoji", "ok"),
+    [
+        ("👍", True),
+        ("❤️", True),
+        ("", False),
+        (None, False),
+        ("x" * 33, False),
+        (" 👍", False),
+        ("e\u0301", False),  # decomposed: not NFC
+    ],
+)
+def test_reaction_emoji_ok_is_the_live_rule(emoji, ok):
+    assert reaction_emoji_ok(emoji) is ok
 
 
 # ─── Size padding + the authority-only removal notice ────────────────────
@@ -372,3 +404,62 @@ def test_a_dictionary_bomb_is_refused_at_the_same_cap():
 def test_zlib_item_plaintext_refuses_an_unknown_suite():
     with pytest.raises(UnsupportedPayloadSuite):
         zlib_item_plaintext(_SHAPED_BODY, suite="json")
+
+
+@pytest.mark.parametrize(
+    ("emoji", "ok"),
+    [
+        ("👍", True),
+        ("❤️", True),
+        ("1️⃣", True),
+        ("👨‍👩‍👧", True),
+        ("nice", False),
+        ("+1", False),
+        ("👍 👍", False),
+        ("👍\n", False),
+        ("", False),
+        ("😀" * 33, False),
+    ],
+)
+def test_a_reaction_is_an_emoji_not_free_text(emoji, ok):
+    """The status-emoji sanity check, for reactions: no whitespace or
+    control characters and at least one non-ASCII code point."""
+    from socialhome.domain.space_item import reaction_emoji_ok
+
+    assert reaction_emoji_ok(emoji) is ok
+
+
+@pytest.mark.parametrize(
+    ("emoji", "ok"),
+    [("nice", True), ("+1", True), ("👍", True), ("", False), ("x" * 33, False)]
+    + [(" x", False), ("e\u0301", False), (None, False)],
+)
+def test_a_reaction_being_removed_may_be_old_free_text(emoji, ok):
+    """``legacy=True`` — a removal, or a catch-up copy of an old reaction:
+    the rule from before v_93 (a short NFC string), so a free-text reaction
+    made back then can still be taken back everywhere."""
+    from socialhome.domain.space_item import reaction_emoji_ok
+
+    assert reaction_emoji_ok(emoji, legacy=True) is ok
+
+
+def test_the_reaction_and_status_emoji_share_one_rule():
+    from socialhome.domain.space_item import reaction_emoji_ok
+    from socialhome.domain.user import clean_status_emoji, looks_like_emoji
+
+    for text in ("👍", "1️⃣", "busy", "a b", "👍 👍"):
+        try:
+            status_ok = clean_status_emoji(text) is not None
+        except ValueError:
+            status_ok = False
+        assert looks_like_emoji(text) is status_ok is reaction_emoji_ok(text), text
+
+
+def test_a_sixth_reaction_is_a_coded_refusal():
+    from socialhome.domain.errors import CodedError
+    from socialhome.domain.space_item import TooManyReactionsError
+
+    err = TooManyReactionsError()
+    assert isinstance(err, CodedError) and isinstance(err, ValueError)
+    assert (err.status, err.code) == (422, "REACTION_LIMIT")
+    assert "too many" in str(err).lower()

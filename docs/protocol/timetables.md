@@ -137,10 +137,17 @@ checks); a chunk from another member household is admitted per record only
 when that household is an admin household (`is_admin_household` — a v_41
 `moderator` seat does not count) and the record's `updated_by` is
 its admin (and, for a timetable new here, it speaks for `created_by`).
-Deletes are not streamed — no other resource streams its tombstones: a
-joiner has nothing to delete, an offline member gets the live
-`SPACE_TIMETABLE_DELETED` from the outbox, and a held tombstone refuses any
-later copy. A peer below v_39 drops the unknown resource.
+Deletes stream as their own resource since v_92: `timetables_deleted`
+(`TimetablesDeletedExporter`, before `timetables`) carries each deleted
+timetable's identity (`id`, `created_by`, `created_at` — never content), so
+a member that missed the live `SPACE_TIMETABLE_DELETED` (offline past the
+outbox, a mesh drop) drops its copy on the host's next stream. The receiver
+takes it from the space's host only — the row does not record the deleting
+moderator, so no other household's copy could be judged by the live rule —
+and stubs an id it never held only when that id is owner-bound to
+`created_by` in this space. Only a v_92 requester is sent it. A held
+tombstone refuses any later copy. A peer below v_39 drops the unknown
+resource.
 
 ## Capability
 

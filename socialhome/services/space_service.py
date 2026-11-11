@@ -248,6 +248,7 @@ from ..domain.space import (
     validate_space_link_url,
 )
 from ..domain.space_app_table import SpaceAppNotAllowedError
+from ..domain.space_item import reaction_emoji_ok
 from ..domain.space_place import PlacePin, validate_place_pin
 from ..domain.user import User
 from ..domain.writer_cert import WriterEntitlement
@@ -4323,7 +4324,10 @@ class SpaceService(
             and not local
             and (
                 self._federation is None
-                or not await self._federation.peer_supports(
+                # A member household reached only over the mesh has no
+                # paired row: judge it by its space-member version claim,
+                # as the host's own path does (every member is equal).
+                or not await self._federation.space_member_supports(
                     instance_id,
                     min_version=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
                 )
@@ -4893,9 +4897,15 @@ class SpaceService(
                 role=role,
             )
             return True
-        if role == SpaceRole.MODERATOR and not await self._federation.peer_supports(
-            instance_id,
-            min_version=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
+        # ``space_member_supports``: a member household we are not paired
+        # with (mesh, directory seat) is judged by the version it claimed as
+        # a member — every member is equal whichever way it is reached.
+        if (
+            role == SpaceRole.MODERATOR
+            and not await self._federation.space_member_supports(
+                instance_id,
+                min_version=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
+            )
         ):
             raise HouseholdUpgradeRequiredError(
                 "this member's household must upgrade before they can be a moderator",
@@ -8212,15 +8222,21 @@ class SpaceService(
         emoji = unicodedata.normalize("NFC", emoji.strip())
         if not emoji:
             raise ValueError("emoji must not be empty")
+        if not reaction_emoji_ok(emoji):
+            # What every other household accepts (v_93): anything else
+            # would show here and nowhere else.
+            raise ValueError("a reaction is one emoji of at most 32 characters")
         await self.require_reader(space_id, user_id)
         await self._post_in_space(post_id, space_id)
         await self._require_writable_space(space_id)
         await self._reject_subscriber(space_id, user_id, action="react")
-        post = await self._posts.add_reaction(
-            post_id, emoji, user_id, space_id=space_id
+        post, at = await self._posts.react(
+            post_id, emoji, user_id, space_id=space_id, added=True
         )
-        # v_49: the member-publish bridge relays it (space reactions are no
-        # federated event; realtime does not frame space reactions).
+        # ``SpacePostOutbound`` sends it on: v_93 to every member household
+        # (``SPACE_POST_REACTION``), v_49 over the member relay where the
+        # space has one — under the stamp just written. Realtime does not
+        # frame space reactions.
         await self._bus.publish(
             PostReactionChanged(
                 post=post,
@@ -8228,6 +8244,7 @@ class SpaceService(
                 reactor_user_id=user_id,
                 emoji=emoji,
                 added=True,
+                occurred_at=datetime.fromisoformat(at).replace(tzinfo=UTC),
             )
         )
         return post
@@ -8243,11 +8260,19 @@ class SpaceService(
         """Withdraw a reaction — same seat + same-space rules as
         :meth:`add_reaction`."""
         emoji = unicodedata.normalize("NFC", emoji.strip())
+        if not reaction_emoji_ok(emoji, legacy=True):
+            # The rule every receiver holds a removal to (v_93): one they
+            # would all refuse is neither stamped nor sent. Free text from
+            # before v_93 passes, so it can still be taken back.
+            raise ValueError("a reaction is at most 32 characters")
         await self.require_reader(space_id, user_id)
         await self._post_in_space(post_id, space_id)
+        # An archived space is read-only to peers too: they refuse the
+        # removal (v_93), so taking it here would leave the copies apart.
+        await self._require_writable_space(space_id)
         await self._reject_subscriber(space_id, user_id, action="react")
-        post = await self._posts.remove_reaction(
-            post_id, emoji, user_id, space_id=space_id
+        post, at = await self._posts.react(
+            post_id, emoji, user_id, space_id=space_id, added=False
         )
         await self._bus.publish(
             PostReactionChanged(
@@ -8256,6 +8281,7 @@ class SpaceService(
                 reactor_user_id=user_id,
                 emoji=emoji,
                 added=False,
+                occurred_at=datetime.fromisoformat(at).replace(tzinfo=UTC),
             )
         )
         return post

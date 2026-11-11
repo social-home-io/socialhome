@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime
+import time
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -63,6 +64,13 @@ class _FakeFederation:
         self.mesh_extras: list[dict | None] = []
         #: Further BEGIN fields per mesh BEGIN (``sync_mode``, ``dir_seq``).
         self.mesh_fields: list[dict] = []
+        #: Households below v_92 (``space_member_supports``); others at it.
+        self.older: set[str] = set()
+        self.version_asks: list[tuple[str, int]] = []
+
+    async def space_member_supports(self, instance_id, *, min_version):
+        self.version_asks.append((instance_id, min_version))
+        return instance_id not in self.older
 
     def record_sync_request(
         self,
@@ -674,16 +682,22 @@ async def test_a_mesh_only_host_hears_our_directory_version_after_catch_up(
     by_space = dict(zip([c[0] for c in fed.mesh_catchups], fed.mesh_fields))
     assert by_space["sp-mesh"]["dir_seq"] == 41
     assert by_space["sp-plain"].get("dir_seq") is None
-    # Catch-up complete for both: only the space with a directory keeps
-    # echoing, as an incremental BEGIN.
+    # Catch-up complete for both: each periodic tick sends both the small
+    # incremental BEGIN (a paired host's trigger 2), the one with a
+    # directory echoing its version.
     sched._mesh_catchup_done.update({("sp-mesh", "host-x"), ("sp-plain", "host-x")})
     fed.mesh_catchups.clear()
     fed.mesh_fields.clear()
     await sched._tick_once()
-    assert fed.mesh_catchups == [("sp-mesh", "host-x")]
+    assert fed.mesh_catchups == [("sp-mesh", "host-x"), ("sp-plain", "host-x")]
     assert fed.mesh_fields == [
-        {"dir_seq": 41, "sync_mode": "incremental", "have_seq": None}
+        {"dir_seq": 41, "sync_mode": "incremental", "have_seq": None},
+        {"dir_seq": None, "sync_mode": "incremental", "have_seq": None},
     ]
+    # The startup sweep sends it only for the directory echo.
+    fed.mesh_catchups.clear()
+    await sched._tick_mesh_catchup()
+    assert fed.mesh_catchups == [("sp-mesh", "host-x")]
 
 
 async def test_tick_skips_confirmed_host(bus, queue, sync_manager):
@@ -745,7 +759,10 @@ async def test_completion_sentinel_stops_the_retries(bus, queue, sync_manager):
     )
 
     await sched._tick_once()
-    assert fed.mesh_catchups == [("sp-mesh", "host-x")], "re-BEGAN after completing"
+    # No second FULL catch-up — only the periodic incremental BEGIN.
+    assert fed.mesh_catchups == [("sp-mesh", "host-x")] * 2
+    assert "sync_mode" not in fed.mesh_fields[0]
+    assert fed.mesh_fields[1]["sync_mode"] == "incremental", "re-BEGAN in full"
 
 
 async def test_mesh_catchup_attempts_are_capped(bus, queue, sync_manager):
@@ -762,7 +779,13 @@ async def test_mesh_catchup_attempts_are_capped(bus, queue, sync_manager):
     for _ in range(MAX_MESH_CATCHUP_ATTEMPTS + 3):
         await sched._tick_once()
 
-    assert len(fed.mesh_catchups) == MAX_MESH_CATCHUP_ATTEMPTS
+    modes = [f.get("sync_mode") for f in fed.mesh_fields]
+    # The FULL catch-up stops at the cap; past it each tick sends only the
+    # small incremental BEGIN (at most 2/h, under the host's 5/h).
+    assert modes == [None] * MAX_MESH_CATCHUP_ATTEMPTS + ["incremental"] * 3
+    # The startup sweep sends nothing past the cap.
+    await sched._tick_mesh_catchup()
+    assert len(fed.mesh_fields) == MAX_MESH_CATCHUP_ATTEMPTS + 3
 
 
 async def test_mesh_catchup_failure_does_not_kill_the_tick(bus, queue, sync_manager):
@@ -1739,3 +1762,727 @@ async def test_an_interrupted_stream_is_asked_again_in_its_mode(
         await queue.stop()
     (begin,) = fed.sent
     assert (begin["to"], begin["payload"]["sync_mode"]) == ("host", "initial")
+
+
+# ─── v_92: trusted helpers while the host is offline ─────────────────────
+
+
+class _HelperSpaceRepo(_FakeSpaceRepo):
+    async def get_invited_by(self, space_id):
+        return None
+
+
+class _Seats:
+    """``list_instances_with_roles`` over a fixed roster mirror."""
+
+    def __init__(self, helpers: list[str]) -> None:
+        self.helpers = helpers
+        self.asked: list[tuple[str, frozenset[str]]] = []
+
+    async def list_instances_with_roles(self, space_id, roles):
+        self.asked.append((space_id, frozenset(roles)))
+        return list(self.helpers)
+
+
+class _Resume:
+    def __init__(self) -> None:
+        self.requests: list[dict] = []
+        self.fail = False
+        #: whether the send was refused (``False``, nothing raised).
+        self.refuse = False
+        #: the ``upto`` row marks each newest-row lookup was made with.
+        self.asked_upto: list[tuple[int, int] | None] = []
+
+    async def send_request(self, *, space_id, instance_id, since) -> bool:
+        self.requests.append(
+            {"space_id": space_id, "instance_id": instance_id, "since": since}
+        )
+        if self.fail:
+            raise RuntimeError("no route")
+        return not self.refuse
+
+
+def _helper_sched(
+    bus,
+    queue,
+    sync_manager,
+    *,
+    helpers: list[str],
+    owner: str = "host",
+    authority: bool = False,
+    own_instance_id: str = "self",
+    space_type: SpaceType = SpaceType.PRIVATE,
+    newest: dict[str, str | list[tuple[int, str]]] | None = None,
+    marks: tuple[int, int] | None = None,
+):
+    from socialhome.federation.sync.space.host_contact import HostContact
+
+    held = newest if newest is not None else {}
+
+    fed = _FakeFederation(confirmed={"host"})
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([_peer("host")]),
+        space_repo=_HelperSpaceRepo(
+            spaces_by_type={space_type: [_space("sp-1", owner_instance_id=owner)]},
+            members_by_space={"sp-1": ["host"]},
+        ),
+        queue=queue,
+        own_instance_id=own_instance_id,
+        sync_manager=sync_manager,
+        seat_repo=_Seats(helpers),
+    )
+    contact = HostContact()
+    resume = _Resume()
+
+    async def _authority(space_id: str) -> bool:
+        return authority
+
+    async def _newest(
+        space_id: str, instance_id: str, *, upto: tuple[int, int] | None = None
+    ) -> str | None:
+        """Like ``newest_from_household``: *rows* are ``(rowid, created_at)``
+        (or one ``created_at`` stored before boot); a row stored after the
+        boot marks *upto* never counts, whatever its stamp."""
+        resume.asked_upto.append(upto)
+        rows = held.get(instance_id)
+        if rows is None:
+            return None
+        listed = [(1, rows)] if isinstance(rows, str) else rows
+        kept = [at for rowid, at in listed if upto is None or rowid <= upto[0]]
+        return max(kept) if kept else None
+
+    sched.attach_helpers(
+        host_contact=contact,
+        resume=resume,
+        roster_authority=_authority,
+        newest_from=_newest,
+    )
+    # The app sets the boot marks at startup.
+    sched.set_row_marks(marks if marks is not None else (10**9, 10**9))
+    return sched, contact, resume
+
+
+async def _round(sched) -> None:
+    """One periodic tick with its queued BEGINs actually sent (the queue
+    drains on stop)."""
+    await sched._queue.start()
+    await sched._tick_once()
+    await sched._queue.stop()
+
+
+async def _wait_checks(sched) -> None:
+    await asyncio.gather(*list(sched._helper_checks.values()))
+
+
+@pytest.fixture
+def quick_answer_wait(monkeypatch):
+    monkeypatch.setattr(scheduler_mod, "HOST_ANSWER_WAIT_S", 0.01)
+
+
+async def test_a_silent_host_sends_one_helper_the_bounded_resume(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """The tick asks the host first (its BEGIN); no answer within
+    HOST_ANSWER_WAIT_S → ONE trusted helper (never us, never the host) gets
+    SPACE_SYNC_RESUME since 30 days ago (nothing heard yet)."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["self", "host", "mod-b", "admin-a"]
+    )
+    await _round(sched)
+    await _wait_checks(sched)
+    [request] = resume.requests
+    assert request["space_id"] == "sp-1"
+    assert request["instance_id"] == "admin-a"
+    floor = datetime.now(UTC) - timedelta(days=30)
+    assert abs(datetime.fromisoformat(request["since"]) - floor) < timedelta(minutes=1)
+    assert sched._seat_repo.asked == [
+        ("sp-1", frozenset({SpaceRole.ADMIN.value, SpaceRole.MODERATOR.value}))
+    ]
+
+
+async def test_a_global_spaces_member_syncs_and_falls_back_to_a_helper(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """A GLOBAL space is a space like any other for its members (a household
+    seated from an invite link included): the tick asks its host, and a
+    silent host sends one helper the resume."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["mod-d"], space_type=SpaceType.GLOBAL
+    )
+    await _round(sched)
+    await _wait_checks(sched)
+    assert [s["to"] for s in sched._federation.sent] == ["host"]
+    assert [r["instance_id"] for r in resume.requests] == ["mod-d"]
+
+
+async def test_a_followed_global_space_never_reaches_its_host(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """The GFS shields followers from hosts: a GLOBAL space we only follow
+    gets no BEGIN to its host (even a paired one) and no helper resume."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["mod-d"], space_type=SpaceType.GLOBAL
+    )
+    sched._space_repo.local_roles["sp-1"] = [SpaceRole.SUBSCRIBER.value]
+    await _round(sched)
+    await _wait_checks(sched)
+    assert sched._federation.sent == []
+    assert resume.requests == []
+
+
+async def test_a_host_that_answered_gets_no_fallback(
+    bus, queue, sync_manager, monkeypatch
+):
+    monkeypatch.setattr(scheduler_mod, "HOST_ANSWER_WAIT_S", 0.05)
+    sched, contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    await _round(sched)
+    contact.heard("sp-1")  # the receiver saw the host's sentinel
+    await _wait_checks(sched)
+    assert resume.requests == []
+
+
+async def test_the_resume_asks_since_the_host_was_last_heard(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    sched, contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    contact.heard("sp-1")  # heard once, before this round's BEGIN
+    last = contact.last_heard_iso("sp-1")
+    await _round(sched)
+    await _wait_checks(sched)
+    assert [r["since"] for r in resume.requests] == [last]
+
+
+async def test_each_helper_is_asked_from_its_own_peoples_newest_row(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """A helper replays only its own people's rows, so its resume starts at
+    the newest row this household holds from ITS people (minus the fixed
+    overlap) — read from the database, never from an ask to another
+    helper. Rotating A → B asks B from B's own point."""
+    sched, _contact, resume = _helper_sched(
+        bus,
+        queue,
+        sync_manager,
+        helpers=["mod-b", "admin-a"],
+        own_instance_id="member-a",  # starts on admin-a
+        newest={"admin-a": "2026-11-09 10:00:00", "mod-b": "2026-11-01 08:00:00"},
+    )
+    for _ in range(2):
+        await _round(sched)
+        await _wait_checks(sched)
+    overlap = timedelta(seconds=scheduler_mod.HELPER_OVERLAP_S)
+    assert [
+        (r["instance_id"], datetime.fromisoformat(r["since"])) for r in resume.requests
+    ] == [
+        ("admin-a", datetime(2026, 11, 9, 10, tzinfo=UTC) - overlap),
+        ("mod-b", datetime(2026, 11, 1, 8, tzinfo=UTC) - overlap),
+    ]
+    assert scheduler_mod.HELPER_OVERLAP_S == 5 * 60
+
+
+async def test_a_restart_starts_from_the_rows_held_not_30_days_back(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """A fresh HostContact (a restart: nothing heard, nothing asked) still
+    starts at the helper's newest row held here."""
+    recent = (datetime.now(UTC) - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"], newest={"admin-a": recent}
+    )
+    await _round(sched)
+    await _wait_checks(sched)
+    [request] = resume.requests
+    since = datetime.fromisoformat(request["since"])
+    assert since == datetime.fromisoformat(recent).replace(tzinfo=UTC) - timedelta(
+        seconds=scheduler_mod.HELPER_OVERLAP_S
+    )
+
+
+async def test_a_row_older_than_30_days_is_clamped_to_the_floor(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    sched, _contact, resume = _helper_sched(
+        bus,
+        queue,
+        sync_manager,
+        helpers=["admin-a"],
+        newest={"admin-a": "2020-01-01 00:00:00"},
+    )
+    await _round(sched)
+    await _wait_checks(sched)
+    floor = datetime.now(UTC) - timedelta(days=30)
+    since = datetime.fromisoformat(resume.requests[0]["since"])
+    assert abs(since - floor) < timedelta(minutes=1)
+
+
+async def test_only_rows_stored_before_boot_count_whatever_their_stamp(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """The boot marks (MAX(rowid) taken in ``start()``) decide which rows
+    count — not their ``created_at``: a gap row that arrives after the
+    restart with an OLDER stamp than the newest pre-boot row, or a live
+    post, must not move ``since`` past rows still missing."""
+    pre_boot = (datetime.now(UTC) - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+    late_gap = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+    live = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    sched, _contact, resume = _helper_sched(
+        bus,
+        queue,
+        sync_manager,
+        helpers=["admin-a"],
+        newest={"admin-a": [(5, pre_boot), (9, late_gap), (10, live)]},
+        marks=(7, 7),
+    )
+    await _round(sched)
+    await _wait_checks(sched)
+    [request] = resume.requests
+    assert resume.asked_upto == [(7, 7)]
+    assert datetime.fromisoformat(request["since"]) == datetime.fromisoformat(
+        pre_boot
+    ).replace(tzinfo=UTC) - timedelta(seconds=scheduler_mod.HELPER_OVERLAP_S)
+
+
+async def test_a_silent_hosts_second_round_asks_only_since_the_first(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """Delta per round: while the host stays silent, the next ask to the
+    same helper starts at the previous SUCCESSFUL ask minus the overlap —
+    not again at the database point (no 500-rows-per-resource replay every
+    30 minutes)."""
+    sched, _contact, resume = _helper_sched(
+        bus,
+        queue,
+        sync_manager,
+        helpers=["admin-a"],
+        newest={"admin-a": "2026-01-01 00:00:00"},
+    )
+    await _round(sched)
+    await _wait_checks(sched)
+    first_at = datetime.now(UTC)
+    await _round(sched)
+    await _wait_checks(sched)
+    first, second = (datetime.fromisoformat(r["since"]) for r in resume.requests)
+    overlap = timedelta(seconds=scheduler_mod.HELPER_OVERLAP_S)
+    assert second > first
+    assert abs(second - (first_at - overlap)) < timedelta(seconds=5)
+
+
+async def test_a_refused_or_failed_ask_does_not_move_the_next_since(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """Only a successful send counts as asked: a refused (``False``) or
+    failed send leaves the next round at the database point."""
+    recent = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+    for how in ("refuse", "fail"):
+        sched, _contact, resume = _helper_sched(
+            bus,
+            queue,
+            sync_manager,
+            helpers=["admin-a"],
+            newest={"admin-a": recent},
+        )
+        setattr(resume, how, True)
+        await _round(sched)
+        await _wait_checks(sched)
+        setattr(resume, how, False)
+        await _round(sched)
+        await _wait_checks(sched)
+        first, second = (r["since"] for r in resume.requests)
+        assert first == second, how
+
+
+def test_since_never_lies_in_the_future():
+    """A helper whose clock runs ahead cannot push ``since`` past now."""
+    ahead = (datetime.now(UTC) + timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+    since = datetime.fromisoformat(scheduler_mod._resume_since(None, ahead, None))
+    assert since <= datetime.now(UTC)
+
+
+async def test_an_unanswered_round_marks_the_host_silent(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """The scheduler's notion of a silent host is what SPACE_MEDIA_WANTED
+    reads before it asks a helper; the host's next answer — or any verified
+    event from the household it waited on — clears it; a helper's does not."""
+    sched, contact, _resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    assert not contact.is_silent("sp-1")
+    await _round(sched)
+    await _wait_checks(sched)
+    assert contact.is_silent("sp-1")
+    contact.heard("sp-1")
+    assert not contact.is_silent("sp-1")
+    await _round(sched)
+    await _wait_checks(sched)
+    assert contact.is_silent("sp-1")
+    contact.heard_from("sp-1", "admin-a")
+    assert contact.is_silent("sp-1")
+    contact.heard_from("sp-1", "host")
+    assert not contact.is_silent("sp-1")
+
+
+async def test_a_host_heard_after_the_helper_ask_moves_since_forward(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """``since`` = the newest of: the host's last answer, the helper's
+    people's newest row here minus the overlap, 30 days ago."""
+    sched, contact, resume = _helper_sched(
+        bus,
+        queue,
+        sync_manager,
+        helpers=["admin-a"],
+        newest={"admin-a": "2026-01-01 00:00:00"},
+    )
+    await _round(sched)
+    await _wait_checks(sched)
+    contact.heard("sp-1")  # the host came back once, then went silent again
+    last = contact.last_heard_iso("sp-1")
+    await _round(sched)
+    await _wait_checks(sched)
+    assert resume.requests[-1]["since"] == last
+
+
+async def test_the_helper_rotates_one_step_per_round(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["mod-b", "admin-a"]
+    )
+    for _ in range(3):
+        await _round(sched)
+        await _wait_checks(sched)
+    assert [r["instance_id"] for r in resume.requests] == [
+        "admin-a",
+        "mod-b",
+        "admin-a",
+    ]
+
+
+async def test_no_helper_means_nothing_is_sent(
+    bus, queue, sync_manager, quick_answer_wait, caplog
+):
+    import logging
+
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["self", "host"]
+    )
+    with caplog.at_level(logging.INFO, logger=scheduler_mod.__name__):
+        await _round(sched)
+        await _wait_checks(sched)
+    assert resume.requests == []
+    assert sum("no trusted helper" in r.getMessage() for r in caplog.records) == 1
+
+
+@pytest.mark.parametrize(("owner", "authority"), [("self", False), ("host", True)])
+async def test_a_host_equivalent_household_never_falls_back(
+    bus, queue, sync_manager, quick_answer_wait, owner, authority
+):
+    """We host the space, or hold its roster authority (a seed-holding
+    delegated admin): nobody to fall back from."""
+    sched, _contact, resume = _helper_sched(
+        bus,
+        queue,
+        sync_manager,
+        helpers=["admin-a"],
+        owner=owner,
+        authority=authority,
+    )
+    await _round(sched)
+    await _wait_checks(sched)
+    assert resume.requests == []
+    assert sched._helper_checks == {}
+
+
+async def test_a_caught_up_mesh_only_host_is_asked_every_tick_and_waited_for(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """Every member is equal: a mesh-only host whose catch-up completed
+    still gets the small incremental BEGIN each tick (as a paired host
+    does), so its silence sends one helper the resume."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    sched._federation.confirmed = set()
+    sched._federation_repo = _FakeFedRepo([])
+    sched._mesh_catchup_done.add(("sp-1", "host"))
+    await _round(sched)
+    await _wait_checks(sched)
+    assert sched._federation.mesh_catchups == [("sp-1", "host")]
+    assert sched._federation.mesh_fields[0]["sync_mode"] == "incremental"
+    assert [r["instance_id"] for r in resume.requests] == ["admin-a"]
+
+
+async def test_a_capped_mesh_only_host_still_gets_the_incremental_begin(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """The attempt cap is for the FULL catch-up only: past it the host gets
+    the incremental BEGIN each tick, and its silence reaches a helper."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    sched._federation.confirmed = set()
+    sched._federation_repo = _FakeFedRepo([])
+    sched._mesh_catchup_attempts[("sp-1", "host")] = MAX_MESH_CATCHUP_ATTEMPTS
+    await _round(sched)
+    await _wait_checks(sched)
+    assert sched._federation.mesh_fields == [
+        {"sync_mode": "incremental", "dir_seq": None, "have_seq": None}
+    ]
+    assert sched._mesh_catchup_attempts[("sp-1", "host")] == MAX_MESH_CATCHUP_ATTEMPTS
+    assert [r["instance_id"] for r in resume.requests] == ["admin-a"]
+
+
+async def test_a_mesh_host_with_no_route_still_reaches_a_helper(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """A BEGIN that found no route is never answered: the helper is asked."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    sched._federation.confirmed = set()
+    sched._federation_repo = _FakeFedRepo([])
+    sched._federation.catchup_ships = False
+    sched._mesh_catchup_done.add(("sp-1", "host"))
+    await _round(sched)
+    await _wait_checks(sched)
+    assert [r["instance_id"] for r in resume.requests] == ["admin-a"]
+
+
+async def test_a_helper_below_v92_is_never_asked_for_a_resume(
+    bus, queue, sync_manager, quick_answer_wait, caplog
+):
+    """A helper below v_92 would replay everyone's rows: only v_92 helpers
+    (``space_member_supports``) are picked; none → wait for the host."""
+    import logging
+
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a", "mod-b"]
+    )
+    sched._federation.older = {"admin-a"}
+    await _round(sched)
+    await _wait_checks(sched)
+    assert [r["instance_id"] for r in resume.requests] == ["mod-b"]
+    assert (
+        "admin-a",
+        scheduler_mod.FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
+    ) in sched._federation.version_asks
+    sched._federation.older = {"admin-a", "mod-b"}
+    with caplog.at_level(logging.INFO, logger=scheduler_mod.__name__):
+        await _round(sched)
+        await _wait_checks(sched)
+    assert len(resume.requests) == 1
+    assert any("no trusted helper" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_mesh_only_hosts_catch_up_begin_is_waited_for(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    sched._federation.confirmed = set()
+    sched._federation_repo = _FakeFedRepo([])
+    await _round(sched)
+    await _wait_checks(sched)
+    assert sched._federation.mesh_catchups == [("sp-1", "host")]
+    assert [r["instance_id"] for r in resume.requests] == ["admin-a"]
+
+
+async def test_stop_ends_a_pending_check_without_a_fallback(
+    bus, queue, sync_manager, monkeypatch
+):
+    monkeypatch.setattr(scheduler_mod, "HOST_ANSWER_WAIT_S", 30.0)
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    await _round(sched)
+    assert len(sched._helper_checks) == 1
+    await sched.stop()
+    assert sched._helper_checks == {}
+    assert resume.requests == []
+
+
+async def test_one_check_per_space_at_a_time(bus, queue, sync_manager, monkeypatch):
+    monkeypatch.setattr(scheduler_mod, "HOST_ANSWER_WAIT_S", 0.05)
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    await _round(sched)
+    await _round(sched)
+    assert len(sched._helper_checks) == 1
+    await _wait_checks(sched)
+    assert len(resume.requests) == 1
+
+
+async def test_a_hosts_capacity_deferral_counts_as_its_answer(bus, queue, sync_manager):
+    sched, contact, _resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    t0 = contact.now()
+    await sched._on_sync_deferred(
+        SpaceSyncDeferred(
+            space_id="sp-1",
+            provider_instance_id="admin-a",
+            sync_mode="incremental",
+            sync_id="s-1",
+        )
+    )
+    assert not contact.heard_since("sp-1", t0)
+    await sched._on_sync_deferred(
+        SpaceSyncDeferred(
+            space_id="sp-1",
+            provider_instance_id="host",
+            sync_mode="incremental",
+            sync_id="s-2",
+        )
+    )
+    assert contact.heard_since("sp-1", t0)
+    await sched.stop()
+
+
+@pytest.mark.parametrize(
+    ("reason", "answer", "retried"),
+    [
+        ("too_many_sessions", True, True),
+        ("node_capacity", True, True),
+        ("rate_limited", True, False),
+        ("interrupted", False, True),
+    ],
+)
+async def test_any_refusal_from_the_host_is_its_answer(
+    bus, queue, sync_manager, reason, answer, retried
+):
+    """Every signed refusal of our BEGIN by the host (no free slot, the
+    hourly budget spent) shows it is online — no helper. A stream cut
+    noticed on our side (``interrupted``) is not an answer. Only a
+    capacity refusal (or a cut) is asked again shortly: a rate-limited
+    BEGIN would only be refused again, so it waits for the next tick."""
+    sched, contact, _resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    t0 = contact.now()
+    await sched._on_sync_deferred(
+        SpaceSyncDeferred(
+            space_id="sp-1",
+            provider_instance_id="host",
+            sync_mode="incremental",
+            sync_id="s-1",
+            reason=reason,
+        )
+    )
+    assert contact.heard_since("sp-1", t0) is answer
+    assert bool(sched._deferred_tasks) is retried
+    await sched.stop()
+
+
+async def test_households_start_on_different_helpers(
+    bus, sync_manager, quick_answer_wait
+):
+    """Every member of a silent space sorts the same helper list; a stable
+    per-household offset (sha256 of our id + the space) spreads them over
+    the helpers instead of sending all of them to the first one."""
+    picks = []
+    for own in ("member-a", "member-b"):
+        sched, _contact, resume = _helper_sched(
+            bus,
+            ReconnectSyncQueue(concurrency=2),
+            sync_manager,
+            helpers=["admin-a", "mod-b"],
+            own_instance_id=own,
+        )
+        await _round(sched)
+        await _wait_checks(sched)
+        picks.append(resume.requests[0]["instance_id"])
+    assert picks == ["admin-a", "mod-b"]
+    # The offset is stable, and the household still rotates from there.
+    sched, _contact, resume = _helper_sched(
+        bus,
+        ReconnectSyncQueue(concurrency=2),
+        sync_manager,
+        helpers=["admin-a", "mod-b"],
+        own_instance_id="member-b",
+    )
+    for _ in range(3):
+        await _round(sched)
+        await _wait_checks(sched)
+    assert [r["instance_id"] for r in resume.requests] == [
+        "mod-b",
+        "admin-a",
+        "mod-b",
+    ]
+
+
+async def test_the_wait_starts_when_the_begin_goes_out_not_when_queued(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """The tick only queues the host's BEGIN; nothing waits for an answer
+    until the queue actually sends it."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    await sched._tick_once()  # queue not running: the BEGIN is not sent
+    await asyncio.sleep(0.05)
+    assert sched._helper_checks == {}
+    assert resume.requests == []
+    await queue.start()
+    await queue.stop()  # now it goes out — and the wait starts
+    assert sched._federation.sent
+    await _wait_checks(sched)
+    assert [r["instance_id"] for r in resume.requests] == ["admin-a"]
+
+
+async def test_a_parked_begin_causes_no_fallback(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """All our slots at the host are held: the BEGIN waits for one and is
+    not sent — no answer is due, so no helper is asked."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    sched._inflight["host"] = {
+        f"held-{i}": ("sp-other", time.monotonic())
+        for i in range(scheduler_mod.MAX_ACTIVE_SESSIONS_PER_INSTANCE)
+    }
+    await _round(sched)
+    await _wait_checks(sched)
+    assert sched._federation.sent == []
+    assert sched._helper_checks == {}
+    assert resume.requests == []
+    await sched.stop()
+
+
+async def test_a_skipped_begin_causes_no_fallback(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """The host's row is gone when the queue runs the BEGIN: it is skipped,
+    never sent — no fallback."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    sched._federation_repo.gone.add("host")
+    await _round(sched)
+    await _wait_checks(sched)
+    assert sched._federation.sent == []
+    assert resume.requests == []
+
+
+async def test_no_helper_is_asked_when_the_boot_marks_could_not_be_read(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """Without the boot cut a helper resume could start past rows still
+    missing: no marks (the startup read failed, so none were set) → no
+    helper ask at all."""
+    sched, _contact, resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    sched._row_marks = None  # never set: the startup read failed
+    await _round(sched)
+    await _wait_checks(sched)
+    assert resume.requests == []

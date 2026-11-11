@@ -35,13 +35,17 @@ Pure module — no I/O.
 
 from __future__ import annotations
 
+import unicodedata
 import zlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import TypeGuard
 
 import orjson
 
+from .errors import CodedError
 from .item_zdict import ZDICT_V1
+from .user import looks_like_emoji
 from .writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE
 
 ITEM_TYPE_POST: str = "post"
@@ -106,6 +110,14 @@ MAX_ITEM_CLOCK_SKEW_S: int = 300
 #: Upper bound on a relayed reaction's emoji (characters).
 MAX_REACTION_EMOJI_CHARS: int = 32
 
+#: How many reactions one person holds on one space post. Enforced where
+#: the reaction is made (a sixth is refused) and wherever one is received
+#: (the newest by stamp are kept — the same ones on every household, in any
+#: arrival order). It replaces a post-wide cap on distinct emoji, which let
+#: one member fill every slot and left each household with whichever
+#: arrived first.
+MAX_REACTIONS_PER_USER_PER_POST: int = 5
+
 
 def required_scope(item_type: str) -> str:
     """The scope a cert must grant for ``item_type``; :class:`ValueError`
@@ -132,6 +144,50 @@ def item_stamp(raw: object, *, now: datetime | None = None) -> datetime | None:
     if parsed > limit:
         return None
     return parsed
+
+
+def stored_stamp(raw: object, *, now: datetime | None = None) -> datetime | None:
+    """A stamp a §25.6 record copies from the host's rows — the live
+    :func:`item_stamp` rule (no more than :data:`MAX_ITEM_CLOCK_SKEW_S`
+    ahead of ``now``), except that a naive stamp is UTC, the shape every
+    stored one has (:func:`stamp_to_db`, SQLite ``datetime('now')``)."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return item_stamp(parsed.isoformat(), now=now)
+
+
+def reaction_emoji_ok(emoji: object, *, legacy: bool = False) -> TypeGuard[str]:
+    """The reaction emoji rule: a non-empty string of at most
+    :data:`MAX_REACTION_EMOJI_CHARS` characters, already NFC and trimmed —
+    and an emoji, not free text, by the sanity check a status emoji gets
+    (:func:`~socialhome.domain.user.looks_like_emoji`).
+
+    ``legacy`` leaves the emoji check out: before v_93 a reaction could be
+    any short text, so a REMOVAL (and a catch-up copy of an old reaction)
+    is held to the length rule only — an old one can always be taken back.
+    """
+    return (
+        isinstance(emoji, str)
+        and bool(emoji)
+        and len(emoji) <= MAX_REACTION_EMOJI_CHARS
+        and unicodedata.normalize("NFC", emoji.strip()) == emoji
+        and (legacy or looks_like_emoji(emoji))
+    )
+
+
+class TooManyReactionsError(CodedError, ValueError):
+    """A person's reaction past :data:`MAX_REACTIONS_PER_USER_PER_POST` on
+    one space post, refused where it is made."""
+
+    status = 422
+    code = "REACTION_LIMIT"
+    detail = "Too many reactions: you can leave up to five on a post."
 
 
 def stamp_to_db(stamp: datetime) -> str:

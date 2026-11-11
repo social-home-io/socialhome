@@ -1104,15 +1104,25 @@ class _StubPipelineOwner:
 
 
 class _FakeFeatures:
-    def __init__(self, allow_subscriber_comment: bool = False) -> None:
+    def __init__(
+        self,
+        allow_subscriber_comment: bool = False,
+        allow_subscriber_react: bool = False,
+    ) -> None:
         self.allow_subscriber_comment = allow_subscriber_comment
-        self.allow_subscriber_react = False
+        self.allow_subscriber_react = allow_subscriber_react
 
 
 class _FakeSpace:
-    def __init__(self, owner_instance_id: str, *, allow_comment: bool = False) -> None:
+    def __init__(
+        self,
+        owner_instance_id: str,
+        *,
+        allow_comment: bool = False,
+        allow_react: bool = False,
+    ) -> None:
         self.owner_instance_id = owner_instance_id
-        self.features = _FakeFeatures(allow_comment)
+        self.features = _FakeFeatures(allow_comment, allow_react)
 
 
 class _FakeSpaceRepo:
@@ -1193,13 +1203,18 @@ def _writer_step(
     owner=OWN,
     seats=None,
     allow_comment=False,
+    allow_react=False,
     space_id="sp-1",
 ):
     if seats is None:
         seats = [_FakeSeat("subscriber")]
     return make_check_space_writer(
         space_repo=_FakeSpaceRepo(
-            {space_id: _FakeSpace(owner, allow_comment=allow_comment)}
+            {
+                space_id: _FakeSpace(
+                    owner, allow_comment=allow_comment, allow_react=allow_react
+                )
+            }
         ),
         remote_member_repo=_FakeRemoteMemberRepo({(space_id, "peer-x"): seats}),
     )
@@ -1437,6 +1452,40 @@ async def test_space_writer_binds_the_comment_opt_in_to_a_real_seat():
         {"author": "u-somebody-else", "content": "nice"},
     )
     assert ctx.drop_reason == REFUSED
+
+
+_REACTION = {"user_id": "u-follower", "post_id": "p1", "emoji": "👍", "action": "add"}
+
+
+async def test_space_writer_allows_a_follower_reaction_only_with_the_opt_in():
+    """v_93 — ``allow_subscriber_react`` is the second opt-in: a follower-only
+    household's ``SPACE_POST_REACTION`` passes only while the space lets
+    followers react, and only for a reactor that IS a live follower seat of
+    that household. The comment opt-in never covers it."""
+    FET = FederationEventType
+    blocked = await _run(_writer_step(), FET.SPACE_POST_REACTION, _REACTION)
+    assert blocked.drop_reason == REFUSED
+    comment_only = await _run(
+        _writer_step(allow_comment=True), FET.SPACE_POST_REACTION, _REACTION
+    )
+    assert comment_only.drop_reason == REFUSED
+    allowed = await _run(
+        _writer_step(allow_react=True), FET.SPACE_POST_REACTION, _REACTION
+    )
+    assert allowed.early_response is None
+    spoof = await _run(
+        _writer_step(allow_react=True),
+        FET.SPACE_POST_REACTION,
+        {**_REACTION, "user_id": "u-somebody-else"},
+    )
+    assert spoof.drop_reason == REFUSED
+    # The react opt-in never lets a follower comment.
+    comment = await _run(
+        _writer_step(allow_react=True),
+        FET.SPACE_COMMENT_CREATED,
+        {"author": "u-follower", "content": "nice"},
+    )
+    assert comment.drop_reason == REFUSED
 
 
 async def test_space_writer_never_extends_the_comment_opt_in_to_a_post():

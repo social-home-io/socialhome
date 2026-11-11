@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -693,10 +693,11 @@ def _ago(hours: float) -> str:
 
 
 async def test_a_removal_tombstone_outlives_the_duplicate_horizon_only(env):
-    """A removal is remembered for longer than any duplicate can arrive
-    (the GFS queue's 24 h plus retries); past that it is dropped."""
+    """A removal is remembered for 30 days — the reach of a catch-up,
+    since a removal travels only as its stamp (v_93), and far longer than
+    any duplicate can arrive; past that it is dropped."""
     await env.repo.save(env.space_id, _post("p1"))
-    for user, hours in (("u-old", 72), ("u-recent", 30)):
+    for user, hours in (("u-old", 31 * 24), ("u-recent", 29 * 24)):
         await env.repo.add_reaction(
             "p1", "👍", user, space_id=env.space_id, stamp=_ago(hours + 1)
         )
@@ -958,3 +959,279 @@ async def test_set_media_rewrites_only_the_files_of_a_live_post(env):
     assert await env.repo.set_media(renamed, space_id="sp-other") is False
     await env.repo.soft_delete("sp-m1", space_id=env.space_id)
     assert await env.repo.set_media(renamed, space_id=env.space_id) is False
+
+
+# ── §25.6 reaction stamps (v_92) ─────────────────────────────────────────
+
+
+def _recent(minutes: int) -> str:
+    return (
+        (datetime.now(UTC) - timedelta(minutes=minutes))
+        .replace(tzinfo=None)
+        .isoformat(sep=" ", timespec="microseconds")
+    )
+
+
+async def _reacted_post(env):
+    await env.repo.save(
+        env.space_id,
+        Post(id="sp-r1", author="u", type=PostType.TEXT, created_at=datetime.now(UTC)),
+    )
+    await env.repo.add_reaction(
+        "sp-r1", "👍", "u-c", space_id=env.space_id, stamp=_recent(10)
+    )
+
+
+async def test_list_reaction_stamps_names_the_posts_with_any(env):
+    await _reacted_post(env)
+    stamps = await env.repo.list_reaction_stamps(["sp-r1", "nope"])
+    assert list(stamps) == ["sp-r1"]
+    assert stamps["sp-r1"]["u-c\x00👍"][1] is True
+
+
+async def test_merge_reaction_stamps_last_writer_wins(env):
+    await _reacted_post(env)
+    # An older removal changes nothing; a newer one removes.
+    assert not await env.repo.merge_reaction_stamps(
+        "sp-r1", {"u-c\x00👍": [_recent(20), False]}, space_id=env.space_id
+    )
+    assert await env.repo.merge_reaction_stamps(
+        "sp-r1",
+        {"u-c\x00👍": [_recent(5), False], "u-d\x00🎉": [_recent(5), True]},
+        space_id=env.space_id,
+    )
+    _sid, got = await env.repo.get("sp-r1")
+    assert got.reactions == {"🎉": frozenset({"u-d"})}
+    # Another space's post is never touched.
+    assert not await env.repo.merge_reaction_stamps(
+        "sp-r1", {"u-e\x00🎉": [_recent(1), True]}, space_id="sp-other"
+    )
+
+
+async def test_merge_reaction_stamps_follows_the_sources_sets_past_the_horizon(env):
+    await env.repo.save(
+        env.space_id,
+        Post(
+            id="sp-r2",
+            author="u",
+            type=PostType.TEXT,
+            created_at=datetime.now(UTC),
+            reactions={"👍": frozenset({"u-old"})},
+        ),
+    )
+    await env.repo.add_reaction(
+        "sp-r2", "❤️", "u-new", space_id=env.space_id, stamp=_recent(1)
+    )
+    # The source holds neither: the unstamped old one goes, the fresh stays.
+    assert await env.repo.merge_reaction_stamps(
+        "sp-r2", {}, space_id=env.space_id, reactions={"🙂": ["u-x"]}
+    )
+    _sid, got = await env.repo.get("sp-r2")
+    assert got.reactions == {
+        "❤️": frozenset({"u-new"}),
+        "🙂": frozenset({"u-x"}),
+    }
+
+
+async def test_merge_reaction_stamps_never_touches_our_own_people(env):
+    await env.repo.save(
+        env.space_id,
+        Post(
+            id="sp-r3",
+            author="u",
+            type=PostType.TEXT,
+            created_at=datetime.now(UTC),
+            reactions={"👋": frozenset({"u-ours"})},
+        ),
+    )
+    keep = frozenset({"u-ours"})
+    # Neither the source's sets (it lacks ours) nor its stamps (one for
+    # ours) change our people's reactions; everybody else's converge.
+    assert await env.repo.merge_reaction_stamps(
+        "sp-r3",
+        {"u-ours\x00🎉": [_recent(1), True], "u-c\x00🎉": [_recent(1), True]},
+        space_id=env.space_id,
+        reactions={"🎉": ["u-c", "u-ours"]},
+        keep_users=keep,
+    )
+    _sid, got = await env.repo.get("sp-r3")
+    assert got.reactions == {"👋": frozenset({"u-ours"}), "🎉": frozenset({"u-c"})}
+
+
+# ── v_92 helper resume: where a helper's replay starts ───────────────────
+
+
+async def test_newest_from_household_is_its_peoples_newest_post_or_comment(env):
+    """The newest ``created_at`` (UTC, naive) of the space's posts and
+    comments written by the people seated for one household — the persisted
+    point a helper resume to that household starts from."""
+    for uid, iid in (("uid-hb", "inst-b"), ("uid-hc", "inst-c")):
+        await env.db.enqueue(
+            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+            " VALUES(?,?,?,?)",
+            (env.space_id, iid, uid, "moderator"),
+        )
+    assert await env.repo.newest_from_household(env.space_id, "inst-b") is None
+    t0 = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
+    await env.repo.save(env.space_id, replace(_post("p-b", "uid-hb"), created_at=t0))
+    await env.repo.save(
+        env.space_id,
+        replace(_post("p-c", "uid-hc"), created_at=t0 + timedelta(days=2)),
+    )
+    assert await env.repo.newest_from_household(env.space_id, "inst-b") == (
+        "2026-11-01 12:00:00"
+    )
+    await env.repo.add_comment(
+        replace(_comment("c-b", "p-c", "uid-hb"), created_at=t0 + timedelta(hours=5)),
+        space_id=env.space_id,
+    )
+    assert await env.repo.newest_from_household(env.space_id, "inst-b") == (
+        "2026-11-01 17:00:00"
+    )
+    assert await env.repo.newest_from_household("sp-other", "inst-b") is None
+
+
+async def test_newest_from_household_upto_counts_only_rows_held_at_boot(env):
+    """``upto`` (the row marks taken when this process started): only rows
+    STORED before it count, whatever their ``created_at`` — a gap row that
+    arrives after a restart with an older stamp, or a live post, must not
+    move a helper resume past the rows still missing."""
+    await env.db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES(?,?,?,?)",
+        (env.space_id, "inst-b", "uid-hb", "moderator"),
+    )
+    t0 = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
+    await env.repo.save(env.space_id, replace(_post("p-old", "uid-hb"), created_at=t0))
+    marks = await env.repo.row_marks()
+    # Stored after the marks: a live post (newer stamp) and a late gap row
+    # and comment whose stamps sit just after the pre-boot row.
+    await env.repo.save(
+        env.space_id,
+        replace(_post("p-live", "uid-hb"), created_at=t0 + timedelta(days=1)),
+    )
+    await env.repo.save(
+        env.space_id,
+        replace(_post("p-late", "uid-hb"), created_at=t0 + timedelta(hours=1)),
+    )
+    await env.repo.add_comment(
+        replace(
+            _comment("c-late", "p-old", "uid-hb"), created_at=t0 + timedelta(hours=2)
+        ),
+        space_id=env.space_id,
+    )
+    assert (
+        await env.repo.newest_from_household(env.space_id, "inst-b", upto=marks)
+        == "2026-11-01 12:00:00"
+    )
+    assert await env.repo.newest_from_household(env.space_id, "inst-b") == (
+        "2026-11-02 12:00:00"
+    )
+
+
+async def test_row_marks_are_zero_on_an_empty_database(env):
+    """Nothing stored yet: the marks count nothing (no row is held at boot)."""
+    assert await env.repo.row_marks() == (0, 0)
+    assert (
+        await env.repo.newest_from_household(env.space_id, "inst-b", upto=(0, 0))
+        is None
+    )
+
+
+# ─── v_93: federated reactions — stamps, caps, convergence ───────────────
+
+
+async def test_merge_never_drops_a_reaction_that_holds_a_live_add_stamp(env):
+    """A removal travels only as a stamp. A reaction whose add this
+    household applied stays even when the source's sets lack it — however
+    old the stamp: the source may simply never have received it (an older
+    host, a lost event). An UNSTAMPED one still follows the source."""
+    await env.repo.save(
+        env.space_id,
+        Post(
+            id="sp-m1",
+            author="u",
+            type=PostType.TEXT,
+            created_at=datetime.now(UTC),
+            reactions={"👍": frozenset({"u-unstamped"})},
+        ),
+    )
+    await env.repo.add_reaction(
+        "sp-m1", "❤️", "u-old", space_id=env.space_id, stamp="2026-01-01 00:00:00"
+    )
+    assert await env.repo.merge_reaction_stamps(
+        "sp-m1", {}, space_id=env.space_id, reactions={}
+    )
+    _sid, got = await env.repo.get("sp-m1")
+    assert got.reactions == {"❤️": frozenset({"u-old"})}
+
+
+async def test_a_local_reaction_is_stamped_after_the_one_it_replaces(env):
+    """``react`` returns the stamp it wrote: now, or just after the held
+    stamp when the clock stepped back — so the change is never older than
+    the one it replaces, here or on any other household."""
+    await env.repo.save(env.space_id, _post("p1"))
+    ahead = _ago(-0.05)  # the add was stamped 3 minutes ahead of our clock
+    await env.repo.add_reaction("p1", "👍", "u-bob", space_id=env.space_id, stamp=ahead)
+    post, at = await env.repo.react(
+        "p1", "👍", "u-bob", space_id=env.space_id, added=False
+    )
+    assert "👍" not in post.reactions
+    assert at > ahead
+    assert (await env.repo.list_reaction_stamps(["p1"]))["p1"]["u-bob\x00👍"] == [
+        at,
+        False,
+    ]
+
+
+async def test_one_person_holds_at_most_five_reactions_on_a_post(env):
+    from socialhome.domain.space_item import MAX_REACTIONS_PER_USER_PER_POST
+
+    assert MAX_REACTIONS_PER_USER_PER_POST == 5
+    await env.repo.save(env.space_id, _post("p1"))
+    emoji = ["👍", "❤️", "🎉", "😂", "😮", "😢"]
+    for e in emoji[:5]:
+        await env.repo.react("p1", e, "u-bob", space_id=env.space_id, added=True)
+    with pytest.raises(ValueError, match="(?i)too many"):
+        await env.repo.react("p1", emoji[5], "u-bob", space_id=env.space_id, added=True)
+    # Re-adding one already held is no sixth; somebody else is not capped
+    # by bob.
+    await env.repo.react("p1", emoji[0], "u-bob", space_id=env.space_id, added=True)
+    post, _at = await env.repo.react(
+        "p1", emoji[5], "u-eve", space_id=env.space_id, added=True
+    )
+    assert sorted(e for e, users in post.reactions.items() if "u-bob" in users) == (
+        sorted(emoji[:5])
+    )
+
+
+@pytest.mark.parametrize("order", [(0, 1, 2, 3, 4, 5, 6), (6, 5, 4, 3, 2, 1, 0)])
+async def test_a_received_overflow_keeps_the_newest_five_in_any_order(env, order):
+    """Received reactions past the per-person cap: every household keeps
+    the same five — the newest by stamp — whatever order they arrive in."""
+    await env.repo.save(env.space_id, _post("p1"))
+    emoji = ["👍", "❤️", "🎉", "😂", "😮", "😢", "🙏"]
+    for i in order:
+        await env.repo.add_reaction(
+            "p1", emoji[i], "u-bob", space_id=env.space_id, stamp=_recent(30 - i)
+        )
+    _sid, post = await env.repo.get("p1")
+    assert sorted(post.reactions) == sorted(emoji[2:])
+    # Taking one of the five back lets the next newest show again.
+    post = await env.repo.remove_reaction(
+        "p1", emoji[6], "u-bob", space_id=env.space_id, stamp=_recent(1)
+    )
+    assert sorted(post.reactions) == sorted(emoji[1:6])
+
+
+async def test_a_space_post_has_no_post_wide_emoji_cap(env):
+    """The post-wide cap made households diverge (each kept whichever 20
+    arrived first) and let one member fill every slot: the per-person cap
+    replaces it."""
+    await env.repo.save(env.space_id, _post("p1"))
+    for i in range(25):
+        await env.repo.add_reaction(
+            "p1", chr(0x1F600 + i), f"u-{i}", space_id=env.space_id, stamp=_recent(1)
+        )
+    _sid, post = await env.repo.get("p1")
+    assert len(post.reactions) == 25

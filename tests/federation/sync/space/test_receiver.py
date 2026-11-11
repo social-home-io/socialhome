@@ -1555,3 +1555,54 @@ async def test_a_faq_record_with_every_marker_of_a_listing_is_taken():
     ]
     await _apply_bazaar_faq(repo, "bzr-1", items)
     assert len(repo.applied) == 30 and all(e.removed for e in repo.applied)
+
+
+# ── v_92: the receiver marks when the space's host answered ─────────────
+
+
+class _Heard:
+    def __init__(self) -> None:
+        self.spaces: list[str] = []
+
+    def heard(self, space_id: str) -> None:
+        self.spaces.append(space_id)
+
+
+async def test_an_acting_hosts_empty_session_marks_the_host_heard(receiver, peer_setup):
+    """An up-to-date incremental session from the host sends back only its
+    sentinel — that answer must count, or a quiet space always falls back
+    to a helper."""
+    r, _, _ = receiver
+    _, kp = peer_setup
+    contact = _Heard()
+    r.attach_host_contact(contact)
+    await r.on_chunk(await _sentinel_frame(kp, "s-q", 0), from_instance="peer-a")
+    assert contact.spaces == ["sp-1"]
+    await r.on_chunk(await _members_chunk(kp, "s-c"), from_instance="peer-a")
+    assert contact.spaces == ["sp-1", "sp-1"]
+
+
+async def test_a_plain_members_chunk_does_not_mark_the_host_heard(receiver, peer_setup):
+    r, space_repo, _ = receiver
+    _, kp = peer_setup
+    space_repo.spaces["sp-1"] = SimpleNamespace(
+        id="sp-1",
+        owner_instance_id="host-elsewhere",
+        archived=False,
+        archived_reason=None,
+        dissolved=False,
+    )
+    contact = _Heard()
+    r.attach_host_contact(contact)
+    await r.on_chunk(await _sentinel_frame(kp, "s-m", 0), from_instance="peer-a")
+    await r.on_chunk(await _members_chunk(kp, "s-m2"), from_instance="peer-a")
+    assert contact.spaces == []
+
+
+async def test_a_forged_chunk_does_not_mark_the_host_heard(receiver):
+    r, _, _ = receiver
+    contact = _Heard()
+    r.attach_host_contact(contact)
+    stranger = generate_identity_keypair()
+    await r.on_chunk(await _sentinel_frame(stranger, "s-f", 0), from_instance="peer-a")
+    assert contact.spaces == []

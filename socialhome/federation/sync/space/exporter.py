@@ -106,6 +106,10 @@ RESOURCE_ORDER: tuple[str, ...] = (
     # has an FK to space_posts(id) — the wrapper post must already be
     # persisted on the receiver side before the listing INSERT lands.
     "bazaar",
+    # Timetable tombstones (v_92) before the live timetables, like the other
+    # tombstones: a household that missed a delete drops its copy. Sent
+    # only to a v_92 requester, taken from the host only.
+    "timetables_deleted",
     # Space timetables (v_39). Self-contained rows; an older receiver drops
     # the unknown resource.
     "timetables",
@@ -146,6 +150,7 @@ REMOVAL_RESOURCES: frozenset[str] = frozenset(
         "gallery_albums_deleted",
         "gallery_items_deleted",
         "space_zones_deleted",
+        "timetables_deleted",
         "chat_messages_deleted",
     }
 )

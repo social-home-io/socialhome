@@ -25,6 +25,8 @@ from socialhome.domain.events import (
     GalleryItemUpdated,
     GalleryItemUploaded,
     PollClosed,
+    PollCreated,
+    PollVoted,
     RemoteSchedulePollFinalized,
     SchedulePollFinalized,
     SpaceZoneDeleted,
@@ -44,6 +46,7 @@ from socialhome.domain.post import (
     BazaarMode,
     BazaarOffer,
     BazaarStatus,
+    poll_option_id,
 )
 from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
@@ -476,6 +479,14 @@ class _FakeSpaceCalendarRepo:
         return applied
 
 
+def _opts(post_id: str) -> list[dict]:
+    """A well-formed poll's options: the ids are bound to its post."""
+    return [
+        {"id": poll_option_id(post_id, i), "text": text}
+        for i, text in enumerate(("Yes", "No"))
+    ]
+
+
 class _FakePollRepo:
     """Space-scoped poll surface. Posts / slots live in ``sp-1`` unless
     ``post_space`` / ``slot_space`` say otherwise."""
@@ -491,8 +502,11 @@ class _FakePollRepo:
         self.responses: dict[tuple[str, str], str] = {}
         self.finalized: list[tuple[str, str]] = []
         self.fail_create_schedule = False
-        #: post_id → poll meta (``get_meta``); unknown posts have none.
+        #: post_id → poll meta (``get_meta``); any other post holds an
+        #: open poll unless it is in ``no_poll``.
         self.meta: dict[str, dict] = {}
+        self.no_poll: set[str] = set()
+        self.created: list[dict] = []
         #: post_id → schedule meta (``get_schedule_meta``).
         self.schedule_meta: dict[str, dict] = {}
 
@@ -502,13 +516,32 @@ class _FakePollRepo:
     def _slot_in(self, slot_id, space_id) -> bool:
         return self.slot_space.get(slot_id, "sp-1") == space_id
 
-    async def cast_vote_in_space(self, *, space_id, post_id, option_id, voter_user_id):
+    async def set_votes_in_space(self, *, space_id, post_id, option_ids, voter_user_id):
         if not self._post_in(post_id, space_id):
             return False
-        if (post_id, option_id) not in self.valid_options:
+        if any((post_id, o) not in self.valid_options for o in option_ids):
             return False
         self.cleared.append((post_id, voter_user_id))
-        self.inserted.append((option_id, voter_user_id))
+        self.inserted.extend((o, voter_user_id) for o in option_ids)
+        return True
+
+    async def create_poll_in_space(
+        self, *, space_id, post_id, question, closes_at, allow_multiple, options
+    ):
+        if not self._post_in(post_id, space_id):
+            return None
+        if post_id not in self.no_poll:
+            return False
+        self.no_poll.discard(post_id)
+        self.created.append(
+            {
+                "post_id": post_id,
+                "question": question,
+                "closes_at": closes_at,
+                "allow_multiple": allow_multiple,
+                "options": options,
+            }
+        )
         return True
 
     async def close_in_space(self, post_id, *, space_id):
@@ -520,8 +553,10 @@ class _FakePollRepo:
         return True
 
     async def get_meta(self, post_id):
-        meta = self.meta.get(post_id)
-        return dict(meta) if meta is not None else None
+        if post_id in self.no_poll:
+            return None
+        meta = self.meta.get(post_id, {"closed": False, "closes_at": None})
+        return dict(meta)
 
     async def get_schedule_meta(self, post_id):
         meta = self.schedule_meta.get(post_id)
@@ -650,8 +685,7 @@ async def test_attach_registers_all_content_event_types(bus, repos):
         FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
         FederationEventType.SPACE_RSVP_UPDATED,
         FederationEventType.SPACE_RSVP_DELETED,
-        # SPACE_POLL_CREATED is intentionally not registered — poll
-        # creation rides inline on SPACE_POST_CREATED.
+        FederationEventType.SPACE_POLL_CREATED,
         FederationEventType.SPACE_POLL_VOTE_CAST,
         FederationEventType.SPACE_POLL_CLOSED,
     ):
@@ -2237,13 +2271,300 @@ async def test_rsvp_updated_invalid_status_drops(repos, handlers):
 # ─── Polls ──────────────────────────────────────────────────────────
 
 
+def _poll_created(post_id="p-new", **over):
+    return _event(
+        FederationEventType.SPACE_POLL_CREATED,
+        {
+            "post_id": post_id,
+            "question": " Which? ",
+            "allow_multiple": True,
+            "closes_at": "2030-01-01T00:00:00+00:00",
+            "options": _opts(post_id),
+            **over,
+        },
+        space_id="sp-1",
+    )
+
+
+async def test_poll_created_stores_the_definition_and_tells_the_spa(
+    repos, handlers, bus
+):
+    seen: list[PollCreated] = []
+
+    async def _keep(event: PollCreated) -> None:
+        seen.append(event)
+
+    bus.subscribe(PollCreated, _keep)
+    repos["poll"].no_poll.add("p-new")
+    await handlers._on_poll_created(_poll_created())
+    assert repos["poll"].created == [
+        {
+            "post_id": "p-new",
+            "question": "Which?",
+            "closes_at": "2030-01-01T00:00:00+00:00",
+            "allow_multiple": True,
+            "options": _opts("p-new"),
+        }
+    ]
+    assert [(e.post_id, e.space_id, e.origin_instance_id) for e in seen] == [
+        ("p-new", "sp-1", "peer-a")
+    ]
+    assert seen[0].options == tuple(_opts("p-new"))
+
+
+async def test_poll_created_for_a_held_poll_changes_nothing(repos, handlers, bus):
+    """A re-send / a resume replay: the poll is kept, nobody is told again."""
+    seen: list[PollCreated] = []
+
+    async def _keep(event: PollCreated) -> None:
+        seen.append(event)
+
+    bus.subscribe(PollCreated, _keep)
+    await handlers._on_poll_created(_poll_created("p-1"))
+    assert repos["poll"].created == [] and seen == []
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"post_id": ""},
+        {"question": "  "},
+        {"question": "q" * 501},
+        {"options": None},
+        {"options": _opts("p-new")[:1]},
+        # Ids of another post: a poll only ever carries its own post's.
+        {"options": _opts("p-other")},
+        {"closes_at": 5},
+        {"closes_at": "soon"},
+        {"closes_at": "2030-01-01T00:00:00+00:00".ljust(41)},
+        {"allow_multiple": 1},
+    ],
+)
+async def test_poll_created_without_a_usable_definition_drops(repos, handlers, over):
+    """An older sender's event carried no options: nothing to keep."""
+    repos["poll"].no_poll.add("p-new")
+    await handlers._on_poll_created(_poll_created(**over))
+    assert repos["poll"].created == []
+
+
+@pytest.mark.parametrize(
+    ("handler", "payload"),
+    [
+        ("_on_poll_created", {"question": "q", "options": _opts("p-bot")}),
+        ("_on_schedule_created", {"title": "t", "slots": [{"id": "s"}]}),
+    ],
+)
+async def test_nobody_hangs_a_poll_on_a_bot_post(repos, handlers, handler, payload):
+    """``may_author`` admits the system author from any household (a bot's
+    post is relayed by anyone) — so a system post takes no poll at all."""
+    repos["poll"].no_poll.add("p-bot")
+    repos["post"].author["p-bot"] = SYSTEM_AUTHOR
+    await getattr(handlers, handler)(
+        _event(
+            FederationEventType.SPACE_POLL_CREATED,
+            {"post_id": "p-bot", **payload},
+            space_id="sp-1",
+        )
+    )
+    assert repos["poll"].created == [] and repos["poll"].scheduled == []
+    assert "p-bot" in repos["auth"].refusals
+    assert ("may_author", "sp-1", SYSTEM_AUTHOR) not in repos["auth"].calls
+
+
+async def test_poll_created_cross_space_is_refused(repos, handlers, caplog):
+    repos["poll"].no_poll.add("p-b")
+    repos["post"].post_space["p-b"] = "sp-b"
+    repos["poll"].post_space["p-b"] = "sp-b"
+    with caplog.at_level("WARNING"):
+        await handlers._on_poll_created(_poll_created("p-b"))
+    assert repos["poll"].created == []
+    assert "is not in space sp-1" in caplog.text
+
+
+async def test_poll_created_the_repo_refuses_is_logged(repos, handlers, caplog):
+    """The post is this space's by the pre-read, the write disagrees (a
+    racing delete, an option id another poll owns): refused, logged."""
+    repos["poll"].no_poll.add("p-new")
+    repos["poll"].post_space["p-new"] = "sp-b"
+    with caplog.at_level("WARNING"):
+        await handlers._on_poll_created(_poll_created())
+    assert repos["poll"].created == []
+    assert "is not in space sp-1" in caplog.text
+
+
+async def test_poll_events_ahead_of_their_parent_wait_for_it(repos, bus):
+    """The definition waits for its post; a vote and a close wait for the
+    post, or — the post held — for its poll. Each replays through
+    ``FederationService.replay_held``."""
+    held: list[tuple[str, str, str]] = []
+
+    class _Buffer:
+        def hold(self, *, space_id, kind, parent_id, replay, **_kw):
+            held.append((space_id, kind, parent_id))
+            self.replay = replay
+            return True
+
+    replayed: list[tuple] = []
+
+    class _Fed(_FakeFederationService):
+        async def replay_held(self, event, *, reason):
+            replayed.append((event.event_type, reason))
+
+    buffer, fed = _Buffer(), _Fed()
+    h = SpaceContentInboundHandlers(
+        bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
+        page_repo=repos["page"],
+        sticky_repo=repos["sticky"],
+        task_repo=repos["task"],
+        calendar_repo=repos["calendar"],
+        poll_repo=repos["poll"],
+        pending_parents=buffer,
+    )
+    h.attach_to(fed)
+    repos["poll"].no_poll.update({"p-gone", "p-new"})
+    repos["post"].missing.add("p-gone")
+    vote = {"option_ids": ["o"], "voter_user_id": "u"}
+    await h._on_poll_created(_poll_created("p-gone"))
+    for post_id in ("p-gone", "p-new"):
+        await h._on_poll_vote(
+            _event(
+                FederationEventType.SPACE_POLL_VOTE_CAST,
+                {"post_id": post_id, **vote},
+                space_id="sp-1",
+            )
+        )
+        await h._on_poll_closed(
+            _event(
+                FederationEventType.SPACE_POLL_CLOSED,
+                {"post_id": post_id},
+                space_id="sp-1",
+            )
+        )
+    assert held == [
+        ("sp-1", "post", "p-gone"),
+        ("sp-1", "post", "p-gone"),
+        ("sp-1", "post", "p-gone"),
+        ("sp-1", "poll", "p-new"),
+        ("sp-1", "poll", "p-new"),
+    ]
+    assert repos["poll"].inserted == [] and repos["poll"].closed == []
+    # A definition for a poll already held (the stream created it) lets
+    # what waited for that poll replay.
+    released: list[tuple] = []
+
+    async def _release(*, space_id, kind, parent_id):
+        released.append((space_id, kind, parent_id))
+
+    buffer.release = _release
+    await h._on_poll_created(_poll_created("p-1"))
+    assert released == [("sp-1", "poll", "p-1")]
+    await buffer.replay()
+    assert replayed == [(FederationEventType.SPACE_POLL_CLOSED, "poll p-new landed")]
+
+
+async def test_poll_events_ahead_of_their_parent_without_a_buffer_drop(
+    repos, handlers, caplog
+):
+    """No buffer wired (or it is full): not applied, logged, nothing held."""
+    repos["poll"].no_poll.update({"p-gone", "p-new"})
+    repos["post"].missing.add("p-gone")
+    with caplog.at_level("DEBUG"):
+        await handlers._on_poll_created(_poll_created("p-gone"))
+        await handlers._on_poll_vote(
+            _event(
+                FederationEventType.SPACE_POLL_VOTE_CAST,
+                {"post_id": "p-new", "option_ids": ["o"], "voter_user_id": "u"},
+                space_id="sp-1",
+            )
+        )
+    assert repos["poll"].created == [] and repos["poll"].inserted == []
+    assert "no such post here" in caplog.text
+    assert "no such poll here" in caplog.text
+
+
+async def test_a_vote_on_a_post_of_another_space_is_never_held(repos, handlers, caplog):
+    """A poll-less post in another space is a refusal, not a wait."""
+    repos["poll"].no_poll.add("p-b")
+    repos["post"].post_space["p-b"] = "sp-b"
+    repos["poll"].post_space["p-b"] = "sp-b"
+    with caplog.at_level("WARNING"):
+        await handlers._on_poll_vote(
+            _event(
+                FederationEventType.SPACE_POLL_VOTE_CAST,
+                {"post_id": "p-b", "option_ids": ["o"], "voter_user_id": "u"},
+                space_id="sp-1",
+            )
+        )
+    assert "is not in space sp-1" in caplog.text
+
+
+async def test_poll_vote_retraction_and_selection(repos, handlers, bus):
+    """``option_ids`` is the voter's whole selection — empty retracts —
+    and the open SPA hears each change (never echoed: it names its origin)."""
+    seen: list[PollVoted] = []
+
+    async def _keep(event: PollVoted) -> None:
+        seen.append(event)
+
+    bus.subscribe(PollVoted, _keep)
+    repos["poll"].valid_options.update({("p-1", "a"), ("p-1", "b")})
+    for option_ids in (["a", "b"], []):
+        await handlers._on_poll_vote(
+            _event(
+                FederationEventType.SPACE_POLL_VOTE_CAST,
+                {"post_id": "p-1", "option_ids": option_ids, "voter_user_id": "u-1"},
+                space_id="sp-1",
+            )
+        )
+    assert repos["poll"].inserted == [("a", "u-1"), ("b", "u-1")]
+    assert repos["poll"].cleared == [("p-1", "u-1"), ("p-1", "u-1")]
+    assert [(e.option_ids, e.origin_instance_id) for e in seen] == [
+        (("a", "b"), "peer-a"),
+        ((), "peer-a"),
+    ]
+
+
+async def test_a_vote_on_a_closed_poll_is_not_applied(repos, handlers, caplog):
+    """The local rule: a closed poll's result stands — also one whose
+    deadline passed before its author's household said so."""
+    repos["poll"].valid_options.update({("p-1", "a"), ("p-2", "a")})
+    repos["poll"].meta["p-1"] = {"closed": True, "closes_at": None}
+    repos["poll"].meta["p-2"] = {"closed": False, "closes_at": "2000-01-01T00:00:00"}
+    with caplog.at_level("DEBUG"):
+        for post_id in ("p-1", "p-2"):
+            await handlers._on_poll_vote(
+                _event(
+                    FederationEventType.SPACE_POLL_VOTE_CAST,
+                    {"post_id": post_id, "option_ids": ["a"], "voter_user_id": "u"},
+                    space_id="sp-1",
+                )
+            )
+    assert repos["poll"].inserted == [] and repos["poll"].cleared == []
+    assert "the poll is closed" in caplog.text
+
+
+@pytest.mark.parametrize("option_ids", [None, "a", ["a", 1], [""], ["a"] * 21])
+async def test_poll_vote_with_a_malformed_selection_drops(repos, handlers, option_ids):
+    repos["poll"].valid_options.add(("p-1", "a"))
+    await handlers._on_poll_vote(
+        _event(
+            FederationEventType.SPACE_POLL_VOTE_CAST,
+            {"post_id": "p-1", "option_ids": option_ids, "voter_user_id": "u-1"},
+            space_id="sp-1",
+        )
+    )
+    assert repos["poll"].inserted == [] and repos["poll"].cleared == []
+
+
 async def test_poll_vote_clears_and_inserts(repos, handlers):
     """Single-choice invariant — prior vote cleared before new one inserts."""
     repos["poll"].valid_options.add(("p-1", "opt-a"))
     await handlers._on_poll_vote(
         _event(
             FederationEventType.SPACE_POLL_VOTE_CAST,
-            {"post_id": "p-1", "option_id": "opt-a", "voter_user_id": "u-1"},
+            {"post_id": "p-1", "option_ids": ["opt-a"], "voter_user_id": "u-1"},
             space_id="sp-1",
         )
     )
@@ -2257,7 +2578,7 @@ async def test_poll_vote_option_not_on_post_drops(repos, handlers):
     await handlers._on_poll_vote(
         _event(
             FederationEventType.SPACE_POLL_VOTE_CAST,
-            {"post_id": "p-1", "option_id": "stolen", "voter_user_id": "u-1"},
+            {"post_id": "p-1", "option_ids": ["stolen"], "voter_user_id": "u-1"},
         )
     )
     assert repos["poll"].inserted == []
@@ -4635,7 +4956,7 @@ async def test_poll_vote_cross_space_is_refused(repos, handlers, caplog):
         await handlers._on_poll_vote(
             _event(
                 FederationEventType.SPACE_POLL_VOTE_CAST,
-                {"post_id": "p-b", "option_id": "o-b", "voter_user_id": "u"},
+                {"post_id": "p-b", "option_ids": ["o-b"], "voter_user_id": "u"},
                 space_id="sp-a",
             )
         )
@@ -5239,7 +5560,8 @@ async def test_bazaar_offer_accepted_unknown_bid_is_silent(bazaar_bids_handlers)
 @pytest.mark.parametrize(
     "handler_name,payload",
     [
-        ("_on_poll_vote", {"post_id": "p", "option_id": "o", "voter_user_id": "u"}),
+        ("_on_poll_created", {"post_id": "p", "question": "q", "options": _opts("p")}),
+        ("_on_poll_vote", {"post_id": "p", "option_ids": ["o"], "voter_user_id": "u"}),
         ("_on_poll_closed", {"post_id": "p"}),
         ("_on_schedule_created", {"post_id": "p", "title": "t", "slots": [{}]}),
         ("_on_schedule_response_updated", {"slot_id": "s", "user_id": "u"}),
@@ -5253,7 +5575,7 @@ async def test_poll_handlers_need_a_space(repos, handlers, handler_name, payload
     )
     poll = repos["poll"]
     assert not (poll.inserted or poll.closed or poll.scheduled or poll.finalized)
-    assert poll.responses == {}
+    assert poll.responses == {} and poll.created == []
 
 
 # ─── §24.11 authorship ──────────────────────────────────────────────
@@ -5400,12 +5722,19 @@ _BOUND = [
     ),
     (
         "_on_poll_vote",
-        {"post_id": "p-1", "option_id": "o-1", "voter_user_id": "u-voter"},
+        {"post_id": "p-1", "option_ids": ["o-1"], "voter_user_id": "u-voter"},
         "acts_for",
         "u-voter",
         None,
     ),
     ("_on_poll_closed", {"post_id": "p-1"}, "acts_for", "u-seller", None),
+    (
+        "_on_poll_created",
+        {"post_id": "p-new", "question": "q", "options": _opts("p-new")},
+        "may_author",
+        "u-seller",
+        None,
+    ),
     (
         "_on_schedule_created",
         {"post_id": "p-1", "title": "t", "slots": [{"id": "s"}]},
@@ -5550,6 +5879,7 @@ def _writes(repos) -> tuple:
         dict(repos["calendar"].rsvps),
         dict(repos["calendar"].buffer),
         list(poll.inserted),
+        list(poll.created),
         list(poll.closed),
         list(poll.scheduled),
         dict(poll.responses),
@@ -5570,6 +5900,7 @@ def _prime(repos, seed):
     _seed(repos, seed)
     repos["calendar"]._events["e-1"] = ("sp-1", SimpleNamespace(created_by="u-author"))
     repos["poll"].valid_options.add(("p-1", "o-1"))
+    repos["poll"].no_poll.add("p-new")
 
 
 _BOUND_IDS = [f"{h}:{rule}:{user or '-'}" for h, _p, rule, user, _s in _BOUND]
@@ -7053,7 +7384,11 @@ class _GfsMediaSink:
         self.kept: list[dict] = []
         self.as_shown: list[tuple] = []
 
-    async def localize(self, space_id, raw_refs, media_urls, *, item_id, origin):
+    async def localize(
+        self, space_id, raw_refs, media_urls, *, item_id, origin, hashes=None
+    ):
+        #: v_85 — the hash map the handler passed (by the author's names).
+        self.hashes = hashes
         urls = [u for u in media_urls if u]
         if isinstance(raw_refs, dict):
             self.received.append((space_id, raw_refs, urls))
@@ -7279,3 +7614,29 @@ async def test_a_gallery_items_files_take_the_readers_names(gallery_handlers):
         "api/media/sg-t.jpg",
     )
     assert sink.kept == [{"t.jpg": "sg-t.jpg", "f.jpg": "sg-f.jpg"}]
+
+
+async def test_calendar_cover_hash_map_reaches_the_gfs_namer(repos, handlers):
+    """v_85: a hashed cover the event also describes keeps its one content
+    name — the GFS namer gets the map the envelope's signature vouches for."""
+    sink = _GfsMediaSink()
+    handlers.attach_gfs_media(sink)
+    await handlers._on_calendar_saved(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+            {
+                "id": "e-h",
+                "calendar_id": "cal-1",
+                "summary": "Picnic",
+                "created_by": "u-1",
+                "start": "2026-04-18T10:00:00+00:00",
+                "end": "2026-04-18T11:00:00+00:00",
+                "cover_url": "api/media/c.webp",
+                "media_refs": _V80_REFS,
+                "files": {"c.webp": {"h": "c" * 64}},
+                "files_suite": "sha256",
+            },
+            space_id="sp-1",
+        )
+    )
+    assert {n: fh.h for n, fh in sink.hashes.items()} == {"c.webp": "c" * 64}

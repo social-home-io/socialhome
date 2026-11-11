@@ -292,9 +292,11 @@ sending household was sent it for. Both blob types share
 
   The resume / resync replay enqueues the replayed rows' files for the
   one household that asked, with these bounds:
-  - at most `RESUME_MEDIA_MAX_FILES` (50) files and
-    `RESUME_MEDIA_MAX_BYTES` (32 MiB) per request; a file past the budget,
-    or one that isn't here, is skipped;
+  - at most 50 files and 32 MiB per (requester, space) per 30 min, ONE
+    budget shared with `SPACE_MEDIA_WANTED` (`file_gate.SpaceFileBudget`);
+    a file past the budget, or one that isn't here, is skipped;
+  - a household that is not the roster authority (a v_92 helper) replays
+    only its own people's rows and ships only their files;
   - one replay per (household, space) per `RESUME_COOLDOWN_S` (30 min);
     a sooner request is dropped. The window sits in the replay itself
     (`replay_space_to` / `replay_calendar_to`), so `SPACE_SYNC_RESUME`
@@ -505,14 +507,22 @@ encrypted payload (live events) and in each §25.6 record:
   without a map: the host matches that copy's file names against the files
   it holds by their sender-bound names (`approved_relay_for`). The host's
   release carries the hashes of its own copies either way.
-* **GFS media cache (v_80 / v_83):** a file a household reads from a GFS
-  keeps its reader-derived `sg-` name — the sealed blob already binds the
-  item and its origin (AAD), the descriptor is author-signed for
-  followers, and the cache's re-upload / streaming address files by those
-  names. The descriptor's names take precedence over content names
-  (`SpaceMediaNamer.combine`). A holder asked to re-upload a file it
-  stores content-addressed tries the item's `sc-` files; the sealed
-  address picks the right one.
+* **GFS media cache (v_80 / v_83):** a described file the item's valid
+  hash map covers (the same map the direct names take: a live event's, or a
+  §25.6 record's only from the host) is **content-named too** — one name on
+  every path, so a host's or helper's hashed push lands under the very name
+  the row shows. Its `space_media_refs` row keeps `local_name` = the `sc-`
+  name (item and origin unchanged: the blob's AAD still names them), and a
+  fetch (or v_83 on-demand answer) of it hashes the decrypted bytes and
+  refuses them (WARNING, nothing written) unless they are that content
+  name's hash (`write_once` writes an `sc-` name only with the hash that
+  binds it). Two households describing the same hashed file land on the
+  same name; the first row stays. An **unhashed** described file keeps its
+  reader-derived `sg-` name — the sealed blob binds the item and its origin
+  (AAD), the descriptor is author-signed for followers (whose relayed post
+  carries no map). A holder asked to re-upload a file it stores
+  content-addressed tries the item's `sc-` files; the sealed address picks
+  the right one.
 * **Sync line 85:** a household crossing it gets one full stream of rows,
   but no catch-up media (it holds the files; `shape_crossed`). Only a
   newcomer or a reset gets the space's files again.
@@ -575,30 +585,37 @@ Unchanged:
   (The GFS relay does not carry these blobs yet: its envelope cap is below
   a media chunk — relay-sync PR 3.)
 
-**Sending side.** No "file wanted" request exists yet (a later, generic
-PR). Until then a helper fills only when one household explicitly asks
-it to replay a space: the catch-up file gate
-(`federation/sync/space/file_gate.py`) decides which files of a row a
-household ships on a §25.6 catch-up and on a replay (`SPACE_SYNC_RESUME`
-or a §319.6 `space:` resync, `resume.replay_space_to`):
+**Sending side.** Since v_92 a helper fills another person's file only
+when one household asks it for that file on view with
+`SPACE_MEDIA_WANTED` ([below](#older-files-on-view--space_media_wanted-v_92))
+— and a member asks a helper only while the host is silent or
+unreachable. The file gate (`federation/sync/space/file_gate.py`) decides
+which files of a row a household ships on a §25.6 catch-up and on a
+`SPACE_MEDIA_WANTED`; a replay (`SPACE_SYNC_RESUME` or a §319.6 `space:`
+resync, `resume.replay_space_to`) ships the files of the rows it replays:
 
-| Provider | Full §25.6 catch-up | Replay (resume / resync) |
-|---|---|---|
-| Host / delegated admin | every file of every row (as before) | every file (as before) |
-| Admin / moderator household | its own people's files only | its own people's files + the hashed (`sc-`) files of other people's rows to a v_86 requester, at most 50 files / 32 MiB (`FILL_MAX_FILES` / `FILL_MAX_BYTES`) |
-| Any other household | its own people's files only | its own people's files only |
+| Provider | Full §25.6 catch-up (v_92: items of the last 30 days, ≤ 200 files, every transport) | Replay (resume / resync, v_92: ≤ 30 days back) | `SPACE_MEDIA_WANTED` |
+|---|---|---|---|
+| Host / delegated admin | every file of those rows | every file of the replayed rows | every asked-for file |
+| Admin / moderator household | its own people's files only | its own people's rows and their files only (the fallback while the host is silent, [sync.md](./sync.md#host-offline-trusted-helpers-v_92)) | other people's files too — the bytes proven to hash to the asked-for content name |
+| Any other household | its own people's files only | its own people's rows and their files | its own people's files only |
 
-Why not on the full catch-up: a full stream is the host's job and the
-host already ships every file. A newcomer that pairs with k helper
-households would otherwise receive each picture up to k + 1 times — the
-copies are dropped write-once, but the bandwidth is spent. A replay is
-targeted: one household asked one provider.
+Replays and `SPACE_MEDIA_WANTED` share ONE budget per (requester, space):
+50 files / 32 MiB per 30 minutes (`SpaceFileBudget`).
+
+Why not on the full catch-up or a helper's replay: a full stream is the
+host's job and the host already ships every file. A newcomer that pairs
+with k helper households would otherwise receive each picture up to k + 1
+times — the copies are dropped write-once, but the bandwidth is spent. A
+`SPACE_MEDIA_WANTED` is targeted: one household asked one provider for a
+file it is looking at.
 
 Rows are unchanged (`_OwnPeopleOnly`): a helper never streams other
 people's rows. A requester below v_86 gets no helper fills (a v_85
 receiver would take them, an older one would store them under a name no
-row shows). Relay-seated requesters still get no catch-up blobs (their GFS
-media cache serves them).
+row shows). Since v_92 relay-seated requesters get the same bounded
+catch-up pushes as everyone; the outbox drops one at send time while their
+GFS media cache holds the file.
 
 **Cost (recipients × files × bytes per trigger):** a replay is asked by
 one household of one provider (`SPACE_SYNC_RESUME` after a long offline,
@@ -612,8 +629,169 @@ moderator households of a space at once: 5 × 32 MiB = 160 MiB once (the
 host's replay is bounded the same way); duplicates are dropped
 write-once at the receiver, the bytes still cross once per asked helper.
 Full streams add nothing for helpers: a plain member household now ships
-*less* than before (only its own people's files). The later "file wanted"
-request (host first, helper as fallback) replaces the replay push.
+*less* than before (only its own people's files). For one missing file
+a member asks with `SPACE_MEDIA_WANTED` (host first, a helper as
+fallback) instead of a replay.
+
+## Older files on view — `SPACE_MEDIA_WANTED` (v_92)
+
+**Why.** A member household can hold a live space item whose file never
+reached it: a push the GFS relay accepted and dropped, a catch-up that
+left the file out for its budget, a picture past the GFS media cache's few
+days. Before v_92 only the host's 30-minute §25.6 catch-up healed it — and
+nothing while the host was offline. Since v_92 every hashed file is stored
+under its content name `sc(S, h)` on every path (GFS-described ones too),
+so any household that holds the file can deliver it, checked against `h`.
+
+**Wire.** `SPACE_MEDIA_WANTED` `{space_id, files: [{item, name}, …]}` —
+`space_id` is the routing field; the list is inside the encrypted
+payload. 1–50 entries (`MAX_WANTED_FILES`); `item` is the id of the live
+item that shows the file (a post, comment, calendar event, space-album
+item or bazaar listing — the listing by its wrapper post's id), `name` is
+the `sc-` content name the requester stores the file under (the requester
+keeps no raw `h`; every v_85 household names the file the same way). The
+answer is ordinary `SPACE_MEDIA_BLOB` pushes (with `h`), so the receiver's
+v_86 fill rule above decides — from the host, a content authority or the
+row's author household only, bytes checked against the row's `h`.
+
+**Requester** (`services/space_media_wanted.py`, `SpaceMediaWanted`).
+
+- A view (`GET /api/media/{name}`) that misses an `sc-` file — after the
+  GFS media cache (every reader reached through a GFS reads it; only the
+  v_83 on-demand ask behind it is a follower's, see Fallback) — schedules
+  a lookup in the background; the view answers 404 at once.
+- Only live items of a space in which **this household holds a member
+  seat** (a writer role). A follower household keeps the v_83 GFS
+  on-demand path.
+- Views add their names to ONE pending set (deduplicated, ≤ 500,
+  `MAX_PENDING_NAMES`) drained by ONE task: after 2 s (`COALESCE_S`,
+  fixed) it looks the names up, groups them per space and sends one
+  request per 50 names of a space, so a gallery grid with more than 50
+  missing pictures asks for all of them.
+- **Provider:** the space's host — the households acting as host here,
+  owner first, then the delegated admin that invited us
+  (`host_equivalence.acting_hosts`, the same households the scheduler
+  BEGINs and waits on); the first at v_92 that takes it ends it. A trusted household (a live `admin` /
+  `moderator` seat in the roster mirror; the owner is the host), sorted by
+  instance id and started at this household's stable offset, never
+  ourselves — the one picker the helper resume uses too
+  (`federation/sync/space/trusted_helpers.py`) — gets the request ONLY
+  when no host at v_92 could be reached or the host is **silent**
+  (`HostContact.is_silent`: it left the scheduler's last round unanswered
+  for 120 s and has not been heard since — a sync answer or any verified
+  event of the space from it ends that at once). One batch never goes to
+  both: while the host is silent it goes to a helper INSTEAD of the host (a
+  send to an offline host's GFS mailbox "succeeds" with nobody to answer),
+  and to the host only when no helper took it. Never after a wait while the
+  host answers, so the request reaches a helper only while the host is
+  away (like any catch-up, whoever serves it learns which items were asked
+  for — inside the space's members, never the GFS). At most 2 helpers are tried (`MAX_HELPERS`); the first
+  that takes the request ends it. Only providers at v_92
+  (`space_member_supports`: a paired row's version, else the mesh claim); a
+  host below v_92 that answers is left to its catch-up.
+- **The host itself misses a file** (a member's push to it was lost — e.g.
+  a media chunk sent into a mesh route that went stale when the host
+  restarted): it asks the household of the item's author first (the roster
+  mirror's seat for the row's owner; that household holds the file as its
+  own people's and the file gate ships it), then a helper.
+- **A sender-bound (legacy, unhashed) name** (`sd-` = H(space, the
+  household that delivered the row, its file name)) is asked only of the
+  household of the item's author — the one it is bound to, by host and
+  member alike; no host or helper can match it. That household matches
+  `space_direct_media_name(space, its own id, file)` of its own files and
+  sends the bytes under the file's own name, so the requester binds them
+  to it again and they land under the name the row shows. It ships only
+  its own people's rows' files that way (`CatchUpFileGate.own_only`):
+  never another person's row it merely relayed. **Limit:** a row taken
+  from a §25.6 stream without a hash map (a non-host provider's record)
+  names its files `sd(space, that provider, file)` (`receiver
+  ._localize_record`): asking the author does not match those — they heal
+  only when that provider streams or pushes them again.
+- Sent with `send_with_mesh_fallback` — paired, mesh `SPACE_ROUTED`, a
+  mailbox seat or the host hop, whichever reaches the provider (the type is
+  in `SPACE_SESSION_ALLOWED_EVENT_TYPES`).
+- One name is asked again only after 10 min (`NAME_COOLDOWN_S`; the map
+  is bounded like the pending set). A name that was never queued (past the
+  pending bound, no live row yet, a follower seat, a failed lookup) is not
+  held on that cooldown: the next view asks again.
+
+**Provider** (`SpaceMediaWantedProvider`, registered for the event).
+
+1. The requester must hold a **writer (member) seat** in the space in this
+   household's roster mirror — the predicate the §25.6 provider uses for
+   member-only data (`SpaceWriterHouseholds.may_receive`) — else the whole
+   request is dropped (a follower-only household asks its GFS, v_83); so is a request with no list or more than 50
+   entries. A malformed entry (no item, an item id over 200 chars, a name
+   that is not a safe `sc-` name) is skipped alone.
+2. The item must be a **live item of that space** showing a file whose
+   content name is `name` (`media_reference_repo.live_item_files`, the
+   space checked in SQL): a stored `sc-` name matches directly; an
+   unhashed local file (the host's own upload under its original name)
+   matches when `sc(S, sha256(file), basename) == name` (hashed off-loop
+   and cached by `MediaFileHasher`). No match, a deleted item or a file not
+   here: skipped.
+3. The **file gate** (`CatchUpFileGates.for_space(space, fills=True)`)
+   with the item's owner: the host ships every file, an admin / moderator
+   household other people's files too, any household its own people's
+   files. A file step 2 matched is proven hashed whatever name it is
+   stored under here (a member that got the item first as the public
+   GFS copy, which carries no hash map, keeps it under its `sg-` name);
+   it is sent under the asked-for `sc-` name, read from the local file —
+   a receiver refuses a reserved `sg-` filename.
+4. ONE **budget** per (requester, space), shared with the resume's files
+   (`SpaceFileBudget`, wired once): at most 50 files / 32 MiB per 30 min
+   (a request arriving with the window spent is dropped whole, before any
+   query or hash). Over it: skipped (logged at INFO with counts).
+5. Queued with `enqueue_for_blob(..., push=True)`: the media outbox never
+   drops such a row for "reads from its GFS" — the requester already
+   missed it. The mark is in memory and LRU-bounded (`MAX_PUSHED_MARKS`,
+   4096 rows): a mark lost to a restart or to eviction only means the push
+   may be skipped while the reader's GFS cache holds the file — the member
+   asks again on its next view after the cooldown.
+
+```mermaid
+sequenceDiagram
+    participant V as Viewer (member household)
+    participant H as Host
+    participant A as Helper (admin / moderator household)
+    V->>V: GET /api/media/sc-… misses (404), lookup live items
+    Note over V: collect names of the space for 2 s (≤ 50)
+    V->>H: SPACE_MEDIA_WANTED {space_id, files: [{item, name}]}
+    H->>H: member? live item shows name? file gate + budget
+    H-->>V: SPACE_MEDIA_BLOB (h, push=True) for each file it holds
+    Note over V: H silent (no answer to the last round) or unreachable: A instead of H
+    V->>A: SPACE_MEDIA_WANTED {space_id, files: [the same names]}
+    A-->>V: SPACE_MEDIA_BLOB (proven-hashed files, shared budget)
+```
+
+**Fallback.** A provider below v_92 is skipped; a host below v_92 that
+answers, or no helper left, means the file waits for the §25.6 catch-up. A requester below v_92 never asks (a
+v_83–v_91 relay reader still asks its GFS). A member of a space whose
+**host** is below v_92 keeps the v_83 GFS on-demand ask during the rollout
+(`SpaceMediaGfsFetcher`, `space_member_supports(host, v_92)`); a member
+with a v_92 host uses it only for a file it holds under a name that is
+not an `sc-` content name — an `sg-` name taken from the public GFS copy
+(no hash map) or before v_92. `SPACE_MEDIA_WANTED` carries content names
+only, so that ask is how such a file heals past the GFS cache.
+
+**Known limit (PR 5).** A member's `sg-` file heals only through its own
+GFS ask (above) — while no GFS holder answers, it waits for the host's
+§25.6 catch-up.
+
+**Cost (recipients × files × bytes per trigger).** One old file on view:
+1 request (< 1 KiB) to the host and the file's bytes once (+ at most
+`MAX_HELPERS` = 2 more requests while the host is silent or unreachable).
+A batch of 50 files: 1 request, ≤ 32 MiB once. Per (requester, space)
+≤ 32 MiB per 30 min per provider, the same provider's resume files
+included — a host that answers is the only provider, so one household
+scrolling a whole space's old pictures pulls ≤ 32 MiB per 30 min, and only
+bytes it is missing. Nothing fans out: the
+request goes to one provider at a time and the answer to the one
+requester; a global space with 10 000 followers adds nothing (followers
+never send it).
+
+It replaces the never-released v_87 relay media refill (a
+`SPACE_SYNC_RESUME` narrowed to one resource, host-only).
 
 ## Space media via the GFS cache (v_80)
 
@@ -732,6 +910,10 @@ envelope's sender; for followers, the author household the signed inner
 proves; for §25.6, the provider), never a descriptor field. A member naming
 another item's file in its own item therefore only ever gets its own copy,
 in either order; it can never take over the picture another item shows.
+The exception is a file the item's valid v_85 hash map covers: it takes its
+content name (`sc-`, see [File hashes](#file-hashes-and-content-addressed-names-v_85)),
+which names the bytes themselves — so the fetch verifies them against it
+(a mismatch is refused, nothing written).
 `sg-` is a reserved prefix: no received item and no `SPACE_MEDIA_BLOB` may
 name it. The blob's AAD names the item and the delivering household, and
 the fetch opens it with the row's values. A file the same item already has
@@ -761,7 +943,7 @@ fetched: `GET /gfs/media/{blob_id}` (anonymous), bounded by the
 descriptor's `size`, checks that the blob sits
 at its scope-bound address for the scope id this household knows,
 decrypts with the epoch's media key and writes the file write-once under
-its `sg-` name. An unknown suite, a
+its `sg-` name (an `sc-` name only once the bytes hash to it). An unknown suite, a
 blob not at its address (or a channel scope with no channel id known here)
 or a failed decrypt is refused with a WARNING and writes nothing.
 
@@ -818,8 +1000,12 @@ cache — never got it. Now a view asks for it, and a household that holds
 the file sends it again. GFS side, routes, settings and bounds:
 [`discovery.md`](./discovery.md#space-media-on-demand-v_83).
 
-**Who.** The same readers as v_80 — link-joined members and followers of a
-global space. Both ask the same way. Paired and mesh members never use it.
+**Who.** Followers of a global space reached through a GFS. Since v_92
+a household holding a member seat (link-joined included) asks its host or
+a helper with [`SPACE_MEDIA_WANTED`](#older-files-on-view--space_media_wanted-v_92)
+instead — unless the space's host is below v_92 (rollout), then it keeps
+this ask — and the uploader counts a reader as one that asks its GFS only in
+[v_83, v_92). Paired and mesh members never use it.
 
 **Reader** (`SpaceMediaGfsFetcher`). Only a **view**
 (`GET /api/media/{local_name}`) whose fetch found the blob on no GFS asks —
@@ -1012,6 +1198,7 @@ follower subset above). A GFS without `on_demand` is never asked.
 - Capability: [`socialhome/domain/federation_capabilities.py`](../../socialhome/domain/federation_capabilities.py) (`MIN_FOR_MEDIA_CHANNEL`, `MIN_FOR_SPACE_MEDIA_REFS`, `MIN_FOR_PAGE_MEDIA`, `MIN_FOR_SPACE_MEDIA_ON_DEMAND`)
 - Page files (v_82): [`page_federation_outbound.py`](../../socialhome/services/page_federation_outbound.py) (`_ship_files`), [`page_proposal_forwarder.py`](../../socialhome/services/page_proposal_forwarder.py) (`_ship_files`), [`federation_inbound/space_content.py`](../../socialhome/services/federation_inbound/space_content.py) (`_localized_proposal`, `_keep_page_media`), [`space_media_names.py`](../../socialhome/services/space_media_names.py) (`pages`)
 - GFS media cache (v_80): [`space_media_seal.py`](../../socialhome/space_media_seal.py), [`domain/space_media_ref.py`](../../socialhome/domain/space_media_ref.py), [`space_media_gfs_uploader.py`](../../socialhome/services/space_media_gfs_uploader.py), [`space_media_gfs_fetcher.py`](../../socialhome/services/space_media_gfs_fetcher.py), [`space_media_refs.py`](../../socialhome/services/space_media_refs.py), [`sync/space/media_refs.py`](../../socialhome/federation/sync/space/media_refs.py)
+- Older files on view (v_92): [`space_media_wanted.py`](../../socialhome/services/space_media_wanted.py) (`SpaceMediaWanted`, `SpaceMediaWantedProvider`), [`media_reference_repo.py`](../../socialhome/repositories/media_reference_repo.py) (`space_rows_of`, `live_item_files`), [`routes/media.py`](../../socialhome/routes/media.py) (`MediaServeView`), [`space_media_sync_service.py`](../../socialhome/services/space_media_sync_service.py) (`enqueue_for_blob(push=True)`)
 - Space media on demand (v_83): [`space_media_hint.py`](../../socialhome/space_media_hint.py), [`domain/gfs_space_media_on_demand.py`](../../socialhome/domain/gfs_space_media_on_demand.py), [`space_media_gfs_responder.py`](../../socialhome/services/space_media_gfs_responder.py), [`space_media_gfs_fetcher.py`](../../socialhome/services/space_media_gfs_fetcher.py) (`_want`), [`gfs_connection_service.py`](../../socialhome/services/gfs_connection_service.py) (`want_space_media`, `serve_space_media`, `space_media_on_demand_wait`), GFS [`space_media_on_demand.py`](../../socialhome/global_server/space_media_on_demand.py) + [`routes/space_media_on_demand.py`](../../socialhome/global_server/routes/space_media_on_demand.py)
 
 ## Spec refs

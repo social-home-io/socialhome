@@ -16,7 +16,12 @@ from __future__ import annotations
 from aiohttp import web
 
 from ..app_keys import space_poll_service_key, space_repo_key, space_service_key
-from ..domain.space import AccessDecision, ContentAction, SpacePermissionError
+from ..domain.space import (
+    AccessDecision,
+    ContentAction,
+    SpacePermissionError,
+    SpaceRole,
+)
 from ..security import error_response
 from .base import BaseView
 
@@ -24,14 +29,23 @@ from .base import BaseView
 class _SpacePollBase(BaseView):
     """Shared member-check for every space-scoped poll view."""
 
-    async def _require_member(self, space_id: str, user_id: str) -> bool:
+    async def _require_member(
+        self, space_id: str, user_id: str, *, vote: bool = False
+    ) -> bool:
         """``False`` (→ 403) without a seat in the path space. With one,
         the path ``{pid}`` must be a post OF that space (``KeyError`` →
         404): polls are keyed by post id alone, so without this a seat in
-        one space read and voted on another space's polls."""
+        one space read and voted on another space's polls.
+
+        ``vote``: a follower reads a poll but does not vote in it (403
+        ``SUBSCRIBER_READ_ONLY``) — every other household refuses a
+        follower household's vote, so it would count on this one only."""
         space_repo = self.svc(space_repo_key)
-        if await space_repo.get_member(space_id, user_id) is None:
+        member = await space_repo.get_member(space_id, user_id)
+        if member is None:
             return False
+        if vote:
+            self.svc(space_service_key).assert_writable_member(member, action="vote")
         post = await self.svc(space_service_key).get_space_post(
             space_id, self.match("pid")
         )
@@ -73,13 +87,16 @@ class SpacePollSummaryView(_SpacePollBase):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         post_id = self.match("pid")
         svc = self.svc(space_poll_service_key)
-        return web.json_response(
-            await svc.summary(
-                post_id,
-                voter_user_id=ctx.user_id,
-                space_id=space_id,
-            ),
+        summary = await svc.summary(
+            post_id,
+            voter_user_id=ctx.user_id,
+            space_id=space_id,
         )
+        # A follower reads the poll but does not vote: the SPA shows the
+        # options as results only.
+        member = await self.svc(space_repo_key).get_member(space_id, ctx.user_id)
+        summary["can_vote"] = member is not None and member.role != SpaceRole.SUBSCRIBER
+        return web.json_response(summary)
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -93,6 +110,7 @@ class SpacePollSummaryView(_SpacePollBase):
         try:
             summary = await svc.create_poll(
                 post_id=post_id,
+                actor_user_id=ctx.user_id,
                 question=str(body.get("question") or ""),
                 options=list(body.get("options") or []),
                 allow_multiple=bool(body.get("allow_multiple", False)),
@@ -122,7 +140,7 @@ class SpacePollVoteView(_SpacePollBase):
     async def post(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, vote=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         post_id = self.match("pid")
         body = await self.body()
@@ -154,7 +172,7 @@ class SpacePollVoteView(_SpacePollBase):
     async def delete(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, vote=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         post_id = self.match("pid")
         svc = self.svc(space_poll_service_key)
@@ -217,6 +235,7 @@ class SpaceSchedulePollCollectionView(_SpacePollBase):
         try:
             summary = await svc.create_schedule_poll(
                 post_id=post_id,
+                actor_user_id=ctx.user_id,
                 title=str(body.get("title") or ""),
                 deadline=body.get("deadline"),
                 slots=list(body.get("slots") or []),

@@ -218,6 +218,21 @@ class FederationEventType(str, enum.Enum):
     #: receiver persists the bytes to their local ``media_path``
     #: under the same filename so the existing relative URL resolves.
     SPACE_MEDIA_BLOB = "space_media_blob"
+    #: v_92 — a member household asks ONE provider (the space's host, then a
+    #: trusted admin / moderator household) for files of live items it holds
+    #: but whose bytes never reached it: ``{space_id, files: [{item, name}]}``
+    #: (≤ 50 entries; ``name`` is the ``sc-`` content name). The answer is
+    #: ordinary ``SPACE_MEDIA_BLOB`` pushes (``services/space_media_wanted``).
+    SPACE_MEDIA_WANTED = "space_media_wanted"
+    #: v_93 — a member's reaction on a space post, added or removed, to
+    #: every member household: ``{space_id, post_id, user_id, emoji, action:
+    #: "add" | "remove", at}`` (all inside the encrypted payload). ``at`` is
+    #: the reactor's action time; a receiver applies it only when newer than
+    #: the stamp it holds for that (post, user, emoji)
+    #: (``space_posts.reaction_stamps_json``), so apply is order-independent
+    #: and a late add never brings back a removed reaction. The reactor is
+    #: seated on the sender. See ``docs/protocol/spaces.md``.
+    SPACE_POST_REACTION = "space_post_reaction"
     SPACE_COMMENT_CREATED = "space_comment_created"
     SPACE_COMMENT_UPDATED = "space_comment_updated"
     SPACE_COMMENT_DELETED = "space_comment_deleted"
@@ -712,6 +727,9 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_POST_CREATED,
         FederationEventType.SPACE_POST_UPDATED,
         FederationEventType.SPACE_POST_DELETED,
+        #: v_93 — reactions on the space's posts: every member household
+        #: sees the same counts, whichever way it is reached.
+        FederationEventType.SPACE_POST_REACTION,
         FederationEventType.SPACE_COMMENT_CREATED,
         FederationEventType.SPACE_COMMENT_UPDATED,
         FederationEventType.SPACE_COMMENT_DELETED,
@@ -792,6 +810,10 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: The bytes ``SPACE_POST_CREATED`` / the gallery referenced by
         #: URL. Without them a member renders broken images.
         FederationEventType.SPACE_MEDIA_BLOB,
+        #: v_92 — a link-joined member asks its host (or a trusted helper)
+        #: for files of items it holds, and a link-joined admin / moderator
+        #: may be asked. The provider re-checks membership.
+        FederationEventType.SPACE_MEDIA_WANTED,
         # ── Content-key epochs ──
         #: The per-space AES key handshake and its rotations. Excluded from
         #: this set, a member decrypts nothing after the first rekey.
@@ -883,6 +905,8 @@ MULTI_SEND_EXCLUDED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_REPORT_ANSWERED,
         FederationEventType.SPACE_REMOTE_ADMIN_KICK,
         FederationEventType.SPACE_REMOTE_ADMIN_ACTION,
+        #: v_92 — a member's file request goes to ONE provider.
+        FederationEventType.SPACE_MEDIA_WANTED,
         #: Pairwise teardown of one space session.
         FederationEventType.SPACE_SESSION_CLEANUP,
         #: A private seller ↔ asker thread, and an offer to the seller only.
@@ -966,6 +990,10 @@ SPACE_WRITE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_POST_CREATED,
         FederationEventType.SPACE_POST_UPDATED,
         FederationEventType.SPACE_POST_DELETED,
+        #: v_93 — a reaction changes a post's shared state. A follower-only
+        #: household's is refused, bar the ``allow_subscriber_react`` opt-in
+        #: (``check_space_writer``); an archived space takes none.
+        FederationEventType.SPACE_POST_REACTION,
         #: The WebP / WebM / file bytes a post or gallery item points at.
         #: A write: it lands rows in the local media store, and shipping
         #: it is how a sender puts content bytes on our disk.
@@ -1164,6 +1192,11 @@ SPACE_READER_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_SYNC_REQUEST_MORE,
         FederationEventType.SPACE_SYNC_REJECTED,
         FederationEventType.SPACE_PARTITION_GAP,
+        #: v_92 — a request for the files of items the asker already holds:
+        #: it lands nothing on the provider (the answer is the provider's own
+        #: ``SPACE_MEDIA_BLOB``), and the provider re-checks membership. Only
+        #: member households send it; a follower reads through the GFS.
+        FederationEventType.SPACE_MEDIA_WANTED,
         # ── Directory + moderation ──
         FederationEventType.SPACE_DIRECTORY_SYNC,
         #: A report is *about* content, not content: the whole point is

@@ -19,7 +19,6 @@ Entry point: ``python -m socialhome.app`` (or via ``socialhome/__main__.py``).
 
 from __future__ import annotations
 
-import functools
 import logging
 import pathlib
 from collections.abc import Awaitable, Callable
@@ -127,7 +126,8 @@ from .federation.sync.dm_history import (
     DmHistoryReceiver,
     DmHistoryScheduler,
 )
-from .federation.sync.space.file_gate import CatchUpFileGates, local_file_size
+from .federation.sync.space.file_gate import CatchUpFileGates, SpaceFileBudget
+from .federation.sync.space.host_contact import HostContact
 from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .federation.sync.space.watermark import SyncWatermarks
 from .federation.sync_manager import SyncSessionManager, make_sync_reject_reason
@@ -419,7 +419,6 @@ from .services.push_withdraw_service import PushWithdrawService
 from .services.realtime_service import RealtimeService
 from .services.recovery_kit_service import RecoveryKitService
 from .services.recovery_reconnect_service import RecoveryReconnectService
-from .services.relay_media_refill import RelayMediaRefill
 from .services.relay_policy import RelayPolicy
 from .services.report_scope import ReportScope
 from .services.report_service import ReportService
@@ -452,6 +451,7 @@ from .services.space_media_gfs_responder import SpaceMediaGfsResponder
 from .services.space_media_gfs_uploader import SpaceMediaGfsUploader
 from .services.space_media_names import SpaceMediaNamer
 from .services.space_media_sync_service import SpaceMediaSyncService
+from .services.space_media_wanted import SpaceMediaWanted, SpaceMediaWantedProvider
 from .services.space_member_directory import SpaceMemberDirectory
 from .services.space_member_profile_federation_outbound import (
     SpaceMemberProfileFederationOutbound,
@@ -1835,6 +1835,8 @@ def _wire_federation_stack(
         # v_48: another household's version of a held page — fast-forward,
         # merge or conflict instead of last write wins.
         page_conflicts=page_conflict_service,
+        # A poll that overtakes its post, a vote that overtakes its poll.
+        pending_parents=pending_parent_buffer,
     )
     content_inbound.attach_to(federation_service)
     PersonalCalendarInboundHandlers(
@@ -1893,15 +1895,11 @@ def _wire_federation_stack(
         builder=chunk_builder,
         exporters=exporters,
         sig_suite=config.federation_sig_suite,
-        # Catch-up media: after the metadata chunks stream the
-        # requester also gets bytes for every post + gallery item +
-        # bazaar listing + calendar cover in the space via the shared
-        # SpaceMediaSyncService outbox.
+        # Catch-up media: after the metadata chunks stream the requester
+        # also gets the files of the space's recent items (30 days, 200
+        # files) via the shared SpaceMediaSyncService outbox.
         media_sync=space_media_sync_service,
-        space_post_repo=space_post_repo,
-        gallery_repo=gallery_repo,
-        bazaar_repo=bazaar_repo,
-        space_calendar_repo=space_calendar_repo,
+        item_files=media_reference_repo,
         windows=sync_windows,
         # §25.6 incremental sessions: a periodic sync streams only the rows
         # changed since the household's last confirmed stream (0086).
@@ -2289,6 +2287,9 @@ def _wire_federation_stack(
     # for events newer than ``since``; we replay individual ``SPACE_*_CREATED``
     # events for posts, comments, tasks, pages, stickies, calendar events
     # and the gallery (albums, album deletes, items).
+    # v_92 — ONE file budget per (requester, space) across a resume's files
+    # and SPACE_MEDIA_WANTED.
+    file_budget = SpaceFileBudget()
     space_sync_resume_provider = SpaceSyncResumeProvider(
         federation_service=federation_service,
         space_repo=space_repo,
@@ -2298,6 +2299,7 @@ def _wire_federation_stack(
         sticky_repo=sticky_repo,
         space_calendar_repo=space_calendar_repo,
         gallery_repo=gallery_repo,
+        space_poll_repo=space_poll_repo,
         # A replayed row's files ship from us: the receiver names them by
         # the household that delivered the row (``SpaceMediaNamer``) —
         # bounded per request by the files' sizes here.
@@ -2305,24 +2307,53 @@ def _wire_federation_stack(
         media_dir=pathlib.Path(config.media_path),
         # v_82: only a replayed page's own files ship.
         media_refs=media_reference_repo,
+        budget=file_budget,
     )
 
-    # v_86 — which files of a row we ship on catch-up / resume: as a
-    # non-host household, our own people's files and (holding an admin /
-    # moderator seat) other people's hashed files to a v_86 requester.
-    file_gates = _build_catch_up_file_gates(
-        space_repo, _roster_authority, federation_service, config
+    # v_86 — which files of a row we ship: on a catch-up, as a non-host
+    # household, our own people's files only; on a SPACE_MEDIA_WANTED,
+    # holding an admin / moderator seat, other people's too.
+    file_gates = CatchUpFileGates(
+        space_repo=space_repo, roster_authority=_roster_authority
     )
     space_sync_service.attach_file_gates(file_gates)
-    space_sync_resume_provider.attach_file_gates(file_gates)
-    # v_87 — a space file the GFS relay accepted but never delivered is
-    # asked for again from its relay-seated host on the next view.
-    app[K.relay_media_refill_key] = RelayMediaRefill(
-        media_refs=media_reference_repo,
-        space_repo=space_repo,
-        federation_repo=federation_repo,
-        federation=federation_service,
+    # v_92 — a resume from a household that is not the roster authority
+    # (a trusted helper while the host is offline) carries only its own
+    # people's rows and their files, to member households only.
+    space_sync_resume_provider.attach_row_scope(
+        _roster_authority,
+        own_members=_own_members,
+        member_gate=SpaceWriterHouseholds(
+            space_remote_member_repo, own_instance_id=identity.instance_id
+        ).may_receive,
+    )
+    # v_92 — the receiver notes each answer of a space's acting host; a
+    # member household whose host stays silent asks ONE trusted helper. Any
+    # verified event from a silent host (federation dispatch) ends it.
+    host_contact = HostContact()
+    space_sync_receiver.attach_host_contact(host_contact)
+    federation_service.attach_host_contact(host_contact)
+    space_sync_scheduler.attach_helpers(
+        host_contact=host_contact,
         resume=space_sync_resume_provider,
+        roster_authority=_roster_authority,
+        # A helper's resume starts at its people's newest row stored here
+        # before this process started (the boot marks, set at startup).
+        newest_from=space_post_repo.newest_from_household,
+    )
+    # v_92 — a member household that views a space file it misses asks the
+    # host (then a trusted helper) for it; we answer such requests too.
+    app[K.space_media_wanted_key] = _build_space_media_wanted(
+        federation_service=federation_service,
+        space_repo=space_repo,
+        space_remote_member_repo=space_remote_member_repo,
+        media_reference_repo=media_reference_repo,
+        file_gates=file_gates,
+        file_budget=file_budget,
+        host_contact=host_contact,
+        space_media_sync_service=space_media_sync_service,
+        own_instance_id=identity.instance_id,
+        config=config,
     )
 
     async def _space_sync_resume(event) -> None:
@@ -2396,19 +2427,54 @@ def _wire_federation_stack(
     )
 
 
-def _build_catch_up_file_gates(
-    space_repo: SqliteSpaceRepo,
-    roster_authority: Callable[[str], Awaitable[bool]],
+def _build_space_media_wanted(
+    *,
     federation_service: FederationService,
+    space_repo: SqliteSpaceRepo,
+    space_remote_member_repo: SqliteSpaceRemoteMemberRepo,
+    media_reference_repo: SqliteMediaReferenceRepo,
+    file_gates: CatchUpFileGates,
+    file_budget: SpaceFileBudget,
+    host_contact: HostContact,
+    space_media_sync_service: SpaceMediaSyncService,
+    own_instance_id: str,
     config: Config,
-) -> CatchUpFileGates:
-    """v_86 — the catch-up / resume file gate (:mod:`.federation.sync.space
-    .file_gate`), sizing files from this household's media dir."""
-    return CatchUpFileGates(
+) -> SpaceMediaWanted:
+    """v_92 ``SPACE_MEDIA_WANTED``: the requester the media route schedules
+    on a miss (a helper only while ``host_contact`` shows the host silent),
+    and the provider registered for the inbound event (the file gate
+    decides what we ship, within the shared budget; the media outbox
+    pushes it)."""
+    provider = SpaceMediaWantedProvider(
+        # Member households only — the §25.6 gate for member-only data; a
+        # follower-only household asks its GFS (v_83).
+        member_gate=SpaceWriterHouseholds(
+            space_remote_member_repo, own_instance_id=own_instance_id
+        ).may_receive,
+        media_refs=media_reference_repo,
+        file_gates=file_gates,
+        hasher=space_media_sync_service.file_hasher,
+        media_sync=space_media_sync_service,
+        media_dir=pathlib.Path(config.media_path),
+        budget=file_budget,
+        # A sender-bound (``sd-``) name is ours to deliver only when bound
+        # to this household.
+        own_instance_id=own_instance_id,
+    )
+
+    async def _space_media_wanted(event) -> None:
+        await provider.handle(event)
+
+    federation_service._event_registry.register(
+        FederationEventType.SPACE_MEDIA_WANTED, _space_media_wanted
+    )
+    return SpaceMediaWanted(
+        media_refs=media_reference_repo,
         space_repo=space_repo,
-        roster_authority=roster_authority,
-        supports=federation_service.space_member_supports,
-        size=functools.partial(local_file_size, pathlib.Path(config.media_path)),
+        remote_members=space_remote_member_repo,
+        federation=federation_service,
+        host_contact=host_contact,
+        own_instance_id=own_instance_id,
     )
 
 
@@ -2468,6 +2534,7 @@ def _build_space_media_gfs(
         gfs_repo=repos.gfs_connection,
         federation_repo=repos.federation,
         space_repo=space_repo,
+        federation=federation_service,
         media_dir=media_dir,
     )
     # v_83 — the holder side of on demand: a GFS asks this household for a
@@ -4306,6 +4373,18 @@ def create_app(config: Config | None = None) -> web.Application:
         nonlocal key_manager, federation_service, outbox_processor
         log.info("socialhome: starting up (mode=%s)", config.mode)
         await db.startup()
+        # v_92 — which rows were stored before this process started, read
+        # before ANY inbound path (GFS mailboxes, GFS websockets, RTC) can
+        # store something queued while we were down: a helper resume counts
+        # only those (handed to the scheduler once it is built). A failed
+        # read leaves none, and then no helper is asked.
+        boot_row_marks: tuple[int, int] | None = None
+        try:
+            boot_row_marks = await space_post_repo.row_marks()
+        except Exception:
+            log.exception(
+                "startup: reading the boot row marks failed — no helper resume"
+            )
         # Notification fan-out runs here from now on, off the publisher.
         await notification_delivery.start()
 
@@ -4814,6 +4893,8 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         federation_service = fed.federation_service
         sync_manager = fed.sync_manager
+        if boot_row_marks is not None:
+            app[K.space_sync_scheduler_key].set_row_marks(boot_row_marks)
         # v_67: ``reactions_reach`` on every moment the API returns; seal /
         # open routed reactions with the existing key-wrap key, and return
         # tokens under a key derived from the existing routing secret.
@@ -6248,6 +6329,10 @@ def create_app(config: Config | None = None) -> web.Application:
         # so we don't leave a row marked ``in_flight`` past the
         # restart (the next boot would see it stuck and never retry).
         await dm_media_sync_service.stop()
+        # v_92 — file requests waiting for their window or a provider end
+        # without sending more.
+        if (wanted := app.get(K.space_media_wanted_key)) is not None:
+            await wanted.stop()
         await space_media_sync_service.stop()
         if (uploader := app.get(K.space_media_gfs_uploader_key)) is not None:
             await uploader.stop()

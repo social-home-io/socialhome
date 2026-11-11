@@ -320,6 +320,13 @@ key-wrap key from its card. Anything else from that peer class is dropped
 `SPACE_SYNC_REJECTED` is the membership backstop covered under "Dissolution"
 below; the rest are the WebRTC/HTTPS content-streaming dance.
 
+**Older files on view (v_92)**
+
+`SPACE_MEDIA_WANTED` `{space_id, files: [{item, name}]}` (≤ 50) — a member
+household asks the host, then one trusted helper at a time, for files of
+live items it holds but never received; the answer is `SPACE_MEDIA_BLOB`.
+See [media.md](./media.md#older-files-on-view--space_media_wanted-v_92).
+
 **GFS public-content relay (Phase 5)**
 
 `SPACE_SUBSCRIBER_KEY_HANDOFF` (`space_subscriber_key_handoff`). These ride the
@@ -397,10 +404,13 @@ The rule, precisely:
   editing or deleting somebody else's row is a write. The classification
   is exhaustive over the enum and pinned by a test, so a new space event
   type is refused-by-default until somebody classifies it.
-- **One opt-in:** `SPACE_COMMENT_CREATED`, when the space has
-  `allow_subscriber_comment` on **and** the payload's author names a live
-  `subscriber` seat of that same household. (`allow_subscriber_react` has
-  no inbound surface — space reactions are not federated events.)
+- **Two opt-ins:** `SPACE_COMMENT_CREATED`, when the space has
+  `allow_subscriber_comment` on, and (v_93) `SPACE_POST_REACTION`, when it
+  has `allow_subscriber_react` on — each only when the payload's acting
+  user (`author` / `user_id`) names a live `subscriber` seat of that same
+  household. Neither flag covers the other's event. Reactions on space
+  posts reach every member household since v_93 — see
+  [feeds.md](./feeds.md#reactions-on-space-posts-v_93).
 - **A household the receiver holds no roster row for is not a writer** —
   except the space's **host**, the roster authority (a member stub written
   before roster mirroring may hold no row for it). Its write is **held**
@@ -445,7 +455,7 @@ act as one — only moderation (below) reaches a local user's rows.
 | Tasks, pages, stickies, calendar events | the claimed `created_by` / `author` seated on the sender (or the host's relay); a page that names nobody needs a writer household; from v_36 a new row's owner-bound id must commit to that creator and space | collaborative — any writer household (any member edits them locally); the stored attribution is kept, the payload's claim ignored | any writer household |
 | Poll votes, schedule answers, bids | the voter / user / bidder seated on the sender — strictly, no host exception | — | — |
 | RSVPs | the user seated on the sender; plus the two writes the calendar service makes for another household: the event creator's household or a moderator settling a `requested` RSVP (→ `going` / `waitlist`, or removed), and any writer household promoting a `waitlist` RSVP into a free seat | | |
-| Poll close, schedule create / finalise | the wrapper post's author's household | | |
+| Poll create (once — a held poll is never rewritten; option ids bound to the post) / close, schedule create / finalise | the wrapper post's author's household (create: or the host relaying it, or releasing a reviewed post — then the `posts` access level); never on a system (bot) post | | |
 | Bazaar listing | the seller seated on the sender, on the seller's own wrapper post, once (a re-send is a no-op) | status (sold / expired / cancelled) and offer acceptance: the seller's household only (a non-seller's expiry of an ended listing is DEBUG noise — every household sweeps expiries, only the seller's announces) | — |
 | Bazaar offers (v_73) | the offerer holds a live **writer** seat on the sender, on an active non-auction listing whose seller is one of OUR people — offers go to the seller's household only, see [Bazaar](./bazaar.md) | accept / reject: the seller's household, for an offer one of ours made; withdraw: the offerer's household, for a listing one of ours sells | — |
 | Zones | settings authority only — the host or a live `admin` seat; a `moderator` seat is refused (the local service is admin-only); a new zone's `created_by` bound like a create | same | same |
@@ -478,9 +488,16 @@ other shape — every earlier row's uuid4, a row from a household that does
 not bind yet, a bot post — keeps the rules above (the legacy window; see
 the v_34 and v_36 rows in [`capabilities.md`](./capabilities.md)).
 
-A **read-only (`subscriber`) seat authors nothing**, with the one opt-in
+A **read-only (`subscriber`) seat authors nothing**, with the two opt-ins
 the Follower gate already has: a comment, when the space turned
-`allow_subscriber_comment` on. It may still change a row it already owns.
+`allow_subscriber_comment` on, and a reaction on a post (v_93), when it
+turned `allow_subscriber_react` on. It may still change a row it already
+owns.
+
+**A reaction is the reactor's own** (`SPACE_POST_REACTION`, v_93): the
+named `user_id` must hold a live seat on the sending household — a writer
+seat, or a follower seat under the opt-in above. No household reacts for
+another's member, the host included.
 
 **A re-send of an existing post is an edit**, judged like one — the
 author's household or a moderator; a bot post only a moderator — and it

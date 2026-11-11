@@ -83,6 +83,9 @@ interface PostCardProps {
   surface?: 'household' | 'space'
 }
 
+/** Reaction chips a post shows before folding the rest behind "+k". */
+const MAX_REACTION_CHIPS = 6
+
 export function PostCard({ post, onReact, onComment, onDelete, onEdit, spaceId, spaceName, surface }: PostCardProps) {
   const timeAgo = formatRelative(post.created_at)
 
@@ -109,6 +112,23 @@ export function PostCard({ post, onReact, onComment, onDelete, onEdit, spaceId, 
 function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spaceId, spaceName, surface }: PostCardProps & { timeAgo: string }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const closeMenu = () => setMenuOpen(false)
+  // Reaction chips: the most used first (ties keep their order), at most
+  // MAX_REACTION_CHIPS until "+k" is opened — a space post has no cap on
+  // distinct emoji, only five per person.
+  const [allReactions, setAllReactions] = useState(false)
+  const reactionChips = Object.entries(post.reactions || {})
+    .map(([emoji, users]) => [emoji, (users as string[]).length] as const)
+    .sort((a, b) => b[1] - a[1])
+  // The viewer's own reactions never fold: one just added must show.
+  const me = currentUser.value?.user_id
+  const mine = (emoji: string) =>
+    !!me && ((post.reactions || {})[emoji] as string[] | undefined)?.includes(me)
+  const foldable = reactionChips
+    .slice(MAX_REACTION_CHIPS)
+    .filter(([emoji]) => !mine(emoji)).length
+  const shownChips = allReactions
+    ? reactionChips
+    : reactionChips.filter(([emoji], i) => i < MAX_REACTION_CHIPS || mine(emoji))
   // Inline edit: the draft text while the editor is open, else ``null``.
   const [draft, setDraft] = useState<string | null>(null)
   const canEdit = !!onEdit && isTextEditable(post)
@@ -332,12 +352,25 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
       {post.content !== null && !isBotPost(post) && (
         <div class="sh-post-actions">
           <div class="sh-reactions">
-            {Object.entries(post.reactions || {}).map(([emoji, users]) => (
+            {shownChips.map(([emoji, count]) => (
               <button key={emoji} class="sh-reaction-chip"
                 onClick={() => onReact?.(emoji)}>
-                {emoji} {(users as string[]).length}
+                {emoji} {count}
               </button>
             ))}
+            {/* One control for both states, so it stays mounted — and
+             *  focused — when it opens or folds the rest. */}
+            {foldable > 0 && (
+              <button
+                class="sh-reaction-chip sh-reaction-more"
+                aria-expanded={allReactions}
+                aria-label={allReactions
+                  ? t('post.fewer_reactions')
+                  : t(isOne(foldable) ? 'post.more_reactions_one' : 'post.more_reactions', { n: String(foldable) })}
+                onClick={() => setAllReactions(!allReactions)}>
+                {allReactions ? '−' : `+${foldable}`}
+              </button>
+            )}
             <div class="sh-reaction-add-wrap">
               <button
                 class="sh-reaction-add"

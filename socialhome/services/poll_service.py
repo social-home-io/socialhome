@@ -21,7 +21,7 @@ from ..domain.events import (
     SchedulePollFinalized,
     SchedulePollResponded,
 )
-from ..domain.post import poll_deadline_passed
+from ..domain.post import poll_deadline_passed, poll_option_id
 from ..infrastructure.event_bus import EventBus
 from ..repositories.poll_repo import AbstractPollRepo
 from .bus_publisher import BusPublisherMixin
@@ -47,6 +47,19 @@ class PollClosedError(CodedError, PollServiceError):
     status = 409
     code = "POLL_CLOSED"
     detail = "This poll is closed."
+
+    def __init__(self, post_id: str) -> None:
+        super().__init__()
+        self.post_id = post_id
+
+
+class PollExistsError(CodedError, PollServiceError):
+    """The post already has a poll — a poll is never edited or replaced
+    (people may have voted in it). HTTP 409 ``POLL_EXISTS``."""
+
+    status = 409
+    code = "POLL_EXISTS"
+    detail = "This post already has a poll."
 
     def __init__(self, post_id: str) -> None:
         super().__init__()
@@ -80,36 +93,48 @@ class PollService(BusPublisherMixin):
         self,
         *,
         post_id: str,
+        actor_user_id: str,
         question: str,
         options: list[str],
         allow_multiple: bool = False,
         closes_at: str | None = None,
         space_id: str | None = None,
     ) -> dict:
-        """Attach a new reply poll to ``post_id``. Returns the summary."""
+        """Attach a new reply poll to ``post_id``. Returns the summary.
+
+        Only the post's author attaches one (``PermissionError``), and only
+        once: a post that already has a poll keeps it
+        (:class:`PollExistsError`) — a poll is never edited, people may
+        have voted in it and every member household holds a copy."""
         question = question.strip()
         if not question:
             raise ValueError("question must not be empty")
         cleaned = [str(o).strip() for o in options if str(o).strip()]
         if len(cleaned) < 2:
             raise ValueError("a poll needs at least two options")
+        author = await self._repo.get_post_author(post_id)
+        if author is None or author != actor_user_id:
+            raise PermissionError("Only the post author may add a poll")
         option_rows = [
-            {"id": uuid.uuid4().hex, "text": t, "position": i}
+            {"id": poll_option_id(post_id, i), "text": t, "position": i}
             for i, t in enumerate(cleaned)
         ]
-        await self._repo.create_poll(
+        if not await self._repo.create_poll_if_absent(
             post_id=post_id,
             question=question,
             closes_at=closes_at,
             allow_multiple=allow_multiple,
             options=option_rows,
-        )
+        ):
+            raise PollExistsError(post_id)
         await self._emit(
             PollCreated(
                 post_id=post_id,
                 question=question,
                 allow_multiple=allow_multiple,
                 space_id=space_id,
+                options=tuple(option_rows),
+                closes_at=closes_at,
             )
         )
         return await self.summary(post_id, space_id=space_id)
@@ -134,15 +159,16 @@ class PollService(BusPublisherMixin):
         cleaned = [str(o).strip() for o in options if str(o).strip()]
         if len(cleaned) < 2:
             raise ValueError("a poll needs at least two options")
+        option_rows = [
+            {"id": poll_option_id(post_id, i), "text": t, "position": i}
+            for i, t in enumerate(cleaned)
+        ]
         created = await self._repo.create_poll_if_absent(
             post_id=post_id,
             question=question,
             closes_at=closes_at,
             allow_multiple=allow_multiple,
-            options=[
-                {"id": uuid.uuid4().hex, "text": t, "position": i}
-                for i, t in enumerate(cleaned)
-            ],
+            options=option_rows,
         )
         if created:
             await self._emit(
@@ -151,6 +177,8 @@ class PollService(BusPublisherMixin):
                     question=question,
                     allow_multiple=allow_multiple,
                     space_id=space_id,
+                    options=tuple(option_rows),
+                    closes_at=closes_at,
                 )
             )
         return created
@@ -234,8 +262,13 @@ class PollService(BusPublisherMixin):
         voter_user_id: str,
         space_id: str | None = None,
     ) -> None:
-        if await self._repo.get_meta(post_id) is None:
+        meta = await self._repo.get_meta(post_id)
+        if meta is None:
             raise PollNotFoundError(post_id)
+        # A closed poll's result stands — like a vote, a retraction is
+        # refused (every other household would refuse it too).
+        if meta["closed"] or poll_deadline_passed(meta["closes_at"], datetime.now(UTC)):
+            raise PollClosedError(post_id)
         await self._repo.clear_user_votes(
             post_id=post_id,
             voter_user_id=voter_user_id,
@@ -348,6 +381,7 @@ class PollService(BusPublisherMixin):
         self,
         *,
         post_id: str,
+        actor_user_id: str,
         title: str,
         deadline: str | None = None,
         slots: list[dict],
@@ -356,9 +390,13 @@ class PollService(BusPublisherMixin):
         """Create a new schedule poll bound to ``post_id``.
 
         Each ``slots`` entry needs ``slot_date`` and optionally
-        ``start_time`` + ``end_time``. Slot ids are minted here so
-        callers can render the poll immediately.
-        """
+        ``start_time`` + ``end_time``. Slot ids are minted here (never
+        taken from the caller) so callers can render the poll immediately.
+
+        The reply poll's rule: only the post's author attaches one
+        (``PermissionError`` — a system post has no such author), and only
+        once (:class:`PollExistsError`) — the slots people answered are
+        never replaced."""
         title = title.strip()
         if not title:
             raise ValueError("title must not be empty")
@@ -371,19 +409,20 @@ class PollService(BusPublisherMixin):
                 raise ValueError("each slot needs a slot_date")
             minted.append(
                 {
-                    "id": s.get("id") or uuid.uuid4().hex,
+                    "id": uuid.uuid4().hex,
                     "slot_date": sd,
                     "start_time": s.get("start_time") or None,
                     "end_time": s.get("end_time") or None,
                     "position": int(s.get("position", i)),
                 }
             )
-        await self._repo.create_schedule_poll(
-            post_id=post_id,
-            title=title,
-            deadline=deadline,
-            slots=minted,
-        )
+        author = await self._repo.get_post_author(post_id)
+        if author is None or author != actor_user_id:
+            raise PermissionError("Only the post author may add a schedule poll")
+        if not await self._repo.create_schedule_poll_if_absent(
+            post_id=post_id, title=title, deadline=deadline, slots=minted
+        ):
+            raise PollExistsError(post_id)
         await self._emit(
             SchedulePollCreated(
                 post_id=post_id,

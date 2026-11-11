@@ -352,13 +352,13 @@ async def test_a_reaction_binds_the_post_to_the_path_space(seeded):
     client, hdr = seeded
     r = await client.post(
         "/api/spaces/sp-glob/posts/p-sp-priv/reactions",
-        json={"emoji": "x"},
+        json={"emoji": "👍"},
         headers=hdr["owner"],
     )
     assert r.status == 404, await r.text()
     r = await client.post(
         "/api/spaces/sp-priv/posts/p-sp-priv/reactions",
-        json={"emoji": "x"},
+        json={"emoji": "👍"},
         headers=hdr["owner"],
     )
     assert r.status == 201, await r.text()
