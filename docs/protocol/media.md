@@ -694,6 +694,13 @@ row's author household only, bytes checked against the row's `h`.
   restarted): it asks the household of the item's author first (the roster
   mirror's seat for the row's owner; that household holds the file as its
   own people's and the file gate ships it), then a helper.
+- **A sender-bound (legacy, unhashed) name** (`sd-` = H(space, the
+  household that delivered the row, its file name)) is asked only of the
+  household of the item's author — the one it is bound to, by host and
+  member alike; no host or helper can match it. That household matches
+  `space_direct_media_name(space, its own id, file)` of its own files and
+  sends the bytes under the file's own name, so the requester binds them
+  to it again and they land under the name the row shows.
 - Sent with `send_with_mesh_fallback` — paired, mesh `SPACE_ROUTED`, a
   mailbox seat or the host hop, whichever reaches the provider (the type is
   in `SPACE_SESSION_ALLOWED_EVENT_TYPES`).

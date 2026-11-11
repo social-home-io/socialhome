@@ -42,6 +42,7 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services import space_media_wanted as mod
+from socialhome.services.inbound_media_store import space_direct_media_name
 from socialhome.services.media_file_hasher import MediaFileHasher
 from socialhome.services.space_media_wanted import (
     MAX_HELPERS,
@@ -335,10 +336,12 @@ async def test_a_name_whose_lookup_failed_is_not_left_on_cooldown():
     assert len(fed.sent) == 1
 
 
-async def test_a_legacy_or_unsafe_name_is_never_looked_up():
+async def test_a_non_space_or_unsafe_name_is_never_looked_up():
+    """Only space file names are asked for: a content name (``sc-``) or a
+    sender-bound one (``sd-``, asked of its author's household)."""
     refs = _Refs()
     w = _wanted(refs=refs)
-    for name in ("a.webp", "sd-abc.webp", "sc-../x", ""):
+    for name in ("a.webp", "sg-abc.webp", "sc-../x", "sd-../x", ""):
         w.schedule(name)
     await w.drain()
     assert refs.asked == []
@@ -637,6 +640,7 @@ def _provider(tmp_path, items, *, gate=None, roster=None, clock=None, budget=Non
         media_sync=outbox,
         media_dir=tmp_path,
         budget=budget or SpaceFileBudget(clock=clock or (lambda: 0.0)),
+        own_instance_id=SELF,
     )
     return p, outbox
 
@@ -902,3 +906,35 @@ async def test_the_host_that_misses_a_file_asks_the_items_author_household():
     await w.drain()
     assert [s[0] for s in fed.sent] == ["hh-d"]
     assert fed.sent[0][2]["files"] == [{"item": "p1", "name": a}]
+
+
+async def test_a_sender_bound_name_is_asked_of_the_items_author_household_only():
+    """A legacy (unhashed) file shows a sender-bound ``sd-`` name: only the
+    household it is bound to — the item's author's, which delivered it —
+    can match it, so neither the host nor a helper is asked."""
+    sd = space_direct_media_name(SPACE, "hh-d", "orig.webp")
+    refs = _Refs({sd: [(SPACE, "p1", "t")]})
+    refs.owners = {"p1": "u-d"}
+    for spaces in (_Spaces(), _Spaces(host=SELF)):
+        fed = _Fed({"hh-d": V92, "h-a": V92, HOST: V92})
+        seats = _Seats(["h-a"], seats=[("hh-d", "u-d"), ("h-a", "u-a")])
+        w = _wanted(refs=refs, spaces=spaces, seats=seats, fed=fed)
+        w.schedule(sd)
+        await w.drain()
+        assert [s[0] for s in fed.sent] == ["hh-d"]
+        assert fed.sent[0][2]["files"] == [{"item": "p1", "name": sd}]
+
+
+async def test_the_author_ships_a_file_under_its_own_sender_bound_name(tmp_path):
+    """The author's household matches ``sd(S, us, basename)`` of its own
+    file and sends it under the basename — the requester binds it to us
+    again, so it lands under the very name its row shows."""
+    (tmp_path / "orig.webp").write_bytes(b"d's picture")
+    sd = space_direct_media_name(SPACE, SELF, "orig.webp")
+    p, outbox = _provider(tmp_path, {(SPACE, "p1"): [("orig.webp", "u1")]})
+    assert await p.handle(_event([{"item": "p1", "name": sd}])) == 1
+    assert outbox.queued[0]["media_urls"] == ["orig.webp"]
+    assert outbox.queued[0].get("wire_names") is None
+    # Bound to another household: not ours to deliver.
+    other = space_direct_media_name(SPACE, "hh-x", "orig.webp")
+    assert await p.handle(_event([{"item": "p1", "name": other}])) == 0

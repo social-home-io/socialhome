@@ -2455,6 +2455,9 @@ def _build_space_media_wanted(
         media_sync=space_media_sync_service,
         media_dir=pathlib.Path(config.media_path),
         budget=file_budget,
+        # A sender-bound (``sd-``) name is ours to deliver only when bound
+        # to this household.
+        own_instance_id=own_instance_id,
     )
 
     async def _space_media_wanted(event) -> None:

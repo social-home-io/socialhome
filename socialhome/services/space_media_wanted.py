@@ -83,7 +83,11 @@ from ..federation.sync.space.file_gate import (
     local_file_size,
 )
 from ..federation.sync.space.trusted_helpers import helper_offset, trusted_helpers
-from .inbound_media_store import is_safe_media_name
+from .inbound_media_store import (
+    is_safe_media_name,
+    is_space_direct_media_name,
+    space_direct_media_name,
+)
 from .space_writer_households import holds_member_seat
 
 if TYPE_CHECKING:
@@ -212,9 +216,7 @@ class SpaceMediaWanted:
         Never raises, never delays the view."""
         if self._stop.is_set() or basename in self._names:
             return
-        if not is_space_content_media_name(basename) or not is_safe_media_name(
-            basename
-        ):
+        if not _askable(basename):
             return
         last = self._asked.get(basename)
         if last is not None and self._clock() - last < NAME_COOLDOWN_S:
@@ -305,19 +307,21 @@ class SpaceMediaWanted:
         space = await self._spaces.get(space_id)
         if space is None or not space.owner_instance_id:
             return
-        payload = {
-            "space_id": space_id,
-            "files": [{"item": item, "name": name} for name, item in files],
-        }
+        bound = [f for f in files if is_space_direct_media_name(f[0])]
+        if bound:
+            # A sender-bound (legacy, unhashed) name: only the household it
+            # is bound to can match it — the author's, which delivered it.
+            await self._ask_authors(space_id, bound)
+            files = [f for f in files if not is_space_direct_media_name(f[0])]
+            if not files:
+                return
+        payload = _payload(space_id, files)
         if space.owner_instance_id == self._own:
             # We ARE the host and lack a member's file (its push was lost):
             # ask the household of each item's author — it holds the file as
             # its own people's — then a helper.
-            for author in await self._author_households(space_id, files):
-                if await self._federation.space_member_supports(
-                    author, min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
-                ) and await self._send(author, space_id, payload):
-                    return
+            if await self._ask_authors(space_id, files):
+                return
             hosts: list[str] = []
             silent = True
         else:
@@ -358,6 +362,17 @@ class SpaceMediaWanted:
             FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
             len(files),
         )
+
+    async def _ask_authors(self, space_id: str, files: list[tuple[str, str]]) -> bool:
+        """Send *files* to the first household of an item's author at v_92
+        that takes it; whether one did."""
+        payload = _payload(space_id, files)
+        for author in await self._author_households(space_id, files):
+            if await self._federation.space_member_supports(
+                author, min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
+            ) and await self._send(author, space_id, payload):
+                return True
+        return False
 
     async def _author_households(
         self, space_id: str, files: list[tuple[str, str]]
@@ -418,6 +433,7 @@ class SpaceMediaWantedProvider:
         "_hasher",
         "_member_gate",
         "_outbox",
+        "_own",
         "_refs",
     )
 
@@ -431,7 +447,11 @@ class SpaceMediaWantedProvider:
         media_sync: _MediaOutbox,
         media_dir: pathlib.Path,
         budget: SpaceFileBudget,
+        own_instance_id: str = "",
     ) -> None:
+        #: This household — a sender-bound ``sd-`` name is ours to deliver
+        #: only when it is bound to us.
+        self._own = own_instance_id
         #: ``(space, household) → holds a writer seat`` — the §25.6 gate for
         #: member-only data (:meth:`SpaceWriterHouseholds.may_receive`).
         self._member_gate = member_gate
@@ -505,10 +525,13 @@ class SpaceMediaWantedProvider:
                     target_instance_ids=[requester],
                     media_urls=[url],
                     push=True,
-                    # Sent as the asked-for content name: a helper may store
-                    # it under its own reader name (``sg-``), which the
-                    # requester refuses by name.
-                    wire_names={url: name},
+                    # A content name is sent as asked (a helper may store it
+                    # under its own reader name, ``sg-``, which the requester
+                    # refuses by name); a sender-bound one under the file's
+                    # own name, which the requester binds to us again.
+                    wire_names=None
+                    if is_space_direct_media_name(name)
+                    else {url: name},
                 )
                 seen.add(name)  # one file is queued once per request
                 queued += 1
@@ -536,9 +559,16 @@ class SpaceMediaWantedProvider:
     ) -> tuple[str, str | None] | None:
         """The local file of the live item *item_id* of *space_id* whose
         content name is *name*, with the item's owner — or ``None``."""
+        bound = is_space_direct_media_name(name)
         for basename, owner in await self._refs.live_item_files(space_id, item_id):
             if basename == name:
                 return basename, owner
+            if bound:
+                if self._own and (
+                    space_direct_media_name(space_id, self._own, basename) == name
+                ):
+                    return basename, owner
+                continue
             if is_space_content_media_name(basename):
                 continue  # another content name: not this file
             found = await self._hasher.hash_name(basename)
@@ -556,11 +586,24 @@ def _entry(raw: Any) -> tuple[str, str] | None:
     item_id, name = raw.get("item"), raw.get("name")
     if not isinstance(item_id, str) or not 0 < len(item_id) <= MAX_ITEM_ID_LEN:
         return None
-    if not isinstance(name, str) or not is_space_content_media_name(name):
-        return None
-    if not is_safe_media_name(name):
+    if not isinstance(name, str) or not _askable(name):
         return None
     return item_id, name
+
+
+def _askable(name: str) -> bool:
+    """A name a request may carry: a content name (``sc-``) or a
+    sender-bound one (``sd-``), and a safe media name."""
+    return (
+        is_space_content_media_name(name) or is_space_direct_media_name(name)
+    ) and is_safe_media_name(name)
+
+
+def _payload(space_id: str, files: list[tuple[str, str]]) -> dict:
+    return {
+        "space_id": space_id,
+        "files": [{"item": item, "name": name} for name, item in files],
+    }
 
 
 __all__ = [
