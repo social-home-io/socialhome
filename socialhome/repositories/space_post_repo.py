@@ -211,13 +211,24 @@ class AbstractSpacePostRepo(Protocol):
         *,
         limit: int = 500,
     ) -> list[tuple[str, Comment]]: ...
+    async def row_marks(self) -> tuple[int, int]:
+        """The highest stored ``rowid`` of ``space_posts`` and
+        ``space_post_comments`` now (``0`` when empty) — taken once at boot so
+        :meth:`newest_from_household` counts only rows held before it."""
+        ...
+
     async def newest_from_household(
-        self, space_id: str, instance_id: str, *, before: str | None = None
+        self,
+        space_id: str,
+        instance_id: str,
+        *,
+        upto: tuple[int, int] | None = None,
     ) -> str | None:
         """The newest ``created_at`` (``YYYY-MM-DD HH:MM:SS``, UTC) of the
         space's posts and comments held here written by the people seated
-        for *instance_id*; ``None``: none (v_92 helper resume). With
-        *before* (same shape) only rows created before it count."""
+        for *instance_id*; ``None``: none (v_92 helper resume). With *upto*
+        (:meth:`row_marks`) only rows STORED by then count, whatever their
+        stamp."""
         ...
 
     async def list_comments_sync_page(
@@ -1001,19 +1012,31 @@ class SqliteSpacePostRepo:
             out.append((d["post_id"], comment))
         return out
 
+    async def row_marks(self) -> tuple[int, int]:
+        row = await self._db.fetchone(
+            "SELECT (SELECT COALESCE(MAX(rowid), 0) FROM space_posts) AS p,"
+            " (SELECT COALESCE(MAX(rowid), 0) FROM space_post_comments) AS c"
+        )
+        return (int(row["p"]), int(row["c"])) if row is not None else (0, 0)
+
     async def newest_from_household(
-        self, space_id: str, instance_id: str, *, before: str | None = None
+        self,
+        space_id: str,
+        instance_id: str,
+        *,
+        upto: tuple[int, int] | None = None,
     ) -> str | None:
         people = (
             "SELECT user_id FROM space_remote_members"
             " WHERE space_id=? AND instance_id=?"
         )
         cut_posts = cut_comments = ""
-        cut: tuple[str, ...] = ()
-        if before is not None:
-            cut_posts = " AND datetime(created_at) < datetime(?)"
-            cut_comments = " AND datetime(c.created_at) < datetime(?)"
-            cut = (before,)
+        post_cut: tuple[int, ...] = ()
+        comment_cut: tuple[int, ...] = ()
+        if upto is not None:
+            cut_posts = " AND rowid <= ?"
+            cut_comments = " AND c.rowid <= ?"
+            post_cut, comment_cut = (upto[0],), (upto[1],)
         row = await self._db.fetchone(
             "SELECT MAX(t) AS t FROM ("
             " SELECT MAX(datetime(created_at)) AS t FROM space_posts"
@@ -1026,11 +1049,11 @@ class SqliteSpacePostRepo:
                 space_id,
                 space_id,
                 instance_id,
-                *cut,
+                *post_cut,
                 space_id,
                 space_id,
                 instance_id,
-                *cut,
+                *comment_cut,
             ),
         )
         return str(row["t"]) if row is not None and row["t"] else None

@@ -47,6 +47,7 @@ class _FakeFederation:
         self.sent: list[dict] = []
         #: ``send_with_mesh_fallback`` sends (the resume request).
         self.routed: list[dict] = []
+        self.route_ok = True
         #: Advertised proto_version per peer (default: current).
         self.versions: dict[str, int] = {}
 
@@ -77,7 +78,7 @@ class _FakeFederation:
                 "space_id": space_id,
             }
         )
-        return SimpleNamespace(ok=True, error=None)
+        return SimpleNamespace(ok=self.route_ok, error=None if self.route_ok else "x")
 
 
 class _FakeSpaceRepo:
@@ -478,9 +479,11 @@ async def test_handle_request_payload_matches_inbound_shape(provider_factory):
 async def test_send_request_validates_inputs(provider_factory):
     """Empty fields produce a no-op, not an error."""
     provider, fed, _ = provider_factory(posts=[], members=[])
-    await provider.send_request(space_id="", instance_id="peer-b", since="x")
-    await provider.send_request(space_id="sp-1", instance_id="", since="x")
-    await provider.send_request(space_id="sp-1", instance_id="peer-b", since="")
+    assert not await provider.send_request(space_id="", instance_id="peer-b", since="x")
+    assert not await provider.send_request(space_id="sp-1", instance_id="", since="x")
+    assert not await provider.send_request(
+        space_id="sp-1", instance_id="peer-b", since=""
+    )
     assert fed.sent == []
     assert fed.routed == []
 
@@ -1446,9 +1449,14 @@ async def test_send_request_reaches_a_helper_over_the_mesh_or_its_mailbox(
     """A helper may be reached by mesh or a GFS mailbox seat only: the
     request goes through ``send_with_mesh_fallback`` (space-scoped)."""
     provider, fed, _ = provider_factory(posts=[], members=[])
-    await provider.send_request(
+    assert await provider.send_request(
         space_id="sp-1", instance_id="helper", since="2026-11-01T00:00:00+00:00"
     )
+    fed.route_ok = False
+    assert not await provider.send_request(
+        space_id="sp-1", instance_id="helper", since="2026-11-01T00:00:00+00:00"
+    )
+    fed.routed.pop()
     assert fed.sent == []
     assert fed.routed == [
         {

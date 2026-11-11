@@ -675,11 +675,14 @@ row's author household only, bytes checked against the row's `h`.
   `moderator` seat in the roster mirror; the owner is the host), sorted by
   instance id and started at this household's stable offset, never
   ourselves — the one picker the helper resume uses too
-  (`federation/sync/space/trusted_helpers.py`) — gets the same request
-  ONLY when the send to the host failed or the host is **silent**
+  (`federation/sync/space/trusted_helpers.py`) — gets the request ONLY
+  when no host at v_92 could be reached or the host is **silent**
   (`HostContact.is_silent`: it left the scheduler's last round unanswered
   for 120 s and has not been heard since — a sync answer or any verified
-  event of the space from it ends that at once). Never after a wait while the
+  event of the space from it ends that at once). One batch never goes to
+  both: while the host is silent it goes to a helper INSTEAD of the host (a
+  send to an offline host's GFS mailbox "succeeds" with nobody to answer),
+  and to the host only when no helper took it. Never after a wait while the
   host answers, so the request reaches a helper only while the host is
   away (like any catch-up, whoever serves it learns which items were asked
   for — inside the space's members, never the GFS). At most 2 helpers are tried (`MAX_HELPERS`); the first
@@ -738,7 +741,7 @@ sequenceDiagram
     V->>H: SPACE_MEDIA_WANTED {space_id, files: [{item, name}]}
     H->>H: member? live item shows name? file gate + budget
     H-->>V: SPACE_MEDIA_BLOB (h, push=True) for each file it holds
-    Note over V: only if the send to H failed or H is silent (no answer to the last round)
+    Note over V: H silent (no answer to the last round) or unreachable: A instead of H
     V->>A: SPACE_MEDIA_WANTED {space_id, files: [the same names]}
     A-->>V: SPACE_MEDIA_BLOB (proven-hashed files, shared budget)
 ```

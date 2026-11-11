@@ -270,8 +270,10 @@ class SpaceSyncResumeProvider:
         space_id: str,
         instance_id: str,
         since: str,
-    ) -> None:
-        """Ask ``instance_id`` to replay missed events since ``since``.
+    ) -> bool:
+        """Ask ``instance_id`` to replay missed events since ``since``;
+        whether the request was handed to a path that reached it (``False``
+        for empty fields or a failed send).
 
         ``since`` is an ISO-8601 timestamp (the provider clamps it to
         :data:`RESUME_MAX_AGE_S`). Returns immediately; responses arrive as
@@ -282,7 +284,7 @@ class SpaceSyncResumeProvider:
         asks while the host is offline may be reached either way (v_92).
         """
         if not space_id or not instance_id or not since:
-            return
+            return False
         payload: dict[str, str] = {"space_id": space_id, "since": since}
         result = await self._federation.send_with_mesh_fallback(
             to_instance_id=instance_id,
@@ -297,6 +299,7 @@ class SpaceSyncResumeProvider:
                 instance_id,
                 result.error,
             )
+        return bool(result.ok)
 
     # ── Inbound (provider side) ───────────────────────────────────────
 

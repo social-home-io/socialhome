@@ -26,10 +26,10 @@ next 30-minute round. A member asks a trusted helper for a file it misses
 In memory only: a restart forgets every answer, so a household that just
 booted falls back only once a BEGIN it sends goes unanswered for the full
 window, and is not silent before that. Where a helper resume starts is not
-kept here: it comes from the rows this household held before this process
-started (:meth:`HostContact.started_at`, ``scheduler._resume_since``), so it
-survives a restart and a live post landing after the restart cannot move it
-past the gap. Bounded: at most :data:`MAX_SPACES_TRACKED` spaces per map,
+kept here: it comes from the rows this household stored before this process
+started (the scheduler's boot row marks, ``scheduler._resume_since``), so it
+survives a restart and a row landing after the restart cannot move it past
+the gap. Bounded: at most :data:`MAX_SPACES_TRACKED` spaces per map,
 oldest dropped.
 """
 
@@ -52,7 +52,7 @@ class HostContact:
     """Per space: the monotonic and the UTC wall-clock time its host was
     last heard."""
 
-    __slots__ = ("_clock", "_heard", "_silent", "_started", "_wall")
+    __slots__ = ("_clock", "_heard", "_silent", "_wall")
 
     def __init__(
         self,
@@ -62,17 +62,10 @@ class HostContact:
     ) -> None:
         self._clock = clock
         self._wall = wall
-        #: When this process started (UTC): a helper resume counts only
-        #: rows held before it.
-        self._started = wall()
         self._heard: OrderedDict[str, tuple[float, str]] = OrderedDict()
         #: spaces whose host left a round unanswered → the households that
         #: acted as its host for that round (oldest first).
         self._silent: OrderedDict[str, frozenset[str]] = OrderedDict()
-
-    def started_at(self) -> datetime:
-        """When this process started (UTC wall clock)."""
-        return self._started
 
     def now(self) -> float:
         """The clock :meth:`heard_since` compares against."""

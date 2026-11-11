@@ -2334,9 +2334,10 @@ def _wire_federation_stack(
         host_contact=host_contact,
         resume=space_sync_resume_provider,
         roster_authority=_roster_authority,
-        # A helper's resume starts at its people's newest row held here
-        # from before this process started.
+        # A helper's resume starts at its people's newest row stored here
+        # before this process started (row marks taken in start()).
         newest_from=space_post_repo.newest_from_household,
+        row_marks=space_post_repo.row_marks,
     )
     # v_92 — a member household that views a space file it misses asks the
     # host (then a trusted helper) for it; we answer such requests too.

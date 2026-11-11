@@ -7946,7 +7946,7 @@ def cmd_gfs_space_healing() -> None:
        is now silent for e — and e asks ONE helper, d, for a
        ``SPACE_SYNC_RESUME``; d replays its own rows → e shows the event.
     4. **Old picture, host offline.** e views the second picture: the
-       request goes to a's mailbox and — a being silent — to the helper d;
+       request goes — a being silent — to the helper d instead of a;
        d's log shows it served e, and e holds the bytes. (While a answers,
        a helper is never asked.)
     5. The GFS log over the whole step: mailbox deliveries, and no line
@@ -8211,7 +8211,7 @@ def cmd_gfs_space_healing() -> None:
         print(
             f"  host a silent; old picture {name2[:15]}… (GFS copies dropped: "
             f"{dropped}; d holds it as {d_name2[:15]}…): e's view → HTTP {first}, "
-            f"asked a, and — a being silent — the helper d, which served it; "
+            f"a being silent, it asked the helper d instead, which served it; "
             f"byte-identical after {took:.0f} s ✓"
         )
 

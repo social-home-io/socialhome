@@ -1934,7 +1934,7 @@ e's roster mirror shows it — d's household is now a trusted helper.
    and sends ``SPACE_SYNC_RESUME`` to d, which replays its own rows; e
    shows the event (polled up to 300 s).
 3. **Old picture, host silent.** e views the second picture: the request
-   goes to a's mailbox and, a being silent, to the helper d, which logs
+   goes, a being silent, to the helper d instead of a, which logs
    that it served e; e serves the bytes (polled up to 180 s). A helper is
    asked only while the host is silent or unreachable.
 4. Over the whole step the GFS log shows ``<mailbox>`` deliveries and no

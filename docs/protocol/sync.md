@@ -212,22 +212,22 @@ the one picker `SPACE_MEDIA_WANTED` uses too); each household starts at its
 own stable offset (`sha256(own instance id ‖ space id) mod k`, never random)
 so a space's members spread over its k helpers instead of all asking the
 first, then one step further each silent round — with `since` = the newest
-of: when the host was last heard, the newest post or comment this household
-held in the space from **that helper's** people **before this process
-started** (`space_post_repo.newest_from_household(…, before=)`,
-`HostContact.started_at`) minus a fixed 5-minute overlap
-(`HELPER_OVERLAP_S`), and 30 days ago — never later than now. A helper
+of: when the host was last heard; the newest post or comment this household
+**stored** in the space from **that helper's** people **before this process
+started** minus a fixed 5-minute overlap (`HELPER_OVERLAP_S`) — "stored
+before" by row id: the scheduler takes `MAX(rowid)` of posts and comments
+once in `start()` (`space_post_repo.row_marks`) and
+`newest_from_household(…, upto=)` counts only rows at or below it, so a live
+post or a late gap row with an older stamp that arrives after a restart
+never moves `since` past rows still missing; this process's last
+**successful** ask to that same helper minus the overlap (in memory, per
+(space, helper), only when `send_request` reported the send ok — so while
+the host stays silent each round asks only for what is new since the last
+one: delta per round); and 30 days ago — never later than now. A helper
 replays only its own people's rows, so its own newest row here is where its
-gap starts — read from the database, so neither a restart nor a rotation to
-another helper makes a resume reach back further than that helper's gap,
-and nothing is remembered about an ask (a send that failed changes nothing).
-Only rows held before the restart count: a live post from the helper's
-people that lands after a restart (before the first fallback round) must not
-move `since` past the day this household was down; a row stamped later (a
-helper whose clock runs ahead) is clamped to the start too. The price: while
-the host stays silent and unheard since the restart, each round asks from
-that pre-restart point again (still one helper, its own people's rows only,
-within the shared file budget). A file the
+gap starts; the database point covers a restart, the last-ask point keeps
+later rounds small, and a rotation to another helper starts that helper at
+its own point. A file the
 member still lacks arrives when someone opens it (`SPACE_MEDIA_WANTED`).
 No helper at v_92 → nothing: the member waits for the host (logged once per
 round). A space we host, or hold the roster authority of, never falls back.
@@ -265,7 +265,7 @@ sequenceDiagram
     M->>H: SPACE_SYNC_BEGIN (periodic tick)
     Note over M,H: no chunk, no sentinel, no refusal
     Note over M: HOST_ANSWER_WAIT_S (120 s) after the BEGIN went out, host not heard → silent
-    M->>A: SPACE_SYNC_RESUME to helper (offset + round) mod k (since = max(host heard, A's people's newest row held before boot − 5 min, now − 30 d) ≤ now)
+    M->>A: SPACE_SYNC_RESUME to helper (offset + round) mod k (since = max(host heard, A's people's newest row stored before boot − 5 min, last ok ask to A − 5 min, now − 30 d) ≤ now)
     A->>M: SPACE_*_CREATED (its own people's rows only)
     A->>M: SPACE_MEDIA_BLOB (the files of those rows, shared budget ≤ 50 / 32 MiB per 30 min)
     Note over M: next round asks the host first again

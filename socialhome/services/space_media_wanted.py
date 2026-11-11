@@ -291,8 +291,11 @@ class SpaceMediaWanted:
     async def _deliver(self, space_id: str, files: list[tuple[str, str]]) -> None:
         """Ask the host for *files* (``(name, item)``) — the households
         acting as host here, owner first (:func:`acting_hosts`, the same
-        notion the scheduler's silent-host wait uses); a helper only when
-        none of them can be reached or the host is silent."""
+        notion the scheduler's silent-host wait uses). A helper instead only
+        when the host is silent (its last sync round went unanswered — a send
+        to its GFS mailbox would "succeed" with nobody to answer) or none of
+        the hosts at v_92 could be reached; one batch never goes to both
+        (a silent host gets it only when no helper took it)."""
         space = await self._spaces.get(space_id)
         if (
             space is None
@@ -311,19 +314,15 @@ class SpaceMediaWanted:
             "space_id": space_id,
             "files": [{"item": item, "name": name} for name, item in files],
         }
-        current = sent = False
-        for host in hosts:
-            if not await self._federation.space_member_supports(
-                host, min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
-            ):
-                continue
-            current = True
-            if await self._send(host, space_id, payload):
-                sent = True
-                break
-        if not self._contact.is_silent(space_id) and (sent or not current):
-            # The host answers (an older one heals through its catch-up).
-            return
+        silent = self._contact.is_silent(space_id)
+        if not silent:
+            current = False
+            for host in await self._current(hosts):
+                current = True
+                if await self._send(host, space_id, payload):
+                    return
+            if not current:
+                return  # an older host that answers heals through its catch-up
         helpers = await trusted_helpers(
             self._seats,
             self._federation,
@@ -334,6 +333,10 @@ class SpaceMediaWanted:
         for helper in helpers[:MAX_HELPERS]:
             if await self._send(helper, space_id, payload):
                 return
+        if silent:
+            for host in await self._current(hosts):
+                if await self._send(host, space_id, payload):
+                    return
         log.info(
             "space media wanted: the host of space %s is away and no helper at "
             "v_%d took %d file(s) — they wait for the catch-up",
@@ -341,6 +344,16 @@ class SpaceMediaWanted:
             FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
             len(files),
         )
+
+    async def _current(self, hosts: list[str]) -> list[str]:
+        """The *hosts* at v_92 (who can answer a request), in order."""
+        return [
+            h
+            for h in hosts
+            if await self._federation.space_member_supports(
+                h, min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
+            )
+        ]
 
     async def _send(self, to: str, space_id: str, payload: dict) -> bool:
         result = await self._federation.send_with_mesh_fallback(

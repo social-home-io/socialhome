@@ -82,6 +82,7 @@ import logging
 import os
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
@@ -194,8 +195,6 @@ HELPER_OVERLAP_S: float = 5 * 60.0
 class _HostContact(Protocol):
     def now(self) -> float: ...
 
-    def started_at(self) -> datetime: ...
-
     def heard(self, space_id: str) -> None: ...
 
     def heard_since(self, space_id: str, t: float) -> bool: ...
@@ -207,14 +206,18 @@ class _HostContact(Protocol):
 
 class _NewestFrom(Protocol):
     async def __call__(
-        self, space_id: str, instance_id: str, *, before: str | None = None
+        self, space_id: str, instance_id: str, *, upto: tuple[int, int] | None = None
     ) -> str | None: ...
 
 
 class _ResumeSender(Protocol):
     async def send_request(
         self, *, space_id: str, instance_id: str, since: str
-    ) -> None: ...
+    ) -> bool: ...
+
+
+#: ``(space, helper)`` pairs whose last successful ask is remembered.
+MAX_HELPER_ASKS_TRACKED: int = 4096
 
 
 def _parse_utc(iso: str | None) -> datetime | None:
@@ -227,34 +230,29 @@ def _parse_utc(iso: str | None) -> datetime | None:
     return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
 
 
-def _db_utc(at: datetime) -> str:
-    """*at* in the naive-UTC shape ``created_at`` columns hold."""
-    return at.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
-
-
 def _resume_since(
-    last_heard_iso: str | None, newest_row_iso: str | None, started: datetime
+    last_heard_iso: str | None,
+    newest_row_iso: str | None,
+    last_ask: datetime | None,
 ) -> str:
     """Where a helper resume starts: the newest of when the host was last
-    heard, the newest row held here from the helper's people minus
-    :data:`HELPER_OVERLAP_S` (it replays only its own people's rows), and
-    ``RESUME_MAX_AGE_S`` ago (the provider clamps to the same floor).
-
-    Only rows held before this process *started* count (the caller asks the
-    database for those; a row stamped later — a helper whose clock runs
-    ahead — is clamped to *started* here): a live post that lands after a
-    restart must not move ``since`` past the day the household was down.
-    ``since`` never lies in the future."""
+    heard, the newest row held here (stored before this process started —
+    the caller's boot marks) from the helper's people minus
+    :data:`HELPER_OVERLAP_S` (it replays only its own people's rows), this
+    process's last SUCCESSFUL ask to that helper minus the same overlap
+    (delta per round while the host stays silent), and ``RESUME_MAX_AGE_S``
+    ago (the provider clamps to the same floor). Never in the future."""
     now = datetime.now(UTC)
-    floor = now - timedelta(seconds=RESUME_MAX_AGE_S)
-    heard = _parse_utc(last_heard_iso)
+    overlap = timedelta(seconds=HELPER_OVERLAP_S)
+    since = now - timedelta(seconds=RESUME_MAX_AGE_S)
     newest = _parse_utc(newest_row_iso)
-    since = floor
-    if newest is not None:
-        newest = min(newest, started)
-        since = max(since, newest - timedelta(seconds=HELPER_OVERLAP_S))
-    if heard is not None and heard > since:
-        since = heard
+    for point in (
+        _parse_utc(last_heard_iso),
+        newest - overlap if newest is not None else None,
+        last_ask - overlap if last_ask is not None else None,
+    ):
+        if point is not None and point > since:
+            since = point
     return min(since, now).isoformat()
 
 
@@ -271,6 +269,7 @@ class SpaceSyncScheduler:
         "_drain_timers",
         "_federation",
         "_federation_repo",
+        "_helper_asks",
         "_helper_checks",
         "_helper_round",
         "_host_ask_due",
@@ -289,11 +288,13 @@ class SpaceSyncScheduler:
         "_roster_authority",
         "_roster_echo",
         "_roster_refresh",
+        "_row_marks",
         "_seat_repo",
         "_space_repo",
         "_startup_task",
         "_stop",
         "_sync_manager",
+        "_take_marks",
         "_task",
     )
 
@@ -370,6 +371,13 @@ class SpaceSyncScheduler:
         self._roster_authority: Callable[[str], Awaitable[bool]] | None = None
         #: ``(space, household) →`` the newest row held here from its people.
         self._newest_from: _NewestFrom | None = None
+        #: ``MAX(rowid)`` of the rows ``_newest_from`` reads, taken at
+        #: ``start()``: only rows stored before it count.
+        self._row_marks: tuple[int, int] | None = None
+        self._take_marks: Callable[[], Awaitable[tuple[int, int]]] | None = None
+        #: ``(space, helper) -> when this process last asked it`` (only a
+        #: successful send).
+        self._helper_asks: OrderedDict[tuple[str, str], datetime] = OrderedDict()
         #: space → the households acting as its host whose answer this
         #: round's BEGIN awaits: set by the tick, consumed when the BEGIN to
         #: one of them actually goes out (a parked one keeps it until sent).
@@ -386,18 +394,27 @@ class SpaceSyncScheduler:
         resume: _ResumeSender,
         roster_authority: Callable[[str], Awaitable[bool]],
         newest_from: _NewestFrom,
+        row_marks: Callable[[], Awaitable[tuple[int, int]]],
     ) -> None:
         """Wire trigger 10 (v_92): the host contact the receiver marks, the
         ``SPACE_SYNC_RESUME`` sender, whether we hold a space's roster
         authority (then we are host-equivalent: nothing to fall back from),
-        and ``newest_from(space, household, before=)`` — the newest row held
-        here from that household's people created before this process
-        started, where its resume starts. Needs the
+        ``newest_from(space, household, upto=)`` — the newest row held here
+        from that household's people among the rows stored by ``upto`` — and
+        ``row_marks()``, those marks, taken once in :meth:`start`. Needs the
         roster mirror (``seat_repo``) for the helpers."""
         self._host_contact = host_contact
         self._resume = resume
         self._roster_authority = roster_authority
         self._newest_from = newest_from
+        self._take_marks = row_marks
+
+    async def _take_row_marks(self) -> None:
+        """Note which rows were stored before this process started (once):
+        a row that arrives later — a live post, a late gap row with an older
+        stamp — must not move a helper resume past rows still missing."""
+        if self._take_marks is not None and self._row_marks is None:
+            self._row_marks = await self._take_marks()
 
     def attach_roster_refresh(self, refresh: Callable[[], Awaitable[object]]) -> None:
         """Run ``refresh`` on every periodic tick — the host re-sending each
@@ -727,6 +744,10 @@ class SpaceSyncScheduler:
         """Begin the periodic tick. Idempotent."""
         if self._task is not None and not self._task.done():
             return
+        try:
+            await self._take_row_marks()
+        except Exception:
+            log.exception("space-sync-scheduler: reading the boot row marks failed")
         self._stop.clear()
         self._task = asyncio.create_task(self._loop(), name="SpaceSyncScheduler")
         if self._startup_task is None or self._startup_task.done():
@@ -1061,11 +1082,10 @@ class SpaceSyncScheduler:
                 return
             self._helper_round[space_id] = rounds + 1
             helper = helpers[0]
-            started = contact.started_at()
             since = _resume_since(
                 contact.last_heard_iso(space_id),
-                await newest_from(space_id, helper, before=_db_utc(started)),
-                started,
+                await newest_from(space_id, helper, upto=self._row_marks),
+                self._helper_asks.get((space_id, helper)),
             )
             log.info(
                 "space %s: the host did not answer within %.0f s — asking "
@@ -1075,9 +1095,15 @@ class SpaceSyncScheduler:
                 helper,
                 since,
             )
-            await resume.send_request(
+            asked_at = datetime.now(UTC)
+            if await resume.send_request(
                 space_id=space_id, instance_id=helper, since=since
-            )
+            ):
+                key = (space_id, helper)
+                self._helper_asks[key] = asked_at
+                self._helper_asks.move_to_end(key)
+                while len(self._helper_asks) > MAX_HELPER_ASKS_TRACKED:
+                    self._helper_asks.popitem(last=False)
         except Exception:
             log.exception("space %s: asking a trusted helper failed", space_id)
 

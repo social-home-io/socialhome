@@ -380,11 +380,21 @@ async def test_an_unreachable_host_sends_the_names_to_one_helper():
     assert seats.asked == [HELPER_ROLES]
 
 
-async def test_a_silent_host_sends_the_names_to_one_helper_too():
+async def test_a_silent_hosts_batch_goes_to_one_helper_only():
+    """The host left its last sync round unanswered: the batch goes to ONE
+    helper and not also to the host — never both (a send to an offline
+    host's GFS mailbox "succeeds" yet nothing would answer it)."""
     w, fed, _seats = _helper_case(contact=_Contact({SPACE}))
     await w.drain()
-    assert [s[0] for s in fed.sent] == [HOST, _rotated()[0]]
-    assert fed.sent[0][2] == fed.sent[1][2]
+    assert [s[0] for s in fed.sent] == [_rotated()[0]]
+
+
+async def test_a_silent_host_is_asked_when_no_helper_takes_the_batch():
+    """No helper reachable: the host still gets it (its mailbox keeps it
+    until it is back)."""
+    w, fed, _seats = _helper_case(contact=_Contact({SPACE}), fail=set(_rotated()))
+    await w.drain()
+    assert [s[0] for s in fed.sent] == [*_rotated()[:MAX_HELPERS], HOST]
 
 
 async def test_a_failed_helper_send_tries_the_next_up_to_the_cap():

@@ -84,12 +84,6 @@ def test_silent_spaces_stay_bounded(monkeypatch) -> None:
     assert contact.is_silent("c") is True
 
 
-def test_started_at_is_the_wall_time_this_process_began() -> None:
-    """A helper resume counts only rows held before this process started."""
-    contact = HostContact(clock=_Clock(), wall=_wall)
-    assert contact.started_at() == _wall()
-
-
 def test_any_verified_event_from_a_silent_host_clears_silent() -> None:
     """``went_silent`` records which households acted as host for the round;
     any verified event from one of them for that space (``heard_from``)

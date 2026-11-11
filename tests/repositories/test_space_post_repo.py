@@ -1090,10 +1090,11 @@ async def test_newest_from_household_is_its_peoples_newest_post_or_comment(env):
     assert await env.repo.newest_from_household("sp-other", "inst-b") is None
 
 
-async def test_newest_from_household_before_counts_only_older_rows(env):
-    """``before`` (this process's start): rows written at or after it never
-    count — a live post that lands after a restart must not move a helper
-    resume past the gap the household was down for."""
+async def test_newest_from_household_upto_counts_only_rows_held_at_boot(env):
+    """``upto`` (the row marks taken when this process started): only rows
+    STORED before it count, whatever their ``created_at`` — a gap row that
+    arrives after a restart with an older stamp, or a live post, must not
+    move a helper resume past the rows still missing."""
     await env.db.enqueue(
         "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
         " VALUES(?,?,?,?)",
@@ -1101,27 +1102,36 @@ async def test_newest_from_household_before_counts_only_older_rows(env):
     )
     t0 = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
     await env.repo.save(env.space_id, replace(_post("p-old", "uid-hb"), created_at=t0))
+    marks = await env.repo.row_marks()
+    # Stored after the marks: a live post (newer stamp) and a late gap row
+    # and comment whose stamps sit just after the pre-boot row.
     await env.repo.save(
         env.space_id,
         replace(_post("p-live", "uid-hb"), created_at=t0 + timedelta(days=1)),
     )
+    await env.repo.save(
+        env.space_id,
+        replace(_post("p-late", "uid-hb"), created_at=t0 + timedelta(hours=1)),
+    )
     await env.repo.add_comment(
         replace(
-            _comment("c-live", "p-old", "uid-hb"), created_at=t0 + timedelta(days=1)
+            _comment("c-late", "p-old", "uid-hb"), created_at=t0 + timedelta(hours=2)
         ),
         space_id=env.space_id,
     )
-    boot = "2026-11-02 00:00:00"
     assert (
-        await env.repo.newest_from_household(env.space_id, "inst-b", before=boot)
+        await env.repo.newest_from_household(env.space_id, "inst-b", upto=marks)
         == "2026-11-01 12:00:00"
-    )
-    assert (
-        await env.repo.newest_from_household(
-            env.space_id, "inst-b", before="2026-11-01 12:00:00"
-        )
-        is None
     )
     assert await env.repo.newest_from_household(env.space_id, "inst-b") == (
         "2026-11-02 12:00:00"
+    )
+
+
+async def test_row_marks_are_zero_on_an_empty_database(env):
+    """Nothing stored yet: the marks count nothing (no row is held at boot)."""
+    assert await env.repo.row_marks() == (0, 0)
+    assert (
+        await env.repo.newest_from_household(env.space_id, "inst-b", upto=(0, 0))
+        is None
     )
