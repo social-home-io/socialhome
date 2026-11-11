@@ -11,6 +11,7 @@ from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import PollClosed, PollCreated
 from socialhome.domain.post import poll_option_id
+from socialhome.domain.user import SYSTEM_AUTHOR
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.poll_repo import SqlitePollRepo
 from socialhome.repositories.space_poll_repo import SqliteSpacePollRepo
@@ -278,3 +279,58 @@ async def test_a_vote_cannot_be_retracted_from_a_closed_poll(env, how):
             post_id="sp-post", voter_user_id="uid-anna", space_id="sp-1"
         )
     assert (await env.space.summary("sp-post"))["total_votes"] == 1
+
+
+_SLOTS = [
+    {"slot_date": "2030-05-01", "id": "client-chosen"},
+    {"slot_date": "2030-05-02"},
+]
+
+
+async def _schedule_post(env, post_id: str = "sp-sched", author: str = "uid-anna"):
+    await env.db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content)"
+        " VALUES(?,?,?,?,?)",
+        (post_id, "sp-1", author, "schedule", "?"),
+    )
+
+
+async def test_a_schedule_poll_is_author_only_create_once_with_minted_slot_ids(env):
+    """The reply poll's rule: only the post's author (never on a system
+    post), once — the slots people answered are never replaced — and a
+    slot id is never the caller's to choose."""
+    await _schedule_post(env)
+    await _schedule_post(env, "sp-bot", SYSTEM_AUTHOR)
+    for post_id, actor in (
+        ("sp-sched", "uid-other"),
+        ("sp-bot", "uid-anna"),
+        ("no-such-post", "uid-anna"),
+    ):
+        with pytest.raises(PermissionError):
+            await env.space.create_schedule_poll(
+                post_id=post_id,
+                actor_user_id=actor,
+                title="When?",
+                slots=_SLOTS,
+                space_id="sp-1",
+            )
+        assert not await env.space.has_schedule_poll(post_id)
+    made = await env.space.create_schedule_poll(
+        post_id="sp-sched",
+        actor_user_id="uid-anna",
+        title="When?",
+        slots=_SLOTS,
+        space_id="sp-1",
+    )
+    ids = [s["id"] for s in made["slots"]]
+    assert len(ids) == 2 and "client-chosen" not in ids
+    with pytest.raises(PollExistsError):
+        await env.space.create_schedule_poll(
+            post_id="sp-sched",
+            actor_user_id="uid-anna",
+            title="Rewritten",
+            slots=[{"slot_date": "2031-01-01"}],
+            space_id="sp-1",
+        )
+    again = await env.space.schedule_summary("sp-sched", space_id="sp-1")
+    assert again["title"] == "When?" and [s["id"] for s in again["slots"]] == ids

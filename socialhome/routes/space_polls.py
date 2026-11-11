@@ -235,6 +235,7 @@ class SpaceSchedulePollCollectionView(_SpacePollBase):
         try:
             summary = await svc.create_schedule_poll(
                 post_id=post_id,
+                actor_user_id=ctx.user_id,
                 title=str(body.get("title") or ""),
                 deadline=body.get("deadline"),
                 slots=list(body.get("slots") or []),

@@ -998,7 +998,7 @@ async def test_covered_exporters_stream_only_rows_changed_since_a_stamp(db):
                 content=pid,
             ),
         )
-    await polls.create_poll(
+    await polls.create_poll_if_absent(
         post_id="p-vote",
         question="Q?",
         closes_at=None,

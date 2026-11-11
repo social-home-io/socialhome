@@ -141,6 +141,40 @@ def test_location_and_online_keys_never_collide():
     )
 
 
+def test_a_poll_vote_supersedes_per_space_poll_and_voter():
+    """A vote is the voter's whole selection — state, not history: an older
+    one delivered after a newer one would roll it back."""
+
+    def key(space="s1", post="p1", voter="u1", **over):
+        return supersede_key(
+            FederationEventType.SPACE_POLL_VOTE_CAST,
+            space_id=space,
+            payload={
+                "post_id": post,
+                "voter_user_id": voter,
+                "option_ids": ["a"],
+                **over,
+            },
+        )
+
+    assert key() == "poll-vote:s1:p1:u1"
+    assert key() == key(option_ids=[])
+    assert len({key(), key(space="s2"), key(post="p2"), key(voter="u2")}) == 4
+    for broken in (key(space=None), key(post=""), key(voter=""), key(post=5)):
+        assert broken is None
+    # A poll's definition and its close are not latest-only state.
+    for t in (
+        FederationEventType.SPACE_POLL_CREATED,
+        FederationEventType.SPACE_POLL_CLOSED,
+    ):
+        assert (
+            supersede_key(
+                t, space_id="s1", payload={"post_id": "p1", "voter_user_id": "u1"}
+            )
+            is None
+        )
+
+
 def test_ordinary_events_never_supersede():
     """A DM or a post is never replaced by a later one."""
     for t in (

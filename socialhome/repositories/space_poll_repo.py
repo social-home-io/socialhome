@@ -143,44 +143,6 @@ class SqliteSpacePollRepo:
 
     # ── reply polls ────────────────────────────────────────────────────
 
-    async def create_poll(
-        self,
-        *,
-        post_id: str,
-        question: str,
-        closes_at: str | None,
-        allow_multiple: bool,
-        options: list[dict],
-    ) -> None:
-        await self._db.enqueue(
-            """
-            INSERT INTO space_polls(
-                post_id, question, closes_at, closed, allow_multiple
-            ) VALUES(?, ?, ?, 0, ?)
-            ON CONFLICT(post_id) DO UPDATE SET
-                question=excluded.question,
-                closes_at=excluded.closes_at,
-                allow_multiple=excluded.allow_multiple
-            """,
-            (post_id, question, closes_at, 1 if allow_multiple else 0),
-        )
-        for opt in options:
-            await self._db.enqueue(
-                """
-                INSERT INTO space_poll_options(id, post_id, text, position)
-                VALUES(?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    text=excluded.text,
-                    position=excluded.position
-                """,
-                (
-                    opt["id"],
-                    post_id,
-                    opt["text"],
-                    int(opt.get("position", 0)),
-                ),
-            )
-
     async def create_poll_if_absent(
         self,
         *,
@@ -392,47 +354,6 @@ class SqliteSpacePollRepo:
         ]
 
     # ── schedule polls ─────────────────────────────────────────────────
-
-    async def create_schedule_poll(
-        self,
-        *,
-        post_id: str,
-        title: str,
-        deadline: str | None,
-        slots: list[dict],
-    ) -> None:
-        await self._db.enqueue(
-            """
-            INSERT INTO space_schedule_poll_meta(
-                post_id, title, deadline, finalized_slot_id, closed
-            ) VALUES(?, ?, ?, NULL, 0)
-            ON CONFLICT(post_id) DO UPDATE SET
-                title=excluded.title,
-                deadline=excluded.deadline
-            """,
-            (post_id, title, deadline),
-        )
-        for s in slots:
-            await self._db.enqueue(
-                """
-                INSERT INTO space_schedule_slots(
-                    id, post_id, slot_date, start_time, end_time, position
-                ) VALUES(?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    slot_date=excluded.slot_date,
-                    start_time=excluded.start_time,
-                    end_time=excluded.end_time,
-                    position=excluded.position
-                """,
-                (
-                    s["id"],
-                    post_id,
-                    s["slot_date"],
-                    s.get("start_time"),
-                    s.get("end_time"),
-                    int(s.get("position", 0)),
-                ),
-            )
 
     async def get_schedule_meta(self, post_id: str) -> dict | None:
         row = await self._db.fetchone(

@@ -50,7 +50,7 @@ async def env(tmp_dir):
 
 
 async def test_create_poll_persists_meta_and_options(env):
-    await env.repo.create_poll(
+    await env.repo.create_poll_if_absent(
         post_id="post-1",
         question="Pizza?",
         closes_at=None,
@@ -78,7 +78,7 @@ async def test_get_meta_missing_returns_none(env):
 
 
 async def test_vote_and_clear_and_list(env):
-    await env.repo.create_poll(
+    await env.repo.create_poll_if_absent(
         post_id="post-1",
         question="Q",
         closes_at=None,
@@ -100,7 +100,7 @@ async def test_vote_and_clear_and_list(env):
 
 
 async def test_close_flips_flag(env):
-    await env.repo.create_poll(
+    await env.repo.create_poll_if_absent(
         post_id="post-1",
         question="Q",
         closes_at=None,
@@ -115,7 +115,7 @@ async def test_close_flips_flag(env):
 
 
 async def test_option_belongs_to_post(env):
-    await env.repo.create_poll(
+    await env.repo.create_poll_if_absent(
         post_id="post-1",
         question="Q",
         closes_at=None,
@@ -137,7 +137,7 @@ async def test_get_post_author_reads_space_posts(env):
 
 
 async def test_create_schedule_poll_roundtrip(env):
-    await env.repo.create_schedule_poll(
+    await env.repo.create_schedule_poll_if_absent(
         post_id="post-1",
         title="When?",
         deadline=None,
@@ -165,7 +165,7 @@ async def test_create_schedule_poll_roundtrip(env):
 
 
 async def test_upsert_schedule_response_updates_existing(env):
-    await env.repo.create_schedule_poll(
+    await env.repo.create_schedule_poll_if_absent(
         post_id="post-1",
         title="When?",
         deadline=None,
@@ -179,7 +179,7 @@ async def test_upsert_schedule_response_updates_existing(env):
 
 
 async def test_delete_schedule_response(env):
-    await env.repo.create_schedule_poll(
+    await env.repo.create_schedule_poll_if_absent(
         post_id="post-1",
         title="When?",
         deadline=None,
@@ -191,7 +191,7 @@ async def test_delete_schedule_response(env):
 
 
 async def test_finalize_schedule_poll(env):
-    await env.repo.create_schedule_poll(
+    await env.repo.create_schedule_poll_if_absent(
         post_id="post-1",
         title="When?",
         deadline=None,
@@ -209,7 +209,7 @@ async def test_finalize_schedule_poll(env):
 
 
 async def test_finalize_rejects_foreign_slot(env):
-    await env.repo.create_schedule_poll(
+    await env.repo.create_schedule_poll_if_absent(
         post_id="post-1",
         title="When?",
         deadline=None,
@@ -236,14 +236,14 @@ async def two_spaces(env):
         ("post-2", "sp-2", "uid-bob", "poll", "Tacos?"),
     )
     for post_id, prefix in (("post-1", "a"), ("post-2", "b")):
-        await env.repo.create_poll(
+        await env.repo.create_poll_if_absent(
             post_id=post_id,
             question="Q",
             closes_at=None,
             allow_multiple=False,
             options=[{"id": f"o-{prefix}", "text": "Yes", "position": 0}],
         )
-        await env.repo.create_schedule_poll(
+        await env.repo.create_schedule_poll_if_absent(
             post_id=post_id,
             title="When?",
             deadline=None,
@@ -463,7 +463,7 @@ async def test_a_deleted_post_takes_no_schedule_from_the_wire(two_spaces):
 
 
 async def test_close_if_open_closes_once(env):
-    await env.repo.create_poll(
+    await env.repo.create_poll_if_absent(
         post_id="post-1",
         question="Pizza?",
         closes_at=None,
@@ -493,7 +493,7 @@ async def test_only_polls_a_local_user_wrote_are_due_here(env):
         ("post-remote", "2026-10-28T09:00:00.000Z"),
         ("post-later", "2026-10-28T11:00:00.000Z"),
     ):
-        await env.repo.create_poll(
+        await env.repo.create_poll_if_absent(
             post_id=post_id,
             question="Pizza?",
             closes_at=closes_at,

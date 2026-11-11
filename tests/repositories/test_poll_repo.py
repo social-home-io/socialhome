@@ -37,7 +37,7 @@ async def env(tmp_dir):
             " VALUES(?,?,?,?,?)",
             (post_id, "uid-anna", "poll", "?", deleted),
         )
-        await repo.create_poll(
+        await repo.create_poll_if_absent(
             post_id=post_id,
             question="Pizza?",
             closes_at=closes_at,

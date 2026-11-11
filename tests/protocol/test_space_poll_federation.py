@@ -86,6 +86,21 @@ QUESTION = "Which evening suits everyone for the lakeside barbecue this month"
 OPTIONS = ["Friday the ninth", "Saturday the tenth", "Sunday the eleventh"]
 
 
+class _Inbox(_LoopbackInbox):
+    """The loopback inbox, with households that can be unreachable
+    (``down``): a send to one fails, so the event is queued in the outbox."""
+
+    def __init__(self, world, me) -> None:
+        super().__init__(world, me)
+        self.down: set[str] = set()
+
+    async def send(self, *, instance, envelope_dict):
+        peer = next(h for h in self._world.values() if h.iid == instance.id)
+        if peer.name in self.down:
+            return False, 503
+        return await super().send(instance=instance, envelope_dict=envelope_dict)
+
+
 async def _household(tmp_path, name: str, world: dict) -> SimpleNamespace:
     db = AsyncDatabase(tmp_path / f"{name}.db", batch_timeout_ms=10)
     await db.startup()
@@ -109,7 +124,7 @@ async def _household(tmp_path, name: str, world: dict) -> SimpleNamespace:
         ident.private_key,
         ident.public_key,
     )
-    inbox = _LoopbackInbox(world, name)
+    inbox = _Inbox(world, name)
     transport = FederationTransport(
         own_instance_id=iid, https_inbox=inbox, signaling_send=_no_signal
     )
@@ -497,6 +512,10 @@ def _bad_definitions() -> list[tuple[str, dict]]:
         # Post-bound option ids must be this post's, in order.
         ("another post's ids", {"options": _definition("post-other")["options"]}),
         ("out of order", {"options": [good[1], good[0]]}),
+        (
+            "post-bound and free ids mixed",
+            {"options": [good[0], {"id": "0f" * 16, "text": "b"}]},
+        ),
         ("skipped position", {"options": [good[0], third]}),
         ("no question", {"question": " "}),
         ("long question", {"question": "q" * 501}),
@@ -696,7 +715,7 @@ async def test_a_poll_made_before_ids_were_post_bound_arrives_and_is_votable(wor
         {"id": uuid.uuid4().hex, "text": "Tea", "position": 0},
         {"id": uuid.uuid4().hex, "text": "Coffee", "position": 1},
     ]
-    await b.poll_repo.create_poll(
+    await b.poll_repo.create_poll_if_absent(
         post_id="post-bob",
         question="Drinks?",
         closes_at=None,
@@ -741,3 +760,62 @@ async def test_a_retraction_after_the_close_is_refused_at_home_too(world):
     with pytest.raises(PollClosedError):
         await b.polls.retract_vote(post_id=POST, voter_user_id="u-bob", space_id=SP)
     assert await _tally(a) == await _tally(b)
+
+
+async def _queued_votes(h, peer) -> int:
+    rows = await h.db.fetchall(
+        "SELECT 1 FROM federation_outbox WHERE instance_id=? AND status='pending'"
+        " AND event_type=?",
+        (peer.iid, FET.SPACE_POLL_VOTE_CAST.value),
+    )
+    return len(rows)
+
+
+async def test_a_queued_older_vote_never_lands_after_a_newer_one(world):
+    """bob votes Friday while the host is unreachable (queued for retry),
+    then Saturday seconds later, which reaches the host live. The queued
+    Friday is dropped — delivered by the outbox afterwards it would win on
+    the host, and the host's stream would spread it to everyone."""
+    a, b, c = world.a, world.b, world.c
+    made = await _make_poll(a)
+    friday, saturday = _option(made, OPTIONS[0]), _option(made, OPTIONS[1])
+    b.inbox.down.add("a")
+    await b.polls.cast_vote(
+        post_id=POST, option_id=friday, voter_user_id="u-bob", space_id=SP
+    )
+    assert await _queued_votes(b, a) == 1
+    b.inbox.down.clear()
+    await b.polls.cast_vote(
+        post_id=POST, option_id=saturday, voter_user_id="u-bob", space_id=SP
+    )
+    assert await _queued_votes(b, a) == 0
+    want = {OPTIONS[0]: 0, OPTIONS[1]: 1, OPTIONS[2]: 0}
+    for h in (a, b, c):
+        assert await _tally(h) == want, h.name
+
+
+async def test_only_the_newest_vote_of_a_voter_waits_in_the_outbox(world):
+    """Two votes and a retraction while the host is unreachable: one row
+    waits — the last. Another voter's and another poll's votes keep theirs."""
+    a, b = world.a, world.b
+    made = await _make_poll(a)
+    await _add_post(a, "post-2")
+    await _add_post(b, "post-2")
+    other = await _make_poll(a, post_id="post-2")
+    b.inbox.down.add("a")
+    for text in (OPTIONS[0], OPTIONS[1]):
+        await b.polls.cast_vote(
+            post_id=POST,
+            option_id=_option(made, text),
+            voter_user_id="u-bob",
+            space_id=SP,
+        )
+    await b.polls.retract_vote(post_id=POST, voter_user_id="u-bob", space_id=SP)
+    assert await _queued_votes(b, a) == 1
+    await b.polls.cast_vote(
+        post_id="post-2",
+        option_id=_option(other, OPTIONS[0]),
+        voter_user_id="u-bob",
+        space_id=SP,
+    )
+    assert await _queued_votes(b, a) == 2

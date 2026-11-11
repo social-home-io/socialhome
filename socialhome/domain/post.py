@@ -419,11 +419,12 @@ def poll_options_from_wire(
     """The ``{id, text}`` options of a received poll definition, in order —
     ``None`` unless they are a well-formed poll's: 2 to
     :data:`MAX_POLL_OPTIONS` options, distinct ids, bounded non-empty text.
-    With ``post_id`` (the live create's rule) an id of the post-bound shape
-    (:data:`POLL_OPTION_ID_PREFIX`) must be that post's own
-    (:func:`poll_option_id`), in order. Any other id is one of a poll made
-    before ids were post-bound (a uuid4 hex) and is taken as stored — the
-    caller has bound the definition to the post's author's household."""
+    With ``post_id`` (the live create's rule) a list with any id of the
+    post-bound shape (:data:`POLL_OPTION_ID_PREFIX`) must be that post's own
+    ids (:func:`poll_option_id`), all of them, in order. A list with none is
+    a poll made before ids were post-bound (uuid4 hex ids) and is taken as
+    stored — the caller has bound the definition to the post's author's
+    household."""
     if not isinstance(raw, list) or not 2 <= len(raw) <= MAX_POLL_OPTIONS:
         return None
     out: list[dict[str, str]] = []
@@ -441,10 +442,12 @@ def poll_options_from_wire(
         out.append({"id": oid, "text": text})
     if len({o["id"] for o in out}) != len(out):
         return None
-    if post_id is not None and any(
-        o["id"].startswith(POLL_OPTION_ID_PREFIX)
-        and o["id"] != poll_option_id(post_id, i)
-        for i, o in enumerate(out)
+    # One id of the post-bound shape makes it a post-bound poll: every id
+    # must then be the post's own — never a mix with free-form ids.
+    if (
+        post_id is not None
+        and any(o["id"].startswith(POLL_OPTION_ID_PREFIX) for o in out)
+        and any(o["id"] != poll_option_id(post_id, i) for i, o in enumerate(out))
     ):
         return None
     return out

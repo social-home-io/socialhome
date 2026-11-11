@@ -267,11 +267,27 @@ async def _create_schedule_poll(
         {"id": "slot-A", "slot_date": "2026-05-01"},
         {"id": "slot-B", "slot_date": "2026-05-02", "start_time": "18:00"},
     ]
-    return await client.post(
+    r = await client.post(
         f"/api/spaces/{space_id}/posts/{post_id}/schedule-poll",
         json={"title": "Pizza night", "slots": slots},
         headers=_auth(client._tok),
     )
+    await _pin_slot_ids(client, post_id, "space_schedule_slots")
+    return r
+
+
+async def _pin_slot_ids(client, post_id: str, table: str) -> None:
+    """The server mints the slot ids (a caller never chooses one); the
+    tests below name the first two ``slot-A`` / ``slot-B``."""
+    rows = await client._db.fetchall(
+        f"SELECT id FROM {table} WHERE post_id=? ORDER BY position",
+        (post_id,),
+    )
+    for row, name in zip(rows, ("slot-A", "slot-B"), strict=False):
+        await client._db.enqueue(
+            f"UPDATE {table} SET id=? WHERE id=?",
+            (name, row["id"]),
+        )
 
 
 async def test_space_schedule_create_returns_shape(client):
@@ -282,7 +298,9 @@ async def test_space_schedule_create_returns_shape(client):
     data = await r.json()
     assert data["title"] == "Pizza night"
     assert data["space_id"] == "sp-polls"
-    assert [s["id"] for s in data["slots"]] == ["slot-A", "slot-B"]
+    # Minted here — never the ids the caller sent.
+    ids = [s["id"] for s in data["slots"]]
+    assert len(set(ids)) == 2 and not {"slot-A", "slot-B"} & set(ids)
 
 
 async def test_space_schedule_respond_and_summary(client):
@@ -558,3 +576,27 @@ async def test_space_poll_retract_after_close_returns_409(client):
     )
     assert r.status == 409
     assert (await r.json())["error"]["code"] == "POLL_CLOSED"
+
+
+async def test_space_schedule_poll_cannot_be_replaced_or_added_by_someone_else(client):
+    """Like a reply poll: 409 ``POLL_EXISTS`` for a second one, 403 on
+    somebody else's post."""
+    await _seed_space(client)
+    await _seed_schedule_post(client, post_id="sp-sched-9")
+    r = await _create_schedule_poll(client, post_id="sp-sched-9")
+    assert r.status == 201
+    first = await r.json()
+    r = await _create_schedule_poll(client, post_id="sp-sched-9")
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "POLL_EXISTS"
+    r = await client.get(
+        "/api/spaces/sp-polls/schedule-polls/sp-sched-9/summary",
+        headers=_auth(client._tok),
+    )
+    assert first["title"] == "Pizza night"
+    assert [s["id"] for s in (await r.json())["slots"]] == ["slot-A", "slot-B"]
+    await _seed_post(
+        client, post_id="sp-sched-x", post_type="schedule", author="uid-someone-else"
+    )
+    r = await _create_schedule_poll(client, post_id="sp-sched-x")
+    assert r.status == 403

@@ -422,7 +422,7 @@ async def _change_rsvps(h: Home) -> None:
 
 async def _poll(h: Home) -> None:
     await _post(h, type=PostType.POLL, content="Lunch?")
-    await h.repos.space_poll.create_poll(
+    await h.repos.space_poll.create_poll_if_absent(
         post_id="post-1",
         question="Lunch?",
         closes_at=None,

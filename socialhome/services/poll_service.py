@@ -381,6 +381,7 @@ class PollService(BusPublisherMixin):
         self,
         *,
         post_id: str,
+        actor_user_id: str,
         title: str,
         deadline: str | None = None,
         slots: list[dict],
@@ -389,9 +390,13 @@ class PollService(BusPublisherMixin):
         """Create a new schedule poll bound to ``post_id``.
 
         Each ``slots`` entry needs ``slot_date`` and optionally
-        ``start_time`` + ``end_time``. Slot ids are minted here so
-        callers can render the poll immediately.
-        """
+        ``start_time`` + ``end_time``. Slot ids are minted here (never
+        taken from the caller) so callers can render the poll immediately.
+
+        The reply poll's rule: only the post's author attaches one
+        (``PermissionError`` — a system post has no such author), and only
+        once (:class:`PollExistsError`) — the slots people answered are
+        never replaced."""
         title = title.strip()
         if not title:
             raise ValueError("title must not be empty")
@@ -404,19 +409,20 @@ class PollService(BusPublisherMixin):
                 raise ValueError("each slot needs a slot_date")
             minted.append(
                 {
-                    "id": s.get("id") or uuid.uuid4().hex,
+                    "id": uuid.uuid4().hex,
                     "slot_date": sd,
                     "start_time": s.get("start_time") or None,
                     "end_time": s.get("end_time") or None,
                     "position": int(s.get("position", i)),
                 }
             )
-        await self._repo.create_schedule_poll(
-            post_id=post_id,
-            title=title,
-            deadline=deadline,
-            slots=minted,
-        )
+        author = await self._repo.get_post_author(post_id)
+        if author is None or author != actor_user_id:
+            raise PermissionError("Only the post author may add a schedule poll")
+        if not await self._repo.create_schedule_poll_if_absent(
+            post_id=post_id, title=title, deadline=deadline, slots=minted
+        ):
+            raise PollExistsError(post_id)
         await self._emit(
             SchedulePollCreated(
                 post_id=post_id,

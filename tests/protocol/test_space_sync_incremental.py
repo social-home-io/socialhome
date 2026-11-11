@@ -376,7 +376,7 @@ async def _baseline(h, c):
         content="a reply",
     )
     assert await _posts(h).add_comment(comment, space_id=SPACE)
-    await _polls(h).create_poll(
+    await _polls(h).create_poll_if_absent(
         post_id=pids[1],
         question="Lunch?",
         closes_at=None,

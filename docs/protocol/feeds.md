@@ -108,7 +108,8 @@ The option ids are the ids every household stores and every vote names —
 so tallies agree everywhere. They are **bound to the post**:
 `poll_option_id(post_id, index)` = `"po"` + the first 30 hex characters of
 `SHA-256("poll-option\0" + post_id + "\0" + index)`. A receiver recomputes
-every id of that shape, so a poll can only carry its own post's option ids
+them — a list with any id of that shape must be the post's own ids, all
+of them, in order — so a poll can only carry its own post's option ids
 and no other poll (on any post, in any space) can take them first and
 block it. A poll made before ids were post-bound has random uuid ids
 (never starting with `po`): they are taken as stored — the definition is
@@ -159,16 +160,24 @@ A member household applies them like this (`SpaceContentInboundHandlers`):
   A poll the host's stream creates releases them the same way. What a
   household misses anyway (offline past the outbox) heals from the host's
   stream, below.
-- **Known limit — no vote ordering.** A vote carries no stamp, so the
-  last *arrival* wins: an older selection delivered late (an outbox retry
-  after a newer one went through another path) replaces the newer one on
-  that household until the host's stream converges it. Ordering needs a
-  per-voter stamp that survives a retraction — new persistent state and a
-  sync record field — and is left for a follow-up.
+- **Vote order.** A vote is the voter's whole selection — state, not
+  history — and the receiver keeps no stamp, so the sender guarantees the
+  order: `SPACE_POLL_VOTE_CAST` has a latest-only outbox key
+  (`poll-vote:{space}:{post}:{voter}`, `supersede_key`). Per peer at most
+  one vote of that voter on that poll waits in the outbox; a newer one
+  replaces it, and a newer one delivered live drops it — so a vote queued
+  while a household was unreachable can never land after a later one (on
+  the host that would roll the voter back for everyone through its
+  stream). The grouped mailbox rows of v_91 follow the same key. What is
+  left: two votes of one voter seconds apart that travel different
+  transports to the same household (direct and mesh-routed) are applied in
+  arrival order; a per-vote stamp that survives a retraction would need
+  new persistent state and is left for a follow-up.
 - **Edit / delete.** A poll cannot be edited — locally either: only the
   post's author attaches one, and a post that has a poll takes no second
   (`409 POLL_EXISTS`), so no household ever rewrites option text under
-  live votes. Editing the post leaves the poll alone; deleting the post drops the poll, its options and votes on
+  live votes. A schedule poll follows the same local rule (author only,
+  once, slot ids minted by the server). Editing the post leaves the poll alone; deleting the post drops the poll, its options and votes on
   every household (migration 0085 trigger), and a deleted post takes no
   new poll.
 
