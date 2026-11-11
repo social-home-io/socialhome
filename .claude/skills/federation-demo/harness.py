@@ -14251,6 +14251,16 @@ def cmd_verify() -> None:
             else:
                 print("  v_69 e holds a's reaction totals that came through the GFS ✓")
 
+    # 13z. members-parity (owner acceptance gate): the posts it left read the
+    #     same on d (paired / mesh) and e (GFS-only) as on the host a.
+    if state.get("members_parity"):
+        before = len(failures)
+        _check_members_parity(state, failures)
+        if len(failures) == before:
+            print("  members-parity: d and e still match the host on every post ✓")
+    else:
+        print("  (members-parity check skipped — run 'members-parity')")
+
     # 14. Log audit — scan each backend's stdout/stderr for unhandled
     #    exceptions, ERROR-level lines, federation-pipeline rejects.
     #    Anything we can't account for (i.e. doesn't match the
@@ -22904,6 +22914,761 @@ def cmd_local_community() -> None:
     }
     _save(state)
     print("local-community: ok")
+
+
+# ─── Step: members-parity ──────────────────────────────────────────────────
+
+#: The two members ``members-parity`` compares: d reaches a's space over the
+#: paired / mesh path, e only through the GFS (joined by link).
+_PARITY_MEMBERS: tuple[str, ...] = ("d", "e")
+#: The calendar day the step's events sit on (a fixed future day).
+_PARITY_DAY = ("2027-04-01T00:00:00Z", "2027-04-02T00:00:00Z")
+
+
+def _parity_get(state: dict, label: str, path: str) -> tuple[int, Any]:
+    """GET ``path`` as ``label``'s admin, waiting out a 429 (the default
+    bucket is 60/min per user per first two path segments, so every
+    ``/api/spaces/…`` read shares one)."""
+    inst = state["instances"][label]
+    for _attempt in range(8):
+        s, body = _request(
+            f"http://127.0.0.1:{inst['port']}{path}", token=inst["token"]
+        )
+        if s != 429:
+            return s, body
+        time.sleep(8.0)
+    return s, body
+
+
+def _parity_media(state: dict, label: str, url: str | None, cache: dict) -> str | None:
+    """sha256 (16 hex) of the bytes ``label`` serves for media ``url`` — the
+    URL as ``label``'s own API returned it, so each household is read under
+    its own name for the file. ``HTTP <code>`` when it serves none."""
+    if not url:
+        return None
+    key = (label, url.split("?", 1)[0])
+    if key in cache:
+        return cache[key]
+    inst = state["instances"][label]
+    path = url if url.startswith("/") else "/" + url
+    if "://" in url:
+        path = "/" + url.split("://", 1)[1].split("/", 1)[1]
+    s, raw = _http_get_bytes(
+        f"http://127.0.0.1:{inst['port']}{path}", token=inst["token"], timeout=60.0
+    )
+    if s != 200:
+        return f"HTTP {s}"
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()[:16]
+    cache[key] = digest
+    return digest
+
+
+def _parity_post(
+    state: dict,
+    label: str,
+    space_id: str,
+    post_id: str,
+    cache: dict,
+    *,
+    comments: bool = False,
+) -> dict:
+    """What ``label``'s API shows for a space post: gone, or its text, the
+    hash of each picture, reaction counts and (opt.) its comments."""
+    s, p = _parity_get(state, label, f"/api/spaces/{space_id}/posts/{post_id}")
+    if s == 404:
+        return {"exists": False}
+    if s != 200 or not isinstance(p, dict):
+        return {"error": f"HTTP {s}"}
+    urls = list(p.get("image_urls") or [])
+    if p.get("media_url"):
+        urls.append(p["media_url"])
+    snap = {
+        "exists": True,
+        "content": p.get("content"),
+        "pictures": [_parity_media(state, label, u, cache) for u in urls],
+        "reactions": {k: len(v) for k, v in sorted((p.get("reactions") or {}).items())},
+    }
+    if comments:
+        s, got = _parity_get(
+            state, label, f"/api/spaces/{space_id}/posts/{post_id}/comments"
+        )
+        rows = got if isinstance(got, list) else (got or {}).get("comments") or []
+        snap["comments"] = (
+            sorted(
+                (
+                    c.get("content") or "",
+                    _parity_media(state, label, c.get("media_url"), cache),
+                )
+                for c in rows
+                if not c.get("deleted")
+            )
+            if s == 200
+            else f"HTTP {s}"
+        )
+    return snap
+
+
+def _parity_event(
+    state: dict, label: str, space_id: str, event_id: str, cache: dict
+) -> dict:
+    s, got = _parity_get(
+        state,
+        label,
+        f"/api/spaces/{space_id}/calendar/events?start={_PARITY_DAY[0]}&end={_PARITY_DAY[1]}",
+    )
+    if s != 200:
+        return {"error": f"HTTP {s}"}
+    rows = (got if isinstance(got, list) else (got or {}).get("events")) or []
+    ev = next((x for x in rows if x.get("id") == event_id), None)
+    if ev is None:
+        return {"exists": False}
+    return {
+        "exists": True,
+        "summary": ev.get("summary"),
+        "cover": _parity_media(state, label, ev.get("cover_url"), cache),
+    }
+
+
+def _parity_gallery(
+    state: dict, label: str, album_id: str, item_id: str, cache: dict
+) -> dict:
+    s, got = _parity_get(state, label, f"/api/gallery/albums/{album_id}/items")
+    if s == 404:
+        return {"exists": False}
+    if s != 200:
+        return {"error": f"HTTP {s}"}
+    rows = got if isinstance(got, list) else (got or {}).get("items") or []
+    item = next((x for x in rows if x.get("id") == item_id), None)
+    if item is None:
+        return {"exists": False}
+    return {
+        "exists": True,
+        "caption": item.get("caption"),
+        "picture": _parity_media(state, label, item.get("url"), cache),
+        "thumbnail": _parity_media(state, label, item.get("thumbnail_url"), cache),
+    }
+
+
+def _parity_page(
+    state: dict, label: str, space_id: str, page_id: str, _cache: dict
+) -> dict:
+    s, got = _parity_get(state, label, f"/api/spaces/{space_id}/pages/{page_id}")
+    if s == 404:
+        return {"exists": False}
+    if s != 200 or not isinstance(got, dict):
+        return {"error": f"HTTP {s}"}
+    return {"exists": True, "title": got.get("title"), "content": got.get("content")}
+
+
+def _parity_poll(
+    state: dict, label: str, space_id: str, post_id: str, _cache: dict
+) -> dict:
+    s, got = _parity_get(state, label, f"/api/spaces/{space_id}/posts/{post_id}/poll")
+    if s == 404:
+        return {"exists": False}
+    if s != 200 or not isinstance(got, dict):
+        return {"error": f"HTTP {s}"}
+    return {
+        "exists": True,
+        "question": got.get("question"),
+        "votes": [
+            (o.get("text"), o.get("vote_count")) for o in got.get("options") or []
+        ],
+    }
+
+
+def _parity_role(
+    state: dict, label: str, space_id: str, user_id: str, _cache: dict
+) -> dict:
+    s, got = _parity_get(state, label, f"/api/spaces/{space_id}/members")
+    if s != 200:
+        return {"error": f"HTTP {s}"}
+    rows = got if isinstance(got, list) else (got or {}).get("members") or []
+    return {
+        "role": next((m.get("role") for m in rows if m.get("user_id") == user_id), None)
+    }
+
+
+def _parity_compare(
+    state: dict,
+    results: list[tuple[str, str, str]],
+    action: str,
+    snap,
+    *,
+    ref: str,
+    want: dict | None = None,
+    timeout: float = 90.0,
+) -> bool:
+    """Poll until each member in :data:`_PARITY_MEMBERS` shows the same as
+    ``ref`` (the household that acted, or the host) — and, when given,
+    ``want`` is a subset of it. Records PASS or DIFF (naming what each
+    member showed, plus each lagging member's newest WARNING lines) in
+    ``results``. Never raises: every action is reported."""
+    offsets = {m: _log_size(m) for m in _PARITY_MEMBERS}
+    cache: dict = {}
+    deadline = time.monotonic() + timeout
+    views: dict[str, dict] = {}
+    while True:
+        views = {label: snap(label, cache) for label in {ref, *_PARITY_MEMBERS}}
+        expected = views[ref]
+        ok_ref = want is None or all(expected.get(k) == v for k, v in want.items())
+        if ok_ref and all(views[m] == expected for m in _PARITY_MEMBERS):
+            results.append((action, "PASS", f"d = e = {ref}: {expected}"))
+            print(f"  {action}: d and e match ✓")
+            return True
+        if time.monotonic() > deadline:
+            break
+        time.sleep(3.0)
+    lines = [
+        f"{ref} (reference) shows {views[ref]}" + ("" if ok_ref else f", want {want}")
+    ]
+    for m in _PARITY_MEMBERS:
+        if views[m] != views[ref]:
+            lines.append(f"{m} shows {views[m]}")
+            warn = _log_lines_matching(m, "WARNING", offset=offsets[m])[-3:]
+            lines += [f"    {m} log: {w.strip()[:240]}" for w in warn]
+    detail = "\n    ".join(lines)
+    results.append((action, "DIFF", detail))
+    print(f"  {action}: DIFF after {timeout:.0f} s\n    {detail}")
+    return False
+
+
+def _parity_upload(state: dict, label: str, size: tuple[int, int]) -> str:
+    inst = state["instances"][label]
+    s, up = _upload_file(
+        f"http://127.0.0.1:{inst['port']}/api/media/upload",
+        token=inst["token"],
+        filename="parity.png",
+        content=_make_noisy_png(*size),
+        content_type="image/png",
+        timeout=60.0,
+    )
+    return _must(f"members-parity: {label} uploads a picture", s, up, ok=(200, 201))[
+        "url"
+    ]
+
+
+def _parity_post_picture(state: dict, label: str, space_id: str, text: str) -> str:
+    url = _parity_upload(state, label, (400, 300))
+    s, post = _inst_request(
+        state,
+        label,
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {"type": "image", "content": text, "image_urls": [url]},
+    )
+    return _must(f"members-parity: {label} posts a picture", s, post, ok=(201,))["id"]
+
+
+def _parity_post_text(state: dict, label: str, space_id: str, text: str) -> str:
+    s, post = _inst_request(
+        state,
+        label,
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {"type": "text", "content": text},
+    )
+    return _must(f"members-parity: {label} posts", s, post, ok=(201,))["id"]
+
+
+def _parity_expire_new_blobs(space_id: str, since: int) -> list[str]:
+    """Expire every GFS cache blob of ``space_id`` stored since ``since`` as
+    OLD content, exactly as ``gfs-media-on-demand``'s old leg does
+    (``GfsSpaceMediaStore._drop`` + ``_remember_left``, ``stored_at`` 30
+    days back). Returns the blob ids."""
+    rows = _gfs_rows(
+        "SELECT blob_id, scope_kind, scope_id FROM gfs_space_media"
+        " WHERE scope_id = ? AND created_at >= ?",
+        (space_id, since),
+    )
+    now = int(time.time())
+    for blob_id, scope_kind, scope_id in rows:
+        _gfs_write("DELETE FROM gfs_space_media WHERE blob_id = ?", (blob_id,))
+        (GFS_DIR / "space_media" / blob_id).unlink(missing_ok=True)
+        _gfs_write(
+            "INSERT INTO gfs_space_media_demand(blob_id, scope_kind, scope_id,"
+            " stored_at, touched_at) VALUES(?,?,?,?,?)"
+            " ON CONFLICT(blob_id, scope_kind, scope_id) DO UPDATE SET"
+            " stored_at = excluded.stored_at, touched_at = excluded.touched_at,"
+            " requests = 0, window_start = 0",
+            (blob_id, scope_kind, scope_id, now - 30 * 86_400, now),
+        )
+    return [r[0] for r in rows]
+
+
+@_offline_step
+def cmd_members_parity() -> None:
+    """Owner acceptance gate: every space member is equal, whichever way its
+    household is reached (CLAUDE.md, owner decision 2026-11-06).
+
+    Prereqs: the gfs chain through ``gfs-member-mesh`` — a hosts the
+    link-joined space (``gfs_invite_space_id``); **d** is a member over the
+    paired / mesh path, **e** only through the GFS (joined by link, paired
+    with nobody). The same actions happen in the space and both members'
+    REST APIs must show the same as the household that acted: the item
+    exists or is gone, its text, and the picture bytes by sha256 (each read
+    under the URL its own API returns). Every check polls with a bounded
+    timeout; every action is reported, PASS or DIFF, and the step fails at
+    the end naming each difference.
+
+    Actions: a post with a picture, its edit, a comment (with a picture —
+    reported SKIP while the space comment API takes no picture), reactions
+    from both members, a calendar event with a cover, a gallery item, a
+    page, poll votes from both members, a deletion; catch-up (d and e
+    offline while a posts, edits and deletes, then back); an old picture
+    (posted while both are offline, then expired from the GFS cache as
+    30-day-old content, the way ``gfs-media-on-demand`` does); host offline
+    (a stopped; d and e each post a picture, the other must get it); admin
+    rights (a promotes e's person to admin, e deletes d's post, both see it
+    gone; e is put back to member at the end).
+    """
+    state = _load()
+    space_id = (state or {}).get("gfs_invite_space_id")
+    if not state or not _gfs_alive(state) or not space_id:
+        raise SystemExit("run the gfs chain through 'gfs-member-mesh' first")
+    s, _sp = _parity_get(state, "d", f"/api/spaces/{space_id}")
+    if s != 200:
+        raise SystemExit(
+            f"members-parity: d is not a member of {space_id} (HTTP {s}) — run "
+            "'gfs-member-mesh' first"
+        )
+    a, d, e = (state["instances"][x] for x in ("a", "d", "e"))
+    results: list[tuple[str, str, str]] = []
+    tag = time.time_ns()
+
+    def post_view(post_id: str, comments: bool = False):
+        return lambda label, cache: _parity_post(
+            state, label, space_id, post_id, cache, comments=comments
+        )
+
+    # 1. A post with a picture.
+    text = f"Parity post {tag}"
+    post_id = _parity_post_picture(state, "a", space_id, text)
+    _parity_compare(
+        state,
+        results,
+        "post with picture",
+        post_view(post_id),
+        ref="a",
+        want={"exists": True, "content": text},
+    )
+
+    # 2. Its edit.
+    edited = f"Parity post, edited {tag}"
+    s, body = _inst_request(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}/posts/{post_id}",
+        {"content": edited},
+    )
+    _must("members-parity: a edits its post", s, body, ok=(200,))
+    _parity_compare(
+        state, results, "edit", post_view(post_id), ref="a", want={"content": edited}
+    )
+
+    # 3. A comment with a picture. The space comment API takes text only
+    #    (``SpacePostCommentView`` reads ``content`` and ``parent_id``), so
+    #    the picture half cannot be produced over REST; the text is compared.
+    pic = _parity_upload(state, "a", (200, 150))
+    comment = f"Parity comment {tag}"
+    s, body = _inst_request(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/posts/{post_id}/comments",
+        {"content": comment, "media_url": pic},
+    )
+    body = _must("members-parity: a comments", s, body, ok=(201,))
+    if body.get("media_url"):
+        results.append(
+            (
+                "comment picture",
+                "NOTE",
+                "the API now keeps a comment picture — compare it",
+            )
+        )
+    else:
+        results.append(
+            (
+                "comment picture",
+                "SKIP",
+                "POST /api/spaces/{id}/posts/{pid}/comments takes no picture (media_url dropped)",
+            )
+        )
+    _parity_compare(
+        state,
+        results,
+        "comment",
+        post_view(post_id, comments=True),
+        ref="a",
+        want={"comments": [(comment, None)]},
+    )
+
+    # 4. A reaction from each member.
+    for label, emoji in (("d", "👍"), ("e", "🎉")):
+        s, body = _inst_request(
+            state,
+            label,
+            "POST",
+            f"/api/spaces/{space_id}/posts/{post_id}/reactions",
+            {"emoji": emoji},
+        )
+        _must(f"members-parity: {label} reacts", s, body, ok=(200, 201, 204))
+    _parity_compare(
+        state,
+        results,
+        "reaction",
+        post_view(post_id),
+        ref="a",
+        want={"reactions": {"🎉": 1, "👍": 1}},
+    )
+
+    # 5. A calendar event with a cover picture.
+    cover = _parity_upload(state, "a", (480, 270))
+    summary = f"Parity evening {tag}"
+    s, ev = _inst_request(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/calendar/events",
+        {
+            "summary": summary,
+            "start": "2027-04-01T18:00:00+00:00",
+            "end": "2027-04-01T20:00:00+00:00",
+            "tz": "Europe/Berlin",
+            "cover_url": cover,
+        },
+    )
+    ev = _must("members-parity: a creates an event", s, ev, ok=(201,))
+    _parity_compare(
+        state,
+        results,
+        "calendar event with cover",
+        lambda label, cache: _parity_event(state, label, space_id, ev["id"], cache),
+        ref="a",
+        want={"exists": True, "summary": summary},
+    )
+
+    # 6. A gallery item in a space album.
+    s, album = _inst_request(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/gallery/albums",
+        {"name": f"Parity album {tag}", "description": "members-parity"},
+    )
+    album = _must("members-parity: a creates a space album", s, album, ok=(201,))
+    s, item = _upload_file(
+        f"http://127.0.0.1:{a['port']}/api/gallery/albums/{album['id']}/items",
+        token=a["token"],
+        filename="gallery.png",
+        content=_make_noisy_png(320, 240),
+        content_type="image/png",
+        timeout=60.0,
+    )
+    item = _must("members-parity: a uploads a gallery item", s, item, ok=(200, 201))
+    _parity_compare(
+        state,
+        results,
+        "gallery item",
+        lambda label, cache: _parity_gallery(
+            state, label, album["id"], item["id"], cache
+        ),
+        ref="a",
+        want={"exists": True},
+    )
+
+    # 7. A page.
+    title = f"Parity page {tag}"
+    s, page = _inst_request(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/pages",
+        {"title": title, "content": "Who brings what.\n\n- bread\n- cheese"},
+    )
+    page = _must("members-parity: a creates a page", s, page, ok=(200, 201))
+    _parity_compare(
+        state,
+        results,
+        "page",
+        lambda label, cache: _parity_page(state, label, space_id, page["id"], cache),
+        ref="a",
+        want={"exists": True, "title": title},
+    )
+
+    # 8. A poll; each member votes.
+    s, poll = _inst_request(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {
+            "type": "poll",
+            "content": f"Parity poll {tag}",
+            "poll": {"question": "Where?", "options": ["Pizza", "Sushi"]},
+        },
+    )
+    poll = _must("members-parity: a posts a poll", s, poll, ok=(201,))
+
+    def poll_view(label, cache):
+        return _parity_poll(state, label, space_id, poll["id"], cache)
+
+    for label, index in (("d", 0), ("e", 1)):
+        deadline = time.monotonic() + 60
+        options: list = []
+        while time.monotonic() < deadline and not options:
+            s, got = _parity_get(
+                state, label, f"/api/spaces/{space_id}/posts/{poll['id']}/poll"
+            )
+            options = (got or {}).get("options") or [] if s == 200 else []
+            if not options:
+                time.sleep(3.0)
+        if not options:
+            results.append(
+                ("poll vote", "DIFF", f"{label} never showed a's poll (last HTTP {s})")
+            )
+            continue
+        s, body = _inst_request(
+            state,
+            label,
+            "POST",
+            f"/api/spaces/{space_id}/posts/{poll['id']}/poll/vote",
+            {"option_id": options[index]["id"]},
+        )
+        if s not in (200, 201, 204):
+            results.append(("poll vote", "DIFF", f"{label}'s vote → HTTP {s} {body!r}"))
+    _parity_compare(
+        state,
+        results,
+        "poll vote",
+        poll_view,
+        ref="a",
+        want={"votes": [("Pizza", 1), ("Sushi", 1)]},
+    )
+
+    # 9. A deletion.
+    s, body = _inst_request(
+        state, "a", "DELETE", f"/api/spaces/{space_id}/posts/{post_id}"
+    )
+    _must("members-parity: a deletes its post", s, body, ok=(200, 204))
+    _parity_compare(
+        state, results, "deletion", post_view(post_id), ref="a", want={"exists": False}
+    )
+
+    # 10 + 11. Catch-up and an old picture: d and e offline while a posts,
+    #     edits and deletes; the picture leaves the GFS cache as OLD content
+    #     before they come back.
+    keep = _parity_post_text(state, "a", space_id, f"Parity catch-up, to edit {tag}")
+    gone = _parity_post_text(state, "a", space_id, f"Parity catch-up, to delete {tag}")
+    for pid in (keep, gone):
+        _parity_compare(
+            state,
+            results,
+            "catch-up setup",
+            post_view(pid),
+            ref="a",
+            want={"exists": True},
+        )
+    for label in _PARITY_MEMBERS:
+        _kill_household(label, state["instances"][label])
+    old_pic = old_new = None
+    try:
+        since = int(time.time()) - 1
+        fresh = _parity_post_text(state, "a", space_id, f"Parity catch-up, new {tag}")
+        catch_edit = f"Parity catch-up, edited while away {tag}"
+        s, body = _inst_request(
+            state,
+            "a",
+            "PATCH",
+            f"/api/spaces/{space_id}/posts/{keep}",
+            {"content": catch_edit},
+        )
+        _must("members-parity: a edits while d, e are away", s, body, ok=(200,))
+        s, body = _inst_request(
+            state, "a", "DELETE", f"/api/spaces/{space_id}/posts/{gone}"
+        )
+        _must("members-parity: a deletes while d, e are away", s, body, ok=(200, 204))
+        old_text = f"Parity old picture {tag}"
+        old_pic = _parity_post_picture(state, "a", space_id, old_text)
+        deadline = time.monotonic() + 60
+        expired: list[str] = []
+        while time.monotonic() < deadline and not expired:
+            time.sleep(2.0)
+            expired = _parity_expire_new_blobs(space_id, since)
+        old_new = expired
+        print(f"  expired {len(expired)} GFS cache blob(s) as 30-day-old content")
+    finally:
+        for label in _PARITY_MEMBERS:
+            _respawn(state, label)
+    _parity_compare(
+        state,
+        results,
+        "catch-up: new post",
+        post_view(fresh),
+        ref="a",
+        want={"exists": True},
+        timeout=180.0,
+    )
+    _parity_compare(
+        state,
+        results,
+        "catch-up: edit",
+        post_view(keep),
+        ref="a",
+        want={"content": catch_edit},
+        timeout=120.0,
+    )
+    _parity_compare(
+        state,
+        results,
+        "catch-up: deletion",
+        post_view(gone),
+        ref="a",
+        want={"exists": False},
+        timeout=120.0,
+    )
+    if old_new:
+        _parity_compare(
+            state,
+            results,
+            "old picture (left the GFS cache)",
+            post_view(old_pic),
+            ref="a",
+            want={"exists": True, "content": old_text},
+            timeout=180.0,
+        )
+    else:
+        results.append(
+            (
+                "old picture (left the GFS cache)",
+                "SKIP",
+                "a stored no blob in the GFS cache within 60 s while both members were "
+                "offline, so there was nothing to expire",
+            )
+        )
+        _parity_compare(
+            state,
+            results,
+            "catch-up: picture",
+            post_view(old_pic),
+            ref="a",
+            want={"exists": True},
+            timeout=180.0,
+        )
+
+    # 12. Host offline: a stopped; each member posts a picture, the other
+    #     member must get it (no host hop).
+    host_posts: list[tuple[str, str, str]] = []
+    _kill_household("a", a)
+    try:
+        for author in _PARITY_MEMBERS:
+            text = f"Parity host-offline post by {author} {tag}"
+            pid = _parity_post_picture(state, author, space_id, text)
+            host_posts.append((author, pid, text))
+            _parity_compare(
+                state,
+                results,
+                f"host offline: {author}'s post",
+                post_view(pid),
+                ref=author,
+                want={"exists": True, "content": text},
+                timeout=120.0,
+            )
+    finally:
+        _respawn(state, "a")
+
+    # 13. Admin rights: a promotes e's person; e deletes d's post.
+    role_url = (
+        f"/api/spaces/{space_id}/remote-members/{e['instance_id']}/{e['user_id']}"
+    )
+    s, body = _inst_request(state, "a", "PATCH", role_url, {"role": "admin"})
+    _must("members-parity: a promotes e's person to admin", s, body, ok=(200,))
+    try:
+        _parity_compare(
+            state,
+            results,
+            "admin: promotion",
+            lambda label, cache: _parity_role(
+                state, label, space_id, e["user_id"], cache
+            ),
+            ref="a",
+            want={"role": "admin"},
+        )
+        victim_text = f"Parity post for the admin to remove {tag}"
+        victim = _parity_post_text(state, "d", space_id, victim_text)
+        _parity_compare(
+            state,
+            results,
+            "admin: d's post",
+            post_view(victim),
+            ref="d",
+            want={"exists": True, "content": victim_text},
+        )
+        s, body = _inst_request(
+            state, "e", "DELETE", f"/api/spaces/{space_id}/posts/{victim}"
+        )
+        if s not in (200, 202, 204):
+            results.append(
+                ("admin: e deletes d's post", "DIFF", f"e's DELETE → HTTP {s} {body!r}")
+            )
+        else:
+            _parity_compare(
+                state,
+                results,
+                "admin: e deletes d's post",
+                post_view(victim),
+                ref="a",
+                want={"exists": False},
+                timeout=120.0,
+            )
+    finally:
+        s, body = _inst_request(state, "a", "PATCH", role_url, {"role": "member"})
+        print(f"  e's person back to member: HTTP {s}")
+
+    state = _load()
+    state["members_parity"] = {
+        "space_id": space_id,
+        "deleted": [post_id, gone],
+        "kept": [fresh, keep] + [pid for _a, pid, _t in host_posts],
+    }
+    _save(state)
+
+    print("\nmembers-parity results (d = paired/mesh member, e = GFS-only member):")
+    for action, verdict, _detail in results:
+        print(f"  {verdict:5} {action}")
+    diffs = [r for r in results if r[1] == "DIFF"]
+    if diffs:
+        raise SystemExit(
+            "members-parity: d and e differ on "
+            + "; ".join(f"{a_} — {det}" for a_, _v, det in diffs)
+        )
+    print("members-parity: ok")
+
+
+def _check_members_parity(state: dict, failures: list[str]) -> None:
+    """``verify`` hook: the posts ``members-parity`` left still read the same
+    on d and e as on the host a (kept ones there, deleted ones gone)."""
+    mp = state["members_parity"]
+    space_id = mp["space_id"]
+    for kind, ids in (("kept", mp["kept"]), ("deleted", mp["deleted"])):
+        for pid in ids:
+            cache: dict = {}
+            views = {
+                label: _parity_post(state, label, space_id, pid, cache)
+                for label in ("a", *_PARITY_MEMBERS)
+            }
+            if views["a"].get("exists") != (kind == "kept"):
+                failures.append(
+                    f"members-parity: a shows {kind} post {pid} as {views['a']}"
+                )
+            for m in _PARITY_MEMBERS:
+                if views[m] != views["a"]:
+                    failures.append(
+                        f"members-parity: {m} shows {kind} post {pid} as {views[m]}, "
+                        f"a as {views['a']}"
+                    )
 
 
 def main() -> None:
