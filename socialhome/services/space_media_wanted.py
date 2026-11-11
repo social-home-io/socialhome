@@ -283,13 +283,22 @@ class SpaceMediaWanted:
         member seat in whose live item shows it; whether it was added."""
         added = False
         try:
-            for space_id, item_id, _created in await self._refs.space_rows_of(name):
+            rows = await self._refs.space_rows_of(name)
+            for space_id, item_id, _created in rows:
                 if name in per_space.get(space_id, {}):
                     continue
                 if not await holds_member_seat(self._spaces, space_id):
                     continue  # a follower reads through its GFS (v_83)
                 per_space.setdefault(space_id, {})[name] = item_id
                 added = True
+            if not added:
+                log.info(
+                    "space media wanted: %s — %s; not asked",
+                    name,
+                    "no live space item here shows it"
+                    if not rows
+                    else "no member seat in its space (a follower asks its GFS)",
+                )
         except Exception:
             log.warning("space media wanted: lookup of %s failed", name, exc_info=True)
         return added
@@ -367,11 +376,19 @@ class SpaceMediaWanted:
         """Send *files* to the first household of an item's author at v_92
         that takes it; whether one did."""
         payload = _payload(space_id, files)
-        for author in await self._author_households(space_id, files):
+        authors = await self._author_households(space_id, files)
+        for author in authors:
             if await self._federation.space_member_supports(
                 author, min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
             ) and await self._send(author, space_id, payload):
                 return True
+        log.info(
+            "space media wanted: no author household of space %s took %d "
+            "file(s) (households: %s)",
+            space_id,
+            len(files),
+            ", ".join(authors) or "none known",
+        )
         return False
 
     async def _author_households(
