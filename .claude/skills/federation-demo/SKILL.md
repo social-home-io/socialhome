@@ -549,6 +549,16 @@ That single command runs the full sequence:
    **a**) keep **a**'s name — **c** logs ``authority signature did not
    verify against the space key — dropping``.
 
+9f-r. ``space-reaction`` (v_93, reactions on space posts reach every
+   member household) — in **b**'s space (owner **b**, members **a** and
+   **c**). Prereqs: ``up``, ``pair``, ``traffic``, ``calendar``; runs
+   standalone after them. **a** posts; **a** reacts 👍 and **c** reacts 🎉
+   → ``GET /api/spaces/{id}/feed`` shows the same two reactions on **a**,
+   **b** and **c** (``SPACE_POST_REACTION``); **a** takes its 👍 back →
+   all three show only **c**'s 🎉. In the ``all`` chain it runs right
+   after ``space-chat``. ``verify`` asserts
+   ``MIN_FOR_SPACE_POST_REACTIONS`` is v_93 and covered by ``OURS``.
+
 9f. ``space-chat`` (v_55, every space's members' chat) — in **b**'s
    space from ``traffic`` / ``calendar`` (owner **b**, members **a** and
    **c**). Prereqs: ``up``, ``pair``, ``traffic``, ``calendar``; runs
@@ -713,7 +723,8 @@ mesh-member-cert → space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → group-dm → federated-moderation →
 space-report → forwarded-role-change → page-concurrent-edit →
-admin-revoke-rotation → rotation-offline-catchup → space-chat → replay →
+admin-revoke-rotation → rotation-offline-catchup → space-chat →
+space-reaction → replay →
 unpair → unpair-offline → gfs-up → gfs-pair → local-community →
 gfs-moment-profile → gfs-highlight-link → gfs-public-pages →
 gfs-moment-late-delete → gfs-join-request → verify``

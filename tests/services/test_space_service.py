@@ -2265,6 +2265,39 @@ async def test_space_reactions(stack):
     assert "👍" not in r2.reactions
 
 
+async def test_a_space_reaction_no_other_household_would_take_is_rejected(stack):
+    """v_93: receivers take an emoji of at most 32 characters, so a longer
+    one would show in this household only."""
+    anna = await stack.provision_user("anna")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    with pytest.raises(ValueError, match="too long"):
+        await stack.space_svc.add_reaction(
+            p.id, space_id=s.id, user_id=anna.user_id, emoji="x" * 33
+        )
+
+
+async def test_a_reaction_stays_put_in_an_archived_space(stack):
+    """v_93: an archived space is read-only to peers too — they refuse a
+    reaction's removal like its add, so neither is taken here."""
+    anna = await stack.provision_user("anna")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    await stack.space_svc.add_reaction(
+        p.id, space_id=s.id, user_id=anna.user_id, emoji="👍"
+    )
+    await stack.space_svc.archive_space(s.id, actor_username="anna")
+    for change in (stack.space_svc.add_reaction, stack.space_svc.remove_reaction):
+        with pytest.raises(SpacePermissionError, match="(?i)archiv"):
+            await change(p.id, space_id=s.id, user_id=anna.user_id, emoji="👍")
+    held = await stack.space_post_repo.get(p.id)
+    assert held[1].reactions == {"👍": frozenset({anna.user_id})}
+
+
 async def test_space_reaction_empty_rejected(stack):
     """Empty emoji raises ValueError."""
     anna = await stack.provision_user("anna")
@@ -4227,6 +4260,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Older space pictures arrive when you open them",
+        "Reactions on space posts reach every household",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -4270,6 +4304,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Older space pictures arrive when you open them",
+        "Reactions on space posts reach every household",
     )
 
 
@@ -4342,6 +4377,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Older space pictures arrive when you open them",
+        "Reactions on space posts reach every household",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -4412,6 +4448,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
         "Older space pictures arrive when you open them",
+        "Reactions on space posts reach every household",
     )
     assert "Apps that work across households" not in c.lagging_features
     assert "Apps that reach the right person" not in c.lagging_features

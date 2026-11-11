@@ -1694,3 +1694,86 @@ async def test_a_comments_picture_rides_with_its_hash_and_its_bytes(tmp_path):
     assert kwargs["correlation_id"] == "c-1"
     assert kwargs["target_instance_ids"] == ["peer-b"]
     assert kwargs["media_urls"] == ["api/media/c.webp"]
+
+
+# ─── v_93: a space reaction reaches every member household ───────────────
+
+
+def _reaction_event(uid="u-1", *, added=True, space_id="sp-1", origin=None, at=None):
+    from socialhome.domain.events import PostReactionChanged
+
+    extra = {} if at is None else {"occurred_at": at}
+    return PostReactionChanged(
+        post=_post_obj("u-author"),
+        space_id=space_id,
+        origin_instance_id=origin,
+        reactor_user_id=uid,
+        emoji="👍",
+        added=added,
+        **extra,
+    )
+
+
+@pytest.mark.parametrize("added", [True, False])
+async def test_a_local_space_reaction_is_broadcast_to_member_households(added):
+    """A private space too (no GFS involved): the delta — who, which emoji,
+    add or remove, when — goes to every member household at v_93; an older
+    one is skipped (``min_proto_version``)."""
+    from socialhome.domain.federation_capabilities import FederationCapability
+
+    bus = EventBus()
+    federation = AsyncMock()
+    _make_outbound(bus=bus, federation=federation)
+    at = datetime(2026, 11, 11, 9, 30, 0, 123456, tzinfo=UTC)
+    await bus.publish(_reaction_event(added=added, at=at))
+    federation.broadcast_to_space_members.assert_awaited_once()
+    call = federation.broadcast_to_space_members.call_args
+    assert call.args[:2] == ("sp-1", FederationEventType.SPACE_POST_REACTION)
+    assert call.args[2] == {
+        "space_id": "sp-1",
+        "post_id": "post-1",
+        "user_id": "u-1",
+        "emoji": "👍",
+        "action": "add" if added else "remove",
+        "at": at.isoformat(),
+    }
+    assert call.kwargs == {
+        "min_proto_version": FederationCapability.MIN_FOR_SPACE_POST_REACTIONS
+    }
+
+
+@pytest.mark.parametrize("setup", ["inbound", "household", "anonymous"])
+async def test_a_reaction_is_not_broadcast_where_it_must_not_be(setup):
+    """An inbound reaction is never echoed, a household-feed one is not a
+    space event, and one naming nobody is not sent."""
+    bus = EventBus()
+    federation = AsyncMock()
+    _make_outbound(bus=bus, federation=federation)
+    await bus.publish(
+        _reaction_event(
+            uid="" if setup == "anonymous" else "u-1",
+            space_id=None if setup == "household" else "sp-1",
+            origin="peer.home" if setup == "inbound" else None,
+        )
+    )
+    federation.broadcast_to_space_members.assert_not_awaited()
+
+
+async def test_a_failed_reaction_broadcast_never_breaks_the_reaction():
+    """Fail-soft: the reaction is already stored; a broadcast that raises is
+    logged, not raised into the request."""
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members.side_effect = RuntimeError("down")
+    _make_outbound(bus=bus, federation=federation)
+    await bus.publish(_reaction_event())
+    federation.broadcast_to_space_members.assert_awaited_once()
+
+
+async def test_a_reaction_carries_one_stamp_on_both_paths():
+    """The member broadcast and the GFS ``space_item`` carry the SAME stamp,
+    so a household that gets both applies one (the second is not newer)."""
+    bus, member, uid = _items_setup()
+    at = datetime(2026, 11, 11, 9, 30, 0, 123456, tzinfo=UTC)
+    await bus.publish(_reaction_event(uid=uid, at=at))
+    assert datetime.fromisoformat(member.scheduled[0][3]["ts"]) == at

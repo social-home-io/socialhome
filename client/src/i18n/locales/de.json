@@ -2689,6 +2689,7 @@
   "capability.synced_picture_resets": "Entfernte Profilbilder beim Space-Abgleich",
   "capability.multi_mailbox": "Space-Updates über einen GFS in einem Upload",
   "capability.space_media_wanted": "Ältere Space-Bilder beim Öffnen nachladen",
+  "capability.space_post_reactions": "Reaktionen auf Space-Beiträge für alle Haushalte",
   "settings.tab.security": "Sicherheit",
   "settings.security.signing_in": "Anmelden",
   "settings.security.signing_in_hint": "Das nutzt nur du. Niemand sonst sieht deinen Anmeldenamen.",

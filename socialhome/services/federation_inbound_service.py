@@ -60,6 +60,7 @@ from ..domain.events import (
     MomentReactionChanged,
     PostDeleted,
     PostEdited,
+    PostReactionChanged,
     SpaceConfigChanged,
     SpaceFeaturesApplied,
     SpaceMemberProfileUpdated,
@@ -106,7 +107,12 @@ from ..domain.space import (
     SpaceRole,
     role_change_event_type,
 )
-from ..domain.space_item import item_stamp, stamp_to_db
+from ..domain.space_item import (
+    StaleItemStamp,
+    item_stamp,
+    reaction_emoji_ok,
+    stamp_to_db,
+)
 from ..domain.space_media_ref import (
     MEDIA_REFS_FIELD,
     SpaceMediaLocalization,
@@ -738,6 +744,7 @@ class FederationInboundService(ProtectionGateMixin):
         registry.register(FET.SPACE_POST_UPDATED, self._on_space_post_updated)
         registry.register(FET.SPACE_POST_DELETED, self._on_space_post_deleted)
         registry.register(FET.SPACE_MEDIA_BLOB, self._on_space_media_blob)
+        registry.register(FET.SPACE_POST_REACTION, self._on_space_post_reaction)
         registry.register(FET.SPACE_COMMENT_CREATED, self._on_space_comment_added)
         registry.register(FET.SPACE_COMMENT_UPDATED, self._on_space_comment_updated)
         registry.register(FET.SPACE_COMMENT_DELETED, self._on_space_comment_deleted)
@@ -2828,6 +2835,114 @@ class FederationInboundService(ProtectionGateMixin):
                 post_id=post_id,
                 space_id=space_id,
                 origin_instance_id=event.from_instance,
+            )
+        )
+
+    async def _on_space_post_reaction(self, event: FederationEvent) -> None:
+        """v_93 — a member's reaction on a space post, added or removed.
+
+        The reactor must hold a live seat on the SENDING household that may
+        react here: a writer seat, or a follower seat while the space has
+        ``allow_subscriber_react`` on (:meth:`SpaceAuthorship.
+        item_seat_admits` — never a local user, a banned one, or somebody
+        seated elsewhere; the host relays nobody's reaction). The payload's
+        ``at`` orders it: applied only over an older stamp held for that
+        (post, user, emoji), in the same transaction as the reaction
+        (``space_posts.reaction_stamps_json``) — so a re-delivery, a copy
+        on a second path (the v_49 ``space_item`` carries the same stamp)
+        and a late add after a removal are all no-ops.
+        """
+        p = event.payload if isinstance(event.payload, dict) else {}
+        post_id = str(p.get("post_id") or "")
+        reactor = str(p.get("user_id") or "")
+        emoji = p.get("emoji")
+        action = p.get("action")
+        stamp = item_stamp(p.get("at"))
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
+        if (
+            not post_id
+            or not reactor
+            or not reaction_emoji_ok(emoji)
+            or action not in ("add", "remove")
+            or stamp is None
+        ):
+            log_not_applied(
+                event, what="post reaction", row_id=post_id, reason="malformed"
+            )
+            return
+        authorship = self._space_authorship(event)
+        if authorship is None:
+            return
+        space = await self._space_repo.get(space_id)
+        if space is None or space.dissolved:
+            log_not_applied(
+                event, what="post reaction", row_id=post_id, reason="space not held"
+            )
+            return
+        if not await authorship.item_seat_admits(
+            origin_instance_id=event.from_instance,
+            space_id=space_id,
+            author_user_id=reactor,
+            subscriber_ok=space.features.allow_subscriber_react,
+        ):
+            await authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="post reaction",
+                row_id=post_id,
+                user_id=reactor,
+            )
+            return
+        if await self._space_post_repo.get(post_id) is None:
+            # The reaction overtook its post on another delivery path.
+            if not self._hold_for_parent(
+                event,
+                space_id,
+                PARENT_POST,
+                post_id,
+                what="post reaction",
+                row_id=post_id,
+            ):
+                log_not_applied(
+                    event,
+                    what="post reaction",
+                    row_id=post_id,
+                    reason="post not held here",
+                )
+            return
+        react = (
+            self._space_post_repo.add_reaction
+            if action == "add"
+            else self._space_post_repo.remove_reaction
+        )
+        try:
+            # Scoped to ``space_id``: a post of another space is a KeyError.
+            post = await react(
+                post_id, emoji, reactor, space_id=space_id, stamp=stamp_to_db(stamp)
+            )
+        except StaleItemStamp:
+            log_not_applied(
+                event, what="post reaction", row_id=post_id, reason="not newer"
+            )
+            return
+        except KeyError, ValueError:
+            log_not_applied(
+                event,
+                what="post reaction",
+                row_id=post_id,
+                reason="post not in this space, deleted, or full",
+            )
+            return
+        await self._bus.publish(
+            PostReactionChanged(
+                post=post,
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+                reactor_user_id=reactor,
+                emoji=emoji,
+                added=action == "add",
             )
         )
 

@@ -1539,11 +1539,20 @@ class SpaceSyncReceiver:
                     # holds stays; what no stamp orders any more (older
                     # than the tombstone horizon) follows the host's sets.
                     # Our own people's reactions are authored here.
+                    #
+                    # The sets are followed only from a host that is sent
+                    # every household's reactions (v_93): an older host
+                    # holds just its own people's, and following its sets
+                    # would drop everybody else's once their stamps age out.
                     await self._space_post_repo.merge_reaction_stamps(
                         post.id,
                         stamps,
                         space_id=space_id,
-                        reactions=_synced_reactions(r.get("reactions")),
+                        reactions=(
+                            _synced_reactions(r.get("reactions"))
+                            if await self._holds_every_reaction(provider)
+                            else None
+                        ),
                         keep_users=await self._local_people(space_id),
                     )
                 elif stamps:
@@ -3088,6 +3097,17 @@ class SpaceSyncReceiver:
         """Is ``provider`` the household hosting ``space_id``?"""
         space = await self._space_repo.get(space_id)
         return await self._acts_as_host(space, provider)
+
+    async def _holds_every_reaction(self, provider: str) -> bool:
+        """``provider`` is sent every member household's post reactions
+        (``SPACE_POST_REACTION``, v_93). Unknown version hook: as before
+        v_93 (its sets are followed)."""
+        if self._peer_version is None:
+            return True
+        return (
+            await self._peer_version(provider)
+            >= FederationCapability.MIN_FOR_SPACE_POST_REACTIONS
+        )
 
     async def _is_host_version(
         self, space_id: str, provider: str, r: dict[str, Any]

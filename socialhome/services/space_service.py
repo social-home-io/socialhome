@@ -248,6 +248,7 @@ from ..domain.space import (
     validate_space_link_url,
 )
 from ..domain.space_app_table import SpaceAppNotAllowedError
+from ..domain.space_item import reaction_emoji_ok
 from ..domain.space_place import PlacePin, validate_place_pin
 from ..domain.user import User
 from ..domain.writer_cert import WriterEntitlement
@@ -8221,6 +8222,10 @@ class SpaceService(
         emoji = unicodedata.normalize("NFC", emoji.strip())
         if not emoji:
             raise ValueError("emoji must not be empty")
+        if not reaction_emoji_ok(emoji):
+            # What every other household accepts (v_93): a longer one would
+            # show here and nowhere else.
+            raise ValueError("emoji is too long")
         await self.require_reader(space_id, user_id)
         await self._post_in_space(post_id, space_id)
         await self._require_writable_space(space_id)
@@ -8228,8 +8233,9 @@ class SpaceService(
         post = await self._posts.add_reaction(
             post_id, emoji, user_id, space_id=space_id
         )
-        # v_49: the member-publish bridge relays it (space reactions are no
-        # federated event; realtime does not frame space reactions).
+        # ``SpacePostOutbound`` sends it on: v_93 to every member household
+        # (``SPACE_POST_REACTION``), v_49 over the member relay where the
+        # space has one. Realtime does not frame space reactions.
         await self._bus.publish(
             PostReactionChanged(
                 post=post,
@@ -8254,6 +8260,9 @@ class SpaceService(
         emoji = unicodedata.normalize("NFC", emoji.strip())
         await self.require_reader(space_id, user_id)
         await self._post_in_space(post_id, space_id)
+        # An archived space is read-only to peers too: they refuse the
+        # removal (v_93), so taking it here would leave the copies apart.
+        await self._require_writable_space(space_id)
         await self._reject_subscriber(space_id, user_id, action="react")
         post = await self._posts.remove_reaction(
             post_id, emoji, user_id, space_id=space_id

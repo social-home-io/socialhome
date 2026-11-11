@@ -20,12 +20,119 @@ symmetry with UI)** — not a federation event type.
 
 `SPACE_POST_CREATED`, `SPACE_POST_UPDATED`, `SPACE_POST_DELETED`,
 `SPACE_COMMENT_CREATED`, `SPACE_COMMENT_UPDATED`,
-`SPACE_COMMENT_DELETED`, `SPACE_REACTION_ADDED`,
-`SPACE_REACTION_REMOVED`.
+`SPACE_COMMENT_DELETED`, `SPACE_POST_REACTION` (v_93 — see
+[Reactions on space posts](#reactions-on-space-posts-v_93)).
 
 **Space-wide poll + schedule-poll (carried inside posts)**
 
 `SPACE_POLL_CREATED`, `SPACE_POLL_VOTE_CAST`, `SPACE_POLL_CLOSED`.
+
+## Reactions on space posts (v_93)
+
+A reaction on a space post is shared by every member household of the
+space, whichever way that household is reached (paired, mesh, or a GFS
+mailbox seat). Before v_93 it stayed in the household that made it.
+
+`SPACE_POST_REACTION` is a delta, sent by the reactor's household on the
+add and on the remove. Everything but the routing fields is inside the
+encrypted payload:
+
+| Field | Meaning |
+|---|---|
+| `space_id` | the space (also the envelope's routing field) |
+| `post_id` | the post |
+| `user_id` | the reactor — a person of the sending household |
+| `emoji` | NFC, trimmed, 1–32 characters |
+| `action` | `"add"` or `"remove"` |
+| `at` | the reactor's action time, tz-aware ISO 8601 |
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Anna<br/>(HFS A browser)
+    participant A as HFS A
+    participant B as HFS B<br/>(paired)
+    participant G as GFS
+    participant E as HFS E<br/>(mailbox seat)
+    U->>A: POST /api/spaces/{id}/posts/{pid}/reactions
+    A->>A: store reaction + stamp,<br/>publish PostReactionChanged
+    par broadcast_to_space_members (v_93 households only)
+        A->>B: SPACE_POST_REACTION {add, at}
+        A->>G: POST /gfs/envelope/multi<br/>(one sealed body, a wrap per mailbox)
+        G->>E: envelope
+    end
+    B->>B: seat check, then apply if `at`<br/>is newer than the held stamp
+    E->>E: same
+    U->>A: DELETE …/reactions/{emoji}
+    par
+        A->>B: SPACE_POST_REACTION {remove, at'}
+        A->>G: POST /gfs/envelope/multi
+        G->>E: envelope
+    end
+    Note over B,E: a copy of the add that arrives now<br/>(queue, second path) is older than at' — dropped
+```
+
+**Receiver rules** (`FederationInboundService._on_space_post_reaction`),
+after the §24.11 pipeline:
+
+- **Who.** `user_id` must hold a live seat **on the sending household**:
+  a writer seat (`member` / `moderator` / `admin`), or a `subscriber` seat
+  while the space has `allow_subscriber_react` on — the same toggle a local
+  follower is held to (`SpaceAuthorship.item_seat_admits`). Never a local
+  user of the receiver, never a banned user, and the host relays nobody's
+  reaction. A follower-only household passes the §24.11 writer gate only
+  under the same opt-in, with the reactor bound to its live follower seat
+  ([spaces.md](./spaces.md#two-kinds-of-follower-v_30)). A user whose seat
+  has not reached the receiver yet is held and replayed with the seat.
+- **Order-independent, idempotent.** The receiver applies the event only
+  when `at` is newer than the stamp it holds for that `(post, user,
+  emoji)` — `space_posts.reaction_stamps_json`, written in the same
+  transaction as the reaction (migration `0075`, the v_49 member-relay
+  stamps; no new storage). The newest stamp wins in any arrival order, a
+  re-delivery is a no-op, and a late add never brings back a removed
+  reaction (a removal's stamp is kept 48 h). `at` more than 300 s ahead of
+  the receiver's clock is refused.
+- **Where.** The post must live in the event's space; a reaction that
+  overtakes its post is held and applied when the post lands; an add on a
+  deleted post is dropped. An archived space takes none (it is a write, not
+  a removal) — and the local API refuses both the add and the remove
+  there, so the copies stay equal.
+- **One apply across paths.** In a space that is also read through a GFS,
+  the reactor's household still publishes the v_49 `space_item`
+  (`reaction_add` / `reaction_remove`,
+  [discovery.md](./discovery.md#comments-reactions-and-own-edits--deletes-v_49))
+  with the **same** stamp, so a member household that gets both applies the
+  first and drops the second as not newer.
+- **Missed while offline.** The outbox queues the event for an unreachable
+  household as for any other; one lost for good heals from the host's
+  §25.6 stream, which carries each post's reaction sets and stamps
+  ([sync.md](./sync.md), v_92 `reaction_stamps`). A receiver follows the
+  host's *sets* (for reactions no stamp orders any more) only when the
+  host is at v_93 — an older host never hears other households' reactions.
+
+**Followers** get what they got before: reactions through the GFS member
+relay in a public / global space, nothing new. **Older households** (below
+v_93) are skipped by the fan-out and keep showing their own people's
+reactions.
+
+**Not covered:** comments have no reactions (there is no such row), and
+space **chat** reactions already federate (`SPACE_CHAT_REACTION`,
+[space-chat.md](./space-chat.md)). An open space view does not update
+live for a reaction (as for a local one); it shows on the next load.
+
+**Cost** — one reaction (or removal) in a space of 200 member households;
+the payload is 214 B of JSON (measured, a `remove` with a one-glyph emoji):
+
+| Path | Per trigger |
+|---|---|
+| Paired / mesh member households | 1 envelope each, ~1 KB sealed (estimate: 214 B payload + envelope fields and signature, base64) → 200 × ~1 KB ≈ 200 KB uplink |
+| Mailbox seats behind one GFS (v_91 multi) | ONE upload: one body in the smallest size bucket (≤ 5.5 KB, the figure measured for a ~1 KiB event) + 229 B per mailbox → ≤ 51.4 KB for 200; the GFS pushes body + wrap to each |
+| Receiver work | one seat read, one row update; no reply, no re-broadcast |
+| Followers | 0 new |
+
+One actor triggers 1 × N sends, never N × M: a receiver answers nothing
+and forwards nothing. Nothing is sent on a timer, and only the delta
+travels — never the post's whole reaction set.
 
 ## Flow — new post fan-out
 

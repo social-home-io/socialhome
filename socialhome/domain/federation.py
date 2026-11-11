@@ -224,6 +224,15 @@ class FederationEventType(str, enum.Enum):
     #: (≤ 50 entries; ``name`` is the ``sc-`` content name). The answer is
     #: ordinary ``SPACE_MEDIA_BLOB`` pushes (``services/space_media_wanted``).
     SPACE_MEDIA_WANTED = "space_media_wanted"
+    #: v_93 — a member's reaction on a space post, added or removed, to
+    #: every member household: ``{space_id, post_id, user_id, emoji, action:
+    #: "add" | "remove", at}`` (all inside the encrypted payload). ``at`` is
+    #: the reactor's action time; a receiver applies it only when newer than
+    #: the stamp it holds for that (post, user, emoji)
+    #: (``space_posts.reaction_stamps_json``), so apply is order-independent
+    #: and a late add never brings back a removed reaction. The reactor is
+    #: seated on the sender. See ``docs/protocol/spaces.md``.
+    SPACE_POST_REACTION = "space_post_reaction"
     SPACE_COMMENT_CREATED = "space_comment_created"
     SPACE_COMMENT_UPDATED = "space_comment_updated"
     SPACE_COMMENT_DELETED = "space_comment_deleted"
@@ -718,6 +727,9 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_POST_CREATED,
         FederationEventType.SPACE_POST_UPDATED,
         FederationEventType.SPACE_POST_DELETED,
+        #: v_93 — reactions on the space's posts: every member household
+        #: sees the same counts, whichever way it is reached.
+        FederationEventType.SPACE_POST_REACTION,
         FederationEventType.SPACE_COMMENT_CREATED,
         FederationEventType.SPACE_COMMENT_UPDATED,
         FederationEventType.SPACE_COMMENT_DELETED,
@@ -978,6 +990,10 @@ SPACE_WRITE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_POST_CREATED,
         FederationEventType.SPACE_POST_UPDATED,
         FederationEventType.SPACE_POST_DELETED,
+        #: v_93 — a reaction changes a post's shared state. A follower-only
+        #: household's is refused, bar the ``allow_subscriber_react`` opt-in
+        #: (``check_space_writer``); an archived space takes none.
+        FederationEventType.SPACE_POST_REACTION,
         #: The WebP / WebM / file bytes a post or gallery item points at.
         #: A write: it lands rows in the local media store, and shipping
         #: it is how a sender puts content bytes on our disk.

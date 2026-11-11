@@ -467,6 +467,12 @@ Same route shapes as the household feed, prefixed by `/api/spaces/{id}/`:
 /api/spaces/{id}/posts/{pid}/comments[/{cid}]
 ```
 
+A reaction (`POST …/reactions` `{emoji}`, `DELETE …/reactions/{emoji}`) is
+shared with every member household of the space (federation v_93). The
+emoji is 1–32 characters after trimming (`422` otherwise), and in an
+**archived** space neither adding nor removing one is possible (`403
+SPACE_ARCHIVED`).
+
 `GET /api/spaces/{id}/posts/{pid}/comments` needs a seat in the **path**
 space (`403` otherwise) and a `{pid}` of that space (another space's post is
 **404**) — a seat in one space never reads another space's thread.
