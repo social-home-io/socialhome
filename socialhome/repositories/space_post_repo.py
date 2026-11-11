@@ -23,14 +23,18 @@ import orjson
 
 from ..db import AsyncDatabase
 from ..domain.post import (
-    MAX_DISTINCT_REACTIONS_PER_POST,
     Comment,
     CommentType,
     Post,
     PostTombstone,
     PostType,
 )
-from ..domain.space_item import StaleItemStamp, stamp_to_db
+from ..domain.space_item import (
+    MAX_REACTIONS_PER_USER_PER_POST,
+    StaleItemStamp,
+    TooManyReactionsError,
+    stamp_to_db,
+)
 from ..utils.datetime import parse_iso8601_optional
 from .base import (
     bool_col,
@@ -159,6 +163,23 @@ class AbstractSpacePostRepo(Protocol):
         space_id: str,
         stamp: str | None = None,
     ) -> Post: ...
+    async def react(
+        self,
+        post_id: str,
+        emoji: str,
+        user_id: str,
+        *,
+        space_id: str,
+        added: bool,
+    ) -> tuple[Post, str]:
+        """A LOCAL user's reaction, added or removed: the post and the stamp
+        written with it — now, or just after the stamp held for that (user,
+        emoji) when the clock stepped back, so the change is never older
+        than the one it replaces (v_93: the stamp every other household
+        orders it by). An add past :data:`MAX_REACTIONS_PER_USER_PER_POST`
+        raises :class:`ValueError`."""
+        ...
+
     async def list_reaction_stamps(
         self, post_ids: list[str]
     ) -> dict[str, dict[str, list]]:
@@ -656,9 +677,10 @@ class SqliteSpacePostRepo:
         belonging to another space raises ``KeyError`` instead of being
         mutated.
         """
-        return await self._react(
+        post, _at = await self._react(
             post_id, emoji, user_id, space_id=space_id, stamp=stamp, added=True
         )
+        return post
 
     async def remove_reaction(
         self,
@@ -671,8 +693,22 @@ class SqliteSpacePostRepo:
     ) -> Post:
         """Remove a reaction inside ``space_id`` — see
         :meth:`add_reaction` for the scoping rule."""
-        return await self._react(
+        post, _at = await self._react(
             post_id, emoji, user_id, space_id=space_id, stamp=stamp, added=False
+        )
+        return post
+
+    async def react(
+        self,
+        post_id: str,
+        emoji: str,
+        user_id: str,
+        *,
+        space_id: str,
+        added: bool,
+    ) -> tuple[Post, str]:
+        return await self._react(
+            post_id, emoji, user_id, space_id=space_id, stamp=None, added=added
         )
 
     async def _react(
@@ -684,8 +720,12 @@ class SqliteSpacePostRepo:
         space_id: str,
         stamp: str | None,
         added: bool,
-    ) -> Post:
-        at = stamp or stamp_to_db(datetime.now(UTC))
+    ) -> tuple[Post, str]:
+        """``stamp`` given: a received reaction — applied only over an
+        older stamp, the per-person cap settled by stamp. ``None``: a local
+        one — stamped now (never at or before the held stamp), a reaction
+        past the cap refused."""
+        now = stamp_to_db(datetime.now(UTC))
 
         def _run(conn):
             where = "id=? AND space_id=?" + (" AND deleted=0" if added else "")
@@ -701,21 +741,25 @@ class SqliteSpacePostRepo:
             held = stamps.get(key)
             if stamp is not None and held is not None and held[0] >= stamp:
                 raise StaleItemStamp(f"reaction on {post_id!r} is not newer")
+            at = stamp or now
+            if stamp is None and held is not None and held[0] >= at:
+                # Our clock stepped back (or the held stamp came from one
+                # ahead): stay strictly after what this change replaces.
+                at = _just_after(held[0])
             reactions = _decode_reactions(row_dict["reactions"])
+            if (
+                added
+                and stamp is None
+                and not (held is not None and held[1])
+                and len(_live_adds(stamps, user_id)) >= MAX_REACTIONS_PER_USER_PER_POST
+            ):
+                raise TooManyReactionsError()
             if added:
-                if (
-                    emoji not in reactions
-                    and len(reactions) >= MAX_DISTINCT_REACTIONS_PER_POST
-                ):
-                    raise ValueError("too many distinct reactions on this post")
                 reactions.setdefault(emoji, set()).add(user_id)
             else:
-                bucket = reactions.get(emoji)
-                if bucket and user_id in bucket:
-                    bucket.discard(user_id)
-                    if not bucket:
-                        reactions.pop(emoji, None)
+                _discard(reactions, emoji, user_id)
             stamps[key] = [at, added]
+            _settle_user_cap(reactions, stamps, user_id)
             conn.execute(
                 "UPDATE space_posts SET reactions=?, reaction_stamps_json=? "
                 "WHERE id=? AND space_id=?",
@@ -730,10 +774,10 @@ class SqliteSpacePostRepo:
                 "SELECT * FROM space_posts WHERE id=? AND space_id=?",
                 (post_id, space_id),
             ).fetchone()
-            return dict(row)
+            return dict(row), at
 
-        row = await self._db.transact(_run)
-        return _row_to_space_post(row)
+        row, at = await self._db.transact(_run)
+        return _row_to_space_post(row), at
 
     async def list_reaction_stamps(
         self, post_ids: list[str]
@@ -768,9 +812,6 @@ class SqliteSpacePostRepo:
             for k, v in _decode_stamps(orjson.dumps(stamps).decode()).items()
             if k.partition("\x00")[0] not in keep_users
         }
-        cutoff = stamp_to_db(
-            datetime.now(UTC) - timedelta(seconds=REACTION_TOMBSTONE_HORIZON_S)
-        )
         source: set[str] | None = (
             None
             if reactions is None
@@ -795,6 +836,7 @@ class SqliteSpacePostRepo:
             held = _decode_stamps(row["reaction_stamps_json"])
             reactions = _decode_reactions(row["reactions"])
             changed = False
+            touched: set[str] = set()
             for key, (at, added) in sorted(incoming.items()):
                 user_id, sep, emoji = key.partition("\x00")
                 if not sep or not user_id or not emoji or len(emoji) > 64:
@@ -803,20 +845,14 @@ class SqliteSpacePostRepo:
                 if prior is not None and prior[0] >= at:
                     continue
                 if added:
-                    if (
-                        emoji not in reactions
-                        and len(reactions) >= MAX_DISTINCT_REACTIONS_PER_POST
-                    ):
-                        continue
                     reactions.setdefault(emoji, set()).add(user_id)
                 else:
-                    bucket = reactions.get(emoji)
-                    if bucket is not None:
-                        bucket.discard(user_id)
-                        if not bucket:
-                            reactions.pop(emoji, None)
+                    _discard(reactions, emoji, user_id)
                 held[key] = [at, added]
+                touched.add(user_id)
                 changed = True
+            for user_id in sorted(touched):
+                _settle_user_cap(reactions, held, user_id)
             if source is not None:
                 live = {
                     f"{user}\x00{emoji}"
@@ -826,23 +862,18 @@ class SqliteSpacePostRepo:
                 }
                 for key in sorted(live - source):
                     prior = held.get(key)
-                    if key in incoming or (prior is not None and prior[0] >= cutoff):
+                    # A removal travels only as a stamp: a reaction whose
+                    # add we applied stays, however old — the source may
+                    # never have received it (v_93). Only one no stamp
+                    # orders follows the source's sets.
+                    if key in incoming or prior is not None:
                         continue
                     user_id, _sep, emoji = key.partition("\x00")
-                    bucket = reactions.get(emoji)
-                    if bucket is not None:
-                        bucket.discard(user_id)
-                        if not bucket:
-                            reactions.pop(emoji, None)
+                    _discard(reactions, emoji, user_id)
                     changed = True
                 for key in sorted(source - live):
                     user_id, _sep, emoji = key.partition("\x00")
                     if key in held or not user_id or not emoji or len(emoji) > 64:
-                        continue
-                    if (
-                        emoji not in reactions
-                        and len(reactions) >= MAX_DISTINCT_REACTIONS_PER_POST
-                    ):
                         continue
                     reactions.setdefault(emoji, set()).add(user_id)
                     changed = True
@@ -1194,11 +1225,14 @@ def _row_to_space_comment(row: dict | None) -> Comment | None:
     )
 
 
-#: How long a reaction removal's tombstone is kept: longer than any
-#: duplicate of the add can still arrive — the GFS holds queued items for
-#: 24 h, the publisher's retry queue adds its backoff on top. Past it the
-#: tombstone is dropped.
-REACTION_TOMBSTONE_HORIZON_S: int = 48 * 3600
+#: How long a reaction removal's tombstone is kept: 30 days, the reach of a
+#: §25.6 resume and of the catch-up media window. A removal travels ONLY as
+#: its stamp (v_93: a household's reaction sets lacking a reaction is no
+#: removal — it may never have received the add), so a household that
+#: missed one heals from the host's stamps for as long as the tombstone
+#: lives; it also outlasts any duplicate add (the GFS queue's 24 h plus
+#: retries). Bounded by the per-user and per-post caps below.
+REACTION_TOMBSTONE_HORIZON_S: int = 30 * 24 * 3600
 
 #: Entries one user may hold per post. Over it, that user's OWN oldest
 #: tombstones go first, so nobody can push out someone else's.
@@ -1206,6 +1240,50 @@ MAX_REACTION_STAMPS_PER_USER: int = 64
 
 #: Last-resort bound per post (oldest tombstones first, then oldest).
 MAX_REACTION_STAMPS_PER_POST: int = 4096
+
+
+def _discard(reactions: dict[str, set[str]], emoji: str, user_id: str) -> None:
+    """Take ``user_id`` off ``emoji``; an emptied emoji goes."""
+    bucket = reactions.get(emoji)
+    if bucket is not None:
+        bucket.discard(user_id)
+        if not bucket:
+            reactions.pop(emoji, None)
+
+
+def _just_after(stamp: str) -> str:
+    """The stored stamp one microsecond after ``stamp`` (naive UTC)."""
+    try:
+        held = datetime.fromisoformat(stamp)
+    except ValueError:
+        return stamp_to_db(datetime.now(UTC))
+    if held.tzinfo is None:
+        held = held.replace(tzinfo=UTC)
+    return stamp_to_db(held + timedelta(microseconds=1))
+
+
+def _live_adds(stamps: dict[str, list], user_id: str) -> list[str]:
+    """``user_id``'s stamped adds, newest first (ties by key)."""
+    prefix = f"{user_id}\x00"
+    keys = [k for k, (_at, added) in stamps.items() if added and k.startswith(prefix)]
+    return sorted(keys, key=lambda k: (stamps[k][0], k), reverse=True)
+
+
+def _settle_user_cap(
+    reactions: dict[str, set[str]], stamps: dict[str, list], user_id: str
+) -> None:
+    """Show exactly ``user_id``'s newest
+    :data:`MAX_REACTIONS_PER_USER_PER_POST` stamped adds — a pure function
+    of the stamps, so every household shows the same ones whatever order
+    they arrived in. One past the cap keeps its stamp and shows again when
+    a newer one is taken back."""
+    adds = _live_adds(stamps, user_id)
+    for n, key in enumerate(adds):
+        emoji = key.partition("\x00")[2]
+        if n < MAX_REACTIONS_PER_USER_PER_POST:
+            reactions.setdefault(emoji, set()).add(user_id)
+        else:
+            _discard(reactions, emoji, user_id)
 
 
 def _decode_stamps(raw: object) -> dict[str, list]:

@@ -405,6 +405,46 @@ async def test_a_post_record_carries_at_most_the_newest_reaction_stamps(
     assert sorted(record["reaction_stamps"]) == ["u-2\x00👍", "u-3\x00👍"]
 
 
+async def test_a_cut_stamp_list_carries_removals_before_adds(homes, monkeypatch):
+    """A removal travels only as its stamp, so when a post holds more
+    stamps than one record carries, the removals go first (newest first),
+    then the newest adds — an add left out still shows in the reaction
+    sets, a removal left out would be missed for good."""
+    host, _member = homes
+    monkeypatch.setattr(posts_exporter_mod, "MAX_SYNCED_REACTION_STAMPS", 2)
+    await _post(host)
+    await host.repos.space_post.add_reaction(
+        "post-1", "👍", "u-1", space_id=SPACE, stamp=_ago(30)
+    )
+    await host.repos.space_post.remove_reaction(
+        "post-1", "👍", "u-1", space_id=SPACE, stamp=_ago(20)
+    )
+    for n, user in enumerate(("u-2", "u-3", "u-4")):
+        await host.repos.space_post.add_reaction(
+            "post-1", "👍", user, space_id=SPACE, stamp=_ago(10 - n)
+        )
+    (record,) = await collect_batches(record_batches(host.exporters["posts"], SPACE))
+    assert sorted(record["reaction_stamps"]) == ["u-1\x00👍", "u-4\x00👍"]
+    assert record["reaction_stamps"]["u-1\x00👍"][1] is False
+
+
+async def test_an_old_free_text_reaction_still_syncs(homes):
+    """Reactions made before v_93 may be short free text: a catch-up keeps
+    carrying them (sets and stamps) — only NEW ones must be emoji."""
+    host, member = homes
+    await _post(host)
+    await _stream(host, member)
+    (record,) = await collect_batches(record_batches(host.exporters["posts"], SPACE))
+    record["reactions"] = {"nice": [CARL]}
+    record["reaction_stamps"] = {f"{CARL}\x00nice": [_ago(5), True]}
+    await member.receiver._apply("posts", SPACE, [record], provider=HOST)
+    assert (await _view_post(member))[2] == {"nice": [CARL]}
+    record["reactions"] = {}
+    record["reaction_stamps"] = {f"{CARL}\x00nice": [_ago(1), False]}
+    await member.receiver._apply("posts", SPACE, [record], provider=HOST)
+    assert (await _view_post(member))[2] == {}
+
+
 async def test_a_cut_vote_list_never_deletes(homes, monkeypatch):
     """A poll record carries at most ``MAX_VOTES_PER_POLL`` votes (one
     record must fit one chunk); a cut list says so, and the receiver then

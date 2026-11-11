@@ -176,11 +176,21 @@ def clean_status_emoji(value: object) -> str | None:
         return None
     if len(emoji) > STATUS_EMOJI_MAX_CODEPOINTS:
         raise ValueError("Pick a single emoji for your status.")
-    if any(unicodedata.category(ch) in ("Cc", "Zs", "Zl", "Zp") for ch in emoji):
-        raise ValueError("Pick a single emoji for your status.")
-    if all(ord(ch) < 0x80 for ch in emoji):
+    if not looks_like_emoji(emoji):
         raise ValueError("Pick a single emoji for your status.")
     return emoji
+
+
+def looks_like_emoji(text: str) -> bool:
+    """The emoji sanity check a status and a reaction share — not a full
+    emoji parser: no whitespace or control character, and at least one
+    non-ASCII code point (plain words fail, keycaps such as ``1️⃣`` pass).
+    Length is the caller's rule."""
+    return (
+        bool(text)
+        and not any(unicodedata.category(ch) in ("Cc", "Zs", "Zl", "Zp") for ch in text)
+        and any(ord(ch) >= 0x80 for ch in text)
+    )
 
 
 @dataclass(slots=True, frozen=True)

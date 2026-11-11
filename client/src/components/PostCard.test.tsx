@@ -4,6 +4,7 @@ import { PostCard } from './PostCard'
 import type { FeedPost } from '@/types'
 import { spaceMembers } from '@/store/spaceMembers'
 import { householdUsers } from '@/store/householdUsers'
+import { currentUser } from '@/store/auth'
 
 const openPersonSpy = vi.fn()
 vi.mock('@/components/PersonSheet', () => ({
@@ -58,6 +59,75 @@ describe('PostCard', () => {
     const edited = { ...mockPost, edited_at: new Date().toISOString() }
     const { container } = render(<PostCard post={edited} />)
     expect(container.textContent).toContain('edited')
+  })
+
+  const manyReactions = (): Record<string, string[]> => {
+    const reactions: Record<string, string[]> = {}
+    const emoji = ['😀', '😁', '😂', '🤣', '😃', '😄', '😅', '😆']
+    emoji.forEach((e, i) => { reactions[e] = Array.from({ length: i + 1 }, (_, n) => `u${n}`) })
+    return reactions
+  }
+  const chipTexts = (container: Element) => Array.from(
+    container.querySelectorAll('.sh-reaction-chip:not(.sh-reaction-more)'),
+  ).map((c) => c.textContent?.trim())
+
+  it('shows the six most used reactions and folds the rest behind +k', () => {
+    const { container } = render(<PostCard post={{ ...mockPost, reactions: manyReactions() }} />)
+    // Most used first; the two least used are folded.
+    expect(chipTexts(container)).toEqual(['😆 8', '😅 7', '😄 6', '😃 5', '🤣 4', '😂 3'])
+    const more = container.querySelector('.sh-reaction-more') as HTMLButtonElement
+    expect(more.textContent).toBe('+2')
+    expect(more.getAttribute('aria-label')).toBe('Show 2 more reactions')
+    expect(more.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('opens the fold without losing keyboard focus, and folds again', () => {
+    const { container } = render(<PostCard post={{ ...mockPost, reactions: manyReactions() }} />)
+    const toggle = () => container.querySelector('.sh-reaction-more') as HTMLButtonElement
+    const before = toggle()
+    before.focus()
+    fireEvent.click(before)
+    expect(chipTexts(container)).toHaveLength(8)
+    // The same control stays mounted and focused, now offering to fold.
+    expect(toggle()).toBe(before)
+    expect(document.activeElement).toBe(before)
+    expect(toggle().getAttribute('aria-expanded')).toBe('true')
+    expect(toggle().getAttribute('aria-label')).toBe('Show fewer reactions')
+    fireEvent.click(toggle())
+    expect(chipTexts(container)).toHaveLength(6)
+    expect(toggle().getAttribute('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(before)
+  })
+
+  it('says "1 more reaction" in the singular', () => {
+    const reactions = manyReactions()
+    delete reactions['😀']
+    const { container } = render(<PostCard post={{ ...mockPost, reactions }} />)
+    const more = container.querySelector('.sh-reaction-more') as HTMLButtonElement
+    expect(more.textContent).toBe('+1')
+    expect(more.getAttribute('aria-label')).toBe('Show 1 more reaction')
+  })
+
+  it('never folds away a reaction the viewer made', () => {
+    currentUser.value = { user_id: 'me', username: 'me', display_name: 'Me', is_admin: false } as never
+    try {
+      const reactions = { ...manyReactions(), '🙏': ['me'] }
+      const { container } = render(<PostCard post={{ ...mockPost, reactions }} />)
+      // The six most used, plus the viewer's own (the least used of all).
+      expect(chipTexts(container)).toEqual(
+        ['😆 8', '😅 7', '😄 6', '😃 5', '🤣 4', '😂 3', '🙏 1'],
+      )
+      expect(container.querySelector('.sh-reaction-more')?.textContent).toBe('+2')
+    } finally {
+      currentUser.value = null
+    }
+  })
+
+  it('shows every reaction when there are at most six', () => {
+    const reactions = { '😀': ['a'], '😁': ['a'], '😂': ['a', 'b'] }
+    const { container } = render(<PostCard post={{ ...mockPost, reactions }} />)
+    expect(container.querySelectorAll('.sh-reaction-chip')).toHaveLength(3)
+    expect(container.querySelector('.sh-reaction-more')).toBeNull()
   })
 
   it('calls onReact when an existing reaction chip is clicked', () => {

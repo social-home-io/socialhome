@@ -1253,14 +1253,14 @@ def make_check_space_writer(
     bytes, is a refusal. Tombstones are still read, so a household we
     KICKED is refused, never held.
 
-    The single exception is ``SPACE_COMMENT_CREATED`` when the space has
-    ``allow_subscriber_comment`` on AND the payload's author names a LIVE
-    ``subscriber`` seat of that same household — the author is bound to a
-    real row, so the flag cannot be used to smuggle the spoof back in. It
-    is the same admin opt-in that decides what a LOCAL subscriber may do.
-    Its sibling ``allow_subscriber_react`` has no inbound surface at all:
-    space reactions are not federated events (they ride the local row and
-    the §25.6 sync snapshot), so there is nothing here to gate.
+    The two exceptions (:data:`_SUBSCRIBER_OPT_INS`) are
+    ``SPACE_COMMENT_CREATED`` when the space has ``allow_subscriber_comment``
+    on, and (v_93) ``SPACE_POST_REACTION`` when it has
+    ``allow_subscriber_react`` on — each only when the payload's acting
+    user names a LIVE ``subscriber`` seat of that same household: the user
+    is bound to a real row, so a flag cannot be used to smuggle the spoof
+    back in. They are the same admin opt-ins that decide what a LOCAL
+    subscriber may do, and neither covers the other's event.
 
     An **unresolvable ``space_id``** (neither the routing field nor the
     payload names one) is refused. Every writer we ship sets the routing
@@ -1336,14 +1336,13 @@ def make_check_space_writer(
             )
             drop(ctx, DROP_HELD_AWAITING_SEAT)
             return
-        if (
-            event.event_type is FederationEventType.SPACE_COMMENT_CREATED
-            and await _subscriber_comment_allowed(
-                space_repo=space_repo,
-                space_id=space_id,
-                live_seats=live,
-                author_user_id=str(payload.get("author") or ""),
-            )
+        opt_in = _SUBSCRIBER_OPT_INS.get(event.event_type)
+        if opt_in is not None and await _subscriber_opt_in_allowed(
+            space_repo=space_repo,
+            space_id=space_id,
+            live_seats=live,
+            author_user_id=str(payload.get(opt_in[0]) or ""),
+            flag=opt_in[1],
         ):
             return
         log.warning(
@@ -1382,19 +1381,31 @@ async def _sender_hosts_space(
         return False
 
 
-async def _subscriber_comment_allowed(
+#: The opt-ins out of the Follower refusal: event type → (the payload field
+#: naming the acting user, the ``SpaceFeatures`` flag that admits a
+#: follower). The same admin toggles that decide what a LOCAL follower may
+#: do.
+_SUBSCRIBER_OPT_INS: dict[FederationEventType, tuple[str, str]] = {
+    FederationEventType.SPACE_COMMENT_CREATED: ("author", "allow_subscriber_comment"),
+    #: v_93 — a follower's reaction on a space post.
+    FederationEventType.SPACE_POST_REACTION: ("user_id", "allow_subscriber_react"),
+}
+
+
+async def _subscriber_opt_in_allowed(
     *,
     space_repo,
     space_id: str,
     live_seats: list,
     author_user_id: str,
+    flag: str,
 ) -> bool:
-    """The one opt-in out of the Follower refusal — see the step's docstring.
+    """An opt-in out of the Follower refusal — see the step's docstring.
 
-    Both halves are required: the space's ``allow_subscriber_comment``
-    flag, and an author bound to a LIVE ``subscriber`` seat of the sending
-    household. Without the binding the flag would re-open the author-spoof
-    hole the gate exists to close.
+    Both halves are required: the space's ``flag`` (``allow_subscriber_
+    comment`` / ``allow_subscriber_react``), and an acting user bound to a
+    LIVE ``subscriber`` seat of the sending household. Without the binding
+    the flag would re-open the author-spoof hole the gate exists to close.
     """
     if not author_user_id:
         return False
@@ -1416,7 +1427,7 @@ async def _subscriber_comment_allowed(
             exc_info=True,
         )
         return False
-    return bool(space is not None and space.features.allow_subscriber_comment)
+    return bool(space is not None and getattr(space.features, flag, False) is True)
 
 
 async def run_post_decrypt_gates(

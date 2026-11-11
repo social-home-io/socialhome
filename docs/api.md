@@ -142,6 +142,7 @@ Coded refusals (`socialhome/domain/errors.py` `CodedError` subclasses):
 | `BAZAAR_FAQ_RATE_LIMITED` | 429 | — | More than 30 changes to one listing's questions and answers in an hour |
 | `LISTING_THREAD_TEXT_ONLY` | 422 | — | A media, location or highlight-reply message in an "Ask the seller" thread |
 | `LISTING_THREAD_NO_CHANGES` | 422 | — | An edit, delete or reaction in an "Ask the seller" thread (v1) |
+| `REACTION_LIMIT` | 422 | — | A sixth reaction by one person on one space post |
 | `LISTING_THREAD_RATE_LIMITED` | 429 | — | A message in an "Ask the seller" thread over the per-person cap: 30 an hour, 100 a day in one thread |
 | `IMAGE_TOO_LARGE` | 422 | `max_mb` | `POST /api/me/picture`, `/api/spaces/{id}/members/me/picture`, `/cover`, `/icon` over the size limit |
 | `PAYLOAD_TOO_LARGE` | 413 | `max_mb` | `POST /api/gallery/albums/{id}/items`, `POST /api/backup/import` over the size limit — refused while streaming, so a chunked body (no `Content-Length`) is bounded too. `POST /api/media/upload` answers the same code without params |
@@ -467,6 +468,17 @@ Same route shapes as the household feed, prefixed by `/api/spaces/{id}/`:
 /api/spaces/{id}/posts/{pid}/reactions[/{emoji}]
 /api/spaces/{id}/posts/{pid}/comments[/{cid}]
 ```
+
+A reaction (`POST …/reactions` `{emoji}`, `DELETE …/reactions/{emoji}`) is
+shared with every member household of the space (federation v_93). The
+emoji to ADD is one emoji of 1–32 characters after trimming — no
+whitespace, not plain ASCII text (`422`) — and a person holds at most five
+reactions on one post (`422 REACTION_LIMIT`; a space post has no post-wide
+cap on distinct emoji). Removing takes any reaction of 1–32 characters after
+trimming (`422` otherwise), so one made before this rule can still be taken
+back. In an
+**archived** space neither adding nor removing one is possible (`403
+SPACE_ARCHIVED`).
 
 `GET /api/spaces/{id}/posts/{pid}/comments` needs a seat in the **path**
 space (`403` otherwise) and a `{pid}` of that space (another space's post is

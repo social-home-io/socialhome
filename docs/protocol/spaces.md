@@ -404,10 +404,13 @@ The rule, precisely:
   editing or deleting somebody else's row is a write. The classification
   is exhaustive over the enum and pinned by a test, so a new space event
   type is refused-by-default until somebody classifies it.
-- **One opt-in:** `SPACE_COMMENT_CREATED`, when the space has
-  `allow_subscriber_comment` on **and** the payload's author names a live
-  `subscriber` seat of that same household. (`allow_subscriber_react` has
-  no inbound surface — space reactions are not federated events.)
+- **Two opt-ins:** `SPACE_COMMENT_CREATED`, when the space has
+  `allow_subscriber_comment` on, and (v_93) `SPACE_POST_REACTION`, when it
+  has `allow_subscriber_react` on — each only when the payload's acting
+  user (`author` / `user_id`) names a live `subscriber` seat of that same
+  household. Neither flag covers the other's event. Reactions on space
+  posts reach every member household since v_93 — see
+  [feeds.md](./feeds.md#reactions-on-space-posts-v_93).
 - **A household the receiver holds no roster row for is not a writer** —
   except the space's **host**, the roster authority (a member stub written
   before roster mirroring may hold no row for it). Its write is **held**
@@ -485,9 +488,16 @@ other shape — every earlier row's uuid4, a row from a household that does
 not bind yet, a bot post — keeps the rules above (the legacy window; see
 the v_34 and v_36 rows in [`capabilities.md`](./capabilities.md)).
 
-A **read-only (`subscriber`) seat authors nothing**, with the one opt-in
+A **read-only (`subscriber`) seat authors nothing**, with the two opt-ins
 the Follower gate already has: a comment, when the space turned
-`allow_subscriber_comment` on. It may still change a row it already owns.
+`allow_subscriber_comment` on, and a reaction on a post (v_93), when it
+turned `allow_subscriber_react` on. It may still change a row it already
+owns.
+
+**A reaction is the reactor's own** (`SPACE_POST_REACTION`, v_93): the
+named `user_id` must hold a live seat on the sending household — a writer
+seat, or a follower seat under the opt-in above. No household reacts for
+another's member, the host included.
 
 **A re-send of an existing post is an edit**, judged like one — the
 author's household or a moderator; a bot post only a moderator — and it

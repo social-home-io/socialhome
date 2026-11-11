@@ -439,3 +439,23 @@ def test_space_media_wanted_rides_a_seat_one_household_at_a_time():
     assert t not in MULTI_EVENT_TYPES
     assert t in SPACE_READER_EVENT_TYPES
     assert t not in SPACE_WRITE_EVENT_TYPES
+
+
+# ─── v_93: SPACE_POST_REACTION ───────────────────────────────────────────
+
+
+def test_space_post_reaction_is_member_content_on_every_path():
+    """A reaction on a space post is space content: a member seated from an
+    invite link sends and takes it (seat vocabulary), identical bytes go to
+    every member household (it rides a multi frame — apply is ordered by the
+    reaction's own stamp, not by arrival), and it is a write (a follower-only
+    household's is refused unless the space opts followers in; an archived
+    space takes none — it is no ``*_DELETED`` removal)."""
+    t = FederationEventType.SPACE_POST_REACTION
+    assert t.value == "space_post_reaction"
+    assert t in SPACE_SESSION_ALLOWED_EVENT_TYPES
+    assert t not in MULTI_SEND_EXCLUDED_EVENT_TYPES
+    assert t in MULTI_EVENT_TYPES
+    assert t in SPACE_WRITE_EVENT_TYPES
+    assert t not in SPACE_READER_EVENT_TYPES
+    assert t not in ARCHIVED_ALLOWED_REMOVAL_TYPES

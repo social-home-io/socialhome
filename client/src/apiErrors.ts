@@ -95,6 +95,7 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   SUBSCRIBE_NOT_ALLOWED: () => t('error.subscribe_not_allowed'),
   SUBSCRIBER_READ_ONLY: () => t('error.subscriber_read_only'),
   SPACE_ARCHIVED: () => t('error.space_archived'),
+  REACTION_LIMIT: () => t('error.reaction_limit'),
   INVALID_LINK: () => t('error.invalid_link'),
   NOT_PAIRED: () => t('error.not_paired'),
   HOST_NOT_REACHABLE: () => t('error.host_not_reachable'),

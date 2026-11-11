@@ -157,6 +157,28 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
     ],
     FET.SPACE_POST_UPDATED: [("edit B's post", {"id": "post-b", "content": "x"})],
     FET.SPACE_POST_DELETED: [("delete B's post", {"post_id": "post-b"})],
+    FET.SPACE_POST_REACTION: [
+        (
+            "react on B's post",
+            {
+                "post_id": "post-b",
+                "user_id": "u-evil",
+                "emoji": "👍",
+                "action": "add",
+                "at": datetime.now(UTC).isoformat(),
+            },
+        ),
+        (
+            "take a reaction off B's post",
+            {
+                "post_id": "post-b",
+                "user_id": "u-b",
+                "emoji": "👍",
+                "action": "remove",
+                "at": datetime.now(UTC).isoformat(),
+            },
+        ),
+    ],
     FET.SPACE_COMMENT_CREATED: [
         (
             "comment on B's post",

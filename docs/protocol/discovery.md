@@ -2379,10 +2379,12 @@ acts on bound inside the author signature:
   (`space_posts.reaction_stamps_json`, migration `0075`; local writes stamp
   now). A duplicate `reaction_add` from a second connection server, a
   queued copy drained later, or one arriving after a restart cannot undo a
-  later remove. A removal's tombstone is kept 48 h — past the GFS's 24 h
+  later remove. A removal's tombstone is kept 30 days — past the GFS's 24 h
   queue plus retries — then dropped; a per-user cap keeps one user from
-  pushing out another's. (Space reactions are no federated event — the
-  relay is their only cross-household path. A §25.6 sync carries each
+  pushing out another's. (Since v_93 member households also get each
+  reaction as the federated `SPACE_POST_REACTION`, carrying the SAME
+  stamp — a household that gets both applies one; followers still have
+  only the relay. A §25.6 sync carries each
   post's reactions to a joiner, but never overwrites the reactions of a
   post already held, which the stamps order.) **Clock edge:** stamps come
   from the reactor's clock; if it steps backwards (an NTP correction), that

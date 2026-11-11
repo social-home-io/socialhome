@@ -613,6 +613,58 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         (AUTHOR, OTHER),
     ),
     (
+        FET.SPACE_POST_REACTION,
+        "react as u-o",
+        {
+            "post_id": "post-a",
+            "user_id": "u-o",
+            "emoji": "🎉",
+            "action": "add",
+            "at": _GAME_TS,
+        },
+        (OTHER,),
+        (AUTHOR, ADMIN, HOST, STRANGER, MOD),
+    ),
+    (
+        FET.SPACE_POST_REACTION,
+        "take back u-o's reaction",
+        {
+            "post_id": "post-a",
+            "user_id": "u-o",
+            "emoji": "👍",
+            "action": "remove",
+            "at": _GAME_TS,
+        },
+        (OTHER,),
+        (AUTHOR, ADMIN, HOST, STRANGER, MOD),
+    ),
+    (
+        FET.SPACE_POST_REACTION,
+        "react as our local user",
+        {
+            "post_id": "post-a",
+            "user_id": LOCAL_USER,
+            "emoji": "🎉",
+            "action": "add",
+            "at": _GAME_TS,
+        },
+        (),
+        (AUTHOR, OTHER, ADMIN, HOST, MOD),
+    ),
+    (
+        FET.SPACE_POST_REACTION,
+        "react as a follower",
+        {
+            "post_id": "post-a",
+            "user_id": "u-sub",
+            "emoji": "🎉",
+            "action": "add",
+            "at": _GAME_TS,
+        },
+        (),
+        (AUTHOR,),
+    ),
+    (
         FET.SPACE_COMMENT_CREATED,
         "comment as u-a",
         {

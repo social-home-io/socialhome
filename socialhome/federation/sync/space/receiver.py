@@ -69,7 +69,6 @@ from ....domain.page import Page
 from ....domain.post import (
     BAZAAR_MAX_IMAGES,
     FEED_POST_MAX_IMAGES,
-    MAX_DISTINCT_REACTIONS_PER_POST,
     BazaarBid,
     BazaarListing,
     BazaarMode,
@@ -540,7 +539,12 @@ def _synced_reaction_stamps(raw: object) -> dict[str, list]:
             continue
         user_id, sep, emoji = key.partition("\x00")
         stamp = stored_stamp(value[0])
-        if not sep or not user_id or stamp is None or not reaction_emoji_ok(emoji):
+        if (
+            not sep
+            or not user_id
+            or stamp is None
+            or not reaction_emoji_ok(emoji, legacy=True)
+        ):
             continue
         out[key] = [stamp_to_db(stamp), value[1] is True]
     return out
@@ -554,7 +558,7 @@ def _synced_reactions(raw: object) -> dict[str, list[str]] | None:
     return {
         k: [u for u in v if isinstance(u, str) and u]
         for k, v in raw.items()
-        if reaction_emoji_ok(k) and isinstance(v, list)
+        if reaction_emoji_ok(k, legacy=True) and isinstance(v, list)
     }
 
 
@@ -1537,8 +1541,10 @@ class SpaceSyncReceiver:
                     # v_92 — the host's reactions, merged last writer wins
                     # per user and emoji by their stamps: a reaction (or a
                     # removal) this household missed lands, a newer one it
-                    # holds stays; what no stamp orders any more (older
-                    # than the tombstone horizon) follows the host's sets.
+                    # holds stays. A removal travels only as a stamp: the
+                    # host's sets settle just the reactions NO stamp orders
+                    # here — one whose add we applied stays even when the
+                    # host lacks it (it may never have received it).
                     # Our own people's reactions are authored here.
                     await self._space_post_repo.merge_reaction_stamps(
                         post.id,
@@ -4129,14 +4135,12 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
 
 
 def _reactions_from_record(raw: object) -> dict[str, frozenset[str]]:
-    """The exporter's ``{emoji: [user_id, …]}``, malformed entries dropped,
-    capped at the per-post distinct-emoji maximum."""
+    """The exporter's ``{emoji: [user_id, …]}``, malformed entries dropped.
+    No post-wide emoji cap (v_93): a joiner shows what the provider shows."""
     if not isinstance(raw, dict):
         return {}
     out: dict[str, frozenset[str]] = {}
     for emoji, users in raw.items():
-        if len(out) >= MAX_DISTINCT_REACTIONS_PER_POST:
-            break
         if not isinstance(emoji, str) or not emoji or not isinstance(users, list):
             continue
         ids = frozenset(u for u in users if isinstance(u, str) and u)

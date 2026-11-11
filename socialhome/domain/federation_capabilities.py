@@ -1505,7 +1505,28 @@ from __future__ import annotations
 #:   helper at v_92: wait for the host); a v_83–v_91 relay reader still
 #:   asks its GFS. Space-
 #:   scoped. Labelled "Older space pictures arrive when you open them".
-OURS: int = 92
+#: * **v_93** (2026-11-11) — **reactions on space posts reach every member
+#:   household** (owner decision 2026-11-11). New event
+#:   ``SPACE_POST_REACTION`` ``{space_id, post_id, user_id, emoji, action,
+#:   at}``, fanned out by the reactor's household with
+#:   ``broadcast_to_space_members`` (paired, mesh, mailbox seat — it rides a
+#:   v_91 multi frame). ``at`` is the reaction's own stamp: a receiver
+#:   applies it only over an older stamp for that (post, user, emoji) — the
+#:   v_49 stamps of migration 0075 — so apply is order-independent, a
+#:   re-delivery is a no-op and a late add never brings back a removal; the
+#:   same stamp rides the v_49 ``space_item``, so a household that gets both
+#:   applies one. The reactor must hold a live writer seat on the sender, or
+#:   a follower seat there while ``allow_subscriber_react`` is on. A person
+#:   holds five reactions per post (receivers show the five newest by
+#:   stamp; no post-wide emoji cap); a sender queues only the latest toggle
+#:   per reaction. A missed one heals from the host's v_92
+#:   ``reaction_stamps``; a removal travels only as its stamp, kept 30 days
+#:   (no sync change).
+#:   **Fallback**: a member household below v_93 is skipped — it keeps
+#:   showing only its own people's reactions (plus the host's on a
+#:   catch-up). Space-scoped. Labelled "Reactions on space posts reach
+#:   every household".
+OURS: int = 93
 
 
 class FederationCapability:
@@ -2193,6 +2214,10 @@ class FederationCapability:
     #: older record shapes and no ``timetables_deleted`` (it drops those
     #: fields anyway). A ``SYNC_RECORD_LINES`` entry (92).
     MIN_FOR_SYNC_ITEM_STATE = 92
+    #: v_93 — a member household at or above it is sent, and applies,
+    #: ``SPACE_POST_REACTION`` (a reaction on a space post, added or
+    #: removed). An older one is skipped by the fan-out.
+    MIN_FOR_SPACE_POST_REACTIONS = 93
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2543,6 +2568,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
         "Older space pictures arrive when you open them",
     ),
+    (
+        FederationCapability.MIN_FOR_SPACE_POST_REACTIONS,
+        "Reactions on space posts reach every household",
+    ),
 ]
 
 
@@ -2645,6 +2674,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY: "anonymous_gfs_posting_only",
     FederationCapability.MIN_FOR_MULTI_MAILBOX: "multi_mailbox",
     FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED: "space_media_wanted",
+    FederationCapability.MIN_FOR_SPACE_POST_REACTIONS: "space_post_reactions",
 }
 
 
@@ -2766,6 +2796,9 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # that missed them when they open it (it waits for the catch-up),
         # and a behind host or helper answers no member's request.
         FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
+        # A behind member household's people see only their own household's
+        # reactions on the space's posts, and nobody else sees theirs.
+        FederationCapability.MIN_FOR_SPACE_POST_REACTIONS,
     }
 )
 

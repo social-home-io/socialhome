@@ -12293,6 +12293,16 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_92 SPACE_MEDIA_WANTED gate in place ✓")
+    # v_93 — SPACE_POST_REACTION: the fan-out skips a member household below
+    # v_93, so the OURS round-trip above is what proves every pair is sent
+    # it; ``space-reaction`` proves the reactions converge on the real wire.
+    if int(_Cap.MIN_FOR_SPACE_POST_REACTIONS) != 93 or _OURS < 93:
+        failures.append(
+            "MIN_FOR_SPACE_POST_REACTIONS moved off v_93 (or OURS fell below "
+            "it) — reactions on space posts would stay in their household"
+        )
+    else:
+        print("  v_93 SPACE_POST_REACTION gate in place ✓")
     # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
     # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
     # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key
@@ -18274,6 +18284,93 @@ def cmd_space_chat() -> None:
     print("space-chat: ok")
 
 
+def cmd_space_reaction() -> None:
+    """Reactions on a space post reach every member household (v_93).
+
+    Prereqs: ``traffic`` + ``calendar`` (Beta's private space — Beta the
+    owner, Alpha and Gamma remote members). Runs standalone after them.
+
+    1. a posts in the space; b and c hold the post.
+    2. **Add.** a reacts 👍 and c reacts 🎉; a, b and c all show
+       ``{👍: [a's user], 🎉: [c's user]}`` (``SPACE_POST_REACTION``).
+    3. **Remove.** a takes its 👍 back; a, b and c all show only c's 🎉.
+    4. **v_93.** ``OURS`` is at least ``MIN_FOR_SPACE_POST_REACTIONS``.
+    """
+    from socialhome.domain.federation_capabilities import (
+        OURS as _OURS,
+        FederationCapability as _Cap,
+    )
+
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    space_id = state.get("space_id")
+    if not space_id:
+        raise SystemExit("run 'traffic' and 'calendar' first — needs Beta's space")
+    inst = state["instances"]
+    a, c = inst["a"], inst["c"]
+    step = "space-reaction"
+    posts = f"/api/spaces/{space_id}/posts"
+
+    def base(info: dict) -> str:
+        return f"http://127.0.0.1:{info['port']}"
+
+    s, post = _request(
+        base(a) + posts,
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": f"react to me {secrets.token_hex(3)}"},
+    )
+    post_id = _must(f"{step}: a posts", s, post, ok=(201,))["id"]
+    for label in ("b", "c"):
+        _await_space_post(state, label, space_id, post_id)
+
+    def shown(label: str) -> dict:
+        s, body = _request(
+            f"{base(inst[label])}/api/spaces/{space_id}/feed",
+            token=inst[label]["token"],
+        )
+        feed = body if isinstance(body, list) else ((body or {}).get("posts") or [])
+        seen = next((p for p in feed if p.get("id") == post_id), None) if s == 200 else None
+        return {k: sorted(v) for k, v in ((seen or {}).get("reactions") or {}).items()}
+
+    def converge(what: str, want: dict) -> None:
+        deadline = time.time() + 45.0
+        got: dict = {}
+        while time.time() < deadline:
+            got = {label: shown(label) for label in ("a", "b", "c")}
+            if all(v == want for v in got.values()):
+                print(f"  {what}: a, b and c all show {want} ✓")
+                return
+            time.sleep(1.0)
+        raise SystemExit(f"{step}: {what} — wanted {want!r} everywhere, got {got!r}")
+
+    for info, emoji, label in ((a, "👍", "a"), (c, "🎉", "c")):
+        s, body = _request(
+            f"{base(info)}{posts}/{post_id}/reactions",
+            token=info["token"],
+            method="POST",
+            body={"emoji": emoji},
+        )
+        _must(f"{step}: {label} reacts {emoji}", s, body, ok=(201,))
+    converge("add", {"👍": [a["user_id"]], "🎉": [c["user_id"]]})
+
+    s, body = _request(
+        f"{base(a)}{posts}/{post_id}/reactions/{urllib.parse.quote('👍')}",
+        token=a["token"],
+        method="DELETE",
+    )
+    _must(f"{step}: a takes its reaction back", s, body, ok=(200, 204))
+    converge("remove", {"🎉": [c["user_id"]]})
+
+    if _OURS < _Cap.MIN_FOR_SPACE_POST_REACTIONS:
+        raise SystemExit(
+            f"{step}: OURS={_OURS} < MIN_FOR_SPACE_POST_REACTIONS="
+            f"{_Cap.MIN_FOR_SPACE_POST_REACTIONS}"
+        )
+    print(f"{step}: ok")
+
+
 def cmd_bazaar_ask() -> None:
     """"Ask the seller" from the listing (v_74).
 
@@ -23463,6 +23560,10 @@ def main() -> None:
         # d holds nothing. Late in the chain: it seats d as a follower in
         # the space the earlier steps assert member counts on.
         cmd_space_chat()
+        # ``space-reaction`` (v_93): in the same space a and c react to a
+        # post of a's and a takes its reaction back — a, b and c show the
+        # same reactions after each change.
+        cmd_space_reaction()
         # ``bazaar-ask`` (v_74): in the same space b turns the Bazaar on, c
         # lists a lamp, a (paired with c) asks and lands in the normal DM,
         # d (follower) is refused; a, b, c see each other at >= v_74.

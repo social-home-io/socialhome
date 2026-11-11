@@ -100,6 +100,15 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe('This household is already paired with you.')
   })
 
+  it('says how many reactions a person can leave on a post', async () => {
+    const refused = { code: 'REACTION_LIMIT', detail: 'Too many reactions: you can leave up to five on a post.' }
+    expect(apiErrorMessage(422, '/api/spaces/s/posts/p/reactions', refused))
+      .toBe('You can leave up to five reactions on a post. Remove one to add another.')
+    await setLocale('de')
+    expect(apiErrorMessage(422, '/api/spaces/s/posts/p/reactions', refused))
+      .toBe('Du kannst bis zu fünf Reaktionen pro Beitrag hinterlassen. Entferne eine, um eine andere hinzuzufügen.')
+  })
+
   it('translates an expired trust-relay pairing request', () => {
     expect(apiErrorMessage(410, '/api/pairing/auto-pair-requests/r1/approve', {
       code: 'REQUEST_EXPIRED',

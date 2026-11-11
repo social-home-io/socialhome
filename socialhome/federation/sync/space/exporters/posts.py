@@ -30,7 +30,8 @@ if TYPE_CHECKING:
     from .....repositories.space_post_repo import AbstractSpacePostRepo
 
 
-#: The most reaction stamps one ``posts`` record carries, newest first
+#: The most reaction stamps one ``posts`` record carries — removals before
+#: adds, each newest first
 #: (~85 B each: ≤ ~90 KB, ≤ ~210 KB with every emoji at its 32-char cap).
 MAX_SYNCED_REACTION_STAMPS: int = 1024
 
@@ -135,8 +136,13 @@ def _post_to_dict(post) -> dict[str, Any]:
 
 
 def _newest_stamps(stamps: dict[str, list]) -> dict[str, list]:
-    """The newest :data:`MAX_SYNCED_REACTION_STAMPS` of a post's stamps."""
+    """At most :data:`MAX_SYNCED_REACTION_STAMPS` of a post's stamps:
+    removals first, then adds, each newest first. A removal travels only
+    as its stamp (v_93), while an add left out still shows in the record's
+    reaction sets."""
     if len(stamps) <= MAX_SYNCED_REACTION_STAMPS:
         return stamps
-    newest = sorted(stamps, key=lambda k: (stamps[k][0], k), reverse=True)
-    return {k: stamps[k] for k in newest[:MAX_SYNCED_REACTION_STAMPS]}
+    order = sorted(
+        stamps, key=lambda k: (not stamps[k][1], stamps[k][0], k), reverse=True
+    )
+    return {k: stamps[k] for k in order[:MAX_SYNCED_REACTION_STAMPS]}
