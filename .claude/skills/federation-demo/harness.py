@@ -170,6 +170,10 @@ _OFFLINE_PEER_NOISE: tuple[str, ...] = (
     # between ``is_ready`` and the write, and the frame fell back to HTTPS
     # ("fed RTC send to <iid> failed: cannot send on a closed channel").
     "failed: cannot send on a closed channel",
+    # A space picture's chunk pushed to a household that is down (e.g.
+    # ``members-parity``: d posts a picture while host a is stopped) — the
+    # route is in cooldown; the household gets it after it is back.
+    "space-media-sync: chunk ",
 )
 
 #: libdatachannel / libjuice status lines while a peer's process dies, or
