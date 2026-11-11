@@ -256,38 +256,38 @@ async def two_spaces(env):
     return env
 
 
-async def test_cast_vote_in_space_replaces_the_previous_vote(two_spaces):
+async def test_set_votes_in_space_replaces_the_previous_vote(two_spaces):
     env = two_spaces
     await env.repo.insert_vote(option_id="o-a", voter_user_id="u-x")
-    assert await env.repo.cast_vote_in_space(
-        space_id="sp-1", post_id="post-1", option_id="o-a", voter_user_id="u-x"
+    assert await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="post-1", option_ids=["o-a"], voter_user_id="u-x"
     )
     assert await env.repo.list_user_votes("post-1", "u-x") == ["o-a"]
 
 
-async def test_cast_vote_in_space_refuses_a_poll_of_another_space(two_spaces):
+async def test_set_votes_in_space_refuses_a_poll_of_another_space(two_spaces):
     env = two_spaces
-    assert not await env.repo.cast_vote_in_space(
-        space_id="sp-1", post_id="post-2", option_id="o-b", voter_user_id="u-evil"
+    assert not await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="post-2", option_ids=["o-b"], voter_user_id="u-evil"
     )
     # sp-2's tally is untouched and the evil vote never landed.
     assert await env.repo.list_user_votes("post-2", "u-evil") == []
     assert await env.repo.list_user_votes("post-2", "u-b") == ["o-b"]
 
 
-async def test_cast_vote_in_space_refuses_an_option_of_another_post(two_spaces):
+async def test_set_votes_in_space_refuses_an_option_of_another_post(two_spaces):
     env = two_spaces
-    assert not await env.repo.cast_vote_in_space(
-        space_id="sp-1", post_id="post-1", option_id="o-b", voter_user_id="u-x"
+    assert not await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="post-1", option_ids=["o-b"], voter_user_id="u-x"
     )
     assert await env.repo.list_user_votes("post-2", "u-x") == []
 
 
-async def test_cast_vote_in_space_refusal_keeps_the_existing_vote(two_spaces):
+async def test_set_votes_in_space_refusal_keeps_the_existing_vote(two_spaces):
     """A refused vote must not have cleared the voter's standing vote."""
     env = two_spaces
-    assert not await env.repo.cast_vote_in_space(
-        space_id="sp-1", post_id="post-2", option_id="o-b", voter_user_id="u-b"
+    assert not await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="post-2", option_ids=["o-b"], voter_user_id="u-b"
     )
     assert await env.repo.list_user_votes("post-2", "u-b") == ["o-b"]
 
@@ -552,19 +552,19 @@ async def test_apply_synced_poll_refuses_another_spaces_post(env):
 
 async def test_apply_synced_poll_keeps_our_peoples_votes_and_older_hosts_votes(env):
     await _sync_poll(env, votes=[])
-    await env.repo.cast_vote_in_space(
-        space_id="sp-1", post_id="post-1", option_id="o-y", voter_user_id="u-ours"
+    await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="post-1", option_ids=["o-y"], voter_user_id="u-ours"
     )
-    await env.repo.cast_vote_in_space(
-        space_id="sp-1", post_id="post-1", option_id="o-n", voter_user_id="u-c"
+    await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="post-1", option_ids=["o-n"], voter_user_id="u-c"
     )
     await _sync_poll(env, votes=[], keep={"u-ours"})
     assert await env.repo.list_votes("post-1") == [
         {"option_id": "o-y", "voter_user_id": "u-ours"}
     ]
     # An older host sends no votes: the held ones stay.
-    await env.repo.cast_vote_in_space(
-        space_id="sp-1", post_id="post-1", option_id="o-n", voter_user_id="u-c"
+    await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="post-1", option_ids=["o-n"], voter_user_id="u-c"
     )
     await _sync_poll(env, votes=None)
     assert len(await env.repo.list_votes("post-1")) == 2
@@ -729,8 +729,8 @@ async def test_list_schedule_answers_newest_first_with_a_limit(env):
 async def test_list_votes_with_a_limit_puts_recent_voters_first(env):
     await _sync_poll(env, votes=[])
     for voter in ("u-a", "u-b"):
-        await env.repo.cast_vote_in_space(
-            space_id="sp-1", post_id="post-1", option_id="o-y", voter_user_id=voter
+        await env.repo.set_votes_in_space(
+            space_id="sp-1", post_id="post-1", option_ids=["o-y"], voter_user_id=voter
         )
     await env.db.enqueue(
         "UPDATE space_poll_votes SET voted_at='2026-01-01 00:00:00'"

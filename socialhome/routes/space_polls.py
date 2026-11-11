@@ -16,7 +16,12 @@ from __future__ import annotations
 from aiohttp import web
 
 from ..app_keys import space_poll_service_key, space_repo_key, space_service_key
-from ..domain.space import AccessDecision, ContentAction, SpacePermissionError
+from ..domain.space import (
+    AccessDecision,
+    ContentAction,
+    SpacePermissionError,
+    SpaceRole,
+)
 from ..security import error_response
 from .base import BaseView
 
@@ -82,13 +87,16 @@ class SpacePollSummaryView(_SpacePollBase):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         post_id = self.match("pid")
         svc = self.svc(space_poll_service_key)
-        return web.json_response(
-            await svc.summary(
-                post_id,
-                voter_user_id=ctx.user_id,
-                space_id=space_id,
-            ),
+        summary = await svc.summary(
+            post_id,
+            voter_user_id=ctx.user_id,
+            space_id=space_id,
         )
+        # A follower reads the poll but does not vote: the SPA shows the
+        # options as results only.
+        member = await self.svc(space_repo_key).get_member(space_id, ctx.user_id)
+        summary["can_vote"] = member is not None and member.role != SpaceRole.SUBSCRIBER
+        return web.json_response(summary)
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -102,6 +110,7 @@ class SpacePollSummaryView(_SpacePollBase):
         try:
             summary = await svc.create_poll(
                 post_id=post_id,
+                actor_user_id=ctx.user_id,
                 question=str(body.get("question") or ""),
                 options=list(body.get("options") or []),
                 allow_multiple=bool(body.get("allow_multiple", False)),

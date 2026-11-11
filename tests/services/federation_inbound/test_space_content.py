@@ -2335,6 +2335,8 @@ async def test_poll_created_for_a_held_poll_changes_nothing(repos, handlers, bus
         # Ids of another post: a poll only ever carries its own post's.
         {"options": _opts("p-other")},
         {"closes_at": 5},
+        {"closes_at": "soon"},
+        {"closes_at": "2030-01-01T00:00:00+00:00".ljust(41)},
         {"allow_multiple": 1},
     ],
 )
@@ -2343,6 +2345,30 @@ async def test_poll_created_without_a_usable_definition_drops(repos, handlers, o
     repos["poll"].no_poll.add("p-new")
     await handlers._on_poll_created(_poll_created(**over))
     assert repos["poll"].created == []
+
+
+@pytest.mark.parametrize(
+    ("handler", "payload"),
+    [
+        ("_on_poll_created", {"question": "q", "options": _opts("p-bot")}),
+        ("_on_schedule_created", {"title": "t", "slots": [{"id": "s"}]}),
+    ],
+)
+async def test_nobody_hangs_a_poll_on_a_bot_post(repos, handlers, handler, payload):
+    """``may_author`` admits the system author from any household (a bot's
+    post is relayed by anyone) — so a system post takes no poll at all."""
+    repos["poll"].no_poll.add("p-bot")
+    repos["post"].author["p-bot"] = SYSTEM_AUTHOR
+    await getattr(handlers, handler)(
+        _event(
+            FederationEventType.SPACE_POLL_CREATED,
+            {"post_id": "p-bot", **payload},
+            space_id="sp-1",
+        )
+    )
+    assert repos["poll"].created == [] and repos["poll"].scheduled == []
+    assert "p-bot" in repos["auth"].refusals
+    assert ("may_author", "sp-1", SYSTEM_AUTHOR) not in repos["auth"].calls
 
 
 async def test_poll_created_cross_space_is_refused(repos, handlers, caplog):

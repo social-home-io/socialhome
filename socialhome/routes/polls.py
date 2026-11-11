@@ -94,6 +94,7 @@ class PollSummaryView(BaseView):
         try:
             summary = await svc.create_poll(
                 post_id=post_id,
+                actor_user_id=ctx.user_id,
                 question=str(body.get("question") or ""),
                 options=list(body.get("options") or []),
                 allow_multiple=bool(body.get("allow_multiple", False)),

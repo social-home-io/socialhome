@@ -369,8 +369,14 @@ def poll_deadline_passed(closes_at: str | None, now: datetime) -> bool:
 #: Caps on a reply poll (the composer's own limits; receivers enforce them).
 MAX_POLL_OPTIONS = 20
 MAX_POLL_TEXT = 500
-#: An option id is a uuid4 hex; anything longer is not one of ours.
+#: An option id is 32 characters (:func:`poll_option_id`; a uuid4 hex on a
+#: poll made before ids were post-bound); anything much longer is not ours.
 MAX_POLL_OPTION_ID = 64
+#: What a post-bound option id starts with. Never the start of a uuid4 hex,
+#: so an id of this shape can be told from an older poll's and checked.
+POLL_OPTION_ID_PREFIX = "po"
+#: The longest ``closes_at`` (an ISO 8601 stamp) a peer may send.
+MAX_POLL_CLOSES_AT = 40
 
 
 def poll_option_id(post_id: str, index: int) -> str:
@@ -379,9 +385,10 @@ def poll_option_id(post_id: str, index: int) -> str:
     Derived from the post, so every household can check it: a poll's
     options can only carry the ids of ITS post, and no other poll (on any
     post, in any space) can claim them first — ``space_poll_options.id`` is
-    one key space per household."""
+    one key space per household. :data:`POLL_OPTION_ID_PREFIX` + 30 hex
+    characters of ``SHA-256("poll-option\\0" + post_id + "\\0" + index)``."""
     digest = hashlib.sha256(f"poll-option\0{post_id}\0{index}".encode())
-    return digest.hexdigest()[:32]
+    return POLL_OPTION_ID_PREFIX + digest.hexdigest()[:30]
 
 
 def poll_to_wire_dict(
@@ -412,8 +419,11 @@ def poll_options_from_wire(
     """The ``{id, text}`` options of a received poll definition, in order —
     ``None`` unless they are a well-formed poll's: 2 to
     :data:`MAX_POLL_OPTIONS` options, distinct ids, bounded non-empty text.
-    With ``post_id`` each id must also be that post's
-    (:func:`poll_option_id`) — the live create's rule."""
+    With ``post_id`` (the live create's rule) an id of the post-bound shape
+    (:data:`POLL_OPTION_ID_PREFIX`) must be that post's own
+    (:func:`poll_option_id`), in order. Any other id is one of a poll made
+    before ids were post-bound (a uuid4 hex) and is taken as stored — the
+    caller has bound the definition to the post's author's household."""
     if not isinstance(raw, list) or not 2 <= len(raw) <= MAX_POLL_OPTIONS:
         return None
     out: list[dict[str, str]] = []
@@ -432,10 +442,27 @@ def poll_options_from_wire(
     if len({o["id"] for o in out}) != len(out):
         return None
     if post_id is not None and any(
-        o["id"] != poll_option_id(post_id, i) for i, o in enumerate(out)
+        o["id"].startswith(POLL_OPTION_ID_PREFIX)
+        and o["id"] != poll_option_id(post_id, i)
+        for i, o in enumerate(out)
     ):
         return None
     return out
+
+
+def poll_closes_at_from_wire(raw: object) -> tuple[bool, str | None]:
+    """``(ok, closes_at)`` for a received poll's deadline: absent / ``None``
+    is no deadline; otherwise a bounded, parseable ISO 8601 stamp (the
+    string is kept as sent — every household reads it the same way)."""
+    if raw is None:
+        return True, None
+    if not isinstance(raw, str) or not 0 < len(raw) <= MAX_POLL_CLOSES_AT:
+        return False, None
+    try:
+        datetime.fromisoformat(raw)
+    except ValueError:
+        return False, None
+    return True, raw
 
 
 @dataclass(slots=True, frozen=True)

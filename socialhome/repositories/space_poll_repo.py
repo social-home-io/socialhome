@@ -50,14 +50,6 @@ _SLOT_IN_SPACE = """
 class AbstractSpacePollRepo(AbstractPollRepo, Protocol):
     """Poll repo + the space-scoped writes federation inbound uses."""
 
-    async def cast_vote_in_space(
-        self,
-        *,
-        space_id: str,
-        post_id: str,
-        option_id: str,
-        voter_user_id: str,
-    ) -> bool: ...
     async def set_votes_in_space(
         self,
         *,
@@ -560,23 +552,6 @@ class SqliteSpacePollRepo:
         )
 
     # ── space-scoped writes (federation inbound, §24.11) ───────────────
-
-    async def cast_vote_in_space(
-        self,
-        *,
-        space_id: str,
-        post_id: str,
-        option_id: str,
-        voter_user_id: str,
-    ) -> bool:
-        """Replace ``voter_user_id``'s vote on ``post_id`` with ``option_id``
-        — :meth:`set_votes_in_space` with one option."""
-        return await self.set_votes_in_space(
-            space_id=space_id,
-            post_id=post_id,
-            option_ids=[option_id],
-            voter_user_id=voter_user_id,
-        )
 
     async def set_votes_in_space(
         self,

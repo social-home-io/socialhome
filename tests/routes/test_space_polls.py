@@ -510,7 +510,9 @@ async def test_a_follower_reads_a_space_poll_but_cannot_vote(client):
     url = "/api/spaces/sp-polls/posts/sp-post-1/poll"
     r = await client.get(url, headers=_auth(client._tok))
     assert r.status == 200
-    assert [o["text"] for o in (await r.json())["options"]] == ["Yes", "No"]
+    data = await r.json()
+    assert [o["text"] for o in data["options"]] == ["Yes", "No"]
+    assert data["can_vote"] is False
     r = await client.post(
         f"{url}/vote", json={"option_id": "opt-y"}, headers=_auth(client._tok)
     )
@@ -519,3 +521,40 @@ async def test_a_follower_reads_a_space_poll_but_cannot_vote(client):
     assert r.status == 403
     r = await client.get(url, headers=_auth(client._tok))
     assert (await r.json())["total_votes"] == 0
+
+
+async def test_space_poll_cannot_be_replaced_or_added_by_someone_else(client):
+    """``POST …/poll`` on a post that has a poll is 409 ``POLL_EXISTS`` (a
+    poll is never edited), and only the post's author adds one (403)."""
+    await _seed_space(client)
+    await _seed_poll(client)
+    url = "/api/spaces/sp-polls/posts/sp-post-1/poll"
+    body = {"question": "Rewritten?", "options": ["Never", "Always"]}
+    r = await client.post(url, json=body, headers=_auth(client._tok))
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "POLL_EXISTS"
+    r = await client.get(url, headers=_auth(client._tok))
+    data = await r.json()
+    assert data["question"] == "Pizza?" and data["can_vote"] is True
+    assert [o["text"] for o in data["options"]] == ["Yes", "No"]
+    await _seed_post(client, post_id="sp-post-2", author="uid-someone-else")
+    r = await client.post(
+        "/api/spaces/sp-polls/posts/sp-post-2/poll",
+        json=body,
+        headers=_auth(client._tok),
+    )
+    assert r.status == 403
+    r = await client.get(
+        "/api/spaces/sp-polls/posts/sp-post-2/poll", headers=_auth(client._tok)
+    )
+    assert r.status == 404
+
+
+async def test_space_poll_retract_after_close_returns_409(client):
+    await _seed_space(client)
+    await _seed_poll(client, closed=True)
+    r = await client.delete(
+        "/api/spaces/sp-polls/posts/sp-post-1/poll/vote", headers=_auth(client._tok)
+    )
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "POLL_CLOSED"

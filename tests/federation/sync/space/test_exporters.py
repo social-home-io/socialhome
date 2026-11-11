@@ -1029,8 +1029,8 @@ async def test_covered_exporters_stream_only_rows_changed_since_a_stamp(db):
     mark = await _seq(db)
 
     await posts.edit("p-edit", "edited", space_id="sp")
-    assert await polls.cast_vote_in_space(
-        space_id="sp", post_id="p-vote", option_id="o-1", voter_user_id="u2"
+    assert await polls.set_votes_in_space(
+        space_id="sp", post_id="p-vote", option_ids=["o-1"], voter_user_id="u2"
     )
     await posts.soft_delete("p-gone", space_id="sp")
     await posts.soft_delete_comment("k-gone", space_id="sp")

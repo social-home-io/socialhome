@@ -101,6 +101,7 @@ from ...domain.post import (
     BazaarOffer,
     BazaarStatus,
     Post,
+    poll_closes_at_from_wire,
     poll_deadline_passed,
     poll_options_from_wire,
 )
@@ -2017,13 +2018,13 @@ class SpaceContentInboundHandlers:
         question = str(p.get("question") or "").strip()
         # Option ids are bound to the post: no other poll can hold them.
         options = poll_options_from_wire(p.get("options"), post_id=post_id)
-        closes_at = p.get("closes_at")
+        closes_ok, closes_at = poll_closes_at_from_wire(p.get("closes_at") or None)
         allow_multiple = p.get("allow_multiple", False)
         if (
             not post_id
             or not 0 < len(question) <= MAX_POLL_TEXT
             or options is None
-            or not (closes_at is None or isinstance(closes_at, str))
+            or not closes_ok
             or not isinstance(allow_multiple, bool)
         ):
             # An older sender's event carried no options: nothing to keep.
@@ -2040,6 +2041,8 @@ class SpaceContentInboundHandlers:
         # creates it (or the host, releasing a reviewed post).
         anchor = await self._post_in_space(event, space_id, post_id, what="poll")
         if anchor is None:
+            return
+        if self._system_post_refused(event, space_id, anchor, what="poll"):
             return
         if not await self._authorship.may_author(event, space_id, anchor.author):
             await self._authorship.hold_or_refuse(
@@ -2066,7 +2069,7 @@ class SpaceContentInboundHandlers:
             space_id=space_id,
             post_id=post_id,
             question=question,
-            closes_at=closes_at or None,
+            closes_at=closes_at,
             allow_multiple=allow_multiple,
             options=options,
         )
@@ -2092,7 +2095,7 @@ class SpaceContentInboundHandlers:
                 allow_multiple=allow_multiple,
                 space_id=space_id,
                 options=tuple(options),
-                closes_at=closes_at or None,
+                closes_at=closes_at,
                 origin_instance_id=event.from_instance,
             )
         )
@@ -2110,7 +2113,7 @@ class SpaceContentInboundHandlers:
         p = event.payload
         post_id = str(p.get("post_id") or "")
         raw = p.get("option_ids")
-        voter = str(p.get("voter_user_id") or p.get("user_id") or "")
+        voter = str(p.get("voter_user_id") or "")
         if (
             not post_id
             or not voter
@@ -2227,6 +2230,8 @@ class SpaceContentInboundHandlers:
             event, space_id, post_id, what="schedule poll"
         )
         if anchor is None:
+            return
+        if self._system_post_refused(event, space_id, anchor, what="schedule poll"):
             return
         if not await self._authorship.may_author(event, space_id, anchor.author):
             await self._authorship.hold_or_refuse(
@@ -4210,6 +4215,20 @@ class SpaceContentInboundHandlers:
             log_cross_space_refusal(event, space_id=space_id, what=what, row_id=post_id)
             return None
         return post
+
+    def _system_post_refused(
+        self, event: FederationEvent, space_id: str, anchor: Post, *, what: str
+    ) -> bool:
+        """A poll / schedule poll belongs to a PERSON's post. A system (bot)
+        post has no author's household: ``may_author`` admits the system
+        author from any sender (any household may relay a bot's post), so
+        without this any member household could hang a poll on a bot post."""
+        if anchor.author != SYSTEM_AUTHOR:
+            return False
+        self._authorship.log_refusal(
+            event, space_id=space_id, what=what, row_id=anchor.id, user_id=anchor.author
+        )
+        return True
 
     async def _post_owner_acts(
         self,

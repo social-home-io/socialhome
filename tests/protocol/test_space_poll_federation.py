@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -30,7 +31,8 @@ from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import SpacePostCreated
 from socialhome.domain.federation import FederationEventType
-from socialhome.domain.post import poll_option_id
+from socialhome.domain.post import poll_option_id, poll_to_wire_dict
+from socialhome.domain.user import SYSTEM_AUTHOR
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.pending_parent_buffer import PendingParentBuffer
 from socialhome.federation.space_authorship import SpaceAuthorship
@@ -54,7 +56,11 @@ from socialhome.services.federation_inbound.space_content import (
     SpaceContentInboundHandlers,
 )
 from socialhome.services.poll_federation_outbound import PollFederationOutbound
-from socialhome.services.poll_service import PollNotFoundError, PollService
+from socialhome.services.poll_service import (
+    PollClosedError,
+    PollNotFoundError,
+    PollService,
+)
 from tests.protocol.test_bazaar_offer_federation import (
     _LoopbackInbox,
     _no_signal,
@@ -238,6 +244,7 @@ async def world(tmp_path):
 async def _make_poll(h, *, allow_multiple: bool = False, post_id: str = POST) -> dict:
     return await h.polls.create_poll(
         post_id=post_id,
+        actor_user_id="u-anna",
         question=QUESTION,
         options=OPTIONS,
         allow_multiple=allow_multiple,
@@ -487,18 +494,15 @@ def _bad_definitions() -> list[tuple[str, dict]]:
         ("not an object", {"options": [good[0], "b"]}),
         ("same id twice", {"options": [good[0], {**good[0], "text": "b"}]}),
         ("too many", {"options": [{"id": f"x{i}", "text": "a"} for i in range(21)]}),
-        # Option ids are bound to the post: random ids, another post's ids
-        # and a shuffled list are not this poll's.
-        (
-            "free ids",
-            {"options": [{"id": "x1", "text": "a"}, {"id": "x2", "text": "b"}]},
-        ),
+        # Post-bound option ids must be this post's, in order.
         ("another post's ids", {"options": _definition("post-other")["options"]}),
         ("out of order", {"options": [good[1], good[0]]}),
         ("skipped position", {"options": [good[0], third]}),
         ("no question", {"question": " "}),
         ("long question", {"question": "q" * 501}),
         ("deadline not a string", {"closes_at": 5}),
+        ("deadline unreadable", {"closes_at": "next friday"}),
+        ("deadline too long", {"closes_at": "2030-01-01T00:00:00+00:00" + " " * 40}),
         ("flag not a bool", {"allow_multiple": "yes"}),
     ]
 
@@ -657,3 +661,83 @@ async def test_deleting_the_post_drops_the_poll_and_refuses_a_new_one(world):
         },
     )
     assert await _tally(b) is None
+
+
+async def test_nobody_puts_a_poll_on_a_bot_post(world):
+    """A system (bot) post has no author's household — any household may
+    relay one — so no household may hang a poll on it."""
+    a, b, c = world.a, world.b, world.c
+    for h in (a, b, c):
+        await h.db.enqueue(
+            "INSERT INTO space_posts(id, space_id, author, type, content)"
+            " VALUES('post-bot', ?, ?, 'text', 'Reminder')",
+            (SP, SYSTEM_AUTHOR),
+        )
+    for sender in (b, a):
+        await _send(sender, c, FET.SPACE_POLL_CREATED, _definition("post-bot"))
+        assert await _tally(c, "post-bot") is None, sender.name
+    assert len(c.pending) == 0
+
+
+async def test_a_poll_made_before_ids_were_post_bound_arrives_and_is_votable(world):
+    """bob's poll predates this change: random (uuid) option ids, held on
+    his household only. His household replays it (``SPACE_SYNC_RESUME``
+    ships the stored ids); cara's takes it as stored — the definition is
+    bound to the post's author's household, not to the id shape — and her
+    vote counts on both."""
+    b, c = world.b, world.c
+    for h in (b, c):
+        await h.db.enqueue(
+            "INSERT INTO space_posts(id, space_id, author, type, content)"
+            " VALUES('post-bob', ?, 'u-bob', 'poll', '')",
+            (SP,),
+        )
+    legacy = [
+        {"id": uuid.uuid4().hex, "text": "Tea", "position": 0},
+        {"id": uuid.uuid4().hex, "text": "Coffee", "position": 1},
+    ]
+    await b.poll_repo.create_poll(
+        post_id="post-bob",
+        question="Drinks?",
+        closes_at=None,
+        allow_multiple=False,
+        options=legacy,
+    )
+    await _send(
+        b,
+        c,
+        FET.SPACE_POLL_CREATED,
+        poll_to_wire_dict(
+            post_id="post-bob",
+            space_id=SP,
+            question="Drinks?",
+            options=legacy,
+            allow_multiple=False,
+            closes_at=None,
+        ),
+    )
+    got = await c.polls.summary("post-bob", space_id=SP)
+    assert [o["id"] for o in got["options"]] == [o["id"] for o in legacy]
+    await c.polls.cast_vote(
+        post_id="post-bob",
+        option_id=legacy[1]["id"],
+        voter_user_id="u-cara",
+        space_id=SP,
+    )
+    want = {"Tea": 0, "Coffee": 1}
+    assert await _tally(b, "post-bob") == await _tally(c, "post-bob") == want
+
+
+async def test_a_retraction_after_the_close_is_refused_at_home_too(world):
+    a, b = world.a, world.b
+    made = await _make_poll(a)
+    await b.polls.cast_vote(
+        post_id=POST,
+        option_id=_option(made, OPTIONS[0]),
+        voter_user_id="u-bob",
+        space_id=SP,
+    )
+    await a.polls.close_poll(post_id=POST, actor_user_id="u-anna", space_id=SP)
+    with pytest.raises(PollClosedError):
+        await b.polls.retract_vote(post_id=POST, voter_user_id="u-bob", space_id=SP)
+    assert await _tally(a) == await _tally(b)
