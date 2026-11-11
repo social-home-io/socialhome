@@ -474,8 +474,9 @@ shared with every member household of the space (federation v_93). The
 emoji to ADD is one emoji of 1–32 characters after trimming — no
 whitespace, not plain ASCII text (`422`) — and a person holds at most five
 reactions on one post (`422 REACTION_LIMIT`; a space post has no post-wide
-cap on distinct emoji). Removing takes any reaction of up to 32 characters,
-so one made before this rule can still be taken back. In an
+cap on distinct emoji). Removing takes any reaction of 1–32 characters after
+trimming (`422` otherwise), so one made before this rule can still be taken
+back. In an
 **archived** space neither adding nor removing one is possible (`403
 SPACE_ARCHIVED`).
 

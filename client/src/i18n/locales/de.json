@@ -5111,6 +5111,8 @@
   "post.deleted": "Dieser Beitrag wurde gelöscht",
   "post.add_reaction": "Reaktion hinzufügen",
   "post.more_reactions": "{n} weitere Reaktionen anzeigen",
+  "post.more_reactions_one": "{n} weitere Reaktion anzeigen",
+  "post.fewer_reactions": "Weniger Reaktionen anzeigen",
   "post.comment": "Kommentieren",
   "post.comment_aria": "Diesen Beitrag kommentieren",
   "post.comments": "{n} Kommentare",

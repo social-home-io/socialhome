@@ -5111,6 +5111,8 @@
   "post.deleted": "Cette publication a été supprimée",
   "post.add_reaction": "Ajouter une réaction",
   "post.more_reactions": "Afficher {n} réactions de plus",
+  "post.more_reactions_one": "Afficher {n} réaction de plus",
+  "post.fewer_reactions": "Afficher moins de réactions",
   "post.comment": "Commenter",
   "post.comment_aria": "Commenter cette publication",
   "post.comments": "{n} commentaires",

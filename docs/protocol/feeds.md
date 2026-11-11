@@ -130,10 +130,13 @@ after the §24.11 pipeline:
   lost), so a reaction whose add a household applied stays until a removal
   stamp arrives. Removal stamps live 30 days — the reach of a catch-up —
   and a `posts` record carries removals before adds when it must cut
-  its stamp list (1024). **Known limit:** a household that misses a
-  removal for more than 30 days (offline that long, the queued event
-  gone), or on a post holding more than 1024 removal stamps, keeps that
-  reaction. Dropping held adds the host lacks on a full stream would
+  its stamp list (1024). **Known limit:** a household keeps a reaction
+  whose removal it missed when the removal's stamp can no longer reach
+  it from the host: it was missed for more than 30 days (offline that
+  long, the queued event gone); the post holds more than 1024 removal
+  stamps; the stamp was evicted on the host by the per-person cap (64
+  stamps per person per post, that person's oldest removals first); or
+  the host itself never received the removal. Dropping held adds the host lacks on a full stream would
   fix it, but it is the same rule that deleted reactions the host
   never received (made while it was below v_93), so it is not done.
 

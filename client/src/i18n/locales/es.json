@@ -5138,6 +5138,8 @@
   "post.deleted": "Esta publicación se eliminó",
   "post.add_reaction": "Añadir reacción",
   "post.more_reactions": "Mostrar {n} reacciones más",
+  "post.more_reactions_one": "Mostrar {n} reacción más",
+  "post.fewer_reactions": "Mostrar menos reacciones",
   "post.comment": "Comentar",
   "post.comment_aria": "Comentar esta publicación",
   "post.comments": "{n} comentarios",

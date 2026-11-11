@@ -11781,3 +11781,33 @@ async def test_a_space_reaction_event_carries_the_stamp_that_was_stored(stack):
         await stack.space_svc.add_reaction(
             p.id, space_id=s.id, user_id=anna.user_id, emoji="nice"
         )
+
+
+@pytest.mark.parametrize("emoji", ["x" * 33, "", "   "])
+async def test_removing_a_reaction_no_household_would_take_is_refused(stack, emoji):
+    """v_93: a removal is held to the length rule every receiver applies —
+    nothing is stamped and nothing is sent for one they would all refuse.
+    An old free-text reaction (≤ 32 characters) can still be removed."""
+    from socialhome.domain.events import PostReactionChanged
+
+    anna = await stack.provision_user("anna")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    seen: list[PostReactionChanged] = []
+
+    async def _on(event: PostReactionChanged) -> None:
+        seen.append(event)
+
+    stack.bus.subscribe(PostReactionChanged, _on)
+    with pytest.raises(ValueError, match="32"):
+        await stack.space_svc.remove_reaction(
+            p.id, space_id=s.id, user_id=anna.user_id, emoji=emoji
+        )
+    assert seen == []
+    assert await stack.space_post_repo.list_reaction_stamps([p.id]) == {}
+    await stack.space_svc.remove_reaction(
+        p.id, space_id=s.id, user_id=anna.user_id, emoji="nice"
+    )
+    assert len(seen) == 1

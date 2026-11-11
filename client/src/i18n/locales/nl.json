@@ -5111,6 +5111,8 @@
   "post.deleted": "Dit bericht is verwijderd",
   "post.add_reaction": "Reactie toevoegen",
   "post.more_reactions": "Nog {n} reacties tonen",
+  "post.more_reactions_one": "Nog {n} reactie tonen",
+  "post.fewer_reactions": "Minder reacties tonen",
   "post.comment": "Reageren",
   "post.comment_aria": "Op dit bericht reageren",
   "post.comments": "{n} reacties",

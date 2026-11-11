@@ -8260,6 +8260,11 @@ class SpaceService(
         """Withdraw a reaction — same seat + same-space rules as
         :meth:`add_reaction`."""
         emoji = unicodedata.normalize("NFC", emoji.strip())
+        if not reaction_emoji_ok(emoji, legacy=True):
+            # The rule every receiver holds a removal to (v_93): one they
+            # would all refuse is neither stamped nor sent. Free text from
+            # before v_93 passes, so it can still be taken back.
+            raise ValueError("a reaction is at most 32 characters")
         await self.require_reader(space_id, user_id)
         await self._post_in_space(post_id, space_id)
         # An archived space is read-only to peers too: they refuse the

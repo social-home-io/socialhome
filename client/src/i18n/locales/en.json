@@ -5147,6 +5147,8 @@
   "post.deleted": "This post was deleted",
   "post.add_reaction": "Add reaction",
   "post.more_reactions": "Show {n} more reactions",
+  "post.more_reactions_one": "Show {n} more reaction",
+  "post.fewer_reactions": "Show fewer reactions",
   "post.comment": "Comment",
   "post.comment_aria": "Comment on this post",
   "post.comments": "{n} comments",

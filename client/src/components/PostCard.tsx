@@ -119,10 +119,16 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
   const reactionChips = Object.entries(post.reactions || {})
     .map(([emoji, users]) => [emoji, (users as string[]).length] as const)
     .sort((a, b) => b[1] - a[1])
+  // The viewer's own reactions never fold: one just added must show.
+  const me = currentUser.value?.user_id
+  const mine = (emoji: string) =>
+    !!me && ((post.reactions || {})[emoji] as string[] | undefined)?.includes(me)
+  const foldable = reactionChips
+    .slice(MAX_REACTION_CHIPS)
+    .filter(([emoji]) => !mine(emoji)).length
   const shownChips = allReactions
     ? reactionChips
-    : reactionChips.slice(0, MAX_REACTION_CHIPS)
-  const foldedChips = reactionChips.length - shownChips.length
+    : reactionChips.filter(([emoji], i) => i < MAX_REACTION_CHIPS || mine(emoji))
   // Inline edit: the draft text while the editor is open, else ``null``.
   const [draft, setDraft] = useState<string | null>(null)
   const canEdit = !!onEdit && isTextEditable(post)
@@ -352,12 +358,17 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
                 {emoji} {count}
               </button>
             ))}
-            {foldedChips > 0 && (
+            {/* One control for both states, so it stays mounted — and
+             *  focused — when it opens or folds the rest. */}
+            {foldable > 0 && (
               <button
                 class="sh-reaction-chip sh-reaction-more"
-                aria-label={t('post.more_reactions', { n: String(foldedChips) })}
-                onClick={() => setAllReactions(true)}>
-                +{foldedChips}
+                aria-expanded={allReactions}
+                aria-label={allReactions
+                  ? t('post.fewer_reactions')
+                  : t(isOne(foldable) ? 'post.more_reactions_one' : 'post.more_reactions', { n: String(foldable) })}
+                onClick={() => setAllReactions(!allReactions)}>
+                {allReactions ? '−' : `+${foldable}`}
               </button>
             )}
             <div class="sh-reaction-add-wrap">
