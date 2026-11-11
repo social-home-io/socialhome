@@ -8223,19 +8223,20 @@ class SpaceService(
         if not emoji:
             raise ValueError("emoji must not be empty")
         if not reaction_emoji_ok(emoji):
-            # What every other household accepts (v_93): a longer one would
-            # show here and nowhere else.
-            raise ValueError("emoji is too long")
+            # What every other household accepts (v_93): anything else
+            # would show here and nowhere else.
+            raise ValueError("a reaction is one emoji of at most 32 characters")
         await self.require_reader(space_id, user_id)
         await self._post_in_space(post_id, space_id)
         await self._require_writable_space(space_id)
         await self._reject_subscriber(space_id, user_id, action="react")
-        post = await self._posts.add_reaction(
-            post_id, emoji, user_id, space_id=space_id
+        post, at = await self._posts.react(
+            post_id, emoji, user_id, space_id=space_id, added=True
         )
         # ``SpacePostOutbound`` sends it on: v_93 to every member household
         # (``SPACE_POST_REACTION``), v_49 over the member relay where the
-        # space has one. Realtime does not frame space reactions.
+        # space has one — under the stamp just written. Realtime does not
+        # frame space reactions.
         await self._bus.publish(
             PostReactionChanged(
                 post=post,
@@ -8243,6 +8244,7 @@ class SpaceService(
                 reactor_user_id=user_id,
                 emoji=emoji,
                 added=True,
+                occurred_at=datetime.fromisoformat(at).replace(tzinfo=UTC),
             )
         )
         return post
@@ -8264,8 +8266,8 @@ class SpaceService(
         # removal (v_93), so taking it here would leave the copies apart.
         await self._require_writable_space(space_id)
         await self._reject_subscriber(space_id, user_id, action="react")
-        post = await self._posts.remove_reaction(
-            post_id, emoji, user_id, space_id=space_id
+        post, at = await self._posts.react(
+            post_id, emoji, user_id, space_id=space_id, added=False
         )
         await self._bus.publish(
             PostReactionChanged(
@@ -8274,6 +8276,7 @@ class SpaceService(
                 reactor_user_id=user_id,
                 emoji=emoji,
                 added=False,
+                occurred_at=datetime.fromisoformat(at).replace(tzinfo=UTC),
             )
         )
         return post

@@ -68,7 +68,6 @@ from ....domain.page import Page
 from ....domain.post import (
     BAZAAR_MAX_IMAGES,
     FEED_POST_MAX_IMAGES,
-    MAX_DISTINCT_REACTIONS_PER_POST,
     BazaarBid,
     BazaarListing,
     BazaarMode,
@@ -1536,23 +1535,16 @@ class SpaceSyncReceiver:
                     # v_92 — the host's reactions, merged last writer wins
                     # per user and emoji by their stamps: a reaction (or a
                     # removal) this household missed lands, a newer one it
-                    # holds stays; what no stamp orders any more (older
-                    # than the tombstone horizon) follows the host's sets.
+                    # holds stays. A removal travels only as a stamp: the
+                    # host's sets settle just the reactions NO stamp orders
+                    # here — one whose add we applied stays even when the
+                    # host lacks it (it may never have received it).
                     # Our own people's reactions are authored here.
-                    #
-                    # The sets are followed only from a host that is sent
-                    # every household's reactions (v_93): an older host
-                    # holds just its own people's, and following its sets
-                    # would drop everybody else's once their stamps age out.
                     await self._space_post_repo.merge_reaction_stamps(
                         post.id,
                         stamps,
                         space_id=space_id,
-                        reactions=(
-                            _synced_reactions(r.get("reactions"))
-                            if await self._holds_every_reaction(provider)
-                            else None
-                        ),
+                        reactions=_synced_reactions(r.get("reactions")),
                         keep_users=await self._local_people(space_id),
                     )
                 elif stamps:
@@ -3098,17 +3090,6 @@ class SpaceSyncReceiver:
         space = await self._space_repo.get(space_id)
         return await self._acts_as_host(space, provider)
 
-    async def _holds_every_reaction(self, provider: str) -> bool:
-        """``provider`` is sent every member household's post reactions
-        (``SPACE_POST_REACTION``, v_93). Unknown version hook: as before
-        v_93 (its sets are followed)."""
-        if self._peer_version is None:
-            return True
-        return (
-            await self._peer_version(provider)
-            >= FederationCapability.MIN_FOR_SPACE_POST_REACTIONS
-        )
-
     async def _is_host_version(
         self, space_id: str, provider: str, r: dict[str, Any]
     ) -> bool:
@@ -4130,14 +4111,12 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
 
 
 def _reactions_from_record(raw: object) -> dict[str, frozenset[str]]:
-    """The exporter's ``{emoji: [user_id, …]}``, malformed entries dropped,
-    capped at the per-post distinct-emoji maximum."""
+    """The exporter's ``{emoji: [user_id, …]}``, malformed entries dropped.
+    No post-wide emoji cap (v_93): a joiner shows what the provider shows."""
     if not isinstance(raw, dict):
         return {}
     out: dict[str, frozenset[str]] = {}
     for emoji, users in raw.items():
-        if len(out) >= MAX_DISTINCT_REACTIONS_PER_POST:
-            break
         if not isinstance(emoji, str) or not emoji or not isinstance(users, list):
             continue
         ids = frozenset(u for u in users if isinstance(u, str) and u)

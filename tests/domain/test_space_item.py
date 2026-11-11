@@ -404,3 +404,26 @@ def test_a_dictionary_bomb_is_refused_at_the_same_cap():
 def test_zlib_item_plaintext_refuses_an_unknown_suite():
     with pytest.raises(UnsupportedPayloadSuite):
         zlib_item_plaintext(_SHAPED_BODY, suite="json")
+
+
+@pytest.mark.parametrize(
+    ("emoji", "ok"),
+    [
+        ("👍", True),
+        ("❤️", True),
+        ("1️⃣", True),
+        ("👨‍👩‍👧", True),
+        ("nice", False),
+        ("+1", False),
+        ("👍 👍", False),
+        ("👍\n", False),
+        ("", False),
+        ("😀" * 33, False),
+    ],
+)
+def test_a_reaction_is_an_emoji_not_free_text(emoji, ok):
+    """The status-emoji sanity check, for reactions: no whitespace or
+    control characters and at least one non-ASCII code point."""
+    from socialhome.domain.space_item import reaction_emoji_ok
+
+    assert reaction_emoji_ok(emoji) is ok

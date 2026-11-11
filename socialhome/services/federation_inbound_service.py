@@ -157,6 +157,7 @@ from ..media.profile_picture import (
     reencode_peer_picture,
 )
 from ..moment_origin import carries_no_relay, check_relayed_moment_origin
+from ..rate_limiter import RateLimiter
 from ..utils.datetime import parse_iso8601_lenient
 from .dm_audience import local_audience
 from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
@@ -227,6 +228,11 @@ if TYPE_CHECKING:
     from .space_media_gfs_fetcher import SpaceMediaGfsFetcher
 
 log = logging.getLogger(__name__)
+
+#: v_93 — most ``SPACE_POST_REACTION`` events taken from one household in
+#: one space per minute. A backstop: an honest household's people toggle
+#: far fewer, and its queued toggles are coalesced per reaction.
+REACTION_ARRIVALS_PER_MIN: int = 60
 
 
 class HighlightAudienceCheck(Protocol):
@@ -515,6 +521,7 @@ class FederationInboundService(ProtectionGateMixin):
         "_pending",
         "_pending_parents",
         "_profile_picture_repo",
+        "_reaction_arrivals",
         "_realtime",
         "_relay_policy",
         "_report_service",
@@ -629,6 +636,9 @@ class FederationInboundService(ProtectionGateMixin):
         #: another path — and replays it when the parent lands. ``None``
         #: refuses instead.
         self._pending_parents = pending_parent_buffer
+        #: v_93 — when each (sending household, space)'s post reactions
+        #: arrived (:data:`REACTION_ARRIVALS_PER_MIN`).
+        self._reaction_arrivals = RateLimiter()
         self._federation_service = None
         #: Where a member stores the cover / icon a host's
         #: ``SPACE_CONFIG_CHANGED`` ships. Optional so unit-test stacks can
@@ -2881,6 +2891,22 @@ class FederationInboundService(ProtectionGateMixin):
                 event, what="post reaction", row_id=post_id, reason="space not held"
             )
             return
+        if not self._reaction_arrivals.is_allowed(
+            f"{event.from_instance}:{space_id}",
+            limit=REACTION_ARRIVALS_PER_MIN,
+            window_s=60,
+        ):
+            # A backstop, not the design: senders coalesce toggles (one
+            # queued per reaction) and a person holds five per post.
+            log.warning(
+                "%s from %s: over %d reactions a minute in space %s — dropped",
+                event.event_type,
+                event.from_instance,
+                REACTION_ARRIVALS_PER_MIN,
+                space_id,
+            )
+            return
+        self._reaction_arrivals.prune(window_s=60)
         if not await authorship.item_seat_admits(
             origin_instance_id=event.from_instance,
             space_id=space_id,

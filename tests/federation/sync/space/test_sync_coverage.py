@@ -51,6 +51,7 @@ from socialhome.domain.space import (
     SpaceType,
     SpaceZone,
 )
+from socialhome.domain.space_item import stamp_to_db
 from socialhome.domain.task import Task, TaskList, TaskStatus
 from socialhome.domain.timetable import Timetable
 from socialhome.federation.owner_bound_id import (
@@ -288,22 +289,28 @@ async def _delete_post(h: Home) -> None:
     await h.repos.space_post.soft_delete("post-1", space_id=SPACE)
 
 
+def _hours_ago(hours: float) -> str:
+    """A reaction stamp relative to now: a removal's stamp is dropped past
+    the tombstone horizon, so fixed dates would turn these cases red."""
+    return stamp_to_db(datetime.now(UTC) - timedelta(hours=hours))
+
+
 async def _react(h: Home) -> None:
     await h.repos.space_post.add_reaction(
-        "post-1", "🎉", CARL, space_id=SPACE, stamp="2026-11-02 10:00:00.000000"
+        "post-1", "🎉", CARL, space_id=SPACE, stamp=_hours_ago(2)
     )
 
 
 async def _unreact(h: Home) -> None:
     await h.repos.space_post.remove_reaction(
-        "post-1", "👍", CARL, space_id=SPACE, stamp="2026-11-02 11:00:00.000000"
+        "post-1", "👍", CARL, space_id=SPACE, stamp=_hours_ago(1)
     )
 
 
 async def _post_with_reaction(h: Home) -> None:
     await _post(h)
     await h.repos.space_post.add_reaction(
-        "post-1", "👍", CARL, space_id=SPACE, stamp="2026-11-01 10:00:00.000000"
+        "post-1", "👍", CARL, space_id=SPACE, stamp=_hours_ago(26)
     )
 
 

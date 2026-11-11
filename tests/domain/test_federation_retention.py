@@ -238,3 +238,29 @@ def test_only_an_uncapped_moment_delete_is_long_lived():
     assert is_long_lived(MD, f"{RELAYED_DELETE_KEY_PREFIX}them:m1")
     assert not is_long_lived(MD, capped_delete_key("them", "m1"))
     assert not is_long_lived(FederationEventType.MOMENT_CREATED, None)
+
+
+def test_a_space_post_reaction_keeps_only_its_latest_toggle_queued():
+    """v_93 — a reaction is state per (space, post, user, emoji): a newer
+    toggle replaces the queued one, so a flood of toggles holds one outbox
+    slot per reaction, not one per click."""
+    from socialhome.domain.federation import FederationEventType as FET
+    from socialhome.domain.federation_retention import supersede_key
+
+    payload = {"post_id": "p1", "user_id": "u1", "emoji": "👍", "action": "add"}
+    key = supersede_key(FET.SPACE_POST_REACTION, space_id="sp", payload=payload)
+    assert key == "reaction:sp:p1:u1:👍"
+    assert key == supersede_key(
+        FET.SPACE_POST_REACTION, space_id="sp", payload={**payload, "action": "remove"}
+    )
+    assert key != supersede_key(
+        FET.SPACE_POST_REACTION, space_id="sp", payload={**payload, "emoji": "🎉"}
+    )
+    for broken in ({**payload, "post_id": ""}, {**payload, "emoji": None}):
+        assert (
+            supersede_key(FET.SPACE_POST_REACTION, space_id="sp", payload=broken)
+            is None
+        )
+    assert (
+        supersede_key(FET.SPACE_POST_REACTION, space_id=None, payload=payload) is None
+    )

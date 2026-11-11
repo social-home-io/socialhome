@@ -42,9 +42,9 @@ encrypted payload:
 | `space_id` | the space (also the envelope's routing field) |
 | `post_id` | the post |
 | `user_id` | the reactor — a person of the sending household |
-| `emoji` | NFC, trimmed, 1–32 characters |
+| `emoji` | NFC, trimmed, 1–32 characters, no whitespace or control character, at least one non-ASCII code point (the status-emoji sanity check — an emoji, not free text; not a full emoji parser) |
 | `action` | `"add"` or `"remove"` |
-| `at` | the reactor's action time, tz-aware ISO 8601 |
+| `at` | the stamp the reactor's household stored with the change, tz-aware ISO 8601: its clock, or one microsecond after the stamp it replaces when the clock stepped back — a change is never older than the one before it |
 
 ```mermaid
 sequenceDiagram
@@ -90,8 +90,21 @@ after the §24.11 pipeline:
   transaction as the reaction (migration `0075`, the v_49 member-relay
   stamps; no new storage). The newest stamp wins in any arrival order, a
   re-delivery is a no-op, and a late add never brings back a removed
-  reaction (a removal's stamp is kept 48 h). `at` more than 300 s ahead of
-  the receiver's clock is refused.
+  reaction (a removal's stamp is kept 30 days). `at` more than 300 s ahead
+  of the receiver's clock is refused.
+- **Five per person per post** (`MAX_REACTIONS_PER_USER_PER_POST`). The
+  reactor's household refuses a sixth (`422`). A receiver that is sent
+  more shows that person's five newest by stamp — a pure function of the
+  stamps, so every household shows the same five in any arrival order —
+  and one past the cap shows again when a newer one is taken back. There
+  is no post-wide cap on distinct emoji any more: it let one member fill
+  every slot and left each household with whichever arrived first.
+- **Bounded.** A sender keeps only the latest queued toggle per `(space,
+  post, user, emoji)` for an unreachable household (the outbox's
+  latest-only key, like presence), so toggling never pushes posts out of a
+  peer's queue. A receiver takes at most 60 a minute from one household in
+  one space (`REACTION_ARRIVALS_PER_MIN`) and drops the rest, logged — a
+  backstop; the host's catch-up settles what an honest household lost.
 - **Where.** The post must live in the event's space; a reaction that
   overtakes its post is held and applied when the post lands; an add on a
   deleted post is dropped. An archived space takes none (it is a write, not
@@ -106,14 +119,21 @@ after the §24.11 pipeline:
 - **Missed while offline.** The outbox queues the event for an unreachable
   household as for any other; one lost for good heals from the host's
   §25.6 stream, which carries each post's reaction sets and stamps
-  ([sync.md](./sync.md), v_92 `reaction_stamps`). A receiver follows the
-  host's *sets* (for reactions no stamp orders any more) only when the
-  host is at v_93 — an older host never hears other households' reactions.
+  ([sync.md](./sync.md), v_92 `reaction_stamps`). **A removal travels
+  only as a stamp:** the host's sets lacking a reaction is no removal (it
+  may never have received the add — it was below v_93, or the event was
+  lost), so a reaction whose add a household applied stays until a removal
+  stamp arrives. Removal stamps live 30 days — the reach of a catch-up.
 
 **Followers** get what they got before: reactions through the GFS member
 relay in a public / global space, nothing new. **Older households** (below
 v_93) are skipped by the fan-out and keep showing their own people's
 reactions.
+
+**No backfill.** A reaction made before every household involved was at
+v_93 reaches the others only if the host holds it: the catch-up stream
+runs host → member, and a member's own reactions never travel up to the
+host in it. Such a reaction shows everywhere once it is toggled again.
 
 **Not covered:** comments have no reactions (there is no such row), and
 space **chat** reactions already federate (`SPACE_CHAT_REACTION`,
@@ -128,6 +148,7 @@ the payload is 214 B of JSON (measured, a `remove` with a one-glyph emoji):
 | Paired / mesh member households | 1 envelope each, ~1 KB sealed (estimate: 214 B payload + envelope fields and signature, base64) → 200 × ~1 KB ≈ 200 KB uplink |
 | Mailbox seats behind one GFS (v_91 multi) | ONE upload: one body in the smallest size bucket (≤ 5.5 KB, the figure measured for a ~1 KiB event) + 229 B per mailbox → ≤ 51.4 KB for 200; the GFS pushes body + wrap to each |
 | Receiver work | one seat read, one row update; no reply, no re-broadcast |
+| Worst case: one person toggling as fast as the API allows | online peers: every toggle is sent (200 × ~1 KB each), and each receiver applies at most 60 a minute per (household, space); an offline peer's queue holds ONE entry per (post, person, emoji) — at most 5 live reactions per person per post — however many toggles were made |
 | Followers | 0 new |
 
 One actor triggers 1 × N sends, never N × M: a receiver answers nothing

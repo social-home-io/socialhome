@@ -108,6 +108,14 @@ MAX_ITEM_CLOCK_SKEW_S: int = 300
 #: Upper bound on a relayed reaction's emoji (characters).
 MAX_REACTION_EMOJI_CHARS: int = 32
 
+#: How many reactions one person holds on one space post. Enforced where
+#: the reaction is made (a sixth is refused) and wherever one is received
+#: (the newest by stamp are kept — the same ones on every household, in any
+#: arrival order). It replaces a post-wide cap on distinct emoji, which let
+#: one member fill every slot and left each household with whichever
+#: arrived first.
+MAX_REACTIONS_PER_USER_PER_POST: int = 5
+
 
 def required_scope(item_type: str) -> str:
     """The scope a cert must grant for ``item_type``; :class:`ValueError`
@@ -154,12 +162,20 @@ def stored_stamp(raw: object, *, now: datetime | None = None) -> datetime | None
 
 def reaction_emoji_ok(emoji: object) -> TypeGuard[str]:
     """The live reaction emoji rule: a non-empty string of at most
-    :data:`MAX_REACTION_EMOJI_CHARS` characters, already NFC and trimmed."""
+    :data:`MAX_REACTION_EMOJI_CHARS` characters, already NFC and trimmed —
+    and an emoji, not free text, by the sanity check a status emoji gets
+    (:func:`~socialhome.domain.user.clean_status_emoji`; not a full emoji
+    parser): no whitespace or control character, at least one non-ASCII
+    code point (keycaps such as ``1️⃣`` pass, words do not)."""
     return (
         isinstance(emoji, str)
         and bool(emoji)
         and len(emoji) <= MAX_REACTION_EMOJI_CHARS
         and unicodedata.normalize("NFC", emoji.strip()) == emoji
+        and not any(
+            unicodedata.category(ch) in ("Cc", "Zs", "Zl", "Zp") for ch in emoji
+        )
+        and any(ord(ch) >= 0x80 for ch in emoji)
     )
 
 

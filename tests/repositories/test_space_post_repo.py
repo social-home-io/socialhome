@@ -693,10 +693,11 @@ def _ago(hours: float) -> str:
 
 
 async def test_a_removal_tombstone_outlives_the_duplicate_horizon_only(env):
-    """A removal is remembered for longer than any duplicate can arrive
-    (the GFS queue's 24 h plus retries); past that it is dropped."""
+    """A removal is remembered for 30 days — the reach of a catch-up,
+    since a removal travels only as its stamp (v_93), and far longer than
+    any duplicate can arrive; past that it is dropped."""
     await env.repo.save(env.space_id, _post("p1"))
-    for user, hours in (("u-old", 72), ("u-recent", 30)):
+    for user, hours in (("u-old", 31 * 24), ("u-recent", 29 * 24)):
         await env.repo.add_reaction(
             "p1", "👍", user, space_id=env.space_id, stamp=_ago(hours + 1)
         )
@@ -1135,3 +1136,102 @@ async def test_row_marks_are_zero_on_an_empty_database(env):
         await env.repo.newest_from_household(env.space_id, "inst-b", upto=(0, 0))
         is None
     )
+
+
+# ─── v_93: federated reactions — stamps, caps, convergence ───────────────
+
+
+async def test_merge_never_drops_a_reaction_that_holds_a_live_add_stamp(env):
+    """A removal travels only as a stamp. A reaction whose add this
+    household applied stays even when the source's sets lack it — however
+    old the stamp: the source may simply never have received it (an older
+    host, a lost event). An UNSTAMPED one still follows the source."""
+    await env.repo.save(
+        env.space_id,
+        Post(
+            id="sp-m1",
+            author="u",
+            type=PostType.TEXT,
+            created_at=datetime.now(UTC),
+            reactions={"👍": frozenset({"u-unstamped"})},
+        ),
+    )
+    await env.repo.add_reaction(
+        "sp-m1", "❤️", "u-old", space_id=env.space_id, stamp="2026-01-01 00:00:00"
+    )
+    assert await env.repo.merge_reaction_stamps(
+        "sp-m1", {}, space_id=env.space_id, reactions={}
+    )
+    _sid, got = await env.repo.get("sp-m1")
+    assert got.reactions == {"❤️": frozenset({"u-old"})}
+
+
+async def test_a_local_reaction_is_stamped_after_the_one_it_replaces(env):
+    """``react`` returns the stamp it wrote: now, or just after the held
+    stamp when the clock stepped back — so the change is never older than
+    the one it replaces, here or on any other household."""
+    await env.repo.save(env.space_id, _post("p1"))
+    ahead = _ago(-0.05)  # the add was stamped 3 minutes ahead of our clock
+    await env.repo.add_reaction("p1", "👍", "u-bob", space_id=env.space_id, stamp=ahead)
+    post, at = await env.repo.react(
+        "p1", "👍", "u-bob", space_id=env.space_id, added=False
+    )
+    assert "👍" not in post.reactions
+    assert at > ahead
+    assert (await env.repo.list_reaction_stamps(["p1"]))["p1"]["u-bob\x00👍"] == [
+        at,
+        False,
+    ]
+
+
+async def test_one_person_holds_at_most_five_reactions_on_a_post(env):
+    from socialhome.domain.space_item import MAX_REACTIONS_PER_USER_PER_POST
+
+    assert MAX_REACTIONS_PER_USER_PER_POST == 5
+    await env.repo.save(env.space_id, _post("p1"))
+    emoji = ["👍", "❤️", "🎉", "😂", "😮", "😢"]
+    for e in emoji[:5]:
+        await env.repo.react("p1", e, "u-bob", space_id=env.space_id, added=True)
+    with pytest.raises(ValueError, match="too many"):
+        await env.repo.react("p1", emoji[5], "u-bob", space_id=env.space_id, added=True)
+    # Re-adding one already held is no sixth; somebody else is not capped
+    # by bob.
+    await env.repo.react("p1", emoji[0], "u-bob", space_id=env.space_id, added=True)
+    post, _at = await env.repo.react(
+        "p1", emoji[5], "u-eve", space_id=env.space_id, added=True
+    )
+    assert sorted(e for e, users in post.reactions.items() if "u-bob" in users) == (
+        sorted(emoji[:5])
+    )
+
+
+@pytest.mark.parametrize("order", [(0, 1, 2, 3, 4, 5, 6), (6, 5, 4, 3, 2, 1, 0)])
+async def test_a_received_overflow_keeps_the_newest_five_in_any_order(env, order):
+    """Received reactions past the per-person cap: every household keeps
+    the same five — the newest by stamp — whatever order they arrive in."""
+    await env.repo.save(env.space_id, _post("p1"))
+    emoji = ["👍", "❤️", "🎉", "😂", "😮", "😢", "🙏"]
+    for i in order:
+        await env.repo.add_reaction(
+            "p1", emoji[i], "u-bob", space_id=env.space_id, stamp=_recent(30 - i)
+        )
+    _sid, post = await env.repo.get("p1")
+    assert sorted(post.reactions) == sorted(emoji[2:])
+    # Taking one of the five back lets the next newest show again.
+    post = await env.repo.remove_reaction(
+        "p1", emoji[6], "u-bob", space_id=env.space_id, stamp=_recent(1)
+    )
+    assert sorted(post.reactions) == sorted(emoji[1:6])
+
+
+async def test_a_space_post_has_no_post_wide_emoji_cap(env):
+    """The post-wide cap made households diverge (each kept whichever 20
+    arrived first) and let one member fill every slot: the per-person cap
+    replaces it."""
+    await env.repo.save(env.space_id, _post("p1"))
+    for i in range(25):
+        await env.repo.add_reaction(
+            "p1", chr(0x1F600 + i), f"u-{i}", space_id=env.space_id, stamp=_recent(1)
+        )
+    _sid, post = await env.repo.get("p1")
+    assert len(post.reactions) == 25

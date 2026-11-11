@@ -1516,8 +1516,12 @@ from __future__ import annotations
 #:   re-delivery is a no-op and a late add never brings back a removal; the
 #:   same stamp rides the v_49 ``space_item``, so a household that gets both
 #:   applies one. The reactor must hold a live writer seat on the sender, or
-#:   a follower seat there while ``allow_subscriber_react`` is on. A missed
-#:   one heals from the host's v_92 ``reaction_stamps`` (no sync change).
+#:   a follower seat there while ``allow_subscriber_react`` is on. A person
+#:   holds five reactions per post (receivers show the five newest by
+#:   stamp; no post-wide emoji cap); a sender queues only the latest toggle
+#:   per reaction. A missed one heals from the host's v_92
+#:   ``reaction_stamps``; a removal travels only as its stamp, kept 30 days
+#:   (no sync change).
 #:   **Fallback**: a member household below v_93 is skipped — it keeps
 #:   showing only its own people's reactions (plus the host's on a
 #:   catch-up). Space-scoped. Labelled "Reactions on space posts reach

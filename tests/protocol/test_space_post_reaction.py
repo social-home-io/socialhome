@@ -403,11 +403,11 @@ async def test_a_reaction_missed_while_offline_heals_from_the_host(homes):
     assert await b.counts() == {"🎉": ["u-ben"]}
 
 
-async def test_an_older_hosts_stream_never_drops_other_households_reactions(homes):
-    """A host below v_93 is not sent other households' reactions, so its
-    reaction sets are not followed: a's reaction, long past the stamp
-    horizon, stays on b. Once the host is at v_93 its sets are the truth
-    again (it would hold the reaction had it not been removed)."""
+async def test_a_hosts_stream_never_drops_a_reaction_it_does_not_hold(homes):
+    """The host may never have received a reaction (it was below v_93 when
+    it was made, or the event was lost): its reaction sets lacking it is no
+    removal — a removal travels only as a stamp. a's reaction, long past
+    the stamp horizon, stays on b, whatever version the host is at."""
     a, b = homes
     await a.react()
     await _flush(a, b)
@@ -433,4 +433,46 @@ async def test_an_older_hosts_stream_never_drops_other_households_reactions(home
         (SP, HOST, int(FederationCapability.MIN_FOR_SPACE_POST_REACTIONS)),
     )
     await receiver._dispatch("posts", SP, [record], provider=HOST)
+    assert await b.counts() == {"👍": ["u-anna"]}
+    # The removal itself still lands, as a stamp.
+    await a.unreact()
+    await _flush(a, b)
     assert await b.counts() == {}
+
+
+async def test_a_household_flooding_reactions_is_bounded_per_space(env):
+    """An inbound backstop per (sending household, space): past
+    ``REACTION_ARRIVALS_PER_MIN`` in a minute the rest is dropped (the
+    host's catch-up stream settles what a real household lost)."""
+    from socialhome.services.federation_inbound_service import (
+        REACTION_ARRIVALS_PER_MIN,
+    )
+
+    app, db = env
+    for i in range(REACTION_ARRIVALS_PER_MIN):
+        await _send(
+            app,
+            _reaction(action="add" if i % 2 == 0 else "remove", at=_at(-600 + i)),
+        )
+    assert await _reactions(db) == {}  # the last one in was a remove
+    await _send(app, _reaction(at=_at(-1)))
+    assert await _reactions(db) == {}
+    # Another household is not held back by it.
+    await _send(app, _reaction("u-a", at=_at(-1)), sender=AUTHOR)
+    assert await _reactions(db) == {"👍": ["u-a"]}
+
+
+async def test_the_sender_and_the_receiver_hold_the_same_stamp(homes):
+    """The stamp on the wire is the one the reactor's household stored."""
+    a, b = homes
+    await a.react()
+    await _flush(a, b)
+    rows = [
+        (
+            await h.db.fetchone(
+                "SELECT reaction_stamps_json FROM space_posts WHERE id='p-1'", ()
+            )
+        )["reaction_stamps_json"]
+        for h in (a, b)
+    ]
+    assert rows[0] == rows[1]

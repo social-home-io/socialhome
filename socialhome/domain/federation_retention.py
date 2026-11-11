@@ -217,6 +217,13 @@ def supersede_key(
         return f"online:{user_id}"
     if event_type is FederationEventType.SPACE_LOCATION_UPDATED and space_id:
         return f"location:{space_id}:{user_id}"
+    if event_type is FederationEventType.SPACE_POST_REACTION and space_id:
+        # v_93 — one person's reaction with one emoji on one post: its
+        # latest toggle is all a peer needs (receivers order by the stamp
+        # anyway), so a flood of toggles holds one slot, not one per click.
+        post_id, emoji = payload.get("post_id"), payload.get("emoji")
+        if isinstance(post_id, str) and post_id and isinstance(emoji, str) and emoji:
+            return f"reaction:{space_id}:{post_id}:{user_id}:{emoji}"
     return None
 
 
