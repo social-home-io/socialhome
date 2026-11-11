@@ -6,6 +6,7 @@ real wire is in ``tests/federation/test_invite_bootstrap_gfs_e2e.py`` (v_89).
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import orjson
@@ -1626,6 +1627,52 @@ async def test_a_paired_joiner_whose_first_snapshot_was_lost_is_repaired():
         await m.directory(part["payload"])
     assert _ids(snap) == {e["id"]}
     assert m.spaces.doc(SPACE, e["id"])["card"]["instance_id"] == e["id"]
+
+
+class YieldingFederation(FakeFederation):
+    """A send that takes a moment on the wire, as a real one does: another
+    handler's directory frames can be sent while ours is in flight."""
+
+    async def broadcast_to_space_members(self, *args, **kwargs):
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return await super().broadcast_to_space_members(*args, **kwargs)
+
+
+async def test_a_seated_snapshot_and_a_joiners_delta_reach_a_member_in_order(
+    monkeypatch,
+):
+    """The demo's ``gfs-private-channel``: the GFS-only e says it is seated
+    (its card — the host answers with a snapshot) while the paired b's card
+    comes in (a delta to every seated member, e included). Both run at
+    once on the host. Every frame to e must build on the one before it —
+    a delta on the version e holds, never between a snapshot's parts nor
+    ahead of the snapshot it builds on — or e drops b's card and, the host
+    having just answered e's "seated", nobody repairs it before e's next
+    sync: e's host hops to b fail for minutes."""
+    host = World()
+    host.fed = YieldingFederation()
+    host.dir.attach_to(host.fed)
+    e, b = _hh(), _hh()
+    host.member(e, b)
+    host.writers.writers[SPACE] = {e["id"], b["id"]}
+    card_e = _card(e, gfs=GFS)
+    host.spaces.put_card(SPACE, card_e)  # stored at e's redeem
+
+    await asyncio.gather(
+        host.card_from(e, card_e),  # e: "seated" → snapshot
+        # b's join stores its card: a delta to every seated member.
+        host.dir.store_seat_card(SPACE, _card(b, gfs=None)),
+    )
+
+    m = World(host=host.me)
+    m.member(b)
+    for frame in host.fed.raw_to(e["id"]):
+        await m.directory(frame["payload"])
+    # e holds b's card — what its host hop to b is sealed to.
+    assert m.spaces.doc(SPACE, b["id"]).get("card", {}).get("instance_id") == b["id"]
+    held = await m.dir.directory_seq(SPACE, host.me["id"])
+    assert held == host.spaces.doc(SPACE, host.me["id"])["dir_seq"]
 
 
 async def test_a_follower_or_a_space_we_left_echoes_no_directory():
