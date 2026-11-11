@@ -164,7 +164,7 @@ A member household applies them like this (`SpaceContentInboundHandlers`):
   after a newer one went through another path) replaces the newer one on
   that household until the host's stream converges it. Ordering needs a
   per-voter stamp that survives a retraction — new persistent state and a
-  sync record field — and is tracked separately.
+  sync record field — and is left for a follow-up.
 - **Edit / delete.** A poll cannot be edited — locally either: only the
   post's author attaches one, and a post that has a poll takes no second
   (`409 POLL_EXISTS`), so no household ever rewrites option text under
