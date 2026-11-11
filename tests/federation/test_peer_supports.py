@@ -142,7 +142,12 @@ class _Bus:
 
 
 def _mesh_service(repo):
-    svc = SimpleNamespace(_federation_repo=repo, _own_instance_id="host", _bus=_Bus())
+    svc = SimpleNamespace(
+        _federation_repo=repo,
+        _own_instance_id="host",
+        _bus=_Bus(),
+        _mesh_claim_answer=None,
+    )
 
     def bind(name):
         fn = getattr(FederationService, name)
@@ -153,6 +158,10 @@ def _mesh_service(repo):
         return call
 
     svc.record_mesh_member_claim = bind("record_mesh_member_claim")
+    svc._answer_mesh_claim = bind("_answer_mesh_claim")
+    svc.attach_mesh_claim_answer = lambda answer: setattr(
+        svc, "_mesh_claim_answer", answer
+    )
     svc.space_member_supports = bind("space_member_supports")
     svc.space_member_version = bind("space_member_version")
     svc.mesh_member_identity_pk = bind("mesh_member_identity_pk")
@@ -201,6 +210,45 @@ async def test_routed_claim_from_a_seated_mesh_member_is_recorded():
             occurred_at=svc._bus.events[0].occurred_at,
         )
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("notify", [True, False])
+async def test_a_risen_claim_is_answered_with_our_own_version(notify):
+    """The claimant holds no row for us either: until it has OUR claim its
+    version-gated space broadcasts skip us (a mesh-only member's reaction
+    never reached its host). A rise answers once — also on the accept path,
+    which passes ``notify=False`` — and the same claim again does not, so
+    two households answering each other stop after one exchange."""
+    svc = _mesh_service(_MeshRepo(seated={MESH}))
+    answered: list[str] = []
+
+    async def _answer(instance_id: str) -> bool:
+        answered.append(instance_id)
+        return True
+
+    svc.attach_mesh_claim_answer(_answer)
+    event = _routed_event(mesh_member_claim(MESH_PK))
+    assert await svc.record_mesh_member_claim(event, notify=notify)
+    assert answered == [MESH]
+    assert await svc.record_mesh_member_claim(event, notify=notify)
+    assert answered == [MESH]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_answer_never_costs_the_claim(caplog):
+    svc = _mesh_service(_MeshRepo(seated={MESH}))
+
+    async def _boom(instance_id: str) -> bool:
+        raise RuntimeError("mesh down")
+
+    svc.attach_mesh_claim_answer(_boom)
+    with caplog.at_level("WARNING"):
+        assert await svc.record_mesh_member_claim(
+            _routed_event(mesh_member_claim(MESH_PK))
+        )
+    assert await svc.space_member_supports(MESH, min_version=OURS)
+    assert "answering its version claim failed" in caplog.text
 
 
 @pytest.mark.asyncio
