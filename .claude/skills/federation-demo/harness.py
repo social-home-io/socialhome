@@ -14386,6 +14386,11 @@ _LOG_BENIGN: tuple[str, ...] = (
     # its feed exposes neither post) runs regardless. Only fires when the
     # opt-in GFS chain is run in the same session as ``verify``.
     "SpaceFeedView: KeyError surfaced from handler",
+    # ``members-parity`` (and its ``verify`` hook) reads each deleted post's
+    # permalink on a, d and e to prove it is GONE: ``SpacePostItemView``
+    # maps the ``KeyError`` to 404 and ``BaseView`` logs it at WARNING. The
+    # 404 is the outcome the check asserts.
+    "SpacePostItemView: KeyError surfaced from handler",
     # Earlier entries removed because the underlying conditions
     # were fixed upstream (instead of permanently allowlisted):
     # * ``FederationEventType.FEDERATION_RTC_ICE`` /
