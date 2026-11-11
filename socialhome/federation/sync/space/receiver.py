@@ -2002,7 +2002,7 @@ class SpaceSyncReceiver:
         """Reply polls (v_92) — only the host's records get here (a member
         household's are refused in :meth:`_authored_record`). Each converges
         the poll on the host's copy: created with its options when missing
-        (the live ``SPACE_POLL_CREATED`` carries no options), the host's
+        (it missed the live ``SPACE_POLL_CREATED``), the host's
         question / deadline, closed when the host's is, and — from a v_92
         host, which sends ``votes`` — everybody's votes but our own
         people's. An older host's record (no ``votes``) leaves the votes."""

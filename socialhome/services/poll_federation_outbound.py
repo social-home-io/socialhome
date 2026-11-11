@@ -6,6 +6,13 @@ fans out ``SPACE_POLL_CREATED`` / ``SPACE_POLL_VOTE_CAST`` /
 ``SPACE_POLL_CLOSED`` federation events to every peer instance in the
 owning space.
 
+``SPACE_POLL_CREATED`` carries the whole poll definition (question,
+options with their ids, ``allow_multiple``, ``closes_at``): the poll is
+created after its post on every path (with the post, attached later, on a
+moderation approval), so the post's own event cannot carry it.
+``SPACE_POLL_VOTE_CAST`` carries the voter's whole selection
+(``option_ids``; empty = retracted).
+
 Household-scoped polls stay local — no peer has a right to see them.
 """
 
@@ -16,7 +23,9 @@ from typing import TYPE_CHECKING
 
 from ..domain.events import PollClosed, PollCreated, PollVoted
 from ..domain.federation import FederationEventType
+from ..domain.post import poll_to_wire_dict
 from ..infrastructure.event_bus import EventBus
+from .moderation_release import with_release
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -44,22 +53,29 @@ class PollFederationOutbound:
         self._bus.subscribe(PollClosed, self._on_closed)
 
     async def _on_created(self, event: PollCreated) -> None:
-        if event.space_id is None:
-            return
+        if event.space_id is None or event.origin_instance_id is not None:
+            return  # household-only, or a peer's poll: never echoed back
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_POLL_CREATED,
-            {
-                "post_id": event.post_id,
-                "question": event.question,
-                "allow_multiple": event.allow_multiple,
-                "space_id": event.space_id,
-            },
+            # The whole definition — the option ids are the ones every
+            # household's votes name. A poll riding a reviewed post is
+            # published by its approval, which it names (v_43).
+            with_release(
+                poll_to_wire_dict(
+                    post_id=event.post_id,
+                    space_id=event.space_id,
+                    question=event.question,
+                    options=event.options,
+                    allow_multiple=event.allow_multiple,
+                    closes_at=event.closes_at,
+                )
+            ),
         )
 
     async def _on_voted(self, event: PollVoted) -> None:
-        if event.space_id is None:
-            return
+        if event.space_id is None or event.origin_instance_id is not None:
+            return  # household-only, or a peer's vote: never echoed back
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_POLL_VOTE_CAST,

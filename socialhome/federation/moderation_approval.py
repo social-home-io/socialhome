@@ -51,6 +51,7 @@ FET = FederationEventType
 FEATURE_OF_EVENT: Mapping[FederationEventType, str] = {
     FET.SPACE_POST_CREATED: "posts",
     #: A post's attachments are released with it (one queue item).
+    FET.SPACE_POLL_CREATED: "posts",
     FET.SPACE_SCHEDULE_CREATED: "posts",
     FET.BAZAAR_LISTING_CREATED: "posts",
     FET.SPACE_PAGE_CREATED: "pages",
@@ -100,6 +101,7 @@ _PAGE_SEQUENCING = frozenset(
 FREE_KEYS: Mapping[FederationEventType, frozenset[str]] = {
     FET.SPACE_POST_CREATED: _ROUTING
     | frozenset({"id", "post_id", "occurred_at", "public_relay"}),
+    FET.SPACE_POLL_CREATED: _ROUTING | frozenset({"post_id"}),
     FET.SPACE_SCHEDULE_CREATED: _ROUTING | frozenset({"post_id"}),
     FET.BAZAAR_LISTING_CREATED: _ROUTING | frozenset({"post_id", "created_at"}),
     # v_48 host-sequencing bookkeeping (the host's ``seq``, the version's
@@ -130,7 +132,13 @@ FREE_KEYS: Mapping[FederationEventType, frozenset[str]] = {
 }
 
 #: Events whose row id is the wrapper post's (``post_id``).
-_POST_ID_EVENTS = frozenset({FET.SPACE_SCHEDULE_CREATED, FET.BAZAAR_LISTING_CREATED})
+_POST_ID_EVENTS = frozenset(
+    {
+        FET.SPACE_POLL_CREATED,
+        FET.SPACE_SCHEDULE_CREATED,
+        FET.BAZAAR_LISTING_CREATED,
+    }
+)
 
 
 def approval_target(event_type: FederationEventType, payload: Mapping) -> str:
@@ -220,6 +228,8 @@ def _rule(item: SpaceModerationItem, event_type: FederationEventType) -> _Rule |
     match item.feature, item.action, entity, event_type:
         case "posts", "create", "post", FET.SPACE_POST_CREATED:
             return _post_create
+        case "posts", "create", "post", FET.SPACE_POLL_CREATED:
+            return _poll_create
         case "posts", "create", "post", FET.SPACE_SCHEDULE_CREATED:
             return _schedule_create
         case "posts", "create", "post", FET.BAZAAR_LISTING_CREATED:
@@ -358,6 +368,28 @@ def _attachment(p: Mapping, kind: str) -> Mapping:
     if not isinstance(value, Mapping):
         raise WrongTypeError(f"the item has no {kind}")
     return value
+
+
+def _poll_create(p: Mapping, by: str, w: Mapping, h: Mapping) -> tuple[dict, dict]:
+    """The queued poll (option texts) against the released one (``{id,
+    text}`` — the host mints the ids when it applies the item)."""
+    queued = _attachment(p, "poll")
+    wire_options = w.get("options")
+    if not isinstance(wire_options, list):
+        raise WrongTypeError("options must be a list")
+    expected = {
+        "question": queued.get("question"),
+        "allow_multiple": bool(queued.get("allow_multiple", False)),
+        "closes_at": queued.get("closes_at") or None,
+        "options": [str(o) for o in (queued.get("options") or [])],
+    }
+    actual = {
+        "question": w.get("question"),
+        "allow_multiple": bool(w.get("allow_multiple", False)),
+        "closes_at": w.get("closes_at") or None,
+        "options": [str(o["text"]) for o in wire_options],
+    }
+    return expected, actual
 
 
 def _slots(raw: object) -> list[tuple[str, str | None, str | None]]:

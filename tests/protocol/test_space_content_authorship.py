@@ -733,11 +733,22 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         (AUTHOR,),
         (OTHER, ADMIN, MOD),
     ),
+    (
+        FET.SPACE_POLL_CREATED,
+        "poll on u-a's post",
+        {
+            "post_id": "post-a-sched",
+            "question": "Which?",
+            "options": [{"id": "opt-n1", "text": "a"}, {"id": "opt-n2", "text": "b"}],
+        },
+        (AUTHOR,),
+        (OTHER, ADMIN, MOD),
+    ),
     # ── Personal actions: strictly the named user's own household ──
     (
         FET.SPACE_POLL_VOTE_CAST,
         "vote as u-a",
-        {"post_id": "post-a", "option_id": "opt-a", "voter_user_id": "u-a"},
+        {"post_id": "post-a", "option_ids": ["opt-a"], "voter_user_id": "u-a"},
         (AUTHOR,),
         (OTHER, ADMIN, HOST, MOD),
     ),

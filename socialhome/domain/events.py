@@ -707,24 +707,37 @@ class SchedulePollResponded(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class PollCreated(DomainEvent):
-    """A reply poll was attached to a post (§9)."""
+    """A reply poll was attached to a post (§9).
+
+    ``options`` (``{id, text}`` in display order) and ``closes_at`` are the
+    rest of the definition: a space poll's goes to the member households
+    whole (``SPACE_POLL_CREATED``), so every household holds the same
+    option ids. ``origin_instance_id`` is set when the poll came from a
+    peer: the outbound bridge does not echo it back.
+    """
 
     post_id: str
     question: str
     allow_multiple: bool
     space_id: str | None = None
+    options: tuple[dict, ...] = ()
+    closes_at: str | None = None
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
 class PollVoted(DomainEvent):
     """A user cast or retracted a vote. ``option_ids`` is the full set
-    after the change (empty = retracted)."""
+    after the change (empty = retracted). ``origin_instance_id`` is set
+    when the vote came from a peer (``SPACE_POLL_VOTE_CAST``): the outbound
+    bridge does not echo it back."""
 
     post_id: str
     voter_user_id: str
     option_ids: tuple[str, ...]
     space_id: str | None = None
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

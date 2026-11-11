@@ -27,7 +27,14 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from ..domain.errors import WrongTypeError
 from ..domain.link_preview import link_preview_to_dict
-from ..domain.post import FileMeta, LocationData, Post, PostType
+from ..domain.post import (
+    MAX_POLL_OPTIONS,
+    MAX_POLL_TEXT,
+    FileMeta,
+    LocationData,
+    Post,
+    PostType,
+)
 from ..domain.space import Space, SpaceModerationItem
 from .link_preview_service import wire_link_preview
 from .space_moderation_service import ApplyResult
@@ -78,8 +85,6 @@ NOT_AT_CREATE_POST_FIELDS: frozenset[str] = frozenset(
 )
 
 #: Attachment caps (the poll / schedule builders' own limits).
-MAX_POLL_OPTIONS = 20
-MAX_POLL_TEXT = 500
 MAX_SCHEDULE_SLOTS = 50
 
 

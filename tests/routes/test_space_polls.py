@@ -496,3 +496,26 @@ async def test_a_vote_racing_the_post_delete_is_a_clean_404(client, monkeypatch)
     )
     assert r.status == 404
     assert await client._db.fetchall("SELECT * FROM space_poll_votes", ()) == []
+
+
+async def test_a_follower_reads_a_space_poll_but_cannot_vote(client):
+    """A follower (``subscriber`` seat) sees the poll and its tallies; a
+    vote from one is refused here — every other household would refuse it
+    too, so it would only ever count on this one."""
+    await _seed_space(client)
+    await _seed_poll(client)
+    await client._db.enqueue(
+        "UPDATE space_members SET role='subscriber' WHERE space_id='sp-polls'"
+    )
+    url = "/api/spaces/sp-polls/posts/sp-post-1/poll"
+    r = await client.get(url, headers=_auth(client._tok))
+    assert r.status == 200
+    assert [o["text"] for o in (await r.json())["options"]] == ["Yes", "No"]
+    r = await client.post(
+        f"{url}/vote", json={"option_id": "opt-y"}, headers=_auth(client._tok)
+    )
+    assert r.status == 403
+    r = await client.delete(f"{url}/vote", headers=_auth(client._tok))
+    assert r.status == 403
+    r = await client.get(url, headers=_auth(client._tok))
+    assert (await r.json())["total_votes"] == 0

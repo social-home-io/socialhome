@@ -110,6 +110,8 @@ class PollService(BusPublisherMixin):
                 question=question,
                 allow_multiple=allow_multiple,
                 space_id=space_id,
+                options=tuple(option_rows),
+                closes_at=closes_at,
             )
         )
         return await self.summary(post_id, space_id=space_id)
@@ -134,15 +136,16 @@ class PollService(BusPublisherMixin):
         cleaned = [str(o).strip() for o in options if str(o).strip()]
         if len(cleaned) < 2:
             raise ValueError("a poll needs at least two options")
+        option_rows = [
+            {"id": uuid.uuid4().hex, "text": t, "position": i}
+            for i, t in enumerate(cleaned)
+        ]
         created = await self._repo.create_poll_if_absent(
             post_id=post_id,
             question=question,
             closes_at=closes_at,
             allow_multiple=allow_multiple,
-            options=[
-                {"id": uuid.uuid4().hex, "text": t, "position": i}
-                for i, t in enumerate(cleaned)
-            ],
+            options=option_rows,
         )
         if created:
             await self._emit(
@@ -151,6 +154,8 @@ class PollService(BusPublisherMixin):
                     question=question,
                     allow_multiple=allow_multiple,
                     space_id=space_id,
+                    options=tuple(option_rows),
+                    closes_at=closes_at,
                 )
             )
         return created

@@ -12,6 +12,7 @@ import pytest
 from socialhome.domain.events import PollClosed, PollCreated, PollVoted
 from socialhome.domain.federation import FederationEventType
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.moderation_release import release_scope
 from socialhome.services.poll_federation_outbound import (
     PollFederationOutbound,
 )
@@ -121,5 +122,70 @@ async def test_broadcast_failure_is_swallowed():
             allow_multiple=False,
             space_id="sp-A",
         ),
+    )
+    assert fed.broadcasts == []
+
+
+async def test_poll_created_carries_the_whole_definition(env):
+    """Member households create the poll from this event alone: question,
+    options with the ids votes name, settings."""
+    bus, fed = env
+    await bus.publish(
+        PollCreated(
+            post_id="p1",
+            question="Which?",
+            allow_multiple=True,
+            space_id="sp-A",
+            options=(
+                {"id": "o1", "text": "Yes", "position": 0},
+                {"id": "o2", "text": "No", "position": 1},
+            ),
+            closes_at="2030-01-01T00:00:00+00:00",
+        ),
+    )
+    assert fed.broadcasts[0][2] == {
+        "post_id": "p1",
+        "space_id": "sp-A",
+        "question": "Which?",
+        "allow_multiple": True,
+        "closes_at": "2030-01-01T00:00:00+00:00",
+        "options": [{"id": "o1", "text": "Yes"}, {"id": "o2", "text": "No"}],
+    }
+
+
+async def test_a_released_poll_names_its_approval(env):
+    """A poll riding a reviewed post is published by the approval."""
+    bus, fed = env
+    with release_scope("item-1", "u-mod"):
+        await bus.publish(
+            PollCreated(
+                post_id="p1", question="?", allow_multiple=False, space_id="sp-A"
+            )
+        )
+    assert fed.broadcasts[0][2]["moderation"] == {
+        "item_id": "item-1",
+        "approved_by": "u-mod",
+    }
+
+
+async def test_a_peers_poll_and_vote_are_not_echoed_back(env):
+    bus, fed = env
+    await bus.publish(
+        PollCreated(
+            post_id="p1",
+            question="?",
+            allow_multiple=False,
+            space_id="sp-A",
+            origin_instance_id="peer-a",
+        )
+    )
+    await bus.publish(
+        PollVoted(
+            post_id="p1",
+            voter_user_id="u1",
+            option_ids=("o1",),
+            space_id="sp-A",
+            origin_instance_id="peer-a",
+        )
     )
     assert fed.broadcasts == []

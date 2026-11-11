@@ -11,6 +11,10 @@ are harmless.
 Resource types replayed today:
 
 * ``SPACE_POST_CREATED``         — posts in the space.
+* ``SPACE_POLL_CREATED``         — the reply poll of each replayed post
+  (question, options with their ids), right after its post. The receiver
+  creates it once, so a poll it holds is left alone; votes and closure
+  heal on the host's §25.6 stream (v_92).
 * ``SPACE_COMMENT_CREATED``      — comments on those posts (joined
   via ``space_post_comments.post_id`` → ``space_posts.space_id``).
 * ``SPACE_TASK_LIST_DELETED``    — the space's task lists deleted since
@@ -62,6 +66,7 @@ from ....domain.federation_capabilities import FederationCapability
 from ....domain.link_preview import link_preview_to_dict
 from ....domain.page import page_tombstone_to_wire_dict
 from ....domain.page_version import version_hash
+from ....domain.post import PostType, poll_to_wire_dict
 from ....domain.space_media_ref import page_media_urls, post_media_urls
 from ....domain.task import (
     task_list_to_wire_dict,
@@ -85,6 +90,7 @@ if TYPE_CHECKING:
     from ....repositories.gallery_repo import AbstractGalleryRepo
     from ....repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ....repositories.page_repo import AbstractPageRepo
+    from ....repositories.poll_repo import AbstractPollRepo
     from ....repositories.space_post_repo import AbstractSpacePostRepo
     from ....repositories.space_repo import AbstractSpaceRepo
     from ....repositories.sticky_repo import AbstractStickyRepo
@@ -193,6 +199,7 @@ class SpaceSyncResumeProvider:
         "_page_repo",
         "_roster_authority",
         "_space_calendar_repo",
+        "_space_poll_repo",
         "_space_post_repo",
         "_space_repo",
         "_space_task_repo",
@@ -210,6 +217,7 @@ class SpaceSyncResumeProvider:
         sticky_repo: AbstractStickyRepo | None = None,
         space_calendar_repo: AbstractSpaceCalendarRepo | None = None,
         gallery_repo: AbstractGalleryRepo | None = None,
+        space_poll_repo: AbstractPollRepo | None = None,
         media_sync: _MediaOutbox | None = None,
         media_dir: pathlib.Path | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -217,6 +225,8 @@ class SpaceSyncResumeProvider:
         budget: SpaceFileBudget | None = None,
     ) -> None:
         self._federation = federation_service
+        #: The replayed posts' reply polls. ``None``: posts only.
+        self._space_poll_repo = space_poll_repo
         #: The (requester, space) file budget shared with SPACE_MEDIA_WANTED.
         self._budget = budget if budget is not None else SpaceFileBudget()
         #: v_82: only a page's files that are the space's own ship.
@@ -532,7 +542,7 @@ class SpaceSyncResumeProvider:
             since,
             limit=MAX_PER_RESOURCE,
         )
-        return await self._send_each(
+        sent = await self._send_each(
             posts,
             FederationEventType.SPACE_POST_CREATED,
             _post_to_payload,
@@ -541,6 +551,50 @@ class SpaceSyncResumeProvider:
             own=own,
             media_of=post_media_urls,
             media=media,
+        )
+        return sent + await self._replay_polls(posts, space_id=space_id, to=to, own=own)
+
+    async def _replay_polls(
+        self,
+        posts: list[Post],
+        *,
+        space_id: str,
+        to: str,
+        own: frozenset[str] | None,
+    ) -> int:
+        """The reply poll of each replayed post, as the live
+        ``SPACE_POLL_CREATED`` (one small event per poll post)."""
+        repo = self._space_poll_repo
+        if repo is None:
+            return 0
+        polls: list[tuple[Post, dict]] = []
+        for post in posts:
+            if post.type is not PostType.POLL:
+                continue
+            meta = await repo.get_meta(post.id)
+            if meta is None:
+                continue
+            polls.append(
+                (
+                    post,
+                    poll_to_wire_dict(
+                        post_id=post.id,
+                        space_id=space_id,
+                        question=meta["question"],
+                        options=await repo.list_options_with_counts(post.id),
+                        allow_multiple=meta["allow_multiple"],
+                        closes_at=meta["closes_at"],
+                    ),
+                )
+            )
+        payload_of = {post.id: payload for post, payload in polls}
+        return await self._send_each(
+            [post for post, _payload in polls],
+            FederationEventType.SPACE_POLL_CREATED,
+            lambda post: payload_of[post.id],
+            space_id=space_id,
+            to=to,
+            own=own,
         )
 
     async def _replay_comments(

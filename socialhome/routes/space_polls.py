@@ -24,14 +24,23 @@ from .base import BaseView
 class _SpacePollBase(BaseView):
     """Shared member-check for every space-scoped poll view."""
 
-    async def _require_member(self, space_id: str, user_id: str) -> bool:
+    async def _require_member(
+        self, space_id: str, user_id: str, *, vote: bool = False
+    ) -> bool:
         """``False`` (→ 403) without a seat in the path space. With one,
         the path ``{pid}`` must be a post OF that space (``KeyError`` →
         404): polls are keyed by post id alone, so without this a seat in
-        one space read and voted on another space's polls."""
+        one space read and voted on another space's polls.
+
+        ``vote``: a follower reads a poll but does not vote in it (403
+        ``SUBSCRIBER_READ_ONLY``) — every other household refuses a
+        follower household's vote, so it would count on this one only."""
         space_repo = self.svc(space_repo_key)
-        if await space_repo.get_member(space_id, user_id) is None:
+        member = await space_repo.get_member(space_id, user_id)
+        if member is None:
             return False
+        if vote:
+            self.svc(space_service_key).assert_writable_member(member, action="vote")
         post = await self.svc(space_service_key).get_space_post(
             space_id, self.match("pid")
         )
@@ -122,7 +131,7 @@ class SpacePollVoteView(_SpacePollBase):
     async def post(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, vote=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         post_id = self.match("pid")
         body = await self.body()
@@ -154,7 +163,7 @@ class SpacePollVoteView(_SpacePollBase):
     async def delete(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        if not await self._require_member(space_id, ctx.user_id):
+        if not await self._require_member(space_id, ctx.user_id, vote=True):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         post_id = self.match("pid")
         svc = self.svc(space_poll_service_key)

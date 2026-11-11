@@ -311,15 +311,28 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
     FET.SPACE_POLL_VOTE_CAST: [
         (
             "vote on B's poll",
-            {"post_id": "post-b", "option_id": "opt-b", "voter_user_id": "u-evil"},
+            {"post_id": "post-b", "option_ids": ["opt-b"], "voter_user_id": "u-evil"},
         ),
         (
             "move B's voter's vote",
-            {"post_id": "post-b", "option_id": "opt-b2", "voter_user_id": "u-b"},
+            {"post_id": "post-b", "option_ids": ["opt-b2"], "voter_user_id": "u-b"},
         ),
         (
             "vote with B's option on A's poll",
-            {"post_id": "post-a", "option_id": "opt-b", "voter_user_id": "u-evil"},
+            {"post_id": "post-a", "option_ids": ["opt-b"], "voter_user_id": "u-evil"},
+        ),
+    ],
+    FET.SPACE_POLL_CREATED: [
+        (
+            "put a poll on B's post",
+            {
+                "post_id": "post-b",
+                "question": "x",
+                "options": [
+                    {"id": "opt-n1", "text": "a"},
+                    {"id": "opt-n2", "text": "b"},
+                ],
+            },
         ),
     ],
     FET.SPACE_POLL_CLOSED: [("close B's poll", {"post_id": "post-b"})],
@@ -643,9 +656,6 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
 #: is the review record. Anything else in SPACE_WRITE_EVENT_TYPES must
 #: have a case in ATTACKS.
 NOT_ROW_SCOPED: dict[FederationEventType, str] = {
-    FET.SPACE_POLL_CREATED: (
-        "no inbound handler — the poll body rides on SPACE_POST_CREATED"
-    ),
     FET.SPACE_LOCATION_UPDATED: (
         "keyed on (routing space, sender's user) — names no row id; the "
         "handler already writes to the routing space (roster-authority tests)"
@@ -1343,7 +1353,6 @@ async def test_every_attacked_type_is_really_handled(env):
     registry = app[federation_service_key]._event_registry
     unhandled = [t.value for t in ATTACKS if not registry.handlers_for(t)]
     assert not unhandled
-    assert not registry.handlers_for(FET.SPACE_POLL_CREATED)
 
 
 # ── Task lists (v_40): no squatting on a legacy list id ─────────────

@@ -8,7 +8,7 @@ import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import PollClosed
+from socialhome.domain.events import PollClosed, PollCreated
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.poll_repo import SqlitePollRepo
 from socialhome.repositories.space_poll_repo import SqliteSpacePollRepo
@@ -162,3 +162,36 @@ async def test_votes_still_count_before_the_deadline(env):
         voter_user_id="uid-anna",
     )
     assert (await env.household.summary("p1"))["total_votes"] == 1
+
+
+@pytest.mark.parametrize("once", [False, True])
+async def test_the_created_event_carries_the_stored_definition(env, once):
+    """What the member households create the poll from: the option ids the
+    repo stored, in order, and the deadline — on both create paths."""
+    seen: list[PollCreated] = []
+
+    async def _keep(event: PollCreated) -> None:
+        seen.append(event)
+
+    env.bus.subscribe(PollCreated, _keep)
+    await env.db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content)"
+        " VALUES(?,?,?,?,?)",
+        ("sp-post", "sp-1", "uid-anna", "poll", "?"),
+    )
+    create = env.space.create_poll_once if once else env.space.create_poll
+    closes_at = (NOW + timedelta(days=365 * 20)).isoformat()
+    await create(
+        post_id="sp-post",
+        question="Pizza?",
+        options=["Yes", "No"],
+        closes_at=closes_at,
+        space_id="sp-1",
+    )
+    stored = (await env.space.summary("sp-post"))["options"]
+    assert len(seen) == 1 and seen[0].origin_instance_id is None
+    assert [(o["id"], o["text"]) for o in seen[0].options] == [
+        (o["id"], o["text"]) for o in stored
+    ]
+    assert [o["text"] for o in stored] == ["Yes", "No"]
+    assert seen[0].closes_at == closes_at

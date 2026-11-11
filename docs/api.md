@@ -1080,7 +1080,10 @@ auction/bid_from `bazaar_bids`. State machine:
 Polls attach to an existing post. Reply polls use `/poll`, schedule
 polls (Doodle-style) use `/schedule-poll`. Household variants are
 unfederated; space variants (below) fan out `SPACE_POLL_*` /
-`SPACE_SCHEDULE_*` federation events to paired peers.
+`SPACE_SCHEDULE_*` federation events to the space's member households, so
+every member household holds the same poll (same option ids) and shows the
+same tallies — see [`protocol/feeds.md`](./protocol/feeds.md#polls). A
+follower (`subscriber` seat) reads a space poll but cannot vote in it.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -1093,7 +1096,7 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 | DELETE | `/api/schedule-polls/{id}/slots/{slot_id}/response` | Retract own response. |
 | POST | `/api/schedule-polls/{id}/finalize` | Author picks winning slot. |
 | GET / POST | `/api/spaces/{id}/posts/{pid}/poll` | Space-scoped reply poll. |
-| POST / DELETE | `/api/spaces/{id}/posts/{pid}/poll/vote` | Cast / retract space vote. |
+| POST / DELETE | `/api/spaces/{id}/posts/{pid}/poll/vote` | Cast / retract space vote. `403 SUBSCRIBER_READ_ONLY` for a follower. |
 | POST | `/api/spaces/{id}/posts/{pid}/poll/close` | Close (author only). |
 | POST | `/api/spaces/{id}/posts/{pid}/schedule-poll` | Space-scoped schedule poll. |
 | GET | `/api/spaces/{id}/schedule-polls/{pid}/summary` | Space schedule summary. |

@@ -10,9 +10,11 @@ All types are immutable. Mutations return new dataclass instances.
 from __future__ import annotations
 
 import copy
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
 from enum import StrEnum
+from typing import Any
 
 from .link_preview import LinkPreview
 
@@ -361,6 +363,59 @@ def poll_deadline_passed(closes_at: str | None, now: datetime) -> bool:
     if at.tzinfo is None:
         at = at.replace(tzinfo=UTC)
     return at <= now
+
+
+#: Caps on a reply poll (the composer's own limits; receivers enforce them).
+MAX_POLL_OPTIONS = 20
+MAX_POLL_TEXT = 500
+#: An option id is a uuid4 hex; anything longer is not one of ours.
+MAX_POLL_OPTION_ID = 64
+
+
+def poll_to_wire_dict(
+    *,
+    post_id: str,
+    space_id: str,
+    question: str,
+    options: Iterable[Mapping[str, Any]],
+    allow_multiple: bool,
+    closes_at: str | None,
+) -> dict[str, Any]:
+    """The ``SPACE_POLL_CREATED`` payload: the whole poll definition, its
+    options as ``{id, text}`` in display order (the ids are the ones votes
+    name on every household)."""
+    return {
+        "post_id": post_id,
+        "space_id": space_id,
+        "question": question,
+        "allow_multiple": bool(allow_multiple),
+        "closes_at": closes_at or None,
+        "options": [{"id": str(o["id"]), "text": str(o["text"])} for o in options],
+    }
+
+
+def poll_options_from_wire(raw: object) -> list[dict[str, str]] | None:
+    """The ``{id, text}`` options of a received poll definition, in order —
+    ``None`` unless they are a well-formed poll's: 2 to
+    :data:`MAX_POLL_OPTIONS` options, distinct ids, bounded non-empty text."""
+    if not isinstance(raw, list) or not 2 <= len(raw) <= MAX_POLL_OPTIONS:
+        return None
+    out: list[dict[str, str]] = []
+    for o in raw:
+        if not isinstance(o, Mapping):
+            return None
+        oid, text = o.get("id"), o.get("text")
+        if (
+            not isinstance(oid, str)
+            or not isinstance(text, str)
+            or not 0 < len(oid) <= MAX_POLL_OPTION_ID
+            or not 0 < len(text) <= MAX_POLL_TEXT
+        ):
+            return None
+        out.append({"id": oid, "text": text})
+    if len({o["id"] for o in out}) != len(out):
+        return None
+    return out
 
 
 @dataclass(slots=True, frozen=True)
