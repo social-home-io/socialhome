@@ -238,3 +238,75 @@ async def test_watch_incoming_ignores_wrong_label():
     s._pc = _FakePc()  # type: ignore[attr-defined]
     await s._watch_incoming()
     assert s._channel is good
+
+
+# ─── send_chunk paces on the library's drain event (aiolibdatachannel ≥ 2026.11.10) ─
+
+
+class _FixedDrainChannel:
+    """Drain bookkeeping of aiolibdatachannel 2026.11.10
+    (social-home-io/aiolibdatachannel#25): a send clears the drain event
+    only when the buffer is ABOVE the low threshold, and the event is set
+    again once the buffer drains to the threshold. Before that release a
+    send cleared it whenever any bytes stayed buffered, so a stream of
+    small chunks parked the next send forever (#1347)."""
+
+    def __init__(self, *, buffered: int, threshold: int) -> None:
+        self.sent: list = []
+        self.buffered_amount = buffered
+        self._threshold = threshold
+        self._drained = asyncio.Event()
+        self._drained.set()
+
+    async def send(self, data, *, wait_for_drain: bool = True) -> None:
+        if wait_for_drain:
+            await self._drained.wait()
+        self.sent.append(data)
+        if self.buffered_amount > self._threshold:
+            self._drained.clear()
+
+    def drain_to(self, amount: int) -> None:
+        self.buffered_amount = amount
+        if amount <= self._threshold:
+            self._drained.set()
+
+
+async def _provider_session() -> SyncRtcSession:
+    s = SyncRtcSession(
+        sync_id="sid",
+        space_id="sp",
+        requester_instance_id="r",
+        provider_instance_id="p",
+        role="provider",
+    )
+    await s.create_offer()
+    return s
+
+
+async def test_send_chunk_stream_of_small_chunks_never_waits():
+    """A few KiB stay buffered after every chunk — under the channel's low
+    threshold (half the HWM), so no chunk of a space sync stream waits."""
+    s = await _provider_session()
+    ch = _FixedDrainChannel(buffered=4096, threshold=SEND_HWM_BYTES // 2)
+    s._channel = ch  # type: ignore[attr-defined]
+    for i in range(5):
+        await asyncio.wait_for(s.send_chunk(f"c{i}".encode()), timeout=1.0)
+    assert ch.sent == [b"c0", b"c1", b"c2", b"c3", b"c4"]
+
+
+async def test_send_chunk_waits_for_the_drain_above_the_low_threshold():
+    """Over the low threshold (still under the HWM) the next chunk waits for
+    the library's drain event and goes out once the requester catches up —
+    the backpressure a large stream relies on."""
+    s = await _provider_session()
+    ch = _FixedDrainChannel(
+        buffered=SEND_HWM_BYTES // 2 + 1, threshold=SEND_HWM_BYTES // 2
+    )
+    s._channel = ch  # type: ignore[attr-defined]
+    await s.send_chunk(b"first")
+    second = asyncio.create_task(s.send_chunk(b"second"))
+    await asyncio.sleep(0.02)
+    assert not second.done()
+    ch.drain_to(0)
+    await asyncio.wait_for(second, timeout=1.0)
+    assert ch.sent == [b"first", b"second"]

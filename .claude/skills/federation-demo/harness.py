@@ -9669,6 +9669,18 @@ def cmd_gfs_private_channel() -> None:
             "one (e and b), never the owner a."
         )
     print("  the GFS seats both members e and b (never the owner a) ✓")
+    # e's own fan-out reaches b through the host hop, sealed to b's card from
+    # a's directory: e must hold it before a goes away. (A delta of b's card
+    # landing between the parts of e's first snapshot used to be dropped,
+    # and a did not answer again before e's next sync.)
+    _poll_rows(
+        "e",
+        "SELECT mailbox FROM space_instances WHERE space_id = ? AND instance_id = ?",
+        (space_id, b["instance_id"]),
+        lambda r: bool(r) and bool(r[0][0]) and '"card"' in r[0][0],
+        what="e never took b's member card from a's directory",
+    )
+    print("  e holds b's member card from the host's directory ✓")
 
     # 4. Host offline; b (paired, publish-only) posts; e gets it live.
     e_off = _log_size("e")

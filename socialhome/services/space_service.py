@@ -268,6 +268,7 @@ from ..repositories.space_post_repo import AbstractSpacePostRepo
 from ..repositories.space_remote_member_repo import SpaceRemoteMember
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
+from ..task_drain import wait_tasks_done
 from .content_access import ContentAccessMixin
 from .gfs_connection_service import GfsConnectionError
 from .inbound_media_store import optional_local_media_ref, require_local_media_refs
@@ -863,8 +864,7 @@ class SpaceService(
 
     async def wait_join_approvals(self) -> None:
         """Wait for approval redeems still running (tests, shutdown)."""
-        while self._join_approvals:
-            await asyncio.gather(*list(self._join_approvals), return_exceptions=True)
+        await wait_tasks_done(lambda: self._join_approvals)
 
     async def on_tier_change(
         self,

@@ -88,6 +88,7 @@ from ..space_media_hint import (
     open_space_media_hint,
 )
 from ..space_media_seal import MAX_SPACE_MEDIA_BYTES
+from ..task_drain import wait_tasks_done
 from .inbound_media_store import (
     gfs_space_media_name,
     is_reserved_media_name,
@@ -236,8 +237,7 @@ class SpaceMediaGfsResponder:
 
     async def drain(self) -> None:
         """Wait for every answer in progress (tests, the demo)."""
-        while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        await wait_tasks_done(lambda: self._tasks)
 
     async def stop(self) -> None:
         if not self._tasks:

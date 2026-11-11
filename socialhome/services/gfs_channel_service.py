@@ -147,6 +147,7 @@ from ..gfs_channel import (
     verify_grant,
 )
 from ..outbound_fetch import OutboundFetchRefused
+from ..task_drain import wait_tasks_done
 from .gfs_connection_service import GfsConnectionService
 from .gfs_http import refused_gfs_key
 from .gfs_publish_retry import (
@@ -371,8 +372,7 @@ class GfsChannelService:
         await self._retry.stop()
 
     async def wait_idle(self) -> None:
-        while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        await wait_tasks_done(lambda: self._tasks)
 
     def _spawn(self, coro, name: str) -> None:
         if self._stopping or len(self._tasks) >= MAX_PENDING_TASKS:

@@ -137,6 +137,7 @@ from ..moment_public_seal import (
     MAX_REACT_BODY_BYTES,
     MOMENT_FRAME_TYPES,
 )
+from ..task_drain import wait_tasks_done
 from .config import EnvelopeMailboxConfig, EnvelopeMediaConfig
 from .public import RATE_LIMIT_MAX_TRACKED_IPS, ClientIpResolver, build_window_limiter
 
@@ -1383,10 +1384,7 @@ class GfsEnvelopeRelay:
 
     async def settle_media(self) -> None:
         """Wait for every running background media drain (tests, shutdown)."""
-        while self._media_drains:
-            await asyncio.gather(
-                *list(self._media_drains.values()), return_exceptions=True
-            )
+        await wait_tasks_done(self._media_drains.values)
 
     async def _drain_locked(self, to_instance: str) -> int:
         try:
