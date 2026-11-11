@@ -47,6 +47,7 @@ from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
 )
+from socialhome.domain.post import poll_option_id
 from socialhome.domain.timetable import Timetable, to_wire_dict
 from socialhome.federation.owner_bound_id import (
     SPACE_CHAT_MESSAGE_KIND,
@@ -329,8 +330,8 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
                 "post_id": "post-b",
                 "question": "x",
                 "options": [
-                    {"id": "opt-n1", "text": "a"},
-                    {"id": "opt-n2", "text": "b"},
+                    {"id": poll_option_id("post-b", 0), "text": "a"},
+                    {"id": poll_option_id("post-b", 1), "text": "b"},
                 ],
             },
         ),

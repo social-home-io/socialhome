@@ -385,7 +385,8 @@ def _poll_create(p: Mapping, by: str, w: Mapping, h: Mapping) -> tuple[dict, dic
     }
     actual = {
         "question": w.get("question"),
-        "allow_multiple": bool(w.get("allow_multiple", False)),
+        # As the receiver stores it: a bool, or the event is dropped.
+        "allow_multiple": w.get("allow_multiple", False),
         "closes_at": w.get("closes_at") or None,
         "options": [str(o["text"]) for o in wire_options],
     }

@@ -869,3 +869,24 @@ async def test_set_votes_in_space_refusals_keep_the_held_vote(two_spaces):
     )
     assert await env.repo.list_user_votes("post-3", "u-x") == ["n-1"]
     assert await env.repo.list_user_votes("post-2", "u-b") == ["o-b"]
+
+
+@pytest.mark.parametrize(
+    "close",
+    [
+        "UPDATE space_polls SET closed=1 WHERE post_id='post-3'",
+        "UPDATE space_polls SET closes_at='2000-01-01T00:00:00' WHERE post_id='post-3'",
+    ],
+    ids=["closed", "past-its-deadline"],
+)
+async def test_set_votes_in_space_refuses_a_closed_poll(two_spaces, close):
+    """Neither a new vote nor a retraction changes a closed poll's result."""
+    env = two_spaces
+    await _bare_post(env)
+    await _define(env)
+    vote = {"space_id": "sp-1", "post_id": "post-3", "voter_user_id": "u-x"}
+    assert await env.repo.set_votes_in_space(option_ids=["n-1"], **vote)
+    await env.db.enqueue(close)
+    assert not await env.repo.set_votes_in_space(option_ids=["n-2"], **vote)
+    assert not await env.repo.set_votes_in_space(option_ids=[], **vote)
+    assert await env.repo.list_user_votes("post-3", "u-x") == ["n-1"]

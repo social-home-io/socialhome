@@ -21,7 +21,7 @@ from ..domain.events import (
     SchedulePollFinalized,
     SchedulePollResponded,
 )
-from ..domain.post import poll_deadline_passed
+from ..domain.post import poll_deadline_passed, poll_option_id
 from ..infrastructure.event_bus import EventBus
 from ..repositories.poll_repo import AbstractPollRepo
 from .bus_publisher import BusPublisherMixin
@@ -94,7 +94,7 @@ class PollService(BusPublisherMixin):
         if len(cleaned) < 2:
             raise ValueError("a poll needs at least two options")
         option_rows = [
-            {"id": uuid.uuid4().hex, "text": t, "position": i}
+            {"id": poll_option_id(post_id, i), "text": t, "position": i}
             for i, t in enumerate(cleaned)
         ]
         await self._repo.create_poll(
@@ -137,7 +137,7 @@ class PollService(BusPublisherMixin):
         if len(cleaned) < 2:
             raise ValueError("a poll needs at least two options")
         option_rows = [
-            {"id": uuid.uuid4().hex, "text": t, "position": i}
+            {"id": poll_option_id(post_id, i), "text": t, "position": i}
             for i, t in enumerate(cleaned)
         ]
         created = await self._repo.create_poll_if_absent(

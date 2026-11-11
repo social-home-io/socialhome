@@ -591,9 +591,11 @@ class SqliteSpacePollRepo:
         ``SPACE_POLL_VOTE_CAST`` carries it (empty: the vote is retracted).
 
         One transaction that first proves the poll's post lives in
-        ``space_id``, that every option belongs to ``post_id``, and that a
-        single-choice poll gets at most one. ``False`` = refused, nothing
-        written (the voter's previous votes stay).
+        ``space_id``, that the poll is still open (not closed, its
+        ``closes_at`` not passed — the local ``PollService.cast_vote`` rule),
+        that every option belongs to ``post_id``, and that a single-choice
+        poll gets at most one. ``False`` = refused, nothing written (the
+        voter's previous votes stay).
         """
         wanted = list(dict.fromkeys(option_ids))
 
@@ -601,7 +603,9 @@ class SqliteSpacePollRepo:
             poll = conn.execute(
                 "SELECT sp.allow_multiple FROM space_polls sp"
                 " JOIN space_posts p ON p.id = sp.post_id"
-                " WHERE sp.post_id=? AND p.space_id=?",
+                " WHERE sp.post_id=? AND p.space_id=? AND sp.closed=0"
+                " AND (sp.closes_at IS NULL"
+                "  OR julianday(sp.closes_at) > julianday('now'))",
                 (post_id, space_id),
             ).fetchone()
             if poll is None or (len(wanted) > 1 and not poll["allow_multiple"]):

@@ -30,6 +30,7 @@ from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import SpacePostCreated
 from socialhome.domain.federation import FederationEventType
+from socialhome.domain.post import poll_option_id
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.pending_parent_buffer import PendingParentBuffer
 from socialhome.federation.space_authorship import SpaceAuthorship
@@ -440,13 +441,19 @@ async def test_a_poll_that_overtakes_its_post_is_held_until_the_post_lands(tmp_p
 # ── Refusals over the real pipeline ───────────────────────────────────────
 
 
-def _definition(question: str = "Hijacked?", ids: tuple[str, str] = ("x1", "x2")):
+def _definition(post_id: str = POST, **over) -> dict:
+    """A well-formed definition anna's household could send for ``post_id``
+    (its option ids are bound to the post), with ``over`` on top."""
     return {
-        "post_id": POST,
-        "question": question,
+        "post_id": post_id,
+        "question": "Hijacked?",
         "allow_multiple": True,
         "closes_at": None,
-        "options": [{"id": ids[0], "text": "yes"}, {"id": ids[1], "text": "no"}],
+        "options": [
+            {"id": poll_option_id(post_id, 0), "text": "yes"},
+            {"id": poll_option_id(post_id, 1), "text": "no"},
+        ],
+        **over,
     }
 
 
@@ -468,23 +475,111 @@ async def test_only_the_post_authors_household_defines_its_poll(world, sender):
     assert len(c.pending) == 0
 
 
+def _bad_definitions() -> list[tuple[str, dict]]:
+    good = _definition()["options"]
+    third = {"id": poll_option_id(POST, 2), "text": "maybe"}
+    return [
+        ("no options", {"options": None}),
+        ("empty", {"options": []}),
+        ("one option", {"options": good[:1]}),
+        ("empty text", {"options": [good[0], {**good[1], "text": ""}]}),
+        ("long text", {"options": [good[0], {**good[1], "text": "b" * 501}]}),
+        ("not an object", {"options": [good[0], "b"]}),
+        ("same id twice", {"options": [good[0], {**good[0], "text": "b"}]}),
+        ("too many", {"options": [{"id": f"x{i}", "text": "a"} for i in range(21)]}),
+        # Option ids are bound to the post: random ids, another post's ids
+        # and a shuffled list are not this poll's.
+        (
+            "free ids",
+            {"options": [{"id": "x1", "text": "a"}, {"id": "x2", "text": "b"}]},
+        ),
+        ("another post's ids", {"options": _definition("post-other")["options"]}),
+        ("out of order", {"options": [good[1], good[0]]}),
+        ("skipped position", {"options": [good[0], third]}),
+        ("no question", {"question": " "}),
+        ("long question", {"question": "q" * 501}),
+        ("deadline not a string", {"closes_at": 5}),
+        ("flag not a bool", {"allow_multiple": "yes"}),
+    ]
+
+
 @pytest.mark.parametrize(
-    "options",
-    [
-        None,
-        [],
-        [{"id": "x1", "text": "only one"}],
-        [{"id": "x1", "text": "a"}, {"id": "x1", "text": "b"}],
-        [{"id": "x1", "text": "a"}, {"id": "x2", "text": ""}],
-        [{"id": "x1", "text": "a"}, {"id": "x2", "text": "b" * 501}],
-        [{"id": f"x{i}", "text": "a"} for i in range(21)],
-        [{"id": "x1", "text": "a"}, "b"],
-    ],
+    "over",
+    [over for _label, over in _bad_definitions()],
+    ids=[label for label, _over in _bad_definitions()],
 )
-async def test_a_malformed_definition_creates_nothing(world, options):
+async def test_a_malformed_definition_creates_nothing(world, over):
     a, b = world.a, world.b
-    await _send(a, b, FET.SPACE_POLL_CREATED, {**_definition(), "options": options})
+    await _send(a, b, FET.SPACE_POLL_CREATED, _definition(**over))
     assert await _tally(b) is None
+
+
+async def test_a_well_formed_definition_from_the_author_is_the_control(world):
+    """…and the same event without a defect lands."""
+    a, b = world.a, world.b
+    await _send(a, b, FET.SPACE_POLL_CREATED, _definition())
+    assert await _tally(b) == {"yes": 0, "no": 0}
+
+
+async def test_nobody_can_take_a_polls_option_ids_first(world):
+    """bob's household announces a poll on bob's own post using the option
+    ids of anna's poll — to make cara's household refuse anna's poll when
+    it arrives. The ids are not his post's: his poll is refused, hers lands."""
+    a, b, c = world.a, world.b, world.c
+    for h in (a, b, c):
+        await h.db.enqueue(
+            "INSERT INTO space_posts(id, space_id, author, type, content)"
+            " VALUES('post-bob', ?, 'u-bob', 'poll', '')",
+            (SP,),
+        )
+    await c.db.enqueue("DELETE FROM space_polls")
+    squat = _definition("post-bob", options=_definition()["options"])
+    await _send(b, c, FET.SPACE_POLL_CREATED, squat)
+    assert await _tally(c, "post-bob") is None
+    await _send(a, c, FET.SPACE_POLL_CREATED, _definition())
+    assert await _tally(c) == {"yes": 0, "no": 0}
+
+
+@pytest.mark.parametrize("level", ["moderated", "admin_only"])
+async def test_a_members_poll_cannot_skip_the_posts_access_level(world, level):
+    """Where posts are reviewed (or admin-only) a plain member's household
+    cannot attach a poll to its post by itself — the local route refuses
+    it, and so does every household that receives it. The owner still can."""
+    a, b, c = world.a, world.b, world.c
+    for h in (a, b, c):
+        await h.db.enqueue("UPDATE spaces SET posts_access=?", (level,))
+        await h.db.enqueue(
+            "INSERT INTO space_posts(id, space_id, author, type, content)"
+            " VALUES('post-bob', ?, 'u-bob', 'poll', '')",
+            (SP,),
+        )
+    await _send(b, c, FET.SPACE_POLL_CREATED, _definition("post-bob"))
+    assert await _tally(c, "post-bob") is None
+    await _send(a, c, FET.SPACE_POLL_CREATED, _definition())
+    assert await _tally(c) == {"yes": 0, "no": 0}
+
+
+async def test_a_vote_after_the_close_changes_nothing(world):
+    """A closed poll's result stands on every household, whoever sends a
+    late vote or retraction."""
+    a, b, c = world.a, world.b, world.c
+    made = await _make_poll(a)
+    friday, saturday = _option(made, OPTIONS[0]), _option(made, OPTIONS[1])
+    await b.polls.cast_vote(
+        post_id=POST, option_id=friday, voter_user_id="u-bob", space_id=SP
+    )
+    await a.polls.close_poll(post_id=POST, actor_user_id="u-anna", space_id=SP)
+    want = {OPTIONS[0]: 1, OPTIONS[1]: 0, OPTIONS[2]: 0}
+    for option_ids in ([saturday], []):
+        for target in (a, c):
+            await _send(
+                b,
+                target,
+                FET.SPACE_POLL_VOTE_CAST,
+                {"post_id": POST, "option_ids": option_ids, "voter_user_id": "u-bob"},
+            )
+    for h in (a, b, c):
+        assert await _tally(h) == want, h.name
 
 
 async def test_nobody_votes_for_another_households_member(world):

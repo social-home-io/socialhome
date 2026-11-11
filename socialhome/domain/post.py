@@ -10,6 +10,7 @@ All types are immutable. Mutations return new dataclass instances.
 from __future__ import annotations
 
 import copy
+import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
@@ -372,6 +373,17 @@ MAX_POLL_TEXT = 500
 MAX_POLL_OPTION_ID = 64
 
 
+def poll_option_id(post_id: str, index: int) -> str:
+    """The id of option ``index`` of the reply poll on ``post_id``.
+
+    Derived from the post, so every household can check it: a poll's
+    options can only carry the ids of ITS post, and no other poll (on any
+    post, in any space) can claim them first — ``space_poll_options.id`` is
+    one key space per household."""
+    digest = hashlib.sha256(f"poll-option\0{post_id}\0{index}".encode())
+    return digest.hexdigest()[:32]
+
+
 def poll_to_wire_dict(
     *,
     post_id: str,
@@ -394,10 +406,14 @@ def poll_to_wire_dict(
     }
 
 
-def poll_options_from_wire(raw: object) -> list[dict[str, str]] | None:
+def poll_options_from_wire(
+    raw: object, *, post_id: str | None = None
+) -> list[dict[str, str]] | None:
     """The ``{id, text}`` options of a received poll definition, in order —
     ``None`` unless they are a well-formed poll's: 2 to
-    :data:`MAX_POLL_OPTIONS` options, distinct ids, bounded non-empty text."""
+    :data:`MAX_POLL_OPTIONS` options, distinct ids, bounded non-empty text.
+    With ``post_id`` each id must also be that post's
+    (:func:`poll_option_id`) — the live create's rule."""
     if not isinstance(raw, list) or not 2 <= len(raw) <= MAX_POLL_OPTIONS:
         return None
     out: list[dict[str, str]] = []
@@ -414,6 +430,10 @@ def poll_options_from_wire(raw: object) -> list[dict[str, str]] | None:
             return None
         out.append({"id": oid, "text": text})
     if len({o["id"] for o in out}) != len(out):
+        return None
+    if post_id is not None and any(
+        o["id"] != poll_option_id(post_id, i) for i, o in enumerate(out)
+    ):
         return None
     return out
 

@@ -2015,13 +2015,16 @@ class SpaceContentInboundHandlers:
         p = event.payload
         post_id = str(p.get("post_id") or "")
         question = str(p.get("question") or "").strip()
-        options = poll_options_from_wire(p.get("options"))
+        # Option ids are bound to the post: no other poll can hold them.
+        options = poll_options_from_wire(p.get("options"), post_id=post_id)
         closes_at = p.get("closes_at")
+        allow_multiple = p.get("allow_multiple", False)
         if (
             not post_id
             or not 0 < len(question) <= MAX_POLL_TEXT
             or options is None
             or not (closes_at is None or isinstance(closes_at, str))
+            or not isinstance(allow_multiple, bool)
         ):
             # An older sender's event carried no options: nothing to keep.
             log.debug("SPACE_POLL_CREATED without a usable poll definition")
@@ -2047,12 +2050,24 @@ class SpaceContentInboundHandlers:
                 user_id=anchor.author,
             )
             return
+        # A poll is part of its post: the space's ``posts`` level applies
+        # (§4.3) — under ADMIN_ONLY / MODERATED a plain member's poll is
+        # refused unless it is the host's release of the reviewed post.
+        if not await self._authorship.access_admits(
+            event,
+            space_id,
+            "posts",
+            ContentAction.CREATE,
+            actor=payload_actor(event),
+            row_owner=anchor.author,
+        ):
+            return
         created = await self._poll_repo.create_poll_in_space(
             space_id=space_id,
             post_id=post_id,
             question=question,
             closes_at=closes_at or None,
-            allow_multiple=p.get("allow_multiple") is True,
+            allow_multiple=allow_multiple,
             options=options,
         )
         if created is None:
@@ -2061,14 +2076,20 @@ class SpaceContentInboundHandlers:
             )
             return
         if not created:
-            return  # held already: kept as it is
+            # Held already (the §25.6 stream got here first): kept as it
+            # is — and what waited for it replays now.
+            if self._pending_parents is not None:
+                await self._pending_parents.release(
+                    space_id=space_id, kind=PARENT_POLL, parent_id=post_id
+                )
+            return
         # The SPA shows it, and the votes / close held for it replay.
         # ``origin_instance_id`` stops the outbound bridge echoing it back.
         await self._bus.publish(
             PollCreated(
                 post_id=post_id,
                 question=question,
-                allow_multiple=p.get("allow_multiple") is True,
+                allow_multiple=allow_multiple,
                 space_id=space_id,
                 options=tuple(options),
                 closes_at=closes_at or None,
@@ -2102,6 +2123,16 @@ class SpaceContentInboundHandlers:
         if not await self._acts_for(event, space_id, voter, "poll vote", post_id):
             return
         if await self._poll_missing(event, space_id, post_id, what="poll vote"):
+            return
+        meta = await self._poll_repo.get_meta(post_id)
+        if meta is not None and (
+            meta["closed"] or poll_deadline_passed(meta["closes_at"], datetime.now(UTC))
+        ):
+            # The local rule (``PollService.cast_vote``): a closed poll's
+            # result stands. The repo refuses it again inside the write.
+            log_not_applied(
+                event, what="poll vote", row_id=post_id, reason="the poll is closed"
+            )
             return
         # The repo proves, in the same transaction as the write, that every
         # option belongs to this post (a mismatched pair would corrupt the

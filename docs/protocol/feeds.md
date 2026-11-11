@@ -101,11 +101,15 @@ inside the sealed payload:
 
 ```json
 {"post_id": "…", "space_id": "…", "question": "…", "allow_multiple": false,
- "closes_at": null, "options": [{"id": "<uuid hex>", "text": "…"}, …]}
+ "closes_at": null, "options": [{"id": "<32 hex>", "text": "…"}, …]}
 ```
 
-The option ids are minted once, on the author's household, and are the ids
-every household stores and every vote names — so tallies agree everywhere.
+The option ids are the ids every household stores and every vote names —
+so tallies agree everywhere. They are **bound to the post**:
+`poll_option_id(post_id, index)` = the first 32 hex characters of
+`SHA-256("poll-option\0" + post_id + "\0" + index)`. A receiver recomputes
+them, so a poll can only carry its own post's option ids and no other poll
+(on any post, in any space) can take them first and block it.
 The poll has its own event (rather than a field of `SPACE_POST_CREATED`)
 because it is created *after* its post on every path: in the same request,
 attached later (`POST …/posts/{pid}/poll`), or when a moderation approval
@@ -120,15 +124,22 @@ A member household applies them like this (`SpaceContentInboundHandlers`):
 
 - **Create** — only from the household of the wrapper post's author (or
   the host relaying it, or the host's release of a reviewed post, whose
-  approval block is compared with the queued poll). 2–20 options with
-  distinct ids, question and option text ≤ 500 characters; anything else
-  is dropped. It is **created once**: a post that already holds a poll
+  approval block is compared with the queued poll), and then the space's
+  `posts` access level for the payload's actor (§4.3, `access_admits`): a
+  plain member's household cannot attach a poll by itself where posts are
+  reviewed or admin-only — as the local route refuses it. 2–20 options
+  carrying the post's option ids in order, question and option text ≤ 500
+  characters, `allow_multiple` a boolean; anything else is dropped. It is **created once**: a post that already holds a poll
   keeps it, so a re-send, a resume replay or the §25.6 stream never
   rewrites a poll people voted in. One transaction proves the post is a
   live post of the routed space (`create_poll_in_space`).
-- **Vote** — only from the household seating the voter. Every option must
-  belong to that poll and a single-choice poll takes at most one
-  (`set_votes_in_space`); a refused vote leaves the earlier one.
+- **Vote** — only from the household seating the voter, and only while
+  the poll is open: a closed poll, or one past its `closes_at`, takes no
+  vote and no retraction (the local `PollService.cast_vote` rule — a
+  closed poll's result stands). Every option must belong to that poll and
+  a single-choice poll takes at most one (`set_votes_in_space`, one
+  transaction); a refused vote leaves the earlier one. A vote that raced
+  the close stays on the voter's own household only.
 - **Arrival order.** With several delivery paths per space a vote from one
   household routinely reaches a third before the author's definition, and
   the definition can overtake its post. Nothing resends an event that was
@@ -160,6 +171,9 @@ typically < 1 KB) per member household; one vote = one
 before, when both were already sent but could not be applied. No new
 event type, no version bump: an older household ignores the definition
 (it had no handler) and heals from the host's v_92 stream as before.
+A poll made before this change has random option ids: no live or resume
+event creates it elsewhere (its ids are not its post's); it reaches the
+member households through the host's `polls` stream, ids and all.
 
 Only the author's household closes a poll — by hand, or when its
 `closes_at` passes: `PollDeadlineScheduler`
@@ -187,9 +201,8 @@ the closure; the `schedules` record carries the answers (`responses`,
 (`finalized_slot_id`). Taken from the host only, never over this
 household's own people's votes and answers; a cut list deletes nothing. See [sync.md](./sync.md#coverage--every-space-item-type).
 
-Votes are encrypted: the envelope payload includes only the vote's
-`option_id` and the voter's `user_id`, which stay inside the space's
-encrypted payload. GFS cannot tally votes even on public spaces.
+Votes are encrypted: the vote's `option_ids` and the voter's `user_id`
+stay inside the space's encrypted payload. GFS cannot tally votes even on public spaces.
 
 ## Implementation
 

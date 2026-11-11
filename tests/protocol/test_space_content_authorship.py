@@ -55,6 +55,7 @@ from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
 )
+from socialhome.domain.post import poll_option_id
 from socialhome.federation.inbound_validator import (
     InboundContext,
     run_post_decrypt_gates,
@@ -739,7 +740,10 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         {
             "post_id": "post-a-sched",
             "question": "Which?",
-            "options": [{"id": "opt-n1", "text": "a"}, {"id": "opt-n2", "text": "b"}],
+            "options": [
+                {"id": poll_option_id("post-a-sched", 0), "text": "a"},
+                {"id": poll_option_id("post-a-sched", 1), "text": "b"},
+            ],
         },
         (AUTHOR,),
         (OTHER, ADMIN, MOD),

@@ -46,6 +46,7 @@ from socialhome.domain.post import (
     BazaarMode,
     BazaarOffer,
     BazaarStatus,
+    poll_option_id,
 )
 from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
@@ -478,7 +479,12 @@ class _FakeSpaceCalendarRepo:
         return applied
 
 
-_OPTS = [{"id": "o-1", "text": "Yes"}, {"id": "o-2", "text": "No"}]
+def _opts(post_id: str) -> list[dict]:
+    """A well-formed poll's options: the ids are bound to its post."""
+    return [
+        {"id": poll_option_id(post_id, i), "text": text}
+        for i, text in enumerate(("Yes", "No"))
+    ]
 
 
 class _FakePollRepo:
@@ -2273,7 +2279,7 @@ def _poll_created(post_id="p-new", **over):
             "question": " Which? ",
             "allow_multiple": True,
             "closes_at": "2030-01-01T00:00:00+00:00",
-            "options": _OPTS,
+            "options": _opts(post_id),
             **over,
         },
         space_id="sp-1",
@@ -2297,13 +2303,13 @@ async def test_poll_created_stores_the_definition_and_tells_the_spa(
             "question": "Which?",
             "closes_at": "2030-01-01T00:00:00+00:00",
             "allow_multiple": True,
-            "options": _OPTS,
+            "options": _opts("p-new"),
         }
     ]
     assert [(e.post_id, e.space_id, e.origin_instance_id) for e in seen] == [
         ("p-new", "sp-1", "peer-a")
     ]
-    assert seen[0].options == tuple(_OPTS)
+    assert seen[0].options == tuple(_opts("p-new"))
 
 
 async def test_poll_created_for_a_held_poll_changes_nothing(repos, handlers, bus):
@@ -2325,8 +2331,11 @@ async def test_poll_created_for_a_held_poll_changes_nothing(repos, handlers, bus
         {"question": "  "},
         {"question": "q" * 501},
         {"options": None},
-        {"options": _OPTS[:1]},
+        {"options": _opts("p-new")[:1]},
+        # Ids of another post: a poll only ever carries its own post's.
+        {"options": _opts("p-other")},
         {"closes_at": 5},
+        {"allow_multiple": 1},
     ],
 )
 async def test_poll_created_without_a_usable_definition_drops(repos, handlers, over):
@@ -2415,6 +2424,16 @@ async def test_poll_events_ahead_of_their_parent_wait_for_it(repos, bus):
         ("sp-1", "poll", "p-new"),
     ]
     assert repos["poll"].inserted == [] and repos["poll"].closed == []
+    # A definition for a poll already held (the stream created it) lets
+    # what waited for that poll replay.
+    released: list[tuple] = []
+
+    async def _release(*, space_id, kind, parent_id):
+        released.append((space_id, kind, parent_id))
+
+    buffer.release = _release
+    await h._on_poll_created(_poll_created("p-1"))
+    assert released == [("sp-1", "poll", "p-1")]
     await buffer.replay()
     assert replayed == [(FederationEventType.SPACE_POLL_CLOSED, "poll p-new landed")]
 
@@ -2479,6 +2498,25 @@ async def test_poll_vote_retraction_and_selection(repos, handlers, bus):
         (("a", "b"), "peer-a"),
         ((), "peer-a"),
     ]
+
+
+async def test_a_vote_on_a_closed_poll_is_not_applied(repos, handlers, caplog):
+    """The local rule: a closed poll's result stands — also one whose
+    deadline passed before its author's household said so."""
+    repos["poll"].valid_options.update({("p-1", "a"), ("p-2", "a")})
+    repos["poll"].meta["p-1"] = {"closed": True, "closes_at": None}
+    repos["poll"].meta["p-2"] = {"closed": False, "closes_at": "2000-01-01T00:00:00"}
+    with caplog.at_level("DEBUG"):
+        for post_id in ("p-1", "p-2"):
+            await handlers._on_poll_vote(
+                _event(
+                    FederationEventType.SPACE_POLL_VOTE_CAST,
+                    {"post_id": post_id, "option_ids": ["a"], "voter_user_id": "u"},
+                    space_id="sp-1",
+                )
+            )
+    assert repos["poll"].inserted == [] and repos["poll"].cleared == []
+    assert "the poll is closed" in caplog.text
 
 
 @pytest.mark.parametrize("option_ids", [None, "a", ["a", 1], [""], ["a"] * 21])
@@ -5496,7 +5534,7 @@ async def test_bazaar_offer_accepted_unknown_bid_is_silent(bazaar_bids_handlers)
 @pytest.mark.parametrize(
     "handler_name,payload",
     [
-        ("_on_poll_created", {"post_id": "p", "question": "q", "options": _OPTS}),
+        ("_on_poll_created", {"post_id": "p", "question": "q", "options": _opts("p")}),
         ("_on_poll_vote", {"post_id": "p", "option_ids": ["o"], "voter_user_id": "u"}),
         ("_on_poll_closed", {"post_id": "p"}),
         ("_on_schedule_created", {"post_id": "p", "title": "t", "slots": [{}]}),
@@ -5666,7 +5704,7 @@ _BOUND = [
     ("_on_poll_closed", {"post_id": "p-1"}, "acts_for", "u-seller", None),
     (
         "_on_poll_created",
-        {"post_id": "p-new", "question": "q", "options": _OPTS},
+        {"post_id": "p-new", "question": "q", "options": _opts("p-new")},
         "may_author",
         "u-seller",
         None,

@@ -23,6 +23,7 @@ from socialhome.domain.post import (
     SchedulePoll,
     ScheduleSlot,
     poll_deadline_passed,
+    poll_option_id,
     poll_options_from_wire,
     poll_to_wire_dict,
 )
@@ -249,3 +250,15 @@ def test_poll_options_from_wire_takes_the_largest_poll():
     got = poll_options_from_wire(raw)
     assert got is not None and len(got) == MAX_POLL_OPTIONS
     assert got[0] == {"id": "o0", "text": "x"}
+
+
+def test_poll_option_ids_are_bound_to_their_post():
+    """Distinct per post and position, stable, and checkable on receipt."""
+    ids = [poll_option_id("post-1", i) for i in range(3)]
+    assert len(set(ids)) == 3 and all(len(i) == 32 for i in ids)
+    assert ids == [poll_option_id("post-1", i) for i in range(3)]
+    assert poll_option_id("post-2", 0) not in ids
+    mine = [{"id": i, "text": "x"} for i in ids]
+    assert poll_options_from_wire(mine, post_id="post-1") == mine
+    assert poll_options_from_wire(mine, post_id="post-2") is None
+    assert poll_options_from_wire(mine[::-1], post_id="post-1") is None
