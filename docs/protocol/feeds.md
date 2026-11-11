@@ -42,7 +42,7 @@ encrypted payload:
 | `space_id` | the space (also the envelope's routing field) |
 | `post_id` | the post |
 | `user_id` | the reactor — a person of the sending household |
-| `emoji` | NFC, trimmed, 1–32 characters, no whitespace or control character, at least one non-ASCII code point (the status-emoji sanity check — an emoji, not free text; not a full emoji parser) |
+| `emoji` | NFC, trimmed, 1–32 characters. On an `add` also the status-emoji sanity check (`looks_like_emoji`: no whitespace or control character, at least one non-ASCII code point — an emoji, not free text; not a full emoji parser). A `remove` is held to the length rule only, so a free-text reaction from before v_93 can still be taken back |
 | `action` | `"add"` or `"remove"` |
 | `at` | the stamp the reactor's household stored with the change, tz-aware ISO 8601: its clock, or one microsecond after the stamp it replaces when the clock stepped back — a change is never older than the one before it |
 
@@ -102,9 +102,14 @@ after the §24.11 pipeline:
 - **Bounded.** A sender keeps only the latest queued toggle per `(space,
   post, user, emoji)` for an unreachable household (the outbox's
   latest-only key, like presence), so toggling never pushes posts out of a
-  peer's queue. A receiver takes at most 60 a minute from one household in
-  one space (`REACTION_ARRIVALS_PER_MIN`) and drops the rest, logged — a
-  backstop; the host's catch-up settles what an honest household lost.
+  peer's queue. A receiver always STORES an applied reaction; it announces
+  (the bus event behind notifications) at most 600 a minute per sending
+  household and space (`REACTION_ARRIVALS_PER_MIN`), counting only
+  reactions it applied — a stale copy, a refusal and one held for its
+  post cost nothing. Nothing is dropped: a handler cannot ask the sender
+  to retry (the registry swallows handler errors and the replay cache
+  refuses a re-send), and the host would drop the same one, so a drop
+  would be lost for good.
 - **Where.** The post must live in the event's space; a reaction that
   overtakes its post is held and applied when the post lands; an add on a
   deleted post is dropped. An archived space takes none (it is a write, not
@@ -123,7 +128,14 @@ after the §24.11 pipeline:
   only as a stamp:** the host's sets lacking a reaction is no removal (it
   may never have received the add — it was below v_93, or the event was
   lost), so a reaction whose add a household applied stays until a removal
-  stamp arrives. Removal stamps live 30 days — the reach of a catch-up.
+  stamp arrives. Removal stamps live 30 days — the reach of a catch-up —
+  and a `posts` record carries removals before adds when it must cut
+  its stamp list (1024). **Known limit:** a household that misses a
+  removal for more than 30 days (offline that long, the queued event
+  gone), or on a post holding more than 1024 removal stamps, keeps that
+  reaction. Dropping held adds the host lacks on a full stream would
+  fix it, but it is the same rule that deleted reactions the host
+  never received (made while it was below v_93), so it is not done.
 
 **Followers** get what they got before: reactions through the GFS member
 relay in a public / global space, nothing new. **Older households** (below
@@ -148,7 +160,7 @@ the payload is 214 B of JSON (measured, a `remove` with a one-glyph emoji):
 | Paired / mesh member households | 1 envelope each, ~1 KB sealed (estimate: 214 B payload + envelope fields and signature, base64) → 200 × ~1 KB ≈ 200 KB uplink |
 | Mailbox seats behind one GFS (v_91 multi) | ONE upload: one body in the smallest size bucket (≤ 5.5 KB, the figure measured for a ~1 KiB event) + 229 B per mailbox → ≤ 51.4 KB for 200; the GFS pushes body + wrap to each |
 | Receiver work | one seat read, one row update; no reply, no re-broadcast |
-| Worst case: one person toggling as fast as the API allows | online peers: every toggle is sent (200 × ~1 KB each), and each receiver applies at most 60 a minute per (household, space); an offline peer's queue holds ONE entry per (post, person, emoji) — at most 5 live reactions per person per post — however many toggles were made |
+| Worst case: one person toggling as fast as the API allows | online peers: every toggle is sent (200 × ~1 KB each), and each receiver stores every one but announces at most 600 a minute per (household, space); an offline peer's queue holds ONE entry per (post, person, emoji) — at most 5 live reactions per person per post — however many toggles were made |
 | Followers | 0 new |
 
 One actor triggers 1 × N sends, never N × M: a receiver answers nothing

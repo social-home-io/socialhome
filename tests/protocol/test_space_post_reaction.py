@@ -440,26 +440,93 @@ async def test_a_hosts_stream_never_drops_a_reaction_it_does_not_hold(homes):
     assert await b.counts() == {}
 
 
-async def test_a_household_flooding_reactions_is_bounded_per_space(env):
-    """An inbound backstop per (sending household, space): past
-    ``REACTION_ARRIVALS_PER_MIN`` in a minute the rest is dropped (the
-    host's catch-up stream settles what a real household lost)."""
-    from socialhome.services.federation_inbound_service import (
-        REACTION_ARRIVALS_PER_MIN,
-    )
-
-    app, db = env
-    for i in range(REACTION_ARRIVALS_PER_MIN):
-        await _send(
-            app,
-            _reaction(action="add" if i % 2 == 0 else "remove", at=_at(-600 + i)),
+async def _seat_reactors(db, n: int) -> list[str]:
+    users = [f"u-r{i}" for i in range(n)]
+    for user in users:
+        await db.enqueue(
+            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+            " VALUES(?,?,?,'member')",
+            (SP, OTHER, user),
         )
-    assert await _reactions(db) == {}  # the last one in was a remove
-    await _send(app, _reaction(at=_at(-1)))
+    return users
+
+
+def _heard(app) -> list:
+    from socialhome.app_keys import event_bus_key
+    from socialhome.domain.events import PostReactionChanged
+
+    heard: list = []
+
+    async def _on(event) -> None:
+        heard.append(event)
+
+    app[event_bus_key].subscribe(PostReactionChanged, _on)
+    return heard
+
+
+async def test_a_reconnect_burst_of_queued_reactions_all_lands(env):
+    """A household that comes back with 100 reactions queued for one space
+    delivers them in one burst: every one is applied."""
+    app, db = env
+    users = await _seat_reactors(db, 100)
+    for user in users:
+        await _send(app, _reaction(user, at=_at(-60)))
+    assert await _reactions(db) == {"👍": sorted(users)}
+
+
+async def test_the_inbound_bound_never_loses_a_reaction(env, monkeypatch):
+    """The backstop per (sending household, space) bounds the WORK a flood
+    triggers here — the bus event behind notifications — never the state:
+    a reaction past it is still stored, so every household converges (a
+    drop could not be retried, and the host would drop it too). Only
+    reactions that were applied count: a stale copy, a refused one and one
+    held for its post (replayed later) cost nothing."""
+    from socialhome.services import federation_inbound_service as mod
+
+    monkeypatch.setattr(mod, "REACTION_ARRIVALS_PER_MIN", 3)
+    app, db = env
+    heard = _heard(app)
+    users = await _seat_reactors(db, 5)
+    first = _reaction(users[0], at=_at(-60))
+    await _send(app, first)
+    for _ in range(10):
+        await _send(app, first)  # stale re-deliveries
+        await _send(app, _reaction("u-a"))  # refused: not OTHER's member
+    await _send(app, _reaction(users[1], post="post-late"))  # held for its post
+    await _deliver(
+        app,
+        FET.SPACE_POST_CREATED,
+        {"id": "post-late", "author": "u-a", "type": "text", "content": "x"},
+        sender=AUTHOR,
+    )
+    for user in users[2:]:
+        await _send(app, _reaction(user, at=_at(-60)))
+    assert await _reactions(db) == {"👍": sorted([users[0], *users[2:]])}
+    assert await _reactions(db, "post-late") == {"👍": [users[1]]}
+    # Five applied, three announced; another household is not held back.
+    assert len(heard) == 3
+    await _send(app, _reaction("u-a"), sender=AUTHOR)
+    assert len(heard) == 4
+
+
+async def test_an_old_free_text_reaction_can_still_be_taken_back(env):
+    """Before v_93 a reaction could be any short text. Adding one is
+    refused now; removing one — here or from another household — works."""
+    app, db = env
+    await db.enqueue(
+        "UPDATE space_posts SET reactions=? WHERE id=?",
+        (orjson.dumps({"nice": ["u-o"], "+1": [LOCAL_USER]}).decode(), POST),
+    )
+    await _send(app, _reaction(emoji="nice"))  # an add: refused
+    await _send(app, _reaction(emoji="nice", action="remove"))
+    assert await _reactions(db) == {"+1": [LOCAL_USER]}
+    await app[space_service_key].remove_reaction(
+        POST, space_id=SP, user_id=LOCAL_USER, emoji="+1"
+    )
     assert await _reactions(db) == {}
-    # Another household is not held back by it.
-    await _send(app, _reaction("u-a", at=_at(-1)), sender=AUTHOR)
-    assert await _reactions(db) == {"👍": ["u-a"]}
+    # Still bounded: 32 characters, trimmed.
+    await _send(app, _reaction(emoji="x" * 33, action="remove"))
+    await _send(app, _reaction(emoji=" x", action="remove"))
 
 
 async def test_the_sender_and_the_receiver_hold_the_same_stamp(homes):

@@ -229,10 +229,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: v_93 — most ``SPACE_POST_REACTION`` events taken from one household in
-#: one space per minute. A backstop: an honest household's people toggle
-#: far fewer, and its queued toggles are coalesced per reaction.
-REACTION_ARRIVALS_PER_MIN: int = 60
+#: v_93 — most applied ``SPACE_POST_REACTION`` events ANNOUNCED on the bus
+#: (notifications) from one household in one space per minute; one past it
+#: is still stored. A backstop a reconnect burst passes: an honest
+#: household's queued toggles are coalesced per reaction.
+REACTION_ARRIVALS_PER_MIN: int = 600
 
 
 class HighlightAudienceCheck(Protocol):
@@ -2874,8 +2875,9 @@ class FederationInboundService(ProtectionGateMixin):
         if (
             not post_id
             or not reactor
-            or not reaction_emoji_ok(emoji)
             or action not in ("add", "remove")
+            # A removal may name an old free-text reaction (pre-v_93).
+            or not reaction_emoji_ok(emoji, legacy=action == "remove")
             or stamp is None
         ):
             log_not_applied(
@@ -2891,22 +2893,6 @@ class FederationInboundService(ProtectionGateMixin):
                 event, what="post reaction", row_id=post_id, reason="space not held"
             )
             return
-        if not self._reaction_arrivals.is_allowed(
-            f"{event.from_instance}:{space_id}",
-            limit=REACTION_ARRIVALS_PER_MIN,
-            window_s=60,
-        ):
-            # A backstop, not the design: senders coalesce toggles (one
-            # queued per reaction) and a person holds five per post.
-            log.warning(
-                "%s from %s: over %d reactions a minute in space %s — dropped",
-                event.event_type,
-                event.from_instance,
-                REACTION_ARRIVALS_PER_MIN,
-                space_id,
-            )
-            return
-        self._reaction_arrivals.prune(window_s=60)
         if not await authorship.item_seat_admits(
             origin_instance_id=event.from_instance,
             space_id=space_id,
@@ -2961,6 +2947,28 @@ class FederationInboundService(ProtectionGateMixin):
                 reason="post not in this space, deleted, or full",
             )
             return
+        # The backstop per (sending household, space) bounds the work a
+        # flood triggers here (the bus event behind notifications), never
+        # the state: the reaction above is stored either way, so every
+        # household converges — a drop could not be retried (the registry
+        # swallows handler errors and the replay cache refuses a re-send)
+        # and the host would drop it too. Only an APPLIED reaction counts:
+        # a stale copy, a refusal and a held one returned before here.
+        if not self._reaction_arrivals.is_allowed(
+            f"{event.from_instance}:{space_id}",
+            limit=REACTION_ARRIVALS_PER_MIN,
+            window_s=60,
+        ):
+            log.warning(
+                "%s from %s: over %d reactions a minute in space %s — stored, "
+                "not announced",
+                event.event_type,
+                event.from_instance,
+                REACTION_ARRIVALS_PER_MIN,
+                space_id,
+            )
+            return
+        self._reaction_arrivals.prune(window_s=60)
         await self._bus.publish(
             PostReactionChanged(
                 post=post,

@@ -43,7 +43,9 @@ from typing import TypeGuard
 
 import orjson
 
+from .errors import CodedError
 from .item_zdict import ZDICT_V1
+from .user import looks_like_emoji
 from .writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE
 
 ITEM_TYPE_POST: str = "post"
@@ -160,23 +162,32 @@ def stored_stamp(raw: object, *, now: datetime | None = None) -> datetime | None
     return item_stamp(parsed.isoformat(), now=now)
 
 
-def reaction_emoji_ok(emoji: object) -> TypeGuard[str]:
-    """The live reaction emoji rule: a non-empty string of at most
+def reaction_emoji_ok(emoji: object, *, legacy: bool = False) -> TypeGuard[str]:
+    """The reaction emoji rule: a non-empty string of at most
     :data:`MAX_REACTION_EMOJI_CHARS` characters, already NFC and trimmed —
     and an emoji, not free text, by the sanity check a status emoji gets
-    (:func:`~socialhome.domain.user.clean_status_emoji`; not a full emoji
-    parser): no whitespace or control character, at least one non-ASCII
-    code point (keycaps such as ``1️⃣`` pass, words do not)."""
+    (:func:`~socialhome.domain.user.looks_like_emoji`).
+
+    ``legacy`` leaves the emoji check out: before v_93 a reaction could be
+    any short text, so a REMOVAL (and a catch-up copy of an old reaction)
+    is held to the length rule only — an old one can always be taken back.
+    """
     return (
         isinstance(emoji, str)
         and bool(emoji)
         and len(emoji) <= MAX_REACTION_EMOJI_CHARS
         and unicodedata.normalize("NFC", emoji.strip()) == emoji
-        and not any(
-            unicodedata.category(ch) in ("Cc", "Zs", "Zl", "Zp") for ch in emoji
-        )
-        and any(ord(ch) >= 0x80 for ch in emoji)
+        and (legacy or looks_like_emoji(emoji))
     )
+
+
+class TooManyReactionsError(CodedError, ValueError):
+    """A person's reaction past :data:`MAX_REACTIONS_PER_USER_PER_POST` on
+    one space post, refused where it is made."""
+
+    status = 422
+    code = "REACTION_LIMIT"
+    detail = "Too many reactions: you can leave up to five on a post."
 
 
 def stamp_to_db(stamp: datetime) -> str:

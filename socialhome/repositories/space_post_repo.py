@@ -32,6 +32,7 @@ from ..domain.post import (
 from ..domain.space_item import (
     MAX_REACTIONS_PER_USER_PER_POST,
     StaleItemStamp,
+    TooManyReactionsError,
     stamp_to_db,
 )
 from ..utils.datetime import parse_iso8601_optional
@@ -752,7 +753,7 @@ class SqliteSpacePostRepo:
                 and not (held is not None and held[1])
                 and len(_live_adds(stamps, user_id)) >= MAX_REACTIONS_PER_USER_PER_POST
             ):
-                raise ValueError("too many reactions on this post")
+                raise TooManyReactionsError()
             if added:
                 reactions.setdefault(emoji, set()).add(user_id)
             else:

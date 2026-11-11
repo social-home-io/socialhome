@@ -60,6 +60,31 @@ describe('PostCard', () => {
     expect(container.textContent).toContain('edited')
   })
 
+  it('shows the six most used reactions and folds the rest behind +k', () => {
+    const reactions: Record<string, string[]> = {}
+    const emoji = ['😀', '😁', '😂', '🤣', '😃', '😄', '😅', '😆']
+    emoji.forEach((e, i) => { reactions[e] = Array.from({ length: i + 1 }, (_, n) => `u${n}`) })
+    const { container } = render(<PostCard post={{ ...mockPost, reactions }} />)
+    const chips = () => Array.from(
+      container.querySelectorAll('.sh-reaction-chip:not(.sh-reaction-more)'),
+    ).map((c) => c.textContent?.trim())
+    // Most used first; the two least used are folded.
+    expect(chips()).toEqual(['😆 8', '😅 7', '😄 6', '😃 5', '🤣 4', '😂 3'])
+    const more = container.querySelector('.sh-reaction-more') as HTMLButtonElement
+    expect(more.textContent).toBe('+2')
+    expect(more.getAttribute('aria-label')).toBe('Show 2 more reactions')
+    fireEvent.click(more)
+    expect(chips()).toHaveLength(8)
+    expect(container.querySelector('.sh-reaction-more')).toBeNull()
+  })
+
+  it('shows every reaction when there are at most six', () => {
+    const reactions = { '😀': ['a'], '😁': ['a'], '😂': ['a', 'b'] }
+    const { container } = render(<PostCard post={{ ...mockPost, reactions }} />)
+    expect(container.querySelectorAll('.sh-reaction-chip')).toHaveLength(3)
+    expect(container.querySelector('.sh-reaction-more')).toBeNull()
+  })
+
   it('calls onReact when an existing reaction chip is clicked', () => {
     const fn = vi.fn()
     const { container } = render(<PostCard post={mockPost} onReact={fn} />)

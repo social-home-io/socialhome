@@ -1192,7 +1192,7 @@ async def test_one_person_holds_at_most_five_reactions_on_a_post(env):
     emoji = ["👍", "❤️", "🎉", "😂", "😮", "😢"]
     for e in emoji[:5]:
         await env.repo.react("p1", e, "u-bob", space_id=env.space_id, added=True)
-    with pytest.raises(ValueError, match="too many"):
+    with pytest.raises(ValueError, match="(?i)too many"):
         await env.repo.react("p1", emoji[5], "u-bob", space_id=env.space_id, added=True)
     # Re-adding one already held is no sixth; somebody else is not capped
     # by bob.

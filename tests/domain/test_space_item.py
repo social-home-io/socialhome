@@ -427,3 +427,39 @@ def test_a_reaction_is_an_emoji_not_free_text(emoji, ok):
     from socialhome.domain.space_item import reaction_emoji_ok
 
     assert reaction_emoji_ok(emoji) is ok
+
+
+@pytest.mark.parametrize(
+    ("emoji", "ok"),
+    [("nice", True), ("+1", True), ("👍", True), ("", False), ("x" * 33, False)]
+    + [(" x", False), ("e\u0301", False), (None, False)],
+)
+def test_a_reaction_being_removed_may_be_old_free_text(emoji, ok):
+    """``legacy=True`` — a removal, or a catch-up copy of an old reaction:
+    the rule from before v_93 (a short NFC string), so a free-text reaction
+    made back then can still be taken back everywhere."""
+    from socialhome.domain.space_item import reaction_emoji_ok
+
+    assert reaction_emoji_ok(emoji, legacy=True) is ok
+
+
+def test_the_reaction_and_status_emoji_share_one_rule():
+    from socialhome.domain.space_item import reaction_emoji_ok
+    from socialhome.domain.user import clean_status_emoji, looks_like_emoji
+
+    for text in ("👍", "1️⃣", "busy", "a b", "👍 👍"):
+        try:
+            status_ok = clean_status_emoji(text) is not None
+        except ValueError:
+            status_ok = False
+        assert looks_like_emoji(text) is status_ok is reaction_emoji_ok(text), text
+
+
+def test_a_sixth_reaction_is_a_coded_refusal():
+    from socialhome.domain.errors import CodedError
+    from socialhome.domain.space_item import TooManyReactionsError
+
+    err = TooManyReactionsError()
+    assert isinstance(err, CodedError) and isinstance(err, ValueError)
+    assert (err.status, err.code) == (422, "REACTION_LIMIT")
+    assert "too many" in str(err).lower()

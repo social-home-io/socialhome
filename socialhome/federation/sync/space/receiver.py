@@ -538,7 +538,12 @@ def _synced_reaction_stamps(raw: object) -> dict[str, list]:
             continue
         user_id, sep, emoji = key.partition("\x00")
         stamp = stored_stamp(value[0])
-        if not sep or not user_id or stamp is None or not reaction_emoji_ok(emoji):
+        if (
+            not sep
+            or not user_id
+            or stamp is None
+            or not reaction_emoji_ok(emoji, legacy=True)
+        ):
             continue
         out[key] = [stamp_to_db(stamp), value[1] is True]
     return out
@@ -552,7 +557,7 @@ def _synced_reactions(raw: object) -> dict[str, list[str]] | None:
     return {
         k: [u for u in v if isinstance(u, str) and u]
         for k, v in raw.items()
-        if reaction_emoji_ok(k) and isinstance(v, list)
+        if reaction_emoji_ok(k, legacy=True) and isinstance(v, list)
     }
 
 
