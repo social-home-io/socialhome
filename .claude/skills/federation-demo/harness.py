@@ -23103,23 +23103,24 @@ def _parity_compare(
     ref: str,
     want: dict | None = None,
     timeout: float = 90.0,
+    members: tuple[str, ...] = _PARITY_MEMBERS,
 ) -> bool:
-    """Poll until each member in :data:`_PARITY_MEMBERS` shows the same as
-    ``ref`` (the household that acted, or the host) — and, when given,
+    """Poll until each of ``members`` (default :data:`_PARITY_MEMBERS`) shows
+    the same as ``ref`` (the household that acted, or the host) — and, when given,
     ``want`` is a subset of it. Records PASS or DIFF (naming what each
     member showed, plus each lagging member's newest WARNING lines) in
     ``results``. Never raises: every action is reported."""
-    offsets = {m: _log_size(m) for m in _PARITY_MEMBERS}
+    offsets = {m: _log_size(m) for m in members}
     cache: dict = {}
     deadline = time.monotonic() + timeout
     views: dict[str, dict] = {}
     while True:
-        views = {label: snap(label, cache) for label in {ref, *_PARITY_MEMBERS}}
+        views = {label: snap(label, cache) for label in {ref, *members}}
         expected = views[ref]
         ok_ref = want is None or all(expected.get(k) == v for k, v in want.items())
-        if ok_ref and all(views[m] == expected for m in _PARITY_MEMBERS):
-            results.append((action, "PASS", f"d = e = {ref}: {expected}"))
-            print(f"  {action}: d and e match ✓")
+        if ok_ref and all(views[m] == expected for m in members):
+            results.append((action, "PASS", f"{' = '.join(members)} = {ref}: {expected}"))
+            print(f"  {action}: {' and '.join(members)} match ✓")
             return True
         if time.monotonic() > deadline:
             break
@@ -23127,7 +23128,7 @@ def _parity_compare(
     lines = [
         f"{ref} (reference) shows {views[ref]}" + ("" if ok_ref else f", want {want}")
     ]
-    for m in _PARITY_MEMBERS:
+    for m in members:
         if views[m] != views[ref]:
             lines.append(f"{m} shows {views[m]}")
             warn = _log_lines_matching(m, "WARNING", offset=offsets[m])[-3:]
@@ -23603,16 +23604,25 @@ def cmd_members_parity() -> None:
         )
         victim_text = f"Parity post for the admin to remove {tag}"
         victim = _parity_post_text(state, "d", space_id, victim_text)
-        _parity_compare(
+        # The host a and e must hold d's post BEFORE e deletes it: d reaches
+        # a over the mesh, which re-routes after a restart, so e's delete
+        # could otherwise reach a first — a holds it and re-runs every gate
+        # on replay (``test_direct_the_replay_runs_every_gate_again``), by
+        # which time e would no longer be an admin.
+        held = _parity_compare(
             state,
             results,
             "admin: d's post",
             post_view(victim),
             ref="d",
             want={"exists": True, "content": victim_text},
+            members=("a", "e"),
+            timeout=120.0,
         )
-        s, body = _inst_request(
-            state, "e", "DELETE", f"/api/spaces/{space_id}/posts/{victim}"
+        s, body = (
+            _inst_request(state, "e", "DELETE", f"/api/spaces/{space_id}/posts/{victim}")
+            if held
+            else (0, "not sent: d's post never reached a and e")
         )
         if s not in (200, 202, 204):
             results.append(
@@ -23629,6 +23639,8 @@ def cmd_members_parity() -> None:
                 timeout=120.0,
             )
     finally:
+        # Only now — the delete has landed on a, d and e (or timed out) —
+        # is e's person put back to member.
         s, body = _inst_request(state, "a", "PATCH", role_url, {"role": "member"})
         print(f"  e's person back to member: HTTP {s}")
 
