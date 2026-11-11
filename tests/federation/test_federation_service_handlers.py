@@ -2107,7 +2107,9 @@ async def test_handle_space_sync_chunk_refuses_an_unpinned_session(svc):
 # ─── A provider at capacity defers our sync (restart catch-up) ────────
 
 
-@pytest.mark.parametrize("reason", ["too_many_sessions", "node_capacity"])
+@pytest.mark.parametrize(
+    "reason", ["too_many_sessions", "node_capacity", "rate_limited"]
+)
 async def test_handle_direct_failed_at_capacity_defers_our_request(svc, reason):
     """A provider caps concurrent syncs per household (S-6). A household
     that restarts and asks one host for more spaces than the cap used to
@@ -2134,6 +2136,9 @@ async def test_handle_direct_failed_at_capacity_defers_our_request(svc, reason):
     published = svc._bus.publish.await_args.args[0]
     assert isinstance(published, SpaceSyncDeferred)
     assert (published.space_id, published.provider_instance_id) == ("sp", "host")
+    # The host's own refusal travels with it: every one is its answer (v_92
+    # trigger 10); the scheduler retries only a capacity refusal.
+    assert published.reason == reason
     svc._sync_manager.forget_sync_request.assert_called_once_with("s1")
     svc._sync_manager.trigger_relay_sync.assert_not_awaited()
 
@@ -2169,9 +2174,9 @@ async def test_a_deferred_periodic_sync_stays_incremental(svc):
 
 @pytest.mark.parametrize(
     ("reason", "sender"),
-    [("rate_limited", "host"), ("too_many_sessions", "someone-else")],
+    [("tier3_abort", "host"), ("too_many_sessions", "someone-else")],
 )
-async def test_handle_direct_failed_defers_only_a_capacity_answer_from_our_provider(
+async def test_handle_direct_failed_defers_only_a_refusal_from_our_provider(
     svc, reason, sender
 ):
     svc._sync_manager = MagicMock()

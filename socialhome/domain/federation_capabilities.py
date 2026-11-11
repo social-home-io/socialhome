@@ -1393,7 +1393,11 @@ from __future__ import annotations
 #:   gets no helper fills (the host still fills; a v_85 receiver would take
 #:   them, an older one stores them under a name no row shows); a helper
 #:   below v_86 ships none. No sync-stream record change. Labelled
-#:   "Admins and moderators fill in missing space pictures".
+#:   "Admins and moderators fill in missing space pictures". Since v_92 a
+#:   helper's replay ships only its own people's rows and files; other
+#:   people's files ride only ``SPACE_MEDIA_WANTED`` (v_92 requesters), so
+#:   no code gates on ``MIN_FOR_TRUSTED_FILE_FILLS`` any more (kept for
+#:   history; the receiver's fill rule stands).
 #: * **v_87** (2026-11-08) — **mesh-sized media through the GFS relay**.
 #:   A ``SPACE_MEDIA_BLOB`` / ``DM_MEDIA_BLOB`` chunk to a household seated
 #:   from an invite link (``space_session``) whose GFS proved the signed
@@ -1464,7 +1468,44 @@ from __future__ import annotations
 #:   per-recipient mailbox frame. Not space-scoped, no sync-stream record
 #:   change. Labelled "Space updates reach households behind a GFS in one
 #:   upload".
-OURS: int = 91
+#: * **v_92** (2026-11-10) — **older space pictures arrive when a member
+#:   opens them**: the new event ``SPACE_MEDIA_WANTED`` ``{space_id, files:
+#:   [{item, name}]}`` (≤ 50 entries, ``name`` the ``sc-`` content name). A
+#:   member household that views a hashed file of a live item it holds but
+#:   whose bytes never reached it asks the space's host, then — after a
+#:   fixed wait — one trusted (admin / moderator) household at a time, at
+#:   most three providers; each answers with ordinary ``SPACE_MEDIA_BLOB``
+#:   pushes under the v_86 file gate and a per-(requester, space) budget
+#:   (``services/space_media_wanted.py``). It replaces the never-released
+#:   v_87 relay media refill, and a member's v_83 GFS on-demand ask is kept
+#:   only for a file it holds under a non-content (``sg-``) name. Every hashed file is stored under its content name on
+#:   every path (GFS-described ones too), which changes how a receiver
+#:   names streamed records' files — a ``SYNC_RECORD_LINES`` entry. With it
+#:   (no wire change): a full catch-up ships the files of the last 30 days
+#:   only, at most 200 per stream, to every member alike (GFS-reached
+#:   too), and a resume reaches back at most 30 days; while a space's host
+#:   does not answer a round's BEGIN, the member asks ONE trusted helper
+#:   for the existing ``SPACE_SYNC_RESUME`` (its own people's rows + hashed
+#:   fills). Also with it (``MIN_FOR_SYNC_ITEM_STATE``, same sync line):
+#:   the host's §25.6 stream carries the item state a lost live event
+#:   leaves behind — poll ``votes``, schedule ``responses`` /
+#:   ``finalized_slot_id``, calendar ``rsvps``, post ``reaction_stamps``,
+#:   bazaar ``bids``, a held comment's newer edit, and the new ``timetables_deleted``
+#:   resource; a v_92 receiver takes them from the host only and keeps its
+#:   own people's votes, answers, RSVPs, reactions and bids (bar what the
+#:   live rule lets another household change). Answers and RSVPs are last
+#:   writer wins (``responded_at`` / ``updated_at``, ``responses_at`` /
+#:   ``rsvps_at``: the host's read time), reaction stamps pass the live
+#:   skew + emoji rules, and every list is capped so one record fits one
+#:   chunk (``votes_partial`` / ``responses_partial`` / ``rsvps_partial``:
+#:   a cut list deletes nothing). A requester below v_92 is sent the older
+#:   record shapes.
+#:   **Fallback**: a provider below v_92 is skipped (the file waits for the
+#:   §25.6 catch-up); a helper below v_92 is never sent a resume (no
+#:   helper at v_92: wait for the host); a v_83–v_91 relay reader still
+#:   asks its GFS. Space-
+#:   scoped. Labelled "Older space pictures arrive when you open them".
+OURS: int = 92
 
 
 class FederationCapability:
@@ -2111,7 +2152,10 @@ class FederationCapability:
     #: v_86 — a household at or above it takes a hashed file of a row it
     #: holds from a trusted household (host, delegated admin, admin or
     #: moderator seat) as well as from the row's author: a trusted non-host
-    #: provider ships other people's hashed files only to it.
+    #: provider ships other people's hashed files only to it. Since v_92 no
+    #: code gates on it: a helper ships other people's files only on a
+    #: ``SPACE_MEDIA_WANTED``, which only a v_92 requester sends (kept for
+    #: history).
     MIN_FOR_TRUSTED_FILE_FILLS = 86
     #: v_87 — a household at or above it opens binary media frames from the
     #: GFS relay (``\x00SHR``): a link-joined peer gets 512 KiB media
@@ -2136,6 +2180,19 @@ class FederationCapability:
     #: sender groups its mailbox seats behind one GFS proving
     #: ``envelope_multi`` into ONE ``POST /gfs/envelope/multi`` upload.
     MIN_FOR_MULTI_MAILBOX = 91
+    #: v_92 — a household at or above it answers ``SPACE_MEDIA_WANTED`` (a
+    #: member's request for files of live items it holds) and, as a member,
+    #: asks with it instead of its GFS's v_83 on-demand path: a requester
+    #: names only providers at or above it, and a GFS relay reader at or
+    #: above it is no longer counted as "asks its GFS" by the uploader.
+    MIN_FOR_SPACE_MEDIA_WANTED = 92
+    #: v_92 — a §25.6 requester at or above it is streamed the item state
+    #: a lost live event leaves behind: poll votes, schedule answers and
+    #: picks, calendar RSVPs, post reaction stamps, bazaar bids and timetable
+    #: tombstones (``timetables_deleted``); below it the provider sends the
+    #: older record shapes and no ``timetables_deleted`` (it drops those
+    #: fields anyway). A ``SYNC_RECORD_LINES`` entry (92).
+    MIN_FOR_SYNC_ITEM_STATE = 92
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2482,6 +2539,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_MULTI_MAILBOX,
         "Space updates reach households behind a GFS in one upload",
     ),
+    (
+        FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
+        "Older space pictures arrive when you open them",
+    ),
 ]
 
 
@@ -2583,6 +2644,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_MAILBOX_MEMBER_MESH: "mailbox_member_mesh",
     FederationCapability.MIN_FOR_ANON_MEMBER_PUBLISH_ONLY: "anonymous_gfs_posting_only",
     FederationCapability.MIN_FOR_MULTI_MAILBOX: "multi_mailbox",
+    FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED: "space_media_wanted",
 }
 
 
@@ -2700,6 +2762,10 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # A behind member household gets a missing picture filled only by
         # the host, not by the space's admins and moderators.
         FederationCapability.MIN_FOR_TRUSTED_FILE_FILLS,
+        # A behind member household's people never get an older picture
+        # that missed them when they open it (it waits for the catch-up),
+        # and a behind host or helper answers no member's request.
+        FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
     }
 )
 

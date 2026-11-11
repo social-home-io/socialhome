@@ -320,6 +320,13 @@ key-wrap key from its card. Anything else from that peer class is dropped
 `SPACE_SYNC_REJECTED` is the membership backstop covered under "Dissolution"
 below; the rest are the WebRTC/HTTPS content-streaming dance.
 
+**Older files on view (v_92)**
+
+`SPACE_MEDIA_WANTED` `{space_id, files: [{item, name}]}` (≤ 50) — a member
+household asks the host, then one trusted helper at a time, for files of
+live items it holds but never received; the answer is `SPACE_MEDIA_BLOB`.
+See [media.md](./media.md#older-files-on-view--space_media_wanted-v_92).
+
 **GFS public-content relay (Phase 5)**
 
 `SPACE_SUBSCRIBER_KEY_HANDOFF` (`space_subscriber_key_handoff`). These ride the

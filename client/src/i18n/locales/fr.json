@@ -2683,6 +2683,7 @@
   "capability.anonymous_gfs_posting_only": "Publication via le GFS sans nommer le foyer",
   "capability.synced_picture_resets": "Photos de profil retirées au rattrapage des espaces",
   "capability.multi_mailbox": "Mises à jour des espaces via un GFS en un seul envoi",
+  "capability.space_media_wanted": "Anciennes photos des espaces chargées à l'ouverture",
   "settings.tab.security": "Sécurité",
   "settings.security.signing_in": "Connexion",
   "settings.security.signing_in_hint": "Vous seul l'utilisez. Personne d'autre ne voit votre identifiant de connexion.",

@@ -4323,7 +4323,10 @@ class SpaceService(
             and not local
             and (
                 self._federation is None
-                or not await self._federation.peer_supports(
+                # A member household reached only over the mesh has no
+                # paired row: judge it by its space-member version claim,
+                # as the host's own path does (every member is equal).
+                or not await self._federation.space_member_supports(
                     instance_id,
                     min_version=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
                 )
@@ -4893,9 +4896,15 @@ class SpaceService(
                 role=role,
             )
             return True
-        if role == SpaceRole.MODERATOR and not await self._federation.peer_supports(
-            instance_id,
-            min_version=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
+        # ``space_member_supports``: a member household we are not paired
+        # with (mesh, directory seat) is judged by the version it claimed as
+        # a member — every member is equal whichever way it is reached.
+        if (
+            role == SpaceRole.MODERATOR
+            and not await self._federation.space_member_supports(
+                instance_id,
+                min_version=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
+            )
         ):
             raise HouseholdUpgradeRequiredError(
                 "this member's household must upgrade before they can be a moderator",

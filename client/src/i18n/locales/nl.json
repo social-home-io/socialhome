@@ -2683,6 +2683,7 @@
   "capability.anonymous_gfs_posting_only": "Posten via de GFS zonder het huishouden te noemen",
   "capability.synced_picture_resets": "Verwijderde profielfoto's bij space-inhaalsync",
   "capability.multi_mailbox": "Space-updates via een GFS in één upload",
+  "capability.space_media_wanted": "Oudere space-foto's ophalen als je ze opent",
   "settings.tab.security": "Beveiliging",
   "settings.security.signing_in": "Inloggen",
   "settings.security.signing_in_hint": "Alleen jij gebruikt dit. Niemand anders ziet je inlognaam.",

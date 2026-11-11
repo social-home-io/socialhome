@@ -314,9 +314,10 @@ bucket plus the 61-byte seal overhead (`VALID_SEALED_LENGTHS`).
   v_87, whose `relay_via` GFS proved the signed `envelope_media` capability.
   Today this carries `SPACE_MEDIA_BLOB` to a link-joined member whose GFS
   keeps **no** space media cache (its signed block carries no
-  `space_media`); live pictures otherwise keep using the cache. The
-  generic relay for files no longer in the cache comes with the wanted /
-  catch-up work after the GFS redesign.
+  `space_media`); live pictures otherwise keep using the cache. A member
+  that misses a file no longer in the cache asks for it with
+  `SPACE_MEDIA_WANTED` (v_92), answered over this relay; the GFS's v_83
+  on-demand path is for followers.
 - **Fallback:** a peer below v_87, or a GFS without `envelope_media`, gets
   JSON chunks of at most 96 KiB (`RELAY_JSON_CHUNK_BYTES`), which fit the
   JSON relay. A binary frame that the relay throttles (429) is waited out;
@@ -330,22 +331,15 @@ bucket plus the 61-byte seal overhead (`VALID_SEALED_LENGTHS`).
   drops later (saturation, a full media queue, the 1 h TTL) or the
   receiver refuses (its media budget) is gone while the sender's outbox
   counts it sent. The receiver heals it on the next VIEW: a missed
-  content-addressed file (`sc-…`) shown by a live row created within the
-  last 3 days makes `RelayMediaRefill` ask the space's relay-seated host for
-  `SPACE_SYNC_RESUME` with `refill: "posts" | "calendar" | "gallery"` — the
-  one resource whose row shows it (`MediaReferenceRepo.space_rows_of`) —
-  since a minute before that row. A v_87 host replays at most 20 rows of
-  that resource (deduped by id on arrival) and re-ships at most 16 files /
-  16 MiB of theirs, under its own (household, space, resource) window, so a
-  refill never uses up the reconnect resume's window. One request per
-  (space, resource) per 30 min on each side. Comment and listing pictures
-  are not refilled (their replay ships no files). **Cost per trigger:** 1
-  recipient × ≤ 20 rows (~2–10 KiB each through the relay) + ≤ 16 files ≤
-  16 MiB; worst case a reader viewing missing files in S spaces ≤ 3 S
-  refills per 30 min, ≤ 48 S MiB. A bridge: the generic one-file
-  `SPACE_MEDIA_WANTED` of the GFS redesign replaces it. Since timestamps
-  are compared as times on the host (`datetime()` on both sides in every
-  `list_since` the replay uses), a same-day row stamped naive is found.
+  content-addressed file (`sc-…`) of a live item of a space where it holds
+  a member seat makes it ask the host — then, after a fixed wait, a
+  trusted helper — with `SPACE_MEDIA_WANTED` (v_92; the answer is a
+  `SPACE_MEDIA_BLOB` push the outbox never drops for "reads from its GFS").
+  Posts, comments, calendar covers, space-album items and bazaar listings
+  are covered. Rules, bounds and cost:
+  [media.md](./media.md#older-files-on-view--space_media_wanted-v_92). It
+  replaced the never-released v_87 relay media refill (a resume narrowed to
+  one resource, host-only).
 - **GFS:** identity-free and content-blind as for every relayed body — it
   reads the magic, the version and the recipient id, never a sender, and
   pushes the body unchanged as a BINARY WebSocket message to a socket whose

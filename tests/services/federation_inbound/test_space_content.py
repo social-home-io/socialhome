@@ -7053,7 +7053,11 @@ class _GfsMediaSink:
         self.kept: list[dict] = []
         self.as_shown: list[tuple] = []
 
-    async def localize(self, space_id, raw_refs, media_urls, *, item_id, origin):
+    async def localize(
+        self, space_id, raw_refs, media_urls, *, item_id, origin, hashes=None
+    ):
+        #: v_85 — the hash map the handler passed (by the author's names).
+        self.hashes = hashes
         urls = [u for u in media_urls if u]
         if isinstance(raw_refs, dict):
             self.received.append((space_id, raw_refs, urls))
@@ -7279,3 +7283,29 @@ async def test_a_gallery_items_files_take_the_readers_names(gallery_handlers):
         "api/media/sg-t.jpg",
     )
     assert sink.kept == [{"t.jpg": "sg-t.jpg", "f.jpg": "sg-f.jpg"}]
+
+
+async def test_calendar_cover_hash_map_reaches_the_gfs_namer(repos, handlers):
+    """v_85: a hashed cover the event also describes keeps its one content
+    name — the GFS namer gets the map the envelope's signature vouches for."""
+    sink = _GfsMediaSink()
+    handlers.attach_gfs_media(sink)
+    await handlers._on_calendar_saved(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+            {
+                "id": "e-h",
+                "calendar_id": "cal-1",
+                "summary": "Picnic",
+                "created_by": "u-1",
+                "start": "2026-04-18T10:00:00+00:00",
+                "end": "2026-04-18T11:00:00+00:00",
+                "cover_url": "api/media/c.webp",
+                "media_refs": _V80_REFS,
+                "files": {"c.webp": {"h": "c" * 64}},
+                "files_suite": "sha256",
+            },
+            space_id="sp-1",
+        )
+    )
+    assert {n: fh.h for n, fh in sink.hashes.items()} == {"c.webp": "c" * 64}

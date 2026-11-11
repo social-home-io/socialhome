@@ -975,3 +975,111 @@ async def test_faq_goes_with_its_listing_and_touches_the_wrapper_post(env):
     await env.db.enqueue("DELETE FROM bazaar_listings WHERE post_id=?", (pid,))
     assert await repo.list_faq_for_listings([pid]) == {}
     assert await repo.list_faq_for_listings([]) == {}
+
+
+# ── §25.6 bids (v_92) ────────────────────────────────────────────────────
+
+
+def _synced_bid(pid: str, bid_id: str, amount: int, **kw) -> BazaarBid:
+    fields = {
+        "id": bid_id,
+        "listing_post_id": pid,
+        "bidder_user_id": "u2",
+        "amount": amount,
+        "created_at": f"2026-11-01T10:00:{amount % 60:02d}+00:00",
+    }
+    fields.update(kw)
+    return BazaarBid(**fields)
+
+
+async def test_apply_synced_bids_adds_and_only_ever_turns_flags_on(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    repo = env.bazaar_repo
+    assert await repo.apply_synced_bids(
+        pid,
+        [_synced_bid(pid, "b-1", 10, rejected=True, rejection_reason="secret")],
+        space_id=_DEFAULT_SPACE_ID,
+    )
+    (held,) = await repo.list_bids(pid)
+    assert held.rejected and held.rejection_reason is None
+    # A stale copy cannot clear a flag; the same snapshot writes nothing.
+    assert not await repo.apply_synced_bids(
+        pid, [_synced_bid(pid, "b-1", 10)], space_id=_DEFAULT_SPACE_ID
+    )
+    assert (await repo.list_bids(pid))[0].rejected
+    # Another space: refused. A bid id of another listing: never moved.
+    assert not await repo.apply_synced_bids(
+        pid, [_synced_bid(pid, "b-2", 11)], space_id="other-space"
+    )
+    other = uuid.uuid4().hex
+    await _seed_listing(env, other)
+    await repo.apply_synced_bids(
+        other,
+        [_synced_bid(other, "b-1", 99, withdrawn=True)],
+        space_id=_DEFAULT_SPACE_ID,
+    )
+    assert (await repo.list_bids(pid))[0].withdrawn is False
+    assert await repo.list_bids(other) == []
+
+
+async def test_list_bids_for_listings_keeps_the_newest_per_listing(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    repo = env.bazaar_repo
+    await repo.apply_synced_bids(
+        pid,
+        [_synced_bid(pid, f"b-{n}", n) for n in range(5)],
+        space_id=_DEFAULT_SPACE_ID,
+    )
+    got = await repo.list_bids_for_listings([pid, "nope"], per_listing=3)
+    assert [b.id for b in got[pid]] == ["b-2", "b-3", "b-4"]
+    assert await repo.list_bids_for_listings([], per_listing=3) == {}
+
+
+async def test_apply_synced_bids_never_speaks_for_our_own_bidders(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    repo = env.bazaar_repo
+    keep = frozenset({"u-ours"})
+    await repo.apply_synced_bids(
+        pid,
+        [_synced_bid(pid, "b-mine", 10, bidder_user_id="u-ours")],
+        space_id=_DEFAULT_SPACE_ID,
+        keep_bidders=keep,
+    )
+    assert await repo.list_bids(pid) == []  # placed here, never synced in
+    await repo.apply_synced_bids(
+        pid,
+        [_synced_bid(pid, "b-mine", 10, bidder_user_id="u-ours")],
+        space_id=_DEFAULT_SPACE_ID,
+    )
+    await repo.apply_synced_bids(
+        pid,
+        [
+            _synced_bid(
+                pid,
+                "b-mine",
+                10,
+                bidder_user_id="u-ours",
+                withdrawn=True,
+                rejected=True,
+            )
+        ],
+        space_id=_DEFAULT_SPACE_ID,
+        keep_bidders=keep,
+    )
+    (held,) = await repo.list_bids(pid)
+    assert held.rejected and not held.withdrawn
+
+
+async def test_apply_synced_bids_stamps_arrival_not_the_hosts_clock(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    await env.bazaar_repo.apply_synced_bids(
+        pid,
+        [_synced_bid(pid, "b-1", 10, created_at="2020-01-01T00:00:00+00:00")],
+        space_id=_DEFAULT_SPACE_ID,
+    )
+    (held,) = await env.bazaar_repo.list_bids(pid)
+    assert held.created_at > "2026"

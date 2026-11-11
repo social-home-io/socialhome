@@ -35,9 +35,11 @@ Pure module — no I/O.
 
 from __future__ import annotations
 
+import unicodedata
 import zlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import TypeGuard
 
 import orjson
 
@@ -132,6 +134,33 @@ def item_stamp(raw: object, *, now: datetime | None = None) -> datetime | None:
     if parsed > limit:
         return None
     return parsed
+
+
+def stored_stamp(raw: object, *, now: datetime | None = None) -> datetime | None:
+    """A stamp a §25.6 record copies from the host's rows — the live
+    :func:`item_stamp` rule (no more than :data:`MAX_ITEM_CLOCK_SKEW_S`
+    ahead of ``now``), except that a naive stamp is UTC, the shape every
+    stored one has (:func:`stamp_to_db`, SQLite ``datetime('now')``)."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return item_stamp(parsed.isoformat(), now=now)
+
+
+def reaction_emoji_ok(emoji: object) -> TypeGuard[str]:
+    """The live reaction emoji rule: a non-empty string of at most
+    :data:`MAX_REACTION_EMOJI_CHARS` characters, already NFC and trimmed."""
+    return (
+        isinstance(emoji, str)
+        and bool(emoji)
+        and len(emoji) <= MAX_REACTION_EMOJI_CHARS
+        and unicodedata.normalize("NFC", emoji.strip()) == emoji
+    )
 
 
 def stamp_to_db(stamp: datetime) -> str:

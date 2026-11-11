@@ -57,6 +57,9 @@ STUB = "house-a"
 OTHER = "house-c"
 #: A household below the v_41 moderator floor.
 OLD = "house-old"
+#: A member household the host reaches only over the mesh: no paired row
+#: (``peer_supports`` False), its version claimed as a space member.
+MESH = "house-mesh"
 
 
 @pytest.fixture
@@ -80,10 +83,14 @@ async def host(tmp_dir):
     fed.send_with_mesh_fallback = AsyncMock()
     fed.broadcast_to_space_members = AsyncMock(return_value=None)
 
-    async def _supports(instance_id, *, min_version):
+    async def _paired_supports(instance_id, *, min_version):
+        return instance_id not in (OLD, MESH)
+
+    async def _member_supports(instance_id, *, min_version):
         return instance_id != OLD
 
-    fed.peer_supports = AsyncMock(side_effect=_supports)
+    fed.peer_supports = AsyncMock(side_effect=_paired_supports)
+    fed.space_member_supports = AsyncMock(side_effect=_member_supports)
     fed_repo = MagicMock()
     fed_repo.get_instance = AsyncMock(return_value=None)
     fed_repo.list_instances_in_space = AsyncMock(return_value=[])
@@ -128,6 +135,7 @@ async def host(tmp_dir):
         (OTHER, "t-admin"): SpaceRole.ADMIN,
         (OTHER, "c-admin"): SpaceRole.ADMIN,
         (OLD, "t-old"): SpaceRole.MEMBER,
+        (MESH, "t-mesh"): SpaceRole.MEMBER,
     }
     for (inst, uid), role in seats.items():
         await remote.add(
@@ -277,6 +285,15 @@ async def test_the_moderator_floor_holds_on_the_forward_path(host):
     target = (OLD, "t-old")
     await _forward(host, sender=STUB, actor="u-admin", target=target, role="moderator")
     assert await _role(host, *target) == SpaceRole.MEMBER
+
+
+async def test_a_mesh_only_members_household_can_become_a_moderator(host):
+    """Every member is equal: a target household the host reaches only over
+    the mesh is judged by the version it claimed as a space member
+    (``space_member_supports``), as on the host's own path."""
+    target = (MESH, "t-mesh")
+    await _forward(host, sender=STUB, actor="u-admin", target=target, role="moderator")
+    assert await _role(host, *target) == SpaceRole.MODERATOR
 
 
 async def test_an_unknown_target_or_role_is_dropped(host):

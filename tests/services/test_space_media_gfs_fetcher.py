@@ -9,7 +9,14 @@ import os
 from dataclasses import dataclass
 
 from socialhome.domain.federation import InstanceSource
+from socialhome.domain.federation_capabilities import FederationCapability
+from socialhome.domain.file_hashes import (
+    FileHash,
+    sha256_hex,
+    space_content_media_name,
+)
 from socialhome.domain.gfs_space_media import space_media_address
+from socialhome.domain.space import SpaceRole
 from socialhome.domain.space_media_ref import SpaceMediaRef, space_page_media_name
 from socialhome.services import space_media_gfs_fetcher as fetch_mod
 from socialhome.services.inbound_media_store import (
@@ -204,24 +211,71 @@ class _FedRepo:
 HOST = _Inst("a", InstanceSource.SPACE_SESSION, relay_via="https://g1.example")
 
 
-class _Spaces:
-    """Only the reader's own channel id of a private space."""
+@dataclass
+class _Seat:
+    user_id: str
+    role: SpaceRole
 
-    def __init__(self, channel_id: str | None = None):
+
+V92 = FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
+SPACE_HOST = "host-h"
+
+
+@dataclass
+class _Space:
+    id: str
+    owner_instance_id: str
+
+
+class _Spaces:
+    """The reader's own channel id of a private space, and its seat: a
+    follower household by default (v_92: only a follower asks its GFS)."""
+
+    def __init__(self, channel_id: str | None = None, *, member: bool = False):
         self.channel_id = channel_id
+        self.role = SpaceRole.MEMBER if member else SpaceRole.SUBSCRIBER
+
+    async def get(self, space_id):
+        return _Space(space_id, SPACE_HOST)
 
     async def get_gfs_channel(self, space_id):
         return (self.channel_id, "pk") if self.channel_id else None
 
+    async def list_local_member_user_ids(self, space_id):
+        return ["u-me"]
 
-def _fetcher(tmp_path, gfs, *, conns=(), insts=(HOST,), channel_id=None):
+    async def list_members(self, space_id):
+        return [_Seat("u-me", self.role)]
+
+
+class _Fed:
+    """``space_member_supports`` over fixed household versions."""
+
+    def __init__(self, versions):
+        self.versions = dict(versions)
+
+    async def space_member_supports(self, instance_id, *, min_version):
+        return self.versions.get(instance_id, 0) >= min_version
+
+
+def _fetcher(
+    tmp_path,
+    gfs,
+    *,
+    conns=(),
+    insts=(HOST,),
+    channel_id=None,
+    member=False,
+    host_version=V92,
+):
     return SpaceMediaGfsFetcher(
         refs_repo=_Refs(),
         space_crypto=_Crypto(),
         gfs_service=gfs,
         gfs_repo=_GfsRepo(conns),
         federation_repo=_FedRepo(insts),
-        space_repo=_Spaces(channel_id),
+        space_repo=_Spaces(channel_id, member=member),
+        federation=_Fed({SPACE_HOST: host_version}),
         media_dir=tmp_path,
     )
 
@@ -1125,6 +1179,49 @@ async def test_a_view_that_misses_asks_once_and_gets_the_bytes(tmp_path):
     assert (loc.item_id, loc.origin, loc.filename) == (ITEM, ORIGIN, "a.webp")
 
 
+async def test_a_member_household_never_asks_its_gfs_for_a_content_named_file(
+    tmp_path,
+):
+    """v_92: a household holding a member seat in a space whose host is at
+    v_92 asks its host or a helper with ``SPACE_MEDIA_WANTED`` for an
+    ``sc-`` file — never its GFS's on-demand path."""
+    data = b"x"
+    blob = _blob("a.webp", data)
+    gfs = _OnDemandGfs({}, served={_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs, member=True)
+    await _recv_hashed(f, _wire("a.webp", blob), data)
+    assert await f.ensure_local(_sc("a.webp", data)) is False
+    assert gfs.wanted == []
+
+
+async def test_a_member_holding_a_gfs_named_file_still_asks_its_gfs(tmp_path):
+    """A member keeps a file under its ``sg-`` name when it took it from the
+    public GFS copy (no hash map, or before v_92) — ``SPACE_MEDIA_WANTED``
+    asks only for ``sc-`` content names, so its GFS on-demand ask is the
+    one way that file heals past the cache."""
+    data = os.urandom(300)
+    blob = _blob("a.webp", data)
+    gfs = _OnDemandGfs({}, served={_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs, member=True)
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
+    assert await f.ensure_local(_L("a.webp")) is True
+    assert (tmp_path / _L("a.webp")).read_bytes() == data
+    assert len(gfs.wanted) == 1
+
+
+async def test_a_member_whose_host_is_below_v92_still_asks_its_gfs(tmp_path):
+    """Rollout: a host below v_92 answers no ``SPACE_MEDIA_WANTED``, so a
+    member of its space keeps the v_83 on-demand ask it had before."""
+    data = os.urandom(300)
+    blob = _blob("a.webp", data)
+    gfs = _OnDemandGfs({}, served={_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs, member=True, host_version=V92 - 1)
+    await _recv_hashed(f, _wire("a.webp", blob), data)
+    assert await f.ensure_local(_sc("a.webp", data)) is True
+    assert (tmp_path / _sc("a.webp", data)).read_bytes() == data
+    assert len(gfs.wanted) == 1
+
+
 async def test_a_wanted_answer_is_checked_like_a_fetch(tmp_path, caplog):
     blob = _blob("a.webp", b"x")
     other = _blob("a.webp", b"y")
@@ -1194,3 +1291,115 @@ async def test_a_follower_asks_through_its_own_gfs_connection(tmp_path):
     assert await f.ensure_local(_L("a.webp")) is True
     assert (tmp_path / _L("a.webp")).read_bytes() == data
     assert gfs.wanted[0][0] == "https://g9.example"
+
+
+# ── v_85 hashed files: one content name on every path ───────────────────
+
+
+def _sc(name: str, data: bytes) -> str:
+    return space_content_media_name(SPACE, sha256_hex(data), name)
+
+
+def _hashes(name: str, data: bytes) -> dict[str, FileHash]:
+    return {name: FileHash(sha256_hex(data))}
+
+
+async def _recv_hashed(f, raw, data, *, origin: str = ORIGIN, names=("a.webp",)):
+    loc = await f.localize(
+        SPACE,
+        raw,
+        [f"api/media/{n}" for n in names],
+        item_id=ITEM,
+        origin=origin,
+        hashes=_hashes("a.webp", data),
+    )
+    await f.keep(loc, prefetch=False)
+    return loc
+
+
+async def test_a_hashed_described_file_takes_its_content_name(tmp_path):
+    """A file the item's hash map covers is named ``sc-`` even when a GFS
+    describes it: the same name a host's or helper's push lands under."""
+    data = b"picture"
+    blob = _blob("a.webp", data)
+    f = _fetcher(tmp_path, _Gfs({}))
+    loc = await _recv_hashed(
+        f,
+        {**_wire("a.webp", blob), **_wire("b.webp", blob)},
+        data,
+        names=("a.webp", "b.webp"),
+    )
+    assert loc.names == {"a.webp": _sc("a.webp", data), "b.webp": _L("b.webp")}
+    by_name = {r.filename: r for r in loc.refs}
+    assert by_name["a.webp"].local_name == _sc("a.webp", data)
+    # The blob's AAD still names the item and the sealing household.
+    assert (by_name["a.webp"].item_id, by_name["a.webp"].origin) == (ITEM, ORIGIN)
+    assert by_name["b.webp"].local_name == _L("b.webp")  # unhashed: unchanged
+    assert (await f._refs.get(_sc("a.webp", data))).blob_id == _addr(blob)
+
+
+async def test_the_same_hashed_file_described_by_two_households_is_one_name(
+    tmp_path, caplog
+):
+    data = b"picture"
+    f = _fetcher(tmp_path, _Gfs({}))
+    await _recv_hashed(f, _wire("a.webp", _blob("a.webp", data)), data)
+    with caplog.at_level("INFO"):
+        second = await _recv_hashed(
+            f,
+            _wire("a.webp", _blob("a.webp", data, origin="peer-b")),
+            data,
+            origin="peer-b",
+        )
+    assert second.names == {"a.webp": _sc("a.webp", data)}
+    assert "described by" not in caplog.text
+    # The row keeps the household whose blob it names (its AAD).
+    assert (await f._refs.get(_sc("a.webp", data))).origin == ORIGIN
+
+
+async def test_a_content_named_described_file_is_fetched_and_verified(tmp_path):
+    data = os.urandom(3000)
+    blob = _blob("a.webp", data)
+    f = _fetcher(tmp_path, _Gfs({_addr(blob): blob}))
+    await _recv_hashed(f, _wire("a.webp", blob), data)
+    assert await f.ensure_local(_sc("a.webp", data)) is True
+    assert (tmp_path / _sc("a.webp", data)).read_bytes() == data
+
+
+async def test_a_content_named_file_whose_bytes_do_not_hash_is_refused(
+    tmp_path, caplog
+):
+    """The author's map says h; the sealed bytes hash to something else —
+    nothing is written under the content name."""
+    data = b"the real picture"
+    blob = _blob("a.webp", b"something else")
+    f = _fetcher(tmp_path, _Gfs({_addr(blob): blob}))
+    await _recv_hashed(f, _wire("a.webp", blob), data)
+    with caplog.at_level("WARNING"):
+        assert await f.ensure_local(_sc("a.webp", data)) is False
+    assert not (tmp_path / _sc("a.webp", data)).exists()
+    assert "does not hash" in caplog.text
+
+
+async def test_a_wanted_content_named_file_is_verified_too(tmp_path, caplog):
+    data = b"the real picture"
+    wrong = _blob("a.webp", b"another picture")
+    gfs = _OnDemandGfs({}, served={_addr(wrong): wrong})
+    f = _fetcher(tmp_path, gfs)
+    await _recv_hashed(f, _wire("a.webp", wrong), data)
+    with caplog.at_level("WARNING"):
+        assert await f.ensure_local(_sc("a.webp", data)) is False
+    assert len(gfs.wanted) == 1
+    assert not (tmp_path / _sc("a.webp", data)).exists()
+    assert "does not hash" in caplog.text
+
+
+async def test_a_content_name_without_a_ref_row_is_never_fetched(tmp_path, caplog):
+    """An ``sc-`` file a household pushes (no descriptor) that is not here
+    yet stays quiet — never a GFS fetch."""
+    gfs = _Gfs({})
+    f = _fetcher(tmp_path, gfs)
+    with caplog.at_level("WARNING"):
+        assert await f.ensure_local(_sc("a.webp", b"x")) is False
+    assert gfs.fetches == []
+    assert caplog.text == ""

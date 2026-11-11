@@ -2897,8 +2897,35 @@ SYNC_CASES: list[tuple[str, str, list, tuple[str, ...], tuple[str, ...]]] = [
     ),
 ]
 
+SYNC_CASES += [
+    (
+        "polls",
+        "vote on u-a's poll and close it (v_92)",
+        [
+            {
+                "post_id": "post-a",
+                "meta": {"question": "Q", "closed": True},
+                "options": [{"id": "opt-a", "text": "Yes"}],
+                "votes": [{"option_id": "opt-a", "voter_user_id": "u-o"}],
+            }
+        ],
+        # The host's alone — not even the poll's author household or an
+        # admin may set everybody's votes by stream.
+        (HOST,),
+        (AUTHOR, OTHER, ADMIN, MOD),
+    ),
+    (
+        "timetables_deleted",
+        "delete u-adm's timetable (v_92)",
+        [{"id": _TT_A, "created_by": "u-adm", "created_at": _NOW}],
+        # The row names no deleting moderator: only the host's counts.
+        (HOST,),
+        (ADMIN, MOD, AUTHOR, OTHER),
+    ),
+]
+
 #: Resources a provider streams that write nothing, with the reason.
-_SYNC_NOT_WRITTEN = {"polls": "informational — polls ride on the posts stream"}
+_SYNC_NOT_WRITTEN: dict[str, str] = {}
 
 
 @pytest.mark.parametrize(

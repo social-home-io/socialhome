@@ -74,7 +74,6 @@ one. It never creates a seat or a user.
 from __future__ import annotations
 
 import logging
-import unicodedata
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -102,11 +101,11 @@ from ..domain.space_item import (
     ITEM_TYPE_POST_DELETE,
     ITEM_TYPE_REACTION_ADD,
     ITEM_TYPE_REACTION_REMOVE,
-    MAX_REACTION_EMOJI_CHARS,
     REMOVAL_TARGET_POST,
     AuthorityRemoval,
     StaleItemStamp,
     item_stamp,
+    reaction_emoji_ok,
     stamp_to_db,
 )
 from ..domain.writer_cert import WRITER_SCOPE_WRITE
@@ -813,12 +812,7 @@ class SpaceItemInbound:
         if item.post_id != item.target:
             return False
         emoji = item.inner.get("emoji")
-        if (
-            not isinstance(emoji, str)
-            or not emoji
-            or len(emoji) > MAX_REACTION_EMOJI_CHARS
-            or unicodedata.normalize("NFC", emoji.strip()) != emoji
-        ):
+        if not reaction_emoji_ok(emoji):
             return False
         features = item.space.features
         # A follower can't tell a comment-only member from a follower: a

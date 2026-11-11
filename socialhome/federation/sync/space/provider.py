@@ -20,6 +20,7 @@ import hashlib
 import logging
 import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
 import orjson
@@ -54,12 +55,16 @@ from .exporter import (
     record_batches,
     serialise_chunk,
 )
+from .exporters.bazaar import BazaarExporter
 from .exporters.calendar import CalendarExporter
 from .exporters.members import PreModeratorMembersExporter
-from .exporters.posts import iter_post_pages
+from .exporters.polls import PollsExporter
+from .exporters.posts import PostsExporter
+from .exporters.schedules import SchedulesExporter
+from .exporters.timetables_deleted import TimetablesDeletedExporter
 from .file_gate import CatchUpFileGates
 from .watermark import session_shape
-from .window import KEEP_FOREVER, SYNC_PAGE_SIZE, SyncWindow, SyncWindows, iter_pages
+from .window import SyncWindows
 
 if TYPE_CHECKING:
     from ...sync_manager import SyncSessionRecord
@@ -110,6 +115,21 @@ MAX_RELAY_THROTTLE_WAIT_S: float = 10.0
 #: normal operation, not a broken path. ~20 waits ≈ 100 s of patience,
 #: still bounded so a relay that never lets us through terminates.
 MAX_RELAY_THROTTLE_WAITS: int = 20
+
+#: A full catch-up ships the files of the items created in the last 30
+#: days only — on every path. An older file arrives when a member opens it
+#: (v_92 ``SPACE_MEDIA_WANTED``).
+CATCHUP_MEDIA_MAX_AGE_S: int = 30 * 86_400
+#: … at most this many files per stream, newest first across every kind of
+#: item (≈ 60 MB at ~300 KB a picture, mostly from the GFS cache for a
+#: reader behind one while a file is ≤ 3 days old).
+CATCHUP_MEDIA_MAX_FILES: int = 200
+
+
+class _ItemFiles(Protocol):
+    async def recent_item_files(
+        self, space_id: str, *, cutoff: str, limit: int
+    ) -> list[tuple[str, str, str | None, list[str]]]: ...
 
 
 def _wait_budget(error: str) -> tuple[int, float] | None:
@@ -479,14 +499,13 @@ class SpaceSyncService:
     """Streams encrypted space content over a negotiated DataChannel."""
 
     __slots__ = (
-        "_bazaar_repo",
         "_builder",
         "_exporters",
         "_federation",
         "_file_gates",
         "_file_hasher",
-        "_gallery_repo",
         "_inviter_proof_for",
+        "_item_files",
         "_media_gfs",
         "_media_sync",
         "_member_gate",
@@ -498,8 +517,6 @@ class SpaceSyncService:
         "_roster_authority",
         "_roster_sent",
         "_sig_suite",
-        "_space_calendar_repo",
-        "_space_post_repo",
         "_watermarks",
         "_windows",
     )
@@ -529,10 +546,7 @@ class SpaceSyncService:
         exporters: dict[str, ResourceExporter],
         sig_suite: str = "ed25519",
         media_sync=None,
-        space_post_repo=None,
-        gallery_repo=None,
-        bazaar_repo=None,
-        space_calendar_repo=None,
+        item_files: _ItemFiles | None = None,
         windows: SyncWindows | None = None,
         watermarks: SyncWatermarks | None = None,
         owner_statement_for: Callable[[str], Awaitable[dict | None]] | None = None,
@@ -556,18 +570,13 @@ class SpaceSyncService:
         self._windows = windows
         self._exporters = exporters
         self._sig_suite = sig_suite
-        #: Optional — when wired, the provider enqueues bytes for
-        #: every post / gallery / bazaar media URL after the metadata
-        #: chunks stream, so a catch-up sync ALSO ships the historical
-        #: images (not just the rows). Without it the receiver gets
-        #: post + gallery metadata but renders broken thumbnails.
+        #: Optional — when wired, the provider enqueues the files of the
+        #: space's recent items after the metadata chunks stream, so a
+        #: catch-up sync ALSO ships the pictures (not just the rows).
         self._media_sync = media_sync
-        self._space_post_repo = space_post_repo
-        self._gallery_repo = gallery_repo
-        self._bazaar_repo = bazaar_repo
-        #: Space calendar events — their cover files ride the catch-up
-        #: media too (the record carries only the reference).
-        self._space_calendar_repo = space_calendar_repo
+        #: The space's recent items and the files they show — the bounded
+        #: catch-up media's candidates (:meth:`_enqueue_catchup_media`).
+        self._item_files: _ItemFiles | None = item_files
         #: v_82 — space pages, whose files (cover, body pictures) ride the
         #: catch-up media of the space's host (:meth:`attach_pages`).
         self._page_repo = None
@@ -605,8 +614,7 @@ class SpaceSyncService:
 
     def attach_file_gates(self, gates: CatchUpFileGates) -> None:
         """Wire the v_86 catch-up file gate: on a full stream a non-host
-        household ships only its own people's files (helper fills ride the
-        bounded resume, :mod:`.file_gate`)."""
+        household ships only its own people's files (:mod:`.file_gate`)."""
         self._file_gates = gates
 
     def attach_file_hasher(self, hasher: _FileHasher) -> None:
@@ -752,6 +760,8 @@ class SpaceSyncService:
                 return None
             exporter = _OwnPeopleOnly(exporter, self._own_members)
         version = await self._session_version(session)
+        if exporter is not None and not _item_state(version):
+            exporter = _without_item_state(exporter)
         if exporter is not None and resource == "calendar":
             if isinstance(exporter, CalendarExporter) and not _series_rows(version):
                 return exporter.expanded()
@@ -776,14 +786,11 @@ class SpaceSyncService:
             return exporter if allowed else None
         if exporter is None or resource != "members":
             return exporter
-        supports = (
-            self._federation is not None
-            and await self._federation.peer_supports(
-                session.requester_instance_id,
-                min_version=FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE,
-            )
-        )
-        return exporter if supports else PreModeratorMembersExporter(exporter)
+        # The session's version (a paired row's, else the mesh claim), like
+        # every other gate here: a mesh-only member at v_41 gets moderators.
+        if version >= FederationCapability.MIN_FOR_SPACE_MODERATOR_ROLE:
+            return exporter
+        return PreModeratorMembersExporter(exporter)
 
     async def _session_version(self, session: SyncSessionRecord) -> int:
         """The requester's protocol version (a space member household, which
@@ -1159,148 +1166,59 @@ class SpaceSyncService:
         space_id: str,
         target_instance_id: str,
     ) -> None:
-        """Enqueue media bytes for every post, gallery item, bazaar listing
-        and calendar cover in ``space_id``.
+        """Enqueue the files of the space's RECENT items for the requester —
+        bounded on every path (paired, mesh, GFS-reached member alike).
 
-        Repo reads catch :class:`sqlite3.Error` only — a renamed /
-        missing repo method raises ``AttributeError`` (a logic bug),
-        which propagates up to ``stream_initial``'s outer handler so
-        it surfaces in logs as a single visible failure rather than
-        being silently swallowed per-call. The original wide
-        ``except Exception`` here masked exactly this kind of bug
-        (see #443 — ``list_items_for_space`` never existed; tests
-        mocked whatever was called so the gap never showed up). Same
-        dedup semantics as the realtime enqueue: the ``(blob_id,
-        target_instance_id)`` primary key drops duplicates.
+        Candidates are the live items (posts and their attachments / link
+        cards, comments, space-album items, bazaar listings, calendar
+        covers — :meth:`~socialhome.repositories.media_reference_repo
+        .SqliteMediaReferenceRepo.recent_item_files`) created in the last
+        :data:`CATCHUP_MEDIA_MAX_AGE_S`, newest first across every kind, cut
+        at :data:`CATCHUP_MEDIA_MAX_FILES` files per stream after the file
+        gate. An older file arrives when a member opens it (v_92
+        ``SPACE_MEDIA_WANTED``, ``services/space_media_wanted.py``). Whether
+        a push goes at all is decided at send time: the outbox drops one
+        while the reader's GFS cache holds the file
+        (``space_media_sync_service._dispatch``).
+
+        Repo reads catch :class:`sqlite3.Error` only — a renamed / missing
+        repo method raises ``AttributeError`` (a logic bug), which
+        propagates to ``stream_initial``'s outer handler as one visible
+        failure (#443). Same dedup as the realtime enqueue: the
+        ``(blob_id, target_instance_id)`` primary key drops duplicates.
         """
         if self._media_sync is None or target_instance_id == "":
             return
-        if (
-            self._federation is not None
-            and await self._federation.is_space_session_peer(target_instance_id)
-        ):
-            # A member seated from an invite link is reached only through
-            # the GFS relay, which refuses these bytes: queuing them would
-            # only burn outbox rows and retries. A v_80 one gets the
-            # records' ``media_refs`` instead (its GFS's media cache).
-            return
-        window = (
-            await self._windows.for_space(space_id)
-            if self._windows is not None
-            else KEEP_FOREVER
-        )
-        gate = (
-            # A full stream is the host's job (it ships every file): a
-            # helper ships only its own people's here — helper fills ride
-            # the bounded resume, so k helpers never re-send one file.
-            await self._file_gates.for_requester(
-                space_id, target_instance_id, fills=False
+        if self._item_files is not None:
+            gate = (
+                # A full stream is the host's job (it ships every file): a
+                # helper ships only its own people's here, so k helpers
+                # never re-send one file.
+                await self._file_gates.for_space(space_id)
+                if self._file_gates is not None
+                else None
             )
-            if self._file_gates is not None
-            else None
-        )
-
-        async def _ship(owner: str | None, urls: list[str]) -> list[str]:
-            return urls if gate is None else await gate.ship(owner, urls)
-
-        # Posts — the same ones the ``posts`` resource streamed: live,
-        # inside the retention window, page by page.
-        if self._space_post_repo is not None:
+            cutoff = (
+                datetime.now(UTC) - timedelta(seconds=CATCHUP_MEDIA_MAX_AGE_S)
+            ).strftime("%Y-%m-%d %H:%M:%S")
+            budget = CATCHUP_MEDIA_MAX_FILES
             try:
-                async for posts in iter_post_pages(
-                    self._space_post_repo, space_id, window
-                ):
-                    for post in posts:
-                        await self._enqueue_media(
-                            space_id,
-                            target_instance_id,
-                            post.id,
-                            await _ship(
-                                getattr(post, "author", None),
-                                self._post_media_urls(post),
-                            ),
-                        )
+                items = await self._item_files.recent_item_files(
+                    space_id, cutoff=cutoff, limit=budget
+                )
             except sqlite3.Error:
                 log.exception(
-                    "sync-catchup-media: list posts failed for space=%s",
+                    "sync-catchup-media: list recent items failed for space=%s",
                     space_id,
                 )
-        # Gallery items — the space's own items the ``gallery`` resource
-        # streamed (never a post's mirror: its bytes ride with the post).
-        # No window: nothing prunes gallery items.
-        if self._gallery_repo is not None:
-            try:
-                async for items in self._gallery_item_pages(space_id):
-                    for item in items:
-                        gallery_urls: list[str] = []
-                        if getattr(item, "thumbnail_url", None):
-                            gallery_urls.append(item.thumbnail_url)
-                        if (
-                            getattr(item, "url", None)
-                            and item.url != item.thumbnail_url
-                        ):
-                            gallery_urls.append(item.url)
-                        await self._enqueue_media(
-                            space_id,
-                            target_instance_id,
-                            item.id,
-                            await _ship(
-                                getattr(item, "uploaded_by", None), gallery_urls
-                            ),
-                        )
-            except sqlite3.Error:
-                log.exception(
-                    "sync-catchup-media: list gallery items failed for space=%s",
-                    space_id,
-                )
-        # Bazaar listings — each listing's photos live on
-        # ``BazaarListing.image_urls`` (NOT on the wrapper Post). Without
-        # this walk a remote member sees the wrapper ``PostType.BAZAAR``
-        # post via ``SPACE_POST_CREATED`` catch-up but the listing
-        # row stays empty and the photos render broken. Same dedup +
-        # correlation_id semantics as posts; ``listing.post_id`` is
-        # used as the correlation so the realtime + catch-up enqueues
-        # collide cleanly at the outbox PK.
-        if self._bazaar_repo is not None:
-            try:
-                async for listings in self._bazaar_pages(space_id, window):
-                    for listing in listings:
-                        await self._enqueue_media(
-                            space_id,
-                            target_instance_id,
-                            listing.post_id,
-                            await _ship(
-                                getattr(listing, "seller_user_id", None),
-                                list(listing.image_urls),
-                            ),
-                        )
-            except sqlite3.Error:
-                log.exception(
-                    "sync-catchup-media: list bazaar listings failed for space=%s",
-                    space_id,
-                )
-
-        # Calendar covers — every event the ``calendar`` resource streamed
-        # (the full record set; nothing prunes events).
-        if self._space_calendar_repo is not None:
-            try:
-                async for events in self._calendar_pages(space_id):
-                    for event in events:
-                        if event.cover_url:
-                            await self._enqueue_media(
-                                space_id,
-                                target_instance_id,
-                                event.id,
-                                await _ship(
-                                    getattr(event, "created_by", None),
-                                    [event.cover_url],
-                                ),
-                            )
-            except sqlite3.Error:
-                log.exception(
-                    "sync-catchup-media: list calendar events failed for space=%s",
-                    space_id,
-                )
+                items = []
+            for _created_at, item_id, owner, names in items:
+                if budget <= 0:
+                    break
+                urls = names if gate is None else gate.ship(owner, names)
+                urls = urls[:budget]
+                budget -= len(urls)
+                await self._enqueue_media(space_id, target_instance_id, item_id, urls)
         # Page files — the host's catch-up only (v_82).
         await self._enqueue_page_media(space_id, target_instance_id)
 
@@ -1351,40 +1269,6 @@ class SpaceSyncService:
                 ),
             )
 
-    def _calendar_pages(self, space_id: str):
-        repo = self._space_calendar_repo
-
-        async def fetch(cursor: int | None):
-            return await repo.list_events_sync_page(
-                space_id, cursor=cursor, limit=SYNC_PAGE_SIZE
-            )
-
-        return iter_pages(fetch)
-
-    def _gallery_item_pages(self, space_id: str):
-        repo = self._gallery_repo
-
-        async def fetch(cursor: int | None):
-            return await repo.list_items_sync_page(
-                space_id, cursor=cursor, limit=SYNC_PAGE_SIZE
-            )
-
-        return iter_pages(fetch)
-
-    def _bazaar_pages(self, space_id: str, window: SyncWindow):
-        repo = self._bazaar_repo
-
-        async def fetch(cursor: int | None):
-            return await repo.list_sync_page(
-                space_id,
-                cutoff=window.cutoff,
-                exempt_types=window.exempt_types,
-                cursor=cursor,
-                limit=SYNC_PAGE_SIZE,
-            )
-
-        return iter_pages(fetch)
-
     async def _enqueue_media(
         self,
         space_id: str,
@@ -1410,20 +1294,6 @@ class SpaceSyncService:
                 correlation_id,
                 space_id,
             )
-
-    @staticmethod
-    def _post_media_urls(post) -> list[str]:
-        urls: list[str] = []
-        if getattr(post, "media_url", None):
-            urls.append(post.media_url)
-        urls.extend(getattr(post, "image_urls", None) or ())
-        fm = getattr(post, "file_meta", None)
-        if fm is not None and getattr(fm, "url", None):
-            urls.append(fm.url)
-        lp = getattr(post, "link_preview", None)
-        if lp is not None and lp.thumbnail_url:
-            urls.append(lp.thumbnail_url)
-        return urls
 
     async def stream_request_more(
         self,
@@ -1586,6 +1456,32 @@ def _series_rows(version: int) -> bool:
     numbered chunks? One we cannot ask (``0``) gets the older shape — never a
     series row an older receiver would flatten."""
     return version >= FederationCapability.MIN_FOR_SYNC_SERIES_ROWS
+
+
+def _item_state(version: int) -> bool:
+    """v_92: does a requester at ``version`` take the item state a lost live
+    event leaves behind (poll votes, schedule answers and picks, RSVPs,
+    reaction stamps, bazaar bids, timetable tombstones)? One we cannot ask (``0``) gets
+    the older shapes."""
+    return version >= FederationCapability.MIN_FOR_SYNC_ITEM_STATE
+
+
+def _without_item_state(exporter: ResourceExporter) -> ResourceExporter | None:
+    """``exporter`` in the record shape before v_92 — ``None`` for a
+    resource that did not exist then."""
+    if isinstance(exporter, PostsExporter):
+        return exporter.without_reaction_stamps()
+    if isinstance(exporter, PollsExporter):
+        return exporter.without_votes()
+    if isinstance(exporter, SchedulesExporter):
+        return exporter.slots_only()
+    if isinstance(exporter, CalendarExporter):
+        return exporter.without_rsvps()
+    if isinstance(exporter, BazaarExporter):
+        return exporter.without_bids()
+    if isinstance(exporter, TimetablesDeletedExporter):
+        return None
+    return exporter
 
 
 def _allocator(session: SyncSessionRecord) -> Callable[[], int]:

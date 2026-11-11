@@ -3,6 +3,17 @@
 Every live post of the space inside its retention window (all of them
 when the space keeps forever — :mod:`..window`), newest first, read page
 by page so a big space streams in bounded memory.
+
+v_92: a record also carries the post's reaction stamps
+(``reaction_stamps``: ``{"user\\0emoji": [stamp, added]}``, the
+per-reaction last-writer-wins order the live reactions keep), the newest
+:data:`MAX_SYNCED_REACTION_STAMPS` of them — the repo keeps up to 4096 per
+post, ~85 B each on the wire (~350 KB), more than one record may carry
+(a record never splits across chunks; ``docs/protocol/sync.md``). A cut
+loses only old stamps, which the reaction sets settle anyway. A v_92
+receiver merges the host's stamps into a post it holds, so a reaction (or
+its removal) it missed lands, and a newer one it holds stays. A requester
+below v_92 gets the record without them.
 """
 
 from __future__ import annotations
@@ -17,6 +28,11 @@ from ..window import SYNC_PAGE_SIZE, SyncWindow, SyncWindows, iter_pages
 if TYPE_CHECKING:
     from .....domain.post import Post
     from .....repositories.space_post_repo import AbstractSpacePostRepo
+
+
+#: The most reaction stamps one ``posts`` record carries, newest first
+#: (~85 B each: ≤ ~90 KB, ≤ ~210 KB with every emoji at its 32-char cap).
+MAX_SYNCED_REACTION_STAMPS: int = 1024
 
 
 def iter_post_pages(
@@ -50,13 +66,22 @@ class PostsExporter(PagedExporterMixin):
 
     resource = "posts"
 
-    __slots__ = ("_repo", "_windows")
+    __slots__ = ("_repo", "_stamps", "_windows")
 
     def __init__(
-        self, space_post_repo: AbstractSpacePostRepo, windows: SyncWindows
+        self,
+        space_post_repo: AbstractSpacePostRepo,
+        windows: SyncWindows,
+        *,
+        reaction_stamps: bool = True,
     ) -> None:
         self._repo = space_post_repo
         self._windows = windows
+        self._stamps = reaction_stamps
+
+    def without_reaction_stamps(self) -> PostsExporter:
+        """The record set of a requester below v_92: no reaction stamps."""
+        return PostsExporter(self._repo, self._windows, reaction_stamps=False)
 
     def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
         return self._pages(space_id, None)
@@ -71,7 +96,14 @@ class PostsExporter(PagedExporterMixin):
     ) -> AsyncIterator[list[dict[str, Any]]]:
         window = await self._windows.for_space(space_id)
         async for posts in iter_post_pages(self._repo, space_id, window, since=since):
-            yield [_post_to_dict(p) for p in posts]
+            records = [_post_to_dict(p) for p in posts]
+            if self._stamps:
+                stamps = await self._repo.list_reaction_stamps([p.id for p in posts])
+                for record in records:
+                    held = stamps.get(record["id"])
+                    if held:
+                        record["reaction_stamps"] = _newest_stamps(held)
+            yield records
 
 
 def _post_to_dict(post) -> dict[str, Any]:
@@ -100,3 +132,11 @@ def _post_to_dict(post) -> dict[str, Any]:
     d.pop("poll", None)
     d.pop("schedule", None)
     return d
+
+
+def _newest_stamps(stamps: dict[str, list]) -> dict[str, list]:
+    """The newest :data:`MAX_SYNCED_REACTION_STAMPS` of a post's stamps."""
+    if len(stamps) <= MAX_SYNCED_REACTION_STAMPS:
+        return stamps
+    newest = sorted(stamps, key=lambda k: (stamps[k][0], k), reverse=True)
+    return {k: stamps[k] for k in newest[:MAX_SYNCED_REACTION_STAMPS]}

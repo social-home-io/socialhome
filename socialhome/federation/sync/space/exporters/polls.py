@@ -3,6 +3,20 @@
 Walks posts for the space, calls :class:`AbstractPollRepo.get_meta` /
 ``list_options_with_counts`` for each post that has a poll, emits
 one record per poll.
+
+v_92: the record also carries ``votes`` (``{option_id, voter_user_id}``
+— every member household sees who voted for what live, through
+``SPACE_POLL_VOTE_CAST``), and a v_92 receiver converges the poll on the
+host's record: it creates the poll and its options when missing (the live
+path never carried the options), takes the votes of everybody but its own
+people and closes a closed poll. A requester below v_92 gets the record
+without ``votes`` (:meth:`PollsExporter.without_votes`) — it drops the
+resource anyway.
+
+A record never splits across chunks, so its votes are bounded:
+:data:`MAX_VOTES_PER_POLL`, the most recent voters' first and each voter's
+votes whole; ``votes_partial`` marks a cut list, and the receiver then
+converges only the voters it names (``docs/protocol/sync.md``).
 """
 
 from __future__ import annotations
@@ -15,24 +29,37 @@ from ..window import SyncWindows
 from .posts import iter_post_pages
 
 if TYPE_CHECKING:
-    from .....repositories.poll_repo import AbstractPollRepo
+    from .....repositories.space_poll_repo import AbstractSpacePollRepo
     from .....repositories.space_post_repo import AbstractSpacePostRepo
+
+
+#: The most votes one ``polls`` record carries (~100 B each: ≤ ~100 KB).
+MAX_VOTES_PER_POLL: int = 1000
 
 
 class PollsExporter(PagedExporterMixin):
     resource = "polls"
 
-    __slots__ = ("_poll_repo", "_post_repo", "_windows")
+    __slots__ = ("_poll_repo", "_post_repo", "_votes", "_windows")
 
     def __init__(
         self,
-        poll_repo: AbstractPollRepo,
+        poll_repo: AbstractSpacePollRepo,
         space_post_repo: AbstractSpacePostRepo,
         windows: SyncWindows,
+        *,
+        votes: bool = True,
     ) -> None:
         self._poll_repo = poll_repo
         self._post_repo = space_post_repo
         self._windows = windows
+        self._votes = votes
+
+    def without_votes(self) -> PollsExporter:
+        """The record set of a requester below v_92: no ``votes``."""
+        return PollsExporter(
+            self._poll_repo, self._post_repo, self._windows, votes=False
+        )
 
     def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
         return self._pages(space_id, None)
@@ -60,11 +87,24 @@ class PollsExporter(PagedExporterMixin):
             if meta is None:
                 continue
             options = await self._poll_repo.list_options_with_counts(p.id)
-            out.append(
-                {
-                    "post_id": p.id,
-                    "meta": meta,
-                    "options": options,
-                }
-            )
+            record: dict[str, Any] = {
+                "post_id": p.id,
+                "meta": meta,
+                "options": options,
+            }
+            if self._votes:
+                votes = await self._poll_repo.list_votes(
+                    p.id, limit=MAX_VOTES_PER_POLL + 1
+                )
+                if len(votes) > MAX_VOTES_PER_POLL:
+                    # Never half a voter: the one the cut runs through goes.
+                    cut = votes[MAX_VOTES_PER_POLL]["voter_user_id"]
+                    votes = [
+                        v
+                        for v in votes[:MAX_VOTES_PER_POLL]
+                        if v["voter_user_id"] != cut
+                    ]
+                    record["votes_partial"] = True
+                record["votes"] = votes
+            out.append(record)
         return out

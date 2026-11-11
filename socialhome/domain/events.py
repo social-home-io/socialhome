@@ -1502,9 +1502,10 @@ class SpaceSyncComplete(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class SpaceSyncDeferred(DomainEvent):
     """A sync we asked a provider for was not served and must be asked for
-    again: the provider refused our ``SPACE_SYNC_BEGIN`` for lack of
-    capacity (``too_many_sessions`` / ``node_capacity``, §25.6 S-6 / S-8),
-    or its stream broke off before the end-of-stream sentinel (the
+    again: the provider refused our ``SPACE_SYNC_BEGIN`` (``reason``: its
+    ``too_many_sessions`` / ``node_capacity`` / ``rate_limited``, §25.6
+    S-6 / S-8 — only a capacity refusal is asked again shortly), or its
+    stream broke off before the end-of-stream sentinel (the
     DataChannel closed under it — the provider restarted; ``reason``
     ``"interrupted"``).
 
@@ -1517,8 +1518,9 @@ class SpaceSyncDeferred(DomainEvent):
     provider_instance_id: str
     sync_mode: str = "initial"
     sync_id: str = ""
-    #: ``"capacity"`` (refused) or ``"interrupted"`` (cut mid-stream).
-    reason: str = "capacity"
+    #: The provider's refusal, or ``"interrupted"`` (cut mid-stream, noticed
+    #: on our side — not an answer from the provider).
+    reason: str = "too_many_sessions"
     occurred_at: datetime = field(default_factory=_now)
 
 

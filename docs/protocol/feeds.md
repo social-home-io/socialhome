@@ -118,6 +118,14 @@ household's people who answered (`poll_scheduled`) through a local-only
 calendar bridge would add a second entry next to the one the organiser's
 household already created and federated.
 
+**Catch-up (v_92).** The host's §25.6 stream converges a member household
+on the host's polls: the `polls` record creates a poll and its options it
+lacks, carries the votes (`votes`, ≤ 1000, `votes_partial` when cut) and
+the closure; the `schedules` record carries the answers (`responses`,
+≤ 1000, last writer wins on `responded_at`) and the pick
+(`finalized_slot_id`). Taken from the host only, never over this
+household's own people's votes and answers; a cut list deletes nothing. See [sync.md](./sync.md#coverage--every-space-item-type).
+
 Votes are encrypted: the envelope payload includes only the vote's
 `option_id` and the voter's `user_id`, which stay inside the space's
 encrypted payload. GFS cannot tally votes even on public spaces.

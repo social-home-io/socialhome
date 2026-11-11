@@ -422,3 +422,20 @@ def test_space_content_rides_multi_frames():
         FederationEventType.SPACE_MEMBER_JOINED,
     ):
         assert t in MULTI_EVENT_TYPES
+
+
+# ─── v_92: SPACE_MEDIA_WANTED ────────────────────────────────────────────
+
+
+def test_space_media_wanted_rides_a_seat_one_household_at_a_time():
+    """A member seated from an invite link (mailbox seat) asks for files
+    too, so the type is in the seat vocabulary; it names ONE provider, so it
+    never rides a multi frame; it lands nothing, so a follower's request is
+    not a write (the provider re-checks membership)."""
+    t = FederationEventType.SPACE_MEDIA_WANTED
+    assert t.value == "space_media_wanted"
+    assert t in SPACE_SESSION_ALLOWED_EVENT_TYPES
+    assert t in MULTI_SEND_EXCLUDED_EVENT_TYPES
+    assert t not in MULTI_EVENT_TYPES
+    assert t in SPACE_READER_EVENT_TYPES
+    assert t not in SPACE_WRITE_EVENT_TYPES

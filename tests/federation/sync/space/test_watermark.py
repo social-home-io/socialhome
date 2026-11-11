@@ -329,8 +329,10 @@ async def test_confirm_keeps_the_last_full_time_for_an_incremental_stream():
 # ── Tripwire: an exporter's record shape is pinned to SYNC_SHAPE_VERSION ──
 
 
-async def _covered_record_keys(db) -> dict[str, list[str]]:
-    """One row of every covered resource, exported; each record's keys."""
+async def _covered_record_keys(db, *, item_state: bool = False) -> dict[str, list[str]]:
+    """One row of every covered resource, exported; each record's keys.
+    ``item_state``: the v_92 record shapes (sync line 92) — else the shapes
+    a requester below v_92 is sent."""
     await db.enqueue(
         "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
         " identity_public_key) VALUES('sp','S','host','anna','ab')"
@@ -508,6 +510,8 @@ async def _covered_record_keys(db) -> dict[str, list[str]]:
         ChatMessagesDeletedExporter(convos, spaces),
         MemberPicturesExporter(spaces, pictures),
     ]
+    if not item_state:
+        exporters = [provider_mod._without_item_state(e) or e for e in exporters]
     keys: dict[str, list[str]] = {}
     for exporter in exporters:
         assert isinstance(exporter, IncrementalExporter), exporter
@@ -802,3 +806,34 @@ async def test_a_shape_crossing_is_told_apart_from_a_newcomer(wm, have_seq, cros
         space_id="sp", instance_id="h", shape="S", have_seq=have_seq
     )
     assert got is crossed
+
+
+#: The record keys v_92 adds (sync line 92, ``MIN_FOR_SYNC_ITEM_STATE``):
+#: only a requester at v_92 is sent them, and its shape crossed the line —
+#: so no ``SYNC_SHAPE_VERSION`` bump (no older household streams in full).
+ITEM_STATE_KEYS_V92: dict[str, set[str]] = {
+    "polls": {"votes"},
+    "schedules": {"finalized_slot_id", "responses", "responses_at"},
+    "calendar": {"rsvps", "rsvps_at"},
+    "bazaar": {"bids"},
+}
+
+
+async def test_the_v92_item_state_keys_ride_sync_line_92(db):
+    new = await _covered_record_keys(db, item_state=True)
+    added = {
+        name: set(keys) - set(RECORD_KEYS_AT_SHAPE[name])
+        for name, keys in new.items()
+        if set(keys) != set(RECORD_KEYS_AT_SHAPE[name])
+    }
+    assert added == ITEM_STATE_KEYS_V92
+    assert FederationCapability.MIN_FOR_SYNC_ITEM_STATE in SYNC_RECORD_LINES
+
+
+def test_v92_content_names_on_every_path_is_a_sync_line():
+    """v_92: every hashed file is stored under its content name on every
+    path, GFS-described ones too — a change to how a receiver names a
+    streamed record's files, so a household crossing it gets one full
+    stream."""
+    assert FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED in SYNC_RECORD_LINES
+    assert _shape(92) != _shape(91)

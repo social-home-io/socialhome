@@ -4226,6 +4226,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Pictures in a space's pages",
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
+        "Older space pictures arrive when you open them",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -4268,6 +4269,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Pictures in a space's pages",
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
+        "Older space pictures arrive when you open them",
     )
 
 
@@ -4339,6 +4341,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Pictures in a space's pages",
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
+        "Older space pictures arrive when you open them",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -4408,6 +4411,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Pictures in a space's pages",
         "Space pictures and files checked against their hash",
         "Admins and moderators fill in missing space pictures",
+        "Older space pictures arrive when you open them",
     )
     assert "Apps that work across households" not in c.lagging_features
     assert "Apps that reach the right person" not in c.lagging_features
@@ -9680,6 +9684,7 @@ async def _remote_seat_space(stack, *, supports=True):
         return True
 
     fed.peer_supports = AsyncMock(side_effect=_supports)
+    fed.space_member_supports = AsyncMock(side_effect=_supports)
     stack.space_svc._federation = fed
     remote = await _wire_remote_members(stack)
     await remote.add(
@@ -9734,6 +9739,23 @@ async def test_an_admin_role_change_carries_no_legacy_payload(stack):
     )
     [changed] = _gossip_calls(fed, FederationEventType.SPACE_MEMBER_ROLE_CHANGED)
     assert changed.kwargs.get("legacy_payload") is None
+
+
+async def test_a_mesh_only_members_household_can_become_a_moderator(stack):
+    """A member household the host is not paired with (reached over the
+    mesh or a directory seat) is judged by the version it claimed as a
+    space member, not by a pairing row it does not have — every member is
+    equal whichever way their household is reached."""
+    space, fed, remote = await _remote_seat_space(stack)
+    fed.peer_supports = AsyncMock(return_value=False)  # no paired row
+    await stack.space_svc.set_remote_member_role(
+        space.id,
+        actor_username="anna",
+        instance_id="peer-x",
+        user_id="ru1",
+        role="moderator",
+    )
+    assert (await remote.get(space.id, "peer-x", "ru1")).role == "moderator"
 
 
 async def test_promoting_a_user_whose_household_is_behind_is_refused(stack):

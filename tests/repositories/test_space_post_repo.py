@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -958,3 +958,180 @@ async def test_set_media_rewrites_only_the_files_of_a_live_post(env):
     assert await env.repo.set_media(renamed, space_id="sp-other") is False
     await env.repo.soft_delete("sp-m1", space_id=env.space_id)
     assert await env.repo.set_media(renamed, space_id=env.space_id) is False
+
+
+# ── §25.6 reaction stamps (v_92) ─────────────────────────────────────────
+
+
+def _recent(minutes: int) -> str:
+    return (
+        (datetime.now(UTC) - timedelta(minutes=minutes))
+        .replace(tzinfo=None)
+        .isoformat(sep=" ", timespec="microseconds")
+    )
+
+
+async def _reacted_post(env):
+    await env.repo.save(
+        env.space_id,
+        Post(id="sp-r1", author="u", type=PostType.TEXT, created_at=datetime.now(UTC)),
+    )
+    await env.repo.add_reaction(
+        "sp-r1", "👍", "u-c", space_id=env.space_id, stamp=_recent(10)
+    )
+
+
+async def test_list_reaction_stamps_names_the_posts_with_any(env):
+    await _reacted_post(env)
+    stamps = await env.repo.list_reaction_stamps(["sp-r1", "nope"])
+    assert list(stamps) == ["sp-r1"]
+    assert stamps["sp-r1"]["u-c\x00👍"][1] is True
+
+
+async def test_merge_reaction_stamps_last_writer_wins(env):
+    await _reacted_post(env)
+    # An older removal changes nothing; a newer one removes.
+    assert not await env.repo.merge_reaction_stamps(
+        "sp-r1", {"u-c\x00👍": [_recent(20), False]}, space_id=env.space_id
+    )
+    assert await env.repo.merge_reaction_stamps(
+        "sp-r1",
+        {"u-c\x00👍": [_recent(5), False], "u-d\x00🎉": [_recent(5), True]},
+        space_id=env.space_id,
+    )
+    _sid, got = await env.repo.get("sp-r1")
+    assert got.reactions == {"🎉": frozenset({"u-d"})}
+    # Another space's post is never touched.
+    assert not await env.repo.merge_reaction_stamps(
+        "sp-r1", {"u-e\x00🎉": [_recent(1), True]}, space_id="sp-other"
+    )
+
+
+async def test_merge_reaction_stamps_follows_the_sources_sets_past_the_horizon(env):
+    await env.repo.save(
+        env.space_id,
+        Post(
+            id="sp-r2",
+            author="u",
+            type=PostType.TEXT,
+            created_at=datetime.now(UTC),
+            reactions={"👍": frozenset({"u-old"})},
+        ),
+    )
+    await env.repo.add_reaction(
+        "sp-r2", "❤️", "u-new", space_id=env.space_id, stamp=_recent(1)
+    )
+    # The source holds neither: the unstamped old one goes, the fresh stays.
+    assert await env.repo.merge_reaction_stamps(
+        "sp-r2", {}, space_id=env.space_id, reactions={"🙂": ["u-x"]}
+    )
+    _sid, got = await env.repo.get("sp-r2")
+    assert got.reactions == {
+        "❤️": frozenset({"u-new"}),
+        "🙂": frozenset({"u-x"}),
+    }
+
+
+async def test_merge_reaction_stamps_never_touches_our_own_people(env):
+    await env.repo.save(
+        env.space_id,
+        Post(
+            id="sp-r3",
+            author="u",
+            type=PostType.TEXT,
+            created_at=datetime.now(UTC),
+            reactions={"👋": frozenset({"u-ours"})},
+        ),
+    )
+    keep = frozenset({"u-ours"})
+    # Neither the source's sets (it lacks ours) nor its stamps (one for
+    # ours) change our people's reactions; everybody else's converge.
+    assert await env.repo.merge_reaction_stamps(
+        "sp-r3",
+        {"u-ours\x00🎉": [_recent(1), True], "u-c\x00🎉": [_recent(1), True]},
+        space_id=env.space_id,
+        reactions={"🎉": ["u-c", "u-ours"]},
+        keep_users=keep,
+    )
+    _sid, got = await env.repo.get("sp-r3")
+    assert got.reactions == {"👋": frozenset({"u-ours"}), "🎉": frozenset({"u-c"})}
+
+
+# ── v_92 helper resume: where a helper's replay starts ───────────────────
+
+
+async def test_newest_from_household_is_its_peoples_newest_post_or_comment(env):
+    """The newest ``created_at`` (UTC, naive) of the space's posts and
+    comments written by the people seated for one household — the persisted
+    point a helper resume to that household starts from."""
+    for uid, iid in (("uid-hb", "inst-b"), ("uid-hc", "inst-c")):
+        await env.db.enqueue(
+            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+            " VALUES(?,?,?,?)",
+            (env.space_id, iid, uid, "moderator"),
+        )
+    assert await env.repo.newest_from_household(env.space_id, "inst-b") is None
+    t0 = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
+    await env.repo.save(env.space_id, replace(_post("p-b", "uid-hb"), created_at=t0))
+    await env.repo.save(
+        env.space_id,
+        replace(_post("p-c", "uid-hc"), created_at=t0 + timedelta(days=2)),
+    )
+    assert await env.repo.newest_from_household(env.space_id, "inst-b") == (
+        "2026-11-01 12:00:00"
+    )
+    await env.repo.add_comment(
+        replace(_comment("c-b", "p-c", "uid-hb"), created_at=t0 + timedelta(hours=5)),
+        space_id=env.space_id,
+    )
+    assert await env.repo.newest_from_household(env.space_id, "inst-b") == (
+        "2026-11-01 17:00:00"
+    )
+    assert await env.repo.newest_from_household("sp-other", "inst-b") is None
+
+
+async def test_newest_from_household_upto_counts_only_rows_held_at_boot(env):
+    """``upto`` (the row marks taken when this process started): only rows
+    STORED before it count, whatever their ``created_at`` — a gap row that
+    arrives after a restart with an older stamp, or a live post, must not
+    move a helper resume past the rows still missing."""
+    await env.db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES(?,?,?,?)",
+        (env.space_id, "inst-b", "uid-hb", "moderator"),
+    )
+    t0 = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
+    await env.repo.save(env.space_id, replace(_post("p-old", "uid-hb"), created_at=t0))
+    marks = await env.repo.row_marks()
+    # Stored after the marks: a live post (newer stamp) and a late gap row
+    # and comment whose stamps sit just after the pre-boot row.
+    await env.repo.save(
+        env.space_id,
+        replace(_post("p-live", "uid-hb"), created_at=t0 + timedelta(days=1)),
+    )
+    await env.repo.save(
+        env.space_id,
+        replace(_post("p-late", "uid-hb"), created_at=t0 + timedelta(hours=1)),
+    )
+    await env.repo.add_comment(
+        replace(
+            _comment("c-late", "p-old", "uid-hb"), created_at=t0 + timedelta(hours=2)
+        ),
+        space_id=env.space_id,
+    )
+    assert (
+        await env.repo.newest_from_household(env.space_id, "inst-b", upto=marks)
+        == "2026-11-01 12:00:00"
+    )
+    assert await env.repo.newest_from_household(env.space_id, "inst-b") == (
+        "2026-11-02 12:00:00"
+    )
+
+
+async def test_row_marks_are_zero_on_an_empty_database(env):
+    """Nothing stored yet: the marks count nothing (no row is held at boot)."""
+    assert await env.repo.row_marks() == (0, 0)
+    assert (
+        await env.repo.newest_from_household(env.space_id, "inst-b", upto=(0, 0))
+        is None
+    )

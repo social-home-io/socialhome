@@ -7571,9 +7571,12 @@ def _picture_via_gfs_media_cache(
     post = _must(f"{step}: {author} posts the photo", s, post, ok=(201,))
     _await_space_post(state, reader, space_id, post["id"])
     src = _instance_dir(author) / "media" / filename
-    # The reader keeps the file under ITS OWN name (``sg-…``, bound to the
-    # household that delivered the post) and the stored post names that —
-    # a member naming the same file in another item gets another name.
+    # v_92: a hashed file keeps ONE content name (``sc-…``, from the space
+    # and the bytes' hash) on every path, the GFS-described one included —
+    # so every member stores it under the same name and any of them can
+    # serve it (``SPACE_MEDIA_WANTED``). A file with no hash (a public
+    # post a follower reads) keeps the reader's own ``sg-…`` name. The
+    # stored post names that.
     deadline = time.time() + timeout
     refs: list = []
     while time.time() < deadline and not refs:
@@ -7588,8 +7591,11 @@ def _picture_via_gfs_media_cache(
     if not refs:
         raise SystemExit(f"{step}: {reader} holds no space_media_refs row for {filename}")
     blob_id, suite, _epoch, blob_size, local_name = refs[0]
-    if not local_name.startswith("sg-"):
-        raise SystemExit(f"{step}: {reader} keeps {filename} as {local_name!r}, not its own sg- name")
+    if not local_name.startswith(("sc-", "sg-")):
+        raise SystemExit(
+            f"{step}: {reader} keeps {filename} as {local_name!r}, neither a "
+            "content (sc-) nor a GFS (sg-) name"
+        )
     shown = _rows(
         reader,
         "SELECT 1 FROM space_posts WHERE id = ? AND image_urls_json LIKE ?",
@@ -7636,7 +7642,7 @@ def _picture_via_gfs_media_cache(
         f"holds it for the space ✓"
     )
     print(
-        f"  {reader} fetched it from the GFS media cache as its own "
+        f"  {reader} fetched it from the GFS media cache as "
         f"{local_name[:15]}…, byte-identical ({size} bytes) ✓"
     )
     return filename
@@ -7866,6 +7872,378 @@ def cmd_gfs_member_mesh() -> None:
     print(f"{step}: ok")
 
 
+# ─── Step: gfs-space-healing ───────────────────────────────────────────────
+
+
+def _make_unique_png(width: int = 96, height: int = 64) -> bytes:
+    """A small noise PNG no earlier run made: a content-named (``sc-``) file
+    is named after its bytes, so a reused picture would already be held."""
+    import io
+    import random
+
+    from PIL import Image
+
+    rng = random.Random(time.time_ns())
+    img = Image.frombytes("RGB", (width, height), rng.randbytes(width * height * 3))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _space_post_file(label: str, post_id: str) -> str:
+    """The file name ``label``'s copy of space post ``post_id`` shows (its
+    first picture), or ``""``."""
+    rows = _rows(
+        label, "SELECT image_urls_json FROM space_posts WHERE id = ?", (post_id,)
+    )
+    if not rows or not rows[0][0]:
+        return ""
+    urls = json.loads(rows[0][0]) or []
+    return str(urls[0]).rsplit("/", 1)[-1].split("?", 1)[0] if urls else ""
+
+
+def _forget_gfs_copies(local_name: str) -> int:
+    """Drop every GFS media cache copy of ``local_name`` the households know
+    (``space_media_refs`` blob ids → ``gfs_space_media`` row + blob file),
+    exactly as the store's expiry drops one; how many blobs went."""
+    blobs: set[str] = set()
+    for label in ("a", "d", "e"):
+        for (blob_id,) in _rows(
+            label,
+            "SELECT blob_id FROM space_media_refs WHERE local_name = ?",
+            (local_name,),
+        ):
+            if blob_id:
+                blobs.add(str(blob_id))
+    for blob_id in blobs:
+        _gfs_write("DELETE FROM gfs_space_media WHERE blob_id = ?", (blob_id,))
+        (GFS_DIR / "space_media" / blob_id).unlink(missing_ok=True)
+    return len(blobs)
+
+
+@_offline_step
+def cmd_gfs_space_healing() -> None:
+    """v_92 — a GFS-only member heals from the host, then from a helper
+    while the host is offline.
+
+    Prereqs: the gfs chain through ``gfs-member-mesh`` (e holds a
+    link-joined seat in a's space reached only through the GFS; d, paired
+    with a, is a member too and holds its own mailbox; each holds the
+    other's member card).
+
+    1. a makes d's person a **moderator**; e's roster mirror shows it (d's
+       household is now a trusted helper for e).
+    2. **Old picture, host online.** a posts a picture; e shows it. The file
+       leaves the GFS media cache (row + blob, as the store's expiry drops
+       it) and e's own copy goes. e views it (``GET /api/media/<sc-name>``):
+       a miss → ``SPACE_MEDIA_WANTED`` to the host a → a ships it (push) →
+       e holds it byte-identical.
+    3. **Missed event, host OFFLINE.** a posts a second picture; d and e
+       hold it; the same expiry on the GFS and on e. a is killed, then e;
+       d creates a calendar event; the frames queued for e's mailbox at the
+       GFS are dropped (what a full mailbox or the TTL would do). e boots:
+       its BEGIN to a goes unanswered for ``HOST_ANSWER_WAIT_S`` — the host
+       is now silent for e — and e asks ONE helper, d, for a
+       ``SPACE_SYNC_RESUME``; d replays its own rows → e shows the event.
+    4. **Old picture, host offline.** e views the second picture: the
+       request goes — a being silent — to the helper d instead of a;
+       d's log shows it served e, and e holds the bytes. (While a answers,
+       a helper is never asked.)
+    5. The GFS log over the whole step: mailbox deliveries, and no line
+       names an instance id, a mailbox id or the space.
+
+    a and e are respawned at the end whatever happened.
+    """
+    state = _load()
+    space_id = (state or {}).get("gfs_invite_space_id")
+    if not state or not _gfs_alive(state) or not space_id:
+        raise SystemExit("run the gfs chain through 'gfs-member-mesh' first")
+    a = state["instances"]["a"]
+    d = state["instances"]["d"]
+    e = state["instances"]["e"]
+    a_base = f"http://127.0.0.1:{a['port']}"
+    d_base = f"http://127.0.0.1:{d['port']}"
+    e_base = f"http://127.0.0.1:{e['port']}"
+    step = "gfs-space-healing"
+    on_d = _card_on("d", space_id, e["instance_id"])
+    on_e = _card_on("e", space_id, d["instance_id"])
+    if not (on_d and on_d.get("mailbox") and on_e and on_e.get("mailbox")):
+        raise SystemExit(f"{step}: d and e hold no member cards — run 'gfs-member-mesh'")
+    e_mailbox = on_d["mailbox"]["mailbox_id"]
+    d_mailbox = on_e["mailbox"]["mailbox_id"]
+    gfs_off = _gfs_log_size()
+
+    def _poll(what: str, check, timeout: float) -> Any:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            got = check()
+            if got:
+                return got
+            time.sleep(1.0)
+        raise SystemExit(f"{step}: {what} within {timeout:.0f} s")
+
+    def _post_picture(label: str) -> tuple[str, bytes]:
+        s, up = _upload_file(
+            f"{a_base}/api/media/upload",
+            token=a["token"],
+            filename=f"healing-{label}.png",
+            content=_make_unique_png(),
+            content_type="image/png",
+        )
+        up = _must(f"{step}: a uploads the {label} picture", s, up, ok=(200, 201))
+        s, post = _request(
+            f"{a_base}/api/spaces/{space_id}/posts",
+            token=a["token"],
+            method="POST",
+            body={"type": "image", "image_urls": [up["url"]]},
+        )
+        post = _must(f"{step}: a posts the {label} picture", s, post, ok=(201,))
+        return post["id"], (_instance_dir("a") / "media" / up["filename"]).read_bytes()
+
+    def _held(label: str, post_id: str, original: bytes) -> str:
+        name = _space_post_file(label, post_id)
+        path = _instance_dir(label) / "media" / name if name else None
+        if path is not None and path.is_file() and path.read_bytes() == original:
+            return name
+        return ""
+
+    def _view_until(post_id: str, original: bytes, timeout: float) -> tuple[str, int]:
+        """e views the picture; its first view must miss. Polls the view
+        until e serves the original bytes; returns (name, first status)."""
+        name = _space_post_file("e", post_id)
+        url = f"{e_base}/api/media/{name}"
+        first, _ = _http_get_bytes(url, token=e["token"], timeout=60.0)
+        if first == 200:
+            raise SystemExit(f"{step}: e still served {name[:15]}… after its copy went")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            s, body = _http_get_bytes(url, token=e["token"], timeout=60.0)
+            if s == 200 and body == original:
+                return name, first
+            time.sleep(2.0)
+        raise SystemExit(
+            f"{step}: e never served {name[:15]}… byte-identical within "
+            f"{timeout:.0f} s (first view HTTP {first}). Check "
+            f"{_log_path('e')}, {_log_path('a')}, {_log_path('d')}."
+        )
+
+    # 1. d's person becomes a moderator; e's roster mirror carries it.
+    s, body = _request(
+        f"{a_base}/api/spaces/{space_id}/remote-members/{d['instance_id']}/{d['user_id']}",
+        token=a["token"],
+        method="PATCH",
+        body={"role": "moderator"},
+    )
+    _must(f"{step}: a promotes d's person to moderator", s, body)
+    _poll(
+        "e's roster mirror did not show d's person as moderator",
+        lambda: _rows(
+            "e",
+            "SELECT 1 FROM space_remote_members WHERE space_id = ? AND user_id = ?"
+            " AND instance_id = ? AND role = 'moderator' AND tombstoned = 0",
+            (space_id, d["user_id"], d["instance_id"]),
+        ),
+        90.0,
+    )
+    print("  d's person is a moderator; e's roster mirror shows it ✓")
+
+    a_down = e_down = False
+    try:
+        # 2. Old picture, host online → the host serves it.
+        post1, pic1 = _post_picture("first")
+        _await_space_post(state, "e", space_id, post1)
+        name1 = _poll(
+            "e did not hold the first picture", lambda: _held("e", post1, pic1), 90.0
+        )
+        if not name1.startswith("sc-"):
+            raise SystemExit(f"{step}: e holds the picture as {name1!r}, not a content name")
+        # d too, before the GFS copies go (it may read the GFS cache copy).
+        _poll(
+            "d did not hold the first picture",
+            lambda: _held("d", post1, pic1),
+            90.0,
+        )
+        dropped = _forget_gfs_copies(name1)
+        (_instance_dir("e") / "media" / name1).unlink()
+        a_off, e_off = _log_size("a"), _log_size("e")
+        _, first = _view_until(post1, pic1, 90.0)
+        asked = _log_lines_matching("e", f"to {a['instance_id']}: sent", offset=e_off)
+        helper_asked = _log_lines_matching(
+            "e", f"to {d['instance_id']}:", offset=e_off
+        )
+        served = _log_lines_matching(
+            "a", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=a_off
+        )
+        if not asked or not [x for x in served if "1 file(s) queued" in x]:
+            raise SystemExit(
+                f"{step}: no SPACE_MEDIA_WANTED round-trip with the host "
+                f"(e: {asked!r}, a: {served!r})"
+            )
+        if helper_asked:
+            raise SystemExit(
+                f"{step}: e asked the helper d while the host answered: "
+                f"{helper_asked!r}"
+            )
+        print(
+            f"  old picture {name1[:15]}… (GFS copies dropped: {dropped}, e's copy "
+            f"gone): e's view → HTTP {first}, SPACE_MEDIA_WANTED to the host a "
+            "only, a served it, e holds it byte-identical ✓"
+        )
+
+        # 3. A second picture both hold, gone from the GFS and from e; then
+        # the host goes offline.
+        post2, pic2 = _post_picture("second")
+        _await_space_post(state, "e", space_id, post2)
+        name2 = _poll(
+            "e did not hold the second picture", lambda: _held("e", post2, pic2), 90.0
+        )
+        # d's name may differ from e's: a member that got the post first as
+        # the public GFS copy (no hash map) keeps its own ``sg-`` name; the
+        # provider still matches it by the bytes' content name.
+        d_name2 = _poll(
+            "d (the helper) did not hold the second picture",
+            lambda: _held("d", post2, pic2),
+            90.0,
+        )
+        dropped = _forget_gfs_copies(name2)
+        (_instance_dir("e") / "media" / name2).unlink()
+        _kill_household("a", a)
+        a_down = True
+
+        # A missed event while the host is offline → a helper resume.
+        _kill_household("e", e)
+        e_down = True
+        top = _gfs_rows("SELECT COALESCE(MAX(id), 0) FROM gfs_envelope_queue")[0][0]
+        top_media = _gfs_rows("SELECT COALESCE(MAX(id), 0) FROM gfs_media_queue")[0][0]
+        summary = f"Missed while the host was away {time.time_ns()}"
+        s, ev = _request(
+            f"{d_base}/api/spaces/{space_id}/calendar/events",
+            token=d["token"],
+            method="POST",
+            body={
+                "summary": summary,
+                "start": "2027-04-01T18:00:00+00:00",
+                "end": "2027-04-01T20:00:00+00:00",
+                "tz": "Europe/Berlin",
+            },
+        )
+        ev = _must(f"{step}: d creates a calendar event", s, ev, ok=(201,))
+        _poll(
+            "d's fan-out queued nothing for e's mailbox",
+            lambda: _gfs_rows(
+                "SELECT 1 FROM gfs_envelope_queue WHERE to_instance = ? AND id > ?",
+                (e_mailbox, top),
+            ),
+            60.0,
+        )
+        time.sleep(5.0)  # let the rest of d's fan-out land before the drop
+        n_env = _gfs_rows(
+            "SELECT COUNT(*) FROM gfs_envelope_queue WHERE to_instance = ? AND id > ?",
+            (e_mailbox, top),
+        )[0][0]
+        _gfs_write(
+            "DELETE FROM gfs_envelope_queue WHERE to_instance = ? AND id > ?",
+            (e_mailbox, top),
+        )
+        _gfs_write(
+            "DELETE FROM gfs_media_queue WHERE to_instance = ? AND id > ?",
+            (e_mailbox, top_media),
+        )
+        print(f"  e offline; d created an event; its {n_env} frame(s) for e's mailbox dropped ✓")
+        _respawn(state, "e")
+        e_down = False
+        seen = None
+        t0 = time.time()
+        deadline = t0 + 300
+        while time.time() < deadline and seen is None:
+            s, events = _request(
+                f"{e_base}/api/spaces/{space_id}/calendar/events"
+                "?start=2027-04-01T00:00:00Z&end=2027-04-02T00:00:00Z",
+                token=e["token"],
+            )
+            rows = (
+                events if isinstance(events, list) else (events or {}).get("events")
+            ) or []
+            seen = next((x for x in rows if x.get("id") == ev["id"]), None)
+            if seen is None:
+                time.sleep(2.0)
+        if seen is None or seen.get("summary") != summary:
+            raise SystemExit(
+                f"{step}: e never showed d's missed event within 300 s with the "
+                f"host offline. Check {_log_path('e')} and {_log_path('d')}."
+            )
+        fallback = [
+            x
+            for x in _log_lines_matching("e", "the host did not answer within")
+            if d["instance_id"] in x and space_id in x
+        ]
+        if not fallback:
+            raise SystemExit(
+                f"{step}: e shows the event, but its log names no helper fallback "
+                "to d — it did not come from the helper resume"
+            )
+        print(
+            f"  e back (host still offline): its BEGIN to a went unanswered, it "
+            f"asked the helper d for a resume and shows d's missed event after "
+            f"{time.time() - t0:.0f} s ✓"
+        )
+
+        # 4. Old picture, host silent → the helper d serves it.
+        d_off, e_off = _log_size("d"), _log_size("e")
+        t0 = time.time()
+        _, first = _view_until(post2, pic2, 180.0)
+        took = time.time() - t0
+        to_d = _log_lines_matching(
+            "e", f"to {d['instance_id']}: sent", offset=e_off
+        )
+        served = [
+            x
+            for x in _log_lines_matching(
+                "d", f"SPACE_MEDIA_WANTED from {e['instance_id']}", offset=d_off
+            )
+            if "1 file(s) queued" in x
+        ]
+        if not to_d or not served:
+            raise SystemExit(
+                f"{step}: the helper d did not serve e's request with the host "
+                f"silent (e asked d: {to_d!r}; d served: {served!r})"
+            )
+        print(
+            f"  host a silent; old picture {name2[:15]}… (GFS copies dropped: "
+            f"{dropped}; d holds it as {d_name2[:15]}…): e's view → HTTP {first}, "
+            f"a being silent, it asked the helper d instead, which served it; "
+            f"byte-identical after {took:.0f} s ✓"
+        )
+
+        # 5. What the GFS saw over the whole step.
+        env_lines = _gfs_log_lines_matching("gfs.envelope:", offset=gfs_off)
+        if not [x for x in env_lines if "<mailbox>" in x]:
+            raise SystemExit(f"{step}: the GFS delivered nothing to a mailbox")
+        named = (a["instance_id"], d["instance_id"], e["instance_id"], space_id)
+        leaked = [
+            x
+            for x in _gfs_log_lines_matching("", offset=gfs_off)
+            if e_mailbox in x
+            or d_mailbox in x
+            or (("gfs.envelope" in x or "mailbox" in x) and any(n in x for n in named))
+        ]
+        if leaked:
+            raise SystemExit(
+                f"{step}: a GFS relay line names an instance id, a mailbox id or "
+                f"the space: {leaked[:3]!r}"
+            )
+        print(
+            "  the GFS logged mailbox deliveries and no instance id, mailbox id "
+            "or space ✓"
+        )
+    finally:
+        if a_down:
+            _respawn(state, "a")
+        if e_down:
+            _respawn(state, "e")
+    print(f"{step}: ok")
+
+
 # ─── Step: gfs-relay-media ─────────────────────────────────────────────────
 
 
@@ -8066,8 +8444,8 @@ def cmd_gfs_media_on_demand() -> None:
     (``GfsSpaceMediaStore._drop`` + ``_remember_left``): the
     ``gfs_space_media`` row and the file ``data_dir/space_media/<blob>`` go,
     and ``gfs_space_media_demand`` remembers when the cache had stored it.
-    The reader's own copy (``sg-…``) is deleted too, so a VIEW
-    (``GET /api/media/<sg-name>``) misses, finds no GFS holding the blob and
+    The reader's own copy is deleted too, so a VIEW
+    (``GET /api/media/<name>``) misses, finds no GFS holding the blob and
     asks ``POST /gfs/media/{blob}/wanted``; the GFS asks the host a over its
     socket (``space_media_request``), a re-seals the file deterministically
     and serves the ticket.
@@ -8080,11 +8458,12 @@ def cmd_gfs_media_on_demand() -> None:
        +1 re-upload. The OTHER reader kind (follower ↔ link-joined member),
        when it holds the same blob, then views it too: straight from the
        cache (``fetched blob … from GFS``), no new holder request. Run for
-       e (invite photo) and d (space photo).
+       the follower d (space photo); since v_92 a member household asks the
+       host and helpers instead (``gfs-space-healing``).
     2. **Old → stream, nothing stored.** ``stored_at`` 30 days ago: the
        reader still gets the bytes byte-identical, but the GFS has NO row
        and no file afterwards; ``streams_served`` +1, ``reuploads`` +0;
-       a logged ``streamed on demand``. Run for e and d.
+       a logged ``streamed on demand``. Run for d.
 
     Not re-runnable within ~10 min: a attaches its upload authorization to
     a cache request at most once per (GFS, blob) per ``REUPLOAD_COALESCE_S``.
@@ -8092,12 +8471,11 @@ def cmd_gfs_media_on_demand() -> None:
     state = _load()
     if not state or not _gfs_alive(state):
         raise SystemExit("run the gfs chain through 'gfs-invite-link-content' first")
-    invite_photo = state.get("gfs_invite_photo")
     space_photo = state.get("gfs_space_photo")
-    if not invite_photo or not space_photo:
+    if not space_photo:
         raise SystemExit(
-            "run 'gfs-space-post' and 'gfs-invite-link-content' first — this step "
-            "needs the photos they proved through the GFS media cache"
+            "run 'gfs-space-post' first — this step needs the photo it proved "
+            "through the GFS media cache"
         )
     gfs = f"http://127.0.0.1:{GFS_PORT}"
     step = "gfs-media-on-demand"
@@ -8172,10 +8550,10 @@ def cmd_gfs_media_on_demand() -> None:
             time.sleep(0.5)
         raise SystemExit(f"{step}: {what} within {timeout:.0f} s")
 
-    cases = [
-        ("e", invite_photo, "d", "the link-joined member"),
-        ("d", space_photo, "e", "the follower"),
-    ]
+    # v_92: only a FOLLOWER asks its GFS on demand. A member household
+    # (the link-joined e) asks the space's host and helpers with
+    # ``SPACE_MEDIA_WANTED`` instead — ``gfs-space-healing`` proves that.
+    cases = [("d", space_photo, "e", "the follower")]
     blobs: dict[str, tuple[str, str, bytes]] = {}
     for reader, photo, _other, _kind in cases:
         ref = _ref(reader, photo)
@@ -8286,7 +8664,7 @@ def cmd_gfs_media_on_demand() -> None:
 
     print(
         f"{step}: ok (fresh → one re-upload, then a plain cache read; old → "
-        "streamed, nothing stored; link-joined member e and follower d alike)"
+        "streamed, nothing stored; the follower d)"
     )
 
 
@@ -11906,6 +12284,15 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_91 multi-recipient mailbox upload gate in place ✓")
+    # v_92 — SPACE_MEDIA_WANTED: a member asks only providers at >= v_92, so
+    # the OURS round-trip above is what proves every pair answers it.
+    if int(_Cap.MIN_FOR_SPACE_MEDIA_WANTED) != 92 or _OURS < 92:
+        failures.append(
+            "MIN_FOR_SPACE_MEDIA_WANTED moved off v_92 (or OURS fell below it) — "
+            "members would never get an older space picture on view"
+        )
+    else:
+        print("  v_92 SPACE_MEDIA_WANTED gate in place ✓")
     # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
     # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
     # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key

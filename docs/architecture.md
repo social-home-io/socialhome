@@ -2489,7 +2489,13 @@ provider streams since the lower of the two — so a household restored from
 an older file snapshot re-streams the gap on its next periodic session;
 no watermark, no echo, a changed session shape (record shape, the
 household's version, retention, its resource set) or a last full stream
-older than a day falls back to the whole window. A session is reaped only when idle,
+older than a day falls back to the whole window. A full stream's catch-up
+media is bounded on every path (the files of the last 30 days' items, ≤ 200
+per stream; older ones arrive on view). While a space's host does not answer
+a round's BEGIN, a member asks ONE trusted (admin / moderator) household
+for the bounded `SPACE_SYNC_RESUME` — that household's own people's rows
+and their files (v_92); a missing file on view goes to the host, and to a
+helper only while the host is silent or unreachable (`SPACE_MEDIA_WANTED`). A session is reaped only when idle,
 never mid-stream; see
 [`protocol/sync.md`](./protocol/sync.md#what-a-sync-streams) and
 [incremental sessions](./protocol/sync.md#incremental-sessions-change-stamps--per-household-watermark).

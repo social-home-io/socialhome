@@ -31,7 +31,8 @@ import logging
 import pathlib
 import time
 import uuid
-from collections.abc import Iterator
+from collections import OrderedDict
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
@@ -46,6 +47,7 @@ from ..repositories.space_media_outbox_repo import (
     SpaceMediaOutboxEntry,
 )
 from .backoff import jittered_backoff_seconds
+from .inbound_media_store import is_safe_media_name
 from .media_chunk_pipeline import send_chunks
 from .media_file_hasher import MediaFileHasher
 from .peer_unpair_service import is_unpair_tombstone
@@ -66,6 +68,11 @@ CHUNK_IDLE_TIMEOUT_S: float = 120.0
 MAX_INFLIGHT_FILE_BYTES: int = 64 * 1024 * 1024
 #: Recipients served at once by one flush pass.
 PARALLEL_RECIPIENTS: int = 6
+#: v_92 — ``(file, household)`` rows queued because the household asked for
+#: the file (``SPACE_MEDIA_WANTED``) remembered at once, oldest dropped. In
+#: memory only: a mark lost to a restart costs one shortcut-dropped push,
+#: and the requester asks again on its next view.
+MAX_PUSHED_MARKS: int = 4096
 
 
 class _RelayReaders(Protocol):
@@ -93,6 +100,7 @@ class SpaceMediaSyncService:
         "_interval",
         "_media_dir",
         "_outbox",
+        "_pushed",
         "_relay_readers",
         "_stop",
         "_task",
@@ -131,6 +139,8 @@ class SpaceMediaSyncService:
         #: Bytes of the files the current pass holds (``MAX_INFLIGHT_FILE_BYTES``).
         self._budget = asyncio.Condition()
         self._held = 0
+        #: v_92 — rows a household asked for (:data:`MAX_PUSHED_MARKS`).
+        self._pushed: OrderedDict[tuple[str, str], None] = OrderedDict()
 
     def attach_relay_readers(self, readers: _RelayReaders) -> None:
         """Wire the v_80 reader check: a member household seated from an
@@ -156,8 +166,20 @@ class SpaceMediaSyncService:
         correlation_id: str,
         target_instance_ids: list[str],
         media_urls: list[str],
+        push: bool = False,
+        wire_names: Mapping[str, str] | None = None,
     ) -> None:
         """One outbox row per (media_url, peer) tuple.
+
+        ``push`` (v_92): the targets asked for these files
+        (``SPACE_MEDIA_WANTED``) — they already missed their GFS cache, so
+        the send-time "reads from its GFS" shortcut never drops these rows.
+
+        ``wire_names`` (v_92): local file name → the name it is SENT under
+        (default: its local name). A provider ships an asked-for file under
+        the requested content name (``sc-``) even when it stores it under
+        its own reader name (``sg-``), which a receiver refuses by name. An
+        unsafe wire name queues nothing.
 
         Generic enqueue surface — :class:`SpacePostOutbound` and
         :class:`GalleryFederationOutbound` both call this. The
@@ -175,7 +197,14 @@ class SpaceMediaSyncService:
             if not filename:
                 continue
             path = self._media_dir / filename
-            blob_id = filename
+            blob_id = (wire_names or {}).get(filename, filename)
+            if not is_safe_media_name(blob_id):
+                log.warning(
+                    "space-media-sync: unsafe wire name %r for %s — not queued",
+                    blob_id,
+                    filename,
+                )
+                continue
             for target in target_instance_ids:
                 if not target:
                     continue
@@ -186,6 +215,12 @@ class SpaceMediaSyncService:
                     target_instance_id=target,
                     bytes_path=str(path),
                 )
+                if push:
+                    key = (blob_id, target)
+                    self._pushed[key] = None
+                    self._pushed.move_to_end(key)
+                    while len(self._pushed) > MAX_PUSHED_MARKS:
+                        self._pushed.popitem(last=False)
         # Nudge the loop so it ships now rather than on the next poll.
         self._wake.set()
 
@@ -339,8 +374,11 @@ class SpaceMediaSyncService:
                 target_instance_id=entry.target_instance_id,
             )
             return False
-        if self._relay_readers is not None and (
-            await self._relay_readers.reads_from_gfs(
+        key = (entry.blob_id, entry.target_instance_id)
+        if (
+            self._relay_readers is not None
+            and key not in self._pushed
+            and await self._relay_readers.reads_from_gfs(
                 entry.target_instance_id, entry.blob_id
             )
         ):
@@ -348,6 +386,8 @@ class SpaceMediaSyncService:
             # when the reader's GFS is known to hold the file (or the
             # reader can ask for it): a GFS whose cache was off when the
             # file was planned never got it, so that reader keeps the push.
+            # A file the reader asked for (v_92, ``push``) is never dropped:
+            # it already missed its GFS.
             log.debug(
                 "space-media-sync: %s reads %s from its GFS — no push",
                 entry.target_instance_id,
@@ -369,7 +409,10 @@ class SpaceMediaSyncService:
             )
             self._held += need
         try:
-            return await self._send_row(entry, fed)
+            sent = await self._send_row(entry, fed)
+            if sent:
+                self._pushed.pop(key, None)
+            return sent
         finally:
             async with self._budget:
                 self._held -= need

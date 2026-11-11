@@ -2988,6 +2988,7 @@
   "capability.anonymous_gfs_posting_only": "Posting over a GFS without naming the household",
   "capability.synced_picture_resets": "Removed profile pictures in space catch-up",
   "capability.multi_mailbox": "Space updates through a GFS in one upload",
+  "capability.space_media_wanted": "Older space pictures fetched when you open them",
   "settings.tab.security": "Security",
   "settings.security.signing_in": "Signing in",
   "settings.security.signing_in_hint": "Only you use this. Nobody else sees your sign-in username.",

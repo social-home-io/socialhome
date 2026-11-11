@@ -666,13 +666,14 @@ class FederationInboundService(ProtectionGateMixin):
         (:class:`SpaceMediaNamer`; *held* — the files the stored row shows
         already) under the v_80 GFS reader names (empty without a
         fetcher)."""
+        hashes = parse_file_hashes(event.payload)
         direct = self._media_names.localize(
             space_id,
             event.from_instance,
             urls,
             held=held or (),
             # v_85 — vouched for by the sender's envelope signature.
-            hashes=parse_file_hashes(event.payload),
+            hashes=hashes,
         )
         if self._gfs_media is None:
             return direct
@@ -684,6 +685,7 @@ class FederationInboundService(ProtectionGateMixin):
                 urls,
                 item_id=item_id,
                 origin=event.from_instance,
+                hashes=hashes,
             ),
         )
 

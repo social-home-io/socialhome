@@ -159,6 +159,31 @@ class AbstractSpacePostRepo(Protocol):
         space_id: str,
         stamp: str | None = None,
     ) -> Post: ...
+    async def list_reaction_stamps(
+        self, post_ids: list[str]
+    ) -> dict[str, dict[str, list]]:
+        """``post id → {"user\\0emoji": [stamp, added]}`` for the posts that
+        hold any (§25.6 v_92: what the host's ``posts`` records carry)."""
+        ...
+
+    async def merge_reaction_stamps(
+        self,
+        post_id: str,
+        stamps: dict[str, list],
+        *,
+        space_id: str,
+        reactions: dict[str, list[str]] | None = None,
+        keep_users: frozenset[str] = frozenset(),
+    ) -> bool:
+        """Apply every reaction stamp of ``stamps`` newer than the one held
+        here (last writer wins per user and emoji, as the live reactions).
+        ``reactions`` — the same source's reaction sets — settles what no
+        stamp orders any more: a held reaction it lacks whose own stamp is
+        gone or older than the tombstone horizon is dropped, and one it
+        has that nothing here stamps is added. ``keep_users`` (this
+        household's own people) are never touched: their reactions are
+        authored here. ``True`` when anything changed."""
+        ...
 
     async def increment_comment_count(
         self,
@@ -186,6 +211,26 @@ class AbstractSpacePostRepo(Protocol):
         *,
         limit: int = 500,
     ) -> list[tuple[str, Comment]]: ...
+    async def row_marks(self) -> tuple[int, int]:
+        """The highest stored ``rowid`` of ``space_posts`` and
+        ``space_post_comments`` now (``0`` when empty) — taken once at boot so
+        :meth:`newest_from_household` counts only rows held before it."""
+        ...
+
+    async def newest_from_household(
+        self,
+        space_id: str,
+        instance_id: str,
+        *,
+        upto: tuple[int, int] | None = None,
+    ) -> str | None:
+        """The newest ``created_at`` (``YYYY-MM-DD HH:MM:SS``, UTC) of the
+        space's posts and comments held here written by the people seated
+        for *instance_id*; ``None``: none (v_92 helper resume). With *upto*
+        (:meth:`row_marks`) only rows STORED by then count, whatever their
+        stamp."""
+        ...
+
     async def list_comments_sync_page(
         self,
         space_id: str,
@@ -690,6 +735,133 @@ class SqliteSpacePostRepo:
         row = await self._db.transact(_run)
         return _row_to_space_post(row)
 
+    async def list_reaction_stamps(
+        self, post_ids: list[str]
+    ) -> dict[str, dict[str, list]]:
+        ids = list(dict.fromkeys(post_ids))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        rows = await self._db.fetchall(
+            "SELECT id, reaction_stamps_json FROM space_posts"
+            f" WHERE id IN ({placeholders}) AND reaction_stamps_json IS NOT NULL",
+            tuple(ids),
+        )
+        out: dict[str, dict[str, list]] = {}
+        for r in rows:
+            stamps = _decode_stamps(r["reaction_stamps_json"])
+            if stamps:
+                out[r["id"]] = stamps
+        return out
+
+    async def merge_reaction_stamps(
+        self,
+        post_id: str,
+        stamps: dict[str, list],
+        *,
+        space_id: str,
+        reactions: dict[str, list[str]] | None = None,
+        keep_users: frozenset[str] = frozenset(),
+    ) -> bool:
+        incoming = {
+            k: v
+            for k, v in _decode_stamps(orjson.dumps(stamps).decode()).items()
+            if k.partition("\x00")[0] not in keep_users
+        }
+        cutoff = stamp_to_db(
+            datetime.now(UTC) - timedelta(seconds=REACTION_TOMBSTONE_HORIZON_S)
+        )
+        source: set[str] | None = (
+            None
+            if reactions is None
+            else {
+                f"{user}\x00{emoji}"
+                for emoji, users in reactions.items()
+                for user in users
+                if isinstance(user, str)
+                and isinstance(emoji, str)
+                and user not in keep_users
+            }
+        )
+
+        def _run(conn) -> bool:
+            row = conn.execute(
+                "SELECT reactions, reaction_stamps_json FROM space_posts"
+                " WHERE id=? AND space_id=? AND deleted=0",
+                (post_id, space_id),
+            ).fetchone()
+            if row is None:
+                return False
+            held = _decode_stamps(row["reaction_stamps_json"])
+            reactions = _decode_reactions(row["reactions"])
+            changed = False
+            for key, (at, added) in sorted(incoming.items()):
+                user_id, sep, emoji = key.partition("\x00")
+                if not sep or not user_id or not emoji or len(emoji) > 64:
+                    continue
+                prior = held.get(key)
+                if prior is not None and prior[0] >= at:
+                    continue
+                if added:
+                    if (
+                        emoji not in reactions
+                        and len(reactions) >= MAX_DISTINCT_REACTIONS_PER_POST
+                    ):
+                        continue
+                    reactions.setdefault(emoji, set()).add(user_id)
+                else:
+                    bucket = reactions.get(emoji)
+                    if bucket is not None:
+                        bucket.discard(user_id)
+                        if not bucket:
+                            reactions.pop(emoji, None)
+                held[key] = [at, added]
+                changed = True
+            if source is not None:
+                live = {
+                    f"{user}\x00{emoji}"
+                    for emoji, users in reactions.items()
+                    for user in users
+                    if user not in keep_users
+                }
+                for key in sorted(live - source):
+                    prior = held.get(key)
+                    if key in incoming or (prior is not None and prior[0] >= cutoff):
+                        continue
+                    user_id, _sep, emoji = key.partition("\x00")
+                    bucket = reactions.get(emoji)
+                    if bucket is not None:
+                        bucket.discard(user_id)
+                        if not bucket:
+                            reactions.pop(emoji, None)
+                    changed = True
+                for key in sorted(source - live):
+                    user_id, _sep, emoji = key.partition("\x00")
+                    if key in held or not user_id or not emoji or len(emoji) > 64:
+                        continue
+                    if (
+                        emoji not in reactions
+                        and len(reactions) >= MAX_DISTINCT_REACTIONS_PER_POST
+                    ):
+                        continue
+                    reactions.setdefault(emoji, set()).add(user_id)
+                    changed = True
+            if not changed:
+                return False
+            conn.execute(
+                "UPDATE space_posts SET reactions=?, reaction_stamps_json=? "
+                "WHERE id=? AND space_id=?",
+                (
+                    _encode_reactions(_to_frozenset(reactions)),
+                    _encode_stamps(held),
+                    post_id,
+                    space_id,
+                ),
+            )
+            return True
+
+        return bool(await self._db.transact(_run))
+
     # ── Comment counters ───────────────────────────────────────────────
 
     async def increment_comment_count(
@@ -839,6 +1011,52 @@ class SqliteSpacePostRepo:
                 continue
             out.append((d["post_id"], comment))
         return out
+
+    async def row_marks(self) -> tuple[int, int]:
+        row = await self._db.fetchone(
+            "SELECT (SELECT COALESCE(MAX(rowid), 0) FROM space_posts) AS p,"
+            " (SELECT COALESCE(MAX(rowid), 0) FROM space_post_comments) AS c"
+        )
+        return (int(row["p"]), int(row["c"])) if row is not None else (0, 0)
+
+    async def newest_from_household(
+        self,
+        space_id: str,
+        instance_id: str,
+        *,
+        upto: tuple[int, int] | None = None,
+    ) -> str | None:
+        people = (
+            "SELECT user_id FROM space_remote_members"
+            " WHERE space_id=? AND instance_id=?"
+        )
+        cut_posts = cut_comments = ""
+        post_cut: tuple[int, ...] = ()
+        comment_cut: tuple[int, ...] = ()
+        if upto is not None:
+            cut_posts = " AND rowid <= ?"
+            cut_comments = " AND c.rowid <= ?"
+            post_cut, comment_cut = (upto[0],), (upto[1],)
+        row = await self._db.fetchone(
+            "SELECT MAX(t) AS t FROM ("
+            " SELECT MAX(datetime(created_at)) AS t FROM space_posts"
+            f" WHERE space_id=? AND author IN ({people}){cut_posts}"
+            " UNION ALL"
+            " SELECT MAX(datetime(c.created_at)) FROM space_post_comments c"
+            " JOIN space_posts p ON p.id = c.post_id"
+            f" WHERE p.space_id=? AND c.author IN ({people}){cut_comments})",
+            (
+                space_id,
+                space_id,
+                instance_id,
+                *post_cut,
+                space_id,
+                space_id,
+                instance_id,
+                *comment_cut,
+            ),
+        )
+        return str(row["t"]) if row is not None and row["t"] else None
 
     async def list_comments_sync_page(
         self,
