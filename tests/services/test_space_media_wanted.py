@@ -8,6 +8,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -73,10 +74,16 @@ class _Refs:
         #: basename → [(space, item, created_at)]
         self.rows: dict[str, list[tuple[str, str, str]]] = rows or {}
         self.asked: list[str] = []
+        #: item → owner (``live_item_files``' author of the item's files).
+        self.owners: dict[str, str] = {}
 
     async def space_rows_of(self, basename):
         self.asked.append(basename)
         return sorted(self.rows.get(basename, []))
+
+    async def live_item_files(self, space_id, item_id):
+        owner = self.owners.get(item_id)
+        return [] if owner is None else [("f.webp", owner)]
 
 
 @dataclass
@@ -114,9 +121,17 @@ class _Spaces:
 
 
 class _Seats:
-    def __init__(self, helpers=()):
+    def __init__(self, helpers=(), seats=()):
         self.helpers = list(helpers)
         self.asked: list[frozenset[str]] = []
+        #: ``(instance_id, user_id)`` live seats of the space.
+        self.seats = list(seats)
+
+    async def list_for_space(self, space_id):
+        return [
+            SimpleNamespace(instance_id=i, user_id=u, space_id=space_id)
+            for i, u in self.seats
+        ]
 
     async def list_instances_with_roles(self, space_id, roles):
         self.asked.append(frozenset(roles))
@@ -871,3 +886,19 @@ async def test_an_error_while_queueing_is_contained(tmp_path, missing):
     else:
         outbox.enqueue_for_blob = _boom
     assert await p.handle(_event([{"item": "p1", "name": a}])) == 0
+
+
+async def test_the_host_that_misses_a_file_asks_the_items_author_household():
+    """The host itself lacks a member's picture (its push was lost on a
+    stale route): it asks the household of the item's author — which holds
+    the file as its own people's — before any helper."""
+    a = _sc("a")
+    refs = _Refs({a: [(SPACE, "p1", "t")]})
+    refs.owners = {"p1": "u-d"}
+    fed = _Fed({"hh-d": V92, "h-a": V92})
+    seats = _Seats(["h-a"], seats=[("hh-d", "u-d"), ("h-a", "u-a")])
+    w = _wanted(refs=refs, spaces=_Spaces(host=SELF), seats=seats, fed=fed)
+    w.schedule(a)
+    await w.drain()
+    assert [s[0] for s in fed.sent] == ["hh-d"]
+    assert fed.sent[0][2]["files"] == [{"item": "p1", "name": a}]

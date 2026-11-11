@@ -689,6 +689,11 @@ row's author household only, bytes checked against the row's `h`.
   that takes the request ends it. Only providers at v_92
   (`space_member_supports`: a paired row's version, else the mesh claim); a
   host below v_92 that answers is left to its catch-up.
+- **The host itself misses a file** (a member's push to it was lost — e.g.
+  a media chunk sent into a mesh route that went stale when the host
+  restarted): it asks the household of the item's author first (the roster
+  mirror's seat for the row's owner; that household holds the file as its
+  own people's and the file gate ships it), then a helper.
 - Sent with `send_with_mesh_fallback` — paired, mesh `SPACE_ROUTED`, a
   mailbox seat or the host hop, whichever reaches the provider (the type is
   in `SPACE_SESSION_ALLOWED_EVENT_TYPES`).

@@ -118,6 +118,10 @@ MAX_ITEM_ID_LEN: int = 200
 class _SpaceRows(Protocol):
     async def space_rows_of(self, basename: str) -> list[tuple[str, str, str]]: ...
 
+    async def live_item_files(
+        self, space_id: str, item_id: str
+    ) -> list[tuple[str, str | None]]: ...
+
 
 class _ItemFiles(Protocol):
     async def live_item_files(
@@ -295,26 +299,36 @@ class SpaceMediaWanted:
         when the host is silent (its last sync round went unanswered — a send
         to its GFS mailbox would "succeed" with nobody to answer) or none of
         the hosts at v_92 could be reached; one batch never goes to both
-        (a silent host gets it only when no helper took it)."""
+        (a silent host gets it only when no helper took it). The host itself
+        asks each item's author household first (it holds its own people's
+        files), then a helper."""
         space = await self._spaces.get(space_id)
-        if (
-            space is None
-            or not space.owner_instance_id
-            or space.owner_instance_id == self._own
-        ):
+        if space is None or not space.owner_instance_id:
             return
-        hosts = [
-            h
-            for h in await acting_hosts(
-                self._spaces, self._seats, space, own_instance_id=self._own
-            )
-            if h and h != self._own
-        ]
         payload = {
             "space_id": space_id,
             "files": [{"item": item, "name": name} for name, item in files],
         }
-        silent = self._contact.is_silent(space_id)
+        if space.owner_instance_id == self._own:
+            # We ARE the host and lack a member's file (its push was lost):
+            # ask the household of each item's author — it holds the file as
+            # its own people's — then a helper.
+            for author in await self._author_households(space_id, files):
+                if await self._federation.space_member_supports(
+                    author, min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
+                ) and await self._send(author, space_id, payload):
+                    return
+            hosts: list[str] = []
+            silent = True
+        else:
+            hosts = [
+                h
+                for h in await acting_hosts(
+                    self._spaces, self._seats, space, own_instance_id=self._own
+                )
+                if h and h != self._own
+            ]
+            silent = self._contact.is_silent(space_id)
         if not silent:
             current = False
             for host in await self._current(hosts):
@@ -344,6 +358,28 @@ class SpaceMediaWanted:
             FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
             len(files),
         )
+
+    async def _author_households(
+        self, space_id: str, files: list[tuple[str, str]]
+    ) -> list[str]:
+        """The households seated for the authors of the items *files* name
+        (``live_item_files`` owners, the roster mirror), in first-seen order,
+        never us."""
+        owners: list[str] = []
+        for item in dict.fromkeys(item for _name, item in files):
+            for _basename, owner in await self._refs.live_item_files(space_id, item):
+                if owner and owner not in owners:
+                    owners.append(owner)
+        if not owners:
+            return []
+        seats = await self._seats.list_for_space(space_id)
+        out: list[str] = []
+        for owner in owners:
+            for seat in seats:
+                iid = str(seat.instance_id)
+                if seat.user_id == owner and iid != self._own and iid not in out:
+                    out.append(iid)
+        return out
 
     async def _current(self, hosts: list[str]) -> list[str]:
         """The *hosts* at v_92 (who can answer a request), in order."""
