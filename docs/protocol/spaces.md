@@ -3320,8 +3320,19 @@ already run. The origin then applies, in order, each a fail-closed drop:
 
 Step 8 is skipped — route invalidated, nothing resent — when the nacked
 send was itself the retry (a target that nacks twice gets one `INFO`
-line, not a loop) or when the inner exceeds 64 KiB (media chunks ride the
-durable `space_media_outbox`, which rediscovers on its own next attempt).
+line, not a loop) or when the inner exceeds 64 KiB — a media chunk, whose
+bytes the mesh does not keep. The chunk's first hop had taken it, so the
+`space_media_outbox` row was already done: the handler hands the inner's
+small head (`blob_id`, …, never the bytes) to the media outbox
+(`SpaceRoutedHandler.attach_lost_inner_listener` →
+`SpaceMediaSyncService.on_mesh_chunk_lost`), which queues the **whole
+file** for that household again, once per file — the other chunks' nacks
+find it queued, and a nack for the resend gives up (the receiver asks for
+the file when someone opens it, `SPACE_MEDIA_WANTED`). Cost: the file's
+bytes once more to the one household that could not open them. Before
+this a picture a mesh-only member posted while the host was down was lost
+on the host: the relay delivered the chunks after the host's restart, the
+host nacked them, and nobody sent them again.
 When rediscovery finds **no route** the origin does not give up at once:
 the nack's own trigger is "the target just rebooted", and the two-second
 discovery window routinely closes before the target is back — its late
