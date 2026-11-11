@@ -422,7 +422,7 @@ async def _change_rsvps(h: Home) -> None:
 
 async def _poll(h: Home) -> None:
     await _post(h, type=PostType.POLL, content="Lunch?")
-    await h.repos.space_poll.create_poll(
+    await h.repos.space_poll.create_poll_if_absent(
         post_id="post-1",
         question="Lunch?",
         closes_at=None,
@@ -432,8 +432,8 @@ async def _poll(h: Home) -> None:
             {"id": "opt-b", "text": "Soup", "position": 1},
         ],
     )
-    await h.repos.space_poll.cast_vote_in_space(
-        space_id=SPACE, post_id="post-1", option_id="opt-a", voter_user_id=ANNA
+    await h.repos.space_poll.set_votes_in_space(
+        space_id=SPACE, post_id="post-1", option_ids=["opt-a"], voter_user_id=ANNA
     )
 
 
@@ -450,11 +450,11 @@ async def _view_poll(h: Home) -> Any:
 
 
 async def _vote_and_close(h: Home) -> None:
-    await h.repos.space_poll.cast_vote_in_space(
-        space_id=SPACE, post_id="post-1", option_id="opt-b", voter_user_id=CARL
+    await h.repos.space_poll.set_votes_in_space(
+        space_id=SPACE, post_id="post-1", option_ids=["opt-b"], voter_user_id=CARL
     )
-    await h.repos.space_poll.cast_vote_in_space(
-        space_id=SPACE, post_id="post-1", option_id="opt-b", voter_user_id=ANNA
+    await h.repos.space_poll.set_votes_in_space(
+        space_id=SPACE, post_id="post-1", option_ids=["opt-b"], voter_user_id=ANNA
     )
     await h.repos.space_poll.close_in_space("post-1", space_id=SPACE)
 

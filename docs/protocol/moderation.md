@@ -54,7 +54,8 @@ There is no event for the approved content and no signed approval token:
 the **host** applies the item from its own copy and emits it as the
 ordinary `SPACE_*` write
 (`SPACE_POST_CREATED`, `SPACE_TASK_CREATED`, `SPACE_STICKY_UPDATED`, …,
-plus a post's `SPACE_SCHEDULE_CREATED` / `BAZAAR_LISTING_CREATED`) through
+plus a post's `SPACE_POLL_CREATED` / `SPACE_SCHEDULE_CREATED` /
+`BAZAAR_LISTING_CREATED`) through
 `broadcast_to_space_members`, authored by the submitter, with an **approval
 block** inside the sealed payload:
 

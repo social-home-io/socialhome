@@ -1,5 +1,10 @@
 """Space items held until the post (or parent comment) they reference lands.
 
+A poll waits the same way: its definition (``SPACE_POLL_CREATED``) for its
+post, and a vote or a close for the poll itself (:data:`PARENT_POLL`,
+released on :class:`~socialhome.domain.events.PollCreated`) — a vote from
+one household routinely reaches a third before the author's definition.
+
 A comment, a reaction, an edit or a delete names the row it hangs off — the
 post, or for a reply the parent comment. With several delivery paths per
 space (direct federation, ``SPACE_ROUTED``, the host's relay of a member's
@@ -51,6 +56,7 @@ from typing import TYPE_CHECKING
 
 from ..domain.events import (
     CommentAdded,
+    PollCreated,
     SpaceCommentSynced,
     SpacePostCreated,
     SpacePostSynced,
@@ -65,6 +71,9 @@ log = logging.getLogger(__name__)
 #: The parent kinds an item may wait for.
 PARENT_POST = "post"
 PARENT_COMMENT = "comment"
+#: The reply poll of a post, keyed by the post's id.
+PARENT_POLL = "poll"
+_PARENT_KINDS = (PARENT_POST, PARENT_COMMENT, PARENT_POLL)
 
 #: Defaults — long enough for a host coming back online to hear the post
 #: over another path, small against a flood.
@@ -151,6 +160,7 @@ class PendingParentBuffer:
         bus.subscribe(SpacePostSynced, self._on_post_synced)
         bus.subscribe(CommentAdded, self._on_comment_added)
         bus.subscribe(SpaceCommentSynced, self._on_comment_synced)
+        bus.subscribe(PollCreated, self._on_poll_created)
 
     def hold(
         self,
@@ -172,7 +182,7 @@ class PendingParentBuffer:
         ``size`` the bytes the replay keeps alive (the frame or payload),
         charged with :data:`ENTRY_OVERHEAD_BYTES` on top. ``False`` when it
         cannot be held — the caller then refuses the item as before."""
-        if not space_id or not parent_id or kind not in (PARENT_POST, PARENT_COMMENT):
+        if not space_id or not parent_id or kind not in _PARENT_KINDS:
             return False
         if self._hold.hold(
             (space_id, kind, parent_id),
@@ -238,6 +248,12 @@ class PendingParentBuffer:
                 space_id=event.space_id,
                 kind=PARENT_COMMENT,
                 parent_id=event.comment.id,
+            )
+
+    async def _on_poll_created(self, event: PollCreated) -> None:
+        if event.space_id:
+            await self.release(
+                space_id=event.space_id, kind=PARENT_POLL, parent_id=event.post_id
             )
 
     async def _on_comment_synced(self, event: SpaceCommentSynced) -> None:

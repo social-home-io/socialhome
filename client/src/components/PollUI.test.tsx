@@ -49,4 +49,24 @@ describe('PollUI', () => {
     render(<PollUI postId="p1" currentUserId="u1" />)
     await waitFor(() => expect(screen.getByText(/voting ended/)).toBeTruthy())
   })
+
+  it('a follower sees the results but cannot press an option', async () => {
+    get.mockResolvedValue(poll({ can_vote: false, space_id: 'sp1' }))
+    render(<PollUI postId="p1" currentUserId="u1" spaceId="sp1" />)
+    await waitFor(() => expect(screen.getByText('2 votes')).toBeTruthy())
+    const options = screen.getAllByRole('button')
+    expect(options.length).toBeGreaterThan(0)
+    for (const option of options) {
+      expect((option as HTMLButtonElement).disabled).toBe(true)
+    }
+  })
+
+  it('a member can press an option', async () => {
+    get.mockResolvedValue(poll({ can_vote: true, space_id: 'sp1' }))
+    render(<PollUI postId="p1" currentUserId="u1" spaceId="sp1" />)
+    await waitFor(() => expect(screen.getByText('2 votes')).toBeTruthy())
+    for (const option of screen.getAllByRole('button')) {
+      expect((option as HTMLButtonElement).disabled).toBe(false)
+    }
+  })
 })

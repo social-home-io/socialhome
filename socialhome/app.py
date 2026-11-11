@@ -1835,6 +1835,8 @@ def _wire_federation_stack(
         # v_48: another household's version of a held page — fast-forward,
         # merge or conflict instead of last write wins.
         page_conflicts=page_conflict_service,
+        # A poll that overtakes its post, a vote that overtakes its poll.
+        pending_parents=pending_parent_buffer,
     )
     content_inbound.attach_to(federation_service)
     PersonalCalendarInboundHandlers(
@@ -2297,6 +2299,7 @@ def _wire_federation_stack(
         sticky_repo=sticky_repo,
         space_calendar_repo=space_calendar_repo,
         gallery_repo=gallery_repo,
+        space_poll_repo=space_poll_repo,
         # A replayed row's files ship from us: the receiver names them by
         # the household that delivered the row (``SpaceMediaNamer``) —
         # bounded per request by the files' sizes here.

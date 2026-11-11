@@ -50,14 +50,24 @@ _SLOT_IN_SPACE = """
 class AbstractSpacePollRepo(AbstractPollRepo, Protocol):
     """Poll repo + the space-scoped writes federation inbound uses."""
 
-    async def cast_vote_in_space(
+    async def set_votes_in_space(
         self,
         *,
         space_id: str,
         post_id: str,
-        option_id: str,
+        option_ids: list[str],
         voter_user_id: str,
     ) -> bool: ...
+    async def create_poll_in_space(
+        self,
+        *,
+        space_id: str,
+        post_id: str,
+        question: str,
+        closes_at: str | None,
+        allow_multiple: bool,
+        options: list[dict],
+    ) -> bool | None: ...
     async def close_in_space(self, post_id: str, *, space_id: str) -> bool: ...
     async def create_schedule_poll_in_space(
         self,
@@ -132,44 +142,6 @@ class SqliteSpacePollRepo:
         self._db = db
 
     # ── reply polls ────────────────────────────────────────────────────
-
-    async def create_poll(
-        self,
-        *,
-        post_id: str,
-        question: str,
-        closes_at: str | None,
-        allow_multiple: bool,
-        options: list[dict],
-    ) -> None:
-        await self._db.enqueue(
-            """
-            INSERT INTO space_polls(
-                post_id, question, closes_at, closed, allow_multiple
-            ) VALUES(?, ?, ?, 0, ?)
-            ON CONFLICT(post_id) DO UPDATE SET
-                question=excluded.question,
-                closes_at=excluded.closes_at,
-                allow_multiple=excluded.allow_multiple
-            """,
-            (post_id, question, closes_at, 1 if allow_multiple else 0),
-        )
-        for opt in options:
-            await self._db.enqueue(
-                """
-                INSERT INTO space_poll_options(id, post_id, text, position)
-                VALUES(?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    text=excluded.text,
-                    position=excluded.position
-                """,
-                (
-                    opt["id"],
-                    post_id,
-                    opt["text"],
-                    int(opt.get("position", 0)),
-                ),
-            )
 
     async def create_poll_if_absent(
         self,
@@ -383,47 +355,6 @@ class SqliteSpacePollRepo:
 
     # ── schedule polls ─────────────────────────────────────────────────
 
-    async def create_schedule_poll(
-        self,
-        *,
-        post_id: str,
-        title: str,
-        deadline: str | None,
-        slots: list[dict],
-    ) -> None:
-        await self._db.enqueue(
-            """
-            INSERT INTO space_schedule_poll_meta(
-                post_id, title, deadline, finalized_slot_id, closed
-            ) VALUES(?, ?, ?, NULL, 0)
-            ON CONFLICT(post_id) DO UPDATE SET
-                title=excluded.title,
-                deadline=excluded.deadline
-            """,
-            (post_id, title, deadline),
-        )
-        for s in slots:
-            await self._db.enqueue(
-                """
-                INSERT INTO space_schedule_slots(
-                    id, post_id, slot_date, start_time, end_time, position
-                ) VALUES(?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    slot_date=excluded.slot_date,
-                    start_time=excluded.start_time,
-                    end_time=excluded.end_time,
-                    position=excluded.position
-                """,
-                (
-                    s["id"],
-                    post_id,
-                    s["slot_date"],
-                    s.get("start_time"),
-                    s.get("end_time"),
-                    int(s.get("position", 0)),
-                ),
-            )
-
     async def get_schedule_meta(self, post_id: str) -> dict | None:
         row = await self._db.fetchone(
             "SELECT post_id, title, deadline, finalized_slot_id, closed "
@@ -543,42 +474,122 @@ class SqliteSpacePollRepo:
 
     # ── space-scoped writes (federation inbound, §24.11) ───────────────
 
-    async def cast_vote_in_space(
+    async def set_votes_in_space(
         self,
         *,
         space_id: str,
         post_id: str,
-        option_id: str,
+        option_ids: list[str],
         voter_user_id: str,
     ) -> bool:
-        """Replace ``voter_user_id``'s vote on ``post_id`` with ``option_id``.
+        """Replace ``voter_user_id``'s votes on ``post_id`` with
+        ``option_ids`` — the voter's whole selection, as
+        ``SPACE_POLL_VOTE_CAST`` carries it (empty: the vote is retracted).
 
-        Single-choice semantics (the voter's previous votes on this poll
-        are cleared first), all inside one transaction that first proves
-        the option belongs to ``post_id`` *and* the post lives in
-        ``space_id``. ``False`` = refused, nothing written.
+        One transaction that first proves the poll's post lives in
+        ``space_id``, that the poll is still open (not closed, its
+        ``closes_at`` not passed — the local ``PollService.cast_vote`` rule),
+        that every option belongs to ``post_id``, and that a single-choice
+        poll gets at most one. ``False`` = refused, nothing written (the
+        voter's previous votes stay).
         """
+        wanted = list(dict.fromkeys(option_ids))
 
         def _run(conn) -> bool:
-            if (
-                conn.execute(
-                    _OPTION_IN_SPACE, (option_id, post_id, space_id)
-                ).fetchone()
-                is None
-            ):
+            poll = conn.execute(
+                "SELECT sp.allow_multiple FROM space_polls sp"
+                " JOIN space_posts p ON p.id = sp.post_id"
+                " WHERE sp.post_id=? AND p.space_id=? AND sp.closed=0"
+                " AND (sp.closes_at IS NULL"
+                "  OR julianday(sp.closes_at) > julianday('now'))",
+                (post_id, space_id),
+            ).fetchone()
+            if poll is None or (len(wanted) > 1 and not poll["allow_multiple"]):
                 return False
+            for option_id in wanted:
+                if (
+                    conn.execute(
+                        _OPTION_IN_SPACE, (option_id, post_id, space_id)
+                    ).fetchone()
+                    is None
+                ):
+                    return False
             conn.execute(
                 "DELETE FROM space_poll_votes WHERE voter_user_id=? AND option_id IN "
                 "(SELECT id FROM space_poll_options WHERE post_id=?)",
                 (voter_user_id, post_id),
             )
-            conn.execute(
+            conn.executemany(
                 "INSERT INTO space_poll_votes(option_id, voter_user_id) VALUES(?, ?)",
-                (option_id, voter_user_id),
+                [(option_id, voter_user_id) for option_id in wanted],
             )
             return True
 
         return bool(await self._db.transact(_run))
+
+    async def create_poll_in_space(
+        self,
+        *,
+        space_id: str,
+        post_id: str,
+        question: str,
+        closes_at: str | None,
+        allow_multiple: bool,
+        options: list[dict],
+    ) -> bool | None:
+        """Create the poll a peer announced for ``post_id`` — the poll row
+        and its options (``{id, text}`` in order: the list index is the
+        position) in ONE transaction that first proves the post is a live
+        post of ``space_id``.
+
+        ``True``: this call created it. ``False``: the post already has a
+        poll — kept as it is (a poll is never rewritten by a re-send).
+        ``None``: refused, nothing written — the post is not a live post of
+        this space, or an option id is already another poll's.
+        """
+
+        def _run(conn) -> bool | None:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM space_posts WHERE id=? AND space_id=? AND deleted=0",
+                    (post_id, space_id),
+                ).fetchone()
+                is None
+            ):
+                return None
+            if (
+                conn.execute(
+                    "SELECT 1 FROM space_polls WHERE post_id=?", (post_id,)
+                ).fetchone()
+                is not None
+            ):
+                return False
+            for opt in options:
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM space_poll_options WHERE id=?",
+                        (str(opt["id"]),),
+                    ).fetchone()
+                    is not None
+                ):
+                    return None
+            conn.execute(
+                "INSERT INTO space_polls(post_id, question, closes_at, closed,"
+                " allow_multiple) VALUES(?, ?, ?, 0, ?)",
+                (post_id, question, closes_at, 1 if allow_multiple else 0),
+            )
+            conn.executemany(
+                "INSERT INTO space_poll_options(id, post_id, text, position)"
+                " VALUES(?, ?, ?, ?)",
+                [
+                    (str(o["id"]), post_id, str(o["text"]), position)
+                    for position, o in enumerate(options)
+                ],
+            )
+            return True
+
+        created: bool | None = await self._db.transact(_run)
+        return created
 
     async def close_in_space(self, post_id: str, *, space_id: str) -> bool:
         """Close the poll on ``post_id`` if that post lives in ``space_id``."""

@@ -37,10 +37,13 @@ for a listing already settled) is DEBUG — see :func:`log_not_applied`.
 
 from __future__ import annotations
 
+import functools
 import logging
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+
+import orjson
 
 from ...domain.bazaar_thread import announced_end
 from ...domain.calendar import (
@@ -66,6 +69,8 @@ from ...domain.events import (
     GalleryItemUploaded,
     PageDeleted,
     PollClosed,
+    PollCreated,
+    PollVoted,
     RemoteSchedulePollFinalized,
     SpaceZoneDeleted,
     SpaceZoneUpserted,
@@ -88,13 +93,17 @@ from ...domain.post import (
     BAZAAR_MAX_IMAGES,
     BAZAAR_OFFER_MESSAGE_MAX_CHARS,
     BAZAAR_REJECT_REASON_MAX_CHARS,
+    MAX_POLL_OPTIONS,
+    MAX_POLL_TEXT,
     BazaarBid,
     BazaarListing,
     BazaarMode,
     BazaarOffer,
     BazaarStatus,
     Post,
+    poll_closes_at_from_wire,
     poll_deadline_passed,
+    poll_options_from_wire,
 )
 from ...domain.space import (
     MODERATION_BLOCK_KEY,
@@ -140,6 +149,7 @@ from ...federation.owner_bound_id import (
     is_owner_bound,
     owner_bound_id_refused,
 )
+from ...federation.pending_parent_buffer import PARENT_POLL, PARENT_POST
 from ...federation.space_authorship import payload_actor
 from ...federation.space_scope import (
     log_cross_space_refusal,
@@ -171,6 +181,7 @@ if TYPE_CHECKING:
 
     from ...domain.federation import FederationEvent
     from ...federation.federation_service import FederationService
+    from ...federation.pending_parent_buffer import PendingParentBuffer
     from ...federation.space_authorship import SpaceAuthorship
     from ...repositories.bazaar_repo import AbstractBazaarRepo
     from ...repositories.calendar_repo import AbstractSpaceCalendarRepo
@@ -244,6 +255,7 @@ class SpaceContentInboundHandlers:
         "_bazaar_repo",
         "_bus",
         "_calendar_repo",
+        "_federation",
         "_gallery_repo",
         "_gfs_media",
         "_legacy_album_deletes",
@@ -252,6 +264,7 @@ class SpaceContentInboundHandlers:
         "_media_refs",
         "_page_conflicts",
         "_page_repo",
+        "_pending_parents",
         "_poll_repo",
         "_post_repo",
         "_sticky_repo",
@@ -279,8 +292,14 @@ class SpaceContentInboundHandlers:
         media_refs: AbstractMediaReferenceRepo | None = None,
         legacy_album_deletes: LegacyAlbumDeletes | None = None,
         page_conflicts: PageConflictService | None = None,
+        pending_parents: PendingParentBuffer | None = None,
     ) -> None:
         self._bus = bus
+        #: Holds a poll definition until its post lands, and a vote or a
+        #: close until the poll does. ``None``: they are refused as before.
+        self._pending_parents = pending_parents
+        #: Replays a held event (set by :meth:`attach_to`).
+        self._federation: FederationService | None = None
         #: v_48 — applies another household's version of an existing page
         #: (fast-forward / merge / conflict). ``None``: last write wins.
         self._page_conflicts = page_conflicts
@@ -360,6 +379,7 @@ class SpaceContentInboundHandlers:
             await self._gfs_media.keep(media)
 
     def attach_to(self, federation_service: FederationService) -> None:
+        self._federation = federation_service
         registry = federation_service._event_registry
 
         # Tasks
@@ -422,12 +442,14 @@ class SpaceContentInboundHandlers:
         )
 
         # Polls — only registered when a poll_repo is attached (deployments
-        # without polls skip it entirely, classical behaviour). Poll
-        # creation rides inline on ``SPACE_POST_CREATED`` (posts with
-        # ``type=poll`` carry the poll body), so there is no inbound
-        # handler for the bare ``SPACE_POLL_CREATED`` event — the
-        # dispatch registry no-ops on unknown events.
+        # without polls skip it entirely, classical behaviour). The wrapper
+        # post lands via ``SPACE_POST_CREATED``; ``SPACE_POLL_CREATED``
+        # carries the poll itself (question, options with their ids).
         if self._poll_repo is not None:
+            registry.register(
+                FederationEventType.SPACE_POLL_CREATED,
+                self._on_poll_created,
+            )
             registry.register(
                 FederationEventType.SPACE_POLL_VOTE_CAST,
                 self._on_poll_vote,
@@ -1924,9 +1946,68 @@ class SpaceContentInboundHandlers:
 
     # ─── Polls ──────────────────────────────────────────────────────────
 
-    async def _on_poll_vote(self, event: FederationEvent) -> None:
-        """Mirror a remote poll vote. Enforces the single-choice invariant
-        (the old vote is cleared first) matching the local poll service."""
+    def _hold_for(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        kind: str,
+        post_id: str,
+        *,
+        what: str,
+    ) -> bool:
+        """Hold ``event`` until ``kind`` ``post_id`` (the post, or its poll)
+        lands in ``space_id``, then replay it through the §24.11
+        post-decrypt gates and its handler again. ``False`` when it cannot
+        be held — the caller refuses as before."""
+        buffer, federation = self._pending_parents, self._federation
+        if buffer is None or federation is None:
+            return False
+        return buffer.hold(
+            space_id=space_id,
+            kind=kind,
+            parent_id=post_id,
+            token=f"{event.event_type}:{post_id}:{event.from_instance}:{event.msg_id}",
+            sender=event.from_instance,
+            size=len(orjson.dumps(event.payload or {})),
+            replay=functools.partial(
+                federation.replay_held, event, reason=f"{kind} {post_id} landed"
+            ),
+            label=f"{event.event_type} from {event.from_instance} ({what} {post_id})",
+        )
+
+    async def _poll_missing(
+        self, event: FederationEvent, space_id: str, post_id: str, *, what: str
+    ) -> bool:
+        """``True`` when ``post_id`` holds no poll here yet and ``event``
+        (a vote, a close) therefore waits for it: held until the post, or
+        the poll of a live post of this space, lands — a vote from one
+        household routinely overtakes the author's definition. A deleted
+        or foreign post is the caller's refusal (``False``)."""
+        assert self._poll_repo is not None
+        if await self._poll_repo.get_meta(post_id) is not None:
+            return False
+        got = await self._post_repo.get(post_id)
+        if got is None:
+            kind = PARENT_POST
+        elif got[0] == space_id and not getattr(got[1], "deleted", False):
+            kind = PARENT_POLL
+        else:
+            return False
+        if not self._hold_for(event, space_id, kind, post_id, what=what):
+            log_not_applied(
+                event, what=what, row_id=post_id, reason="no such poll here"
+            )
+        return True
+
+    async def _on_poll_created(self, event: FederationEvent) -> None:
+        """Persist a peer's reply poll — question, options (with the ids
+        every household's votes name), ``allow_multiple``, ``closes_at`` —
+        on the wrapper post that arrived via ``SPACE_POST_CREATED``.
+
+        Created once: a post that already holds a poll keeps it (a re-send,
+        a resume replay, the §25.6 stream that got here first), so nobody
+        rewrites a poll people voted in. A definition that overtakes its
+        post is held until the post lands."""
         if self._poll_repo is None:
             return
         space_id = resolve_space_id(event)
@@ -1934,25 +2015,152 @@ class SpaceContentInboundHandlers:
             return
         p = event.payload
         post_id = str(p.get("post_id") or "")
-        option_id = str(p.get("option_id") or "")
-        voter = str(p.get("voter_user_id") or p.get("user_id") or "")
-        if not post_id or not option_id or not voter:
+        question = str(p.get("question") or "").strip()
+        # Option ids are bound to the post: no other poll can hold them.
+        options = poll_options_from_wire(p.get("options"), post_id=post_id)
+        closes_ok, closes_at = poll_closes_at_from_wire(p.get("closes_at") or None)
+        allow_multiple = p.get("allow_multiple", False)
+        if (
+            not post_id
+            or not 0 < len(question) <= MAX_POLL_TEXT
+            or options is None
+            or not closes_ok
+            or not isinstance(allow_multiple, bool)
+        ):
+            # An older sender's event carried no options: nothing to keep.
+            log.debug("SPACE_POLL_CREATED without a usable poll definition")
+            return
+        got = await self._post_repo.get(post_id)
+        if got is None:
+            if not self._hold_for(event, space_id, PARENT_POST, post_id, what="poll"):
+                log_not_applied(
+                    event, what="poll", row_id=post_id, reason="no such post here"
+                )
+            return
+        # The poll belongs to the wrapper post: its author's household
+        # creates it (or the host, releasing a reviewed post).
+        anchor = await self._post_in_space(event, space_id, post_id, what="poll")
+        if anchor is None:
+            return
+        if self._system_post_refused(event, space_id, anchor, what="poll"):
+            return
+        if not await self._authorship.may_author(event, space_id, anchor.author):
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="poll",
+                row_id=post_id,
+                user_id=anchor.author,
+            )
+            return
+        # A poll is part of its post: the space's ``posts`` level applies
+        # (§4.3) — under ADMIN_ONLY / MODERATED a plain member's poll is
+        # refused unless it is the host's release of the reviewed post.
+        if not await self._authorship.access_admits(
+            event,
+            space_id,
+            "posts",
+            ContentAction.CREATE,
+            actor=payload_actor(event),
+            row_owner=anchor.author,
+        ):
+            return
+        created = await self._poll_repo.create_poll_in_space(
+            space_id=space_id,
+            post_id=post_id,
+            question=question,
+            closes_at=closes_at,
+            allow_multiple=allow_multiple,
+            options=options,
+        )
+        if created is None:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="poll", row_id=post_id
+            )
+            return
+        if not created:
+            # Held already (the §25.6 stream got here first): kept as it
+            # is — and what waited for it replays now.
+            if self._pending_parents is not None:
+                await self._pending_parents.release(
+                    space_id=space_id, kind=PARENT_POLL, parent_id=post_id
+                )
+            return
+        # The SPA shows it, and the votes / close held for it replay.
+        # ``origin_instance_id`` stops the outbound bridge echoing it back.
+        await self._bus.publish(
+            PollCreated(
+                post_id=post_id,
+                question=question,
+                allow_multiple=allow_multiple,
+                space_id=space_id,
+                options=tuple(options),
+                closes_at=closes_at,
+                origin_instance_id=event.from_instance,
+            )
+        )
+
+    async def _on_poll_vote(self, event: FederationEvent) -> None:
+        """Mirror a remote voter's selection: ``option_ids`` is the whole
+        set after the change (empty — the vote was retracted), as
+        :class:`PollFederationOutbound` sends it; it replaces the voter's
+        previous votes on the poll."""
+        if self._poll_repo is None:
+            return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
+        p = event.payload
+        post_id = str(p.get("post_id") or "")
+        raw = p.get("option_ids")
+        voter = str(p.get("voter_user_id") or "")
+        if (
+            not post_id
+            or not voter
+            or not isinstance(raw, list)
+            or len(raw) > MAX_POLL_OPTIONS
+            or not all(isinstance(o, str) and o for o in raw)
+        ):
             log.debug("SPACE_POLL_VOTE_CAST missing required field")
             return
         if not await self._acts_for(event, space_id, voter, "poll vote", post_id):
             return
-        # The repo proves, in the same transaction as the write, that the
+        if await self._poll_missing(event, space_id, post_id, what="poll vote"):
+            return
+        meta = await self._poll_repo.get_meta(post_id)
+        if meta is not None and (
+            meta["closed"] or poll_deadline_passed(meta["closes_at"], datetime.now(UTC))
+        ):
+            # The local rule (``PollService.cast_vote``): a closed poll's
+            # result stands. The repo refuses it again inside the write.
+            log_not_applied(
+                event, what="poll vote", row_id=post_id, reason="the poll is closed"
+            )
+            return
+        # The repo proves, in the same transaction as the write, that every
         # option belongs to this post (a mismatched pair would corrupt the
         # tally) and that the post lives in the gated space.
-        if not await self._poll_repo.cast_vote_in_space(
+        if not await self._poll_repo.set_votes_in_space(
             space_id=space_id,
             post_id=post_id,
-            option_id=option_id,
+            option_ids=list(raw),
             voter_user_id=voter,
         ):
             log_cross_space_refusal(
-                event, space_id=space_id, what="poll option", row_id=option_id
+                event, space_id=space_id, what="poll vote", row_id=post_id
             )
+            return
+        # The open SPA re-reads the tally.
+        # ``origin_instance_id`` stops the outbound bridge echoing it back.
+        await self._bus.publish(
+            PollVoted(
+                post_id=post_id,
+                voter_user_id=voter,
+                option_ids=tuple(dict.fromkeys(raw)),
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+            )
+        )
 
     async def _on_poll_closed(self, event: FederationEvent) -> None:
         if self._poll_repo is None:
@@ -1965,6 +2173,8 @@ class SpaceContentInboundHandlers:
             return
         # Only the poll's author closes it (``PollService.close_poll``, or
         # its household's deadline sweep).
+        if await self._poll_missing(event, space_id, post_id, what="poll close"):
+            return
         if not await self._post_owner_acts(event, space_id, post_id, what="poll"):
             return
         meta = await self._poll_repo.get_meta(post_id)
@@ -2020,6 +2230,8 @@ class SpaceContentInboundHandlers:
             event, space_id, post_id, what="schedule poll"
         )
         if anchor is None:
+            return
+        if self._system_post_refused(event, space_id, anchor, what="schedule poll"):
             return
         if not await self._authorship.may_author(event, space_id, anchor.author):
             await self._authorship.hold_or_refuse(
@@ -4003,6 +4215,20 @@ class SpaceContentInboundHandlers:
             log_cross_space_refusal(event, space_id=space_id, what=what, row_id=post_id)
             return None
         return post
+
+    def _system_post_refused(
+        self, event: FederationEvent, space_id: str, anchor: Post, *, what: str
+    ) -> bool:
+        """A poll / schedule poll belongs to a PERSON's post. A system (bot)
+        post has no author's household: ``may_author`` admits the system
+        author from any sender (any household may relay a bot's post), so
+        without this any member household could hang a poll on a bot post."""
+        if anchor.author != SYSTEM_AUTHOR:
+            return False
+        self._authorship.log_refusal(
+            event, space_id=space_id, what=what, row_id=anchor.id, user_id=anchor.author
+        )
+        return True
 
     async def _post_owner_acts(
         self,

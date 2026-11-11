@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import functools
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import PollClosed
+from socialhome.domain.events import PollClosed, PollCreated
+from socialhome.domain.post import poll_option_id
+from socialhome.domain.user import SYSTEM_AUTHOR
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.poll_repo import SqlitePollRepo
 from socialhome.repositories.space_poll_repo import SqliteSpacePollRepo
-from socialhome.services.poll_service import PollClosedError, PollService
+from socialhome.services.poll_service import (
+    PollClosedError,
+    PollExistsError,
+    PollService,
+)
 
 NOW = datetime(2026, 10, 28, 10, 0, tzinfo=UTC)
 
@@ -64,6 +71,7 @@ async def env(tmp_dir):
         )
         await e.household.create_poll(
             post_id=post_id,
+            actor_user_id="uid-anna",
             question="Pizza?",
             options=["Yes", "No"],
             closes_at=closes_at,
@@ -77,6 +85,7 @@ async def env(tmp_dir):
         )
         await e.space.create_poll(
             post_id=post_id,
+            actor_user_id=author,
             question="Pizza?",
             options=["Yes", "No"],
             closes_at=closes_at,
@@ -162,3 +171,166 @@ async def test_votes_still_count_before_the_deadline(env):
         voter_user_id="uid-anna",
     )
     assert (await env.household.summary("p1"))["total_votes"] == 1
+
+
+@pytest.mark.parametrize("once", [False, True])
+async def test_the_created_event_carries_the_stored_definition(env, once):
+    """What the member households create the poll from: the option ids the
+    repo stored, in order, and the deadline — on both create paths."""
+    seen: list[PollCreated] = []
+
+    async def _keep(event: PollCreated) -> None:
+        seen.append(event)
+
+    env.bus.subscribe(PollCreated, _keep)
+    await env.db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content)"
+        " VALUES(?,?,?,?,?)",
+        ("sp-post", "sp-1", "uid-anna", "poll", "?"),
+    )
+    closes_at = (NOW + timedelta(days=365 * 20)).isoformat()
+    create = (
+        env.space.create_poll_once
+        if once
+        else functools.partial(env.space.create_poll, actor_user_id="uid-anna")
+    )
+    await create(
+        post_id="sp-post",
+        question="Pizza?",
+        options=["Yes", "No"],
+        closes_at=closes_at,
+        space_id="sp-1",
+    )
+    stored = (await env.space.summary("sp-post"))["options"]
+    assert len(seen) == 1 and seen[0].origin_instance_id is None
+    assert [(o["id"], o["text"]) for o in seen[0].options] == [
+        (o["id"], o["text"]) for o in stored
+    ]
+    assert [o["text"] for o in stored] == ["Yes", "No"]
+    assert seen[0].closes_at == closes_at
+
+
+async def _vote(env, option: int = 0, post_id: str = "sp-post") -> None:
+    await env.space.cast_vote(
+        post_id=post_id,
+        option_id=poll_option_id(post_id, option),
+        voter_user_id="uid-anna",
+        space_id="sp-1",
+    )
+
+
+async def test_a_poll_is_never_replaced(env):
+    """A second poll for the post is refused whole — with post-bound option
+    ids an upsert would rewrite the option text under the votes, and the
+    host's stream would spread it."""
+    await env.space_poll("sp-post", "uid-anna", None)
+    await _vote(env)
+    with pytest.raises(PollExistsError) as err:
+        await env.space.create_poll(
+            post_id="sp-post",
+            actor_user_id="uid-anna",
+            question="Rewritten?",
+            options=["Never", "Always", "Maybe"],
+            space_id="sp-1",
+        )
+    assert (err.value.status, err.value.code) == (409, "POLL_EXISTS")
+    summary = await env.space.summary("sp-post")
+    assert summary["question"] == "Pizza?"
+    assert [(o["text"], o["vote_count"]) for o in summary["options"]] == [
+        ("Yes", 1),
+        ("No", 0),
+    ]
+
+
+@pytest.mark.parametrize("actor", ["uid-other", ""])
+async def test_only_the_posts_author_adds_its_poll(env, actor):
+    await env.db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content)"
+        " VALUES(?,?,?,?,?)",
+        ("sp-post", "sp-1", "uid-anna", "poll", "?"),
+    )
+    for post_id in ("sp-post", "no-such-post"):
+        with pytest.raises(PermissionError):
+            await env.space.create_poll(
+                post_id=post_id,
+                actor_user_id=actor,
+                question="Pizza?",
+                options=["Yes", "No"],
+                space_id="sp-1",
+            )
+    assert not await env.space.has_poll("sp-post")
+
+
+@pytest.mark.parametrize("how", ["closed", "deadline"])
+async def test_a_vote_cannot_be_retracted_from_a_closed_poll(env, how):
+    """Like a vote: the result stands, here as on every other household."""
+    await env.space_poll("sp-post", "uid-anna", None)
+    await _vote(env)
+    if how == "closed":
+        await env.space.close_poll(
+            post_id="sp-post", actor_user_id="uid-anna", space_id="sp-1"
+        )
+    else:
+        await env.db.enqueue(
+            "UPDATE space_polls SET closes_at='2000-01-01T00:00:00+00:00'"
+        )
+    with pytest.raises(PollClosedError):
+        await env.space.retract_vote(
+            post_id="sp-post", voter_user_id="uid-anna", space_id="sp-1"
+        )
+    assert (await env.space.summary("sp-post"))["total_votes"] == 1
+
+
+_SLOTS = [
+    {"slot_date": "2030-05-01", "id": "client-chosen"},
+    {"slot_date": "2030-05-02"},
+]
+
+
+async def _schedule_post(env, post_id: str = "sp-sched", author: str = "uid-anna"):
+    await env.db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content)"
+        " VALUES(?,?,?,?,?)",
+        (post_id, "sp-1", author, "schedule", "?"),
+    )
+
+
+async def test_a_schedule_poll_is_author_only_create_once_with_minted_slot_ids(env):
+    """The reply poll's rule: only the post's author (never on a system
+    post), once — the slots people answered are never replaced — and a
+    slot id is never the caller's to choose."""
+    await _schedule_post(env)
+    await _schedule_post(env, "sp-bot", SYSTEM_AUTHOR)
+    for post_id, actor in (
+        ("sp-sched", "uid-other"),
+        ("sp-bot", "uid-anna"),
+        ("no-such-post", "uid-anna"),
+    ):
+        with pytest.raises(PermissionError):
+            await env.space.create_schedule_poll(
+                post_id=post_id,
+                actor_user_id=actor,
+                title="When?",
+                slots=_SLOTS,
+                space_id="sp-1",
+            )
+        assert not await env.space.has_schedule_poll(post_id)
+    made = await env.space.create_schedule_poll(
+        post_id="sp-sched",
+        actor_user_id="uid-anna",
+        title="When?",
+        slots=_SLOTS,
+        space_id="sp-1",
+    )
+    ids = [s["id"] for s in made["slots"]]
+    assert len(ids) == 2 and "client-chosen" not in ids
+    with pytest.raises(PollExistsError):
+        await env.space.create_schedule_poll(
+            post_id="sp-sched",
+            actor_user_id="uid-anna",
+            title="Rewritten",
+            slots=[{"slot_date": "2031-01-01"}],
+            space_id="sp-1",
+        )
+    again = await env.space.schedule_summary("sp-sched", space_id="sp-1")
+    assert again["title"] == "When?" and [s["id"] for s in again["slots"]] == ids

@@ -267,11 +267,27 @@ async def _create_poll(client, post_id: str = "sp-1", slots: list | None = None)
         {"id": "slot-A", "slot_date": "2026-05-01"},
         {"id": "slot-B", "slot_date": "2026-05-02", "start_time": "18:00"},
     ]
-    return await client.post(
+    r = await client.post(
         f"/api/posts/{post_id}/schedule-poll",
         json={"title": "Pizza night", "slots": slots},
         headers=_auth(client._tok),
     )
+    await _pin_slot_ids(client, post_id, "schedule_slots")
+    return r
+
+
+async def _pin_slot_ids(client, post_id: str, table: str) -> None:
+    """The server mints the slot ids (a caller never chooses one); the
+    tests below name the first two ``slot-A`` / ``slot-B``."""
+    rows = await client._db.fetchall(
+        f"SELECT id FROM {table} WHERE post_id=? ORDER BY position",
+        (post_id,),
+    )
+    for row, name in zip(rows, ("slot-A", "slot-B"), strict=False):
+        await client._db.enqueue(
+            f"UPDATE {table} SET id=? WHERE id=?",
+            (name, row["id"]),
+        )
 
 
 async def test_schedule_create_returns_shape(client):
@@ -280,7 +296,9 @@ async def test_schedule_create_returns_shape(client):
     assert r.status == 201
     data = await r.json()
     assert data["title"] == "Pizza night"
-    assert [s["id"] for s in data["slots"]] == ["slot-A", "slot-B"]
+    # Minted here — never the ids the caller sent.
+    ids = [s["id"] for s in data["slots"]]
+    assert len(set(ids)) == 2 and not {"slot-A", "slot-B"} & set(ids)
     assert data["responses"] == []
     assert data["finalized_slot_id"] is None
     assert data["closed"] is False

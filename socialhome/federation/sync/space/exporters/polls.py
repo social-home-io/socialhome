@@ -7,8 +7,8 @@ one record per poll.
 v_92: the record also carries ``votes`` (``{option_id, voter_user_id}``
 — every member household sees who voted for what live, through
 ``SPACE_POLL_VOTE_CAST``), and a v_92 receiver converges the poll on the
-host's record: it creates the poll and its options when missing (the live
-path never carried the options), takes the votes of everybody but its own
+host's record: it creates the poll and its options when missing (it missed
+the live ``SPACE_POLL_CREATED``), takes the votes of everybody but its own
 people and closes a closed poll. A requester below v_92 gets the record
 without ``votes`` (:meth:`PollsExporter.without_votes`) — it drops the
 resource anyway.

@@ -49,6 +49,7 @@ from ....domain.events import (
     GalleryAlbumDeleted,
     GalleryItemDeleted,
     PageDeleted,
+    PollCreated,
     PostDeleted,
     RemoteSpaceMemberBanned,
     SpaceCommentSynced,
@@ -1798,7 +1799,7 @@ class SpaceSyncReceiver:
             for album_id in sorted(recount):
                 await self._gallery_repo.recount_items(album_id)
         elif resource == "polls":
-            await self._persist_polls(records, space_id)
+            await self._persist_polls(records, space_id, provider=provider)
         elif resource == "schedules":
             # F5: schedule-poll meta + slot defs catch up so a remote
             # member's slot picker isn't empty after a §25.6 sync. The
@@ -1997,12 +1998,12 @@ class SpaceSyncReceiver:
         return frozenset(await self._space_repo.list_local_member_user_ids(space_id))
 
     async def _persist_polls(
-        self, records: list[dict[str, Any]], space_id: str
+        self, records: list[dict[str, Any]], space_id: str, *, provider: str
     ) -> None:
         """Reply polls (v_92) — only the host's records get here (a member
         household's are refused in :meth:`_authored_record`). Each converges
         the poll on the host's copy: created with its options when missing
-        (the live ``SPACE_POLL_CREATED`` carries no options), the host's
+        (it missed the live ``SPACE_POLL_CREATED``), the host's
         question / deadline, closed when the host's is, and — from a v_92
         host, which sends ``votes`` — everybody's votes but our own
         people's. An older host's record (no ``votes``) leaves the votes."""
@@ -2042,6 +2043,7 @@ class SpaceSyncReceiver:
                 else None
             )
             closes_at = meta.get("closes_at")
+            lacked = await self._poll_repo.get_meta(post_id) is None
             if not await self._poll_repo.apply_synced_poll(
                 space_id=space_id,
                 post_id=post_id,
@@ -2055,6 +2057,23 @@ class SpaceSyncReceiver:
                 votes_partial=r.get("votes_partial") is True,
             ):
                 _log_sync_refusal("poll", post_id, space_id)
+                continue
+            if lacked and await self._poll_repo.get_meta(post_id) is not None:
+                # The stream created a poll this household lacked: the SPA
+                # shows it, and a vote or a close held for it
+                # (``PendingParentBuffer``) replays now. Never re-broadcast
+                # (it names the household it came from).
+                await self._bus.publish(
+                    PollCreated(
+                        post_id=post_id,
+                        question=question,
+                        allow_multiple=bool(meta.get("allow_multiple")),
+                        space_id=space_id,
+                        options=tuple(shaped),
+                        closes_at=str(closes_at) if closes_at else None,
+                        origin_instance_id=provider or space_id,
+                    )
+                )
 
     async def _persist_rsvps(
         self, event: CalendarEvent, r: dict[str, Any], space_id: str

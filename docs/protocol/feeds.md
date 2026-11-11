@@ -95,10 +95,110 @@ cannot create it. See [`sync.md`](./sync.md#post-and-comment-tombstones).
 
 ## Polls
 
-A poll lives inside a post. `SPACE_POLL_CREATED` announces the poll
-options when a post of type `poll` is federated;
-`SPACE_POLL_VOTE_CAST` carries one vote; `SPACE_POLL_CLOSED` ends the
-voting window.
+A poll hangs off a post. The post travels as `SPACE_POST_CREATED`; the
+poll follows as `SPACE_POLL_CREATED`, which carries the whole definition
+inside the sealed payload:
+
+```json
+{"post_id": "…", "space_id": "…", "question": "…", "allow_multiple": false,
+ "closes_at": null, "options": [{"id": "<32 hex>", "text": "…"}, …]}
+```
+
+The option ids are the ids every household stores and every vote names —
+so tallies agree everywhere. They are **bound to the post**:
+`poll_option_id(post_id, index)` = `"po"` + the first 30 hex characters of
+`SHA-256("poll-option\0" + post_id + "\0" + index)`. A receiver recomputes
+them — a list with any id of that shape must be the post's own ids, all
+of them, in order — so a poll can only carry its own post's option ids
+and no other poll (on any post, in any space) can take them first and
+block it. A poll made before ids were post-bound has random uuid ids
+(never starting with `po`): they are taken as stored — the definition is
+bound to the post's author's household (or the host) by the create rule
+below, so such a poll still reaches every household live and on resume.
+Only for those older polls can another poll still claim an id first.
+The poll has its own event (rather than a field of `SPACE_POST_CREATED`)
+because it is created *after* its post on every path: in the same request,
+attached later (`POST …/posts/{pid}/poll`), or when a moderation approval
+that published the post finishes its poll.
+
+`SPACE_POLL_VOTE_CAST` carries one voter's **whole selection** —
+`{post_id, voter_user_id, option_ids: [...]}`; an empty list is a
+retraction — and replaces that voter's earlier votes on the poll.
+`SPACE_POLL_CLOSED` ends the voting window.
+
+A member household applies them like this (`SpaceContentInboundHandlers`):
+
+- **Create** — never on a system (bot) post, which has no author's
+  household (any household may relay one); otherwise only from the
+  household of the wrapper post's author (or
+  the host relaying it, or the host's release of a reviewed post, whose
+  approval block is compared with the queued poll), and then the space's
+  `posts` access level for the payload's actor (§4.3, `access_admits`): a
+  plain member's household cannot attach a poll by itself where posts are
+  reviewed or admin-only — as the local route refuses it. 2–20 options
+  carrying the post's option ids in order, question and option text ≤ 500
+  characters, `allow_multiple` a boolean, `closes_at` absent or a
+  parseable ISO 8601 stamp of at most 40 characters; anything else is
+  dropped. It is **created once**: a post that already holds a poll
+  keeps it, so a re-send, a resume replay or the §25.6 stream never
+  rewrites a poll people voted in. One transaction proves the post is a
+  live post of the routed space (`create_poll_in_space`).
+- **Vote** — only from the household seating the voter, and only while
+  the poll is open: a closed poll, or one past its `closes_at`, takes no
+  vote and no retraction (the local `PollService.cast_vote` rule — a
+  closed poll's result stands). Every option must belong to that poll and
+  a single-choice poll takes at most one (`set_votes_in_space`, one
+  transaction); a refused vote leaves the earlier one. A vote that raced
+  the close stays on the voter's own household only.
+- **Arrival order.** With several delivery paths per space a vote from one
+  household routinely reaches a third before the author's definition, and
+  the definition can overtake its post. Nothing resends an event that was
+  answered `ok`, so they are **held**, not dropped: the definition until
+  its post lands, a vote or a close until the poll does
+  (`PendingParentBuffer`, kinds `post` / `poll` — in memory, bounded,
+  10 min), then replayed through the §24.11 gates and the handler again.
+  A poll the host's stream creates releases them the same way. What a
+  household misses anyway (offline past the outbox) heals from the host's
+  stream, below.
+- **Vote order.** A vote is the voter's whole selection — state, not
+  history — and the receiver keeps no stamp, so the sender guarantees the
+  order: `SPACE_POLL_VOTE_CAST` has a latest-only outbox key
+  (`poll-vote:{space}:{post}:{voter}`, `supersede_key`). Per peer at most
+  one vote of that voter on that poll waits in the outbox; a newer one
+  replaces it, and a newer one delivered live drops it — so a vote queued
+  while a household was unreachable can never land after a later one (on
+  the host that would roll the voter back for everyone through its
+  stream). The grouped mailbox rows of v_91 follow the same key. What is
+  left: two votes of one voter seconds apart that travel different
+  transports to the same household (direct and mesh-routed) are applied in
+  arrival order; a per-vote stamp that survives a retraction would need
+  new persistent state and is left for a follow-up.
+- **Edit / delete.** A poll cannot be edited — locally either: only the
+  post's author attaches one, and a post that has a poll takes no second
+  (`409 POLL_EXISTS`), so no household ever rewrites option text under
+  live votes. A schedule poll follows the same local rule (author only,
+  once, slot ids minted by the server). Editing the post leaves the poll alone; deleting the post drops the poll, its options and votes on
+  every household (migration 0085 trigger), and a deleted post takes no
+  new poll.
+
+**Who gets it.** `broadcast_to_space_members`, so every member household on
+every path (paired, mesh, GFS mailbox — one upload for all mailbox
+households since v_91) gets the same three events. A **follower household**
+(a `subscriber` invite link) is in that fan-out too: followers see the
+poll and its live tallies but cannot vote — the SPA's vote is refused
+locally (`403 SUBSCRIBER_READ_ONLY`; `GET …/poll` says `can_vote: false`
+and the SPA shows the options as results only) and every household drops a follower
+household's `SPACE_POLL_VOTE_CAST` at the §24.11 writer gate. **GFS
+subscribers** of a public / global space (no seat) do not get polls: the
+poll events are not relayed to a GFS, so they see the post without its
+poll.
+
+**Cost.** One poll = one `SPACE_POLL_CREATED` (≤ ~11 KB at the caps,
+typically < 1 KB) per member household; one vote = one
+`SPACE_POLL_VOTE_CAST` (~200 B) per member household — unchanged from
+before, when both were already sent but could not be applied. No new
+event type, no version bump: an older household ignores the definition
+(it had no handler) and heals from the host's v_92 stream as before.
 
 Only the author's household closes a poll — by hand, or when its
 `closes_at` passes: `PollDeadlineScheduler`
@@ -126,9 +226,8 @@ the closure; the `schedules` record carries the answers (`responses`,
 (`finalized_slot_id`). Taken from the host only, never over this
 household's own people's votes and answers; a cut list deletes nothing. See [sync.md](./sync.md#coverage--every-space-item-type).
 
-Votes are encrypted: the envelope payload includes only the vote's
-`option_id` and the voter's `user_id`, which stay inside the space's
-encrypted payload. GFS cannot tally votes even on public spaces.
+Votes are encrypted: the vote's `option_ids` and the voter's `user_id`
+stay inside the space's encrypted payload. GFS cannot tally votes even on public spaces.
 
 ## Implementation
 
