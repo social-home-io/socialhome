@@ -50,7 +50,7 @@ async def env(tmp_dir):
 
 
 async def test_create_poll_persists_meta_and_options(env):
-    await env.repo.create_poll(
+    await env.repo.create_poll_if_absent(
         post_id="post-1",
         question="Pizza?",
         closes_at=None,
@@ -78,7 +78,7 @@ async def test_get_meta_missing_returns_none(env):
 
 
 async def test_vote_and_clear_and_list(env):
-    await env.repo.create_poll(
+    await env.repo.create_poll_if_absent(
         post_id="post-1",
         question="Q",
         closes_at=None,
@@ -100,7 +100,7 @@ async def test_vote_and_clear_and_list(env):
 
 
 async def test_close_flips_flag(env):
-    await env.repo.create_poll(
+    await env.repo.create_poll_if_absent(
         post_id="post-1",
         question="Q",
         closes_at=None,
@@ -115,7 +115,7 @@ async def test_close_flips_flag(env):
 
 
 async def test_option_belongs_to_post(env):
-    await env.repo.create_poll(
+    await env.repo.create_poll_if_absent(
         post_id="post-1",
         question="Q",
         closes_at=None,
@@ -137,7 +137,7 @@ async def test_get_post_author_reads_space_posts(env):
 
 
 async def test_create_schedule_poll_roundtrip(env):
-    await env.repo.create_schedule_poll(
+    await env.repo.create_schedule_poll_if_absent(
         post_id="post-1",
         title="When?",
         deadline=None,
@@ -165,7 +165,7 @@ async def test_create_schedule_poll_roundtrip(env):
 
 
 async def test_upsert_schedule_response_updates_existing(env):
-    await env.repo.create_schedule_poll(
+    await env.repo.create_schedule_poll_if_absent(
         post_id="post-1",
         title="When?",
         deadline=None,
@@ -179,7 +179,7 @@ async def test_upsert_schedule_response_updates_existing(env):
 
 
 async def test_delete_schedule_response(env):
-    await env.repo.create_schedule_poll(
+    await env.repo.create_schedule_poll_if_absent(
         post_id="post-1",
         title="When?",
         deadline=None,
@@ -191,7 +191,7 @@ async def test_delete_schedule_response(env):
 
 
 async def test_finalize_schedule_poll(env):
-    await env.repo.create_schedule_poll(
+    await env.repo.create_schedule_poll_if_absent(
         post_id="post-1",
         title="When?",
         deadline=None,
@@ -209,7 +209,7 @@ async def test_finalize_schedule_poll(env):
 
 
 async def test_finalize_rejects_foreign_slot(env):
-    await env.repo.create_schedule_poll(
+    await env.repo.create_schedule_poll_if_absent(
         post_id="post-1",
         title="When?",
         deadline=None,
@@ -236,14 +236,14 @@ async def two_spaces(env):
         ("post-2", "sp-2", "uid-bob", "poll", "Tacos?"),
     )
     for post_id, prefix in (("post-1", "a"), ("post-2", "b")):
-        await env.repo.create_poll(
+        await env.repo.create_poll_if_absent(
             post_id=post_id,
             question="Q",
             closes_at=None,
             allow_multiple=False,
             options=[{"id": f"o-{prefix}", "text": "Yes", "position": 0}],
         )
-        await env.repo.create_schedule_poll(
+        await env.repo.create_schedule_poll_if_absent(
             post_id=post_id,
             title="When?",
             deadline=None,
@@ -256,38 +256,38 @@ async def two_spaces(env):
     return env
 
 
-async def test_cast_vote_in_space_replaces_the_previous_vote(two_spaces):
+async def test_set_votes_in_space_replaces_the_previous_vote(two_spaces):
     env = two_spaces
     await env.repo.insert_vote(option_id="o-a", voter_user_id="u-x")
-    assert await env.repo.cast_vote_in_space(
-        space_id="sp-1", post_id="post-1", option_id="o-a", voter_user_id="u-x"
+    assert await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="post-1", option_ids=["o-a"], voter_user_id="u-x"
     )
     assert await env.repo.list_user_votes("post-1", "u-x") == ["o-a"]
 
 
-async def test_cast_vote_in_space_refuses_a_poll_of_another_space(two_spaces):
+async def test_set_votes_in_space_refuses_a_poll_of_another_space(two_spaces):
     env = two_spaces
-    assert not await env.repo.cast_vote_in_space(
-        space_id="sp-1", post_id="post-2", option_id="o-b", voter_user_id="u-evil"
+    assert not await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="post-2", option_ids=["o-b"], voter_user_id="u-evil"
     )
     # sp-2's tally is untouched and the evil vote never landed.
     assert await env.repo.list_user_votes("post-2", "u-evil") == []
     assert await env.repo.list_user_votes("post-2", "u-b") == ["o-b"]
 
 
-async def test_cast_vote_in_space_refuses_an_option_of_another_post(two_spaces):
+async def test_set_votes_in_space_refuses_an_option_of_another_post(two_spaces):
     env = two_spaces
-    assert not await env.repo.cast_vote_in_space(
-        space_id="sp-1", post_id="post-1", option_id="o-b", voter_user_id="u-x"
+    assert not await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="post-1", option_ids=["o-b"], voter_user_id="u-x"
     )
     assert await env.repo.list_user_votes("post-2", "u-x") == []
 
 
-async def test_cast_vote_in_space_refusal_keeps_the_existing_vote(two_spaces):
+async def test_set_votes_in_space_refusal_keeps_the_existing_vote(two_spaces):
     """A refused vote must not have cleared the voter's standing vote."""
     env = two_spaces
-    assert not await env.repo.cast_vote_in_space(
-        space_id="sp-1", post_id="post-2", option_id="o-b", voter_user_id="u-b"
+    assert not await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="post-2", option_ids=["o-b"], voter_user_id="u-b"
     )
     assert await env.repo.list_user_votes("post-2", "u-b") == ["o-b"]
 
@@ -463,7 +463,7 @@ async def test_a_deleted_post_takes_no_schedule_from_the_wire(two_spaces):
 
 
 async def test_close_if_open_closes_once(env):
-    await env.repo.create_poll(
+    await env.repo.create_poll_if_absent(
         post_id="post-1",
         question="Pizza?",
         closes_at=None,
@@ -493,7 +493,7 @@ async def test_only_polls_a_local_user_wrote_are_due_here(env):
         ("post-remote", "2026-10-28T09:00:00.000Z"),
         ("post-later", "2026-10-28T11:00:00.000Z"),
     ):
-        await env.repo.create_poll(
+        await env.repo.create_poll_if_absent(
             post_id=post_id,
             question="Pizza?",
             closes_at=closes_at,
@@ -552,19 +552,19 @@ async def test_apply_synced_poll_refuses_another_spaces_post(env):
 
 async def test_apply_synced_poll_keeps_our_peoples_votes_and_older_hosts_votes(env):
     await _sync_poll(env, votes=[])
-    await env.repo.cast_vote_in_space(
-        space_id="sp-1", post_id="post-1", option_id="o-y", voter_user_id="u-ours"
+    await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="post-1", option_ids=["o-y"], voter_user_id="u-ours"
     )
-    await env.repo.cast_vote_in_space(
-        space_id="sp-1", post_id="post-1", option_id="o-n", voter_user_id="u-c"
+    await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="post-1", option_ids=["o-n"], voter_user_id="u-c"
     )
     await _sync_poll(env, votes=[], keep={"u-ours"})
     assert await env.repo.list_votes("post-1") == [
         {"option_id": "o-y", "voter_user_id": "u-ours"}
     ]
     # An older host sends no votes: the held ones stay.
-    await env.repo.cast_vote_in_space(
-        space_id="sp-1", post_id="post-1", option_id="o-n", voter_user_id="u-c"
+    await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="post-1", option_ids=["o-n"], voter_user_id="u-c"
     )
     await _sync_poll(env, votes=None)
     assert len(await env.repo.list_votes("post-1")) == 2
@@ -729,8 +729,8 @@ async def test_list_schedule_answers_newest_first_with_a_limit(env):
 async def test_list_votes_with_a_limit_puts_recent_voters_first(env):
     await _sync_poll(env, votes=[])
     for voter in ("u-a", "u-b"):
-        await env.repo.cast_vote_in_space(
-            space_id="sp-1", post_id="post-1", option_id="o-y", voter_user_id=voter
+        await env.repo.set_votes_in_space(
+            space_id="sp-1", post_id="post-1", option_ids=["o-y"], voter_user_id=voter
         )
     await env.db.enqueue(
         "UPDATE space_poll_votes SET voted_at='2026-01-01 00:00:00'"
@@ -758,3 +758,135 @@ async def test_a_partial_vote_list_converges_only_the_voters_it_names(env):
         {"option_id": "o-y", "voter_user_id": "u-a"},
         {"option_id": "o-n", "voter_user_id": "u-b"},
     ]
+
+
+# ─── A peer's poll definition and vote selection ───────────────────────────
+
+
+_NEW = [{"id": "n-1", "text": "Yes"}, {"id": "n-2", "text": "No"}]
+
+
+async def _bare_post(env, post_id: str = "post-3", space_id: str = "sp-1") -> None:
+    await env.db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content)"
+        " VALUES(?,?,?,?,?)",
+        (post_id, space_id, "uid-bob", "poll", ""),
+    )
+
+
+async def _define(env, *, space_id="sp-1", post_id="post-3", options=None, multi=True):
+    return await env.repo.create_poll_in_space(
+        space_id=space_id,
+        post_id=post_id,
+        question="Which?",
+        closes_at="2030-01-01T00:00:00+00:00",
+        allow_multiple=multi,
+        options=_NEW if options is None else options,
+    )
+
+
+async def test_create_poll_in_space_keeps_the_ids_and_the_order(two_spaces):
+    env = two_spaces
+    await _bare_post(env)
+    assert await _define(env) is True
+    meta = await env.repo.get_meta("post-3")
+    assert (meta["question"], meta["allow_multiple"], meta["closed"]) == (
+        "Which?",
+        True,
+        False,
+    )
+    assert meta["closes_at"] == "2030-01-01T00:00:00+00:00"
+    assert await env.repo.list_options_with_counts("post-3") == [
+        {"id": "n-1", "text": "Yes", "count": 0},
+        {"id": "n-2", "text": "No", "count": 0},
+    ]
+
+
+async def test_create_poll_in_space_never_rewrites_a_held_poll(two_spaces):
+    env = two_spaces
+    assert await _define(env, post_id="post-1") is False
+    assert (await env.repo.get_meta("post-1"))["question"] == "Q"
+    assert [o["id"] for o in await env.repo.list_options_with_counts("post-1")] == [
+        "o-a"
+    ]
+
+
+async def test_create_poll_in_space_refuses_another_spaces_post(two_spaces):
+    env = two_spaces
+    await _bare_post(env, "post-4", "sp-2")
+    assert await _define(env, post_id="post-4") is None
+    assert await _define(env, post_id="no-such-post") is None
+    assert await env.repo.get_meta("post-4") is None
+
+
+async def test_create_poll_in_space_refuses_a_deleted_post(two_spaces):
+    env = two_spaces
+    await _bare_post(env)
+    await env.db.enqueue("UPDATE space_posts SET deleted=1 WHERE id='post-3'")
+    assert await _define(env) is None
+    assert await env.repo.get_meta("post-3") is None
+
+
+async def test_create_poll_in_space_refuses_another_polls_option_id(two_spaces):
+    """All or nothing: an option id another poll owns creates no half poll."""
+    env = two_spaces
+    await _bare_post(env)
+    taken = [{"id": "n-1", "text": "Yes"}, {"id": "o-b", "text": "theirs"}]
+    assert await _define(env, options=taken) is None
+    assert await env.repo.get_meta("post-3") is None
+    assert await env.repo.option_belongs_to_post(option_id="o-b", post_id="post-2")
+
+
+async def test_set_votes_in_space_replaces_the_whole_selection(two_spaces):
+    env = two_spaces
+    await _bare_post(env)
+    await _define(env)
+    vote = {"space_id": "sp-1", "post_id": "post-3", "voter_user_id": "u-x"}
+    assert await env.repo.set_votes_in_space(option_ids=["n-1", "n-2", "n-1"], **vote)
+    assert sorted(await env.repo.list_user_votes("post-3", "u-x")) == ["n-1", "n-2"]
+    assert await env.repo.set_votes_in_space(option_ids=["n-2"], **vote)
+    assert await env.repo.list_user_votes("post-3", "u-x") == ["n-2"]
+    # An empty selection is the retraction.
+    assert await env.repo.set_votes_in_space(option_ids=[], **vote)
+    assert await env.repo.list_user_votes("post-3", "u-x") == []
+
+
+async def test_set_votes_in_space_refusals_keep_the_held_vote(two_spaces):
+    env = two_spaces
+    await _bare_post(env)
+    await _define(env, multi=False)
+    vote = {"space_id": "sp-1", "post_id": "post-3", "voter_user_id": "u-x"}
+    assert await env.repo.set_votes_in_space(option_ids=["n-1"], **vote)
+    # Two options on a single-choice poll, another poll's option, a post
+    # with no poll, the poll of another space.
+    assert not await env.repo.set_votes_in_space(option_ids=["n-1", "n-2"], **vote)
+    assert not await env.repo.set_votes_in_space(option_ids=["n-2", "o-a"], **vote)
+    assert not await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="no-poll", option_ids=[], voter_user_id="u-x"
+    )
+    assert not await env.repo.set_votes_in_space(
+        space_id="sp-1", post_id="post-2", option_ids=[], voter_user_id="u-b"
+    )
+    assert await env.repo.list_user_votes("post-3", "u-x") == ["n-1"]
+    assert await env.repo.list_user_votes("post-2", "u-b") == ["o-b"]
+
+
+@pytest.mark.parametrize(
+    "close",
+    [
+        "UPDATE space_polls SET closed=1 WHERE post_id='post-3'",
+        "UPDATE space_polls SET closes_at='2000-01-01T00:00:00' WHERE post_id='post-3'",
+    ],
+    ids=["closed", "past-its-deadline"],
+)
+async def test_set_votes_in_space_refuses_a_closed_poll(two_spaces, close):
+    """Neither a new vote nor a retraction changes a closed poll's result."""
+    env = two_spaces
+    await _bare_post(env)
+    await _define(env)
+    vote = {"space_id": "sp-1", "post_id": "post-3", "voter_user_id": "u-x"}
+    assert await env.repo.set_votes_in_space(option_ids=["n-1"], **vote)
+    await env.db.enqueue(close)
+    assert not await env.repo.set_votes_in_space(option_ids=["n-2"], **vote)
+    assert not await env.repo.set_votes_in_space(option_ids=[], **vote)
+    assert await env.repo.list_user_votes("post-3", "u-x") == ["n-1"]

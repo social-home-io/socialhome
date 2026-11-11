@@ -55,6 +55,7 @@ from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
 )
+from socialhome.domain.post import poll_option_id
 from socialhome.federation.inbound_validator import (
     InboundContext,
     run_post_decrypt_gates,
@@ -785,11 +786,25 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         (AUTHOR,),
         (OTHER, ADMIN, MOD),
     ),
+    (
+        FET.SPACE_POLL_CREATED,
+        "poll on u-a's post",
+        {
+            "post_id": "post-a-sched",
+            "question": "Which?",
+            "options": [
+                {"id": poll_option_id("post-a-sched", 0), "text": "a"},
+                {"id": poll_option_id("post-a-sched", 1), "text": "b"},
+            ],
+        },
+        (AUTHOR,),
+        (OTHER, ADMIN, MOD),
+    ),
     # ── Personal actions: strictly the named user's own household ──
     (
         FET.SPACE_POLL_VOTE_CAST,
         "vote as u-a",
-        {"post_id": "post-a", "option_id": "opt-a", "voter_user_id": "u-a"},
+        {"post_id": "post-a", "option_ids": ["opt-a"], "voter_user_id": "u-a"},
         (AUTHOR,),
         (OTHER, ADMIN, HOST, MOD),
     ),

@@ -233,6 +233,20 @@ def _ts_attr(row) -> str:
     return ""
 
 
+class _FakePollRepo:
+    """``post_id → (meta, options)`` — the two reads the poll replay makes."""
+
+    def __init__(self, polls: dict[str, tuple[dict, list[dict]]]) -> None:
+        self._polls = polls
+
+    async def get_meta(self, post_id):
+        held = self._polls.get(post_id)
+        return dict(held[0]) if held is not None else None
+
+    async def list_options_with_counts(self, post_id):
+        return [dict(o) for o in self._polls[post_id][1]]
+
+
 def _post(i: int, at: datetime) -> Post:
     return Post(
         id=f"p-{i}",
@@ -342,6 +356,7 @@ def provider_factory():
         gallery_items=None,
         gallery_albums=None,
         gallery_tombstones=None,
+        polls=None,
         members,
     ):
         fed = _FakeFederation()
@@ -365,6 +380,7 @@ def provider_factory():
                 if gallery_items is not None
                 else None
             ),
+            space_poll_repo=_FakePollRepo(polls) if polls is not None else None,
         )
         return provider, fed, post_repo
 
@@ -1585,3 +1601,62 @@ async def test_the_roster_authority_resume_replays_every_row():
         "t-0",
         "t-1",
     ]
+
+
+# ── Reply polls ride behind their posts ───────────────────────────────
+
+
+def _poll_post(i: int, at: datetime, author: str = "alice") -> Post:
+    return Post(
+        id=f"p-{i}", author=author, type=PostType.POLL, created_at=at, content=""
+    )
+
+
+_POLL = (
+    {"question": "Which?", "allow_multiple": True, "closes_at": None, "closed": False},
+    [{"id": "o-1", "text": "Yes", "count": 3}, {"id": "o-2", "text": "No", "count": 0}],
+)
+
+
+async def test_a_replayed_poll_post_is_followed_by_its_poll(provider_factory):
+    """The definition goes out as the live ``SPACE_POLL_CREATED``, after the
+    posts: a text post and a poll post without a poll send none."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    posts = [
+        _post(0, base + timedelta(minutes=1)),
+        _poll_post(1, base + timedelta(minutes=2)),
+        _poll_post(2, base + timedelta(minutes=3)),
+    ]
+    provider, fed, _ = provider_factory(
+        posts=posts, polls={"p-1": _POLL, "p-0": _POLL}, members=["peer-a"]
+    )
+    sent = await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    )
+    assert sent == 4
+    assert [s["type"] for s in fed.sent] == [
+        *[FederationEventType.SPACE_POST_CREATED] * 3,
+        FederationEventType.SPACE_POLL_CREATED,
+    ]
+    assert fed.sent[-1]["payload"] == {
+        "post_id": "p-1",
+        "space_id": "sp-1",
+        "question": "Which?",
+        "allow_multiple": True,
+        "closes_at": None,
+        "options": [{"id": "o-1", "text": "Yes"}, {"id": "o-2", "text": "No"}],
+    }
+    assert fed.sent[-1]["to"] == "peer-a"
+
+
+async def test_without_a_poll_repo_only_the_posts_replay(provider_factory):
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    provider, _fed, _ = provider_factory(
+        posts=[_poll_post(1, base + timedelta(minutes=1))], members=["peer-a"]
+    )
+    assert (
+        await provider.handle_request(
+            _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+        )
+        == 1
+    )

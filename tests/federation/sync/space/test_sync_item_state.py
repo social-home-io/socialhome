@@ -15,6 +15,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 from socialhome.domain.calendar import CalendarEvent, CalendarRSVP
+from socialhome.domain.events import PollCreated
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.post import (
     BazaarBid,
@@ -88,8 +89,8 @@ async def test_our_own_peoples_votes_answers_and_rsvps_stay_ours(homes):
     await _schedule_on_other_post(host)
     await _event(host)
     await _stream(host, member)
-    await member.repos.space_poll.cast_vote_in_space(
-        space_id=SPACE, post_id="post-1", option_id="opt-b", voter_user_id=BOB
+    await member.repos.space_poll.set_votes_in_space(
+        space_id=SPACE, post_id="post-1", option_ids=["opt-b"], voter_user_id=BOB
     )
     await member.repos.space_poll.upsert_schedule_response_in_space(
         space_id=SPACE, slot_id="slot-9", user_id=BOB, response="yes"
@@ -453,8 +454,8 @@ async def test_a_cut_vote_list_never_deletes(homes, monkeypatch):
     await _poll(host)
     await _stream(host, member)
     for voter in ("u-v1", "u-v2", "u-v3"):
-        await host.repos.space_poll.cast_vote_in_space(
-            space_id=SPACE, post_id="post-1", option_id="opt-b", voter_user_id=voter
+        await host.repos.space_poll.set_votes_in_space(
+            space_id=SPACE, post_id="post-1", option_ids=["opt-b"], voter_user_id=voter
         )
     (record,) = await collect_batches(record_batches(host.exporters["polls"], SPACE))
     assert record["votes_partial"] is True and 0 < len(record["votes"]) <= 2
@@ -616,3 +617,26 @@ async def test_the_hosts_bids_never_speak_for_our_own_people(homes):
     host_carl = await host.repos.bazaar.get_bid("bid-carl")
     assert host_carl is not None
     assert held["bid-carl"].created_at != host_carl.created_at
+
+
+async def test_a_poll_the_stream_creates_is_announced_once(homes):
+    """A poll this household lacked and the host's stream created is told
+    to the household's bus — the open SPA shows it, and a vote or a close
+    held for it (``PendingParentBuffer``, released on ``PollCreated``)
+    replays — naming the provider, so it is never broadcast again. A second
+    stream of the same poll announces nothing."""
+    host, member = homes
+    seen: list[PollCreated] = []
+
+    async def _keep(event: PollCreated) -> None:
+        seen.append(event)
+
+    member.receiver._bus.subscribe(PollCreated, _keep)
+    await _poll(host)
+    await _stream(host, member)
+    assert [(e.post_id, e.space_id, e.origin_instance_id) for e in seen] == [
+        ("post-1", SPACE, HOST)
+    ]
+    assert [o["id"] for o in seen[0].options] == ["opt-a", "opt-b"]
+    await _stream(host, member)
+    assert len(seen) == 1

@@ -352,7 +352,7 @@ async def _covered_record_keys(db, *, item_state: bool = False) -> dict[str, lis
             "sp",
             Post(id=pid, author="u", type=PostType.TEXT, created_at=now, content="x"),
         )
-    await polls.create_poll(
+    await polls.create_poll_if_absent(
         post_id="p-live",
         question="Q?",
         closes_at=None,

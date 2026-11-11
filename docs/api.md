@@ -124,7 +124,8 @@ Coded refusals (`socialhome/domain/errors.py` `CodedError` subclasses):
 | `DM_GROUP_NOT_ALLOWED` | 403 | — | A group that a guardian block rules out |
 | `GROUP_MEMBER_UNSUPPORTED` | 422 | `reason` (`legacy_group` / `not_paired` / `too_old`), `name` | Adding a remote person to a group |
 | `RSVP_PAST` | 422 | — | `POST /api/calendars/events/{id}/rsvp` for an occurrence that has ended |
-| `POLL_CLOSED` | 409 | — | Voting on a closed poll, or one past its `closes_at` |
+| `POLL_CLOSED` | 409 | — | Voting on — or retracting a vote from — a closed poll, or one past its `closes_at` |
+| `POLL_EXISTS` | 409 | — | Attaching a poll or a schedule poll to a post that already has one (neither is ever edited) |
 | `HIGHLIGHT_AUDIENCE_MISMATCH` | 409 | `audience_kind`, `audience_count` (today's highlight) | `POST /api/highlights/frames` naming another audience than today's highlight — a day's frames share one audience, so the frame is refused rather than shown to today's people (change it for every frame with `PATCH /api/highlights/{id}/audience`) |
 | `HIGHLIGHT_NOT_TODAY` | 409 | — | `PATCH /api/highlights/{id}/audience` on an earlier day's highlight — only today's highlight changes who sees it |
 | `HIGHLIGHT_AUDIENCE_EMPTY` | 422 | — | `PATCH /api/highlights/{id}/audience` with `audience_kind: users` and nobody picked |
@@ -1091,22 +1092,25 @@ auction/bid_from `bazaar_bids`. State machine:
 Polls attach to an existing post. Reply polls use `/poll`, schedule
 polls (Doodle-style) use `/schedule-poll`. Household variants are
 unfederated; space variants (below) fan out `SPACE_POLL_*` /
-`SPACE_SCHEDULE_*` federation events to paired peers.
+`SPACE_SCHEDULE_*` federation events to the space's member households, so
+every member household holds the same poll (same option ids) and shows the
+same tallies — see [`protocol/feeds.md`](./protocol/feeds.md#polls). A
+follower (`subscriber` seat) reads a space poll but cannot vote in it.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET / POST | `/api/posts/{id}/poll` | Fetch summary / attach a new reply poll. |
-| POST / DELETE | `/api/posts/{id}/poll/vote` | Cast / retract own vote. |
+| GET / POST | `/api/posts/{id}/poll` | Fetch summary / attach a new reply poll — only the post's author (`403`), once (`409 POLL_EXISTS`). |
+| POST / DELETE | `/api/posts/{id}/poll/vote` | Cast / retract own vote (`409 POLL_CLOSED` on a closed poll). |
 | POST | `/api/posts/{id}/poll/close` | Close (author only). |
-| POST | `/api/posts/{id}/schedule-poll` | Attach a new schedule poll. |
+| POST | `/api/posts/{id}/schedule-poll` | Attach a new schedule poll — only the post's author (`403`), once (`409 POLL_EXISTS`); slot ids are minted by the server (an `id` in the body is ignored). |
 | GET | `/api/schedule-polls/{id}/summary` | Slots + responses. |
 | POST | `/api/schedule-polls/{id}/respond` | Respond yes/maybe/no to a slot. |
 | DELETE | `/api/schedule-polls/{id}/slots/{slot_id}/response` | Retract own response. |
 | POST | `/api/schedule-polls/{id}/finalize` | Author picks winning slot. |
-| GET / POST | `/api/spaces/{id}/posts/{pid}/poll` | Space-scoped reply poll. |
-| POST / DELETE | `/api/spaces/{id}/posts/{pid}/poll/vote` | Cast / retract space vote. |
+| GET / POST | `/api/spaces/{id}/posts/{pid}/poll` | Space-scoped reply poll. GET adds `can_vote` (`false` for a follower). POST: only the post's author (`403`), once — `409 POLL_EXISTS` when the post already has a poll (a poll is never edited). |
+| POST / DELETE | `/api/spaces/{id}/posts/{pid}/poll/vote` | Cast / retract space vote. `403 SUBSCRIBER_READ_ONLY` for a follower; `409 POLL_CLOSED` once the poll is closed or past its deadline — for a retraction too. |
 | POST | `/api/spaces/{id}/posts/{pid}/poll/close` | Close (author only). |
-| POST | `/api/spaces/{id}/posts/{pid}/schedule-poll` | Space-scoped schedule poll. |
+| POST | `/api/spaces/{id}/posts/{pid}/schedule-poll` | Space-scoped schedule poll. Same rule: the post's author (`403`), once (`409 POLL_EXISTS`), server-minted slot ids. |
 | GET | `/api/spaces/{id}/schedule-polls/{pid}/summary` | Space schedule summary. |
 | POST | `/api/spaces/{id}/schedule-polls/{pid}/respond` | Respond to a space slot. |
 | DELETE | `/api/spaces/{id}/schedule-polls/{pid}/slots/{slot_id}/response` | Retract. |

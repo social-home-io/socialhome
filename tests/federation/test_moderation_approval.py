@@ -781,3 +781,64 @@ def test_an_edit_releases_cap_is_reviewed_content():
     renamed = _edit({"summary": "Workshop"})
     assert item_matches_event(renamed, updated, {**wire, "capacity": 4}, held=held)
     assert not item_matches_event(renamed, updated, {**wire, "capacity": 9}, held=held)
+
+
+# ── A reviewed post's reply poll ──────────────────────────────────────
+
+_POLL_ITEM = {
+    **POST_CREATE,
+    "type": "poll",
+    "attachments": {
+        "poll": {
+            "question": "Which?",
+            "options": ["Yes", "No"],
+            "allow_multiple": False,
+            "closes_at": None,
+        }
+    },
+}
+
+
+def _poll_wire(**over) -> dict:
+    return {
+        "post_id": "p-1",
+        "space_id": "sp",
+        "question": "Which?",
+        "allow_multiple": False,
+        "closes_at": None,
+        # The host mints the ids when it applies the item.
+        "options": [{"id": "o-1", "text": "Yes"}, {"id": "o-2", "text": "No"}],
+        "moderation": {"item_id": "item-1", "approved_by": "u-mod"},
+        **over,
+    }
+
+
+def test_a_released_poll_matches_the_queued_one() -> None:
+    item = _item("posts", "create", _POLL_ITEM)
+    assert FEATURE_OF_EVENT[FET.SPACE_POLL_CREATED] == "posts"
+    assert approval_target(FET.SPACE_POLL_CREATED, {"post_id": "p"}) == "p"
+    assert item_matches_event(item, FET.SPACE_POLL_CREATED, _poll_wire())
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"question": "Another?"},
+        {"allow_multiple": True},
+        {"closes_at": "2030-01-01T00:00:00+00:00"},
+        {"options": [{"id": "o-1", "text": "Yes"}, {"id": "o-2", "text": "Maybe"}]},
+        {"options": [{"id": "o-2", "text": "No"}, {"id": "o-1", "text": "Yes"}]},
+        {"options": [{"id": "o-1", "text": "Yes"}]},
+        {"options": "Yes"},
+        {"post_id": "p-other"},
+        {"closed": True},
+    ],
+)
+def test_a_released_poll_that_differs_is_refused(over) -> None:
+    item = _item("posts", "create", _POLL_ITEM)
+    assert not item_matches_event(item, FET.SPACE_POLL_CREATED, _poll_wire(**over))
+
+
+def test_a_post_queued_without_a_poll_releases_none() -> None:
+    item = _item("posts", "create", {**POST_CREATE, "attachments": {}})
+    assert not item_matches_event(item, FET.SPACE_POLL_CREATED, _poll_wire())

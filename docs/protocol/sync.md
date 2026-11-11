@@ -129,7 +129,9 @@ sequenceDiagram
 ```
 
 Implemented by `socialhome/federation/sync/space/resume.py`
-(`SpaceSyncResumeProvider`). Today's cut replays:
+(`SpaceSyncResumeProvider`). Each replayed poll post is followed by its
+poll as `SPACE_POLL_CREATED` (created once on the receiver; votes and
+closure heal on the host's stream). Today's cut replays:
 
 - `SPACE_POST_CREATED` — posts (`space_post_repo.list_since`)
 - `SPACE_COMMENT_CREATED` — comments on those posts
@@ -471,7 +473,7 @@ a bid:
 
 | Record | Field | Receiver |
 |---|---|---|
-| `polls` | `votes`: `{option_id, voter_user_id}` (every member household sees each vote live), the most recent `MAX_VOTES_PER_POLL` (1000) voters' first, never half a voter; `votes_partial` when cut | creates the poll and its options when missing (the live `SPACE_POLL_CREATED` never carried options), takes the host's question / deadline, closes a closed poll (never reopens), and replaces everybody's votes but its own people's — of a cut list only the voters it names (`apply_synced_poll`) |
+| `polls` | `votes`: `{option_id, voter_user_id}` (every member household sees each vote live), the most recent `MAX_VOTES_PER_POLL` (1000) voters' first, never half a voter; `votes_partial` when cut | creates the poll and its options when missing (it missed the live `SPACE_POLL_CREATED`), takes the host's question / deadline, closes a closed poll (never reopens), and replaces everybody's votes but its own people's — of a cut list only the voters it names (`apply_synced_poll`) |
 | `schedules` | `responses`: `{slot_id, user_id, availability, responded_at}`, the newest `MAX_RESPONSES_PER_SCHEDULE` (1000); `responses_partial` when cut; `responses_at` (when the host read them); `finalized_slot_id` | everybody's answers but its own people's, **last writer wins on `responded_at`**: a held answer is replaced only by a newer one, and dropped only when the list is whole and the held one is not newer than `responses_at`; the pick (never reverts) (`apply_synced_schedule_state`) |
 | `calendar` | `rsvps`: `{user_id, occurrence_at, status, updated_at}`, the latest `MAX_RSVPS_PER_EVENT` (500) occurrences' worth; `rsvps_partial` when cut; `rsvps_at` (when the host read them) | everybody's RSVPs but its own people's (bar the organiser transitions above), **last writer wins on `updated_at`**: a held RSVP is replaced only by a newer one, and dropped only when the list is whole and the held one is not newer than `rsvps_at` — an RSVP that reached this household live after the host read its list stays |
 | `posts` | `reaction_stamps`: `{"user\0emoji": [stamp, added]}`, at most `MAX_SYNCED_REACTION_STAMPS` (1024): removals first, then adds, each newest first | each stamp passes the live rules first — no more than 300 s ahead of the receiver's clock (`stored_stamp`; a stamp years ahead would win every later removal) and the emoji length rule (`reaction_emoji_ok(legacy=True)`: NFC, ≤ 32 chars — a reaction from before v_93 may be free text) — or is dropped; then merged last writer wins per user and emoji into a post it holds (a reaction or a removal it missed lands, a newer one it holds stays); a removal travels only as a stamp (kept 30 days): a reaction whose add this household applied stays even when the host's sets lack it — the host may never have received it (v_93); only a reaction NO stamp orders here follows the host's reaction sets (`merge_reaction_stamps`); a person's reactions past the cap of five show as their five newest; its own people's reactions are never touched |
@@ -537,7 +539,7 @@ module, `tests/federation/sync/space/test_sync_item_state.py`.
 | Post reactions | `SPACE_POST_REACTION` (v_93) | `posts.reaction_stamps` (v_92, incremental) | — | removals as stamps only (30 days) | before v_92 a held post kept its own reactions |
 | Comments (create) | `SPACE_COMMENT_CREATED` | `comments` (incremental) | yes | `comments_deleted` | |
 | Comment edits | `SPACE_COMMENT_UPDATED` | `comments` (v_92 receiver, incremental) | — | — | last writer wins on `edited_at` |
-| Polls (poll, options) | inline with the post (no options on the wire) | `polls` (v_92 receiver) | — | with the post | the stream is the only path that carries options |
+| Polls (question, options, settings) | `SPACE_POLL_CREATED` (the whole definition, after its post) | `polls` (v_92 receiver) | yes, after its post | with the post | created once on every path — a held poll is never rewritten |
 | Poll votes, closure | `SPACE_POLL_VOTE_CAST`, `SPACE_POLL_CLOSED` | `polls.votes` / `meta.closed` (v_92, incremental) | — | a retracted vote is absent from the host's list | |
 | Schedule polls (slots) | `SPACE_SCHEDULE_CREATED` | `schedules` | — | with the post | |
 | Schedule answers, pick | `SPACE_SCHEDULE_RESPONSE_UPDATED`, `_FINALIZED` | `schedules.responses` / `finalized_slot_id` (v_92) | — | a retraction is absent from the host's list | answers: full stream only (stamp nothing) |

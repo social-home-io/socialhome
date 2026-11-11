@@ -658,7 +658,7 @@ async def test_a_post_tombstone_takes_its_poll_and_schedule(houses):
             is not None
         )
         polls = _rx(app)._poll_repo
-        await polls.create_poll(
+        await polls.create_poll_if_absent(
             post_id=pid,
             question="Which day?",
             closes_at=None,
