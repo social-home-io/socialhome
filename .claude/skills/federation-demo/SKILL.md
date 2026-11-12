@@ -988,6 +988,7 @@ python .claude/skills/federation-demo/harness.py gfs-invite-link
 python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py gfs-media-on-demand
 python .claude/skills/federation-demo/harness.py gfs-member-mesh
+python .claude/skills/federation-demo/harness.py members-parity
 python .claude/skills/federation-demo/harness.py gfs-space-healing
 python .claude/skills/federation-demo/harness.py gfs-relay-media
 python .claude/skills/federation-demo/harness.py gfs-member-publish
@@ -1929,6 +1930,38 @@ mailbox); e creates one and d must show it (e's fan-out reached d's
 mailbox, no host hop). Over that window the GFS log must show
 ``<mailbox>`` deliveries, no envelope / mailbox line may name an instance
 id or the space, and no line either mailbox id. a is respawned at the end (``@_offline_step``).
+
+### ``members-parity`` — a paired/mesh member and a GFS-only member see the same (owner acceptance gate)
+
+Prereqs: the chain through ``gfs-member-mesh`` (a hosts the link-joined
+space; **d** is a member over the paired / mesh path, **e** only through the
+GFS). It is the acceptance check for CLAUDE.md's "every space member is
+equal, whichever way their household is reached": the same actions happen
+in one space and d's and e's REST APIs must show what the household that
+acted shows — the item exists or is gone, its text, and the picture bytes
+by sha256 (each household read under the URL its own API returns). Every
+check polls (3 s, bounded timeout, 429-aware); no sleep is a check.
+
+| Action | Who acts | Compared |
+|---|---|---|
+| post with picture, edit, deletion | a | ``GET …/posts/{id}``: gone / text / picture hashes |
+| comment with picture | a | ``…/comments`` text; the picture is **SKIP** — the space comment API takes no picture |
+| reaction | d 👍, e 🎉 | reaction counts |
+| calendar event with cover | a | summary + cover hash |
+| gallery item | a (space album) | item + full and thumbnail hashes |
+| page | a | title + content |
+| poll vote | d votes Pizza, e Sushi | ``…/poll`` counts |
+| catch-up | a, while d and e are killed | new post, edit, deletion after both respawn |
+| old picture | a, while d and e are killed | the blob is expired from the GFS cache as 30-day-old content (as ``gfs-media-on-demand``'s old leg), then both must show the picture; SKIP if a cached nothing |
+| host offline | d and e, a killed | each one's picture post on the other |
+| admin rights | a promotes e's person; e deletes d's post | role on both; the post gone on both (e is put back to member) |
+
+Every action is reported PASS / DIFF / SKIP in a table at the end; the step
+fails naming each DIFF with what the reference and each member showed plus
+the member's newest WARNING lines. ``verify`` (gated on the
+``members_parity`` state key) re-reads the posts it kept and deleted and
+fails if d or e differ from a. Kills households, so it is an
+``@_offline_step``.
 
 ### ``gfs-space-healing`` — a GFS-only member heals from a helper while the host is offline (v_92)
 
