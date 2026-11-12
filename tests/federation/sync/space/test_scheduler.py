@@ -695,13 +695,13 @@ async def test_a_mesh_only_host_hears_our_directory_version_after_catch_up(
             "dir_seq": 41,
             "sync_mode": "incremental",
             "have_seq": None,
-            "mod_pending": None,
+            "mod_held": None,
         },
         {
             "dir_seq": None,
             "sync_mode": "incremental",
             "have_seq": None,
-            "mod_pending": None,
+            "mod_held": None,
         },
     ]
     # The startup sweep sends it only for the directory echo.
@@ -2330,7 +2330,7 @@ async def test_a_capped_mesh_only_host_still_gets_the_incremental_begin(
             "sync_mode": "incremental",
             "dir_seq": None,
             "have_seq": None,
-            "mod_pending": None,
+            "mod_held": None,
         }
     ]
     assert sched._mesh_catchup_attempts[("sp-1", "host")] == MAX_MESH_CATCHUP_ATTEMPTS
@@ -2609,7 +2609,7 @@ def _mod_sched(bus, queue, sync_manager, *, confirmed: bool):
 
     async def echo(space_id, peer):
         asked.append((space_id, peer))
-        return ["i-1", "i-2"]
+        return {"p": ["i-1", "i-2"]}
 
     sched.attach_moderation_echo(echo)
     return sched, fed, repo, asked
@@ -2631,7 +2631,7 @@ async def test_a_begin_echoes_the_pending_moderation_items(bus, queue, sync_mana
         s for s in fed.sent if s["type"] == FederationEventType.SPACE_SYNC_BEGIN
     ]
     assert begin["to"] == "host"
-    assert begin["payload"]["mod_pending"] == ["i-1", "i-2"]
+    assert begin["payload"]["mod_held"] == {"p": ["i-1", "i-2"]}
     assert begin["payload"]["sync_mode"] == "incremental"
     assert asked == [("sp-1", "host")]
 
@@ -2643,7 +2643,7 @@ async def test_a_mesh_only_host_gets_the_moderation_echo_too(bus, queue, sync_ma
     repo.get = AsyncMock(return_value=_space("sp-1", owner_instance_id="host"))
     await sched.sync_with_host("sp-1")
     assert fed.mesh_catchups == [("sp-1", "host")]
-    assert fed.mesh_fields[0]["mod_pending"] == ["i-1", "i-2"]
+    assert fed.mesh_fields[0]["mod_held"] == {"p": ["i-1", "i-2"]}
     assert fed.mesh_fields[0]["sync_mode"] == "incremental"
 
 

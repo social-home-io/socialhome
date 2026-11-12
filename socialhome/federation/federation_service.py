@@ -2807,7 +2807,7 @@ class FederationService:
         sync_mode: str = "initial",
         dir_seq: int | None = None,
         have_seq: int | None = None,
-        mod_pending: list[str] | None = None,
+        mod_held: dict | None = None,
     ) -> bool:
         """Initiate a §25.6 catch-up sync FROM a mesh-only host.
 
@@ -2816,8 +2816,8 @@ class FederationService:
         (v_89) is the member directory version we hold, echoed so a host
         that is ahead answers with one snapshot; ``sync_mode="incremental"``
         (with its ``have_seq``) is the periodic BEGIN after catch-up that
-        carries it. ``mod_pending`` is the moderation queue echo of a
-        household that reviews the space (the pending item ids it holds),
+        carries it. ``mod_held`` is the moderation queue echo of a
+        household that reviews the space (the items it holds, by state),
         carried by that same incremental BEGIN.
 
         For a space whose host is NOT a confirmed direct peer (we joined over a
@@ -2867,8 +2867,8 @@ class FederationService:
                 payload["dir_seq"] = dir_seq
             if have_seq is not None:
                 payload["have_seq"] = have_seq
-            if mod_pending is not None:
-                payload["mod_pending"] = mod_pending
+            if mod_held is not None:
+                payload["mod_held"] = mod_held
             result = await self.send_with_mesh_fallback(
                 to_instance_id=host_instance_id,
                 event_type=FederationEventType.SPACE_SYNC_BEGIN,

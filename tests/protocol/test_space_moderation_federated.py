@@ -34,6 +34,7 @@ What this file proves:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import copy
 import dataclasses
@@ -66,6 +67,7 @@ from socialhome.domain.outbox import OutboxEntry
 from socialhome.domain.space import ContentQueuedForReview
 from socialhome.domain.space_media_ref import space_page_media_name
 from socialhome.federation.federation_service import FederationService
+from socialhome.federation.gfs_relay_transport import RELAY_MAX_ENVELOPE_BYTES
 from socialhome.federation.inbound_validator import (
     InboundContext,
     run_post_decrypt_gates,
@@ -94,6 +96,8 @@ pytestmark = pytest.mark.security
 
 #: The real targeted door, before the fixture captures it (the sealing test).
 _REAL_SEND = FederationService.send_with_mesh_fallback
+_REAL_PEER_SUPPORTS = FederationService.peer_supports
+_REAL_MEMBER_SUPPORTS = FederationService.space_member_supports
 
 FET = FederationEventType
 SID = "sp-reviewed"
@@ -1875,44 +1879,43 @@ def _federated(house: House):
     return house.app[space_moderation_service_key]._federated
 
 
-async def _begin(mesh, house: House, *, echo: list | None = None) -> None:
+async def _begin(mesh, house: House, *, echo: object = None) -> None:
     """``house``'s periodic §25.6 ``SPACE_SYNC_BEGIN`` reaches the host: it
-    echoes the pending items ``house`` holds (``echo`` overrides what it
-    would send), and the host's moderation catch-up answers it."""
+    echoes the moderation items ``house`` holds, by state (``echo``
+    overrides what it would send), and the host's catch-up answers it."""
     h = mesh["H"]
     payload: dict = {"sync_id": "s-1", "space_id": SID, "sync_mode": "incremental"}
     if echo is None:
-        ask = getattr(_federated(house), "pending_echo", None)
+        ask = getattr(_federated(house), "held_echo", None)
         echo = await ask(SID, h.iid) if ask is not None else None
     if echo is not None:
-        payload["mod_pending"] = echo
+        payload["mod_held"] = echo
     answer = getattr(_federated(h), "on_sync_begin", None)
     if answer is not None:
         await answer(_event(house, FET.SPACE_SYNC_BEGIN, payload, h))
 
 
+#: What a role change makes the host send (and nothing of the queue).
+_ROSTER_EVENTS = {
+    FET.SPACE_MEMBER_ROLE_CHANGED,
+    FET.SPACE_MEMBER_JOINED,
+    FET.SPACE_ROSTER_SNAPSHOT,
+}
+
+
 async def _promote(mesh, house: House, role: str = "moderator") -> None:
-    """The host gives ``house``'s person ``role``: every roster mirror
-    holds it and ``house`` applies its ``SPACE_MEMBER_ROLE_CHANGED``."""
-    for other in _by_iid(mesh).values():
-        await other.db.enqueue(
-            "UPDATE space_remote_members SET role=? WHERE instance_id=?",
-            (role, house.iid),
-        )
-    await _receive(
-        house,
-        _event(
-            mesh["H"],
-            FET.SPACE_MEMBER_ROLE_CHANGED,
-            {
-                "space_id": SID,
-                "user_id": house.user_id,
-                "instance_id": house.iid,
-                "role": role,
-            },
-            house,
-        ),
+    """The host's owner gives ``house``'s person ``role`` through the real
+    REST path; every household applies what the host sends for it."""
+    h = mesh["H"]
+    r = await h.tc.patch(
+        f"/api/spaces/{SID}/remote-members/{house.iid}/{house.user_id}",
+        json={"role": role},
+        headers=h.headers,
     )
+    assert r.status == 200, await r.text()
+    await _pump(mesh, only=_ROSTER_EVENTS)
+    for sender in _by_iid(mesh).values():
+        sender.sent[:] = [s for s in sender.sent if s[1] not in _ROSTER_EVENTS]
 
 
 def _drop_sends(house: House, event_type, to: House) -> int:
@@ -2013,28 +2016,28 @@ async def test_only_a_reviewer_household_is_caught_up(mesh):
     a, h, c, d = mesh["A"], mesh["H"], mesh["C"], mesh["D"]
     await _submit_task(mesh)
     await _pump(mesh)
-    await _begin(mesh, d, echo=[])
+    await _begin(mesh, d, echo={})
     assert not h.sent
     # The submitter's own household holds its item already; a plain member
     # one is never sent anybody else's either.
-    await _begin(mesh, a, echo=[])
+    await _begin(mesh, a, echo={})
     assert not h.sent
     # A plain member household does not echo at all…
-    assert await _federated(d).pending_echo(SID, h.iid) is None
-    assert await _federated(a).pending_echo(SID, h.iid) is None
+    assert await _federated(d).held_echo(SID, h.iid) is None
+    assert await _federated(a).held_echo(SID, h.iid) is None
     # …nobody echoes to a household that is not the space's host, and the
     # host echoes to nobody.
-    assert await _federated(c).pending_echo(SID, a.iid) is None
-    assert await _federated(h).pending_echo(SID, c.iid) is None
+    assert await _federated(c).held_echo(SID, a.iid) is None
+    assert await _federated(h).held_echo(SID, c.iid) is None
     # A demoted moderator household: its live seat is a plain member's.
     await h.db.enqueue(
         "UPDATE space_remote_members SET role='member' WHERE instance_id=?", (c.iid,)
     )
-    await _begin(mesh, c, echo=[])
+    await _begin(mesh, c, echo={})
     assert not h.sent
     # A household that is not the host never answers an echo.
     await _federated(c).on_sync_begin(
-        _event(d, FET.SPACE_SYNC_BEGIN, {"space_id": SID, "mod_pending": []}, c)
+        _event(d, FET.SPACE_SYNC_BEGIN, {"space_id": SID, "mod_held": {}}, c)
     )
     assert not c.sent
 
@@ -2076,26 +2079,50 @@ async def test_a_catch_up_is_rate_limited_and_bounded(mesh, monkeypatch):
     # One answer carries at most CATCH_UP_MAX_BYTES of items (oldest
     # first, at least one); the rest follows on a later sync.
     monkeypatch.setattr(moderation_federation, "CATCH_UP_MAX_BYTES", 1)
-    await _begin(mesh, c, echo=[])
+    await _begin(mesh, c, echo={})
     assert [p["item_id"] for _to, p in _sends(h, FET.SPACE_MODERATION_SUBMITTED)] == [
         first
     ]
     h.sent.clear()
-    # At most one answer per (household, space) in CATCH_UP_INTERVAL_S.
-    await _begin(mesh, c, echo=[first])
-    assert not h.sent
+    # At most one answer per (household, space) in CATCH_UP_INTERVAL_S —
+    # checked before the host reads anything.
+    reads: list[str] = []
+    real = type(_federated(h))._open_rows
+
+    async def _counted(self, space_id):
+        reads.append(space_id)
+        return await real(self, space_id)
+
+    monkeypatch.setattr(type(_federated(h)), "_open_rows", _counted)
+    await _begin(mesh, c, echo={"p": [first]})
+    assert not h.sent and reads == []
     _federated(h)._caught_up_at.clear()
-    await _begin(mesh, c, echo=[first])
+    await _begin(mesh, c, echo={"p": [first]})
+    assert reads == [SID]
     assert [p["item_id"] for _to, p in _sends(h, FET.SPACE_MODERATION_SUBMITTED)] == [
         second
     ]
-    # An echo that is no list of ids, or longer than a queue can be, is
+    # A malformed echo, or one longer than a household can hold, is
     # ignored.
     h.sent.clear()
+    third = await _submit_task(mesh, "Three")
+    await _pump(mesh)
     _federated(h)._caught_up_at.clear()
-    await _begin(mesh, c, echo=["x"] * (MAX_PENDING_PER_SPACE + 1))
-    await _begin(mesh, c, echo=[7])
-    assert not h.sent
+    for bad in (
+        [],
+        {"p": ["x"] * (moderation_federation.MAX_ECHO_IDS + 1)},
+        {"p": [7]},
+        {"p": "abc"},
+        {"zz": [first]},
+        {"r": [{"id": first}]},
+        {"r": ["plain"]},
+    ):
+        await _begin(mesh, c, echo=bad)
+        assert not h.sent, bad
+    await _begin(mesh, c, echo={"p": [first, second]})
+    assert [p["item_id"] for _to, p in _sends(h, FET.SPACE_MODERATION_SUBMITTED)] == [
+        third
+    ]
 
 
 async def test_a_pending_posts_media_follows_a_resent_item_to_that_household(mesh):
@@ -2145,7 +2172,7 @@ async def test_the_host_resends_only_what_a_reviewer_would_admit(mesh):
     await h.db.enqueue(
         "UPDATE space_remote_members SET tombstoned=1 WHERE user_id=?", (a.user_id,)
     )
-    await _begin(mesh, c, echo=[])
+    await _begin(mesh, c, echo={})
     assert not h.sent
     await h.db.enqueue("UPDATE space_remote_members SET tombstoned=0", ())
     # The review window closed (the hourly sweep has not run yet).
@@ -2153,7 +2180,7 @@ async def test_the_host_resends_only_what_a_reviewer_would_admit(mesh):
         "UPDATE space_moderation_queue SET expires_at=? WHERE id=?",
         ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), left),
     )
-    await _begin(mesh, c, echo=[])
+    await _begin(mesh, c, echo={})
     assert not h.sent
     await h.db.enqueue(
         "UPDATE space_moderation_queue SET expires_at=? WHERE id=?",
@@ -2161,7 +2188,7 @@ async def test_the_host_resends_only_what_a_reviewer_would_admit(mesh):
     )
     # Tasks are no longer reviewed on the host.
     await h.db.enqueue("UPDATE spaces SET tasks_access='open'", ())
-    await _begin(mesh, c, echo=[])
+    await _begin(mesh, c, echo={})
     assert not h.sent
     await h.db.enqueue("UPDATE spaces SET tasks_access='moderated'", ())
     # Echoed ids the host cannot speak for: one it never held, and one
@@ -2180,14 +2207,14 @@ async def test_the_host_resends_only_what_a_reviewer_would_admit(mesh):
         " display_name) VALUES(?, ?, 'u-cleo', 'moderator', 'Cleo')",
         (SID, c.iid),
     )
-    await _begin(mesh, c, echo=[left, "never-held"])
+    await _begin(mesh, c, echo={"p": [left, "never-held"]})
     assert not h.sent
     # carl is a moderator again: his rejection is announced again.
     await h.db.enqueue(
         "UPDATE space_remote_members SET role='moderator' WHERE user_id=?",
         (c.user_id,),
     )
-    await _begin(mesh, c, echo=[left, "never-held"])
+    await _begin(mesh, c, echo={"p": [left, "never-held"]})
     assert [
         (to, p["item_id"]) for to, p in _sends(h, FET.SPACE_MODERATION_DECIDED)
     ] == [(c.iid, left)]
@@ -2235,6 +2262,230 @@ async def test_a_failing_catch_up_never_fails_the_sync_begin(mesh, monkeypatch):
     async def _boom(*args, **kwargs):
         raise RuntimeError("queue unreadable")
 
-    monkeypatch.setattr(type(_federated(h)), "_live_pending", _boom)
-    await _begin(mesh, c, echo=[])
+    monkeypatch.setattr(type(_federated(h)), "_open_rows", _boom)
+    await _begin(mesh, c, echo={})
     assert not h.sent
+
+
+# ── Catch-up round 2: every held state is echoed, nothing repeats ───────
+
+
+async def _row(house: House, item_id: str) -> tuple:
+    row = await house.db.fetchone(
+        "SELECT status, payload_json FROM space_moderation_queue WHERE id=?",
+        (item_id,),
+    )
+    return (row["status"], row["payload_json"] is not None) if row else ()
+
+
+async def test_a_repromoted_household_gets_its_purged_items_back_once(mesh):
+    """A demotion expires the other households' pending items held here and
+    NULLs their content. Promoted again, the household echoes them as
+    purged; the host re-sends them ONCE, the rows are pending with content
+    again, and the next sync repeats nothing."""
+    a, h, c = mesh["A"], mesh["H"], mesh["C"]
+    item_id = await _submit_task(mesh)
+    await _pump(mesh)
+    await _promote(mesh, c, "member")
+    assert await _row(c, item_id) == ("expired", False)
+    await _promote(mesh, c, "moderator")
+    assert (await _federated(c).held_echo(SID, h.iid)) == {"x": [item_id]}
+    await _begin(mesh, c)
+    assert [
+        (to, p["item_id"]) for to, p in _sends(h, FET.SPACE_MODERATION_SUBMITTED)
+    ] == [(c.iid, item_id)]
+    await _pump(mesh)
+    assert await _row(c, item_id) == ("pending", True)
+    r = await c.tc.get(f"/api/spaces/{SID}/moderation", headers=c.headers)
+    assert [i["id"] for i in await r.json()] == [item_id]
+    # Nothing repeats — not on the next sync, not after the rate window.
+    _federated(h)._caught_up_at.clear()
+    await _begin(mesh, c)
+    assert not h.sent
+    # carl approves the revived copy; everyone gets the task.
+    await _approve(c, item_id)
+    await _pump(mesh)
+    for house in (a, h, c, mesh["D"]):
+        assert await _tasks(house) == [("Buy milk", a.user_id)], house.name
+
+
+async def test_only_the_host_revives_a_purged_item(mesh):
+    """A replay from the submitter's household never brings a purged (or
+    otherwise expired) copy back: only the host knows it is still pending."""
+    a, h, c = mesh["A"], mesh["H"], mesh["C"]
+    item_id = await _submit_task(mesh)
+    (sent,) = [p for to, p in _sends(a, FET.SPACE_MODERATION_SUBMITTED) if to == c.iid]
+    await _pump(mesh)
+    await c.db.enqueue(
+        "UPDATE space_moderation_queue SET status='expired', payload_json=NULL", ()
+    )
+    await _receive(c, _event(a, FET.SPACE_MODERATION_SUBMITTED, sent, c))
+    assert await _row(c, item_id) == ("expired", False)
+    # A decided copy is never reopened, by anybody.
+    await c.db.enqueue("UPDATE space_moderation_queue SET status='rejected'", ())
+    resent = {**sent, "submitter_instance_id": a.iid}
+    await _receive(c, _event(h, FET.SPACE_MODERATION_SUBMITTED, resent, c))
+    assert (await _row(c, item_id))[0] == "rejected"
+
+
+async def test_a_rejection_the_host_missed_reaches_it_with_the_echo(mesh):
+    """carl rejected the item on C; the host never got that decision. The
+    host does not re-send the item (C holds it): C's echo names its own
+    people's rejections, and the host applies it like the decision itself
+    — carl's live seat on C is checked — so every copy converges."""
+    a, h, c = mesh["A"], mesh["H"], mesh["C"]
+    item_id = await _submit_task(mesh)
+    await _pump(mesh)
+    r = await c.tc.post(
+        f"/api/spaces/{SID}/moderation/{item_id}/reject",
+        json={"reason": "off topic"},
+        headers=c.headers,
+    )
+    assert r.status == 200, await r.text()
+    assert _drop_sends(c, FET.SPACE_MODERATION_DECIDED, h) == 1
+    await _pump(mesh)
+    assert (await _row(h, item_id))[0] == "pending"
+    echo = await _federated(c).held_echo(SID, h.iid)
+    assert echo == {"r": [{"id": item_id, "by": c.user_id, "reason": "off topic"}]}
+    await _begin(mesh, c)
+    assert not _sends(h, FET.SPACE_MODERATION_SUBMITTED)
+    row = await h.db.fetchone(
+        "SELECT status, reviewed_by, rejection_reason FROM space_moderation_queue"
+        " WHERE id=?",
+        (item_id,),
+    )
+    assert tuple(row) == ("rejected", c.user_id, "off topic")
+    # A rejection in somebody else's name is not taken from an echo.
+    other = await _submit_task(mesh, "Another")
+    await _pump(mesh)
+    await _begin(mesh, c, echo={"r": [{"id": other, "by": h.user_id}], "p": [item_id]})
+    assert (await _row(h, other))[0] == "pending"
+    # …nor one from a household that does not review.
+    await _begin(mesh, a, echo={"r": [{"id": other, "by": a.user_id}]})
+    assert (await _row(h, other))[0] == "pending"
+
+
+async def test_an_item_a_household_keeps_refusing_is_not_sent_every_sync(mesh):
+    """C refuses the re-sent item (tasks are not reviewed on C's copy of
+    the space): the host sends it once, not on every sync — until C's seat
+    changes, which starts over."""
+    h, c = mesh["H"], mesh["C"]
+    item_id = await _submit_task(mesh)
+    _drop_sends(mesh["A"], FET.SPACE_MODERATION_SUBMITTED, c)
+    await _pump(mesh)
+    await c.db.enqueue("UPDATE spaces SET tasks_access='open'", ())
+    await _begin(mesh, c)
+    assert len(_sends(h, FET.SPACE_MODERATION_SUBMITTED)) == 1
+    await _pump(mesh)
+    assert await _queue_rows(c) == []
+    _federated(h)._caught_up_at.clear()
+    await _begin(mesh, c)
+    assert not h.sent
+    # A role change of C's person on the host starts over — and is never
+    # held back by the answer the host gave a moment ago.
+    await c.db.enqueue("UPDATE spaces SET tasks_access='moderated'", ())
+    await _promote(mesh, c, "admin")
+    await _begin(mesh, c)
+    assert [p["item_id"] for _to, p in _sends(h, FET.SPACE_MODERATION_SUBMITTED)] == [
+        item_id
+    ]
+
+
+async def test_a_mesh_only_reviewer_household_gets_items_and_decisions(
+    mesh, monkeypatch
+):
+    """C is reached only over the mesh: A and H hold no ``remote_instances``
+    row for it, only the version it claimed as a space member. It still
+    gets a live submission, and a decision it missed. (The real version
+    checks run here — nothing is patched.)"""
+    monkeypatch.setattr(FederationService, "peer_supports", _REAL_PEER_SUPPORTS)
+    monkeypatch.setattr(
+        FederationService, "space_member_supports", _REAL_MEMBER_SUPPORTS
+    )
+    a, h, c = mesh["A"], mesh["H"], mesh["C"]
+    for house in (a, h):
+        await house.db.enqueue("DELETE FROM remote_instances WHERE id=?", (c.iid,))
+        await house.db.enqueue(
+            "UPDATE space_instances SET proto_version=? WHERE instance_id=?",
+            (OURS, c.iid),
+        )
+        await house.db.enqueue("UPDATE remote_instances SET proto_version=?", (OURS,))
+    await c.db.enqueue("UPDATE remote_instances SET proto_version=?", (OURS,))
+    item_id = await _submit_task(mesh)
+    assert sorted(to for to, _p in _sends(a, FET.SPACE_MODERATION_SUBMITTED)) == sorted(
+        [h.iid, c.iid]
+    )
+    await _pump(mesh)
+    assert await _row(c, item_id) == ("pending", True)
+    r = await h.tc.post(
+        f"/api/spaces/{SID}/moderation/{item_id}/reject", json={}, headers=h.headers
+    )
+    assert r.status == 200, await r.text()
+    # The live announcement reaches the mesh-only reviewer household…
+    assert c.iid in {to for to, _p in _sends(h, FET.SPACE_MODERATION_DECIDED)}
+    # …and so does the catch-up when it was lost.
+    h.sent.clear()
+    await _begin(mesh, c, echo={"p": [item_id]})
+    assert [
+        (to, p["decision"]) for to, p in _sends(h, FET.SPACE_MODERATION_DECIDED)
+    ] == [(c.iid, "rejected")]
+
+
+async def test_a_promotion_sends_a_real_begin_that_carries_the_echo(mesh, monkeypatch):
+    """No stub between the promotion and the wire: D applies its role, its
+    real scheduler queues the incremental BEGIN to the host, and that
+    BEGIN's payload — echo included — is what the host answers."""
+    a, h, d = mesh["A"], mesh["H"], mesh["D"]
+    begins: list[tuple[str, dict]] = []
+
+    async def _capture(self, *, to_instance_id, event_type, payload, space_id=None):
+        if event_type is FET.SPACE_SYNC_BEGIN:
+            begins.append((to_instance_id, copy.deepcopy(payload)))
+        return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+    monkeypatch.setattr(FederationService, "send_event", _capture)
+    item_id = await _submit_task(mesh)
+    await _pump(mesh)
+    await _promote(mesh, d)
+    for _ in range(100):
+        if begins:
+            break
+        await asyncio.sleep(0.05)
+    assert [to for to, _p in begins] == [h.iid]
+    payload = begins[0][1]
+    assert payload["sync_mode"] == "incremental" and payload["mod_held"] == {}
+    await _federated(h).on_sync_begin(_event(d, FET.SPACE_SYNC_BEGIN, payload, h))
+    assert [
+        (to, p["item_id"]) for to, p in _sends(h, FET.SPACE_MODERATION_SUBMITTED)
+    ] == [(d.iid, item_id)]
+    await _pump(mesh)
+    assert await _row(d, item_id) == ("pending", True)
+    assert a.user_id in {r["submitted_by"] for r in await _queue_rows(d)}
+
+
+async def test_a_submission_always_fits_one_gfs_relay_envelope(mesh):
+    """Every member is equal on every path: an item is refused at submit
+    (413) unless what is sent for it fits one envelope on the GFS relay —
+    the path to and from a household seated from an invite link — even
+    when it is sealed twice (a mesh hop, then the relay)."""
+    a = mesh["A"]
+    wire = moderation_federation.MAX_WIRE_BYTES
+    # Encrypt + base64, twice, plus the envelope around it.
+    assert wire * 4 / 3 * 4 / 3 + 4096 <= RELAY_MAX_ENVELOPE_BYTES
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/pages",
+        json={"title": "Big", "content": "x" * (wire + 1)},
+        headers=a.headers,
+    )
+    assert r.status == 413, await r.text()
+    assert await _queue_rows(a) == [] and not a.sent
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/pages",
+        json={"title": "Fits", "content": "x" * (wire - 4096)},
+        headers=a.headers,
+    )
+    assert r.status == 202, await r.text()
+    for _to, p in _sends(a, FET.SPACE_MODERATION_SUBMITTED):
+        assert len(json.dumps(p)) <= wire
+        # The "before" values are rebuilt by every receiver: never sent.
+        assert p["snapshot"] is None

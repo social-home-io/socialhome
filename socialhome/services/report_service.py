@@ -41,7 +41,11 @@ space (host, or ≥1 local content-authority member), the reporter holds a
 live seat on the sending household and is not banned, the target resolves
 into that same space, and the per-space caps leave room. When this
 household stops reviewing a space (demotion, leave, dissolve) the reports
-other households filed there are purged (:meth:`watch_seats`). Once a
+other households filed there are purged (:meth:`watch_seats`); when it
+reviews again, the host re-sends the space's pending reports once — in
+answer to that household's next §25.6 ``SPACE_SYNC_BEGIN``, which carries
+the reviewer echo and is sent the moment it applies its promotion
+(:meth:`on_sync_begin`), never before the role change itself. Once a
 report filed on another household is decided, the host alone tells that
 household it was reviewed (``SPACE_REPORT_ANSWERED``, v_71 — no verdict, no
 decider; :meth:`_answer_remote_reporter` / :meth:`apply_report_answer`).
@@ -100,6 +104,7 @@ from ..repositories.user_repo import AbstractUserRepo
 from .report_scope import CONTENT_TARGETS, ReportScope
 
 if TYPE_CHECKING:
+    from ..domain.federation import FederationEvent
     from ..federation.federation_service import FederationService
     from ..repositories.space_post_repo import AbstractSpacePostRepo
     from ..repositories.space_remote_member_repo import (
@@ -128,6 +133,10 @@ _UNSCOPED_TARGETS: frozenset[ReportTargetType] = frozenset(
 
 #: The remote seats whose households review a space's reports (a remote
 #: seat is never ``owner`` — the host stands for the owner).
+#: The ``SPACE_SYNC_BEGIN`` field only a household that reviews the
+#: space sends (``space_moderation_federation.HELD_ECHO_KEY``).
+REVIEWER_ECHO_KEY = "mod_held"
+
 REVIEWER_SEATS: frozenset[str] = frozenset(
     r.value for r in CONTENT_AUTHORITY_ROLES if r is not SpaceRole.OWNER
 )
@@ -145,6 +154,7 @@ class ReportService:
         "_federation",
         "_gfs_connection_service",
         "_own_instance_id",
+        "_redelivered",
         "_reports",
         "_scope",
         "_seats",
@@ -174,6 +184,9 @@ class ReportService:
         self._scope = scope or ReportScope(space_post_repo=space_post_repo)
         self._federation: FederationService | None = None
         self._own_instance_id: str = ""
+        #: (space, household) the host re-sent the pending reports to since
+        #: that household's seats last changed role (:meth:`on_sync_begin`).
+        self._redelivered: set[tuple[str, str]] = set()
         self._gfs_connection_service = None
         self._signing_key: bytes | None = None
 
@@ -220,13 +233,15 @@ class ReportService:
             and not space.dissolved
             and space.owner_instance_id == self._own_instance_id
         ):
-            # The host: a remote seat just became admin / moderator — that
-            # household reviews again, and a demotion earlier purged its
-            # copies. Re-deliver the space's pending reports to it.
+            # The host: a remote seat changed role. If that household
+            # reviews (again), a demotion earlier purged its copies — the
+            # pending reports go to it again, but only once it ASKS
+            # (:meth:`on_sync_begin`): this event fires before the role
+            # change is sent, and a report that arrives before it is
+            # dropped by a household that does not review yet.
             iid = str((event.payload or {}).get("instance_id") or "")
-            role = str((event.payload or {}).get("role") or "")
-            if iid and role in REVIEWER_SEATS:
-                await self.resend_pending(event.space_id, iid)
+            if iid:
+                self._redelivered.discard((event.space_id, iid))
         if space is None or space.dissolved:
             n = await self._reports.delete_for_space(event.space_id, remote_only=False)
         elif not await self._reviews_here(space):
@@ -715,6 +730,41 @@ class ReportService:
                     exc_info=True,
                 )
         return dispatched
+
+    async def on_sync_begin(self, event: FederationEvent) -> None:
+        """Host side: a household's §25.6 ``SPACE_SYNC_BEGIN`` carries the
+        reviewer echo (``mod_held`` — only a household that reviews the
+        space sends it, and it sends that BEGIN as soon as it has applied a
+        promotion). The first one since its seats last changed role (or
+        since this process started) gets the space's pending reports again
+        — a demotion purged its copies. Only to a live admin / moderator
+        seat; the receiver's dedupe makes a repeat a no-op. Never raises."""
+        try:
+            p = event.payload if isinstance(event.payload, dict) else {}
+            space_id = str(event.space_id or p.get("space_id") or "")
+            sender = str(event.from_instance or "")
+            key = (space_id, sender)
+            if (
+                not isinstance(p.get(REVIEWER_ECHO_KEY), dict)
+                or not space_id
+                or not sender
+                or key in self._redelivered
+                or self._space_repo is None
+            ):
+                return
+            space = await self._space_repo.get(space_id)
+            if (
+                space is None
+                or space.dissolved
+                or space.owner_instance_id != self._own_instance_id
+                or sender not in await self.reviewer_households(space_id)
+                or sender == space.owner_instance_id
+            ):
+                return
+            self._redelivered.add(key)
+            await self.resend_pending(space_id, sender)
+        except Exception:
+            log.warning("reports: re-delivery on a sync BEGIN failed", exc_info=True)
 
     async def resend_pending(self, space_id: str, instance_id: str) -> int:
         """Re-deliver a space's pending reports to a household that has

@@ -363,9 +363,9 @@ class SpaceSyncScheduler:
         #: v_89 member directory version echo (see :meth:`attach_directory_echo`).
         self._directory_echo: Callable[[str, str], Awaitable[int | None]] | None = None
         #: Moderation queue echo (see :meth:`attach_moderation_echo`).
-        self._moderation_echo: (
-            Callable[[str, str], Awaitable[list[str] | None]] | None
-        ) = None
+        self._moderation_echo: Callable[[str, str], Awaitable[dict | None]] | None = (
+            None
+        )
         #: ``(space_id, provider)`` → deferred retries since it last completed.
         self._deferred_attempts: dict[tuple[str, str], int] = {}
         #: Pending deferred-retry waits (they end on ``_stop``).
@@ -465,19 +465,19 @@ class SpaceSyncScheduler:
         self._directory_echo = echo
 
     def attach_moderation_echo(
-        self, echo: Callable[[str, str], Awaitable[list[str] | None]]
+        self, echo: Callable[[str, str], Awaitable[dict | None]]
     ) -> None:
-        """``echo(space_id, to_instance_id)`` → the ids of the pending
-        moderation items we hold for the space, carried as ``mod_pending``
-        by a BEGIN to the space's host from a household that reviews it
-        (``SpaceModerationFederation.pending_echo``): the host answers
-        with the pending items we lack and the decisions we missed.
-        ``None`` → not sent (a plain member household, another target)."""
+        """``echo(space_id, to_instance_id)`` → the moderation items we
+        hold for the space, by state, carried as ``mod_held`` by a BEGIN to
+        the space's host from a household that reviews it
+        (``SpaceModerationFederation.held_echo``): the host answers with
+        the pending items we lack and the decisions we missed. ``None`` →
+        not sent (a plain member household, another target)."""
         self._moderation_echo = echo
 
     async def _moderation_echo_for(
         self, space_id: str, to_instance_id: str
-    ) -> list[str] | None:
+    ) -> dict | None:
         if self._moderation_echo is None:
             return None
         try:
@@ -490,7 +490,7 @@ class SpaceSyncScheduler:
         """Send the incremental §25.6 BEGIN to ``space_id``'s host now,
         outside the periodic tick — with every echo a BEGIN carries. For a
         household that just started reviewing the space: the host answers
-        its (empty) ``mod_pending`` echo with the items already pending."""
+        its ``mod_held`` echo with the items already pending."""
         space = await self._space_repo.get(space_id)
         if space is None or space.dissolved:
             return
@@ -940,9 +940,9 @@ class SpaceSyncScheduler:
             dir_seq = await self._directory_echo_for(space_id, peer_instance_id)
             if dir_seq is not None:
                 payload["dir_seq"] = dir_seq
-            mod_pending = await self._moderation_echo_for(space_id, peer_instance_id)
-            if mod_pending is not None:
-                payload["mod_pending"] = mod_pending
+            mod_held = await self._moderation_echo_for(space_id, peer_instance_id)
+            if mod_held is not None:
+                payload["mod_held"] = mod_held
             echo = await self._echo_for(space_id, peer_instance_id)
             if echo is not None:
                 payload["authority_epoch_echo"] = echo
@@ -1314,7 +1314,7 @@ class SpaceSyncScheduler:
                 sync_mode="incremental",
                 dir_seq=dir_seq,
                 have_seq=fields.get("have_seq"),
-                mod_pending=await self._moderation_echo_for(space.id, host),
+                mod_held=await self._moderation_echo_for(space.id, host),
             )
         except Exception:  # pragma: no cover — fail-soft
             log.debug("mesh incremental BEGIN failed", exc_info=True)

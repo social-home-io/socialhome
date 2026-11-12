@@ -2118,7 +2118,7 @@ async def test_begin_mesh_catchup_sync_carries_the_authority_echo():
         )
     payload = send_mock.call_args.kwargs["payload"]
     assert payload["authority_epoch_echo"] == {"key_epoch": 3}
-    assert "mod_pending" not in payload
+    assert "mod_held" not in payload
 
 
 @pytest.mark.asyncio
@@ -2142,9 +2142,9 @@ async def test_begin_mesh_catchup_sync_carries_the_moderation_echo():
             space_id="sp-1",
             host_instance_id="host-1",
             sync_mode="incremental",
-            mod_pending=[],
+            mod_held={},
         )
-    assert send_mock.call_args.kwargs["payload"]["mod_pending"] == []
+    assert send_mock.call_args.kwargs["payload"]["mod_held"] == {}
 
 
 @pytest.mark.asyncio

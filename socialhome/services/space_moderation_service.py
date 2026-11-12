@@ -207,6 +207,15 @@ class ModerationFederation(Protocol):
         """The other households that review ``space`` right now."""
         ...
 
+    async def check_wire(self, space: Space, item: SpaceModerationItem) -> None:
+        """Raise ``ModerationPayloadTooLargeError`` when ``item`` would not
+        fit one envelope on every path."""
+        ...
+
+    def forget_household(self, space_id: str, instance_id: str) -> None:
+        """A seat of that household changed role on this host."""
+        ...
+
     async def display_name(self, space_id: str, user_id: str) -> str | None:
         """A remote submitter's name as the roster mirror holds it."""
         ...
@@ -408,17 +417,31 @@ class SpaceModerationService(BusPublisherMixin):
             expires_at=now + MODERATION_TTL,
             status=ModerationStatus.PENDING,
         )
+        if self._federated is not None:
+            # One cap for everybody, whatever path today's reviewers are
+            # reached over: the item must fit a GFS relay envelope.
+            await self._federated.check_wire(space, item)
         await self._spaces.insert_moderation_item(item)
         await self._emit(SpaceModerationQueued(item=item))
         if targets and self._federated is not None:
             await self._federated.send_submitted(space, item, targets)
         return item
 
-    async def store_received(self, item: SpaceModerationItem) -> bool:
+    async def store_received(
+        self, item: SpaceModerationItem, *, from_host: bool = False
+    ) -> bool:
         """Hold an item another household submitted (v_43) — its inbound
         handler checked it. Stored once (the same id everywhere): True when
-        this call stored it, which announces it to local content authority."""
+        this call stored it, which announces it to local content authority.
+
+        ``from_host``: the space's host sent it — it holds the item
+        pending. A copy that EXPIRED here (purged when this household
+        stopped reviewing) is pending again with the host's content; a
+        decided copy is never reopened."""
         if not await self._spaces.insert_moderation_item_if_absent(item):
+            if from_host and await self._spaces.revive_moderation_item(item):
+                await self._emit(SpaceModerationQueued(item=item))
+                return True
             # A decision overtook it (a tombstone): the content fills in, the
             # decision stands — nothing new to review.
             await self._spaces.fill_moderation_tombstone(item)
@@ -590,6 +613,11 @@ class SpaceModerationService(BusPublisherMixin):
                 dropped,
             )
         if isinstance(event, SpaceConfigChanged):
+            iid = str((event.payload or {}).get("instance_id") or "")
+            if iid and self._federated is not None:
+                # (On the host) that household's next echo is answered at
+                # once and in full.
+                self._federated.forget_household(event.space_id, iid)
             await self._catch_up_if_promoted(event)
 
     async def _catch_up_if_promoted(self, event: SpaceConfigChanged) -> None:
@@ -1031,7 +1059,7 @@ class SpaceModerationService(BusPublisherMixin):
         """Tell the other households holding the item (v_43). Fail-soft: the
         decision stands here (and its content is already published); a
         reviewer household that misses it hears it again from the host on
-        its next §25.6 BEGIN (the ``mod_pending`` echo), any other copy
+        its next §25.6 BEGIN (the ``mod_held`` echo), any other copy
         expires on schedule."""
         if self._federated is None:
             return

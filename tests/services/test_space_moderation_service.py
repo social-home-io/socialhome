@@ -70,6 +70,8 @@ class _FakeModerationFederation:
         self.submitted: list[tuple[str, list[str]]] = []
         self.decided: list[tuple[str, str, str, str | None]] = []
         self.release_requests: list[tuple[str, str]] = []
+        self.checked: list[str] = []
+        self.forgotten: list[tuple[str, str]] = []
 
     async def submission_targets(self, space) -> list[str]:
         if self.host_too_old:
@@ -87,6 +89,12 @@ class _FakeModerationFederation:
 
     async def reviewer_households(self, space):
         return list(self.targets)
+
+    async def check_wire(self, space, item) -> None:
+        self.checked.append(item.id)
+
+    def forget_household(self, space_id, instance_id) -> None:
+        self.forgotten.append((space_id, instance_id))
 
     async def display_name(self, space_id, user_id):
         return "Remote Rita" if user_id == "u-remote" else None

@@ -1571,6 +1571,11 @@ def _wire_federation_stack(
         identity.instance_id,
     )
     report_service.watch_seats(bus)
+    # A household that (again) reviews a space asks its host with a §25.6
+    # BEGIN; the host re-sends the pending reports then.
+    federation_service._event_registry.register(
+        FederationEventType.SPACE_SYNC_BEGIN, report_service.on_sync_begin
+    )
     dm_routing_service.attach_federation(
         federation_service,
         own_instance_id=identity.instance_id,
@@ -4987,11 +4992,11 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         app[K.space_moderation_service_key] = space_moderation
         # Catch-up for a reviewer household rides the §25.6 BEGIN to the
-        # host: it echoes the pending items it holds, the host answers with
+        # host: it echoes the items it holds by state, the host answers with
         # what it lacks (``moderation_federation.on_sync_begin``). A
         # household that starts reviewing asks at once.
         app[K.space_sync_scheduler_key].attach_moderation_echo(
-            moderation_federation.pending_echo
+            moderation_federation.held_echo
         )
         space_moderation.attach_host_sync(
             app[K.space_sync_scheduler_key].sync_with_host
