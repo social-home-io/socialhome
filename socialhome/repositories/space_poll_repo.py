@@ -21,11 +21,36 @@ local :class:`PollService`, whose routes authorise the caller first.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
+
+import orjson
 
 from ..db import AsyncDatabase
-from ..domain.space_item import stored_stamp
+from ..domain.item_merge import (
+    decode_stamp_map,
+    local_stamp,
+    record_change,
+    settle,
+    standing,
+    to_stored,
+    to_wire,
+    tombstone_cutoff,
+    too_late,
+)
+from ..domain.space_item import stamp_to_db, stored_stamp
 from .poll_repo import AbstractPollRepo
+
+#: What became of a received vote (:meth:`set_votes_in_space`):
+#: ``applied`` — it is the voter's selection now; ``kept`` — recorded, but
+#: a newer one stands (or it was held already: a re-delivery); ``late`` —
+#: stamped after the poll's close, it counts nowhere; ``refused`` — not a
+#: vote this poll takes (another space, an option of another poll, two
+#: options on a single-choice poll).
+VoteOutcome = Literal["applied", "kept", "late", "refused"]
+
+#: Voters one poll keeps stamps for (retractions' tombstones go first,
+#: oldest first). A voter past it keeps the vote rows, unstamped.
+MAX_VOTE_STAMP_VOTERS: int = 4096
 
 #: ``space_poll_options`` row ``?`` belongs to post ``?`` which lives in
 #: space ``?``.
@@ -34,6 +59,124 @@ _OPTION_IN_SPACE = """
       JOIN space_posts p ON p.id = o.post_id
      WHERE o.id=? AND o.post_id=? AND p.space_id=?
 """
+
+
+def _decode_votes(raw: object) -> dict[str, list[list]]:
+    """``vote_stamps_json`` → ``{voter: [[stamp, [option_id, …]], …]}``,
+    each voter's entries newest first."""
+    out: dict[str, list[list]] = {}
+    for voter, entries in decode_stamp_map(raw).items():
+        shaped = [
+            [e[0], [str(o) for o in e[1]]]
+            for e in entries
+            if isinstance(e, list)
+            and len(e) == 2
+            and isinstance(e[0], str)
+            and isinstance(e[1], list)
+        ]
+        if shaped:
+            out[voter] = sorted(shaped, key=lambda e: e[0], reverse=True)
+    return out
+
+
+def _encode_votes(stamps: dict[str, list[list]]) -> str | None:
+    """Bound the map: a retraction's tombstone lives the shared horizon,
+    and past :data:`MAX_VOTE_STAMP_VOTERS` tombstones go first, then the
+    oldest."""
+    cutoff = tombstone_cutoff()
+    for voter in [
+        v for v, e in stamps.items() if not e or (not e[0][1] and e[0][0] < cutoff)
+    ]:
+        del stamps[voter]
+    order = sorted(stamps, key=lambda v: (bool(stamps[v][0][1]), stamps[v][0][0]))
+    for voter in order[: max(0, len(stamps) - MAX_VOTE_STAMP_VOTERS)]:
+        del stamps[voter]
+    if not stamps:
+        return None
+    return orjson.dumps(stamps, option=orjson.OPT_SORT_KEYS).decode()
+
+
+def _cutoff(poll, now: datetime | None = None) -> tuple[bool, str | None]:
+    """``(closed, cutoff)`` of a ``space_polls`` row: is it closed (by its
+    author, or past its deadline), and the stamp after which no vote counts
+    — the close's or the deadline, whichever is earlier. A poll closed
+    before closes were stamped has none."""
+    deadline = to_stored(poll["closes_at"])
+    marks = [m for m in (poll["closed_at"] if poll["closed"] else None, deadline) if m]
+    closed = bool(poll["closed"]) or (
+        deadline is not None and deadline <= stamp_to_db(now or datetime.now(UTC))
+    )
+    return closed, (min(marks) if marks else None)
+
+
+def _poll_row(conn, post_id: str, space_id: str | None = None):
+    """The poll on ``post_id`` — only of a post in ``space_id`` when given."""
+    return conn.execute(
+        "SELECT sp.closed, sp.closed_at, sp.closes_at, sp.allow_multiple,"
+        " sp.vote_stamps_json FROM space_polls sp"
+        " JOIN space_posts p ON p.id = sp.post_id"
+        " WHERE sp.post_id=?" + (" AND p.space_id=?" if space_id else ""),
+        (post_id, space_id) if space_id else (post_id,),
+    ).fetchone()
+
+
+def _voter_rows(conn, post_id: str, voter: str) -> set[str]:
+    return {
+        r["option_id"]
+        for r in conn.execute(
+            "SELECT pv.option_id FROM space_poll_votes pv"
+            " JOIN space_poll_options po ON po.id = pv.option_id"
+            " WHERE pv.voter_user_id=? AND po.post_id=?",
+            (voter, post_id),
+        ).fetchall()
+    }
+
+
+def _write_selection(conn, post_id: str, voter: str, options: list[str]) -> bool:
+    """Make ``voter``'s vote rows on ``post_id`` exactly ``options`` — only
+    real differences are written (the 0086 touch triggers). True when a
+    row changed."""
+    held = _voter_rows(conn, post_id, voter)
+    wanted = set(options)
+    for option_id in sorted(held - wanted):
+        conn.execute(
+            "DELETE FROM space_poll_votes WHERE option_id=? AND voter_user_id=?",
+            (option_id, voter),
+        )
+    for option_id in sorted(wanted - held):
+        conn.execute(
+            "INSERT INTO space_poll_votes(option_id, voter_user_id)"
+            " SELECT ?, ? WHERE EXISTS"
+            " (SELECT 1 FROM space_poll_options WHERE id=? AND post_id=?)",
+            (option_id, voter, option_id, post_id),
+        )
+    return held != wanted
+
+
+def _save_votes(conn, post_id: str, stamps: dict[str, list[list]]) -> None:
+    conn.execute(
+        "UPDATE space_polls SET vote_stamps_json=? WHERE post_id=?",
+        (_encode_votes(stamps), post_id),
+    )
+
+
+def _settle_poll(
+    conn, post_id: str, stamps: dict[str, list[list]], cutoff: str
+) -> list[str]:
+    """The poll's cutoff is known: every voter keeps only the selection
+    that stands (stamped at or before it), and the vote rows follow. The
+    voters whose rows changed."""
+    changed: list[str] = []
+    for voter in sorted(stamps):
+        entries = stamps[voter]
+        settle(entries, cutoff)
+        if _write_selection(conn, post_id, voter, entries[0][1] if entries else []):
+            changed.append(voter)
+        if not entries:
+            del stamps[voter]
+    _save_votes(conn, post_id, stamps)
+    return changed
+
 
 #: The answers a schedule slot takes (the table's CHECK).
 _AVAILABILITIES: frozenset[str] = frozenset({"yes", "no", "maybe"})
@@ -57,7 +200,8 @@ class AbstractSpacePollRepo(AbstractPollRepo, Protocol):
         post_id: str,
         option_ids: list[str],
         voter_user_id: str,
-    ) -> bool: ...
+        stamp: str,
+    ) -> VoteOutcome: ...
     async def create_poll_in_space(
         self,
         *,
@@ -68,7 +212,9 @@ class AbstractSpacePollRepo(AbstractPollRepo, Protocol):
         allow_multiple: bool,
         options: list[dict],
     ) -> bool | None: ...
-    async def close_in_space(self, post_id: str, *, space_id: str) -> bool: ...
+    async def close_in_space(
+        self, post_id: str, *, space_id: str, stamp: str
+    ) -> list[str] | None: ...
     async def create_schedule_poll_in_space(
         self,
         *,
@@ -103,6 +249,9 @@ class AbstractSpacePollRepo(AbstractPollRepo, Protocol):
     async def list_votes(
         self, post_id: str, *, limit: int | None = None
     ) -> list[dict]: ...
+    async def list_vote_stamps(
+        self, post_id: str, *, limit: int
+    ) -> tuple[dict[str, list], bool]: ...
     async def list_schedule_answers(
         self, post_id: str, *, limit: int
     ) -> list[dict]: ...
@@ -119,6 +268,8 @@ class AbstractSpacePollRepo(AbstractPollRepo, Protocol):
         votes: list[tuple[str, str]] | None,
         keep_voters: frozenset[str],
         votes_partial: bool = False,
+        closed_at: str | None = None,
+        vote_stamps: dict[str, list] | None = None,
     ) -> bool: ...
     async def apply_synced_schedule_state(
         self,
@@ -222,8 +373,8 @@ class SqliteSpacePollRepo:
 
     async def get_meta(self, post_id: str) -> dict | None:
         row = await self._db.fetchone(
-            "SELECT post_id, question, closes_at, closed, allow_multiple "
-            "FROM space_polls WHERE post_id=?",
+            "SELECT post_id, question, closes_at, closed, allow_multiple,"
+            " closed_at FROM space_polls WHERE post_id=?",
             (post_id,),
         )
         if row is None:
@@ -245,33 +396,51 @@ class SqliteSpacePollRepo:
         )
         return row is not None
 
-    async def clear_user_votes(
+    async def set_votes(
         self,
         *,
         post_id: str,
         voter_user_id: str,
-    ) -> None:
-        await self._db.enqueue(
-            "DELETE FROM space_poll_votes WHERE voter_user_id=? AND option_id IN "
-            "(SELECT id FROM space_poll_options WHERE post_id=?)",
-            (voter_user_id, post_id),
-        )
+        option_ids: list[str],
+    ) -> bool:
+        """A LOCAL voter's whole selection (empty: retracted), stamped now
+        — never at or before the stamp it replaces — in ONE transaction
+        with the vote rows. ``False``: nothing written — the poll is gone
+        (a post delete drops it, migration 0085) or closed meanwhile."""
+        wanted = list(dict.fromkeys(option_ids))
 
-    async def insert_vote(
-        self,
-        *,
-        option_id: str,
-        voter_user_id: str,
-    ) -> None:
-        # Only onto an option that still exists: a post delete drops its
-        # poll (migration 0085 trigger), and a vote racing it must land
-        # nowhere rather than fail the FK.
-        await self._db.enqueue(
-            "INSERT INTO space_poll_votes(option_id, voter_user_id)"
-            " SELECT ?, ? WHERE EXISTS"
-            " (SELECT 1 FROM space_poll_options WHERE id=?)",
-            (option_id, voter_user_id, option_id),
+        def _run(conn) -> bool:
+            poll = _poll_row(conn, post_id)
+            if poll is None:
+                return False
+            closed, cutoff = _cutoff(poll)
+            stamps = _decode_votes(poll["vote_stamps_json"])
+            entries = stamps.setdefault(voter_user_id, [])
+            at = local_stamp(entries[0][0] if entries else None)
+            if closed or (cutoff is not None and at > cutoff):
+                return False
+            record_change(entries, at, wanted)
+            _write_selection(conn, post_id, voter_user_id, wanted)
+            _save_votes(conn, post_id, stamps)
+            return True
+
+        return bool(await self._db.transact(_run))
+
+    async def vote_stamp(self, post_id: str, voter_user_id: str) -> str | None:
+        """The stamp (as it travels) of ``voter_user_id``'s selection that
+        counts on ``post_id`` — ``None`` when none is stamped."""
+        row = await self._db.fetchone(
+            "SELECT closed, closed_at, closes_at, vote_stamps_json"
+            " FROM space_polls WHERE post_id=?",
+            (post_id,),
         )
+        if row is None:
+            return None
+        entry = standing(
+            _decode_votes(row["vote_stamps_json"]).get(voter_user_id, []),
+            _cutoff(row)[1],
+        )
+        return to_wire(entry[0]) if entry is not None else None
 
     async def get_post_author(self, post_id: str) -> str | None:
         row = await self._db.fetchone(
@@ -280,18 +449,27 @@ class SqliteSpacePollRepo:
         )
         return row["author"] if row else None
 
-    async def close(self, post_id: str) -> None:
-        await self._db.enqueue(
-            "UPDATE space_polls SET closed=1 WHERE post_id=?",
-            (post_id,),
-        )
-
     async def close_if_open(self, post_id: str) -> bool:
-        n = await self._db.enqueue_rowcount(
-            "UPDATE space_polls SET closed=1 WHERE post_id=? AND closed=0",
-            (post_id,),
-        )
-        return n > 0
+        """Close the poll unless it is closed — stamping the close
+        (``closed_at``), after which no vote counts on any household."""
+
+        def _run(conn) -> bool:
+            cur = conn.execute(
+                "UPDATE space_polls SET closed=1, closed_at=?"
+                " WHERE post_id=? AND closed=0",
+                (stamp_to_db(datetime.now(UTC)), post_id),
+            )
+            if cur.rowcount == 0:
+                return False
+            poll = _poll_row(conn, post_id)
+            cutoff = _cutoff(poll)[1] if poll is not None else None
+            if poll is not None and cutoff is not None:
+                _settle_poll(
+                    conn, post_id, _decode_votes(poll["vote_stamps_json"]), cutoff
+                )
+            return True
+
+        return bool(await self._db.transact(_run))
 
     async def list_due_to_close(self, now_iso: str) -> list[dict]:
         # Only the author's household closes a space poll: peers accept
@@ -481,31 +659,28 @@ class SqliteSpacePollRepo:
         post_id: str,
         option_ids: list[str],
         voter_user_id: str,
-    ) -> bool:
-        """Replace ``voter_user_id``'s votes on ``post_id`` with
-        ``option_ids`` — the voter's whole selection, as
-        ``SPACE_POLL_VOTE_CAST`` carries it (empty: the vote is retracted).
+        stamp: str,
+    ) -> VoteOutcome:
+        """Merge a received selection of ``voter_user_id`` on ``post_id`` —
+        the voter's whole selection, as ``SPACE_POLL_VOTE_CAST`` carries it
+        (empty: the vote is retracted) — stamped ``stamp`` (stored shape):
+        the one merge rule (:mod:`~socialhome.domain.item_merge`).
 
         One transaction that first proves the poll's post lives in
-        ``space_id``, that the poll is still open (not closed, its
-        ``closes_at`` not passed — the local ``PollService.cast_vote`` rule),
-        that every option belongs to ``post_id``, and that a single-choice
-        poll gets at most one. ``False`` = refused, nothing written (the
-        voter's previous votes stay).
+        ``space_id``, that every option belongs to ``post_id`` and that a
+        single-choice poll gets at most one (``refused``, nothing written).
+        The newest stamp wins, in any arrival order; a retraction is kept
+        as a stamp. A selection stamped after the poll's cutoff (its close,
+        or its deadline) counts nowhere (``late``); one stamped before it
+        is taken even after the close — for as long as an honest one can
+        still be in flight (the outbox's retention).
         """
         wanted = list(dict.fromkeys(option_ids))
 
-        def _run(conn) -> bool:
-            poll = conn.execute(
-                "SELECT sp.allow_multiple FROM space_polls sp"
-                " JOIN space_posts p ON p.id = sp.post_id"
-                " WHERE sp.post_id=? AND p.space_id=? AND sp.closed=0"
-                " AND (sp.closes_at IS NULL"
-                "  OR julianday(sp.closes_at) > julianday('now'))",
-                (post_id, space_id),
-            ).fetchone()
+        def _run(conn) -> VoteOutcome:
+            poll = _poll_row(conn, post_id, space_id)
             if poll is None or (len(wanted) > 1 and not poll["allow_multiple"]):
-                return False
+                return "refused"
             for option_id in wanted:
                 if (
                     conn.execute(
@@ -513,19 +688,27 @@ class SqliteSpacePollRepo:
                     ).fetchone()
                     is None
                 ):
-                    return False
-            conn.execute(
-                "DELETE FROM space_poll_votes WHERE voter_user_id=? AND option_id IN "
-                "(SELECT id FROM space_poll_options WHERE post_id=?)",
-                (voter_user_id, post_id),
-            )
-            conn.executemany(
-                "INSERT INTO space_poll_votes(option_id, voter_user_id) VALUES(?, ?)",
-                [(option_id, voter_user_id) for option_id in wanted],
-            )
-            return True
+                    return "refused"
+            closed, cutoff = _cutoff(poll)
+            if cutoff is not None and stamp > cutoff:
+                return "late"
+            if closed and (cutoff is None or too_late(cutoff)):
+                return "late"
+            stamps = _decode_votes(poll["vote_stamps_json"])
+            entries = stamps.setdefault(voter_user_id, [])
+            if not record_change(entries, stamp, wanted):
+                return "kept"
+            if closed and cutoff is not None:
+                settle(entries, cutoff)
+            now_standing = standing(entries, cutoff)
+            _save_votes(conn, post_id, stamps)
+            if now_standing is None or now_standing[0] != stamp:
+                return "kept"
+            _write_selection(conn, post_id, voter_user_id, wanted)
+            return "applied"
 
-        return bool(await self._db.transact(_run))
+        outcome: VoteOutcome = await self._db.transact(_run)
+        return outcome
 
     async def create_poll_in_space(
         self,
@@ -591,15 +774,36 @@ class SqliteSpacePollRepo:
         created: bool | None = await self._db.transact(_run)
         return created
 
-    async def close_in_space(self, post_id: str, *, space_id: str) -> bool:
-        """Close the poll on ``post_id`` if that post lives in ``space_id``."""
-        n = await self._db.enqueue_rowcount(
-            "UPDATE space_polls SET closed=1 WHERE post_id=? AND EXISTS ("
-            " SELECT 1 FROM space_posts"
-            "  WHERE id = space_polls.post_id AND space_id=?)",
-            (post_id, space_id),
-        )
-        return n > 0
+    async def close_in_space(
+        self, post_id: str, *, space_id: str, stamp: str
+    ) -> list[str] | None:
+        """Close the poll on ``post_id`` if that post lives in ``space_id``
+        (``None``: it does not), the close stamped ``stamp`` (stored shape;
+        of two closes the earlier stays).
+
+        The close is the votes' cutoff: a selection this household applied
+        that was stamped after it (it had not heard of the close) counts
+        nowhere, so its voter falls back to the newest one stamped before
+        it. Returns the voters whose selection changed that way."""
+
+        def _run(conn) -> list[str] | None:
+            poll = _poll_row(conn, post_id, space_id)
+            if poll is None:
+                return None
+            held = poll["closed_at"] if poll["closed"] else None
+            conn.execute(
+                "UPDATE space_polls SET closed=1, closed_at=? WHERE post_id=?",
+                (min(held, stamp) if held else stamp, post_id),
+            )
+            poll = _poll_row(conn, post_id, space_id)
+            cutoff = _cutoff(poll)[1]
+            assert cutoff is not None  # closed, with a stamp
+            return _settle_poll(
+                conn, post_id, _decode_votes(poll["vote_stamps_json"]), cutoff
+            )
+
+        changed: list[str] | None = await self._db.transact(_run)
+        return changed
 
     async def create_schedule_poll_in_space(
         self,
@@ -763,6 +967,51 @@ class SqliteSpacePollRepo:
             for r in rows
         ]
 
+    async def list_vote_stamps(
+        self, post_id: str, *, limit: int
+    ) -> tuple[dict[str, list], bool]:
+        """What the host's v_94 ``polls`` record carries: per voter the
+        selection that counts and its stamp, ``{voter: [stamp, [option_id,
+        …]]}`` (the stamp as it travels) — a retraction included, as the
+        tombstone it is. A voter whose votes carry no stamp (cast before
+        migration 0146) goes with the time the rows were written here. At
+        most ``limit`` voters, the newest first; the flag says the map was
+        cut."""
+        poll = await self._db.fetchone(
+            "SELECT closed, closed_at, closes_at, vote_stamps_json"
+            " FROM space_polls WHERE post_id=?",
+            (post_id,),
+        )
+        if poll is None:
+            return {}, False
+        cutoff = _cutoff(poll)[1]
+        out: dict[str, list] = {}
+        for voter, entries in _decode_votes(poll["vote_stamps_json"]).items():
+            entry = standing(entries, cutoff)
+            if entry is not None:
+                out[voter] = [entry[0], list(entry[1])]
+        rows = await self._db.fetchall(
+            "SELECT pv.option_id, pv.voter_user_id, pv.voted_at"
+            " FROM space_poll_votes pv"
+            " JOIN space_poll_options po ON po.id = pv.option_id"
+            " WHERE po.post_id=? ORDER BY po.position, po.id",
+            (post_id,),
+        )
+        unstamped: dict[str, list] = {}
+        for r in rows:
+            voter = r["voter_user_id"]
+            if voter in out:
+                continue
+            entry = unstamped.setdefault(voter, ["", []])
+            entry[0] = max(entry[0], to_stored(r["voted_at"]) or "")
+            entry[1].append(r["option_id"])
+        out.update({v: e for v, e in unstamped.items() if e[0]})
+        newest = sorted(out, key=lambda v: (out[v][0], v), reverse=True)
+        return (
+            {v: [to_wire(out[v][0]), out[v][1]] for v in newest[:limit]},
+            len(newest) > limit,
+        )
+
     async def list_schedule_answers(self, post_id: str, *, limit: int) -> list[dict]:
         """At most ``limit`` answers on ``post_id``'s schedule poll, the
         newest first, with their ``responded_at`` — what the host's
@@ -798,6 +1047,8 @@ class SqliteSpacePollRepo:
         votes: list[tuple[str, str]] | None,
         keep_voters: frozenset[str],
         votes_partial: bool = False,
+        closed_at: str | None = None,
+        vote_stamps: dict[str, list] | None = None,
     ) -> bool:
         """Converge the poll on ``post_id`` on the host's copy, in ONE
         transaction that first proves the post is a live post of
@@ -806,14 +1057,25 @@ class SqliteSpacePollRepo:
         The poll and its options (``{id, text}`` in order — the list index is
         the position) are created when missing and take the host's question
         and deadline; an option id another post owns is left alone. A poll
-        never reopens: ``closed`` only closes. ``votes`` (``(option_id,
-        voter)`` pairs; ``None`` — an older host that sends none — keeps the
-        held votes) replaces the votes of everybody but ``keep_voters``, this
-        household's own people, whose votes it authors itself;
-        ``votes_partial`` (the host's list was cut) converges only the voters
-        the list names — a voter it could not carry keeps the held votes.
-        Only real differences are written, so re-applying the same snapshot
-        stamps nothing (the migration 0086 touch triggers)."""
+        never reopens: ``closed`` only closes, and takes the host's close
+        stamp (``closed_at``, stored shape; the earlier of two stays).
+
+        The votes of everybody but ``keep_voters`` — this household's own
+        people, whose votes it authors itself — merge by the one rule
+        (:mod:`~socialhome.domain.item_merge`): ``vote_stamps`` (``{voter:
+        [stamp, [option_id, …]]}``, stamps in the stored shape) is taken per
+        voter when newer than what is held, a retraction included; a voter
+        the host does not name keeps a stamped vote (the host may not have
+        heard it). Only a voter NO stamp orders here follows the host's
+        list: ``votes`` (``(option_id, voter)`` pairs, what a host below
+        v_94 sends) replaces such a voter's rows, and a whole list (not
+        ``votes_partial``) that lacks one drops them. ``None`` for both —
+        a host below v_92 — keeps the held votes.
+
+        A closed poll is settled: each voter keeps the selection stamped at
+        or before the close. Only real differences are written, so
+        re-applying the same snapshot stamps nothing (the migration 0086
+        touch triggers)."""
 
         def _run(conn) -> bool:
             if (
@@ -843,6 +1105,12 @@ class SqliteSpacePollRepo:
                     1 if allow_multiple else 0,
                 ),
             )
+            if closed and closed_at:
+                conn.execute(
+                    "UPDATE space_polls SET closed_at=? WHERE post_id=?"
+                    " AND closed=1 AND (closed_at IS NULL OR closed_at > ?)",
+                    (closed_at, post_id, closed_at),
+                )
             for position, opt in enumerate(options):
                 conn.execute(
                     """
@@ -855,43 +1123,67 @@ class SqliteSpacePollRepo:
                     """,
                     (str(opt["id"]), post_id, str(opt["text"]), position),
                 )
-            if votes is None:
-                return True
-            mine = {
-                str(r["id"])
-                for r in conn.execute(
-                    "SELECT id FROM space_poll_options WHERE post_id=?", (post_id,)
-                ).fetchall()
-            }
-            held = {
-                (r["option_id"], r["voter_user_id"])
-                for r in conn.execute(
-                    "SELECT pv.option_id, pv.voter_user_id FROM space_poll_votes pv"
-                    " JOIN space_poll_options po ON po.id = pv.option_id"
-                    " WHERE po.post_id=?",
-                    (post_id,),
-                ).fetchall()
-                if r["voter_user_id"] not in keep_voters
-            }
-            wanted = {
-                (option_id, voter)
-                for option_id, voter in votes
-                if option_id in mine and voter and voter not in keep_voters
-            }
-            if votes_partial:
-                named = {voter for _o, voter in votes}
-                held = {(o, v) for o, v in held if v in named}
-            for option_id, voter in sorted(held - wanted):
-                conn.execute(
-                    "DELETE FROM space_poll_votes WHERE option_id=? AND voter_user_id=?",
-                    (option_id, voter),
-                )
-            for option_id, voter in sorted(wanted - held):
-                conn.execute(
-                    "INSERT INTO space_poll_votes(option_id, voter_user_id)"
-                    " VALUES(?, ?) ON CONFLICT DO NOTHING",
-                    (option_id, voter),
-                )
+            poll = _poll_row(conn, post_id)
+            is_closed, cutoff = _cutoff(poll)
+            stamps = _decode_votes(poll["vote_stamps_json"])
+            touched: set[str] = set()
+            if votes is not None or vote_stamps is not None:
+                mine = {
+                    str(r["id"])
+                    for r in conn.execute(
+                        "SELECT id FROM space_poll_options WHERE post_id=?",
+                        (post_id,),
+                    ).fetchall()
+                }
+                named: set[str] = set()
+                if vote_stamps is not None:
+                    for voter, (at, picked) in sorted(vote_stamps.items()):
+                        named.add(voter)
+                        chosen = list(dict.fromkeys(picked))
+                        if (
+                            not voter
+                            or voter in keep_voters
+                            or any(o not in mine for o in chosen)
+                            or (len(chosen) > 1 and not poll["allow_multiple"])
+                            or (cutoff is not None and at > cutoff)
+                        ):
+                            continue
+                        if record_change(stamps.setdefault(voter, []), at, chosen):
+                            touched.add(voter)
+                else:
+                    listed: dict[str, list[str]] = {}
+                    for option_id, voter in votes or ():
+                        named.add(voter)
+                        if voter and voter not in keep_voters:
+                            picked = listed.setdefault(voter, [])
+                            if option_id in mine:
+                                picked.append(option_id)
+                    for voter, picked in sorted(listed.items()):
+                        if voter not in stamps:
+                            _write_selection(conn, post_id, voter, picked)
+                if not votes_partial:
+                    # A voter no stamp orders, whom the host's whole list
+                    # lacks: the vote was retracted before stamps existed.
+                    voters = {
+                        r["voter_user_id"]
+                        for r in conn.execute(
+                            "SELECT DISTINCT pv.voter_user_id"
+                            " FROM space_poll_votes pv"
+                            " JOIN space_poll_options po ON po.id = pv.option_id"
+                            " WHERE po.post_id=?",
+                            (post_id,),
+                        ).fetchall()
+                    }
+                    for voter in sorted(voters - named - stamps.keys() - keep_voters):
+                        _write_selection(conn, post_id, voter, [])
+            if is_closed and cutoff is not None:
+                _settle_poll(conn, post_id, stamps, cutoff)
+            elif touched:
+                for voter in sorted(touched):
+                    entry = standing(stamps[voter], cutoff)
+                    if entry is not None:
+                        _write_selection(conn, post_id, voter, entry[1])
+                _save_votes(conn, post_id, stamps)
             return True
 
         return bool(await self._db.transact(_run))

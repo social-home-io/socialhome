@@ -12303,6 +12303,17 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_93 SPACE_POST_REACTION gate in place ✓")
+    # v_94 — one merge rule: a §25.6 requester at >= v_94 is streamed a
+    # poll's vote stamps instead of the vote list. The OURS round-trip above
+    # proves every pair merges by stamp; the stamps on SPACE_POLL_VOTE_CAST /
+    # SPACE_POLL_CLOSED are additive (no gate).
+    if int(_Cap.MIN_FOR_ITEM_MERGE_STAMPS) != 94 or _OURS < 94:
+        failures.append(
+            "MIN_FOR_ITEM_MERGE_STAMPS moved off v_94 (or OURS fell below it) "
+            "— a poll's votes would be replaced by the host's list again"
+        )
+    else:
+        print("  v_94 item merge stamps gate in place ✓")
     # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
     # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
     # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key

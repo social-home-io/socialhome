@@ -69,6 +69,7 @@ from ....domain.page import Page
 from ....domain.post import (
     BAZAAR_MAX_IMAGES,
     FEED_POST_MAX_IMAGES,
+    MAX_POLL_OPTIONS,
     BazaarBid,
     BazaarListing,
     BazaarMode,
@@ -547,6 +548,33 @@ def _synced_reaction_stamps(raw: object) -> dict[str, list]:
         ):
             continue
         out[key] = [stamp_to_db(stamp), value[1] is True]
+    return out
+
+
+def _synced_vote_stamps(raw: object) -> dict[str, list] | None:
+    """The host's v_94 ``vote_stamps`` (``{voter: [stamp, [option_id,
+    …]]}``) with only the entries the live vote rule would take — a stamp
+    no more than the live skew ahead of our clock, re-shaped like a stored
+    one, a list of option ids no longer than a poll has options. ``None``
+    when the record carries none (a host below v_94)."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, list] = {}
+    for voter, value in raw.items():
+        if not isinstance(voter, str) or not voter:
+            continue
+        if not isinstance(value, list) or len(value) != 2:
+            continue
+        stamp = stored_stamp(value[0])
+        picked = value[1]
+        if (
+            stamp is None
+            or not isinstance(picked, list)
+            or len(picked) > MAX_POLL_OPTIONS
+            or not all(isinstance(o, str) and o for o in picked)
+        ):
+            continue
+        out[voter] = [stamp_to_db(stamp), picked]
     return out
 
 
@@ -2010,9 +2038,11 @@ class SpaceSyncReceiver:
         household's are refused in :meth:`_authored_record`). Each converges
         the poll on the host's copy: created with its options when missing
         (it missed the live ``SPACE_POLL_CREATED``), the host's
-        question / deadline, closed when the host's is, and — from a v_92
-        host, which sends ``votes`` — everybody's votes but our own
-        people's. An older host's record (no ``votes``) leaves the votes."""
+        question / deadline, closed when the host's is (with the close's
+        stamp), and everybody's votes but our own people's — merged per
+        voter by stamp from a v_94 host's ``vote_stamps`` (the one merge
+        rule), the unstamped ones taken from a v_92 / v_93 host's ``votes``
+        list. An older host's record (neither) leaves the votes."""
         if self._poll_repo is None:
             log.debug(
                 "received %d poll records — no poll_repo wired, skipping",
@@ -2049,6 +2079,7 @@ class SpaceSyncReceiver:
                 else None
             )
             closes_at = meta.get("closes_at")
+            closed_at = stored_stamp(meta.get("closed_at"))
             lacked = await self._poll_repo.get_meta(post_id) is None
             if not await self._poll_repo.apply_synced_poll(
                 space_id=space_id,
@@ -2061,6 +2092,8 @@ class SpaceSyncReceiver:
                 votes=votes,
                 keep_voters=keep,
                 votes_partial=r.get("votes_partial") is True,
+                closed_at=stamp_to_db(closed_at) if closed_at is not None else None,
+                vote_stamps=_synced_vote_stamps(r.get("vote_stamps")),
             ):
                 _log_sync_refusal("poll", post_id, space_id)
                 continue

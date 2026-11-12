@@ -762,6 +762,12 @@ class SpaceSyncService:
         version = await self._session_version(session)
         if exporter is not None and not _item_state(version):
             exporter = _without_item_state(exporter)
+        elif (
+            isinstance(exporter, PollsExporter)
+            and version < FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS
+        ):
+            # v_92 / v_93 merge the host's vote LIST; v_94 its vote stamps.
+            exporter = exporter.unstamped_votes()
         if exporter is not None and resource == "calendar":
             if isinstance(exporter, CalendarExporter) and not _series_rows(version):
                 return exporter.expanded()

@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -819,3 +820,179 @@ async def test_only_the_newest_vote_of_a_voter_waits_in_the_outbox(world):
         space_id=SP,
     )
     assert await _queued_votes(b, a) == 2
+
+
+# ── One merge rule (v_94): the newest stamp wins, the close is a cutoff ───
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _vote(option_ids: list[str], at: str, voter: str = "u-bob") -> dict:
+    return {
+        "post_id": POST,
+        "option_ids": option_ids,
+        "voter_user_id": voter,
+        "at": at,
+    }
+
+
+async def test_a_retry_in_flight_lands_after_a_newer_vote_and_changes_nothing(world):
+    """Bug (a): bob votes Friday, then Saturday. A copy of the Friday vote
+    that was already on its way (an outbox retry the latest-only key could
+    no longer drop) reaches the host and a member afterwards. The newest
+    stamp wins: everyone keeps Saturday."""
+    a, b, c = world.a, world.b, world.c
+    made = await _make_poll(a)
+    friday, saturday = _option(made, OPTIONS[0]), _option(made, OPTIONS[1])
+    await b.polls.cast_vote(
+        post_id=POST, option_id=friday, voter_user_id="u-bob", space_id=SP
+    )
+    first = _now()  # at or after Friday's stamp, before Saturday's
+    await b.polls.cast_vote(
+        post_id=POST, option_id=saturday, voter_user_id="u-bob", space_id=SP
+    )
+    for target in (a, c):
+        await _send(b, target, FET.SPACE_POLL_VOTE_CAST, _vote([friday], first))
+    want = {OPTIONS[0]: 0, OPTIONS[1]: 1, OPTIONS[2]: 0}
+    for h in (a, b, c):
+        assert await _tally(h) == want, h.name
+
+
+async def test_two_votes_on_different_paths_end_the_same_in_any_order(world):
+    """Bug (b): two votes of one voter (and a retraction between them)
+    travel different transports and arrive in a different order on each
+    household. Every household ends on the newest."""
+    a, b, c = world.a, world.b, world.c
+    made = await _make_poll(a)
+    friday, saturday = _option(made, OPTIONS[0]), _option(made, OPTIONS[1])
+    base = datetime.now(UTC) - timedelta(seconds=1)
+    t1, t2, t3 = ((base + timedelta(milliseconds=ms)).isoformat() for ms in (0, 5, 10))
+    sends = [_vote([friday], t1), _vote([], t2), _vote([saturday], t3)]
+    for target, order in ((a, (0, 1, 2)), (c, (2, 1, 0))):
+        for i in order:
+            await _send(b, target, FET.SPACE_POLL_VOTE_CAST, sends[i])
+    want = {OPTIONS[0]: 0, OPTIONS[1]: 1, OPTIONS[2]: 0}
+    assert await _tally(a) == await _tally(c) == want
+    # A re-delivery of each changes nothing either.
+    for send in sends:
+        await _send(b, c, FET.SPACE_POLL_VOTE_CAST, send)
+    assert await _tally(c) == want
+
+
+async def test_a_late_retraction_is_kept_as_a_stamp(world):
+    """A retraction is a stamp too: the vote it took back, arriving after
+    it, does not come back."""
+    a, b = world.a, world.b
+    made = await _make_poll(a)
+    friday = _option(made, OPTIONS[0])
+    base = datetime.now(UTC) - timedelta(seconds=1)
+    t1, t2 = base.isoformat(), (base + timedelta(milliseconds=5)).isoformat()
+    await _send(b, a, FET.SPACE_POLL_VOTE_CAST, _vote([], t2))
+    await _send(b, a, FET.SPACE_POLL_VOTE_CAST, _vote([friday], t1))
+    assert await _tally(a) == {OPTIONS[0]: 0, OPTIONS[1]: 0, OPTIONS[2]: 0}
+
+
+async def test_a_vote_made_before_the_close_counts_everywhere_however_late(world):
+    """Bug (c), first half: bob votes while nobody can be reached (the vote
+    waits in the outbox), then anna closes the poll. The vote is delivered
+    after ``SPACE_POLL_CLOSED``. It was stamped before the close: it counts
+    on every household — not only on bob's."""
+    a, b, c = world.a, world.b, world.c
+    made = await _make_poll(a)
+    friday = _option(made, OPTIONS[0])
+    b.inbox.down.update("acd")
+    await b.polls.cast_vote(
+        post_id=POST, option_id=friday, voter_user_id="u-bob", space_id=SP
+    )
+    voted = _now()
+    b.inbox.down.clear()
+    await a.polls.close_poll(post_id=POST, actor_user_id="u-anna", space_id=SP)
+    for target in (a, c):
+        await _send(b, target, FET.SPACE_POLL_VOTE_CAST, _vote([friday], voted))
+    want = {OPTIONS[0]: 1, OPTIONS[1]: 0, OPTIONS[2]: 0}
+    for h in (a, b, c):
+        assert await _tally(h) == want, h.name
+
+
+async def test_a_vote_made_after_the_close_counts_nowhere(world):
+    """Bug (c), second half: the close cannot reach bob's household yet, so
+    bob still votes there — after the close's stamp. Everyone else refuses
+    it; when the close arrives, bob's household drops it too."""
+    a, b, c = world.a, world.b, world.c
+    made = await _make_poll(a)
+    a.inbox.down.add("b")
+    await a.polls.close_poll(post_id=POST, actor_user_id="u-anna", space_id=SP)
+    closed = _now()
+    a.inbox.down.clear()
+    await b.polls.cast_vote(
+        post_id=POST,
+        option_id=_option(made, OPTIONS[1]),
+        voter_user_id="u-bob",
+        space_id=SP,
+    )
+    assert (await _tally(b))[OPTIONS[1]] == 1  # bob's household had not heard
+    await _send(a, b, FET.SPACE_POLL_CLOSED, {"post_id": POST, "at": closed})
+    want = {OPTIONS[0]: 0, OPTIONS[1]: 0, OPTIONS[2]: 0}
+    for h in (a, b, c):
+        assert await _tally(h) == want, h.name
+
+
+async def test_a_vote_changed_after_the_close_falls_back_to_the_one_before(world):
+    """bob voted Friday (everyone has it), anna closes, and bob — whose
+    household has not heard — switches to Saturday. The closed result
+    stands: when the close arrives bob's household goes back to Friday, and
+    re-sends it so a household that only ever got Saturday has it too."""
+    a, b, c = world.a, world.b, world.c
+    made = await _make_poll(a)
+    friday, saturday = _option(made, OPTIONS[0]), _option(made, OPTIONS[1])
+    await b.polls.cast_vote(
+        post_id=POST, option_id=friday, voter_user_id="u-bob", space_id=SP
+    )
+    a.inbox.down.add("b")
+    await a.polls.close_poll(post_id=POST, actor_user_id="u-anna", space_id=SP)
+    closed = _now()
+    a.inbox.down.clear()
+    await b.polls.cast_vote(
+        post_id=POST, option_id=saturday, voter_user_id="u-bob", space_id=SP
+    )
+    assert (await _tally(b))[OPTIONS[1]] == 1
+    before = len(_traffic(world, "space_poll_vote_cast"))
+    await _send(a, b, FET.SPACE_POLL_CLOSED, {"post_id": POST, "at": closed})
+    want = {OPTIONS[0]: 1, OPTIONS[1]: 0, OPTIONS[2]: 0}
+    for h in (a, b, c):
+        assert await _tally(h) == want, h.name
+    # One re-send per member household, for the one voter that fell back.
+    assert len(_traffic(world, "space_poll_vote_cast")) - before == 3
+
+
+async def test_an_older_peers_unstamped_vote_is_ordered_by_its_envelope(world):
+    """A household below v_94 sends no ``at``: its vote is taken, stamped
+    with the envelope's timestamp — never dropped — and a stamped one made
+    before it does not replace it."""
+    a, b = world.a, world.b
+    made = await _make_poll(a)
+    friday, saturday = _option(made, OPTIONS[0]), _option(made, OPTIONS[1])
+    earlier = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
+    await _send(
+        b,
+        a,
+        FET.SPACE_POLL_VOTE_CAST,
+        {"post_id": POST, "option_ids": [friday], "voter_user_id": "u-bob"},
+    )
+    await _send(b, a, FET.SPACE_POLL_VOTE_CAST, _vote([saturday], earlier))
+    assert await _tally(a) == {OPTIONS[0]: 1, OPTIONS[1]: 0, OPTIONS[2]: 0}
+
+
+async def test_a_stamp_from_the_future_is_refused(world):
+    a, b = world.a, world.b
+    made = await _make_poll(a)
+    ahead = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    await _send(
+        b,
+        a,
+        FET.SPACE_POLL_VOTE_CAST,
+        _vote([_option(made, OPTIONS[0])], ahead),
+    )
+    assert await _tally(a) == {OPTIONS[0]: 0, OPTIONS[1]: 0, OPTIONS[2]: 0}

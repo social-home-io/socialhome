@@ -1526,7 +1526,26 @@ from __future__ import annotations
 #:   showing only its own people's reactions (plus the host's on a
 #:   catch-up). Space-scoped. Labelled "Reactions on space posts reach
 #:   every household".
-OURS: int = 93
+#: * **v_94** (2026-11-12) — **one merge rule for changes to existing space
+#:   items** (owner decision 2026-11-12; ``domain/item_merge.py``): a stamp
+#:   per (item, author[, key]), the newest wins, a removal is kept as a
+#:   stamp. Poll votes move onto it: ``SPACE_POLL_VOTE_CAST`` gains ``at``
+#:   (the stamp the voter's household wrote with the selection) and
+#:   ``SPACE_POLL_CLOSED`` gains ``at`` (the close's stamp, the votes'
+#:   cutoff: a vote stamped after it counts on no household, the newest
+#:   one stamped at or before it on every household — also when it arrives
+#:   after the close, for up to the outbox's 7 days). Both fields are
+#:   additive and sent to every member household. The §25.6 ``polls``
+#:   record toward a v_94 requester carries ``vote_stamps`` (``{voter:
+#:   [stamp, [option_id, …]]}``, ≤ 1000 voters) in place of ``votes`` and
+#:   ``meta.closed_at``; the receiver merges per voter instead of replacing
+#:   the list (migration 0146). Sync line 94.
+#:   **Fallback**: a vote or a close from a household below v_94 carries no
+#:   ``at`` and is stamped with its envelope's timestamp (so it is ordered
+#:   by when it was sent, never dropped); a requester below v_94 keeps
+#:   getting the ``votes`` list; a host below v_94 sends ``votes``, which a
+#:   v_94 receiver applies only to voters it holds no stamp for.
+OURS: int = 94
 
 
 class FederationCapability:
@@ -2218,6 +2237,13 @@ class FederationCapability:
     #: ``SPACE_POST_REACTION`` (a reaction on a space post, added or
     #: removed). An older one is skipped by the fan-out.
     MIN_FOR_SPACE_POST_REACTIONS = 93
+    #: v_94 — a §25.6 requester at or above it is streamed a poll's
+    #: ``vote_stamps`` (each voter's selection with its stamp) instead of
+    #: the ``votes`` list, and merges them by the one rule
+    #: (``domain/item_merge.py``). Live, the stamps (``at`` on
+    #: ``SPACE_POLL_VOTE_CAST`` / ``SPACE_POLL_CLOSED``) are additive and
+    #: go to everyone. A ``SYNC_RECORD_LINES`` entry (94).
+    MIN_FOR_ITEM_MERGE_STAMPS = 94
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so

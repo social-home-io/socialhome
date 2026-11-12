@@ -13,10 +13,19 @@ people and closes a closed poll. A requester below v_92 gets the record
 without ``votes`` (:meth:`PollsExporter.without_votes`) — it drops the
 resource anyway.
 
+v_94: toward a v_94 requester ``votes`` is replaced by ``vote_stamps``
+(``{voter: [stamp, [option_id, …]]}`` — each voter's selection that counts
+and the stamp it was made at, a retraction included) and ``meta`` carries
+``closed_at``: the receiver merges per voter by the one rule (the newest
+stamp wins, :mod:`socialhome.domain.item_merge`) instead of replacing the
+list. A v_92 / v_93 requester keeps getting ``votes``
+(:meth:`PollsExporter.unstamped_votes`).
+
 A record never splits across chunks, so its votes are bounded:
-:data:`MAX_VOTES_PER_POLL`, the most recent voters' first and each voter's
-votes whole; ``votes_partial`` marks a cut list, and the receiver then
-converges only the voters it names (``docs/protocol/sync.md``).
+:data:`MAX_VOTES_PER_POLL` (votes, or voters of the stamp map), the most
+recent voters' first and each voter's votes whole; ``votes_partial`` marks
+a cut list, and the receiver then converges only the voters it names
+(``docs/protocol/sync.md``).
 """
 
 from __future__ import annotations
@@ -40,7 +49,7 @@ MAX_VOTES_PER_POLL: int = 1000
 class PollsExporter(PagedExporterMixin):
     resource = "polls"
 
-    __slots__ = ("_poll_repo", "_post_repo", "_votes", "_windows")
+    __slots__ = ("_poll_repo", "_post_repo", "_stamps", "_votes", "_windows")
 
     def __init__(
         self,
@@ -49,16 +58,25 @@ class PollsExporter(PagedExporterMixin):
         windows: SyncWindows,
         *,
         votes: bool = True,
+        stamps: bool = True,
     ) -> None:
         self._poll_repo = poll_repo
         self._post_repo = space_post_repo
         self._windows = windows
         self._votes = votes
+        self._stamps = stamps
 
     def without_votes(self) -> PollsExporter:
         """The record set of a requester below v_92: no ``votes``."""
         return PollsExporter(
             self._poll_repo, self._post_repo, self._windows, votes=False
+        )
+
+    def unstamped_votes(self) -> PollsExporter:
+        """The record set of a v_92 / v_93 requester: the ``votes`` list,
+        no ``vote_stamps``."""
+        return PollsExporter(
+            self._poll_repo, self._post_repo, self._windows, stamps=False
         )
 
     def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
@@ -92,7 +110,14 @@ class PollsExporter(PagedExporterMixin):
                 "meta": meta,
                 "options": options,
             }
-            if self._votes:
+            if self._votes and self._stamps:
+                stamps, cut = await self._poll_repo.list_vote_stamps(
+                    p.id, limit=MAX_VOTES_PER_POLL
+                )
+                if cut:
+                    record["votes_partial"] = True
+                record["vote_stamps"] = stamps
+            elif self._votes:
                 votes = await self._poll_repo.list_votes(
                     p.id, limit=MAX_VOTES_PER_POLL + 1
                 )
