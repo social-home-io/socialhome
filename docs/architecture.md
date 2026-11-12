@@ -1071,6 +1071,18 @@ holding the item checks that the release equals it in every applied field
 (`federation/moderation_approval.py`), against its own copy of the row for
 an edit.
 
+**Catch-up.** The host holds every pending item, so it repairs a reviewer
+household's copy: that household's §25.6 `SPACE_SYNC_BEGIN` to the host
+echoes the pending item ids it holds (`mod_pending`,
+`SpaceSyncScheduler.attach_moderation_echo` →
+`SpaceModerationFederation.pending_echo`), and the host's
+`on_sync_begin` sends that one household the pending items it lacks and
+the decisions it missed — only to a live admin / moderator seat, rate
+limited and bounded. A household whose person is promoted sends that
+BEGIN at once (`SpaceSyncScheduler.sync_with_host`). The queue never
+enters the §25.6 stream
+([`protocol/moderation.md`](./protocol/moderation.md#re-delivery-and-catch-up)).
+
 ### GFS cluster membership
 
 A GFS can run as several symmetric nodes (§24.10). The one state they do not
