@@ -15,6 +15,7 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from ..domain.federation import FederationEvent, FederationEventType
+from .inbound_retry import InboundRetry
 
 log = logging.getLogger(__name__)
 
@@ -35,10 +36,12 @@ class EventDispatchRegistry:
     just invokes.
     """
 
-    __slots__ = ("_handlers",)
+    __slots__ = ("_handlers", "_retry")
 
-    def __init__(self) -> None:
+    def __init__(self, *, retry: InboundRetry | None = None) -> None:
         self._handlers: dict[FederationEventType, list[EventHandler]] = {}
+        #: Second tries for a handler that failed for a passing reason.
+        self._retry = retry
 
     def register(
         self,
@@ -73,14 +76,19 @@ class EventDispatchRegistry:
     async def dispatch(self, event: FederationEvent) -> None:
         """Invoke all handlers registered for the event's type.
 
-        Handler exceptions are logged and swallowed so one failing
-        handler doesn't block others.
+        A handler exception never blocks the other handlers. The envelope's
+        replay id is already stored, so the sender cannot deliver it again:
+        a failure that may pass is handed to :class:`InboundRetry`, which
+        runs that one handler again shortly; any other is logged and the
+        event is dropped for that handler.
         """
         handlers = self._handlers.get(event.event_type, ())
         for handler in handlers:
             try:
                 await handler(event)
-            except Exception:
+            except Exception as exc:
+                if self._retry is not None and self._retry.hold(event, handler, exc):
+                    continue
                 log.exception(
                     "Event handler %s failed for %s",
                     getattr(handler, "__qualname__", repr(handler)),

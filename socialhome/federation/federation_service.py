@@ -119,6 +119,7 @@ from .gfs_relay_transport import (
     MailboxTarget,
     normalize_gfs_base,
 )
+from .inbound_retry import InboundRetry
 from .inbound_validator import (
     TRANSPORT_GFS_RELAY,
     InboundContext,
@@ -446,6 +447,7 @@ class FederationService:
         "_ice_servers",
         "_idempotency_cache",
         "_inbound_pipeline",
+        "_inbound_retry",
         "_key_manager",
         "_last_mesh_begin_at",
         "_mailbox_sender_check",
@@ -662,7 +664,10 @@ class FederationService:
         self._media_relay_inbound_pipeline = None  # lazy, v_87 relay frames
         # Event dispatch registry for federation event handlers.
         # Handlers register themselves via attach_* methods.
-        self._event_registry = EventDispatchRegistry()
+        # A handler that failed for a passing reason is run again shortly:
+        # the replay id is stored before dispatch, so the sender cannot.
+        self._inbound_retry = InboundRetry(gate=self._held_event_allowed)
+        self._event_registry = EventDispatchRegistry(retry=self._inbound_retry)
         self._register_default_handlers()
         # Subscribe to domain events that trigger outbound federation.
         self._bus.subscribe(
@@ -1121,10 +1126,10 @@ class FederationService:
         ):
             await self.replay_held(held, reason=f"the seat landed in {event.space_id}")
 
-    async def replay_held(self, held: FederationEvent, *, reason: str) -> None:
-        """Re-run a held inbound event through the post-decrypt gates, then
-        dispatch it — the decision is taken again with the awaited state in
-        place (a write that still doesn't qualify is refused then)."""
+    async def _held_event_allowed(self, held: FederationEvent) -> bool:
+        """Whether an event held since it was verified (a seat wait, a
+        handler's second try) still passes the post-decrypt gates — ban
+        check included — with the state as it is now."""
         payload = held.payload if isinstance(held.payload, dict) else {}
         ctx = InboundContext(
             envelope={
@@ -1133,9 +1138,15 @@ class FederationService:
             },
             event=held,
         )
-        if not await run_post_decrypt_gates(
+        return await run_post_decrypt_gates(
             ctx, steps=self.post_decrypt_gate_steps(include_ban_check=True)
-        ):
+        )
+
+    async def replay_held(self, held: FederationEvent, *, reason: str) -> None:
+        """Re-run a held inbound event through the post-decrypt gates, then
+        dispatch it — the decision is taken again with the awaited state in
+        place (a write that still doesn't qualify is refused then)."""
+        if not await self._held_event_allowed(held):
             return
         log.info(
             "replaying held %s from %s now that %s",
@@ -4270,6 +4281,8 @@ class FederationService:
         since a deferred send rides both.
         """
         self._stopping = True
+        # Held inbound events get their last try while the database is open.
+        await self._inbound_retry.stop()
         tasks = [
             t
             for t in (
