@@ -477,17 +477,20 @@ than once. Every such per-author change merges the same way
    brings it back.
 4. **A stamp is bounded.** One more than 300 s ahead of the receiver's
    clock is refused (`item_stamp`): it would win every later change.
-5. **A cutoff, where the item has one.** A poll's close (its `at`, or its
-   deadline, whichever is earlier) is the votes' cutoff: a vote stamped
-   after it counts on no household, and the newest one stamped at or
-   before it counts on every household — also when it arrives after the
-   close, for as long as an honest one can still be in flight (the
-   outbox's 7 days, `LATE_CHANGE_WINDOW_S`). A household may have applied
-   a vote before it heard of the close, so it keeps each voter's last 4
-   selections (`MAX_KEPT_CHANGES`) and falls back to the newest one before
-   the cutoff; for its own people it re-sends that one (one
-   `SPACE_POLL_VOTE_CAST` per such voter and member household — usually
-   none), so a household that only ever got the later one has it too.
+5. **An item that closes stops taking changes.** Once a household has
+   applied a poll's close (`SPACE_POLL_CLOSED`, or its deadline passed), no
+   vote and no retraction for that poll counts there any more, **whatever
+   its stamp** (owner decision 2026-11-12): a household cannot change a
+   closed poll's result by dating a vote before the close. The close
+   itself carries no stamp and only ever turns on, so a second close
+   changes nothing. A vote that was in flight when the poll closed is
+   therefore held by the households it reached in time and not by the
+   others; the host's stream settles that: once the poll is closed on the
+   host, every member household shows **the host's votes** for other
+   households' people (`apply_synced_poll` replaces them, whatever their
+   stamps), and keeps its own people's (it authored them). What can still
+   differ afterwards is only a voter's own household showing a vote of its
+   own people that the host never got in time.
 
 | Change | Key | Stamp | Removal |
 |---|---|---|---|
@@ -499,13 +502,18 @@ than once. Every such per-author change merges the same way
 
 **One kind of change is not a last-writer-wins value and keeps its own
 rule: a state that only ever advances.** A bazaar bid goes pending →
-declined → withdrawn → accepted (`domain/post.py` `BID_STATES`) and never
+withdrawn → declined → accepted (`domain/post.py` `BID_STATES`) and never
 back, so its merge is the highest state any household reported
 (`item_merge.advance`, `bazaar_repo.advance_bid`) — commutative and
-idempotent, the same in any order, and it needs no stamp: when the
-seller's decline and the bidder's withdrawal cross, every household ends
-on *withdrawn*; an accept outranks both (the sale is announced with it).
-A schedule poll's pick and a poll's close likewise only ever turn on.
+idempotent, the same in any order, and it needs no stamp. The seller's
+answer outranks the bidder's withdrawal (owner decision 2026-11-12): when
+a decline and a withdrawal cross, every household ends on *declined*, with
+the seller's reason where it is kept; when an accept and a withdrawal
+cross, on *accepted* (the sale is announced with it). The allowed
+transitions are exactly pending → withdrawn / declined / accepted,
+withdrawn → declined / accepted and declined → accepted; a declined bid is
+never withdrawn and nothing leaves accepted. A schedule poll's pick and a
+poll's close likewise only ever turn on.
 
 **Not on the rule yet.** A schedule answer and an RSVP are stamped where
 they are stored and merged by stamp in the stream, but live they still
@@ -549,12 +557,12 @@ a bid:
 
 | Record | Field | Receiver |
 |---|---|---|
-| `polls` | `vote_stamps` (v_94): `{voter: [stamp, [option_id, …]]}` — each voter's selection that counts and the stamp it was made at, a retraction included (an empty list); a vote from before stamps existed goes with the time the host wrote it; the newest `MAX_VOTES_PER_POLL` (1000) voters; `votes_partial` when cut. `meta.closed_at` (v_94): the close's stamp. Toward a v_92 / v_93 requester: `votes` (`{option_id, voter_user_id}`, the most recent 1000 voters' first, never half a voter) | creates the poll and its options when missing (it missed the live `SPACE_POLL_CREATED`), takes the host's question / deadline, closes a closed poll with the host's close stamp (never reopens; the earlier of two stamps stays), and merges everybody's votes but its own people's by the [merge rule](#merge-rule-one-rule-for-a-change-to-an-existing-item-v_94): per voter the newest stamp wins, a voter the host does not name keeps a stamped vote, a vote no stamp orders is dropped when the host's whole map lacks its voter; a closed poll is settled on the selections stamped at or before the close. A host below v_94 sends `votes`: no stamps to merge by, so the list replaces everybody's votes but its own people's as before v_94 — of a cut list only the voters it names (`apply_synced_poll`) |
+| `polls` | `vote_stamps` (v_94): `{voter: [stamp, [option_id, …]]}` — each voter's selection and the stamp it was made at, a retraction included (an empty list); a vote from before stamps existed goes with the time the host wrote it; the newest `MAX_VOTES_PER_POLL` (1000) voters; `votes_partial` when cut. Toward a v_92 / v_93 requester: `votes` (`{option_id, voter_user_id}`, the most recent 1000 voters' first, never half a voter) | creates the poll and its options when missing (it missed the live `SPACE_POLL_CREATED`), takes the host's question / deadline, closes a closed poll (never reopens), and takes everybody's votes but its own people's by the [merge rule](#merge-rule-one-rule-for-a-change-to-an-existing-item-v_94). **Open poll**: per voter the newest stamp wins; a voter the host's whole map lacks keeps a stamped vote (the host may not have heard it) unless the stamp is older than the 30-day tombstone horizon (then it is a retraction this household missed and the host has forgotten); a vote no stamp orders is dropped at once. **Closed on the host**: the host's map replaces them, whatever the stamps (a cut map only the voters it names). **Closed here but not yet on the host**: nothing is taken. A host below v_94 sends `votes`: no stamps to merge by, so the list replaces everybody's votes but its own people's as before v_94 (`apply_synced_poll`) |
 | `schedules` | `responses`: `{slot_id, user_id, availability, responded_at}`, the newest `MAX_RESPONSES_PER_SCHEDULE` (1000); `responses_partial` when cut; `responses_at` (when the host read them); `finalized_slot_id` | everybody's answers but its own people's, **last writer wins on `responded_at`**: a held answer is replaced only by a newer one, and dropped only when the list is whole and the held one is not newer than `responses_at`; the pick (never reverts) (`apply_synced_schedule_state`) |
 | `calendar` | `rsvps`: `{user_id, occurrence_at, status, updated_at}`, the latest `MAX_RSVPS_PER_EVENT` (500) occurrences' worth; `rsvps_partial` when cut; `rsvps_at` (when the host read them) | everybody's RSVPs but its own people's (bar the organiser transitions above), **last writer wins on `updated_at`**: a held RSVP is replaced only by a newer one, and dropped only when the list is whole and the held one is not newer than `rsvps_at` — an RSVP that reached this household live after the host read its list stays |
 | `posts` | `reaction_stamps`: `{"user\0emoji": [stamp, added]}`, at most `MAX_SYNCED_REACTION_STAMPS` (1024): removals first, then adds, each newest first | each stamp passes the live rules first — no more than 300 s ahead of the receiver's clock (`stored_stamp`; a stamp years ahead would win every later removal) and the emoji length rule (`reaction_emoji_ok(legacy=True)`: NFC, ≤ 32 chars — a reaction from before v_93 may be free text) — or is dropped; then merged last writer wins per user and emoji into a post it holds (a reaction or a removal it missed lands, a newer one it holds stays); a removal travels only as a stamp (kept 30 days): a reaction whose add this household applied stays even when the host's sets lack it — the host may never have received it (v_93); only a reaction NO stamp orders here follows the host's reaction sets (`merge_reaction_stamps`); a person's reactions past the cap of five show as their five newest; its own people's reactions are never touched |
 | `comments` | (`edited_at`, unchanged) | a comment held here takes the host's edit when newer (last writer wins on `edited_at`, like `SPACE_COMMENT_UPDATED`) — before, a held comment was skipped |
-| `bazaar` | `bids`: `{id, bidder_user_id, amount, message, accepted, rejected, withdrawn, created_at}`, the newest `MAX_BIDS_PER_LISTING` (200) — never the seller's decline reason (the bidder's alone) | a bid it lacks is added (without a reason, stamped with its arrival here like the live bid — never the host's `created_at`), a held one only ever **advances** (pending → declined → withdrawn → accepted: the higher of the held and the host's state, see the [merge rule](#merge-rule-one-rule-for-a-change-to-an-existing-item-v_94)); its own people's bids are never added or withdrawn from the stream, only accepted / declined (`apply_synced_bids`) |
+| `bazaar` | `bids`: `{id, bidder_user_id, amount, message, accepted, rejected, withdrawn, created_at}`, the newest `MAX_BIDS_PER_LISTING` (200) — never the seller's decline reason (the bidder's alone) | a bid it lacks is added (without a reason, stamped with its arrival here like the live bid — never the host's `created_at`), a held one only ever **advances** (pending → withdrawn → declined → accepted: the higher of the held and the host's state, see the [merge rule](#merge-rule-one-rule-for-a-change-to-an-existing-item-v_94)); its own people's bids are never added or withdrawn from the stream, only accepted / declined (`apply_synced_bids`) |
 | `timetables_deleted` | new resource: `{id, created_by, created_at}` | tombstones a held timetable; an id never held gets a stub only when owner-bound to `created_by` in this space |
 
 All of it is gated on the requester's version
@@ -563,7 +571,7 @@ a requester below v_92 gets the older record shapes and no
 `timetables_deleted`, so it is **sync line 92** (`SYNC_RECORD_LINES`, no
 `SYNC_SHAPE_VERSION` bump: a household crossing v_92 gets one full stream;
 no older one does).
-`vote_stamps` (in place of `votes`) and `meta.closed_at` go to a requester
+`vote_stamps` (in place of `votes`) goes to a requester
 at v_94 (`FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS`,
 `PollsExporter.unstamped_votes`) — **sync line 94**: a household crossing
 v_94 gets one full stream, and with it the stamps of every poll.
@@ -620,7 +628,7 @@ module, `tests/federation/sync/space/test_sync_item_state.py`.
 | Comments (create) | `SPACE_COMMENT_CREATED` | `comments` (incremental) | yes | `comments_deleted` | |
 | Comment edits | `SPACE_COMMENT_UPDATED` | `comments` (v_92 receiver, incremental) | — | — | last writer wins on `edited_at` |
 | Polls (question, options, settings) | `SPACE_POLL_CREATED` (the whole definition, after its post) | `polls` (v_92 receiver) | yes, after its post | with the post | created once on every path — a held poll is never rewritten |
-| Poll votes, closure | `SPACE_POLL_VOTE_CAST`, `SPACE_POLL_CLOSED` (both stamped `at`, v_94) | `polls.vote_stamps` / `meta.closed` + `closed_at` (v_94, incremental; `polls.votes` toward v_92 / v_93) | — | a retraction is a stamp (kept 30 days) | merge rule: the newest stamp wins, the close is the cutoff |
+| Poll votes, closure | `SPACE_POLL_VOTE_CAST` (stamped `at`, v_94), `SPACE_POLL_CLOSED` | `polls.vote_stamps` / `meta.closed` (v_94, incremental; `polls.votes` toward v_92 / v_93) | — | a retraction is a stamp (kept 30 days) | merge rule: the newest stamp wins while open; nothing counts after the close, then the host's votes are the result |
 | Schedule polls (slots) | `SPACE_SCHEDULE_CREATED` | `schedules` | — | with the post | |
 | Schedule answers, pick | `SPACE_SCHEDULE_RESPONSE_UPDATED`, `_FINALIZED` | `schedules.responses` / `finalized_slot_id` (v_92, incremental since migration 0146) | — | a retraction is absent from the host's list | |
 | Calendar events | `SPACE_CALENDAR_EVENT_*` | `calendar` (incremental) | yes | `calendar_deleted` | |

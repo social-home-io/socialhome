@@ -268,11 +268,11 @@ that published the post finishes its poll.
 `{post_id, voter_user_id, option_ids: [...], at}`; an empty list is a
 retraction — and `at` (v_94), the stamp the voter's household wrote with
 it (tz-aware ISO 8601: its clock, never at or before the voter's previous
-stamp). `SPACE_POLL_CLOSED` `{post_id, at}` ends the voting window; its
-`at` (v_94) is the close's stamp. Both merge by the one merge rule
+stamp). Votes merge by the one merge rule
 ([sync.md](./sync.md#merge-rule-one-rule-for-a-change-to-an-existing-item-v_94)): the newest stamp wins, a retraction is kept as
-a stamp, the close is the votes' cutoff. A household below v_94 sends no
-`at`; its vote or close is stamped with its envelope's timestamp.
+a stamp. A household below v_94 sends no `at`; its vote is stamped with
+its envelope's timestamp. `SPACE_POLL_CLOSED` `{post_id}` ends the voting
+window; it carries no stamp and only ever turns on.
 
 A member household applies them like this (`SpaceContentInboundHandlers`):
 
@@ -295,19 +295,19 @@ A member household applies them like this (`SpaceContentInboundHandlers`):
   must belong to that poll and a single-choice poll takes at most one
   (`set_votes_in_space`, one transaction); a refused vote leaves the
   earlier one. `at` more than 300 s ahead of the receiver's clock (or
-  malformed) is refused. A closed poll's result stands, on every
-  household alike: **a vote or retraction stamped after the close (or
-  the deadline) counts nowhere; one stamped at or before it counts
-  everywhere** — also when it was queued and arrives after
-  `SPACE_POLL_CLOSED`, for up to the outbox's 7 days. Locally a closed
-  poll takes no vote (`PollService.cast_vote`).
-- **Close** — the close's `at` is that cutoff (the earlier of two stays).
-  A household that had not heard of the close may have applied a vote
-  made after it: when the close lands, that voter is back on the newest
-  selection stamped before it (each household keeps a voter's last 4),
-  and the voter's own household re-sends that one — one
-  `SPACE_POLL_VOTE_CAST` per such voter and member household, usually
-  none — so a household that only ever got the later vote has it too.
+  malformed) is refused. **Once this household has applied the close —
+  `SPACE_POLL_CLOSED`, or the deadline passed — no vote and no retraction
+  counts here, whatever its stamp** (owner decision 2026-11-12; the local
+  `PollService.cast_vote` rule): a closed poll's result stands, and a
+  household cannot change it by dating a vote before the close.
+- **Close** — only from the household of the poll's author; it only ever
+  turns on, so a second close (or one carrying an early `at`) changes
+  nothing and erases no vote. A vote in flight when the poll closed counts
+  on the households it reached before the close and not on the others;
+  the host's stream then settles it (below): every household shows the
+  host's votes for other households' people. **Known limit:** the voter's
+  own household keeps showing such a vote of its own people even when the
+  host never got it in time.
 - **Arrival order.** With several delivery paths per space a vote from one
   household routinely reaches a third before the author's definition, and
   the definition can overtake its post. Nothing resends an event that was
@@ -329,10 +329,7 @@ A member household applies them like this (`SpaceContentInboundHandlers`):
   (`poll-vote:{space}:{post}:{voter}`, `supersede_key`): per peer at most
   one vote of that voter on that poll waits in the outbox — it no longer
   carries correctness, it keeps a flood of changes to one slot. The
-  grouped mailbox rows of v_91 follow the same key. **Known limit:** the
-  stamp is the voter's household's clock; a household whose clock runs
-  more than a few seconds ahead can stamp a vote after a close that had
-  not happened yet for everyone else — that vote then counts nowhere.
+  grouped mailbox rows of v_91 follow the same key.
 - **Edit / delete.** A poll cannot be edited — locally either: only the
   post's author attaches one, and a post that has a poll takes no second
   (`409 POLL_EXISTS`), so no household ever rewrites option text under
@@ -359,8 +356,7 @@ typically < 1 KB) per member household; one vote = one
 household — unchanged from before, when both were already sent but could
 not be applied. No new event type: an older household ignores the
 definition (it had no handler) and heals from the host's v_92 stream as
-before. v_94 adds only the two `at` fields (and, after a close that sets a
-voter back, one re-sent vote per such voter and member household).
+before. v_94 adds only the vote's `at` field.
 
 Only the author's household closes a poll — by hand, or when its
 `closes_at` passes: `PollDeadlineScheduler`
@@ -384,8 +380,10 @@ household already created and federated.
 household on the host's polls: the `polls` record creates a poll and its
 options it lacks, carries each voter's selection with its stamp
 (`vote_stamps`, ≤ 1000 voters, `votes_partial` when cut — merged per
-voter by the same rule as a live vote; a v_92 / v_93 household gets the
-plain `votes` list) and the closure with its stamp; the `schedules`
+voter by the same rule as a live vote while the poll is open; once it is
+closed on the host, the host's votes replace other households' people's
+votes on every member household; a v_92 / v_93 household gets the plain
+`votes` list) and the closure; the `schedules`
 record carries the answers (`responses`, ≤ 1000, last writer wins on
 `responded_at`) and the pick (`finalized_slot_id`). Taken from the host
 only, never over this household's own people's votes and answers; a cut

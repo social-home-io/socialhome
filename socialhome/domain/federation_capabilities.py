@@ -1530,17 +1530,16 @@ from __future__ import annotations
 #:   items** (owner decision 2026-11-12; ``domain/item_merge.py``): a stamp
 #:   per (item, author[, key]), the newest wins, a removal is kept as a
 #:   stamp. Poll votes move onto it: ``SPACE_POLL_VOTE_CAST`` gains ``at``
-#:   (the stamp the voter's household wrote with the selection) and
-#:   ``SPACE_POLL_CLOSED`` gains ``at`` (the close's stamp, the votes'
-#:   cutoff: a vote stamped after it counts on no household, the newest
-#:   one stamped at or before it on every household — also when it arrives
-#:   after the close, for up to the outbox's 7 days). Both fields are
-#:   additive and sent to every member household. The §25.6 ``polls``
-#:   record toward a v_94 requester carries ``vote_stamps`` (``{voter:
-#:   [stamp, [option_id, …]]}``, ≤ 1000 voters) in place of ``votes`` and
-#:   ``meta.closed_at``; the receiver merges per voter instead of replacing
-#:   the list (migration 0146). Sync line 94.
-#:   **Fallback**: a vote or a close from a household below v_94 carries no
+#:   (the stamp the voter's household wrote with the selection; additive,
+#:   sent to every member household). Once a household has applied a
+#:   poll's close no vote or retraction counts there, whatever its stamp;
+#:   ``SPACE_POLL_CLOSED`` is unchanged (no stamp, it only turns on). The
+#:   §25.6 ``polls`` record toward a v_94 requester carries
+#:   ``vote_stamps`` (``{voter: [stamp, [option_id, …]]}``, ≤ 1000 voters)
+#:   in place of ``votes``: merged per voter while the poll is open; once
+#:   it is closed on the host, the host's votes are what every household
+#:   shows for other households' people (migration 0146). Sync line 94.
+#:   **Fallback**: a vote from a household below v_94 carries no
 #:   ``at`` and is stamped with its envelope's timestamp (so it is ordered
 #:   by when it was sent, never dropped); a requester below v_94 keeps
 #:   getting the ``votes`` list; a host below v_94 sends ``votes``, which a
@@ -2242,9 +2241,9 @@ class FederationCapability:
     #: v_94 — a §25.6 requester at or above it is streamed a poll's
     #: ``vote_stamps`` (each voter's selection with its stamp) instead of
     #: the ``votes`` list, and merges them by the one rule
-    #: (``domain/item_merge.py``). Live, the stamps (``at`` on
-    #: ``SPACE_POLL_VOTE_CAST`` / ``SPACE_POLL_CLOSED``) are additive and
-    #: go to everyone. A ``SYNC_RECORD_LINES`` entry (94).
+    #: (``domain/item_merge.py``). Live, the stamp (``at`` on
+    #: ``SPACE_POLL_VOTE_CAST``) is additive and goes to everyone. A
+    #: ``SYNC_RECORD_LINES`` entry (94).
     MIN_FOR_ITEM_MERGE_STAMPS = 94
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant

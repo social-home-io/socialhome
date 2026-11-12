@@ -83,26 +83,28 @@ member household seated through an invite link receives them).
 - a bid's decline only from the household seating the listing's seller
   (`acts_for(any_role=True)`, as for an offer's answer), for a bid this
   household holds in the envelope's space. A bid only ever **advances**
-  — pending → declined → withdrawn → accepted (`BID_STATES`): every
+  — pending → withdrawn → declined → accepted (`BID_STATES`): every
   household merges what it hears to the highest state
-  (`bazaar_repo.advance_bid`), so a decline that crosses the bidder's
-  withdrawal ends *withdrawn* everywhere, an accept that crosses it ends
-  *accepted* everywhere, whichever arrives first, and neither a replay
-  nor a second decline swaps the reason. It is a state machine, not a
-  last-writer-wins value, so it carries no stamp (see the merge rule in
+  (`bazaar_repo.advance_bid`), the same whichever arrives first. It is a
+  state machine, not a last-writer-wins value, so it carries no stamp
+  (see the merge rule in
   [sync.md](./sync.md#merge-rule-one-rule-for-a-change-to-an-existing-item-v_94)).
-  The reason is kept only where the bidder is one of the household's own
-  people;
+  The seller's answer outranks the bidder's withdrawal (owner decision
+  2026-11-12): a decline that crosses a withdrawal ends *declined*
+  everywhere and keeps the seller's reason; an accept that crosses one
+  ends *accepted* everywhere. Neither a replay nor a second decline swaps
+  the reason. The reason is kept only where the bidder is one of the
+  household's own people;
 - a bid's withdrawal only from the household seating the bidder
   (`acts_for(any_role=True)`), and only as the bidder's own household
-  allows it (`BazaarListing.is_open`): a bid not accepted or withdrawn
-  yet (a declined one still takes it — the withdrawal outranks the
-  decline), on a listing still `active` and before its `end_time` — past
-  it the high bid is the winner, even before the expiry sweep closes the
-  listing, so nobody backs out of a win. A replay or a second withdrawal
-  is a no-op. **Known limit:** a withdrawal that races the listing's end
-  is refused by a household that already saw it close and taken by one
-  that had not (a withdrawal carries no stamp). The high bid recomputes everywhere
+  allows it (`BazaarListing.is_open`): a pending bid — one the seller
+  declined or accepted is never withdrawn — on a listing still `active`
+  and before its `end_time` — past it the high bid is the winner, even
+  before the expiry sweep closes the listing, so nobody backs out of a
+  win. A replay or a second withdrawal is a no-op. **Known limit:** a
+  withdrawal that races the listing's end is refused by a household that
+  already saw it close and taken by one that had not (a withdrawal
+  carries no stamp). The high bid recomputes everywhere
   (`highest_bid` skips a withdrawn bid); nobody is notified, open
   listings refresh (`bazaar.bid_withdrawn` WebSocket frame).
 
