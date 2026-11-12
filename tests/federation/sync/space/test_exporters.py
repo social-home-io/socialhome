@@ -71,6 +71,7 @@ from socialhome.repositories.space_zone_repo import SqliteSpaceZoneRepo
 from socialhome.repositories.sticky_repo import SqliteStickyRepo
 from socialhome.repositories.task_repo import SqliteSpaceTaskRepo
 from socialhome.repositories.timetable_repo import SqliteSpaceTimetableRepo
+from tests.poll_votes import cast
 
 
 class _NoSpaces:
@@ -622,13 +623,24 @@ async def test_polls_exporter_walks_posts_with_polls():
         async def list_votes(self, post_id, *, limit=None):
             return [{"option_id": "opt-a", "voter_user_id": "u-1"}]
 
-    recs = await PollsExporter(_Polls(), _Posts(), _WINDOWS).list_records("sp-1")
+        async def list_vote_stamps(self, post_id, *, limit):
+            return {"u-1": ["2026-11-12T10:00:00+00:00", ["opt-a"]]}, False
+
+    exporter = PollsExporter(_Polls(), _Posts(), _WINDOWS)
+    recs = await exporter.list_records("sp-1")
     assert recs[0]["post_id"] == "p-1"
     assert recs[0]["meta"]["question"] == "Pizza?"
     assert recs[0]["options"][0]["id"] == "opt-a"
-    # v_92: who voted for what — every member household sees it live.
-    assert recs[0]["votes"] == [{"option_id": "opt-a", "voter_user_id": "u-1"}]
-    assert "votes_partial" not in recs[0]
+    # v_94: each voter's selection with its stamp, no plain list.
+    assert recs[0]["vote_stamps"] == {"u-1": ["2026-11-12T10:00:00+00:00", ["opt-a"]]}
+    assert "votes" not in recs[0] and "votes_partial" not in recs[0]
+    # v_92 / v_93: who voted for what, unstamped.
+    (old,) = await exporter.unstamped_votes().list_records("sp-1")
+    assert old["votes"] == [{"option_id": "opt-a", "voter_user_id": "u-1"}]
+    assert "vote_stamps" not in old and "votes_partial" not in old
+    # Below v_92: neither.
+    (older,) = await exporter.without_votes().list_records("sp-1")
+    assert "votes" not in older and "vote_stamps" not in older
 
 
 async def test_polls_exporter_cuts_votes_at_a_whole_voter(monkeypatch):
@@ -658,9 +670,17 @@ async def test_polls_exporter_cuts_votes_at_a_whole_voter(monkeypatch):
         async def list_votes(self, post_id, *, limit=None):
             return held[:limit]
 
-    (rec,) = await PollsExporter(_Polls(), _Posts(), _WINDOWS).list_records("sp-1")
+        async def list_vote_stamps(self, post_id, *, limit):
+            assert limit == 3
+            return {"u-1": ["2026-11-12T10:00:00+00:00", ["a", "b"]]}, True
+
+    exporter = PollsExporter(_Polls(), _Posts(), _WINDOWS)
+    (rec,) = await exporter.unstamped_votes().list_records("sp-1")
     assert rec["votes_partial"] is True
     assert rec["votes"] == held[:2]
+    # The v_94 stamp map is cut by the repo, per voter, and marked the same.
+    (rec,) = await exporter.list_records("sp-1")
+    assert rec["votes_partial"] is True and list(rec["vote_stamps"]) == ["u-1"]
 
 
 async def test_polls_exporter_skips_posts_without_polls():
@@ -1029,8 +1049,8 @@ async def test_covered_exporters_stream_only_rows_changed_since_a_stamp(db):
     mark = await _seq(db)
 
     await posts.edit("p-edit", "edited", space_id="sp")
-    assert await polls.set_votes_in_space(
-        space_id="sp", post_id="p-vote", option_ids=["o-1"], voter_user_id="u2"
+    assert await cast(
+        polls, space_id="sp", post_id="p-vote", option_ids=["o-1"], voter_user_id="u2"
     )
     await posts.soft_delete("p-gone", space_id="sp")
     await posts.soft_delete_comment("k-gone", space_id="sp")

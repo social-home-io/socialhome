@@ -104,6 +104,7 @@ from socialhome.federation.sync.space.exporters import (
 from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
 from socialhome.federation.sync.space.window import SyncWindows
 from socialhome.infrastructure.event_bus import EventBus
+from tests.poll_votes import cast, now_stamp
 
 HOST = "host-household"
 SPACE = "sp-coverage"
@@ -439,8 +440,12 @@ async def _poll(h: Home) -> None:
             {"id": "opt-b", "text": "Soup", "position": 1},
         ],
     )
-    await h.repos.space_poll.set_votes_in_space(
-        space_id=SPACE, post_id="post-1", option_ids=["opt-a"], voter_user_id=ANNA
+    await cast(
+        h.repos.space_poll,
+        space_id=SPACE,
+        post_id="post-1",
+        option_ids=["opt-a"],
+        voter_user_id=ANNA,
     )
 
 
@@ -457,13 +462,21 @@ async def _view_poll(h: Home) -> Any:
 
 
 async def _vote_and_close(h: Home) -> None:
-    await h.repos.space_poll.set_votes_in_space(
-        space_id=SPACE, post_id="post-1", option_ids=["opt-b"], voter_user_id=CARL
+    await cast(
+        h.repos.space_poll,
+        space_id=SPACE,
+        post_id="post-1",
+        option_ids=["opt-b"],
+        voter_user_id=CARL,
     )
-    await h.repos.space_poll.set_votes_in_space(
-        space_id=SPACE, post_id="post-1", option_ids=["opt-b"], voter_user_id=ANNA
+    await cast(
+        h.repos.space_poll,
+        space_id=SPACE,
+        post_id="post-1",
+        option_ids=["opt-b"],
+        voter_user_id=ANNA,
     )
-    await h.repos.space_poll.close_in_space("post-1", space_id=SPACE)
+    await h.repos.space_poll.close_in_space("post-1", space_id=SPACE, stamp=now_stamp())
 
 
 async def _schedule(h: Home) -> None:

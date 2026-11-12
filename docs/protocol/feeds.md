@@ -265,9 +265,14 @@ attached later (`POST …/posts/{pid}/poll`), or when a moderation approval
 that published the post finishes its poll.
 
 `SPACE_POLL_VOTE_CAST` carries one voter's **whole selection** —
-`{post_id, voter_user_id, option_ids: [...]}`; an empty list is a
-retraction — and replaces that voter's earlier votes on the poll.
-`SPACE_POLL_CLOSED` ends the voting window.
+`{post_id, voter_user_id, option_ids: [...], at}`; an empty list is a
+retraction — and `at` (v_94), the stamp the voter's household wrote with
+it (tz-aware ISO 8601: its clock, never at or before the voter's previous
+stamp). `SPACE_POLL_CLOSED` `{post_id, at}` ends the voting window; its
+`at` (v_94) is the close's stamp. Both merge by the one merge rule
+([sync.md](./sync.md#merge-rule-one-rule-for-a-change-to-an-existing-item-v_94)): the newest stamp wins, a retraction is kept as
+a stamp, the close is the votes' cutoff. A household below v_94 sends no
+`at`; its vote or close is stamped with its envelope's timestamp.
 
 A member household applies them like this (`SpaceContentInboundHandlers`):
 
@@ -286,13 +291,23 @@ A member household applies them like this (`SpaceContentInboundHandlers`):
   keeps it, so a re-send, a resume replay or the §25.6 stream never
   rewrites a poll people voted in. One transaction proves the post is a
   live post of the routed space (`create_poll_in_space`).
-- **Vote** — only from the household seating the voter, and only while
-  the poll is open: a closed poll, or one past its `closes_at`, takes no
-  vote and no retraction (the local `PollService.cast_vote` rule — a
-  closed poll's result stands). Every option must belong to that poll and
-  a single-choice poll takes at most one (`set_votes_in_space`, one
-  transaction); a refused vote leaves the earlier one. A vote that raced
-  the close stays on the voter's own household only.
+- **Vote** — only from the household seating the voter. Every option
+  must belong to that poll and a single-choice poll takes at most one
+  (`set_votes_in_space`, one transaction); a refused vote leaves the
+  earlier one. `at` more than 300 s ahead of the receiver's clock (or
+  malformed) is refused. A closed poll's result stands, on every
+  household alike: **a vote or retraction stamped after the close (or
+  the deadline) counts nowhere; one stamped at or before it counts
+  everywhere** — also when it was queued and arrives after
+  `SPACE_POLL_CLOSED`, for up to the outbox's 7 days. Locally a closed
+  poll takes no vote (`PollService.cast_vote`).
+- **Close** — the close's `at` is that cutoff (the earlier of two stays).
+  A household that had not heard of the close may have applied a vote
+  made after it: when the close lands, that voter is back on the newest
+  selection stamped before it (each household keeps a voter's last 4),
+  and the voter's own household re-sends that one — one
+  `SPACE_POLL_VOTE_CAST` per such voter and member household, usually
+  none — so a household that only ever got the later vote has it too.
 - **Arrival order.** With several delivery paths per space a vote from one
   household routinely reaches a third before the author's definition, and
   the definition can overtake its post. Nothing resends an event that was
@@ -304,18 +319,20 @@ A member household applies them like this (`SpaceContentInboundHandlers`):
   household misses anyway (offline past the outbox) heals from the host's
   stream, below.
 - **Vote order.** A vote is the voter's whole selection — state, not
-  history — and the receiver keeps no stamp, so the sender guarantees the
-  order: `SPACE_POLL_VOTE_CAST` has a latest-only outbox key
-  (`poll-vote:{space}:{post}:{voter}`, `supersede_key`). Per peer at most
-  one vote of that voter on that poll waits in the outbox; a newer one
-  replaces it, and a newer one delivered live drops it — so a vote queued
-  while a household was unreachable can never land after a later one (on
-  the host that would roll the voter back for everyone through its
-  stream). The grouped mailbox rows of v_91 follow the same key. What is
-  left: two votes of one voter seconds apart that travel different
-  transports to the same household (direct and mesh-routed) are applied in
-  arrival order; a per-vote stamp that survives a retraction would need
-  new persistent state and is left for a follow-up.
+  history — ordered by its stamp (v_94, `space_polls.vote_stamps_json`,
+  migration 0146): a receiver applies it only when it is newer than the
+  one that stands for that voter, so an outbox retry already in flight,
+  two votes on different transports (direct and mesh-routed) and a
+  re-delivery end the same on every household, and a retraction (kept as
+  a stamp for 30 days) is not undone by a late copy of the vote it took
+  back. The latest-only outbox key stays
+  (`poll-vote:{space}:{post}:{voter}`, `supersede_key`): per peer at most
+  one vote of that voter on that poll waits in the outbox — it no longer
+  carries correctness, it keeps a flood of changes to one slot. The
+  grouped mailbox rows of v_91 follow the same key. **Known limit:** the
+  stamp is the voter's household's clock; a household whose clock runs
+  more than a few seconds ahead can stamp a vote after a close that had
+  not happened yet for everyone else — that vote then counts nowhere.
 - **Edit / delete.** A poll cannot be edited — locally either: only the
   post's author attaches one, and a post that has a poll takes no second
   (`409 POLL_EXISTS`), so no household ever rewrites option text under
@@ -338,10 +355,12 @@ poll.
 
 **Cost.** One poll = one `SPACE_POLL_CREATED` (≤ ~11 KB at the caps,
 typically < 1 KB) per member household; one vote = one
-`SPACE_POLL_VOTE_CAST` (~200 B) per member household — unchanged from
-before, when both were already sent but could not be applied. No new
-event type, no version bump: an older household ignores the definition
-(it had no handler) and heals from the host's v_92 stream as before.
+`SPACE_POLL_VOTE_CAST` (~200 B, + ~40 B for `at` since v_94) per member
+household — unchanged from before, when both were already sent but could
+not be applied. No new event type: an older household ignores the
+definition (it had no handler) and heals from the host's v_92 stream as
+before. v_94 adds only the two `at` fields (and, after a close that sets a
+voter back, one re-sent vote per such voter and member household).
 
 Only the author's household closes a poll — by hand, or when its
 `closes_at` passes: `PollDeadlineScheduler`
@@ -361,13 +380,17 @@ household's people who answered (`poll_scheduled`) through a local-only
 calendar bridge would add a second entry next to the one the organiser's
 household already created and federated.
 
-**Catch-up (v_92).** The host's §25.6 stream converges a member household
-on the host's polls: the `polls` record creates a poll and its options it
-lacks, carries the votes (`votes`, ≤ 1000, `votes_partial` when cut) and
-the closure; the `schedules` record carries the answers (`responses`,
-≤ 1000, last writer wins on `responded_at`) and the pick
-(`finalized_slot_id`). Taken from the host only, never over this
-household's own people's votes and answers; a cut list deletes nothing. See [sync.md](./sync.md#coverage--every-space-item-type).
+**Catch-up (v_92, v_94).** The host's §25.6 stream converges a member
+household on the host's polls: the `polls` record creates a poll and its
+options it lacks, carries each voter's selection with its stamp
+(`vote_stamps`, ≤ 1000 voters, `votes_partial` when cut — merged per
+voter by the same rule as a live vote; a v_92 / v_93 household gets the
+plain `votes` list) and the closure with its stamp; the `schedules`
+record carries the answers (`responses`, ≤ 1000, last writer wins on
+`responded_at`) and the pick (`finalized_slot_id`). Taken from the host
+only, never over this household's own people's votes and answers; a cut
+list deletes nothing. Votes, answers and the close re-stamp their post,
+so the 30-minute incremental session carries them. See [sync.md](./sync.md#coverage--every-space-item-type).
 
 Votes are encrypted: the vote's `option_ids` and the voter's `user_id`
 stay inside the space's encrypted payload. GFS cannot tally votes even on public spaces.

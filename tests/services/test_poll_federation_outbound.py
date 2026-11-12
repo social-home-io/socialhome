@@ -189,3 +189,30 @@ async def test_a_peers_poll_and_vote_are_not_echoed_back(env):
         )
     )
     assert fed.broadcasts == []
+
+
+async def test_a_vote_and_a_close_carry_their_stamp(env):
+    """v_94: the stamp the household wrote with the change travels as
+    ``at`` — what every receiver orders it by. Without one (a household
+    poll's event never gets here; a stamp could not be read) the field is
+    left out and the receiver falls back to the envelope's timestamp."""
+    bus, fed = env
+    at = "2026-11-12T09:00:00.250000+00:00"
+    await bus.publish(
+        PollVoted(
+            post_id="p1", voter_user_id="u1", option_ids=(), space_id="sp-A", at=at
+        )
+    )
+    await bus.publish(PollClosed(post_id="p1", space_id="sp-A", at=at))
+    await bus.publish(PollClosed(post_id="p1", space_id="sp-A"))
+    (_s, vote_type, vote), (_s2, _t, closed), (_s3, _t3, bare) = fed.broadcasts
+    assert vote_type is FederationEventType.SPACE_POLL_VOTE_CAST
+    assert vote == {
+        "post_id": "p1",
+        "voter_user_id": "u1",
+        "option_ids": [],
+        "space_id": "sp-A",
+        "at": at,
+    }
+    assert closed == {"post_id": "p1", "space_id": "sp-A", "at": at}
+    assert bare == {"post_id": "p1", "space_id": "sp-A"}

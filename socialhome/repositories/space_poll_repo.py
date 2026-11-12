@@ -99,14 +99,17 @@ def _encode_votes(stamps: dict[str, list[list]]) -> str | None:
 def _cutoff(poll, now: datetime | None = None) -> tuple[bool, str | None]:
     """``(closed, cutoff)`` of a ``space_polls`` row: is it closed (by its
     author, or past its deadline), and the stamp after which no vote counts
-    — the close's or the deadline, whichever is earlier. A poll closed
-    before closes were stamped has none."""
+    — the close's or the deadline, whichever is earlier. A poll closed by
+    hand before closes were stamped (no ``closed_at``, its deadline — if
+    any — still ahead) has none: nobody knows when it closed."""
     deadline = to_stored(poll["closes_at"])
-    marks = [m for m in (poll["closed_at"] if poll["closed"] else None, deadline) if m]
-    closed = bool(poll["closed"]) or (
-        deadline is not None and deadline <= stamp_to_db(now or datetime.now(UTC))
+    past_deadline = deadline is not None and deadline <= stamp_to_db(
+        now or datetime.now(UTC)
     )
-    return closed, (min(marks) if marks else None)
+    if poll["closed"] and not poll["closed_at"]:
+        return True, (deadline if past_deadline else None)
+    marks = [m for m in (poll["closed_at"], deadline) if m]
+    return bool(poll["closed"]) or past_deadline, (min(marks) if marks else None)
 
 
 def _poll_row(conn, post_id: str, space_id: str | None = None):
@@ -1066,11 +1069,14 @@ class SqliteSpacePollRepo:
         [stamp, [option_id, …]]}``, stamps in the stored shape) is taken per
         voter when newer than what is held, a retraction included; a voter
         the host does not name keeps a stamped vote (the host may not have
-        heard it). Only a voter NO stamp orders here follows the host's
-        list: ``votes`` (``(option_id, voter)`` pairs, what a host below
-        v_94 sends) replaces such a voter's rows, and a whole list (not
-        ``votes_partial``) that lacks one drops them. ``None`` for both —
-        a host below v_92 — keeps the held votes.
+        heard it), and only a vote NO stamp orders (cast before stamps
+        existed) is dropped when the host's whole map (not
+        ``votes_partial``) lacks its voter. ``votes`` (``(option_id,
+        voter)`` pairs) is what a host below v_94 sends instead: without
+        stamps there is nothing to merge by, so it replaces those voters'
+        votes as it did before v_94 (of a cut list only the voters it
+        names). ``None`` for both — a host below v_92 — keeps the held
+        votes.
 
         A closed poll is settled: each voter keeps the selection stamped at
         or before the close. Only real differences are written, so
@@ -1126,7 +1132,7 @@ class SqliteSpacePollRepo:
             poll = _poll_row(conn, post_id)
             is_closed, cutoff = _cutoff(poll)
             stamps = _decode_votes(poll["vote_stamps_json"])
-            touched: set[str] = set()
+            dirty = False
             if votes is not None or vote_stamps is not None:
                 mine = {
                     str(r["id"])
@@ -1135,54 +1141,56 @@ class SqliteSpacePollRepo:
                         (post_id,),
                     ).fetchall()
                 }
-                named: set[str] = set()
-                if vote_stamps is not None:
-                    for voter, (at, picked) in sorted(vote_stamps.items()):
-                        named.add(voter)
-                        chosen = list(dict.fromkeys(picked))
-                        if (
-                            not voter
-                            or voter in keep_voters
-                            or any(o not in mine for o in chosen)
-                            or (len(chosen) > 1 and not poll["allow_multiple"])
-                            or (cutoff is not None and at > cutoff)
-                        ):
-                            continue
-                        if record_change(stamps.setdefault(voter, []), at, chosen):
-                            touched.add(voter)
-                else:
-                    listed: dict[str, list[str]] = {}
-                    for option_id, voter in votes or ():
-                        named.add(voter)
-                        if voter and voter not in keep_voters:
-                            picked = listed.setdefault(voter, [])
-                            if option_id in mine:
-                                picked.append(option_id)
-                    for voter, picked in sorted(listed.items()):
-                        if voter not in stamps:
-                            _write_selection(conn, post_id, voter, picked)
+                voting = {
+                    r["voter_user_id"]
+                    for r in conn.execute(
+                        "SELECT DISTINCT pv.voter_user_id FROM space_poll_votes pv"
+                        " JOIN space_poll_options po ON po.id = pv.option_id"
+                        " WHERE po.post_id=?",
+                        (post_id,),
+                    ).fetchall()
+                }
+            if vote_stamps is not None:
+                for voter, (at, picked) in sorted(vote_stamps.items()):
+                    chosen = list(dict.fromkeys(picked))
+                    if (
+                        not voter
+                        or voter in keep_voters
+                        or any(o not in mine for o in chosen)
+                        or (len(chosen) > 1 and not poll["allow_multiple"])
+                        or (cutoff is not None and at > cutoff)
+                    ):
+                        continue
+                    entries = stamps.setdefault(voter, [])
+                    if record_change(entries, at, chosen):
+                        dirty = True
+                        entry = standing(entries, cutoff)
+                        if entry is not None:
+                            _write_selection(conn, post_id, voter, entry[1])
                 if not votes_partial:
-                    # A voter no stamp orders, whom the host's whole list
-                    # lacks: the vote was retracted before stamps existed.
-                    voters = {
-                        r["voter_user_id"]
-                        for r in conn.execute(
-                            "SELECT DISTINCT pv.voter_user_id"
-                            " FROM space_poll_votes pv"
-                            " JOIN space_poll_options po ON po.id = pv.option_id"
-                            " WHERE po.post_id=?",
-                            (post_id,),
-                        ).fetchall()
-                    }
-                    for voter in sorted(voters - named - stamps.keys() - keep_voters):
+                    # Votes no stamp orders (cast before stamps existed)
+                    # that the host's whole map lacks: retracted meanwhile.
+                    unstamped = voting - vote_stamps.keys() - stamps.keys()
+                    for voter in sorted(unstamped - keep_voters):
                         _write_selection(conn, post_id, voter, [])
+            elif votes is not None:
+                # A host below v_94 sends a list without stamps: as before
+                # v_94, it replaces everybody's votes but ours (of a cut
+                # list, only the voters it names). A voter it changes is
+                # ordered by no stamp any more.
+                listed: dict[str, list[str]] = {}
+                for option_id, voter in votes:
+                    if voter:
+                        picked = listed.setdefault(voter, [])
+                        if option_id in mine:
+                            picked.append(option_id)
+                replaced = listed.keys() if votes_partial else listed.keys() | voting
+                for voter in sorted(replaced - keep_voters):
+                    if _write_selection(conn, post_id, voter, listed.get(voter, [])):
+                        dirty = stamps.pop(voter, None) is not None or dirty
             if is_closed and cutoff is not None:
                 _settle_poll(conn, post_id, stamps, cutoff)
-            elif touched:
-                for voter in sorted(touched):
-                    entry = standing(stamps[voter], cutoff)
-                    if entry is not None:
-                        _write_selection(conn, post_id, voter, entry[1])
+            elif dirty:
                 _save_votes(conn, post_id, stamps)
             return True
 

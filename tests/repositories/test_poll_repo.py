@@ -70,7 +70,7 @@ async def test_list_due_to_close_reads_the_deadline(env):
     await env.poll("open-ended", None)
     await env.poll("deleted", "2026-10-01T00:00:00Z", deleted=1)
     await env.poll("closed", "2026-10-01T00:00:00Z")
-    await env.repo.close("closed")
+    await env.repo.close_if_open("closed")
     due = await env.repo.list_due_to_close("2026-10-28T10:00:00+00:00")
     assert {d["post_id"] for d in due} == {"past-z", "past-offset", "past-naive"}
     assert all(d["author"] == "uid-anna" and d["space_id"] is None for d in due)

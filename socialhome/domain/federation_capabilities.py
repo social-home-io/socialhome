@@ -1544,7 +1544,9 @@ from __future__ import annotations
 #:   ``at`` and is stamped with its envelope's timestamp (so it is ordered
 #:   by when it was sent, never dropped); a requester below v_94 keeps
 #:   getting the ``votes`` list; a host below v_94 sends ``votes``, which a
-#:   v_94 receiver applies only to voters it holds no stamp for.
+#:   v_94 receiver applies as before v_94 (it replaces everybody's votes
+#:   but its own people's). Space-scoped. Labelled "Poll votes count the
+#:   same in every household".
 OURS: int = 94
 
 
@@ -2598,6 +2600,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_POST_REACTIONS,
         "Reactions on space posts reach every household",
     ),
+    (
+        FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS,
+        "Poll votes count the same in every household",
+    ),
 ]
 
 
@@ -2701,6 +2707,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_MULTI_MAILBOX: "multi_mailbox",
     FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED: "space_media_wanted",
     FederationCapability.MIN_FOR_SPACE_POST_REACTIONS: "space_post_reactions",
+    FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS: "poll_vote_stamps",
 }
 
 
@@ -2825,6 +2832,11 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # A behind member household's people see only their own household's
         # reactions on the space's posts, and nobody else sees theirs.
         FederationCapability.MIN_FOR_SPACE_POST_REACTIONS,
+        # A behind member household's poll votes are ordered by when they
+        # were sent, not when they were made, and it takes the host's vote
+        # list instead of merging it — a vote that raced another, or the
+        # poll's close, can count differently there.
+        FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS,
     }
 )
 

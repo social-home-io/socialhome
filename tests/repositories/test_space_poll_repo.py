@@ -10,11 +10,16 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import orjson
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.item_merge import LATE_CHANGE_WINDOW_S, MAX_KEPT_CHANGES
+from socialhome.domain.space_item import stamp_to_db
+from socialhome.repositories import space_poll_repo as space_poll_repo_mod
 from socialhome.repositories.space_poll_repo import SqliteSpacePollRepo
+from tests.poll_votes import cast, now_stamp, seed_unstamped
 
 
 @pytest.fixture
@@ -67,6 +72,7 @@ async def test_create_poll_persists_meta_and_options(env):
         "closes_at": None,
         "closed": False,
         "allow_multiple": False,
+        "closed_at": None,
     }
     opts = await env.repo.list_options_with_counts("post-1")
     assert [o["text"] for o in opts] == ["Yes", "No"]
@@ -88,14 +94,14 @@ async def test_vote_and_clear_and_list(env):
             {"id": "o-b", "text": "B", "position": 1},
         ],
     )
-    await env.repo.insert_vote(option_id="o-a", voter_user_id="u1")
-    await env.repo.insert_vote(option_id="o-b", voter_user_id="u1")
+    await seed_unstamped(env.repo, option_id="o-a", voter_user_id="u1")
+    await seed_unstamped(env.repo, option_id="o-b", voter_user_id="u1")
     assert set(await env.repo.list_user_votes("post-1", "u1")) == {"o-a", "o-b"}
     counts = {
         o["id"]: o["count"] for o in await env.repo.list_options_with_counts("post-1")
     }
     assert counts == {"o-a": 1, "o-b": 1}
-    await env.repo.clear_user_votes(post_id="post-1", voter_user_id="u1")
+    assert await env.repo.set_votes(post_id="post-1", voter_user_id="u1", option_ids=[])
     assert await env.repo.list_user_votes("post-1", "u1") == []
 
 
@@ -110,8 +116,9 @@ async def test_close_flips_flag(env):
             {"id": "o-b", "text": "B", "position": 1},
         ],
     )
-    await env.repo.close("post-1")
-    assert (await env.repo.get_meta("post-1"))["closed"] is True
+    assert await env.repo.close_if_open("post-1")
+    meta = await env.repo.get_meta("post-1")
+    assert meta["closed"] is True and meta["closed_at"]
 
 
 async def test_option_belongs_to_post(env):
@@ -249,7 +256,7 @@ async def two_spaces(env):
             deadline=None,
             slots=[{"id": f"s-{prefix}", "slot_date": "2026-06-01"}],
         )
-    await env.repo.insert_vote(option_id="o-b", voter_user_id="u-b")
+    await seed_unstamped(env.repo, option_id="o-b", voter_user_id="u-b")
     await env.repo.upsert_schedule_response(
         slot_id="s-b", user_id="u-b", response="yes"
     )
@@ -258,17 +265,25 @@ async def two_spaces(env):
 
 async def test_set_votes_in_space_replaces_the_previous_vote(two_spaces):
     env = two_spaces
-    await env.repo.insert_vote(option_id="o-a", voter_user_id="u-x")
-    assert await env.repo.set_votes_in_space(
-        space_id="sp-1", post_id="post-1", option_ids=["o-a"], voter_user_id="u-x"
+    await seed_unstamped(env.repo, option_id="o-a", voter_user_id="u-x")
+    assert await cast(
+        env.repo,
+        space_id="sp-1",
+        post_id="post-1",
+        option_ids=["o-a"],
+        voter_user_id="u-x",
     )
     assert await env.repo.list_user_votes("post-1", "u-x") == ["o-a"]
 
 
 async def test_set_votes_in_space_refuses_a_poll_of_another_space(two_spaces):
     env = two_spaces
-    assert not await env.repo.set_votes_in_space(
-        space_id="sp-1", post_id="post-2", option_ids=["o-b"], voter_user_id="u-evil"
+    assert not await cast(
+        env.repo,
+        space_id="sp-1",
+        post_id="post-2",
+        option_ids=["o-b"],
+        voter_user_id="u-evil",
     )
     # sp-2's tally is untouched and the evil vote never landed.
     assert await env.repo.list_user_votes("post-2", "u-evil") == []
@@ -277,8 +292,12 @@ async def test_set_votes_in_space_refuses_a_poll_of_another_space(two_spaces):
 
 async def test_set_votes_in_space_refuses_an_option_of_another_post(two_spaces):
     env = two_spaces
-    assert not await env.repo.set_votes_in_space(
-        space_id="sp-1", post_id="post-1", option_ids=["o-b"], voter_user_id="u-x"
+    assert not await cast(
+        env.repo,
+        space_id="sp-1",
+        post_id="post-1",
+        option_ids=["o-b"],
+        voter_user_id="u-x",
     )
     assert await env.repo.list_user_votes("post-2", "u-x") == []
 
@@ -286,17 +305,27 @@ async def test_set_votes_in_space_refuses_an_option_of_another_post(two_spaces):
 async def test_set_votes_in_space_refusal_keeps_the_existing_vote(two_spaces):
     """A refused vote must not have cleared the voter's standing vote."""
     env = two_spaces
-    assert not await env.repo.set_votes_in_space(
-        space_id="sp-1", post_id="post-2", option_ids=["o-b"], voter_user_id="u-b"
+    assert not await cast(
+        env.repo,
+        space_id="sp-1",
+        post_id="post-2",
+        option_ids=["o-b"],
+        voter_user_id="u-b",
     )
     assert await env.repo.list_user_votes("post-2", "u-b") == ["o-b"]
 
 
 async def test_close_in_space_is_scoped(two_spaces):
     env = two_spaces
-    assert not await env.repo.close_in_space("post-2", space_id="sp-1")
+    assert (
+        await env.repo.close_in_space("post-2", space_id="sp-1", stamp=now_stamp())
+        is None
+    )
     assert (await env.repo.get_meta("post-2"))["closed"] is False
-    assert await env.repo.close_in_space("post-2", space_id="sp-2")
+    assert (
+        await env.repo.close_in_space("post-2", space_id="sp-2", stamp=now_stamp())
+        == []
+    )
     assert (await env.repo.get_meta("post-2"))["closed"] is True
 
 
@@ -504,7 +533,7 @@ async def test_only_polls_a_local_user_wrote_are_due_here(env):
     assert await env.repo.list_due_to_close(now) == [
         {"post_id": "post-1", "author": "uid-alice", "space_id": "sp-1"}
     ]
-    await env.repo.close("post-1")
+    await env.repo.close_if_open("post-1")
     assert await env.repo.list_due_to_close(now) == []
 
 
@@ -552,19 +581,31 @@ async def test_apply_synced_poll_refuses_another_spaces_post(env):
 
 async def test_apply_synced_poll_keeps_our_peoples_votes_and_older_hosts_votes(env):
     await _sync_poll(env, votes=[])
-    await env.repo.set_votes_in_space(
-        space_id="sp-1", post_id="post-1", option_ids=["o-y"], voter_user_id="u-ours"
+    await cast(
+        env.repo,
+        space_id="sp-1",
+        post_id="post-1",
+        option_ids=["o-y"],
+        voter_user_id="u-ours",
     )
-    await env.repo.set_votes_in_space(
-        space_id="sp-1", post_id="post-1", option_ids=["o-n"], voter_user_id="u-c"
+    await cast(
+        env.repo,
+        space_id="sp-1",
+        post_id="post-1",
+        option_ids=["o-n"],
+        voter_user_id="u-c",
     )
     await _sync_poll(env, votes=[], keep={"u-ours"})
     assert await env.repo.list_votes("post-1") == [
         {"option_id": "o-y", "voter_user_id": "u-ours"}
     ]
     # An older host sends no votes: the held ones stay.
-    await env.repo.set_votes_in_space(
-        space_id="sp-1", post_id="post-1", option_ids=["o-n"], voter_user_id="u-c"
+    await cast(
+        env.repo,
+        space_id="sp-1",
+        post_id="post-1",
+        option_ids=["o-n"],
+        voter_user_id="u-c",
     )
     await _sync_poll(env, votes=None)
     assert len(await env.repo.list_votes("post-1")) == 2
@@ -729,8 +770,12 @@ async def test_list_schedule_answers_newest_first_with_a_limit(env):
 async def test_list_votes_with_a_limit_puts_recent_voters_first(env):
     await _sync_poll(env, votes=[])
     for voter in ("u-a", "u-b"):
-        await env.repo.set_votes_in_space(
-            space_id="sp-1", post_id="post-1", option_ids=["o-y"], voter_user_id=voter
+        await cast(
+            env.repo,
+            space_id="sp-1",
+            post_id="post-1",
+            option_ids=["o-y"],
+            voter_user_id=voter,
         )
     await env.db.enqueue(
         "UPDATE space_poll_votes SET voted_at='2026-01-01 00:00:00'"
@@ -842,12 +887,12 @@ async def test_set_votes_in_space_replaces_the_whole_selection(two_spaces):
     await _bare_post(env)
     await _define(env)
     vote = {"space_id": "sp-1", "post_id": "post-3", "voter_user_id": "u-x"}
-    assert await env.repo.set_votes_in_space(option_ids=["n-1", "n-2", "n-1"], **vote)
+    assert await cast(env.repo, option_ids=["n-1", "n-2", "n-1"], **vote)
     assert sorted(await env.repo.list_user_votes("post-3", "u-x")) == ["n-1", "n-2"]
-    assert await env.repo.set_votes_in_space(option_ids=["n-2"], **vote)
+    assert await cast(env.repo, option_ids=["n-2"], **vote)
     assert await env.repo.list_user_votes("post-3", "u-x") == ["n-2"]
     # An empty selection is the retraction.
-    assert await env.repo.set_votes_in_space(option_ids=[], **vote)
+    assert await cast(env.repo, option_ids=[], **vote)
     assert await env.repo.list_user_votes("post-3", "u-x") == []
 
 
@@ -856,16 +901,16 @@ async def test_set_votes_in_space_refusals_keep_the_held_vote(two_spaces):
     await _bare_post(env)
     await _define(env, multi=False)
     vote = {"space_id": "sp-1", "post_id": "post-3", "voter_user_id": "u-x"}
-    assert await env.repo.set_votes_in_space(option_ids=["n-1"], **vote)
+    assert await cast(env.repo, option_ids=["n-1"], **vote)
     # Two options on a single-choice poll, another poll's option, a post
     # with no poll, the poll of another space.
-    assert not await env.repo.set_votes_in_space(option_ids=["n-1", "n-2"], **vote)
-    assert not await env.repo.set_votes_in_space(option_ids=["n-2", "o-a"], **vote)
-    assert not await env.repo.set_votes_in_space(
-        space_id="sp-1", post_id="no-poll", option_ids=[], voter_user_id="u-x"
+    assert not await cast(env.repo, option_ids=["n-1", "n-2"], **vote)
+    assert not await cast(env.repo, option_ids=["n-2", "o-a"], **vote)
+    assert not await cast(
+        env.repo, space_id="sp-1", post_id="no-poll", option_ids=[], voter_user_id="u-x"
     )
-    assert not await env.repo.set_votes_in_space(
-        space_id="sp-1", post_id="post-2", option_ids=[], voter_user_id="u-b"
+    assert not await cast(
+        env.repo, space_id="sp-1", post_id="post-2", option_ids=[], voter_user_id="u-b"
     )
     assert await env.repo.list_user_votes("post-3", "u-x") == ["n-1"]
     assert await env.repo.list_user_votes("post-2", "u-b") == ["o-b"]
@@ -885,8 +930,282 @@ async def test_set_votes_in_space_refuses_a_closed_poll(two_spaces, close):
     await _bare_post(env)
     await _define(env)
     vote = {"space_id": "sp-1", "post_id": "post-3", "voter_user_id": "u-x"}
-    assert await env.repo.set_votes_in_space(option_ids=["n-1"], **vote)
+    assert await cast(env.repo, option_ids=["n-1"], **vote)
     await env.db.enqueue(close)
-    assert not await env.repo.set_votes_in_space(option_ids=["n-2"], **vote)
-    assert not await env.repo.set_votes_in_space(option_ids=[], **vote)
+    assert not await cast(env.repo, option_ids=["n-2"], **vote)
+    assert not await cast(env.repo, option_ids=[], **vote)
     assert await env.repo.list_user_votes("post-3", "u-x") == ["n-1"]
+
+
+# ── The one merge rule (v_94): votes by stamp, the close as a cutoff ─────
+
+
+def _at(seconds_ago: float) -> str:
+    return stamp_to_db(datetime.now(UTC) - timedelta(seconds=seconds_ago))
+
+
+async def _open_poll(env, *, multi=False, closes_at=None) -> dict:
+    await env.repo.create_poll_if_absent(
+        post_id="post-1",
+        question="Q",
+        closes_at=closes_at,
+        allow_multiple=multi,
+        options=[
+            {"id": "o-a", "text": "A", "position": 0},
+            {"id": "o-b", "text": "B", "position": 1},
+        ],
+    )
+    return {"space_id": "sp-1", "post_id": "post-1", "voter_user_id": "u-x"}
+
+
+async def _stamps(env) -> dict:
+    raw = await env.db.fetchval(
+        "SELECT vote_stamps_json FROM space_polls WHERE post_id='post-1'", (), None
+    )
+    return orjson.loads(raw) if raw else {}
+
+
+async def test_a_local_vote_is_stamped_and_never_older_than_the_one_before(env):
+    await _open_poll(env)
+    assert await env.repo.vote_stamp("post-1", "u-x") is None
+    assert await env.repo.set_votes(
+        post_id="post-1", voter_user_id="u-x", option_ids=["o-a"]
+    )
+    first = await env.repo.vote_stamp("post-1", "u-x")
+    assert first is not None and first.endswith("+00:00")
+    # The held stamp lies ahead of our clock (it came from a clock ahead).
+    ahead = stamp_to_db(datetime.now(UTC) + timedelta(seconds=120))
+    await env.db.enqueue(
+        "UPDATE space_polls SET vote_stamps_json=? WHERE post_id='post-1'",
+        (orjson.dumps({"u-x": [[ahead, ["o-a"]]]}).decode(),),
+    )
+    assert await env.repo.set_votes(
+        post_id="post-1", voter_user_id="u-x", option_ids=["o-b", "o-b"]
+    )
+    newest = (await _stamps(env))["u-x"][0]
+    assert newest[0] > ahead and newest[1] == ["o-b"]
+    assert await env.repo.list_user_votes("post-1", "u-x") == ["o-b"]
+    assert await env.repo.vote_stamp("no-poll", "u-x") is None
+
+
+async def test_a_local_vote_on_a_closed_or_missing_poll_writes_nothing(env):
+    assert not await env.repo.set_votes(
+        post_id="post-1", voter_user_id="u-x", option_ids=["o-a"]
+    )
+    await _open_poll(env)
+    assert await env.repo.close_if_open("post-1")
+    assert not await env.repo.set_votes(
+        post_id="post-1", voter_user_id="u-x", option_ids=["o-a"]
+    )
+    assert await env.repo.list_user_votes("post-1", "u-x") == []
+
+
+async def test_received_votes_end_on_the_newest_stamp_in_any_order(env):
+    vote = await _open_poll(env)
+    t1, t2, t3 = _at(30), _at(20), _at(10)
+    assert (
+        await env.repo.set_votes_in_space(option_ids=["o-b"], stamp=t3, **vote)
+        == "applied"
+    )
+    # Older ones, and a re-delivery, are recorded or ignored — never applied.
+    for option_ids, stamp in ((["o-a"], t1), ([], t2), (["o-b"], t3)):
+        assert (
+            await env.repo.set_votes_in_space(
+                option_ids=option_ids, stamp=stamp, **vote
+            )
+            == "kept"
+        )
+    assert await env.repo.list_user_votes("post-1", "u-x") == ["o-b"]
+    assert [e[0] for e in (await _stamps(env))["u-x"]] == [t3, t2, t1]
+
+
+async def test_a_received_vote_replaces_one_cast_before_stamps_existed(env):
+    vote = await _open_poll(env)
+    await seed_unstamped(env.repo, option_id="o-a", voter_user_id="u-x")
+    assert (
+        await env.repo.set_votes_in_space(option_ids=["o-b"], stamp=_at(5), **vote)
+        == "applied"
+    )
+    assert await env.repo.list_user_votes("post-1", "u-x") == ["o-b"]
+
+
+async def test_the_close_is_the_votes_cutoff(env):
+    """A vote stamped after the close counts nowhere — also one this
+    household applied before it heard of the close: its voter falls back
+    to the newest selection stamped before it. One stamped before the close
+    is taken even when it arrives after it."""
+    vote = await _open_poll(env)
+    await env.repo.set_votes_in_space(option_ids=["o-a"], stamp=_at(60), **vote)
+    await env.repo.set_votes_in_space(option_ids=["o-b"], stamp=_at(20), **vote)
+    late = {**vote, "voter_user_id": "u-late"}
+    await env.repo.set_votes_in_space(option_ids=["o-b"], stamp=_at(10), **late)
+    closed = _at(30)
+    assert await env.repo.close_in_space("post-1", space_id="sp-1", stamp=closed) == [
+        "u-late",
+        "u-x",
+    ]
+    assert await env.repo.list_user_votes("post-1", "u-x") == ["o-a"]
+    assert await env.repo.list_user_votes("post-1", "u-late") == []
+    assert set(await _stamps(env)) == {"u-x"}  # only what stands is kept
+    # A redelivered close, and a later one, change nothing.
+    assert await env.repo.close_in_space("post-1", space_id="sp-1", stamp=closed) == []
+    assert await env.repo.close_in_space("post-1", space_id="sp-1", stamp=_at(1)) == []
+    assert (await env.repo.get_meta("post-1"))["closed_at"] == closed
+    # After the close: stamped after it → late; before it → still counted.
+    assert (
+        await env.repo.set_votes_in_space(option_ids=["o-b"], stamp=_at(25), **vote)
+        == "late"
+    )
+    assert (
+        await env.repo.set_votes_in_space(option_ids=["o-b"], stamp=_at(40), **vote)
+        == "applied"
+    )
+    assert (
+        await env.repo.set_votes_in_space(option_ids=["o-a"], stamp=_at(45), **late)
+        == "applied"
+    )
+    assert await env.repo.vote_stamp("post-1", "u-late") is not None
+
+
+async def test_a_deadline_is_a_cutoff_without_a_close(env):
+    deadline = datetime.now(UTC) - timedelta(seconds=30)
+    vote = await _open_poll(env, closes_at=deadline.isoformat())
+    assert (
+        await env.repo.set_votes_in_space(option_ids=["o-a"], stamp=_at(10), **vote)
+        == "late"
+    )
+    assert (
+        await env.repo.set_votes_in_space(option_ids=["o-a"], stamp=_at(60), **vote)
+        == "applied"
+    )
+
+
+async def test_a_vote_for_a_poll_closed_long_ago_is_refused(env):
+    """Nothing honest stays queued longer than the outbox keeps it, so a
+    household cannot date a vote back into a poll closed more than that
+    ago."""
+    vote = await _open_poll(env)
+    closed = stamp_to_db(
+        datetime.now(UTC) - timedelta(seconds=LATE_CHANGE_WINDOW_S + 60)
+    )
+    await env.repo.close_in_space("post-1", space_id="sp-1", stamp=closed)
+    before = stamp_to_db(
+        datetime.now(UTC) - timedelta(seconds=LATE_CHANGE_WINDOW_S + 120)
+    )
+    assert (
+        await env.repo.set_votes_in_space(option_ids=["o-a"], stamp=before, **vote)
+        == "late"
+    )
+
+
+async def test_a_local_close_settles_votes_stamped_ahead_of_it(env):
+    """A voter's household whose clock runs ahead stamped a vote after the
+    close made here: it counts nowhere, here included."""
+    vote = await _open_poll(env)
+    ahead = stamp_to_db(datetime.now(UTC) + timedelta(seconds=120))
+    await env.repo.set_votes_in_space(option_ids=["o-a"], stamp=_at(60), **vote)
+    await env.repo.set_votes_in_space(option_ids=["o-b"], stamp=ahead, **vote)
+    assert await env.repo.close_if_open("post-1")
+    assert await env.repo.list_user_votes("post-1", "u-x") == ["o-a"]
+
+
+async def test_only_a_voters_last_few_selections_are_kept(env):
+    vote = await _open_poll(env)
+    for n in range(MAX_KEPT_CHANGES + 3):
+        await env.repo.set_votes_in_space(
+            option_ids=["o-a" if n % 2 else "o-b"], stamp=_at(100 - n), **vote
+        )
+    assert len((await _stamps(env))["u-x"]) == MAX_KEPT_CHANGES
+
+
+async def test_the_stamp_map_is_bounded_and_drops_old_retractions(env, monkeypatch):
+    await _open_poll(env)
+    old = stamp_to_db(datetime.now(UTC) - timedelta(days=31))
+    await env.db.enqueue(
+        "UPDATE space_polls SET vote_stamps_json=? WHERE post_id='post-1'",
+        (orjson.dumps({"u-old": [[old, []]], "broken": "x"}).decode(),),
+    )
+    monkeypatch.setattr(space_poll_repo_mod, "MAX_VOTE_STAMP_VOTERS", 2)
+    for n, voter in enumerate(("u-1", "u-2", "u-3")):
+        await env.repo.set_votes_in_space(
+            space_id="sp-1",
+            post_id="post-1",
+            voter_user_id=voter,
+            option_ids=[] if voter == "u-2" else ["o-a"],
+            stamp=_at(30 - n),
+        )
+    # The 31-day-old tombstone went by age; of three voters the retraction
+    # went first.
+    assert set(await _stamps(env)) == {"u-1", "u-3"}
+
+
+async def test_list_vote_stamps_is_what_counts_newest_first_and_cut(env):
+    vote = await _open_poll(env)
+    await env.repo.set_votes_in_space(option_ids=["o-a"], stamp=_at(60), **vote)
+    await env.repo.set_votes_in_space(option_ids=["o-b"], stamp=_at(50), **vote)
+    await env.repo.set_votes_in_space(
+        **{**vote, "voter_user_id": "u-gone"}, option_ids=[], stamp=_at(40)
+    )
+    await seed_unstamped(env.repo, option_id="o-a", voter_user_id="u-legacy")
+    stamps, cut = await env.repo.list_vote_stamps("post-1", limit=10)
+    assert not cut
+    assert stamps["u-x"][1] == ["o-b"] and stamps["u-x"][0].endswith("+00:00")
+    assert stamps["u-gone"][1] == []  # the retraction travels as a stamp
+    assert stamps["u-legacy"][1] == ["o-a"] and stamps["u-legacy"][0]
+    stamps, cut = await env.repo.list_vote_stamps("post-1", limit=1)
+    assert cut and list(stamps) == ["u-legacy"]  # written just now: the newest
+    assert await env.repo.list_vote_stamps("no-poll", limit=5) == ({}, False)
+
+
+async def test_apply_synced_poll_merges_the_hosts_vote_stamps(env):
+    vote = await _open_poll(env, multi=False)
+    await env.repo.set_votes_in_space(option_ids=["o-b"], stamp=_at(20), **vote)
+    await seed_unstamped(env.repo, option_id="o-a", voter_user_id="u-legacy")
+    await seed_unstamped(env.repo, option_id="o-a", voter_user_id="u-ours")
+
+    async def sync(stamps, **kw):
+        return await env.repo.apply_synced_poll(
+            space_id="sp-1",
+            post_id="post-1",
+            question="Q",
+            closes_at=None,
+            allow_multiple=False,
+            closed=kw.pop("closed", False),
+            options=[{"id": "o-a", "text": "A"}, {"id": "o-b", "text": "B"}],
+            votes=None,
+            keep_voters=frozenset({"u-ours"}),
+            vote_stamps=stamps,
+            **kw,
+        )
+
+    assert await sync(
+        {
+            "u-x": [_at(60), ["o-a"]],  # older than what we hold: stays o-b
+            "u-new": [_at(30), ["o-a"]],
+            "u-ours": [_at(1), ["o-b"]],  # our own people's: never taken
+            "u-two": [_at(30), ["o-a", "o-b"]],  # single choice: refused
+            "u-foreign": [_at(30), ["o-z"]],  # not this poll's option
+            "": [_at(30), ["o-a"]],
+        }
+    )
+    votes = {
+        (v["voter_user_id"], v["option_id"])
+        for v in await env.repo.list_votes("post-1")
+    }
+    # u-legacy held an unstamped vote the host's whole map lacks: gone.
+    assert votes == {("u-x", "o-b"), ("u-new", "o-a"), ("u-ours", "o-a")}
+    # A cut map drops nothing it could not name.
+    await seed_unstamped(env.repo, option_id="o-a", voter_user_id="u-legacy")
+    assert await sync({}, votes_partial=True)
+    assert await env.repo.list_user_votes("post-1", "u-legacy") == ["o-a"]
+    # The host's close comes with its stamp and settles: u-x's vote was
+    # made after it, the one before it stands; a later close stamp from a
+    # second stream does not move it.
+    closed = _at(40)
+    assert await sync({}, closed=True, closed_at=closed, votes_partial=True)
+    assert await env.repo.list_user_votes("post-1", "u-x") == ["o-a"]
+    assert await sync({}, closed=True, closed_at=_at(5), votes_partial=True)
+    assert (await env.repo.get_meta("post-1"))["closed_at"] == closed
+    # A vote the host's map carries that was made after the close: ignored.
+    assert await sync({"u-after": [_at(10), ["o-a"]]}, closed=True, closed_at=closed)
+    assert await env.repo.list_user_votes("post-1", "u-after") == []

@@ -14,6 +14,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from socialhome.domain.calendar import CalendarEvent, CalendarRSVP
 from socialhome.domain.events import PollCreated
 from socialhome.domain.federation_capabilities import FederationCapability
@@ -33,6 +35,7 @@ from socialhome.domain.space import (
 from socialhome.domain.space_item import stamp_to_db
 from socialhome.federation.sync.space.exporter import (
     RESOURCE_ORDER,
+    IncrementalExporter,
     collect_batches,
     record_batches,
 )
@@ -58,12 +61,14 @@ from tests.federation.sync.space.test_sync_coverage import (
     _event,
     _event_with_rsvps,
     _listing,
+    _listing_with_bid,
     _poll,
     _post,
     _react,
     _schedule,
     _stream,
     _timetable,
+    _view_bids,
     _view_comment,
     _view_poll,
     _view_post,
@@ -73,6 +78,7 @@ from tests.federation.sync.space.test_sync_coverage import (
     _vote_and_close,
     homes,
 )
+from tests.poll_votes import cast, seed_unstamped
 
 __all__ = ["homes"]
 
@@ -89,8 +95,12 @@ async def test_our_own_peoples_votes_answers_and_rsvps_stay_ours(homes):
     await _schedule_on_other_post(host)
     await _event(host)
     await _stream(host, member)
-    await member.repos.space_poll.set_votes_in_space(
-        space_id=SPACE, post_id="post-1", option_ids=["opt-b"], voter_user_id=BOB
+    await cast(
+        member.repos.space_poll,
+        space_id=SPACE,
+        post_id="post-1",
+        option_ids=["opt-b"],
+        voter_user_id=BOB,
     )
     await member.repos.space_poll.upsert_schedule_response_in_space(
         space_id=SPACE, slot_id="slot-9", user_id=BOB, response="yes"
@@ -454,15 +464,22 @@ async def test_a_cut_vote_list_never_deletes(homes, monkeypatch):
     await _poll(host)
     await _stream(host, member)
     for voter in ("u-v1", "u-v2", "u-v3"):
-        await host.repos.space_poll.set_votes_in_space(
-            space_id=SPACE, post_id="post-1", option_ids=["opt-b"], voter_user_id=voter
+        await cast(
+            host.repos.space_poll,
+            space_id=SPACE,
+            post_id="post-1",
+            option_ids=["opt-b"],
+            voter_user_id=voter,
         )
     (record,) = await collect_batches(record_batches(host.exporters["polls"], SPACE))
-    assert record["votes_partial"] is True and 0 < len(record["votes"]) <= 2
+    assert record["votes_partial"] is True and len(record["vote_stamps"]) == 2
     await _stream(host, member)
     held = await member.repos.space_poll.list_votes("post-1")
     assert {"option_id": "opt-a", "voter_user_id": ANNA} in held
-    assert all(v in held for v in record["votes"])
+    assert all(
+        {"option_id": "opt-b", "voter_user_id": voter} in held
+        for voter in record["vote_stamps"]
+    )
 
 
 async def test_a_cut_answer_list_never_deletes(homes, monkeypatch):
@@ -640,3 +657,254 @@ async def test_a_poll_the_stream_creates_is_announced_once(homes):
     assert [o["id"] for o in seen[0].options] == ["opt-a", "opt-b"]
     await _stream(host, member)
     assert len(seen) == 1
+
+
+# ── v_94: one merge rule, and the incremental session carries it ─────────
+
+
+async def _seq(h: Home) -> int:
+    return int(
+        await h.db.fetchval("SELECT seq FROM sync_seq_counter WHERE id = 1", (), 0)
+    )
+
+
+async def _incremental(host: Home, member: Home, since: int) -> dict[str, int]:
+    """The host's periodic (30-minute) session: only the rows stamped after
+    ``since`` — the watermark the member confirmed. Records sent, by
+    resource."""
+    sent: dict[str, int] = {}
+    for resource in RESOURCE_ORDER:
+        exporter = host.exporters.get(resource)
+        if not isinstance(exporter, IncrementalExporter):
+            continue
+        records = await collect_batches(record_batches(exporter, SPACE, since=since))
+        if records:
+            sent[resource] = len(records)
+            await member.receiver._apply(resource, SPACE, records, provider=HOST)
+    return sent
+
+
+async def _carl_changes_his_rsvp(h: Home) -> None:
+    await h.repos.space_cal.upsert_rsvp(
+        CalendarRSVP(
+            event_id="ev-1",
+            user_id=CARL,
+            status="declined",
+            updated_at=datetime.now(UTC).isoformat(),
+            occurrence_at=_OCC,
+        ),
+        space_id=SPACE,
+    )
+
+
+async def _carl_changes_his_answer(h: Home) -> None:
+    await h.repos.space_poll.upsert_schedule_response_in_space(
+        space_id=SPACE, slot_id="slot-1", user_id=CARL, response="no"
+    )
+
+
+async def _a_bid_is_declined(h: Home) -> None:
+    await h.repos.bazaar.reject_offer("bid-1", reason="too low")
+
+
+async def _carl_bids_again(h: Home) -> None:
+    await _bid(h, "bid-2", 45)
+
+
+@pytest.mark.parametrize(
+    ("seed", "change", "view", "sent"),
+    [
+        (_event_with_rsvps, _carl_changes_his_rsvp, _view_rsvps, {"calendar": 1}),
+        (
+            _schedule,
+            _carl_changes_his_answer,
+            _view_schedule,
+            {"posts": 1, "schedules": 1},
+        ),
+        (_listing_with_bid, _a_bid_is_declined, _view_bids, {"posts": 1, "bazaar": 1}),
+        (_listing_with_bid, _carl_bids_again, _view_bids, {"posts": 1, "bazaar": 1}),
+    ],
+    ids=["RSVP", "schedule answer", "bid declined", "bid placed"],
+)
+async def test_a_missed_change_heals_on_the_incremental_session(
+    homes, seed, change, view, sent
+):
+    """An RSVP, a schedule answer and a bid are part of their event's /
+    post's record but used to stamp nothing, so a missed one waited for the
+    host's daily full stream. Now the change touches its parent row
+    (migration 0146) and the next 30-minute session carries it — one record
+    of the parent per change, nothing else."""
+    host, member = homes
+    await seed(host)
+    await _stream(host, member)
+    since = await _seq(host)
+    assert await _incremental(host, member, since) == {}  # nothing changed
+    await change(host)  # the live event never reached the member
+    assert await view(member) != await view(host)
+    assert await _incremental(host, member, since) == sent
+    assert await view(member) == await view(host)
+
+
+@pytest.mark.parametrize(
+    ("seed", "change"),
+    [
+        (_event_with_rsvps, _carl_changes_his_rsvp),
+        (_schedule, _carl_changes_his_answer),
+        (_listing_with_bid, _a_bid_is_declined),
+        (_poll, _vote_and_close),
+    ],
+    ids=["RSVP", "schedule answer", "bid", "vote"],
+)
+async def test_applying_a_change_it_already_holds_stamps_nothing(homes, seed, change):
+    """No echo: the member took the change (its own parent row is stamped
+    once, so ITS requesters get it once); the same records again write
+    nothing, so two households never bounce a row."""
+    host, member = homes
+    await seed(host)
+    await _stream(host, member)
+    since = await _seq(host)
+    await change(host)
+    before = await _seq(member)
+    await _incremental(host, member, since)
+    taken = await _seq(member)
+    assert taken > before
+    await _incremental(host, member, since)
+    await _stream(host, member)
+    assert await _seq(member) == taken
+
+
+async def _carl_votes(h: Home, option: str | None, at: str) -> None:
+    await cast(
+        h.repos.space_poll,
+        space_id=SPACE,
+        post_id="post-1",
+        option_ids=[option] if option else [],
+        voter_user_id=CARL,
+        stamp=at,
+    )
+
+
+async def _carls_vote(h: Home) -> list[str]:
+    return await h.repos.space_poll.list_user_votes("post-1", CARL)
+
+
+async def test_a_missed_retraction_heals_from_the_hosts_vote_stamps(homes):
+    """A retraction travels as a stamp (the tombstone), also in the stream:
+    the member that missed it drops the vote — on the incremental session."""
+    host, member = homes
+    await _poll(host)
+    await _carl_votes(host, "opt-b", _ago(60))
+    await _stream(host, member)
+    assert await _carls_vote(member) == ["opt-b"]
+    since = await _seq(host)
+    await _carl_votes(host, None, _ago(30))
+    assert await _incremental(host, member, since) == {"posts": 1, "polls": 1}
+    assert await _carls_vote(member) == []
+    # …and the vote it took back, arriving late and live, does not return.
+    await _carl_votes(member, "opt-b", _ago(60))
+    assert await _carls_vote(member) == []
+
+
+async def test_the_hosts_older_vote_never_rolls_back_a_newer_one(homes):
+    """The host has not heard Carl's newest vote yet (it reached this
+    household live): its stream carries the older one, which loses on the
+    stamp — before v_94 the host's list replaced it."""
+    host, member = homes
+    await _poll(host)
+    await _carl_votes(host, "opt-a", _ago(60))
+    await _stream(host, member)
+    await _carl_votes(member, "opt-b", _ago(10))
+    await _stream(host, member)
+    assert await _carls_vote(member) == ["opt-b"]
+
+
+async def test_a_vote_from_before_stamps_follows_the_hosts_map(homes):
+    """A vote row cast before migration 0146 has no stamp to order it: it
+    takes the host's stamped selection, and one the host's whole map lacks
+    is gone (retracted while this household was not looking)."""
+    host, member = homes
+    await _poll(host)
+    await _stream(host, member)
+    await seed_unstamped(member.repos.space_poll, option_id="opt-a", voter_user_id=CARL)
+    await seed_unstamped(
+        member.repos.space_poll, option_id="opt-a", voter_user_id="u-gone"
+    )
+    await _carl_votes(host, "opt-b", _ago(30))
+    await _stream(host, member)
+    assert await _carls_vote(member) == ["opt-b"]
+    assert await member.repos.space_poll.list_user_votes("post-1", "u-gone") == []
+
+
+async def test_the_hosts_unstamped_votes_travel_with_the_time_it_took_them(homes):
+    """The host's own rows from before stamps existed go out stamped with
+    when it wrote them, so they order against later, stamped votes."""
+    host, member = homes
+    await _poll(host)
+    await seed_unstamped(host.repos.space_poll, option_id="opt-b", voter_user_id=CARL)
+    (record,) = await collect_batches(record_batches(host.exporters["polls"], SPACE))
+    assert "votes" not in record
+    assert set(record["vote_stamps"]) == {ANNA, CARL}
+    assert record["vote_stamps"][CARL][1] == ["opt-b"]
+    await _stream(host, member)
+    assert await _carls_vote(member) == ["opt-b"]
+    await _carl_votes(member, "opt-a", _ago(0))
+    await _stream(host, member)
+    assert await _carls_vote(member) == ["opt-a"]
+
+
+async def test_an_older_hosts_vote_list_is_applied_as_before(homes):
+    """A host below v_94 sends ``votes`` without stamps: there is nothing
+    to merge by, so the list replaces everybody's votes but our own
+    people's — the rule before v_94."""
+    host, member = homes
+    await _poll(host)
+    await _carl_votes(host, "opt-a", _ago(60))
+    await _stream(host, member)
+    await _carl_votes(member, "opt-b", _ago(10))
+    await cast(
+        member.repos.space_poll,
+        space_id=SPACE,
+        post_id="post-1",
+        option_ids=["opt-b"],
+        voter_user_id=BOB,
+    )
+    records = await collect_batches(
+        record_batches(host.exporters["polls"].unstamped_votes(), SPACE)
+    )
+    assert "vote_stamps" not in records[0] and records[0]["votes"]
+    await member.receiver._apply("polls", SPACE, records, provider=HOST)
+    assert await _carls_vote(member) == ["opt-a"]
+    # Bob is one of ours: his vote is authored here.
+    assert await member.repos.space_poll.list_user_votes("post-1", BOB) == ["opt-b"]
+
+
+async def test_the_close_streams_with_its_stamp_and_settles_the_votes(homes):
+    """The member missed ``SPACE_POLL_CLOSED`` and took a vote Carl made
+    after it. The host's stream brings the close with its stamp: the late
+    vote counts nowhere, Carl is back on the one made before the close —
+    and a vote stamped before the close that the host hears afterwards
+    still counts."""
+    host, member = homes
+    await _poll(host)
+    await _carl_votes(host, "opt-a", _ago(120))
+    await _stream(host, member)
+    closed = _ago(60)
+    await host.repos.space_poll.close_in_space("post-1", space_id=SPACE, stamp=closed)
+    await _carl_votes(member, "opt-b", _ago(30))
+    assert await _carls_vote(member) == ["opt-b"]
+    await _stream(host, member)
+    meta = await member.repos.space_poll.get_meta("post-1")
+    assert meta["closed"] is True and meta["closed_at"] == closed
+    assert await _carls_vote(member) == ["opt-a"]
+    await cast(
+        host.repos.space_poll,
+        space_id=SPACE,
+        post_id="post-1",
+        option_ids=["opt-b"],
+        voter_user_id="u-late",
+        stamp=_ago(90),
+    )
+    await _stream(host, member)
+    assert await member.repos.space_poll.list_user_votes("post-1", "u-late") == [
+        "opt-b"
+    ]
