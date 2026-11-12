@@ -975,6 +975,40 @@ Mutating HTTP routes accept an `Idempotency-Key` header; the
 `(user_id, key)`. Combined with the replay cache, this means
 both API callers and federation peers can retry safely.
 
+### Inbound handler retry
+
+An envelope's `msg_id` is stored in the replay cache *before* its handlers
+run, and on most transports the sender gets no answer at all (DataChannel,
+GFS relay, GFS mailbox, mesh). So when a handler fails after that, the
+sender can do nothing: it believes the delivery worked, and a re-send of
+the same envelope is refused as a replay. The receiver therefore gives its
+own handler a second try (`federation/inbound_retry.py`, behind
+`EventDispatchRegistry.dispatch`, where every transport ends):
+
+- **Only passing failures** — `sqlite3.OperationalError` (database
+  locked / busy), `OSError` (I/O, timeouts), `RuntimeError` (a service not
+  started or not attached yet). A refusal, a malformed payload or a bug
+  (`ValueError`, `KeyError`, `TypeError`, `AttributeError`,
+  `IntegrityError`, …) fails the same way again and is logged and dropped
+  as before.
+- **Only the handler that failed** runs again, after 1 s, 5 s and 20 s
+  (four tries in all); then one WARNING and the event is dropped.
+- **The post-decrypt gates run again before each try** (ban, deprovisioned
+  author, archived space, writer seat), so a ban that landed meanwhile
+  wins.
+- **Never retried:** call negotiation, typing, RTC signalling, the sync
+  streams (stateful, with their own resume) and the `SPACE_ROUTED` wrapper
+  (the inner event it unwraps is retried on its own).
+- **Bounded and in memory:** 256 events, 64 per sending household, 4 MiB.
+  On shutdown every held event gets one last try; what still fails, and
+  anything held when the process is killed, is lost — as it was before
+  (space content then comes back with the next sync).
+
+The replay cache is not touched: a second try is this household re-running
+its own handler on an envelope it already verified, never a second
+acceptance of the envelope. Handlers are expected to be safe to run twice
+(they already are for sync and multi-path delivery).
+
 ### Reconnect queue
 
 When a peer flips from `unreachable` → `confirmed`, the

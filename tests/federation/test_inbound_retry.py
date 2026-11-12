@@ -13,14 +13,17 @@ import pytest
 
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.federation_retention import SHORT_LIVED
+from socialhome.domain.space import SpacePermissionError
+from socialhome.federation.event_dispatch_registry import EventDispatchRegistry
 from socialhome.federation.inbound_retry import (
     NEVER_RETRIED,
-    PERMANENT_ERRORS,
     RETRY_DELAYS_S,
     InboundRetry,
+    is_transient,
 )
 from socialhome.federation.inbound_validator import TRANSPORT_GFS_RELAY
 from tests.federation.test_federation_service import _make_frame, _paired
+from tests.federation.test_routed_envelope import _build_chain, _mint_target_eph
 from tests.services.test_gfs_relay_inbound import _multi_frame, _MultiHousehold
 
 DM = FederationEventType.DM_MESSAGE
@@ -94,12 +97,47 @@ async def test_a_handler_that_fails_once_applies_the_event_exactly_once():
     assert handler.calls == 2
 
 
-@pytest.mark.parametrize("exc", PERMANENT_ERRORS)
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ValueError,  # a refusal
+        KeyError,  # what a malformed payload raises …
+        TypeError,
+        AttributeError,
+        sqlite3.IntegrityError,  # already stored
+        AssertionError,  # a bug
+        NotImplementedError,  # RuntimeError subclasses that never pass
+        RecursionError,
+        SpacePermissionError,  # a domain refusal
+    ],
+)
 async def test_a_failure_that_would_repeat_is_not_tried_again(exc):
     retry, handler = _fast(), _Flaky(fail=1, exc=exc)
     assert await _first_try(retry, handler, _event()) is False
     assert len(retry) == 0
     assert handler.calls == 1
+
+
+@pytest.mark.parametrize(
+    "exc", [sqlite3.OperationalError, OSError, TimeoutError, RuntimeError]
+)
+async def test_a_passing_failure_is_tried_again(exc):
+    assert is_transient(exc())
+    retry, handler = _fast(), _Flaky(fail=1, exc=exc)
+    assert await _first_try(retry, handler, _event()) is True
+    await _settle(retry)
+    assert len(handler.applied) == 1
+
+
+async def test_a_payload_too_deep_to_size_is_not_held():
+    """orjson reads deeper nesting than it writes: the hold must refuse
+    such an event, not raise into the dispatch loop."""
+    deep: dict = {}
+    for _ in range(300):
+        deep = {"a": deep}
+    retry, handler = _fast(), _Flaky(fail=1)
+    assert await _first_try(retry, handler, _event(payload=deep)) is False
+    assert len(retry) == 0
 
 
 async def test_a_refusal_on_a_later_try_ends_the_tries(caplog):
@@ -325,15 +363,35 @@ async def test_gfs_mailbox_multi_recipient_frame_a_failed_handler_is_tried_again
 
 
 async def test_mesh_routed_inner_event_a_failed_handler_is_tried_again():
-    """``SpaceRoutedHandler`` hands the unwrapped inner event to
-    ``FederationService._dispatch_event`` — the same dispatch."""
-    p, handler = _flaky_paired(DM)
-    inner = dataclasses.replace(
-        _event(DM, sender=p.a_id), routed_path=[p.a_id, "relay", p.b_id]
+    """a → b → c over the mesh: c's ``SpaceRoutedHandler`` unwraps the
+    inner event and hands it to the dispatch (in production
+    ``FederationService._dispatch_event``, which ends in the registry)."""
+    redeem = FederationEventType.SPACE_INVITE_TOKEN_REDEEM
+    retry, handler = _fast(), _Flaky()
+    registry = EventDispatchRegistry(retry=retry)
+    registry.register(redeem, handler)
+    nodes = _build_chain(["a", "b", "c"])
+    nodes["c"].handler._dispatcher = registry.dispatch
+    await nodes["a"].handler.send_routed(
+        path=["a", "b", "c"],
+        target_eph_pk_b64=_mint_target_eph(nodes["c"]),
+        inner_event_type=redeem,
+        inner_payload={"redeem_nonce": "n1"},
     )
-    await p.svc_b._dispatch_event(inner)
-    await _settle(p.svc_b._inbound_retry)
-    assert handler.applied == [inner]
+    for _ in range(8):  # the chained deliveries
+        await asyncio.sleep(0)
+    await _settle(retry)
+    [inner] = handler.applied
+    assert inner.from_instance == "a"
+    assert inner.routed_path == ["a", "b", "c"]
+    assert handler.calls == 2
+
+
+async def test_the_routed_wrapper_itself_is_never_tried_again():
+    """Its handler marks the route seen first — a second run is a no-op."""
+    retry, handler = _fast(), _Flaky()
+    routed = _event(FederationEventType.SPACE_ROUTED)
+    assert await _first_try(retry, handler, routed) is False
 
 
 async def test_only_the_handler_that_failed_runs_again():
@@ -382,3 +440,34 @@ async def test_service_stop_gives_held_events_their_last_try():
     await p.svc_b.handle_inbound_rtc(p.a_id, body)
     await p.svc_b.stop()
     assert len(handler.applied) == 1
+
+
+async def test_the_second_try_gate_refuses_instead_of_holding_for_a_seat(monkeypatch):
+    """Held for a seat, the event would later be replayed to the handlers
+    that already ran — the second try's gate must only refuse."""
+    p, _ = _flaky_paired()
+    svc = p.svc_b
+    svc._space_repo = svc._space_remote_member_repo = object()
+    svc._pending_seat_buffer = object()
+    seen: list = []
+
+    def _writer_gate(*, pending, **_kw):
+        seen.append(pending)
+
+        async def step(ctx):
+            return None
+
+        return step
+
+    monkeypatch.setattr(
+        "socialhome.federation.federation_service.make_check_space_writer",
+        _writer_gate,
+    )
+    monkeypatch.setattr(
+        "socialhome.federation.federation_service.make_check_space_archived",
+        lambda **_kw: _writer_gate(pending=None),
+    )
+    assert await svc._retry_allowed(_event(sender=p.a_id)) is True
+    assert seen[-1] is None
+    assert await svc._held_event_allowed(_event(sender=p.a_id)) is True
+    assert seen[-1] is svc._pending_seat_buffer

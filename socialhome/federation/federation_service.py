@@ -666,7 +666,7 @@ class FederationService:
         # Handlers register themselves via attach_* methods.
         # A handler that failed for a passing reason is run again shortly:
         # the replay id is stored before dispatch, so the sender cannot.
-        self._inbound_retry = InboundRetry(gate=self._held_event_allowed)
+        self._inbound_retry = InboundRetry(gate=self._retry_allowed)
         self._event_registry = EventDispatchRegistry(retry=self._inbound_retry)
         self._register_default_handlers()
         # Subscribe to domain events that trigger outbound federation.
@@ -924,7 +924,9 @@ class FederationService:
             FederationEventType.UNPAIR,
         )
 
-    def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:
+    def post_decrypt_gate_steps(
+        self, *, include_ban_check: bool = False, hold_for_seat: bool = True
+    ) -> list:
         """The gates that judge a DECRYPTED event, in pipeline order.
 
         Split out because the mesh path needs exactly these and nothing
@@ -942,6 +944,11 @@ class FederationService:
         path needs it here, because the envelope the pipeline judged was
         the RELAY's — nothing has yet checked whether the ORIGIN household
         is banned from the space.
+
+        ``hold_for_seat=False`` makes the writer gate refuse a write with
+        no seat instead of holding it in the seat buffer — for a handler's
+        second try (:class:`InboundRetry`), whose event was dispatched once
+        already.
         """
         steps: list = []
         if include_ban_check:
@@ -971,7 +978,7 @@ class FederationService:
                 make_check_space_writer(
                     space_repo=self._space_repo,
                     remote_member_repo=self._space_remote_member_repo,
-                    pending=self._pending_seat_buffer,
+                    pending=self._pending_seat_buffer if hold_for_seat else None,
                 ),
             )
         return steps
@@ -1126,7 +1133,14 @@ class FederationService:
         ):
             await self.replay_held(held, reason=f"the seat landed in {event.space_id}")
 
-    async def _held_event_allowed(self, held: FederationEvent) -> bool:
+    async def _retry_allowed(self, held: FederationEvent) -> bool:
+        """The gate of a handler's second try: refuse, never hold — a hold
+        would later replay the event to the handlers that already ran."""
+        return await self._held_event_allowed(held, hold_for_seat=False)
+
+    async def _held_event_allowed(
+        self, held: FederationEvent, *, hold_for_seat: bool = True
+    ) -> bool:
         """Whether an event held since it was verified (a seat wait, a
         handler's second try) still passes the post-decrypt gates — ban
         check included — with the state as it is now."""
@@ -1139,7 +1153,10 @@ class FederationService:
             event=held,
         )
         return await run_post_decrypt_gates(
-            ctx, steps=self.post_decrypt_gate_steps(include_ban_check=True)
+            ctx,
+            steps=self.post_decrypt_gate_steps(
+                include_ban_check=True, hold_for_seat=hold_for_seat
+            ),
         )
 
     async def replay_held(self, held: FederationEvent, *, reason: str) -> None:

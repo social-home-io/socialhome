@@ -83,6 +83,16 @@ The reason is kept server-side (`InboundContext.drop_reason` and the gate's
 log line). Over the DataChannel and the GFS relay the answer is not sent
 back at all.
 
+**A handler that fails is the receiver's to retry.** The replay step has
+stored the `msg_id` by the time a handler runs, so the sender cannot
+deliver the envelope again. A handler failure that can pass (database
+locked, I/O error, a service not attached yet) is retried by the receiver
+itself — that one handler, three more times within ~26 s, behind the
+post-decrypt gates — from a small bounded in-memory hold
+(`federation/inbound_retry.py`). Nothing changes on the wire, and a
+replayed envelope is refused as before. Details:
+[architecture → Inbound handler retry](../architecture.md#inbound-handler-retry).
+
 The signature step **also binds `from_instance` to the verified signing
 identity**: an envelope whose `from_instance` claim does not match the
 instance whose public key passed verification is rejected with

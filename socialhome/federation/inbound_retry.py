@@ -19,8 +19,8 @@ mailbox and multi-recipient frames, mesh ``SPACE_ROUTED`` inner events).
 
 What is never tried again:
 
-* a failure that would repeat (:data:`PERMANENT_ERRORS` — a refusal or a
-  programming error on this payload);
+* a failure that would repeat — anything but :data:`TRANSIENT_ERRORS`: a
+  refusal, a malformed payload, a programming error;
 * :data:`NEVER_RETRIED` events — call negotiation, typing, transport
   signalling and the sync streams, which are stale within seconds or have
   their own resume;
@@ -56,25 +56,42 @@ DEFAULT_MAX_ENTRIES = 256
 DEFAULT_MAX_PER_SENDER = 64
 DEFAULT_MAX_BYTES = 4 * 1024 * 1024
 
-#: A handler raising one of these fails the same way on every try: the
-#: payload is malformed or refused (``ValueError`` and the lookup / type
-#: errors a bad payload causes), not permitted, or already stored.
-PERMANENT_ERRORS: tuple[type[BaseException], ...] = (
-    ValueError,
-    LookupError,
-    TypeError,
-    PermissionError,
-    sqlite3.IntegrityError,
+#: The only failures tried again — the ones that pass on their own: the
+#: database was locked or busy, an I/O call failed or timed out
+#: (``TimeoutError`` is an ``OSError``), a service was not started or not
+#: attached yet (``RuntimeError``). Everything else — a refusal
+#: (``ValueError``), what a malformed payload raises (``KeyError``,
+#: ``TypeError``, ``AttributeError``), a row already stored
+#: (``IntegrityError``), a bug — fails the same way again, and a second run
+#: would only repeat whatever the handler did before it raised.
+TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
+    sqlite3.OperationalError,
+    OSError,
+    RuntimeError,
 )
+#: ``RuntimeError`` subclasses that are not passing conditions.
+_NOT_TRANSIENT: tuple[type[BaseException], ...] = (
+    NotImplementedError,
+    RecursionError,
+)
+
+
+def is_transient(exc: BaseException) -> bool:
+    """Whether a handler that raised ``exc`` is worth running again."""
+    return isinstance(exc, TRANSIENT_ERRORS) and not isinstance(exc, _NOT_TRANSIENT)
+
 
 #: Events a late second try would only hurt: a call that has stopped
 #: ringing (:data:`~socialhome.domain.federation_retention.SHORT_LIVED`), a
-#: typing indicator, transport signalling, and the sync streams (stateful,
-#: with their own resume).
+#: typing indicator, transport signalling, the sync streams (stateful, with
+#: their own resume), and the ``SPACE_ROUTED`` wrapper — its handler marks
+#: the route seen first, so a second run is a no-op; the inner event it
+#: unwraps is dispatched on its own and tried again like any other.
 NEVER_RETRIED: frozenset[FederationEventType] = (
     SHORT_LIVED
     | frozenset(
         {
+            FederationEventType.SPACE_ROUTED,
             FederationEventType.DM_USER_TYPING,
             FederationEventType.FEDERATION_RTC_OFFER,
             FederationEventType.FEDERATION_RTC_ANSWER,
@@ -141,14 +158,17 @@ class InboundRetry:
         we are stopping."""
         if (
             self._stop.is_set()
-            or isinstance(exc, PERMANENT_ERRORS)
+            or not is_transient(exc)
             or event.event_type in NEVER_RETRIED
         ):
             return False
         sender = event.from_instance
-        size = len(orjson.dumps(event.payload, default=str)) + len(
-            event.media_bytes or b""
-        )
+        try:
+            size = len(orjson.dumps(event.payload))
+        except orjson.JSONEncodeError:
+            # Nested deeper than orjson writes: cannot be sized, not held.
+            return False
+        size += len(event.media_bytes or b"")
         if (
             len(self._tasks) >= self._max_entries
             or self._per_sender.get(sender, 0) >= self._max_per_sender
@@ -220,7 +240,7 @@ class InboundRetry:
                     await handler(event)
                 except Exception as exc:  # noqa: BLE001 — judged below, logged at the end
                     last = exc
-                    if stopping or isinstance(exc, PERMANENT_ERRORS):
+                    if stopping or not is_transient(exc):
                         break
                     continue
                 log.info(
