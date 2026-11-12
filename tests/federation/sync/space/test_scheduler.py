@@ -1458,6 +1458,44 @@ async def test_tick_announces_our_version_once_to_each_mesh_only_host(
     assert announced == ["host-x", "host-x"]
 
 
+async def test_tick_announces_our_version_to_mesh_only_member_households(
+    bus, queue, sync_manager
+):
+    """A member household we are not paired with holds no row for us either,
+    so its version-gated space broadcasts skip us until it has our claim: a
+    mesh-only member's reaction never reached the host. The host announces
+    to its mesh-only member households, a member to its mesh-only
+    co-members — never to a paired household, never to itself."""
+    fed = _FakeFederation(confirmed={"paired"})
+    sched = _mesh_sched(
+        bus,
+        queue,
+        sync_manager,
+        fed,
+        [
+            _space("sp-ours", owner_instance_id="self"),
+            _space("sp-joined", owner_instance_id="host-x"),
+        ],
+    )
+    sched._space_repo._members.update(
+        {
+            "sp-ours": ["self", "paired", "mesh-member"],
+            "sp-joined": ["host-x", "self", "mesh-co-member"],
+        }
+    )
+    announced: list[str] = []
+
+    async def _announce(instance_id: str) -> bool:
+        announced.append(instance_id)
+        return True
+
+    sched.attach_mesh_announce(_announce)
+    assert await sched._tick_mesh_announce() == 0
+    assert announced == ["host-x", "mesh-co-member", "mesh-member"]
+    assert await sched._tick_mesh_announce() == 0
+    assert len(announced) == 3
+
+
 async def test_mesh_announce_failure_does_not_kill_the_tick(bus, queue, sync_manager):
     fed = _FakeFederation(confirmed=set())
     sched = _mesh_sched(
@@ -1532,6 +1570,7 @@ async def test_a_followed_only_space_host_gets_no_announce_and_no_catchup(
     )
     sched._space_repo.local_roles["sp-followed"] = roles
     sched._space_repo.mirrored_roles["sp-followed"] = mirrored
+    sched._space_repo._members["sp-followed"] = ["host-f", "member-f"]
     announced: list[str] = []
 
     async def _announce(host: str) -> bool:
