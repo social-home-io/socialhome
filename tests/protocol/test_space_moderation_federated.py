@@ -2223,3 +2223,18 @@ async def test_only_a_promotion_of_our_own_person_asks_the_host(mesh):
     # Our own person made an admin.
     await _promote(mesh, d, "admin")
     assert asked == [("D", SID)]
+
+
+async def test_a_failing_catch_up_never_fails_the_sync_begin(mesh, monkeypatch):
+    """The catch-up shares ``SPACE_SYNC_BEGIN`` with the sync itself: an
+    error in it is logged, never raised into the BEGIN's dispatch."""
+    h, c = mesh["H"], mesh["C"]
+    await _submit_task(mesh)
+    await _pump(mesh)
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("queue unreadable")
+
+    monkeypatch.setattr(type(_federated(h)), "_live_pending", _boom)
+    await _begin(mesh, c, echo=[])
+    assert not h.sent
