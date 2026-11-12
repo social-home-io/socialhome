@@ -778,6 +778,46 @@ only, so that ask is how such a file heals past the GFS cache.
 GFS ask (above) — while no GFS holder answers, it waits for the host's
 §25.6 catch-up.
 
+**Without a view (rows applied without their files).** A push counts as
+done for its sender once the first hop took it. A relay that later drops
+it — the target stayed away past the mesh's pending window (270 s) — tells
+nobody, so the receiving side closes the gap with the same request:
+
+- Every verified inbound event of a space (a live row, a sync / resume
+  chunk, a helper's catch-up; not `SPACE_MEDIA_BLOB` / `SPACE_MEDIA_WANTED`
+  themselves) marks the space after its handlers ran
+  (`FederationService._dispatch_event` → `SpaceMediaWanted.applied`, O(1)).
+- ONE check per marked space runs `APPLY_GRACE_S` (5 min) after the first
+  mark — a row's file normally follows it; by then the push arrived or is
+  lost. It reads the newest live items of the last 30 days
+  (`recent_item_files`: **the newest 50 rows of each kind** — post, comment,
+  calendar cover, album item, listing; a missing file of an older row heals
+  on view) and asks for the `sc-` / `sd-` names that are not in the media
+  dir: ≤ 50 files per check, never a file the household reads from a GFS
+  media cache (it holds a `space_media_refs` row), never for a follower
+  seat. A row created less than the grace ago is left out — its push may
+  still be on its way — and the space is checked again a grace later; so
+  is a space with more than 50 missing files.
+- A name is settled (not asked again without a view) once a provider
+  **accepted** its request. A request nobody took is made again by the
+  space's next check, `MAX_CHECK_ATTEMPTS` (3) times in all; after that
+  the file waits for a view.
+- Routing and the provider's checks and budget are the view's: the host
+  sends **one request per author household**, each naming only the files
+  of that household's people's items (an author household may ship no
+  others; an `sd-` name always goes there) and what no author took to a
+  helper; a member asks its host, a helper only while the host is silent.
+
+So a host that was down for ten minutes while a mesh-only member posted a
+picture holds the picture a few minutes after the row reaches it, before
+anyone opens the post. **Cost:** nothing on the wire while every file is
+here (one bounded local read per active space per 5 min); per lost file one
+request entry (< 1 KiB per ≤ 50 files) to one provider and the file's bytes
+once, inside the provider's 50 files / 32 MiB per 30 min budget. Worst
+case, a host back after a day with 200 missing pictures of 5 authors: 50
+files per check, so 4 checks and ≤ 20 requests (one per author household
+per check), ≤ 32 MiB per 30 min per author household; nothing fans out.
+
 **Cost (recipients × files × bytes per trigger).** One old file on view:
 1 request (< 1 KiB) to the host and the file's bytes once (+ at most
 `MAX_HELPERS` = 2 more requests while the host is silent or unreachable).

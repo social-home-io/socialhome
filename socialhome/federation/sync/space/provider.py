@@ -1222,7 +1222,11 @@ class SpaceSyncService:
                 if budget <= 0:
                     break
                 urls = names if gate is None else gate.ship(owner, names)
-                urls = urls[:budget]
+                # Only what is here: the host may hold a member's row whose
+                # file never arrived (it asks the author on view, v_92). A
+                # file we lack is neither queued — every attempt would fail
+                # — nor charged to the stream's budget.
+                urls = (await self._media_sync.held_files(urls))[:budget]
                 budget -= len(urls)
                 await self._enqueue_media(space_id, target_instance_id, item_id, urls)
         # Page files — the host's catch-up only (v_82).
@@ -1266,14 +1270,15 @@ class SpaceSyncService:
                     urls.extend(history)
             except sqlite3.Error:
                 log.exception("sync-catchup-media: history of page %s failed", page.id)
-            await self._enqueue_media(
-                space_id,
-                target_instance_id,
-                page.id,
-                await space_own_files(
-                    self._page_media_refs, space_id, list(dict.fromkeys(urls))
-                ),
+            own = await space_own_files(
+                self._page_media_refs, space_id, list(dict.fromkeys(urls))
             )
+            # Only what is here, like the items' files above: a member's
+            # page file whose push never reached us cannot ship, and every
+            # attempt would fail on the missing source.
+            if self._media_sync is not None:
+                own = await self._media_sync.held_files(own)
+            await self._enqueue_media(space_id, target_instance_id, page.id, own)
 
     async def _enqueue_media(
         self,

@@ -37,6 +37,8 @@ Triggers:
    (:meth:`attach_mesh_announce`) once per process, so it learns our
    version + identity key: a host can deliver our writer cert (migration
    0078), and any member household's version-gated broadcast reaches us.
+   A household no route reaches after :data:`MAX_MESH_ANNOUNCE_ATTEMPTS`
+   attempts is tried only every :data:`MESH_ANNOUNCE_SLOW_EVERY` sweeps.
 8. **Per-provider slots** — every BEGIN this scheduler sends holds one of
    the provider's :data:`MAX_ACTIVE_SESSIONS_PER_INSTANCE` slots until its
    ``SpaceSyncComplete`` (or deferral, or :data:`INFLIGHT_BEGIN_TTL_S`). A
@@ -149,6 +151,15 @@ STARTUP_MESH_CATCHUP_DELAY_SECONDS: float = 45.0
 #: Only BEGINs that actually shipped count — a ``no_route`` never reached the
 #: host and so never touched its budget (#648).
 MAX_MESH_CATCHUP_ATTEMPTS: int = 3
+
+#: Failed version announcements to one mesh-only household before the sweep
+#: slows down for it: it no longer counts as pending (the startup retries
+#: end) and is tried only every :data:`MESH_ANNOUNCE_SLOW_EVERY` sweeps. It
+#: is never given up — a household that comes online needs our version, or
+#: its version-gated broadcasts skip us.
+MAX_MESH_ANNOUNCE_ATTEMPTS: int = 3
+#: With the 30-minute tick: one route probe per household every 4 hours.
+MESH_ANNOUNCE_SLOW_EVERY: int = 8
 
 #: First delay before asking a provider again for a sync it deferred for
 #: lack of a slot; the n-th retry waits n times this. Long enough for the
@@ -280,6 +291,7 @@ class SpaceSyncScheduler:
         "_inflight",
         "_interval",
         "_mesh_announce",
+        "_mesh_announce_failed",
         "_mesh_announced",
         "_mesh_catchup_attempts",
         "_mesh_catchup_done",
@@ -357,6 +369,9 @@ class SpaceSyncScheduler:
         self._mesh_announce: Callable[[str], Awaitable[bool]] | None = None
         #: Mesh-only hosts our version reached this process.
         self._mesh_announced: set[str] = set()
+        #: household → announcements that failed, then sweeps skipped since
+        #: (:data:`MAX_MESH_ANNOUNCE_ATTEMPTS`).
+        self._mesh_announce_failed: dict[str, int] = {}
         #: provider → {sync_id: (space_id, monotonic sent-at)} — the BEGINs
         #: we sent it that have not ended yet. A provider serves at most
         #: :data:`MAX_ACTIVE_SESSIONS_PER_INSTANCE` of ours at once and
@@ -1277,24 +1292,47 @@ class SpaceSyncScheduler:
                     targets.update(await self._mesh_targets(space))
                 targets.update(await self._space_repo.list_member_instances(space.id))
             targets -= {"", self._own_instance_id}
-            hosts = sorted(targets)
+            households = sorted(targets)
         except Exception:  # pragma: no cover — defensive
-            log.exception("space-sync-scheduler: listing mesh hosts failed")
+            log.exception(
+                "space-sync-scheduler: listing the households to announce "
+                "our version to failed"
+            )
             return 0
-        for host in hosts:
-            if host in self._mesh_announced:
+        for household in households:
+            if household in self._mesh_announced:
+                continue
+            failed = self._mesh_announce_failed.get(household, 0)
+            slow = failed >= MAX_MESH_ANNOUNCE_ATTEMPTS
+            if slow and (failed + 1 - MAX_MESH_ANNOUNCE_ATTEMPTS) % (
+                MESH_ANNOUNCE_SLOW_EVERY
+            ):
+                self._mesh_announce_failed[household] = failed + 1  # a skip
                 continue
             try:
-                if await self._federation.is_confirmed_peer(host):
+                if await self._federation.is_confirmed_peer(household):
+                    self._mesh_announce_failed.pop(household, None)
                     continue
-                done = await self._mesh_announce(host)
+                done = await self._mesh_announce(household)
             except Exception:
-                log.exception("mesh version announcement to %s failed", host)
+                log.exception("mesh version announcement to %s failed", household)
                 done = False
             if done:
-                self._mesh_announced.add(host)
-            else:
-                pending += 1
+                self._mesh_announced.add(household)
+                self._mesh_announce_failed.pop(household, None)
+                continue
+            self._mesh_announce_failed[household] = failed + 1
+            if slow:
+                continue
+            pending += 1
+            if failed + 1 >= MAX_MESH_ANNOUNCE_ATTEMPTS:
+                log.info(
+                    "mesh version announcement: no route to %s after %d "
+                    "attempts — tried again every %d sweeps",
+                    household,
+                    MAX_MESH_ANNOUNCE_ATTEMPTS,
+                    MESH_ANNOUNCE_SLOW_EVERY,
+                )
         return pending
 
     async def _mesh_targets(self, space: Space) -> list[str]:

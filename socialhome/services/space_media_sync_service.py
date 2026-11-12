@@ -32,7 +32,7 @@ import pathlib
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
@@ -47,7 +47,7 @@ from ..repositories.space_media_outbox_repo import (
     SpaceMediaOutboxEntry,
 )
 from .backoff import jittered_backoff_seconds
-from .inbound_media_store import is_safe_media_name
+from .inbound_media_store import is_safe_media_name, media_basename, media_file_path
 from .media_chunk_pipeline import send_chunks
 from .media_file_hasher import MediaFileHasher
 from .peer_unpair_service import is_unpair_tombstone
@@ -68,11 +68,20 @@ CHUNK_IDLE_TIMEOUT_S: float = 120.0
 MAX_INFLIGHT_FILE_BYTES: int = 64 * 1024 * 1024
 #: Recipients served at once by one flush pass.
 PARALLEL_RECIPIENTS: int = 6
+#: ``(file, household)`` rows remembered from the start of their send, oldest dropped,
+#: so a chunk the mesh reports lost (:meth:`SpaceMediaSyncService
+#: .on_mesh_chunk_lost`) can queue the file again. In memory only: a nack
+#: arrives within the mesh's pending window (minutes) or never.
+MAX_SENT_MARKS: int = 512
 #: v_92 — ``(file, household)`` rows queued because the household asked for
 #: the file (``SPACE_MEDIA_WANTED``) remembered at once, oldest dropped. In
 #: memory only: a mark lost to a restart costs one shortcut-dropped push,
 #: and the requester asks again on its next view.
 MAX_PUSHED_MARKS: int = 4096
+
+
+#: Where a sent row's one mesh resend stands (``SpaceMediaSyncService._sent``).
+_SENT, _RESEND_QUEUED, _RESENT = range(3)
 
 
 class _RelayReaders(Protocol):
@@ -102,6 +111,7 @@ class SpaceMediaSyncService:
         "_outbox",
         "_pushed",
         "_relay_readers",
+        "_sent",
         "_stop",
         "_task",
         "_wake",
@@ -141,6 +151,13 @@ class SpaceMediaSyncService:
         self._held = 0
         #: v_92 — rows a household asked for (:data:`MAX_PUSHED_MARKS`).
         self._pushed: OrderedDict[tuple[str, str], None] = OrderedDict()
+        #: ``(file, household)`` → the row as it was sent and where its one
+        #: resend stands: ``_SENT`` → (a chunk is reported lost) →
+        #: ``_RESEND_QUEUED`` → (the row is sent again) → ``_RESENT``
+        #: (:data:`MAX_SENT_MARKS`).
+        self._sent: OrderedDict[tuple[str, str], tuple[SpaceMediaOutboxEntry, int]] = (
+            OrderedDict()
+        )
 
     def attach_relay_readers(self, readers: _RelayReaders) -> None:
         """Wire the v_80 reader check: a member household seated from an
@@ -222,6 +239,74 @@ class SpaceMediaSyncService:
                     while len(self._pushed) > MAX_PUSHED_MARKS:
                         self._pushed.popitem(last=False)
         # Nudge the loop so it ships now rather than on the next poll.
+        self._wake.set()
+
+    async def held_files(self, media_urls: Sequence[str]) -> list[str]:
+        """The *media_urls* whose file is in this household's media dir, in
+        order. A catch-up queues only these: a row can be here without its
+        file (it never arrived), and a file that is not here cannot ship."""
+        held: list[str] = []
+        for url in media_urls:
+            path = media_file_path(self._media_dir, media_basename(url))
+            if path is not None and await aiofiles.os.path.isfile(path):
+                held.append(url)
+        return held
+
+    async def on_mesh_chunk_lost(self, target_instance_id: str, head: dict) -> None:
+        """A chunk of ``head["blob_id"]`` we sent to *target_instance_id*
+        over the mesh came back nacked (``SPACE_ROUTE_STALE``: the target
+        restarted and cannot open what was sealed to its old key).
+
+        The relay had taken the chunk, so the row was done and deleted (or
+        is still being sent: its later chunks — then ``_send_row`` keeps the
+        row instead of deleting it); the mesh keeps no copy of a chunk to
+        retransmit. Queue the whole file again — once: the other chunks' nacks find the row already queued,
+        and a nack for the resend gives up (the receiver asks for the file
+        when someone opens it, v_92). Never raises.
+        """
+        blob_id = head.get("blob_id")
+        if not isinstance(blob_id, str):
+            return
+        key = (blob_id, target_instance_id)
+        sent = self._sent.get(key)
+        if sent is None:
+            return
+        entry, state = sent
+        if state != _SENT:
+            # Another chunk of the first send (the file is queued already),
+            # or the resend itself: nothing more to do.
+            log.debug(
+                "space-media-sync: %s → %s lost on the mesh — %s",
+                blob_id,
+                target_instance_id,
+                "already queued again"
+                if state == _RESEND_QUEUED
+                else "the resend too; not sent a third time",
+            )
+            return
+        try:
+            await self._outbox.enqueue(
+                blob_id=entry.blob_id,
+                space_id=entry.space_id,
+                correlation_id=entry.correlation_id,
+                target_instance_id=entry.target_instance_id,
+                bytes_path=entry.bytes_path,
+            )
+        except Exception:
+            log.warning(
+                "space-media-sync: queueing %s → %s again failed",
+                blob_id,
+                target_instance_id,
+                exc_info=True,
+            )
+            return
+        log.info(
+            "space-media-sync: %s → %s was lost on the mesh (the target "
+            "could not open it) — queued again",
+            blob_id,
+            target_instance_id,
+        )
+        self._sent[key] = (entry, _RESEND_QUEUED)
         self._wake.set()
 
     # Back-compat alias for the post-only signature shipped in PR #440.
@@ -497,6 +582,11 @@ class SpaceMediaSyncService:
             if not result.ok:
                 raise RuntimeError(result.error or "delivery_failed")
 
+        # Marked before the first chunk goes: a nack can arrive while later
+        # chunks are still being sent (the target is back, the route cached).
+        key = (entry.blob_id, entry.target_instance_id)
+        before = self._sent.get(key)
+        self._remember_sent(entry)
         failure = await send_chunks(payloads, _send, window=PIPELINE_WINDOW)
         log.debug(
             "space-media-sync: %s → %s %s after %.1f s",
@@ -515,13 +605,39 @@ class SpaceMediaSyncService:
                 entry.target_instance_id,
                 error,
             )
+            if before is not None and before[1] == _RESEND_QUEUED:
+                # The resend itself failed: its retry is still the resend.
+                self._sent[key] = before
             await self._reschedule_or_fail(entry, str(error) or "chunk send failed")
             return False
+        mark = self._sent.get(key)
+        if mark is not None and mark[1] == _RESEND_QUEUED:
+            # A chunk was reported lost during this very send: the row is
+            # the resend — due now, not deleted.
+            await self._outbox.reschedule(
+                blob_id=entry.blob_id,
+                target_instance_id=entry.target_instance_id,
+                attempts=entry.attempts,
+                next_attempt_at=datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+                last_error="a chunk was lost on the mesh",
+            )
+            self._wake.set()
+            return True
         await self._outbox.delete(
             blob_id=entry.blob_id,
             target_instance_id=entry.target_instance_id,
         )
         return True
+
+    def _remember_sent(self, entry: SpaceMediaOutboxEntry) -> None:
+        """Keep the row being sent for :meth:`on_mesh_chunk_lost`. A row
+        queued again by it stays marked as the resend."""
+        key = (entry.blob_id, entry.target_instance_id)
+        previous = self._sent.pop(key, None)
+        resend = previous is not None and previous[1] == _RESEND_QUEUED
+        self._sent[key] = (entry, _RESENT if resend else _SENT)
+        while len(self._sent) > MAX_SENT_MARKS:
+            self._sent.popitem(last=False)
 
     # ── Internals ─────────────────────────────────────────────────────
 

@@ -179,11 +179,24 @@ _MAX_ROUTED_PATH_LEN: int = 8
 
 #: Largest inner payload (compact JSON, bytes) the origin keeps around for a
 #: possible ``SPACE_ROUTE_STALE`` retransmit. Anything bigger is a media
-#: chunk: those ride the durable ``space_media_outbox``, which re-discovers
-#: the route on its own next retry, so retaining them here would only
-#: duplicate bytes in RAM. An oversized send still gets a pending record
-#: (with ``inner_payload=None``) so the nack can invalidate the route.
+#: chunk: its bytes are on disk, so retaining them here would only
+#: duplicate them in RAM. An oversized send still gets a pending record
+#: (with ``inner_payload=None`` and the inner's small head) so the nack can
+#: invalidate the route and tell the chunk's sender, which queues the file
+#: again (``SpaceMediaSyncService.on_mesh_chunk_lost``). The media outbox
+#: does not retry on its own: its row is done once the first hop took the
+#: chunk.
 _MAX_RETAINED_INNER_BYTES: int = 64 * 1024
+
+#: Longest string value kept in the head of an oversized inner
+#: (:attr:`_PendingRouted.inner_head`): ids and names pass, the bulk
+#: (a chunk's base64 bytes) does not.
+_MAX_HEAD_VALUE_CHARS: int = 256
+
+#: Told ``(target_instance_id, head)`` when a verified nack names an
+#: oversized inner of its event type (:meth:`SpaceRoutedHandler
+#: .attach_lost_inner_listener`).
+LostInnerListener = Callable[[str, dict], Awaitable[None]]
 
 #: Ceiling on ``_pending_routed`` entries. Each is bounded by
 #: ``_MAX_RETAINED_INNER_BYTES``, so this caps the retained-inner memory at
@@ -226,6 +239,20 @@ class _PendingRouted:
     #: True when this send IS the one retransmit — a nack for it gives up.
     is_retry: bool
     expires_at: float
+    #: Only with ``inner_payload_json=None``: the oversized inner's small
+    #: top-level scalar fields (ids, names, sequencing — never the bulk),
+    #: handed to the event type's lost-inner listener on a verified nack.
+    inner_head: dict[str, str | int | float | bool] | None = None
+
+
+def _inner_head(payload: dict) -> dict[str, str | int | float | bool]:
+    """The small top-level scalar fields of an oversized inner *payload*."""
+    return {
+        str(k): v
+        for k, v in payload.items()
+        if isinstance(v, (int, float, bool))
+        or (isinstance(v, str) and len(v) <= _MAX_HEAD_VALUE_CHARS)
+    }
 
 
 class SpaceRoutedHandler:
@@ -238,6 +265,7 @@ class SpaceRoutedHandler:
         "_federation",
         "_federation_repo",
         "_host_hop",
+        "_lost_inner_listeners",
         "_origin_eph_state",
         "_pending_routed",
         "_reply_eph_state",
@@ -313,6 +341,8 @@ class SpaceRoutedHandler:
         #: ``FederationService.attach_mesh``). ``None`` → a verified nack
         #: is consumed but nothing is invalidated or retransmitted.
         self._route_service: RouteDiscoveryService | None = None
+        #: See :meth:`attach_lost_inner_listener`.
+        self._lost_inner_listeners: dict[FederationEventType, LostInnerListener] = {}
 
     # ── Attach ─────────────────────────────────────────────────────────
 
@@ -321,6 +351,16 @@ class SpaceRoutedHandler:
         we relay / unwrap its three-hop shape)."""
         self._host_hop = host_hop
         host_hop.attach_routed(self)
+
+    def attach_lost_inner_listener(
+        self, event_type: FederationEventType, listener: LostInnerListener
+    ) -> None:
+        """``listener(target_instance_id, head)`` is told when a verified
+        ``SPACE_ROUTE_STALE`` nack names an inner of *event_type* too big
+        to be kept for a retransmit (a media chunk). The first hop had taken
+        the envelope, so its sender counted it as delivered; only the sender
+        can send it again (the media outbox queues the file again)."""
+        self._lost_inner_listeners[event_type] = listener
 
     def attach_route_service(self, route_service: RouteDiscoveryService) -> None:
         """Give the handler the discovery service so a verified
@@ -454,8 +494,10 @@ class SpaceRoutedHandler:
         # exact, and immune to the caller mutating its dict afterwards);
         # over the cap → invalidate-only record.
         retained: str | None = inner_payload_json
+        head: dict[str, str | int | float | bool] | None = None
         if len(inner_payload_json.encode()) > _MAX_RETAINED_INNER_BYTES:
             retained = None
+            head = _inner_head(inner_payload)
         self._pending_routed[route_id] = _PendingRouted(
             target_instance_id=path[-1],
             target_identity_pk=target_identity_pk,
@@ -464,6 +506,7 @@ class SpaceRoutedHandler:
             inner_payload_json=retained,
             is_retry=is_retry,
             expires_at=now + _PENDING_ROUTED_TTL_S,
+            inner_head=head,
         )
         # Origin-side dedup: if this same route_id loops back to us
         # (shouldn't happen with a valid path, but defensive), drop.
@@ -1675,15 +1718,18 @@ class SpaceRoutedHandler:
                 )
                 return
             if pending.inner_payload_json is None:
+                listener = self._lost_inner_listeners.get(pending.inner_event_type)
                 log.info(
                     "SPACE_ROUTE_STALE route_id=%s: route to %s %s;"
-                    " oversized inner %s not retransmitted (durable outbox will"
-                    " retry)",
+                    " oversized inner %s not retransmitted (%s)",
                     route_id[:8],
                     target,
                     state,
                     pending.inner_event_type.value,
+                    "its sender is told" if listener is not None else "lost",
                 )
+                if listener is not None:
+                    await self._report_lost_inner(listener, pending)
                 return
             # ``discover_route`` is cache-first (a late nack after the
             # rebuild costs zero floods), single-flights per target and
@@ -1734,6 +1780,20 @@ class SpaceRoutedHandler:
             pending.inner_event_type.value,
             new_route_id[:8],
         )
+
+    async def _report_lost_inner(
+        self, listener: LostInnerListener, pending: _PendingRouted
+    ) -> None:
+        """Hand a nacked oversized inner's head to *listener*. Never raises."""
+        try:
+            await listener(pending.target_instance_id, dict(pending.inner_head or {}))
+        except Exception:
+            log.warning(
+                "SPACE_ROUTE_STALE: the lost-inner listener for %s to %s failed",
+                pending.inner_event_type.value,
+                pending.target_instance_id,
+                exc_info=True,
+            )
 
     # ── Deferred retransmit (GAP 1: rediscovery raced the target's boot) ─
 
