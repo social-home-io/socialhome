@@ -15,7 +15,7 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 
 from ..domain.federation import FederationEvent, FederationEventType
-from .inbound_retry import Failed, InboundRetry, log_handler_failure
+from .inbound_retry import NEVER_RETRIED, Failed, InboundRetry, log_handler_failure
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class EventDispatchRegistry:
 
     def __init__(self, *, retry: InboundRetry | None = None) -> None:
         self._handlers: dict[FederationEventType, list[EventHandler]] = {}
-        #: Second tries for a handler that failed for a passing reason.
+        #: Per-sender lanes and the in-place second tries.
         self._retry = retry
 
     def register(
@@ -76,23 +76,18 @@ class EventDispatchRegistry:
     async def dispatch(self, event: FederationEvent) -> None:
         """Invoke all handlers registered for the event's type.
 
-        A handler exception never blocks the other handlers. The envelope's
-        replay id is already stored, so the sender cannot deliver it again:
-        a failure that may pass is handed to :class:`InboundRetry`, which
-        runs the failed handlers again shortly — and makes every later
-        event of the same sender wait behind it (it is then taken here and
-        dispatched in its turn). Any other failure is logged and the event
-        is dropped for that handler.
+        A handler exception never blocks the other handlers. With an
+        :class:`InboundRetry` the event runs in its sender's lane — one
+        household's events are applied in arrival order — and a handler
+        that failed for a passing reason is run again there (the envelope's
+        replay id is already stored, so the sender cannot deliver it
+        again). Any other failure is logged and the event is dropped for
+        that handler. Returns once the handlers are done with the event.
         """
-        retry = self._retry
-        if retry is not None and retry.defer(event):
+        if self._retry is not None and event.event_type not in NEVER_RETRIED:
+            await self._retry.dispatch(event, self._run)
             return
-        failed = await self._run(event, None)
-        if retry is not None:
-            again = [f for f in failed if retry.may_retry(event, f[1])]
-            if again and retry.hold(event, again, self._run):
-                failed = [f for f in failed if f not in again]
-        for handler, exc in failed:
+        for handler, exc in await self._run(event, None):
             log_handler_failure(event, handler, exc)
 
     async def _run(

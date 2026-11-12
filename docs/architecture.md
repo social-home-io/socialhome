@@ -975,44 +975,60 @@ Mutating HTTP routes accept an `Idempotency-Key` header; the
 `(user_id, key)`. Combined with the replay cache, this means
 both API callers and federation peers can retry safely.
 
-### Inbound handler retry
+### Inbound order and handler retry
 
 An envelope's `msg_id` is stored in the replay cache *before* its handlers
 run, and on most transports the sender gets no answer at all (DataChannel,
 GFS relay, GFS mailbox, mesh). So when a handler fails after that, the
 sender can do nothing: it believes the delivery worked, and a re-send of
-the same envelope is refused as a replay. The receiver therefore gives its
-own handler a second try (`federation/inbound_retry.py`, behind
+the same envelope is refused as a replay. The receiver handles both order
+and failure itself (`federation/inbound_retry.py`, behind
 `EventDispatchRegistry.dispatch`, where every transport ends):
 
-- **Only passing failures** — `sqlite3.OperationalError` (database
-  locked / busy) and `OSError` (I/O, timeouts). A refusal, a malformed
-  payload, a `RuntimeError` or a bug (`ValueError`, `KeyError`,
-  `TypeError`, `AttributeError`, `IntegrityError`, …) fails the same way
-  again and is logged and dropped as before.
-- **Only the handlers that failed** run again, after 1 s, 5 s and 20 s
-  (four tries in all); then one WARNING and the event is dropped.
-- **One sender's events stay in order.** While a household has a held
-  event, everything else it sends — for any handler — waits behind it in
-  one queue per sender (`from_instance`; for a mesh-routed event the
-  origin, not the relay) and is dispatched in arrival order once the head
-  succeeded or was given up. A delete never overtakes the create it
-  follows, a demotion never lands before its promotion. Other senders are
-  not held up.
-- **The gate runs again before every delayed run** — the sender is still a
-  peer (not unpaired meanwhile), and the post-decrypt gates (ban,
-  deprovisioned author, archived space, writer seat) still pass.
-- **Never held, never waiting:** call negotiation, typing, RTC signalling,
-  the sync streams (stateful, with their own resume; they already travel
-  beside the live events) and the `SPACE_ROUTED` wrapper (the inner event
-  it unwraps is queued on its own, under its origin).
-- **Bounded and in memory:** 256 events, 64 per sending household, 4 MiB.
-  An event that does not fit behind a sender's head ends the wait: the
-  head is given up at once (one WARNING) and the queue runs now, in order
-  — never out of order, never dropped silently. On shutdown a handler that
-  is running finishes and the rest is dropped with one log line; that, and
-  anything held when the process is killed, is lost — as it was before
-  (space content then comes back with the next sync).
+- **A lane per sender.** Every event takes its sender's lane — one
+  `asyncio.Lock` per `from_instance` (for a mesh-routed inner event the
+  origin household, not the relay) — before its handlers run, and keeps it
+  until they succeeded, refused or were given up. One household's events
+  are therefore applied strictly in the order they arrived, always: a
+  delete never overtakes the create it follows, a demotion never lands
+  before its promotion. Later events wait on the lock (that is the
+  back-pressure); nothing is queued aside, nothing is dropped. A lane
+  entry exists only while an event holds or waits on it.
+- **The retry happens in place**, while the lane is held. Only passing
+  failures are retried — `sqlite3.OperationalError` (database locked /
+  busy) and `OSError` (I/O, timeouts). A refusal, a malformed payload, a
+  `RuntimeError` or a bug fails the same way again and is logged and
+  dropped as before. Only the handlers that failed run again, after 1 s,
+  2 s and 4 s (four tries in all); then one WARNING.
+- **The hold is bounded in time:** no try starts later than 8 s after the
+  event's first run began. That is below what waits on the other side —
+  the sender's inbox POST (10 s), and the read loops of a DataChannel, the
+  GFS relay socket and a mailbox claim (30 s heartbeat, 15 s pong window).
+  If a sender's POST times out anyway, the event is still applied once:
+  the handler is not cancelled, and the outbox's re-send (same `msg_id`)
+  is answered `410` "replay", which the outbox takes as "the receiver has
+  it" and drops the row.
+- **The gate runs again before every later try** — the sender is still a
+  peer (not unpaired meanwhile; its own `UNPAIR` and a routed origin are
+  exempt), and the post-decrypt gates (ban, deprovisioned author, archived
+  space, writer seat) still pass.
+- **No lane, no retry:** call negotiation, typing, RTC signalling, the
+  sync streams (stateful, with their own resume) and the `SPACE_ROUTED`
+  wrapper (its inner event takes its origin's lane). A dispatch made from
+  inside a handler (a held event replayed when its parent or seat lands)
+  runs in place, without a second lane.
+- **Shutdown:** the waits end, each event being retried gets one last try
+  (a handler is never cut mid-write), the lanes are released.
+
+Two limits are accepted:
+
+- **Order is per sender, not across senders.** Two households' events
+  about the same thing are not ordered against each other: a delete the
+  host relays can pass the author's own create while that create is being
+  retried.
+- **A restart loses an event that is being retried** (it lives in the
+  handler's own task) — as it was lost before this existed. Space content
+  then comes back with the next sync.
 
 The replay cache is not touched: a second try is this household re-running
 its own handler on an envelope it already verified, never a second

@@ -664,11 +664,10 @@ class FederationService:
         self._media_relay_inbound_pipeline = None  # lazy, v_87 relay frames
         # Event dispatch registry for federation event handlers.
         # Handlers register themselves via attach_* methods.
-        # A handler that failed for a passing reason is run again shortly:
-        # the replay id is stored before dispatch, so the sender cannot.
-        self._inbound_retry = InboundRetry(
-            gate=self._retry_allowed, on_applied=self._mark_space_applied
-        )
+        # One sender's events run in arrival order, and a handler that
+        # failed for a passing reason is run again in place: the replay id
+        # is stored before dispatch, so the sender cannot re-deliver.
+        self._inbound_retry = InboundRetry(gate=self._retry_allowed)
         self._event_registry = EventDispatchRegistry(retry=self._inbound_retry)
         self._register_default_handlers()
         # Subscribe to domain events that trigger outbound federation.
@@ -4313,7 +4312,7 @@ class FederationService:
         since a deferred send rides both.
         """
         self._stopping = True
-        # A handler on its second try finishes; what else is held is dropped.
+        # An inbound event waiting for its next try gets its last one now.
         await self._inbound_retry.stop()
         tasks = [
             t
@@ -4642,16 +4641,12 @@ class FederationService:
             # In memory, O(1) — clears a silent host only (v_92).
             self._host_contact.heard_from(event.space_id, event.from_instance)
         await self._event_registry.dispatch(event)
-        self._mark_space_applied(event)
-
-    def _mark_space_applied(self, event: FederationEvent) -> None:
-        """After the handlers — here, or on a later try
-        (:class:`InboundRetry`): the row this event carried is stored."""
         if (
             self._space_applied is not None
             and event.space_id
             and event.event_type not in _FILE_TRAFFIC
         ):
+            # After the handlers: the row this event carried is stored.
             try:
                 self._space_applied(event.space_id)
             except Exception:

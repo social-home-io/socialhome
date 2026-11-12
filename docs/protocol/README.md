@@ -83,17 +83,19 @@ The reason is kept server-side (`InboundContext.drop_reason` and the gate's
 log line). Over the DataChannel and the GFS relay the answer is not sent
 back at all.
 
-**A handler that fails is the receiver's to retry.** The replay step has
-stored the `msg_id` by the time a handler runs, so the sender cannot
-deliver the envelope again. A handler failure that can pass (database
-locked, I/O error) is retried by the receiver itself — the failed
-handlers, three more times within ~26 s, behind the post-decrypt gates —
-from a small bounded in-memory hold (`federation/inbound_retry.py`).
-Meanwhile every later event of the same sender waits behind it, so one
-household's events are applied in the order they arrived. Nothing changes
-on the wire, and a
-replayed envelope is refused as before. Details:
-[architecture → Inbound handler retry](../architecture.md#inbound-handler-retry).
+**Order and failure are the receiver's.** Every event runs in its
+sender's lane (one lock per `from_instance`; the origin household for a
+mesh-routed inner event), so one household's events are applied in the
+order they arrived. The replay step has stored the `msg_id` by the time a
+handler runs, so the sender cannot deliver the envelope again: a handler
+failure that can pass (database locked, I/O error) is retried by the
+receiver itself, in place — the failed handlers, up to three more times
+within 8 s, behind the post-decrypt gates (`federation/inbound_retry.py`).
+Nothing changes on the wire, and a replayed envelope is refused as before.
+Two accepted limits: order holds per sender, not across senders (a
+host-relayed delete can pass the author's own create while it is being
+retried), and a restart loses an event that is being retried. Details:
+[architecture → Inbound order and handler retry](../architecture.md#inbound-order-and-handler-retry).
 
 The signature step **also binds `from_instance` to the verified signing
 identity**: an envelope whose `from_instance` claim does not match the
