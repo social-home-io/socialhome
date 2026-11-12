@@ -2192,10 +2192,13 @@ def _wire_federation_stack(
     )
     capabilities_outbound.wire()
     app[K.capabilities_outbound_key] = capabilities_outbound
-    # A space host we reach only over the mesh holds no row for us: the
-    # scheduler's mesh sweep tells it our version (migration 0078).
-    space_sync_scheduler.attach_mesh_announce(
-        capabilities_outbound.announce_to_mesh_host
+    # A member household of one of our spaces that we reach only over the
+    # mesh holds no row for us: the scheduler's mesh sweep tells it our
+    # version (migration 0078), and a household whose own claim just raised
+    # its version here is answered right away.
+    space_sync_scheduler.attach_mesh_announce(capabilities_outbound.announce_over_mesh)
+    federation_service.attach_mesh_claim_answer(
+        capabilities_outbound.announce_over_mesh
     )
 
     peer_directory_service = PeerDirectoryService(
