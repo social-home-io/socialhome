@@ -12303,6 +12303,34 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_93 SPACE_POST_REACTION gate in place ✓")
+    # v_94 — one merge rule: a §25.6 requester at >= v_94 is streamed a
+    # poll's vote stamps instead of the vote list, and the stamp on
+    # SPACE_POLL_VOTE_CAST is additive (no gate). ``space-poll-vote`` sent a
+    # stamped vote from c; the host b must still hold it under c's stamp.
+    sent = state.get("poll_vote")
+    if sent:
+        held = _rows(
+            "b",
+            "SELECT vote_stamps_json FROM space_polls WHERE post_id=?",
+            (sent["post_id"],),
+        )
+        entry = (json.loads(held[0][0]) if held and held[0][0] else {}).get(
+            sent["voter"]
+        )
+        if entry != sent["entry"]:
+            failures.append(
+                f"v_94: b holds {entry!r} for c's poll vote, c stamped "
+                f"{sent['entry']!r} — the vote was not merged by its stamp"
+            )
+        else:
+            print("  v_94 b holds c's poll vote under c's own stamp ✓")
+    if int(_Cap.MIN_FOR_ITEM_MERGE_STAMPS) != 94 or _OURS < 94:
+        failures.append(
+            "MIN_FOR_ITEM_MERGE_STAMPS moved off v_94 (or OURS fell below it) "
+            "— a poll's votes would be replaced by the host's list again"
+        )
+    else:
+        print("  v_94 item merge stamps gate in place ✓")
     # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
     # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
     # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key
@@ -18371,6 +18399,142 @@ def cmd_space_reaction() -> None:
     print(f"{step}: ok")
 
 
+def cmd_space_poll_vote() -> None:
+    """A stamped poll vote crosses households and merges by its stamp (v_94).
+
+    Prereqs: ``traffic`` + ``calendar`` (Beta's private space — Beta the
+    owner, Alpha and Gamma remote members). Runs standalone after them.
+
+    1. a posts a poll in the space; a, b and c hold it with the same
+       option ids (``SPACE_POLL_CREATED``).
+    2. **Vote.** c votes the first option, then switches to the second
+       (``SPACE_POLL_VOTE_CAST`` with ``at``). a, b and c all show c on the
+       second option only.
+    3. **The stamp round-trips.** b (the host) and a hold, for c's voter,
+       exactly the stamp c's household wrote
+       (``space_polls.vote_stamps_json``) — the receivers merged by the
+       sender's stamp, not by arrival. Recorded in ``state.json`` so
+       ``verify`` re-checks it on b at the end of the chain.
+    4. **Nothing after the close.** a closes the poll; once b and c hold the
+       close, c's retraction is refused where it is made (409) and the vote
+       stays on all three.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    space_id = state.get("space_id")
+    if not space_id:
+        raise SystemExit("run 'traffic' and 'calendar' first — needs Beta's space")
+    inst = state["instances"]
+    a, c = inst["a"], inst["c"]
+    step = "space-poll-vote"
+    posts = f"/api/spaces/{space_id}/posts"
+
+    def base(info: dict) -> str:
+        return f"http://127.0.0.1:{info['port']}"
+
+    s, post = _request(
+        base(a) + posts,
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": f"which one {secrets.token_hex(3)}"},
+    )
+    post_id = _must(f"{step}: a posts", s, post, ok=(201,))["id"]
+    poll_url = f"{posts}/{post_id}/poll"
+    s, made = _request(
+        base(a) + poll_url,
+        token=a["token"],
+        method="POST",
+        body={"question": "Which one?", "options": ["First", "Second"]},
+    )
+    options = [o["id"] for o in _must(f"{step}: a adds a poll", s, made, ok=(201,))["options"]]
+
+    def wait(what: str, check, timeout: float = 45.0):
+        deadline = time.time() + timeout
+        got = None
+        while time.time() < deadline:
+            got = check()
+            if got:
+                return got
+            time.sleep(1.0)
+        raise SystemExit(f"{step}: timed out waiting for {what} (last: {got!r})")
+
+    def held_options(label: str) -> list[str]:
+        return [
+            r[0]
+            for r in _rows(
+                label,
+                "SELECT id FROM space_poll_options WHERE post_id=? ORDER BY position",
+                (post_id,),
+            )
+        ]
+
+    wait(
+        "the poll on a, b and c",
+        lambda: all(held_options(label) == options for label in "abc"),
+    )
+
+    def stamp_of(label: str) -> list | None:
+        rows = _rows(
+            label,
+            "SELECT vote_stamps_json FROM space_polls WHERE post_id=?",
+            (post_id,),
+        )
+        raw = rows[0][0] if rows else None
+        return (json.loads(raw) if raw else {}).get(c["user_id"])
+
+    def votes(label: str) -> list[str]:
+        return sorted(
+            r[0]
+            for r in _rows(
+                label,
+                "SELECT v.option_id FROM space_poll_votes v"
+                " JOIN space_poll_options o ON o.id = v.option_id"
+                " WHERE o.post_id=? AND v.voter_user_id=?",
+                (post_id, c["user_id"]),
+            )
+        )
+
+    for option in options:
+        s, body = _request(
+            f"{base(c)}{poll_url}/vote",
+            token=c["token"],
+            method="POST",
+            body={"option_id": option},
+        )
+        _must(f"{step}: c votes", s, body, ok=(200, 201, 204))
+    mine = stamp_of("c")
+    if not mine or mine[1] != [options[1]]:
+        raise SystemExit(f"{step}: c holds no stamp for its own vote: {mine!r}")
+    wait(
+        "c's stamped vote on a and b",
+        lambda: all(
+            stamp_of(label) == mine and votes(label) == [options[1]] for label in "ab"
+        ),
+    )
+    print(f"  a, b and c hold c's vote under c's own stamp {mine[0]} ✓")
+    state["poll_vote"] = {"post_id": post_id, "voter": c["user_id"], "entry": mine}
+    _save(state)
+
+    s, body = _request(f"{base(a)}{poll_url}/close", token=a["token"], method="POST")
+    _must(f"{step}: a closes the poll", s, body, ok=(200, 204))
+    wait(
+        "the close on b and c",
+        lambda: all(
+            _rows(label, "SELECT closed FROM space_polls WHERE post_id=?", (post_id,))
+            == [(1,)]
+            for label in "bc"
+        ),
+    )
+    s, body = _request(f"{base(c)}{poll_url}/vote", token=c["token"], method="DELETE")
+    if s != 409:
+        raise SystemExit(f"{step}: a retraction after the close → {s} {body!r}")
+    if any(votes(label) != [options[1]] for label in "abc"):
+        raise SystemExit(f"{step}: the closed poll's vote moved")
+    print("  after the close c's retraction is refused and the vote stays ✓")
+    print(f"{step}: ok")
+
+
 def cmd_bazaar_ask() -> None:
     """"Ask the seller" from the listing (v_74).
 
@@ -23564,6 +23728,10 @@ def main() -> None:
         # post of a's and a takes its reaction back — a, b and c show the
         # same reactions after each change.
         cmd_space_reaction()
+        # ``space-poll-vote`` (v_94): in the same space a posts a poll, c
+        # votes twice; a and b hold c's vote under c's own stamp, and after
+        # a's close nothing moves it.
+        cmd_space_poll_vote()
         # ``bazaar-ask`` (v_74): in the same space b turns the Bazaar on, c
         # lists a lamp, a (paired with c) asks and lands in the normal DM,
         # d (follower) is refused; a, b, c see each other at >= v_74.

@@ -212,48 +212,39 @@ class PollService(BusPublisherMixin):
         current = set(
             await self._repo.list_user_votes(post_id, voter_user_id),
         )
-        if meta["allow_multiple"]:
-            if option_id in current:
-                # Toggle off — clear all + reinsert the rest.
-                await self._repo.clear_user_votes(
-                    post_id=post_id,
-                    voter_user_id=voter_user_id,
-                )
-                for oid in current - {option_id}:
-                    await self._repo.insert_vote(
-                        option_id=oid,
-                        voter_user_id=voter_user_id,
-                    )
-            else:
-                await self._repo.insert_vote(
-                    option_id=option_id,
-                    voter_user_id=voter_user_id,
-                )
-        else:
-            await self._repo.clear_user_votes(
+        # The voter's whole selection after the change: a multiple-choice
+        # vote toggles the option, a single-choice one replaces the vote.
+        selection = current ^ {option_id} if meta["allow_multiple"] else {option_id}
+        await self._set_votes(post_id, voter_user_id, sorted(selection), space_id)
+
+    async def _set_votes(
+        self,
+        post_id: str,
+        voter_user_id: str,
+        option_ids: list[str],
+        space_id: str | None,
+    ) -> None:
+        """Write the voter's whole selection in one step and announce it
+        with the stamp other households order it by."""
+        if not await self._repo.set_votes(
+            post_id=post_id, voter_user_id=voter_user_id, option_ids=option_ids
+        ):
+            # The post was deleted meanwhile — which drops its poll (a
+            # space post, migration 0085) — or the poll closed.
+            if await self._repo.get_meta(post_id) is None:
+                raise PollNotFoundError(post_id)
+            raise PollClosedError(post_id)
+        await self._emit(
+            PollVoted(
                 post_id=post_id,
                 voter_user_id=voter_user_id,
+                option_ids=tuple(
+                    await self._repo.list_user_votes(post_id, voter_user_id)
+                ),
+                space_id=space_id,
+                at=await self._repo.vote_stamp(post_id, voter_user_id),
             )
-            await self._repo.insert_vote(
-                option_id=option_id,
-                voter_user_id=voter_user_id,
-            )
-        # The post may have been deleted meanwhile — which drops its poll
-        # (a space post, migration 0085): the vote landed nowhere.
-        if await self._repo.get_meta(post_id) is None:
-            raise PollNotFoundError(post_id)
-        if self._bus is not None:
-            new_votes = tuple(
-                await self._repo.list_user_votes(post_id, voter_user_id),
-            )
-            await self._bus.publish(
-                PollVoted(
-                    post_id=post_id,
-                    voter_user_id=voter_user_id,
-                    option_ids=new_votes,
-                    space_id=space_id,
-                )
-            )
+        )
 
     async def retract_vote(
         self,
@@ -269,18 +260,7 @@ class PollService(BusPublisherMixin):
         # refused (every other household would refuse it too).
         if meta["closed"] or poll_deadline_passed(meta["closes_at"], datetime.now(UTC)):
             raise PollClosedError(post_id)
-        await self._repo.clear_user_votes(
-            post_id=post_id,
-            voter_user_id=voter_user_id,
-        )
-        await self._emit(
-            PollVoted(
-                post_id=post_id,
-                voter_user_id=voter_user_id,
-                option_ids=(),
-                space_id=space_id,
-            )
-        )
+        await self._set_votes(post_id, voter_user_id, [], space_id)
 
     async def close_poll(
         self,

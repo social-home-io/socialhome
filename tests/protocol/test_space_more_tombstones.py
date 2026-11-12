@@ -61,6 +61,7 @@ from socialhome.federation.owner_bound_id import (
     mint_owner_bound_id,
 )
 from socialhome.federation.sync.space.exporter import REMOVAL_RESOURCES, RESOURCE_ORDER
+from tests.poll_votes import seed_unstamped
 
 pytestmark = pytest.mark.security
 
@@ -665,7 +666,7 @@ async def test_a_post_tombstone_takes_its_poll_and_schedule(houses):
             allow_multiple=False,
             options=[{"id": f"o-{pid[-6:]}", "text": "Mon"}],
         )
-        await polls.insert_vote(option_id=f"o-{pid[-6:]}", voter_user_id=CORA)
+        await seed_unstamped(polls, option_id=f"o-{pid[-6:]}", voter_user_id=CORA)
         await polls.create_schedule_poll_in_space(
             space_id=SPACE,
             post_id=pid,

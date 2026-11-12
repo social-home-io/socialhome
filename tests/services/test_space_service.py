@@ -4261,6 +4261,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Admins and moderators fill in missing space pictures",
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
+        "Poll votes count the same in every household",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -4305,6 +4306,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Admins and moderators fill in missing space pictures",
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
+        "Poll votes count the same in every household",
     )
 
 
@@ -4378,6 +4380,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Admins and moderators fill in missing space pictures",
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
+        "Poll votes count the same in every household",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -4449,6 +4452,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Admins and moderators fill in missing space pictures",
         "Older space pictures arrive when you open them",
         "Reactions on space posts reach every household",
+        "Poll votes count the same in every household",
     )
     assert "Apps that work across households" not in c.lagging_features
     assert "Apps that reach the right person" not in c.lagging_features

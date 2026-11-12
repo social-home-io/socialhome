@@ -49,20 +49,25 @@ class AbstractPollRepo(Protocol):
         option_id: str,
         post_id: str,
     ) -> bool: ...
-    async def clear_user_votes(
+    async def set_votes(
         self,
         *,
         post_id: str,
         voter_user_id: str,
-    ) -> None: ...
-    async def insert_vote(
-        self,
-        *,
-        option_id: str,
-        voter_user_id: str,
-    ) -> None: ...
+        option_ids: list[str],
+    ) -> bool:
+        """Make ``option_ids`` the voter's whole selection on ``post_id``
+        (empty: retracted), atomically. ``False``: nothing written — the
+        poll is gone or closed meanwhile."""
+        ...
+
+    async def vote_stamp(self, post_id: str, voter_user_id: str) -> str | None:
+        """The stamp (tz-aware ISO 8601) other households order the voter's
+        selection by — ``None`` where votes carry none (a household poll
+        never leaves the household)."""
+        ...
+
     async def get_post_author(self, post_id: str) -> str | None: ...
-    async def close(self, post_id: str) -> None: ...
     async def close_if_open(self, post_id: str) -> bool:
         """Close the poll unless it is closed already — atomically. True
         only for the call that closed it, so it is announced once."""
@@ -229,28 +234,40 @@ class SqlitePollRepo:
         )
         return row is not None
 
-    async def clear_user_votes(
+    async def set_votes(
         self,
         *,
         post_id: str,
         voter_user_id: str,
-    ) -> None:
-        await self._db.enqueue(
-            "DELETE FROM poll_votes WHERE voter_user_id=? AND option_id IN "
-            "(SELECT id FROM poll_options WHERE post_id=?)",
-            (voter_user_id, post_id),
-        )
+        option_ids: list[str],
+    ) -> bool:
+        wanted = list(dict.fromkeys(option_ids))
 
-    async def insert_vote(
-        self,
-        *,
-        option_id: str,
-        voter_user_id: str,
-    ) -> None:
-        await self._db.enqueue(
-            "INSERT INTO poll_votes(option_id, voter_user_id) VALUES(?, ?)",
-            (option_id, voter_user_id),
-        )
+        def _run(conn) -> bool:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM polls WHERE post_id=? AND closed=0", (post_id,)
+                ).fetchone()
+                is None
+            ):
+                return False
+            conn.execute(
+                "DELETE FROM poll_votes WHERE voter_user_id=? AND option_id IN "
+                "(SELECT id FROM poll_options WHERE post_id=?)",
+                (voter_user_id, post_id),
+            )
+            conn.executemany(
+                "INSERT INTO poll_votes(option_id, voter_user_id)"
+                " SELECT ?, ? WHERE EXISTS"
+                " (SELECT 1 FROM poll_options WHERE id=? AND post_id=?)",
+                [(o, voter_user_id, o, post_id) for o in wanted],
+            )
+            return True
+
+        return bool(await self._db.transact(_run))
+
+    async def vote_stamp(self, post_id: str, voter_user_id: str) -> str | None:
+        return None
 
     async def get_post_author(self, post_id: str) -> str | None:
         row = await self._db.fetchone(
@@ -258,12 +275,6 @@ class SqlitePollRepo:
             (post_id,),
         )
         return row["author"] if row else None
-
-    async def close(self, post_id: str) -> None:
-        await self._db.enqueue(
-            "UPDATE polls SET closed=1 WHERE post_id=?",
-            (post_id,),
-        )
 
     async def close_if_open(self, post_id: str) -> bool:
         n = await self._db.enqueue_rowcount(

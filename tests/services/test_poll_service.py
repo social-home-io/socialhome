@@ -9,7 +9,7 @@ import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import PollClosed, PollCreated
+from socialhome.domain.events import PollClosed, PollCreated, PollVoted
 from socialhome.domain.post import poll_option_id
 from socialhome.domain.user import SYSTEM_AUTHOR
 from socialhome.infrastructure.event_bus import EventBus
@@ -18,6 +18,7 @@ from socialhome.repositories.space_poll_repo import SqliteSpacePollRepo
 from socialhome.services.poll_service import (
     PollClosedError,
     PollExistsError,
+    PollNotFoundError,
     PollService,
 )
 
@@ -334,3 +335,77 @@ async def test_a_schedule_poll_is_author_only_create_once_with_minted_slot_ids(e
         )
     again = await env.space.schedule_summary("sp-sched", space_id="sp-1")
     assert again["title"] == "When?" and [s["id"] for s in again["slots"]] == ids
+
+
+async def test_a_space_vote_is_announced_with_its_stamp(env):
+    """The one merge rule (v_94): a space poll's vote is written whole, in
+    one step, with a stamp, and announced with it. A
+    household poll never leaves the household and carries none."""
+    voted: list[PollVoted] = []
+
+    async def _keep(event: PollVoted) -> None:
+        voted.append(event)
+
+    env.bus.subscribe(PollVoted, _keep)
+    await env.space_poll("sp-own", "uid-anna", None)
+    yes, no = (o["id"] for o in (await env.space.summary("sp-own"))["options"])
+    vote = {"post_id": "sp-own", "voter_user_id": "uid-anna", "space_id": "sp-1"}
+    await env.space.cast_vote(option_id=yes, **vote)
+    await env.space.cast_vote(option_id=no, **vote)
+    await env.space.retract_vote(**vote)
+    assert [e.option_ids for e in voted] == [(yes,), (no,), ()]
+    stamps = [e.at for e in voted]
+    assert all(s and s.endswith("+00:00") for s in stamps)
+    assert stamps == sorted(set(stamps))  # each newer than the one before
+    await env.space.close_poll(
+        post_id="sp-own", actor_user_id="uid-anna", space_id="sp-1"
+    )
+    with pytest.raises(PollClosedError):
+        await env.space.cast_vote(option_id=yes, **vote)
+
+    await env.household_poll("hh", None)
+    option = (await env.household.summary("hh"))["options"][0]["id"]
+    await env.household.cast_vote(
+        post_id="hh", option_id=option, voter_user_id="uid-anna"
+    )
+    assert voted[-1].at is None and voted[-1].option_ids == (option,)
+
+
+async def test_a_multiple_choice_vote_toggles_one_option(env):
+    await env.db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content)"
+        " VALUES('sp-multi','sp-1','uid-anna','poll','?')"
+    )
+    made = await env.space.create_poll(
+        post_id="sp-multi",
+        actor_user_id="uid-anna",
+        question="Which?",
+        options=["A", "B"],
+        allow_multiple=True,
+        space_id="sp-1",
+    )
+    a, b = (o["id"] for o in made["options"])
+    vote = {"post_id": "sp-multi", "voter_user_id": "uid-anna", "space_id": "sp-1"}
+    for option, want in ((a, {a}), (b, {a, b}), (a, {b})):
+        await env.space.cast_vote(option_id=option, **vote)
+        got = await env.space.summary("sp-multi", voter_user_id="uid-anna")
+        assert set(got["user_vote"]) == want
+
+
+async def test_a_vote_on_a_post_deleted_meanwhile_lands_nowhere(env, monkeypatch):
+    await env.space_poll("sp-gone", "uid-anna", None)
+    option = (await env.space.summary("sp-gone"))["options"][0]["id"]
+    real = SqliteSpacePollRepo.set_votes
+
+    async def _deleted_first(self, **kw):
+        await env.db.enqueue("DELETE FROM space_polls WHERE post_id='sp-gone'")
+        return await real(self, **kw)
+
+    monkeypatch.setattr(SqliteSpacePollRepo, "set_votes", _deleted_first)
+    with pytest.raises(PollNotFoundError):
+        await env.space.cast_vote(
+            post_id="sp-gone",
+            option_id=option,
+            voter_user_id="uid-anna",
+            space_id="sp-1",
+        )

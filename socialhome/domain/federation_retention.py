@@ -203,11 +203,12 @@ def supersede_key(
 
     Some events carry *state*, not history: a person's online status, a
     person's pin on a space map, a voter's selection in a space poll
-    (``SPACE_POLL_VOTE_CAST`` carries the whole selection; the receiver
-    keeps no stamp, so an older one landing late would win — and, on the
-    host, be spread to everyone by its stream). For those a newer send makes every queued
-    older one worthless — and harmful: delivered after it, the older one
-    overwrites the newer state at the peer, and every queued copy takes a
+    (``SPACE_POLL_VOTE_CAST`` carries the whole selection; since v_94 the
+    receiver orders it by its stamp, so an older one landing late no longer
+    wins — the key only saves the slot). For those a newer send makes every
+    queued older one worthless — and, where the receiver keeps no stamp,
+    harmful: delivered after it, the older one overwrites the newer state
+    at the peer — and every queued copy takes a
     slot of the per-peer cap that a DM or a post would otherwise keep. So
     the outbox holds at most one pending row per (peer, key): a new one
     replaces it, and a newer one delivered directly drops it.

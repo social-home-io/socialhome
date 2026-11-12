@@ -257,6 +257,31 @@ class BazaarBid:
     withdrawn: bool = False
 
 
+#: A bid's states in the order they outrank each other when two
+#: households change the same bid at once (the seller declines or accepts
+#: while the bidder withdraws). A bid only ever ADVANCES — it is no
+#: last-writer-wins value, so it carries no stamp: every household merges
+#: what it hears with :func:`socialhome.domain.item_merge.advance` and ends
+#: on the highest state, in any arrival order. The seller's answer
+#: outranks the bidder's withdrawal (owner decision 2026-11-12): a decline
+#: that crosses a withdrawal stands, with its reason, and an accept that
+#: crosses one stands too (the sale it made is announced with it). So the
+#: only transitions are pending → withdrawn / rejected / accepted,
+#: withdrawn → rejected / accepted, rejected → accepted; nothing ever
+#: leaves ``accepted``, and a declined bid is never withdrawn.
+BID_STATES: tuple[str, ...] = ("pending", "withdrawn", "rejected", "accepted")
+
+
+def bid_rank(*, accepted: object, rejected: object, withdrawn: object) -> int:
+    """The rank in :data:`BID_STATES` of a bid's stored flags (a row from
+    before the merge rule may hold two: the highest counts)."""
+    if accepted:
+        return 3
+    if rejected:
+        return 2
+    return 1 if withdrawn else 0
+
+
 #: Legal transitions for :class:`BazaarOffer.status`.
 BAZAAR_OFFER_TRANSITIONS: dict[str, frozenset[str]] = {
     "pending": frozenset({"accepted", "rejected", "withdrawn"}),

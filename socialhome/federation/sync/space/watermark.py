@@ -141,7 +141,12 @@ SYNC_VERSION_HISTORY_THROUGH: int = 64
 #:   resource, which a
 #:   v_92 receiver takes from the host; the crossing full stream brings the
 #:   state it missed while older.
-SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 82, 85, 92)
+#: * 94 — the ``polls`` record toward a v_94 requester carries
+#:   ``vote_stamps`` in place of ``votes`` (``MIN_FOR_ITEM_MERGE_STAMPS``,
+#:   ``PollsExporter.unstamped_votes``): the crossing full stream brings
+#:   every poll's stamps, so votes it took unstamped while older are
+#:   ordered from then on.
+SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 82, 85, 92, 94)
 
 
 def sync_version_bucket(peer_version: int) -> int:

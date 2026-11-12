@@ -731,13 +731,16 @@ class PollVoted(DomainEvent):
     """A user cast or retracted a vote. ``option_ids`` is the full set
     after the change (empty = retracted). ``origin_instance_id`` is set
     when the vote came from a peer (``SPACE_POLL_VOTE_CAST``): the outbound
-    bridge does not echo it back."""
+    bridge does not echo it back. ``at`` is the stamp the voter's household
+    wrote with a space poll's selection (tz-aware ISO 8601) — what every
+    other household orders it by (v_94)."""
 
     post_id: str
     voter_user_id: str
     option_ids: tuple[str, ...]
     space_id: str | None = None
     origin_instance_id: str | None = None
+    at: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

@@ -86,6 +86,7 @@ from ...domain.events import (
 from ...domain.federation import FederationEventType
 from ...domain.file_hashes import parse_file_hashes
 from ...domain.gallery import GalleryAlbum, GalleryItem, valid_taken_day
+from ...domain.item_merge import change_stamp
 from ...domain.media_constraints import CAPTION_MAX
 from ...domain.page import MAX_PAGE_TITLE_LENGTH, Page
 from ...domain.page_version import version_hash
@@ -158,7 +159,7 @@ from ...federation.space_scope import (
 )
 from ...infrastructure.event_bus import EventBus
 from ...media.cleanup import unlink_unreferenced
-from ...repositories.bazaar_repo import BidStateError, OfferStateError
+from ...repositories.bazaar_repo import OfferStateError
 from ...utils.datetime import parse_iso8601_optional
 from ...utils.timezones import coerce_tz
 from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
@@ -2101,10 +2102,14 @@ class SpaceContentInboundHandlers:
         )
 
     async def _on_poll_vote(self, event: FederationEvent) -> None:
-        """Mirror a remote voter's selection: ``option_ids`` is the whole
+        """Merge a remote voter's selection: ``option_ids`` is the whole
         set after the change (empty — the vote was retracted), as
-        :class:`PollFederationOutbound` sends it; it replaces the voter's
-        previous votes on the poll."""
+        :class:`PollFederationOutbound` sends it, stamped ``at`` by the
+        voter's household (v_94; an older household sends none and is
+        stamped with its envelope's timestamp). While the poll is open
+        here the newest stamp wins in any arrival order; once it is closed
+        here nothing counts any more, whatever its stamp
+        (:meth:`set_votes_in_space`)."""
         if self._poll_repo is None:
             return
         space_id = resolve_space_id(event)
@@ -2114,42 +2119,48 @@ class SpaceContentInboundHandlers:
         post_id = str(p.get("post_id") or "")
         raw = p.get("option_ids")
         voter = str(p.get("voter_user_id") or "")
+        stamp = change_stamp(p.get("at"), envelope_timestamp=event.timestamp)
         if (
             not post_id
             or not voter
             or not isinstance(raw, list)
             or len(raw) > MAX_POLL_OPTIONS
             or not all(isinstance(o, str) and o for o in raw)
+            or stamp is None
         ):
-            log.debug("SPACE_POLL_VOTE_CAST missing required field")
+            log_not_applied(event, what="poll vote", row_id=post_id, reason="malformed")
             return
         if not await self._acts_for(event, space_id, voter, "poll vote", post_id):
             return
         if await self._poll_missing(event, space_id, post_id, what="poll vote"):
             return
-        meta = await self._poll_repo.get_meta(post_id)
-        if meta is not None and (
-            meta["closed"] or poll_deadline_passed(meta["closes_at"], datetime.now(UTC))
-        ):
-            # The local rule (``PollService.cast_vote``): a closed poll's
-            # result stands. The repo refuses it again inside the write.
-            log_not_applied(
-                event, what="poll vote", row_id=post_id, reason="the poll is closed"
-            )
-            return
         # The repo proves, in the same transaction as the write, that every
         # option belongs to this post (a mismatched pair would corrupt the
-        # tally) and that the post lives in the gated space.
-        if not await self._poll_repo.set_votes_in_space(
+        # tally) and that the post lives in the gated space — and merges by
+        # the stamp.
+        outcome = await self._poll_repo.set_votes_in_space(
             space_id=space_id,
             post_id=post_id,
             option_ids=list(raw),
             voter_user_id=voter,
-        ):
+            stamp=stamp,
+        )
+        if outcome == "refused":
             log_cross_space_refusal(
                 event, space_id=space_id, what="poll vote", row_id=post_id
             )
             return
+        if outcome == "late":
+            # A closed poll's result stands (``PollService.cast_vote``).
+            log_not_applied(
+                event,
+                what="poll vote",
+                row_id=post_id,
+                reason="the poll is closed",
+            )
+            return
+        if outcome == "kept":
+            return  # a re-delivery, or older than the one that stands
         # The open SPA re-reads the tally.
         # ``origin_instance_id`` stops the outbound bridge echoing it back.
         await self._bus.publish(
@@ -2178,6 +2189,10 @@ class SpaceContentInboundHandlers:
         if not await self._post_owner_acts(event, space_id, post_id, what="poll"):
             return
         meta = await self._poll_repo.get_meta(post_id)
+        # A close only ever turns on, and it carries no stamp to order
+        # votes by: once it is applied here no vote counts here any more
+        # (``set_votes_in_space``), so a re-sent or forged close can erase
+        # nothing.
         if not await self._poll_repo.close_in_space(post_id, space_id=space_id):
             log_cross_space_refusal(
                 event, space_id=space_id, what="poll", row_id=post_id
@@ -3626,10 +3641,12 @@ class SpaceContentInboundHandlers:
         """F7: mirror an offer acceptance on the bidder + every other
         member's local row.
 
-        ``accept_offer`` flips ``accepted=1`` for the row; the matching
-        F8 BAZAAR_LISTING_UPDATED handler will fire separately and
-        mark the listing sold via ``mark_sold``. Both are idempotent
-        so the order doesn't matter.
+        ``advance_bid`` moves the row to ``accepted`` — a bid only ever
+        advances (``BID_STATES``), so an accept that crosses the bidder's
+        withdrawal ends the same on every household whichever arrives
+        first; the matching F8 BAZAAR_LISTING_UPDATED handler will fire
+        separately and mark the listing sold via ``mark_sold``. Both are
+        idempotent so the order doesn't matter.
         """
         if self._bazaar_repo is None:
             return
@@ -3652,16 +3669,10 @@ class SpaceContentInboundHandlers:
             event, space_id, listing.seller_user_id, "bazaar offer", bid_id
         ):
             return
-        try:
-            await self._bazaar_repo.accept_offer(bid_id, space_id=space_id)
-        except Exception as exc:
-            log.debug(
-                "BAZAAR_OFFER_ACCEPTED apply failed bid=%s: %s",
-                bid_id,
-                exc,
-                exc_info=True,
-            )
-            return
+        if not await self._bazaar_repo.advance_bid(
+            bid_id, "accepted", space_id=space_id
+        ):
+            return  # a replay: accepted here already
         # The buyer hears of it on their own household.
         await self._bus.publish(
             BazaarOfferAccepted(
@@ -3929,9 +3940,12 @@ class SpaceContentInboundHandlers:
         takes the decline — only from the household seating the listing's
         seller (a demoted seat still may, as for offers). The reason is
         kept only where the bidder is one of OUR people; the seller's
-        household sends it to no one else. The first answer stands: a
-        bid already accepted / declined / withdrawn here is left as it is,
-        so a replay or a second decline can't swap the words.
+        household sends it to no one else. A bid only ever advances
+        (``BID_STATES``: pending → withdrawn → declined → accepted): a
+        decline takes effect on a pending bid and on one whose withdrawal
+        crossed it on the way — every household ends on the decline,
+        whichever of the two it heard first; an accepted bid outranks it,
+        and a replay or a second decline can't swap the words.
         """
         assert self._bazaar_repo is not None
         if status != "rejected":
@@ -3959,20 +3973,17 @@ class SpaceContentInboundHandlers:
                 user_id=listing.seller_user_id,
             )
             return
-        if bid.accepted or bid.rejected or bid.withdrawn:
-            log_not_applied(
-                event, what="bazaar bid", row_id=bid_id, reason="already answered"
-            )
-            return
         kept = (
             reason
             if reason and await self._authorship.is_local_user(bid.bidder_user_id)
             else None
         )
-        try:
-            await self._bazaar_repo.reject_offer(bid_id, reason=kept)
-        except (BidStateError, ValueError) as exc:
-            log_not_applied(event, what="bazaar bid", row_id=bid_id, reason=str(exc))
+        if not await self._bazaar_repo.advance_bid(
+            bid_id, "rejected", space_id=space_id, reason=kept
+        ):
+            log_not_applied(
+                event, what="bazaar bid", row_id=bid_id, reason="already answered"
+            )
             return
         # The bidder hears of it on their own household (the notification
         # gate drops it everywhere else); open listings refresh.
@@ -3998,10 +4009,12 @@ class SpaceContentInboundHandlers:
         ``bid_id``, ``status: withdrawn``). Every member household mirrors
         the bid, so every one takes the withdrawal — only from the
         household seating the bidder (a seat demoted to follower since
-        still may, as for an offer), and only as the bidder's own household
-        allows it: the bid neither accepted, declined nor withdrawn yet,
-        on a listing still open here (active, before ``end_time`` — past
-        it the high bid is the winner). A replay is a no-op. The high bid
+        still may, as for an offer), on a listing still open here (active,
+        before ``end_time`` — past it the high bid is the winner). A bid
+        only ever advances (``BID_STATES``): a withdrawal takes effect on a
+        pending bid only — a bid the seller declined or accepted outranks
+        it, in whichever order they arrive, so a declined bid keeps the
+        seller's answer and reason. A replay is a no-op. The high bid
         recomputes on its own (``highest_bid`` skips a withdrawn bid); the
         seller is not notified, open listings refresh.
         """
@@ -4026,20 +4039,17 @@ class SpaceContentInboundHandlers:
                 user_id=bid.bidder_user_id,
             )
             return
-        if bid.accepted or bid.rejected or bid.withdrawn:
-            log_not_applied(
-                event, what="bazaar bid", row_id=bid_id, reason="already answered"
-            )
-            return
         if not listing.is_open(datetime.now(UTC)):
             log_not_applied(
                 event, what="bazaar bid", row_id=bid_id, reason="listing closed"
             )
             return
-        try:
-            await self._bazaar_repo.withdraw_bid(bid_id)
-        except (BidStateError, ValueError) as exc:
-            log_not_applied(event, what="bazaar bid", row_id=bid_id, reason=str(exc))
+        if not await self._bazaar_repo.advance_bid(
+            bid_id, "withdrawn", space_id=space_id
+        ):
+            log_not_applied(
+                event, what="bazaar bid", row_id=bid_id, reason="already answered"
+            )
             return
         await self._bus.publish(
             BazaarBidWithdrawn(
