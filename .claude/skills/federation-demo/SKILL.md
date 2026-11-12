@@ -474,7 +474,15 @@ That single command runs the full sequence:
    ``SPACE_TASK_CREATED`` as Alice's with the approval block. **a**, **b**, **c**
    and **d** all hold the task created by Alice, **a**'s own queue row reads
    ``approved``, and **d** — a plain member household — holds no queue row
-   for the item and its log never names it.
+   for the item and its log never names it. Then the catch-up: **c** is
+   killed, Alice submits a second task and the copy queued for **c** is
+   dropped (offline past the retries); **c** restarts, its §25.6 BEGIN to
+   **b** echoes the pending items it holds (``mod_pending``) and **b**
+   re-sends the item to **c** alone — **c**'s Moderation tab lists it and
+   **b** logged the catch-up. **b** then promotes **d**'s Dave to
+   ``moderator``: **d** asks the host at once, gets the item that was
+   already pending, Dave approves it **on d**, and **a**, **b**, **c** and
+   **d** all hold the task with every queue copy ``approved``.
 
 9c2. ``space-report`` (v_45 space-scoped reports) — **b** hosts a fresh
    "Report club" with **a**'s, **c**'s and **d**'s users as remote members

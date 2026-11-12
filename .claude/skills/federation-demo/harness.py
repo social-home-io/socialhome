@@ -21513,6 +21513,7 @@ def cmd_space_report() -> None:
     print("space-report: ok")
 
 
+@_offline_step
 def cmd_federated_moderation() -> None:
     """Federated moderation (v_43): "Reviewed" across households.
 
@@ -21534,9 +21535,19 @@ def cmd_federated_moderation() -> None:
     4. **d — a plain member household — never received the pending
        item**: no ``space_moderation_queue`` row for it in d's DB, and the
        item id never appears in d's log.
+    5. **A moderator household that was offline catches up.** c is killed;
+       Alice submits a second task; the copy a queued for c is dropped
+       (c stayed away past a's retries). c restarts: its §25.6 BEGIN to
+       the host b echoes the pending items it holds (``mod_pending``:
+       none), b re-sends the item to c alone, and c's Moderation tab lists
+       it.
+    6. **A household promoted later gets what is already pending.** b
+       makes Dave (d) a moderator. d asks the host as soon as it applies
+       the promotion; b re-sends the still-pending item to d; Dave sees it
+       and approves it on d; a, b, c and d all hold the second task.
 
-    Beta then resets the level, demotes Carol and the space stays (its
-    own, so no earlier step's assertions change).
+    Beta then resets the level, demotes Carol and Dave and the space stays
+    (its own, so no earlier step's assertions change).
     """
     state = _load()
     if not state:
@@ -21750,6 +21761,156 @@ def cmd_federated_moderation() -> None:
         raise SystemExit("federated-moderation: d's log mentions the pending item")
     print("  d (plain member) never received the pending item ✓")
 
+    # 5. c — the moderator household — is offline during a submission and
+    #    past the submitter's retries: the host catches it up on c's next
+    #    §25.6 BEGIN (the ``mod_pending`` echo).
+    d = inst["d"]
+
+    def _queue_lists(label: str, wanted: str) -> bool:
+        v = inst[label]
+        s, items = _request(
+            f"http://127.0.0.1:{v['port']}/api/spaces/{space_id}/moderation",
+            token=v["token"],
+        )
+        return s == 200 and any(i.get("id") == wanted for i in items)
+
+    def _caught_up(label: str, offset: int) -> bool:
+        return _log_contains(
+            "b",
+            f"moderation: caught {inst[label]['instance_id']} up on space {space_id}",
+            offset=offset,
+        )
+
+    _kill_household("c", c)
+    t0 = _rows("a", "SELECT datetime('now', '-2 seconds')")[0][0]
+    b_log_before = _log_size("b")
+    late_title = f"Water the plants {int(time.time())}"
+    s, queued = _request(
+        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/tasks/lists/{list_id}/tasks",
+        token=a["token"],
+        method="POST",
+        body={"title": late_title},
+    )
+    if s != 202 or not (queued or {}).get("queued"):
+        raise SystemExit(
+            f"federated-moderation: a's second task -> {s} {queued!r} "
+            "(expected 202 queued)"
+        )
+    late_id = queued["item_id"]
+    _wait_for(
+        "b's Moderation tab to list the second item",
+        lambda: _queue_lists("b", late_id),
+        timeout=60.0,
+    )
+    # c stayed away past a's retries: whatever a or b queued for c since
+    # (the direct envelope or a mesh-routed copy) is dropped.
+    lost = 0
+    for label in ("a", "b"):
+        con = sqlite3.connect(_instance_dir(label) / "socialhome.db", timeout=10)
+        try:
+            cur = con.execute(
+                "DELETE FROM federation_outbox WHERE instance_id=? AND status='pending'"
+                " AND event_type IN ('space_moderation_submitted', 'space_routed')"
+                " AND created_at >= ?",
+                (c["instance_id"], t0),
+            )
+            lost += cur.rowcount
+            con.commit()
+        finally:
+            con.close()
+    print(f"  c offline missed Alice's second item ({lost} queued envelope(s) dropped)")
+    new_pid = _spawn("c", c["port"])
+    state["instances"]["c"]["pid"] = new_pid
+    _save(state)
+    _wait_ready(c["port"])
+    print(f"  c respawned: pid={new_pid}")
+    _wait_for(
+        "c's Moderation tab to list the item it missed (host catch-up)",
+        lambda: _queue_lists("c", late_id),
+        timeout=240.0,
+    )
+    if not _caught_up("c", b_log_before):
+        raise SystemExit(
+            "federated-moderation: c holds the missed item, but the host b "
+            "never logged a catch-up for c — it arrived some other way"
+        )
+    print("  c caught up after one sync: the host re-sent the pending item ✓")
+
+    # 6. d's person is promoted AFTER the item was submitted: d asks the
+    #    host at once and gets the items already pending.
+    if _rows("d", "SELECT 1 FROM space_moderation_queue WHERE id=?", (late_id,)):
+        raise SystemExit(
+            "federated-moderation: plain member household d holds the second item"
+        )
+    b_log_before = _log_size("b")
+    d_role_url = (
+        f"{b_base}/api/spaces/{space_id}/remote-members/"
+        f"{d['instance_id']}/{d['user_id']}"
+    )
+    s, body = _request(
+        d_role_url, token=b["token"], method="PATCH", body={"role": "moderator"}
+    )
+    _must("promote dave to moderator", s, body)
+    _wait_for(
+        "d to hold dave's moderator seat", lambda: _local_role("d") == "moderator"
+    )
+    _wait_for(
+        "d's Moderation tab to list the item submitted before the promotion",
+        lambda: _queue_lists("d", late_id),
+        timeout=90.0,
+    )
+    if not _caught_up("d", b_log_before):
+        raise SystemExit(
+            "federated-moderation: d holds the pending item, but the host b "
+            "never logged a catch-up for d"
+        )
+    print("  d (promoted later) sees the item that was already pending ✓")
+    s, body = _request(
+        f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/moderation/{late_id}/approve",
+        token=d["token"],
+        method="POST",
+        body={},
+    )
+    _must("d: dave approves on his own household", s, body)
+    if body.get("status") != "publishing":
+        raise SystemExit(
+            f"federated-moderation: d's approve -> {body!r} (expected 'publishing')"
+        )
+
+    def _late_task_by(label: str) -> str | None:
+        v = inst[label]
+        s, rows = _request(
+            f"http://127.0.0.1:{v['port']}/api/spaces/{space_id}/tasks/lists/{list_id}/tasks",
+            token=v["token"],
+        )
+        hit = (
+            next((t for t in rows if t.get("title") == late_title), None)
+            if s == 200
+            else None
+        )
+        return hit.get("created_by") if hit else None
+
+    for label in ("a", "b", "c", "d"):
+        _wait_for(
+            f"{label} to hold the task dave approved",
+            lambda label=label: _late_task_by(label) == a["user_id"],
+            timeout=90.0,
+        )
+    for label in ("a", "b", "c", "d"):
+        _wait_for(
+            f"{label}'s row of the second item to read approved",
+            lambda label=label: (
+                _rows(
+                    label,
+                    "SELECT status FROM space_moderation_queue WHERE id=?",
+                    (late_id,),
+                )
+                == [("approved",)]
+            ),
+            timeout=60.0,
+        )
+    print("  dave approved on d; a, b, c and d hold the task, every copy approved ✓")
+
     _request(
         f"{b_base}/api/spaces/{space_id}",
         token=b["token"],
@@ -21762,6 +21923,7 @@ def cmd_federated_moderation() -> None:
         method="PATCH",
         body={"role": "member"},
     )
+    _request(d_role_url, token=b["token"], method="PATCH", body={"role": "member"})
     state["federated_moderation_space_id"] = space_id
     _save(state)
     print("federated-moderation: ok")
