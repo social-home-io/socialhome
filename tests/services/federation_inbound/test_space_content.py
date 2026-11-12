@@ -502,16 +502,10 @@ class _FakePollRepo:
         self.cleared: list[tuple[str, str]] = []
         self.inserted: list[tuple[str, str]] = []
         self.closed: list[str] = []
-        #: The stamp of every vote / close the handler handed over.
+        #: The stamp of every vote the handler handed over.
         self.vote_stamps_seen: list[str] = []
-        self.close_stamps_seen: list[str] = []
         #: Set to ``"kept"`` to answer a vote as a re-delivery / older one.
         self.vote_outcome: str | None = None
-        #: post_id → voters ``close_in_space`` reports as fallen back.
-        self.fell_back: dict[str, list[str]] = {}
-        #: (post_id, voter) → the stamp / selection that stands.
-        self.standing_stamp: dict[tuple[str, str], str] = {}
-        self.standing_votes: dict[tuple[str, str], list[str]] = {}
         self.scheduled: list[dict] = []
         self.responses: dict[tuple[str, str], str] = {}
         self.finalized: list[tuple[str, str]] = []
@@ -571,22 +565,13 @@ class _FakePollRepo:
         )
         return True
 
-    async def close_in_space(self, post_id, *, space_id, stamp):
-        """``None``: not this space's post. Else the voters whose selection
-        fell back to the one made before the close (``fell_back``)."""
+    async def close_in_space(self, post_id, *, space_id):
         if not self._post_in(post_id, space_id):
-            return None
+            return False
         self.closed.append(post_id)
-        self.close_stamps_seen.append(stamp)
         if post_id in self.meta:
             self.meta[post_id]["closed"] = True
-        return list(self.fell_back.get(post_id, []))
-
-    async def vote_stamp(self, post_id, voter_user_id):
-        return self.standing_stamp.get((post_id, voter_user_id))
-
-    async def list_user_votes(self, post_id, voter_user_id):
-        return list(self.standing_votes.get((post_id, voter_user_id), []))
+        return True
 
     async def get_meta(self, post_id):
         if post_id in self.no_poll:
@@ -2579,7 +2564,7 @@ async def test_a_vote_on_a_closed_poll_is_not_applied(repos, handlers, caplog):
                 )
             )
     assert repos["poll"].inserted == [] and repos["poll"].cleared == []
-    assert "made after the poll closed" in caplog.text
+    assert "the poll is closed" in caplog.text
 
 
 async def _vote(handlers, payload=None, **event_kw):
@@ -2758,94 +2743,22 @@ async def test_poll_closed_redelivered_tells_voters_once(repos, handlers, bus):
     assert event.at_deadline is False  # its author closed it
 
 
-async def test_a_poll_close_carries_its_stamp_to_the_repo(repos, handlers):
-    """The close is the votes' cutoff: the author's household stamps it
-    (``at``); an older one's close takes its envelope's timestamp."""
-    at = datetime.now(UTC) - timedelta(minutes=5)
-    stamped = _event(
-        FederationEventType.SPACE_POLL_CLOSED,
-        {"post_id": "p-1", "at": at.isoformat()},
-        space_id="sp-1",
-    )
-    bare = _event(
-        FederationEventType.SPACE_POLL_CLOSED, {"post_id": "p-1"}, space_id="sp-1"
-    )
-    await handlers._on_poll_closed(stamped)
-    await handlers._on_poll_closed(bare)
-    assert repos["poll"].close_stamps_seen == [
-        stamp_to_db(at),
-        stamp_to_db(datetime.fromisoformat(bare.timestamp)),
-    ]
-
-
-async def test_a_poll_close_stamped_ahead_is_not_applied(repos, handlers, bus, caplog):
+async def test_a_poll_close_takes_no_stamp(repos, handlers, bus):
+    """A close only ever turns on and orders nothing: an ``at`` on it (an
+    unreleased build sent one as the votes' cutoff) is ignored, so a
+    re-sent close with an early stamp can erase no vote."""
     seen = _capture(bus, PollClosed, PollVoted)
-    with caplog.at_level("DEBUG"):
+    repos["poll"].meta["p-1"] = {"closed": False, "closes_at": None}
+    for at in ("2001-01-01T00:00:00+00:00", "not a time", 7):
         await handlers._on_poll_closed(
             _event(
                 FederationEventType.SPACE_POLL_CLOSED,
-                {
-                    "post_id": "p-1",
-                    "at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
-                },
+                {"post_id": "p-1", "at": at},
                 space_id="sp-1",
             )
         )
-    assert repos["poll"].closed == [] and seen == []
-    assert "malformed" in caplog.text
-
-
-async def test_a_close_that_sets_a_vote_back_says_which_selection_stands(
-    repos, handlers, bus
-):
-    """A voter whose selection here was made after the close falls back to
-    the one made before it. For one of OUR people the change is ours to
-    send on (no origin, with the stamp of what stands); for anyone else it
-    only refreshes the open SPA (the origin stops the echo). Voters hear
-    the close after that."""
-    seen = _capture(bus, PollVoted, PollClosed)
-    poll = repos["poll"]
-    poll.fell_back["p-1"] = ["u-buyer", "u-remote"]  # u-buyer is local
-    poll.standing_stamp[("p-1", "u-buyer")] = "2026-11-01T10:00:00+00:00"
-    poll.standing_votes[("p-1", "u-buyer")] = ["a"]
-    poll.standing_stamp[("p-1", "u-remote")] = "2026-11-01T11:00:00+00:00"
-    await handlers._on_poll_closed(
-        _event(
-            FederationEventType.SPACE_POLL_CLOSED, {"post_id": "p-1"}, space_id="sp-1"
-        )
-    )
-    ours, theirs, closed = seen
-    assert isinstance(closed, PollClosed)
-    assert (
-        ours.post_id,
-        ours.voter_user_id,
-        ours.option_ids,
-        ours.space_id,
-        ours.origin_instance_id,
-        ours.at,
-    ) == ("p-1", "u-buyer", ("a",), "sp-1", None, "2026-11-01T10:00:00+00:00")
-    assert (
-        theirs.voter_user_id,
-        theirs.option_ids,
-        theirs.origin_instance_id,
-        theirs.at,
-    ) == ("u-remote", (), "peer-a", "2026-11-01T11:00:00+00:00")
-
-
-async def test_a_local_voter_set_back_to_no_stamped_vote_is_not_sent_on(
-    repos, handlers, bus
-):
-    """Nothing stamped stands for our voter: there is no change of theirs
-    to send, the event keeps its origin."""
-    seen = _capture(bus, PollVoted)
-    repos["poll"].fell_back["p-1"] = ["u-buyer"]
-    await handlers._on_poll_closed(
-        _event(
-            FederationEventType.SPACE_POLL_CLOSED, {"post_id": "p-1"}, space_id="sp-1"
-        )
-    )
-    [evt] = seen
-    assert (evt.option_ids, evt.origin_instance_id, evt.at) == ((), "peer-a", None)
+    assert repos["poll"].closed == ["p-1", "p-1", "p-1"]
+    assert [type(e) for e in seen] == [PollClosed]  # told once, no vote moved
 
 
 async def test_refused_poll_close_publishes_nothing(repos, handlers, bus):
@@ -7391,7 +7304,6 @@ async def test_a_declined_bid_of_someone_elses_keeps_no_reason(
         ("not a rejection", _bid(), {"status": "accepted"}),
         ("already declined", _bid(rejected=True, rejection_reason="first"), {}),
         ("already accepted", _bid(accepted=True), {}),
-        ("withdrawn", _bid(withdrawn=True), {}),
         ("a reason that is no text", _bid(), {"reason": 7}),
         ("an over-long reason", _bid(), {"reason": "x" * 281}),
         ("another space", _bid(), {"space_id": "sp-other"}),
@@ -7400,8 +7312,8 @@ async def test_a_declined_bid_of_someone_elses_keeps_no_reason(
 async def test_a_bid_decline_that_does_not_apply_changes_nothing(
     bus, bazaar_bids_handlers, label, bid, overrides
 ):
-    """A decline takes effect on a pending bid only: one declined,
-    withdrawn or accepted here already outranks it (``BID_STATES``)."""
+    """A decline changes nothing on a bid declined or accepted here
+    already (``BID_STATES``) — the first answer's words stand."""
     handlers, bazaar = bazaar_bids_handlers
     if bid is not None:
         bazaar.existing_bids["bid-1"] = bid
@@ -7537,6 +7449,7 @@ async def test_a_withdrawn_bid_is_withdrawn_here_too(repos, bus, open_auction):
     [
         ("an unknown bid", None, {}, {}),
         ("already accepted", _bid(accepted=True), {}, {}),
+        ("already declined", _bid(rejected=True, rejection_reason="first"), {}, {}),
         ("already withdrawn", _bid(withdrawn=True), {}, {}),
         ("another space", _bid(), {}, {"space_id": "sp-other"}),
         ("the auction ended", _bid(), {"end_time": "2020-01-01T00:00:00Z"}, {}),
@@ -7546,9 +7459,10 @@ async def test_a_withdrawn_bid_is_withdrawn_here_too(repos, bus, open_auction):
 async def test_a_bid_withdrawal_that_does_not_apply_changes_nothing(
     bus, open_auction, label, bid, listing, overrides
 ):
-    """A withdrawal changes nothing on a bid accepted or withdrawn here
-    already (``BID_STATES``), nor a pending one on a listing that is over.
-    A DECLINED bid is another matter — see the next test."""
+    """A withdrawal takes effect on a pending bid only: one the seller
+    declined (it keeps the answer and its reason) or accepted outranks it,
+    one withdrawn already is a replay (``BID_STATES``) — and a pending one
+    on a listing that is over stays."""
     handlers, bazaar = open_auction
     bazaar.existing_bids.pop("bid-1")
     if bid is not None:
@@ -7569,40 +7483,27 @@ async def test_a_bid_withdrawal_that_does_not_apply_changes_nothing(
     assert seen == [], label
 
 
-@pytest.mark.parametrize(
-    "listing",
-    [{}, {"end_time": "2020-01-01T00:00:00Z"}, {"status": BazaarStatus.SOLD}],
-    ids=["open listing", "auction ended", "listing sold"],
-)
-async def test_a_withdrawal_of_an_already_declined_bid_applies(
-    bus, open_auction, listing
+async def test_a_decline_that_crossed_a_withdrawal_stands_with_its_reason(
+    bus, bazaar_bids_handlers
 ):
-    """Withdrawn outranks declined, in whichever order the two arrive —
-    so the withdrawal lands on a bid declined here first, even when the
-    listing has closed since."""
-    handlers, bazaar = open_auction
-    bazaar.existing_bids["bid-1"] = _bid(
-        bidder="u-remote", rejected=True, rejection_reason="not to you"
-    )
-    for attr, value in listing.items():
-        setattr(bazaar, attr, value)
-    seen = _capture(bus, BazaarBidWithdrawn)
+    """The bidder withdrew while the seller's decline was on its way: the
+    seller's answer outranks the withdrawal (owner decision 2026-11-12), so
+    this household ends where one that heard the decline first does —
+    declined, with the reason when the bidder is one of ours."""
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.existing_bids["bid-1"] = _bid(withdrawn=True)
+    seen = _capture(bus, BazaarOfferRejected)
+    payload = _declined()
     await handlers._on_bazaar_offer_updated(
-        _event(FederationEventType.BAZAAR_OFFER_UPDATED, _withdrawal())
+        _event(
+            FederationEventType.BAZAAR_OFFER_UPDATED,
+            payload,
+            space_id=payload["space_id"],
+        )
     )
     got = bazaar.existing_bids["bid-1"]
-    assert (got.withdrawn, got.rejected, got.rejection_reason, got.accepted) == (
-        True,
-        False,
-        None,
-        False,
-    )
-    [evt] = seen
-    assert (evt.bid_id, evt.bidder_user_id, evt.origin_instance_id) == (
-        "bid-1",
-        "u-remote",
-        "peer-a",
-    )
+    assert (got.rejected, got.withdrawn, got.accepted) == (True, False, False)
+    assert len(seen) == 1
 
 
 def _bid_state(bid) -> str:
@@ -7614,8 +7515,8 @@ def _bid_state(bid) -> str:
 @pytest.mark.parametrize(
     ("first", "second", "ends"),
     [
-        ("rejected", "withdrawn", "withdrawn"),
-        ("withdrawn", "rejected", "withdrawn"),
+        ("rejected", "withdrawn", "rejected"),
+        ("withdrawn", "rejected", "rejected"),
         ("accepted", "withdrawn", "accepted"),
         ("withdrawn", "accepted", "accepted"),
     ],
@@ -7624,7 +7525,7 @@ async def test_crossing_bid_answers_end_the_same_in_either_order(
     open_auction, first, second, ends
 ):
     """The seller declines or accepts while the bidder withdraws: every
-    household ends on the highest state, whichever arrives first."""
+    household ends on the seller's answer, whichever arrives first."""
     handlers, bazaar = open_auction
 
     async def _apply(state):
