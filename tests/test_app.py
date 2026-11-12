@@ -42,10 +42,20 @@ from socialhome.config import Config
 from socialhome.dashboard.advertiser import DisplayAdvertiser, display_short_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
+    DeliveryResult,
+    FederationEvent,
     FederationEventType,
     GfsConnection,
     InstanceSource,
     RemoteInstance,
+)
+from socialhome.domain.file_hashes import space_content_media_name
+from socialhome.domain.space import (
+    JoinMode,
+    Space,
+    SpaceFeatures,
+    SpaceMember,
+    SpaceType,
 )
 from socialhome.federation.event_dispatch_registry import EventDispatchRegistry
 from socialhome.federation.pairing_gfs_reach import PairingGfsReach
@@ -1016,6 +1026,93 @@ async def test_space_media_wanted_is_wired_both_ways(cfg):
         registry = app[K.federation_service_key]._event_registry
         assert registry.handler_count(FederationEventType.SPACE_MEDIA_WANTED) == 1
     assert not hasattr(K, "relay_media_refill_key")
+
+
+async def test_a_host_that_missed_a_members_picture_asks_for_it_without_a_view(
+    cfg,
+):
+    """The whole household, real repositories: d posted a picture while this
+    host was down for longer than the mesh keeps a chunk — the push is gone,
+    nobody was told. The host is back; a verified space event arrives (the
+    sync that brings d's row) and the federation dispatch marks the space.
+    The file check finds the row's picture missing and sends d's household
+    one ``SPACE_MEDIA_WANTED`` — no view involved."""
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)):
+        db = app[K.db_key]
+        fed = app[K.federation_service_key]
+        own = fed._own_instance_id
+        spaces = app[K.space_repo_key]
+        seats = app[K.space_remote_member_repo_key]
+        await db.enqueue(
+            "INSERT INTO users(username, user_id, display_name) VALUES('me','u-me','M')"
+        )
+        await spaces.save(
+            Space(
+                id="sp-h",
+                name="S",
+                owner_instance_id=own,
+                owner_username="me",
+                identity_public_key="aa" * 32,
+                config_sequence=1,
+                features=SpaceFeatures(),
+                space_type=SpaceType.PRIVATE,
+                join_mode=JoinMode.INVITE_ONLY,
+            )
+        )
+        await spaces.save_member(
+            SpaceMember(space_id="sp-h", user_id="u-me", role="owner", joined_at="t")
+        )
+        await seats.add(
+            space_id="sp-h",
+            instance_id="hh-d",
+            user_id="u-d",
+            user_pk=None,
+            display_name="D",
+            role="member",
+        )
+        name = space_content_media_name("sp-h", "ab" * 32, "p.webp")
+        await db.enqueue(
+            "INSERT INTO space_posts(id, space_id, author, type, media_url) "
+            "VALUES('p1', 'sp-h', 'u-d', 'image', ?)",
+            (f"api/media/{name}",),
+        )
+        sent: list[tuple[str, FederationEventType, dict]] = []
+
+        async def _send(*, to_instance_id, event_type, payload, space_id=None):
+            sent.append((to_instance_id, event_type, payload))
+            return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+        wanted = app[K.space_media_wanted_key]
+        wanted._apply_grace_s = 0.0
+        with (
+            # Slotted: patched on the class (an unbound mock, kwargs only).
+            patch.object(
+                type(fed), "send_with_mesh_fallback", AsyncMock(side_effect=_send)
+            ),
+            patch.object(
+                type(fed), "space_member_supports", AsyncMock(return_value=True)
+            ),
+        ):
+            await fed._dispatch_event(
+                FederationEvent(
+                    msg_id="m1",
+                    event_type=FederationEventType.SPACE_SYNC_COMPLETE,
+                    from_instance="hh-d",
+                    to_instance=own,
+                    timestamp="2026-11-12T00:00:00+00:00",
+                    payload={},
+                    space_id="sp-h",
+                )
+            )
+            await wanted.drain()
+        assert sent == [
+            (
+                "hh-d",
+                FederationEventType.SPACE_MEDIA_WANTED,
+                {"space_id": "sp-h", "files": [{"item": "p1", "name": name}]},
+            )
+        ]
 
 
 async def test_the_boot_row_marks_are_taken_before_any_inbound_starts(

@@ -1496,6 +1496,50 @@ async def test_tick_announces_our_version_to_mesh_only_member_households(
     assert len(announced) == 3
 
 
+async def test_a_household_no_route_reaches_is_announced_to_ever_more_rarely(
+    bus, queue, sync_manager, caplog
+):
+    """A member household with no row and no mesh route (gone, or never
+    reachable) was probed, and logged at INFO, on every 30-minute tick for
+    the life of the process. After :data:`MAX_MESH_ANNOUNCE_ATTEMPTS` failed
+    attempts it no longer counts as pending (the startup retries end) and
+    is tried again only every :data:`MESH_ANNOUNCE_SLOW_EVERY` sweeps — it
+    is not given up: it may come online, and it needs our version."""
+    fed = _FakeFederation(confirmed=set())
+    sched = _mesh_sched(
+        bus, queue, sync_manager, fed, [_space("sp-1", owner_instance_id="host-x")]
+    )
+    announced: list[str] = []
+    outcome = {"ok": False}
+
+    async def _announce(host: str) -> bool:
+        announced.append(host)
+        return outcome["ok"]
+
+    sched.attach_mesh_announce(_announce)
+    cap = scheduler_mod.MAX_MESH_ANNOUNCE_ATTEMPTS
+    slow = scheduler_mod.MESH_ANNOUNCE_SLOW_EVERY
+    with caplog.at_level("INFO", logger=scheduler_mod.__name__):
+        for _ in range(cap):
+            assert await sched._tick_mesh_announce() == 1
+        assert len(announced) == cap
+        assert caplog.text.count("no route to host-x") == 1
+        for _ in range(slow - 1):
+            assert await sched._tick_mesh_announce() == 0
+        assert len(announced) == cap
+        assert await sched._tick_mesh_announce() == 0
+        assert len(announced) == cap + 1
+        assert caplog.text.count("no route to host-x") == 1
+    # It comes online: the next slow attempt delivers, and that is the end.
+    outcome["ok"] = True
+    for _ in range(slow):
+        await sched._tick_mesh_announce()
+    assert len(announced) == cap + 2
+    for _ in range(2 * slow):
+        assert await sched._tick_mesh_announce() == 0
+    assert len(announced) == cap + 2
+
+
 async def test_mesh_announce_failure_does_not_kill_the_tick(bus, queue, sync_manager):
     fed = _FakeFederation(confirmed=set())
     sched = _mesh_sched(

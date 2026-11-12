@@ -389,7 +389,11 @@ items, bazaar listings and calendar covers created in the last
 `CATCHUP_MEDIA_MAX_AGE_S` (30 days), newest first across every kind, at most
 `CATCHUP_MEDIA_MAX_FILES` (200) files per stream after the v_86 file gate
 (`provider._enqueue_catchup_media`, one bounded read:
-`media_reference_repo.recent_item_files`). An older file arrives when a
+`media_reference_repo.recent_item_files`). Only files the provider holds
+are queued or counted (`SpaceMediaSyncService.held_files`): a host can hold
+a member's row whose file never arrived, and asks its author for it (a
+few minutes after the row arrived, or on view). Page files follow the same
+rule. An older file arrives when a
 member opens it (`SPACE_MEDIA_WANTED`, [media.md](./media.md#older-files-on-view--space_media_wanted-v_92)).
 Page files keep their own bound (below). **Cost:** a newcomer's catch-up is
 ≤ 200 files ≈ 60 MB at ~300 KB a picture, per (newcomer, space); for a

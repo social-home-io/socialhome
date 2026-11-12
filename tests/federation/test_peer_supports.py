@@ -8,6 +8,7 @@ never sees the field.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -147,6 +148,8 @@ def _mesh_service(repo):
         _own_instance_id="host",
         _bus=_Bus(),
         _mesh_claim_answer=None,
+        _mesh_claim_answer_tasks=set(),
+        _stopping=False,
     )
 
     def bind(name):
@@ -159,6 +162,10 @@ def _mesh_service(repo):
 
     svc.record_mesh_member_claim = bind("record_mesh_member_claim")
     svc._answer_mesh_claim = bind("_answer_mesh_claim")
+    svc._spawn_mesh_claim_answer = lambda origin: (
+        FederationService._spawn_mesh_claim_answer(svc, origin)
+    )
+    svc.drain_mesh_claim_answers = bind("drain_mesh_claim_answers")
     svc.attach_mesh_claim_answer = lambda answer: setattr(
         svc, "_mesh_claim_answer", answer
     )
@@ -230,9 +237,43 @@ async def test_a_risen_claim_is_answered_with_our_own_version(notify):
     svc.attach_mesh_claim_answer(_answer)
     event = _routed_event(mesh_member_claim(MESH_PK))
     assert await svc.record_mesh_member_claim(event, notify=notify)
+    await svc.drain_mesh_claim_answers()
     assert answered == [MESH]
     assert await svc.record_mesh_member_claim(event, notify=notify)
+    await svc.drain_mesh_claim_answers()
     assert answered == [MESH]
+
+
+@pytest.mark.asyncio
+async def test_the_answer_never_holds_up_the_inbound_claim():
+    """The answer is a send over the mesh (it can take seconds): it runs as
+    a tracked task, so handling the claim returns at once; ``stop`` ends an
+    answer still on its way, and nothing is answered after it."""
+    svc = _mesh_service(_MeshRepo(seated={MESH}))
+    started, release = asyncio.Event(), asyncio.Event()
+    done: list[str] = []
+
+    async def _slow(instance_id: str) -> bool:
+        started.set()
+        await release.wait()
+        done.append(instance_id)
+        return True
+
+    svc.attach_mesh_claim_answer(_slow)
+    assert await asyncio.wait_for(
+        svc.record_mesh_member_claim(_routed_event(mesh_member_claim(MESH_PK))),
+        timeout=1.0,
+    )
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert done == [] and len(svc._mesh_claim_answer_tasks) == 1
+    release.set()
+    await svc.drain_mesh_claim_answers()
+    assert done == [MESH]
+    await asyncio.sleep(0)
+    assert svc._mesh_claim_answer_tasks == set()
+    svc._stopping = True
+    svc._spawn_mesh_claim_answer(MESH)
+    assert svc._mesh_claim_answer_tasks == set()
 
 
 @pytest.mark.asyncio
@@ -247,6 +288,7 @@ async def test_a_failing_answer_never_costs_the_claim(caplog):
         assert await svc.record_mesh_member_claim(
             _routed_event(mesh_member_claim(MESH_PK))
         )
+        await svc.drain_mesh_claim_answers()
     assert await svc.space_member_supports(MESH, min_version=OURS)
     assert "answering its version claim failed" in caplog.text
 

@@ -2220,7 +2220,8 @@ async def test_route_stale_at_origin_oversized_inner_invalidates_without_retrans
 ):
     """An inner over ``_MAX_RETAINED_INNER_BYTES`` is retained with
     ``inner_payload_json=None`` — the nack still invalidates the route, but
-    nothing is retransmitted (the durable outbox re-sends media chunks)."""
+    nothing is retransmitted (with no listener for its event type the inner
+    is simply gone)."""
     a, b, c, rs = _origin_with_route_service()
     path = [a.instance_id, b.instance_id, c.instance_id]
     rs.discovery = (list(path), _mint_target_eph(c))
@@ -2240,6 +2241,77 @@ async def test_route_stale_at_origin_oversized_inner_invalidates_without_retrans
     assert any(
         r.levelno == logging.INFO and "oversized" in r.message for r in caplog.records
     )
+
+
+async def test_route_stale_at_origin_oversized_inner_is_reported_lost(caplog):
+    """The mesh keeps no copy of an oversized inner (a media chunk), and a
+    relay that took it already answered "ok" — the sender's outbox row is
+    done. A verified nack hands the inner's head (its small scalar fields,
+    never the bulk) to whoever sends that event type, so the file is queued
+    again: before this a picture a member posted while the host was down
+    was lost when the restarted host nacked its chunks."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    rs.discovery = (list(path), _mint_target_eph(c))
+    lost: list[tuple[str, dict]] = []
+
+    async def _lost(target: str, head: dict) -> None:
+        lost.append((target, head))
+
+    a.handler.attach_lost_inner_listener(FederationEventType.SPACE_MEDIA_BLOB, _lost)
+    chunk = {
+        "blob_id": "img.webp",
+        "space_id": "sp-1",
+        "chunk_index": 1,
+        "final": False,
+        "bytes_b64": "x" * (_MAX_RETAINED_INNER_BYTES + 1),
+        "nested": {"k": "v"},
+    }
+    await _send_under_dead_key(
+        a,
+        path,
+        payload=chunk,
+        pin=c.fed.own_identity_pk.hex(),
+        inner_event_type=FederationEventType.SPACE_MEDIA_BLOB,
+    )
+    await _settle()
+    assert lost == [
+        (
+            c.instance_id,
+            {
+                "blob_id": "img.webp",
+                "space_id": "sp-1",
+                "chunk_index": 1,
+                "final": False,
+            },
+        )
+    ]
+    assert rs.invalidated == [c.instance_id]
+    assert len(_routed_sends(a)) == 1  # the mesh itself retransmits nothing
+
+
+async def test_route_stale_at_origin_a_failing_lost_listener_is_contained(caplog):
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    rs.discovery = (list(path), _mint_target_eph(c))
+
+    async def _boom(target: str, head: dict) -> None:
+        raise RuntimeError("outbox down")
+
+    a.handler.attach_lost_inner_listener(FederationEventType.SPACE_MEDIA_BLOB, _boom)
+    with caplog.at_level(logging.WARNING, logger=_RS_LOGGER):
+        route_id, _dead, _ = await _send_under_dead_key(
+            a,
+            path,
+            payload={"blob_id": "i.webp", "b": "x" * (_MAX_RETAINED_INNER_BYTES + 1)},
+            pin=c.fed.own_identity_pk.hex(),
+            inner_event_type=FederationEventType.SPACE_MEDIA_BLOB,
+        )
+        await _settle()
+    assert rs.invalidated == [c.instance_id]
+    assert route_id not in a.handler._pending_routed
+    assert not a.handler._deferred_retransmits
+    assert any("lost-inner listener" in r.message for r in caplog.records)
 
 
 async def test_route_stale_at_origin_small_inner_is_retained_intact():

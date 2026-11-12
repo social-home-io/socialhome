@@ -274,9 +274,13 @@ async def test_mesh_host_gets_our_version_claim_over_the_mesh():
 
 
 @pytest.mark.asyncio
-async def test_mesh_announce_failure_is_reported_for_a_retry():
+async def test_mesh_announce_failure_is_reported_for_a_retry(caplog):
+    """Returned for a retry, logged at DEBUG only: a household no route
+    reaches fails on every sweep, and the scheduler reports it once."""
     out, _fed = _mesh_out(ok=False)
-    assert await out.announce_over_mesh("host-c") is False
+    with caplog.at_level("INFO"):
+        assert await out.announce_over_mesh("host-c") is False
+    assert "mesh announcement" not in caplog.text
 
 
 @pytest.mark.asyncio
