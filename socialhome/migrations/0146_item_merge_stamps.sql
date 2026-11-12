@@ -31,7 +31,7 @@
 --       for the §25.6 receiver, ``list_votes`` for the exporter),
 --       ``poll_deadline_scheduler`` (through ``close_if_open``), the 0085
 --       ``space_posts_delete_drops_polls`` trigger, the backup / data
---       export (whole-table dumps: the new columns go with the row).
+--       export (whole-table dumps: the new column goes with the row).
 --       ``space_schedule_responses``: ``space_poll_repo`` only.
 --       ``space_calendar_rsvps``: ``calendar_repo`` (SqliteSpaceCalendarRepo)
 --       and the 0085 event-tombstone trigger. ``bazaar_bids``:

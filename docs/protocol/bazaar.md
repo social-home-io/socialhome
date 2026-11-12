@@ -92,7 +92,11 @@ member household seated through an invite link receives them).
   The seller's answer outranks the bidder's withdrawal (owner decision
   2026-11-12): a decline that crosses a withdrawal ends *declined*
   everywhere and keeps the seller's reason; an accept that crosses one
-  ends *accepted* everywhere. Neither a replay nor a second decline swaps
+  ends *accepted* everywhere. An accept also declines every other bid of
+  the listing that is not declined yet ("another offer was accepted") — a
+  withdrawn one too, so the result does not depend on whether that bid's
+  withdrawal or the accept arrived first: a withdrawn bid on a sold
+  listing reads *declined*. Neither a replay nor a second decline swaps
   the reason. The reason is kept only where the bidder is one of the
   household's own people;
 - a bid's withdrawal only from the household seating the bidder

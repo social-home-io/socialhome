@@ -1153,8 +1153,9 @@ async def test_advance_bid_allows_only_the_transitions_that_advance(env):
         "b-1", "rejected", space_id=_DEFAULT_SPACE_ID, reason="other words"
     )
     assert await _bid_state(env) == (False, True, False, "too low")
-    # An accept declines the listing's other pending bids, as where it was
-    # made — never one already withdrawn or declined.
+    # An accept declines every other bid of the listing that is not
+    # declined yet — a withdrawn one too (a pure advance), so the result
+    # does not depend on whether the withdrawal or the accept came first.
     await repo.apply_synced_bids(
         pid,
         [_synced_bid(pid, "b-3", 12), _synced_bid(pid, "b-4", 13, withdrawn=True)],
@@ -1167,7 +1168,12 @@ async def test_advance_bid_allows_only_the_transitions_that_advance(env):
         False,
         "another offer was accepted",
     )
-    assert await _bid_state(env, "b-4") == (False, False, True, None)
+    assert await _bid_state(env, "b-4") == (
+        False,
+        True,
+        False,
+        "another offer was accepted",
+    )
     assert await _bid_state(env) == (False, True, False, "too low")
     for state in ("withdrawn", "rejected", "accepted"):
         assert not await repo.advance_bid("b-2", state, space_id=_DEFAULT_SPACE_ID)
@@ -1197,3 +1203,33 @@ async def test_apply_synced_bids_advances_and_normalises_a_two_flag_row(env):
         space_id=_DEFAULT_SPACE_ID,
     )
     assert await _bid_state(env) == (False, True, False, None)
+
+
+@pytest.mark.parametrize("accept_first", [True, False])
+async def test_an_accept_and_another_bids_withdrawal_end_the_same(env, accept_first):
+    """The seller accepts bid A while the bidder of B withdraws: B ends
+    declined ("another offer was accepted") in either order — locally on
+    the seller's household too."""
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    repo = env.bazaar_repo
+    await repo.apply_synced_bids(
+        pid,
+        [_synced_bid(pid, "b-1", 10), _synced_bid(pid, "b-2", 11)],
+        space_id=_DEFAULT_SPACE_ID,
+    )
+    steps = [("b-1", "accepted"), ("b-2", "withdrawn")]
+    for bid_id, state in steps if accept_first else steps[::-1]:
+        await repo.advance_bid(bid_id, state, space_id=_DEFAULT_SPACE_ID)
+    want = (False, True, False, "another offer was accepted")
+    assert await _bid_state(env, "b-2") == want
+    # The seller's own household, where the withdrawal arrived first.
+    other = uuid.uuid4().hex
+    await _seed_listing(env, other)
+    await repo.apply_synced_bids(
+        other,
+        [_synced_bid(other, "c-1", 10), _synced_bid(other, "c-2", 11, withdrawn=True)],
+        space_id=_DEFAULT_SPACE_ID,
+    )
+    await repo.accept_offer("c-1", space_id=_DEFAULT_SPACE_ID)
+    assert await _bid_state(env, "c-2") == want

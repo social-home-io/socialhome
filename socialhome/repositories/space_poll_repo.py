@@ -999,7 +999,9 @@ class SqliteSpacePollRepo:
             ):
                 return False
             held_poll = _poll_row(conn, post_id)
-            closed_here = held_poll is not None and bool(held_poll["closed"])
+            # Closed here — by the flag, or by the deadline this household
+            # holds: a deadline that has passed here never moves or clears.
+            closed_here = held_poll is not None and _is_closed(held_poll)
             conn.execute(
                 """
                 INSERT INTO space_polls(
@@ -1007,7 +1009,8 @@ class SqliteSpacePollRepo:
                 ) VALUES(?, ?, ?, ?, ?)
                 ON CONFLICT(post_id) DO UPDATE SET
                     question=excluded.question,
-                    closes_at=excluded.closes_at,
+                    closes_at=CASE WHEN ? THEN space_polls.closes_at
+                                   ELSE excluded.closes_at END,
                     allow_multiple=excluded.allow_multiple,
                     closed=MAX(space_polls.closed, excluded.closed)
                 """,
@@ -1017,6 +1020,7 @@ class SqliteSpacePollRepo:
                     closes_at,
                     1 if closed else 0,
                     1 if allow_multiple else 0,
+                    1 if closed_here and not held_poll["closed"] else 0,
                 ),
             )
             for position, opt in enumerate(options):
@@ -1034,8 +1038,8 @@ class SqliteSpacePollRepo:
             if votes is None and vote_stamps is None:
                 return True
             poll = _poll_row(conn, post_id)
-            # Closed on the host: by its flag, or by the deadline both share.
-            host_closed = closed or _is_closed({**dict(poll), "closed": 0})
+            # Closed on the host: by its flag, or by the deadline it sent.
+            host_closed = closed or _is_closed({"closed": 0, "closes_at": closes_at})
             stamps = _decode_votes(poll["vote_stamps_json"])
             before = dict(stamps)
             mine = {
@@ -1054,7 +1058,7 @@ class SqliteSpacePollRepo:
                     (post_id,),
                 ).fetchall()
             }
-            if vote_stamps is None:
+            if vote_stamps is None and (host_closed or not closed_here):
                 # A host below v_94 sends a list without stamps: as before
                 # v_94, it replaces everybody's votes but ours (of a cut
                 # list, only the voters it names). A voter it changes is
@@ -1069,7 +1073,7 @@ class SqliteSpacePollRepo:
                 for voter in sorted(replaced - keep_voters):
                     if _write_selection(conn, post_id, voter, listed.get(voter, [])):
                         stamps.pop(voter, None)
-            elif host_closed or not closed_here:
+            elif vote_stamps is not None and (host_closed or not closed_here):
                 theirs = {
                     voter: [at, list(dict.fromkeys(picked))]
                     for voter, (at, picked) in vote_stamps.items()

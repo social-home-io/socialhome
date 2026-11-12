@@ -842,10 +842,12 @@ class SqliteBazaarRepo:
                 return False
             if state == "accepted":
                 conn.execute(
-                    "UPDATE bazaar_bids SET rejected=1,"
+                    # A pure advance to declined — a withdrawn bid too, so
+                    # the result does not depend on which came first.
+                    "UPDATE bazaar_bids SET rejected=1, withdrawn=0,"
                     " rejection_reason='another offer was accepted'"
                     " WHERE listing_post_id=? AND id != ?"
-                    " AND accepted=0 AND rejected=0 AND withdrawn=0",
+                    " AND accepted=0 AND rejected=0",
                     (held["listing_post_id"], bid_id),
                 )
             return True
@@ -902,10 +904,11 @@ class SqliteBazaarRepo:
                 """
                 UPDATE bazaar_bids
                    SET rejected=1,
+                       withdrawn=0,
                        rejection_reason='another offer was accepted'
                  WHERE listing_post_id=?
                    AND id != ?
-                   AND accepted=0 AND rejected=0 AND withdrawn=0
+                   AND accepted=0 AND rejected=0
                 """,
                 (listing_post_id, bid_id),
             )

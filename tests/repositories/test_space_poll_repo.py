@@ -1221,3 +1221,52 @@ async def test_closed_here_but_not_yet_on_the_host_takes_no_vote(env):
     )
     assert await _votes(env) == {("u-x", "o-b")}
     assert (await env.repo.get_meta("post-1"))["closed"] is True  # never reopens
+
+
+async def test_an_older_hosts_list_lands_no_vote_after_the_close_here(env):
+    """A host below v_94 sends the plain ``votes`` list: closed here but
+    not yet on the host, it is not applied either; once the host is closed
+    too, its list is the result."""
+    vote = await _open_poll(env)
+    await env.repo.set_votes_in_space(option_ids=["o-b"], stamp=_at(20), **vote)
+    assert await env.repo.close_in_space("post-1", space_id="sp-1")
+    listed = [("o-a", "u-x"), ("o-a", "u-new")]
+    assert await _sync_poll_votes(env, listed, closed=False)
+    assert await _votes(env) == {("u-x", "o-b")}
+    assert await _sync_poll_votes(env, listed, closed=True)
+    assert await _votes(env) == {("u-x", "o-a"), ("u-new", "o-a")}
+
+
+async def _sync_poll_votes(env, votes, *, closed, closes_at=None, stamps=None):
+    return await env.repo.apply_synced_poll(
+        space_id="sp-1",
+        post_id="post-1",
+        question="Q",
+        closes_at=closes_at,
+        allow_multiple=False,
+        closed=closed,
+        options=[{"id": "o-a", "text": "A"}, {"id": "o-b", "text": "B"}],
+        votes=votes,
+        keep_voters=frozenset(),
+        vote_stamps=stamps,
+    )
+
+
+@pytest.mark.parametrize("moved", [None, "2099-01-01T00:00:00+00:00"])
+async def test_a_deadline_that_passed_here_is_never_reopened(env, moved):
+    """The poll's deadline has passed on this household: a host's record
+    that clears it or moves it later neither reopens the poll nor lands a
+    vote here."""
+    passed = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+    vote = await _open_poll(env, closes_at=passed)
+    await seed_unstamped(env.repo, option_id="o-b", voter_user_id="u-x")
+    assert await _sync_poll_votes(
+        env, None, closed=False, closes_at=moved, stamps={"u-new": [_at(5), ["o-a"]]}
+    )
+    assert (await env.repo.get_meta("post-1"))["closes_at"] == passed
+    assert await _votes(env) == {("u-x", "o-b")}
+    assert not await cast(env.repo, option_ids=["o-a"], **vote)
+    # A deadline still ahead here does follow the host's.
+    await env.db.enqueue("UPDATE space_polls SET closes_at='2098-01-01T00:00:00+00:00'")
+    assert await _sync_poll_votes(env, None, closed=False, closes_at=moved)
+    assert (await env.repo.get_meta("post-1"))["closes_at"] == moved
