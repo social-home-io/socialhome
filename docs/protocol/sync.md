@@ -649,7 +649,7 @@ module, `tests/federation/sync/space/test_sync_item_state.py`.
 | Space chat messages | `SPACE_CHAT_MESSAGE_*` | `chat_messages` (writer households, v_55) | — | `chat_messages_deleted` | |
 | Space chat reactions | `SPACE_CHAT_REACTION` | **not streamed** | — | — | out of scope (see below) |
 | Space config | `SPACE_CONFIG_*` | `SPACE_CONFIG_CATCH_UP` (not §25.6) | — | — | |
-| Moderation queue | — | **never streamed** | — | — | pending posts wait on the host; member households never hold them |
+| Moderation queue | `SPACE_MODERATION_SUBMITTED` / `_DECIDED` (targeted, to the host and reviewer households) | **never streamed** — a reviewer household's BEGIN to the host echoes the pending ids it holds (`mod_pending`); the host re-sends the difference to that household alone | — | a missed decision is sent again on that echo | pending items are held by the submitter's household, the host and every household with a live admin / moderator seat (v_43) — never by a plain member household or a follower ([moderation.md](./moderation.md#re-delivery-and-catch-up)) |
 
 Out of scope, with the reason:
 

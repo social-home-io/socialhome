@@ -1030,7 +1030,9 @@ class SpaceModerationService(BusPublisherMixin):
     ) -> None:
         """Tell the other households holding the item (v_43). Fail-soft: the
         decision stands here (and its content is already published); a
-        household that misses it expires its copy on schedule."""
+        reviewer household that misses it hears it again from the host on
+        its next §25.6 BEGIN (the ``mod_pending`` echo), any other copy
+        expires on schedule."""
         if self._federated is None:
             return
         try:

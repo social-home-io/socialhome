@@ -1896,6 +1896,15 @@ host alone**, which replays the write from its own stored copy through the
 feature's normal persist path, so the released content federates exactly
 like a direct write, as the submitter's, with the approval block.
 
+A reviewer household that lacks an item — its person was promoted after
+the item was submitted, or it was offline — or that missed a decision is
+caught up by the host: its §25.6 `SPACE_SYNC_BEGIN` to the host echoes
+the pending items it holds (`mod_pending`), and the host sends that
+household the difference
+([`moderation.md` — Re-delivery and catch-up](./moderation.md#re-delivery-and-catch-up)).
+A household whose last admin / moderator is demoted drops the other
+households' pending items it holds.
+
 **What queues** — `SpaceFeatures.access_decision` answers `queue` for a
 plain member's:
 
