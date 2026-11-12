@@ -77,6 +77,7 @@ from socialhome.federation.owner_bound_id import (
     SPACE_TASK_LIST_KIND,
     mint_owner_bound_id,
 )
+from socialhome.services import space_moderation_federation as moderation_federation
 from socialhome.services.inbound_media_store import space_direct_media_name
 from socialhome.services.space_moderation_federation import (
     MAX_EXPIRY,
@@ -1865,3 +1866,360 @@ async def test_a_signed_copy_rides_next_to_the_payload_and_only_verified(mesh):
     )
     assert len(rows) == 1
     assert "public_relay" not in json.loads(rows[0]["payload_json"])
+
+
+# ── Catch-up for reviewer households (the §25.6 BEGIN echo) ─────────────
+
+
+def _federated(house: House):
+    return house.app[space_moderation_service_key]._federated
+
+
+async def _begin(mesh, house: House, *, echo: list | None = None) -> None:
+    """``house``'s periodic §25.6 ``SPACE_SYNC_BEGIN`` reaches the host: it
+    echoes the pending items ``house`` holds (``echo`` overrides what it
+    would send), and the host's moderation catch-up answers it."""
+    h = mesh["H"]
+    payload: dict = {"sync_id": "s-1", "space_id": SID, "sync_mode": "incremental"}
+    if echo is None:
+        ask = getattr(_federated(house), "pending_echo", None)
+        echo = await ask(SID, h.iid) if ask is not None else None
+    if echo is not None:
+        payload["mod_pending"] = echo
+    answer = getattr(_federated(h), "on_sync_begin", None)
+    if answer is not None:
+        await answer(_event(house, FET.SPACE_SYNC_BEGIN, payload, h))
+
+
+async def _promote(mesh, house: House, role: str = "moderator") -> None:
+    """The host gives ``house``'s person ``role``: every roster mirror
+    holds it and ``house`` applies its ``SPACE_MEMBER_ROLE_CHANGED``."""
+    for other in _by_iid(mesh).values():
+        await other.db.enqueue(
+            "UPDATE space_remote_members SET role=? WHERE instance_id=?",
+            (role, house.iid),
+        )
+    await _receive(
+        house,
+        _event(
+            mesh["H"],
+            FET.SPACE_MEMBER_ROLE_CHANGED,
+            {
+                "space_id": SID,
+                "user_id": house.user_id,
+                "instance_id": house.iid,
+                "role": role,
+            },
+            house,
+        ),
+    )
+
+
+def _drop_sends(house: House, event_type, to: House) -> int:
+    """Lose what ``house`` sent ``to`` (it was offline past the retries)."""
+    kept = [s for s in house.sent if not (s[0] == to.iid and s[1] is event_type)]
+    lost = len(house.sent) - len(kept)
+    house.sent[:] = kept
+    return lost
+
+
+async def test_a_household_promoted_later_gets_the_items_already_pending(mesh):
+    """Gap 1: dora is made a moderator AFTER anna's item was submitted. D
+    asks the host the moment it applies the promotion, the host re-sends
+    the pending item to D alone, dora approves it, everyone gets the task."""
+    a, h, c, d = mesh["A"], mesh["H"], mesh["C"], mesh["D"]
+    asked: list[str] = []
+
+    async def _ask(space_id: str) -> None:
+        asked.append(space_id)
+
+    for house in (a, h, c, d):
+        house.app[space_moderation_service_key].attach_host_sync(_ask)
+    item_id = await _submit_task(mesh)
+    await _pump(mesh)
+    assert await _queue_rows(d) == []
+    await _promote(mesh, d)
+    assert asked == [SID]
+    await _begin(mesh, d)
+    resent = _sends(h, FET.SPACE_MODERATION_SUBMITTED)
+    assert [to for to, _p in resent] == [d.iid]
+    assert resent[0][1]["submitter_instance_id"] == a.iid
+    await _pump(mesh)
+    assert [(r["id"], r["status"]) for r in await _queue_rows(d)] == [
+        (item_id, "pending")
+    ]
+    r = await d.tc.get(f"/api/spaces/{SID}/moderation", headers=d.headers)
+    assert [i["id"] for i in await r.json()] == [item_id]
+    await _approve(d, item_id)
+    await _pump(mesh)
+    for house in (a, h, c, d):
+        assert await _tasks(house) == [("Buy milk", a.user_id)], house.name
+    for house in (a, h, c, d):
+        (row,) = await _queue_rows(house)
+        assert row["status"] == "approved", house.name
+
+
+async def test_a_reviewer_household_that_missed_a_submission_gets_it_on_sync(mesh):
+    """Gap 2: C was offline past A's retries. Its next BEGIN to the host
+    echoes what it holds (nothing); the host re-sends the item it lacks."""
+    a, h, c = mesh["A"], mesh["H"], mesh["C"]
+    item_id = await _submit_task(mesh)
+    assert _drop_sends(a, FET.SPACE_MODERATION_SUBMITTED, c) == 1
+    await _pump(mesh)
+    assert await _queue_rows(c) == []
+    await _begin(mesh, c)
+    await _pump(mesh)
+    assert [(r["id"], r["status"]) for r in await _queue_rows(c)] == [
+        (item_id, "pending")
+    ]
+    # Up to date now: the next BEGIN echoes the item and nothing is sent.
+    await _begin(mesh, c)
+    assert not h.sent
+
+
+@pytest.mark.parametrize("decision", ["rejected", "approved"])
+async def test_a_missed_decision_is_caught_up_on_sync(mesh, decision):
+    """Gap 3: C never got the host's decision (nor, for an approval, the
+    released task): its copy reads pending until it expires. C's BEGIN
+    echoes the stale id and the host sends that one decision again."""
+    h, c = mesh["H"], mesh["C"]
+    item_id = await _submit_task(mesh)
+    await _pump(mesh)
+    if decision == "approved":
+        await _approve(h, item_id)
+        _drop_sends(h, FET.SPACE_TASK_CREATED, c)
+    else:
+        r = await h.tc.post(
+            f"/api/spaces/{SID}/moderation/{item_id}/reject",
+            json={"reason": "not here"},
+            headers=h.headers,
+        )
+        assert r.status == 200, await r.text()
+    assert _drop_sends(h, FET.SPACE_MODERATION_DECIDED, c) == 1
+    await _pump(mesh)
+    assert [r["status"] for r in await _queue_rows(c)] == ["pending"]
+    await _begin(mesh, c)
+    again = _sends(h, FET.SPACE_MODERATION_DECIDED)
+    assert [(to, p["item_id"], p["decision"]) for to, p in again] == [
+        (c.iid, item_id, decision)
+    ]
+    await _pump(mesh)
+    assert [r["status"] for r in await _queue_rows(c)] == [decision]
+
+
+async def test_only_a_reviewer_household_is_caught_up(mesh):
+    """A plain member household (or one whose seat is gone) echoing an
+    empty set gets nothing — pending content never leaves the reviewers."""
+    a, h, c, d = mesh["A"], mesh["H"], mesh["C"], mesh["D"]
+    await _submit_task(mesh)
+    await _pump(mesh)
+    await _begin(mesh, d, echo=[])
+    assert not h.sent
+    # The submitter's own household holds its item already; a plain member
+    # one is never sent anybody else's either.
+    await _begin(mesh, a, echo=[])
+    assert not h.sent
+    # A plain member household does not echo at all…
+    assert await _federated(d).pending_echo(SID, h.iid) is None
+    assert await _federated(a).pending_echo(SID, h.iid) is None
+    # …nobody echoes to a household that is not the space's host, and the
+    # host echoes to nobody.
+    assert await _federated(c).pending_echo(SID, a.iid) is None
+    assert await _federated(h).pending_echo(SID, c.iid) is None
+    # A demoted moderator household: its live seat is a plain member's.
+    await h.db.enqueue(
+        "UPDATE space_remote_members SET role='member' WHERE instance_id=?", (c.iid,)
+    )
+    await _begin(mesh, c, echo=[])
+    assert not h.sent
+    # A household that is not the host never answers an echo.
+    await _federated(c).on_sync_begin(
+        _event(d, FET.SPACE_SYNC_BEGIN, {"space_id": SID, "mod_pending": []}, c)
+    )
+    assert not c.sent
+
+
+async def test_a_resent_item_is_taken_from_the_host_only(mesh):
+    """``submitter_instance_id`` is believed only from the host, and the
+    submitter must hold a live writer seat on the household it names."""
+    a, h, c, d = mesh["A"], mesh["H"], mesh["C"], mesh["D"]
+    sub = {**_submission(mesh), "submitter_instance_id": a.iid}
+    # D (not the host) relays anna's item: D is the origin, anna is not D's.
+    await _receive(c, _event(d, FET.SPACE_MODERATION_SUBMITTED, sub, c))
+    assert await _queue_rows(c) == []
+    # The host names a household anna holds no seat on.
+    wrong = {**sub, "submitter_instance_id": d.iid}
+    await _receive(c, _event(h, FET.SPACE_MODERATION_SUBMITTED, wrong, c))
+    assert await _queue_rows(c) == []
+    # The host relays an item of a submitter banned here.
+    await c.db.enqueue(
+        "INSERT INTO space_bans(space_id, user_id, banned_by) VALUES(?, ?, ?)",
+        (SID, a.user_id, h.user_id),
+    )
+    await _receive(c, _event(h, FET.SPACE_MODERATION_SUBMITTED, sub, c))
+    assert await _queue_rows(c) == []
+    await c.db.enqueue("DELETE FROM space_bans", ())
+    # The host, naming anna's own household: held.
+    await _receive(c, _event(h, FET.SPACE_MODERATION_SUBMITTED, sub, c))
+    assert [r["submitted_by"] for r in await _queue_rows(c)] == [a.user_id]
+    # A plain member household drops a re-sent item like any other.
+    await _receive(d, _event(h, FET.SPACE_MODERATION_SUBMITTED, sub, d))
+    assert await _queue_rows(d) == []
+
+
+async def test_a_catch_up_is_rate_limited_and_bounded(mesh, monkeypatch):
+    h, c = mesh["H"], mesh["C"]
+    first = await _submit_task(mesh, "One")
+    await _pump(mesh)
+    second = await _submit_task(mesh, "Two")
+    await _pump(mesh)
+    # One answer carries at most CATCH_UP_MAX_BYTES of items (oldest
+    # first, at least one); the rest follows on a later sync.
+    monkeypatch.setattr(moderation_federation, "CATCH_UP_MAX_BYTES", 1)
+    await _begin(mesh, c, echo=[])
+    assert [p["item_id"] for _to, p in _sends(h, FET.SPACE_MODERATION_SUBMITTED)] == [
+        first
+    ]
+    h.sent.clear()
+    # At most one answer per (household, space) in CATCH_UP_INTERVAL_S.
+    await _begin(mesh, c, echo=[first])
+    assert not h.sent
+    _federated(h)._caught_up_at.clear()
+    await _begin(mesh, c, echo=[first])
+    assert [p["item_id"] for _to, p in _sends(h, FET.SPACE_MODERATION_SUBMITTED)] == [
+        second
+    ]
+    # An echo that is no list of ids, or longer than a queue can be, is
+    # ignored.
+    h.sent.clear()
+    _federated(h)._caught_up_at.clear()
+    await _begin(mesh, c, echo=["x"] * (MAX_PENDING_PER_SPACE + 1))
+    await _begin(mesh, c, echo=[7])
+    assert not h.sent
+
+
+async def test_a_pending_posts_media_follows_a_resent_item_to_that_household(mesh):
+    a, h, c, d = mesh["A"], mesh["H"], mesh["C"], mesh["D"]
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/posts",
+        json={"type": "image", "image_urls": ["api/media/pending-pic.webp"]},
+        headers=a.headers,
+    )
+    assert r.status == 202, await r.text()
+    item_id = (await r.json())["item_id"]
+    await _pump(mesh)
+    await _promote(mesh, d)
+    await _begin(mesh, d)
+    assert [to for to, _p in _sends(h, FET.SPACE_MODERATION_SUBMITTED)] == [d.iid]
+    # The host ships the picture, under the name it holds it by, to D only.
+    from_a = space_direct_media_name(SID, a.iid, "pending-pic.webp")
+    rows = await h.db.fetchall(
+        "SELECT blob_id, target_instance_id FROM space_media_outbox", ()
+    )
+    assert [(row["blob_id"], row["target_instance_id"]) for row in rows] == [
+        (from_a, d.iid)
+    ]
+    assert c.iid not in {to for to, _et, _p in h.sent}
+    await _pump(mesh)
+    # D holds it under the host's name — and still takes the host's release.
+    from_h = space_direct_media_name(SID, h.iid, from_a)
+    row = await d.db.fetchone(
+        "SELECT payload_json FROM space_moderation_queue WHERE id=?", (item_id,)
+    )
+    assert from_h in row["payload_json"]
+    await _approve(d, item_id)
+    await _pump(mesh)
+    for house in (a, h, c, d):
+        posts = await house.db.fetchall("SELECT id FROM space_posts", ())
+        assert len(posts) == 1, house.name
+
+
+async def test_the_host_resends_only_what_a_reviewer_would_admit(mesh):
+    """Not re-sent: an item whose author left, one whose review window
+    closed, one of a feature no longer reviewed. A decision is sent again
+    only when it names somebody who still holds content authority."""
+    a, h, c = mesh["A"], mesh["H"], mesh["C"]
+    left = await _submit_task(mesh, "Author left")
+    await _pump(mesh)
+    # anna's seat is gone on the host's roster.
+    await h.db.enqueue(
+        "UPDATE space_remote_members SET tombstoned=1 WHERE user_id=?", (a.user_id,)
+    )
+    await _begin(mesh, c, echo=[])
+    assert not h.sent
+    await h.db.enqueue("UPDATE space_remote_members SET tombstoned=0", ())
+    # The review window closed (the hourly sweep has not run yet).
+    await h.db.enqueue(
+        "UPDATE space_moderation_queue SET expires_at=? WHERE id=?",
+        ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), left),
+    )
+    await _begin(mesh, c, echo=[])
+    assert not h.sent
+    await h.db.enqueue(
+        "UPDATE space_moderation_queue SET expires_at=? WHERE id=?",
+        ((datetime.now(UTC) + timedelta(days=1)).isoformat(), left),
+    )
+    # Tasks are no longer reviewed on the host.
+    await h.db.enqueue("UPDATE spaces SET tasks_access='open'", ())
+    await _begin(mesh, c, echo=[])
+    assert not h.sent
+    await h.db.enqueue("UPDATE spaces SET tasks_access='moderated'", ())
+    # Echoed ids the host cannot speak for: one it never held, and one
+    # rejected by a moderator who has since lost the seat.
+    await h.db.enqueue(
+        "UPDATE space_moderation_queue SET status='rejected', reviewed_by=?,"
+        " reviewed_at=? WHERE id=?",
+        (c.user_id, datetime.now(UTC).isoformat(), left),
+    )
+    await h.db.enqueue(
+        "UPDATE space_remote_members SET role='member' WHERE user_id=?", (c.user_id,)
+    )
+    # C still reviews (another moderator lives there), so it is heard.
+    await h.db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role,"
+        " display_name) VALUES(?, ?, 'u-cleo', 'moderator', 'Cleo')",
+        (SID, c.iid),
+    )
+    await _begin(mesh, c, echo=[left, "never-held"])
+    assert not h.sent
+    # carl is a moderator again: his rejection is announced again.
+    await h.db.enqueue(
+        "UPDATE space_remote_members SET role='moderator' WHERE user_id=?",
+        (c.user_id,),
+    )
+    await _begin(mesh, c, echo=[left, "never-held"])
+    assert [
+        (to, p["item_id"]) for to, p in _sends(h, FET.SPACE_MODERATION_DECIDED)
+    ] == [(c.iid, left)]
+
+
+async def test_only_a_promotion_of_our_own_person_asks_the_host(mesh):
+    a, h, c, d = mesh["A"], mesh["H"], mesh["C"], mesh["D"]
+    asked: list[tuple[str, str]] = []
+    for house in (a, h, c, d):
+
+        async def _ask(space_id: str, name: str = house.name) -> None:
+            asked.append((name, space_id))
+
+        house.app[space_moderation_service_key].attach_host_sync(_ask)
+    # Somebody else's promotion, as D's roster mirror hears it.
+    await _receive(
+        d,
+        _event(
+            h,
+            FET.SPACE_MEMBER_ROLE_CHANGED,
+            {
+                "space_id": SID,
+                "user_id": a.user_id,
+                "instance_id": a.iid,
+                "role": "moderator",
+            },
+            d,
+        ),
+    )
+    # A demotion of our own person.
+    await _promote(mesh, c, "member")
+    assert asked == []
+    # Our own person made an admin.
+    await _promote(mesh, d, "admin")
+    assert asked == [("D", SID)]

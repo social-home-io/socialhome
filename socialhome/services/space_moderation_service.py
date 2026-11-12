@@ -78,6 +78,8 @@ from .bus_publisher import BusPublisherMixin
 from .moderation_release import release_scope
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from ..domain.outbox import OutboxEntry
     from ..infrastructure.event_bus import EventBus
     from ..repositories.federation_repo import AbstractFederationRepo
@@ -240,6 +242,7 @@ class SpaceModerationService(BusPublisherMixin):
         "_inflight",
         "_own_instance_id",
         "_spaces",
+        "_sync_with_host",
         "_users",
     )
 
@@ -266,10 +269,24 @@ class SpaceModerationService(BusPublisherMixin):
         #: Items + decisions to and from the other households (v_43).
         #: ``None`` (unit tests, no federation): only the host holds items.
         self._federated: ModerationFederation | None = None
+        #: ``sync_with_host(space_id)`` — a §25.6 BEGIN to the space's host
+        #: now (see :meth:`attach_host_sync`).
+        self._sync_with_host: Callable[[str], Awaitable[None]] | None = None
 
     def attach_federation(self, federated: ModerationFederation) -> None:
         """Wire federated moderation (``app._build_space_moderation``)."""
         self._federated = federated
+
+    def attach_host_sync(
+        self, sync_with_host: Callable[[str], Awaitable[None]]
+    ) -> None:
+        """Wire ``sync_with_host(space_id)``
+        (``SpaceSyncScheduler.sync_with_host``): a household that starts
+        reviewing a space asks its host right away. That BEGIN echoes the
+        pending items held here (none yet), and the host answers with the
+        ones already waiting — instead of an empty Moderation tab until
+        the next periodic sync."""
+        self._sync_with_host = sync_with_host
 
     # ── Registry ─────────────────────────────────────────────────────────
 
@@ -572,6 +589,28 @@ class SpaceModerationService(BusPublisherMixin):
                 event.space_id,
                 dropped,
             )
+        if isinstance(event, SpaceConfigChanged):
+            await self._catch_up_if_promoted(event)
+
+    async def _catch_up_if_promoted(self, event: SpaceConfigChanged) -> None:
+        """One of OUR people was just given a content-authority seat in a
+        space hosted elsewhere: ask the host for the items already pending
+        (:meth:`attach_host_sync`). Asked from here, once this household
+        knows it reviews — an item pushed by the host could arrive before
+        the role change and be dropped as misdirected."""
+        payload = event.payload or {}
+        if self._sync_with_host is None or str(payload.get("role") or "") not in {
+            r.value for r in CONTENT_AUTHORITY_ROLES
+        }:
+            return
+        space = await self._spaces.get(event.space_id)
+        if space is None or space.dissolved or self.is_host(space):
+            return
+        if str(payload.get("user_id") or "") not in (
+            await self._spaces.list_local_member_user_ids(event.space_id)
+        ):
+            return
+        await self._sync_with_host(event.space_id)
 
     async def outbox_entry_wanted(self, entry: OutboxEntry) -> bool:
         """May a queued envelope still go out? A retried

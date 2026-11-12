@@ -691,8 +691,18 @@ async def test_a_mesh_only_host_hears_our_directory_version_after_catch_up(
     await sched._tick_once()
     assert fed.mesh_catchups == [("sp-mesh", "host-x"), ("sp-plain", "host-x")]
     assert fed.mesh_fields == [
-        {"dir_seq": 41, "sync_mode": "incremental", "have_seq": None},
-        {"dir_seq": None, "sync_mode": "incremental", "have_seq": None},
+        {
+            "dir_seq": 41,
+            "sync_mode": "incremental",
+            "have_seq": None,
+            "mod_pending": None,
+        },
+        {
+            "dir_seq": None,
+            "sync_mode": "incremental",
+            "have_seq": None,
+            "mod_pending": None,
+        },
     ]
     # The startup sweep sends it only for the directory echo.
     fed.mesh_catchups.clear()
@@ -2316,7 +2326,12 @@ async def test_a_capped_mesh_only_host_still_gets_the_incremental_begin(
     await _round(sched)
     await _wait_checks(sched)
     assert sched._federation.mesh_fields == [
-        {"sync_mode": "incremental", "dir_seq": None, "have_seq": None}
+        {
+            "sync_mode": "incremental",
+            "dir_seq": None,
+            "have_seq": None,
+            "mod_pending": None,
+        }
     ]
     assert sched._mesh_catchup_attempts[("sp-1", "host")] == MAX_MESH_CATCHUP_ATTEMPTS
     assert [r["instance_id"] for r in resume.requests] == ["admin-a"]
@@ -2569,3 +2584,88 @@ async def test_no_helper_is_asked_when_the_boot_marks_could_not_be_read(
     await _round(sched)
     await _wait_checks(sched)
     assert resume.requests == []
+
+
+# ── Moderation queue echo (catch-up for reviewer households) ────────────
+
+
+def _mod_sched(bus, queue, sync_manager, *, confirmed: bool):
+    fed = _FakeFederation(confirmed={"host"} if confirmed else set())
+    space = _space("sp-1", owner_instance_id="host")
+    repo = _FakeSpaceRepo(
+        spaces_by_type={SpaceType.PRIVATE: [space]},
+        members_by_space={"sp-1": ["host"]},
+    )
+    sched = SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([_peer("host")] if confirmed else []),
+        space_repo=repo,
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+    )
+    asked: list[tuple[str, str]] = []
+
+    async def echo(space_id, peer):
+        asked.append((space_id, peer))
+        return ["i-1", "i-2"]
+
+    sched.attach_moderation_echo(echo)
+    return sched, fed, repo, asked
+
+
+async def test_a_begin_echoes_the_pending_moderation_items(bus, queue, sync_manager):
+    """A reviewer household's BEGIN to the space's host carries the ids of
+    the pending items it holds (``mod_pending``); ``sync_with_host`` sends
+    that BEGIN at once (a household that just started reviewing)."""
+    sched, fed, repo, asked = _mod_sched(bus, queue, sync_manager, confirmed=True)
+    repo.get = AsyncMock(return_value=_space("sp-1", owner_instance_id="host"))
+    await queue.start()
+    try:
+        await sched.sync_with_host("sp-1")
+        await asyncio.sleep(0.05)
+    finally:
+        await queue.stop()
+    (begin,) = [
+        s for s in fed.sent if s["type"] == FederationEventType.SPACE_SYNC_BEGIN
+    ]
+    assert begin["to"] == "host"
+    assert begin["payload"]["mod_pending"] == ["i-1", "i-2"]
+    assert begin["payload"]["sync_mode"] == "incremental"
+    assert asked == [("sp-1", "host")]
+
+
+async def test_a_mesh_only_host_gets_the_moderation_echo_too(bus, queue, sync_manager):
+    """Every member is equal: a host reached over the mesh or a GFS relay
+    gets the same echo on the incremental BEGIN."""
+    sched, fed, repo, _asked = _mod_sched(bus, queue, sync_manager, confirmed=False)
+    repo.get = AsyncMock(return_value=_space("sp-1", owner_instance_id="host"))
+    await sched.sync_with_host("sp-1")
+    assert fed.mesh_catchups == [("sp-1", "host")]
+    assert fed.mesh_fields[0]["mod_pending"] == ["i-1", "i-2"]
+    assert fed.mesh_fields[0]["sync_mode"] == "incremental"
+
+
+async def test_sync_with_host_is_a_no_op_without_a_remote_host(
+    bus, queue, sync_manager
+):
+    sched, fed, repo, _asked = _mod_sched(bus, queue, sync_manager, confirmed=False)
+    repo.get = AsyncMock(return_value=None)
+    await sched.sync_with_host("sp-gone")
+    ours = _space("sp-1")
+    repo.get = AsyncMock(return_value=ours)
+    await sched.sync_with_host("sp-1")
+    assert fed.mesh_catchups == [] and fed.sent == []
+
+
+async def test_a_failing_moderation_echo_never_blocks_the_begin(
+    bus, queue, sync_manager
+):
+    sched, _fed, _repo, _asked = _mod_sched(bus, queue, sync_manager, confirmed=True)
+
+    async def boom(space_id, peer):
+        raise RuntimeError("db gone")
+
+    sched.attach_moderation_echo(boom)
+    assert await sched._moderation_echo_for("sp-1", "host") is None

@@ -4986,6 +4986,16 @@ def create_app(config: Config | None = None) -> web.Application:
             bazaar_service=bazaar_service,
         )
         app[K.space_moderation_service_key] = space_moderation
+        # Catch-up for a reviewer household rides the §25.6 BEGIN to the
+        # host: it echoes the pending items it holds, the host answers with
+        # what it lacks (``moderation_federation.on_sync_begin``). A
+        # household that starts reviewing asks at once.
+        app[K.space_sync_scheduler_key].attach_moderation_echo(
+            moderation_federation.pending_echo
+        )
+        space_moderation.attach_host_sync(
+            app[K.space_sync_scheduler_key].sync_with_host
+        )
         # Releases of items held here are checked against our own rows, and
         # move the held row to approved (v_43).
         fed.space_authorship.attach_moderation(

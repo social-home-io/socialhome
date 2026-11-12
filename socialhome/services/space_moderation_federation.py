@@ -54,11 +54,30 @@ a content-authority user seated on it (``moderates_as``, live seats). An
 approval from a non-host is acted on by the host only (it publishes); one
 for an item not held here yet leaves a tombstone, so the late submission is
 never stored as pending.
+
+**Catch-up.** A reviewer household can miss a submission or a decision (it
+was offline past the sender's retries, or it only started reviewing after
+the item was submitted). The host holds every pending item, so it is the
+one source: a reviewer household's §25.6 ``SPACE_SYNC_BEGIN`` to the host
+echoes the ids of the pending items it holds (``mod_pending``,
+:meth:`SpaceModerationFederation.pending_echo` — the periodic BEGIN, and
+one sent the moment one of its people is given a content-authority seat),
+and the host answers with exactly the difference
+(:meth:`SpaceModerationFederation.on_sync_begin`): each pending item the
+household lacks, re-sent as ``SPACE_MODERATION_SUBMITTED`` naming the
+submitter's own household (``submitter_instance_id`` — believed only from
+the host, and the submitter must hold a live writer seat there), with its
+files to that household alone; and the decision of each echoed item the
+host has since approved or rejected. Only to a household holding a live
+admin / moderator seat, at most once per :data:`CATCH_UP_INTERVAL_S` per
+(household, space), at most :data:`CATCH_UP_MAX_BYTES` of items per answer.
+Nothing of the queue enters the §25.6 stream itself.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -144,6 +163,17 @@ MAX_EXPIRY = timedelta(days=14)
 MAX_FUTURE_SKEW = timedelta(minutes=5)
 #: Bounds on ids read from the wire.
 _MAX_ID = 128
+#: The ``SPACE_SYNC_BEGIN`` field a reviewer household echoes the ids of
+#: the pending items it holds under (additive: an older host ignores it).
+PENDING_ECHO_KEY = "mod_pending"
+#: The household a re-sent item's submitter belongs to — set by the host
+#: on a catch-up re-send, believed only from the host.
+SUBMITTER_INSTANCE_KEY = "submitter_instance_id"
+#: The host answers a household's echo for one space at most this often.
+CATCH_UP_INTERVAL_S: float = 600.0
+#: Item payload bytes one catch-up answer carries (at least one item); the
+#: rest follows on the household's next sync, which echoes what arrived.
+CATCH_UP_MAX_BYTES = 1024 * 1024
 
 #: The owner-bound id kind of a create's target, per (feature, entity).
 _CREATE_KINDS: dict[tuple[str, str], str] = {
@@ -161,6 +191,8 @@ class SpaceModerationFederation(FileHashesMixin):
 
     __slots__ = (
         "_authorship",
+        "_caught_up_at",
+        "_clock",
         "_federation",
         "_file_hasher",
         "_media_names",
@@ -182,7 +214,11 @@ class SpaceModerationFederation(FileHashesMixin):
         remote_member_repo: AbstractSpaceRemoteMemberRepo,
         authorship: SpaceAuthorship,
         media_sync: SpaceMediaSyncService | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        self._clock = clock
+        #: (space, household) → when the host last answered its echo.
+        self._caught_up_at: dict[tuple[str, str], float] = {}
         self._federation = federation_service
         self._spaces = space_repo
         self._seats = remote_member_repo
@@ -236,6 +272,8 @@ class SpaceModerationFederation(FileHashesMixin):
         registry = federation_service._event_registry
         registry.register(FET.SPACE_MODERATION_SUBMITTED, self._on_submitted)
         registry.register(FET.SPACE_MODERATION_DECIDED, self._on_decided)
+        # The host's catch-up answers a reviewer household's §25.6 BEGIN.
+        registry.register(FET.SPACE_SYNC_BEGIN, self.on_sync_begin)
 
     @property
     def _own(self) -> str:
@@ -276,11 +314,26 @@ class SpaceModerationFederation(FileHashesMixin):
         return targets
 
     async def send_submitted(
-        self, space: Space, item: SpaceModerationItem, targets: list[str]
+        self,
+        space: Space,
+        item: SpaceModerationItem,
+        targets: list[str],
+        *,
+        submitter_instance_id: str | None = None,
     ) -> None:
         """One targeted, sealed send per reviewer household — never a
-        broadcast — and the item's media to those households only."""
-        relay = await self._public_relay_for(space, item)
+        broadcast — and the item's media to those households only.
+
+        ``submitter_instance_id`` is set by the host re-sending an item it
+        holds to a reviewer household that lacks it (:meth:`on_sync_begin`):
+        the household the submitter belongs to."""
+        # A held copy keeps the author's signed inner in its payload; on
+        # the wire it rides next to the payload, never inside it.
+        held = item.payload or {}
+        body = {k: v for k, v in held.items() if k != PUBLIC_RELAY_KEY}
+        relay = held.get(PUBLIC_RELAY_KEY) or (
+            await self._public_relay_for(space, item)
+        )
         payload = {
             # Also in the sealed payload: the routing field is absent on a
             # mesh-relayed envelope, and the space-writer gate needs it.
@@ -288,15 +341,17 @@ class SpaceModerationFederation(FileHashesMixin):
             "item_id": item.id,
             "feature": item.feature,
             "action": item.action,
-            "target_id": (item.payload or {}).get("target_id"),
+            "target_id": body.get("target_id"),
             "submitted_by": item.submitted_by,
-            "payload": item.payload,
+            "payload": body,
             "snapshot": item.current_snapshot,
             "submitted_at": _aware(item.submitted_at).isoformat(),
             "expires_at": _aware(item.expires_at).isoformat(),
         }
         if relay is not None:
-            payload["public_relay"] = relay
+            payload[PUBLIC_RELAY_KEY] = relay
+        if submitter_instance_id:
+            payload[SUBMITTER_INSTANCE_KEY] = submitter_instance_id
         # v_85 — the proposed files with their hashes, to a v_85 reviewer
         # household only. A page's files stay page-scoped (``sp-``) on
         # every household, so a page submission carries none; nor does a
@@ -411,12 +466,33 @@ class SpaceModerationFederation(FileHashesMixin):
         )
         if seat is not None and seat.instance_id not in (self._own, *targets):
             targets.append(seat.instance_id)
+        await self._send_decision(
+            space,
+            item,
+            targets,
+            decision=decision,
+            decided_by=decided_by,
+            reason=reason,
+            decided_at=datetime.now(UTC),
+        )
+
+    async def _send_decision(
+        self,
+        space: Space,
+        item: SpaceModerationItem,
+        targets: list[str],
+        *,
+        decision: ModerationStatus,
+        decided_by: str,
+        reason: str | None,
+        decided_at: datetime,
+    ) -> None:
         payload: dict = {
             "space_id": space.id,
             "item_id": item.id,
             "decision": decision.value,
             "decided_by": decided_by,
-            "decided_at": datetime.now(UTC).isoformat(),
+            "decided_at": _aware(decided_at).isoformat(),
         }
         if reason:
             payload["reason"] = reason
@@ -484,6 +560,168 @@ class SpaceModerationFederation(FileHashesMixin):
             and seat.instance_id != self._own
         )
 
+    # ── Catch-up (the §25.6 BEGIN echo) ──────────────────────────────────
+
+    async def pending_echo(
+        self, space_id: str, to_instance_id: str
+    ) -> list[str] | None:
+        """The ids of the pending items this household holds for
+        ``space_id`` — what its §25.6 ``SPACE_SYNC_BEGIN`` to the space's
+        host echoes (:data:`PENDING_ECHO_KEY`), so the host can send what
+        is missing and what was decided meanwhile. ``None`` (no field)
+        unless ``to_instance_id`` is the space's host, somewhere else, and
+        one of our people holds a content-authority seat in the space."""
+        space = await self._spaces.get(space_id)
+        if (
+            space is None
+            or space.dissolved
+            or not to_instance_id
+            or to_instance_id != space.owner_instance_id
+            or to_instance_id == self._own
+            or not await self._reviews_here(space)
+        ):
+            return None
+        return [item.id for item in await self._live_pending(space_id)]
+
+    async def _live_pending(self, space_id: str) -> list[SpaceModerationItem]:
+        """The space's pending items whose review window is open, oldest
+        first (a space holds at most ``MAX_PENDING_PER_SPACE``)."""
+        now = datetime.now(UTC)
+        items = await self._spaces.list_moderation_queue(
+            space_id, status=ModerationStatus.PENDING, limit=MAX_PENDING_PER_SPACE
+        )
+        return [i for i in reversed(items) if i.feature and _aware(i.expires_at) > now]
+
+    async def on_sync_begin(self, event: FederationEvent) -> None:
+        """Host side of the catch-up: a reviewer household's §25.6 BEGIN
+        echoes the pending items it holds. Send it exactly the difference —
+        the pending items it lacks, and the decision of each echoed item
+        that was approved or rejected meanwhile. Only to a household
+        holding a live admin / moderator seat; no echo (an older household,
+        a plain member one) → nothing. Never raises: the BEGIN's own
+        handler (the sync itself) is not this catch-up's to fail."""
+        try:
+            await self._catch_up(event)
+        except Exception:
+            log.warning(
+                "moderation: catch-up for %s failed",
+                getattr(event, "from_instance", "?"),
+                exc_info=True,
+            )
+
+    async def _catch_up(self, event: FederationEvent) -> None:
+        p = event.payload if isinstance(event.payload, dict) else {}
+        echo = p.get(PENDING_ECHO_KEY)
+        space_id = str(event.space_id or p.get("space_id") or "")
+        sender = str(event.from_instance or "")
+        if (
+            not isinstance(echo, list)
+            or len(echo) > MAX_PENDING_PER_SPACE
+            or not all(_bounded(i) for i in echo)
+            or not space_id
+            or not sender
+            or sender == self._own
+        ):
+            return
+        space = await self._spaces.get(space_id)
+        if space is None or space.dissolved or space.owner_instance_id != self._own:
+            return
+        # Pending content goes to a household that reviews, and nowhere else.
+        if sender not in await self._seats.list_instances_with_roles(
+            space_id, REVIEWER_SEATS
+        ):
+            return
+        held = set(echo)
+        pending = await self._live_pending(space_id)
+        missing: list[tuple[SpaceModerationItem, str]] = []
+        for item in pending:
+            if item.id in held or not _reviewable(space, item):
+                continue
+            origin = await self._submitter_household(space_id, item)
+            # The submitter's own household holds its item already.
+            if origin and origin != sender:
+                missing.append((item, origin))
+        decided = [
+            verdict
+            for item_id in sorted(held - {i.id for i in pending})
+            if (verdict := await self._decided_here(space, item_id)) is not None
+        ]
+        if not (missing or decided) or not self._may_catch_up(space_id, sender):
+            return
+        sent = size = 0
+        for item, origin in missing:
+            size += len(dump_json(item.payload).encode())
+            if sent and size > CATCH_UP_MAX_BYTES:
+                break
+            await self.send_submitted(
+                space, item, [sender], submitter_instance_id=origin
+            )
+            sent += 1
+        for verdict in decided:
+            await self._send_decision(
+                space,
+                verdict,
+                [sender],
+                decision=verdict.status,
+                decided_by=verdict.reviewed_by or "",
+                reason=verdict.rejection_reason,
+                decided_at=verdict.reviewed_at or datetime.now(UTC),
+            )
+        log.info(
+            "moderation: caught %s up on space %s — %d of %d missing item(s), "
+            "%d decision(s)",
+            sender,
+            space_id,
+            sent,
+            len(missing),
+            len(decided),
+        )
+
+    def _may_catch_up(self, space_id: str, instance_id: str) -> bool:
+        key = (space_id, instance_id)
+        now = self._clock()
+        if now - self._caught_up_at.get(key, float("-inf")) < CATCH_UP_INTERVAL_S:
+            return False
+        self._caught_up_at[key] = now
+        return True
+
+    async def _submitter_household(
+        self, space_id: str, item: SpaceModerationItem
+    ) -> str | None:
+        """The household ``item``'s submitter holds a live seat on: ours,
+        the one the roster mirror names, or ``None`` (they left)."""
+        if item.submitted_by in await self._spaces.list_local_member_user_ids(space_id):
+            return self._own
+        seat = await self._seats.get_including_tombstones(
+            space_id, "", item.submitted_by
+        )
+        if seat is None or seat.tombstoned:
+            return None
+        return seat.instance_id
+
+    async def _decided_here(
+        self, space: Space, item_id: str
+    ) -> SpaceModerationItem | None:
+        """The host's copy of ``item_id`` when it was approved or rejected
+        by somebody who still holds content authority (a receiver refuses a
+        decision naming anybody else) — else ``None``: an id the host does
+        not hold, or one that expired (its copy expires on its own)."""
+        item = await self._spaces.get_moderation_item(item_id)
+        if (
+            item is None
+            or item.space_id != space.id
+            or not item.reviewed_by
+            or item.status not in (ModerationStatus.APPROVED, ModerationStatus.REJECTED)
+        ):
+            return None
+        member = await self._spaces.get_member(space.id, item.reviewed_by)
+        role = (
+            str(member.role)
+            if member is not None
+            else await self.remote_role(space.id, item.reviewed_by)
+        )
+        return item if role in _AUTHORITY_ROLES else None
+
     # ── Inbound ──────────────────────────────────────────────────────────
 
     async def _on_submitted(self, event: FederationEvent) -> None:
@@ -539,13 +777,28 @@ class SpaceModerationFederation(FileHashesMixin):
                 item_id,
                 "this household holds no content-authority seat (misdirected)",
             )
-        # 2. The submitter is the sender's own writer, not banned.
-        if not await self._authorship.acts_for(event, space_id, submitted_by):
+        # 2. The submitter is the sender's own writer, not banned. Only
+        # the HOST may name another household as the submitter's: it holds
+        # every pending item and re-sends one to a reviewer household that
+        # lacks it (``on_sync_begin``). From anybody else the field is
+        # ignored and the sender is the origin.
+        origin = _bounded(p.get(SUBMITTER_INSTANCE_KEY))
+        relayed = bool(
+            origin
+            and event.from_instance == space.owner_instance_id
+            and origin not in (self._own, event.from_instance)
+        )
+        if not (
+            await self._writes_on(space_id, origin, submitted_by)
+            if relayed
+            else await self._authorship.acts_for(event, space_id, submitted_by)
+        ):
             return self._refuse(
                 event,
                 space_id,
                 item_id,
-                f"{submitted_by!r} holds no writer seat on the sending household",
+                f"{submitted_by!r} holds no writer seat on "
+                + (f"household {origin}" if relayed else "the sending household"),
             )
         if await self._spaces.is_banned(space_id, submitted_by):
             return self._refuse(event, space_id, item_id, "the submitter is banned")
@@ -650,7 +903,7 @@ class SpaceModerationFederation(FileHashesMixin):
             return self._refuse(event, space_id, item_id, "submitter cap reached")
         if (
             await self._spaces.count_pending_from_instance(
-                space_id, str(event.from_instance or "")
+                space_id, origin if relayed else str(event.from_instance or "")
             )
             >= MAX_PENDING_PER_HOUSEHOLD
         ):
@@ -679,6 +932,13 @@ class SpaceModerationFederation(FileHashesMixin):
             expires_at=expires_at,
             status=ModerationStatus.PENDING,
         )
+
+    async def _writes_on(self, space_id: str, instance_id: str, user_id: str) -> bool:
+        """``user_id`` holds a live writer seat in ``space_id`` on household
+        ``instance_id`` — :meth:`SpaceAuthorship.acts_for` for a submitter
+        the host names on another household."""
+        seat = await self._seats.get(space_id, instance_id, user_id)
+        return seat is not None and seat.role in _WRITER_SEATS
 
     async def _reviews_here(self, space: Space) -> bool:
         """This household is the host, or one of its own people holds a
@@ -812,6 +1072,23 @@ class SpaceModerationFederation(FileHashesMixin):
 #: copy the host relays to GFS followers once it approves the post
 #: (``space_public_outbound``; ``docs/protocol/moderation.md``).
 PUBLIC_RELAY_KEY: str = "public_relay"
+
+
+#: Roles (local or mirrored) whose decision a receiver accepts.
+_AUTHORITY_ROLES: frozenset[str] = frozenset(r.value for r in CONTENT_AUTHORITY_ROLES)
+
+
+def _reviewable(space: Space, item: SpaceModerationItem) -> bool:
+    """Would a reviewer household admit ``item`` now (receiver check 4)?"""
+    try:
+        level = space.features.access_level(item.feature)
+    except ValueError:
+        return False
+    return (
+        level is SpaceFeatureAccess.MODERATED
+        and not space.archived
+        and feature_on(space, item.feature, item.payload or {})
+    )
 
 
 def _signed_copy(
