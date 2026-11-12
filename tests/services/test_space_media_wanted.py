@@ -186,8 +186,11 @@ def _wanted(
     clock=None,
     media_dir=None,
     apply_grace_s=0.0,
+    utcnow=None,
 ):
     kw = {} if clock is None else {"clock": clock}
+    if utcnow is not None:
+        kw["utcnow"] = utcnow
     if media_dir is not None:
         kw |= {"media_dir": media_dir, "apply_grace_s": apply_grace_s}
     return SpaceMediaWanted(
@@ -983,7 +986,7 @@ def _host_missing(tmp_path, names, **kw):
     """We are the host; d's household posted ``p1`` showing *names* while we
     were away — the row is here, the files are not."""
     refs = _Refs()
-    refs.recent = {SPACE: [("2026-11-12 10:00:00", "p1", "u-d", list(names))]}
+    refs.recent = {SPACE: [("2026-01-01 10:00:00", "p1", "u-d", list(names))]}
     refs.owners = {"p1": "u-d"}
     fed = _Fed({"hh-d": V92, "h-a": V92})
     seats = _Seats(["h-a"], seats=[("hh-d", "u-d"), ("h-a", "u-a")])
@@ -1018,7 +1021,7 @@ async def test_a_row_applied_without_its_file_is_asked_for_without_a_view(tmp_pa
 async def test_a_member_household_asks_its_host_for_a_row_without_its_file(tmp_path):
     a = _sc("a")
     refs = _Refs()
-    refs.recent = {SPACE: [("2026-11-12 10:00:00", "p1", "u-x", [a])]}
+    refs.recent = {SPACE: [("2026-01-01 10:00:00", "p1", "u-x", [a])]}
     fed = _Fed({HOST: V92})
     w = _wanted(refs=refs, fed=fed, media_dir=tmp_path)
     w.applied(SPACE)
@@ -1095,10 +1098,7 @@ async def test_a_check_asks_for_at_most_50_files(tmp_path):
     w, fed, _ = _host_missing(tmp_path, names)
     w.applied(SPACE)
     await w.drain()
-    assert [len(s[2]["files"]) for s in fed.sent] == [MAX_WANTED_FILES]
-    # The rest follow with the space's next event.
-    w.applied(SPACE)
-    await w.drain()
+    # The rest follow with the space's next check, a grace later.
     assert [len(s[2]["files"]) for s in fed.sent] == [MAX_WANTED_FILES, 7]
 
 
@@ -1117,7 +1117,7 @@ async def test_a_file_read_from_a_gfs_media_cache_is_not_asked_for(tmp_path):
 
 async def test_a_follower_household_checks_nothing(tmp_path):
     refs = _Refs()
-    refs.recent = {SPACE: [("2026-11-12 10:00:00", "p1", "u-x", [_sc("a")])]}
+    refs.recent = {SPACE: [("2026-01-01 10:00:00", "p1", "u-x", [_sc("a")])]}
     fed = _Fed({HOST: V92})
     w = _wanted(
         refs=refs,
@@ -1231,7 +1231,7 @@ async def test_the_host_back_after_ten_minutes_gets_the_picture_without_a_view(
             return result
 
     refs = _Refs()
-    refs.recent = {SPACE: [("2026-11-12 10:00:00", "p1", "u-d", [name])]}
+    refs.recent = {SPACE: [("2026-01-01 10:00:00", "p1", "u-d", [name])]}
     refs.owners = {"p1": "u-d"}
     host = _wanted(
         refs=refs,
@@ -1244,3 +1244,196 @@ async def test_the_host_back_after_ten_minutes_gets_the_picture_without_a_view(
     host.applied(SPACE)  # the sync that brought the row
     await host.drain()
     assert (host_dir / name).read_bytes() == body
+
+
+# ── The check: every author, only accepted requests, only settled rows ────
+
+
+async def test_a_check_asks_each_author_household_for_its_own_files(tmp_path):
+    """The host misses p1 (its author lives on d) and p2 (on e). One request
+    to the first author household would get p1 only — d may ship only its
+    own people's files — and p2 would never be asked for again. Each
+    author household gets one request naming only its own file."""
+    a, b = _sc("a"), _sc("b")
+    refs = _Refs()
+    refs.recent = {
+        SPACE: [
+            ("2026-01-01 10:00:00", "p1", "u-d", [a]),
+            ("2026-01-01 09:00:00", "p2", "u-e", [b]),
+        ]
+    }
+    refs.owners = {"p1": "u-d", "p2": "u-e"}
+    fed = _Fed({"hh-d": V92, "hh-e": V92})
+    w = _wanted(
+        refs=refs,
+        spaces=_Spaces(host=SELF),
+        seats=_Seats(seats=[("hh-d", "u-d"), ("hh-e", "u-e")]),
+        fed=fed,
+        media_dir=tmp_path,
+    )
+    w.applied(SPACE)
+    await w.drain()
+    assert sorted((s[0], s[2]["files"]) for s in fed.sent) == [
+        ("hh-d", [{"item": "p1", "name": a}]),
+        ("hh-e", [{"item": "p2", "name": b}]),
+    ]
+
+
+async def test_a_view_too_asks_each_author_household_for_its_own_files():
+    a, b = _sc("a"), _sc("b")
+    refs = _Refs({a: [(SPACE, "p1", "t")], b: [(SPACE, "p2", "t")]})
+    refs.owners = {"p1": "u-d", "p2": "u-e"}
+    fed = _Fed({"hh-d": V92, "hh-e": V92})
+    seats = _Seats(seats=[("hh-d", "u-d"), ("hh-e", "u-e")])
+    w = _wanted(refs=refs, spaces=_Spaces(host=SELF), seats=seats, fed=fed)
+    w.schedule(a)
+    w.schedule(b)
+    await w.drain()
+    assert sorted((s[0], _names(s)) for s in fed.sent) == [
+        ("hh-d", [a]),
+        ("hh-e", [b]),
+    ]
+
+
+async def test_the_files_no_author_took_go_to_a_helper_the_others_do_not(tmp_path):
+    a, b = _sc("a"), _sc("b")
+    refs = _Refs()
+    refs.recent = {
+        SPACE: [
+            ("2026-01-01 10:00:00", "p1", "u-d", [a]),
+            ("2026-01-01 09:00:00", "p2", "u-e", [b]),
+        ]
+    }
+    refs.owners = {"p1": "u-d", "p2": "u-e"}
+    fed = _Fed({"hh-d": V92, "hh-e": V92, "h-a": V92}, fail={"hh-e"})
+    w = _wanted(
+        refs=refs,
+        spaces=_Spaces(host=SELF),
+        seats=_Seats(["h-a"], seats=[("hh-d", "u-d"), ("hh-e", "u-e")]),
+        fed=fed,
+        media_dir=tmp_path,
+    )
+    w.applied(SPACE)
+    await w.drain()
+    assert [(s[0], _names(s)) for s in fed.sent] == [
+        ("hh-d", [a]),
+        ("hh-e", [b]),
+        ("h-a", [b]),
+    ]
+
+
+class _FailFirst(_Fed):
+    """A federation whose first ``failures`` sends find no route."""
+
+    failures = 0
+
+    async def send_with_mesh_fallback(self, **kw):
+        if self.failures > 0:
+            self.failures -= 1
+            self.sent.append(
+                (kw["to_instance_id"], kw["event_type"], kw["payload"], None)
+            )
+            return DeliveryResult(
+                instance_id=kw["to_instance_id"], ok=False, error="no_route"
+            )
+        return await super().send_with_mesh_fallback(**kw)
+
+
+async def test_a_request_nobody_took_is_made_again_and_then_asked_once(tmp_path):
+    """The name counted as asked before anything was sent: an author that
+    could not be reached for a moment cost the picture for the life of the
+    process. Only an accepted request settles a name; the space is checked
+    again for the rest."""
+    a = _sc("a")
+    w, _, refs = _host_missing(tmp_path, [a])
+    fed = _FailFirst({"hh-d": V92})
+    fed.failures = 1
+    w._federation = fed
+    w._seats = _Seats(seats=[("hh-d", "u-d")])
+    w.applied(SPACE)
+    await w.drain()
+    assert [s[0] for s in fed.sent] == ["hh-d", "hh-d"]
+    assert len(refs.recent_asked) == 2
+    w.applied(SPACE)
+    await w.drain()
+    assert len(fed.sent) == 2  # accepted: not asked again
+
+
+async def test_an_author_nobody_reaches_is_asked_three_times_then_left_to_a_view(
+    tmp_path,
+):
+    a = _sc("a")
+    w, _, refs = _host_missing(tmp_path, [a])
+    fed = _Fed({"hh-d": V92}, fail={"hh-d"})
+    w._federation = fed
+    w._seats = _Seats(seats=[("hh-d", "u-d")])
+    refs.rows = {a: [(SPACE, "p1", "t")]}
+    w.applied(SPACE)
+    await w.drain()
+    assert [s[0] for s in fed.sent] == ["hh-d"] * mod.MAX_CHECK_ATTEMPTS
+    w.applied(SPACE)
+    await w.drain()
+    assert len(fed.sent) == mod.MAX_CHECK_ATTEMPTS
+    # Never left on a cooldown by the failed checks: a view asks at once.
+    w.schedule(a)
+    await w.drain()
+    assert len(fed.sent) == mod.MAX_CHECK_ATTEMPTS + 1
+
+
+async def test_a_row_younger_than_the_grace_waits_for_the_next_check(
+    tmp_path, monkeypatch
+):
+    """The grace ran from the space's FIRST event: a row that arrived
+    seconds before the check was asked for while its push was still on its
+    way. A row created less than the grace ago is left out, and the space
+    is checked again a grace later."""
+    monkeypatch.setattr(mod, "_CHECK_STEP_S", 0.01)
+    old, young = _sc("a"), _sc("b")
+    wall = [datetime(2026, 11, 12, 12, 0, 0, tzinfo=UTC)]
+    now = [0.0]
+    w, fed, refs = _host_missing(
+        tmp_path,
+        [],
+        apply_grace_s=300.0,
+        clock=lambda: now[0],
+        utcnow=lambda: wall[0],
+    )
+    refs.recent = {
+        SPACE: [
+            ("2026-11-12 11:59:50", "p2", "u-d", [young]),  # 10 s old
+            ("2026-11-12 11:00:00", "p1", "u-d", [old]),
+        ]
+    }
+    refs.owners = {"p1": "u-d", "p2": "u-d"}
+    w.applied(SPACE)
+    now[0] = 300.0
+    await asyncio.sleep(0.1)
+    assert [_names(s) for s in fed.sent] == [[old]]
+    # Its push never came: the next check, a grace later, asks.
+    wall[0] = datetime(2026, 11, 12, 12, 5, 0, tzinfo=UTC)
+    now[0] = 600.0
+    await w.drain()
+    assert [_names(s) for s in fed.sent] == [[old], [young]]
+
+
+async def test_a_young_row_whose_file_arrived_ends_the_checks(tmp_path, monkeypatch):
+    monkeypatch.setattr(mod, "_CHECK_STEP_S", 0.01)
+    young = _sc("b")
+    wall = [datetime(2026, 11, 12, 12, 0, 0, tzinfo=UTC)]
+    now = [0.0]
+    w, fed, refs = _host_missing(
+        tmp_path,
+        [],
+        apply_grace_s=300.0,
+        clock=lambda: now[0],
+        utcnow=lambda: wall[0],
+    )
+    refs.recent = {SPACE: [("2026-11-12 11:59:50", "p2", "u-d", [young])]}
+    w.applied(SPACE)
+    now[0] = 300.0
+    await asyncio.sleep(0.1)
+    (tmp_path / young).write_bytes(b"arrived")
+    wall[0] = datetime(2026, 11, 12, 12, 5, 0, tzinfo=UTC)
+    now[0] = 600.0
+    await w.drain()
+    assert fed.sent == [] and len(refs.recent_asked) == 2
