@@ -986,28 +986,37 @@ own handler a second try (`federation/inbound_retry.py`, behind
 `EventDispatchRegistry.dispatch`, where every transport ends):
 
 - **Only passing failures** — `sqlite3.OperationalError` (database
-  locked / busy), `OSError` (I/O, timeouts), `RuntimeError` (a service not
-  started or not attached yet). A refusal, a malformed payload or a bug
-  (`ValueError`, `KeyError`, `TypeError`, `AttributeError`,
-  `IntegrityError`, …) fails the same way again and is logged and dropped
-  as before.
-- **Only the handler that failed** runs again, after 1 s, 5 s and 20 s
+  locked / busy) and `OSError` (I/O, timeouts). A refusal, a malformed
+  payload, a `RuntimeError` or a bug (`ValueError`, `KeyError`,
+  `TypeError`, `AttributeError`, `IntegrityError`, …) fails the same way
+  again and is logged and dropped as before.
+- **Only the handlers that failed** run again, after 1 s, 5 s and 20 s
   (four tries in all); then one WARNING and the event is dropped.
-- **The post-decrypt gates run again before each try** (ban, deprovisioned
-  author, archived space, writer seat), so a ban that landed meanwhile
-  wins.
-- **Never retried:** call negotiation, typing, RTC signalling, the sync
-  streams (stateful, with their own resume) and the `SPACE_ROUTED` wrapper
-  (the inner event it unwraps is retried on its own).
+- **One sender's events stay in order.** While a household has a held
+  event, everything else it sends — for any handler — waits behind it in
+  one queue per sender (`from_instance`; for a mesh-routed event the
+  origin, not the relay) and is dispatched in arrival order once the head
+  succeeded or was given up. A delete never overtakes the create it
+  follows, a demotion never lands before its promotion. Other senders are
+  not held up.
+- **The gate runs again before every delayed run** — the sender is still a
+  peer (not unpaired meanwhile), and the post-decrypt gates (ban,
+  deprovisioned author, archived space, writer seat) still pass.
+- **Never held, never waiting:** call negotiation, typing, RTC signalling,
+  the sync streams (stateful, with their own resume; they already travel
+  beside the live events) and the `SPACE_ROUTED` wrapper (the inner event
+  it unwraps is queued on its own, under its origin).
 - **Bounded and in memory:** 256 events, 64 per sending household, 4 MiB.
-  On shutdown every held event gets one last try; what still fails, and
+  An event that does not fit behind a sender's head ends the wait: the
+  head is given up at once (one WARNING) and the queue runs now, in order
+  — never out of order, never dropped silently. On shutdown a handler that
+  is running finishes and the rest is dropped with one log line; that, and
   anything held when the process is killed, is lost — as it was before
   (space content then comes back with the next sync).
 
 The replay cache is not touched: a second try is this household re-running
 its own handler on an envelope it already verified, never a second
-acceptance of the envelope. Handlers are expected to be safe to run twice
-(they already are for sync and multi-path delivery).
+acceptance of the envelope.
 
 ### Reconnect queue
 

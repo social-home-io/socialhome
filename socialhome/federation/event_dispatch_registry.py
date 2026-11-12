@@ -12,10 +12,10 @@ easy to add new event types without editing :meth:`FederationService._dispatch_e
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 
 from ..domain.federation import FederationEvent, FederationEventType
-from .inbound_retry import InboundRetry
+from .inbound_retry import Failed, InboundRetry, log_handler_failure
 
 log = logging.getLogger(__name__)
 
@@ -79,21 +79,38 @@ class EventDispatchRegistry:
         A handler exception never blocks the other handlers. The envelope's
         replay id is already stored, so the sender cannot deliver it again:
         a failure that may pass is handed to :class:`InboundRetry`, which
-        runs that one handler again shortly; any other is logged and the
-        event is dropped for that handler.
+        runs the failed handlers again shortly — and makes every later
+        event of the same sender wait behind it (it is then taken here and
+        dispatched in its turn). Any other failure is logged and the event
+        is dropped for that handler.
         """
-        handlers = self._handlers.get(event.event_type, ())
+        retry = self._retry
+        if retry is not None and retry.defer(event):
+            return
+        failed = await self._run(event, None)
+        if retry is not None:
+            again = [f for f in failed if retry.may_retry(event, f[1])]
+            if again and retry.hold(event, again, self._run):
+                failed = [f for f in failed if f not in again]
+        for handler, exc in failed:
+            log_handler_failure(event, handler, exc)
+
+    async def _run(
+        self,
+        event: FederationEvent,
+        handlers: Sequence[EventHandler] | None,
+    ) -> list[Failed]:
+        """Run ``handlers`` (``None``: every handler of the event's type) in
+        order; return the ones that raised, with what they raised."""
+        if handlers is None:
+            handlers = tuple(self._handlers.get(event.event_type, ()))
+        failed: list[Failed] = []
         for handler in handlers:
             try:
                 await handler(event)
-            except Exception as exc:
-                if self._retry is not None and self._retry.hold(event, handler, exc):
-                    continue
-                log.exception(
-                    "Event handler %s failed for %s",
-                    getattr(handler, "__qualname__", repr(handler)),
-                    event.event_type,
-                )
+            except Exception as exc:  # noqa: BLE001 — judged by the caller
+                failed.append((handler, exc))
+        return failed
 
     def handlers_for(
         self,

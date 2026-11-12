@@ -86,10 +86,12 @@ back at all.
 **A handler that fails is the receiver's to retry.** The replay step has
 stored the `msg_id` by the time a handler runs, so the sender cannot
 deliver the envelope again. A handler failure that can pass (database
-locked, I/O error, a service not attached yet) is retried by the receiver
-itself — that one handler, three more times within ~26 s, behind the
-post-decrypt gates — from a small bounded in-memory hold
-(`federation/inbound_retry.py`). Nothing changes on the wire, and a
+locked, I/O error) is retried by the receiver itself — the failed
+handlers, three more times within ~26 s, behind the post-decrypt gates —
+from a small bounded in-memory hold (`federation/inbound_retry.py`).
+Meanwhile every later event of the same sender waits behind it, so one
+household's events are applied in the order they arrived. Nothing changes
+on the wire, and a
 replayed envelope is refused as before. Details:
 [architecture → Inbound handler retry](../architecture.md#inbound-handler-retry).
 

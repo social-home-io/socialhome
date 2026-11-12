@@ -666,7 +666,9 @@ class FederationService:
         # Handlers register themselves via attach_* methods.
         # A handler that failed for a passing reason is run again shortly:
         # the replay id is stored before dispatch, so the sender cannot.
-        self._inbound_retry = InboundRetry(gate=self._retry_allowed)
+        self._inbound_retry = InboundRetry(
+            gate=self._retry_allowed, on_applied=self._mark_space_applied
+        )
         self._event_registry = EventDispatchRegistry(retry=self._inbound_retry)
         self._register_default_handlers()
         # Subscribe to domain events that trigger outbound federation.
@@ -1134,8 +1136,21 @@ class FederationService:
             await self.replay_held(held, reason=f"the seat landed in {event.space_id}")
 
     async def _retry_allowed(self, held: FederationEvent) -> bool:
-        """The gate of a handler's second try: refuse, never hold — a hold
-        would later replay the event to the handlers that already ran."""
+        """The gate of a delayed run (:class:`InboundRetry`): the sender must
+        still be a peer — a household unpaired meanwhile gets nothing applied
+        (its own ``UNPAIR`` may come from the tombstone; a mesh-routed
+        event's origin never was a peer) — and the post-decrypt gates must
+        still pass. Refuse, never hold for a seat: a hold would later replay
+        the event to the handlers that already ran."""
+        if (
+            held.routed_path is None
+            and await self._federation_repo.get_instance(
+                held.from_instance,
+                include_unpairing=held.event_type is FederationEventType.UNPAIR,
+            )
+            is None
+        ):
+            return False
         return await self._held_event_allowed(held, hold_for_seat=False)
 
     async def _held_event_allowed(
@@ -4298,7 +4313,7 @@ class FederationService:
         since a deferred send rides both.
         """
         self._stopping = True
-        # Held inbound events get their last try while the database is open.
+        # A handler on its second try finishes; what else is held is dropped.
         await self._inbound_retry.stop()
         tasks = [
             t
@@ -4627,12 +4642,16 @@ class FederationService:
             # In memory, O(1) — clears a silent host only (v_92).
             self._host_contact.heard_from(event.space_id, event.from_instance)
         await self._event_registry.dispatch(event)
+        self._mark_space_applied(event)
+
+    def _mark_space_applied(self, event: FederationEvent) -> None:
+        """After the handlers — here, or on a later try
+        (:class:`InboundRetry`): the row this event carried is stored."""
         if (
             self._space_applied is not None
             and event.space_id
             and event.event_type not in _FILE_TRAFFIC
         ):
-            # After the handlers: the row this event carried is stored.
             try:
                 self._space_applied(event.space_id)
             except Exception:
