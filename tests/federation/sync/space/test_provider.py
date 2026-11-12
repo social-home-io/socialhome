@@ -244,6 +244,7 @@ class _ItemFiles:
 def _catchup_provider(encoder, rows, **kw) -> tuple[SpaceSyncService, AsyncMock]:
     media_sync = AsyncMock()
     media_sync.enqueue_for_blob = AsyncMock()
+    media_sync.held_files = AsyncMock(side_effect=list)
     svc = SpaceSyncService(
         builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
         exporters=kw.pop("exporters", {}),
@@ -277,6 +278,28 @@ async def test_an_incremental_resync_ships_no_catchup_media(encoder):
     assert _shipped(media_sync) == [("p-1", ["a.webp"])]
     parsed = orjson.loads(session.rtc.sent[-1])
     assert parsed["resource"] == SENTINEL_RESOURCE
+
+
+async def test_catchup_never_queues_a_file_this_household_does_not_hold(encoder):
+    """The host holds a member's post whose picture never arrived (the
+    member posted while the host was down). Its catch-up must not queue
+    that file — every attempt failed with "blob source missing" — and the
+    file does not use up the stream's file budget either."""
+    svc, media_sync = _catchup_provider(
+        encoder,
+        [
+            ("2026-11-03 10:00:00", "p-missing", "u-d", ["sd-lost.webp"]),
+            ("2026-11-02 10:00:00", "p-mixed", "u-1", ["here.webp", "gone.webp"]),
+            ("2026-11-01 10:00:00", "p-held", "u-1", ["a.webp"]),
+        ],
+    )
+    held = {"here.webp", "a.webp"}
+    media_sync.held_files = AsyncMock(
+        side_effect=lambda urls: [u for u in urls if u in held]
+    )
+    with patch.object(provider_mod, "CATCHUP_MEDIA_MAX_FILES", 2):
+        await svc.stream_initial(_FakeSession(requester="peer-d"))
+    assert _shipped(media_sync) == [("p-mixed", ["here.webp"]), ("p-held", ["a.webp"])]
 
 
 async def test_stream_initial_enqueues_catchup_media(encoder):
@@ -451,6 +474,7 @@ async def test_stream_initial_catchup_real_repos(tmp_dir, encoder):
         )
         media_sync = AsyncMock()
         media_sync.enqueue_for_blob = AsyncMock()
+        media_sync.held_files = AsyncMock(side_effect=list)
         svc = SpaceSyncService(
             builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
             exporters={},
@@ -1968,6 +1992,7 @@ _PAGES = [
 def _page_provider(encoder, *, hosting=True, versions=None, exporters=None):
     media_sync = AsyncMock()
     media_sync.enqueue_for_blob = AsyncMock()
+    media_sync.held_files = AsyncMock(side_effect=list)
     svc = SpaceSyncService(
         builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
         exporters=exporters or {},
@@ -2045,6 +2070,27 @@ async def test_a_page_file_named_outside_the_space_is_not_in_the_catchup(
     assert [c["media_urls"] for c in calls] == [
         ["api/media/a.webp", "/api/media/b.webp"]
     ]
+
+
+async def test_a_page_file_the_host_never_received_is_not_in_the_catchup(encoder):
+    """A member's page picture whose push never reached the host: the page
+    row is here, the file is not. Queued, every send failed on "blob source
+    missing" until the row ran out of attempts — for every requester, on
+    every stream. Only what is here is queued; a page whose files are all
+    missing queues nothing."""
+    svc, media_sync = _page_provider(encoder)
+    media_sync.held_files = AsyncMock(
+        side_effect=lambda urls: [u for u in urls if "a.webp" not in u]
+    )
+    await svc.stream_initial(_FakeSession(requester="peer-new"))
+    calls = [c.kwargs for c in media_sync.enqueue_for_blob.call_args_list]
+    assert [(c["correlation_id"], c["media_urls"]) for c in calls] == [
+        ("pg-1", ["api/media/c.webp", "/api/media/b.webp"])
+    ]
+    media_sync.enqueue_for_blob.reset_mock()
+    media_sync.held_files = AsyncMock(return_value=[])
+    await svc.stream_initial(_FakeSession(requester="peer-new"))
+    assert media_sync.enqueue_for_blob.call_args_list == []
 
 
 async def test_the_catchup_ships_a_pages_history_and_side_files(encoder):
@@ -2220,6 +2266,7 @@ async def test_a_trusted_non_host_full_catch_up_ships_only_its_own_peoples_files
         return {"u-ours"}
 
     media_sync = AsyncMock()
+    media_sync.held_files = AsyncMock(side_effect=list)
     svc = SpaceSyncService(
         builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
         exporters={

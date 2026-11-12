@@ -2192,10 +2192,13 @@ def _wire_federation_stack(
     )
     capabilities_outbound.wire()
     app[K.capabilities_outbound_key] = capabilities_outbound
-    # A space host we reach only over the mesh holds no row for us: the
-    # scheduler's mesh sweep tells it our version (migration 0078).
-    space_sync_scheduler.attach_mesh_announce(
-        capabilities_outbound.announce_to_mesh_host
+    # A member household of one of our spaces that we reach only over the
+    # mesh holds no row for us: the scheduler's mesh sweep tells it our
+    # version (migration 0078), and a household whose own claim just raised
+    # its version here is answered right away.
+    space_sync_scheduler.attach_mesh_announce(capabilities_outbound.announce_over_mesh)
+    federation_service.attach_mesh_claim_answer(
+        capabilities_outbound.announce_over_mesh
     )
 
     peer_directory_service = PeerDirectoryService(
@@ -2468,14 +2471,19 @@ def _build_space_media_wanted(
     federation_service._event_registry.register(
         FederationEventType.SPACE_MEDIA_WANTED, _space_media_wanted
     )
-    return SpaceMediaWanted(
+    wanted = SpaceMediaWanted(
         media_refs=media_reference_repo,
         space_repo=space_repo,
         remote_members=space_remote_member_repo,
         federation=federation_service,
         host_contact=host_contact,
         own_instance_id=own_instance_id,
+        media_dir=pathlib.Path(config.media_path),
     )
+    # Not only on view: every verified event of a space has the files of
+    # its recent rows checked, and the ones that never arrived asked for.
+    federation_service.attach_space_applied(wanted.applied)
+    return wanted
 
 
 def _build_page_files_reach_host(
@@ -2549,6 +2557,10 @@ def _build_space_media_gfs(
         media_dir=media_dir,
     )
     responder.attach_federation(federation_service)
+    if (wanted := app.get(K.space_media_wanted_key)) is not None:
+        # A file this household reads from a GFS media cache is fetched
+        # there (prefetch / on view), never asked for by the file check.
+        wanted.attach_gfs_refs(repos.space_media_ref.get)
     app[K.space_media_gfs_uploader_key] = uploader
     app[K.space_media_gfs_fetcher_key] = fetcher
     app[K.space_media_gfs_responder_key] = responder
@@ -5131,6 +5143,13 @@ def create_app(config: Config | None = None) -> web.Application:
             target_eph_lookup=route_discovery.lookup_target_eph_priv,
         )
         routed_handler.attach_to(federation_service)
+        # A media chunk the target nacked (it restarted and cannot open
+        # what was sealed to its old key) is not retransmitted by the mesh:
+        # the media outbox queues the file again.
+        routed_handler.attach_lost_inner_listener(
+            FederationEventType.SPACE_MEDIA_BLOB,
+            space_media_sync_service.on_mesh_chunk_lost,
+        )
         # Mesh lives on the federation service so every outbound that
         # goes through ``send_with_mesh_fallback`` (private invites,
         # space-content broadcasts, future per-peer fanouts) sees the

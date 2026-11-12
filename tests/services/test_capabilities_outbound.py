@@ -243,7 +243,7 @@ async def test_resend_to_skips_self():
     fed.send_event.assert_not_awaited()
 
 
-# ── Mesh-only space hosts (migration 0078) ────────────────────────────────
+# ── Mesh-only member households (migration 0078) ────────────────────────────────
 
 
 def _mesh_out(*, row=None, ok=True):
@@ -262,7 +262,7 @@ async def test_mesh_host_gets_our_version_claim_over_the_mesh():
     our version + identity key from this announcement, which rides
     ``send_with_mesh_fallback`` (SPACE_ROUTED, sealed end to end)."""
     out, fed = _mesh_out()
-    assert await out.announce_to_mesh_host("host-c") is True
+    assert await out.announce_over_mesh("host-c") is True
     kw = fed.send_with_mesh_fallback.await_args.kwargs
     assert kw["to_instance_id"] == "host-c"
     assert kw["event_type"] is FederationEventType.INSTANCE_CAPABILITIES_UPDATED
@@ -274,17 +274,21 @@ async def test_mesh_host_gets_our_version_claim_over_the_mesh():
 
 
 @pytest.mark.asyncio
-async def test_mesh_announce_failure_is_reported_for_a_retry():
+async def test_mesh_announce_failure_is_reported_for_a_retry(caplog):
+    """Returned for a retry, logged at DEBUG only: a household no route
+    reaches fails on every sweep, and the scheduler reports it once."""
     out, _fed = _mesh_out(ok=False)
-    assert await out.announce_to_mesh_host("host-c") is False
+    with caplog.at_level("INFO"):
+        assert await out.announce_over_mesh("host-c") is False
+    assert "mesh announcement" not in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_paired_host_needs_no_mesh_announcement():
     out, fed = _mesh_out(row=_peer("host-c"))
-    assert await out.announce_to_mesh_host("host-c") is True
+    assert await out.announce_over_mesh("host-c") is True
     fed.send_with_mesh_fallback.assert_not_awaited()
-    assert await out.announce_to_mesh_host("inst-self") is True
+    assert await out.announce_over_mesh("inst-self") is True
     fed.send_with_mesh_fallback.assert_not_awaited()
 
 

@@ -104,6 +104,7 @@ from ..infrastructure.key_manager import KeyManager
 from ..peer_http import post_to_peer
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..repositories.outbox_repo import AbstractOutboxRepo
+from ..task_drain import wait_tasks_done
 from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from .app_framing import (
     APP_AEAD_SUITE_AESGCM_256,
@@ -344,6 +345,16 @@ def _deferred_payload_size(payload: dict) -> int:
     return len(_orjson.dumps(payload, default=str))
 
 
+#: Events that are file traffic themselves: they never mark their space
+#: for the missing-file check (:meth:`FederationService.attach_space_applied`).
+_FILE_TRAFFIC: frozenset[FederationEventType] = frozenset(
+    {
+        FederationEventType.SPACE_MEDIA_BLOB,
+        FederationEventType.SPACE_MEDIA_WANTED,
+    }
+)
+
+
 class _HostSeen(Protocol):
     def heard_from(self, space_id: str, instance_id: str) -> None: ...
 
@@ -441,6 +452,8 @@ class FederationService:
         "_media_https_backoff",
         "_media_https_inbound_pipeline",
         "_media_relay_inbound_pipeline",
+        "_mesh_claim_answer",
+        "_mesh_claim_answer_tasks",
         "_online_status_service",
         "_outbox_payload_key",
         "_outbox_repo",
@@ -461,6 +474,7 @@ class FederationService:
         "_rtc_inbound_pipeline",
         "_seat_send_locks",
         "_sig_suite",
+        "_space_applied",
         "_space_remote_member_repo",
         "_space_repo",
         "_space_sync_receiver",
@@ -595,6 +609,12 @@ class FederationService:
         #: unreferenced task can be GC'd mid-flight); it removes both entries
         #: when its queue is empty. :meth:`stop` cancels the rest.
         self._deferred_mesh_queues: dict[str, deque[_DeferredMeshSend]] = {}
+        #: See :meth:`attach_mesh_claim_answer`.
+        self._mesh_claim_answer: Callable[[str], Awaitable[bool]] | None = None
+        #: Answers on their way (:meth:`_spawn_mesh_claim_answer`).
+        self._mesh_claim_answer_tasks: set[asyncio.Task[None]] = set()
+        #: See :meth:`attach_space_applied`.
+        self._space_applied: Callable[[str], None] | None = None
         self._deferred_mesh_tasks: dict[str, asyncio.Task[None]] = {}
         #: Per pending target: set to cut its drain task's wait short when a
         #: route to it is learned (:meth:`on_route_learned`).
@@ -1133,6 +1153,26 @@ class FederationService:
         sync answer — stops the helper fallback at once."""
         self._host_contact = contact
 
+    def attach_space_applied(self, applied: Callable[[str], None]) -> None:
+        """Wire ``applied(space_id)``
+        (:meth:`~socialhome.services.space_media_wanted.SpaceMediaWanted
+        .applied`): called after every verified event of a space was
+        handled here — a live row, a sync or resume chunk, a helper's
+        catch-up — so the files of the rows it stored that never arrived
+        are asked for without waiting for a view. O(1) per event."""
+        self._space_applied = applied
+
+    def attach_mesh_claim_answer(
+        self, answer: Callable[[str], Awaitable[bool]]
+    ) -> None:
+        """``answer(instance_id)`` tells a member household we reach only
+        over the mesh our own version
+        (``CapabilitiesOutbound.announce_over_mesh``). Run by
+        :meth:`record_mesh_member_claim` whenever such a household's claimed
+        version rises: it holds no row for us either, so until it has OUR
+        claim its version-gated space broadcasts skip us."""
+        self._mesh_claim_answer = answer
+
     def attach_idempotency_cache(self, cache) -> None:
         """Attach an :class:`IdempotencyCache` for inbound dedup."""
         self._idempotency_cache = cache
@@ -1659,6 +1699,9 @@ class FederationService:
         cert, writer key and channel grant — right away. A caller about to
         send that snapshot itself (an accept seats and snapshots) passes
         ``notify=False``.
+
+        Rising also answers the household with OUR claim
+        (:meth:`attach_mesh_claim_answer`), whatever ``notify`` says.
         """
         origin = event.from_instance
         if event.routed_path is None or not origin or origin == self._own_instance_id:
@@ -1710,6 +1753,11 @@ class FederationService:
                         new_version=claim.proto_version,
                     )
                 )
+            # The claimant holds no row for us either: answer with our own
+            # claim, or its version-gated space broadcasts keep skipping us
+            # (a reaction, a bazaar listing). Only on a rise, so two
+            # households answering each other stop after one exchange.
+            self._spawn_mesh_claim_answer(origin)
         elif claim.proto_version < previous:
             log.warning(
                 "mesh member %s: claimed proto_version %d below its high-water "
@@ -1720,6 +1768,36 @@ class FederationService:
                 previous,
             )
         return True
+
+    def _spawn_mesh_claim_answer(self, instance_id: str) -> None:
+        """Answer *instance_id*'s claim in a tracked task: the answer is a
+        send over the mesh and must not hold up the inbound event that
+        carried the claim. :meth:`stop` ends the ones still on their way."""
+        if self._mesh_claim_answer is None or self._stopping:
+            return
+        task = asyncio.create_task(
+            self._answer_mesh_claim(instance_id), name="mesh-claim-answer"
+        )
+        self._mesh_claim_answer_tasks.add(task)
+        task.add_done_callback(self._mesh_claim_answer_tasks.discard)
+
+    async def drain_mesh_claim_answers(self) -> None:
+        """Wait until every answer started so far is done (tests)."""
+        await wait_tasks_done(lambda: self._mesh_claim_answer_tasks)
+
+    async def _answer_mesh_claim(self, instance_id: str) -> None:
+        """Tell *instance_id* our version over the mesh. Never raises: a
+        failed answer is retried by the scheduler's mesh sweep."""
+        if self._mesh_claim_answer is None:
+            return
+        try:
+            await self._mesh_claim_answer(instance_id)
+        except Exception:
+            log.warning(
+                "mesh member %s: answering its version claim failed",
+                instance_id,
+                exc_info=True,
+            )
 
     async def is_space_session_peer(self, instance_id: str) -> bool:
         """``True`` iff ``instance_id`` is a household seated from an invite
@@ -4192,7 +4270,14 @@ class FederationService:
         since a deferred send rides both.
         """
         self._stopping = True
-        tasks = [t for t in self._deferred_mesh_tasks.values() if not t.done()]
+        tasks = [
+            t
+            for t in (
+                *self._deferred_mesh_tasks.values(),
+                *self._mesh_claim_answer_tasks,
+            )
+            if not t.done()
+        ]
         for task in tasks:
             task.cancel()
         if tasks:
@@ -4512,6 +4597,20 @@ class FederationService:
             # In memory, O(1) — clears a silent host only (v_92).
             self._host_contact.heard_from(event.space_id, event.from_instance)
         await self._event_registry.dispatch(event)
+        if (
+            self._space_applied is not None
+            and event.space_id
+            and event.event_type not in _FILE_TRAFFIC
+        ):
+            # After the handlers: the row this event carried is stored.
+            try:
+                self._space_applied(event.space_id)
+            except Exception:
+                log.warning(
+                    "marking space %s for its file check failed",
+                    event.space_id,
+                    exc_info=True,
+                )
 
     def _register_default_handlers(self) -> None:
         """Register built-in event handlers available in all configurations.

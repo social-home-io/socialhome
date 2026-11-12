@@ -30,10 +30,15 @@ Triggers:
    the ``authority_epoch_echo`` the attached builder returns
    (:meth:`attach_authority_echo`), and :class:`SpaceAuthorityEchoDue`
    sends one to the owner right away.
-7. **Mesh-only host announcement** — the same mesh sweep hands each host
-   we reach only over the mesh to the attached announcer
+7. **Mesh-only version announcement** — the same mesh sweep hands each
+   household we reach only over the mesh — the hosts of the spaces we
+   joined, and every member household of a space one of our people is a
+   member of (hosted here or elsewhere) — to the attached announcer
    (:meth:`attach_mesh_announce`) once per process, so it learns our
-   version + identity key and can deliver our writer cert (migration 0078).
+   version + identity key: a host can deliver our writer cert (migration
+   0078), and any member household's version-gated broadcast reaches us.
+   A household no route reaches after :data:`MAX_MESH_ANNOUNCE_ATTEMPTS`
+   attempts is tried only every :data:`MESH_ANNOUNCE_SLOW_EVERY` sweeps.
 8. **Per-provider slots** — every BEGIN this scheduler sends holds one of
    the provider's :data:`MAX_ACTIVE_SESSIONS_PER_INSTANCE` slots until its
    ``SpaceSyncComplete`` (or deferral, or :data:`INFLIGHT_BEGIN_TTL_S`). A
@@ -146,6 +151,15 @@ STARTUP_MESH_CATCHUP_DELAY_SECONDS: float = 45.0
 #: Only BEGINs that actually shipped count — a ``no_route`` never reached the
 #: host and so never touched its budget (#648).
 MAX_MESH_CATCHUP_ATTEMPTS: int = 3
+
+#: Failed version announcements to one mesh-only household before the sweep
+#: slows down for it: it no longer counts as pending (the startup retries
+#: end) and is tried only every :data:`MESH_ANNOUNCE_SLOW_EVERY` sweeps. It
+#: is never given up — a household that comes online needs our version, or
+#: its version-gated broadcasts skip us.
+MAX_MESH_ANNOUNCE_ATTEMPTS: int = 3
+#: With the 30-minute tick: one route probe per household every 4 hours.
+MESH_ANNOUNCE_SLOW_EVERY: int = 8
 
 #: First delay before asking a provider again for a sync it deferred for
 #: lack of a slot; the n-th retry waits n times this. Long enough for the
@@ -277,6 +291,7 @@ class SpaceSyncScheduler:
         "_inflight",
         "_interval",
         "_mesh_announce",
+        "_mesh_announce_failed",
         "_mesh_announced",
         "_mesh_catchup_attempts",
         "_mesh_catchup_done",
@@ -354,6 +369,9 @@ class SpaceSyncScheduler:
         self._mesh_announce: Callable[[str], Awaitable[bool]] | None = None
         #: Mesh-only hosts our version reached this process.
         self._mesh_announced: set[str] = set()
+        #: household → announcements that failed, then sweeps skipped since
+        #: (:data:`MAX_MESH_ANNOUNCE_ATTEMPTS`).
+        self._mesh_announce_failed: dict[str, int] = {}
         #: provider → {sync_id: (space_id, monotonic sent-at)} — the BEGINs
         #: we sent it that have not ended yet. A provider serves at most
         #: :data:`MAX_ACTIVE_SESSIONS_PER_INSTANCE` of ours at once and
@@ -451,12 +469,13 @@ class SpaceSyncScheduler:
         self._roster_echo = echo
 
     def attach_mesh_announce(self, announce: Callable[[str], Awaitable[bool]]) -> None:
-        """``announce(host_instance_id)`` → ``True`` once nothing more is
-        needed (``CapabilitiesOutbound.announce_to_mesh_host``). Run by the
-        mesh sweep for every host we reach only over the mesh: such a host
+        """``announce(instance_id)`` → ``True`` once nothing more is needed
+        (``CapabilitiesOutbound.announce_over_mesh``). Run by the mesh sweep
+        for every household of our spaces we reach only over the mesh: it
         holds no ``remote_instances`` row for us, so without it it could
-        gate nothing on our version — no writer cert, writer key or channel
-        grant for us (migration 0078)."""
+        gate nothing on our version — a host: no writer cert, writer key or
+        channel grant for us (migration 0078); any member household: its
+        version-gated broadcasts (a reaction, a bazaar listing) skip us."""
         self._mesh_announce = announce
 
     def wire(self) -> None:
@@ -1252,33 +1271,68 @@ class SpaceSyncScheduler:
             log.debug("mesh incremental BEGIN failed", exc_info=True)
 
     async def _tick_mesh_announce(self) -> int:
-        """Announce our version to each mesh-only space host not yet reached
-        this process. Returns how many are still pending. Never raises."""
+        """Announce our version to each mesh-only household of our spaces
+        not yet reached this process: the hosts of the spaces we joined and
+        the member households of every space one of our people is a member
+        of. Returns how many are still pending. Never raises."""
         if self._mesh_announce is None:
             return 0
         pending = 0
         try:
             targets: set[str] = set()
-            for joined in await self._list_joined_remote_spaces():
-                targets.update(await self._mesh_targets(joined))
-            hosts = sorted(targets)
+            for space in await self._list_local_spaces():
+                hosted_here = space.owner_instance_id == self._own_instance_id
+                if not hosted_here and not (
+                    space.owner_instance_id and await self._holds_member_seat(space)
+                ):
+                    # Followed only (or a bare mirror): the GFS shields a
+                    # follower from the host and the members.
+                    continue
+                if not hosted_here:
+                    targets.update(await self._mesh_targets(space))
+                targets.update(await self._space_repo.list_member_instances(space.id))
+            targets -= {"", self._own_instance_id}
+            households = sorted(targets)
         except Exception:  # pragma: no cover — defensive
-            log.exception("space-sync-scheduler: listing mesh hosts failed")
+            log.exception(
+                "space-sync-scheduler: listing the households to announce "
+                "our version to failed"
+            )
             return 0
-        for host in hosts:
-            if host in self._mesh_announced:
+        for household in households:
+            if household in self._mesh_announced:
+                continue
+            failed = self._mesh_announce_failed.get(household, 0)
+            slow = failed >= MAX_MESH_ANNOUNCE_ATTEMPTS
+            if slow and (failed + 1 - MAX_MESH_ANNOUNCE_ATTEMPTS) % (
+                MESH_ANNOUNCE_SLOW_EVERY
+            ):
+                self._mesh_announce_failed[household] = failed + 1  # a skip
                 continue
             try:
-                if await self._federation.is_confirmed_peer(host):
+                if await self._federation.is_confirmed_peer(household):
+                    self._mesh_announce_failed.pop(household, None)
                     continue
-                done = await self._mesh_announce(host)
+                done = await self._mesh_announce(household)
             except Exception:
-                log.exception("mesh version announcement to %s failed", host)
+                log.exception("mesh version announcement to %s failed", household)
                 done = False
             if done:
-                self._mesh_announced.add(host)
-            else:
-                pending += 1
+                self._mesh_announced.add(household)
+                self._mesh_announce_failed.pop(household, None)
+                continue
+            self._mesh_announce_failed[household] = failed + 1
+            if slow:
+                continue
+            pending += 1
+            if failed + 1 >= MAX_MESH_ANNOUNCE_ATTEMPTS:
+                log.info(
+                    "mesh version announcement: no route to %s after %d "
+                    "attempts — tried again every %d sweeps",
+                    household,
+                    MAX_MESH_ANNOUNCE_ATTEMPTS,
+                    MESH_ANNOUNCE_SLOW_EVERY,
+                )
         return pending
 
     async def _mesh_targets(self, space: Space) -> list[str]:
