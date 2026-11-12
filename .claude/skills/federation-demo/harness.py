@@ -174,6 +174,10 @@ _OFFLINE_PEER_NOISE: tuple[str, ...] = (
     # ``members-parity``: d posts a picture while host a is stopped) — the
     # route is in cooldown; the household gets it after it is back.
     "space-media-sync: chunk ",
+    # ``federated-moderation``: a member submits while a moderator household
+    # is down — the submission to it is not delivered (the host catches
+    # that household up on its next sync).
+    "did not reach reviewer household ",
 )
 
 #: libdatachannel / libjuice status lines while a peer's process dies, or
