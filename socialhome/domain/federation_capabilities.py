@@ -1526,7 +1526,27 @@ from __future__ import annotations
 #:   showing only its own people's reactions (plus the host's on a
 #:   catch-up). Space-scoped. Labelled "Reactions on space posts reach
 #:   every household".
-OURS: int = 93
+#: * **v_94** (2026-11-12) — **one merge rule for changes to existing space
+#:   items** (owner decision 2026-11-12; ``domain/item_merge.py``): a stamp
+#:   per (item, author[, key]), the newest wins, a removal is kept as a
+#:   stamp. Poll votes move onto it: ``SPACE_POLL_VOTE_CAST`` gains ``at``
+#:   (the stamp the voter's household wrote with the selection; additive,
+#:   sent to every member household). Once a household has applied a
+#:   poll's close no vote or retraction counts there, whatever its stamp;
+#:   ``SPACE_POLL_CLOSED`` is unchanged (no stamp, it only turns on). The
+#:   §25.6 ``polls`` record toward a v_94 requester carries
+#:   ``vote_stamps`` (``{voter: [stamp, [option_id, …]]}``, ≤ 1000 voters)
+#:   in place of ``votes``: merged per voter while the poll is open; once
+#:   it is closed on the host, the host's votes are what every household
+#:   shows for other households' people (migration 0146). Sync line 94.
+#:   **Fallback**: a vote from a household below v_94 carries no
+#:   ``at`` and is stamped with its envelope's timestamp (so it is ordered
+#:   by when it was sent, never dropped); a requester below v_94 keeps
+#:   getting the ``votes`` list; a host below v_94 sends ``votes``, which a
+#:   v_94 receiver applies as before v_94 (it replaces everybody's votes
+#:   but its own people's). Space-scoped. Labelled "Poll votes count the
+#:   same in every household".
+OURS: int = 94
 
 
 class FederationCapability:
@@ -2218,6 +2238,13 @@ class FederationCapability:
     #: ``SPACE_POST_REACTION`` (a reaction on a space post, added or
     #: removed). An older one is skipped by the fan-out.
     MIN_FOR_SPACE_POST_REACTIONS = 93
+    #: v_94 — a §25.6 requester at or above it is streamed a poll's
+    #: ``vote_stamps`` (each voter's selection with its stamp) instead of
+    #: the ``votes`` list, and merges them by the one rule
+    #: (``domain/item_merge.py``). Live, the stamp (``at`` on
+    #: ``SPACE_POLL_VOTE_CAST``) is additive and goes to everyone. A
+    #: ``SYNC_RECORD_LINES`` entry (94).
+    MIN_FOR_ITEM_MERGE_STAMPS = 94
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2572,6 +2599,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_POST_REACTIONS,
         "Reactions on space posts reach every household",
     ),
+    (
+        FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS,
+        "Poll votes count the same in every household",
+    ),
 ]
 
 
@@ -2675,6 +2706,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_MULTI_MAILBOX: "multi_mailbox",
     FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED: "space_media_wanted",
     FederationCapability.MIN_FOR_SPACE_POST_REACTIONS: "space_post_reactions",
+    FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS: "poll_vote_stamps",
 }
 
 
@@ -2799,6 +2831,11 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # A behind member household's people see only their own household's
         # reactions on the space's posts, and nobody else sees theirs.
         FederationCapability.MIN_FOR_SPACE_POST_REACTIONS,
+        # A behind member household's poll votes are ordered by when they
+        # were sent, not when they were made, and it takes the host's vote
+        # list instead of merging it — a vote that raced another, or the
+        # poll's close, can count differently there.
+        FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS,
     }
 )
 

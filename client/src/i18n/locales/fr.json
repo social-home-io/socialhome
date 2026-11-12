@@ -2685,6 +2685,7 @@
   "capability.multi_mailbox": "Mises à jour des espaces via un GFS en un seul envoi",
   "capability.space_media_wanted": "Anciennes photos des espaces chargées à l'ouverture",
   "capability.space_post_reactions": "Réactions aux publications des espaces pour tous les foyers",
+  "capability.poll_vote_stamps": "Votes des sondages comptés de la même façon dans tous les foyers",
   "settings.tab.security": "Sécurité",
   "settings.security.signing_in": "Connexion",
   "settings.security.signing_in_hint": "Vous seul l'utilisez. Personne d'autre ne voit votre identifiant de connexion.",

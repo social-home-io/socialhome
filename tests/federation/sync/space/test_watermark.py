@@ -811,8 +811,10 @@ async def test_a_shape_crossing_is_told_apart_from_a_newcomer(wm, have_seq, cros
 #: The record keys v_92 adds (sync line 92, ``MIN_FOR_SYNC_ITEM_STATE``):
 #: only a requester at v_92 is sent them, and its shape crossed the line —
 #: so no ``SYNC_SHAPE_VERSION`` bump (no older household streams in full).
+#: A poll's votes travel as ``vote_stamps`` since v_94 (sync line 94,
+#: ``MIN_FOR_ITEM_MERGE_STAMPS``; ``votes`` toward a v_92 / v_93 requester).
 ITEM_STATE_KEYS_V92: dict[str, set[str]] = {
-    "polls": {"votes"},
+    "polls": {"vote_stamps"},
     "schedules": {"finalized_slot_id", "responses", "responses_at"},
     "calendar": {"rsvps", "rsvps_at"},
     "bazaar": {"bids"},
@@ -828,6 +830,7 @@ async def test_the_v92_item_state_keys_ride_sync_line_92(db):
     }
     assert added == ITEM_STATE_KEYS_V92
     assert FederationCapability.MIN_FOR_SYNC_ITEM_STATE in SYNC_RECORD_LINES
+    assert FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS in SYNC_RECORD_LINES
 
 
 def test_v92_content_names_on_every_path_is_a_sync_line():

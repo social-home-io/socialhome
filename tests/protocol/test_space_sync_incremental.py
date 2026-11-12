@@ -79,6 +79,7 @@ from socialhome.federation.sync.space.exporter import (
 from socialhome.federation.sync.space.watermark import parse_have_seq
 from socialhome.federation.sync_rtc import SyncSessionRecord
 from socialhome.services.inbound_media_store import space_direct_media_name
+from tests.poll_votes import cast
 
 pytestmark = pytest.mark.security
 
@@ -417,8 +418,12 @@ async def test_a_periodic_session_streams_only_what_changed_and_converges(houses
     # a comment delete, a new post.
     await _posts(h).edit(pids[2], "edited on H", space_id=SPACE)
     await _posts(h).add_reaction(pids[3], "🎉", CORA, space_id=SPACE)
-    assert await _polls(h).set_votes_in_space(
-        space_id=SPACE, post_id=pids[1], option_ids=["opt-yes"], voter_user_id=CORA
+    assert await cast(
+        _polls(h),
+        space_id=SPACE,
+        post_id=pids[1],
+        option_ids=["opt-yes"],
+        voter_user_id=CORA,
     )
     assert await _posts(h).soft_delete(pids[4], space_id=SPACE, moderated_by=AUTHOR)
     assert await _posts(h).soft_delete_comment(comment.id, space_id=SPACE)

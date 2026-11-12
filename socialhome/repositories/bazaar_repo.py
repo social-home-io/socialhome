@@ -28,14 +28,17 @@ from ..domain.bazaar_faq import (
     BazaarFaqFullError,
     BazaarFaqUsedUpError,
 )
+from ..domain.item_merge import advance
 from ..domain.post import (
     BAZAAR_CURRENCIES,
     BAZAAR_OFFER_TRANSITIONS,
+    BID_STATES,
     BazaarBid,
     BazaarListing,
     BazaarMode,
     BazaarOffer,
     BazaarStatus,
+    bid_rank,
 )
 from .base import (
     bool_col,
@@ -52,6 +55,32 @@ from .base import (
 #: close-time push the close-time back by :data:`SNIPE_EXTEND_SECONDS`.
 SNIPE_WINDOW_SECONDS: int = 5 * 60
 SNIPE_EXTEND_SECONDS: int = 5 * 60
+
+
+def _advance_bid(conn, bid_id: str, held, rank: int, reason: str | None = None) -> bool:
+    """Move the bid ``held`` (its stored flags) to the higher of its state
+    and ``rank`` — exactly one flag set afterwards. True when it changed
+    state (a row that held two flags from before is only normalised)."""
+    mine = bid_rank(
+        accepted=held["accepted"],
+        rejected=held["rejected"],
+        withdrawn=held["withdrawn"],
+    )
+    merged = advance(mine, rank)
+    flags = (int(merged == 3), int(merged == 2), int(merged == 1))
+    if flags == (
+        int(held["accepted"]),
+        int(held["rejected"]),
+        int(held["withdrawn"]),
+    ):
+        return False
+    conn.execute(
+        "UPDATE bazaar_bids SET accepted=?, rejected=?, withdrawn=?,"
+        " rejection_reason=CASE WHEN ?=1 THEN COALESCE(rejection_reason, ?)"
+        " ELSE NULL END WHERE id=?",
+        (*flags, flags[1], reason if merged != mine else None, bid_id),
+    )
+    return merged != mine
 
 
 # ─── Bid state-machine errors ─────────────────────────────────────────────
@@ -147,10 +176,29 @@ class AbstractBazaarRepo(Protocol):
         """Take the host's bids of a listing of ``space_id``: a bid not held
         is added (never with a decline reason — that is the bidder's —
         and stamped with its arrival here, as the live bid), and a held one
-        only ever turns accepted / declined / withdrawn on. A bid of
-        ``keep_bidders`` (this household's own people, who author their
-        bids here) is never added nor withdrawn — only the seller's accept /
-        decline is taken. ``True`` when anything was written."""
+        only ever advances (:data:`~socialhome.domain.post.BID_STATES`: the
+        higher of the held and the host's state, the same in any order). A
+        bid of ``keep_bidders`` (this household's own people, who author
+        their bids here) is never added nor withdrawn — only the seller's
+        accept / decline is taken. ``True`` when anything was written."""
+        ...
+
+    async def advance_bid(
+        self,
+        bid_id: str,
+        state: str,
+        *,
+        space_id: str,
+        reason: str | None = None,
+    ) -> bool:
+        """Merge a state another household reports for a bid on a listing
+        of ``space_id`` (``accepted`` / ``rejected`` / ``withdrawn``): the
+        bid ends on the higher of its held state and ``state``
+        (:data:`~socialhome.domain.post.BID_STATES`) — so two households
+        that hear a decline and a withdrawal in opposite orders end the
+        same (declined). An accept also declines the listing's other pending bids, as
+        where it was made. ``reason`` is kept with a decline that takes
+        effect. ``True`` when the bid's state changed."""
         ...
 
     async def highest_bid(self, post_id: str) -> BazaarBid | None: ...
@@ -761,24 +809,48 @@ class SqliteBazaarRepo:
                 if held["listing_post_id"] != post_id:
                     continue  # another listing's bid id: never moved
                 ours = held["bidder_user_id"] in keep_bidders
-                flags = (
-                    int(held["accepted"]) or int(bid.accepted),
-                    int(held["rejected"]) or int(bid.rejected),
+                theirs = bid_rank(
+                    accepted=bid.accepted,
+                    rejected=bid.rejected,
                     # A withdrawal is the bidder's: ours happen here.
-                    int(held["withdrawn"]) or (0 if ours else int(bid.withdrawn)),
+                    withdrawn=bid.withdrawn and not ours,
                 )
-                if flags != (
-                    int(held["accepted"]),
-                    int(held["rejected"]),
-                    int(held["withdrawn"]),
-                ):
-                    conn.execute(
-                        "UPDATE bazaar_bids SET accepted=?, rejected=?, withdrawn=?"
-                        " WHERE id=?",
-                        (*flags, bid.id),
-                    )
-                    wrote = True
+                wrote = _advance_bid(conn, bid.id, held, theirs) or wrote
             return wrote
+
+        return bool(await self._db.transact(_run))
+
+    async def advance_bid(
+        self,
+        bid_id: str,
+        state: str,
+        *,
+        space_id: str,
+        reason: str | None = None,
+    ) -> bool:
+        rank = BID_STATES.index(state)
+
+        def _run(conn) -> bool:
+            held = conn.execute(
+                "SELECT b.listing_post_id, b.accepted, b.rejected, b.withdrawn"
+                " FROM bazaar_bids b"
+                " JOIN bazaar_listings l ON l.post_id = b.listing_post_id"
+                " WHERE b.id=? AND l.space_id=?",
+                (bid_id, space_id),
+            ).fetchone()
+            if held is None or not _advance_bid(conn, bid_id, held, rank, reason):
+                return False
+            if state == "accepted":
+                conn.execute(
+                    # A pure advance to declined — a withdrawn bid too, so
+                    # the result does not depend on which came first.
+                    "UPDATE bazaar_bids SET rejected=1, withdrawn=0,"
+                    " rejection_reason='another offer was accepted'"
+                    " WHERE listing_post_id=? AND id != ?"
+                    " AND accepted=0 AND rejected=0",
+                    (held["listing_post_id"], bid_id),
+                )
+            return True
 
         return bool(await self._db.transact(_run))
 
@@ -832,10 +904,11 @@ class SqliteBazaarRepo:
                 """
                 UPDATE bazaar_bids
                    SET rejected=1,
+                       withdrawn=0,
                        rejection_reason='another offer was accepted'
                  WHERE listing_post_id=?
                    AND id != ?
-                   AND accepted=0 AND rejected=0 AND withdrawn=0
+                   AND accepted=0 AND rejected=0
                 """,
                 (listing_post_id, bid_id),
             )

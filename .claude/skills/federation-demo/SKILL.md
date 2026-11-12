@@ -559,6 +559,16 @@ That single command runs the full sequence:
    after ``space-chat``. ``verify`` asserts
    ``MIN_FOR_SPACE_POST_REACTIONS`` is v_93 and covered by ``OURS``.
 
+9f-s. ``space-poll-vote`` (v_94, one merge rule: a poll vote is merged by
+   its stamp) — in the same space. Prereqs as ``space-reaction``. **a**
+   posts a poll; **c** votes the first option, then the second → **a**,
+   **b** and **c** show **c** on the second only, and **a** and **b** hold
+   for **c**'s voter exactly the stamp **c**'s household wrote
+   (``space_polls.vote_stamps_json``). **a** closes the poll → **c**'s
+   retraction is refused (409) and the vote stays everywhere. ``verify``
+   re-reads **b** and fails when it no longer holds **c**'s vote under
+   **c**'s stamp, and pins ``MIN_FOR_ITEM_MERGE_STAMPS`` = 94.
+
 9f. ``space-chat`` (v_55, every space's members' chat) — in **b**'s
    space from ``traffic`` / ``calendar`` (owner **b**, members **a** and
    **c**). Prereqs: ``up``, ``pair``, ``traffic``, ``calendar``; runs
@@ -724,7 +734,7 @@ space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → group-dm → federated-moderation →
 space-report → forwarded-role-change → page-concurrent-edit →
 admin-revoke-rotation → rotation-offline-catchup → space-chat →
-space-reaction → replay →
+space-reaction → space-poll-vote → replay →
 unpair → unpair-offline → gfs-up → gfs-pair → local-community →
 gfs-moment-profile → gfs-highlight-link → gfs-public-pages →
 gfs-moment-late-delete → gfs-join-request → verify``

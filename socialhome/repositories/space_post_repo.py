@@ -16,12 +16,19 @@ Scope:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 import orjson
 
 from ..db import AsyncDatabase
+from ..domain.item_merge import (
+    TOMBSTONE_HORIZON_S,
+    decode_stamp_map,
+    is_newer,
+    local_stamp,
+    tombstone_cutoff,
+)
 from ..domain.post import (
     Comment,
     CommentType,
@@ -724,8 +731,8 @@ class SqliteSpacePostRepo:
         """``stamp`` given: a received reaction — applied only over an
         older stamp, the per-person cap settled by stamp. ``None``: a local
         one — stamped now (never at or before the held stamp), a reaction
-        past the cap refused."""
-        now = stamp_to_db(datetime.now(UTC))
+        past the cap refused. The one merge rule
+        (:mod:`~socialhome.domain.item_merge`)."""
 
         def _run(conn):
             where = "id=? AND space_id=?" + (" AND deleted=0" if added else "")
@@ -739,13 +746,11 @@ class SqliteSpacePostRepo:
             stamps = _decode_stamps(row_dict.get("reaction_stamps_json"))
             key = f"{user_id}\x00{emoji}"
             held = stamps.get(key)
-            if stamp is not None and held is not None and held[0] >= stamp:
+            held_at = held[0] if held is not None else None
+            if stamp is not None and not is_newer(stamp, held_at):
                 raise StaleItemStamp(f"reaction on {post_id!r} is not newer")
-            at = stamp or now
-            if stamp is None and held is not None and held[0] >= at:
-                # Our clock stepped back (or the held stamp came from one
-                # ahead): stay strictly after what this change replaces.
-                at = _just_after(held[0])
+            # A local one is never at or before what it replaces.
+            at = stamp or local_stamp(held_at)
             reactions = _decode_reactions(row_dict["reactions"])
             if (
                 added
@@ -842,7 +847,7 @@ class SqliteSpacePostRepo:
                 if not sep or not user_id or not emoji or len(emoji) > 64:
                     continue
                 prior = held.get(key)
-                if prior is not None and prior[0] >= at:
+                if not is_newer(at, prior[0] if prior is not None else None):
                     continue
                 if added:
                     reactions.setdefault(emoji, set()).add(user_id)
@@ -1225,14 +1230,13 @@ def _row_to_space_comment(row: dict | None) -> Comment | None:
     )
 
 
-#: How long a reaction removal's tombstone is kept: 30 days, the reach of a
-#: §25.6 resume and of the catch-up media window. A removal travels ONLY as
-#: its stamp (v_93: a household's reaction sets lacking a reaction is no
-#: removal — it may never have received the add), so a household that
-#: missed one heals from the host's stamps for as long as the tombstone
-#: lives; it also outlasts any duplicate add (the GFS queue's 24 h plus
-#: retries). Bounded by the per-user and per-post caps below.
-REACTION_TOMBSTONE_HORIZON_S: int = 30 * 24 * 3600
+#: How long a reaction removal's tombstone is kept — the shared horizon of
+#: the one merge rule. A removal travels ONLY as its stamp (v_93: a
+#: household's reaction sets lacking a reaction is no removal — it may
+#: never have received the add), so a household that missed one heals from
+#: the host's stamps for as long as the tombstone lives. Bounded by the
+#: per-user and per-post caps below.
+REACTION_TOMBSTONE_HORIZON_S: int = TOMBSTONE_HORIZON_S
 
 #: Entries one user may hold per post. Over it, that user's OWN oldest
 #: tombstones go first, so nobody can push out someone else's.
@@ -1249,17 +1253,6 @@ def _discard(reactions: dict[str, set[str]], emoji: str, user_id: str) -> None:
         bucket.discard(user_id)
         if not bucket:
             reactions.pop(emoji, None)
-
-
-def _just_after(stamp: str) -> str:
-    """The stored stamp one microsecond after ``stamp`` (naive UTC)."""
-    try:
-        held = datetime.fromisoformat(stamp)
-    except ValueError:
-        return stamp_to_db(datetime.now(UTC))
-    if held.tzinfo is None:
-        held = held.replace(tzinfo=UTC)
-    return stamp_to_db(held + timedelta(microseconds=1))
 
 
 def _live_adds(stamps: dict[str, list], user_id: str) -> list[str]:
@@ -1288,18 +1281,10 @@ def _settle_user_cap(
 
 def _decode_stamps(raw: object) -> dict[str, list]:
     """``reaction_stamps_json`` → ``{"user\\0emoji": [stamp, added]}``."""
-    if not isinstance(raw, str) or not raw:
-        return {}
-    try:
-        data = orjson.loads(raw)
-    except ValueError:
-        return {}
-    if not isinstance(data, dict):
-        return {}
     return {
-        str(k): [str(v[0]), bool(v[1])]
-        for k, v in data.items()
-        if isinstance(v, list) and len(v) == 2 and isinstance(v[0], str)
+        k: [str(v[0]), bool(v[1])]
+        for k, v in decode_stamp_map(raw).items()
+        if len(v) == 2 and isinstance(v[0], str)
     }
 
 
@@ -1307,9 +1292,7 @@ def _encode_stamps(stamps: dict[str, list]) -> str:
     """Bound the map by AGE first — a tombstone lives
     :data:`REACTION_TOMBSTONE_HORIZON_S` — then per user, then per post;
     each cap evicts tombstones before live entries, oldest first."""
-    cutoff = stamp_to_db(
-        datetime.now(UTC) - timedelta(seconds=REACTION_TOMBSTONE_HORIZON_S)
-    )
+    cutoff = tombstone_cutoff()
     for k in [k for k, (at, added) in stamps.items() if not added and at < cutoff]:
         del stamps[k]
 

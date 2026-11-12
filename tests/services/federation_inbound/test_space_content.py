@@ -41,13 +41,17 @@ from socialhome.domain.events import (
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.gallery import GalleryItem
 from socialhome.domain.post import (
+    BID_STATES,
     BazaarBid,
     BazaarListing,
     BazaarMode,
     BazaarOffer,
     BazaarStatus,
+    bid_rank,
+    poll_deadline_passed,
     poll_option_id,
 )
+from socialhome.domain.space_item import stamp_to_db
 from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
 from socialhome.domain.task import Task, TaskList, TaskPriority, TaskStatus
@@ -59,7 +63,7 @@ from socialhome.federation.owner_bound_id import (
     mint_owner_bound_id,
 )
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.repositories.bazaar_repo import BidStateError, OfferStateError
+from socialhome.repositories.bazaar_repo import OfferStateError
 from socialhome.services.federation_inbound import SpaceContentInboundHandlers
 from socialhome.services.federation_inbound.space_content import _deleter
 from socialhome.services.gallery_service import (
@@ -498,6 +502,10 @@ class _FakePollRepo:
         self.cleared: list[tuple[str, str]] = []
         self.inserted: list[tuple[str, str]] = []
         self.closed: list[str] = []
+        #: The stamp of every vote the handler handed over.
+        self.vote_stamps_seen: list[str] = []
+        #: Set to ``"kept"`` to answer a vote as a re-delivery / older one.
+        self.vote_outcome: str | None = None
         self.scheduled: list[dict] = []
         self.responses: dict[tuple[str, str], str] = {}
         self.finalized: list[tuple[str, str]] = []
@@ -516,14 +524,27 @@ class _FakePollRepo:
     def _slot_in(self, slot_id, space_id) -> bool:
         return self.slot_space.get(slot_id, "sp-1") == space_id
 
-    async def set_votes_in_space(self, *, space_id, post_id, option_ids, voter_user_id):
+    async def set_votes_in_space(
+        self, *, space_id, post_id, option_ids, voter_user_id, stamp
+    ):
+        """The real repo's outcomes: ``refused`` (not this space's poll /
+        option), ``late`` (the poll here is closed or past its deadline),
+        ``kept`` (``vote_outcome``), else ``applied``."""
+        self.vote_stamps_seen.append(stamp)
         if not self._post_in(post_id, space_id):
-            return False
+            return "refused"
         if any((post_id, o) not in self.valid_options for o in option_ids):
-            return False
+            return "refused"
+        meta = self.meta.get(post_id, {})
+        if meta.get("closed") or poll_deadline_passed(
+            meta.get("closes_at"), datetime.now(UTC)
+        ):
+            return "late"
+        if self.vote_outcome is not None:
+            return self.vote_outcome
         self.cleared.append((post_id, voter_user_id))
         self.inserted.extend((o, voter_user_id) for o in option_ids)
-        return True
+        return "applied"
 
     async def create_poll_in_space(
         self, *, space_id, post_id, question, closes_at, allow_multiple, options
@@ -2527,8 +2548,9 @@ async def test_poll_vote_retraction_and_selection(repos, handlers, bus):
 
 
 async def test_a_vote_on_a_closed_poll_is_not_applied(repos, handlers, caplog):
-    """The local rule: a closed poll's result stands — also one whose
-    deadline passed before its author's household said so."""
+    """A closed poll's result stands — also one whose deadline passed
+    before its author's household said so: the repo answers ``late`` (the
+    vote was made after the cutoff) and nothing is applied."""
     repos["poll"].valid_options.update({("p-1", "a"), ("p-2", "a")})
     repos["poll"].meta["p-1"] = {"closed": True, "closes_at": None}
     repos["poll"].meta["p-2"] = {"closed": False, "closes_at": "2000-01-01T00:00:00"}
@@ -2543,6 +2565,69 @@ async def test_a_vote_on_a_closed_poll_is_not_applied(repos, handlers, caplog):
             )
     assert repos["poll"].inserted == [] and repos["poll"].cleared == []
     assert "the poll is closed" in caplog.text
+
+
+async def _vote(handlers, payload=None, **event_kw):
+    event = _event(
+        FederationEventType.SPACE_POLL_VOTE_CAST,
+        {"post_id": "p-1", "option_ids": ["a"], "voter_user_id": "u-1"}
+        | (payload or {}),
+        space_id="sp-1",
+        **event_kw,
+    )
+    await handlers._on_poll_vote(event)
+    return event
+
+
+async def test_a_votes_stamp_reaches_the_repo_in_the_stored_shape(repos, handlers):
+    """The voter's household stamps the vote (``at``, tz-aware on the
+    wire); the repo merges by it in the stored shape (naive UTC)."""
+    repos["poll"].valid_options.add(("p-1", "a"))
+    at = datetime.now(UTC) - timedelta(minutes=5)
+    await _vote(handlers, {"at": at.isoformat()})
+    assert repos["poll"].vote_stamps_seen == [stamp_to_db(at)]
+    assert repos["poll"].inserted == [("a", "u-1")]
+
+
+async def test_a_vote_without_a_stamp_takes_its_envelopes_timestamp(repos, handlers):
+    """An older household sends no ``at``: its vote is merged like any
+    other, stamped with the envelope's signed timestamp."""
+    repos["poll"].valid_options.add(("p-1", "a"))
+    event = await _vote(handlers)
+    assert repos["poll"].vote_stamps_seen == [
+        stamp_to_db(datetime.fromisoformat(event.timestamp))
+    ]
+    assert repos["poll"].inserted == [("a", "u-1")]
+
+
+async def test_a_vote_older_than_the_one_that_stands_publishes_nothing(
+    repos, handlers, bus
+):
+    """``kept``: a re-delivery, or older than the selection held — the
+    tally did not change, so nobody is told."""
+    seen = _capture(bus, PollVoted)
+    repos["poll"].valid_options.add(("p-1", "a"))
+    repos["poll"].vote_outcome = "kept"
+    await _vote(handlers)
+    assert len(repos["poll"].vote_stamps_seen) == 1  # the repo was asked
+    assert seen == []
+
+
+@pytest.mark.parametrize("at", ["an-hour-ahead", "2026-01-01T00:00:00", "soon", 7])
+async def test_a_vote_with_a_stamp_ahead_or_malformed_is_not_applied(
+    repos, handlers, bus, caplog, at
+):
+    """A stamp far ahead of our clock would win every later change; a
+    naive or non-ISO one is no stamp. Neither reaches the repo."""
+    seen = _capture(bus, PollVoted)
+    repos["poll"].valid_options.add(("p-1", "a"))
+    if at == "an-hour-ahead":
+        at = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    with caplog.at_level("DEBUG"):
+        await _vote(handlers, {"at": at})
+    assert repos["poll"].vote_stamps_seen == []
+    assert repos["poll"].inserted == [] and seen == []
+    assert "malformed" in caplog.text
 
 
 @pytest.mark.parametrize("option_ids", [None, "a", ["a", 1], [""], ["a"] * 21])
@@ -2656,6 +2741,24 @@ async def test_poll_closed_redelivered_tells_voters_once(repos, handlers, bus):
     assert repos["poll"].closed == ["p-1", "p-1"]
     (event,) = seen
     assert event.at_deadline is False  # its author closed it
+
+
+async def test_a_poll_close_takes_no_stamp(repos, handlers, bus):
+    """A close only ever turns on and orders nothing: an ``at`` on it (an
+    unreleased build sent one as the votes' cutoff) is ignored, so a
+    re-sent close with an early stamp can erase no vote."""
+    seen = _capture(bus, PollClosed, PollVoted)
+    repos["poll"].meta["p-1"] = {"closed": False, "closes_at": None}
+    for at in ("2001-01-01T00:00:00+00:00", "not a time", 7):
+        await handlers._on_poll_closed(
+            _event(
+                FederationEventType.SPACE_POLL_CLOSED,
+                {"post_id": "p-1", "at": at},
+                space_id="sp-1",
+            )
+        )
+    assert repos["poll"].closed == ["p-1", "p-1", "p-1"]
+    assert [type(e) for e in seen] == [PollClosed]  # told once, no vote moved
 
 
 async def test_refused_poll_close_publishes_nothing(repos, handlers, bus):
@@ -3860,6 +3963,7 @@ class _FakeBazaarRepoWithBids:
         self.status = BazaarStatus.ACTIVE
         self.end_time = "2026-06-08T00:00:00+00:00"
         self.withdrawn: list[str] = []
+        self.advanced: list[tuple[str, str]] = []
 
     async def get_listing(self, post_id):
         return BazaarListing(
@@ -3925,21 +4029,39 @@ class _FakeBazaarRepoWithBids:
         self.existing_bids[bid.id] = bid
         return bid
 
-    async def accept_offer(self, bid_id, *, space_id):
-        self.accepted.append(bid_id)
-
-    async def reject_offer(self, bid_id, *, reason=None):
-        bid = self.existing_bids[bid_id]
-        if bid.rejected:
-            raise BidStateError("already rejected")
-        self.existing_bids[bid_id] = replace(
-            bid, rejected=True, rejection_reason=reason
+    async def advance_bid(self, bid_id, state, *, space_id, reason=None):
+        """A bid only ever advances (``BID_STATES``): ``True`` when its
+        state changed. ``accepted`` / ``withdrawn`` list the bids that
+        advanced there; ``advanced`` every call."""
+        self.advanced.append((bid_id, state))
+        bid = self.existing_bids.get(bid_id)
+        if bid is None:
+            return False
+        if self.listing_space.get(bid.listing_post_id, "sp-1") != space_id:
+            return False
+        held = bid_rank(
+            accepted=getattr(bid, "accepted", False),
+            rejected=getattr(bid, "rejected", False),
+            withdrawn=getattr(bid, "withdrawn", False),
         )
-
-    async def withdraw_bid(self, bid_id):
-        if bid_id in self.withdrawn:
-            raise BidStateError("already withdrawn")
-        self.withdrawn.append(bid_id)
+        if BID_STATES.index(state) <= held:
+            return False
+        flags = {
+            "accepted": state == "accepted",
+            "rejected": state == "rejected",
+            "withdrawn": state == "withdrawn",
+            "rejection_reason": reason if state == "rejected" else None,
+        }
+        self.existing_bids[bid_id] = (
+            replace(bid, **flags)
+            if isinstance(bid, BazaarBid)
+            else SimpleNamespace(**(vars(bid) | flags))
+        )
+        if state == "accepted":
+            self.accepted.append(bid_id)
+        if state == "withdrawn":
+            self.withdrawn.append(bid_id)
+        return True
 
 
 @pytest.fixture
@@ -4061,7 +4183,7 @@ async def test_bazaar_bid_placed_missing_required_drops(bazaar_bids_handlers):
     assert bazaar.placed == []
 
 
-async def test_bazaar_offer_accepted_routes_to_accept_offer(
+async def test_bazaar_offer_accepted_advances_the_bid_to_accepted(
     bazaar_bids_handlers,
 ):
     handlers, bazaar = bazaar_bids_handlers
@@ -4080,7 +4202,9 @@ async def test_bazaar_offer_accepted_routes_to_accept_offer(
             },
         ),
     )
+    assert bazaar.advanced == [("bid-winning", "accepted")]
     assert bazaar.accepted == ["bid-winning"]
+    assert bazaar.existing_bids["bid-winning"].accepted is True
 
 
 def _capture(bus, *types) -> list:
@@ -4162,16 +4286,17 @@ async def test_a_remote_bid_acceptance_tells_the_buyer(bus, bazaar_bids_handlers
     )
 
 
-async def test_a_failed_bid_acceptance_publishes_nothing(bus, bazaar_bids_handlers):
+async def test_a_replayed_bid_acceptance_publishes_nothing(bus, bazaar_bids_handlers):
+    """Accepted here already: the bid does not advance, the buyer is not
+    told twice."""
     handlers, bazaar = bazaar_bids_handlers
     bazaar.existing_bids["bid-w"] = SimpleNamespace(
-        id="bid-w", listing_post_id="bzr-1", bidder_user_id="u-bidder", amount=4500
+        id="bid-w",
+        listing_post_id="bzr-1",
+        bidder_user_id="u-bidder",
+        amount=4500,
+        accepted=True,
     )
-
-    async def _boom(bid_id, *, space_id):
-        raise ValueError("not pending")
-
-    bazaar.accept_offer = _boom
     seen = _capture(bus, BazaarOfferAccepted)
     await handlers._on_bazaar_offer_accepted(
         _event(
@@ -7179,7 +7304,6 @@ async def test_a_declined_bid_of_someone_elses_keeps_no_reason(
         ("not a rejection", _bid(), {"status": "accepted"}),
         ("already declined", _bid(rejected=True, rejection_reason="first"), {}),
         ("already accepted", _bid(accepted=True), {}),
-        ("withdrawn", _bid(withdrawn=True), {}),
         ("a reason that is no text", _bid(), {"reason": 7}),
         ("an over-long reason", _bid(), {"reason": "x" * 281}),
         ("another space", _bid(), {"space_id": "sp-other"}),
@@ -7188,6 +7312,8 @@ async def test_a_declined_bid_of_someone_elses_keeps_no_reason(
 async def test_a_bid_decline_that_does_not_apply_changes_nothing(
     bus, bazaar_bids_handlers, label, bid, overrides
 ):
+    """A decline changes nothing on a bid declined or accepted here
+    already (``BID_STATES``) — the first answer's words stand."""
     handlers, bazaar = bazaar_bids_handlers
     if bid is not None:
         bazaar.existing_bids["bid-1"] = bid
@@ -7220,20 +7346,24 @@ async def test_a_bid_decline_from_a_household_not_seating_the_seller_is_refused(
 
 
 async def test_a_lost_race_on_a_bid_decline_publishes_nothing(
-    bus, bazaar_bids_handlers
+    bus, bazaar_bids_handlers, caplog
 ):
+    """The bid was withdrawn between the handler's read and the repo's
+    write: ``advance_bid`` says it did not advance, nobody is told."""
     handlers, bazaar = bazaar_bids_handlers
     bazaar.existing_bids["bid-1"] = _bid()
 
-    async def _gone(bid_id, *, reason=None):
-        raise BidStateError("withdrawn meanwhile")
+    async def _gone(bid_id, state, *, space_id, reason=None):
+        return False
 
-    bazaar.reject_offer = _gone
+    bazaar.advance_bid = _gone
     seen = _capture(bus, BazaarOfferRejected)
-    await handlers._on_bazaar_offer_updated(
-        _event(FederationEventType.BAZAAR_OFFER_UPDATED, _declined())
-    )
+    with caplog.at_level("DEBUG"):
+        await handlers._on_bazaar_offer_updated(
+            _event(FederationEventType.BAZAAR_OFFER_UPDATED, _declined())
+        )
     assert seen == []
+    assert "already answered" in caplog.text
 
 
 async def test_a_declined_offer_keeps_the_sellers_reason(bus, bazaar_bids_handlers):
@@ -7318,8 +7448,8 @@ async def test_a_withdrawn_bid_is_withdrawn_here_too(repos, bus, open_auction):
     ("label", "bid", "listing", "overrides"),
     [
         ("an unknown bid", None, {}, {}),
-        ("already declined", _bid(rejected=True), {}, {}),
         ("already accepted", _bid(accepted=True), {}, {}),
+        ("already declined", _bid(rejected=True, rejection_reason="first"), {}, {}),
         ("already withdrawn", _bid(withdrawn=True), {}, {}),
         ("another space", _bid(), {}, {"space_id": "sp-other"}),
         ("the auction ended", _bid(), {"end_time": "2020-01-01T00:00:00Z"}, {}),
@@ -7329,6 +7459,10 @@ async def test_a_withdrawn_bid_is_withdrawn_here_too(repos, bus, open_auction):
 async def test_a_bid_withdrawal_that_does_not_apply_changes_nothing(
     bus, open_auction, label, bid, listing, overrides
 ):
+    """A withdrawal takes effect on a pending bid only: one the seller
+    declined (it keeps the answer and its reason) or accepted outranks it,
+    one withdrawn already is a replay (``BID_STATES``) — and a pending one
+    on a listing that is over stays."""
     handlers, bazaar = open_auction
     bazaar.existing_bids.pop("bid-1")
     if bid is not None:
@@ -7345,7 +7479,74 @@ async def test_a_bid_withdrawal_that_does_not_apply_changes_nothing(
         )
     )
     assert bazaar.withdrawn == [], label
+    assert bazaar.existing_bids.get("bid-1") == bid, label
     assert seen == [], label
+
+
+async def test_a_decline_that_crossed_a_withdrawal_stands_with_its_reason(
+    bus, bazaar_bids_handlers
+):
+    """The bidder withdrew while the seller's decline was on its way: the
+    seller's answer outranks the withdrawal (owner decision 2026-11-12), so
+    this household ends where one that heard the decline first does —
+    declined, with the reason when the bidder is one of ours."""
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.existing_bids["bid-1"] = _bid(withdrawn=True)
+    seen = _capture(bus, BazaarOfferRejected)
+    payload = _declined()
+    await handlers._on_bazaar_offer_updated(
+        _event(
+            FederationEventType.BAZAAR_OFFER_UPDATED,
+            payload,
+            space_id=payload["space_id"],
+        )
+    )
+    got = bazaar.existing_bids["bid-1"]
+    assert (got.rejected, got.withdrawn, got.accepted) == (True, False, False)
+    assert len(seen) == 1
+
+
+def _bid_state(bid) -> str:
+    return BID_STATES[
+        bid_rank(accepted=bid.accepted, rejected=bid.rejected, withdrawn=bid.withdrawn)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "ends"),
+    [
+        ("rejected", "withdrawn", "rejected"),
+        ("withdrawn", "rejected", "rejected"),
+        ("accepted", "withdrawn", "accepted"),
+        ("withdrawn", "accepted", "accepted"),
+    ],
+)
+async def test_crossing_bid_answers_end_the_same_in_either_order(
+    open_auction, first, second, ends
+):
+    """The seller declines or accepts while the bidder withdraws: every
+    household ends on the seller's answer, whichever arrives first."""
+    handlers, bazaar = open_auction
+
+    async def _apply(state):
+        if state == "accepted":
+            await handlers._on_bazaar_offer_accepted(
+                _event(
+                    FederationEventType.BAZAAR_OFFER_ACCEPTED,
+                    {"bid_id": "bid-1"},
+                    space_id="sp-1",
+                )
+            )
+            return
+        payload = _declined() if state == "rejected" else _withdrawal()
+        await handlers._on_bazaar_offer_updated(
+            _event(FederationEventType.BAZAAR_OFFER_UPDATED, payload)
+        )
+
+    await _apply(first)
+    assert _bid_state(bazaar.existing_bids["bid-1"]) == first
+    await _apply(second)
+    assert _bid_state(bazaar.existing_bids["bid-1"]) == ends
 
 
 async def test_a_bid_withdrawal_from_a_household_not_seating_the_bidder_is_refused(
@@ -7362,14 +7563,24 @@ async def test_a_bid_withdrawal_from_a_household_not_seating_the_bidder_is_refus
     assert seen == []
 
 
-async def test_a_lost_race_on_a_bid_withdrawal_publishes_nothing(bus, open_auction):
+async def test_a_lost_race_on_a_bid_withdrawal_publishes_nothing(
+    bus, open_auction, caplog
+):
+    """The bid was accepted between the handler's read and the repo's
+    write: ``advance_bid`` says it did not advance, nobody is told."""
     handlers, bazaar = open_auction
-    bazaar.withdrawn.append("bid-1")  # the repo already holds it withdrawn
+
+    async def _gone(bid_id, state, *, space_id, reason=None):
+        return False
+
+    bazaar.advance_bid = _gone
     seen = _capture(bus, BazaarBidWithdrawn)
-    await handlers._on_bazaar_offer_updated(
-        _event(FederationEventType.BAZAAR_OFFER_UPDATED, _withdrawal())
-    )
+    with caplog.at_level("DEBUG"):
+        await handlers._on_bazaar_offer_updated(
+            _event(FederationEventType.BAZAAR_OFFER_UPDATED, _withdrawal())
+        )
     assert seen == []
+    assert "already answered" in caplog.text
 
 
 # ─── v_80 — media_refs for link-joined members ──────────────────────────
