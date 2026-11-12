@@ -67,7 +67,7 @@ def _advance_bid(conn, bid_id: str, held, rank: int, reason: str | None = None) 
         withdrawn=held["withdrawn"],
     )
     merged = advance(mine, rank)
-    flags = (int(merged == 3), int(merged == 1), int(merged == 2))
+    flags = (int(merged == 3), int(merged == 2), int(merged == 1))
     if flags == (
         int(held["accepted"]),
         int(held["rejected"]),
@@ -196,7 +196,7 @@ class AbstractBazaarRepo(Protocol):
         bid ends on the higher of its held state and ``state``
         (:data:`~socialhome.domain.post.BID_STATES`) — so two households
         that hear a decline and a withdrawal in opposite orders end the
-        same. An accept also declines the listing's other pending bids, as
+        same (declined). An accept also declines the listing's other pending bids, as
         where it was made. ``reason`` is kept with a decline that takes
         effect. ``True`` when the bid's state changed."""
         ...

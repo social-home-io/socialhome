@@ -878,33 +878,70 @@ async def test_an_older_hosts_vote_list_is_applied_as_before(homes):
     assert await member.repos.space_poll.list_user_votes("post-1", BOB) == ["opt-b"]
 
 
-async def test_the_close_streams_with_its_stamp_and_settles_the_votes(homes):
-    """The member missed ``SPACE_POLL_CLOSED`` and took a vote Carl made
-    after it. The host's stream brings the close with its stamp: the late
-    vote counts nowhere, Carl is back on the one made before the close —
-    and a vote stamped before the close that the host hears afterwards
-    still counts."""
+async def test_once_closed_the_hosts_votes_are_what_everyone_shows(homes):
+    """After the close no vote counts on a household that applied it, so a
+    vote in flight when the poll closed is held by some households and not
+    by others. The host's stream settles it: for other households' people
+    every member shows the host's votes — one the host got in time is
+    taken, one only this household got is dropped — and its own people's
+    votes stay (they are authored here)."""
     host, member = homes
     await _poll(host)
-    await _carl_votes(host, "opt-a", _ago(120))
     await _stream(host, member)
-    closed = _ago(60)
-    await host.repos.space_poll.close_in_space("post-1", space_id=SPACE, stamp=closed)
-    await _carl_votes(member, "opt-b", _ago(30))
-    assert await _carls_vote(member) == ["opt-b"]
-    await _stream(host, member)
-    meta = await member.repos.space_poll.get_meta("post-1")
-    assert meta["closed"] is True and meta["closed_at"] == closed
-    assert await _carls_vote(member) == ["opt-a"]
-    await cast(
-        host.repos.space_poll,
+    await _carl_votes(host, "opt-a", _ago(3))  # reached the host in time
+    await cast(  # reached only the member before the close
+        member.repos.space_poll,
         space_id=SPACE,
         post_id="post-1",
         option_ids=["opt-b"],
-        voter_user_id="u-late",
-        stamp=_ago(90),
+        voter_user_id="u-raced",
+    )
+    await cast(
+        member.repos.space_poll,
+        space_id=SPACE,
+        post_id="post-1",
+        option_ids=["opt-b"],
+        voter_user_id=BOB,
+    )
+    assert await host.repos.space_poll.close_in_space("post-1", space_id=SPACE)
+    assert await member.repos.space_poll.close_in_space("post-1", space_id=SPACE)
+    # Live, nothing more counts on the member…
+    assert not await cast(
+        member.repos.space_poll,
+        space_id=SPACE,
+        post_id="post-1",
+        option_ids=["opt-a"],
+        voter_user_id=CARL,
+        stamp=_ago(3),
+    )
+    # …the host's stream is what converges it.
+    await _stream(host, member)
+    assert await _carls_vote(member) == ["opt-a"]
+    assert await member.repos.space_poll.list_user_votes("post-1", "u-raced") == []
+    assert await member.repos.space_poll.list_user_votes("post-1", BOB) == ["opt-b"]
+    seq = await _seq(member)
+    await _stream(host, member)
+    assert await _seq(member) == seq
+
+
+async def test_a_retraction_missed_for_over_a_month_still_heals(homes):
+    """The member was offline past the tombstone horizon: the host has
+    dropped the retraction's stamp. Its whole map lacking a vote that old
+    is the retraction; a recent vote it lacks stays (not heard yet)."""
+    host, member = homes
+    await _poll(host)
+    await _stream(host, member)
+    await _carl_votes(member, "opt-b", _ago(60 * 24 * 31))
+    await cast(
+        member.repos.space_poll,
+        space_id=SPACE,
+        post_id="post-1",
+        option_ids=["opt-b"],
+        voter_user_id="u-recent",
+        stamp=_ago(5),
     )
     await _stream(host, member)
-    assert await member.repos.space_poll.list_user_votes("post-1", "u-late") == [
+    assert await _carls_vote(member) == []
+    assert await member.repos.space_poll.list_user_votes("post-1", "u-recent") == [
         "opt-b"
     ]

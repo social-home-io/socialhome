@@ -2106,10 +2106,10 @@ class SpaceContentInboundHandlers:
         set after the change (empty — the vote was retracted), as
         :class:`PollFederationOutbound` sends it, stamped ``at`` by the
         voter's household (v_94; an older household sends none and is
-        stamped with its envelope's timestamp). The newest stamp wins in
-        any arrival order; one stamped after the poll's close counts
-        nowhere, one stamped before it counts even when it arrives after
-        the close (:meth:`set_votes_in_space`)."""
+        stamped with its envelope's timestamp). While the poll is open
+        here the newest stamp wins in any arrival order; once it is closed
+        here nothing counts any more, whatever its stamp
+        (:meth:`set_votes_in_space`)."""
         if self._poll_repo is None:
             return
         space_id = resolve_space_id(event)
@@ -2156,7 +2156,7 @@ class SpaceContentInboundHandlers:
                 event,
                 what="poll vote",
                 row_id=post_id,
-                reason="made after the poll closed",
+                reason="the poll is closed",
             )
             return
         if outcome == "kept":
@@ -2180,13 +2180,7 @@ class SpaceContentInboundHandlers:
         if not space_id:
             return
         post_id = str(event.payload.get("post_id") or "")
-        stamp = change_stamp(
-            event.payload.get("at"), envelope_timestamp=event.timestamp
-        )
-        if not post_id or stamp is None:
-            log_not_applied(
-                event, what="poll close", row_id=post_id, reason="malformed"
-            )
+        if not post_id:
             return
         # Only the poll's author closes it (``PollService.close_poll``, or
         # its household's deadline sweep).
@@ -2195,35 +2189,15 @@ class SpaceContentInboundHandlers:
         if not await self._post_owner_acts(event, space_id, post_id, what="poll"):
             return
         meta = await self._poll_repo.get_meta(post_id)
-        fell_back = await self._poll_repo.close_in_space(
-            post_id, space_id=space_id, stamp=stamp
-        )
-        if fell_back is None:
+        # A close only ever turns on, and it carries no stamp to order
+        # votes by: once it is applied here no vote counts here any more
+        # (``set_votes_in_space``), so a re-sent or forged close can erase
+        # nothing.
+        if not await self._poll_repo.close_in_space(post_id, space_id=space_id):
             log_cross_space_refusal(
                 event, space_id=space_id, what="poll", row_id=post_id
             )
             return
-        # The close is the votes' cutoff (v_94). A voter whose selection
-        # here was made after it — this household had not heard of the
-        # close — is back on the one made before it. For OUR people we say
-        # so (their household is the one every other takes their vote
-        # from): a household that only ever got the later one has it then.
-        # One send per such voter and member household; usually none.
-        for voter in fell_back:
-            at = await self._poll_repo.vote_stamp(post_id, voter)
-            ours = at is not None and await self._authorship.is_local_user(voter)
-            await self._bus.publish(
-                PollVoted(
-                    post_id=post_id,
-                    voter_user_id=voter,
-                    option_ids=tuple(
-                        await self._poll_repo.list_user_votes(post_id, voter)
-                    ),
-                    space_id=space_id,
-                    origin_instance_id=None if ours else event.from_instance,
-                    at=at,
-                )
-            )
         if meta is not None and meta["closed"]:
             return  # a redelivery: its voters heard it already
         # Local voters hear the poll closed — "ended" when its deadline had
@@ -3967,9 +3941,11 @@ class SpaceContentInboundHandlers:
         seller (a demoted seat still may, as for offers). The reason is
         kept only where the bidder is one of OUR people; the seller's
         household sends it to no one else. A bid only ever advances
-        (``BID_STATES``): a decline takes effect on a pending bid only — a
-        bid accepted or withdrawn here outranks it, in whichever order the
-        two arrive — and a replay or a second decline can't swap the words.
+        (``BID_STATES``: pending → withdrawn → declined → accepted): a
+        decline takes effect on a pending bid and on one whose withdrawal
+        crossed it on the way — every household ends on the decline,
+        whichever of the two it heard first; an accepted bid outranks it,
+        and a replay or a second decline can't swap the words.
         """
         assert self._bazaar_repo is not None
         if status != "rejected":
@@ -4035,9 +4011,10 @@ class SpaceContentInboundHandlers:
         household seating the bidder (a seat demoted to follower since
         still may, as for an offer), on a listing still open here (active,
         before ``end_time`` — past it the high bid is the winner). A bid
-        only ever advances (``BID_STATES``): the withdrawal outranks a
-        decline and is outranked by an accept, in whichever order they
-        arrive. A replay is a no-op. The high bid
+        only ever advances (``BID_STATES``): a withdrawal takes effect on a
+        pending bid only — a bid the seller declined or accepted outranks
+        it, in whichever order they arrive, so a declined bid keeps the
+        seller's answer and reason. A replay is a no-op. The high bid
         recomputes on its own (``highest_bid`` skips a withdrawn bid); the
         seller is not notified, open listings refresh.
         """
@@ -4062,7 +4039,7 @@ class SpaceContentInboundHandlers:
                 user_id=bid.bidder_user_id,
             )
             return
-        if not bid.rejected and not listing.is_open(datetime.now(UTC)):
+        if not listing.is_open(datetime.now(UTC)):
             log_not_applied(
                 event, what="bazaar bid", row_id=bid_id, reason="listing closed"
             )

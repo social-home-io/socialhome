@@ -1098,7 +1098,7 @@ async def _bid_state(env, bid_id: str = "b-1") -> tuple[bool, bool, bool, str | 
 @pytest.mark.parametrize(
     ("states", "end"),
     [
-        (("rejected", "withdrawn"), (False, False, True, None)),
+        (("rejected", "withdrawn"), (False, True, False, "too low")),
         (("withdrawn", "accepted"), (True, False, False, None)),
         (("rejected", "accepted"), (True, False, False, None)),
         (("rejected", "withdrawn", "accepted"), (True, False, False, None)),
@@ -1107,7 +1107,9 @@ async def _bid_state(env, bid_id: str = "b-1") -> tuple[bool, bool, bool, str | 
 )
 async def test_crossing_bid_answers_end_the_same_in_any_order(env, states, end):
     """The seller's answer and the bidder's withdrawal cross on the way:
-    whichever a household hears first, the bid ends on the highest state."""
+    whichever a household hears first, the bid ends on the seller's answer
+    (owner decision 2026-11-12) — a decline with its reason, or the
+    accept."""
     for n, order in enumerate(itertools.permutations(states)):
         pid = uuid.uuid4().hex
         await _seed_listing(env, pid)
@@ -1117,12 +1119,18 @@ async def test_crossing_bid_answers_end_the_same_in_any_order(env, states, end):
         )
         for state in order:
             await env.bazaar_repo.advance_bid(
-                bid_id, state, space_id=_DEFAULT_SPACE_ID, reason="too low"
+                bid_id,
+                state,
+                space_id=_DEFAULT_SPACE_ID,
+                reason="too low" if state == "rejected" else None,
             )
         assert await _bid_state(env, bid_id) == end, order
 
 
-async def test_advance_bid_says_whether_the_state_changed(env):
+async def test_advance_bid_allows_only_the_transitions_that_advance(env):
+    """pending → withdrawn / declined / accepted; withdrawn → declined /
+    accepted; declined → accepted. A declined bid is never withdrawn and
+    keeps the seller's first reason; nothing leaves accepted."""
     pid = uuid.uuid4().hex
     await _seed_listing(env, pid)
     repo = env.bazaar_repo
@@ -1133,22 +1141,24 @@ async def test_advance_bid_says_whether_the_state_changed(env):
     )
     assert not await repo.advance_bid("b-1", "rejected", space_id="other-space")
     assert not await repo.advance_bid("nope", "rejected", space_id=_DEFAULT_SPACE_ID)
+    assert await repo.advance_bid("b-1", "withdrawn", space_id=_DEFAULT_SPACE_ID)
+    assert not await repo.advance_bid("b-1", "withdrawn", space_id=_DEFAULT_SPACE_ID)
     assert await repo.advance_bid(
         "b-1", "rejected", space_id=_DEFAULT_SPACE_ID, reason="too low"
     )
     assert await _bid_state(env) == (False, True, False, "too low")
-    # The first answer's words stand; a replay changes nothing.
+    # Declined: no withdrawal, and the first answer's words stand.
+    assert not await repo.advance_bid("b-1", "withdrawn", space_id=_DEFAULT_SPACE_ID)
     assert not await repo.advance_bid(
         "b-1", "rejected", space_id=_DEFAULT_SPACE_ID, reason="other words"
     )
     assert await _bid_state(env) == (False, True, False, "too low")
-    assert await repo.advance_bid("b-1", "withdrawn", space_id=_DEFAULT_SPACE_ID)
-    assert not await repo.advance_bid("b-1", "rejected", space_id=_DEFAULT_SPACE_ID)
-    assert await _bid_state(env) == (False, False, True, None)
     # An accept declines the listing's other pending bids, as where it was
-    # made — never one already withdrawn.
+    # made — never one already withdrawn or declined.
     await repo.apply_synced_bids(
-        pid, [_synced_bid(pid, "b-3", 12)], space_id=_DEFAULT_SPACE_ID
+        pid,
+        [_synced_bid(pid, "b-3", 12), _synced_bid(pid, "b-4", 13, withdrawn=True)],
+        space_id=_DEFAULT_SPACE_ID,
     )
     assert await repo.advance_bid("b-2", "accepted", space_id=_DEFAULT_SPACE_ID)
     assert await _bid_state(env, "b-3") == (
@@ -1157,7 +1167,11 @@ async def test_advance_bid_says_whether_the_state_changed(env):
         False,
         "another offer was accepted",
     )
-    assert await _bid_state(env) == (False, False, True, None)
+    assert await _bid_state(env, "b-4") == (False, False, True, None)
+    assert await _bid_state(env) == (False, True, False, "too low")
+    for state in ("withdrawn", "rejected", "accepted"):
+        assert not await repo.advance_bid("b-2", state, space_id=_DEFAULT_SPACE_ID)
+    assert await _bid_state(env, "b-2") == (True, False, False, None)
 
 
 async def test_apply_synced_bids_advances_and_normalises_a_two_flag_row(env):
@@ -1167,19 +1181,19 @@ async def test_apply_synced_bids_advances_and_normalises_a_two_flag_row(env):
     await _seed_listing(env, pid)
     repo = env.bazaar_repo
     await repo.apply_synced_bids(
-        pid, [_synced_bid(pid, "b-1", 10, rejected=True)], space_id=_DEFAULT_SPACE_ID
-    )
-    assert await repo.apply_synced_bids(
         pid, [_synced_bid(pid, "b-1", 10, withdrawn=True)], space_id=_DEFAULT_SPACE_ID
     )
-    assert await _bid_state(env) == (False, False, True, None)
-    assert not await repo.apply_synced_bids(
+    assert await repo.apply_synced_bids(
         pid, [_synced_bid(pid, "b-1", 10, rejected=True)], space_id=_DEFAULT_SPACE_ID
     )
-    await env.db.enqueue("UPDATE bazaar_bids SET accepted=1 WHERE id='b-1'")
+    assert await _bid_state(env) == (False, True, False, None)
+    assert not await repo.apply_synced_bids(
+        pid, [_synced_bid(pid, "b-1", 10, withdrawn=True)], space_id=_DEFAULT_SPACE_ID
+    )
+    await env.db.enqueue("UPDATE bazaar_bids SET withdrawn=1 WHERE id='b-1'")
     await repo.apply_synced_bids(
         pid,
-        [_synced_bid(pid, "b-1", 10, accepted=True, withdrawn=True)],
+        [_synced_bid(pid, "b-1", 10, rejected=True, withdrawn=True)],
         space_id=_DEFAULT_SPACE_ID,
     )
-    assert await _bid_state(env) == (True, False, False, None)
+    assert await _bid_state(env) == (False, True, False, None)

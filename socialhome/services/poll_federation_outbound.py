@@ -12,9 +12,9 @@ created after its post on every path (with the post, attached later, on a
 moderation approval), so the post's own event cannot carry it.
 ``SPACE_POLL_VOTE_CAST`` carries the voter's whole selection
 (``option_ids``; empty = retracted) and, since v_94, the stamp it was made
-at (``at``); ``SPACE_POLL_CLOSED`` carries the close's stamp. Receivers
-merge by the stamp (:mod:`~socialhome.domain.item_merge`), so the order of
-arrival does not matter.
+at (``at``). Receivers merge by the stamp
+(:mod:`~socialhome.domain.item_merge`), so the order of arrival does not
+matter — until the poll closes: then nothing counts any more.
 
 Household-scoped polls stay local — no peer has a right to see them.
 """
@@ -104,7 +104,7 @@ class PollFederationOutbound:
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_POLL_CLOSED,
-            _stamped({"post_id": event.post_id, "space_id": event.space_id}, event.at),
+            {"post_id": event.post_id, "space_id": event.space_id},
         )
 
     async def _fan_out(

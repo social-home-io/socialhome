@@ -14,11 +14,12 @@ without ``votes`` (:meth:`PollsExporter.without_votes`) — it drops the
 resource anyway.
 
 v_94: toward a v_94 requester ``votes`` is replaced by ``vote_stamps``
-(``{voter: [stamp, [option_id, …]]}`` — each voter's selection that counts
-and the stamp it was made at, a retraction included) and ``meta`` carries
-``closed_at``: the receiver merges per voter by the one rule (the newest
-stamp wins, :mod:`socialhome.domain.item_merge`) instead of replacing the
-list. A v_92 / v_93 requester keeps getting ``votes``
+(``{voter: [stamp, [option_id, …]]}`` — each voter's selection and the
+stamp it was made at, a retraction included): while the poll is open the
+receiver merges per voter by the one rule (the newest stamp wins,
+:mod:`socialhome.domain.item_merge`) instead of replacing the list; once
+it is closed on the host, the host's map is the result every household
+shows. A v_92 / v_93 requester keeps getting ``votes``
 (:meth:`PollsExporter.unstamped_votes`).
 
 A record never splits across chunks, so its votes are bounded:

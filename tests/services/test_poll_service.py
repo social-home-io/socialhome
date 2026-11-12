@@ -337,9 +337,9 @@ async def test_a_schedule_poll_is_author_only_create_once_with_minted_slot_ids(e
     assert again["title"] == "When?" and [s["id"] for s in again["slots"]] == ids
 
 
-async def test_a_space_vote_and_close_are_announced_with_their_stamps(env):
+async def test_a_space_vote_is_announced_with_its_stamp(env):
     """The one merge rule (v_94): a space poll's vote is written whole, in
-    one step, with a stamp, and announced with it; so is the close. A
+    one step, with a stamp, and announced with it. A
     household poll never leaves the household and carries none."""
     voted: list[PollVoted] = []
 
@@ -360,7 +360,6 @@ async def test_a_space_vote_and_close_are_announced_with_their_stamps(env):
     await env.space.close_poll(
         post_id="sp-own", actor_user_id="uid-anna", space_id="sp-1"
     )
-    assert env.closed[-1].at and env.closed[-1].at > stamps[-1]
     with pytest.raises(PollClosedError):
         await env.space.cast_vote(option_id=yes, **vote)
 
@@ -370,8 +369,6 @@ async def test_a_space_vote_and_close_are_announced_with_their_stamps(env):
         post_id="hh", option_id=option, voter_user_id="uid-anna"
     )
     assert voted[-1].at is None and voted[-1].option_ids == (option,)
-    await env.household.close_poll(post_id="hh", actor_user_id="uid-anna")
-    assert env.closed[-1].at is None
 
 
 async def test_a_multiple_choice_vote_toggles_one_option(env):

@@ -104,7 +104,7 @@ from socialhome.federation.sync.space.exporters import (
 from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
 from socialhome.federation.sync.space.window import SyncWindows
 from socialhome.infrastructure.event_bus import EventBus
-from tests.poll_votes import cast, now_stamp
+from tests.poll_votes import cast
 
 HOST = "host-household"
 SPACE = "sp-coverage"
@@ -476,7 +476,7 @@ async def _vote_and_close(h: Home) -> None:
         option_ids=["opt-b"],
         voter_user_id=ANNA,
     )
-    await h.repos.space_poll.close_in_space("post-1", space_id=SPACE, stamp=now_stamp())
+    await h.repos.space_poll.close_in_space("post-1", space_id=SPACE)
 
 
 async def _schedule(h: Home) -> None:

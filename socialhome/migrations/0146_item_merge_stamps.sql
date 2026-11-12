@@ -1,15 +1,11 @@
 -- 0146 — one merge rule for changes to existing space items (v_94).
 --
 -- 1. ``space_polls.vote_stamps_json`` (NULL default) — per voter, the
---    stamps of their last few selections, newest first:
---    ``{voter: [[stamp, [option_id, …]], …]}``. A retraction is an entry
---    with no options — the tombstone that a late copy of the vote it took
---    back cannot get past. ``space_poll_votes`` keeps holding the
---    selection that counts (the tallies read it, unchanged).
--- 2. ``space_polls.closed_at`` (NULL default) — the stamp of the close:
---    a vote stamped after it counts on no household, the newest one
---    stamped at or before it on every household.
--- 3. Touch triggers, the 0086 pattern: a schedule answer
+--    stamp of their selection: ``{voter: [stamp, [option_id, …]]}``. A
+--    retraction is an entry with no options — the tombstone that a late
+--    copy of the vote it took back cannot get past. ``space_poll_votes``
+--    keeps holding the selection (the tallies read it, unchanged).
+-- 2. Touch triggers, the 0086 pattern: a schedule answer
 --    (``space_schedule_responses``), a bazaar bid (``bazaar_bids``) and an
 --    RSVP (``space_calendar_rsvps``) are part of their post's / event's
 --    §25.6 record since v_92 but stamped nothing, so a missed one healed
@@ -23,9 +19,8 @@
 --    ``rejection_reason`` / ``created_at``, which never stream), so
 --    applying a record a household already holds stamps nothing and two
 --    households never bounce a row.
--- 4. ``space_polls_touch_post_update`` is recreated with the two new
---    columns, so a close's stamp or a stamp-only vote change re-streams
---    the poll.
+-- 3. ``space_polls_touch_post_update`` is recreated with the new column,
+--    so a stamp-only vote change re-streams the poll.
 --
 -- CLAUDE.md "audit before a migration":
 --
@@ -52,25 +47,22 @@
 --       * Ordering in the outbox only (#1353's latest-only key) — it
 --         cannot recall a retry already in flight, nor order two
 --         transports, nor a close.
---       * Deriving the close's stamp from ``closes_at`` — a hand close has
---         none.
---       * For 3.: stamping the parent from Python — every write site would
+--       * For 2.: stamping the parent from Python — every write site would
 --         have to remember (the 0086 reasoning); or a full stream more
 --         often — the whole window for every space instead of one record.
---   (3) Smallest possible change: two NULL-default columns (metadata-only
+--   (3) Smallest possible change: one NULL-default column (metadata-only
 --       in SQLite: no rewrite, no backfill — a vote from before has no
 --       stamp and follows the host's list as before, until its voter
 --       votes again), nine touch triggers and one trigger recreated.
 --       Nothing existing is rewritten or dropped.
 
 ALTER TABLE space_polls ADD COLUMN vote_stamps_json TEXT;
-ALTER TABLE space_polls ADD COLUMN closed_at TEXT;
 
 DROP TRIGGER space_polls_touch_post_update;
 CREATE TRIGGER space_polls_touch_post_update
 AFTER UPDATE ON space_polls
-WHEN (NEW.post_id, NEW.question, NEW.closes_at, NEW.closed, NEW.allow_multiple, NEW.vote_stamps_json, NEW.closed_at)
- IS NOT (OLD.post_id, OLD.question, OLD.closes_at, OLD.closed, OLD.allow_multiple, OLD.vote_stamps_json, OLD.closed_at)
+WHEN (NEW.post_id, NEW.question, NEW.closes_at, NEW.closed, NEW.allow_multiple, NEW.vote_stamps_json)
+ IS NOT (OLD.post_id, OLD.question, OLD.closes_at, OLD.closed, OLD.allow_multiple, OLD.vote_stamps_json)
 BEGIN
     UPDATE space_posts SET sync_seq = NULL WHERE id = NEW.post_id;
     UPDATE space_posts SET sync_seq = NULL WHERE id = OLD.post_id AND OLD.post_id IS NOT NEW.post_id;

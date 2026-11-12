@@ -21,7 +21,6 @@ from ..domain.events import (
     SchedulePollFinalized,
     SchedulePollResponded,
 )
-from ..domain.item_merge import to_wire
 from ..domain.post import poll_deadline_passed, poll_option_id
 from ..infrastructure.event_bus import EventBus
 from ..repositories.poll_repo import AbstractPollRepo
@@ -285,15 +284,8 @@ class PollService(BusPublisherMixin):
                 post_id=post_id,
                 space_id=space_id,
                 actor_user_id=actor_user_id,
-                at=await self._closed_at(post_id),
             )
         )
-
-    async def _closed_at(self, post_id: str) -> str | None:
-        """The close's stamp as it travels (a space poll's; ``None`` for a
-        household poll, which never leaves the household)."""
-        meta = await self._repo.get_meta(post_id)
-        return to_wire(meta.get("closed_at")) if meta is not None else None
 
     async def close_due_polls(self, now: datetime | None = None) -> int:
         """Close this household's polls whose ``closes_at`` has passed.
@@ -318,7 +310,6 @@ class PollService(BusPublisherMixin):
                     space_id=due["space_id"],
                     actor_user_id=due["author"] or "",
                     at_deadline=True,
-                    at=await self._closed_at(post_id),
                 )
             )
         return closed

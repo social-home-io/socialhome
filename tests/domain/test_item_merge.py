@@ -8,8 +8,6 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from socialhome.domain.item_merge import (
-    LATE_CHANGE_WINDOW_S,
-    MAX_KEPT_CHANGES,
     TOMBSTONE_HORIZON_S,
     advance,
     change_stamp,
@@ -17,13 +15,9 @@ from socialhome.domain.item_merge import (
     is_newer,
     just_after,
     local_stamp,
-    record_change,
-    settle,
-    standing,
     to_stored,
     to_wire,
     tombstone_cutoff,
-    too_late,
 )
 from socialhome.domain.space_item import MAX_ITEM_CLOCK_SKEW_S
 
@@ -126,81 +120,6 @@ def test_a_stamp_map_decodes_to_lists_or_nothing():
 def test_a_tombstone_lives_thirty_days():
     assert TOMBSTONE_HORIZON_S == 30 * 24 * 3600
     assert tombstone_cutoff(NOW) == "2026-10-13 10:00:00.000000"
-
-
-# ── a value with a cutoff ─────────────────────────────────────────────────
-
-
-def test_the_newest_change_stands_in_any_arrival_order():
-    changes = [(T1, ["a"]), (T2, []), (T3, ["b"])]
-    for order in itertools.permutations(changes):
-        entries: list[list] = []
-        for at, value in order:
-            record_change(entries, at, value)
-        assert standing(entries) == [T3, ["b"]], order
-        assert [e[0] for e in entries] == [T3, T2, T1]
-
-
-def test_a_redelivery_changes_nothing():
-    entries: list[list] = []
-    assert record_change(entries, T1, ["a"])
-    assert not record_change(entries, T1, ["b"])
-    assert entries == [[T1, ["a"]]]
-
-
-def test_a_removal_is_kept_as_a_stamp():
-    """The retraction (an empty value) is an entry like any other, so the
-    value it took back, arriving late, does not stand."""
-    entries: list[list] = []
-    record_change(entries, T2, [])
-    record_change(entries, T1, ["a"])
-    assert standing(entries) == [T2, []]
-
-
-def test_only_the_last_few_changes_are_kept():
-    entries: list[list] = []
-    stamps = [f"2026-11-12 09:00:0{n}.000000" for n in range(MAX_KEPT_CHANGES + 2)]
-    for at in stamps:
-        assert record_change(entries, at, [at])
-    assert [e[0] for e in entries] == stamps[::-1][:MAX_KEPT_CHANGES]
-    # One older than every kept entry of a full list is not taken.
-    assert not record_change(entries, stamps[0], ["late"])
-    assert len(entries) == MAX_KEPT_CHANGES
-
-
-def test_a_change_after_the_cutoff_counts_nowhere():
-    """Applied before the cutoff was known, a change stamped after it does
-    not stand: the newest one at or before the cutoff does."""
-    entries: list[list] = []
-    record_change(entries, T1, ["a"])
-    record_change(entries, T3, ["b"])
-    assert standing(entries, T2) == [T1, ["a"]]
-    assert standing(entries, T3) == [T3, ["b"]]  # at the cutoff still counts
-    assert standing(entries, "2026-11-12 08:00:00.000000") is None
-    settle(entries, T2)
-    assert entries == [[T1, ["a"]]]
-    settle(entries, "2026-11-12 08:00:00.000000")
-    assert entries == []
-
-
-def test_settling_ends_the_same_whichever_came_first():
-    """The cutoff before the late change, or after it: one result."""
-    late_first: list[list] = []
-    record_change(late_first, T1, ["a"])
-    record_change(late_first, T3, ["b"])
-    settle(late_first, T2)
-    cutoff_first: list[list] = []
-    record_change(cutoff_first, T1, ["a"])
-    settle(cutoff_first, T2)  # then the late change is refused (stamp > cutoff)
-    assert late_first == cutoff_first == [[T1, ["a"]]]
-
-
-def test_a_change_is_too_late_once_nothing_honest_can_still_be_in_flight():
-    week_ago = NOW - timedelta(seconds=LATE_CHANGE_WINDOW_S)
-    inside = (week_ago + timedelta(minutes=1)).replace(tzinfo=None)
-    outside = (week_ago - timedelta(minutes=1)).replace(tzinfo=None)
-    assert not too_late(inside.isoformat(sep=" ", timespec="microseconds"), now=NOW)
-    assert too_late(outside.isoformat(sep=" ", timespec="microseconds"), now=NOW)
 
 
 # ── a state that only advances ────────────────────────────────────────────

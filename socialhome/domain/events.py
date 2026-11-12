@@ -754,8 +754,6 @@ class PollClosed(DomainEvent):
     the peer's ``SPACE_POLL_CLOSED`` for a poll past its deadline) closed
     it. ``origin_instance_id`` is set when the close came from a peer
     (``SPACE_POLL_CLOSED``): the outbound bridge does not echo it back.
-    ``at`` is a space poll's close stamp (tz-aware ISO 8601): a vote
-    stamped after it counts on no household (v_94).
     """
 
     post_id: str
@@ -763,7 +761,6 @@ class PollClosed(DomainEvent):
     actor_user_id: str = ""
     origin_instance_id: str | None = None
     at_deadline: bool = False
-    at: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

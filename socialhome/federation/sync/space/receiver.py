@@ -2038,11 +2038,13 @@ class SpaceSyncReceiver:
         household's are refused in :meth:`_authored_record`). Each converges
         the poll on the host's copy: created with its options when missing
         (it missed the live ``SPACE_POLL_CREATED``), the host's
-        question / deadline, closed when the host's is (with the close's
-        stamp), and everybody's votes but our own people's — merged per
-        voter by stamp from a v_94 host's ``vote_stamps`` (the one merge
-        rule), the unstamped ones taken from a v_92 / v_93 host's ``votes``
-        list. An older host's record (neither) leaves the votes."""
+        question / deadline, closed when the host's is, and everybody's
+        votes but our own people's — from a v_94 host's ``vote_stamps``:
+        merged per voter by stamp while the poll is open (the one merge
+        rule), replaced by the host's map once it is closed there (its
+        result is the one every household shows); from a v_92 / v_93
+        host's ``votes`` list as before v_94. An older host's record
+        (neither) leaves the votes."""
         if self._poll_repo is None:
             log.debug(
                 "received %d poll records — no poll_repo wired, skipping",
@@ -2079,7 +2081,6 @@ class SpaceSyncReceiver:
                 else None
             )
             closes_at = meta.get("closes_at")
-            closed_at = stored_stamp(meta.get("closed_at"))
             lacked = await self._poll_repo.get_meta(post_id) is None
             if not await self._poll_repo.apply_synced_poll(
                 space_id=space_id,
@@ -2092,7 +2093,6 @@ class SpaceSyncReceiver:
                 votes=votes,
                 keep_voters=keep,
                 votes_partial=r.get("votes_partial") is True,
-                closed_at=stamp_to_db(closed_at) if closed_at is not None else None,
                 vote_stamps=_synced_vote_stamps(r.get("vote_stamps")),
             ):
                 _log_sync_refusal("poll", post_id, space_id)

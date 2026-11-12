@@ -87,25 +87,20 @@ def _event_seq(c: sqlite3.Connection) -> int:
 def test_an_existing_poll_and_its_votes_are_left_as_they_were(conn):
     row = conn.execute("SELECT * FROM space_polls WHERE post_id='p-poll'").fetchone()
     assert row["closed"] == 1
-    assert row["vote_stamps_json"] is None and row["closed_at"] is None
+    assert row["vote_stamps_json"] is None
     assert conn.execute("SELECT COUNT(*) FROM space_poll_votes").fetchone()[0] == 1
 
 
-def test_a_vote_stamp_or_a_close_stamp_re_stamps_the_post(conn):
+def test_a_vote_stamp_re_stamps_the_post(conn):
     before = _post_seq(conn, "p-poll")
     conn.execute("UPDATE space_polls SET vote_stamps_json='{}' WHERE post_id='p-poll'")
-    after = _post_seq(conn, "p-poll")
-    assert after > before
-    conn.execute("UPDATE space_polls SET closed_at='2026-11-12 09:00:00.000000'")
-    assert _post_seq(conn, "p-poll") > after
+    assert _post_seq(conn, "p-poll") > before
 
 
 def test_rewriting_a_poll_with_what_it_holds_stamps_nothing(conn):
-    conn.execute("UPDATE space_polls SET vote_stamps_json='{}', closed_at='t'")
+    conn.execute("UPDATE space_polls SET vote_stamps_json='{}'")
     before = _post_seq(conn, "p-poll")
-    conn.execute(
-        "UPDATE space_polls SET vote_stamps_json='{}', closed_at='t', closed=1"
-    )
+    conn.execute("UPDATE space_polls SET vote_stamps_json='{}', closed=1")
     assert _post_seq(conn, "p-poll") == before
 
 

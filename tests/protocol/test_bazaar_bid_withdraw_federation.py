@@ -149,25 +149,18 @@ async def test_a_replayed_withdrawal_changes_nothing(world):
     assert await _high(a) == 500
 
 
-async def test_a_withdrawal_crossing_a_decline_ends_withdrawn_everywhere(world):
-    """The bidder's own household refuses to withdraw a bid it knows was
-    declined. A withdrawal that *crossed* the decline on the wire is
-    another matter: a bid only ever advances (``BID_STATES``: pending →
-    declined → withdrawn → accepted), so every household ends on
-    *withdrawn* whichever of the two it got first — never one declined
-    and another withdrawn."""
+async def test_a_declined_bid_can_not_be_withdrawn(world):
     a, b, c = world.a, world.b, world.c
     _cara, bob = await _two_bids(world)
     await a.bazaar.reject_offer(bid_id=bob.id, actor_user_id="u-anna")
     with pytest.raises(BazaarServiceError):
         await b.bazaar.withdraw_bid(bid_id=bob.id, actor_user_id="u-bob")
-    # The withdrawal that crossed the decline: the same end on a and c.
-    for home in (a, c):
-        await _forge(b, home, FET.BAZAAR_OFFER_UPDATED, _withdraw(bob.id))
-        row = await home.db.fetchone(
-            "SELECT rejected, withdrawn FROM bazaar_bids WHERE id=?", (bob.id,)
-        )
-        assert (bool(row["rejected"]), bool(row["withdrawn"])) == (False, True)
+    # Nor by sending it anyway: the decline stands everywhere.
+    await _forge(b, c, FET.BAZAAR_OFFER_UPDATED, _withdraw(bob.id))
+    row = await c.db.fetchone(
+        "SELECT rejected, withdrawn FROM bazaar_bids WHERE id=?", (bob.id,)
+    )
+    assert (bool(row["rejected"]), bool(row["withdrawn"])) == (True, False)
 
 
 async def test_a_bid_can_not_be_withdrawn_once_the_auction_ended(world):
