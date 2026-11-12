@@ -1264,14 +1264,15 @@ class SpaceSyncService:
                     urls.extend(history)
             except sqlite3.Error:
                 log.exception("sync-catchup-media: history of page %s failed", page.id)
-            await self._enqueue_media(
-                space_id,
-                target_instance_id,
-                page.id,
-                await space_own_files(
-                    self._page_media_refs, space_id, list(dict.fromkeys(urls))
-                ),
+            own = await space_own_files(
+                self._page_media_refs, space_id, list(dict.fromkeys(urls))
             )
+            # Only what is here, like the items' files above: a member's
+            # page file whose push never reached us cannot ship, and every
+            # attempt would fail on the missing source.
+            if self._media_sync is not None:
+                own = await self._media_sync.held_files(own)
+            await self._enqueue_media(space_id, target_instance_id, page.id, own)
 
     async def _enqueue_media(
         self,

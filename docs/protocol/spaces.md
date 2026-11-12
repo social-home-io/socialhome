@@ -3327,8 +3327,13 @@ small head (`blob_id`, …, never the bytes) to the media outbox
 (`SpaceRoutedHandler.attach_lost_inner_listener` →
 `SpaceMediaSyncService.on_mesh_chunk_lost`), which queues the **whole
 file** for that household again, once per file — the other chunks' nacks
-find it queued, and a nack for the resend gives up (the receiver asks for
-the file when someone opens it, `SPACE_MEDIA_WANTED`). Cost: the file's
+find it queued, and a nack for the resend gives up. The row is marked
+before its first chunk goes, so a nack that arrives while later chunks are
+still being sent keeps the row (due at once) instead of being dropped. A
+chunk the relay dropped without a nack (the target stayed away past the
+pending window), or a lost resend, is asked for by the receiver: a few
+minutes after the row reached it, or when someone opens it
+(`SPACE_MEDIA_WANTED`, [media.md](./media.md#older-files-on-view--space_media_wanted-v_92)). Cost: the file's
 bytes once more to the one household that could not open them. Before
 this a picture a mesh-only member posted while the host was down was lost
 on the host: the relay delivered the chunks after the host's restart, the

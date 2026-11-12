@@ -2392,6 +2392,56 @@ async def test_any_dispatched_space_event_tells_the_host_contact():
     assert seen == [("s1", "host-hh")]
 
 
+async def test_a_dispatched_space_event_has_the_spaces_files_checked():
+    """Every verified event of a space (a live row, a sync chunk, a helper's
+    catch-up) marks the space for the missing-file check — after its
+    handlers ran, so the row is stored. File traffic itself and events
+    without a space mark nothing."""
+    svc, _ = _make_service(bus=EventBus())
+    marked: list[str] = []
+    svc.attach_space_applied(marked.append)
+    for event_type, space_id in (
+        (FederationEventType.SPACE_POST_CREATED, "s1"),
+        (FederationEventType.SPACE_SYNC_CHUNK, "s2"),
+        (FederationEventType.SPACE_MEDIA_BLOB, "s3"),
+        (FederationEventType.SPACE_MEDIA_WANTED, "s4"),
+        (FederationEventType.SPACE_POST_CREATED, None),
+    ):
+        await svc._dispatch_event(
+            FederationEvent(
+                msg_id=f"m-{space_id}",
+                event_type=event_type,
+                from_instance="peer",
+                to_instance="test-instance",
+                timestamp=datetime.now(UTC).isoformat(),
+                payload={},
+                space_id=space_id,
+            )
+        )
+    assert marked == ["s1", "s2"]
+
+
+async def test_a_failing_file_check_mark_never_costs_the_event(caplog):
+    svc, _ = _make_service(bus=EventBus())
+
+    def _boom(space_id: str) -> None:
+        raise RuntimeError("boom")
+
+    svc.attach_space_applied(_boom)
+    await svc._dispatch_event(
+        FederationEvent(
+            msg_id="m",
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            from_instance="peer",
+            to_instance="test-instance",
+            timestamp=datetime.now(UTC).isoformat(),
+            payload={},
+            space_id="s1",
+        )
+    )
+    assert "marking space s1" in caplog.text
+
+
 async def test_dispatch_space_member_joined():
     """SPACE_MEMBER_JOINED dispatch logs without error."""
     bus = EventBus()

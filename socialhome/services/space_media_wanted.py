@@ -32,6 +32,25 @@ asked again only after :data:`NAME_COOLDOWN_S` — unless it was never queued
 (past the pending bound, no live row, a follower seat, a failed lookup):
 then the next view asks again. Fixed delays, never random.
 
+**Without a view** (:meth:`SpaceMediaWanted.applied`). A push is done for
+its sender once the first hop took it; a relay that then drops it (the
+target stayed away past the mesh's pending window) tells nobody. So the
+receiving side closes the gap: every verified inbound event of a space —
+a live row, a sync or resume chunk, a helper's catch-up — marks the space
+(``FederationService._dispatch_event``), and ONE check per marked space,
+:data:`APPLY_GRACE_S` after the first mark (a row's file normally follows
+it; by then its push arrived or is lost), reads the newest live items of
+the last :data:`SWEEP_MAX_AGE_S`
+(:meth:`~socialhome.repositories.media_reference_repo.SqliteMediaReferenceRepo
+.recent_item_files`, at most :data:`MAX_WANTED_FILES` rows per kind) and
+asks — the same request, the same routing as a view — for the askable
+names that are not in the media dir: at most :data:`MAX_WANTED_FILES` per
+check, each name ONCE per process (a view still asks again after its
+cooldown), never a file this household reads from a GFS media cache (it
+holds a ``space_media_refs`` row: prefetched, or fetched on view), never
+for a follower seat. Cost: nothing on the wire while every file is here;
+per lost file one request entry and its bytes once.
+
 **Provider** (:class:`SpaceMediaWantedProvider`). The requester must hold a
 writer (member) seat in the space — the predicate the §25.6 provider uses
 for member-only data (:meth:`SpaceWriterHouseholds.may_receive`), so a
@@ -68,7 +87,10 @@ import pathlib
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
+
+import aiofiles.os
 
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
@@ -86,6 +108,7 @@ from ..federation.sync.space.trusted_helpers import helper_offset, trusted_helpe
 from .inbound_media_store import (
     is_safe_media_name,
     is_space_direct_media_name,
+    media_file_path,
     space_direct_media_name,
 )
 from .space_writer_households import holds_member_seat
@@ -115,6 +138,21 @@ NAME_COOLDOWN_S: float = 10 * 60.0
 #: is bounded the same way.
 MAX_PENDING_NAMES: int = 500
 
+#: How long after a space's first inbound event its rows are checked for
+#: files that are not here: past the mesh's pending window (270 s), so a
+#: push still on its way is not asked for a second time.
+APPLY_GRACE_S: float = 5 * 60.0
+
+#: A check looks at live items created in this long (the catch-up's window,
+#: ``CATCHUP_MEDIA_MAX_AGE_S``); an older file is asked for on view.
+SWEEP_MAX_AGE_S: int = 30 * 86_400
+
+#: Names a check asked for, remembered so it asks each once (oldest dropped).
+MAX_SWEPT_NAMES: int = 4096
+
+#: Longest sleep of the drain task while only checks wait.
+_CHECK_STEP_S: float = 1.0
+
 #: Longest item id a provider looks up.
 MAX_ITEM_ID_LEN: int = 200
 
@@ -128,6 +166,10 @@ class _SpaceItemFiles(Protocol):
     async def live_item_files(
         self, space_id: str, item_id: str
     ) -> list[tuple[str, str | None]]: ...
+
+    async def recent_item_files(
+        self, space_id: str, *, cutoff: str, limit: int
+    ) -> list[tuple[str, str, str | None, list[str]]]: ...
 
 
 class _HostContact(Protocol):
@@ -167,17 +209,22 @@ class SpaceMediaWanted:
     member household misses."""
 
     __slots__ = (
+        "_applied",
+        "_apply_grace_s",
         "_asked",
         "_clock",
         "_coalesce_s",
         "_contact",
+        "_dir",
         "_federation",
+        "_gfs_ref",
         "_names",
         "_own",
         "_refs",
         "_seats",
         "_spaces",
         "_stop",
+        "_swept",
         "_task",
     )
 
@@ -192,7 +239,19 @@ class SpaceMediaWanted:
         own_instance_id: str,
         clock: Callable[[], float] = time.monotonic,
         coalesce_s: float = COALESCE_S,
+        media_dir: pathlib.Path | None = None,
+        apply_grace_s: float = APPLY_GRACE_S,
     ) -> None:
+        #: Where this household's files are — ``None``: no check
+        #: (:meth:`applied` does nothing).
+        self._dir = pathlib.Path(media_dir) if media_dir is not None else None
+        self._apply_grace_s = apply_grace_s
+        #: space → when its check is due (:meth:`applied`).
+        self._applied: dict[str, float] = {}
+        #: names a check asked for (:data:`MAX_SWEPT_NAMES`).
+        self._swept: OrderedDict[str, None] = OrderedDict()
+        #: ``name → its space_media_refs row`` (:meth:`attach_gfs_refs`).
+        self._gfs_ref: Callable[[str], Awaitable[object | None]] | None = None
         self._refs = media_refs
         self._spaces = space_repo
         self._seats = remote_members
@@ -226,6 +285,33 @@ class SpaceMediaWanted:
             )
             return
         self._names[basename] = None
+        self._ensure_task()
+
+    def attach_gfs_refs(self, get: Callable[[str], Awaitable[object | None]]) -> None:
+        """``get(name)``: the ``space_media_refs`` row of a file this
+        household reads from a GFS media cache — a check never asks for
+        such a file."""
+        self._gfs_ref = get
+
+    def applied(self, space_id: str) -> None:
+        """A verified event of *space_id* arrived: check its recent rows for
+        files that are not here, once, :data:`APPLY_GRACE_S` from now (a
+        space already marked keeps its time). O(1), never raises."""
+        if (
+            self._dir is None
+            or not space_id
+            or self._stop.is_set()
+            or space_id in self._applied
+            or len(self._applied) >= MAX_PENDING_NAMES
+        ):
+            return
+        self._applied[space_id] = self._clock() + self._apply_grace_s
+        try:
+            self._ensure_task()
+        except RuntimeError:  # no running loop
+            self._applied.pop(space_id, None)
+
+    def _ensure_task(self) -> None:
         if self._task is None or self._task.done():
             self._task = asyncio.get_running_loop().create_task(
                 self._drain(), name="space-media-wanted"
@@ -241,12 +327,20 @@ class SpaceMediaWanted:
         """Stop: names still waiting are dropped; nothing new starts."""
         self._stop.set()
         self._names.clear()
+        self._applied.clear()
         await self.drain()
 
     async def _drain(self) -> None:
-        while self._names and not self._stop.is_set():
+        while (self._names or self._applied) and not self._stop.is_set():
+            wait = self._coalesce_s
+            if not self._names:
+                # Only checks wait: sleep until the first is due, in steps
+                # short enough that a view arriving meanwhile keeps its
+                # coalescing window.
+                wait = max(min(self._applied.values()) - self._clock(), 0.0)
+                wait = min(wait, max(self._coalesce_s, _CHECK_STEP_S))
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=self._coalesce_s)
+                await asyncio.wait_for(self._stop.wait(), timeout=wait)
                 return  # stopped while collecting
             except TimeoutError:
                 pass
@@ -263,6 +357,16 @@ class SpaceMediaWanted:
                 if not await self._lookup(name, per_space):
                     # Nothing asked for it: the next view may try again.
                     self._asked.pop(name, None)
+            for space_id in [s for s, due in self._applied.items() if due <= now]:
+                del self._applied[space_id]
+                try:
+                    await self._check(space_id, per_space, now)
+                except Exception:
+                    log.warning(
+                        "space media wanted: checking the files of space %s failed",
+                        space_id,
+                        exc_info=True,
+                    )
             for space_id, files in per_space.items():
                 entries = list(files.items())
                 for i in range(0, len(entries), MAX_WANTED_FILES):
@@ -274,6 +378,53 @@ class SpaceMediaWanted:
                             space_id,
                             exc_info=True,
                         )
+
+    async def _check(
+        self, space_id: str, per_space: dict[str, dict[str, str]], now: float
+    ) -> None:
+        """Add to ``per_space`` the files of *space_id*'s recent live items
+        that are not here (see the module docstring, "Without a view")."""
+        if self._dir is None or not await holds_member_seat(self._spaces, space_id):
+            return
+        cutoff = (datetime.now(UTC) - timedelta(seconds=SWEEP_MAX_AGE_S)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        files = per_space.get(space_id, {})
+        room = MAX_WANTED_FILES - len(files)
+        added = 0
+        for _created, item_id, _owner, names in await self._refs.recent_item_files(
+            space_id, cutoff=cutoff, limit=MAX_WANTED_FILES
+        ):
+            for name in names:
+                if added >= room:
+                    break
+                if name in files or name in self._swept or not _askable(name):
+                    continue
+                last = self._asked.get(name)
+                if last is not None and now - last < NAME_COOLDOWN_S:
+                    continue  # a view just asked
+                path = media_file_path(self._dir, name)
+                if path is None or await aiofiles.os.path.isfile(path):
+                    continue
+                if self._gfs_ref is not None and await self._gfs_ref(name) is not None:
+                    continue  # read from its GFS media cache
+                files[name] = item_id
+                added += 1
+                self._swept[name] = None
+                self._asked[name] = now
+                self._asked.move_to_end(name)
+        while len(self._swept) > MAX_SWEPT_NAMES:
+            self._swept.popitem(last=False)
+        while len(self._asked) > MAX_PENDING_NAMES:
+            self._asked.popitem(last=False)
+        if added:
+            per_space[space_id] = files
+            log.info(
+                "space media wanted: %d file(s) of space %s never arrived — "
+                "asking for them",
+                added,
+                space_id,
+            )
 
     async def _lookup(self, name: str, per_space: dict[str, dict[str, str]]) -> bool:
         """Add *name* to ``per_space`` for every space this household holds a
@@ -626,6 +777,7 @@ def _payload(space_id: str, files: list[tuple[str, str]]) -> dict:
 
 
 __all__ = [
+    "APPLY_GRACE_S",
     "COALESCE_S",
     "MAX_HELPERS",
     "MAX_WANTED_FILES",

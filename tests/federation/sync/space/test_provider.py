@@ -2072,6 +2072,27 @@ async def test_a_page_file_named_outside_the_space_is_not_in_the_catchup(
     ]
 
 
+async def test_a_page_file_the_host_never_received_is_not_in_the_catchup(encoder):
+    """A member's page picture whose push never reached the host: the page
+    row is here, the file is not. Queued, every send failed on "blob source
+    missing" until the row ran out of attempts — for every requester, on
+    every stream. Only what is here is queued; a page whose files are all
+    missing queues nothing."""
+    svc, media_sync = _page_provider(encoder)
+    media_sync.held_files = AsyncMock(
+        side_effect=lambda urls: [u for u in urls if "a.webp" not in u]
+    )
+    await svc.stream_initial(_FakeSession(requester="peer-new"))
+    calls = [c.kwargs for c in media_sync.enqueue_for_blob.call_args_list]
+    assert [(c["correlation_id"], c["media_urls"]) for c in calls] == [
+        ("pg-1", ["api/media/c.webp", "/api/media/b.webp"])
+    ]
+    media_sync.enqueue_for_blob.reset_mock()
+    media_sync.held_files = AsyncMock(return_value=[])
+    await svc.stream_initial(_FakeSession(requester="peer-new"))
+    assert media_sync.enqueue_for_blob.call_args_list == []
+
+
 async def test_the_catchup_ships_a_pages_history_and_side_files(encoder):
     """Review finding 7: a newcomer gets a page's history versions' files
     (a revert brings one back) and its open sides' files too."""

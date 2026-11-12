@@ -2471,14 +2471,19 @@ def _build_space_media_wanted(
     federation_service._event_registry.register(
         FederationEventType.SPACE_MEDIA_WANTED, _space_media_wanted
     )
-    return SpaceMediaWanted(
+    wanted = SpaceMediaWanted(
         media_refs=media_reference_repo,
         space_repo=space_repo,
         remote_members=space_remote_member_repo,
         federation=federation_service,
         host_contact=host_contact,
         own_instance_id=own_instance_id,
+        media_dir=pathlib.Path(config.media_path),
     )
+    # Not only on view: every verified event of a space has the files of
+    # its recent rows checked, and the ones that never arrived asked for.
+    federation_service.attach_space_applied(wanted.applied)
+    return wanted
 
 
 def _build_page_files_reach_host(
@@ -2552,6 +2557,10 @@ def _build_space_media_gfs(
         media_dir=media_dir,
     )
     responder.attach_federation(federation_service)
+    if (wanted := app.get(K.space_media_wanted_key)) is not None:
+        # A file this household reads from a GFS media cache is fetched
+        # there (prefetch / on view), never asked for by the file check.
+        wanted.attach_gfs_refs(repos.space_media_ref.get)
     app[K.space_media_gfs_uploader_key] = uploader
     app[K.space_media_gfs_fetcher_key] = fetcher
     app[K.space_media_gfs_responder_key] = responder

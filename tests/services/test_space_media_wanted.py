@@ -77,6 +77,9 @@ class _Refs:
         self.asked: list[str] = []
         #: item → owner (``live_item_files``' author of the item's files).
         self.owners: dict[str, str] = {}
+        #: space → [(created_at, item, owner, [basenames])], newest first.
+        self.recent: dict[str, list[tuple[str, str, str | None, list[str]]]] = {}
+        self.recent_asked: list[tuple[str, str, int]] = []
 
     async def space_rows_of(self, basename):
         self.asked.append(basename)
@@ -85,6 +88,10 @@ class _Refs:
     async def live_item_files(self, space_id, item_id):
         owner = self.owners.get(item_id)
         return [] if owner is None else [("f.webp", owner)]
+
+    async def recent_item_files(self, space_id, *, cutoff, limit):
+        self.recent_asked.append((space_id, cutoff, limit))
+        return list(self.recent.get(space_id, []))[:limit]
 
 
 @dataclass
@@ -177,8 +184,12 @@ def _wanted(
     contact=None,
     coalesce_s=0.0,
     clock=None,
+    media_dir=None,
+    apply_grace_s=0.0,
 ):
     kw = {} if clock is None else {"clock": clock}
+    if media_dir is not None:
+        kw |= {"media_dir": media_dir, "apply_grace_s": apply_grace_s}
     return SpaceMediaWanted(
         media_refs=refs or _Refs(),
         space_repo=spaces or _Spaces(),
@@ -963,3 +974,273 @@ async def test_a_sender_bound_file_leaves_only_for_this_households_own_row(
             gate=_Gate(all_files=True, fills=True, own={"u-me"}),
         )
         assert await p.handle(_event([{"item": "p1", "name": sd}])) == want, owner
+
+
+# ── Without a view: a row applied without its file ────────────────────────
+
+
+def _host_missing(tmp_path, names, **kw):
+    """We are the host; d's household posted ``p1`` showing *names* while we
+    were away — the row is here, the files are not."""
+    refs = _Refs()
+    refs.recent = {SPACE: [("2026-11-12 10:00:00", "p1", "u-d", list(names))]}
+    refs.owners = {"p1": "u-d"}
+    fed = _Fed({"hh-d": V92, "h-a": V92})
+    seats = _Seats(["h-a"], seats=[("hh-d", "u-d"), ("h-a", "u-a")])
+    w = _wanted(
+        refs=refs,
+        spaces=_Spaces(host=SELF),
+        seats=seats,
+        fed=fed,
+        media_dir=tmp_path,
+        **kw,
+    )
+    return w, fed, refs
+
+
+async def test_a_row_applied_without_its_file_is_asked_for_without_a_view(tmp_path):
+    """The host was down past the mesh's pending window while a member
+    posted a picture: the relay took the push and dropped it, nobody was
+    told. When the row reaches the host, the host asks the author's
+    household for the file — nobody has to open the post first."""
+    a = _sc("a")
+    w, fed, refs = _host_missing(tmp_path, [a])
+    w.applied(SPACE)
+    await w.drain()
+    assert [s[0] for s in fed.sent] == ["hh-d"]
+    assert fed.sent[0][1] is FederationEventType.SPACE_MEDIA_WANTED
+    assert fed.sent[0][2] == {"space_id": SPACE, "files": [{"item": "p1", "name": a}]}
+    assert refs.asked == []  # the sweep knows the item: no per-name lookup
+    assert refs.recent_asked[0][0] == SPACE
+    assert refs.recent_asked[0][2] == MAX_WANTED_FILES
+
+
+async def test_a_member_household_asks_its_host_for_a_row_without_its_file(tmp_path):
+    a = _sc("a")
+    refs = _Refs()
+    refs.recent = {SPACE: [("2026-11-12 10:00:00", "p1", "u-x", [a])]}
+    fed = _Fed({HOST: V92})
+    w = _wanted(refs=refs, fed=fed, media_dir=tmp_path)
+    w.applied(SPACE)
+    await w.drain()
+    assert [s[0] for s in fed.sent] == [HOST]
+    assert _names(fed.sent[0]) == [a]
+
+
+async def test_a_file_that_is_here_is_not_asked_for(tmp_path):
+    a, b = _sc("a"), _sc("b")
+    (tmp_path / a).write_bytes(b"here")
+    w, fed, _ = _host_missing(tmp_path, [a, b])
+    w.applied(SPACE)
+    await w.drain()
+    assert [_names(s) for s in fed.sent] == [[b]]
+
+
+async def test_a_file_that_arrives_within_the_grace_is_not_asked_for(tmp_path):
+    """A row's push normally follows it: the check waits, so a file still on
+    its way is not sent a second time."""
+    a = _sc("a")
+    w, fed, _ = _host_missing(tmp_path, [a], apply_grace_s=0.2)
+    w.applied(SPACE)
+    await asyncio.sleep(0.02)
+    assert fed.sent == []  # nothing before the grace is over
+    (tmp_path / a).write_bytes(b"arrived")
+    await w.drain()
+    assert fed.sent == []
+
+
+async def test_events_of_one_space_are_coalesced_into_one_check(tmp_path):
+    a = _sc("a")
+    w, fed, refs = _host_missing(tmp_path, [a])
+    for _ in range(20):
+        w.applied(SPACE)
+    await w.drain()
+    assert len(refs.recent_asked) == 1
+    assert len(fed.sent) == 1
+
+
+async def test_a_file_is_asked_for_once_without_a_view_however_often_its_row_comes(
+    tmp_path,
+):
+    """A sync round re-applies the row every 30 minutes: a file its author
+    cannot send is not asked for on every round. A view still asks."""
+    a = _sc("a")
+    now = [0.0]
+    w, fed, refs = _host_missing(tmp_path, [a], clock=lambda: now[0])
+    refs.rows = {a: [(SPACE, "p1", "t")]}
+    w.applied(SPACE)
+    await w.drain()
+    now[0] += NAME_COOLDOWN_S + 1
+    w.applied(SPACE)
+    await w.drain()
+    assert len(fed.sent) == 1
+    w.schedule(a)
+    await w.drain()
+    assert len(fed.sent) == 2
+
+
+async def test_a_check_right_after_a_view_asked_does_not_ask_again(tmp_path):
+    a = _sc("a")
+    w, fed, refs = _host_missing(tmp_path, [a])
+    refs.rows = {a: [(SPACE, "p1", "t")]}
+    w.schedule(a)
+    await w.drain()
+    w.applied(SPACE)
+    await w.drain()
+    assert len(fed.sent) == 1
+
+
+async def test_a_check_asks_for_at_most_50_files(tmp_path):
+    names = [_sc_n(i) for i in range(MAX_WANTED_FILES + 7)]
+    w, fed, _ = _host_missing(tmp_path, names)
+    w.applied(SPACE)
+    await w.drain()
+    assert [len(s[2]["files"]) for s in fed.sent] == [MAX_WANTED_FILES]
+    # The rest follow with the space's next event.
+    w.applied(SPACE)
+    await w.drain()
+    assert [len(s[2]["files"]) for s in fed.sent] == [MAX_WANTED_FILES, 7]
+
+
+async def test_a_file_read_from_a_gfs_media_cache_is_not_asked_for(tmp_path):
+    a, b = _sc("a"), _sc("b")
+    w, fed, _ = _host_missing(tmp_path, [a, b])
+
+    async def _ref(name):
+        return object() if name == a else None
+
+    w.attach_gfs_refs(_ref)
+    w.applied(SPACE)
+    await w.drain()
+    assert [_names(s) for s in fed.sent] == [[b]]
+
+
+async def test_a_follower_household_checks_nothing(tmp_path):
+    refs = _Refs()
+    refs.recent = {SPACE: [("2026-11-12 10:00:00", "p1", "u-x", [_sc("a")])]}
+    fed = _Fed({HOST: V92})
+    w = _wanted(
+        refs=refs,
+        spaces=_Spaces(role=SpaceRole.SUBSCRIBER),
+        fed=fed,
+        media_dir=tmp_path,
+    )
+    w.applied(SPACE)
+    await w.drain()
+    assert fed.sent == [] and refs.recent_asked == []
+
+
+async def test_a_name_no_request_can_carry_is_not_asked_for(tmp_path):
+    w, fed, _ = _host_missing(tmp_path, ["plain.webp", "../x", ""])
+    w.applied(SPACE)
+    await w.drain()
+    assert fed.sent == []
+
+
+async def test_a_failed_check_is_contained_and_the_next_event_checks_again(tmp_path):
+    a = _sc("a")
+    w, fed, refs = _host_missing(tmp_path, [a])
+    real = refs.recent_item_files
+
+    async def _boom(space_id, *, cutoff, limit):
+        raise RuntimeError("db")
+
+    refs.recent_item_files = _boom
+    w.applied(SPACE)
+    await w.drain()
+    assert fed.sent == []
+    refs.recent_item_files = real
+    w.applied(SPACE)
+    await w.drain()
+    assert len(fed.sent) == 1
+
+
+async def test_without_a_media_dir_or_after_stop_nothing_is_checked(tmp_path):
+    w = _wanted()
+    w.applied(SPACE)
+    await w.drain()
+    w2, fed, _ = _host_missing(tmp_path, [_sc("a")], apply_grace_s=60.0)
+    w2.applied(SPACE)
+    w2.applied("")
+    await w2.stop()
+    w2.applied(SPACE)
+    await w2.drain()
+    assert fed.sent == []
+
+
+async def test_the_host_back_after_ten_minutes_gets_the_picture_without_a_view(
+    tmp_path,
+):
+    """End to end, requester and provider: d posts a picture while the host
+    is down for ten minutes — longer than the mesh keeps a chunk. The push
+    is gone and nobody is told. The host comes back, a sync brings the row,
+    and the host's check asks d's household, whose provider queues the file
+    for the host: the host holds it without anyone opening the post."""
+    host_dir, d_dir = tmp_path / "host", tmp_path / "d"
+    host_dir.mkdir()
+    d_dir.mkdir()
+    body = b"the picture d posted"
+    name = space_content_media_name(SPACE, hashlib.sha256(body).hexdigest(), "p.webp")
+    (d_dir / name).write_bytes(body)
+
+    # d's household: the provider, and an outbox that "sends" to the host.
+    class _DOutbox:
+        async def enqueue_for_blob(
+            self, *, target_instance_ids, media_urls, wire_names=None, **kw
+        ):
+            assert target_instance_ids == [SELF]
+            for url in media_urls:
+                wire = (wire_names or {}).get(url, url)
+                (host_dir / wire).write_bytes((d_dir / url).read_bytes())
+
+    provider = SpaceMediaWantedProvider(
+        member_gate=SpaceWriterHouseholds(
+            _Roster({SELF: "owner"}), own_instance_id="hh-d"
+        ).may_receive,
+        media_refs=_ItemFiles({(SPACE, "p1"): [(name, "u-d")]}),
+        file_gates=_Gates(_Gate(own={"u-d"})),
+        hasher=MediaFileHasher(d_dir),
+        media_sync=_DOutbox(),
+        media_dir=d_dir,
+        budget=SpaceFileBudget(clock=lambda: 0.0),
+        own_instance_id="hh-d",
+    )
+
+    class _Wire(_Fed):
+        async def send_with_mesh_fallback(
+            self, *, to_instance_id, event_type, payload, space_id=None
+        ):
+            result = await super().send_with_mesh_fallback(
+                to_instance_id=to_instance_id,
+                event_type=event_type,
+                payload=payload,
+                space_id=space_id,
+            )
+            if to_instance_id == "hh-d":
+                await provider.handle(
+                    FederationEvent(
+                        msg_id="m",
+                        event_type=event_type,
+                        from_instance=SELF,
+                        to_instance="hh-d",
+                        timestamp="2026-11-12T00:00:00+00:00",
+                        payload=payload,
+                        space_id=space_id,
+                    )
+                )
+            return result
+
+    refs = _Refs()
+    refs.recent = {SPACE: [("2026-11-12 10:00:00", "p1", "u-d", [name])]}
+    refs.owners = {"p1": "u-d"}
+    host = _wanted(
+        refs=refs,
+        spaces=_Spaces(host=SELF),
+        seats=_Seats(seats=[("hh-d", "u-d")]),
+        fed=_Wire({"hh-d": V92}),
+        media_dir=host_dir,
+    )
+    assert not (host_dir / name).exists()
+    host.applied(SPACE)  # the sync that brought the row
+    await host.drain()
+    assert (host_dir / name).read_bytes() == body

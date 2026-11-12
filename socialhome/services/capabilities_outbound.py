@@ -273,7 +273,10 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
             payload=payload,
         )
         ok = bool(getattr(result, "ok", False))
-        log.info(
+        # A failure is the scheduler's to report (once, when it slows down):
+        # a household no route reaches fails on every sweep.
+        log.log(
+            logging.INFO if ok else logging.DEBUG,
             "capabilities-outbound: mesh announcement to %s %s",
             instance_id,
             "sent" if ok else "failed (will retry)",
