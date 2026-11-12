@@ -441,6 +441,7 @@ class FederationService:
         "_media_https_backoff",
         "_media_https_inbound_pipeline",
         "_media_relay_inbound_pipeline",
+        "_mesh_claim_answer",
         "_online_status_service",
         "_outbox_payload_key",
         "_outbox_repo",
@@ -595,6 +596,8 @@ class FederationService:
         #: unreferenced task can be GC'd mid-flight); it removes both entries
         #: when its queue is empty. :meth:`stop` cancels the rest.
         self._deferred_mesh_queues: dict[str, deque[_DeferredMeshSend]] = {}
+        #: See :meth:`attach_mesh_claim_answer`.
+        self._mesh_claim_answer: Callable[[str], Awaitable[bool]] | None = None
         self._deferred_mesh_tasks: dict[str, asyncio.Task[None]] = {}
         #: Per pending target: set to cut its drain task's wait short when a
         #: route to it is learned (:meth:`on_route_learned`).
@@ -1133,6 +1136,17 @@ class FederationService:
         sync answer — stops the helper fallback at once."""
         self._host_contact = contact
 
+    def attach_mesh_claim_answer(
+        self, answer: Callable[[str], Awaitable[bool]]
+    ) -> None:
+        """``answer(instance_id)`` tells a member household we reach only
+        over the mesh our own version
+        (``CapabilitiesOutbound.announce_over_mesh``). Run by
+        :meth:`record_mesh_member_claim` whenever such a household's claimed
+        version rises: it holds no row for us either, so until it has OUR
+        claim its version-gated space broadcasts skip us."""
+        self._mesh_claim_answer = answer
+
     def attach_idempotency_cache(self, cache) -> None:
         """Attach an :class:`IdempotencyCache` for inbound dedup."""
         self._idempotency_cache = cache
@@ -1659,6 +1673,9 @@ class FederationService:
         cert, writer key and channel grant — right away. A caller about to
         send that snapshot itself (an accept seats and snapshots) passes
         ``notify=False``.
+
+        Rising also answers the household with OUR claim
+        (:meth:`attach_mesh_claim_answer`), whatever ``notify`` says.
         """
         origin = event.from_instance
         if event.routed_path is None or not origin or origin == self._own_instance_id:
@@ -1710,6 +1727,11 @@ class FederationService:
                         new_version=claim.proto_version,
                     )
                 )
+            # The claimant holds no row for us either: answer with our own
+            # claim, or its version-gated space broadcasts keep skipping us
+            # (a reaction, a bazaar listing). Only on a rise, so two
+            # households answering each other stop after one exchange.
+            await self._answer_mesh_claim(origin)
         elif claim.proto_version < previous:
             log.warning(
                 "mesh member %s: claimed proto_version %d below its high-water "
@@ -1720,6 +1742,20 @@ class FederationService:
                 previous,
             )
         return True
+
+    async def _answer_mesh_claim(self, instance_id: str) -> None:
+        """Tell *instance_id* our version over the mesh. Never raises: a
+        failed answer is retried by the scheduler's mesh sweep."""
+        if self._mesh_claim_answer is None:
+            return
+        try:
+            await self._mesh_claim_answer(instance_id)
+        except Exception:
+            log.warning(
+                "mesh member %s: answering its version claim failed",
+                instance_id,
+                exc_info=True,
+            )
 
     async def is_space_session_peer(self, instance_id: str) -> bool:
         """``True`` iff ``instance_id`` is a household seated from an invite

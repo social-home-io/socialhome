@@ -93,6 +93,27 @@ space broadcast on `peer_supports` alone would skip every mesh-only member,
 so a gated event (a bazaar listing, its questions and answers) never
 reached a member household that isn't paired with the sender.
 
+**Who makes a mesh claim to whom.** Neither of two unpaired member
+households holds a row for the other, so each tells the other its version
+(`INSTANCE_CAPABILITIES_UPDATED` with `member_proto_version` +
+`member_identity_pk`, inside `SPACE_ROUTED`): a household announces to the
+hosts of the spaces it joined and to every member household of a space one
+of its people is a member of (hosted here or elsewhere) that it holds no
+row for — once per process, from the sync scheduler's mesh sweep (startup
+and periodic tick, retried until delivered) — and answers right away a
+household whose claim just **raised** its version here (a first claim on
+an accept / redeem / announcement, or an upgrade). Only a rise is answered,
+so two households stop after one exchange. (Earlier only the member
+announced, and only to the host: the host's version stayed unknown to a
+mesh-only member, whose gated broadcasts — a `SPACE_POST_REACTION`, a
+bazaar listing — therefore skipped the host.) Cost: one ~0.3 KiB routed
+envelope per mesh-only household pair and direction per process start
+(a household with M such co-member households sends M), plus one answer
+per rise. Households that hold a row for each other (paired, or a
+`space_session` seat, which learns the version from the member card) are
+never announced to. A household that only follows a space announces to
+nobody.
+
 ## Bumping the version
 
 When a release adds a federation surface whose default-if-missing

@@ -17,10 +17,13 @@ outbound fields on the version we actually run. Three trigger points:
 4. **GFS fallback switched on** — :class:`~socialhome.services
    .peer_gfs_relay_service.PeerGfsRelayService` calls :meth:`resend_to`
    when an admin turns the relay on for one paired household (v_54).
-5. **Mesh-only space hosts** — :meth:`announce_to_mesh_host`, driven by
-   the space sync scheduler's mesh sweep at startup and on its periodic
-   tick: a host we reach only over the mesh holds no row for us and gets
-   our version (plus identity key) as a claim over ``SPACE_ROUTED``.
+5. **Mesh-only member households** — :meth:`announce_over_mesh`: a
+   household of one of our spaces that we reach only over the mesh holds
+   no row for us (nor we for it) and gets our version (plus identity key)
+   as a claim over ``SPACE_ROUTED``. Driven by the space sync scheduler's
+   mesh sweep (once per process, at startup and on its periodic tick) and,
+   right away, by :meth:`FederationService.record_mesh_member_claim` when
+   such a household's own claim raises its version here.
 
 A failed send to a single peer lands in the outbox retry queue; we
 never raise.
@@ -235,39 +238,44 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
             **keywrap_wire_fields(self._keywrap_public_key, self._keywrap_sig),
         }
 
-    async def announce_to_mesh_host(self, host_instance_id: str) -> bool:
-        """Tell a space host we reach only over the mesh our version.
+    async def announce_over_mesh(self, instance_id: str) -> bool:
+        """Tell a member household of one of our spaces that we reach only
+        over the mesh our version.
 
-        Such a host holds no ``remote_instances`` row for us, so it never
-        sees the confirmed-peer fan-out and could not deliver our writer
-        cert / key / channel grant. The announcement carries the mesh
-        claim (:mod:`~socialhome.federation.mesh_member_claim`) and rides
+        Neither side holds a ``remote_instances`` row for the other, so
+        neither sees the confirmed-peer fan-out: a host could not deliver
+        our writer cert / key / channel grant, and any member household's
+        version-gated space broadcast (``broadcast_to_space_members(…,
+        min_proto_version=N)``) skips a household whose version it does not
+        know — a mesh-only member's reaction never reached its host. The
+        announcement carries the mesh claim
+        (:mod:`~socialhome.federation.mesh_member_claim`) and rides
         :meth:`FederationService.send_with_mesh_fallback` — SPACE_ROUTED,
-        sealed end to end to the host and origin-signed, so no relay reads
-        or alters it. The host keeps it on our ``space_instances`` rows.
+        sealed end to end to the target and origin-signed, so no relay reads
+        or alters it. The receiver keeps it on our ``space_instances`` rows.
 
-        Returns ``True`` when nothing more is needed (sent, or the host is
+        Returns ``True`` when nothing more is needed (sent, or the target is
         a household we hold a row for — the ordinary path covers it) and
         ``False`` when the send failed and a later attempt should retry.
         """
         own = getattr(self._federation, "_own_instance_id", "")
-        if not host_instance_id or host_instance_id == own:
+        if not instance_id or instance_id == own:
             return True
-        if await self._federation_repo.get_instance(host_instance_id) is not None:
+        if await self._federation_repo.get_instance(instance_id) is not None:
             return True
         payload: dict = {
             "proto_version": OUR_PROTO_VERSION,
             **mesh_member_claim(self._federation.own_identity_pk),
         }
         result = await self._federation.send_with_mesh_fallback(
-            to_instance_id=host_instance_id,
+            to_instance_id=instance_id,
             event_type=FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
             payload=payload,
         )
         ok = bool(getattr(result, "ok", False))
         log.info(
-            "capabilities-outbound: mesh announcement to host %s %s",
-            host_instance_id,
+            "capabilities-outbound: mesh announcement to %s %s",
+            instance_id,
             "sent" if ok else "failed (will retry)",
         )
         return ok

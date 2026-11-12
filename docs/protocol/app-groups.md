@@ -667,9 +667,12 @@ the space.
 **Residual — households the hub doesn't know.** A card and a seat answer
 go only to member households whose version the hub knows
 (`space_member_supports`: a pairing, a link-joined seat, or a mesh claim).
-A mesh-only member announces its claim to the space's **host**; a table
-hosted by another member household doesn't reach a member it has neither
-a pairing nor a claim for (that member's people don't see the card).
+Mesh-only member households announce their claim to each other (every
+household of a space to the member households it reaches only over the
+mesh, see [capabilities](./capabilities.md)); until that announcement has
+arrived, a table hosted by a member household doesn't reach a member it
+has neither a pairing nor a claim for (that member's people don't see the
+card yet).
 
 ### Cost
 
