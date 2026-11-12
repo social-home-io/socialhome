@@ -900,6 +900,64 @@ async def test_a_file_whose_mesh_chunk_was_lost_is_sent_again_once(
     assert await svc.flush_once() == 0
 
 
+async def test_a_chunk_reported_lost_while_the_file_is_still_being_sent(
+    db, outbox, tmp_path
+):
+    """The host is already back and the route cached: the nack for chunk 0
+    of a file in several chunks arrives while a later chunk is still being
+    sent. The send still "succeeds" (the relay took every chunk) — the row
+    must stay queued instead of being deleted, and go out again once."""
+    await _seed_space(db)
+    (tmp_path / "img.webp").write_bytes(b"x" * 64)
+    fed = _fed(16)  # four chunks
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    lost = {"blob_id": "img.webp", "space_id": "sp-1", "chunk_index": 0}
+    nacked = False
+
+    async def _send(**kwargs):
+        nonlocal nacked
+        if kwargs["payload"]["chunk_index"] == 1 and not nacked:
+            nacked = True
+            await svc.on_mesh_chunk_lost("peer-mesh", lost)
+        return _OK
+
+    fed.send_media_chunk = AsyncMock(side_effect=_send)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-mesh"],
+        media_urls=["api/media/img.webp"],
+    )
+    await svc.flush_once()
+    assert nacked
+    [row] = await outbox.list_for_correlation("p-1")
+    assert (row.status, row.attempts) == ("pending", 0)
+    first = fed.send_media_chunk.await_count
+    assert await svc.flush_once() == 1  # the one resend, at once
+    assert fed.send_media_chunk.await_count == 2 * first
+    assert await outbox.list_for_correlation("p-1") == []
+    # A nack for the resend gives up.
+    await svc.on_mesh_chunk_lost("peer-mesh", lost)
+    assert await outbox.list_for_correlation("p-1") == []
+
+
+async def test_a_resend_that_fails_and_is_retried_is_still_the_one_resend(
+    db, outbox, tmp_path
+):
+    svc, fed = await _sent_over_the_mesh(db, outbox, tmp_path)
+    lost = {"blob_id": "img.webp", "space_id": "sp-1", "chunk_index": 0}
+    await svc.on_mesh_chunk_lost("peer-mesh", lost)
+    fed.send_media_chunk = AsyncMock(
+        return_value=DeliveryResult(instance_id="peer-mesh", ok=False, error="x")
+    )
+    assert await svc.flush_once() == 0
+    await db.enqueue("UPDATE space_media_outbox SET next_attempt_at=datetime('now')")
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    assert await svc.flush_once() == 1
+    await svc.on_mesh_chunk_lost("peer-mesh", lost)  # for the resend: gives up
+    assert await outbox.list_for_correlation("p-1") == []
+
+
 async def test_a_lost_chunk_of_a_file_never_sent_from_here_queues_nothing(
     db, outbox, tmp_path
 ):

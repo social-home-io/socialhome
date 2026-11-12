@@ -68,7 +68,7 @@ CHUNK_IDLE_TIMEOUT_S: float = 120.0
 MAX_INFLIGHT_FILE_BYTES: int = 64 * 1024 * 1024
 #: Recipients served at once by one flush pass.
 PARALLEL_RECIPIENTS: int = 6
-#: ``(file, household)`` rows remembered after their send, oldest dropped,
+#: ``(file, household)`` rows remembered from the start of their send, oldest dropped,
 #: so a chunk the mesh reports lost (:meth:`SpaceMediaSyncService
 #: .on_mesh_chunk_lost`) can queue the file again. In memory only: a nack
 #: arrives within the mesh's pending window (minutes) or never.
@@ -257,9 +257,10 @@ class SpaceMediaSyncService:
         over the mesh came back nacked (``SPACE_ROUTE_STALE``: the target
         restarted and cannot open what was sealed to its old key).
 
-        The relay had taken the chunk, so the row was done and deleted; the
-        mesh keeps no copy of a chunk to retransmit. Queue the whole file
-        again — once: the other chunks' nacks find the row already queued,
+        The relay had taken the chunk, so the row was done and deleted (or
+        is still being sent: its later chunks — then ``_send_row`` keeps the
+        row instead of deleting it); the mesh keeps no copy of a chunk to
+        retransmit. Queue the whole file again — once: the other chunks' nacks find the row already queued,
         and a nack for the resend gives up (the receiver asks for the file
         when someone opens it, v_92). Never raises.
         """
@@ -581,6 +582,11 @@ class SpaceMediaSyncService:
             if not result.ok:
                 raise RuntimeError(result.error or "delivery_failed")
 
+        # Marked before the first chunk goes: a nack can arrive while later
+        # chunks are still being sent (the target is back, the route cached).
+        key = (entry.blob_id, entry.target_instance_id)
+        before = self._sent.get(key)
+        self._remember_sent(entry)
         failure = await send_chunks(payloads, _send, window=PIPELINE_WINDOW)
         log.debug(
             "space-media-sync: %s → %s %s after %.1f s",
@@ -599,18 +605,33 @@ class SpaceMediaSyncService:
                 entry.target_instance_id,
                 error,
             )
+            if before is not None and before[1] == _RESEND_QUEUED:
+                # The resend itself failed: its retry is still the resend.
+                self._sent[key] = before
             await self._reschedule_or_fail(entry, str(error) or "chunk send failed")
             return False
+        mark = self._sent.get(key)
+        if mark is not None and mark[1] == _RESEND_QUEUED:
+            # A chunk was reported lost during this very send: the row is
+            # the resend — due now, not deleted.
+            await self._outbox.reschedule(
+                blob_id=entry.blob_id,
+                target_instance_id=entry.target_instance_id,
+                attempts=entry.attempts,
+                next_attempt_at=datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+                last_error="a chunk was lost on the mesh",
+            )
+            self._wake.set()
+            return True
         await self._outbox.delete(
             blob_id=entry.blob_id,
             target_instance_id=entry.target_instance_id,
         )
-        self._remember_sent(entry)
         return True
 
     def _remember_sent(self, entry: SpaceMediaOutboxEntry) -> None:
-        """Keep the sent row for :meth:`on_mesh_chunk_lost`. A row queued
-        again by it stays marked as the resend."""
+        """Keep the row being sent for :meth:`on_mesh_chunk_lost`. A row
+        queued again by it stays marked as the resend."""
         key = (entry.blob_id, entry.target_instance_id)
         previous = self._sent.pop(key, None)
         resend = previous is not None and previous[1] == _RESEND_QUEUED
