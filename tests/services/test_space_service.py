@@ -922,6 +922,12 @@ class _RecordingModerationFederation:
     async def send_decided(self, space, item, **kwargs) -> None:
         return None
 
+    async def check_wire(self, space, item) -> None:
+        return None
+
+    def forget_household(self, space_id, instance_id) -> None:
+        return None
+
     async def display_name(self, space_id, user_id):
         return None
 
