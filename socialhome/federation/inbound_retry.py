@@ -18,7 +18,9 @@ which every transport ends in, and does two things:
   household's events are applied strictly in the order they arrived here —
   always, not only after a failure: a delete never overtakes the create it
   follows, a demotion never lands before the promotion. Later events simply
-  wait on the lock; nothing is queued aside and nothing is dropped.
+  wait on the lock; nothing is queued aside and nothing is dropped. The
+  wait is bounded (:data:`LANE_WAIT_S`): an event whose turn has not come
+  by then runs anyway — see below.
 * **The retry, in place.** A handler that raised one of
   :data:`TRANSIENT_ERRORS` is run again — only it — after
   :data:`RETRY_DELAYS_S`, while the lane is held; then one WARNING. It is
@@ -31,6 +33,15 @@ which every transport ends in, and does two things:
 made from inside a handler (``replay_held``: a parent landed, a seat went
 live) runs in place, without a second lane — the task already holds one, and
 taking another could deadlock two senders against each other.
+
+**Why the wait for a lane is bounded.** Handlers answer their sender in
+place, and over the HTTPS inbox a send waits for the receiver's answer,
+which comes only after ITS dispatch. Two households that handle each
+other's events at the same moment would each hold the lane the other's
+answer needs — neither could finish until a POST timed out. So a turn that
+has not come within :data:`LANE_WAIT_S` is taken anyway (one WARNING): the
+cycle unwinds before the sender's POST gives up, and order is given up only
+for a turn that took longer than every retry does.
 
 In memory on purpose: an event being retried when the process dies is lost,
 as before this existed. Lanes are ordered per sender only: two households'
@@ -50,16 +61,21 @@ from ..domain.federation_retention import SHORT_LIVED
 
 log = logging.getLogger(__name__)
 
-#: Seconds before the 2nd, 3rd and 4th try — a lock is over in seconds.
-RETRY_DELAYS_S: tuple[float, ...] = (1.0, 2.0, 4.0)
+#: Seconds before the 2nd and 3rd try — a lock is over in seconds.
+RETRY_DELAYS_S: tuple[float, ...] = (1.0, 2.0)
 
-#: No try starts later than this after the event's first run began. While a
-#: lane is held its transport waits: the sender's inbox POST (10 s total,
-#: ``HttpsInboxTransport``), a peer's DataChannel read loop, the GFS relay
-#: socket and a mailbox claim (one read loop each, 30 s heartbeat with a
-#: 15 s pong window). 8 s keeps the hold under the shortest of them, slow
-#: handler included.
-RETRY_WINDOW_S: float = 8.0
+#: No try starts later than this after the event's first run began (a
+#: "database is locked" takes the 5 s busy timeout to surface, so the
+#: delays alone do not bound the hold).
+RETRY_WINDOW_S: float = 4.0
+
+#: How long an event waits for its sender's lane before it runs anyway.
+#: Above :data:`RETRY_WINDOW_S`, so a retry is never overtaken; below what
+#: waits on the other side while a lane is held — the sender's inbox POST
+#: (10 s total, ``HttpsInboxTransport``), and the read loops of a peer's
+#: DataChannel, the GFS relay socket and a mailbox claim (30 s heartbeat,
+#: 15 s pong window) — with room left for the handlers to answer.
+LANE_WAIT_S: float = 6.0
 
 #: How long :meth:`InboundRetry.stop` waits for the last tries it set off.
 STOP_WAIT_S: float = 5.0
@@ -149,6 +165,7 @@ class InboundRetry:
         "_gate",
         "_idle",
         "_in_lane",
+        "_lane_wait",
         "_lanes",
         "_retrying",
         "_stop",
@@ -161,10 +178,12 @@ class InboundRetry:
         gate: RetryGate | None = None,
         delays: tuple[float, ...] = RETRY_DELAYS_S,
         window: float = RETRY_WINDOW_S,
+        lane_wait: float = LANE_WAIT_S,
     ) -> None:
         self._gate = gate
         self._delays = delays
         self._window = window
+        self._lane_wait = lane_wait
         self._lanes: dict[str, _Lane] = {}
         #: Tasks running handlers inside a lane (see the module docstring).
         self._in_lane: set[asyncio.Task[object]] = set()
@@ -189,14 +208,28 @@ class InboundRetry:
         if lane is None:
             lane = self._lanes[key] = _Lane()
         lane.users += 1
+        in_turn = False
         try:
-            async with lane.lock:
-                self._in_lane.add(task)
-                try:
-                    await self._apply(event, run)
-                finally:
-                    self._in_lane.discard(task)
+            try:
+                await asyncio.wait_for(lane.lock.acquire(), timeout=self._lane_wait)
+                in_turn = True
+            except TimeoutError:
+                # Never dropped, never left waiting: see the module docstring.
+                log.warning(
+                    "%s from %s: its turn did not come within %ss — applied"
+                    " out of turn",
+                    event.event_type,
+                    key,
+                    self._lane_wait,
+                )
+            self._in_lane.add(task)
+            try:
+                await self._apply(event, run)
+            finally:
+                self._in_lane.discard(task)
         finally:
+            if in_turn:
+                lane.lock.release()
             lane.users -= 1
             if lane.users == 0:
                 del self._lanes[key]

@@ -998,16 +998,21 @@ and failure itself (`federation/inbound_retry.py`, behind
   failures are retried — `sqlite3.OperationalError` (database locked /
   busy) and `OSError` (I/O, timeouts). A refusal, a malformed payload, a
   `RuntimeError` or a bug fails the same way again and is logged and
-  dropped as before. Only the handlers that failed run again, after 1 s,
-  2 s and 4 s (four tries in all); then one WARNING.
-- **The hold is bounded in time:** no try starts later than 8 s after the
-  event's first run began. That is below what waits on the other side —
-  the sender's inbox POST (10 s), and the read loops of a DataChannel, the
-  GFS relay socket and a mailbox claim (30 s heartbeat, 15 s pong window).
-  If a sender's POST times out anyway, the event is still applied once:
-  the handler is not cancelled, and the outbox's re-send (same `msg_id`)
-  is answered `410` "replay", which the outbox takes as "the receiver has
-  it" and drops the row.
+  dropped as before. Only the handlers that failed run again, after 1 s
+  and 2 s (three tries in all); then one WARNING.
+- **Both waits are bounded.** No try starts later than 4 s after the
+  event's first run began, and an event waits at most 6 s for its lane —
+  then it runs anyway, with one WARNING ("applied out of turn"). Both are
+  below what waits on the other side: the sender's inbox POST (10 s), and
+  the read loops of a DataChannel, the GFS relay socket and a mailbox
+  claim (30 s heartbeat, 15 s pong window). The lane wait must be bounded:
+  handlers answer their sender in place, and an inbox POST is answered
+  only after the receiver's dispatch, so two households handling each
+  other's events at the same moment would each hold the lane the other's
+  answer needs until a POST timed out. If a sender's POST times out
+  anyway, the event is still applied once: the handler is not cancelled,
+  and the outbox's re-send (same `msg_id`) is answered `410` "replay",
+  which the outbox takes as "the receiver has it" and drops the row.
 - **The gate runs again before every later try** — the sender is still a
   peer (not unpaired meanwhile; its own `UNPAIR` and a routed origin are
   exempt), and the post-decrypt gates (ban, deprovisioned author, archived
@@ -1020,12 +1025,15 @@ and failure itself (`federation/inbound_retry.py`, behind
 - **Shutdown:** the waits end, each event being retried gets one last try
   (a handler is never cut mid-write), the lanes are released.
 
-Two limits are accepted:
+Three limits are accepted:
 
 - **Order is per sender, not across senders.** Two households' events
   about the same thing are not ordered against each other: a delete the
   host relays can pass the author's own create while that create is being
   retried.
+- **A turn longer than 6 s is overtaken** (see above) — longer than every
+  retry, so only a handler stuck on something else, or two households
+  answering each other over HTTPS at the same moment.
 - **A restart loses an event that is being retried** (it lives in the
   handler's own task) — as it was lost before this existed. Space content
   then comes back with the next sync.

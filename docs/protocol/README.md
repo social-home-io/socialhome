@@ -89,12 +89,15 @@ mesh-routed inner event), so one household's events are applied in the
 order they arrived. The replay step has stored the `msg_id` by the time a
 handler runs, so the sender cannot deliver the envelope again: a handler
 failure that can pass (database locked, I/O error) is retried by the
-receiver itself, in place — the failed handlers, up to three more times
-within 8 s, behind the post-decrypt gates (`federation/inbound_retry.py`).
+receiver itself, in place — the failed handlers, up to two more times
+within 4 s, behind the post-decrypt gates (`federation/inbound_retry.py`).
 Nothing changes on the wire, and a replayed envelope is refused as before.
-Two accepted limits: order holds per sender, not across senders (a
+Accepted limits: order holds per sender, not across senders (a
 host-relayed delete can pass the author's own create while it is being
-retried), and a restart loses an event that is being retried. Details:
+retried); an event whose turn has not come within 6 s runs anyway (two
+households answering each other over HTTPS would otherwise wait on each
+other until a POST timed out); and a restart loses an event that is being
+retried. Details:
 [architecture → Inbound order and handler retry](../architecture.md#inbound-order-and-handler-retry).
 
 The signature step **also binds `from_instance` to the verified signing

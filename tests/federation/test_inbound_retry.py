@@ -20,6 +20,7 @@ from socialhome.domain.federation_retention import SHORT_LIVED
 from socialhome.domain.space import SpacePermissionError
 from socialhome.federation.event_dispatch_registry import EventDispatchRegistry
 from socialhome.federation.inbound_retry import (
+    LANE_WAIT_S,
     NEVER_RETRIED,
     RETRY_DELAYS_S,
     RETRY_WINDOW_S,
@@ -164,13 +165,13 @@ async def test_a_refusal_on_a_later_try_ends_the_tries(caplog):
 
 async def test_a_poison_event_stops_after_the_last_try_with_one_warning(caplog):
     handler = _Flaky(fail=99)
-    registry, retry = _registry(handler=handler)
+    registry, retry = _registry(handler=handler, delays=FAST[: len(RETRY_DELAYS_S)])
     with caplog.at_level(logging.WARNING):
         await registry.dispatch(_event())
-    assert handler.calls == 1 + len(RETRY_DELAYS_S) == 4
+    assert handler.calls == 1 + len(RETRY_DELAYS_S) == 3
     assert handler.applied == []
     [warning] = _warnings(caplog)
-    assert "after 4 tries" in warning.getMessage()
+    assert "after 3 tries" in warning.getMessage()
     assert warning.exc_info is not None
     assert len(retry) == 0
 
@@ -178,11 +179,12 @@ async def test_a_poison_event_stops_after_the_last_try_with_one_warning(caplog):
 async def test_no_try_starts_after_the_window():
     """The hold is bounded in time, whatever the handler does: slower than
     every sender-side timeout would turn a retry into a transport fault."""
-    assert sum(RETRY_DELAYS_S) < RETRY_WINDOW_S < HttpsInboxTransport(None)._timeout_s
+    post_timeout = HttpsInboxTransport(None)._timeout_s
+    assert sum(RETRY_DELAYS_S) < RETRY_WINDOW_S < LANE_WAIT_S < post_timeout
     handler = _Flaky(fail=99)
     registry, _ = _registry(handler=handler, delays=(0.02, 0.02, 0.02), window=0.05)
     await registry.dispatch(_event())
-    assert handler.calls == 3  # the 4th would start past the window
+    assert handler.calls == 3  # a 4th would start past the window
 
 
 async def test_only_the_handler_that_failed_runs_again():
@@ -364,6 +366,68 @@ async def test_nothing_waiting_is_ever_dropped():
     assert len(retry) == 1  # one lane, however many wait on it
     await asyncio.gather(*tasks)
     assert state.applied == [str(i) for i in range(200)]
+    assert len(retry) == 0
+
+
+async def test_two_households_answering_each_other_do_not_lock_each_other(caplog):
+    """Each handles the other's event with a handler that POSTs back and
+    waits for the 200 — which the other's inbox gives only after its own
+    dispatch, in the lane the first one holds. Unbounded, neither finishes
+    until a POST times out; bounded, the turn is taken anyway."""
+    regs = {
+        name: _registry(POST, handler=None, lane_wait=0.05)[0] for name in ("a", "b")
+    }
+    both_in = asyncio.Barrier(2)
+    answered: list[str] = []
+
+    def wire(me: str, peer: str) -> None:
+        async def on_post(event):  # answer the sender in place
+            await both_in.wait()
+            await regs[peer].dispatch(_event(DM, sender=me))
+
+        async def on_answer(event):
+            answered.append(f"{event.from_instance}->{me}")
+
+        regs[me]._handlers[POST] = [on_post]
+        regs[me].register(DM, on_answer)
+
+    wire("a", "b")
+    wire("b", "a")
+    with caplog.at_level(logging.WARNING, logger=RETRY_LOG):
+        await asyncio.wait_for(
+            asyncio.gather(
+                regs["a"].dispatch(_event(POST, sender="b")),
+                regs["b"].dispatch(_event(POST, sender="a")),
+            ),
+            timeout=2.0,
+        )
+    assert sorted(answered) == ["a->b", "b->a"]
+    assert all("out of turn" in r.getMessage() for r in _warnings(caplog))
+    assert len(_warnings(caplog)) == 2
+
+
+async def test_an_event_whose_turn_does_not_come_runs_anyway_with_one_warning(caplog):
+    """A handler stuck far longer than any retry: the next event is not
+    dropped and not left waiting for ever."""
+    stuck = asyncio.Event()
+    applied: list[str] = []
+
+    async def handler(event):
+        if event.payload["v"] == "stuck":
+            await stuck.wait()
+        applied.append(event.payload["v"])
+
+    registry, retry = _registry(handler=handler, lane_wait=0.03)
+    first = asyncio.create_task(registry.dispatch(_event(payload={"v": "stuck"})))
+    await _yield()
+    with caplog.at_level(logging.WARNING, logger=RETRY_LOG):
+        await registry.dispatch(_event(payload={"v": "next"}))
+    assert applied == ["next"]
+    [warning] = _warnings(caplog)
+    assert "out of turn" in warning.getMessage()
+    stuck.set()
+    await first
+    assert applied == ["next", "stuck"]
     assert len(retry) == 0
 
 
