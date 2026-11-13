@@ -975,6 +975,34 @@ Mutating HTTP routes accept an `Idempotency-Key` header; the
 `(user_id, key)`. Combined with the replay cache, this means
 both API callers and federation peers can retry safely.
 
+### Inbound handler retry
+
+An envelope's `msg_id` is stored in the replay cache *before* its handlers
+run, so the sender cannot deliver it again (and on the DataChannel, the GFS
+relay, a GFS mailbox and the mesh it gets no answer at all). A handler
+that then fails on a busy or locked database (`sqlite3.OperationalError`
+with SQLite's result code `SQLITE_BUSY` / `SQLITE_LOCKED`; the failing
+write did not commit) is run **once more, in place**, 1 s after the failure, after
+the receiver checked again that the sender is still a peer and that the
+post-decrypt gates (ban, deprovisioned author, archived space, writer
+seat) still pass (`federation/inbound_retry.py`, called by
+`EventDispatchRegistry.dispatch`). The replay cache is not touched. Call
+negotiation, typing, RTC signalling, the sync streams and the
+`SPACE_ROUTED` wrapper are never retried. Every handler failure that is
+final is one ERROR record naming the handler, the event type, the sending
+household and the exception class, with its traceback — the message never
+carries the payload.
+
+Limits: the whole handler runs again, so the writes it made before the
+failing one are repeated — handlers must be idempotent up to it (the ones
+checked return early on a duplicate, or upsert); any other failure (handler
+I/O, a timeout, a bug) is not retried — the handler may already have
+written something; a later event of the same
+sender arriving on another connection (a second HTTPS POST, another
+transport) can be applied before a retried one; an event waiting for its
+second try when the process restarts is lost. The space sync remains the
+heal for space content.
+
 ### Reconnect queue
 
 When a peer flips from `unreachable` → `confirmed`, the
