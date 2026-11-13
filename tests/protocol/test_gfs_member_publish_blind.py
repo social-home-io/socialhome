@@ -509,8 +509,10 @@ async def test_an_author_profile_reaches_the_gfs_with_no_name_bio_or_picture(
         ),
         ("the GFS logs", caplog.text),
     ):
+        # Needles are long enough not to turn up in random base64 by chance
+        # ("Noor" alone did, about once in a few hundred runs).
         for leak in (
-            "Noor",
+            "Noor Haddad",
             "Haddad",
             "Beekeeper",
             "author_profile",
