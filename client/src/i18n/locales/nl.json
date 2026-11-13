@@ -2686,6 +2686,7 @@
   "capability.space_media_wanted": "Oudere space-foto's ophalen als je ze opent",
   "capability.space_post_reactions": "Reacties op space-berichten voor elk huishouden",
   "capability.poll_vote_stamps": "Stemmen in peilingen tellen in elk huishouden gelijk",
+  "capability.relay_event_frames": "Grote pagina's via een GFS",
   "settings.tab.security": "Beveiliging",
   "settings.security.signing_in": "Inloggen",
   "settings.security.signing_in_hint": "Alleen jij gebruikt dit. Niemand anders ziet je inlognaam.",

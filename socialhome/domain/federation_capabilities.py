@@ -1560,14 +1560,14 @@ from __future__ import annotations
 #:   event of the seat vocabulary (``SPACE_SESSION_ALLOWED_EVENT_TYPES``)
 #:   and runs the full §24.11 step list on its real payload (this replaces
 #:   the one-event entry of the unreleased #1359). An event no frame can
-#:   carry (payload over ~520 KiB) is refused at the sender. The GFS
+#:   carry (payload over ~527 KiB) is refused at the sender. The GFS
 #:   learns what it learned of a picture chunk: a recipient and a size
 #:   bucket. **Fallback**: to a peer below v_95, or through a GFS without
 #:   ``envelope_media``, a large event is refused at the sender as before
 #:   (WARNING, never queued); a local submission that could not reach the
 #:   space's host that way is refused with 413 before it is stored. Not
 #:   space-scoped, no sync-stream change (no sync line). Labelled "Large
-#:   pages and posts reach households behind a GFS".
+#:   pages reach households behind a GFS".
 OURS: int = 95
 
 
@@ -2633,7 +2633,7 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
     ),
     (
         FederationCapability.MIN_FOR_RELAY_EVENT_FRAMES,
-        "Large pages and posts reach households behind a GFS",
+        "Large pages reach households behind a GFS",
     ),
 ]
 

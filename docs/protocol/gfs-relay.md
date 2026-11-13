@@ -418,6 +418,126 @@ household (the sender waits out each 429). That is why live pictures stay on
 the cache (one upload per GFS, not per member) and the relay carries only
 what the cache cannot.
 
+## Large events in a binary frame (v_95)
+
+Owner decision 2026-11-13: **a household behind a GFS keeps size parity
+with local federation.** No limit is shrunk to fit the small JSON relay
+envelope; a large item rides the existing big path.
+
+**The rule (one, for every space event).** When the sealed §24.11
+envelope of an outbound event does not fit a JSON envelope on the relay
+(`relay_envelope_fits`: ~191 KiB, the top padding bucket) and the target
+is reached only through a GFS (`space_session`: a relay seat or a
+mailbox), the event goes as **one binary relay frame** — the v_87 frame
+above, no new wire shape and no new event type:
+
+- the header is the same signed envelope (same `event_type`, `msg_id`,
+  `space_id`, `sig_suite`, session-key encryption); its sealed metadata
+  holds only what binds the bytes — `chunk_sha256`, `media_aead_suite`,
+  `media_frame_suite` (every suite tag the frame already carried);
+- the frame's bytes are the event's **payload JSON**, AES-256-GCM-sealed
+  under the directional session key, raw (no base64);
+- the whole is sealed to the recipient (its mailbox's `kem_pk`, else its
+  key-wrap key) and padded to a size bucket, exactly as a media chunk.
+
+It applies in every direction a seat sends — host → member, member →
+host, member ↔ member mailboxes — live (`FederationService.send_event`)
+and from the outbox (a throttled or failed frame is queued and re-sent as
+a frame under the same `msg_id`, so a retry is one message to the
+receiver's replay cache), and to a §25.6 `SPACE_SYNC_CHUNK`, so a
+catch-up carries the same large record
+([sync.md](./sync.md), *One record, one chunk*). One place decides:
+`FederationService.relay_event_frame`.
+
+**Multi-recipient sends (v_91).** A large event is not grouped: a multi
+frame is a JSON upload (`ENVELOPE_MULTI_MAX_CIPHERTEXT_CHARS`, 256 KiB)
+and the binary frame is sealed to ONE recipient. Building the multi frame
+fails on size, the payload is ungrouped and each seat gets its own frame.
+A binary multi frame would be a new wire shape and a new GFS route for a
+rare event — not worth it.
+
+**Receive.** The relay media pipeline's event-type gate takes a media
+chunk or any event of the vocabulary a seat may send at all
+(`RELAY_FRAME_EVENT_TYPES` = the media chunks +
+`SPACE_SESSION_ALLOWED_EVENT_TYPES`; this replaced the single
+moderation entry of the unreleased #1359). Straight after the header's
+decrypt, one extra step (`_open_framed_event`) opens the bytes (suites,
+AEAD, the signed `chunk_sha256`), requires a JSON object and makes it the
+event's payload. Every later step then judges the **real payload**, as
+for a JSON envelope: idempotency, ban (the payload's own `space_id`
+too), replay persist, deprovisioned author, archived space, space writer
+(follower seats, the seat buffer) — and before it peer class, mailbox
+sender card, relay opt-in, timestamp, signature, unpair tombstone and
+replay. The handler gets an ordinary event (`media_bytes` unset). The
+inbox's binary route and the `fed-media-v1` channel are unchanged.
+
+**Bounds.** One frame carries a media body of at most 540,570 bytes
+(`RELAY_MEDIA_MAX_MEDIA_BODY_BYTES`): the payload JSON may be about
+**527 KiB** (measured; the signed header takes under 1 KiB, a few
+KiB more with a hybrid signature). What fits, with the sender's own caps:
+
+| Event | Largest payload | Fits one frame |
+|---|---|---|
+| `SPACE_MODERATION_SUBMITTED` | 256 KiB item cap + ~2 KiB | yes |
+| `SPACE_PAGE_*`, page proposals | the content as JSON text (+ conflict sides); a 256 KiB page is ~260 KiB | yes, up to ~500 KiB of content |
+| `SPACE_SYNC_CHUNK` with one large record | record × 4/3 (encrypted, base64) — a 256 KiB page ≈ 345 KiB | yes up to ~390 KiB of record |
+| `SPACE_CONFIG_CHANGED` with cover + icon | ~430 KiB | yes |
+| posts, comments, bazaar, tasks, polls, timetables, app tables, directory parts | ≤ ~175 KiB | yes (most fit the JSON envelope) |
+
+What can exceed one frame, because the product has no cap on it (only
+the 1 MiB request body): a page over ~500 KiB of content (~390 KiB for
+its sync record), a calendar event description or a space description
+of that size, and a `SPACE_ROSTER_SNAPSHOT` of a space with more than
+about a thousand members. Those are **refused at the sender**
+(`relay_too_large`, a WARNING naming the household, the event and the
+size; never queued, never silently dropped) toward a household behind a
+GFS, and still reach paired and mesh members. Carrying them needs the
+event split over several frames — an open follow-up, not a smaller limit.
+
+**Versioning.** Sent only to a peer at v_95
+(`MIN_FOR_RELAY_EVENT_FRAMES`) through a GFS proving `envelope_media`
+(the mailbox's GFS, else the seat's `relay_via`). Otherwise the behaviour
+before v_95: the JSON relay leg refuses the envelope (WARNING, permanent,
+nothing queued). A local moderation submission that could not reach the
+space's host that way answers **413** before anything is stored
+(`check_reaches_host`); with a v_95 host it is taken.
+
+**What the GFS sees — unchanged.** A recipient id (a mailbox id or an
+instance id), a time and a size bucket (64 / 128 / 256 / 516 KiB or the
+cap): what it saw of a picture chunk. It cannot tell a large event from
+a chunk, and learns no sender, event type or space. No GFS change, no
+new capability.
+
+**The GFS media queue (16 MiB per recipient, 1 h).** Event frames share
+it with pictures; there is no separate budget. A frame to an online
+household is pushed at once and never queued. For an offline one, 16 MiB
+is ~30 top-bucket frames: a burst of large events past that, or older
+than an hour, is dropped by the GFS after its 202 — exactly what happens
+to picture chunks. The sender cannot see it (the 202 is uniform). The
+household heals on its next §25.6 sync with the host (within 30 minutes
+of reconnecting, at once on a join), which now carries large records;
+pictures heal through `SPACE_MEDIA_WANTED`. A pending moderation item is
+additionally re-sent on the reviewer household's echo
+([moderation.md](./moderation.md#re-delivery-and-catch-up)). A separate
+budget would only move the tail-drop; the sync is the repair.
+
+**Cost.** One large event to N households behind a GFS = N frames of one
+bucket each: a 240 KiB page is N × 256 KiB up (N × 516 KiB once the
+payload passes 256 KiB). Worst realistic case, a global space with 10,000 GFS-reached
+member households and a 256 KiB page edit: ~5 GiB of uploads from the
+editing household for one save — the same order as the N × ~340 KiB of
+JSON envelopes the same edit costs toward N paired households, and
+bounded by the relay's per-IP byte budget (64 MiB / min per node), so
+it drains from the outbox over time rather than in a burst. Followers
+are not members and get no page events. A sync chunk goes to the one
+requester.
+
+Not covered: a paired peer on the opt-in relay fallback (its inbox is
+its big path; a large event waits for it in the outbox), and a directory
+seat with no reachable mailbox, which goes through the host hop — the
+host hop sends its `SPACE_ROUTED` wrapper with `send_event`, so the rule
+applies to each hop, but that path is not exercised by a test yet.
+
 ## Anonymous mailboxes (GFS redesign PR 1)
 
 Every relay above addresses a household by its **instance id**, so the GFS

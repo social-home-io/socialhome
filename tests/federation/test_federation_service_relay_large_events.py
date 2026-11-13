@@ -18,6 +18,7 @@ import dataclasses
 import logging
 import os
 from collections import deque
+from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
@@ -61,6 +62,7 @@ from socialhome.federation.media_envelope import (
 )
 from socialhome.federation.transport import FederationTransport
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.outbox_processor import OutboxProcessor
 from socialhome.services.gfs_relay_inbound import GfsRelayInbound
 from tests.federation.test_federation_service import (
     InMemoryFederationRepo,
@@ -624,3 +626,56 @@ async def test_queued_results_keep_their_error_for_small_events():
     w.gfs.send_sealed_envelope = _down  # type: ignore[method-assign]
     result = await w.send(w.host, w.member, PAGE, _page(4))
     assert result.error == DELIVERY_ERROR_QUEUED
+
+
+# ── v_91: a large event is not grouped — one frame per recipient ──────────
+
+
+async def test_a_large_broadcast_to_mailbox_seats_goes_per_recipient_by_frame():
+    """Two mailbox seats behind one GFS that takes multi-recipient uploads:
+    a small event is ONE upload for both; a large one cannot ride that JSON
+    upload, is ungrouped and reaches each seat as its own binary frame."""
+    gfs = _Gfs()
+    uploads: list = []
+
+    async def _multi_connection(gfs_url):
+        return object()
+
+    async def _send_to_mailboxes(*, entries, gfs_url, body):
+        uploads.append(entries)
+        return 202
+
+    gfs.multi_connection = _multi_connection  # type: ignore[method-assign]
+    gfs.multi_max_recipients = lambda conn: 500  # type: ignore[method-assign]
+    gfs.send_to_mailboxes = _send_to_mailboxes  # type: ignore[attr-defined]
+    host, one, two = _House(gfs), _House(gfs), _House(gfs)
+    for member in (one, two):
+        session = os.urandom(32)
+        host.seat(member, session, mailbox=True, version=OURS)
+        member.seat(host, session, mailbox=True, version=OURS)
+
+    async def _single(entry):
+        return await _redeliver_envelope(host.svc, host.repo, entry)
+
+    async def _drain() -> None:
+        repo = MagicMock()
+        repo.list_due = AsyncMock(return_value=host.outbox.entries())
+        repo.mark_delivered = AsyncMock()
+        repo.mark_failed = AsyncMock()
+        repo.reschedule = AsyncMock()
+        await OutboxProcessor(repo, _single, multi=host.svc).drain_once()
+
+    page = _page()
+    result = await host.svc.broadcast_to_space_members(SPACE, PAGE, page)
+    assert {r.error for r in result.results} == {DELIVERY_ERROR_QUEUED}
+    await _drain()  # the multi frame cannot be built: ungrouped
+    await _drain()  # each row on its own
+    assert uploads == []
+    assert sorted(to for kind, to, _wire in gfs.seen if kind == "media") == sorted(
+        m.mailbox.mailbox_id for m in (one, two)
+    )
+    assert [kind for kind, _to, _wire in gfs.seen] == ["media", "media"]
+    await gfs.deliver()
+    for member in (one, two):
+        [event] = member.received
+        assert event.payload == page

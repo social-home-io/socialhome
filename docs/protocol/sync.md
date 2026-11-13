@@ -596,6 +596,22 @@ is sized to ≤ ~150 KB typical (user and option ids are 32 chars):
 | `posts.reaction_stamps` | ~85 B (≤ ~205 B with a 32-char emoji) | 1024 (the repo keeps up to 4096 per post — ~350 KB, ~840 KB worst, too big for a record) | ≤ ~90 KB, ≤ ~210 KB worst |
 | `bazaar.bids` | ~150 B + the message (≤ 280 chars) | 200 | ≤ ~90 KB, ≤ ~260 KB with every message full |
 
+**A requester behind a GFS (v_95).** Its chunks ride
+`SPACE_SYNC_CHUNK` events over the GFS relay, whose JSON envelope takes
+~191 KiB — less than one large record (a 240 KiB page is a ~437 KiB
+envelope, refused before v_95, so the stream was abandoned after three
+strikes and the page never arrived). The chunk is not re-sized: the
+transport sends any event too large for the JSON envelope as one binary
+relay frame (528 KiB, the event's payload as its bytes —
+[gfs-relay.md](./gfs-relay.md#large-events-in-a-binary-frame-v_95)), so
+the tightest hop for a record is about the same on every path: a chunk
+payload of ~527 KiB, i.e. a record of ~390 KiB before the chunk's own
+encryption and base64. A record past that (a page with
+more content than that; pages have no size cap) is refused at the
+provider with a WARNING and counts a strike, as before. A requester
+below v_95, or a GFS without `envelope_media`, keeps the pre-v_95
+behaviour. The stream's records are unchanged — no sync line.
+
 A cut list is marked (`votes_partial`, `responses_partial`,
 `rsvps_partial`) and the receiver then deletes nothing it could not see; a
 cut stamp map loses only stamps older than the 1024 newest, which the

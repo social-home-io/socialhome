@@ -2713,6 +2713,7 @@
   "capability.space_media_wanted": "Fotos antiguas de espacios al abrirlas",
   "capability.space_post_reactions": "Reacciones a publicaciones de espacios para todos los hogares",
   "capability.poll_vote_stamps": "Votos de encuestas que cuentan igual en todos los hogares",
+  "capability.relay_event_frames": "Páginas grandes por un GFS",
   "settings.tab.security": "Seguridad",
   "settings.security.signing_in": "Inicio de sesión",
   "settings.security.signing_in_hint": "Solo lo usas tú. Nadie más ve tu usuario de acceso.",
