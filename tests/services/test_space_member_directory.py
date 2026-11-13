@@ -2159,29 +2159,41 @@ async def test_the_owners_directory_never_drops_a_card_the_household_gave_us():
     m = _hh()
     a.member(m)
     a.writers.writers[SPACE] = {m["id"], owner["id"]}
+    now = [1_800_000_000.0]
+    a.dir._wall_clock = lambda: now[0]
     card_m = _card(m)
     await a.card_from(m, card_m)
-    a.fed.cards.clear()
+
+    def passed_on() -> int:
+        return len([c for c in a.fed.cards if c["payload"].get("forwarded")])
+
+    assert passed_on() == 1
     # The owner's whole directory does not list m (it never got the card
-    # we passed on): m stays here, and its card is passed on again.
+    # we passed on): m stays here.
     await a.directory(
         {"cards": [], "members": [], "snapshot": True, "part": 0, "parts": 1}
     )
     assert a.spaces.doc(SPACE, m["id"])["card"] == card_m.to_wire()
     await a.dir.sweep_once()
-    assert len([c for c in a.fed.cards if c["payload"].get("forwarded")]) == 1
-    # Once the owner lists it, nothing more goes.
-    a.fed.cards.clear()
-    await a.directory(
-        {
-            "cards": [card_m.to_wire()],
-            "members": [m["id"]],
-            "snapshot": True,
-            "part": 0,
-            "parts": 1,
-        }
-    )
+    assert passed_on() == 1  # not at every sweep
+    # Still unlisted hours later: passed on again (a lost frame, an owner
+    # that was too old then).
+    now[0] += smd.FORWARD_RETRY_S
     await a.dir.sweep_once()
+    assert passed_on() == 2
+    # Once the owner lists it, nothing more goes.
+    await a.directory({"cards": [card_m.to_wire()]})
+    now[0] += smd.FORWARD_RETRY_S
+    await a.dir.sweep_once()
+    assert passed_on() == 2
+
+
+async def test_a_card_of_a_household_without_a_writer_seat_is_not_passed_on():
+    a, owner = _admin_world()
+    m = _hh()
+    a.member(m)
+    a.writers.writers[SPACE] = {owner["id"]}  # m only follows
+    await a.card_from(m, _card(m))
     assert [c for c in a.fed.cards if c["payload"].get("forwarded")] == []
 
 
