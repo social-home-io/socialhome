@@ -653,3 +653,34 @@ async def test_a_household_promoted_later_gets_the_pending_reports(mesh):
         )
     )
     assert not OUTBOX.get(mesh["C"].iid)
+
+
+async def _mesh_only(on: House, peer: House, version: int = 71) -> None:
+    """``on`` reaches ``peer`` only over the mesh: no pairing row, just the
+    version ``peer`` claimed as a member of the space."""
+    await on.db.enqueue("DELETE FROM remote_instances WHERE id=?", (peer.iid,))
+    await on.db.enqueue(
+        "UPDATE space_instances SET proto_version=? WHERE instance_id=?",
+        (version, peer.iid),
+    )
+
+
+async def test_a_mesh_only_reviewer_household_gets_reports_and_answers(mesh):
+    """A reviewer household — or a reporter's — reached only over the mesh
+    is judged by the version it claimed as a space member, not by a pairing
+    row it does not have. (The real version checks run here.)"""
+    a, h, c = mesh["A"], mesh["H"], mesh["C"]
+    await _at_v71(mesh)
+    for house in (a, h):
+        await _mesh_only(house, c)
+    await _mesh_only(h, a)
+    # The first fan-out reaches the mesh-only moderator household…
+    await _file(a, target_type="post", target_id="p-1")
+    assert {to for to, *_ in _sent(a, FET.SPACE_REPORT)} == {h.iid, c.iid}
+    await _pump(mesh)
+    assert [r["reporter_instance_id"] for r in await _rows(c)] == [a.iid]
+    # …so does the host's re-delivery…
+    assert await h.app[report_service_key].resend_pending(SID, c.iid) == 1
+    # …and the host's "reviewed" reaches the mesh-only reporter household.
+    await _resolve_on(h, dismissed=True)
+    assert [to for to, *_ in _sent(h, FET.SPACE_REPORT_ANSWERED)] == [a.iid]

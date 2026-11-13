@@ -233,6 +233,7 @@ class SpaceModerationFederation(FileHashesMixin):
         "_own_seed",
         "_page_media",
         "_resent",
+        "_seat_stamps",
         "_seats",
         "_spaces",
         "_users",
@@ -254,6 +255,9 @@ class SpaceModerationFederation(FileHashesMixin):
         #: (space, household) → {item or decision key: when the host last
         #: re-sent it there} (:data:`RESEND_SAME_INTERVAL_S`).
         self._resent: dict[tuple[str, str], dict[str, float]] = {}
+        #: (space, household) → its reviewer seats as last seen on a BEGIN
+        #: (:func:`_reviewer_stamp`): a different one starts over.
+        self._seat_stamps: dict[tuple[str, str], tuple] = {}
         self._federation = federation_service
         self._spaces = space_repo
         self._seats = remote_member_repo
@@ -358,9 +362,10 @@ class SpaceModerationFederation(FileHashesMixin):
         targets: list[str],
         *,
         submitter_instance_id: str | None = None,
-    ) -> None:
+    ) -> list[str]:
         """One targeted, sealed send per reviewer household — never a
         broadcast — and the item's media to those households only.
+        Returns the households the transport took it for.
 
         ``submitter_instance_id`` is set by the host re-sending an item it
         holds to a reviewer household that lacks it (:meth:`on_sync_begin`):
@@ -380,6 +385,7 @@ class SpaceModerationFederation(FileHashesMixin):
             if item.feature != "pages" and relay is None
             else payload
         )
+        reached: list[str] = []
         for iid in targets:
             result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=iid,
@@ -395,7 +401,9 @@ class SpaceModerationFederation(FileHashesMixin):
                 ),
                 space_id=space.id,
             )
-            if not result.ok:
+            if result.ok:
+                reached.append(iid)
+            else:
                 log.warning(
                     "moderation: item %s did not reach reviewer household %s (%s)",
                     item.id,
@@ -403,6 +411,7 @@ class SpaceModerationFederation(FileHashesMixin):
                     result.error,
                 )
         await self._send_media(space, item, targets)
+        return reached
 
     async def _wire(
         self, space: Space, item: SpaceModerationItem
@@ -545,7 +554,9 @@ class SpaceModerationFederation(FileHashesMixin):
         decided_by: str,
         reason: str | None,
         decided_at: datetime,
-    ) -> None:
+    ) -> list[str]:
+        """Returns the households the transport took it for."""
+        reached: list[str] = []
         payload: dict = {
             "space_id": space.id,
             "item_id": item.id,
@@ -566,13 +577,16 @@ class SpaceModerationFederation(FileHashesMixin):
                 payload=payload,
                 space_id=space.id,
             )
-            if not result.ok:
+            if result.ok:
+                reached.append(iid)
+            else:
                 log.warning(
                     "moderation: decision on item %s did not reach %s (%s)",
                     item.id,
                     iid,
                     result.error,
                 )
+        return reached
 
     async def send_release_request(
         self, space: Space, item: SpaceModerationItem, *, decided_by: str
@@ -672,6 +686,7 @@ class SpaceModerationFederation(FileHashesMixin):
         purged while it did not review is sent again)."""
         self._caught_up_at.pop((space_id, instance_id), None)
         self._resent.pop((space_id, instance_id), None)
+        self._seat_stamps.pop((space_id, instance_id), None)
 
     async def on_sync_begin(self, event: FederationEvent) -> None:
         """Host side of the catch-up: a reviewer household's §25.6 BEGIN
@@ -709,13 +724,24 @@ class SpaceModerationFederation(FileHashesMixin):
         if space is None or space.dissolved or space.owner_instance_id != self._own:
             return
         # Pending content goes to a household that reviews, and nowhere else.
-        if sender not in await self._seats.list_instances_with_roles(
-            space_id, REVIEWER_SEATS
-        ):
+        stamp = _reviewer_stamp(
+            await self._seats.list_for_instance(
+                space_id, sender, include_tombstoned=False
+            )
+        )
+        if not stamp:
+            self.forget_household(space_id, sender)
             return
+        if self._seat_stamps.get(key, stamp) != stamp:
+            # Its reviewer seats are not the ones last answered — somebody
+            # left and was seated again, with or without a role change:
+            # what was sent before may be gone there, so start over.
+            self._resent.pop(key, None)
+        self._seat_stamps[key] = stamp
         held, rejections = states
         rows = await self._open_rows(space_id)
         resent = self._resent.setdefault(key, {})
+        heard = False
         # Forget what is no longer open here, so the memory stays bounded.
         open_ids = {i.id for i in rows}
         for stale in [k for k in resent if k.removeprefix("d:") not in open_ids]:
@@ -732,6 +758,7 @@ class SpaceModerationFederation(FileHashesMixin):
                 if state == ECHO_REJECTED:
                     # Rejected there by its own people, and we never heard:
                     # the echo is that decision (checked like one).
+                    heard = True
                     await self._on_decided(
                         replace(
                             event,
@@ -765,21 +792,25 @@ class SpaceModerationFederation(FileHashesMixin):
                 and await self._decision_stands(space, item)
             ):
                 decided.append(item)
-        if not (missing or decided):
+        if not (missing or decided or heard):
             return
+        # Spent by anything the echo made us do — an echoed rejection too,
+        # so its checks do not run again on every BEGIN that still names it.
         self._caught_up_at[key] = now
         sent = size = 0
         for item, origin in missing:
             size += len(dump_json(item.payload).encode())
             if sent and size > CATCH_UP_MAX_BYTES:
                 break
-            await self.send_submitted(
+            # Marked only when it got out: a send the transport refused is
+            # tried again on the next answer.
+            if await self.send_submitted(
                 space, item, [sender], submitter_instance_id=origin
-            )
-            resent[item.id] = now
+            ):
+                resent[item.id] = now
             sent += 1
         for verdict in decided:
-            await self._send_decision(
+            if await self._send_decision(
                 space,
                 verdict,
                 [sender],
@@ -787,8 +818,8 @@ class SpaceModerationFederation(FileHashesMixin):
                 decided_by=verdict.reviewed_by or "",
                 reason=verdict.rejection_reason,
                 decided_at=verdict.reviewed_at or datetime.now(UTC),
-            )
-            resent[f"d:{verdict.id}"] = now
+            ):
+                resent[f"d:{verdict.id}"] = now
         log.info(
             "moderation: caught %s up on space %s — %d of %d missing item(s), "
             "%d decision(s)",
@@ -1198,6 +1229,20 @@ def _reviewable(space: Space, item: SpaceModerationItem) -> bool:
         level is SpaceFeatureAccess.MODERATED
         and not space.archived
         and feature_on(space, item.feature, item.payload or {})
+    )
+
+
+def _reviewer_stamp(seats: list) -> tuple:
+    """The live admin / moderator seats of one household in one space, as
+    a comparable value: who, in which role, at which roster version (a
+    removal and a re-seat each advance ``member_version``). Empty: the
+    household does not review."""
+    return tuple(
+        sorted(
+            (s.user_id, s.role, s.member_version)
+            for s in seats
+            if s.role in REVIEWER_SEATS and not s.tombstoned
+        )
     )
 
 

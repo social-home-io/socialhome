@@ -369,16 +369,21 @@ reviewer household already opens with it. Nothing of the queue enters the
   one, a follower — is ignored: pending content never leaves the reviewers.
 - **Bounds.** Checked in this order, the first before the host reads
   anything: one answer per (household, space) per 10 minutes
-  (`CATCH_UP_INTERVAL_S`, spent only when something is sent); the echo is
+  (`CATCH_UP_INTERVAL_S`, spent when the echo made the host send
+  something or apply an echoed rejection); the echo is
   at most 1000 ids, 100 of them own rejections (a longer or malformed one
   is ignored whole); one answer carries at most 1 MiB of item payloads
   (`CATCH_UP_MAX_BYTES`, at least one item, oldest first — the rest follows
   on the next sync, whose echo names what arrived); the **same** item or
   decision goes to the same household at most once per 24 hours
   (`RESEND_SAME_INTERVAL_S`), so a household that keeps refusing an item is
-  not sent it on every sync. A **role change** of that household's people
-  on the host clears both limits: a promotion is answered at once and in
-  full. The host compares the echo with one read of its own open items.
+  not sent it on every sync — marked only when the transport took it, so
+  a send that did not get out is tried again. A **role change** of that
+  household's people on the host clears both limits: a promotion is
+  answered at once and in full. So does, for the 24-hour marks, any other
+  change of its reviewer seats — somebody who left and was seated again
+  by a role-bearing invite link, with no role event: the host compares
+  the seats (who, role, roster version) with the ones it last answered. The host compares the echo with one read of its own open items.
 - **Receiver rules.** A re-sent item passes **every** check of
   `SPACE_MODERATION_SUBMITTED` above. Only check 2 reads the new field:
   `submitter_instance_id` is believed **only from the space's host**, and
@@ -544,9 +549,13 @@ is not in (the same 404 body) and nothing is stored — no existence oracle.
   them when that household **asks**: its §25.6 `SPACE_SYNC_BEGIN` carries
   the reviewer echo (`mod_held`, *Re-delivery and catch-up* above) and is
   sent as soon as it has applied the promotion. The host answers the
-  first such BEGIN after a role change of that household's people (and the
-  first after its own restart), from a live admin / moderator seat only —
-  once, not on every sync. (It used to re-send from the role change's
+  first such BEGIN after that household's reviewer seats changed — a role
+  change, or somebody who left and was seated again (the seats' roster
+  versions are compared) — and the first after its own restart, from a
+  live admin / moderator seat only: once, not on every sync. A household
+  reached only over the mesh counts by the version it claimed as a space
+  member (`space_member_supports`), for the first fan-out, the
+  re-delivery and `SPACE_REPORT_ANSWERED` alike. (It used to re-send from the role change's
   local event, which fires **before** the role change is sent: the report
   reached a household that did not review yet and was dropped.) The
   payload names the reporter's own household

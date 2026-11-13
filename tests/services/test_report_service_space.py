@@ -38,10 +38,10 @@ OWN = "inst-self"
 class _Fed:
     def __init__(self):
         self.sent: list[dict] = []
-        #: Households below v_45 (``peer_supports`` says no).
+        #: Households below v_45 (``space_member_supports`` says no).
         self.old: set[str] = set()
 
-    async def peer_supports(self, instance_id, *, min_version):
+    async def space_member_supports(self, instance_id, *, min_version):
         return instance_id not in self.old
 
     async def send_event(self, *, to_instance_id, event_type, payload, space_id=None):
@@ -1015,6 +1015,23 @@ async def test_host_redelivers_pending_reports_to_a_new_reviewer(env):
     assert env.fed.sent == []
     # …promoted again: once more.
     await role("admin")
+    await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
+    assert [s["to"] for s in env.fed.sent] == ["inst-back"]
+    # The moderator left and was seated again (a role-bearing invite link:
+    # no role-change event at all) — the seat's roster version moved, and
+    # that alone makes the host send them once more.
+    env.fed.sent.clear()
+    await env.db.enqueue(
+        "UPDATE space_remote_members SET tombstoned=1,"
+        " member_version=member_version+1 WHERE user_id='rback'"
+    )
+    await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
+    assert env.fed.sent == [] and ("spA", "inst-back") not in env.svc._redelivered
+    await env.db.enqueue(
+        "UPDATE space_remote_members SET tombstoned=0,"
+        " member_version=member_version+1 WHERE user_id='rback'"
+    )
+    await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
     await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
     assert [s["to"] for s in env.fed.sent] == ["inst-back"]
     # Somebody who holds no seat, ourselves, a malformed BEGIN: nothing,

@@ -41,6 +41,7 @@ import dataclasses
 import itertools
 import json
 import pathlib
+import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
@@ -54,20 +55,29 @@ from socialhome.app_keys import (
     federation_service_key,
     space_moderation_service_key,
     space_page_service_key,
+    space_remote_member_repo_key,
 )
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
+from socialhome.crypto import generate_x25519_keypair
 from socialhome.domain.federation import (
     DeliveryResult,
     FederationEvent,
     FederationEventType,
+    InstanceSource,
+    PairingStatus,
+    RemoteInstance,
 )
 from socialhome.domain.federation_capabilities import OURS
 from socialhome.domain.outbox import OutboxEntry
 from socialhome.domain.space import ContentQueuedForReview
 from socialhome.domain.space_media_ref import space_page_media_name
 from socialhome.federation.federation_service import FederationService
-from socialhome.federation.gfs_relay_transport import RELAY_MAX_ENVELOPE_BYTES
+from socialhome.federation.gfs_relay_transport import (
+    RELAY_MAX_ENVELOPE_BYTES,
+    RELAY_STATUS_TOO_LARGE,
+    GfsRelayTransport,
+)
 from socialhome.federation.inbound_validator import (
     InboundContext,
     run_post_decrypt_gates,
@@ -2489,3 +2499,182 @@ async def test_a_submission_always_fits_one_gfs_relay_envelope(mesh):
         assert len(json.dumps(p)) <= wire
         # The "before" values are rebuilt by every receiver: never sent.
         assert p["snapshot"] is None
+
+
+# ── Catch-up round 3 ────────────────────────────────────────────────────
+
+
+async def test_a_resend_that_did_not_get_out_is_tried_again(mesh, monkeypatch):
+    """The once-a-day mark is for an item (or decision) that REACHED the
+    household: a send the transport refused is tried again on the next
+    answer."""
+    h, c = mesh["H"], mesh["C"]
+    item_id = await _submit_task(mesh)
+    _drop_sends(mesh["A"], FET.SPACE_MODERATION_SUBMITTED, c)
+    await _pump(mesh)
+    failing = {FET.SPACE_MODERATION_SUBMITTED, FET.SPACE_MODERATION_DECIDED}
+
+    async def _refused(self, *, to_instance_id, event_type, payload, space_id=None):
+        if event_type in failing and self._own_instance_id == h.iid:
+            return DeliveryResult(
+                instance_id=to_instance_id, ok=False, error="no_route"
+            )
+        return await _fake_send(
+            self,
+            to_instance_id=to_instance_id,
+            event_type=event_type,
+            payload=payload,
+            space_id=space_id,
+        )
+
+    monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _refused)
+    await _begin(mesh, c)
+    assert not h.sent
+    monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _fake_send)
+    _federated(h)._caught_up_at.clear()
+    await _begin(mesh, c)
+    assert [p["item_id"] for _to, p in _sends(h, FET.SPACE_MODERATION_SUBMITTED)] == [
+        item_id
+    ]
+    # The same for a decision.
+    await _pump(mesh)
+    r = await h.tc.post(
+        f"/api/spaces/{SID}/moderation/{item_id}/reject", json={}, headers=h.headers
+    )
+    assert r.status == 200, await r.text()
+    h.sent.clear()
+    monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _refused)
+    _federated(h)._caught_up_at.clear()
+    await _begin(mesh, c)
+    monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _fake_send)
+    _federated(h)._caught_up_at.clear()
+    await _begin(mesh, c)
+    assert [p["item_id"] for _to, p in _sends(h, FET.SPACE_MODERATION_DECIDED)] == [
+        item_id
+    ]
+
+
+async def test_a_moderator_who_left_and_was_seated_again_starts_over(mesh):
+    """No role change happens when a moderator leaves and is seated again
+    (a role-bearing invite link): the seat itself changed, and that alone
+    makes the host answer in full again."""
+    h, c = mesh["H"], mesh["C"]
+    item_id = await _submit_task(mesh)
+    _drop_sends(mesh["A"], FET.SPACE_MODERATION_SUBMITTED, c)
+    await _pump(mesh)
+    await _begin(mesh, c)
+    assert len(_sends(h, FET.SPACE_MODERATION_SUBMITTED)) == 1
+    h.sent.clear()
+    # carl's seat is removed and written again on the host's roster — the
+    # way a leave and a redeem do, with no role-change event.
+    seats = h.app[space_remote_member_repo_key]
+    await seats.remove(SID, c.iid, c.user_id)
+    await _begin(mesh, c, echo={})
+    assert not h.sent  # not seated: not answered
+    await seats.add(
+        space_id=SID,
+        instance_id=c.iid,
+        user_id=c.user_id,
+        user_pk=None,
+        display_name="Carl",
+        role="moderator",
+    )
+    _federated(h)._caught_up_at.clear()
+    await _begin(mesh, c, echo={})
+    assert [p["item_id"] for _to, p in _sends(h, FET.SPACE_MODERATION_SUBMITTED)] == [
+        item_id
+    ]
+
+
+async def test_an_echoed_rejection_is_processed_once_per_rate_window(mesh, monkeypatch):
+    """An echo that only carries own rejections spends the rate window
+    too: the host does not run the decision checks again on every BEGIN
+    (and log a refusal each time) while the entry stays in the echo."""
+    h, c = mesh["H"], mesh["C"]
+    item_id = await _submit_task(mesh)
+    await _pump(mesh)
+    seen: list[str] = []
+    real = type(_federated(h))._on_decided
+
+    async def _counted(self, event):
+        seen.append(event.payload["item_id"])
+        return await real(self, event)
+
+    monkeypatch.setattr(type(_federated(h)), "_on_decided", _counted)
+    # A rejection in the name of somebody who holds no seat on C: refused.
+    echo = {"r": [{"id": item_id, "by": "u-nobody"}]}
+    await _begin(mesh, c, echo=echo)
+    await _begin(mesh, c, echo=echo)
+    assert seen == [item_id]
+    assert (await _row(h, item_id))[0] == "pending"
+
+
+async def test_a_near_cap_item_rides_the_real_gfs_relay(mesh):
+    """Not only arithmetic: the largest submission the cap lets through is
+    sealed by the real federation service into a real §24.11 envelope and
+    carried by the real GFS relay transport (padded, sealed to the
+    household's key) — and the same item at the old 256 KiB size is what
+    that transport refuses."""
+    a = mesh["A"]
+    wire = moderation_federation.MAX_WIRE_BYTES
+    # Hex text: nothing a compressor could shrink on the way.
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/pages",
+        json={
+            "title": "Near the cap",
+            "content": secrets.token_hex((wire - 4096) // 2),
+        },
+        headers=a.headers,
+    )
+    assert r.status == 202, await r.text()
+    (payload,) = {
+        json.dumps(p, sort_keys=True)
+        for _to, p in _sends(a, FET.SPACE_MODERATION_SUBMITTED)
+    }
+    payload = json.loads(payload)
+    assert wire - 8192 < len(json.dumps(payload)) <= wire
+    fed = a.app[federation_service_key]
+    keywrap = generate_x25519_keypair()
+    session = fed._key_manager.encrypt(secrets.token_bytes(32))
+    link_household = RemoteInstance(
+        id="b" * 32,
+        display_name="Link household",
+        remote_identity_pk="cc" * 32,
+        key_self_to_remote=session,
+        key_remote_to_self=session,
+        remote_inbox_url="",
+        local_inbox_id="wh-1",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.SPACE_SESSION,
+        relay_via="https://gfs.example.org",
+        remote_keywrap_pk=keywrap.public_key.hex(),
+    )
+
+    class _Relay:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def send_sealed_envelope(self, *, to_instance_id, envelope, gfs_url=""):
+            self.calls.append(envelope)
+            return True
+
+    async def _ride(body: dict) -> tuple[tuple, int]:
+        envelope = fed._seal_envelope(
+            link_household,
+            event_type=FET.SPACE_MODERATION_SUBMITTED,
+            payload=body,
+            space_id=SID,
+            msg_id=None,
+        )
+        relay = _Relay()
+        result = await GfsRelayTransport(relay_sender=relay).send(
+            instance=link_household, envelope_dict=envelope
+        )
+        return result, len(relay.calls)
+
+    assert await _ride(payload) == ((True, None), 1)
+    old_size = {
+        **payload,
+        "payload": {**payload["payload"], "content": secrets.token_hex(100 * 1024)},
+    }
+    assert await _ride(old_size) == ((False, RELAY_STATUS_TOO_LARGE), 0)

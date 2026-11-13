@@ -185,7 +185,7 @@ class ModerationFederation(Protocol):
 
     async def send_submitted(
         self, space: Space, item: SpaceModerationItem, targets: list[str]
-    ) -> None: ...
+    ) -> object: ...
 
     async def send_decided(
         self,

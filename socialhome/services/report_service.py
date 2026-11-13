@@ -184,9 +184,11 @@ class ReportService:
         self._scope = scope or ReportScope(space_post_repo=space_post_repo)
         self._federation: FederationService | None = None
         self._own_instance_id: str = ""
-        #: (space, household) the host re-sent the pending reports to since
-        #: that household's seats last changed role (:meth:`on_sync_begin`).
-        self._redelivered: set[tuple[str, str]] = set()
+        #: (space, household) → the reviewer seats (who, role, roster
+        #: version) the host last re-sent the pending reports for
+        #: (:meth:`on_sync_begin`). Dropped when the household stops
+        #: reviewing or the space goes.
+        self._redelivered: dict[tuple[str, str], tuple] = {}
         self._gfs_connection_service = None
         self._signing_key: bytes | None = None
 
@@ -241,8 +243,10 @@ class ReportService:
             # dropped by a household that does not review yet.
             iid = str((event.payload or {}).get("instance_id") or "")
             if iid:
-                self._redelivered.discard((event.space_id, iid))
+                self._redelivered.pop((event.space_id, iid), None)
         if space is None or space.dissolved:
+            for key in [k for k in self._redelivered if k[0] == event.space_id]:
+                del self._redelivered[key]
             n = await self._reports.delete_for_space(event.space_id, remote_only=False)
         elif not await self._reviews_here(space):
             n = await self._reports.delete_for_space(event.space_id, remote_only=True)
@@ -748,8 +752,9 @@ class ReportService:
                 not isinstance(p.get(REVIEWER_ECHO_KEY), dict)
                 or not space_id
                 or not sender
-                or key in self._redelivered
+                or sender == self._own_instance_id
                 or self._space_repo is None
+                or self._seats is None
             ):
                 return
             space = await self._space_repo.get(space_id)
@@ -757,11 +762,27 @@ class ReportService:
                 space is None
                 or space.dissolved
                 or space.owner_instance_id != self._own_instance_id
-                or sender not in await self.reviewer_households(space_id)
-                or sender == space.owner_instance_id
             ):
                 return
-            self._redelivered.add(key)
+            # Its live admin / moderator seats: who, in which role, at
+            # which roster version. A different value than the one last
+            # answered means a seat changed — a role change, or somebody
+            # who left and was seated again (no role event at all).
+            stamp = tuple(
+                sorted(
+                    (s.user_id, s.role, s.member_version)
+                    for s in await self._seats.list_for_instance(
+                        space_id, sender, include_tombstoned=False
+                    )
+                    if s.role in REVIEWER_SEATS
+                )
+            )
+            if not stamp:
+                self._redelivered.pop(key, None)
+                return
+            if self._redelivered.get(key) == stamp:
+                return
+            self._redelivered[key] = stamp
             await self.resend_pending(space_id, sender)
         except Exception:
             log.warning("reports: re-delivery on a sync BEGIN failed", exc_info=True)
@@ -780,7 +801,7 @@ class ReportService:
         space = await self._space_repo.get(space_id)
         if space is None or space.owner_instance_id != self._own_instance_id:
             return 0
-        if not await self._federation.peer_supports(
+        if not await self._federation.space_member_supports(
             instance_id, min_version=FederationCapability.MIN_FOR_SPACE_REPORT_SCOPE
         ):
             return 0
@@ -838,7 +859,7 @@ class ReportService:
                     space_id,
                 )
                 continue
-            if await self._federation.peer_supports(
+            if await self._federation.space_member_supports(
                 iid, min_version=FederationCapability.MIN_FOR_SPACE_REPORT_SCOPE
             ):
                 out.append(iid)
@@ -1279,7 +1300,7 @@ class ReportService:
             return
         if origin in await self.reviewer_households(report.space_id):
             return
-        if not await self._federation.peer_supports(
+        if not await self._federation.space_member_supports(
             origin, min_version=FederationCapability.MIN_FOR_REMOTE_REPORT_ANSWER
         ):
             log.info(
