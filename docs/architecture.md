@@ -989,8 +989,9 @@ seat) still pass (`federation/inbound_retry.py`, called by
 `EventDispatchRegistry.dispatch`). The replay cache is not touched. Call
 negotiation, typing, RTC signalling, the sync streams and the
 `SPACE_ROUTED` wrapper are never retried. Every handler failure that is
-final is one ERROR line naming the handler, the event type, the sending
-household and the exception class — never the payload.
+final is one ERROR record naming the handler, the event type, the sending
+household and the exception class, with its traceback — the message never
+carries the payload.
 
 Limits: any other failure (handler I/O, a timeout, a bug) is not retried —
 the handler may already have written something; a later event of the same

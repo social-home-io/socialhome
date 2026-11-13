@@ -80,9 +80,9 @@ class EventDispatchRegistry:
         replay id is already stored, so the sender cannot deliver it again:
         a handler that failed on a locked database gets one more run in
         place (:class:`InboundRetry`). Every failure that is final is one
-        ERROR line naming the handler, the event type, the sending
-        household and the exception class — never the payload or the
-        exception's text (the traceback is logged at DEBUG).
+        ERROR record naming the handler, the event type, the sending
+        household and the exception class, with the traceback — the
+        message itself never carries the payload.
         """
         for handler in tuple(self._handlers.get(event.event_type, ())):
             try:
@@ -101,8 +101,8 @@ class EventDispatchRegistry:
                     event.event_type.value,
                     event.from_instance,
                     type(exc).__name__,
+                    exc_info=exc,
                 )
-                log.debug("Event handler %s traceback", name, exc_info=exc)
 
     def handlers_for(
         self,

@@ -88,7 +88,8 @@ stored the `msg_id` by the time a handler runs, so the sender cannot
 deliver the envelope again. A handler that failed on a locked or busy
 database is run once more by the receiver, in place, behind the
 post-decrypt gates (`federation/inbound_retry.py`); every final handler
-failure is logged at ERROR (event type and sender, no payload). Limits: no
+failure is logged at ERROR (event type, sender and traceback; no payload
+in the message). Limits: no
 other failure is retried (handler I/O, timeouts, bugs); a later event of
 the same sender on another connection or transport can overtake a retried
 one; a restart loses an event waiting for its retry. The space sync is the

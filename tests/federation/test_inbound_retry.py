@@ -268,10 +268,8 @@ async def test_a_failing_gate_drops_the_event(caplog):
 # ─── Every final failure is one ERROR line, without content ───────────────
 
 
-@pytest.mark.parametrize(
-    "exc", [ValueError("the secret text"), _locked(), TimeoutError("the secret text")]
-)
-async def test_a_final_failure_is_one_error_naming_type_and_sender_only(exc, caplog):
+@pytest.mark.parametrize("exc", [ValueError("refused"), _locked(), TimeoutError("x")])
+async def test_a_final_failure_is_one_error_with_type_sender_and_traceback(exc, caplog):
     handler = _Flaky(fail=99, exc=exc)
     registry, _ = _registry(handler=handler)
     with caplog.at_level(logging.DEBUG):
@@ -282,10 +280,10 @@ async def test_a_final_failure_is_one_error_naming_type_and_sender_only(exc, cap
     line = error.getMessage()
     assert "dm_message" in line and "household-b" in line
     assert type(exc).__name__ in line
-    assert error.exc_info is None  # one line: the traceback is DEBUG
-    above_debug = [r for r in caplog.records if r.levelno > logging.DEBUG]
-    assert all("secret" not in r.getMessage() for r in above_debug)
-    assert all(r.exc_info is None for r in above_debug)
+    # Diagnosable from a normal log: the traceback rides on the same record.
+    assert error.exc_info is not None and error.exc_info[1] is exc
+    # The message itself never carries the payload.
+    assert all("secret" not in r.getMessage() for r in caplog.records)
 
 
 async def test_without_a_retry_object_failures_are_logged_the_same(caplog):
