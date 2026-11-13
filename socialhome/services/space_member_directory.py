@@ -60,9 +60,12 @@ from ..domain.federation import (
 )
 from ..domain.federation_capabilities import OURS, FederationCapability
 from ..domain.member_card import InvalidMemberCard, MemberCard, parse_card
+from ..domain.space import SpaceRole
 from ..federation.gfs_relay_transport import MailboxTarget
+from ..federation.host_equivalence import acting_hosts, serves_as_host
 from ..federation.member_card import build_card, verify_card
 from ..repositories.federation_repo import AbstractFederationRepo
+from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from .gfs_envelope_sender import normalize_gfs_base
 from .gfs_mailbox_service import GfsMailboxService
@@ -172,6 +175,7 @@ class SpaceMemberDirectory:
         "_reconciling",
         "_seat_ender",
         "_seater",
+        "_seats",
         "_snap_in",
         "_spaces",
         "_wall_clock",
@@ -190,12 +194,16 @@ class SpaceMemberDirectory:
         identity_pk: bytes,
         keywrap_pk: bytes,
         keywrap_sig: str,
+        remote_member_repo: AbstractSpaceRemoteMemberRepo | None = None,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._spaces = space_repo
         self._federation_repo = federation_repo
         self._writers = writer_households
+        #: The roster mirror: who holds an admin seat (the delegated
+        #: inviting admin acts as host). Without it only the owner does.
+        self._seats = remote_member_repo
         self._mailboxes = mailboxes
         self._instance_id = instance_id
         self._identity_seed = identity_seed
@@ -216,12 +224,13 @@ class SpaceMemberDirectory:
         self._early_hello: dict[tuple[str, str], float] = {}
         #: (space, household) whose stored card just lost its mailbox.
         self._lost_mailbox: set[tuple[str, str]] = set()
-        #: space → (``dir_seq``, part indices taken) of the snapshot coming
-        #: in: it moves our ``dir_seq`` only once every part arrived.
-        self._snap_in: dict[str, tuple[int, frozenset[int]]] = {}
-        #: space → when we last asked its host for the directory again
-        #: (:meth:`ask_host`, :data:`HELLO_RESNAPSHOT_S`).
-        self._asked_at: dict[str, float] = {}
+        #: (space, issuer) → (``dir_seq``, part indices taken) of the
+        #: snapshot coming in: it moves our ``dir_seq`` of that issuer only
+        #: once every part arrived.
+        self._snap_in: dict[tuple[str, str], tuple[int, frozenset[int]]] = {}
+        #: (space, host) → when we last asked that host for the directory
+        #: again (:meth:`ask_host`, :data:`HELLO_RESNAPSHOT_S`).
+        self._asked_at: dict[tuple[str, str], float] = {}
         #: space → held while :meth:`reconcile` versions and sends its
         #: directory, so the frames to a household go out in version order.
         self._reconciling: dict[str, asyncio.Lock] = {}
@@ -230,8 +239,8 @@ class SpaceMemberDirectory:
         mailboxes.attach_on_change(self.on_own_change)
 
     def attach_to(self, federation_service: FederationService) -> None:
-        """Both events: the host takes ``SPACE_MEMBER_CARD``, members take
-        ``SPACE_MAILBOX_DIRECTORY``."""
+        """Both events: a household acting as host takes
+        ``SPACE_MEMBER_CARD``, members take ``SPACE_MAILBOX_DIRECTORY``."""
         self._federation = federation_service
         registry = federation_service._event_registry
         registry.register(FederationEventType.SPACE_MEMBER_CARD, self._on_member_card)
@@ -240,8 +249,8 @@ class SpaceMemberDirectory:
         )
 
     def wire(self, bus: EventBus) -> None:
-        """A seat that goes live or ends in a space we host brings that
-        space's directory up to date (snapshot to the newcomer, ``removed``
+        """A seat that goes live or ends in a space we act as host of brings
+        that space's directory up to date (snapshot to the newcomer, ``removed``
         to the rest); role changes are the sweep's."""
         bus.subscribe(SpaceRemoteSeatLive, self._on_seat_change)
         bus.subscribe(SpaceRemoteSeatEnded, self._on_seat_change)
@@ -250,7 +259,7 @@ class SpaceMemberDirectory:
         self, event: SpaceRemoteSeatLive | SpaceRemoteSeatEnded
     ) -> None:
         try:
-            if await self.host_of(event.space_id) == self._instance_id:
+            if await self.serves(event.space_id):
                 await self.reconcile(event.space_id)
         except Exception:
             log.warning(
@@ -370,9 +379,78 @@ class SpaceMemberDirectory:
             return False
         return bool(await self._spaces.list_local_member_user_ids(space_id))
 
-    async def host_of(self, space_id: str) -> str | None:
+    # ── Who is "the host" ────────────────────────────────────────────────
+    #
+    # One notion, :mod:`socialhome.federation.host_equivalence`: the owner
+    # household and — on a household a delegated admin invited — that
+    # admin while the trust holds. Nothing below compares a household to
+    # ``owner_instance_id`` to decide whom to listen to.
+
+    async def hosts_of(self, space_id: str) -> list[str]:
+        """The households acting as *space_id*'s host HERE, owner first
+        (:func:`acting_hosts`) — us included when we own it."""
         space = await self._spaces.get(space_id)
-        return space.owner_instance_id if space is not None else None
+        if space is None or not space.owner_instance_id:
+            return []
+        return await acting_hosts(
+            self._spaces, self._seats, space, own_instance_id=self._instance_id
+        )
+
+    async def _hosts(self, space_id: str) -> list[str]:
+        """:meth:`hosts_of` without us: who we take a directory from and
+        give our card to."""
+        return [h for h in await self.hosts_of(space_id) if h != self._instance_id]
+
+    async def serves(self, space_id: str) -> bool:
+        """Whether WE act as *space_id*'s host toward other members: its
+        owner, or a delegated admin household (:func:`serves_as_host`). A
+        delegated admin keeps a directory only for the households that come
+        to it — those that take it as their host (it invited them)."""
+        space = await self._spaces.get(space_id)
+        return await serves_as_host(
+            self._spaces, space, own_instance_id=self._instance_id
+        )
+
+    async def _owns(self, space_id: str) -> bool:
+        space = await self._spaces.get(space_id)
+        return space is not None and space.owner_instance_id == self._instance_id
+
+    async def hop_hosts(self, space_id: str) -> list[str]:
+        """:meth:`_hosts` in the order a host hop tries them: first a host
+        we hold a link of our own to (a pairing, or the sealed-redeem seat
+        it gave us), then one we know only from a directory card — that one
+        we reach at its GFS mailbox at best. Owner first among equals."""
+
+        async def _card_only(host: str) -> bool:
+            row = await self._federation_repo.get_instance(host)
+            return row is None or (
+                row.source is InstanceSource.SPACE_SESSION and not row.relay_via
+            )
+
+        hosts = await self._hosts(space_id)
+        keyed = [(await _card_only(h), n, h) for n, h in enumerate(hosts)]
+        return [h for _c, _n, h in sorted(keyed)]
+
+    async def _listers(self, space_id: str, doc: dict[str, Any]) -> set[str]:
+        """Which hosts' directories list the household of row *doc*: the
+        issuers recorded with its card (``by``); a card stored before
+        issuers were recorded, or handed over at seat time, counts as the
+        owner's."""
+        by = doc.get("by")
+        if isinstance(by, list):
+            return {i for i in by if isinstance(i, str)}
+        space = await self._spaces.get(space_id)
+        return {space.owner_instance_id} if space is not None else set()
+
+    async def _still_listed(self, space_id: str, doc: dict[str, Any]) -> bool:
+        """A household's card still counts: it gave it to us itself while
+        we act as host (``direct``), or a household acting as host here
+        lists it."""
+        if doc.get("direct") is True:
+            return True
+        return bool(
+            await self._listers(space_id, doc) & set(await self.hosts_of(space_id))
+        )
 
     # ── Our card ─────────────────────────────────────────────────────────
 
@@ -491,11 +569,13 @@ class SpaceMemberDirectory:
         return card
 
     async def store_seat_card(self, space_id: str, card: MemberCard) -> None:
-        """Store a verified seat card once the seat row exists; a host then
-        brings the space's directory up to date. Fail-soft."""
+        """Store a verified seat card once the seat row exists; a household
+        acting as host then brings the space's directory up to date.
+        Fail-soft."""
         try:
             await self._store(space_id, card)
-            if await self.host_of(space_id) == self._instance_id:
+            if await self.serves(space_id):
+                await self._mark_direct(space_id, card.instance_id)
                 # Its "seated" card came before our seat row (the commit
                 # follows the ACK) and was kept aside: it is answered now. No
                 # snapshot otherwise — one sent now could beat the joiner's
@@ -537,21 +617,25 @@ class SpaceMemberDirectory:
     # ── Member: publish our card, take the directory ─────────────────────
 
     async def publish_cards(self) -> int:
-        """Give our current card to the host of every space we are in whose
-        host (≥ v_89) does not have this ``rev`` yet — once per space and
-        ``rev``: it is also how the host learns we are seated (its first
-        snapshot answers it). Returns how many went out."""
+        """Give our current card to every household acting as host of a
+        space we are in (owner first, then the delegated admin that invited
+        us) that is ≥ v_89 and does not have this ``rev`` yet — once per
+        space, host and ``rev``: it is also how that host learns we are
+        seated (its first snapshot answers it). Returns how many went out."""
         if self._federation is None:
             return 0
         sent = 0
         for space in sorted(await self._spaces.list_all(), key=lambda sp: sp.id):
-            space_id = space.id
-            host = space.owner_instance_id
-            if not host or host == self._instance_id:
-                continue
-            # A writer seat of ours only: followers get no directory.
-            if not await holds_member_seat(self._spaces, space_id):
-                continue
+            sent += await self._publish_to_hosts(space.id)
+        return sent
+
+    async def _publish_to_hosts(self, space_id: str) -> int:
+        hosts = await self._hosts(space_id)
+        # A writer seat of ours only: followers get no directory.
+        if not hosts or not await holds_member_seat(self._spaces, space_id):
+            return 0
+        sent = 0
+        for host in hosts:
             if await self._publish_to_host(space_id, host):
                 sent += 1
         return sent
@@ -609,16 +693,26 @@ class SpaceMemberDirectory:
         return True
 
     async def _on_directory(self, event: FederationEvent) -> None:
-        """The host's member directory for one space: verify every card
-        (self-certifying), store it, seat its household lazily, and answer
-        with our own card if the host lacks it. Taken only from the space's
-        host, by a member household of the space."""
+        """A member directory for one space from a household acting as its
+        host here — the owner, or the delegated admin that invited us
+        (:meth:`hosts_of`): verify every card (self-certifying), store it,
+        seat its household lazily, and answer with our own card if that host
+        lacks it. Each issuer has its own version line (``dir_seq`` on its
+        row) and a card remembers who lists it (``by``): one issuer's
+        removal takes a household out only when no other host lists it, and
+        an admin's never takes out the owner household."""
         space_id = _event_space(event)
         if not space_id:
             return
-        host = await self.host_of(space_id)
-        if host is None or host != event.from_instance or host == self._instance_id:
+        issuer = event.from_instance
+        hosts = await self._hosts(space_id)
+        if not issuer or issuer not in hosts:
             log.info("directory: ignoring a directory not from the space's host")
+            if issuer and "dir_seq" in await self._doc(space_id, issuer):
+                # A household whose trust just ended (delegation off, its
+                # admin seat gone, a rotation it did not follow): what only
+                # it listed goes now, not at the next sweep.
+                await self._drop_lapsed(space_id)
             return
         if not await self._in_use(space_id):
             return
@@ -628,7 +722,7 @@ class SpaceMemberDirectory:
         if not _is_count(seq):
             log.info("directory: ignoring a directory without a version")
             return
-        host_doc = await self._doc(space_id, host)
+        host_doc = await self._doc(space_id, issuer)
         held = _count(host_doc.get("dir_seq"))
         # One version per directory change: a delta must be newer than what
         # we hold (a late old one never re-adds a removed household); the
@@ -639,12 +733,12 @@ class SpaceMemberDirectory:
         if not snapshot and payload.get("base_seq") != held:
             # A delta builds on one version: taken on another (a snapshot
             # still coming in, or lost) it would move us past what we never
-            # got. We stay behind and ask the host again (a snapshot still
+            # got. We stay behind and ask that host again (a snapshot still
             # coming in: the host does not answer twice in a row).
             log.info("directory: ignoring a delta on a version we do not hold")
-            await self.ask_host(space_id)
+            await self._ask(space_id, issuer)
             return
-        coming = self._snap_in.get(space_id)
+        coming = self._snap_in.get((space_id, issuer))
         if snapshot and coming is not None and seq < coming[0]:
             log.info("directory: ignoring a part of an older snapshot")
             return
@@ -677,19 +771,39 @@ class SpaceMemberDirectory:
                 cards[card.instance_id] = card
         gone = set(removed)
         if has_members:
-            # The whole directory: a carded household it does not list is
-            # gone — card, row and seat (a household listed without a card,
-            # one we are given mailbox cards only for, keeps its row). A
-            # snapshot without ``members`` (too big to name them all) drops
-            # nobody.
+            # The issuer's whole directory: a household it listed before
+            # and does not list now left it — its card, row and seat go
+            # once no other host lists it (a household listed without a
+            # card, one we are given mailbox cards only for, keeps its
+            # row). A snapshot without ``members`` (too big to name them
+            # all) drops nobody.
             listed = set(members) | set(cards)
-            gone |= {i for i in await self._space_cards(space_id) if i not in listed}
-        gone -= {host, self._instance_id}
+            for (space, inst), doc in (await self._rows()).items():
+                if (
+                    space == space_id
+                    and inst not in listed
+                    and "card" in doc
+                    and issuer in await self._listers(space_id, doc)
+                ):
+                    gone.add(inst)
+        # Never us, never a household acting as host here: an inviting
+        # admin does not take the owner household out, nor the owner the
+        # admin whose roster we still follow (the roster decides that).
+        gone -= {self._instance_id, *hosts}
         for inst in sorted(gone):
-            await self._forget(space_id, inst)
+            await self._unlist(space_id, inst, issuer)
+        news: list[MemberCard] = []
         for card in cards.values():
-            await self._store(space_id, card, create_row=True)
-            await self._flag(space_id, card.instance_id, card.instance_id in reached)
+            fresh = "card" not in await self._doc(space_id, card.instance_id)
+            if await self._store(space_id, card, create_row=True):
+                news.append(card)
+            await self._listed_by(
+                space_id,
+                card.instance_id,
+                issuer,
+                card.instance_id in reached,
+                fresh=fresh,
+            )
         boxes = self._mailboxes.mailbox_gfs_urls()
         if any(
             c.mailbox is not None
@@ -700,19 +814,102 @@ class SpaceMemberDirectory:
             # A GFS-reached member at a GFS we hold no mailbox at: ours is
             # minted now (in the background) and its card goes out at once.
             self._mailboxes.mint_soon()
-        if self._complete(space_id, payload, seq):
-            host_doc = await self._doc(space_id, host)
+        if self._complete(space_id, issuer, payload, seq):
+            host_doc = await self._doc(space_id, issuer)
             host_doc["dir_seq"] = seq
-            await self._put(space_id, host, host_doc)
+            await self._put(space_id, issuer, host_doc)
+            if has_members and await self._is_owner(space_id, issuer):
+                await self._forward_again(space_id, set(members) | set(cards))
         has_mailbox = bool(self._mailboxes.mailbox_gfs_urls())
         for card in cards.values():
-            if card.instance_id == host:
+            if card.instance_id == issuer:
                 continue
             if card.mailbox is not None or has_mailbox:
                 await self._seat(card)
-        await self._publish_to_host(space_id, host, host_is_v89=True)
+        await self._publish_to_host(space_id, issuer, host_is_v89=True)
+        # Another host's card may just have arrived (the owner's, in the
+        # directory of the admin that invited us): it gets our card too.
+        await self._publish_to_hosts(space_id)
+        if (news or gone) and await self.serves(space_id):
+            # We act as host for the households we invited: what the owner
+            # just told us goes on to them.
+            await self.reconcile(space_id, changed=news)
 
-    def _complete(self, space_id: str, payload: dict[str, Any], seq: int) -> bool:
+    async def _listed_by(
+        self,
+        space_id: str,
+        instance_id: str,
+        issuer: str,
+        reached: bool,
+        *,
+        fresh: bool,
+    ) -> None:
+        """Note on a card's row that *issuer* lists it, and keep that
+        host's ``gfs_reached`` flag (sent with each card, changed or not).
+        *fresh*: we held no card of that household before this frame, so
+        nobody else lists it."""
+        if instance_id == self._instance_id:
+            return
+        doc = await self._doc(space_id, instance_id)
+        if "card" not in doc:
+            return
+        by = set() if fresh else await self._listers(space_id, doc)
+        flagged = doc.get("gfs_reached") is True
+        if "by" in doc and issuer in by and flagged == reached:
+            return
+        doc["by"] = sorted(by | {issuer})
+        if reached:
+            doc["gfs_reached"] = True
+        else:
+            doc.pop("gfs_reached", None)
+        await self._put(space_id, instance_id, doc)
+
+    async def _unlist(self, space_id: str, instance_id: str, issuer: str) -> None:
+        """*issuer* no longer lists *instance_id*: the household goes
+        (:meth:`_forget`) unless another household acting as host here
+        still lists it, or it gave us its card itself."""
+        doc = await self._doc(space_id, instance_id)
+        if "card" in doc:
+            doc["by"] = sorted(await self._listers(space_id, doc) - {issuer})
+            if await self._still_listed(space_id, doc):
+                await self._put(space_id, instance_id, doc)
+                return
+        await self._forget(space_id, instance_id)
+
+    async def _drop_lapsed(self, space_id: str) -> None:
+        """The trust in a host ended, or we stopped acting as one: its
+        version line goes (a resumed trust starts from a fresh snapshot)
+        and so does every household only it listed — the owner's directory
+        is what counts again."""
+        hosts = set(await self.hosts_of(space_id))
+        if not hosts:
+            return
+        serving = await self.serves(space_id)
+        for (space, inst), doc in sorted((await self._rows()).items()):
+            if space != space_id or inst == self._instance_id:
+                continue
+            changed = False
+            if inst not in hosts and ("dir_seq" in doc or "sent" in doc):
+                for key in ("dir_seq", "sent", "sent_digest", "host_proto"):
+                    doc.pop(key, None)
+                self._snap_in.pop((space_id, inst), None)
+                changed = True
+            if not serving and doc.pop("direct", None) is not None:
+                doc.pop("fwd", None)
+                changed = True
+            if (
+                "card" in doc
+                and inst not in hosts
+                and not await self._still_listed(space_id, doc)
+            ):
+                await self._forget(space_id, inst)
+                continue
+            if changed:
+                await self._put(space_id, inst, doc)
+
+    def _complete(
+        self, space_id: str, issuer: str, payload: dict[str, Any], seq: int
+    ) -> bool:
         """Whether this frame completes a directory version: a delta does;
         a snapshot once every one of its ``parts`` (by ``part`` index)
         arrived, in any order — else our ``dir_seq`` stays behind and the
@@ -722,27 +919,14 @@ class SpaceMemberDirectory:
         part, parts = payload.get("part"), payload.get("parts")
         if not (_is_count(part) and _is_count(parts) and part < parts):
             return False
-        got_seq, got = self._snap_in.get(space_id, (seq, frozenset()))
+        key = (space_id, issuer)
+        got_seq, got = self._snap_in.get(key, (seq, frozenset()))
         have = (got if got_seq == seq else frozenset()) | {part}
         if len(have) < parts:
-            self._snap_in[space_id] = (seq, have)
+            self._snap_in[key] = (seq, have)
             return False
-        self._snap_in.pop(space_id, None)
+        self._snap_in.pop(key, None)
         return True
-
-    async def _flag(self, space_id: str, instance_id: str, reached: bool) -> None:
-        """Keep the host's ``gfs_reached`` flag on a member's row (set with
-        each of its cards the host sends, changed or not)."""
-        if instance_id == self._instance_id:
-            return
-        doc = await self._doc(space_id, instance_id)
-        if (doc.get("gfs_reached") is True) == reached or "card" not in doc:
-            return
-        if reached:
-            doc["gfs_reached"] = True
-        else:
-            doc.pop("gfs_reached", None)
-        await self._put(space_id, instance_id, doc)
 
     async def _forget(self, space_id: str, instance_id: str) -> None:
         """A household that left the host's directory of *space_id* (left,
@@ -775,10 +959,16 @@ class SpaceMemberDirectory:
     # ── Host: take cards, keep the directory ─────────────────────────────
 
     async def _on_member_card(self, event: FederationEvent) -> None:
-        """A member household gives the host (us) its card for one space."""
+        """A member household gives us — acting as the space's host — its
+        card for one space; or, on the owner, a delegated admin passes on
+        the card of a household it seated (:meth:`_on_forwarded_card`)."""
         space_id = _event_space(event)
         sender = event.from_instance
-        if not space_id or await self.host_of(space_id) != self._instance_id:
+        if not space_id or not await self.serves(space_id):
+            return
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if payload.get("forwarded") is True:
+            await self._on_forwarded_card(space_id, sender, payload)
             return
         if sender not in await self._spaces.list_member_instances(space_id):
             # A joiner's "seated" card can beat our seat row (the commit
@@ -789,14 +979,14 @@ class SpaceMemberDirectory:
             if len(self._early_hello) < EARLY_HELLO_MAX:
                 self._early_hello[(space_id, sender)] = now + EARLY_HELLO_TTL_S
             return
-        raw = event.payload.get("card") if isinstance(event.payload, dict) else None
         try:
-            card = verify_card(raw, expected_instance_id=sender)
+            card = verify_card(payload.get("card"), expected_instance_id=sender)
         except InvalidMemberCard as exc:
             log.info("directory: ignoring a card from %s: %s", sender, exc)
             return
         old = await self.card_of(space_id, sender)
         changed = await self._store(space_id, card)
+        await self._mark_direct(space_id, sender)
         await self._mark_seated(space_id, sender)
         # A first card, or the same card again, is the household's "I am
         # seated": it gets a snapshot (at most once per
@@ -813,6 +1003,137 @@ class SpaceMemberDirectory:
         if snapshot_to:
             await self._seated(space_id, sender)
 
+    async def _mark_direct(self, space_id: str, instance_id: str) -> None:
+        """The household gave us its card ITSELF while we act as host (its
+        seat card, or a ``SPACE_MEMBER_CARD``): no other host's directory
+        takes it away, and — on a delegated admin — it is passed on to the
+        owner (:meth:`_forward_to_owner`)."""
+        doc = await self._doc(space_id, instance_id)
+        if "card" in doc and doc.get("direct") is not True:
+            doc["direct"] = True
+            await self._put(space_id, instance_id, doc)
+
+    async def _on_forwarded_card(
+        self, space_id: str, sender: str, payload: dict[str, Any]
+    ) -> None:
+        """Owner side: a delegated admin household passes on the card of a
+        household it seated — one that reaches the space through that admin
+        and cannot give us its card before we list it. Taken only on the
+        space's owner, only from a household holding a live admin seat while
+        delegation is on, and only for a household our OWN roster already
+        names a member household. The card is self-certifying: the admin
+        carries it, it cannot forge or alter it."""
+        if not await self._owns(space_id) or not await self._is_delegated_admin(
+            space_id, sender
+        ):
+            log.info("directory: ignoring a forwarded card not from our admin")
+            return
+        try:
+            card = verify_card(payload.get("card"))
+        except InvalidMemberCard as exc:
+            log.info("directory: ignoring a forwarded card: %s", exc)
+            return
+        inst = card.instance_id
+        if inst in (self._instance_id, sender):
+            return
+        if inst not in await self._spaces.list_member_instances(space_id):
+            return
+        changed = await self._store(space_id, card)
+        # We hold no seat of our own for it (the admin seated it): a lazy
+        # one from its card, as a member makes from a directory card — its
+        # frames verify, and ours reach its mailbox.
+        if card.mailbox is not None or self._mailboxes.mailbox_gfs_urls():
+            await self._seat(card)
+        # Whether that household reaches the space only through a GFS is
+        # the seating admin's to say (ours is a card-only seat of it).
+        doc = await self._doc(space_id, inst)
+        flag = payload.get("gfs_reached") is True
+        if "card" in doc and (doc.get("gfs_reached") is True) != flag:
+            if flag:
+                doc["gfs_reached"] = True
+            else:
+                doc.pop("gfs_reached", None)
+            await self._put(space_id, inst, doc)
+            changed = True
+        if changed:
+            await self.reconcile(space_id, changed=[card])
+
+    async def _is_delegated_admin(self, space_id: str, instance_id: str) -> bool:
+        """By OUR rows: delegation is on and *instance_id* holds a live
+        admin seat in *space_id*."""
+        space = await self._spaces.get(space_id)
+        features = getattr(space, "features", None)
+        if self._seats is None or not getattr(
+            features, "delegated_admin_authority", False
+        ):
+            return False
+        seats = await self._seats.list_for_instance(
+            space_id, instance_id, include_tombstoned=False
+        )
+        return any(seat.role == SpaceRole.ADMIN.value for seat in seats)
+
+    async def _is_owner(self, space_id: str, instance_id: str) -> bool:
+        space = await self._spaces.get(space_id)
+        return space is not None and space.owner_instance_id == instance_id
+
+    async def _forward_to_owner(
+        self, space_id: str, cards: dict[str, MemberCard]
+    ) -> None:
+        """Delegated admin side: pass each card a household gave US itself
+        on to the space's owner, once per card ``rev`` — the owner lists it
+        for every member, and until then that household's own card to the
+        owner is refused (the owner holds no card to check it against). One
+        small frame to one household per newcomer. An owner below this
+        build drops it; :meth:`_forward_again` repairs a lost one."""
+        assert self._federation is not None
+        space = await self._spaces.get(space_id)
+        if space is None or space.owner_instance_id == self._instance_id:
+            return
+        owner = space.owner_instance_id
+        for inst, card in sorted(cards.items()):
+            doc = await self._doc(space_id, inst)
+            if doc.get("direct") is not True or doc.get("fwd") == card.rev:
+                continue
+            if inst == owner:
+                continue
+            try:
+                result = await self._federation.send_with_mesh_fallback(
+                    to_instance_id=owner,
+                    event_type=FederationEventType.SPACE_MEMBER_CARD,
+                    payload={
+                        "space_id": space_id,
+                        "forwarded": True,
+                        "card": card.to_wire(),
+                        "gfs_reached": await self._reached(space_id, inst),
+                    },
+                    space_id=space_id,
+                )
+            except Exception:
+                log.warning("directory: passing a card on failed", exc_info=True)
+                continue
+            if result.ok or result.error == DELIVERY_ERROR_QUEUED:
+                doc["fwd"] = card.rev
+                await self._put(space_id, inst, doc)
+
+    async def _forward_again(self, space_id: str, listed: set[str]) -> None:
+        """The owner's whole directory does not list a household whose card
+        we passed on (a lost frame, an owner that was too old then): the
+        next reconcile passes it on again."""
+        for inst in sorted(await self._space_cards(space_id)):
+            if inst in listed:
+                continue
+            doc = await self._doc(space_id, inst)
+            if doc.get("direct") is True and doc.pop("fwd", None) is not None:
+                await self._put(space_id, inst, doc)
+
+    async def _reached(self, space_id: str, instance_id: str) -> bool:
+        """*instance_id* reaches the space only through a GFS: by our own
+        sealed-redeem seat with a relay, or as the host that seated it
+        told us (its flag on the card's row)."""
+        if await self._reached_by_gfs(instance_id):
+            return True
+        return (await self._doc(space_id, instance_id)).get("gfs_reached") is True
+
     def _may_resnapshot(self, space_id: str, instance_id: str) -> bool:
         key = (space_id, instance_id)
         now = self._clock()
@@ -823,9 +1144,10 @@ class SpaceMemberDirectory:
 
     async def directory_seq(self, space_id: str, host_id: str) -> int | None:
         """The ``dir_seq`` of *space_id*'s directory we hold — what our §25.6
-        ``SPACE_SYNC_BEGIN`` to its host echoes — or ``None`` when we do not
-        sync it with that household (not its host), or none is held."""
-        if host_id != await self.host_of(space_id) or host_id == self._instance_id:
+        ``SPACE_SYNC_BEGIN`` to a household acting as its host echoes (each
+        host has its own version line) — or ``None`` when that household
+        does not act as its host here, or none is held."""
+        if host_id not in await self._hosts(space_id):
             return None
         seq = (await self._doc(space_id, host_id)).get("dir_seq")
         if _is_count(seq):
@@ -837,26 +1159,30 @@ class SpaceMemberDirectory:
         return 0 if await holds_member_seat(self._spaces, space_id) else None
 
     async def ask_host(self, space_id: str) -> None:
-        """Our directory of *space_id* misses something its host has (a
-        delta on a version we do not hold, a host hop from a member whose
-        card we lack): give the host our card again now — the "seated" it
-        answers with a snapshot — rather than wait for the next §25.6
-        sync. A writer seat only, at most once per
-        :data:`HELLO_RESNAPSHOT_S` a space (the host answers at most that
-        often too). Never raises."""
+        """Our directory of *space_id* misses something a host has (a host
+        hop from a member whose card we lack): ask every household acting
+        as its host again (:meth:`_ask`). Never raises."""
+        try:
+            for host in await self._hosts(space_id):
+                await self._ask(space_id, host)
+        except Exception:
+            log.warning("directory: asking the host again failed", exc_info=True)
+
+    async def _ask(self, space_id: str, host: str) -> None:
+        """Give *host* our card again now — the "seated" it answers with a
+        snapshot — rather than wait for the next §25.6 sync. A writer seat
+        only, at most once per :data:`HELLO_RESNAPSHOT_S` a space and host
+        (the host answers at most that often too). Never raises."""
         if self._federation is None:
             return
         try:
-            host = await self.host_of(space_id)
-            if host is None or host == self._instance_id:
-                return
             now = self._clock()
-            last = self._asked_at.get(space_id, float("-inf"))
+            last = self._asked_at.get((space_id, host), float("-inf"))
             if now - last < HELLO_RESNAPSHOT_S:
                 return
             if not await holds_member_seat(self._spaces, space_id):
                 return
-            self._asked_at[space_id] = now
+            self._asked_at[(space_id, host)] = now
             await self._publish_to_host(space_id, host, again=True)
         except Exception:
             log.warning("directory: asking the host again failed", exc_info=True)
@@ -872,7 +1198,7 @@ class SpaceMemberDirectory:
         sender = event.from_instance
         if not _is_count(echo) or not space_id or not sender:
             return
-        if await self.host_of(space_id) != self._instance_id:
+        if not await self.serves(space_id):
             return
         if sender not in await self._writers_v89(space_id):
             return
@@ -935,7 +1261,7 @@ class SpaceMemberDirectory:
                 [
                     c.instance_id
                     for c in cards
-                    if await self._reached_by_gfs(c.instance_id)
+                    if await self._reached(space_id, c.instance_id)
                 ]
             )
         result = await self._federation.broadcast_to_space_members(
@@ -986,9 +1312,17 @@ class SpaceMemberDirectory:
         snapshot_to: set[str] | None,
     ) -> None:
         assert self._federation is not None
-        if await self.host_of(space_id) != self._instance_id:
+        if not await self.serves(space_id):
             return
         cards = await self._space_cards(space_id)
+        owner = await self._owns(space_id)
+        if not owner:
+            await self._forward_to_owner(space_id, cards)
+            if not await self._recipients(space_id):
+                # A delegated admin nobody takes as host (it invited no
+                # household, or none said it is seated): no directory to
+                # keep. The first one that comes gets a snapshot.
+                return
         own = await self.own_card(space_id)
         lost = {k for k in self._lost_mailbox if k[0] == space_id}
         self._lost_mailbox -= lost
@@ -1012,7 +1346,7 @@ class SpaceMemberDirectory:
         # seat paired, or a new relay seat) goes out again, card unchanged,
         # so no stale flag keeps a member's mailbox alive.
         reached = sorted(
-            [i for i in cards if i in listed and await self._reached_by_gfs(i)]
+            [i for i in cards if i in listed and await self._reached(space_id, i)]
         )
         before_reached = {i for i in own_doc.get("reached") or [] if isinstance(i, str)}
         for inst in before_reached.symmetric_difference(reached):
@@ -1120,7 +1454,7 @@ class SpaceMemberDirectory:
         new card, now."""
         for space_id in sorted({space for (space, _i) in await self._rows()}):
             try:
-                if await self.host_of(space_id) == self._instance_id:
+                if await self.serves(space_id):
                     await self.reconcile(space_id)
             except Exception:
                 log.warning("directory: reconcile failed", exc_info=True)
@@ -1136,7 +1470,9 @@ class SpaceMemberDirectory:
             try:
                 if not await self._in_use(space_id):
                     await self._forget_space(space_id)
-                elif await self.host_of(space_id) == self._instance_id:
+                    continue
+                await self._drop_lapsed(space_id)
+                if await self.serves(space_id):
                     await self.reconcile(space_id)
             except Exception:
                 log.warning("directory: reconcile failed", exc_info=True)
@@ -1147,10 +1483,11 @@ class SpaceMemberDirectory:
         host): every household carded in it loses its card, its row and
         — once no shared space is left — its seat (the host's own row is
         the roster's to drop)."""
-        self._snap_in.pop(space_id, None)
-        host = await self.host_of(space_id)
+        for key in [k for k in self._snap_in if k[0] == space_id]:
+            self._snap_in.pop(key, None)
+        hosts = await self.hosts_of(space_id)
         for inst in sorted(await self._space_cards(space_id)):
-            if inst == host:
+            if inst in hosts:
                 await self._clear(space_id, inst)
             else:
                 await self._forget(space_id, inst)
@@ -1203,16 +1540,20 @@ class SpaceMemberDirectory:
             return False
         if sender not in await self._spaces.list_member_instances(space_id):
             return False
-        if await self.card_of(space_id, sender) is not None:
-            return True
+        hosts = await self.hosts_of(space_id)
+        doc = await self._doc(space_id, sender)
+        card = _card(doc)
+        if card is not None and card.instance_id == sender:
+            # A card only a household that no longer acts as host listed
+            # counts for nothing — at once, not at the next sweep.
+            return sender in hosts or await self._still_listed(space_id, doc)
         # A card of another space counts only where the roster is ours to
-        # trust: the sender is the space's host (a second space joined over
-        # the existing seat carries no card), or WE host the space (its
+        # trust: the sender acts as the space's host here (a second space
+        # joined over the existing seat carries no card), or WE do (its
         # member household's first card for it is on its way in). A member
         # needs the sender's card for THIS space, so a removal (its card
-        # cleared by the host's delta) takes effect at once.
-        host = await self.host_of(space_id)
-        if sender != host and host != self._instance_id:
+        # cleared by a host's delta) takes effect at once.
+        if sender not in hosts and not await self.serves(space_id):
             return False
         return await self._any_card(sender) is not None
 

@@ -6,6 +6,13 @@ reaches the space through, or the other has no mailbox — sends through the
 space's host instead: a three-hop route ``[us, host, them]`` of that space
 (owner decision 2026-11-08: "we need the relay only members").
 
+"The host" is the one notion of
+:mod:`socialhome.federation.host_equivalence` (owner decision 2026-11-13):
+the owner household, or — for a household a delegated admin invited — that
+admin while the trust holds. Each side checks it on its own rows: the hop
+relays only where it acts as host itself, and an end takes (or sends) the
+hop only through a household acting as host for IT.
+
 * **No discovery.** The route is fixed and the inner payload is sealed to
   the target's static key-wrap key from its verified member card — the
   same key its seat was made from — so there is no probe flood, and a
@@ -16,9 +23,9 @@ space's host instead: a three-hop route ``[us, host, them]`` of that space
 * **One shape only.** :meth:`HostHop.allows` is what ``SpaceRoutedHandler``
   asks before it relays or unwraps a ``SPACE_ROUTED`` that a
   ``space_session`` seat sent us, or that it would forward to one: exactly
-  three hops, the routing space's host in the middle, both ends holding a
-  card for that space on the side that checks. Anything else from that
-  peer class is dropped.
+  three hops, a household acting as the routing space's host in the middle,
+  both ends holding a card for that space on the side that checks. Anything
+  else from that peer class is dropped.
 """
 
 from __future__ import annotations
@@ -44,7 +51,11 @@ log = logging.getLogger(__name__)
 HOST_HOP_UNAVAILABLE: str = "host_hop_unavailable"
 
 CardLookup = Callable[[str, str], Awaitable[MemberCard | None]]
-HostLookup = Callable[[str], Awaitable[str | None]]
+#: ``space_id`` → the households acting as its host HERE that a hop may
+#: go through, in the order to try them (never us).
+HostsLookup = Callable[[str], Awaitable[list[str]]]
+#: ``space_id`` → whether WE act as its host toward other members.
+ServesLookup = Callable[[str], Awaitable[bool]]
 #: Asks a space's host for its member directory again (``space_id``).
 AskHost = Callable[[str], Awaitable[None]]
 
@@ -55,11 +66,12 @@ class HostHop:
     __slots__ = (
         "_ask_host",
         "_card_of",
-        "_host_of",
+        "_hosts_of",
         "_keywrap_private",
         "_keywrap_public_b64",
         "_own_instance_id",
         "_routed",
+        "_serves",
     )
 
     def __init__(
@@ -67,14 +79,16 @@ class HostHop:
         *,
         own_instance_id: str,
         card_of: CardLookup,
-        host_of: HostLookup,
+        hosts_of: HostsLookup,
+        serves: ServesLookup,
         keywrap_private_key: bytes,
         keywrap_public_key: bytes,
         ask_host: AskHost | None = None,
     ) -> None:
         self._own_instance_id = own_instance_id
         self._card_of = card_of
-        self._host_of = host_of
+        self._hosts_of = hosts_of
+        self._serves = serves
         self._ask_host = ask_host
         self._keywrap_private = keywrap_private_key
         self._keywrap_public_b64 = b64url_encode(keywrap_public_key)
@@ -99,15 +113,23 @@ class HostHop:
         payload: dict,
         space_id: str,
     ) -> DeliveryResult:
-        """Ship one event of *space_id* to *to_instance_id* through the
-        space's host. Never raises."""
+        """Ship one event of *space_id* to *to_instance_id* through a
+        household acting as the space's host here — the first of
+        ``hosts_of`` that is neither us nor the target. Never raises."""
         failed = DeliveryResult(
             instance_id=to_instance_id, ok=False, error=HOST_HOP_UNAVAILABLE
         )
         if self._routed is None or not space_id:
             return failed
-        host = await self._host_of(space_id)
-        if host is None or host in (self._own_instance_id, to_instance_id):
+        host = next(
+            (
+                h
+                for h in await self._hosts_of(space_id)
+                if h not in (self._own_instance_id, to_instance_id)
+            ),
+            None,
+        )
+        if host is None:
             return failed
         card = await self._card_of(space_id, to_instance_id)
         if card is None:
@@ -135,10 +157,13 @@ class HostHop:
     ) -> bool:
         """Whether a ``SPACE_ROUTED`` with *path*, routing *space_id* and
         inner *inner_type* is the host-hop shape we take from (or forward
-        to) a ``space_session`` seat: three hops, the space's host in the
-        middle, an inner event a seat may send directly too (the §D2b
-        vocabulary — the hop never widens it), and — on the host — both
-        ends' cards held for that space; on an end, the other end's."""
+        to) a ``space_session`` seat: three hops, a household acting as
+        the space's host in the middle, an inner event a seat may send
+        directly too (the §D2b vocabulary — the hop never widens it), and —
+        on the hop — both ends' cards held for that space; on an end, the
+        other end's. The hop relays only where WE act as host (the owner,
+        or a delegated admin); an end takes it only through a household
+        acting as host for it (never through any other member)."""
         if not space_id or len(path) != 3 or len(set(path)) != 3:
             return False
         if (
@@ -147,13 +172,15 @@ class HostHop:
         ):
             log.info("host hop: an inner %r is not seat vocabulary", inner_type.value)
             return False
-        host = await self._host_of(space_id)
-        if host is None or path[1] != host:
-            return False
         me = self._own_instance_id
+        hop = path[1]
         ends: tuple[str, ...]
-        if me == host:
+        if me == hop:
+            if not await self._serves(space_id):
+                return False
             ends = (path[0], path[2])
+        elif hop not in await self._hosts_of(space_id):
+            return False
         elif me == path[2]:
             ends = (path[0],)
         elif me == path[0]:

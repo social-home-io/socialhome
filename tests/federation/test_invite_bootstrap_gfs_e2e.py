@@ -481,6 +481,7 @@ async def _household(
             identity_pk=ident.public_key,
             keywrap_pk=keywrap.public_key,
             keywrap_sig=keywrap_sig,
+            remote_member_repo=remote_members,
         )
         await mailbox_service.start()
         coordinator.attach_mailboxes(mailbox_service, directory)
@@ -2390,3 +2391,182 @@ async def test_a_redeem_seat_replaces_a_directory_seat_and_nothing_else_does(
     seat = await a.federation_repo.get_instance(c.instance_id)
     assert seat.relay_via == gfs.url
     assert a.key_manager.decrypt(seat.key_self_to_remote) != lazy_key
+
+
+# ─── "Host" = the owner OR the delegated admin that invited us ────────────
+#
+# Owner decision 2026-11-13: the member directory follows the one notion of
+# ``socialhome/federation/host_equivalence.py``. Owner ``o``, delegated
+# admin ``a`` (delegation on, seed held), ``m`` seated by a link of ``a``,
+# and ``e`` seated by a link of ``o`` — all four reach the space only
+# through the GFS.
+
+
+async def _join_through_the_admin(m, a, gfs, space) -> None:
+    await _link_join(m, a, gfs, space, "tok-for-m")
+    # The mailbox sweep tick: cards a join changed go out from it.
+    for _ in range(2):
+        for h in (a, m):
+            await h.directory.sweep_once()
+            await gfs.drain()
+
+
+@pytest.fixture
+async def delegated_households(tmp_path, gfs, http_session):
+    gfs.mailboxes_on = True
+    o = await _household(tmp_path, "mo", gfs, http_session, mailboxes=True)
+    a = await _household(tmp_path, "ma", gfs, http_session, mailboxes=True)
+    m = await _household(tmp_path, "mm", gfs, http_session, mailboxes=True)
+    e = await _household(tmp_path, "me", gfs, http_session, mailboxes=True)
+    space = await _join(a, o, gfs)
+    await _link_join(e, o, gfs, space, "tok-for-e")
+    # The owner turns delegation on and makes a's person an admin. (This
+    # fixture wires no config / role / key-share inbound, so a's copy of
+    # what those events carry is written directly.)
+    await o.space_service.update_config(
+        space.id,
+        actor_username=o.username,
+        features=dataclasses.replace(
+            (await o.space_repo.get(space.id)).features,
+            delegated_admin_authority=True,
+        ),
+    )
+    await o.space_service.set_remote_member_role(
+        space.id,
+        actor_username=o.username,
+        instance_id=a.instance_id,
+        user_id=a.user_id,
+        role="admin",
+    )
+    await gfs.drain()
+    await a.db.enqueue(
+        "UPDATE spaces SET delegated_admin_authority=1 WHERE id=?", (space.id,)
+    )
+    await a.space_repo.set_space_seed(
+        space.id, await o.space_repo.get_space_seed(space.id)
+    )
+    await a.space_repo.set_role(space.id, a.user_id, "admin")
+    yield o, a, m, e, space
+    await gfs.drain()
+    for h in (o, a, m, e):
+        await h.mailboxes.stop()
+        await h.db.shutdown()
+
+
+def _go_offline(h, gfs) -> None:
+    """Nothing reaches *h* any more: no socket, no mailbox."""
+    gfs.mailboxes.pop(_mailbox_of(h, gfs))
+    gfs.sockets.pop(h.instance_id)
+
+
+async def _cards_at(h, space) -> set[str]:
+    return {
+        inst
+        for (sp, inst), doc in (await _rows(h)).items()
+        if sp == space.id and "card" in doc
+    }
+
+
+async def test_a_member_invited_by_a_delegated_admin_gets_the_directory(
+    delegated_households, gfs
+):
+    """With the owner online: m (seated by the admin, with no link of its
+    own to the owner) holds every member's card, the owner lists m, and the
+    owner's own invitee e learns m from the owner."""
+    o, a, m, e, space = delegated_households
+    await _join_through_the_admin(m, a, gfs, space)
+    assert await m.space_repo.get_invited_by(space.id) == a.instance_id
+    assert (await m.space_repo.get(space.id)).owner_instance_id == o.instance_id
+    assert await _cards_at(m, space) == {o.instance_id, a.instance_id, e.instance_id}
+    # The admin's directory has its own version line on m.
+    assert (await _rows(m))[(space.id, a.instance_id)]["dir_seq"] > 0
+    # The admin passed m's card on: the owner lists it, e got it from the
+    # owner — and both check m's frames against it.
+    assert m.instance_id in await _cards_at(o, space)
+    assert m.instance_id in await _cards_at(e, space)
+    assert await e.directory.sender_allowed(m.instance_id, space.id)
+    # Once the owner lists m it answers m itself too: two version lines.
+    assert (await _rows(m))[(space.id, o.instance_id)]["dir_seq"] > 0
+
+
+async def test_with_the_owner_offline_the_admins_invitee_still_gets_the_directory(
+    delegated_households, gfs
+):
+    """The owner is offline when m joins through the admin: m still gets
+    the directory (every card the admin holds) and seats for it."""
+    o, a, m, e, space = delegated_households
+    _go_offline(o, gfs)
+    await _join_through_the_admin(m, a, gfs, space)
+    assert await _cards_at(m, space) == {o.instance_id, a.instance_id, e.instance_id}
+    seat = await m.federation_repo.get_instance(e.instance_id)
+    assert seat is not None and seat.source is InstanceSource.SPACE_SESSION
+    # e was invited by the owner: only the owner's directory tells it who
+    # is a member, so it learns m when the owner is back — not from the
+    # admin (no new trust).
+    assert m.instance_id not in await _cards_at(e, space)
+
+
+async def test_the_admins_invitee_and_a_gfs_only_member_exchange_posts_owner_offline(
+    delegated_households, gfs
+):
+    """m joined through the admin while the owner was online; then the
+    owner goes offline. m and e (GFS-only, invited by the owner) still
+    reach each other at their mailboxes, and the GFS sees no instance id,
+    no space and no content."""
+    o, a, m, e, space = delegated_households
+    await _join_through_the_admin(m, a, gfs, space)
+    _go_offline(o, gfs)
+    for h in (m, e):
+        h.received.clear()
+    gfs.mailbox.clear()
+    await m.federation.broadcast_to_space_members(
+        space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("from-m")
+    )
+    await e.federation.broadcast_to_space_members(
+        space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("from-e")
+    )
+    await gfs.drain()
+    assert (m.instance_id, "from-m") in [
+        (ev.from_instance, ev.payload["content"]) for ev in e.received
+    ]
+    assert (e.instance_id, "from-e") in [
+        (ev.from_instance, ev.payload["content"]) for ev in m.received
+    ]
+    wire = json.dumps(gfs.mailbox)
+    for leak in (
+        o.instance_id,
+        a.instance_id,
+        m.instance_id,
+        e.instance_id,
+        space.id,
+        "from-m",
+        "from-e",
+    ):
+        assert leak not in wire
+
+
+async def test_when_the_trust_in_the_admin_ends_its_directory_is_refused_at_once(
+    delegated_households, gfs
+):
+    """Delegation goes off on m (the owner's signed config): the admin's
+    next directory frame is dropped, what only the admin listed goes, and
+    the owner's directory is what counts."""
+    o, a, m, e, space = delegated_households
+    _go_offline(o, gfs)  # so only the admin lists e and the owner on m
+    await _join_through_the_admin(m, a, gfs, space)
+    assert e.instance_id in await _cards_at(m, space)
+    await m.db.enqueue(
+        "UPDATE spaces SET delegated_admin_authority=0 WHERE id=?", (space.id,)
+    )
+    assert not await m.directory.sender_allowed(e.instance_id, space.id)
+    held = (await _rows(m))[(space.id, a.instance_id)]["dir_seq"]
+    a.directory._hello_at.clear()
+    await a.directory.reconcile(space.id, snapshot_to={m.instance_id})
+    await gfs.drain()
+    rows = await _rows(m)
+    # Not taken: no newer version — the admin's line is gone altogether.
+    assert rows.get((space.id, a.instance_id), {}).get("dir_seq", 0) != held
+    assert "dir_seq" not in rows.get((space.id, a.instance_id), {})
+    assert e.instance_id not in await _cards_at(m, space)
+    assert await m.directory.directory_seq(space.id, a.instance_id) is None
+    assert await m.directory.directory_seq(space.id, o.instance_id) == 0
