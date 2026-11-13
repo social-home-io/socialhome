@@ -59,14 +59,10 @@ from socialhome.app_keys import (
 )
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
-from socialhome.crypto import generate_x25519_keypair
 from socialhome.domain.federation import (
     DeliveryResult,
     FederationEvent,
     FederationEventType,
-    InstanceSource,
-    PairingStatus,
-    RemoteInstance,
 )
 from socialhome.domain.federation_capabilities import OURS
 from socialhome.domain.outbox import OutboxEntry
@@ -75,8 +71,6 @@ from socialhome.domain.space_media_ref import space_page_media_name
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.gfs_relay_transport import (
     RELAY_MAX_ENVELOPE_BYTES,
-    RELAY_STATUS_TOO_LARGE,
-    GfsRelayTransport,
 )
 from socialhome.federation.inbound_validator import (
     InboundContext,
@@ -2473,34 +2467,6 @@ async def test_a_promotion_sends_a_real_begin_that_carries_the_echo(mesh, monkey
     assert a.user_id in {r["submitted_by"] for r in await _queue_rows(d)}
 
 
-async def test_a_submission_always_fits_one_gfs_relay_envelope(mesh):
-    """Every member is equal on every path: an item is refused at submit
-    (413) unless what is sent for it fits one envelope on the GFS relay —
-    the path to and from a household seated from an invite link — even
-    when it is sealed twice (a mesh hop, then the relay)."""
-    a = mesh["A"]
-    wire = moderation_federation.MAX_WIRE_BYTES
-    # Encrypt + base64, twice, plus the envelope around it.
-    assert wire * 4 / 3 * 4 / 3 + 4096 <= RELAY_MAX_ENVELOPE_BYTES
-    r = await a.tc.post(
-        f"/api/spaces/{SID}/pages",
-        json={"title": "Big", "content": "x" * (wire + 1)},
-        headers=a.headers,
-    )
-    assert r.status == 413, await r.text()
-    assert await _queue_rows(a) == [] and not a.sent
-    r = await a.tc.post(
-        f"/api/spaces/{SID}/pages",
-        json={"title": "Fits", "content": "x" * (wire - 4096)},
-        headers=a.headers,
-    )
-    assert r.status == 202, await r.text()
-    for _to, p in _sends(a, FET.SPACE_MODERATION_SUBMITTED):
-        assert len(json.dumps(p)) <= wire
-        # The "before" values are rebuilt by every receiver: never sent.
-        assert p["snapshot"] is None
-
-
 # ── Catch-up round 3 ────────────────────────────────────────────────────
 
 
@@ -2609,72 +2575,76 @@ async def test_an_echoed_rejection_is_processed_once_per_rate_window(mesh, monke
     assert (await _row(h, item_id))[0] == "pending"
 
 
-async def test_a_near_cap_item_rides_the_real_gfs_relay(mesh):
-    """Not only arithmetic: the largest submission the cap lets through is
-    sealed by the real federation service into a real §24.11 envelope and
-    carried by the real GFS relay transport (padded, sealed to the
-    household's key) — and the same item at the old 256 KiB size is what
-    that transport refuses."""
-    a = mesh["A"]
-    wire = moderation_federation.MAX_WIRE_BYTES
-    # Hex text: nothing a compressor could shrink on the way.
+async def test_a_large_item_reaches_a_gfs_only_moderator_and_a_paired_one(
+    mesh, monkeypatch
+):
+    """No size change for anybody: an item near the 256 KiB cap is taken
+    (202) and reaches a paired moderator household as the ordinary event.
+    A moderator household behind a GFS relay cannot take that much in one
+    JSON envelope: the host — which knows from its echo that it runs this
+    revision — sends it there as one binary relay frame (the item's
+    content as the frame's bytes), and it is admitted like any other."""
+    a, h, c, d = mesh["A"], mesh["H"], mesh["C"], mesh["D"]
+    frames: list[tuple[str, str, FederationEventType, dict, bytes]] = []
+
+    async def _frame(
+        self,
+        *,
+        to_instance_id,
+        event_type,
+        payload,
+        raw_chunk,
+        space_id=None,
+        mesh_fallback=False,
+    ):
+        frames.append(
+            (self._own_instance_id, to_instance_id, event_type, payload, raw_chunk)
+        )
+        return DeliveryResult(instance_id=to_instance_id, ok=True, via="gfs_relay")
+
+    monkeypatch.setattr(FederationService, "send_media_chunk", _frame)
+    content = secrets.token_hex(120 * 1024)  # 240 KiB of text
     r = await a.tc.post(
         f"/api/spaces/{SID}/pages",
-        json={
-            "title": "Near the cap",
-            "content": secrets.token_hex((wire - 4096) // 2),
-        },
+        json={"title": "Big", "content": content},
         headers=a.headers,
     )
     assert r.status == 202, await r.text()
-    (payload,) = {
-        json.dumps(p, sort_keys=True)
-        for _to, p in _sends(a, FET.SPACE_MODERATION_SUBMITTED)
-    }
-    payload = json.loads(payload)
-    assert wire - 8192 < len(json.dumps(payload)) <= wire
-    fed = a.app[federation_service_key]
-    keywrap = generate_x25519_keypair()
-    session = fed._key_manager.encrypt(secrets.token_bytes(32))
-    link_household = RemoteInstance(
-        id="b" * 32,
-        display_name="Link household",
-        remote_identity_pk="cc" * 32,
-        key_self_to_remote=session,
-        key_remote_to_self=session,
-        remote_inbox_url="",
-        local_inbox_id="wh-1",
-        status=PairingStatus.CONFIRMED,
-        source=InstanceSource.SPACE_SESSION,
-        relay_via="https://gfs.example.org",
-        remote_keywrap_pk=keywrap.public_key.hex(),
+    item_id = (await r.json())["item_id"]
+    sent = _sends(a, FET.SPACE_MODERATION_SUBMITTED)
+    assert sorted(to for to, _p in sent) == sorted([h.iid, c.iid])
+    for _to, p in sent:
+        assert len(json.dumps(p)) > RELAY_MAX_ENVELOPE_BYTES
+        # The "before" values are rebuilt by every receiver: never sent.
+        assert p["snapshot"] is None
+    await _pump(mesh)
+    assert await _row(c, item_id) == ("pending", True)  # paired: as ever
+    assert not frames
+    # D sits behind a GFS relay as the host sees it, and is promoted.
+    await h.db.enqueue(
+        "UPDATE remote_instances SET source='space_session' WHERE id=?", (d.iid,)
     )
-
-    class _Relay:
-        def __init__(self) -> None:
-            self.calls: list[dict] = []
-
-        async def send_sealed_envelope(self, *, to_instance_id, envelope, gfs_url=""):
-            self.calls.append(envelope)
-            return True
-
-    async def _ride(body: dict) -> tuple[tuple, int]:
-        envelope = fed._seal_envelope(
-            link_household,
-            event_type=FET.SPACE_MODERATION_SUBMITTED,
-            payload=body,
-            space_id=SID,
-            msg_id=None,
-        )
-        relay = _Relay()
-        result = await GfsRelayTransport(relay_sender=relay).send(
-            instance=link_household, envelope_dict=envelope
-        )
-        return result, len(relay.calls)
-
-    assert await _ride(payload) == ((True, None), 1)
-    old_size = {
-        **payload,
-        "payload": {**payload["payload"], "content": secrets.token_hex(100 * 1024)},
-    }
-    assert await _ride(old_size) == ((False, RELAY_STATUS_TOO_LARGE), 0)
+    await _promote(mesh, d)
+    await _begin(mesh, d)
+    assert not _sends(h, FET.SPACE_MODERATION_SUBMITTED)  # no JSON envelope
+    ((sender, to, et, meta, raw),) = frames
+    assert (sender, to, et) == (h.iid, d.iid, FET.SPACE_MODERATION_SUBMITTED)
+    assert meta["item_id"] == item_id and meta["submitter_instance_id"] == a.iid
+    assert "payload" not in meta and len(json.dumps(meta)) < 2048
+    assert json.loads(raw)["payload"]["content"] == content
+    event = dataclasses.replace(_event(h, et, meta, d), media_bytes=raw)
+    await _receive(d, event)
+    assert await _row(d, item_id) == ("pending", True)
+    row = await d.db.fetchone(
+        "SELECT payload_json FROM space_moderation_queue WHERE id=?", (item_id,)
+    )
+    assert json.loads(row["payload_json"])["content"] == content
+    # Up to date: nothing more is sent.
+    _federated(h)._caught_up_at.clear()
+    await _begin(mesh, d)
+    assert len(frames) == 1 and not h.sent
+    # A frame whose bytes are no item content is refused, nothing stored.
+    await d.db.enqueue("DELETE FROM space_moderation_queue", ())
+    for junk in (b"not json", b"[1]", b'{"payload": 7}'):
+        await _receive(d, dataclasses.replace(_event(h, et, meta, d), media_bytes=junk))
+    assert await _queue_rows(d) == []

@@ -1108,7 +1108,9 @@ echoes what it holds by state (`mod_held`,
 purged and the decisions it missed, and applies a rejection it never got
 — only for a live admin / moderator seat, rate limited and bounded. The
 host re-sends a space's pending reports on the same BEGIN, once per
-promotion (`ReportService.on_sync_begin`). A household whose person is promoted sends that
+promotion (`ReportService.on_sync_begin`). An item too large for a JSON
+envelope on the GFS relay goes to a household behind a GFS as one binary
+relay frame (the v_87 media frame; `RELAY_FRAME_EVENT_TYPES`). A household whose person is promoted sends that
 BEGIN at once (`SpaceSyncScheduler.sync_with_host`). The queue never
 enters the §25.6 stream
 ([`protocol/moderation.md`](./protocol/moderation.md#re-delivery-and-catch-up)).

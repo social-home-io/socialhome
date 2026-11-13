@@ -207,11 +207,6 @@ class ModerationFederation(Protocol):
         """The other households that review ``space`` right now."""
         ...
 
-    async def check_wire(self, space: Space, item: SpaceModerationItem) -> None:
-        """Raise ``ModerationPayloadTooLargeError`` when ``item`` would not
-        fit one envelope on every path."""
-        ...
-
     def forget_household(self, space_id: str, instance_id: str) -> None:
         """A seat of that household changed role on this host."""
         ...
@@ -417,10 +412,6 @@ class SpaceModerationService(BusPublisherMixin):
             expires_at=now + MODERATION_TTL,
             status=ModerationStatus.PENDING,
         )
-        if self._federated is not None:
-            # One cap for everybody, whatever path today's reviewers are
-            # reached over: the item must fit a GFS relay envelope.
-            await self._federated.check_wire(space, item)
         await self._spaces.insert_moderation_item(item)
         await self._emit(SpaceModerationQueued(item=item))
         if targets and self._federated is not None:

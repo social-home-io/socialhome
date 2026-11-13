@@ -88,6 +88,7 @@ envelope carries no routing field.
 | A plain member household | Never a target. A submission that reaches a household with no local content-authority member anyway (misdirected) is dropped and not stored. |
 | Approved content | The ordinary write: `broadcast_to_space_members` to member households only. In a public / global space with followers, the host also relays an approved post to the GFS on its authority, encrypted and padded (see *Outcomes for GFS followers*). |
 | Decisions | Pairwise, sealed: an approval request to the host only; the host's announcement and any rejection to the host, the reviewers and the submitter's household. |
+| A large item to a household behind a GFS | One binary relay frame (v_87), sealed to that household's key-wrap key and padded to a size bucket: the GFS sees the recipient and a bucket, never the event type, the space or the content — exactly as for a media chunk. See *Large items behind a GFS*. |
 | Catch-up (host → a reviewer household) | The host re-sends a pending item only in answer to the `mod_held` echo of a household holding a live admin / moderator seat — one `send_with_mesh_fallback` to that household, its files to that household only. Never in the §25.6 stream. See *Re-delivery and catch-up*. |
 | Queued retries | The outbox re-checks a retried `SPACE_MODERATION_SUBMITTED` at send time and drops it when the target no longer reviews the space. |
 | A household that stops reviewing | When it loses its last content-authority seat in the space, it expires the pending items of other households' members it holds and NULLs their content (its own members' items stay). |
@@ -152,8 +153,7 @@ Checked in order; any failure is a WARNING and stores nothing.
    rebuilt from **this** household's copy of the target; the sender's is
    ignored.
 6. Caps: 20 pending per (space, submitter), 50 per (space, sending
-   household), 500 per space, 256 KiB per item (a submitter refuses its own
-   above 96 KiB on the wire — *One size for every path*); `expires_at` is clamped to
+   household), 500 per space, 256 KiB per item; `expires_at` is clamped to
    at most 14 days ahead, `submitted_at` to at most 5 minutes ahead and at
    most 14 days before `expires_at`.
 7. Stored once (`INSERT OR IGNORE`): a replay changes nothing — and a
@@ -417,23 +417,38 @@ sequenceDiagram
     D->>D: row "stale" → rejected
 ```
 
-**One size for every path.** What is sent for an item — its payload and,
-for a public post, the author-signed copy — must fit **one envelope on the
-GFS relay**, the path to and from a household seated from an invite link
-(191 KiB, and an envelope may be sealed twice on the way). A submission
-over **96 KiB** on the wire (`MAX_WIRE_BYTES`) is refused where it is made
-(413), whatever path today's reviewers are reached over: no moderator is
-left out by how their household is reached. The `snapshot` field is always
+**Large items behind a GFS.** The size limit is the same for everybody
+(256 KiB per item, as before). A JSON envelope on the GFS relay — the path
+to a household seated from an invite link or a directory join — takes
+about 191 KiB, so an item whose content is over 96 KiB (the bound media
+chunks use: encrypt + base64, twice) does not fit one. The host then sends
+it to that household as **one binary relay frame** (v_87, `\x00SHR`, up
+to 528 KiB — what `SPACE_MEDIA_BLOB` chunks ride): the same
+`SPACE_MODERATION_SUBMITTED` event, its small signed and sealed metadata
+(ids, feature, action, submitter, times, `submitter_instance_id`) as the
+frame's header payload and `{payload, public_relay?}` as the frame's
+bytes, bound by the signed `chunk_sha256`. No new event and no new frame:
+the relay pipeline's event-type gate takes this one event besides the
+media chunks (`RELAY_FRAME_EVENT_TYPES`; the inbox's binary media route
+and the media channel stay media-only), and the receiver runs every check
+of *Receiver rules* on the reassembled payload. The host uses the frame
+only in a catch-up answer — the household's echo proves it runs a revision
+that reads it — so a large item reaches a moderator behind a GFS with its
+next BEGIN to the host (at once on a promotion, else within 30 minutes);
+a paired or mesh-reached moderator household gets it live, as the
+ordinary event. Needs what media over the relay needs: the household at
+v_87 and a GFS proving `envelope_media`; without them the item waits
+(the send is tried again on later answers). The `snapshot` field is always
 `null` on the wire — every receiver rebuilds the "before" values from its
-own copy and has always ignored the sender's — which halves an edit or a
-delete. (A receiver still takes up to 256 KiB from an older submitter.)
+own copy (`local_snapshot`) and never read the sender's — which halves an
+edit or a delete.
 
 **Cost.** The echo adds ≈ 35 B per held item to one BEGIN per reviewer
 household every 30 minutes — ≈ 350 B for ten items, ≈ 35 KB at the
 1000-id bound — and nothing for plain member households and followers. An
 up-to-date household costs the host one seat lookup and one queue read and
 gets **no** answer. A difference costs the missing items once (a typical
-item is 0.5–2 KB, at most 96 KiB), to one household: no fan-out, so a
+item is 0.5–2 KB, at most 256 KiB), to one household: no fan-out, so a
 global space with 200 authors and 10 000 followers pays per **reviewer
 household** only (five of them: ten echoes an hour). Worst case per
 reviewer household: 1 MiB of items per 10 minutes plus the files of the
@@ -721,6 +736,13 @@ back).
   to the host (at most 30 minutes; at once on a promotion). A role change
   the household itself missed (the mesh has no outbox) delays it the same
   way as it delays every other right of that role.
+- **A large item from a submitter behind a GFS.** A household seated
+  from an invite link cannot send an item over ~96 KiB to the host in one
+  JSON relay envelope (the relay refuses it, as it refuses any other
+  space write of that size from such a household — a general limit of the
+  relay, not of moderation). The item stays on the submitter's household
+  only. Sending it as a relay frame needs the submitter to know the host
+  reads one, i.e. a protocol version gate — not part of this change.
 - **An echoed rejection is the household's word**, like its
   `SPACE_MODERATION_DECIDED`: the host checks the named moderator's live
   seat on that household, not that the rejection happened earlier.

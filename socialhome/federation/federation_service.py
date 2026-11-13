@@ -148,7 +148,11 @@ from .inbound_validator import (
     run_post_decrypt_gates,
 )
 from .invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
-from .media_envelope import MEDIA_HTTPS_EVENT_TYPES, build_media_envelope
+from .media_envelope import (
+    MEDIA_HTTPS_EVENT_TYPES,
+    RELAY_FRAME_EVENT_TYPES,
+    build_media_envelope,
+)
 from .media_framing import (
     MEDIA_FRAME_SUITE_V1,
     SUPPORTED_MEDIA_AEAD_SUITES,
@@ -756,15 +760,17 @@ class FederationService:
         """The §24.11 pipeline for a media body that came through the GFS
         relay (v_87): the DataChannel chain (lookup by the sender's
         instance id) with the inbox media route's event-type gate straight
-        after the parse — a relay media frame is a media chunk, nothing
-        else. Composed from the shared step list, never a copy."""
+        after the parse — a relay frame is a media chunk or a large
+        pending moderation item
+        (:data:`~socialhome.federation.media_envelope.RELAY_FRAME_EVENT_TYPES`),
+        nothing else. Composed from the shared step list, never a copy."""
         steps = self._common_pipeline_steps(
             lookup_step=make_lookup_instance_by_id(
                 repo=self._federation_repo,
                 unpaired_recently=self._unpaired_recently,
             ),
         )
-        steps.insert(1, make_check_event_types(MEDIA_HTTPS_EVENT_TYPES))
+        steps.insert(1, make_check_event_types(RELAY_FRAME_EVENT_TYPES))
         return InboundPipeline(steps)
 
     def _build_rtc_inbound_pipeline(self):

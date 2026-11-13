@@ -24032,6 +24032,11 @@ def _parity_expire_new_blobs(space_id: str, since: int) -> list[str]:
     return [r[0] for r in rows]
 
 
+#: How long ``gfs-moderator-parity`` waits for the large item on e after
+#: the role change that makes e ask the host.
+_LARGE_ITEM_WAIT_S: float = 240.0
+
+
 @_offline_step
 def cmd_gfs_moderator_parity() -> None:
     """A moderator reached ONLY through the GFS reviews like any other
@@ -24054,8 +24059,16 @@ def cmd_gfs_moderator_parity() -> None:
        again (queued); e restarts and its Moderation tab lists the item —
        from the GFS mailbox or from the host's catch-up, whichever came
        first (reported). e approves; a, d and e hold the post.
+    4. **A large item.** With pages ``moderated`` too, d's person creates a
+       page of ~240 KiB — more than a JSON envelope on the GFS relay
+       carries. e's next BEGIN to the host echoes what it holds (a role
+       change makes e send it at once); a sends the item to e as one
+       binary relay frame (logged by a's catch-up);
+       e's Moderation tab lists it with the whole text, e approves, and a,
+       d and e hold the page.
 
-    a then puts posts back to ``open`` and e's person back to ``member``.
+    a then puts posts and pages back to ``open`` and e's person back to
+    ``member``.
     """
     state = _load()
     space_id = (state or {}).get("gfs_invite_space_id")
@@ -24197,8 +24210,117 @@ def cmd_gfs_moderator_parity() -> None:
         print(f"  e (offline during the submission) sees the item — from {via} ✓")
         approve_on_e(item_id, post_id, text)
         print("  e approved it; a, d and e hold d's second post ✓")
+
+        # 4. A large item: over the JSON relay envelope, as one relay frame.
+        st, body = _inst_request(
+            state,
+            "a",
+            "PATCH",
+            f"/api/spaces/{space_id}",
+            {"features": {"pages_access": "moderated"}, "force": True},
+        )
+        _must(f"{step}: a: pages_access=moderated", st, body)
+        _poll(
+            "d to see pages reviewed",
+            lambda: (
+                _rows("d", "SELECT pages_access FROM spaces WHERE id=?", (space_id,))
+                == [("moderated",)]
+            ),
+            timeout=60.0,
+        )
+        _poll(
+            "e to see pages reviewed",
+            lambda: (
+                _rows("e", "SELECT pages_access FROM spaces WHERE id=?", (space_id,))
+                == [("moderated",)]
+            ),
+            timeout=60.0,
+        )
+        big = secrets.token_hex(120 * 1024)
+        a_log = _log_size("a")
+        st, queued = _inst_request(
+            state,
+            "d",
+            "POST",
+            f"/api/spaces/{space_id}/pages",
+            {"title": f"Big page {time.time_ns()}", "content": big},
+        )
+        if st != 202 or not (queued or {}).get("queued"):
+            raise SystemExit(
+                f"{step}: d's 240 KiB page under Reviewed -> {st} "
+                f"{str(queued)[:200]!r} (expected 202 queued)"
+            )
+        big_item, page_id = queued["item_id"], queued["target_id"]
+        _poll(
+            "the host a to list d's large item",
+            lambda: queue_lists("a", big_item),
+            timeout=60.0,
+            interval=2.0,
+        )
+        # e's next BEGIN to the host brings it. The periodic one comes
+        # every 30 minutes; a role change makes e ask at once — a takes
+        # e's moderator seat away and gives it back.
+        for role in ("member", "moderator"):
+            st, body = _inst_request(state, "a", "PATCH", role_url, {"role": role})
+            _must(f"{step}: a sets e's person to {role}", st, body)
+            _poll(
+                f"e to hold the {role} seat",
+                lambda role=role: local_role("e") == role,
+                timeout=90.0,
+                interval=2.0,
+            )
+        _poll(
+            "e's Moderation tab to list the large item",
+            lambda: queue_lists("e", big_item),
+            timeout=_LARGE_ITEM_WAIT_S,
+            interval=5.0,
+        )
+        held = _rows(
+            "e",
+            "SELECT payload_json FROM space_moderation_queue WHERE id=?",
+            (big_item,),
+        )
+        if not held or json.loads(held[0][0]).get("content") != big:
+            raise SystemExit(f"{step}: e holds the large item without its whole text")
+        if not _log_contains("a", needle, offset=a_log):
+            raise SystemExit(
+                f"{step}: e holds the large item but the host a never logged a "
+                "catch-up for e — it did not come as the host's relay frame"
+            )
+        print("  e (GFS only) holds the 240 KiB item, sent by the host as one frame ✓")
+        st, body = _inst_request(
+            state,
+            "e",
+            "POST",
+            f"/api/spaces/{space_id}/moderation/{big_item}/approve",
+            {},
+        )
+        _must(f"{step}: e approves the large page", st, body)
+        for label in ("a", "d", "e"):
+            _poll(
+                f"{label} to hold the large page",
+                lambda label=label: (
+                    _rows(
+                        label,
+                        "SELECT content FROM space_pages WHERE id=?"
+                        " AND deleted_at IS NULL",
+                        (page_id,),
+                    )
+                    == [(big,)]
+                ),
+                timeout=180.0,
+                interval=3.0,
+            )
+        print("  e approved it; a, d and e hold the large page ✓")
     finally:
         _inst_request(state, "a", "PATCH", role_url, {"role": "member"})
+        _inst_request(
+            state,
+            "a",
+            "PATCH",
+            f"/api/spaces/{space_id}",
+            {"features": {"pages_access": "open"}, "force": True},
+        )
         _set_posts_access(state, space_id, "open")
     _poll(
         "e's person to be a member again",

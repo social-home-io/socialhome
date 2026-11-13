@@ -100,7 +100,6 @@ from ..domain.space import (
     WRITER_ROLES,
     ContentAction,
     HostTooOldError,
-    ModerationPayloadTooLargeError,
     ModerationStatus,
     Space,
     SpaceFeatureAccess,
@@ -198,13 +197,14 @@ CATCH_UP_MAX_BYTES = 1024 * 1024
 #: space says the feature is not reviewed, a cap) is not sent it on every
 #: sync. A role change of that household's people starts over.
 RESEND_SAME_INTERVAL_S: float = 24 * 3600.0
-#: What is sent for one item (its payload and, for a public post, the
-#: author-signed copy — never the snapshot) fits ONE envelope on every
-#: path: the GFS relay to and from a household seated from an invite link
-#: takes at most 191 KiB, and an envelope may be sealed twice on the way
-#: (base64 × base64 of 96 KiB ≈ 171 KiB). A larger submission is refused
-#: where it is made, so no reviewer household is left out by its path.
-MAX_WIRE_BYTES: int = RELAY_JSON_CHUNK_BYTES
+#: An item whose ``SPACE_MODERATION_SUBMITTED`` payload is larger than this
+#: does not fit a JSON envelope on the GFS relay (191 KiB, after encrypt +
+#: base64 twice — the bound media chunks use). To a household seated from
+#: an invite link the host then sends it as ONE binary relay frame (v_87,
+#: up to 528 KiB): the same event, the content as the frame's bytes.
+RELAY_JSON_ITEM_BYTES: int = RELAY_JSON_CHUNK_BYTES
+#: The keys of the wire payload that travel as a relay frame's bytes.
+_FRAME_BODY_KEYS: tuple[str, ...] = ("payload", "public_relay")
 
 #: The owner-bound id kind of a create's target, per (feature, entity).
 _CREATE_KINDS: dict[tuple[str, str], str] = {
@@ -362,6 +362,7 @@ class SpaceModerationFederation(FileHashesMixin):
         targets: list[str],
         *,
         submitter_instance_id: str | None = None,
+        relay_frames: bool = False,
     ) -> list[str]:
         """One targeted, sealed send per reviewer household — never a
         broadcast — and the item's media to those households only.
@@ -369,10 +370,20 @@ class SpaceModerationFederation(FileHashesMixin):
 
         ``submitter_instance_id`` is set by the host re-sending an item it
         holds to a reviewer household that lacks it (:meth:`on_sync_begin`):
-        the household the submitter belongs to."""
+        the household the submitter belongs to. ``relay_frames``: the
+        targets are known to run this revision (they echoed), so an item
+        too large for a JSON relay envelope goes to a household seated from
+        an invite link as one binary relay frame."""
         payload, relay = await self._wire(space, item)
         if submitter_instance_id:
             payload[SUBMITTER_INSTANCE_KEY] = submitter_instance_id
+        # What a relay frame would carry as bytes. Only a content this
+        # large is framed: a smaller one fits the JSON envelope, and
+        # ``send_media_chunk`` would fall back to a JSON chunk for it.
+        content = dump_json(
+            {k: payload[k] for k in _FRAME_BODY_KEYS if k in payload}
+        ).encode()
+        framed = relay_frames and len(content) > RELAY_JSON_ITEM_BYTES
         # v_85 — the proposed files with their hashes, to a v_85 reviewer
         # household only. A page's files stay page-scoped (``sp-``) on
         # every household, so a page submission carries none; nor does a
@@ -387,6 +398,30 @@ class SpaceModerationFederation(FileHashesMixin):
         )
         reached: list[str] = []
         for iid in targets:
+            if framed and await self._federation.is_space_session_peer(iid):
+                # The existing v_87 frame: the small signed metadata names
+                # the item, its content rides as the frame's bytes.
+                result = await self._federation.send_media_chunk(
+                    to_instance_id=iid,
+                    event_type=FET.SPACE_MODERATION_SUBMITTED,
+                    payload={
+                        k: v for k, v in payload.items() if k not in _FRAME_BODY_KEYS
+                    },
+                    raw_chunk=content,
+                    space_id=space.id,
+                    mesh_fallback=True,
+                )
+                if result.ok:
+                    reached.append(iid)
+                else:
+                    log.warning(
+                        "moderation: large item %s did not reach reviewer "
+                        "household %s over its relay (%s)",
+                        item.id,
+                        iid,
+                        result.error,
+                    )
+                continue
             result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=iid,
                 event_type=FET.SPACE_MODERATION_SUBMITTED,
@@ -445,16 +480,6 @@ class SpaceModerationFederation(FileHashesMixin):
         if relay is not None:
             payload[PUBLIC_RELAY_KEY] = relay
         return payload, relay
-
-    async def check_wire(self, space: Space, item: SpaceModerationItem) -> None:
-        """Refuse (413) a new submission that would not fit one envelope
-        on every path (:data:`MAX_WIRE_BYTES`) — before it is stored."""
-        payload, _relay = await self._wire(space, item)
-        size = len(dump_json(payload).encode())
-        if size > MAX_WIRE_BYTES:
-            raise ModerationPayloadTooLargeError(
-                f"submission is too large to review ({size} bytes)"
-            )
 
     async def _public_relay_for(
         self, space: Space, item: SpaceModerationItem
@@ -805,7 +830,12 @@ class SpaceModerationFederation(FileHashesMixin):
             # Marked only when it got out: a send the transport refused is
             # tried again on the next answer.
             if await self.send_submitted(
-                space, item, [sender], submitter_instance_id=origin
+                space,
+                item,
+                [sender],
+                submitter_instance_id=origin,
+                # It echoed: it runs this revision and reads a relay frame.
+                relay_frames=True,
             ):
                 resent[item.id] = now
             sent += 1
@@ -864,6 +894,19 @@ class SpaceModerationFederation(FileHashesMixin):
     # ── Inbound ──────────────────────────────────────────────────────────
 
     async def _on_submitted(self, event: FederationEvent) -> None:
+        if event.media_bytes is not None:
+            # A relay frame (a large item to a household behind a GFS): the
+            # signed metadata is the payload, the content its bytes.
+            body = _frame_body(event.media_bytes)
+            if body is None:
+                self._refuse(
+                    event,
+                    resolve_space_id(event) or "",
+                    _bounded(event.payload.get("item_id")),
+                    "malformed relay frame content",
+                )
+                return
+            event = replace(event, payload={**event.payload, **body}, media_bytes=None)
         item = await self._admit_submission(event)
         if item is None or self._moderation is None:
             return
@@ -1230,6 +1273,21 @@ def _reviewable(space: Space, item: SpaceModerationItem) -> bool:
         and not space.archived
         and feature_on(space, item.feature, item.payload or {})
     )
+
+
+def _frame_body(raw: bytes) -> dict | None:
+    """The content a relay frame carries for a large item — only the keys
+    that travel as bytes, each an object — or ``None``."""
+    try:
+        body = load_json(raw.decode("utf-8"), None)
+    except UnicodeDecodeError:
+        return None
+    if not isinstance(body, dict) or not isinstance(body.get("payload"), dict):
+        return None
+    relay = body.get("public_relay")
+    if relay is not None and not isinstance(relay, dict):
+        return None
+    return {k: body[k] for k in _FRAME_BODY_KEYS if k in body}
 
 
 def _reviewer_stamp(seats: list) -> tuple:

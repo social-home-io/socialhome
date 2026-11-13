@@ -1950,8 +1950,12 @@ nothing. a promotes e's person to ``moderator``: e asks the host with its
 alone and logs the catch-up, e's Moderation tab lists it, e approves on its
 own household and a, d and e hold the post. Then e is killed while d's person
 posts again; after its restart e lists that item too (from its GFS mailbox or
-the host's catch-up — the step reports which) and approves it. a resets the
-level and e's role.
+the host's catch-up — the step reports which) and approves it. Last, a large
+item: with pages ``moderated`` d's person creates a ~240 KiB page — more than a
+JSON envelope on the GFS relay carries; on e's next BEGIN (a role change makes
+e send it at once) a sends the item to e as one binary relay frame, e holds the
+whole text, approves, and a, d and e hold the page. a resets the levels and
+e's role.
 
 ### ``members-parity`` — a paired/mesh member and a GFS-only member see the same (owner acceptance gate)
 

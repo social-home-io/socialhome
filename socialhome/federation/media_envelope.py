@@ -56,6 +56,15 @@ MEDIA_HTTPS_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
     {FederationEventType.SPACE_MEDIA_BLOB, FederationEventType.DM_MEDIA_BLOB}
 )
 
+#: What a binary frame on the GFS relay (v_87) may carry: a media chunk,
+#: or a pending moderation item whose content does not fit a JSON relay
+#: envelope — the same signed frame, the item's content as its bytes
+#: (``services/space_moderation_federation.py``). The relay is the one path
+#: with the small JSON cap, so only its pipeline takes the wider set.
+RELAY_FRAME_EVENT_TYPES: frozenset[FederationEventType] = MEDIA_HTTPS_EVENT_TYPES | {
+    FederationEventType.SPACE_MODERATION_SUBMITTED
+}
+
 
 def build_media_envelope(
     *,

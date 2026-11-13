@@ -1953,8 +1953,7 @@ idempotent, the item stays the submitter's), stores the proposed state in
 `payload_json` and — for an edit — the old values of exactly the changed
 fields in `current_snapshot` (the full row for a delete), and answers 202.
 Caps: 20 pending per submitter per space, 500 per space (429
-`QUEUE_FULL`), 256 KiB per payload and 96 KiB on the wire — it must fit
-one GFS relay envelope, so a moderator on any path can review it — (413), a rejection reason ≤ 500
+`QUEUE_FULL`), 256 KiB per payload (413), a rejection reason ≤ 500
 characters. Approve claims the row with a conditional `UPDATE … WHERE
 status='pending'` (two moderators approving at once persist it once), checks
 the feature's level for the **approver** (`admin_only` → admins only), and
