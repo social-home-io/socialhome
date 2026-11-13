@@ -174,6 +174,11 @@ _OFFLINE_PEER_NOISE: tuple[str, ...] = (
     # ``members-parity``: d posts a picture while host a is stopped) — the
     # route is in cooldown; the household gets it after it is back.
     "space-media-sync: chunk ",
+    # A relay handing a ``SPACE_ROUTE_STALE`` nack back toward an origin
+    # that was stopped after it sent the routed envelope (``members-parity``
+    # stops host a several times while d reaches it through b): the nack is
+    # best-effort and has nowhere to go.
+    "SPACE_ROUTE_STALE route_id=",
 )
 
 #: libdatachannel / libjuice status lines while a peer's process dies, or
