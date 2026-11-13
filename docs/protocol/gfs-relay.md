@@ -383,8 +383,9 @@ bucket plus the 61-byte seal overhead (`VALID_SEALED_LENGTHS`).
   It checks the recipient id and the kem-suite byte
   (unknown → refused, no default), opens the seal and runs
   `FederationService.handle_inbound_media_relay`: the §24.11 chain on the
-  signed header (lookup by its `from_instance`, a media-only event-type
-  gate, peer-class and relay-opt-in gates, the relay's timestamp window,
+  signed header (lookup by its `from_instance`, an event-type gate — media
+  chunks, and a pending moderation item too large for a JSON envelope
+  ([moderation.md](./moderation.md#re-delivery-and-catch-up)) —, peer-class and relay-opt-in gates, the relay's timestamp window,
   signature, replay, decrypt, idempotency, ban), then the same tail as the
   inbox and the DataChannel (`_finish_media_frame`: frame and AEAD suites,
   chunk decrypt, `chunk_sha256` binding).

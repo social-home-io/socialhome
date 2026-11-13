@@ -2118,6 +2118,33 @@ async def test_begin_mesh_catchup_sync_carries_the_authority_echo():
         )
     payload = send_mock.call_args.kwargs["payload"]
     assert payload["authority_epoch_echo"] == {"key_epoch": 3}
+    assert "mod_held" not in payload
+
+
+@pytest.mark.asyncio
+async def test_begin_mesh_catchup_sync_carries_the_moderation_echo():
+    """A reviewer household's BEGIN to a mesh-only host echoes the pending
+    moderation items it holds — an empty list is an echo too."""
+    svc, _ = _make_service()
+    sync_manager = MagicMock()
+    sync_manager.register_requester_https_session = MagicMock(return_value=True)
+    svc.attach_sync_manager(sync_manager)
+    send_mock = AsyncMock(
+        return_value=DeliveryResult(instance_id="host-1", ok=True),
+    )
+    with (
+        patch.object(
+            FederationService, "is_confirmed_peer", AsyncMock(return_value=False)
+        ),
+        patch.object(FederationService, "send_with_mesh_fallback", send_mock),
+    ):
+        await svc.begin_mesh_catchup_sync(
+            space_id="sp-1",
+            host_instance_id="host-1",
+            sync_mode="incremental",
+            mod_held={},
+        )
+    assert send_mock.call_args.kwargs["payload"]["mod_held"] == {}
 
 
 @pytest.mark.asyncio

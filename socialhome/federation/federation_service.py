@@ -148,7 +148,11 @@ from .inbound_validator import (
     run_post_decrypt_gates,
 )
 from .invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
-from .media_envelope import MEDIA_HTTPS_EVENT_TYPES, build_media_envelope
+from .media_envelope import (
+    MEDIA_HTTPS_EVENT_TYPES,
+    RELAY_FRAME_EVENT_TYPES,
+    build_media_envelope,
+)
 from .media_framing import (
     MEDIA_FRAME_SUITE_V1,
     SUPPORTED_MEDIA_AEAD_SUITES,
@@ -756,15 +760,17 @@ class FederationService:
         """The §24.11 pipeline for a media body that came through the GFS
         relay (v_87): the DataChannel chain (lookup by the sender's
         instance id) with the inbox media route's event-type gate straight
-        after the parse — a relay media frame is a media chunk, nothing
-        else. Composed from the shared step list, never a copy."""
+        after the parse — a relay frame is a media chunk or a large
+        pending moderation item
+        (:data:`~socialhome.federation.media_envelope.RELAY_FRAME_EVENT_TYPES`),
+        nothing else. Composed from the shared step list, never a copy."""
         steps = self._common_pipeline_steps(
             lookup_step=make_lookup_instance_by_id(
                 repo=self._federation_repo,
                 unpaired_recently=self._unpaired_recently,
             ),
         )
-        steps.insert(1, make_check_event_types(MEDIA_HTTPS_EVENT_TYPES))
+        steps.insert(1, make_check_event_types(RELAY_FRAME_EVENT_TYPES))
         return InboundPipeline(steps)
 
     def _build_rtc_inbound_pipeline(self):
@@ -2849,6 +2855,7 @@ class FederationService:
         sync_mode: str = "initial",
         dir_seq: int | None = None,
         have_seq: int | None = None,
+        mod_held: dict | None = None,
     ) -> bool:
         """Initiate a §25.6 catch-up sync FROM a mesh-only host.
 
@@ -2857,7 +2864,9 @@ class FederationService:
         (v_89) is the member directory version we hold, echoed so a host
         that is ahead answers with one snapshot; ``sync_mode="incremental"``
         (with its ``have_seq``) is the periodic BEGIN after catch-up that
-        carries it.
+        carries it. ``mod_held`` is the moderation queue echo of a
+        household that reviews the space (the items it holds, by state),
+        carried by that same incremental BEGIN.
 
         For a space whose host is NOT a confirmed direct peer (we joined over a
         relay), the normal SpaceSyncScheduler never triggers (it only syncs with
@@ -2906,6 +2915,8 @@ class FederationService:
                 payload["dir_seq"] = dir_seq
             if have_seq is not None:
                 payload["have_seq"] = have_seq
+            if mod_held is not None:
+                payload["mod_held"] = mod_held
             result = await self.send_with_mesh_fallback(
                 to_instance_id=host_instance_id,
                 event_type=FederationEventType.SPACE_SYNC_BEGIN,

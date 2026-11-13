@@ -78,6 +78,8 @@ from .bus_publisher import BusPublisherMixin
 from .moderation_release import release_scope
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from ..domain.outbox import OutboxEntry
     from ..infrastructure.event_bus import EventBus
     from ..repositories.federation_repo import AbstractFederationRepo
@@ -183,7 +185,7 @@ class ModerationFederation(Protocol):
 
     async def send_submitted(
         self, space: Space, item: SpaceModerationItem, targets: list[str]
-    ) -> None: ...
+    ) -> object: ...
 
     async def send_decided(
         self,
@@ -203,6 +205,15 @@ class ModerationFederation(Protocol):
 
     async def reviewer_households(self, space: Space) -> list[str]:
         """The other households that review ``space`` right now."""
+        ...
+
+    def forget_household(self, space_id: str, instance_id: str) -> None:
+        """A seat of that household changed role on this host."""
+        ...
+
+    async def check_reaches_host(self, space: Space, item: SpaceModerationItem) -> None:
+        """Raise ``ModerationPayloadTooLargeError`` when ``item`` could
+        never get to the space's host from here."""
         ...
 
     async def display_name(self, space_id: str, user_id: str) -> str | None:
@@ -240,6 +251,7 @@ class SpaceModerationService(BusPublisherMixin):
         "_inflight",
         "_own_instance_id",
         "_spaces",
+        "_sync_with_host",
         "_users",
     )
 
@@ -266,10 +278,24 @@ class SpaceModerationService(BusPublisherMixin):
         #: Items + decisions to and from the other households (v_43).
         #: ``None`` (unit tests, no federation): only the host holds items.
         self._federated: ModerationFederation | None = None
+        #: ``sync_with_host(space_id)`` — a §25.6 BEGIN to the space's host
+        #: now (see :meth:`attach_host_sync`).
+        self._sync_with_host: Callable[[str], Awaitable[None]] | None = None
 
     def attach_federation(self, federated: ModerationFederation) -> None:
         """Wire federated moderation (``app._build_space_moderation``)."""
         self._federated = federated
+
+    def attach_host_sync(
+        self, sync_with_host: Callable[[str], Awaitable[None]]
+    ) -> None:
+        """Wire ``sync_with_host(space_id)``
+        (``SpaceSyncScheduler.sync_with_host``): a household that starts
+        reviewing a space asks its host right away. That BEGIN echoes the
+        pending items held here (none yet), and the host answers with the
+        ones already waiting — instead of an empty Moderation tab until
+        the next periodic sync."""
+        self._sync_with_host = sync_with_host
 
     # ── Registry ─────────────────────────────────────────────────────────
 
@@ -391,17 +417,31 @@ class SpaceModerationService(BusPublisherMixin):
             expires_at=now + MODERATION_TTL,
             status=ModerationStatus.PENDING,
         )
+        if self._federated is not None:
+            # An item the host can never receive would sit here as
+            # "pending" until it expires: refused instead (413).
+            await self._federated.check_reaches_host(space, item)
         await self._spaces.insert_moderation_item(item)
         await self._emit(SpaceModerationQueued(item=item))
         if targets and self._federated is not None:
             await self._federated.send_submitted(space, item, targets)
         return item
 
-    async def store_received(self, item: SpaceModerationItem) -> bool:
+    async def store_received(
+        self, item: SpaceModerationItem, *, from_host: bool = False
+    ) -> bool:
         """Hold an item another household submitted (v_43) — its inbound
         handler checked it. Stored once (the same id everywhere): True when
-        this call stored it, which announces it to local content authority."""
+        this call stored it, which announces it to local content authority.
+
+        ``from_host``: the space's host sent it — it holds the item
+        pending. A copy that EXPIRED here (purged when this household
+        stopped reviewing) is pending again with the host's content; a
+        decided copy is never reopened."""
         if not await self._spaces.insert_moderation_item_if_absent(item):
+            if from_host and await self._spaces.revive_moderation_item(item):
+                await self._emit(SpaceModerationQueued(item=item))
+                return True
             # A decision overtook it (a tombstone): the content fills in, the
             # decision stands — nothing new to review.
             await self._spaces.fill_moderation_tombstone(item)
@@ -572,6 +612,33 @@ class SpaceModerationService(BusPublisherMixin):
                 event.space_id,
                 dropped,
             )
+        if isinstance(event, SpaceConfigChanged):
+            iid = str((event.payload or {}).get("instance_id") or "")
+            if iid and self._federated is not None:
+                # (On the host) that household's next echo is answered at
+                # once and in full.
+                self._federated.forget_household(event.space_id, iid)
+            await self._catch_up_if_promoted(event)
+
+    async def _catch_up_if_promoted(self, event: SpaceConfigChanged) -> None:
+        """One of OUR people was just given a content-authority seat in a
+        space hosted elsewhere: ask the host for the items already pending
+        (:meth:`attach_host_sync`). Asked from here, once this household
+        knows it reviews — an item pushed by the host could arrive before
+        the role change and be dropped as misdirected."""
+        payload = event.payload or {}
+        if self._sync_with_host is None or str(payload.get("role") or "") not in {
+            r.value for r in CONTENT_AUTHORITY_ROLES
+        }:
+            return
+        space = await self._spaces.get(event.space_id)
+        if space is None or space.dissolved or self.is_host(space):
+            return
+        if str(payload.get("user_id") or "") not in (
+            await self._spaces.list_local_member_user_ids(event.space_id)
+        ):
+            return
+        await self._sync_with_host(event.space_id)
 
     async def outbox_entry_wanted(self, entry: OutboxEntry) -> bool:
         """May a queued envelope still go out? A retried
@@ -991,7 +1058,9 @@ class SpaceModerationService(BusPublisherMixin):
     ) -> None:
         """Tell the other households holding the item (v_43). Fail-soft: the
         decision stands here (and its content is already published); a
-        household that misses it expires its copy on schedule."""
+        reviewer household that misses it hears it again from the host on
+        its next §25.6 BEGIN (the ``mod_held`` echo), any other copy
+        expires on schedule."""
         if self._federated is None:
             return
         try:

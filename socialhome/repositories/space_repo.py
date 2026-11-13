@@ -297,6 +297,10 @@ class AbstractSpaceRepo(Protocol):
         self, item_id: str, *, reviewed_by: str
     ) -> bool: ...
     async def fill_moderation_tombstone(self, item: SpaceModerationItem) -> bool: ...
+    async def revive_moderation_item(self, item: SpaceModerationItem) -> bool: ...
+    async def list_moderation_open(
+        self, space_id: str, now: datetime, *, limit: int
+    ) -> list[SpaceModerationItem]: ...
     async def count_moderation_tombstones(self, from_instance: str) -> int: ...
     async def delete_stale_tombstones(self, before: datetime) -> int: ...
     async def drop_pending_from_others(
@@ -2198,6 +2202,47 @@ class SqliteSpaceRepo:
             (reviewed_by, datetime.now(UTC).isoformat(), item_id),
         )
         return changed > 0
+
+    async def revive_moderation_item(self, item: SpaceModerationItem) -> bool:
+        """Make an EXPIRED copy of ``item`` pending again, with the content
+        the space's host just re-sent — a household that stopped reviewing
+        purged it (:meth:`drop_pending_from_others`) and reviews again. Only
+        an expired row of the same space and submitter; a decided one is
+        never reopened."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE space_moderation_queue SET status='pending', feature=?, "
+            "action=?, payload_json=?, current_snapshot=?, submitted_at=?, "
+            "expires_at=?, reviewed_by=NULL, reviewed_at=NULL, "
+            "rejection_reason=NULL "
+            "WHERE id=? AND space_id=? AND submitted_by=? AND status='expired'",
+            (
+                item.feature,
+                item.action,
+                dump_json(item.payload),
+                item.current_snapshot,
+                _iso_ts(item.submitted_at),
+                _iso_ts(item.expires_at),
+                item.id,
+                item.space_id,
+                item.submitted_by,
+            ),
+        )
+        return changed > 0
+
+    async def list_moderation_open(
+        self, space_id: str, now: datetime, *, limit: int
+    ) -> list[SpaceModerationItem]:
+        """Every item of ``space_id`` held here whose review window is
+        still open — any status, pending first, then the newest — for the
+        moderation catch-up (what a household echoes, what the host
+        compares it with)."""
+        rows = await self._db.fetchall(
+            "SELECT * FROM space_moderation_queue "
+            "WHERE space_id=? AND feature != '' AND expires_at>? "
+            "ORDER BY (status='pending') DESC, submitted_at DESC LIMIT ?",
+            (space_id, now.isoformat(), int(limit)),
+        )
+        return _moderation_items(rows)
 
     async def fill_moderation_tombstone(self, item: SpaceModerationItem) -> bool:
         """Give a decision tombstone (an early decision, v_43) the content of
