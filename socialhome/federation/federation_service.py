@@ -119,6 +119,7 @@ from .gfs_relay_transport import (
     MailboxTarget,
     normalize_gfs_base,
 )
+from .inbound_retry import InboundRetry
 from .inbound_validator import (
     TRANSPORT_GFS_RELAY,
     InboundContext,
@@ -446,6 +447,7 @@ class FederationService:
         "_ice_servers",
         "_idempotency_cache",
         "_inbound_pipeline",
+        "_inbound_retry",
         "_key_manager",
         "_last_mesh_begin_at",
         "_mailbox_sender_check",
@@ -662,7 +664,11 @@ class FederationService:
         self._media_relay_inbound_pipeline = None  # lazy, v_87 relay frames
         # Event dispatch registry for federation event handlers.
         # Handlers register themselves via attach_* methods.
-        self._event_registry = EventDispatchRegistry()
+        # A handler that failed on a locked database is run once more, in
+        # place: the replay id is stored before dispatch, so the sender
+        # cannot re-deliver.
+        self._inbound_retry = InboundRetry(gate=self._retry_allowed)
+        self._event_registry = EventDispatchRegistry(retry=self._inbound_retry)
         self._register_default_handlers()
         # Subscribe to domain events that trigger outbound federation.
         self._bus.subscribe(
@@ -919,7 +925,9 @@ class FederationService:
             FederationEventType.UNPAIR,
         )
 
-    def post_decrypt_gate_steps(self, *, include_ban_check: bool = False) -> list:
+    def post_decrypt_gate_steps(
+        self, *, include_ban_check: bool = False, hold_for_seat: bool = True
+    ) -> list:
         """The gates that judge a DECRYPTED event, in pipeline order.
 
         Split out because the mesh path needs exactly these and nothing
@@ -937,6 +945,11 @@ class FederationService:
         path needs it here, because the envelope the pipeline judged was
         the RELAY's — nothing has yet checked whether the ORIGIN household
         is banned from the space.
+
+        ``hold_for_seat=False`` makes the writer gate refuse a write with
+        no seat instead of holding it in the seat buffer — for a handler's
+        second try (:class:`InboundRetry`), whose event was dispatched once
+        already.
         """
         steps: list = []
         if include_ban_check:
@@ -966,7 +979,7 @@ class FederationService:
                 make_check_space_writer(
                     space_repo=self._space_repo,
                     remote_member_repo=self._space_remote_member_repo,
-                    pending=self._pending_seat_buffer,
+                    pending=self._pending_seat_buffer if hold_for_seat else None,
                 ),
             )
         return steps
@@ -1121,10 +1134,30 @@ class FederationService:
         ):
             await self.replay_held(held, reason=f"the seat landed in {event.space_id}")
 
-    async def replay_held(self, held: FederationEvent, *, reason: str) -> None:
-        """Re-run a held inbound event through the post-decrypt gates, then
-        dispatch it — the decision is taken again with the awaited state in
-        place (a write that still doesn't qualify is refused then)."""
+    async def _retry_allowed(self, held: FederationEvent) -> bool:
+        """The gate of a second try (:class:`InboundRetry`): the sender must
+        still be a peer — a household unpaired meanwhile gets nothing applied
+        (its own ``UNPAIR`` may come from the tombstone; a mesh-routed
+        event's origin never was a peer) — and the post-decrypt gates must
+        still pass. Refuse, never hold for a seat: a hold would later replay
+        the event to the handlers that already ran."""
+        if (
+            held.routed_path is None
+            and await self._federation_repo.get_instance(
+                held.from_instance,
+                include_unpairing=held.event_type is FederationEventType.UNPAIR,
+            )
+            is None
+        ):
+            return False
+        return await self._held_event_allowed(held, hold_for_seat=False)
+
+    async def _held_event_allowed(
+        self, held: FederationEvent, *, hold_for_seat: bool = True
+    ) -> bool:
+        """Whether an event held since it was verified (a seat wait, a
+        handler's second try) still passes the post-decrypt gates — ban
+        check included — with the state as it is now."""
         payload = held.payload if isinstance(held.payload, dict) else {}
         ctx = InboundContext(
             envelope={
@@ -1133,9 +1166,18 @@ class FederationService:
             },
             event=held,
         )
-        if not await run_post_decrypt_gates(
-            ctx, steps=self.post_decrypt_gate_steps(include_ban_check=True)
-        ):
+        return await run_post_decrypt_gates(
+            ctx,
+            steps=self.post_decrypt_gate_steps(
+                include_ban_check=True, hold_for_seat=hold_for_seat
+            ),
+        )
+
+    async def replay_held(self, held: FederationEvent, *, reason: str) -> None:
+        """Re-run a held inbound event through the post-decrypt gates, then
+        dispatch it — the decision is taken again with the awaited state in
+        place (a write that still doesn't qualify is refused then)."""
+        if not await self._held_event_allowed(held):
             return
         log.info(
             "replaying held %s from %s now that %s",
@@ -4275,6 +4317,8 @@ class FederationService:
         since a deferred send rides both.
         """
         self._stopping = True
+        # An inbound event waiting for its second try gets it now.
+        await self._inbound_retry.stop()
         tasks = [
             t
             for t in (
