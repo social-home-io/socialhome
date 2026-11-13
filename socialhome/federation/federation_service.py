@@ -664,9 +664,9 @@ class FederationService:
         self._media_relay_inbound_pipeline = None  # lazy, v_87 relay frames
         # Event dispatch registry for federation event handlers.
         # Handlers register themselves via attach_* methods.
-        # One sender's events run in arrival order, and a handler that
-        # failed for a passing reason is run again in place: the replay id
-        # is stored before dispatch, so the sender cannot re-deliver.
+        # A handler that failed on a locked database is run once more, in
+        # place: the replay id is stored before dispatch, so the sender
+        # cannot re-deliver.
         self._inbound_retry = InboundRetry(gate=self._retry_allowed)
         self._event_registry = EventDispatchRegistry(retry=self._inbound_retry)
         self._register_default_handlers()
@@ -1135,7 +1135,7 @@ class FederationService:
             await self.replay_held(held, reason=f"the seat landed in {event.space_id}")
 
     async def _retry_allowed(self, held: FederationEvent) -> bool:
-        """The gate of a delayed run (:class:`InboundRetry`): the sender must
+        """The gate of a second try (:class:`InboundRetry`): the sender must
         still be a peer — a household unpaired meanwhile gets nothing applied
         (its own ``UNPAIR`` may come from the tombstone; a mesh-routed
         event's origin never was a peer) — and the post-decrypt gates must
@@ -4312,7 +4312,7 @@ class FederationService:
         since a deferred send rides both.
         """
         self._stopping = True
-        # An inbound event waiting for its next try gets its last one now.
+        # An inbound event waiting for its second try gets it now.
         await self._inbound_retry.stop()
         tasks = [
             t

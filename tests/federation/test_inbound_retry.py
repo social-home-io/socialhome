@@ -1,6 +1,6 @@
-"""One sender's inbound events are applied strictly in arrival order, and a
-handler that failed for a passing reason is run again in place — on every
-transport; a replayed envelope is still refused."""
+"""An inbound handler that failed on a locked database is run once more,
+in place, on every transport; every final handler failure is one ERROR
+line; a replayed envelope is still refused."""
 
 from __future__ import annotations
 
@@ -8,9 +8,12 @@ import asyncio
 import dataclasses
 import logging
 import sqlite3
+import threading
+import time
 
 import pytest
 
+from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
@@ -20,28 +23,21 @@ from socialhome.domain.federation_retention import SHORT_LIVED
 from socialhome.domain.space import SpacePermissionError
 from socialhome.federation.event_dispatch_registry import EventDispatchRegistry
 from socialhome.federation.inbound_retry import (
-    LANE_WAIT_S,
     NEVER_RETRIED,
-    RETRY_DELAYS_S,
-    RETRY_WINDOW_S,
     InboundRetry,
     is_transient,
 )
 from socialhome.federation.inbound_validator import TRANSPORT_GFS_RELAY
-from socialhome.federation.transport import HttpsInboxTransport
-from socialhome.services.call_service import CallAlreadyAnsweredError
 from tests.federation.test_federation_service import _make_frame, _paired
 from tests.federation.test_routed_envelope import _build_chain, _mint_target_eph
 from tests.services.test_gfs_relay_inbound import _multi_frame, _MultiHousehold
 
 DM = FederationEventType.DM_MESSAGE
-DM_DELETED = FederationEventType.DM_MESSAGE_DELETED
-ROLE = FederationEventType.SPACE_MEMBER_ROLE_CHANGED
 POST = FederationEventType.SPACE_POST_CREATED
 UNPAIR = FederationEventType.UNPAIR
 RETRY_LOG = "socialhome.federation.inbound_retry"
-FAST = (0.001, 0.001, 0.001)
-SLOW = (60.0,)
+FAST = 0.001
+SLOW = 60.0
 
 
 def _event(
@@ -69,122 +65,122 @@ def _locked() -> sqlite3.OperationalError:
 class _Flaky:
     """A handler that raises ``fail`` times, then applies the event."""
 
-    def __init__(
-        self, fail: int = 1, exc: type[Exception] = sqlite3.OperationalError
-    ) -> None:
+    def __init__(self, fail: int = 1, exc: BaseException | None = None) -> None:
         self.fail = fail
-        self.exc = exc
+        self.exc = exc if exc is not None else _locked()
         self.calls = 0
         self.applied: list[FederationEvent] = []
 
     async def __call__(self, event: FederationEvent) -> None:
         self.calls += 1
         if self.calls <= self.fail:
-            raise self.exc("database is locked")
+            raise self.exc
         self.applied.append(event)
 
 
 def _registry(*types: FederationEventType, handler=None, **kw):
-    """A registry with its lanes and ``handler`` bound to ``types``."""
-    retry = InboundRetry(**{"delays": FAST, "window": 3600.0, **kw})
+    """A registry with its retry and ``handler`` bound to ``types``."""
+    retry = InboundRetry(**{"delay": FAST, **kw})
     registry = EventDispatchRegistry(retry=retry)
     for event_type in types or (DM,):
         registry.register(event_type, handler)
     return registry, retry
 
 
-async def _yield(times: int = 5) -> None:
+async def _yield(times: int = 20) -> None:
     for _ in range(times):
         await asyncio.sleep(0)
 
 
-def _warnings(caplog) -> list[logging.LogRecord]:
-    return [r for r in caplog.records if r.levelno >= logging.WARNING]
+def _errors(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
-# ─── One event: the retry happens in place ────────────────────────────────
+# ─── What is retried ──────────────────────────────────────────────────────
 
 
-async def test_a_handler_that_fails_once_applies_the_event_exactly_once():
+async def test_a_handler_that_hit_a_locked_database_applies_the_event_once(caplog):
     handler = _Flaky(fail=1)
-    registry, retry = _registry(handler=handler)
-    await registry.dispatch(_event())  # returns once it is applied
+    registry, _ = _registry(handler=handler)
+    with caplog.at_level(logging.ERROR):
+        await registry.dispatch(_event())  # returns once it is applied
     assert len(handler.applied) == 1
     assert handler.calls == 2
-    assert len(retry) == 0  # the lane went with its last user
+    assert _errors(caplog) == []
+
+
+@pytest.mark.parametrize(
+    "message", ["database is locked", "database table is locked", "database is busy"]
+)
+async def test_locked_and_busy_are_the_failures_that_pass(message):
+    assert is_transient(sqlite3.OperationalError(message))
+    handler = _Flaky(fail=1, exc=sqlite3.OperationalError(message))
+    registry, _ = _registry(handler=handler)
+    await registry.dispatch(_event())
+    assert len(handler.applied) == 1
 
 
 @pytest.mark.parametrize(
     "exc",
     [
-        ValueError,  # a refusal
-        KeyError,  # what a malformed payload raises …
-        TypeError,
-        AttributeError,
-        sqlite3.IntegrityError,  # already stored
-        AssertionError,  # a bug
-        RuntimeError,  # mostly "not configured" — permanent
-        NotImplementedError,
-        CallAlreadyAnsweredError,  # a RuntimeError that is a refusal
-        SpacePermissionError,  # a domain refusal
+        sqlite3.OperationalError("no such table: t"),  # a schema bug
+        sqlite3.IntegrityError("UNIQUE constraint failed"),
+        OSError("disk"),  # handler I/O: not covered
+        TimeoutError("an answer timed out"),
+        ConnectionError("peer went away"),
+        ValueError("refused"),
+        KeyError("x"),
+        TypeError("x"),
+        AttributeError("x"),
+        RuntimeError("not configured"),
+        SpacePermissionError("x"),
     ],
 )
-async def test_a_failure_that_would_repeat_is_not_tried_again(exc, caplog):
-    assert not is_transient(exc("x"))
-    handler = _Flaky(fail=1, exc=exc)
-    registry, _ = _registry(handler=handler)
-    with caplog.at_level(logging.ERROR):
-        await registry.dispatch(_event())
-    assert handler.calls == 1
-    assert "failed for" in caplog.text
-
-
-@pytest.mark.parametrize("exc", [sqlite3.OperationalError, OSError, TimeoutError])
-async def test_a_passing_failure_is_tried_again(exc):
-    assert is_transient(exc("x"))
+async def test_any_other_failure_is_not_tried_again(exc):
+    assert not is_transient(exc)
     handler = _Flaky(fail=1, exc=exc)
     registry, _ = _registry(handler=handler)
     await registry.dispatch(_event())
-    assert len(handler.applied) == 1
+    assert handler.calls == 1
 
 
-async def test_a_refusal_on_a_later_try_ends_the_tries(caplog):
-    calls = 0
+async def test_a_timeout_after_a_committed_write_does_not_rerun_the_handler():
+    """Re-running the whole handler would write its first row twice."""
+    rows: list[int] = []
 
     async def handler(event):
-        nonlocal calls
-        calls += 1
-        raise (OSError if calls == 1 else ValueError)("x")
+        rows.append(1)  # committed
+        raise TimeoutError("its answer to the sender timed out")
 
+    registry, _ = _registry(handler=handler)
+    await registry.dispatch(_event())
+    assert rows == [1]
+
+
+async def test_there_is_one_second_try_and_no_third(caplog):
+    handler = _Flaky(fail=99)
     registry, _ = _registry(handler=handler)
     with caplog.at_level(logging.ERROR):
         await registry.dispatch(_event())
-    assert calls == 2
-    assert "failed for" in caplog.text
+    assert handler.calls == 2
+    assert len(_errors(caplog)) == 1
 
 
-async def test_a_poison_event_stops_after_the_last_try_with_one_warning(caplog):
-    handler = _Flaky(fail=99)
-    registry, retry = _registry(handler=handler, delays=FAST[: len(RETRY_DELAYS_S)])
-    with caplog.at_level(logging.WARNING):
-        await registry.dispatch(_event())
-    assert handler.calls == 1 + len(RETRY_DELAYS_S) == 3
-    assert handler.applied == []
-    [warning] = _warnings(caplog)
-    assert "after 3 tries" in warning.getMessage()
-    assert warning.exc_info is not None
-    assert len(retry) == 0
+async def test_the_wait_is_measured_from_the_failure():
+    """A real lock surfaces only after SQLite's busy timeout (5 s): however
+    long the first run took to fail, the second try still comes."""
+    calls: list[float] = []
 
+    async def handler(event):
+        calls.append(time.monotonic())
+        if len(calls) == 1:
+            await asyncio.sleep(0.05)  # the busy timeout
+            raise _locked()
 
-async def test_no_try_starts_after_the_window():
-    """The hold is bounded in time, whatever the handler does: slower than
-    every sender-side timeout would turn a retry into a transport fault."""
-    post_timeout = HttpsInboxTransport(None)._timeout_s
-    assert sum(RETRY_DELAYS_S) < RETRY_WINDOW_S < LANE_WAIT_S < post_timeout
-    handler = _Flaky(fail=99)
-    registry, _ = _registry(handler=handler, delays=(0.02, 0.02, 0.02), window=0.05)
+    registry, _ = _registry(handler=handler, delay=0.02)
     await registry.dispatch(_event())
-    assert handler.calls == 3  # a 4th would start past the window
+    assert len(calls) == 2
+    assert calls[1] - calls[0] >= 0.07
 
 
 async def test_only_the_handler_that_failed_runs_again():
@@ -196,284 +192,12 @@ async def test_only_the_handler_that_failed_runs_again():
     assert steady.calls == 1
 
 
-async def test_the_gate_runs_before_every_later_try_and_not_before_the_first():
-    order: list[str] = []
-
-    async def gate(event):
-        order.append("gate")
-        return True
-
-    async def handler(event):
-        order.append("handler")
-        if order.count("handler") < 3:
-            raise _locked()
-
-    registry, _ = _registry(handler=handler, gate=gate)
+async def test_a_failing_handler_never_blocks_the_next_one():
+    broken, steady = _Flaky(fail=99, exc=ValueError("x")), _Flaky(fail=0)
+    registry, _ = _registry(handler=broken)
+    registry.register(DM, steady)
     await registry.dispatch(_event())
-    assert order == ["handler", "gate", "handler", "gate", "handler"]
-
-
-async def test_an_event_the_gate_no_longer_allows_is_dropped():
-    """A ban or an unpair that landed between the failure and the next try."""
-
-    async def gate(event):
-        return False
-
-    handler = _Flaky(fail=1)
-    registry, _ = _registry(handler=handler, gate=gate)
-    await registry.dispatch(_event())
-    assert handler.calls == 1
-
-
-async def test_a_failing_gate_drops_the_event(caplog):
-    async def gate(event):
-        raise _locked()
-
-    handler = _Flaky(fail=1)
-    registry, _ = _registry(handler=handler, gate=gate)
-    with caplog.at_level(logging.WARNING, logger=RETRY_LOG):
-        await registry.dispatch(_event())
-    assert handler.calls == 1
-    assert "gate failed" in caplog.text
-
-
-# ─── One sender's events stay in order ────────────────────────────────────
-
-
-class _State:
-    """Handlers shaped like the real ones: last write wins, and a delete of
-    something not stored returns silently."""
-
-    def __init__(self, *, fail_first: int = 1) -> None:
-        self.fail = fail_first
-        self.applied: list[str] = []
-        self.messages: dict[str, dict] = {}
-        self.role = "member"
-        #: Set once a handler is inside its "write"; it then waits for
-        #: ``db`` — the database lock an in-flight handler sits on.
-        self.in_flight = asyncio.Event()
-        self.db = asyncio.Event()
-        self.db.set()
-
-    async def _write(self) -> None:
-        self.in_flight.set()
-        await self.db.wait()
-        if self.fail > 0:
-            self.fail -= 1
-            raise _locked()
-
-    async def write(self, event: FederationEvent) -> None:
-        await self._write()
-        self.applied.append(event.payload["v"])
-
-    async def dm_create(self, event: FederationEvent) -> None:
-        await self._write()
-        self.messages[event.payload["id"]] = {"deleted": False}
-
-    async def dm_delete(self, event: FederationEvent) -> None:
-        message = self.messages.get(event.payload["id"])
-        if message is None:
-            return
-        message["deleted"] = True
-
-    async def role_changed(self, event: FederationEvent) -> None:
-        await self._write()
-        self.role = event.payload["role"]
-
-
-async def test_a_delete_arriving_while_its_create_is_in_flight_ends_deleted():
-    """Recheck probe 1: the create waits on the database lock, the delete
-    arrives, the create then fails and is retried. On b5d23b750 the delete
-    ran inline as a no-op and the message ended undeleted."""
-    state = _State()
-    registry, _ = _registry(handler=state.dm_create, delays=(0.02,))
-    registry.register(DM_DELETED, state.dm_delete)
-    state.db.clear()
-    create = asyncio.create_task(registry.dispatch(_event(payload={"id": "m-1"})))
-    await state.in_flight.wait()
-    delete = asyncio.create_task(
-        registry.dispatch(_event(DM_DELETED, payload={"id": "m-1"}))
-    )
-    await _yield()
-    state.db.set()
-    await asyncio.gather(create, delete)
-    await asyncio.sleep(0.06)  # (the old hold applied the create only now)
-    assert state.messages == {"m-1": {"deleted": True}}
-
-
-async def test_events_in_flight_together_are_applied_in_arrival_order():
-    """Recheck probe 2: A in flight, C fails, D follows, A fails. On
-    b5d23b750 the order was C, D, A."""
-    applied: list[str] = []
-    to_fail = {"A", "C"}  # each fails its first run
-    in_flight, db = asyncio.Event(), asyncio.Event()
-
-    async def write(event):
-        v = event.payload["v"]
-        in_flight.set()
-        await db.wait()  # A sits on the database lock
-        if v in to_fail:
-            to_fail.discard(v)
-            raise _locked()
-        applied.append(v)
-
-    registry, _ = _registry(handler=write, delays=(0.02,))
-    tasks = [asyncio.create_task(registry.dispatch(_event(payload={"v": "A"})))]
-    await in_flight.wait()
-    for v in ("C", "D"):
-        tasks.append(asyncio.create_task(registry.dispatch(_event(payload={"v": v}))))
-        await _yield()
-    db.set()
-    await asyncio.gather(*tasks)
-    await asyncio.sleep(0.06)  # (the old hold applied A only now)
-    assert applied == ["A", "C", "D"]
-
-
-async def test_a_later_event_waits_behind_the_one_being_retried():
-    """Old at t=0 (its handler fails once), new right after — applied old,
-    then new."""
-    state = _State()
-    registry, _ = _registry(handler=state.write, delays=(0.02,))
-    old = asyncio.create_task(registry.dispatch(_event(payload={"v": "old"})))
-    await _yield()
-    new = asyncio.create_task(registry.dispatch(_event(payload={"v": "new"})))
-    await _yield()
-    assert state.applied == []  # the new one did not overtake
-    await asyncio.gather(old, new)
-    assert state.applied == ["old", "new"]
-
-
-async def test_a_demote_after_a_promote_being_retried_ends_demoted():
-    state = _State()
-    registry, _ = _registry(ROLE, handler=state.role_changed, delays=(0.02,))
-    await asyncio.gather(
-        registry.dispatch(_event(ROLE, payload={"role": "admin"})),
-        registry.dispatch(_event(ROLE, payload={"role": "member"})),
-    )
-    assert state.role == "member"
-
-
-async def test_nothing_waiting_is_ever_dropped():
-    """No queue to overflow: 200 events behind a failing head all run, in
-    order (main applies them too)."""
-    state = _State()
-    registry, retry = _registry(handler=state.write, delays=(0.02,))
-    tasks = [
-        asyncio.create_task(registry.dispatch(_event(payload={"v": str(i)})))
-        for i in range(200)
-    ]
-    await _yield()
-    assert len(retry) == 1  # one lane, however many wait on it
-    await asyncio.gather(*tasks)
-    assert state.applied == [str(i) for i in range(200)]
-    assert len(retry) == 0
-
-
-async def test_two_households_answering_each_other_do_not_lock_each_other(caplog):
-    """Each handles the other's event with a handler that POSTs back and
-    waits for the 200 — which the other's inbox gives only after its own
-    dispatch, in the lane the first one holds. Unbounded, neither finishes
-    until a POST times out; bounded, the turn is taken anyway."""
-    regs = {
-        name: _registry(POST, handler=None, lane_wait=0.05)[0] for name in ("a", "b")
-    }
-    both_in = asyncio.Barrier(2)
-    answered: list[str] = []
-
-    def wire(me: str, peer: str) -> None:
-        async def on_post(event):  # answer the sender in place
-            await both_in.wait()
-            await regs[peer].dispatch(_event(DM, sender=me))
-
-        async def on_answer(event):
-            answered.append(f"{event.from_instance}->{me}")
-
-        regs[me]._handlers[POST] = [on_post]
-        regs[me].register(DM, on_answer)
-
-    wire("a", "b")
-    wire("b", "a")
-    with caplog.at_level(logging.WARNING, logger=RETRY_LOG):
-        await asyncio.wait_for(
-            asyncio.gather(
-                regs["a"].dispatch(_event(POST, sender="b")),
-                regs["b"].dispatch(_event(POST, sender="a")),
-            ),
-            timeout=2.0,
-        )
-    assert sorted(answered) == ["a->b", "b->a"]
-    assert all("out of turn" in r.getMessage() for r in _warnings(caplog))
-    assert len(_warnings(caplog)) == 2
-
-
-async def test_an_event_whose_turn_does_not_come_runs_anyway_with_one_warning(caplog):
-    """A handler stuck far longer than any retry: the next event is not
-    dropped and not left waiting for ever."""
-    stuck = asyncio.Event()
-    applied: list[str] = []
-
-    async def handler(event):
-        if event.payload["v"] == "stuck":
-            await stuck.wait()
-        applied.append(event.payload["v"])
-
-    registry, retry = _registry(handler=handler, lane_wait=0.03)
-    first = asyncio.create_task(registry.dispatch(_event(payload={"v": "stuck"})))
-    await _yield()
-    with caplog.at_level(logging.WARNING, logger=RETRY_LOG):
-        await registry.dispatch(_event(payload={"v": "next"}))
-    assert applied == ["next"]
-    [warning] = _warnings(caplog)
-    assert "out of turn" in warning.getMessage()
-    stuck.set()
-    await first
-    assert applied == ["next", "stuck"]
-    assert len(retry) == 0
-
-
-async def test_another_sender_is_not_held_up():
-    state = _State()
-    registry, retry = _registry(handler=state.write, delays=SLOW)
-    held = asyncio.create_task(
-        registry.dispatch(_event(sender="a", payload={"v": "a-1"}))
-    )
-    await _yield()
-    await registry.dispatch(_event(sender="b", payload={"v": "b-1"}))
-    assert state.applied == ["b-1"]
-    await retry.stop()
-    await held
-    assert state.applied == ["b-1", "a-1"]
-
-
-async def test_lanes_go_when_idle_whatever_the_sender_ids():
-    """Routed origins are ids a relay chooses — no entry may outlive its
-    event."""
-    handler = _Flaky(fail=0)
-    registry, retry = _registry(handler=handler)
-    for i in range(50):
-        await registry.dispatch(_event(sender=f"origin-{i}"))
-    assert len(retry) == 0
-
-
-async def test_a_dispatch_from_inside_a_handler_does_not_wait_for_its_own_lane():
-    """``replay_held`` runs inside a handler (a parent landed, a seat went
-    live) and dispatches events of any sender, the same one included."""
-    applied: list[str] = []
-    registry, retry = _registry(POST)
-
-    async def on_post(event):
-        applied.append("post")
-        await registry.dispatch(_event(DM, sender=event.from_instance))
-        await registry.dispatch(_event(DM, sender="someone-else"))
-
-    async def on_dm(event):
-        applied.append(f"dm:{event.from_instance}")
-
-    registry.register(POST, on_post)
-    registry.register(DM, on_dm)
-    await asyncio.wait_for(registry.dispatch(_event(POST)), timeout=1.0)
-    assert applied == ["post", "dm:peer", "dm:someone-else"]
-    assert len(retry) == 0
+    assert steady.calls == 1
 
 
 @pytest.mark.parametrize(
@@ -487,56 +211,115 @@ async def test_a_dispatch_from_inside_a_handler_does_not_wait_for_its_own_lane()
         FederationEventType.SPACE_ROUTED,
     ],
 )
-async def test_signalling_and_sync_streams_take_no_lane_and_no_retry(event_type):
+async def test_signalling_and_sync_streams_are_never_tried_again(event_type):
     assert SHORT_LIVED <= NEVER_RETRIED
-    held, stream = _Flaky(fail=1), _Flaky(fail=1)
-    registry, retry = _registry(handler=held, delays=SLOW)
-    registry.register(event_type, stream)
-    waiting = asyncio.create_task(registry.dispatch(_event()))
-    await _yield()
-    await registry.dispatch(_event(event_type))  # fails: not tried again
-    assert stream.calls == 1
-    await registry.dispatch(_event(event_type))  # and did not wait for the DM
-    assert len(stream.applied) == 1
-    await retry.stop()
-    await waiting
+    handler = _Flaky(fail=1)
+    registry, _ = _registry(event_type, handler=handler)
+    await registry.dispatch(_event(event_type))
+    assert handler.calls == 1
+
+
+# ─── The gate before the second try ───────────────────────────────────────
+
+
+async def test_the_gate_runs_before_the_second_try_and_not_before_the_first():
+    order: list[str] = []
+
+    async def gate(event):
+        order.append("gate")
+        return True
+
+    async def handler(event):
+        order.append("handler")
+        if order.count("handler") == 1:
+            raise _locked()
+
+    registry, _ = _registry(handler=handler, gate=gate)
+    await registry.dispatch(_event())
+    assert order == ["handler", "gate", "handler"]
+
+
+async def test_an_event_the_gate_no_longer_allows_is_not_tried_again(caplog):
+    """A ban or an unpair that landed between the failure and the retry."""
+
+    async def gate(event):
+        return False
+
+    handler = _Flaky(fail=1)
+    registry, _ = _registry(handler=handler, gate=gate)
+    with caplog.at_level(logging.INFO, logger=RETRY_LOG):
+        await registry.dispatch(_event())
+    assert handler.calls == 1
+    assert "no longer allowed" in caplog.text
+
+
+async def test_a_failing_gate_drops_the_event(caplog):
+    async def gate(event):
+        raise _locked()
+
+    handler = _Flaky(fail=1)
+    registry, _ = _registry(handler=handler, gate=gate)
+    with caplog.at_level(logging.ERROR):
+        await registry.dispatch(_event())
+    assert handler.calls == 1
+    assert len(_errors(caplog)) == 1
+
+
+# ─── Every final failure is one ERROR line, without content ───────────────
+
+
+@pytest.mark.parametrize(
+    "exc", [ValueError("the secret text"), _locked(), TimeoutError("the secret text")]
+)
+async def test_a_final_failure_is_one_error_naming_type_and_sender_only(exc, caplog):
+    handler = _Flaky(fail=99, exc=exc)
+    registry, _ = _registry(handler=handler)
+    with caplog.at_level(logging.DEBUG):
+        await registry.dispatch(
+            _event(sender="household-b", payload={"text": "the secret text"})
+        )
+    [error] = _errors(caplog)
+    line = error.getMessage()
+    assert "dm_message" in line and "household-b" in line
+    assert type(exc).__name__ in line
+    assert error.exc_info is None  # one line: the traceback is DEBUG
+    above_debug = [r for r in caplog.records if r.levelno > logging.DEBUG]
+    assert all("secret" not in r.getMessage() for r in above_debug)
+    assert all(r.exc_info is None for r in above_debug)
+
+
+async def test_without_a_retry_object_failures_are_logged_the_same(caplog):
+    handler = _Flaky(fail=99)
+    registry = EventDispatchRegistry()
+    registry.register(DM, handler)
+    with caplog.at_level(logging.ERROR):
+        await registry.dispatch(_event())
+    assert handler.calls == 1
+    assert len(_errors(caplog)) == 1
 
 
 # ─── Stop / restart ───────────────────────────────────────────────────────
 
 
-async def test_stop_ends_the_wait_and_gives_one_last_try():
+async def test_stop_ends_the_wait_and_gives_the_last_try():
     handler = _Flaky(fail=1)
-    registry, retry = _registry(handler=handler, delays=SLOW)
+    registry, retry = _registry(handler=handler, delay=SLOW)
     waiting = asyncio.create_task(registry.dispatch(_event()))
     await _yield()
     assert handler.calls == 1
     await retry.stop()  # returns once the last try is over
     assert len(handler.applied) == 1
-    assert waiting.done() or await waiting is None
+    await waiting
 
 
-async def test_stop_drops_an_event_that_still_fails_with_one_warning(caplog):
-    handler = _Flaky(fail=99)
-    registry, retry = _registry(handler=handler, delays=(60.0, 60.0))
-    waiting = asyncio.create_task(registry.dispatch(_event()))
-    await _yield()
-    with caplog.at_level(logging.WARNING, logger=RETRY_LOG):
-        await retry.stop()
-        await waiting
-    assert handler.calls == 2  # the first try and the last one — no more
-    assert len(_warnings(caplog)) == 1
-    assert len(retry) == 0
-
-
-async def test_stop_lets_a_handler_in_its_later_try_finish():
+async def test_stop_never_cancels_a_handler_in_its_second_try():
     release = asyncio.Event()
     calls: list[str] = []
 
     async def handler(event):
         calls.append("run")
         if len(calls) == 1:
-            raise OSError("first try")
+            raise _locked()
         await release.wait()  # mid-write when stop() comes
         calls.append("finished")
 
@@ -546,23 +329,63 @@ async def test_stop_lets_a_handler_in_its_later_try_finish():
         await asyncio.sleep(0.001)
     stopping = asyncio.create_task(retry.stop())
     await asyncio.sleep(0.01)
-    assert not stopping.done()  # waiting for the handler, never cancelling it
+    assert not stopping.done()
     release.set()
     await stopping
     await waiting
     assert calls == ["run", "run", "finished"]
 
 
-async def test_after_stop_nothing_sleeps_and_a_new_process_holds_nothing():
-    """In memory on purpose: an event being retried when the process dies
-    is lost (as before this existed) — a restart starts with no lanes."""
+async def test_after_stop_the_second_try_comes_at_once():
+    """Nothing is kept across a restart: the retry lives in the handler's
+    own task (an event being retried when the process dies is lost)."""
     handler = _Flaky(fail=1)
-    registry, retry = _registry(handler=handler, delays=SLOW)
+    registry, retry = _registry(handler=handler, delay=SLOW)
     await retry.stop()
     await retry.stop()  # idempotent
     await asyncio.wait_for(registry.dispatch(_event()), timeout=1.0)
-    assert len(handler.applied) == 1  # its one last try, at once
-    assert len(InboundRetry()) == 0
+    assert len(handler.applied) == 1
+
+
+# ─── A real database, a real lock ─────────────────────────────────────────
+
+
+async def test_a_write_that_met_an_outside_lock_is_applied_by_the_second_try(tmp_path):
+    """Production timing: another process holds the file's write lock for
+    5.5 s, so the first run fails only after SQLite's 5 s busy timeout. (On
+    9110ee714 the retry window was measured from the first run's start and
+    had closed by then: one try, the event dropped.)"""
+    (tmp_path / "no-migrations").mkdir()
+    db = AsyncDatabase(tmp_path / "sh.db", migrations_dir=tmp_path / "no-migrations")
+    await db.startup()
+    await db.enqueue("CREATE TABLE t (i INTEGER)")
+
+    def hold() -> None:
+        conn = sqlite3.connect(str(tmp_path / "sh.db"), isolation_level=None)
+        conn.execute("BEGIN IMMEDIATE")
+        time.sleep(5.5)
+        conn.execute("COMMIT")
+        conn.close()
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    await asyncio.sleep(0.2)
+    calls = 0
+
+    async def handler(event):
+        nonlocal calls
+        calls += 1
+        await db.enqueue("INSERT INTO t VALUES (?)", (1,))
+
+    registry = EventDispatchRegistry(retry=InboundRetry())
+    registry.register(DM, handler)
+    try:
+        await registry.dispatch(_event())
+        assert calls == 2
+        assert await db.fetchval("SELECT COUNT(*) FROM t") == 1
+    finally:
+        await asyncio.to_thread(holder.join)
+        await db.shutdown()
 
 
 # ─── Every transport ends in the same dispatch ────────────────────────────
@@ -574,7 +397,7 @@ def _flaky_paired(event_type=FederationEventType.DM_MEDIA_BLOB, **kw):
     registry = p.svc_b._event_registry
     registry.clear()
     registry.register(event_type, handler)
-    p.svc_b._inbound_retry._delays = FAST
+    p.svc_b._inbound_retry._delay = FAST
     return p, handler
 
 
@@ -591,15 +414,13 @@ async def test_https_inbox_a_failed_handler_is_tried_again_and_a_replay_refused(
     assert len(handler.applied) == 1
 
 
-async def test_a_replay_is_refused_while_the_event_is_still_being_retried():
-    """The sender's POST timed out and it re-sends: refused, and the event
-    is still applied exactly once."""
+async def test_a_replay_is_refused_while_the_event_waits_for_its_second_try():
     p, handler = _flaky_paired()
-    p.svc_b._inbound_retry._delays = (0.05,)
+    p.svc_b._inbound_retry._delay = 0.05
     body, _ = _make_frame(p)
     inbox = p.repo_b._instances[p.a_id].local_inbox_id
     first = asyncio.create_task(p.svc_b.handle_inbound_envelope(inbox, body))
-    await _yield(20)
+    await _yield()
     assert handler.calls == 1 and not first.done()
     with pytest.raises(ValueError, match="Replay detected"):
         await p.svc_b.handle_inbound_envelope(inbox, body)
@@ -639,7 +460,7 @@ async def test_gfs_mailbox_multi_recipient_frame_a_failed_handler_is_tried_again
     handler = _Flaky()
     h.federation._event_registry.clear()
     h.federation._event_registry.register(POST, handler)
-    h.federation._inbound_retry._delays = FAST
+    h.federation._inbound_retry._delay = FAST
     sender, enc = await h.add_sender()
     frame, env, _ = _multi_frame(h, sender, enc, to=h.audience)
     assert await h.frame(frame) == {"status": "ok"}
@@ -650,55 +471,40 @@ async def test_gfs_mailbox_multi_recipient_frame_a_failed_handler_is_tried_again
     assert handler.calls == 2
 
 
-async def test_mesh_routed_inner_events_take_their_origins_lane():
-    """a → b → c over the mesh: c's ``SpaceRoutedHandler`` unwraps each
+async def test_mesh_routed_inner_event_a_failed_handler_is_tried_again():
+    """a → b → c over the mesh: c's ``SpaceRoutedHandler`` unwraps the
     inner event and hands it to the dispatch (in production
-    ``FederationService._dispatch_event``, which ends in the registry). The
-    wrapper came from the relay b; the lane is the origin's, a."""
+    ``FederationService._dispatch_event``, which ends in the registry)."""
     redeem = FederationEventType.SPACE_INVITE_TOKEN_REDEEM
     handler = _Flaky()
-    registry, retry = _registry(redeem, handler=handler, delays=(0.03,))
-    lanes: list[set[str]] = []
-
-    async def dispatch(event):
-        task = asyncio.create_task(registry.dispatch(event))
-        await _yield()
-        lanes.append(set(retry._lanes))
-        await task
-
+    registry, _ = _registry(redeem, handler=handler)
     nodes = _build_chain(["a", "b", "c"])
-    nodes["c"].handler._dispatcher = dispatch
-    sends = [
-        asyncio.create_task(
-            nodes["a"].handler.send_routed(
-                path=["a", "b", "c"],
-                target_eph_pk_b64=_mint_target_eph(nodes["c"]),
-                inner_event_type=redeem,
-                inner_payload={"redeem_nonce": nonce},
-            )
-        )
-        for nonce in ("n1", "n2")
-    ]
-    await asyncio.gather(*sends)
+    nodes["c"].handler._dispatcher = registry.dispatch
+    await nodes["a"].handler.send_routed(
+        path=["a", "b", "c"],
+        target_eph_pk_b64=_mint_target_eph(nodes["c"]),
+        inner_event_type=redeem,
+        inner_payload={"redeem_nonce": "n1"},
+    )
     for _ in range(100):
-        if len(handler.applied) == 2:
+        if handler.applied:
             break
         await asyncio.sleep(0.005)
-    assert [e.payload["redeem_nonce"] for e in handler.applied] == ["n1", "n2"]
-    assert handler.applied[0].routed_path == ["a", "b", "c"]
-    assert handler.calls == 3
-    assert lanes and all(lane == {"a"} for lane in lanes)
+    [inner] = handler.applied
+    assert inner.from_instance == "a"
+    assert inner.routed_path == ["a", "b", "c"]
+    assert handler.calls == 2
 
 
-# ─── The later try's gate, and what follows a success ─────────────────────
+# ─── The service's gate, and what follows a success ───────────────────────
 
 
 async def _dispatch_then(p, call, change) -> None:
     """Start an inbound call whose handler fails once, make ``change``
     while it waits for its second try, then let it finish."""
-    p.svc_b._inbound_retry._delays = (0.05,)
+    p.svc_b._inbound_retry._delay = 0.05
     task = asyncio.create_task(call)
-    await _yield(20)
+    await _yield()
     assert not task.done()
     change()
     await task
@@ -805,13 +611,12 @@ async def test_the_second_try_gate_refuses_instead_of_holding_for_a_seat(monkeyp
     assert seen[-1] is svc._pending_seat_buffer
 
 
-async def test_service_stop_gives_an_event_being_retried_its_last_try():
+async def test_service_stop_gives_an_event_its_second_try_at_once():
     p, handler = _flaky_paired()
-    p.svc_b._inbound_retry._delays = SLOW
-    p.svc_b._inbound_retry._window = 3600.0
+    p.svc_b._inbound_retry._delay = SLOW
     body, _ = _make_frame(p)
     waiting = asyncio.create_task(p.svc_b.handle_inbound_rtc(p.a_id, body))
-    await _yield(20)
+    await _yield()
     assert handler.calls == 1
     await p.svc_b.stop()
     assert await waiting == {"status": "ok"}

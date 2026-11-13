@@ -12,10 +12,10 @@ easy to add new event types without editing :meth:`FederationService._dispatch_e
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 
 from ..domain.federation import FederationEvent, FederationEventType
-from .inbound_retry import NEVER_RETRIED, Failed, InboundRetry, log_handler_failure
+from .inbound_retry import InboundRetry
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class EventDispatchRegistry:
 
     def __init__(self, *, retry: InboundRetry | None = None) -> None:
         self._handlers: dict[FederationEventType, list[EventHandler]] = {}
-        #: Per-sender lanes and the in-place second tries.
+        #: One more run for a handler that failed on a locked database.
         self._retry = retry
 
     def register(
@@ -76,36 +76,33 @@ class EventDispatchRegistry:
     async def dispatch(self, event: FederationEvent) -> None:
         """Invoke all handlers registered for the event's type.
 
-        A handler exception never blocks the other handlers. With an
-        :class:`InboundRetry` the event runs in its sender's lane — one
-        household's events are applied in arrival order — and a handler
-        that failed for a passing reason is run again there (the envelope's
-        replay id is already stored, so the sender cannot deliver it
-        again). Any other failure is logged and the event is dropped for
-        that handler. Returns once the handlers are done with the event.
+        A handler exception never blocks the other handlers. The envelope's
+        replay id is already stored, so the sender cannot deliver it again:
+        a handler that failed on a locked database gets one more run in
+        place (:class:`InboundRetry`). Every failure that is final is one
+        ERROR line naming the handler, the event type, the sending
+        household and the exception class — never the payload or the
+        exception's text (the traceback is logged at DEBUG).
         """
-        if self._retry is not None and event.event_type not in NEVER_RETRIED:
-            await self._retry.dispatch(event, self._run)
-            return
-        for handler, exc in await self._run(event, None):
-            log_handler_failure(event, handler, exc)
-
-    async def _run(
-        self,
-        event: FederationEvent,
-        handlers: Sequence[EventHandler] | None,
-    ) -> list[Failed]:
-        """Run ``handlers`` (``None``: every handler of the event's type) in
-        order; return the ones that raised, with what they raised."""
-        if handlers is None:
-            handlers = tuple(self._handlers.get(event.event_type, ()))
-        failed: list[Failed] = []
-        for handler in handlers:
+        for handler in tuple(self._handlers.get(event.event_type, ())):
             try:
                 await handler(event)
-            except Exception as exc:  # noqa: BLE001 — judged by the caller
-                failed.append((handler, exc))
-        return failed
+            except Exception as first:
+                exc: Exception | None = first
+                if self._retry is not None:
+                    exc = await self._retry.again(event, handler, first)
+                if exc is None:
+                    continue
+                name = getattr(handler, "__qualname__", repr(handler))
+                log.error(
+                    "Event handler %s failed for %s from %s: %s — the event"
+                    " is lost for this handler",
+                    name,
+                    event.event_type.value,
+                    event.from_instance,
+                    type(exc).__name__,
+                )
+                log.debug("Event handler %s traceback", name, exc_info=exc)
 
     def handlers_for(
         self,

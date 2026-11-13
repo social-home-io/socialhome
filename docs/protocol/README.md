@@ -83,22 +83,17 @@ The reason is kept server-side (`InboundContext.drop_reason` and the gate's
 log line). Over the DataChannel and the GFS relay the answer is not sent
 back at all.
 
-**Order and failure are the receiver's.** Every event runs in its
-sender's lane (one lock per `from_instance`; the origin household for a
-mesh-routed inner event), so one household's events are applied in the
-order they arrived. The replay step has stored the `msg_id` by the time a
-handler runs, so the sender cannot deliver the envelope again: a handler
-failure that can pass (database locked, I/O error) is retried by the
-receiver itself, in place — the failed handlers, up to two more times
-within 4 s, behind the post-decrypt gates (`federation/inbound_retry.py`).
-Nothing changes on the wire, and a replayed envelope is refused as before.
-Accepted limits: order holds per sender, not across senders (a
-host-relayed delete can pass the author's own create while it is being
-retried); an event whose turn has not come within 6 s runs anyway (two
-households answering each other over HTTPS would otherwise wait on each
-other until a POST timed out); and a restart loses an event that is being
-retried. Details:
-[architecture → Inbound order and handler retry](../architecture.md#inbound-order-and-handler-retry).
+**A handler failure is the receiver's to retry.** The replay step has
+stored the `msg_id` by the time a handler runs, so the sender cannot
+deliver the envelope again. A handler that failed on a locked or busy
+database is run once more by the receiver, in place, behind the
+post-decrypt gates (`federation/inbound_retry.py`); every final handler
+failure is logged at ERROR (event type and sender, no payload). Limits: no
+other failure is retried (handler I/O, timeouts, bugs); a later event of
+the same sender on another connection or transport can overtake a retried
+one; a restart loses an event waiting for its retry. The space sync is the
+heal for space content. Details:
+[architecture → Inbound handler retry](../architecture.md#inbound-handler-retry).
 
 The signature step **also binds `from_instance` to the verified signing
 identity**: an envelope whose `from_instance` claim does not match the
