@@ -250,7 +250,7 @@ def seal_relay_envelope(
 def relay_envelope_fits(envelope_dict: dict) -> bool:
     """Whether a JSON relay envelope can carry *envelope_dict* — the two
     size checks of :func:`_seal_for_relay`, without the seal. An envelope
-    that does not fit goes as a binary relay frame instead (v_95,
+    that does not fit goes as a binary relay frame instead (v_87,
     :meth:`~socialhome.federation.federation_service.FederationService
     .relay_event_frames_ok`), or is refused."""
     raw_len = len(orjson.dumps(envelope_dict))
@@ -283,7 +283,7 @@ def _seal_for_relay(
         log.warning(
             "gfs relay: refusing a %d-byte %r envelope for %s — the relay "
             "body cap is %d bytes, and it cannot go as a binary relay frame "
-            "(the household is below v_95, or its GFS does not carry them)",
+            "(the household is below v_87, or its GFS does not carry them)",
             raw_len,
             envelope_dict.get("event_type"),
             who,

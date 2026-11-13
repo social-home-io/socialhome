@@ -256,7 +256,7 @@ async def test_unknown_kem_suite_is_refused():
 
 
 async def test_an_event_outside_the_seat_vocabulary_in_a_relay_frame_is_refused():
-    """A relay frame carries a media chunk or (v_95) an event a household
+    """A relay frame carries a media chunk or an event a household
     behind a GFS may send at all — the framed-event tests are in
     ``test_federation_service_relay_large_events``."""
     p = _relay_paired()

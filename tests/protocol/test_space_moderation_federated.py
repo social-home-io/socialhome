@@ -2601,7 +2601,7 @@ async def test_a_large_item_reaches_a_gfs_only_moderator_and_a_paired_one(
     (202) and reaches a paired moderator household as the ordinary event.
     A moderator household behind a GFS gets the very same event — the
     transport carries what a JSON relay envelope cannot as one binary relay
-    frame (v_95, ``test_federation_service_relay_large_events``) — and it is
+    frame (v_87, ``test_federation_service_relay_large_events``) — and it is
     admitted like any other; nothing in the moderation code builds a frame."""
     a, h, c, d = mesh["A"], mesh["H"], mesh["C"], mesh["D"]
     _relay_seat_sends(monkeypatch, d)
@@ -2715,7 +2715,7 @@ async def test_an_item_that_cannot_reach_the_host_is_refused_at_submit(
     relay envelope could never get to the host, so nobody could ever review
     it. It is refused where it is made (413) — not stored, not shown as
     pending — and a smaller one is taken as ever. Once the host takes
-    frames (v_95), the large item is taken and sent to it."""
+    frames (v_87), the large item is taken and sent to it."""
     a, h = mesh["A"], mesh["H"]
     await a.db.enqueue(
         "UPDATE remote_instances SET source='space_session' WHERE id=?", (h.iid,)

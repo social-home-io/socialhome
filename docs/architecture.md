@@ -1111,7 +1111,7 @@ host re-sends a space's pending reports on the same BEGIN, once per
 promotion (`ReportService.on_sync_begin`). Any space event too large for a JSON
 envelope on the GFS relay (a pending item, a large page, a §25.6 sync chunk
 holding one) goes to a household behind a GFS as one binary relay frame
-(v_95: the v_87 media frame, the payload as its bytes;
+(the v_87 media frame, the payload as its bytes;
 `FederationService.relay_event_frame`, `RELAY_FRAME_EVENT_TYPES`), so a
 household behind a GFS keeps the size limits of local federation. A household whose person is promoted sends that
 BEGIN at once (`SpaceSyncScheduler.sync_with_host`). The queue never

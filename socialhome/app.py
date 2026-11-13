@@ -944,7 +944,7 @@ async def _redeliver_via_gfs_relay(
     result = None
     if not fallback:
         try:
-            # v_95 — a row too large for a JSON relay envelope goes as one
+            # v_87 — a row too large for a JSON relay envelope goes as one
             # binary relay frame (``None``: the JSON envelope below).
             result = await federation_service.relay_outbox_frame(
                 entry, instance, envelope_dict
@@ -971,7 +971,7 @@ async def _redeliver_via_gfs_relay(
     if not fallback and result.error == DELIVERY_ERROR_RELAY_TOO_LARGE:
         # Deterministic: the envelope is over the relay's JSON cap and
         # cannot go as a binary relay frame either (the peer is below
-        # v_95, its GFS carries none, or not even a frame fits it) — and
+        # v_87, its GFS carries none, or not even a frame fits it) — and
         # will be on every retry too. Retrying spends the whole attempt budget
         # re-deriving one length compare and then reports a
         # permanent condition as a transient one. The transport

@@ -1413,7 +1413,20 @@ from __future__ import annotations
 #:   ``envelope_media``, gets JSON chunks of ``RELAY_JSON_CHUNK_BYTES``
 #:   (96 KiB), which fit the JSON relay's envelope cap. Not space-scoped, no
 #:   sync-stream change. Labelled "Members reached through a GFS get pictures
-#:   in full-size pieces".
+#:   in full-size pieces". **Large space events ride the same frame**
+#:   (owner decision 2026-11-13: a household behind a GFS keeps size parity
+#:   with local federation; no new version — v_81..v_94 ship together): a
+#:   space event whose sealed envelope does not fit a JSON envelope on the
+#:   relay (~191 KiB) — a large page, a pending item, a §25.6
+#:   ``space_sync_chunk`` holding one — goes to a household reached only
+#:   through a GFS (relay seat or mailbox) as ONE such frame: the same event
+#:   type, signature, encryption and ``msg_id``, the payload JSON as the
+#:   frame's bytes (``FederationService.relay_event_frame``). The receiver
+#:   takes a framed event of ``SPACE_SESSION_ALLOWED_EVENT_TYPES`` and runs
+#:   every §24.11 step on its real payload. A payload over ~527 KiB fits no
+#:   frame and is refused at the sender; so is a large event to a peer below
+#:   v_87 or through a GFS without ``envelope_media`` (WARNING, never
+#:   queued).
 #: * **v_88** (2026-11-08) — per-space GFS mailboxes (GFS redesign PR 2,
 #:   #1333). Never released: v_89 replaced it before any release, so no
 #:   household speaks it and nothing gates on it any more.
@@ -1546,29 +1559,7 @@ from __future__ import annotations
 #:   v_94 receiver applies as before v_94 (it replaces everybody's votes
 #:   but its own people's). Space-scoped. Labelled "Poll votes count the
 #:   same in every household".
-#: * **v_95** (2026-11-13) — **large space events cross the GFS relay**
-#:   (owner decision 2026-11-13: a household behind a GFS keeps size parity
-#:   with local federation). A space event whose sealed envelope does not
-#:   fit a JSON envelope on the relay (~191 KiB) goes to a household reached
-#:   only through a GFS (``space_session``: a relay seat or a mailbox) as
-#:   ONE binary relay frame — the v_87 ``\x00SHR`` frame, no new wire shape
-#:   and no new event type: the same event type, signature and encryption,
-#:   the payload JSON as the frame's bytes (bound by the signed
-#:   ``chunk_sha256``). Host → member, member → host, member ↔ member
-#:   mailboxes, live and from the outbox; a §25.6 ``space_sync_chunk`` too,
-#:   so a catch-up carries a 256 KiB page. The receiver takes a framed
-#:   event of the seat vocabulary (``SPACE_SESSION_ALLOWED_EVENT_TYPES``)
-#:   and runs the full §24.11 step list on its real payload (this replaces
-#:   the one-event entry of the unreleased #1359). An event no frame can
-#:   carry (payload over ~527 KiB) is refused at the sender. The GFS
-#:   learns what it learned of a picture chunk: a recipient and a size
-#:   bucket. **Fallback**: to a peer below v_95, or through a GFS without
-#:   ``envelope_media``, a large event is refused at the sender as before
-#:   (WARNING, never queued); a local submission that could not reach the
-#:   space's host that way is refused with 413 before it is stored. Not
-#:   space-scoped, no sync-stream change (no sync line). Labelled "Large
-#:   pages reach households behind a GFS".
-OURS: int = 95
+OURS: int = 94
 
 
 class FederationCapability:
@@ -2223,6 +2214,9 @@ class FederationCapability:
     #: v_87 — a household at or above it opens binary media frames from the
     #: GFS relay (``\x00SHR``): a link-joined peer gets 512 KiB media
     #: chunks through a GFS proving ``envelope_media``.
+    #: The same frame carries a space event too large for a JSON relay
+    #: envelope (the payload as its bytes), so this is also the gate for
+    #: large events toward a household behind a GFS.
     MIN_FOR_RELAY_MEDIA = 87
     #: v_89 — a household at or above it owns one GFS mailbox (shared by
     #: its spaces), reads member key cards in a sealed redeem / ACK and in
@@ -2267,12 +2261,6 @@ class FederationCapability:
     #: ``SPACE_POLL_VOTE_CAST``) is additive and goes to everyone. A
     #: ``SYNC_RECORD_LINES`` entry (94).
     MIN_FOR_ITEM_MERGE_STAMPS = 94
-    #: v_95 — a household at or above it opens a binary relay frame
-    #: (``\x00SHR``) that carries a space event instead of a media chunk:
-    #: an event too large for a JSON relay envelope goes to it as one
-    #: frame, through a GFS proving ``envelope_media``. Below it the sender
-    #: refuses the large event (as before v_95).
-    MIN_FOR_RELAY_EVENT_FRAMES = 95
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2631,10 +2619,6 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS,
         "Poll votes count the same in every household",
     ),
-    (
-        FederationCapability.MIN_FOR_RELAY_EVENT_FRAMES,
-        "Large pages reach households behind a GFS",
-    ),
 ]
 
 
@@ -2739,7 +2723,6 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED: "space_media_wanted",
     FederationCapability.MIN_FOR_SPACE_POST_REACTIONS: "space_post_reactions",
     FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS: "poll_vote_stamps",
-    FederationCapability.MIN_FOR_RELAY_EVENT_FRAMES: "relay_event_frames",
 }
 
 

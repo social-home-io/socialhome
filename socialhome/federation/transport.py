@@ -2462,7 +2462,7 @@ class FederationTransport:
     ) -> bool:
         """Whether an *event_type* event of *space_id* too large for a JSON
         relay envelope can go to *instance* as one binary relay frame
-        (v_95): a household reached only through a GFS, whose mailbox sits
+        (v_87): a household reached only through a GFS, whose mailbox sits
         on a GFS of ours that proved ``envelope_media`` — or, with no
         mailbox for it, whose own relay (``relay_via``) did. The same
         choice :meth:`send_media_relay` makes. The peer's version is the
@@ -2487,7 +2487,7 @@ class FederationTransport:
         header_dict: dict,
         payload_bytes: bytes,
     ) -> _TransportSendResult:
-        """Deliver one event as a binary relay frame (v_95): the frame of
+        """Deliver one event as a binary relay frame (v_87): the frame of
         :meth:`send_media_relay`, its bytes the event's sealed payload.
         The result reads like :meth:`send_via_gfs_relay`'s — ``ok`` is the
         relay's acceptance; too large is permanent, throttled waitable."""

@@ -207,7 +207,7 @@ RESEND_SAME_INTERVAL_S: float = 24 * 3600.0
 #: (:data:`RELAY_MAX_ENVELOPE_BYTES`, 191 KiB: the content is encrypted and
 #: base64'ed once inside it, next to ~4 KiB of metadata and envelope). To a
 #: household reached only through a GFS it travels as ONE binary relay
-#: frame instead — the general rule for every large space event (v_95,
+#: frame instead — the general rule for every large space event (v_87,
 #: :meth:`FederationService.relay_event_frame`); nothing here builds one.
 RELAY_JSON_ITEM_BYTES: int = (RELAY_MAX_ENVELOPE_BYTES - 4096) * 3 // 4
 #: The keys of the wire payload that make up an item's content.
@@ -384,8 +384,8 @@ class SpaceModerationFederation(FileHashesMixin):
         holds to a reviewer household that lacks it (:meth:`on_sync_begin`):
         the household the submitter belongs to. An item too large for a
         JSON relay envelope goes to a household behind a GFS as one binary
-        relay frame (v_95, the transport's rule); one that takes none
-        (below v_95) is not reached — the host sends it the item on its
+        relay frame (v_87, the transport's rule); one that takes none
+        (below v_87) is not reached — the host sends it the item on its
         next sync once it does."""
         payload, relay = await self._wire(space, item)
         if submitter_instance_id:
@@ -452,10 +452,10 @@ class SpaceModerationFederation(FileHashesMixin):
         """Refuse (413) a NEW submission that could never get to the
         space's host: this household reaches the host only through a GFS,
         the item is too large for a JSON relay envelope, and the host (below
-        v_95) or that GFS (no ``envelope_media``) takes no binary relay
+        v_87) or that GFS (no ``envelope_media``) takes no binary relay
         frame for it. Nobody could review it — the host is where an item is
         applied. Raised before the item is stored, so it is never shown as
-        pending. A v_95 host behind a capable GFS gets the large item as one
+        pending. A v_87 host behind a capable GFS gets the large item as one
         frame."""
         host = space.owner_instance_id
         if not host or host == self._own:

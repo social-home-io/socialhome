@@ -1,4 +1,4 @@
-"""v_95 — a space event too large for a JSON envelope on the GFS relay
+"""v_87 — a space event too large for a JSON envelope on the GFS relay
 (~191 KiB) reaches a household behind a GFS as ONE binary relay frame (the
 v_87 frame): the same event type, the same signature and encryption, the
 payload as the frame's bytes — host → member, member → host, mailbox seats,
@@ -76,7 +76,7 @@ GFS = "https://gfs.example"
 SPACE = "space-large-events-leak-check-0001"
 PAGE = FederationEventType.SPACE_PAGE_CREATED
 CHUNK = FederationEventType.SPACE_SYNC_CHUNK
-V95 = FederationCapability.MIN_FOR_RELAY_EVENT_FRAMES
+V87 = FederationCapability.MIN_FOR_RELAY_MEDIA
 
 
 def _page(kib: int = 240) -> dict:
@@ -301,8 +301,8 @@ def _world(
     return _World(gfs=gfs, host=host, member=member)
 
 
-def test_the_capability_is_v95():
-    assert V95 == 95 and V95 <= OURS
+def test_the_gate_is_the_v87_relay_frame_capability():
+    assert V87 == 87 and V87 <= OURS
 
 
 # ── The gap, closed: host → member, member → host, relay seat and mailbox ──
@@ -383,8 +383,8 @@ async def test_an_event_no_frame_can_carry_is_refused_at_the_sender(caplog):
 
 
 @pytest.mark.parametrize("why", ["older-peer", "gfs-without-envelope-media"])
-async def test_without_v95_or_envelope_media_the_large_event_is_refused(why, caplog):
-    w = _world(member_version=V95 - 1 if why == "older-peer" else OURS)
+async def test_without_v87_or_envelope_media_the_large_event_is_refused(why, caplog):
+    w = _world(member_version=V87 - 1 if why == "older-peer" else OURS)
     w.gfs.media_capable = why == "older-peer"
     with caplog.at_level(logging.WARNING):
         result = await w.send(w.host, w.member, PAGE, _page())
@@ -398,7 +398,7 @@ async def test_without_v95_or_envelope_media_the_large_event_is_refused(why, cap
 
 async def test_large_event_reaches_says_whether_a_frame_would_carry_it():
     """The check a local action runs before it stores anything."""
-    w = _world(host_version=V95 - 1)
+    w = _world(host_version=V87 - 1)
     assert await w.host.svc.large_event_reaches(w.member.id)
     assert not await w.member.svc.large_event_reaches(w.host.id)
     # A household that is not behind a GFS takes large events as ever.
@@ -441,7 +441,7 @@ async def test_a_queued_large_row_for_an_older_peer_is_dropped_not_retried():
     [entry] = w.host.outbox.entries()
     row = w.host.repo._instances[w.member.id]
     w.host.repo._instances[w.member.id] = dataclasses.replace(
-        row, proto_version=V95 - 1
+        row, proto_version=V87 - 1
     )
     assert (
         await _redeliver_envelope(w.host.svc, w.host.repo, entry)

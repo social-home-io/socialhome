@@ -418,7 +418,7 @@ household (the sender waits out each 429). That is why live pictures stay on
 the cache (one upload per GFS, not per member) and the relay carries only
 what the cache cannot.
 
-## Large events in a binary frame (v_95)
+## Large events in a binary frame
 
 Owner decision 2026-11-13: **a household behind a GFS keeps size parity
 with local federation.** No limit is shrunk to fit the small JSON relay
@@ -498,13 +498,16 @@ size; never queued, never silently dropped) toward a household behind a
 GFS, and still reach paired and mesh members. Carrying them needs the
 event split over several frames — an open follow-up, not a smaller limit.
 
-**Versioning.** Sent only to a peer at v_95
-(`MIN_FOR_RELAY_EVENT_FRAMES`) through a GFS proving `envelope_media`
-(the mailbox's GFS, else the seat's `relay_via`). Otherwise the behaviour
-before v_95: the JSON relay leg refuses the envelope (WARNING, permanent,
-nothing queued). A local moderation submission that could not reach the
-space's host that way answers **413** before anything is stored
-(`check_reaches_host`); with a v_95 host it is taken.
+**Versioning — no new version.** The gate is the one of the frame
+itself: a peer at v_87 (`MIN_FOR_RELAY_MEDIA` — it reads binary relay
+frames at all) through a GFS proving `envelope_media` (the mailbox's GFS,
+else the seat's `relay_via`). v_81–v_94 are unreleased and ship together
+(the last release speaks v_80), so every released build that reads the
+frame also takes a large event in it. To a peer below v_87, or through a
+GFS without `envelope_media`, nothing changes: the JSON relay leg refuses
+the envelope (WARNING, permanent, nothing queued), and a local moderation
+submission that could not reach the space's host that way answers **413**
+before anything is stored (`check_reaches_host`).
 
 **What the GFS sees — unchanged.** A recipient id (a mailbox id or an
 instance id), a time and a size bucket (64 / 128 / 256 / 516 KiB or the

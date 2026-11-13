@@ -765,7 +765,7 @@ class FederationService:
         """The §24.11 pipeline for a media body that came through the GFS
         relay (v_87): the DataChannel chain (lookup by the sender's
         instance id) with an event-type gate straight after the parse — a
-        relay frame is a media chunk or (v_95) an event of the vocabulary a
+        relay frame is a media chunk or an event of the vocabulary a
         household behind a GFS may send at all
         (:data:`~socialhome.federation.media_envelope.RELAY_FRAME_EVENT_TYPES`),
         nothing else — and, straight after the payload decrypt, the step
@@ -788,7 +788,7 @@ class FederationService:
         return InboundPipeline(steps)
 
     async def _open_framed_event(self, ctx: InboundContext) -> None:
-        """Relay media pipeline step (v_95): for an event that is not a
+        """Relay media pipeline step (v_87): for an event that is not a
         media chunk, the frame's bytes ARE its payload. Opens them (suites,
         AEAD, the signed ``chunk_sha256``) and replaces the event's payload
         with the JSON object inside; the signed metadata held only the
@@ -2117,7 +2117,7 @@ class FederationService:
         status_code: int | None = None
         transport_error: str | None = None
         if self._transport is not None:
-            # v_95 — too large for a JSON envelope on the GFS relay: one
+            # v_87 — too large for a JSON envelope on the GFS relay: one
             # binary relay frame instead. ``None``: the ordinary send.
             result = await self.relay_event_frame(
                 instance,
@@ -2373,18 +2373,18 @@ class FederationService:
     ) -> bool:
         """Whether an event too large for a JSON relay envelope can go to
         *instance* — a household reached only through a GFS — as one binary
-        relay frame (v_95): the peer is at
-        :data:`FederationCapability.MIN_FOR_RELAY_EVENT_FRAMES` and the GFS
+        relay frame (v_87): the peer is at
+        :data:`FederationCapability.MIN_FOR_RELAY_MEDIA` and the GFS
         that reaches it (its mailbox's, else its ``relay_via``) proved
         ``envelope_media``. Otherwise the large event is refused at the
-        sender, as before v_95."""
+        sender, as before v_87."""
         return (
             self._transport is not None
             and instance.source is InstanceSource.SPACE_SESSION
             and instance.status is PairingStatus.CONFIRMED
             and await self.peer_supports(
                 instance.id,
-                min_version=FederationCapability.MIN_FOR_RELAY_EVENT_FRAMES,
+                min_version=FederationCapability.MIN_FOR_RELAY_MEDIA,
             )
             and await self._transport.relay_frame_ready(
                 instance,
@@ -2416,7 +2416,7 @@ class FederationService:
         payload_json: Callable[[], str],
         space_id: str | None,
     ):
-        """v_95 — the ONE rule for a large event toward a household behind
+        """v_87 — the ONE rule for a large event toward a household behind
         a GFS: when *envelope_dict* (the sealed JSON envelope of this send)
         does not fit a JSON envelope on the relay and *instance* is reached
         only through a GFS, the event goes as one binary relay frame — the
@@ -2430,7 +2430,7 @@ class FederationService:
         and the caller sends the JSON envelope: it fits, the peer is not
         behind a GFS, or the peer / its GFS takes no event frames (the JSON
         relay leg then refuses the envelope with its WARNING, as before
-        v_95). Used by the live send and the outbox alike."""
+        v_87). Used by the live send and the outbox alike."""
         if (
             self._transport is None
             or instance.source is not InstanceSource.SPACE_SESSION
@@ -2769,7 +2769,7 @@ class FederationService:
         self, entry: OutboxEntry, instance: RemoteInstance, envelope_dict: dict
     ):
         """:meth:`relay_event_frame` for an outbox row sealed for
-        *instance* as *envelope_dict* (v_95): a row that references a
+        *instance* as *envelope_dict* (v_87): a row that references a
         stored payload and is too large for a JSON relay envelope goes as
         one binary relay frame under the same ``msg_id``. ``None`` → the
         caller sends the JSON envelope."""
@@ -4729,7 +4729,7 @@ class FederationService:
         transport: str = TRANSPORT_GFS_RELAY,
     ) -> dict:
         """Validate + decrypt one binary media body that the GFS relay
-        delivered (v_87), then dispatch — a media chunk, or (v_95) a space
+        delivered (v_87), then dispatch — a media chunk, or a space
         event too large for a JSON relay envelope, whose payload the
         pipeline opens from the frame's bytes (:meth:`_open_framed_event`).
 
@@ -4772,7 +4772,7 @@ class FederationService:
             and ctx.event is not None
             and ctx.event.event_type not in MEDIA_HTTPS_EVENT_TYPES
         ):
-            # v_95 — a framed event: the pipeline opened its bytes into its
+            # v_87 — a framed event: the pipeline opened its bytes into its
             # payload and ran every gate on it; dispatched like any event.
             await self._dispatch_event(ctx.event)
             return {"status": "ok"}

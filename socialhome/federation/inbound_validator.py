@@ -201,7 +201,7 @@ class InboundContext:
 
     #: A binary relay frame's sealed bytes and the frame suite its body
     #: named (set by the relay media leg, never by a wire field). For a
-    #: framed event (v_95) the relay pipeline opens them into the event's
+    #: framed event (v_87) the relay pipeline opens them into the event's
     #: payload straight after the header's decrypt, so every later step
     #: judges the real payload.
     frame_payload: bytes = b""

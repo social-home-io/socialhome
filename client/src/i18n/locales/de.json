@@ -2691,7 +2691,6 @@
   "capability.space_media_wanted": "Ältere Space-Bilder beim Öffnen nachladen",
   "capability.space_post_reactions": "Reaktionen auf Space-Beiträge für alle Haushalte",
   "capability.poll_vote_stamps": "Umfragestimmen zählen in jedem Haushalt gleich",
-  "capability.relay_event_frames": "Große Seiten über einen GFS",
   "settings.tab.security": "Sicherheit",
   "settings.security.signing_in": "Anmelden",
   "settings.security.signing_in_hint": "Das nutzt nur du. Niemand sonst sieht deinen Anmeldenamen.",

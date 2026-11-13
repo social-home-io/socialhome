@@ -2991,7 +2991,6 @@
   "capability.space_media_wanted": "Older space pictures fetched when you open them",
   "capability.space_post_reactions": "Reactions on space posts shared with every household",
   "capability.poll_vote_stamps": "Poll votes that count the same in every household",
-  "capability.relay_event_frames": "Large pages through a GFS",
   "settings.tab.security": "Security",
   "settings.security.signing_in": "Signing in",
   "settings.security.signing_in_hint": "Only you use this. Nobody else sees your sign-in username.",

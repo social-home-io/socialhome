@@ -12339,17 +12339,6 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_94 item merge stamps gate in place ✓")
-    # v_95 — large space events cross the GFS relay as one binary relay
-    # frame: sent only to a household at >= v_95, so the OURS round-trip
-    # above is what proves every pair takes them (``members-parity`` sends
-    # a 240 KiB page both ways and through a catch-up).
-    if int(_Cap.MIN_FOR_RELAY_EVENT_FRAMES) != 95 or _OURS < 95:
-        failures.append(
-            "MIN_FOR_RELAY_EVENT_FRAMES moved off v_95 (or OURS fell below it) "
-            "— a large page would never reach a household behind a GFS"
-        )
-    else:
-        print("  v_95 large events over the GFS relay gate in place ✓")
     # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
     # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
     # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key
@@ -23770,7 +23759,7 @@ _PARITY_MEMBERS: tuple[str, ...] = ("d", "e")
 #: The calendar day the step's events sit on (a fixed future day).
 _PARITY_DAY = ("2027-04-01T00:00:00Z", "2027-04-02T00:00:00Z")
 #: A page too large for a JSON envelope on the GFS relay (~191 KiB) that
-#: one binary relay frame carries (v_95).
+#: one binary relay frame carries (v_87).
 _PARITY_BIG_PAGE_BYTES = 240 * 1024
 
 
@@ -23927,7 +23916,7 @@ def _parity_create_big_page(
     state: dict, label: str, space_id: str, tag: str
 ) -> tuple[str, dict]:
     """``label`` creates a ~240 KiB page — over the GFS relay's JSON
-    envelope (~191 KiB), under one binary relay frame (v_95). Returns its
+    envelope (~191 KiB), under one binary relay frame (v_87). Returns its
     id and what every household must show."""
     text = secrets.token_hex(_PARITY_BIG_PAGE_BYTES // 2)
     title = f"Parity large page by {label} {tag}"
@@ -24351,7 +24340,7 @@ def cmd_gfs_moderator_parity() -> None:
             {},
         )
         _must(f"{step}: e approves the large page", st, body)
-        # v_95 — the PUBLISHED page is an ordinary 240 KiB page event: e
+        # v_87 — the PUBLISHED page is an ordinary 240 KiB page event: e
         # gets it like a and d, as one binary relay frame.
         for label in ("a", "d", "e"):
             _poll(
@@ -24590,7 +24579,7 @@ def cmd_members_parity() -> None:
         want={"exists": True, "title": title},
     )
 
-    # 7b. v_95 — a ~240 KiB page, created by the paired member d and by the
+    # 7b. v_87 — a ~240 KiB page, created by the paired member d and by the
     #     GFS-only member e: a, d and e show it byte-identical. e's goes to
     #     the host, and d's reaches e, as one binary relay frame each.
     for author in _PARITY_MEMBERS:
@@ -24700,7 +24689,7 @@ def cmd_members_parity() -> None:
             state, "a", "DELETE", f"/api/spaces/{space_id}/posts/{gone}"
         )
         _must("members-parity: a deletes while d, e are away", s, body, ok=(200, 204))
-        # v_95 — a 240 KiB page they both missed: the catch-up carries it
+        # v_87 — a 240 KiB page they both missed: the catch-up carries it
         # (to e as a §25.6 chunk in one binary relay frame).
         away_page, away_want = _parity_create_big_page(state, "a", space_id, tag)
         old_text = f"Parity old picture {tag}"

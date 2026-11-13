@@ -1954,7 +1954,7 @@ the host's catch-up — the step reports which) and approves it. Last, a large
 item: with pages ``moderated`` d's person creates a ~240 KiB page — more than a
 JSON envelope on the GFS relay carries; on e's next BEGIN (a role change makes
 e send it at once) a sends the item to e as one binary relay frame, e holds the
-whole text, approves, and a, d and e hold the published 240 KiB page (v_95:
+whole text, approves, and a, d and e hold the published 240 KiB page (v_87:
 the page event crosses the relay as one binary relay frame, like the item). a
 resets the levels and e's role.
 
@@ -1977,9 +1977,9 @@ check polls (3 s, bounded timeout, 429-aware); no sleep is a check.
 | calendar event with cover | a | summary + cover hash |
 | gallery item | a (space album) | item + full and thumbnail hashes |
 | page | a | title + content |
-| 240 KiB page (v_95) | d, then e | size + SHA-256 on a, d and e — over the relay's JSON envelope, one binary relay frame |
+| 240 KiB page (v_87) | d, then e | size + SHA-256 on a, d and e — over the relay's JSON envelope, one binary relay frame |
 | poll vote | d votes Pizza, e Sushi | ``…/poll`` counts |
-| catch-up | a, while d and e are killed | new post, a 240 KiB page (v_95), edit, deletion after both respawn |
+| catch-up | a, while d and e are killed | new post, a 240 KiB page (v_87), edit, deletion after both respawn |
 | old picture | a, while d and e are killed | the blob is expired from the GFS cache as 30-day-old content (as ``gfs-media-on-demand``'s old leg), then both must show the picture; SKIP if a cached nothing |
 | host offline | d and e, a killed | each one's picture post on the other |
 | admin rights | a promotes e's person; e deletes d's post | role on both; the post gone on both (e is put back to member) |
