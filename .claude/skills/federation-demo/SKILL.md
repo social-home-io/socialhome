@@ -1963,6 +1963,19 @@ the member's newest WARNING lines. ``verify`` (gated on the
 fails if d or e differ from a. Kills households, so it is an
 ``@_offline_step``.
 
+Its last action covers **"host" = the owner or the delegated admin that
+invited us** (owner decision 2026-11-13,
+``socialhome/federation/host_equivalence.py``): in a fresh private space of
+a's (``private_gfs`` + ``delegated_admin_authority`` on; e joined by a
+``gfs`` link, d by an ``internal`` link and made admin) the owner a is
+stopped, d mints a link and **b** (paired with the GFS for this step)
+redeems it. b must still get the member directory — from d, on d's own
+``dir_seq`` line — with e's card. a comes back and lists b (so e, which
+takes a directory only from the owner that invited it, holds b's card);
+then a is stopped again and b and e each post — the other must show it,
+mailbox to mailbox — and no GFS envelope / mailbox line names an instance
+id, a mailbox id or the space.
+
 ### ``gfs-space-healing`` — a GFS-only member heals from a helper while the host is offline (v_92)
 
 Prereqs: the chain through ``gfs-member-mesh`` (d, paired with a, and e,

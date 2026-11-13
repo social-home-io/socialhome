@@ -23866,6 +23866,214 @@ def _parity_expire_new_blobs(space_id: str, since: int) -> list[str]:
     return [r[0] for r in rows]
 
 
+def _dir_seq_on(label: str, space_id: str, instance_id: str) -> int:
+    """The ``dir_seq`` of the member directory ``label`` took from
+    ``instance_id`` for ``space_id`` (kept on that issuer's
+    ``space_instances.mailbox`` row), or 0."""
+    rows = _rows(
+        label,
+        "SELECT mailbox FROM space_instances WHERE space_id = ? AND instance_id = ?",
+        (space_id, instance_id),
+    )
+    if not rows or not rows[0][0]:
+        return 0
+    seq = json.loads(rows[0][0]).get("dir_seq")
+    return seq if isinstance(seq, int) else 0
+
+
+def _parity_admin_invitee(state: dict, results: list[tuple[str, str, str]]) -> None:
+    """"Host" means the owner OR the delegated admin that invited us (owner
+    decision 2026-11-13, ``federation/host_equivalence.py``).
+
+    A fresh private space of a's (``private_gfs`` and
+    ``delegated_admin_authority`` on): e joins by a ``gfs`` link (GFS-only),
+    d by an ``internal`` link and is made admin (it gets the space seed).
+
+    1. The owner a goes OFFLINE. d mints a link and **b** redeems it: b is
+       seated by the delegated admin. b must still get the member directory
+       — from d, on d's own version line — and with it e's card.
+    2. a comes back: it lists b (d passed b's card on, or b's own card
+       reached it), so e — which takes a directory only from the owner that
+       invited it — holds b's card.
+    3. a goes OFFLINE again. b posts and e must show it; e posts and b must
+       show it: each reaches the other's GFS mailbox, no host involved.
+    4. The GFS log over that window names no instance id, no mailbox id and
+       not the space on any envelope / mailbox line.
+    """
+    step = "members-parity (admin's invitee)"
+    _ensure_gfs_client(state, "b")
+    a, b, d, e = (state["instances"][x] for x in ("a", "b", "d", "e"))
+    a_base = f"http://127.0.0.1:{a['port']}"
+    tag = time.time_ns()
+    s, space = _inst_request(
+        state,
+        "a",
+        "POST",
+        "/api/spaces",
+        {
+            "name": f"Acting host {tag}",
+            "space_type": "private",
+            "join_mode": "invite_only",
+            "emoji": "🪑",
+        },
+    )
+    space_id = _must(f"{step}: a creates a private space", s, space, ok=(201,))["id"]
+    s, cur = _inst_request(state, "a", "GET", f"/api/spaces/{space_id}")
+    feats = dict(_must(f"{step}: a reads the space", s, cur).get("features") or {})
+    feats["private_gfs"] = True
+    feats["delegated_admin_authority"] = True
+    s, body = _inst_request(
+        state, "a", "PATCH", f"/api/spaces/{space_id}", {"features": feats}
+    )
+    _must(f"{step}: a turns private_gfs + delegation on", s, body, ok=(200,))
+    _join_private_link(state, "e", space_id, a_base, via="gfs")
+    _join_private_link(state, "d", space_id, a_base, via="internal")
+    s, body = _inst_request(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}/remote-members/{d['instance_id']}/{d['user_id']}",
+        {"role": "admin"},
+    )
+    _must(f"{step}: a makes d's person an admin", s, body, ok=(200,))
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        seed = _rows(
+            "d",
+            "SELECT identity_private_key IS NOT NULL FROM spaces WHERE id = ?",
+            (space_id,),
+        )
+        on_d = _card_on("d", space_id, e["instance_id"])
+        if seed and seed[0][0] and on_d and on_d.get("mailbox"):
+            break
+        time.sleep(1.0)
+    else:
+        raise SystemExit(
+            f"{step}: d never became a delegated admin holding the space seed "
+            "and e's card"
+        )
+    print("  d is a delegated admin (seed held) of a fresh private space ✓")
+
+    # 1. Owner offline: b is seated by the admin and gets the directory.
+    _kill_household("a", a)
+    try:
+        s, link = _inst_request(
+            state,
+            "d",
+            "POST",
+            f"/api/spaces/{space_id}/invite-tokens",
+            {"role": "member", "uses": 1, "via": "internal"},
+        )
+        link = _must(f"{step}: d mints an internal link", s, link, ok=(201,))
+        s, joined = _request(
+            f"http://127.0.0.1:{b['port']}/api/spaces/join",
+            token=b["token"],
+            method="POST",
+            body=_join_body_from_blob(_decode_invite_blob(link["code"])),
+            timeout=40.0,
+        )
+        _must(f"{step}: b redeems d's link (owner offline)", s, joined, ok=(200, 201))
+        invited = _rows(
+            "b", "SELECT invited_by_instance FROM spaces WHERE id = ?", (space_id,)
+        )
+        if not invited or invited[0][0] != d["instance_id"]:
+            raise SystemExit(
+                f"{step}: b's stub does not name d as its inviting admin: {invited!r}"
+            )
+        deadline = time.time() + 120
+        on_b = None
+        seq = 0
+        while time.time() < deadline:
+            on_b = _card_on("b", space_id, e["instance_id"])
+            seq = _dir_seq_on("b", space_id, d["instance_id"])
+            if on_b and on_b.get("mailbox") and seq > 0:
+                break
+            time.sleep(1.0)
+        ok = bool(on_b and on_b.get("mailbox") and seq > 0)
+        results.append(
+            (
+                "admin's invitee: the directory with the owner offline",
+                "PASS" if ok else "DIFF",
+                "" if ok else f"b holds {on_b!r} for e, dir_seq from d = {seq}",
+            )
+        )
+        print(
+            "  owner a offline; b (seated by admin d) "
+            + ("holds e's card from d's directory ✓" if ok else "got NO directory ✗")
+        )
+    finally:
+        _respawn(state, "a")
+
+    # 2. The owner is back: it lists b, so e (the owner's invitee) holds
+    #    b's card with b's mailbox.
+    deadline = time.time() + 180
+    on_e = on_b = None
+    while time.time() < deadline:
+        on_e = _card_on("e", space_id, b["instance_id"])
+        on_b = _card_on("b", space_id, e["instance_id"])
+        if on_e and on_e.get("mailbox") and on_b and on_b.get("mailbox"):
+            break
+        time.sleep(1.0)
+    else:
+        results.append(
+            (
+                "admin's invitee: the owner lists it",
+                "DIFF",
+                f"e holds {on_e!r} for b, b holds {on_b!r} for e",
+            )
+        )
+        return
+    results.append(("admin's invitee: the owner lists it", "PASS", ""))
+    b_mailbox, e_mailbox = on_e["mailbox"]["mailbox_id"], on_b["mailbox"]["mailbox_id"]
+
+    # 3. Owner offline again: b and e exchange a post.
+    gfs_off = _gfs_log_size()
+    _kill_household("a", a)
+    try:
+        for author, reader in (("b", "e"), ("e", "b")):
+            text = f"Acting-host post by {author} {tag}"
+            pid = _parity_post_text(state, author, space_id, text)
+            _parity_compare(
+                state,
+                results,
+                f"admin's invitee, owner offline: {author}'s post on {reader}",
+                lambda label, cache, pid=pid: _parity_post(
+                    state, label, space_id, pid, cache
+                ),
+                ref=author,
+                want={"exists": True, "content": text},
+                members=(reader,),
+                timeout=120.0,
+            )
+        # 4. What the GFS saw.
+        named = (
+            a["instance_id"],
+            b["instance_id"],
+            d["instance_id"],
+            e["instance_id"],
+            space_id,
+        )
+        leaked = [
+            line
+            for line in _gfs_log_lines_matching("", offset=gfs_off)
+            if b_mailbox in line
+            or e_mailbox in line
+            or (
+                ("gfs.envelope" in line or "mailbox" in line)
+                and any(x in line for x in named)
+            )
+        ]
+        results.append(
+            (
+                "admin's invitee: the GFS log names nobody",
+                "DIFF" if leaked else "PASS",
+                f"{leaked[:3]!r}" if leaked else "",
+            )
+        )
+    finally:
+        _respawn(state, "a")
+
+
 @_offline_step
 def cmd_members_parity() -> None:
     """Owner acceptance gate: every space member is equal, whichever way its
@@ -23890,7 +24098,10 @@ def cmd_members_parity() -> None:
     30-day-old content, the way ``gfs-media-on-demand`` does); host offline
     (a stopped; d and e each post a picture, the other must get it); admin
     rights (a promotes e's person to admin, e deletes d's post, both see it
-    gone; e is put back to member at the end).
+    gone; e is put back to member at the end); the delegated admin's
+    invitee (:func:`_parity_admin_invitee`: in a fresh private space b is
+    seated by admin d while a is offline, still gets the member directory,
+    and exchanges a post with GFS-only e with a offline again).
     """
     state = _load()
     space_id = (state or {}).get("gfs_invite_space_id")
@@ -24307,6 +24518,10 @@ def cmd_members_parity() -> None:
         # is e's person put back to member.
         s, body = _inst_request(state, "a", "PATCH", role_url, {"role": "member"})
         print(f"  e's person back to member: HTTP {s}")
+
+    # 14. "Host" = the owner or the delegated admin that invited us: b,
+    #     seated by admin d in a fresh space while a is offline.
+    _parity_admin_invitee(_load(), results)
 
     state = _load()
     state["members_parity"] = {
