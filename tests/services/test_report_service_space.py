@@ -38,10 +38,10 @@ OWN = "inst-self"
 class _Fed:
     def __init__(self):
         self.sent: list[dict] = []
-        #: Households below v_45 (``peer_supports`` says no).
+        #: Households below v_45 (``space_member_supports`` says no).
         self.old: set[str] = set()
 
-    async def peer_supports(self, instance_id, *, min_version):
+    async def space_member_supports(self, instance_id, *, min_version):
         return instance_id not in self.old
 
     async def send_event(self, *, to_instance_id, event_type, payload, space_id=None):
@@ -958,9 +958,21 @@ async def test_fallback_needs_sole_authority_still(env):
     ] == [report.id]
 
 
+def _begin(sender: str, space_id: str = "spA", **payload) -> SimpleNamespace:
+    """A §25.6 ``SPACE_SYNC_BEGIN`` from ``sender`` as the handler sees it."""
+    return SimpleNamespace(
+        from_instance=sender,
+        space_id=space_id,
+        payload={"space_id": space_id, **payload},
+    )
+
+
 async def test_host_redelivers_pending_reports_to_a_new_reviewer(env):
     """N3 — a household that regains an admin / moderator seat gets the
-    space's pending reports again (v_45 only), on the SPACE_REPORT path."""
+    space's pending reports again (v_45 only), on the SPACE_REPORT path —
+    when it ASKS (its BEGIN with the reviewer echo), never from the role
+    change's own event: that fires before the role change is sent, and the
+    report would reach a household that does not review yet."""
     from socialhome.domain.events import SpaceConfigChanged
 
     env.svc.watch_seats(env.bus)
@@ -969,36 +981,74 @@ async def test_host_redelivers_pending_reports_to_a_new_reviewer(env):
         reporter_user_id=env.member, target_type="post", target_id="pA", category="spam"
     )
     env.fed.sent.clear()
-    await env.db.enqueue(
-        "UPDATE space_remote_members SET role='moderator' WHERE user_id='rback'"
-    )
-    await env.bus.publish(
-        SpaceConfigChanged(
-            space_id="spA",
-            event_type="space_member_role_changed",
-            payload={
-                "user_id": "rback",
-                "instance_id": "inst-back",
-                "role": "moderator",
-            },
-            sequence=0,
+
+    async def role(value: str) -> None:
+        await env.db.enqueue(
+            "UPDATE space_remote_members SET role=? WHERE user_id='rback'", (value,)
         )
-    )
+        await env.bus.publish(
+            SpaceConfigChanged(
+                space_id="spA",
+                event_type="space_member_role_changed",
+                payload={"user_id": "rback", "instance_id": "inst-back", "role": value},
+                sequence=0,
+            )
+        )
+
+    now = [1000.0]
+    env.svc._clock = lambda: now[0]
+    await role("moderator")
+    assert env.fed.sent == []  # nothing leaves before the role change does
+    # A BEGIN without the reviewer echo (a plain member's shape) is not one.
+    await env.svc.on_sync_begin(_begin("inst-back"))
+    assert env.fed.sent == []
+    await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
     assert [(s["to"], s["type"]) for s in env.fed.sent] == [
         ("inst-back", FederationEventType.SPACE_REPORT)
     ]
     assert env.fed.sent[0]["payload"]["target_id"] == "pA"
-    # A demotion, an older household, a non-host or ourselves: nothing.
+    # Once per promotion: the periodic BEGINs that follow re-send nothing.
     env.fed.sent.clear()
-    for payload in (
-        {"user_id": "rback", "instance_id": "inst-back", "role": "member"},
-        {"user_id": "x", "instance_id": OWN, "role": "admin"},
-    ):
-        await env.bus.publish(
-            SpaceConfigChanged(
-                space_id="spA", event_type="x", payload=payload, sequence=0
-            )
-        )
+    await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
+    assert env.fed.sent == []
+    # Demoted: its echo (it would not send one) is not answered…
+    await role("member")
+    await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
+    assert env.fed.sent == []
+    # …promoted again: once more — but not inside the rate window, however
+    # often the seat changes.
+    await role("admin")
+    await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
+    assert env.fed.sent == []
+    now[0] += 601
+    await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
+    assert [s["to"] for s in env.fed.sent] == ["inst-back"]
+    # The moderator left and was seated again (a role-bearing invite link:
+    # no role-change event at all) — the seat's roster version moved, and
+    # that alone makes the host send them once more.
+    env.fed.sent.clear()
+    await env.db.enqueue(
+        "UPDATE space_remote_members SET tombstoned=1,"
+        " member_version=member_version+1 WHERE user_id='rback'"
+    )
+    await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
+    assert env.fed.sent == [] and ("spA", "inst-back") not in env.svc._redelivered
+    await env.db.enqueue(
+        "UPDATE space_remote_members SET tombstoned=0,"
+        " member_version=member_version+1 WHERE user_id='rback'"
+    )
+    now[0] += 601
+    await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
+    await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
+    assert [s["to"] for s in env.fed.sent] == ["inst-back"]
+    # Somebody who holds no seat, ourselves, a malformed BEGIN: nothing,
+    # and never an exception.
+    env.fed.sent.clear()
+    await env.svc.on_sync_begin(_begin("inst-stranger", mod_held={}))
+    await env.svc.on_sync_begin(_begin(OWN, mod_held={}))
+    await env.svc.on_sync_begin(_begin("inst-back", "sp-unknown", mod_held={}))
+    await env.svc.on_sync_begin(SimpleNamespace(from_instance="x", space_id="spA"))
+    assert env.fed.sent == []
     env.fed.old.add("inst-old")
     assert await env.svc.resend_pending("spA", "inst-old") == 0
     await env.space("spR", host="inst-host")

@@ -54,8 +54,14 @@ class _Fed:
         self.versions = versions
         self.sent: list[tuple[str, FederationEventType, dict]] = []
 
-    async def peer_supports(self, instance_id, *, min_version):
+    async def space_member_supports(self, instance_id, *, min_version):
+        # The space-member judge: a mesh-only reviewer household counts by
+        # the version it claimed, not by a pairing row. ``peer_supports``
+        # is deliberately absent — the queue must not gate on it.
         return self.versions.get(instance_id, 0) >= min_version
+
+    async def is_space_session_peer(self, instance_id):
+        return False
 
     async def send_with_mesh_fallback(
         self, *, to_instance_id, event_type, payload, space_id=None

@@ -2414,3 +2414,46 @@ async def test_answer_join_request_moves_a_pending_request_once(env):
     assert not await env.repo.answer_join_request("missing", "denied")
     with pytest.raises(ValueError):
         await env.repo.answer_join_request(rid, "pending")
+
+
+async def test_a_purged_item_is_revived_and_open_items_are_listed(env):
+    """The moderation catch-up: an EXPIRED copy (purged while this
+    household did not review) is pending again with the re-sent content —
+    never a decided one, never somebody else's id; and every item whose
+    review window is open is listed in one read, pending first."""
+    from socialhome.domain.space import ModerationStatus
+
+    await env.repo.save(_space())
+    now = datetime.now(UTC)
+    for item_id in ("m1", "m2", "m3"):
+        await env.repo.insert_moderation_item(_mod_item(item_id))
+    assert (
+        await env.repo.drop_pending_from_others("sp-1", keep_submitters=frozenset())
+        == 3
+    )
+    gone = await env.repo.get_moderation_item("m1")
+    assert (gone.status, gone.payload) == (ModerationStatus.EXPIRED, {})
+    assert await env.repo.revive_moderation_item(_mod_item("m1"))
+    back = await env.repo.get_moderation_item("m1")
+    assert back.status is ModerationStatus.PENDING
+    assert back.payload["patch"] == {"title": "New"} and back.reviewed_at is None
+    # Not twice, not another submitter's row, not a decided one.
+    assert not await env.repo.revive_moderation_item(_mod_item("m1"))
+    assert not await env.repo.revive_moderation_item(
+        _mod_item("m2", submitted_by="uid-eve")
+    )
+    await env.db.enqueue(
+        "UPDATE space_moderation_queue SET status='rejected' WHERE id='m3'", ()
+    )
+    assert not await env.repo.revive_moderation_item(_mod_item("m3"))
+    # A row past its review window is not open any more.
+    await env.db.enqueue(
+        "UPDATE space_moderation_queue SET expires_at=? WHERE id='m2'",
+        ((now - timedelta(minutes=1)).isoformat(),),
+    )
+    open_rows = await env.repo.list_moderation_open("sp-1", now, limit=10)
+    assert [(i.id, i.status.value) for i in open_rows] == [
+        ("m1", "pending"),
+        ("m3", "rejected"),
+    ]
+    assert len(await env.repo.list_moderation_open("sp-1", now, limit=1)) == 1

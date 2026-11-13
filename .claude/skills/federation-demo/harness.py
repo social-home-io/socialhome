@@ -179,6 +179,10 @@ _OFFLINE_PEER_NOISE: tuple[str, ...] = (
     # stops host a several times while d reaches it through b): the nack is
     # best-effort and has nowhere to go.
     "SPACE_ROUTE_STALE route_id=",
+    # ``federated-moderation``: a member submits while a moderator household
+    # is down — the submission to it is not delivered (the host catches
+    # that household up on its next sync).
+    "did not reach reviewer household ",
 )
 
 #: libdatachannel / libjuice status lines while a peer's process dies, or
@@ -21518,6 +21522,7 @@ def cmd_space_report() -> None:
     print("space-report: ok")
 
 
+@_offline_step
 def cmd_federated_moderation() -> None:
     """Federated moderation (v_43): "Reviewed" across households.
 
@@ -21539,9 +21544,19 @@ def cmd_federated_moderation() -> None:
     4. **d — a plain member household — never received the pending
        item**: no ``space_moderation_queue`` row for it in d's DB, and the
        item id never appears in d's log.
+    5. **A moderator household that was offline catches up.** c is killed;
+       Alice submits a second task; the copy a queued for c is dropped
+       (c stayed away past a's retries). c restarts: its §25.6 BEGIN to
+       the host b echoes the pending items it holds (``mod_pending``:
+       none), b re-sends the item to c alone, and c's Moderation tab lists
+       it.
+    6. **A household promoted later gets what is already pending.** b
+       makes Dave (d) a moderator. d asks the host as soon as it applies
+       the promotion; b re-sends the still-pending item to d; Dave sees it
+       and approves it on d; a, b, c and d all hold the second task.
 
-    Beta then resets the level, demotes Carol and the space stays (its
-    own, so no earlier step's assertions change).
+    Beta then resets the level, demotes Carol and Dave and the space stays
+    (its own, so no earlier step's assertions change).
     """
     state = _load()
     if not state:
@@ -21755,6 +21770,156 @@ def cmd_federated_moderation() -> None:
         raise SystemExit("federated-moderation: d's log mentions the pending item")
     print("  d (plain member) never received the pending item ✓")
 
+    # 5. c — the moderator household — is offline during a submission and
+    #    past the submitter's retries: the host catches it up on c's next
+    #    §25.6 BEGIN (the ``mod_pending`` echo).
+    d = inst["d"]
+
+    def _queue_lists(label: str, wanted: str) -> bool:
+        v = inst[label]
+        s, items = _request(
+            f"http://127.0.0.1:{v['port']}/api/spaces/{space_id}/moderation",
+            token=v["token"],
+        )
+        return s == 200 and any(i.get("id") == wanted for i in items)
+
+    def _caught_up(label: str, offset: int) -> bool:
+        return _log_contains(
+            "b",
+            f"moderation: caught {inst[label]['instance_id']} up on space {space_id}",
+            offset=offset,
+        )
+
+    _kill_household("c", c)
+    t0 = _rows("a", "SELECT datetime('now', '-2 seconds')")[0][0]
+    b_log_before = _log_size("b")
+    late_title = f"Water the plants {int(time.time())}"
+    s, queued = _request(
+        f"http://127.0.0.1:{a['port']}/api/spaces/{space_id}/tasks/lists/{list_id}/tasks",
+        token=a["token"],
+        method="POST",
+        body={"title": late_title},
+    )
+    if s != 202 or not (queued or {}).get("queued"):
+        raise SystemExit(
+            f"federated-moderation: a's second task -> {s} {queued!r} "
+            "(expected 202 queued)"
+        )
+    late_id = queued["item_id"]
+    _wait_for(
+        "b's Moderation tab to list the second item",
+        lambda: _queue_lists("b", late_id),
+        timeout=60.0,
+    )
+    # c stayed away past a's retries: whatever a or b queued for c since
+    # (the direct envelope or a mesh-routed copy) is dropped.
+    lost = 0
+    for label in ("a", "b"):
+        con = sqlite3.connect(_instance_dir(label) / "socialhome.db", timeout=10)
+        try:
+            cur = con.execute(
+                "DELETE FROM federation_outbox WHERE instance_id=? AND status='pending'"
+                " AND event_type IN ('space_moderation_submitted', 'space_routed')"
+                " AND created_at >= ?",
+                (c["instance_id"], t0),
+            )
+            lost += cur.rowcount
+            con.commit()
+        finally:
+            con.close()
+    print(f"  c offline missed Alice's second item ({lost} queued envelope(s) dropped)")
+    new_pid = _spawn("c", c["port"])
+    state["instances"]["c"]["pid"] = new_pid
+    _save(state)
+    _wait_ready(c["port"])
+    print(f"  c respawned: pid={new_pid}")
+    _wait_for(
+        "c's Moderation tab to list the item it missed (host catch-up)",
+        lambda: _queue_lists("c", late_id),
+        timeout=240.0,
+    )
+    if not _caught_up("c", b_log_before):
+        raise SystemExit(
+            "federated-moderation: c holds the missed item, but the host b "
+            "never logged a catch-up for c — it arrived some other way"
+        )
+    print("  c caught up after one sync: the host re-sent the pending item ✓")
+
+    # 6. d's person is promoted AFTER the item was submitted: d asks the
+    #    host at once and gets the items already pending.
+    if _rows("d", "SELECT 1 FROM space_moderation_queue WHERE id=?", (late_id,)):
+        raise SystemExit(
+            "federated-moderation: plain member household d holds the second item"
+        )
+    b_log_before = _log_size("b")
+    d_role_url = (
+        f"{b_base}/api/spaces/{space_id}/remote-members/"
+        f"{d['instance_id']}/{d['user_id']}"
+    )
+    s, body = _request(
+        d_role_url, token=b["token"], method="PATCH", body={"role": "moderator"}
+    )
+    _must("promote dave to moderator", s, body)
+    _wait_for(
+        "d to hold dave's moderator seat", lambda: _local_role("d") == "moderator"
+    )
+    _wait_for(
+        "d's Moderation tab to list the item submitted before the promotion",
+        lambda: _queue_lists("d", late_id),
+        timeout=90.0,
+    )
+    if not _caught_up("d", b_log_before):
+        raise SystemExit(
+            "federated-moderation: d holds the pending item, but the host b "
+            "never logged a catch-up for d"
+        )
+    print("  d (promoted later) sees the item that was already pending ✓")
+    s, body = _request(
+        f"http://127.0.0.1:{d['port']}/api/spaces/{space_id}/moderation/{late_id}/approve",
+        token=d["token"],
+        method="POST",
+        body={},
+    )
+    _must("d: dave approves on his own household", s, body)
+    if body.get("status") != "publishing":
+        raise SystemExit(
+            f"federated-moderation: d's approve -> {body!r} (expected 'publishing')"
+        )
+
+    def _late_task_by(label: str) -> str | None:
+        v = inst[label]
+        s, rows = _request(
+            f"http://127.0.0.1:{v['port']}/api/spaces/{space_id}/tasks/lists/{list_id}/tasks",
+            token=v["token"],
+        )
+        hit = (
+            next((t for t in rows if t.get("title") == late_title), None)
+            if s == 200
+            else None
+        )
+        return hit.get("created_by") if hit else None
+
+    for label in ("a", "b", "c", "d"):
+        _wait_for(
+            f"{label} to hold the task dave approved",
+            lambda label=label: _late_task_by(label) == a["user_id"],
+            timeout=90.0,
+        )
+    for label in ("a", "b", "c", "d"):
+        _wait_for(
+            f"{label}'s row of the second item to read approved",
+            lambda label=label: (
+                _rows(
+                    label,
+                    "SELECT status FROM space_moderation_queue WHERE id=?",
+                    (late_id,),
+                )
+                == [("approved",)]
+            ),
+            timeout=60.0,
+        )
+    print("  dave approved on d; a, b, c and d hold the task, every copy approved ✓")
+
     _request(
         f"{b_base}/api/spaces/{space_id}",
         token=b["token"],
@@ -21767,6 +21932,7 @@ def cmd_federated_moderation() -> None:
         method="PATCH",
         body={"role": "member"},
     )
+    _request(d_role_url, token=b["token"], method="PATCH", body={"role": "member"})
     state["federated_moderation_space_id"] = space_id
     _save(state)
     print("federated-moderation: ok")
@@ -24090,6 +24256,339 @@ def _parity_admin_invitee(state: dict, results: list[tuple[str, str, str]]) -> N
         )
     finally:
         _respawn(state, "a")
+
+
+#: How long ``gfs-moderator-parity`` waits for the large item on e after
+#: the role change that makes e ask the host.
+_LARGE_ITEM_WAIT_S: float = 240.0
+
+
+@_offline_step
+def cmd_gfs_moderator_parity() -> None:
+    """A moderator reached ONLY through the GFS reviews like any other
+    (every member is equal on every path).
+
+    Prereqs: the gfs chain through ``gfs-member-mesh`` — a hosts the
+    link-joined space (``gfs_invite_space_id``); **d** is a member over the
+    paired / mesh path, **e** only through the GFS relay.
+
+    1. a sets posts to ``moderated``. d's person (a plain member) posts: 202
+       queued; the host a holds the item, e — a plain member household —
+       does not.
+    2. **Promoted later.** a makes e's person a ``moderator``. e asks the
+       host as soon as it applies the promotion (its §25.6 BEGIN carries the
+       ``mod_held`` echo, over the relay); a re-sends the item that was
+       already pending to e alone; e's Moderation tab lists it and a logged
+       the catch-up. e approves it on its own household; a, d and e hold
+       the post, authored by d's person.
+    3. **Offline during a submission.** e is killed; d's person posts
+       again (queued); e restarts and its Moderation tab lists the item —
+       from the GFS mailbox or from the host's catch-up, whichever came
+       first (reported). e approves; a, d and e hold the post.
+    4. **A large item.** With pages ``moderated`` too, d's person creates a
+       page of ~240 KiB — more than a JSON envelope on the GFS relay
+       carries. e's next BEGIN to the host echoes what it holds (a role
+       change makes e send it at once); a sends the item to e as one
+       binary relay frame (logged by a's catch-up);
+       e's Moderation tab lists it with the whole text, e approves, and a
+       and d hold the page (the published page itself reaches e with its
+       next sync: the relay's general size limit for any large write).
+
+    a then puts posts and pages back to ``open`` and e's person back to
+    ``member``.
+    """
+    state = _load()
+    space_id = (state or {}).get("gfs_invite_space_id")
+    if not state or not _gfs_alive(state) or not space_id:
+        raise SystemExit("run the gfs chain through 'gfs-member-mesh' first")
+    step = "gfs-moderator-parity"
+    a, d, e = (state["instances"][x] for x in ("a", "d", "e"))
+    role_url = (
+        f"/api/spaces/{space_id}/remote-members/{e['instance_id']}/{e['user_id']}"
+    )
+
+    def local_role(label: str) -> str | None:
+        rows = _rows(
+            label,
+            "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+            (space_id, state["instances"][label]["user_id"]),
+        )
+        return rows[0][0] if rows else None
+
+    def queue_lists(label: str, item_id: str) -> bool:
+        st, items = _inst_request(
+            state, label, "GET", f"/api/spaces/{space_id}/moderation"
+        )
+        return st == 200 and any(i.get("id") == item_id for i in items)
+
+    def holds_post(label: str, post_id: str, text: str) -> bool:
+        rows = _rows(
+            label,
+            "SELECT content, author FROM space_posts WHERE id=? AND deleted=0",
+            (post_id,),
+        )
+        return bool(rows) and rows[0] == (text, d["user_id"])
+
+    def submit(text: str) -> tuple[str, str]:
+        st, queued = _inst_request(
+            state,
+            "d",
+            "POST",
+            f"/api/spaces/{space_id}/posts",
+            {"type": "text", "content": text},
+        )
+        if st != 202 or not (queued or {}).get("queued"):
+            raise SystemExit(
+                f"{step}: d's post under Reviewed -> {st} {queued!r} "
+                "(expected 202 queued)"
+            )
+        return queued["item_id"], queued["target_id"]
+
+    def approve_on_e(item_id: str, post_id: str, text: str) -> None:
+        st, body = _inst_request(
+            state,
+            "e",
+            "POST",
+            f"/api/spaces/{space_id}/moderation/{item_id}/approve",
+            {},
+        )
+        body = _must(f"{step}: e approves on its own household", st, body)
+        if body.get("status") != "publishing":
+            raise SystemExit(f"{step}: e's approve -> {body!r} (expected 'publishing')")
+        for label in ("a", "d", "e"):
+            _poll(
+                f"{label} to hold the post e approved",
+                lambda label=label: holds_post(label, post_id, text),
+                timeout=120.0,
+                interval=2.0,
+            )
+
+    if local_role("e") != "member":
+        raise SystemExit(f"{step}: e's person is {local_role('e')!r}, expected member")
+    _set_posts_access(state, space_id, "moderated")
+    _poll(
+        "d to see posts reviewed",
+        lambda: (
+            _rows("d", "SELECT posts_access FROM spaces WHERE id=?", (space_id,))
+            == [("moderated",)]
+        ),
+        timeout=60.0,
+    )
+    try:
+        # 1 + 2. Submitted first, e promoted afterwards.
+        text = f"Reviewed over the relay {time.time_ns()}"
+        item_id, post_id = submit(text)
+        _poll(
+            "the host a to list d's item",
+            lambda: queue_lists("a", item_id),
+            timeout=60.0,
+            interval=2.0,
+        )
+        if _rows("e", "SELECT 1 FROM space_moderation_queue WHERE id=?", (item_id,)):
+            raise SystemExit(f"{step}: plain member household e holds the pending item")
+        a_log = _log_size("a")
+        st, body = _inst_request(state, "a", "PATCH", role_url, {"role": "moderator"})
+        _must(f"{step}: a promotes e's person to moderator", st, body)
+        _poll(
+            "e to hold its moderator seat",
+            lambda: local_role("e") == "moderator",
+            timeout=90.0,
+            interval=2.0,
+        )
+        _poll(
+            "e's Moderation tab to list the item submitted before its promotion",
+            lambda: queue_lists("e", item_id),
+            timeout=180.0,
+            interval=3.0,
+        )
+        needle = f"moderation: caught {e['instance_id']} up on space {space_id}"
+        if not _log_contains("a", needle, offset=a_log):
+            raise SystemExit(
+                f"{step}: e holds the pending item but the host a never logged "
+                "a catch-up for e"
+            )
+        print("  e (GFS only, promoted later) sees the item already pending ✓")
+        approve_on_e(item_id, post_id, text)
+        print("  e approved on its own household; a, d and e hold d's post ✓")
+
+        # 3. e offline during a submission.
+        _kill_household("e", e)
+        a_log = _log_size("a")
+        try:
+            text = f"Reviewed while e was away {time.time_ns()}"
+            item_id, post_id = submit(text)
+            _poll(
+                "the host a to list d's second item",
+                lambda: queue_lists("a", item_id),
+                timeout=60.0,
+                interval=2.0,
+            )
+        finally:
+            _respawn(state, "e")
+        _poll(
+            "e's Moderation tab to list the item it was offline for",
+            lambda: queue_lists("e", item_id),
+            timeout=300.0,
+            interval=3.0,
+        )
+        via = "the host's catch-up" if _log_contains("a", needle, offset=a_log) else (
+            "its GFS mailbox"
+        )
+        print(f"  e (offline during the submission) sees the item — from {via} ✓")
+        approve_on_e(item_id, post_id, text)
+        print("  e approved it; a, d and e hold d's second post ✓")
+
+        # 4. A large item: over the JSON relay envelope, as one relay frame.
+        st, body = _inst_request(
+            state,
+            "a",
+            "PATCH",
+            f"/api/spaces/{space_id}",
+            {"features": {"pages_access": "moderated"}, "force": True},
+        )
+        _must(f"{step}: a: pages_access=moderated", st, body)
+        _poll(
+            "d to see pages reviewed",
+            lambda: (
+                _rows("d", "SELECT pages_access FROM spaces WHERE id=?", (space_id,))
+                == [("moderated",)]
+            ),
+            timeout=60.0,
+        )
+        _poll(
+            "e to see pages reviewed",
+            lambda: (
+                _rows("e", "SELECT pages_access FROM spaces WHERE id=?", (space_id,))
+                == [("moderated",)]
+            ),
+            timeout=60.0,
+        )
+        big = secrets.token_hex(120 * 1024)
+        a_log = _log_size("a")
+        # The published page (not the pending item) is over the relay's
+        # JSON envelope cap on its way to e: a logs that refusal.
+        too_large = _open_noise_window(
+            about="e",
+            reason=f"{step}: a 240 KiB page does not fit a JSON relay envelope",
+            witnesses=("a",),
+            named=("gfs relay: refusing a ", "did not reach 1/", "chunk ship to "),
+            names=[e["instance_id"]],
+        )
+        st, queued = _inst_request(
+            state,
+            "d",
+            "POST",
+            f"/api/spaces/{space_id}/pages",
+            {"title": f"Big page {time.time_ns()}", "content": big},
+        )
+        if st != 202 or not (queued or {}).get("queued"):
+            raise SystemExit(
+                f"{step}: d's 240 KiB page under Reviewed -> {st} "
+                f"{str(queued)[:200]!r} (expected 202 queued)"
+            )
+        big_item, page_id = queued["item_id"], queued["target_id"]
+        _poll(
+            "the host a to list d's large item",
+            lambda: queue_lists("a", big_item),
+            timeout=60.0,
+            interval=2.0,
+        )
+        # e's next BEGIN to the host brings it. The periodic one comes
+        # every 30 minutes; a role change makes e ask at once — a takes
+        # e's moderator seat away and gives it back.
+        for role in ("member", "moderator"):
+            st, body = _inst_request(state, "a", "PATCH", role_url, {"role": role})
+            _must(f"{step}: a sets e's person to {role}", st, body)
+            _poll(
+                f"e to hold the {role} seat",
+                lambda role=role: local_role("e") == role,
+                timeout=90.0,
+                interval=2.0,
+            )
+        _poll(
+            "e's Moderation tab to list the large item",
+            lambda: queue_lists("e", big_item),
+            timeout=_LARGE_ITEM_WAIT_S,
+            interval=5.0,
+        )
+        held = _rows(
+            "e",
+            "SELECT payload_json FROM space_moderation_queue WHERE id=?",
+            (big_item,),
+        )
+        if not held or json.loads(held[0][0]).get("content") != big:
+            raise SystemExit(f"{step}: e holds the large item without its whole text")
+        if not _log_contains("a", needle, offset=a_log):
+            raise SystemExit(
+                f"{step}: e holds the large item but the host a never logged a "
+                "catch-up for e — it did not come as the host's relay frame"
+            )
+        print("  e (GFS only) holds the 240 KiB item, sent by the host as one frame ✓")
+        st, body = _inst_request(
+            state,
+            "e",
+            "POST",
+            f"/api/spaces/{space_id}/moderation/{big_item}/approve",
+            {},
+        )
+        _must(f"{step}: e approves the large page", st, body)
+        for label in ("a", "d"):
+            _poll(
+                f"{label} to hold the large page",
+                lambda label=label: (
+                    _rows(
+                        label,
+                        "SELECT content FROM space_pages WHERE id=?"
+                        " AND deleted_at IS NULL",
+                        (page_id,),
+                    )
+                    == [(big,)]
+                ),
+                timeout=180.0,
+                interval=3.0,
+            )
+        # The PUBLISHED page is an ordinary 240 KiB ``SPACE_PAGE_CREATED``:
+        # no JSON envelope on the relay carries it to e either — the relay's
+        # general size limit for any large write, reviewed or not — so e
+        # gets the page with its §25.6 sync, not live. Not asserted here.
+        print(
+            "  e approved it; a and d hold the large page (e gets the "
+            "published page with its next sync: the relay's general limit) ✓"
+        )
+        # The page goes again, so no later sync of this chain has to carry
+        # a record the relay cannot take (the general limit above).
+        st, body = _inst_request(
+            state, "a", "DELETE", f"/api/spaces/{space_id}/pages/{page_id}"
+        )
+        _must(f"{step}: a deletes the large page", st, body, ok=(200, 204))
+        _poll(
+            "d to drop the large page",
+            lambda: not _rows(
+                "d",
+                "SELECT 1 FROM space_pages WHERE id=? AND deleted_at IS NULL",
+                (page_id,),
+            ),
+            timeout=90.0,
+            interval=2.0,
+        )
+        _close_noise_windows(too_large)
+    finally:
+        _inst_request(state, "a", "PATCH", role_url, {"role": "member"})
+        _inst_request(
+            state,
+            "a",
+            "PATCH",
+            f"/api/spaces/{space_id}",
+            {"features": {"pages_access": "open"}, "force": True},
+        )
+        _set_posts_access(state, space_id, "open")
+    _poll(
+        "e's person to be a member again",
+        lambda: local_role("e") == "member",
+        timeout=90.0,
+        interval=2.0,
+    )
+    print(f"{step}: ok")
 
 
 @_offline_step

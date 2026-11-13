@@ -474,7 +474,15 @@ That single command runs the full sequence:
    ``SPACE_TASK_CREATED`` as Alice's with the approval block. **a**, **b**, **c**
    and **d** all hold the task created by Alice, **a**'s own queue row reads
    ``approved``, and **d** — a plain member household — holds no queue row
-   for the item and its log never names it.
+   for the item and its log never names it. Then the catch-up: **c** is
+   killed, Alice submits a second task and the copy queued for **c** is
+   dropped (offline past the retries); **c** restarts, its §25.6 BEGIN to
+   **b** echoes the pending items it holds (``mod_pending``) and **b**
+   re-sends the item to **c** alone — **c**'s Moderation tab lists it and
+   **b** logged the catch-up. **b** then promotes **d**'s Dave to
+   ``moderator``: **d** asks the host at once, gets the item that was
+   already pending, Dave approves it **on d**, and **a**, **b**, **c** and
+   **d** all hold the task with every queue copy ``approved``.
 
 9c2. ``space-report`` (v_45 space-scoped reports) — **b** hosts a fresh
    "Report club" with **a**'s, **c**'s and **d**'s users as remote members
@@ -988,6 +996,7 @@ python .claude/skills/federation-demo/harness.py gfs-invite-link
 python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py gfs-media-on-demand
 python .claude/skills/federation-demo/harness.py gfs-member-mesh
+python .claude/skills/federation-demo/harness.py gfs-moderator-parity
 python .claude/skills/federation-demo/harness.py members-parity
 python .claude/skills/federation-demo/harness.py gfs-space-healing
 python .claude/skills/federation-demo/harness.py gfs-relay-media
@@ -1930,6 +1939,24 @@ mailbox); e creates one and d must show it (e's fan-out reached d's
 mailbox, no host hop). Over that window the GFS log must show
 ``<mailbox>`` deliveries, no envelope / mailbox line may name an instance
 id or the space, and no line either mailbox id. a is respawned at the end (``@_offline_step``).
+
+### ``gfs-moderator-parity`` — a moderator reached only through the GFS reviews like any other
+
+Needs the gfs chain through ``gfs-member-mesh`` (a hosts ``gfs_invite_space_id``;
+d is a paired / mesh member, e GFS-only). a sets posts to ``moderated``; d's
+person posts (202 queued) and e — still a plain member household — holds
+nothing. a promotes e's person to ``moderator``: e asks the host with its
+§25.6 BEGIN (the ``mod_held`` echo, over the relay), a re-sends the item to e
+alone and logs the catch-up, e's Moderation tab lists it, e approves on its
+own household and a, d and e hold the post. Then e is killed while d's person
+posts again; after its restart e lists that item too (from its GFS mailbox or
+the host's catch-up — the step reports which) and approves it. Last, a large
+item: with pages ``moderated`` d's person creates a ~240 KiB page — more than a
+JSON envelope on the GFS relay carries; on e's next BEGIN (a role change makes
+e send it at once) a sends the item to e as one binary relay frame, e holds the
+whole text, approves, and a and d hold the page (the published 240 KiB page
+reaches e with its next sync — the relay's general limit for large writes). a
+resets the levels and e's role.
 
 ### ``members-parity`` — a paired/mesh member and a GFS-only member see the same (owner acceptance gate)
 
