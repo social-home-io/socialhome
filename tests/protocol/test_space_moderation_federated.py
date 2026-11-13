@@ -2575,34 +2575,36 @@ async def test_an_echoed_rejection_is_processed_once_per_rate_window(mesh, monke
     assert (await _row(h, item_id))[0] == "pending"
 
 
+def _relay_seat_sends(monkeypatch, seat: House) -> None:
+    """Sends to *seat* are answered as a GFS relay answers: accepted
+    (``via = gfs_relay``), which is not a delivery."""
+
+    async def _send(self, *, to_instance_id, event_type, payload, space_id=None):
+        result = await _fake_send(
+            self,
+            to_instance_id=to_instance_id,
+            event_type=event_type,
+            payload=payload,
+            space_id=space_id,
+        )
+        if to_instance_id == seat.iid:
+            return dataclasses.replace(result, via="gfs_relay")
+        return result
+
+    monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _send)
+
+
 async def test_a_large_item_reaches_a_gfs_only_moderator_and_a_paired_one(
     mesh, monkeypatch
 ):
     """No size change for anybody: an item near the 256 KiB cap is taken
     (202) and reaches a paired moderator household as the ordinary event.
-    A moderator household behind a GFS relay cannot take that much in one
-    JSON envelope: the host — which knows from its echo that it runs this
-    revision — sends it there as one binary relay frame (the item's
-    content as the frame's bytes), and it is admitted like any other."""
+    A moderator household behind a GFS gets the very same event — the
+    transport carries what a JSON relay envelope cannot as one binary relay
+    frame (v_95, ``test_federation_service_relay_large_events``) — and it is
+    admitted like any other; nothing in the moderation code builds a frame."""
     a, h, c, d = mesh["A"], mesh["H"], mesh["C"], mesh["D"]
-    frames: list[tuple[str, str, FederationEventType, dict, bytes]] = []
-
-    async def _frame(
-        self,
-        *,
-        to_instance_id,
-        event_type,
-        payload,
-        raw_chunk,
-        space_id=None,
-        mesh_fallback=False,
-    ):
-        frames.append(
-            (self._own_instance_id, to_instance_id, event_type, payload, raw_chunk)
-        )
-        return DeliveryResult(instance_id=to_instance_id, ok=True, via="gfs_relay")
-
-    monkeypatch.setattr(FederationService, "send_media_chunk", _frame)
+    _relay_seat_sends(monkeypatch, d)
     content = secrets.token_hex(120 * 1024)  # 240 KiB of text
     r = await a.tc.post(
         f"/api/spaces/{SID}/pages",
@@ -2619,21 +2621,17 @@ async def test_a_large_item_reaches_a_gfs_only_moderator_and_a_paired_one(
         assert p["snapshot"] is None
     await _pump(mesh)
     assert await _row(c, item_id) == ("pending", True)  # paired: as ever
-    assert not frames
-    # D sits behind a GFS relay as the host sees it, and is promoted.
+    # D sits behind a GFS as the host sees it, and is promoted.
     await h.db.enqueue(
         "UPDATE remote_instances SET source='space_session' WHERE id=?", (d.iid,)
     )
     await _promote(mesh, d)
     await _begin(mesh, d)
-    assert not _sends(h, FET.SPACE_MODERATION_SUBMITTED)  # no JSON envelope
-    ((sender, to, et, meta, raw),) = frames
-    assert (sender, to, et) == (h.iid, d.iid, FET.SPACE_MODERATION_SUBMITTED)
-    assert meta["item_id"] == item_id and meta["submitter_instance_id"] == a.iid
-    assert "payload" not in meta and len(json.dumps(meta)) < 2048
-    assert json.loads(raw)["payload"]["content"] == content
-    event = dataclasses.replace(_event(h, et, meta, d), media_bytes=raw)
-    await _receive(d, event)
+    ((to, payload),) = _sends(h, FET.SPACE_MODERATION_SUBMITTED)
+    assert to == d.iid and payload["item_id"] == item_id
+    assert payload["submitter_instance_id"] == a.iid
+    assert payload["payload"]["content"] == content  # the whole event
+    await _pump(mesh)
     assert await _row(d, item_id) == ("pending", True)
     row = await d.db.fetchone(
         "SELECT payload_json FROM space_moderation_queue WHERE id=?", (item_id,)
@@ -2641,11 +2639,11 @@ async def test_a_large_item_reaches_a_gfs_only_moderator_and_a_paired_one(
     assert json.loads(row["payload_json"])["content"] == content
     # Up to date: nothing more is sent.
     _federated(h)._caught_up_at.clear()
+    h.sent.clear()
     await _begin(mesh, d)
-    assert len(frames) == 1 and not h.sent
-    # A's own view: D is a moderator household behind a relay now. A second
-    # large item is not thrown at a JSON envelope that cannot carry it —
-    # the host delivers it — and still goes to the host and to paired C.
+    assert not h.sent
+    # A's own view: D is a moderator household behind a GFS now. A second
+    # large item goes straight to it too, like to the host and to paired C.
     await a.db.enqueue(
         "UPDATE remote_instances SET source='space_session' WHERE id=?", (d.iid,)
     )
@@ -2657,30 +2655,72 @@ async def test_a_large_item_reaches_a_gfs_only_moderator_and_a_paired_one(
     )
     assert r.status == 202, await r.text()
     assert sorted(to for to, _p in _sends(a, FET.SPACE_MODERATION_SUBMITTED)) == sorted(
-        [h.iid, c.iid]
+        [h.iid, c.iid, d.iid]
     )
-    assert len(frames) == 1
-    a.sent.clear()
-    # A frame whose bytes are no item content is refused, nothing stored.
-    await d.db.enqueue("DELETE FROM space_moderation_queue", ())
-    for junk in (b"not json", b"[1]", b'{"payload": 7}'):
-        await _receive(d, dataclasses.replace(_event(h, et, meta, d), media_bytes=junk))
-    assert await _queue_rows(d) == []
+
+
+async def test_a_relay_frame_is_sent_again_after_the_rate_window(mesh, monkeypatch):
+    """The relay's answer to a frame is "accepted", not "delivered" (its
+    media queue drops frames after an hour, or when full). So a large item
+    — one that crossed the relay as a frame — the household still does not
+    hold is sent again once the 10-minute window has passed; a small one
+    (a JSON envelope, kept a day by the relay) waits its day."""
+    a, h, d = mesh["A"], mesh["H"], mesh["D"]
+    _relay_seat_sends(monkeypatch, d)
+    now = [1000.0]
+    _federated(h)._clock = lambda: now[0]
+    small = await _submit_task(mesh)
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/pages",
+        json={"title": "Big", "content": secrets.token_hex(120 * 1024)},
+        headers=a.headers,
+    )
+    assert r.status == 202, await r.text()
+    big = (await r.json())["item_id"]
+    await _pump(mesh)
+    await h.db.enqueue(
+        "UPDATE remote_instances SET source='space_session' WHERE id=?", (d.iid,)
+    )
+    await _promote(mesh, d)
+
+    def _resent() -> list[str]:
+        ids = [
+            p["item_id"]
+            for to, p in _sends(h, FET.SPACE_MODERATION_SUBMITTED)
+            if to == d.iid
+        ]
+        h.sent.clear()
+        return sorted(ids)
+
+    await _begin(mesh, d, echo={})
+    assert _resent() == sorted([small, big])
+    # Neither arrived (both lost). Inside the window: nothing.
+    now[0] += moderation_federation.CATCH_UP_INTERVAL_S - 1
+    await _begin(mesh, d, echo={})
+    assert _resent() == []
+    # After it: the large one again — the small one waits its day.
+    now[0] += 2
+    await _begin(mesh, d, echo={})
+    assert _resent() == [big]
 
 
 # ── Catch-up round 4 ────────────────────────────────────────────────────
 
 
-async def test_an_item_that_cannot_reach_the_host_is_refused_at_submit(mesh):
-    """A's household reaches the host only through a GFS relay: an item too
-    large for a JSON relay envelope could never get to the host (only the
-    host knows which reviewers read a relay frame), so nobody could ever
-    review it. It is refused where it is made (413) — not stored, not shown
-    as pending — and a smaller one is taken as ever."""
+async def test_an_item_that_cannot_reach_the_host_is_refused_at_submit(
+    mesh, monkeypatch
+):
+    """A's household reaches the host only through a GFS, and the host (or
+    that GFS) takes no binary relay frame: an item too large for a JSON
+    relay envelope could never get to the host, so nobody could ever review
+    it. It is refused where it is made (413) — not stored, not shown as
+    pending — and a smaller one is taken as ever. Once the host takes
+    frames (v_95), the large item is taken and sent to it."""
     a, h = mesh["A"], mesh["H"]
     await a.db.enqueue(
         "UPDATE remote_instances SET source='space_session' WHERE id=?", (h.iid,)
     )
+    assert not await a.app[federation_service_key].large_event_reaches(h.iid)
     r = await a.tc.post(
         f"/api/spaces/{SID}/pages",
         json={"title": "Big", "content": secrets.token_hex(120 * 1024)},
@@ -2692,6 +2732,19 @@ async def test_an_item_that_cannot_reach_the_host_is_refused_at_submit(mesh):
     r = await a.tc.post(
         f"/api/spaces/{SID}/pages",
         json={"title": "Fits", "content": secrets.token_hex(40 * 1024)},
+        headers=a.headers,
+    )
+    assert r.status == 202, await r.text()
+    assert h.iid in {to for to, _p in _sends(a, FET.SPACE_MODERATION_SUBMITTED)}
+    a.sent.clear()
+
+    async def _frames_ok(self, instance, **_kw):
+        return True
+
+    monkeypatch.setattr(FederationService, "relay_event_frames_ok", _frames_ok)
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/pages",
+        json={"title": "Big", "content": secrets.token_hex(120 * 1024)},
         headers=a.headers,
     )
     assert r.status == 202, await r.text()
@@ -2734,48 +2787,3 @@ async def test_an_items_files_go_only_where_the_item_goes(
     )
     wanted = [h.iid, c.iid] if gets_files else [h.iid]
     assert sorted(r["target_instance_id"] for r in rows) == sorted(wanted)
-
-
-async def test_a_relay_frame_is_sent_again_after_the_rate_window(mesh, monkeypatch):
-    """The relay's answer to a frame is "accepted", not "delivered" (its
-    queue drops frames after an hour, or when full). So a framed item the
-    household still does not hold is sent again once the 10-minute window
-    has passed — not after a day, as an item the transport delivered."""
-    a, h, c, d = mesh["A"], mesh["H"], mesh["C"], mesh["D"]
-    frames: list[str] = []
-
-    async def _frame(self, *, to_instance_id, payload, **_kw):
-        frames.append(payload["item_id"])
-        return DeliveryResult(instance_id=to_instance_id, ok=True, via="gfs_relay")
-
-    monkeypatch.setattr(FederationService, "send_media_chunk", _frame)
-    now = [1000.0]
-    _federated(h)._clock = lambda: now[0]
-    small = await _submit_task(mesh)
-    r = await a.tc.post(
-        f"/api/spaces/{SID}/pages",
-        json={"title": "Big", "content": secrets.token_hex(120 * 1024)},
-        headers=a.headers,
-    )
-    assert r.status == 202, await r.text()
-    big = (await r.json())["item_id"]
-    await _pump(mesh)
-    await h.db.enqueue(
-        "UPDATE remote_instances SET source='space_session' WHERE id=?", (d.iid,)
-    )
-    await _promote(mesh, d)
-    await _begin(mesh, d, echo={})
-    assert frames == [big]
-    assert [p["item_id"] for _to, p in _sends(h, FET.SPACE_MODERATION_SUBMITTED)] == [
-        small
-    ]
-    h.sent.clear()
-    # Neither arrived (both lost). Inside the window: nothing.
-    now[0] += moderation_federation.CATCH_UP_INTERVAL_S - 1
-    await _begin(mesh, d, echo={})
-    assert frames == [big] and not h.sent
-    # After it: the frame again — the ordinary event waits its day.
-    now[0] += 2
-    await _begin(mesh, d, echo={})
-    assert frames == [big, big] and not h.sent
-    assert c.iid not in frames

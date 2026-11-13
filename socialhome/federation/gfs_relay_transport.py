@@ -188,6 +188,11 @@ RELAY_SIZE_BUCKETS: tuple[int, ...] = (*ITEM_SIZE_BUCKETS[1:], 191 * 1024)
 #: passes is re-checked exactly once padded (:func:`build_relay_plaintext`).
 RELAY_MAX_ENVELOPE_BYTES: int = RELAY_SIZE_BUCKETS[-1]
 
+#: More than the ``kind`` wrapper and the pad field add around an envelope:
+#: below the cap by this much, :func:`relay_envelope_fits` needs no padding
+#: pass to know the answer.
+_RELAY_WRAP_SLACK_BYTES: int = 1024
+
 #: Status this transport reports for a frame it refuses BEFORE the wire,
 #: because it cannot fit :data:`RELAY_MAX_BODY_BYTES`. It is the status the
 #: relay itself would have answered, so one number means one thing all the
@@ -242,6 +247,20 @@ def seal_relay_envelope(
     )
 
 
+def relay_envelope_fits(envelope_dict: dict) -> bool:
+    """Whether a JSON relay envelope can carry *envelope_dict* — the two
+    size checks of :func:`_seal_for_relay`, without the seal. An envelope
+    that does not fit goes as a binary relay frame instead (v_95,
+    :meth:`~socialhome.federation.federation_service.FederationService
+    .relay_event_frames_ok`), or is refused."""
+    raw_len = len(orjson.dumps(envelope_dict))
+    if raw_len > RELAY_MAX_ENVELOPE_BYTES:
+        return False
+    if raw_len <= RELAY_MAX_ENVELOPE_BYTES - _RELAY_WRAP_SLACK_BYTES:
+        return True
+    return len(build_relay_plaintext(envelope_dict)) <= RELAY_SIZE_BUCKETS[-1]
+
+
 def is_relay_envelope_body(body: Any) -> bool:
     """True when an unsealed relay plaintext is a §24.11 envelope frame."""
     return isinstance(body, dict) and body.get("kind") == RELAY_KIND_ENVELOPE
@@ -263,8 +282,8 @@ def _seal_for_relay(
         # structurally too big for this transport".
         log.warning(
             "gfs relay: refusing a %d-byte %r envelope for %s — the relay "
-            "body cap is %d bytes (media does not flow over the "
-            "connection-server relay)",
+            "body cap is %d bytes, and it cannot go as a binary relay frame "
+            "(the household is below v_95, or its GFS does not carry them)",
             raw_len,
             envelope_dict.get("event_type"),
             who,
@@ -673,5 +692,6 @@ __all__ = [
     "build_relay_plaintext",
     "is_relay_envelope_body",
     "normalize_gfs_base",
+    "relay_envelope_fits",
     "seal_relay_envelope",
 ]

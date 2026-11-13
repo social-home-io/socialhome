@@ -940,10 +940,23 @@ async def _redeliver_via_gfs_relay(
             entry.instance_id,
         )
         return DeliveryOutcome.PERMANENT
-    result = await transport.send_via_gfs_relay(
-        instance=instance,
-        envelope_dict=orjson.loads(body),
-    )
+    envelope_dict = orjson.loads(body)
+    result = None
+    if not fallback:
+        try:
+            # v_95 — a row too large for a JSON relay envelope goes as one
+            # binary relay frame (``None``: the JSON envelope below).
+            result = await federation_service.relay_outbox_frame(
+                entry, instance, envelope_dict
+            )
+        except ValueError as exc:
+            log.warning("outbox: unusable entry %s — dropping: %s", entry.id, exc)
+            return DeliveryOutcome.PERMANENT
+    if result is None:
+        result = await transport.send_via_gfs_relay(
+            instance=instance,
+            envelope_dict=envelope_dict,
+        )
     if result.ok:
         # NO ``mark_reachable`` here. The relay answers a uniform 202
         # to every well-formed envelope — recipient online, offline,

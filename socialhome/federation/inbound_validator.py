@@ -199,6 +199,14 @@ class InboundContext:
     #: :func:`make_check_multi_recipient`.
     multi_frame: bool = False
 
+    #: A binary relay frame's sealed bytes and the frame suite its body
+    #: named (set by the relay media leg, never by a wire field). For a
+    #: framed event (v_95) the relay pipeline opens them into the event's
+    #: payload straight after the header's decrypt, so every later step
+    #: judges the real payload.
+    frame_payload: bytes = b""
+    frame_suite: str | None = None
+
 
 #: Middleware shape: async callable that takes context + raises or returns.
 InboundStep = Callable[[InboundContext], Awaitable[None]]
