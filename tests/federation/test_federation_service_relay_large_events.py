@@ -504,7 +504,7 @@ async def test_a_framed_event_runs_the_ban_gate_on_its_real_payload():
     here the ban check, which reads the payload's own ``space_id``."""
     w = _world()
     w.member.repo._bans.add(("space-the-sender-is-banned-from", w.host.id))
-    page = {**_page(4), "space_id": "space-the-sender-is-banned-from"}
+    page = {**_page(100), "space_id": "space-the-sender-is-banned-from"}
     frame = _frame(w.host, w.member, PAGE, page)
     assert await w.member.inbound.handle_frame(frame, gfs_url=GFS) == {"status": "ok"}
     assert w.member.received == []  # dropped by the gate, answered like any
@@ -523,7 +523,7 @@ async def test_a_framed_event_is_deduplicated_by_its_idempotency_key():
             return fresh
 
     w.member.svc.attach_idempotency_cache(_Cache())
-    page = {**_page(4), "idempotency_key": "once"}
+    page = {**_page(100), "idempotency_key": "once"}
     for _ in range(2):
         frame = _frame(w.host, w.member, PAGE, page)
         assert await w.member.inbound.handle_frame(frame, gfs_url=GFS) == {
@@ -532,7 +532,9 @@ async def test_a_framed_event_is_deduplicated_by_its_idempotency_key():
     assert len(w.member.received) == 1
 
 
-@pytest.mark.parametrize("raw", [b"not json", b"[1, 2]", b'"text"'])
+@pytest.mark.parametrize(
+    "raw", [b"x" * 100_000, b"[" + b"1," * 50_000 + b"1]", b'"' + b"t" * 100_000 + b'"']
+)
 async def test_a_frame_whose_bytes_are_not_a_json_object_is_refused(raw):
     w = _world()
     row = w.host.repo._instances[w.member.id]
@@ -552,7 +554,7 @@ async def test_a_frame_whose_bytes_are_not_a_json_object_is_refused(raw):
         media_body=encode_media_body(header, sealed),
         recipient_keywrap_pub=w.member.kw.public_key,
     )
-    with pytest.raises(ValueError, match="not a JSON object"):
+    with pytest.raises(ValueError, match="not JSON|not a JSON object"):
         await w.member.inbound.handle_frame(
             {"type": "envelope_media", "body": body}, gfs_url=GFS
         )
@@ -679,3 +681,41 @@ async def test_a_large_broadcast_to_mailbox_seats_goes_per_recipient_by_frame():
     for member in (one, two):
         [event] = member.received
         assert event.payload == page
+
+
+async def test_a_framed_event_that_fits_a_json_envelope_is_refused():
+    """The frame is no second lane for ordinary events."""
+    w = _world()
+    with pytest.raises(ValueError, match="small enough for a JSON envelope"):
+        await w.member.inbound.handle_frame(
+            _frame(w.host, w.member, PAGE, _page(4)), gfs_url=GFS
+        )
+    assert w.member.received == []
+
+
+@pytest.mark.parametrize("decoy", ["space_id", "idempotency_key", "page_id"])
+async def test_a_framed_event_with_fields_next_to_its_bytes_is_refused(decoy):
+    """One place for the payload: the signed metadata holds the binding
+    fields only, so no early gate can be shown a different payload."""
+    w = _world()
+    with pytest.raises(ValueError, match="more than the binding"):
+        await w.member.inbound.handle_frame(
+            _frame(w.host, w.member, PAGE, _page(100), **{decoy: "decoy"}),
+            gfs_url=GFS,
+        )
+    assert w.member.received == []
+
+
+async def test_a_framed_event_from_a_paired_peer_needs_the_relay_opt_in():
+    """Not a household behind a GFS: the relay opt-in gate judges it, as
+    for a JSON envelope on the relay."""
+    w = _world()
+    row = w.member.repo._instances[w.host.id]
+    w.member.repo._instances[w.host.id] = dataclasses.replace(
+        row, source=InstanceSource.MANUAL, gfs_relay=False
+    )
+    with pytest.raises(ValueError, match="GFS relay is not enabled"):
+        await w.member.inbound.handle_frame(
+            _frame(w.host, w.member, PAGE, _page(100)), gfs_url=GFS
+        )
+    assert w.member.received == []

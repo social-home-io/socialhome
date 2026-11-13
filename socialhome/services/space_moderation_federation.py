@@ -88,7 +88,11 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from ..domain.federation import DELIVERY_ERROR_QUEUED, FederationEventType
+from ..domain.federation import (
+    DELIVERY_ERROR_QUEUED,
+    DELIVERY_ERROR_RELAY_THROTTLED,
+    FederationEventType,
+)
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.file_hashes import parse_file_hashes
 from ..domain.post import BAZAAR_MAX_IMAGES, FEED_POST_MAX_IMAGES
@@ -386,7 +390,10 @@ class SpaceModerationFederation(FileHashesMixin):
         payload, relay = await self._wire(space, item)
         if submitter_instance_id:
             payload[SUBMITTER_INSTANCE_KEY] = submitter_instance_id
-        large = _content_size(payload) > RELAY_JSON_ITEM_BYTES
+        # Whether the transport may have framed it: it decides on the whole
+        # sealed envelope, so this errs low (an item wrongly taken for a
+        # frame is only offered again sooner).
+        maybe_framed = _content_size(payload) > RELAY_JSON_ITEM_BYTES * 3 // 4
         # v_85 — the proposed files with their hashes, to a v_85 reviewer
         # household only. A page's files stay page-scoped (``sp-``) on
         # every household, so a page submission carries none; nor does a
@@ -422,7 +429,9 @@ class SpaceModerationFederation(FileHashesMixin):
                 # A relay's acceptance of a large item is a frame in its
                 # short-lived media queue, not a delivery.
                 reached[iid] = (
-                    VIA_FRAME if large and result.via == "gfs_relay" else VIA_EVENT
+                    VIA_FRAME
+                    if maybe_framed and result.via == "gfs_relay"
+                    else VIA_EVENT
                 )
             else:
                 log.warning(
@@ -431,7 +440,10 @@ class SpaceModerationFederation(FileHashesMixin):
                     iid,
                     result.error,
                 )
-            if result.ok or result.error == DELIVERY_ERROR_QUEUED:
+            if result.ok or result.error in (
+                DELIVERY_ERROR_QUEUED,
+                DELIVERY_ERROR_RELAY_THROTTLED,
+            ):
                 with_files.append(iid)
         await self._send_media(space, item, with_files)
         return reached

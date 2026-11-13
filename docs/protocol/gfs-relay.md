@@ -463,7 +463,11 @@ chunk or any event of the vocabulary a seat may send at all
 moderation entry of the unreleased #1359). Straight after the header's
 decrypt, one extra step (`_open_framed_event`) opens the bytes (suites,
 AEAD, the signed `chunk_sha256`), requires a JSON object and makes it the
-event's payload. Every later step then judges the **real payload**, as
+event's payload. It refuses a frame whose signed metadata holds anything
+but the binding fields (one place for the payload — nothing an early
+gate could be shown instead) and one whose payload is under 96 KiB
+(`RELAY_EVENT_FRAME_MIN_PAYLOAD_BYTES`: the frame is for what no JSON
+envelope carries, never a second lane with the media budgets). Every later step then judges the **real payload**, as
 for a JSON envelope: idempotency, ban (the payload's own `space_id`
 too), replay persist, deprovisioned author, archived space, space writer
 (follower seats, the seat buffer) — and before it peer class, mailbox
@@ -520,6 +524,16 @@ pictures heal through `SPACE_MEDIA_WANTED`. A pending moderation item is
 additionally re-sent on the reviewer household's echo
 ([moderation.md](./moderation.md#re-delivery-and-catch-up)). A separate
 budget would only move the tail-drop; the sync is the repair.
+
+**Order.** Toward an OFFLINE household the GFS keeps frames and JSON
+envelopes in two queues and drains the envelopes first, so a large
+event can arrive after a small later one about the same item (a page's
+large create after its small rename), or be dropped while the later one
+survives. The sender's per-seat ordering (`_must_queue_behind`) cannot
+see that. Handlers already tolerate it — an update for a row not held
+is what a lost live event looks like on any path — and the same sync
+settles the row. Toward an online household both are pushed at once,
+in order.
 
 **Cost.** One large event to N households behind a GFS = N frames of one
 bucket each: a 240 KiB page is N × 256 KiB up (N × 516 KiB once the

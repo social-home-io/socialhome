@@ -71,6 +71,13 @@ RELAY_FRAME_EVENT_TYPES: frozenset[FederationEventType] = (
     MEDIA_HTTPS_EVENT_TYPES | SPACE_SESSION_ALLOWED_EVENT_TYPES
 )
 
+#: The smallest payload a framed event may carry. A sender frames only
+#: what no JSON relay envelope takes (a payload over ~140 KiB: the 191 KiB
+#: envelope holds it encrypted and base64'ed); a receiver refuses a framed
+#: event well below that, so the frame is never a second lane — with the
+#: media leg's own budgets — for ordinary events.
+RELAY_EVENT_FRAME_MIN_PAYLOAD_BYTES: int = 96 * 1024
+
 #: The signed metadata fields that bind a frame's bytes to its envelope and
 #: name how they are sealed. A framed event (v_95) carries these and nothing
 #: else there: its payload is the object in the frame's bytes.

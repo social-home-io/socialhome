@@ -969,9 +969,10 @@ async def _redeliver_via_gfs_relay(
         federation_service.note_relay_accepted(entry.instance_id)
         return DeliveryOutcome.SUCCESS
     if not fallback and result.error == DELIVERY_ERROR_RELAY_TOO_LARGE:
-        # Deterministic: the frame is over the relay's body cap and
-        # will be on every retry too (media does not ride this
-        # transport). Retrying spends the whole attempt budget
+        # Deterministic: the envelope is over the relay's JSON cap and
+        # cannot go as a binary relay frame either (the peer is below
+        # v_95, its GFS carries none, or not even a frame fits it) — and
+        # will be on every retry too. Retrying spends the whole attempt budget
         # re-deriving one length compare and then reports a
         # permanent condition as a transient one. The transport
         # already logged a WARNING naming the peer, event type and

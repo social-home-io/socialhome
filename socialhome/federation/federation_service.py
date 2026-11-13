@@ -152,7 +152,9 @@ from .inbound_validator import (
 )
 from .invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
 from .media_envelope import (
+    FRAME_BINDING_FIELDS,
     MEDIA_HTTPS_EVENT_TYPES,
+    RELAY_EVENT_FRAME_MIN_PAYLOAD_BYTES,
     RELAY_FRAME_EVENT_TYPES,
     build_media_envelope,
 )
@@ -795,13 +797,21 @@ class FederationService:
         event = ctx.event
         if event is None or event.event_type in MEDIA_HTTPS_EVENT_TYPES:
             return
+        meta = event.payload if isinstance(event.payload, dict) else None
+        if meta is None or not set(meta) <= FRAME_BINDING_FIELDS:
+            # Nothing rides next to the bytes: one place for the payload.
+            raise ValueError("framed event metadata carries more than the binding")
         raw = self._open_frame_bytes(
             ctx, ctx.frame_payload, wire_frame_suite=ctx.frame_suite
         )
+        if len(raw) < RELAY_EVENT_FRAME_MIN_PAYLOAD_BYTES:
+            # A frame is for what no JSON envelope carries — never a second
+            # lane (with the media leg's budgets) for ordinary events.
+            raise ValueError("framed event is small enough for a JSON envelope")
         try:
             payload = _loads(raw)
         except Exception as exc:
-            raise ValueError("framed event payload is not a JSON object") from exc
+            raise ValueError("framed event payload is not JSON") from exc
         if not isinstance(payload, dict):
             raise WrongTypeError("framed event payload is not a JSON object")
         ctx.event = replace(event, payload=payload)
@@ -2113,12 +2123,14 @@ class FederationService:
                 instance,
                 envelope_dict,
                 event_type=event_type,
-                payload_json=_dumps(payload),
+                payload_json=lambda: _dumps(payload),
                 space_id=space_id,
-            ) or await self._transport.send(
-                instance=instance,
-                envelope_dict=envelope_dict,
             )
+            if result is None:
+                result = await self._transport.send(
+                    instance=instance,
+                    envelope_dict=envelope_dict,
+                )
             if result.ok:
                 # Reachability is only provable by DELIVERY. The
                 # connection-server relay answers a uniform 202 to every
@@ -2401,7 +2413,7 @@ class FederationService:
         envelope_dict: dict,
         *,
         event_type: FederationEventType,
-        payload_json: str,
+        payload_json: Callable[[], str],
         space_id: str | None,
     ):
         """v_95 — the ONE rule for a large event toward a household behind
@@ -2409,7 +2421,8 @@ class FederationService:
         does not fit a JSON envelope on the relay and *instance* is reached
         only through a GFS, the event goes as one binary relay frame — the
         v_87 frame, the same event type, signature scheme, session-key
-        encryption and ``msg_id``; ``payload_json`` as the frame's bytes.
+        encryption and ``msg_id``; ``payload_json()`` (read only once the
+        rule applies) as the frame's bytes.
 
         Returns the transport's result (``ok`` = the relay accepted it;
         ``relay_too_large`` when not even a frame can carry it — refused
@@ -2436,6 +2449,7 @@ class FederationService:
                 exc_info=True,
             )
             return None
+        raw_payload = payload_json().encode("utf-8")
         header, sealed = build_media_envelope(
             encoder=self._encoder,
             session_key=session_key,
@@ -2445,7 +2459,7 @@ class FederationService:
             event_type=event_type,
             # The signed metadata holds only what binds the bytes.
             payload={},
-            raw_chunk=payload_json.encode("utf-8"),
+            raw_chunk=raw_payload,
             space_id=space_id,
             msg_id=envelope_dict["msg_id"],
         )
@@ -2457,7 +2471,7 @@ class FederationService:
                 "send_event: a %d-byte %r payload for %s does not fit one "
                 "binary relay frame (at most %d bytes with its header) — "
                 "refused, not sent",
-                len(payload_json),
+                len(raw_payload),
                 event_type.value,
                 instance.id,
                 RELAY_MEDIA_MAX_MEDIA_BODY_BYTES,
@@ -2770,7 +2784,7 @@ class FederationService:
             instance,
             envelope_dict,
             event_type=entry.event_type,
-            payload_json=payload_json,
+            payload_json=lambda: payload_json,
             space_id=stored.space_id,
         )
 
@@ -4715,7 +4729,9 @@ class FederationService:
         transport: str = TRANSPORT_GFS_RELAY,
     ) -> dict:
         """Validate + decrypt one binary media body that the GFS relay
-        delivered (v_87), then dispatch.
+        delivered (v_87), then dispatch — a media chunk, or (v_95) a space
+        event too large for a JSON relay envelope, whose payload the
+        pipeline opens from the frame's bytes (:meth:`_open_framed_event`).
 
         *media_body* is the inbox media body (``\\x00SHM``, the suite byte,
         one ``fed-media-v1`` frame) the caller opened from a ``\\x00SHR``
