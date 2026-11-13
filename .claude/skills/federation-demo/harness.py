@@ -24245,7 +24245,7 @@ def cmd_gfs_moderator_parity() -> None:
             about="e",
             reason=f"{step}: a 240 KiB page does not fit a JSON relay envelope",
             witnesses=("a",),
-            named=("gfs relay: refusing a ", "did not reach 1/"),
+            named=("gfs relay: refusing a ", "did not reach 1/", "chunk ship to "),
             names=[e["instance_id"]],
         )
         st, queued = _inst_request(
@@ -24328,6 +24328,22 @@ def cmd_gfs_moderator_parity() -> None:
         print(
             "  e approved it; a and d hold the large page (e gets the "
             "published page with its next sync: the relay's general limit) ✓"
+        )
+        # The page goes again, so no later sync of this chain has to carry
+        # a record the relay cannot take (the general limit above).
+        st, body = _inst_request(
+            state, "a", "DELETE", f"/api/spaces/{space_id}/pages/{page_id}"
+        )
+        _must(f"{step}: a deletes the large page", st, body, ok=(200, 204))
+        _poll(
+            "d to drop the large page",
+            lambda: not _rows(
+                "d",
+                "SELECT 1 FROM space_pages WHERE id=? AND deleted_at IS NULL",
+                (page_id,),
+            ),
+            timeout=90.0,
+            interval=2.0,
         )
         _close_noise_windows(too_large)
     finally:
