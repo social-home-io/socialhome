@@ -68,6 +68,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -133,6 +134,10 @@ _UNSCOPED_TARGETS: frozenset[ReportTargetType] = frozenset(
 
 #: The remote seats whose households review a space's reports (a remote
 #: seat is never ``owner`` — the host stands for the owner).
+#: The host re-sends a space's pending reports to one household at most
+#: this often (the moderation catch-up's window).
+REDELIVERY_INTERVAL_S: float = 600.0
+
 #: The ``SPACE_SYNC_BEGIN`` field only a household that reviews the
 #: space sends (``space_moderation_federation.HELD_ECHO_KEY``).
 REVIEWER_ECHO_KEY = "mod_held"
@@ -151,10 +156,12 @@ class _Drop(Exception):
 class ReportService:
     __slots__ = (
         "_bus",
+        "_clock",
         "_federation",
         "_gfs_connection_service",
         "_own_instance_id",
         "_redelivered",
+        "_redelivered_at",
         "_reports",
         "_scope",
         "_seats",
@@ -189,6 +196,11 @@ class ReportService:
         #: (:meth:`on_sync_begin`). Dropped when the household stops
         #: reviewing or the space goes.
         self._redelivered: dict[tuple[str, str], tuple] = {}
+        #: …and when (monotonic): at most one re-delivery per (space,
+        #: household) per :data:`REDELIVERY_INTERVAL_S`, however often its
+        #: seats change.
+        self._redelivered_at: dict[tuple[str, str], float] = {}
+        self._clock = time.monotonic
         self._gfs_connection_service = None
         self._signing_key: bytes | None = None
 
@@ -247,6 +259,7 @@ class ReportService:
         if space is None or space.dissolved:
             for key in [k for k in self._redelivered if k[0] == event.space_id]:
                 del self._redelivered[key]
+                self._redelivered_at.pop(key, None)
             n = await self._reports.delete_for_space(event.space_id, remote_only=False)
         elif not await self._reviews_here(space):
             n = await self._reports.delete_for_space(event.space_id, remote_only=True)
@@ -782,6 +795,16 @@ class ReportService:
                 return
             if self._redelivered.get(key) == stamp:
                 return
+            now = self._clock()
+            if (
+                now - self._redelivered_at.get(key, float("-inf"))
+                < REDELIVERY_INTERVAL_S
+            ):
+                # Seats that keep changing (or a household that keeps
+                # asking) get the reports once per window; the next BEGIN
+                # after it still sees a stamp it was not answered for.
+                return
+            self._redelivered_at[key] = now
             self._redelivered[key] = stamp
             await self.resend_pending(space_id, sender)
         except Exception:

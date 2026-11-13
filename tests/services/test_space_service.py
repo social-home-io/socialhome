@@ -925,6 +925,9 @@ class _RecordingModerationFederation:
     def forget_household(self, space_id, instance_id) -> None:
         return None
 
+    async def check_reaches_host(self, space, item) -> None:
+        return None
+
     async def display_name(self, space_id, user_id):
         return None
 

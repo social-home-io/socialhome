@@ -211,6 +211,11 @@ class ModerationFederation(Protocol):
         """A seat of that household changed role on this host."""
         ...
 
+    async def check_reaches_host(self, space: Space, item: SpaceModerationItem) -> None:
+        """Raise ``ModerationPayloadTooLargeError`` when ``item`` could
+        never get to the space's host from here."""
+        ...
+
     async def display_name(self, space_id: str, user_id: str) -> str | None:
         """A remote submitter's name as the roster mirror holds it."""
         ...
@@ -412,6 +417,10 @@ class SpaceModerationService(BusPublisherMixin):
             expires_at=now + MODERATION_TTL,
             status=ModerationStatus.PENDING,
         )
+        if self._federated is not None:
+            # An item the host can never receive would sit here as
+            # "pending" until it expires: refused instead (413).
+            await self._federated.check_reaches_host(space, item)
         await self._spaces.insert_moderation_item(item)
         await self._emit(SpaceModerationQueued(item=item))
         if targets and self._federated is not None:

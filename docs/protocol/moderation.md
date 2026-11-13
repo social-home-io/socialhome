@@ -431,8 +431,11 @@ frame's header payload and `{payload, public_relay?}` as the frame's
 bytes, bound by the signed `chunk_sha256`. No new event and no new frame:
 the relay pipeline's event-type gate takes this one event besides the
 media chunks (`RELAY_FRAME_EVENT_TYPES`; the inbox's binary media route
-and the media channel stay media-only), and the receiver runs every check
-of *Receiver rules* on the reassembled payload. The host uses the frame
+keeps its media-only gate). The `fed-media-v1` DataChannel pipeline has
+no event-type gate at all — a frame of this event arriving there runs the
+same §24.11 chain and the same admission checks, so it is no extra door.
+The receiver runs every check of *Receiver rules* on the reassembled
+payload. The host uses the frame
 only in a catch-up answer — the household's echo proves it runs a revision
 that reads it — so a large item reaches a moderator behind a GFS with its
 next BEGIN to the host (at once on a promotion, else within 30 minutes);
@@ -440,7 +443,12 @@ a paired or mesh-reached moderator household gets it live, as the
 ordinary event. The submitter's household does not try the JSON envelope
 toward a relay-seated reviewer for such an item (it could not go). Needs what media over the relay needs: the household at
 v_87 and a GFS proving `envelope_media`; without them the item waits
-(the send is tried again on later answers). The `snapshot` field is always
+(the send is tried again on later answers). The relay answers a frame
+"accepted", not "delivered" (its media queue keeps a frame for an hour,
+under a size cap), so a framed item the household still does not echo is
+sent again after one 10-minute window, not after the 24 hours of an item
+the transport delivered. The item's files go only to the households the
+item itself went to (or is parked in the outbox for). The `snapshot` field is always
 `null` on the wire — every receiver rebuilds the "before" values from its
 own copy (`local_snapshot`) and never read the sender's — which halves an
 edit or a delete.
@@ -569,7 +577,9 @@ is not in (the same 404 body) and nothing is stored — no existence oracle.
   first such BEGIN after that household's reviewer seats changed — a role
   change, or somebody who left and was seated again (the seats' roster
   versions are compared) — and the first after its own restart, from a
-  live admin / moderator seat only: once, not on every sync. A household
+  live admin / moderator seat only: once, not on every sync, and at most
+  once per 10 minutes per (space, household) however often its seats
+  change (`REDELIVERY_INTERVAL_S`). A household
   reached only over the mesh counts by the version it claimed as a space
   member (`space_member_supports`), for the first fan-out, the
   re-delivery and `SPACE_REPORT_ANSWERED` alike. (It used to re-send from the role change's
@@ -738,18 +748,22 @@ back).
   to the host (at most 30 minutes; at once on a promotion). A role change
   the household itself missed (the mesh has no outbox) delays it the same
   way as it delays every other right of that role.
-- **A large item from a submitter behind a GFS.** A household seated
-  from an invite link cannot send an item over ~140 KiB to the host in one
-  JSON relay envelope (the relay refuses it, as it refuses any other
-  space write of that size from such a household — a general limit of the
-  relay, not of moderation). The item stays on the submitter's household
-  only. Sending it as a relay frame needs the submitter to know the host
-  reads one, i.e. a protocol version gate — not part of this change.
-- **The published item is an ordinary write.** Once approved, a large
-  item is released as its normal `SPACE_*` event; toward a member behind
-  a GFS that event meets the same JSON envelope limit as any other large
-  write there, reviewed or not, and reaches that household with its §25.6
-  sync instead of live. Only the pending item uses the relay frame.
+- **A large item from a submitter behind a GFS is refused.** A household
+  that reaches the host only through a GFS relay cannot send an item over
+  ~140 KiB to it in one JSON envelope (the relay refuses any space write
+  of that size from such a household). Nobody could review the item, so
+  the submit answers **413 `PAYLOAD_TOO_LARGE`** and nothing is stored —
+  it is never shown as pending. Sending it as a relay frame needs the
+  submitter to know the host reads one, i.e. a protocol version gate —
+  a follow-up.
+- **Open limit: a large published item never reaches a member behind a
+  GFS.** Once approved, a large item is released as its normal `SPACE_*`
+  event. Toward a member household behind a GFS that event exceeds the
+  JSON relay envelope — and so does the §25.6 `SPACE_SYNC_CHUNK` that
+  would carry the row later (it is refused the same way). Such a
+  household does not get a page of that size today, reviewed or not. Only
+  the *pending* item uses the relay frame; a general path for large
+  events over the relay is a follow-up PR.
 - **An echoed rejection is the household's word**, like its
   `SPACE_MODERATION_DECIDED`: the host checks the named moderator's live
   seat on that household, not that the rejection happened earlier.

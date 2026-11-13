@@ -995,6 +995,8 @@ async def test_host_redelivers_pending_reports_to_a_new_reviewer(env):
             )
         )
 
+    now = [1000.0]
+    env.svc._clock = lambda: now[0]
     await role("moderator")
     assert env.fed.sent == []  # nothing leaves before the role change does
     # A BEGIN without the reviewer echo (a plain member's shape) is not one.
@@ -1013,8 +1015,12 @@ async def test_host_redelivers_pending_reports_to_a_new_reviewer(env):
     await role("member")
     await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
     assert env.fed.sent == []
-    # …promoted again: once more.
+    # …promoted again: once more — but not inside the rate window, however
+    # often the seat changes.
     await role("admin")
+    await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
+    assert env.fed.sent == []
+    now[0] += 601
     await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
     assert [s["to"] for s in env.fed.sent] == ["inst-back"]
     # The moderator left and was seated again (a role-bearing invite link:
@@ -1031,6 +1037,7 @@ async def test_host_redelivers_pending_reports_to_a_new_reviewer(env):
         "UPDATE space_remote_members SET tombstoned=0,"
         " member_version=member_version+1 WHERE user_id='rback'"
     )
+    now[0] += 601
     await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
     await env.svc.on_sync_begin(_begin("inst-back", mod_held={}))
     assert [s["to"] for s in env.fed.sent] == ["inst-back"]
