@@ -24033,6 +24033,183 @@ def _parity_expire_new_blobs(space_id: str, since: int) -> list[str]:
 
 
 @_offline_step
+def cmd_gfs_moderator_parity() -> None:
+    """A moderator reached ONLY through the GFS reviews like any other
+    (every member is equal on every path).
+
+    Prereqs: the gfs chain through ``gfs-member-mesh`` — a hosts the
+    link-joined space (``gfs_invite_space_id``); **d** is a member over the
+    paired / mesh path, **e** only through the GFS relay.
+
+    1. a sets posts to ``moderated``. d's person (a plain member) posts: 202
+       queued; the host a holds the item, e — a plain member household —
+       does not.
+    2. **Promoted later.** a makes e's person a ``moderator``. e asks the
+       host as soon as it applies the promotion (its §25.6 BEGIN carries the
+       ``mod_held`` echo, over the relay); a re-sends the item that was
+       already pending to e alone; e's Moderation tab lists it and a logged
+       the catch-up. e approves it on its own household; a, d and e hold
+       the post, authored by d's person.
+    3. **Offline during a submission.** e is killed; d's person posts
+       again (queued); e restarts and its Moderation tab lists the item —
+       from the GFS mailbox or from the host's catch-up, whichever came
+       first (reported). e approves; a, d and e hold the post.
+
+    a then puts posts back to ``open`` and e's person back to ``member``.
+    """
+    state = _load()
+    space_id = (state or {}).get("gfs_invite_space_id")
+    if not state or not _gfs_alive(state) or not space_id:
+        raise SystemExit("run the gfs chain through 'gfs-member-mesh' first")
+    step = "gfs-moderator-parity"
+    a, d, e = (state["instances"][x] for x in ("a", "d", "e"))
+    role_url = (
+        f"/api/spaces/{space_id}/remote-members/{e['instance_id']}/{e['user_id']}"
+    )
+
+    def local_role(label: str) -> str | None:
+        rows = _rows(
+            label,
+            "SELECT role FROM space_members WHERE space_id=? AND user_id=?",
+            (space_id, state["instances"][label]["user_id"]),
+        )
+        return rows[0][0] if rows else None
+
+    def queue_lists(label: str, item_id: str) -> bool:
+        st, items = _inst_request(
+            state, label, "GET", f"/api/spaces/{space_id}/moderation"
+        )
+        return st == 200 and any(i.get("id") == item_id for i in items)
+
+    def holds_post(label: str, post_id: str, text: str) -> bool:
+        rows = _rows(
+            label,
+            "SELECT content, author FROM space_posts WHERE id=? AND deleted=0",
+            (post_id,),
+        )
+        return bool(rows) and rows[0] == (text, d["user_id"])
+
+    def submit(text: str) -> tuple[str, str]:
+        st, queued = _inst_request(
+            state,
+            "d",
+            "POST",
+            f"/api/spaces/{space_id}/posts",
+            {"type": "text", "content": text},
+        )
+        if st != 202 or not (queued or {}).get("queued"):
+            raise SystemExit(
+                f"{step}: d's post under Reviewed -> {st} {queued!r} "
+                "(expected 202 queued)"
+            )
+        return queued["item_id"], queued["target_id"]
+
+    def approve_on_e(item_id: str, post_id: str, text: str) -> None:
+        st, body = _inst_request(
+            state,
+            "e",
+            "POST",
+            f"/api/spaces/{space_id}/moderation/{item_id}/approve",
+            {},
+        )
+        body = _must(f"{step}: e approves on its own household", st, body)
+        if body.get("status") != "publishing":
+            raise SystemExit(f"{step}: e's approve -> {body!r} (expected 'publishing')")
+        for label in ("a", "d", "e"):
+            _poll(
+                f"{label} to hold the post e approved",
+                lambda label=label: holds_post(label, post_id, text),
+                timeout=120.0,
+                interval=2.0,
+            )
+
+    if local_role("e") != "member":
+        raise SystemExit(f"{step}: e's person is {local_role('e')!r}, expected member")
+    _set_posts_access(state, space_id, "moderated")
+    _poll(
+        "d to see posts reviewed",
+        lambda: (
+            _rows("d", "SELECT posts_access FROM spaces WHERE id=?", (space_id,))
+            == [("moderated",)]
+        ),
+        timeout=60.0,
+    )
+    try:
+        # 1 + 2. Submitted first, e promoted afterwards.
+        text = f"Reviewed over the relay {time.time_ns()}"
+        item_id, post_id = submit(text)
+        _poll(
+            "the host a to list d's item",
+            lambda: queue_lists("a", item_id),
+            timeout=60.0,
+            interval=2.0,
+        )
+        if _rows("e", "SELECT 1 FROM space_moderation_queue WHERE id=?", (item_id,)):
+            raise SystemExit(f"{step}: plain member household e holds the pending item")
+        a_log = _log_size("a")
+        st, body = _inst_request(state, "a", "PATCH", role_url, {"role": "moderator"})
+        _must(f"{step}: a promotes e's person to moderator", st, body)
+        _poll(
+            "e to hold its moderator seat",
+            lambda: local_role("e") == "moderator",
+            timeout=90.0,
+            interval=2.0,
+        )
+        _poll(
+            "e's Moderation tab to list the item submitted before its promotion",
+            lambda: queue_lists("e", item_id),
+            timeout=180.0,
+            interval=3.0,
+        )
+        needle = f"moderation: caught {e['instance_id']} up on space {space_id}"
+        if not _log_contains("a", needle, offset=a_log):
+            raise SystemExit(
+                f"{step}: e holds the pending item but the host a never logged "
+                "a catch-up for e"
+            )
+        print("  e (GFS only, promoted later) sees the item already pending ✓")
+        approve_on_e(item_id, post_id, text)
+        print("  e approved on its own household; a, d and e hold d's post ✓")
+
+        # 3. e offline during a submission.
+        _kill_household("e", e)
+        a_log = _log_size("a")
+        try:
+            text = f"Reviewed while e was away {time.time_ns()}"
+            item_id, post_id = submit(text)
+            _poll(
+                "the host a to list d's second item",
+                lambda: queue_lists("a", item_id),
+                timeout=60.0,
+                interval=2.0,
+            )
+        finally:
+            _respawn(state, "e")
+        _poll(
+            "e's Moderation tab to list the item it was offline for",
+            lambda: queue_lists("e", item_id),
+            timeout=300.0,
+            interval=3.0,
+        )
+        via = "the host's catch-up" if _log_contains("a", needle, offset=a_log) else (
+            "its GFS mailbox"
+        )
+        print(f"  e (offline during the submission) sees the item — from {via} ✓")
+        approve_on_e(item_id, post_id, text)
+        print("  e approved it; a, d and e hold d's second post ✓")
+    finally:
+        _inst_request(state, "a", "PATCH", role_url, {"role": "member"})
+        _set_posts_access(state, space_id, "open")
+    _poll(
+        "e's person to be a member again",
+        lambda: local_role("e") == "member",
+        timeout=90.0,
+        interval=2.0,
+    )
+    print(f"{step}: ok")
+
+
+@_offline_step
 def cmd_members_parity() -> None:
     """Owner acceptance gate: every space member is equal, whichever way its
     household is reached (CLAUDE.md, owner decision 2026-11-06).

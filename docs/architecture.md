@@ -1073,12 +1073,14 @@ an edit.
 
 **Catch-up.** The host holds every pending item, so it repairs a reviewer
 household's copy: that household's §25.6 `SPACE_SYNC_BEGIN` to the host
-echoes the pending item ids it holds (`mod_pending`,
+echoes what it holds by state (`mod_held`,
 `SpaceSyncScheduler.attach_moderation_echo` →
-`SpaceModerationFederation.pending_echo`), and the host's
-`on_sync_begin` sends that one household the pending items it lacks and
-the decisions it missed — only to a live admin / moderator seat, rate
-limited and bounded. A household whose person is promoted sends that
+`SpaceModerationFederation.held_echo`), and the host's
+`on_sync_begin` sends that one household the pending items it lacks or
+purged and the decisions it missed, and applies a rejection it never got
+— only for a live admin / moderator seat, rate limited and bounded. The
+host re-sends a space's pending reports on the same BEGIN, once per
+promotion (`ReportService.on_sync_begin`). A household whose person is promoted sends that
 BEGIN at once (`SpaceSyncScheduler.sync_with_host`). The queue never
 enters the §25.6 stream
 ([`protocol/moderation.md`](./protocol/moderation.md#re-delivery-and-catch-up)).

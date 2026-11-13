@@ -1899,7 +1899,7 @@ like a direct write, as the submitter's, with the approval block.
 A reviewer household that lacks an item — its person was promoted after
 the item was submitted, or it was offline — or that missed a decision is
 caught up by the host: its §25.6 `SPACE_SYNC_BEGIN` to the host echoes
-the pending items it holds (`mod_pending`), and the host sends that
+what it holds, by state (`mod_held`), and the host sends that
 household the difference
 ([`moderation.md` — Re-delivery and catch-up](./moderation.md#re-delivery-and-catch-up)).
 A household whose last admin / moderator is demoted drops the other
@@ -1953,7 +1953,8 @@ idempotent, the item stays the submitter's), stores the proposed state in
 `payload_json` and — for an edit — the old values of exactly the changed
 fields in `current_snapshot` (the full row for a delete), and answers 202.
 Caps: 20 pending per submitter per space, 500 per space (429
-`QUEUE_FULL`), 256 KiB per payload (413), a rejection reason ≤ 500
+`QUEUE_FULL`), 256 KiB per payload and 96 KiB on the wire — it must fit
+one GFS relay envelope, so a moderator on any path can review it — (413), a rejection reason ≤ 500
 characters. Approve claims the row with a conditional `UPDATE … WHERE
 status='pending'` (two moderators approving at once persist it once), checks
 the feature's level for the **approver** (`admin_only` → admins only), and

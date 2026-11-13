@@ -70,7 +70,7 @@ event.
 
 | Event | Body |
 |---|---|
-| `SPACE_MODERATION_SUBMITTED` | `space_id`, `item_id`, `feature`, `action` (`create` / `edit` / `delete`), `target_id`, `submitted_by`, `payload` (the feature handler's item payload), `snapshot`, `submitted_at`, `expires_at`, `submitter_instance_id?` (only on the host's re-send of an item to a reviewer household that lacks it — see *Re-delivery and catch-up*), `public_relay?` (a post create in a public / global space with followers: the submitter's author-signed post inner, for GFS followers — see *Outcomes for GFS followers*) |
+| `SPACE_MODERATION_SUBMITTED` | `space_id`, `item_id`, `feature`, `action` (`create` / `edit` / `delete`), `target_id`, `submitted_by`, `payload` (the feature handler's item payload), `snapshot` (always `null`: receivers rebuild it), `submitted_at`, `expires_at`, `submitter_instance_id?` (only on the host's re-send of an item to a reviewer household that lacks it — see *Re-delivery and catch-up*), `public_relay?` (a post create in a public / global space with followers: the submitter's author-signed post inner, for GFS followers — see *Outcomes for GFS followers*) |
 | `SPACE_MODERATION_DECIDED` | `space_id`, `item_id`, `decision` (`approved` / `rejected`), `decided_by`, `decided_at`, `reason?` |
 
 Plaintext on the envelope: the routing `space_id` only (encryption-first,
@@ -81,14 +81,14 @@ envelope carries no routing field.
 
 | Path | Guarantee |
 |---|---|
-| Submitter → reviewer (paired) | One `send_with_mesh_fallback` per target — never `broadcast_to_space_members` — sealed under the pairwise session key. Only the host and live admin / moderator seat households are targets. |
+| Submitter → reviewer (paired) | One `send_with_mesh_fallback` per target — never `broadcast_to_space_members` — sealed under the pairwise session key. Only the host and live admin / moderator seat households are targets — a reviewer household reached only over the mesh included (its version is the one it claimed as a space member, `space_member_supports`). |
 | Submitter → reviewer (mesh) | The same send seals it end-to-end under `SPACE_ROUTED` for the target's ephemeral X25519 key: every relay sees ciphertext only. |
 | Submitter → reviewer (link-joined, §D2b) | The pairwise session, carried by the connection-server relay as an opaque sealed envelope — the GFS can't read it. |
 | Media of a pending post | `SpaceMediaSyncService.enqueue_for_post(…, target_instance_ids=<the reviewers>)` — the bytes go to the reviewer households only. |
 | A plain member household | Never a target. A submission that reaches a household with no local content-authority member anyway (misdirected) is dropped and not stored. |
 | Approved content | The ordinary write: `broadcast_to_space_members` to member households only. In a public / global space with followers, the host also relays an approved post to the GFS on its authority, encrypted and padded (see *Outcomes for GFS followers*). |
 | Decisions | Pairwise, sealed: an approval request to the host only; the host's announcement and any rejection to the host, the reviewers and the submitter's household. |
-| Catch-up (host → a reviewer household) | The host re-sends a pending item only in answer to the `mod_pending` echo of a household holding a live admin / moderator seat — one `send_with_mesh_fallback` to that household, its files to that household only. Never in the §25.6 stream. See *Re-delivery and catch-up*. |
+| Catch-up (host → a reviewer household) | The host re-sends a pending item only in answer to the `mod_held` echo of a household holding a live admin / moderator seat — one `send_with_mesh_fallback` to that household, its files to that household only. Never in the §25.6 stream. See *Re-delivery and catch-up*. |
 | Queued retries | The outbox re-checks a retried `SPACE_MODERATION_SUBMITTED` at send time and drops it when the target no longer reviews the space. |
 | A household that stops reviewing | When it loses its last content-authority seat in the space, it expires the pending items of other households' members it holds and NULLs their content (its own members' items stay). |
 
@@ -152,7 +152,8 @@ Checked in order; any failure is a WARNING and stores nothing.
    rebuilt from **this** household's copy of the target; the sender's is
    ignored.
 6. Caps: 20 pending per (space, submitter), 50 per (space, sending
-   household), 500 per space, 256 KiB per item; `expires_at` is clamped to
+   household), 500 per space, 256 KiB per item (a submitter refuses its own
+   above 96 KiB on the wire — *One size for every path*); `expires_at` is clamped to
    at most 14 days ahead, `submitted_at` to at most 5 minutes ahead and at
    most 14 days before `expires_at`.
 7. Stored once (`INSERT OR IGNORE`): a replay changes nothing — and a
@@ -297,6 +298,9 @@ pending:
 
 - its person was made admin / moderator **after** the item was submitted
   (the submission went to the reviewers of that moment);
+- it **stopped reviewing** for a while: a demotion expires the other
+  households' pending items it holds and NULLs their content
+  (*Confidentiality*), and it was promoted again;
 - it was offline past the submitter's retries, or its handler failed, when
   a `SPACE_MODERATION_SUBMITTED` was sent;
 - it missed a `SPACE_MODERATION_DECIDED`. An approval still converges when
@@ -305,7 +309,9 @@ pending:
   **rejection**, and an approval whose release was missed too (the content
   then arrives with the §25.6 stream, which carries no approval block) —
   the copy read "pending" until it expired, and a moderator there could
-  approve it again, asking the host to overturn a rejection they never saw.
+  approve it again, asking the host to overturn a rejection they never saw;
+- the **host** missed a rejection made on a reviewer household: the item
+  stayed pending on the host and on the other reviewers.
 
 The **host** holds every pending item — a submission always goes to it —
 so it is the one source, and the repair rides the §25.6 session the
@@ -313,57 +319,77 @@ reviewer household already opens with it. Nothing of the queue enters the
 §25.6 stream (every member household gets that).
 
 - **The echo.** A household that reviews a space (≥1 local content
-  authority member, not the host) adds `mod_pending` to its
-  `SPACE_SYNC_BEGIN` **to the space's host**: the ids of the pending items
-  it holds whose review window is open (its own members' included; `[]`
-  when it holds none). Sealed like the rest of the BEGIN. A plain member
-  household, a follower and a BEGIN to anybody but the host carry no such
-  field.
+  authority member, not the host) adds `mod_held` to its
+  `SPACE_SYNC_BEGIN` **to the space's host**: every item it holds for the
+  space whose review window is open, by state —
+
+  ```json
+  {"p": ["<id>", …], "x": ["<id>", …], "d": ["<id>", …],
+   "r": [{"id": "<id>", "by": "<our moderator>", "reason": "…"}]}
+  ```
+
+  `p` pending · `x` expired or purged · `d` decided (approved, or rejected
+  by somebody elsewhere) · `r` rejected by **one of the household's own
+  people** (the decision itself). Empty lists are left out; `{}` holds
+  nothing. Sealed like the rest of the BEGIN. A plain member household, a
+  follower and a BEGIN to anybody but the host carry no such field.
 - **When.** On the periodic BEGIN (every 30 minutes, paired, mesh or GFS
   relay alike), and at once when one of the household's own people is given
   a content-authority seat (`SpaceSyncScheduler.sync_with_host`): the
   household asks as soon as it has applied the promotion, so the answer can
   never arrive before it knows that it reviews. (A push from the host at the
-  moment of promotion would be sent before the role change itself and be
-  dropped as misdirected.)
+  moment of promotion would leave before the role change itself and be
+  dropped as misdirected.) A household seated as admin / moderator from the
+  start (a moderator invite link) echoes on its first BEGIN.
 - **The host's answer** (`SpaceModerationFederation.on_sync_begin`) is
   exactly the difference, to that one household:
-  - each pending item the echo lacks → `SPACE_MODERATION_SUBMITTED` again,
-    from the host's own copy, with `submitter_instance_id` = the household
-    the submitter holds a live seat on, and the item's files through
+  - a pending item the echo **lacks or names `x`** →
+    `SPACE_MODERATION_SUBMITTED` again, from the host's own copy, with
+    `submitter_instance_id` = the household the submitter holds a live seat
+    on, and the item's files through
     `enqueue_for_post(…, target_instance_ids=[that household])`. Not
     re-sent: an item of the asking household's own member (it holds it), of
     an author who left, of a feature no longer `moderated` / switched off,
     of an archived space, or past its review window.
-  - each echoed id the host has since **approved or rejected** →
+  - a pending item the echo names **`r`** → nothing is sent: the echo **is**
+    the decision. The host applies it exactly like a
+    `SPACE_MODERATION_DECIDED{rejected}` from that household — the sender
+    has content authority, `by` holds a live content-authority seat **on
+    it** — and its other reviewers hear it on their own echoes.
+  - an item the host has since **approved or rejected** that the echo
+    names `p` (or `r`, when the host approved: approve beats reject) →
     `SPACE_MODERATION_DECIDED` again, as first announced (same decider,
     time and reason) — when the decider still holds content authority (a
     receiver refuses a decision naming anybody else).
-  - nothing for an echoed id the host does not hold, or one that expired
-    (its copy expires on the same `expires_at`).
+  - nothing for `d`, for an id the host does not hold, or one that expired
+    on the host too.
 - **Who is answered.** Only a household holding a **live `admin` or
   `moderator` seat** on the host's roster, for a space this household
   hosts. An echo from anybody else — a plain member household, a demoted
   one, a follower — is ignored: pending content never leaves the reviewers.
-- **Bounds.** The echo is at most 500 ids (the per-space queue cap; a
-  longer or malformed one is ignored). One answer per (household, space)
-  per 10 minutes (`CATCH_UP_INTERVAL_S`), spent only when there is
-  something to send. One answer carries at most 1 MiB of item payloads
-  (`CATCH_UP_MAX_BYTES`, at least one item, oldest first); the rest follows
-  on the household's next sync, whose echo names what arrived. Decisions
-  are bounded by the echo.
+- **Bounds.** Checked in this order, the first before the host reads
+  anything: one answer per (household, space) per 10 minutes
+  (`CATCH_UP_INTERVAL_S`, spent only when something is sent); the echo is
+  at most 1000 ids, 100 of them own rejections (a longer or malformed one
+  is ignored whole); one answer carries at most 1 MiB of item payloads
+  (`CATCH_UP_MAX_BYTES`, at least one item, oldest first — the rest follows
+  on the next sync, whose echo names what arrived); the **same** item or
+  decision goes to the same household at most once per 24 hours
+  (`RESEND_SAME_INTERVAL_S`), so a household that keeps refusing an item is
+  not sent it on every sync. A **role change** of that household's people
+  on the host clears both limits: a promotion is answered at once and in
+  full. The host compares the echo with one read of its own open items.
 - **Receiver rules.** A re-sent item passes **every** check of
   `SPACE_MODERATION_SUBMITTED` above. Only check 2 reads the new field:
   `submitter_instance_id` is believed **only from the space's host**, and
   the submitter must then hold a live writer seat on the household it names
   (the per-household cap counts there, not against the host). From any
   other sender the field is ignored and the sender is the origin — a
-  household can still only submit for its own members. The item is stored
-  once under its id (a re-send of one already held, or already decided, is a
-  no-op). A re-sent decision is the ordinary decision from the host.
-- **A household that stops reviewing** drops the pending items of other
-  households' members (*Confidentiality*); promoted again, its echo is
-  empty and the host sends them again.
+  household can still only submit for its own members. Stored once under
+  its id; **from the host**, a copy that *expired* here (purged while this
+  household did not review) is pending again with the host's content — a
+  decided copy is never reopened, and a replay from anybody else revives
+  nothing. A re-sent decision is the ordinary decision from the host.
 
 ```mermaid
 sequenceDiagram
@@ -374,30 +400,43 @@ sequenceDiagram
     Note over D: not a reviewer: nothing sent
     H->>D: SPACE_MEMBER_ROLE_CHANGED {D's person: moderator}
     D->>D: role applied → this household reviews now
-    D->>H: SPACE_SYNC_BEGIN {…, mod_pending: []}
-    H->>H: D holds a live admin / moderator seat ✓ · rate limit ✓ · diff
+    D->>H: SPACE_SYNC_BEGIN {…, mod_held: {}}
+    H->>H: rate limit ✓ · D holds a live admin / moderator seat ✓ · diff
     H->>D: SPACE_MODERATION_SUBMITTED {item, submitter_instance_id: C}
     H-->>D: the item's files (SPACE_MEDIA_BLOB, to D only)
     D->>D: sender is the host ✓ · submitter seated on C ✓ · checks 1–7 → hold copy
-    Note over H,D: later — D was offline when H rejected another item
-    D->>H: SPACE_SYNC_BEGIN {…, mod_pending: [item, stale]}
+    Note over H,D: later — D was offline when H rejected "stale", and H never got D's rejection of "mine"
+    D->>H: SPACE_SYNC_BEGIN {…, mod_held: {p: [item, stale], r: [{id: mine, by: D's moderator}]}}
+    H->>H: "mine": D's moderator holds a live seat on D ✓ → rejected
     H->>D: SPACE_MODERATION_DECIDED {stale, rejected, decided_by, reason}
     D->>D: row "stale" → rejected
 ```
 
-**Cost.** The echo adds ≈ 35 B per pending item to one BEGIN per reviewer
-household every 30 minutes — ≈ 350 B for ten items, ≈ 17.5 KB for a full
-queue of 500 — and nothing for plain member households and followers. An
+**One size for every path.** What is sent for an item — its payload and,
+for a public post, the author-signed copy — must fit **one envelope on the
+GFS relay**, the path to and from a household seated from an invite link
+(191 KiB, and an envelope may be sealed twice on the way). A submission
+over **96 KiB** on the wire (`MAX_WIRE_BYTES`) is refused where it is made
+(413), whatever path today's reviewers are reached over: no moderator is
+left out by how their household is reached. The `snapshot` field is always
+`null` on the wire — every receiver rebuilds the "before" values from its
+own copy and has always ignored the sender's — which halves an edit or a
+delete. (A receiver still takes up to 256 KiB from an older submitter.)
+
+**Cost.** The echo adds ≈ 35 B per held item to one BEGIN per reviewer
+household every 30 minutes — ≈ 350 B for ten items, ≈ 35 KB at the
+1000-id bound — and nothing for plain member households and followers. An
 up-to-date household costs the host one seat lookup and one queue read and
 gets **no** answer. A difference costs the missing items once (a typical
-item is 0.5–2 KB, at most 256 KiB), to one household: no fan-out, so a
+item is 0.5–2 KB, at most 96 KiB), to one household: no fan-out, so a
 global space with 200 authors and 10 000 followers pays per **reviewer
 household** only (five of them: ten echoes an hour). Worst case per
 reviewer household: 1 MiB of items per 10 minutes plus the files of the
-pending posts among them. A promotion costs one extra incremental BEGIN
-(answered by the sentinel when nothing changed) and the pending items once.
+pending posts among them, and never the same item twice in a day. A
+promotion costs one extra incremental BEGIN (answered by the sentinel when
+nothing changed) and the pending items once.
 
-**Compatibility — no version bump.** `mod_pending` is an additive BEGIN
+**Compatibility — no version bump.** `mod_held` is an additive BEGIN
 field: an older host ignores it (that household is caught up by nobody, as
 before). The host re-sends only to a household that echoed, and only this
 revision echoes — so no older household is ever sent an item naming
@@ -498,18 +537,28 @@ is not in (the same 404 body) and nothing is stored — no existence oracle.
 - **Purge.** When this household stops reviewing a space (its last
   content-authority member demoted or gone) it deletes the reports other
   households filed there; a dissolved space's reports all go.
-- **Re-delivery.** When the host promotes a remote seat to admin /
-  moderator (that household reviews again — a temporary demotion purged
-  its copies), the host re-sends the space's pending reports to it over
-  the same `SPACE_REPORT` path (v_45 only; the receiver's dedupe makes a
-  repeat a no-op). The payload names the reporter's own household
+- **Re-delivery.** A household that reviews a space again (a temporary
+  demotion purged its copies), or for the first time, gets the space's
+  pending reports from the host over the same `SPACE_REPORT` path (v_45
+  only; the receiver's dedupe makes a repeat a no-op). The host sends
+  them when that household **asks**: its §25.6 `SPACE_SYNC_BEGIN` carries
+  the reviewer echo (`mod_held`, *Re-delivery and catch-up* above) and is
+  sent as soon as it has applied the promotion. The host answers the
+  first such BEGIN after a role change of that household's people (and the
+  first after its own restart), from a live admin / moderator seat only —
+  once, not on every sync. (It used to re-send from the role change's
+  local event, which fires **before** the role change is sent: the report
+  reached a household that did not review yet and was dropped.) The
+  payload names the reporter's own household
   (`reporter_instance_id`, sealed); the receiver trusts it **only from the
   host** — the reporter must hold a live seat on that household, and the
   per-household caps and the stored `reporter_instance_id` key on it, so a
   relayed report never counts against the host. From any other sender the
   field is ignored and the sender is the origin (it may only send reports
   by its own members). A re-delivery skips a household whose only reviewer
-  is the report's subject, too.
+  is the report's subject, too. Cost: ≤ 500 pending reports × ≈ 0.5 KB to
+  one household per promotion (and per reviewer household once after a
+  host restart).
 - **GFS.** The automatic fraud forward fires for space content only when
   the space is `public` / `global`, and for a reported user (as their
   household) or a public / global space itself. What the GFS gets: the
@@ -660,7 +709,12 @@ back).
   its decider still holds content authority; one made by somebody demoted
   since, and an expiry, are not announced — that copy expires on its own
   `expires_at`. A catch-up waits for the reviewer household's next BEGIN
-  to the host (at most 30 minutes; at once on a promotion).
+  to the host (at most 30 minutes; at once on a promotion). A role change
+  the household itself missed (the mesh has no outbox) delays it the same
+  way as it delays every other right of that role.
+- **An echoed rejection is the household's word**, like its
+  `SPACE_MODERATION_DECIDED`: the host checks the named moderator's live
+  seat on that household, not that the rejection happened earlier.
 - **Concurrent edits.** A household holding an edit item whose target was
   changed meanwhile by another write refuses the release (its copy no
   longer matches); the host's §25.6 sync converges it.
@@ -684,9 +738,9 @@ back).
 
 - `socialhome/services/space_moderation_federation.py` —
   `SpaceModerationFederation`: targets, sends, the two inbound handlers and
-  their receiver checks; the catch-up (`pending_echo`, `on_sync_begin`).
+  their receiver checks; the catch-up (`held_echo`, `on_sync_begin`).
 - `socialhome/federation/sync/space/scheduler.py` —
-  `attach_moderation_echo` (the `mod_pending` BEGIN field),
+  `attach_moderation_echo` (the `mod_held` BEGIN field),
   `sync_with_host` (the BEGIN a newly reviewing household sends at once).
 - `socialhome/services/space_moderation_service.py` — the queue: submit,
   approve (the host inside `release_scope`; elsewhere a release request),
