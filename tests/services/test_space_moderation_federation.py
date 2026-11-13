@@ -60,6 +60,9 @@ class _Fed:
         # is deliberately absent — the queue must not gate on it.
         return self.versions.get(instance_id, 0) >= min_version
 
+    async def is_space_session_peer(self, instance_id):
+        return False
+
     async def send_with_mesh_fallback(
         self, *, to_instance_id, event_type, payload, space_id=None
     ):

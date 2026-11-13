@@ -1954,8 +1954,9 @@ the host's catch-up — the step reports which) and approves it. Last, a large
 item: with pages ``moderated`` d's person creates a ~240 KiB page — more than a
 JSON envelope on the GFS relay carries; on e's next BEGIN (a role change makes
 e send it at once) a sends the item to e as one binary relay frame, e holds the
-whole text, approves, and a, d and e hold the page. a resets the levels and
-e's role.
+whole text, approves, and a and d hold the page (the published 240 KiB page
+reaches e with its next sync — the relay's general limit for large writes). a
+resets the levels and e's role.
 
 ### ``members-parity`` — a paired/mesh member and a GFS-only member see the same (owner acceptance gate)
 

@@ -2643,6 +2643,24 @@ async def test_a_large_item_reaches_a_gfs_only_moderator_and_a_paired_one(
     _federated(h)._caught_up_at.clear()
     await _begin(mesh, d)
     assert len(frames) == 1 and not h.sent
+    # A's own view: D is a moderator household behind a relay now. A second
+    # large item is not thrown at a JSON envelope that cannot carry it —
+    # the host delivers it — and still goes to the host and to paired C.
+    await a.db.enqueue(
+        "UPDATE remote_instances SET source='space_session' WHERE id=?", (d.iid,)
+    )
+    a.sent.clear()
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/pages",
+        json={"title": "Big two", "content": content},
+        headers=a.headers,
+    )
+    assert r.status == 202, await r.text()
+    assert sorted(to for to, _p in _sends(a, FET.SPACE_MODERATION_SUBMITTED)) == sorted(
+        [h.iid, c.iid]
+    )
+    assert len(frames) == 1
+    a.sent.clear()
     # A frame whose bytes are no item content is refused, nothing stored.
     await d.db.enqueue("DELETE FROM space_moderation_queue", ())
     for junk in (b"not json", b"[1]", b'{"payload": 7}'):

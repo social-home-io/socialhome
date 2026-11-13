@@ -24064,8 +24064,9 @@ def cmd_gfs_moderator_parity() -> None:
        carries. e's next BEGIN to the host echoes what it holds (a role
        change makes e send it at once); a sends the item to e as one
        binary relay frame (logged by a's catch-up);
-       e's Moderation tab lists it with the whole text, e approves, and a,
-       d and e hold the page.
+       e's Moderation tab lists it with the whole text, e approves, and a
+       and d hold the page (the published page itself reaches e with its
+       next sync: the relay's general size limit for any large write).
 
     a then puts posts and pages back to ``open`` and e's person back to
     ``member``.
@@ -24238,6 +24239,15 @@ def cmd_gfs_moderator_parity() -> None:
         )
         big = secrets.token_hex(120 * 1024)
         a_log = _log_size("a")
+        # The published page (not the pending item) is over the relay's
+        # JSON envelope cap on its way to e: a logs that refusal.
+        too_large = _open_noise_window(
+            about="e",
+            reason=f"{step}: a 240 KiB page does not fit a JSON relay envelope",
+            witnesses=("a",),
+            named=("gfs relay: refusing a ", "did not reach 1/"),
+            names=[e["instance_id"]],
+        )
         st, queued = _inst_request(
             state,
             "d",
@@ -24296,7 +24306,7 @@ def cmd_gfs_moderator_parity() -> None:
             {},
         )
         _must(f"{step}: e approves the large page", st, body)
-        for label in ("a", "d", "e"):
+        for label in ("a", "d"):
             _poll(
                 f"{label} to hold the large page",
                 lambda label=label: (
@@ -24311,7 +24321,15 @@ def cmd_gfs_moderator_parity() -> None:
                 timeout=180.0,
                 interval=3.0,
             )
-        print("  e approved it; a, d and e hold the large page ✓")
+        # The PUBLISHED page is an ordinary 240 KiB ``SPACE_PAGE_CREATED``:
+        # no JSON envelope on the relay carries it to e either — the relay's
+        # general size limit for any large write, reviewed or not — so e
+        # gets the page with its §25.6 sync, not live. Not asserted here.
+        print(
+            "  e approved it; a and d hold the large page (e gets the "
+            "published page with its next sync: the relay's general limit) ✓"
+        )
+        _close_noise_windows(too_large)
     finally:
         _inst_request(state, "a", "PATCH", role_url, {"role": "member"})
         _inst_request(

@@ -420,8 +420,9 @@ sequenceDiagram
 **Large items behind a GFS.** The size limit is the same for everybody
 (256 KiB per item, as before). A JSON envelope on the GFS relay — the path
 to a household seated from an invite link or a directory join — takes
-about 191 KiB, so an item whose content is over 96 KiB (the bound media
-chunks use: encrypt + base64, twice) does not fit one. The host then sends
+about 191 KiB, so an item whose content is over ~140 KiB
+(`RELAY_JSON_ITEM_BYTES`: encrypted and base64'ed inside the envelope)
+does not fit one. The host then sends
 it to that household as **one binary relay frame** (v_87, `\x00SHR`, up
 to 528 KiB — what `SPACE_MEDIA_BLOB` chunks ride): the same
 `SPACE_MODERATION_SUBMITTED` event, its small signed and sealed metadata
@@ -436,7 +437,8 @@ only in a catch-up answer — the household's echo proves it runs a revision
 that reads it — so a large item reaches a moderator behind a GFS with its
 next BEGIN to the host (at once on a promotion, else within 30 minutes);
 a paired or mesh-reached moderator household gets it live, as the
-ordinary event. Needs what media over the relay needs: the household at
+ordinary event. The submitter's household does not try the JSON envelope
+toward a relay-seated reviewer for such an item (it could not go). Needs what media over the relay needs: the household at
 v_87 and a GFS proving `envelope_media`; without them the item waits
 (the send is tried again on later answers). The `snapshot` field is always
 `null` on the wire — every receiver rebuilds the "before" values from its
@@ -737,12 +739,17 @@ back).
   the household itself missed (the mesh has no outbox) delays it the same
   way as it delays every other right of that role.
 - **A large item from a submitter behind a GFS.** A household seated
-  from an invite link cannot send an item over ~96 KiB to the host in one
+  from an invite link cannot send an item over ~140 KiB to the host in one
   JSON relay envelope (the relay refuses it, as it refuses any other
   space write of that size from such a household — a general limit of the
   relay, not of moderation). The item stays on the submitter's household
   only. Sending it as a relay frame needs the submitter to know the host
   reads one, i.e. a protocol version gate — not part of this change.
+- **The published item is an ordinary write.** Once approved, a large
+  item is released as its normal `SPACE_*` event; toward a member behind
+  a GFS that event meets the same JSON envelope limit as any other large
+  write there, reviewed or not, and reaches that household with its §25.6
+  sync instead of live. Only the pending item uses the relay frame.
 - **An echoed rejection is the household's word**, like its
   `SPACE_MODERATION_DECIDED`: the host checks the named moderator's live
   seat on that household, not that the rejection happened earlier.

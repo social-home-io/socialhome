@@ -91,7 +91,6 @@ from typing import TYPE_CHECKING
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.file_hashes import parse_file_hashes
-from ..domain.media_chunking import RELAY_JSON_CHUNK_BYTES
 from ..domain.post import BAZAAR_MAX_IMAGES, FEED_POST_MAX_IMAGES
 from ..domain.presence import truncate_coord
 from ..domain.space import (
@@ -107,6 +106,7 @@ from ..domain.space import (
     SpaceRole,
 )
 from ..domain.space_media_ref import rewrite_page_body_media
+from ..federation.gfs_relay_transport import RELAY_MAX_ENVELOPE_BYTES
 from ..federation.owner_bound_id import (
     SPACE_CALENDAR_EVENT_KIND,
     SPACE_PAGE_KIND,
@@ -197,12 +197,14 @@ CATCH_UP_MAX_BYTES = 1024 * 1024
 #: space says the feature is not reviewed, a cap) is not sent it on every
 #: sync. A role change of that household's people starts over.
 RESEND_SAME_INTERVAL_S: float = 24 * 3600.0
-#: An item whose ``SPACE_MODERATION_SUBMITTED`` payload is larger than this
-#: does not fit a JSON envelope on the GFS relay (191 KiB, after encrypt +
-#: base64 twice — the bound media chunks use). To a household seated from
-#: an invite link the host then sends it as ONE binary relay frame (v_87,
-#: up to 528 KiB): the same event, the content as the frame's bytes.
-RELAY_JSON_ITEM_BYTES: int = RELAY_JSON_CHUNK_BYTES
+#: An item whose content (``payload`` + ``public_relay`` as JSON) is larger
+#: than this does not fit a JSON envelope on the GFS relay
+#: (:data:`RELAY_MAX_ENVELOPE_BYTES`, 191 KiB: the content is encrypted and
+#: base64'ed once inside it, next to ~4 KiB of metadata and envelope). To a
+#: household seated from an invite link it travels as ONE binary relay
+#: frame (v_87, up to 528 KiB) instead: the same event, the content as the
+#: frame's bytes.
+RELAY_JSON_ITEM_BYTES: int = (RELAY_MAX_ENVELOPE_BYTES - 4096) * 3 // 4
 #: The keys of the wire payload that travel as a relay frame's bytes.
 _FRAME_BODY_KEYS: tuple[str, ...] = ("payload", "public_relay")
 
@@ -377,13 +379,12 @@ class SpaceModerationFederation(FileHashesMixin):
         payload, relay = await self._wire(space, item)
         if submitter_instance_id:
             payload[SUBMITTER_INSTANCE_KEY] = submitter_instance_id
-        # What a relay frame would carry as bytes. Only a content this
-        # large is framed: a smaller one fits the JSON envelope, and
-        # ``send_media_chunk`` would fall back to a JSON chunk for it.
+        # What a relay frame would carry as bytes. Only a content too
+        # large for the relay's JSON envelope is framed.
         content = dump_json(
             {k: payload[k] for k in _FRAME_BODY_KEYS if k in payload}
         ).encode()
-        framed = relay_frames and len(content) > RELAY_JSON_ITEM_BYTES
+        large = len(content) > RELAY_JSON_ITEM_BYTES
         # v_85 — the proposed files with their hashes, to a v_85 reviewer
         # household only. A page's files stay page-scoped (``sp-``) on
         # every household, so a page submission carries none; nor does a
@@ -398,7 +399,19 @@ class SpaceModerationFederation(FileHashesMixin):
         )
         reached: list[str] = []
         for iid in targets:
-            if framed and await self._federation.is_space_session_peer(iid):
+            if large and await self._federation.is_space_session_peer(iid):
+                if not relay_frames:
+                    # No JSON envelope on its relay carries this, and only
+                    # the host knows (from its echo) that it reads a relay
+                    # frame: the host delivers the item on that household's
+                    # next sync.
+                    log.info(
+                        "moderation: item %s is too large for the relay "
+                        "envelope to %s — left to the host's catch-up",
+                        item.id,
+                        iid,
+                    )
+                    continue
                 # The existing v_87 frame: the small signed metadata names
                 # the item, its content rides as the frame's bytes.
                 result = await self._federation.send_media_chunk(
