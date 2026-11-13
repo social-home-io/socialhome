@@ -5281,6 +5281,7 @@ def create_app(config: Config | None = None) -> web.Application:
             own_instance_id=real_instance_id,
             card_of=member_directory.card_of,
             hosts_of=member_directory.hop_hosts,
+            acting_hosts=member_directory.hosts_of,
             serves=member_directory.serves,
             keywrap_private_key=identity.keywrap_private_key,
             keywrap_public_key=identity.keywrap_public_key,

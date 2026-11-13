@@ -2570,3 +2570,51 @@ async def test_when_the_trust_in_the_admin_ends_its_directory_is_refused_at_once
     assert e.instance_id not in await _cards_at(m, space)
     assert await m.directory.directory_seq(space.id, a.instance_id) is None
     assert await m.directory.directory_seq(space.id, o.instance_id) == 0
+
+
+async def test_a_stale_admin_listing_never_brings_back_whom_the_owner_removed(
+    delegated_households, gfs
+):
+    """Review round 1 (#1361) — the roster wins. The owner removes e while
+    the admin is offline; the admin comes back and sends its directory from
+    a roster that still holds e. On m (the admin's invitee) e stays gone:
+    no card, no row, no seat, nothing sent to its mailbox, nothing taken
+    from it."""
+    o, a, m, e, space = delegated_households
+    await _join_through_the_admin(m, a, gfs, space)
+    assert e.instance_id in await _cards_at(m, space)
+    e_mailbox = _mailbox_of(e, gfs)
+    # The admin goes offline: nothing reaches it.
+    a_mailbox = _mailbox_of(a, gfs)
+    a_box = gfs.mailboxes.pop(a_mailbox)
+    a_socket = gfs.sockets.pop(a.instance_id)
+    await o.space_service.remove_remote_member(
+        space.id,
+        actor_username=o.username,
+        instance_id=e.instance_id,
+        user_id=e.user_id,
+    )
+    await gfs.drain()
+    await o.directory.sweep_once()  # the owner's delta: e left the directory
+    await gfs.drain()
+    assert e.instance_id not in await _cards_at(m, space)
+    assert not await m.directory.sender_allowed(e.instance_id, space.id)
+    # The admin is back and still lists e (it never heard of the removal).
+    gfs.mailboxes[a_mailbox] = a_box
+    gfs.sockets[a.instance_id] = a_socket
+    assert e.instance_id in await _cards_at(a, space)
+    a.directory._hello_at.clear()
+    await a.directory.reconcile(space.id, snapshot_to={m.instance_id})
+    await gfs.drain()
+    assert e.instance_id not in await _cards_at(m, space)
+    assert e.instance_id not in await m.space_repo.list_member_instances(space.id)
+    assert await m.federation_repo.get_instance(e.instance_id) is None
+    assert not await m.directory.sender_allowed(e.instance_id, space.id)
+    e.received.clear()
+    gfs.mailbox.clear()
+    await m.federation.broadcast_to_space_members(
+        space.id, FederationEventType.SPACE_POST_CREATED, _post_payload("after")
+    )
+    await gfs.drain()
+    assert e_mailbox not in [to for to, _ in gfs.mailbox]
+    assert e.received == []

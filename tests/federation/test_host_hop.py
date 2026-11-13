@@ -122,11 +122,15 @@ def _wire(
                 return None
             return cards[iid] if role[iid] in holds else None
 
-        async def hosts_of(space_id, node_id=node_id):
+        async def acting(space_id, node_id=node_id):
             # The households acting as host for this node (never itself).
             if space_id != SPACE:
                 return []
             return [h for h in space_hosts if h != node_id]
+
+        async def hosts_of(space_id, _target, acting=acting):
+            # Every target here takes the same hosts.
+            return await acting(space_id)
 
         async def serves(space_id, node_id=node_id):
             return space_id == SPACE and node_id in serving
@@ -135,6 +139,7 @@ def _wire(
             own_instance_id=node_id,
             card_of=card_of,
             hosts_of=hosts_of,
+            acting_hosts=acting,
             serves=serves,
             keywrap_private_key=keywraps[node_id].private_key,
             keywrap_public_key=keywraps[node_id].public_key,
@@ -283,7 +288,7 @@ async def test_no_host_hop_when_we_are_the_host_or_hold_no_card():
     async def no_card(_s, _i):
         return None
 
-    async def no_other_host(_s):
+    async def no_other_host(_s, _t=None):
         return []  # we are the host: nobody else to hop through
 
     async def we_serve(_s):
@@ -294,6 +299,7 @@ async def test_no_host_hop_when_we_are_the_host_or_hold_no_card():
         own_instance_id="me",
         card_of=no_card,
         hosts_of=no_other_host,
+        acting_hosts=no_other_host,
         serves=we_serve,
         keywrap_private_key=kw.private_key,
         keywrap_public_key=kw.public_key,
@@ -517,7 +523,7 @@ async def test_an_end_takes_the_hop_only_through_a_household_acting_as_its_host(
     async def owner_only(_space_id):
         return ["the-owner"]
 
-    _hop(nodes[target])._hosts_of = owner_only
+    _hop(nodes[target])._acting = owner_only
     await _send_through(nodes, origin, target)
     assert nodes[target].dispatched == []
 
@@ -549,8 +555,11 @@ async def test_the_hop_goes_through_the_first_host_that_is_not_an_end():
     async def card_of(_s, iid):
         return card if iid == target else None
 
-    async def hosts_of(_s):
+    async def hosts_of(_s, _t):
         # The owner IS the target here: the admin that invited us is next.
+        return [target, "the-admin"]
+
+    async def acting(_s):
         return [target, "the-admin"]
 
     async def serves(_s):
@@ -560,6 +569,7 @@ async def test_the_hop_goes_through_the_first_host_that_is_not_an_end():
         own_instance_id="me",
         card_of=card_of,
         hosts_of=hosts_of,
+        acting_hosts=acting,
         serves=serves,
         keywrap_private_key=kw.private_key,
         keywrap_public_key=kw.public_key,
@@ -572,3 +582,49 @@ async def test_the_hop_goes_through_the_first_host_that_is_not_an_end():
         space_id=SPACE,
     )
     assert result.ok and sent == [["me", "the-admin", target]]
+
+
+async def test_no_hop_the_target_would_refuse_is_reported_as_sent():
+    """Review round 1 (#1361): we take the admin as host, the target does
+    not (the owner invited it) and we hold no link to the owner — there is
+    no hop the target takes. The send FAILS; it never returns ``ok`` for an
+    envelope the target drops."""
+    sent: list[list[str]] = []
+
+    class _Routed:
+        async def send_routed(self, *, path, **_kw):
+            sent.append(path)
+            return "route"
+
+    kw = generate_x25519_keypair()
+
+    async def card_of(_s, _i):
+        raise AssertionError("no card is read when there is no hop")
+
+    async def no_hop_for_this_target(_s, _t):
+        return []
+
+    async def acting(_s):
+        return ["the-owner", "the-admin"]
+
+    async def serves(_s):
+        return False
+
+    hop = HostHop(
+        own_instance_id="me",
+        card_of=card_of,
+        hosts_of=no_hop_for_this_target,
+        acting_hosts=acting,
+        serves=serves,
+        keywrap_private_key=kw.private_key,
+        keywrap_public_key=kw.public_key,
+    )
+    hop.attach_routed(_Routed())  # type: ignore[arg-type]
+    result = await hop.send(
+        to_instance_id="them",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload={},
+        space_id=SPACE,
+    )
+    assert not result.ok and result.error == HOST_HOP_UNAVAILABLE
+    assert sent == []

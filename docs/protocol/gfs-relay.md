@@ -819,7 +819,7 @@ mailbox gate refuses a frame for a space its person is not seated in yet.
 
 **The member directory.** The host passes the cards on as
 `SPACE_MAILBOX_DIRECTORY {cards, removed, snapshot, part, parts, members,
-gfs_reached, dir_seq, base_seq}`
+gfs_reached, seated, dir_seq, base_seq}`
 (routing `space_id`, everything else encrypted), only to **writer-seat**
 member households at v_89 (`only_instances`), never to followers.
 Receivers take it only from a household that **acts as the space's host
@@ -848,11 +848,20 @@ member's card and no host hop.
   household the owner invited never takes an admin's directory.
 - **One version line per issuer.** A member keeps `dir_seq` on the row of
   the household that sent it, so the owner's and the admin's directories
-  never mix versions, and remembers on each card who lists it (`by`). A
-  household leaves only when no household acting as host still lists it:
-  one issuer's `removed` or whole directory never drops what only the
-  other lists. No issuer removes a household acting as host — an admin
-  never takes out the owner household.
+  never mix versions, and remembers on each card who lists it (`by`).
+- **The roster wins.** The owner's removal (`removed`, or a household
+  missing from its whole directory) ends that household here — card, row
+  and seat — whoever else still lists it, and the member remembers it
+  (`gone` on the owner's row, the newest 1 000) until the owner lists the
+  household again: an admin that missed the removal and still lists it
+  never brings it back. An admin's card makes or keeps a row only for a
+  household the member's OWN roster mirror holds a live writer seat for
+  (one it does not is skipped and that admin's `dir_seq` stays behind, so
+  the next sync echo fetches it again once the roster caught up). An
+  admin's `removed` only withdraws its own listing: the household goes
+  when no household acting as host lists it any more, a row the admin
+  never listed is not its to drop, and no issuer removes a household
+  acting as host — an admin never takes out the owner household.
 - **The admin passes a newcomer's card on to the owner**:
   `SPACE_MEMBER_CARD {space_id, forwarded: true, card, gfs_reached}`. The
   owner takes it only from a household holding a live admin seat while
@@ -860,9 +869,11 @@ member's card and no host hop.
   and the card is self-certifying — the admin carries it, it cannot forge
   it. The owner seats that household lazily and lists it for everyone;
   from then on the newcomer talks to the owner itself. One ~0.8 KiB frame
-  to one household per newcomer and card `rev`, sent again every 6 h
-  while the owner still does not list it. An owner below this build drops
-  it (the card is not the sender's).
+  to one household when the card arrives or changes, repeated every 6 h
+  while the owner still does not list it — at most 4 times per card `rev`,
+  then it stops — and only in a space that has a directory at all (some
+  card carries a mailbox). An owner below this build drops it (the card is
+  not the sender's).
 - **When the trust ends** (delegation off, the admin demoted, a rotation
   without a fresh proof) the member drops the admin's frames at once, its
   mailbox gate stops counting a card only that admin listed, and the
@@ -982,11 +993,16 @@ both ends carded on the host (the other end on an end). Anything else from
 that peer class is dropped (`federation/host_hop.py`,
 `SpaceRoutedHandler._touches_seat`). The hop is the owner or the
 delegated inviting admin ("Who is the host" above): the sender picks the
-acting host it holds a link of its own to first (a pairing, or the seat
-that host gave it), the owner first among equals; the hop relays only
+owner whenever it holds a link of its own to it (a pairing, or the seat
+the owner gave it) — every member takes the owner; the hop relays only
 while it acts as host itself; and an end takes the envelope only through
-a household acting as host for IT — so a household the owner invited
-never takes a hop through an admin.
+a household acting as host for IT. So a household the owner invited
+never takes a hop through an admin, and the sender does not try one: it
+uses its inviting admin only toward a household that admin says it seated
+itself (`seated` in the admin's directory frames, kept as `via` on the
+card's row — such a household takes that admin as host too). With no hop
+the target takes, the send fails (`host_hop_unavailable`) instead of
+reporting a delivery that cannot happen.
 The inner event must be one the seat may send directly
 (`SPACE_SESSION_ALLOWED_EVENT_TYPES`): the hop never widens a seat's
 vocabulary. The routing `space_id` is re-signed by the host on its leg, so

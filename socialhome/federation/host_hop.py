@@ -51,9 +51,11 @@ log = logging.getLogger(__name__)
 HOST_HOP_UNAVAILABLE: str = "host_hop_unavailable"
 
 CardLookup = Callable[[str, str], Awaitable[MemberCard | None]]
-#: ``space_id`` → the households acting as its host HERE that a hop may
-#: go through, in the order to try them (never us).
-HostsLookup = Callable[[str], Awaitable[list[str]]]
+#: ``(space_id, target)`` → the households a hop toward *target* may go
+#: through, best first: only ones *target* takes as its host (never us).
+HostsLookup = Callable[[str, str], Awaitable[list[str]]]
+#: ``space_id`` → the households acting as its host for US.
+ActingLookup = Callable[[str], Awaitable[list[str]]]
 #: ``space_id`` → whether WE act as its host toward other members.
 ServesLookup = Callable[[str], Awaitable[bool]]
 #: Asks a space's host for its member directory again (``space_id``).
@@ -64,6 +66,7 @@ class HostHop:
     """See the module docstring."""
 
     __slots__ = (
+        "_acting",
         "_ask_host",
         "_card_of",
         "_hosts_of",
@@ -80,6 +83,7 @@ class HostHop:
         own_instance_id: str,
         card_of: CardLookup,
         hosts_of: HostsLookup,
+        acting_hosts: ActingLookup,
         serves: ServesLookup,
         keywrap_private_key: bytes,
         keywrap_public_key: bytes,
@@ -88,6 +92,7 @@ class HostHop:
         self._own_instance_id = own_instance_id
         self._card_of = card_of
         self._hosts_of = hosts_of
+        self._acting = acting_hosts
         self._serves = serves
         self._ask_host = ask_host
         self._keywrap_private = keywrap_private_key
@@ -114,8 +119,12 @@ class HostHop:
         space_id: str,
     ) -> DeliveryResult:
         """Ship one event of *space_id* to *to_instance_id* through a
-        household acting as the space's host here — the first of
-        ``hosts_of`` that is neither us nor the target. Never raises."""
+        household acting as the space's host for BOTH ends — the first of
+        ``hosts_of(space, target)``: the owner (every member takes it), else
+        our inviting admin when it seated the target too. A hop the target
+        would refuse is never sent: with no such host the send fails
+        (:data:`HOST_HOP_UNAVAILABLE`) instead of reporting a delivery that
+        cannot happen. Never raises."""
         failed = DeliveryResult(
             instance_id=to_instance_id, ok=False, error=HOST_HOP_UNAVAILABLE
         )
@@ -124,7 +133,7 @@ class HostHop:
         host = next(
             (
                 h
-                for h in await self._hosts_of(space_id)
+                for h in await self._hosts_of(space_id, to_instance_id)
                 if h not in (self._own_instance_id, to_instance_id)
             ),
             None,
@@ -179,7 +188,7 @@ class HostHop:
             if not await self._serves(space_id):
                 return False
             ends = (path[0], path[2])
-        elif hop not in await self._hosts_of(space_id):
+        elif hop not in await self._acting(space_id):
             return False
         elif me == path[2]:
             ends = (path[0],)
