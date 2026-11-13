@@ -9,10 +9,13 @@ worked, and a re-send of the same envelope is refused as a replay.
 ``busy`` (:func:`is_transient`) exactly one more run, in place —
 :meth:`~socialhome.federation.event_dispatch_registry.EventDispatchRegistry.dispatch`
 awaits it — :data:`RETRY_DELAY_S` after the failure, once the gate (still a
-peer, the post-decrypt gates) passed again. Such a failure happened at a
-write that did not commit, so running the handler again repeats nothing.
-It is this household's own second try of an envelope it already verified:
-the replay cache is not touched and nothing is asked of the sender.
+peer, the post-decrypt gates) passed again. The write that failed did
+not commit — but the whole handler runs again, so every write it made
+BEFORE the failing one is repeated: handlers must be idempotent up to the
+write that failed (the ones checked return early on a duplicate, or
+upsert). It is this household's own second try of an envelope it already
+verified: the replay cache is not touched and nothing is asked of the
+sender.
 
 Nothing else is tried again: any other exception (a refusal, a bug, a
 timeout or I/O error — the handler may already have written something),
@@ -44,13 +47,21 @@ STOP_WAIT_S: float = 10.0
 
 
 def is_transient(exc: BaseException) -> bool:
-    """Whether ``exc`` is SQLite refusing a write because the database was
-    locked or busy — the one failure that passes on its own and that left
-    nothing half-done (other ``OperationalError``s are schema or SQL bugs)."""
+    """Whether ``exc`` is SQLite refusing a statement because the database
+    was busy or locked — the one failure that passes on its own. Judged by
+    SQLite's own result code (``SQLITE_BUSY`` / ``SQLITE_LOCKED`` and their
+    extended codes, whose low byte is the primary code); other
+    ``OperationalError``s are schema or SQL bugs. The statement that failed
+    did not commit; what the handler wrote before it stays written (see the
+    module docstring). Only an error that carries no code at all (not
+    raised by SQLite itself) is judged by its message."""
     if not isinstance(exc, sqlite3.OperationalError):
         return False
-    message = str(exc).lower()
-    return "locked" in message or "busy" in message
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is None:
+        message = str(exc).lower()
+        return "locked" in message or "busy" in message
+    return (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
 
 
 #: Events never tried again: a call that has stopped ringing

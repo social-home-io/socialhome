@@ -109,15 +109,70 @@ async def test_a_handler_that_hit_a_locked_database_applies_the_event_once(caplo
     assert _errors(caplog) == []
 
 
-@pytest.mark.parametrize(
-    "message", ["database is locked", "database table is locked", "database is busy"]
-)
-async def test_locked_and_busy_are_the_failures_that_pass(message):
-    assert is_transient(sqlite3.OperationalError(message))
-    handler = _Flaky(fail=1, exc=sqlite3.OperationalError(message))
+def _coded(code: int, message: str = "x") -> sqlite3.OperationalError:
+    """An error as SQLite raises it: with its result code."""
+    exc = sqlite3.OperationalError(message)
+    exc.sqlite_errorcode = code
+    return exc
+
+
+def _real_busy_error(tmp_path) -> sqlite3.OperationalError:
+    """What SQLite itself raises when another connection holds the lock."""
+    path = str(tmp_path / "busy.db")
+    holder = sqlite3.connect(path, isolation_level=None)
+    holder.execute("CREATE TABLE t (i INTEGER)")
+    holder.execute("BEGIN IMMEDIATE")
+    other = sqlite3.connect(path, isolation_level=None, timeout=0)
+    try:
+        other.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError as exc:
+        return exc
+    finally:
+        other.close()
+        holder.close()
+    raise AssertionError("the second writer was not refused")
+
+
+def test_busy_and_locked_are_judged_by_sqlites_result_code(tmp_path):
+    real = _real_busy_error(tmp_path)
+    assert real.sqlite_errorcode == sqlite3.SQLITE_BUSY
+    assert is_transient(real)
+    assert is_transient(_coded(sqlite3.SQLITE_LOCKED))
+    # Extended codes carry the primary code in their low byte.
+    assert is_transient(_coded(sqlite3.SQLITE_BUSY_SNAPSHOT))
+    assert is_transient(_coded(sqlite3.SQLITE_LOCKED_SHAREDCACHE))
+    # The code decides, not the text.
+    assert not is_transient(_coded(sqlite3.SQLITE_ERROR, "no such table: locked"))
+    assert not is_transient(_coded(sqlite3.SQLITE_IOERR, "disk I/O error"))
+    assert not is_transient(_coded(sqlite3.SQLITE_READONLY, "database is busy"))
+
+
+@pytest.mark.parametrize("message", ["database is locked", "database is busy"])
+async def test_an_error_without_a_code_is_judged_by_its_message(message):
+    exc = sqlite3.OperationalError(message)
+    assert not hasattr(exc, "sqlite_errorcode") and is_transient(exc)
+    handler = _Flaky(fail=1, exc=exc)
     registry, _ = _registry(handler=handler)
     await registry.dispatch(_event())
     assert len(handler.applied) == 1
+
+
+async def test_the_second_try_repeats_the_writes_before_the_failing_one():
+    """The documented limit: the whole handler runs again, so a handler
+    must be idempotent up to the write that failed."""
+    counter = {"n": 0}
+    calls = 0
+
+    async def handler(event):
+        nonlocal calls
+        calls += 1
+        counter["n"] += 1  # a first write that committed
+        if calls == 1:
+            raise _coded(sqlite3.SQLITE_BUSY, "database is locked")
+
+    registry, _ = _registry(handler=handler)
+    await registry.dispatch(_event())
+    assert counter["n"] == 2
 
 
 @pytest.mark.parametrize(
