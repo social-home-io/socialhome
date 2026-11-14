@@ -612,9 +612,13 @@ live event toward such a household may be (`RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES`,
 515,998 bytes, derived from the frame's): every item that reached it
 live also fits its catch-up. The GFS keeps a frame one hour (a JSON
 envelope a day), so for a large item the sync, not the queue, is the
-heal. A record past the bound (saved before the space had a household
-behind a GFS — later saves are refused with 413) is refused at the
-provider with a WARNING and counts a strike, as before. Nothing changes
+heal. A record past the bound (`SYNC_RECORD_MAX_BYTES_BEHIND_GFS`; saved
+before the space had a household behind a GFS — later saves are refused
+with 413) is **left out** of a stream to such a household with a WARNING
+naming its resource, id and size, before it takes a chunk index: the
+stream stays whole and clean and the watermark moves on. (Before, the
+refused chunk made the stream unclean, so every later sync re-sent it
+from the old watermark.) Nothing changes
 on the DataChannel, the inbox or the mesh, in the records or in the
 resources — no sync line. A requester below v_87, or a GFS without
 `envelope_media`, keeps the JSON envelope and its ~191 KiB.
