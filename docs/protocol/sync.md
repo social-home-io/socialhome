@@ -596,6 +596,29 @@ is sized to ≤ ~150 KB typical (user and option ids are 32 chars):
 | `posts.reaction_stamps` | ~85 B (≤ ~205 B with a 32-char emoji) | 1024 (the repo keeps up to 4096 per post — ~350 KB, ~840 KB worst, too big for a record) | ≤ ~90 KB, ≤ ~210 KB worst |
 | `bazaar.bids` | ~150 B + the message (≤ 280 chars) | 200 | ≤ ~90 KB, ≤ ~260 KB with every message full |
 
+**A requester behind a GFS (v_87).** Its chunks ride
+`SPACE_SYNC_CHUNK` events over the GFS relay, whose JSON envelope takes
+~191 KiB — less than one large record (a 240 KiB page was a ~437 KiB
+envelope and refused, so the stream was abandoned after three strikes and
+the page never arrived). A chunk event too large for the JSON envelope
+now goes as one binary relay frame
+([gfs-relay.md](./gfs-relay.md#large-events-in-a-binary-frame)), and
+inside the frame its record's ciphertext rides **raw** instead of as
+base64url text (body suite `sync-chunk-raw-v1`; the receiver rebuilds the
+identical `{sync_id, chunk}` payload, so the chunk's signature and AEAD
+are untouched). **Record bound on this path: ~505 KiB** — the frame's
+532,382 bytes less the chunk's wrapper — which is by construction what a
+live event toward such a household may be (`RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES`,
+515,998 bytes, derived from the frame's): every item that reached it
+live also fits its catch-up. The GFS keeps a frame one hour (a JSON
+envelope a day), so for a large item the sync, not the queue, is the
+heal. A record past the bound (saved before the space had a household
+behind a GFS — later saves are refused with 413) is refused at the
+provider with a WARNING and counts a strike, as before. Nothing changes
+on the DataChannel, the inbox or the mesh, in the records or in the
+resources — no sync line. A requester below v_87, or a GFS without
+`envelope_media`, keeps the JSON envelope and its ~191 KiB.
+
 A cut list is marked (`votes_partial`, `responses_partial`,
 `rsvps_partial`) and the receiver then deletes nothing it could not see; a
 cut stamp map loses only stamps older than the 1024 newest, which the

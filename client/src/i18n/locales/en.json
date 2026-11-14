@@ -3607,6 +3607,7 @@
   "error.video_too_long": "This video is {length} long — the gallery keeps videos up to {max} minutes.",
   "error.video_unreadable": "This video couldn't be opened. Try an MP4, MOV or WebM file.",
   "error.transcode_queue_full": "Your home is still converting a lot of videos. Try again later.",
+  "error.space_item_too_large": "This is too large for a space with households that reach it through a GFS (at most {max_kb} KB of text). Shorten it or split it up.",
   "connections.map.you_pin": "You",
   "space.notif.muted_toast": "Muted — you won't get notifications about new posts in this space.",
   "space.notif.mentions_toast": "You'll only be notified when someone @mentions you.",

@@ -2439,7 +2439,12 @@ class FederationTransport:
         if self._gfs_relay is None:
             return False, None
         media_body = encode_media_body(header_dict, payload_bytes)
-        if instance.source is InstanceSource.SPACE_SESSION:
+        if (
+            instance.source is InstanceSource.SPACE_SESSION
+            # As for a JSON envelope: a space event that names no space
+            # never rides a mailbox (the receiver refuses one there).
+            and not _space_event_without_space(header_dict)
+        ):
             target = await self._mailbox_target(
                 instance, header_dict.get("space_id"), media=True
             )
@@ -2450,6 +2455,50 @@ class FederationTransport:
         return await self._gfs_relay.send_media(
             instance=instance,
             media_body=media_body,
+        )
+
+    async def relay_frame_ready(
+        self, instance: RemoteInstance, *, event_type: str, space_id: str | None
+    ) -> bool:
+        """Whether an *event_type* event of *space_id* too large for a JSON
+        relay envelope can go to *instance* as one binary relay frame
+        (v_87): a household reached only through a GFS, whose mailbox sits
+        on a GFS of ours that proved ``envelope_media`` — or, with no
+        mailbox for it, whose own relay (``relay_via``) did. The same
+        choice :meth:`send_media_relay` makes. The peer's version is the
+        caller's check. Never raises."""
+        if (
+            self._gfs_relay is None
+            or instance.source is not InstanceSource.SPACE_SESSION
+        ):
+            return False
+        routing = {"event_type": event_type, "space_id": space_id}
+        if (
+            not _space_event_without_space(routing)
+            and await self._mailbox_target(instance, space_id, media=True) is not None
+        ):
+            return True
+        return await self._gfs_relay.media_ready(instance)
+
+    async def send_event_frame(
+        self,
+        *,
+        instance: RemoteInstance,
+        header_dict: dict,
+        payload_bytes: bytes,
+    ) -> _TransportSendResult:
+        """Deliver one event as a binary relay frame (v_87): the frame of
+        :meth:`send_media_relay`, its bytes the event's sealed payload.
+        The result reads like :meth:`send_via_gfs_relay`'s — ``ok`` is the
+        relay's acceptance; too large is permanent, throttled waitable."""
+        ok, status = await self.send_media_relay(
+            instance=instance, header_dict=header_dict, payload_bytes=payload_bytes
+        )
+        return _TransportSendResult(
+            ok=ok,
+            via="gfs_relay",
+            status_code=status,
+            error=None if ok else _relay_failure_reason(status),
         )
 
     async def _mailbox_target(

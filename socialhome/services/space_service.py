@@ -42,6 +42,7 @@ import re
 import unicodedata
 import uuid
 import weakref
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -440,6 +441,29 @@ def _require_link_publishable(space: Space) -> None:
     raise SpaceNotPublishableError()
 
 
+#: Entry bytes (as JSON) one ``SPACE_ROSTER_SNAPSHOT`` part carries: sealed
+#: and base64'ed it stays under the GFS relay's JSON envelope (~191 KiB), so
+#: a roster of any size reaches a household behind a GFS — about 190 seats a
+#: part.
+ROSTER_SNAPSHOT_PART_BYTES: int = 96 * 1024
+
+
+def _roster_parts(entries: list[dict]) -> list[list[dict]]:
+    """*entries* cut into parts of at most
+    :data:`ROSTER_SNAPSHOT_PART_BYTES` (at least one entry each), in order.
+    A roster that fits is one part — the snapshot as it always was."""
+    parts: list[list[dict]] = [[]]
+    size = 0
+    for entry in entries:
+        entry_size = len(orjson.dumps(entry))
+        if parts[-1] and size + entry_size > ROSTER_SNAPSHOT_PART_BYTES:
+            parts.append([])
+            size = 0
+        parts[-1].append(entry)
+        size += entry_size
+    return parts
+
+
 class SpaceService(
     MediaRefGuardedMixin, SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixin
 ):
@@ -484,6 +508,7 @@ class SpaceService(
         "_space_crypto",
         "_spaces",
         "_subscriber_keys",
+        "_text_size_check",
         "_users",
         "_writer_certs",
     )
@@ -547,6 +572,7 @@ class SpaceService(
         #: inbound pipeline (:meth:`_on_remote_join_request_approved_bus`).
         self._join_approvals: set[asyncio.Task] = set()
         self._federation = None
+        self._text_size_check: Callable[..., Awaitable[None]] | None = None
         self._remote_members = None
         self._redeem_coordinator = None
         #: "Ask to join" through the GFS (v_84) — both ends; unwired, an
@@ -730,6 +756,16 @@ class SpaceService(
                 event.space_id,
                 event.instance_id,
             )
+
+    def attach_text_size_check(
+        self, check: Callable[..., Awaitable[None]] | None
+    ) -> None:
+        """Wire ``check(space_id, *texts)``: refuses (413,
+        :class:`~socialhome.domain.errors.SpaceItemTooLargeError`) a text
+        too large to reach a member household behind a GFS
+        (:meth:`FederationService.check_space_text_size`) — called before
+        anything is stored, so nothing shows as saved that cannot arrive."""
+        self._text_size_check = check
 
     def attach_federation(
         self,
@@ -1818,13 +1854,39 @@ class SpaceService(
         )
         if not entries:
             return False
+        # A large roster goes in parts (each a snapshot event of its own:
+        # every entry is signed and merged on its own, so a receiver needs
+        # no change): none is too large for a household behind a GFS, whose
+        # relay takes ~191 KiB per JSON envelope. Only the last part says
+        # what the roster is complete up to — and only when every earlier
+        # part got out, so a lost part is sent again on the next tick.
+        *earlier, entries = _roster_parts(entries)
+        complete = True
+        for part in earlier:
+            try:
+                sent = await self._federation.send_with_mesh_fallback(
+                    to_instance_id=to_instance_id,
+                    event_type=FederationEventType.SPACE_ROSTER_SNAPSHOT,
+                    payload={"space_id": space.id, "entries": part},
+                    space_id=space.id,
+                )
+            except Exception:
+                log.exception(
+                    "roster-snapshot: send to %s failed for %s",
+                    to_instance_id,
+                    space.id,
+                )
+                return False
+            if not (
+                getattr(sent, "ok", True)
+                or getattr(sent, "error", None) == DELIVERY_ERROR_QUEUED
+            ):
+                complete = False
         # The version this snapshot is complete up to — the member echoes it
         # back on its next BEGIN (additive: an older receiver ignores it).
-        payload: dict = {
-            "space_id": space.id,
-            "entries": entries,
-            "roster_version": current,
-        }
+        payload: dict = {"space_id": space.id, "entries": entries}
+        if complete:
+            payload["roster_version"] = current
         # v_44 — the periodic heal also carries the owner's cert for the
         # current authority key, so a household that missed the rotation
         # bundle re-pins before verifying these (new-key-signed) entries.
@@ -2603,6 +2665,12 @@ class SpaceService(
         (:meth:`on_tier_change`). A public space never touches a GFS.
         """
         space = await self._require_space(space_id)
+        if self._text_size_check is not None:
+            await self._text_size_check(
+                space_id,
+                description,
+                about_markdown if isinstance(about_markdown, str) else None,
+            )
         if _games_list_only(
             space,
             features,

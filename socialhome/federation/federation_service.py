@@ -48,6 +48,7 @@ from ..crypto import (
     derive_instance_id,
 )
 from ..db import AsyncDatabase
+from ..domain.errors import SpaceItemTooLargeError
 from ..domain.events import (
     ConnectionReachable,
     ConnectionUnreachable,
@@ -98,6 +99,11 @@ from ..domain.media_chunking import (
 )
 from ..domain.media_validator import validate_inbound_media_meta
 from ..domain.outbox import DeliveryOutcome, OutboxEntry, OutboxPayload, RetryAfter
+from ..domain.relay_media_frame import (
+    RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES,
+    RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES,
+    SPACE_TEXT_MAX_BYTES_BEHIND_GFS,
+)
 from ..domain.space import parse_have_seq
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
@@ -118,6 +124,7 @@ from .gfs_relay_transport import (
     RELAY_STATUS_TOO_LARGE,
     MailboxTarget,
     normalize_gfs_base,
+    relay_envelope_fits,
 )
 from .inbound_retry import InboundRetry
 from .inbound_validator import (
@@ -149,7 +156,9 @@ from .inbound_validator import (
 )
 from .invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
 from .media_envelope import (
+    FRAME_BINDING_FIELDS,
     MEDIA_HTTPS_EVENT_TYPES,
+    RELAY_EVENT_FRAME_MIN_PAYLOAD_BYTES,
     RELAY_FRAME_EVENT_TYPES,
     build_media_envelope,
 )
@@ -178,6 +187,16 @@ from .pairing_coordinator import PairingCoordinator
 from .pairing_gfs_reach import PairingGfsReach
 from .peer_pairing_client import PeerPairingClient
 from .pq_signer import PqSigner
+from .relay_event_body import (
+    EVENT_BODY_SUITE_FIELD,
+    pack_event_body,
+    unpack_event_body,
+)
+
+
+def _dumps_text(text: str) -> bytes:
+    """*text* as it travels inside an event payload: a JSON string."""
+    return _orjson.dumps(text)
 
 
 def _dumps(obj: dict) -> str:
@@ -759,11 +778,16 @@ class FederationService:
     def _build_media_relay_pipeline(self):
         """The §24.11 pipeline for a media body that came through the GFS
         relay (v_87): the DataChannel chain (lookup by the sender's
-        instance id) with the inbox media route's event-type gate straight
-        after the parse — a relay frame is a media chunk or a large
-        pending moderation item
+        instance id) with an event-type gate straight after the parse — a
+        relay frame is a media chunk or an event of the vocabulary a
+        household behind a GFS may send at all
         (:data:`~socialhome.federation.media_envelope.RELAY_FRAME_EVENT_TYPES`),
-        nothing else. Composed from the shared step list, never a copy."""
+        nothing else — and, straight after the payload decrypt, the step
+        that makes a framed event's bytes its payload
+        (:meth:`_open_framed_event`), so every later step (idempotency,
+        ban, replay persist, deprovisioned author, archived space, space
+        writer) judges the real payload exactly as for a JSON envelope.
+        Composed from the shared step list, never a copy."""
         steps = self._common_pipeline_steps(
             lookup_step=make_lookup_instance_by_id(
                 repo=self._federation_repo,
@@ -771,7 +795,43 @@ class FederationService:
             ),
         )
         steps.insert(1, make_check_event_types(RELAY_FRAME_EVENT_TYPES))
+        decrypt_at = next(
+            i for i, step in enumerate(steps) if step.__name__ == "decrypt_and_parse"
+        )
+        steps.insert(decrypt_at + 1, self._open_framed_event)
         return InboundPipeline(steps)
+
+    async def _open_framed_event(self, ctx: InboundContext) -> None:
+        """Relay media pipeline step (v_87): for an event that is not a
+        media chunk, the frame's bytes ARE its payload. Opens them (suites,
+        AEAD, the signed ``chunk_sha256``) and replaces the event's payload
+        with the JSON object inside; the signed metadata held only the
+        binding fields. A media chunk is left to :meth:`_finish_media_frame`.
+        Raises :class:`ValueError` on any refusal."""
+        event = ctx.event
+        if event is None or event.event_type in MEDIA_HTTPS_EVENT_TYPES:
+            return
+        if getattr(ctx.instance, "source", None) is not InstanceSource.SPACE_SESSION:
+            # Only a household behind a GFS is ever sent an event this way,
+            # so only one may send it: a paired peer on the relay opt-in
+            # has its inbox for large events.
+            raise ValueError("framed event from a household that is not behind a GFS")
+        meta = event.payload if isinstance(event.payload, dict) else None
+        if meta is None or not set(meta) <= FRAME_BINDING_FIELDS | {
+            EVENT_BODY_SUITE_FIELD
+        }:
+            # Nothing rides next to the bytes: one place for the payload.
+            raise ValueError("framed event metadata carries more than the binding")
+        raw = self._open_frame_bytes(
+            ctx, ctx.frame_payload, wire_frame_suite=ctx.frame_suite
+        )
+        if len(raw) < RELAY_EVENT_FRAME_MIN_PAYLOAD_BYTES:
+            # A frame is for what no JSON envelope carries — never a second
+            # lane (with the media leg's budgets) for ordinary events.
+            raise ValueError("framed event is small enough for a JSON envelope")
+        # How the bytes carry the payload: named, required, never guessed.
+        payload = unpack_event_body(meta.get(EVENT_BODY_SUITE_FIELD), raw)
+        ctx.event = replace(event, payload=payload)
 
     def _build_rtc_inbound_pipeline(self):
         """Build the §24.11 pipeline variant for WebRTC DataChannel frames.
@@ -2074,10 +2134,20 @@ class FederationService:
         status_code: int | None = None
         transport_error: str | None = None
         if self._transport is not None:
-            result = await self._transport.send(
-                instance=instance,
-                envelope_dict=envelope_dict,
+            # v_87 — too large for a JSON envelope on the GFS relay: one
+            # binary relay frame instead. ``None``: the ordinary send.
+            result = await self.relay_event_frame(
+                instance,
+                envelope_dict,
+                event_type=event_type,
+                payload_json=lambda: _dumps(payload),
+                space_id=space_id,
             )
+            if result is None:
+                result = await self._transport.send(
+                    instance=instance,
+                    envelope_dict=envelope_dict,
+                )
             if result.ok:
                 # Reachability is only provable by DELIVERY. The
                 # connection-server relay answers a uniform 202 to every
@@ -2310,6 +2380,159 @@ class FederationService:
             error=DELIVERY_ERROR_QUEUED,
             via="gfs_relay",
         )
+
+    async def relay_event_frames_ok(
+        self,
+        instance: RemoteInstance,
+        *,
+        event_type: FederationEventType | None = None,
+        space_id: str | None = None,
+    ) -> bool:
+        """Whether an event too large for a JSON relay envelope can go to
+        *instance* — a household reached only through a GFS — as one binary
+        relay frame (v_87): the peer is at
+        :data:`FederationCapability.MIN_FOR_RELAY_MEDIA` and the GFS
+        that reaches it (its mailbox's, else its ``relay_via``) proved
+        ``envelope_media``. Otherwise the large event is refused at the
+        sender, as before v_87."""
+        return (
+            self._transport is not None
+            and instance.source is InstanceSource.SPACE_SESSION
+            and instance.status is PairingStatus.CONFIRMED
+            and await self.peer_supports(
+                instance.id,
+                min_version=FederationCapability.MIN_FOR_RELAY_MEDIA,
+            )
+            and await self._transport.relay_frame_ready(
+                instance,
+                event_type=event_type.value if event_type is not None else "",
+                space_id=space_id,
+            )
+        )
+
+    async def large_event_reaches(
+        self, instance_id: str, *, space_id: str | None = None
+    ) -> bool:
+        """Whether a space event too large for a JSON relay envelope can
+        reach *instance_id* at all — for a local action to check BEFORE it
+        stores anything, so a large item that could never leave is refused
+        instead of shown as delivered. Only a household reached solely
+        through a GFS can fail this (:meth:`relay_event_frames_ok`); every
+        other path carries large events as ever."""
+        instance = await self._federation_repo.get_instance(instance_id)
+        if instance is None or instance.source is not InstanceSource.SPACE_SESSION:
+            return True
+        return await self.relay_event_frames_ok(instance, space_id=space_id)
+
+    async def relay_event_frame(
+        self,
+        instance: RemoteInstance,
+        envelope_dict: dict,
+        *,
+        event_type: FederationEventType,
+        payload_json: Callable[[], str],
+        space_id: str | None,
+    ):
+        """v_87 — the ONE rule for a large event toward a household behind
+        a GFS: when *envelope_dict* (the sealed JSON envelope of this send)
+        does not fit a JSON envelope on the relay and *instance* is reached
+        only through a GFS, the event goes as one binary relay frame — the
+        v_87 frame, the same event type, signature scheme, session-key
+        encryption and ``msg_id``; ``payload_json()`` (read only once the
+        rule applies) as the frame's bytes.
+
+        Returns the transport's result (``ok`` = the relay accepted it;
+        ``relay_too_large`` when not even a frame can carry it — refused
+        here, logged, never sent), or ``None`` when the rule does not apply
+        and the caller sends the JSON envelope: it fits, the peer is not
+        behind a GFS, or the peer / its GFS takes no event frames (the JSON
+        relay leg then refuses the envelope with its WARNING, as before
+        v_87). Used by the live send and the outbox alike."""
+        if (
+            self._transport is None
+            or instance.source is not InstanceSource.SPACE_SESSION
+            or relay_envelope_fits(envelope_dict)
+            or not await self.relay_event_frames_ok(
+                instance, event_type=event_type, space_id=space_id
+            )
+        ):
+            return None
+        try:
+            session_key = self._key_manager.decrypt(instance.key_self_to_remote)
+        except Exception:
+            log.warning(
+                "send_event: failed to decrypt session key for %s",
+                instance.id,
+                exc_info=True,
+            )
+            return None
+        # A sync chunk rides with its record's ciphertext raw and may fill
+        # the frame; anything else must also fit the sync chunk that heals a
+        # lost frame (one bound, derived).
+        body_suite, raw_payload = pack_event_body(event_type, payload_json())
+        limit = (
+            RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES
+            if event_type is FederationEventType.SPACE_SYNC_CHUNK
+            else RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES
+        )
+        if len(raw_payload) > limit:
+            log.warning(
+                "send_event: a %d-byte %r payload for %s does not fit — a "
+                "household behind a GFS takes at most %d bytes of it (one "
+                "binary relay frame, and the sync chunk that re-delivers "
+                "it); refused, not sent",
+                len(raw_payload),
+                event_type.value,
+                instance.id,
+                limit,
+            )
+            return DeliveryResult(
+                instance_id=instance.id,
+                ok=False,
+                status_code=RELAY_STATUS_TOO_LARGE,
+                error=DELIVERY_ERROR_RELAY_TOO_LARGE,
+                via="gfs_relay",
+            )
+        header, sealed = build_media_envelope(
+            encoder=self._encoder,
+            session_key=session_key,
+            from_instance=self._own_instance_id,
+            to_instance=instance.id,
+            sig_suite=instance.sig_suite or self._encoder.sig_suite,
+            event_type=event_type,
+            # The signed metadata holds only what binds the bytes and
+            # names how they carry the payload.
+            payload={EVENT_BODY_SUITE_FIELD: body_suite},
+            raw_chunk=raw_payload,
+            space_id=space_id,
+            msg_id=envelope_dict["msg_id"],
+        )
+        return await self._transport.send_event_frame(
+            instance=instance, header_dict=header, payload_bytes=sealed
+        )
+
+    async def check_space_text_size(self, space_id: str, *texts: str | None) -> None:
+        """Refuse (:class:`SpaceItemTooLargeError`, 413) a text a person is
+        about to save into *space_id* — a page's title and content, a
+        description — that could not reach a member household behind a GFS:
+        over :data:`SPACE_TEXT_MAX_BYTES_BEHIND_GFS` as JSON while the space
+        has a household reached only through one. For a local action to
+        call BEFORE it stores anything, so nothing is shown as saved that
+        can never arrive. A space without such a household keeps the
+        limits of local federation."""
+        size = sum(len(_dumps_text(t)) for t in texts if t)
+        if size <= SPACE_TEXT_MAX_BYTES_BEHIND_GFS:
+            return
+        for row in await self._federation_repo.list_instances_in_space(space_id):
+            if row.source is InstanceSource.SPACE_SESSION:
+                log.warning(
+                    "space %s: a %d-byte text is refused — a member household "
+                    "behind a GFS takes at most %d bytes",
+                    space_id,
+                    size,
+                    SPACE_TEXT_MAX_BYTES_BEHIND_GFS,
+                )
+                raise SpaceItemTooLargeError(SPACE_TEXT_MAX_BYTES_BEHIND_GFS)
 
     async def send_event_once(
         self,
@@ -2597,6 +2820,29 @@ class FederationService:
         if envelope is None:
             raise ValueError(f"no session key to seal {entry.id} for {instance.id}")
         return _dumps(envelope)
+
+    async def relay_outbox_frame(
+        self, entry: OutboxEntry, instance: RemoteInstance, envelope_dict: dict
+    ):
+        """:meth:`relay_event_frame` for an outbox row sealed for
+        *instance* as *envelope_dict* (v_87): a row that references a
+        stored payload and is too large for a JSON relay envelope goes as
+        one binary relay frame under the same ``msg_id``. ``None`` → the
+        caller sends the JSON envelope."""
+        if (
+            entry.payload_id is None
+            or instance.source is not InstanceSource.SPACE_SESSION
+            or relay_envelope_fits(envelope_dict)
+        ):
+            return None
+        stored, payload_json = await self._outbox_payload_json(entry.payload_id)
+        return await self.relay_event_frame(
+            instance,
+            envelope_dict,
+            event_type=entry.event_type,
+            payload_json=lambda: payload_json,
+            space_id=stored.space_id,
+        )
 
     async def queue_event(
         self,
@@ -4539,7 +4785,9 @@ class FederationService:
         transport: str = TRANSPORT_GFS_RELAY,
     ) -> dict:
         """Validate + decrypt one binary media body that the GFS relay
-        delivered (v_87), then dispatch.
+        delivered (v_87), then dispatch — a media chunk, or a space
+        event too large for a JSON relay envelope, whose payload the
+        pipeline opens from the frame's bytes (:meth:`_open_framed_event`).
 
         *media_body* is the inbox media body (``\\x00SHM``, the suite byte,
         one ``fed-media-v1`` frame) the caller opened from a ``\\x00SHR``
@@ -4571,8 +4819,19 @@ class FederationService:
             raw_body=frame.header,
             instance_id=claimed,
             transport=transport,
+            frame_payload=frame.payload,
+            frame_suite=wire_suite,
         )
         await pipeline.run(ctx)
+        if (
+            ctx.early_response is None
+            and ctx.event is not None
+            and ctx.event.event_type not in MEDIA_HTTPS_EVENT_TYPES
+        ):
+            # v_87 — a framed event: the pipeline opened its bytes into its
+            # payload and ran every gate on it; dispatched like any event.
+            await self._dispatch_event(ctx.event)
+            return {"status": "ok"}
         return await self._finish_media_frame(
             ctx, frame.payload, wire_frame_suite=wire_suite
         )
@@ -4602,7 +4861,29 @@ class FederationService:
             event is None
         ):  # pragma: no cover — pipeline always sets event or early_response
             return {"status": "ok"}
-        meta = event.payload if isinstance(event.payload, dict) else {}
+        raw = self._open_frame_bytes(
+            ctx, payload_bytes, wire_frame_suite=wire_frame_suite
+        )
+        await self._dispatch_event(replace(event, media_bytes=raw))
+        return {"status": "ok"}
+
+    def _open_frame_bytes(
+        self,
+        ctx: InboundContext,
+        payload_bytes: bytes,
+        *,
+        wire_frame_suite: str | None,
+    ) -> bytes:
+        """The plaintext bytes of a binary frame whose header the §24.11
+        pipeline validated and decrypted: frame and AEAD suites checked,
+        the bytes decrypted under the directional session key and matched
+        against the signed ``chunk_sha256``. Raises on any mismatch."""
+        event = ctx.event
+        meta = (
+            event.payload
+            if event is not None and isinstance(event.payload, dict)
+            else {}
+        )
         frame_suite = meta.get("media_frame_suite")
         if frame_suite is None and wire_frame_suite is None:
             frame_suite = MEDIA_FRAME_SUITE_V1
@@ -4631,8 +4912,7 @@ class FederationService:
         actual = b64url_encode(hashlib.sha256(raw).digest())
         if not _digest_matches(meta.get("chunk_sha256"), actual):
             raise ValueError("media chunk sha256 mismatch")
-        await self._dispatch_event(replace(event, media_bytes=raw))
-        return {"status": "ok"}
+        return raw
 
     async def _dispatch_event(self, event: FederationEvent) -> None:
         """Route a validated inbound event to registered handlers.

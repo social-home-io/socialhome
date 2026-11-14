@@ -8168,6 +8168,74 @@ async def test_roster_snapshot_entries_are_signed_off_the_event_loop(
     assert threading.get_ident() not in threads
 
 
+async def test_a_roster_of_a_thousand_seats_goes_in_parts_a_gfs_member_can_take(stack):
+    """One event with every seat of a large space passed what a household
+    behind a GFS takes. The snapshot goes in parts — each an ordinary
+    ``SPACE_ROSTER_SNAPSHOT`` (entries are signed and merged one by one, so
+    the receiver is unchanged), each small enough for a JSON envelope on the
+    relay — and the member ends with every seat. Only the last part says
+    what the roster is complete up to."""
+    import orjson
+
+    from socialhome.domain.federation import DeliveryResult, FederationEventType
+    from socialhome.federation.gfs_relay_transport import RELAY_MAX_ENVELOPE_BYTES
+    from socialhome.services.space_service import ROSTER_SNAPSHOT_PART_BYTES
+
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    for n in range(1000):
+        await _seat(remote, space.id, f"peer-{n % 400}", f"u-{n:04d}")
+    await _seat(remote, space.id, "peer-gfs", "u-gfs")
+    fed.send_with_mesh_fallback.reset_mock()
+    assert await stack.space_svc.send_roster_snapshot(
+        space.id, to_instance_id="peer-gfs"
+    )
+    payloads = [
+        c.kwargs["payload"]
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs["event_type"] is FederationEventType.SPACE_ROSTER_SNAPSHOT
+    ]
+    assert len(payloads) > 3
+    seats = [e["payload"]["user_id"] for p in payloads for e in p["entries"]]
+    assert len(seats) == len(set(seats))
+    assert {f"u-{n:04d}" for n in range(1000)} <= set(seats)
+    for payload in payloads:
+        assert payload["space_id"] == space.id
+        entries = payload["entries"]
+        # The entries plus the list's brackets and commas.
+        assert (
+            len(orjson.dumps(entries)) <= ROSTER_SNAPSHOT_PART_BYTES + len(entries) + 1
+        )
+        # Encrypted and base64'ed inside the envelope, next to its fields.
+        assert len(orjson.dumps(payload)) * 4 // 3 + 4096 < RELAY_MAX_ENVELOPE_BYTES
+    assert ["roster_version" in p for p in payloads] == [False] * (
+        len(payloads) - 1
+    ) + [True]
+
+    # A part that did not get out: the snapshot is not called complete, so
+    # the household echoes nothing and the next tick sends it all again.
+    fed.send_with_mesh_fallback.reset_mock()
+    fed.send_with_mesh_fallback.side_effect = [
+        DeliveryResult(instance_id="peer-gfs", ok=False, error="relay_too_large"),
+        *[DeliveryResult(instance_id="peer-gfs", ok=True)] * (len(payloads) - 1),
+    ]
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-gfs")
+    last = fed.send_with_mesh_fallback.await_args_list[-1].kwargs["payload"]
+    assert "roster_version" not in last
+
+
+async def test_a_small_roster_is_still_one_snapshot_event(stack):
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    for n in range(20):
+        await _seat(remote, space.id, f"peer-{n}", f"u-{n}")
+    await _seat(remote, space.id, "peer-new", "u-new")
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-new")
+    [(_to, entries)] = _snapshots(fed, to="peer-new")
+    assert len(entries) >= 21
+    payload = fed.send_with_mesh_fallback.await_args_list[-1].kwargs["payload"]
+    assert "roster_version" in payload
+
+
 async def test_an_invite_link_redeem_sends_no_snapshot(stack):
     _owner, space, fed, remote = await _hosted_space_with_seats(stack)
     await _seat(remote, space.id, "peer-new", "u-new")

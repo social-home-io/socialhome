@@ -96,6 +96,26 @@ class PayloadTooLargeError(CodedError):
         super().__init__(params={"max_mb": max(1, max_bytes // (1024 * 1024))})
 
 
+class SpaceItemTooLargeError(CodedError, ValueError):
+    """A page or a description too large to reach every member household.
+
+    A household that reaches a space only through a GFS gets a large item
+    as one relay frame, which carries about 495 KiB of text. Saving more
+    into a space with such a household is refused up front (413) — it
+    would show as saved here and never arrive there.
+    """
+
+    status = 413
+    code = "SPACE_ITEM_TOO_LARGE"
+    detail = (
+        "This is too large for a space with households that reach it "
+        "through a GFS. Shorten it or split it."
+    )
+
+    def __init__(self, max_bytes: int) -> None:
+        super().__init__(params={"max_kb": max_bytes // 1024})
+
+
 class DownloadTooLargeError(CodedError):
     """A gallery download asks for more photos or bytes than one ZIP holds.
     The SPA says how many fit (``max_items``) and how big (``max_mb``)."""

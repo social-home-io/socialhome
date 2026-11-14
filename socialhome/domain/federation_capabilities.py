@@ -1413,7 +1413,23 @@ from __future__ import annotations
 #:   ``envelope_media``, gets JSON chunks of ``RELAY_JSON_CHUNK_BYTES``
 #:   (96 KiB), which fit the JSON relay's envelope cap. Not space-scoped, no
 #:   sync-stream change. Labelled "Members reached through a GFS get pictures
-#:   in full-size pieces".
+#:   in full-size pieces". **Large space events ride the same frame**
+#:   (owner decision 2026-11-13: a household behind a GFS keeps size parity
+#:   with local federation; no new version — v_81..v_94 ship together): a
+#:   space event whose sealed envelope does not fit a JSON envelope on the
+#:   relay (~191 KiB) — a large page, a pending item, a §25.6
+#:   ``space_sync_chunk`` holding one — goes to a household reached only
+#:   through a GFS (relay seat or mailbox) as ONE such frame: the same event
+#:   type, signature, encryption and ``msg_id``, the payload JSON as the
+#:   frame's bytes (``FederationService.relay_event_frame``). The receiver
+#:   takes a framed event of ``SPACE_SESSION_ALLOWED_EVENT_TYPES`` and runs
+#:   every §24.11 step on its real payload. A framed sync chunk carries its record's
+#:   ciphertext raw (``federation/relay_event_body.py``), so ONE bound holds
+#:   live and by sync: a payload over 515,998 bytes (~503 KiB: the frame's
+#:   bound less a chunk's wrapper) is refused at the sender, and a page or
+#:   description that large with 413 where it is saved; so is a large event to a peer below
+#:   v_87 or through a GFS without ``envelope_media`` (WARNING, never
+#:   queued).
 #: * **v_88** (2026-11-08) — per-space GFS mailboxes (GFS redesign PR 2,
 #:   #1333). Never released: v_89 replaced it before any release, so no
 #:   household speaks it and nothing gates on it any more.
@@ -2201,6 +2217,9 @@ class FederationCapability:
     #: v_87 — a household at or above it opens binary media frames from the
     #: GFS relay (``\x00SHR``): a link-joined peer gets 512 KiB media
     #: chunks through a GFS proving ``envelope_media``.
+    #: The same frame carries a space event too large for a JSON relay
+    #: envelope (the payload as its bytes), so this is also the gate for
+    #: large events toward a household behind a GFS.
     MIN_FOR_RELAY_MEDIA = 87
     #: v_89 — a household at or above it owns one GFS mailbox (shared by
     #: its spaces), reads member key cards in a sealed redeem / ACK and in

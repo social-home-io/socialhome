@@ -88,7 +88,7 @@ envelope carries no routing field.
 | A plain member household | Never a target. A submission that reaches a household with no local content-authority member anyway (misdirected) is dropped and not stored. |
 | Approved content | The ordinary write: `broadcast_to_space_members` to member households only. In a public / global space with followers, the host also relays an approved post to the GFS on its authority, encrypted and padded (see *Outcomes for GFS followers*). |
 | Decisions | Pairwise, sealed: an approval request to the host only; the host's announcement and any rejection to the host, the reviewers and the submitter's household. |
-| A large item to a household behind a GFS | One binary relay frame (v_87), sealed to that household's key-wrap key and padded to a size bucket: the GFS sees the recipient and a bucket, never the event type, the space or the content — exactly as for a media chunk. See *Large items behind a GFS*. |
+| A large item to a household behind a GFS | One binary relay frame (the transport's rule for every large space event, v_87), sealed to that household's key-wrap key and padded to a size bucket: the GFS sees the recipient and a bucket, never the event type, the space or the content — exactly as for a media chunk. See *Large items behind a GFS*. |
 | Catch-up (host → a reviewer household) | The host re-sends a pending item only in answer to the `mod_held` echo of a household holding a live admin / moderator seat — one `send_with_mesh_fallback` to that household, its files to that household only. Never in the §25.6 stream. See *Re-delivery and catch-up*. |
 | Queued retries | The outbox re-checks a retried `SPACE_MODERATION_SUBMITTED` at send time and drops it when the target no longer reviews the space. |
 | A household that stops reviewing | When it loses its last content-authority seat in the space, it expires the pending items of other households' members it holds and NULLs their content (its own members' items stay). |
@@ -422,27 +422,19 @@ sequenceDiagram
 to a household seated from an invite link or a directory join — takes
 about 191 KiB, so an item whose content is over ~140 KiB
 (`RELAY_JSON_ITEM_BYTES`: encrypted and base64'ed inside the envelope)
-does not fit one. The host then sends
-it to that household as **one binary relay frame** (v_87, `\x00SHR`, up
-to 528 KiB — what `SPACE_MEDIA_BLOB` chunks ride): the same
-`SPACE_MODERATION_SUBMITTED` event, its small signed and sealed metadata
-(ids, feature, action, submitter, times, `submitter_instance_id`) as the
-frame's header payload and `{payload, public_relay?}` as the frame's
-bytes, bound by the signed `chunk_sha256`. No new event and no new frame:
-the relay pipeline's event-type gate takes this one event besides the
-media chunks (`RELAY_FRAME_EVENT_TYPES`; the inbox's binary media route
-keeps its media-only gate). The `fed-media-v1` DataChannel pipeline has
-no event-type gate at all — a frame of this event arriving there runs the
-same §24.11 chain and the same admission checks, so it is no extra door.
-The receiver runs every check of *Receiver rules* on the reassembled
-payload. The host uses the frame
-only in a catch-up answer — the household's echo proves it runs a revision
-that reads it — so a large item reaches a moderator behind a GFS with its
-next BEGIN to the host (at once on a promotion, else within 30 minutes);
-a paired or mesh-reached moderator household gets it live, as the
-ordinary event. The submitter's household does not try the JSON envelope
-toward a relay-seated reviewer for such an item (it could not go). Needs what media over the relay needs: the household at
-v_87 and a GFS proving `envelope_media`; without them the item waits
+does not fit one. Nothing in the moderation code handles that: since v_87
+the transport sends **every** space event too large for a JSON relay
+envelope to a household behind a GFS as **one binary relay frame** — the
+same `SPACE_MODERATION_SUBMITTED` event, its payload as the frame's bytes
+([gfs-relay.md](./gfs-relay.md#large-events-in-a-binary-frame)). The
+receiver's relay pipeline makes those bytes the payload before the
+post-decrypt gates run, so the handler sees the ordinary event and runs
+every check of *Receiver rules* on it. It works in every direction: the
+submitter's household to the host and to reviewer households, the host to
+a reviewer household on a catch-up. Needs the receiving household at v_87
+and a GFS proving `envelope_media`; a reviewer household without them is
+not reached live (WARNING) and gets the item from the host's catch-up
+once it is. The relay answers a frame
 (the send is tried again on later answers). The relay answers a frame
 "accepted", not "delivered" (its media queue keeps a frame for an hour,
 under a size cap), so a framed item the household still does not echo is
@@ -748,22 +740,17 @@ back).
   to the host (at most 30 minutes; at once on a promotion). A role change
   the household itself missed (the mesh has no outbox) delays it the same
   way as it delays every other right of that role.
-- **A large item from a submitter behind a GFS is refused.** A household
-  that reaches the host only through a GFS relay cannot send an item over
-  ~140 KiB to it in one JSON envelope (the relay refuses any space write
-  of that size from such a household). Nobody could review the item, so
-  the submit answers **413 `PAYLOAD_TOO_LARGE`** and nothing is stored —
-  it is never shown as pending. Sending it as a relay frame needs the
-  submitter to know the host reads one, i.e. a protocol version gate —
-  a follow-up.
-- **Open limit: a large published item never reaches a member behind a
-  GFS.** Once approved, a large item is released as its normal `SPACE_*`
-  event. Toward a member household behind a GFS that event exceeds the
-  JSON relay envelope — and so does the §25.6 `SPACE_SYNC_CHUNK` that
-  would carry the row later (it is refused the same way). Such a
-  household does not get a page of that size today, reviewed or not. Only
-  the *pending* item uses the relay frame; a general path for large
-  events over the relay is a follow-up PR.
+- **A large item from a submitter behind a GFS** reaches a v_87 host as
+  one binary relay frame (closed: large events ride the v_87 frame). Only when the host is below
+  v_87, or the GFS between them does not prove `envelope_media`, could
+  nobody review it: the submit then answers **413 `PAYLOAD_TOO_LARGE`**
+  and nothing is stored — it is never shown as pending
+  (`check_reaches_host`).
+- **A large published item reaches a member behind a GFS** (closed: large events ride the v_87 frame): the released `SPACE_*` event and the §25.6 `SPACE_SYNC_CHUNK`
+  that carries the row later both cross the relay as one frame. What one
+  frame and its sync chunk cannot carry (a payload over ~503 KiB — no reviewed item is that
+  large, the queue cap is 256 KiB) is listed in
+  [gfs-relay.md](./gfs-relay.md#large-events-in-a-binary-frame).
 - **An echoed rejection is the household's word**, like its
   `SPACE_MODERATION_DECIDED`: the host checks the named moderator's live
   seat on that household, not that the rejection happened earlier.
