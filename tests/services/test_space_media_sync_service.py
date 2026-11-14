@@ -12,6 +12,7 @@ import pytest
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_QUEUED,
     DeliveryResult,
     FederationEventType,
     InstanceSource,
@@ -275,6 +276,66 @@ async def test_flush_once_reschedules_on_delivery_failure(
     assert len(rows) == 1
     assert rows[0].attempts == 1
     assert rows[0].last_error == "no_route"
+
+
+async def test_a_chunk_held_behind_the_seats_pending_rows_is_not_a_failure(
+    db, outbox, tmp_path, caplog
+):
+    """#1361: a member posts a picture to a space with GFS-reached members.
+    The post goes to the outbox as one multi upload; the picture's chunk for
+    one of those seats, sent right after, is held BEHIND that pending row by
+    the ordering gate — in the durable outbox, delivered in order. That is
+    accepted, not failed: no WARNING, no second send of the whole file."""
+    await _seed_space(db)
+    (tmp_path / "x.webp").write_bytes(b"x")
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(
+        return_value=DeliveryResult(
+            instance_id="peer-x",
+            ok=False,
+            error=DELIVERY_ERROR_QUEUED,
+            via="gfs_relay",
+            held_in_order=True,
+        ),
+    )
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-x"],
+        media_urls=["api/media/x.webp"],
+    )
+    with caplog.at_level("WARNING"):
+        shipped = await svc.flush_once()
+    assert shipped == 1
+    assert "failed" not in caplog.text
+    assert await svc.flush_once() == 0  # nothing left to send again
+    fed.send_media_chunk.assert_awaited_once()
+
+
+async def test_a_send_that_failed_and_was_queued_still_reschedules_the_file(
+    db, outbox, tmp_path
+):
+    """Only the ordering gate's hold is accepted: a send that FAILED (and
+    was queued for retry) keeps today's handling."""
+    await _seed_space(db)
+    (tmp_path / "x.webp").write_bytes(b"x")
+    fed = _fed()
+    fed.send_media_chunk = AsyncMock(
+        return_value=DeliveryResult(
+            instance_id="peer-x", ok=False, error=DELIVERY_ERROR_QUEUED
+        ),
+    )
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-x"],
+        media_urls=["api/media/x.webp"],
+    )
+    assert await svc.flush_once() == 0
+    [row] = await outbox.list_for_correlation("p-1")
+    assert row.attempts == 1 and row.last_error == DELIVERY_ERROR_QUEUED
 
 
 async def test_dedup_same_blob_to_same_peer(db, outbox, tmp_path):

@@ -24979,6 +24979,23 @@ def cmd_members_parity() -> None:
             )
     finally:
         _respawn(state, "a")
+    # 12b. The host is back: it must hold what the members posted while it
+    #      was away BEFORE anything stops it again. d reaches a over the
+    #      mesh; a restarted host nacks a routed envelope sealed to its old
+    #      key and d retransmits ONCE — a second restart inside that retry
+    #      (the later actions stop a again) would cost the post until the
+    #      next periodic sync, and ``verify`` would read too early.
+    for author, pid, text in host_posts:
+        _parity_compare(
+            state,
+            results,
+            f"host back: {author}'s post on the host",
+            post_view(pid),
+            ref=author,
+            want={"exists": True, "content": text},
+            members=("a",),
+            timeout=180.0,
+        )
 
     # 13. Admin rights: a promotes e's person; e deletes d's post.
     role_url = (

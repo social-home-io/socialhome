@@ -163,6 +163,7 @@ class HostHop:
             # That hop did not take it now (it is in our outbox for it at
             # best): the next one that holds both ends' cards is tried.
             queued = queued or leg[0].error == DELIVERY_ERROR_QUEUED
+            log.info("host hop: %s did not take it now (%s)", host, leg[0].error)
         if queued:
             return DeliveryResult(
                 instance_id=to_instance_id, ok=False, error=DELIVERY_ERROR_QUEUED
