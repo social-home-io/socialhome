@@ -21,6 +21,11 @@ does both on top of the household's ONE mailbox per GFS
   newcomer, a delta on every change after that. A household with a mailbox
   gets every writer's card (it checks every sender against them); one
   without gets only the cards that carry a mailbox (all it can use).
+* **The roster decides.** A card is keys and an address — never
+  membership. It goes on the household's ``space_instances`` row, which the
+  roster makes and removes (a card for a household without a seat waits on
+  the issuer's row), and whether it may be used is asked of our own roster
+  mirror at that moment (:meth:`SpaceMemberDirectory._usable`).
 * **Seats.** On a directory card a member seats that household lazily — a
   ``space_session`` row from the card's key-wrap key, static-static keys,
   no round-trip, never downgrading a confirmed row — so its own fan-out
