@@ -24689,9 +24689,6 @@ def cmd_members_parity() -> None:
             state, "a", "DELETE", f"/api/spaces/{space_id}/posts/{gone}"
         )
         _must("members-parity: a deletes while d, e are away", s, body, ok=(200, 204))
-        # v_87 — a 240 KiB page they both missed: the catch-up carries it
-        # (to e as a §25.6 chunk in one binary relay frame).
-        away_page, away_want = _parity_create_big_page(state, "a", space_id, tag)
         old_text = f"Parity old picture {tag}"
         old_pic = _parity_post_picture(state, "a", space_id, old_text)
         deadline = time.monotonic() + 60
@@ -24701,9 +24698,25 @@ def cmd_members_parity() -> None:
             expired = _parity_expire_new_blobs(space_id, since)
         old_new = expired
         print(f"  expired {len(expired)} GFS cache blob(s) as 30-day-old content")
+        # v_87 — a 240 KiB page they both missed: the catch-up carries it
+        # (to e as a §25.6 chunk in one binary relay frame). Last in the
+        # window, so it sits behind the small events on the way to d.
+        away_page, away_want = _parity_create_big_page(state, "a", space_id, tag)
     finally:
         for label in _PARITY_MEMBERS:
             _respawn(state, label)
+    # d is reached over the mesh, where the large page is lost (see below)
+    # and holds up d's catch-up: a's re-sent edit can reach d before the
+    # row it edits, and d says so once. The row arrives with d's sync — the
+    # "catch-up: edit" comparison below proves it.
+    mesh_lag = _open_noise_window(
+        about="a",
+        reason="members-parity: a large page in the away window delays d's "
+        "mesh catch-up, so an edit reaches d before its row",
+        witnesses=("d",),
+        named=("is not in space",),
+        names=[state["instances"]["a"]["instance_id"]],
+    )
     _parity_compare(
         state,
         results,
@@ -24731,10 +24744,15 @@ def cmd_members_parity() -> None:
         timeout=180.0,
         members=("e",),
     )
-    d_view = _parity_big_page(state, "d", space_id, away_page, {})
+    # Read from d's database: a GET of a page it lacks would log a WARNING.
+    d_holds = _rows(
+        "d",
+        "SELECT length(content) FROM space_pages WHERE id=? AND deleted_at IS NULL",
+        (away_page,),
+    )
     print(
         "  catch-up: 240 KiB page on d (mesh path, not asserted — open mesh "
-        f"limit): {'holds it' if d_view == away_want else d_view}"
+        f"limit): {'holds it' if d_holds else 'not there'}"
     )
     _parity_compare(
         state,
@@ -24754,6 +24772,7 @@ def cmd_members_parity() -> None:
         want={"exists": False},
         timeout=120.0,
     )
+    _close_noise_windows(mesh_lag)
     if old_new:
         _parity_compare(
             state,
