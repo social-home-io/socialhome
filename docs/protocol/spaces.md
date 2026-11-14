@@ -3338,10 +3338,36 @@ already run. The origin then applies, in order, each a fail-closed drop:
    makes the target mint a new ephemeral) and `send_routed` the retained
    inner event **once**, flagged as a retry.
 
+**What the origin keeps.** One rule for every inner event type, by size
+of the inner's compact JSON:
+
+| Inner | Kept for the retransmit |
+|---|---|
+| ≤ 64 KiB | always |
+| > 64 KiB (a long page, a space cover, a §25.6 chunk with one big record) | yes, while all kept large inners together stay ≤ 16 MiB (`_MAX_RETAINED_LARGE_BYTES`) |
+| > 64 KiB of a type whose sender holds the bytes itself (`SPACE_MEDIA_BLOB`: the file is on disk) | no — the sender is told and queues the file again (below) |
+
+A hop carries at most ~1 MiB of envelope (an inner of ~570 KiB), so the
+16 MiB cover some 28 of the largest events one household sends over the
+mesh inside one pending window; one past it is recorded by its head only
+(route invalidated, nothing resent, one `WARNING` on the sender). Before
+this every inner over 64 KiB was treated like a media chunk — recorded by
+its head only — though nothing but the media outbox can send its event
+again: a long page a household sent while a mesh-only member was
+restarting was dropped with one `INFO` line on the sender. Cost of a
+large retransmit: the event's bytes once more, to the one household that
+could not open them (≤ ~1 MiB per hop, ≤ 4 hops), never a fan-out.
+
+The retransmit may arrive after a copy that came another way (the
+member's §25.6 catch-up, a GFS `space_item`). Creates and saves are
+upserts; a post or comment edit that is not newer than the held row
+changes nothing (last writer wins) and is logged at `DEBUG` ("not
+applied"), not as a cross-space refusal.
+
 Step 8 is skipped — route invalidated, nothing resent — when the nacked
 send was itself the retry (a target that nacks twice gets one `INFO`
-line, not a loop) or when the inner exceeds 64 KiB — a media chunk, whose
-bytes the mesh does not keep. The chunk's first hop had taken it, so the
+line, not a loop) or when the inner was not kept. For a media chunk the
+first hop had taken it, so the
 `space_media_outbox` row was already done: the handler hands the inner's
 small head (`blob_id`, …, never the bytes) to the media outbox
 (`SpaceRoutedHandler.attach_lost_inner_listener` →
@@ -3382,7 +3408,8 @@ visits each hop at most once; replays are no-ops); one retransmit per
 original send (the retry's pending record is flagged so its own nack
 cannot trigger another) plus at most one deferred re-attempt; a
 bounded pending table (2000 entries, oldest
-expiry evicted first, ≤ 64 KiB retained inner each); and
+expiry evicted first, ≤ 64 KiB retained inner each plus ≤ 16 MiB of
+large ones in all); and
 `discover_route` single-flights per target and honours the negative
 cooldown, so a burst of nacks for one target costs one flood.
 

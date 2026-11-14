@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -625,6 +626,34 @@ async def test_direct_a_comment_edit_keeps_its_own_stamp(direct):
         sender=AUTHOR,
     )
     assert (await _comment_row(db, "cmt-a"))["content"] == "newer"
+
+
+async def test_direct_an_edit_delivered_twice_is_not_called_a_cross_space_write(
+    direct, caplog
+):
+    """A space edit reaches a household over more than one path (a GFS
+    ``space_item``, then the mesh's retransmit of ``SPACE_POST_UPDATED`` to a
+    member that restarted). The second copy changes nothing — last writer
+    wins — and is not a refusal: before this it was logged at WARNING as
+    "post … is not in space — refusing the write", which is the line for a
+    write across the space boundary (the federation demo's log audit failed
+    on it)."""
+    app, db = direct
+    edit = {"post_id": "post-a", "content": "edited", "edited_at": _ago(30)}
+    reply = {"id": "cmt-a", "content": "edited reply", "edited_at": _ago(30)}
+    for _ in range(2):
+        await _deliver(app, FET.SPACE_POST_UPDATED, dict(edit), sender=AUTHOR)
+        await _deliver(app, FET.SPACE_COMMENT_UPDATED, dict(reply), sender=AUTHOR)
+    assert await _post_content(db, "post-a") == "edited"
+    assert (await _comment_row(db, "cmt-a"))["content"] == "edited reply"
+    with caplog.at_level(logging.DEBUG):
+        await _deliver(app, FET.SPACE_POST_UPDATED, dict(edit), sender=AUTHOR)
+        await _deliver(app, FET.SPACE_COMMENT_UPDATED, dict(reply), sender=AUTHOR)
+    assert "is not in space" not in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    held = [r.getMessage() for r in caplog.records if "not applied" in r.getMessage()]
+    assert any("post post-a" in m and "newer edit" in m for m in held)
+    assert any("comment cmt-a" in m and "newer edit" in m for m in held)
 
 
 async def test_direct_a_reply_that_cannot_be_held_is_refused_never_orphaned(direct):

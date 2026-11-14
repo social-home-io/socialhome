@@ -5169,8 +5169,9 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         routed_handler.attach_to(federation_service)
         # A media chunk the target nacked (it restarted and cannot open
-        # what was sealed to its old key) is not retransmitted by the mesh:
-        # the media outbox queues the file again.
+        # what was sealed to its old key) is not retransmitted by the mesh
+        # (the file is on disk; every other large inner is kept and
+        # retransmitted): the media outbox queues the file again.
         routed_handler.attach_lost_inner_listener(
             FederationEventType.SPACE_MEDIA_BLOB,
             space_media_sync_service.on_mesh_chunk_lost,
