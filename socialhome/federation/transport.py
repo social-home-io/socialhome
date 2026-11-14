@@ -1443,8 +1443,22 @@ class _RtcPeer:
                 self._send_hwm,
             )
             return False
+        data = orjson.dumps(envelope_dict)
+        limit = getattr(self._channel, "max_message_size", None)
+        if isinstance(limit, int) and 0 < limit < len(data):
+            # A large event (a long page) is more than one DataChannel
+            # message takes: the HTTPS inbox carries it. Not an error, and
+            # never handed to the channel to fail there.
+            log.debug(
+                "fed RTC peer %s: %d-byte frame over the channel's %d-byte "
+                "message limit — using the HTTPS inbox",
+                self.instance_id,
+                len(data),
+                limit,
+            )
+            return False
         try:
-            await self._channel.send(orjson.dumps(envelope_dict), wait_for_drain=False)
+            await self._channel.send(data, wait_for_drain=False)
             return True
         except (rtc.RTCError, rtc.ConnectionClosedError) as exc:
             log.warning("fed RTC send to %s failed: %s", self.instance_id, exc)

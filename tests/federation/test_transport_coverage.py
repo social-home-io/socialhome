@@ -98,6 +98,32 @@ async def _noop_inbound(_data):
     return None
 
 
+async def test_peer_send_leaves_a_frame_over_the_channel_limit_to_the_inbox(caplog):
+    """An envelope larger than one DataChannel message (a long page) is
+    never handed to the channel — it failed there with an ERROR from the
+    library and a WARNING from us before the inbox carried it anyway."""
+    import logging
+    from types import SimpleNamespace
+
+    _events, signaling = await _collect_signals()
+    peer = _RtcPeer(instance_id="p", signaling=signaling, inbound=_noop_inbound)
+    sent: list[bytes] = []
+
+    async def _send(data, *, wait_for_drain=False):
+        sent.append(data)
+
+    peer._channel = SimpleNamespace(
+        buffered_amount=0, max_message_size=1000, send=_send, is_open=True
+    )
+    peer._open.set()
+    with caplog.at_level(logging.WARNING):
+        assert await peer.send({"content": "x" * 2000}) is False
+        assert sent == [] and caplog.text == ""
+        assert await peer.send({"content": "x" * 100}) is True
+    assert len(sent) == 1
+    peer.close()
+
+
 async def test_peer_start_offer_signals_offer_sdp():
     events, signaling = await _collect_signals()
     peer = _RtcPeer(
