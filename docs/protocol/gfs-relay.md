@@ -887,7 +887,10 @@ member's card and no host hop.
   owner takes it only from a household holding a live admin seat while
   delegation is on, only for a household its own roster already names,
   and the card is self-certifying — the admin carries it, it cannot forge
-  it. The owner seats that household lazily and lists it for everyone;
+  it. A card that arrives before the roster seat it belongs to (both
+  frames waited in the admin's outbox while the owner was away, in no
+  fixed order) waits for that seat like any card. The owner seats that
+  household lazily and lists it for everyone;
   from then on the newcomer talks to the owner itself. One ~0.8 KiB frame
   to one household when the card arrives or changes, repeated every 6 h
   while the owner still does not list it — at most 4 times per card `rev`;

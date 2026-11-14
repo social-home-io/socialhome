@@ -2214,6 +2214,8 @@ def _owner_with_admin() -> tuple[World, dict, dict]:
     o.member(admin, m)
     o.spaces.delegated.add(SPACE)
     o.seats.admins[SPACE] = {admin["id"]}
+    # The owner's roster: exactly these two hold a member's seat.
+    o.writers.everyone = False
     o.writers.writers[SPACE] = {admin["id"], m["id"]}
     o.mailboxes.add_box(GFS)
     o.mailboxes.rev = 1
@@ -2671,3 +2673,39 @@ async def test_the_directory_never_drops_a_roster_row():
     )
     assert x["id"] in m.spaces.rows[SPACE]
     assert "card" not in m.spaces.doc(SPACE, x["id"])
+
+
+async def test_a_passed_on_card_that_beats_its_roster_seat_waits_on_the_owner():
+    """The admin seated X while the owner was away; back online the owner
+    gets the admin's two queued frames in either order. The card first:
+    it is kept until the roster names X, then listed for everyone — not
+    dropped (the admin passes it on again only hours later)."""
+    o, admin, m = _owner_with_admin()
+    o.writers.everyone = False
+    o.writers.writers[SPACE] = {admin["id"]}
+    del o.spaces.rows[SPACE][m["id"]]  # the roster does not know m yet
+    await o.card_from(admin, _card(admin))
+    o.fed.directories.clear()
+    card_m = _card(m)
+    await _forward(o, admin, card_m)
+    assert m["id"] not in o.spaces.rows[SPACE]
+    assert o.seated == [] and o.fed.directories == []
+    # The roster gossip arrives: m's seat goes live.
+    await _seat_live(o, m)
+    assert o.spaces.doc(SPACE, m["id"])["card"] == card_m.to_wire()
+    assert o.spaces.doc(SPACE, m["id"])["gfs_reached"] is True
+    assert o.seated == [m["id"]]
+    (delta,) = o.fed.to(admin["id"])
+    assert _ids(delta) == {m["id"]}
+    assert "wait" not in o.spaces.doc(SPACE, admin["id"])
+
+
+async def test_a_waiting_passed_on_card_is_taken_only_from_a_delegated_admin():
+    o, admin, m = _owner_with_admin()
+    o.writers.everyone = False
+    o.writers.writers[SPACE] = {admin["id"]}
+    del o.spaces.rows[SPACE][m["id"]]
+    await _forward(o, admin, _card(m))
+    o.spaces.delegated.clear()  # delegation went off meanwhile
+    await _seat_live(o, m)
+    assert "card" not in o.spaces.doc(SPACE, m["id"])

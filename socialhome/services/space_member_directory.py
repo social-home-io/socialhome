@@ -941,6 +941,27 @@ class SpaceMemberDirectory:
         seat — and its lazy seat is made."""
         if not await self._writers.may_receive(space_id, instance_id):
             return  # not a member's seat (a follower's): the card keeps waiting
+        if await self._owns(space_id):
+            # On the owner the waiting cards are the ones its delegated
+            # admins passed on (:meth:`_on_forwarded_card`).
+            for (space, admin), doc in sorted((await self._rows()).items()):
+                wait = doc.get("wait")
+                if space != space_id or not isinstance(wait, dict):
+                    continue
+                entry = wait.pop(instance_id, None)
+                if not isinstance(entry, dict):
+                    continue
+                if not wait:
+                    doc.pop("wait", None)
+                await self._put(space_id, admin, doc)
+                if not await self._is_delegated_admin(space_id, admin):
+                    continue
+                try:
+                    card = parse_card(entry.get("card"))
+                except InvalidMemberCard:
+                    continue
+                await self._take_forwarded(space_id, card, entry.get("reached") is True)
+            return
         acting = await self.hosts_of(space_id)
         adopted = False
         for issuer in acting:
@@ -1198,8 +1219,28 @@ class SpaceMemberDirectory:
         inst = card.instance_id
         if inst in (self._instance_id, sender):
             return
-        if inst not in await self._spaces.list_member_instances(space_id):
+        flag = payload.get("gfs_reached") is True
+        if not await self._writers.may_receive(space_id, inst):
+            # The admin's roster gossip for that household is still on its
+            # way (both frames waited in its outbox while we were away, in
+            # no fixed order): the card waits for the seat on the admin's
+            # row, like any card (:meth:`_adopt`).
+            doc = await self._doc(space_id, sender)
+            wait = doc.get("wait")
+            wait = dict(wait) if isinstance(wait, dict) else {}
+            wait[inst] = {"card": card.to_wire(), "reached": flag}
+            doc["wait"] = dict(list(wait.items())[-WAIT_MAX:])
+            await self._put(space_id, sender, doc)
             return
+        await self._take_forwarded(space_id, card, flag)
+
+    async def _take_forwarded(
+        self, space_id: str, card: MemberCard, flag: bool
+    ) -> None:
+        """Owner side: list a card a delegated admin passed on, for a
+        household our roster holds a member's seat for."""
+        inst = card.instance_id
+        await self._spaces.add_space_instance(space_id, inst)
         changed = await self._store(space_id, card)
         # We hold no seat of our own for it (the admin seated it): a lazy
         # one from its card, as a member makes from a directory card — its
@@ -1208,7 +1249,6 @@ class SpaceMemberDirectory:
         # Whether that household reaches the space only through a GFS is
         # the seating admin's to say (ours is a card-only seat of it).
         doc = await self._doc(space_id, inst)
-        flag = payload.get("gfs_reached") is True
         if "card" in doc and (doc.get("gfs_reached") is True) != flag:
             if flag:
                 doc["gfs_reached"] = True
