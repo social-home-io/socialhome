@@ -49,7 +49,7 @@ from socialhome.domain.relay_media_frame import (
     RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES,
     RELAY_MEDIA_MAX_BODY_BYTES,
     RELAY_MEDIA_MAX_PLAINTEXT_BYTES,
-    SPACE_TEXT_MAX_BYTES_BEHIND_GFS,
+    SPACE_PAGE_STATE_MAX_BYTES,
     SYNC_CHUNK_WRAP_ALLOWANCE_BYTES,
     parse_relay_media_body,
 )
@@ -61,9 +61,11 @@ from socialhome.federation.gfs_relay_transport import (
     RELAY_MAX_ENVELOPE_BYTES,
     GfsRelayTransport,
     MailboxTarget,
+    relay_envelope_fits,
 )
 from socialhome.federation.invite_bootstrap import EnvelopeRelayThrottled
 from socialhome.federation.media_envelope import (
+    RELAY_EVENT_FRAME_MIN_PAYLOAD_BYTES,
     RELAY_FRAME_EVENT_TYPES,
     build_media_envelope,
     encode_media_body,
@@ -71,7 +73,9 @@ from socialhome.federation.media_envelope import (
 from socialhome.federation.relay_event_body import (
     EVENT_BODY_SUITE_FIELD,
     EVENT_BODY_SUITE_JSON,
+    EVENT_BODY_SUITE_SYNC_CHUNK_RAW,
     UnsupportedEventBodySuite,
+    pack_event_body,
 )
 from socialhome.federation.transport import FederationTransport
 from socialhome.infrastructure.event_bus import EventBus
@@ -905,18 +909,18 @@ async def test_a_framed_event_from_a_paired_peer_with_the_opt_in_is_refused():
 
 async def test_a_text_no_frame_carries_is_refused_before_it_is_stored():
     w = _world()
-    fits = "x" * (SPACE_TEXT_MAX_BYTES_BEHIND_GFS - 64)
-    await w.host.svc.check_space_text_size(SPACE, "Title", fits)
+    limit = SPACE_PAGE_STATE_MAX_BYTES
+    check = w.host.svc.check_space_text_size
+    fits = "x" * (limit - 64)
+    await check(SPACE, "Title", fits, limit=limit)
     with pytest.raises(SpaceItemTooLargeError) as refused:
-        await w.host.svc.check_space_text_size(SPACE, "Title", fits + "x" * 128)
+        await check(SPACE, "Title", fits + "x" * 128, limit=limit)
     assert refused.value.status == 413
     assert refused.value.code == "SPACE_ITEM_TOO_LARGE"
-    assert refused.value.params == {"max_kb": SPACE_TEXT_MAX_BYTES_BEHIND_GFS // 1024}
+    assert refused.value.params == {"max_kb": limit // 1024}
     # Measured as it travels: JSON escapes count.
     with pytest.raises(SpaceItemTooLargeError):
-        await w.host.svc.check_space_text_size(
-            SPACE, '"' * (SPACE_TEXT_MAX_BYTES_BEHIND_GFS // 2 + 64)
-        )
+        await check(SPACE, '"' * (limit // 2 + 64), limit=limit)
 
 
 async def test_a_space_without_a_household_behind_a_gfs_keeps_its_limits():
@@ -925,5 +929,111 @@ async def test_a_space_without_a_household_behind_a_gfs_keeps_its_limits():
     w.host.repo._instances[w.member.id] = dataclasses.replace(
         row, source=InstanceSource.MANUAL
     )
-    await w.host.svc.check_space_text_size(SPACE, "x" * 900_000)
-    await w.host.svc.check_space_text_size("another-space", "x" * 900_000)
+    assert not await w.host.svc.space_has_gfs_only_household(SPACE)
+    await w.host.svc.check_space_text_size(SPACE, "x" * 900_000, limit=1000)
+    await w.host.svc.check_space_text_size("another-space", "x" * 900_000, limit=1000)
+
+
+# ── The body suite is bound to the event type ─────────────────────────────
+
+
+async def test_a_framed_page_claiming_the_raw_sync_layout_is_refused():
+    w = _world()
+    chunk = _chunk_of(_payload_of(200 * 1024))
+    _suite, raw = pack_event_body(CHUNK, orjson.dumps(chunk).decode())
+    row = w.host.repo._instances[w.member.id]
+    header, sealed = build_media_envelope(
+        encoder=w.host.svc._encoder,
+        session_key=w.host.km.decrypt(row.key_self_to_remote),
+        from_instance=w.host.id,
+        to_instance=w.member.id,
+        sig_suite=row.sig_suite or w.host.svc._encoder.sig_suite,
+        event_type=PAGE,
+        payload={EVENT_BODY_SUITE_FIELD: EVENT_BODY_SUITE_SYNC_CHUNK_RAW},
+        raw_chunk=raw,
+        space_id=SPACE,
+    )
+    body = seal_relay_media(
+        to_instance=w.member.id,
+        media_body=encode_media_body(header, sealed),
+        recipient_keywrap_pub=w.member.kw.public_key,
+    )
+    with pytest.raises(UnsupportedEventBodySuite, match="is not for"):
+        await w.member.inbound.handle_frame(
+            {"type": "envelope_media", "body": body}, gfs_url=GFS
+        )
+    assert w.member.received == []
+
+
+# ── The sender's smallest and largest frames, with a hybrid signature ─────
+
+#: What a hybrid signature set adds to a signed envelope (an ML-DSA-65
+#: signature, base64url) next to the Ed25519 one.
+_MLDSA65_SIG_CHARS = 4412
+
+
+def _with_hybrid_signature(envelope: dict) -> dict:
+    return {
+        **envelope,
+        "signatures": {**envelope["signatures"], "mldsa65": "p" * _MLDSA65_SIG_CHARS},
+    }
+
+
+@pytest.mark.parametrize("hybrid", [False, True], ids=["ed25519", "hybrid"])
+async def test_the_smallest_raw_sync_chunk_a_sender_frames_is_over_the_floor(hybrid):
+    """The sender frames only what no JSON envelope takes; raw, a chunk is a
+    quarter smaller than its JSON. The smallest one that is framed must
+    still clear the receiver's floor, or a legitimate chunk is refused."""
+    w = _world()
+    row = w.host.repo._instances[w.member.id]
+
+    def _framed(record_bytes: int) -> bytes | None:
+        chunk = _chunk_of({"content": "x" * record_bytes})
+        envelope = w.host.svc._seal_envelope(
+            row, event_type=CHUNK, payload=chunk, space_id=SPACE
+        )
+        if hybrid:
+            envelope = _with_hybrid_signature(envelope)
+        if relay_envelope_fits(envelope):
+            return None
+        return pack_event_body(CHUNK, orjson.dumps(chunk).decode())[1]
+
+    low, high = 64 * 1024, 200 * 1024
+    assert _framed(low) is None and _framed(high) is not None
+    while high - low > 16:
+        mid = (low + high) // 2
+        low, high = (mid, high) if _framed(mid) is None else (low, mid)
+    smallest = _framed(high)
+    assert smallest is not None
+    assert len(smallest) >= RELAY_EVENT_FRAME_MIN_PAYLOAD_BYTES + 4 * 1024
+
+
+@pytest.mark.parametrize("event_type", [PAGE, CHUNK], ids=["page", "sync-chunk"])
+def test_a_frame_at_the_exact_bound_fits_with_a_hybrid_outer_signature(event_type):
+    """The 8 KiB allowance next to the payload covers the signed header
+    with a hybrid signature set, the framing and the AEAD overhead."""
+    gfs = _Gfs()
+    house, peer = _House(gfs), _House(gfs)
+    size = (
+        RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES
+        if event_type is CHUNK
+        else RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES
+    )
+    header, sealed = build_media_envelope(
+        encoder=house.svc._encoder,
+        session_key=os.urandom(32),
+        from_instance=house.id,
+        to_instance=peer.id,
+        sig_suite=house.svc._encoder.sig_suite,
+        event_type=event_type,
+        payload={EVENT_BODY_SUITE_FIELD: EVENT_BODY_SUITE_SYNC_CHUNK_RAW},
+        raw_chunk=os.urandom(size),
+        space_id=SPACE,
+    )
+    body = seal_relay_media(
+        to_instance=peer.id,
+        media_body=encode_media_body(_with_hybrid_signature(header), sealed),
+        recipient_keywrap_pub=peer.kw.public_key,
+    )
+    assert len(body) <= RELAY_MEDIA_MAX_BODY_BYTES
+    parse_relay_media_body(body)

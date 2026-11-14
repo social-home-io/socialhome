@@ -102,7 +102,6 @@ from ..domain.outbox import DeliveryOutcome, OutboxEntry, OutboxPayload, RetryAf
 from ..domain.relay_media_frame import (
     RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES,
     RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES,
-    SPACE_TEXT_MAX_BYTES_BEHIND_GFS,
 )
 from ..domain.space import parse_have_seq
 from ..infrastructure.event_bus import EventBus
@@ -194,9 +193,10 @@ from .relay_event_body import (
 )
 
 
-def _dumps_text(text: str) -> bytes:
-    """*text* as it travels inside an event payload: a JSON string."""
-    return _orjson.dumps(text)
+def space_text_bytes(*texts: str | None) -> int:
+    """The bytes *texts* take inside an event payload or a sync record: each
+    as a JSON string (escapes count)."""
+    return sum(len(_orjson.dumps(t)) for t in texts if t)
 
 
 def _dumps(obj: dict) -> str:
@@ -793,12 +793,9 @@ class FederationService:
                 repo=self._federation_repo,
                 unpaired_recently=self._unpaired_recently,
             ),
+            after_decrypt=self._open_framed_event,
         )
         steps.insert(1, make_check_event_types(RELAY_FRAME_EVENT_TYPES))
-        decrypt_at = next(
-            i for i, step in enumerate(steps) if step.__name__ == "decrypt_and_parse"
-        )
-        steps.insert(decrypt_at + 1, self._open_framed_event)
         return InboundPipeline(steps)
 
     async def _open_framed_event(self, ctx: InboundContext) -> None:
@@ -830,7 +827,9 @@ class FederationService:
             # lane (with the media leg's budgets) for ordinary events.
             raise ValueError("framed event is small enough for a JSON envelope")
         # How the bytes carry the payload: named, required, never guessed.
-        payload = unpack_event_body(meta.get(EVENT_BODY_SUITE_FIELD), raw)
+        payload = unpack_event_body(
+            meta.get(EVENT_BODY_SUITE_FIELD), raw, event_type=event.event_type
+        )
         ctx.event = replace(event, payload=payload)
 
     def _build_rtc_inbound_pipeline(self):
@@ -849,8 +848,12 @@ class FederationService:
             )
         )
 
-    def _common_pipeline_steps(self, *, lookup_step):
-        """Return the shared step list for both inbox and RTC pipelines."""
+    def _common_pipeline_steps(self, *, lookup_step, after_decrypt=None):
+        """Return the shared step list for both inbox and RTC pipelines.
+        ``after_decrypt``: one extra step run straight after the payload
+        decrypt, before every step that judges the payload (the relay media
+        pipeline opens a framed event's bytes there)."""
+        opened = [after_decrypt] if after_decrypt is not None else []
         steps = [
             make_parse_json(loads=_loads),
             # v_91: ``to_instance = "*"`` only inside a multi-recipient
@@ -885,6 +888,7 @@ class FederationService:
                 encoder=self._encoder,
                 loads=_loads,
             ),
+            *opened,
             # An approved trust-relay pair confirms on the requester's first
             # envelope that verified AND decrypted — proof it completed the
             # pairing on its side. Before dispatch, so the handler already
@@ -2517,28 +2521,40 @@ class FederationService:
             instance=instance, header_dict=header, payload_bytes=sealed
         )
 
-    async def check_space_text_size(self, space_id: str, *texts: str | None) -> None:
-        """Refuse (:class:`SpaceItemTooLargeError`, 413) a text a person is
-        about to save into *space_id* — a page's title and content, a
-        description — that could not reach a member household behind a GFS:
-        over :data:`SPACE_TEXT_MAX_BYTES_BEHIND_GFS` as JSON while the space
-        has a household reached only through one. For a local action to
-        call BEFORE it stores anything, so nothing is shown as saved that
-        can never arrive. A space without such a household keeps the
-        limits of local federation."""
-        size = sum(len(_dumps_text(t)) for t in texts if t)
-        if size <= SPACE_TEXT_MAX_BYTES_BEHIND_GFS:
+    async def space_has_gfs_only_household(self, space_id: str) -> bool:
+        """Whether a member household of *space_id* is reached only through
+        a GFS (a ``space_session`` row) — the households the size rule for
+        large items protects."""
+        return any(
+            row.source is InstanceSource.SPACE_SESSION
+            for row in await self._federation_repo.list_instances_in_space(space_id)
+        )
+
+    async def check_space_text_size(
+        self, space_id: str, *texts: str | None, limit: int
+    ) -> None:
+        """Refuse (:class:`SpaceItemTooLargeError`, 413) text a person is
+        about to save into *space_id* that could not reach a member
+        household behind a GFS: over *limit* as JSON — the bound for its kind
+        of item (``SPACE_PAGE_STATE_MAX_BYTES`` for a page's whole state,
+        ``SPACE_CALENDAR_TEXT_MAX_BYTES``, ``SPACE_CONFIG_TEXT_MAX_BYTES``:
+        the frame's bound less the hard cap of everything that rides with
+        the text) — while the space has such a household. For a local
+        action to call AFTER it authorized the actor and BEFORE it stores
+        anything, so nothing is shown as saved that can never arrive. A
+        space without such a household keeps the limits of local
+        federation."""
+        size = space_text_bytes(*texts)
+        if size <= limit or not await self.space_has_gfs_only_household(space_id):
             return
-        for row in await self._federation_repo.list_instances_in_space(space_id):
-            if row.source is InstanceSource.SPACE_SESSION:
-                log.warning(
-                    "space %s: a %d-byte text is refused — a member household "
-                    "behind a GFS takes at most %d bytes",
-                    space_id,
-                    size,
-                    SPACE_TEXT_MAX_BYTES_BEHIND_GFS,
-                )
-                raise SpaceItemTooLargeError(SPACE_TEXT_MAX_BYTES_BEHIND_GFS)
+        log.warning(
+            "space %s: a %d-byte text is refused — a member household behind "
+            "a GFS takes at most %d bytes of it",
+            space_id,
+            size,
+            limit,
+        )
+        raise SpaceItemTooLargeError(limit)
 
     async def send_event_once(
         self,

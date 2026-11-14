@@ -9,6 +9,8 @@ hit directly. Uses the fake aiolibdatachannel module installed by
 from __future__ import annotations
 
 import asyncio
+import logging
+from types import SimpleNamespace
 
 import aiolibdatachannel as rtc
 
@@ -102,9 +104,6 @@ async def test_peer_send_leaves_a_frame_over_the_channel_limit_to_the_inbox(capl
     """An envelope larger than one DataChannel message (a long page) is
     never handed to the channel — it failed there with an ERROR from the
     library and a WARNING from us before the inbox carried it anyway."""
-    import logging
-    from types import SimpleNamespace
-
     _events, signaling = await _collect_signals()
     peer = _RtcPeer(instance_id="p", signaling=signaling, inbound=_noop_inbound)
     sent: list[bytes] = []

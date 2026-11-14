@@ -51,16 +51,16 @@ def test_a_sync_chunk_rides_with_its_ciphertext_raw_and_comes_back_identical():
     assert suite == EVENT_BODY_SUITE_SYNC_CHUNK_RAW
     # No base64: about a quarter smaller than the JSON form.
     assert len(raw) < len(as_json) * 0.76
-    assert unpack_event_body(suite, raw) == payload
+    assert unpack_event_body(suite, raw, event_type=CHUNK) == payload
     # Byte-identical chunk envelope: its own signature covers the JSON form.
-    assert unpack_event_body(suite, raw)["chunk"] == payload["chunk"]
+    assert unpack_event_body(suite, raw, event_type=CHUNK)["chunk"] == payload["chunk"]
 
 
 def test_any_other_event_is_its_json():
     payload = {"space_id": "s", "content": "x" * 1000}
     suite, raw = pack_event_body(PAGE, orjson.dumps(payload).decode())
     assert suite == EVENT_BODY_SUITE_JSON and raw == orjson.dumps(payload)
-    assert unpack_event_body(suite, raw) == payload
+    assert unpack_event_body(suite, raw, event_type=CHUNK) == payload
 
 
 @pytest.mark.parametrize(
@@ -80,20 +80,20 @@ def test_any_other_event_is_its_json():
 def test_a_chunk_that_would_not_round_trip_stays_json(payload):
     suite, raw = pack_event_body(CHUNK, orjson.dumps(payload).decode())
     assert suite == EVENT_BODY_SUITE_JSON
-    assert unpack_event_body(suite, raw) == payload
+    assert unpack_event_body(suite, raw, event_type=CHUNK) == payload
 
 
 def test_an_unknown_suite_is_refused_never_defaulted():
     assert SUPPORTED_EVENT_BODY_SUITES == {"json", "sync-chunk-raw-v1"}
     for suite in (None, "", "json-v2", 1):
         with pytest.raises(UnsupportedEventBodySuite):
-            unpack_event_body(suite, b"{}")
+            unpack_event_body(suite, b"{}", event_type=PAGE)
 
 
 @pytest.mark.parametrize("raw", [b"not json", b"[1]", b'"text"'])
 def test_json_bytes_that_are_no_object_are_refused(raw):
     with pytest.raises(ValueError, match="not JSON|not a JSON object"):
-        unpack_event_body(EVENT_BODY_SUITE_JSON, raw)
+        unpack_event_body(EVENT_BODY_SUITE_JSON, raw, event_type=PAGE)
 
 
 def _raw_frame(meta: object, body: bytes = b"") -> bytes:
@@ -130,4 +130,42 @@ def _raw_frame(meta: object, body: bytes = b"") -> bytes:
 )
 def test_a_malformed_raw_sync_chunk_is_refused(raw):
     with pytest.raises(ValueError):
-        unpack_event_body(EVENT_BODY_SUITE_SYNC_CHUNK_RAW, raw)
+        unpack_event_body(EVENT_BODY_SUITE_SYNC_CHUNK_RAW, raw, event_type=CHUNK)
+
+
+def _nested(depth: int) -> object:
+    value: object = "x"
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def test_a_raw_sync_chunk_nested_too_deep_is_refused_as_a_value_error():
+    """``orjson.dumps`` raises a ``TypeError`` past 254 levels: the refusal
+    must still be the ``ValueError`` every caller (and the relay's junk
+    budget) counts."""
+    meta = b'{"payload":{"chunk":{"encrypted_payload":"","x":'
+    meta += b"[" * 300 + b"1" + b"]" * 300 + b'}},"parts":[1]}'
+    raw = len(meta).to_bytes(4, "big") + meta + b"a"
+    with pytest.raises(ValueError):
+        unpack_event_body(EVENT_BODY_SUITE_SYNC_CHUNK_RAW, raw, event_type=CHUNK)
+
+
+def test_a_chunk_nested_too_deep_to_pack_stays_json():
+    envelope = '{"encrypted_payload":"QUJD","x":' + "[" * 252 + "1" + "]" * 252 + "}"
+    payload_json = orjson.dumps({"sync_id": "s", "chunk": envelope}).decode()
+    # Sanity: the chunk string itself is what the packer would re-serialise.
+    suite, raw = pack_event_body(CHUNK, payload_json)
+    assert suite == EVENT_BODY_SUITE_JSON and raw == payload_json.encode()
+
+
+def test_the_raw_suite_is_for_sync_chunks_only():
+    """The suite is bound to the event type: a page (or anything else)
+    claiming the raw layout is refused before its bytes are read."""
+    payload = _chunk_payload(1000)
+    suite, raw = pack_event_body(CHUNK, orjson.dumps(payload).decode())
+    assert suite == EVENT_BODY_SUITE_SYNC_CHUNK_RAW
+    assert unpack_event_body(suite, raw, event_type=CHUNK) == payload
+    for other in (PAGE, FederationEventType.SPACE_ROSTER_SNAPSHOT):
+        with pytest.raises(UnsupportedEventBodySuite):
+            unpack_event_body(suite, raw, event_type=other)

@@ -74,13 +74,21 @@ def pack_event_body(
     return EVENT_BODY_SUITE_JSON, payload_json.encode("utf-8")
 
 
-def unpack_event_body(suite: object, raw: bytes) -> dict:
-    """The payload a frame's bytes carry under *suite*. Raises
-    :class:`UnsupportedEventBodySuite` for an unknown suite (no default) and
-    :class:`ValueError` for bytes that are not a payload object."""
+def unpack_event_body(
+    suite: object, raw: bytes, *, event_type: FederationEventType
+) -> dict:
+    """The payload of an *event_type* event that a frame's bytes carry
+    under *suite*. Raises :class:`UnsupportedEventBodySuite` for an unknown
+    suite (no default) or one that is not for this event type (the raw
+    layout is a sync chunk's alone), and :class:`ValueError` for bytes that
+    are not a payload object."""
     if suite not in SUPPORTED_EVENT_BODY_SUITES:
         raise UnsupportedEventBodySuite(f"unknown event_body_suite: {suite!r}")
     if suite == EVENT_BODY_SUITE_SYNC_CHUNK_RAW:
+        if event_type is not FederationEventType.SPACE_SYNC_CHUNK:
+            raise UnsupportedEventBodySuite(
+                f"event_body_suite {suite!r} is not for {event_type.value!r}"
+            )
         return _unpack_sync_chunk(raw)
     try:
         payload = orjson.loads(raw)
@@ -106,17 +114,19 @@ def _pack_sync_chunk(payload_json: str) -> bytes | None:
         return None
     if not isinstance(envelope, dict) or len(parts) > _MAX_PARTS:
         return None
-    meta = orjson.dumps(
-        {
-            "payload": {**payload, _CHUNK: {**envelope, _SEALED: ""}},
-            "parts": [len(p) for p in parts],
-        }
-    )
-    packed = _LEN.pack(len(meta)) + meta + b"".join(parts)
     try:
+        meta = orjson.dumps(
+            {
+                "payload": {**payload, _CHUNK: {**envelope, _SEALED: ""}},
+                "parts": [len(p) for p in parts],
+            }
+        )
+        packed = _LEN.pack(len(meta)) + meta + b"".join(parts)
         if _unpack_sync_chunk(packed) != payload:
             return None
-    except ValueError:
+    except ValueError, TypeError:
+        # Not serialisable the same way (orjson refuses nesting past 254
+        # levels with a TypeError): the JSON suite carries it as it is.
         return None
     return packed
 
@@ -152,10 +162,14 @@ def _unpack_sync_chunk(raw: bytes) -> dict:
     for size in sizes:
         parts.append(b64url_encode(raw[at : at + size]))
         at += size
-    return {
-        **payload,
-        _CHUNK: orjson.dumps({**envelope, _SEALED: ":".join(parts)}).decode(),
-    }
+    try:
+        chunk = orjson.dumps({**envelope, _SEALED: ":".join(parts)}).decode()
+    except TypeError as exc:
+        # orjson refuses nesting past 254 levels with a TypeError; a refusal
+        # here is a ValueError like every other (the relay's junk budget
+        # counts those).
+        raise ValueError("framed sync chunk cannot be re-serialised") from exc
+    return {**payload, _CHUNK: chunk}
 
 
 __all__ = [

@@ -42,6 +42,8 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+import orjson
+
 from ..domain.events import (
     PageConflictEmitted,
     PageCreated,
@@ -101,6 +103,21 @@ REFUSALS_PER_SENDER_PER_MINUTE = 30
 #: Refusals that carry no page state: the proposer keeps (or restores) its
 #: own copy, and nothing of the page is revealed to the sender.
 _STATELESS_REFUSALS = frozenset({"rate_limited", "archived"})
+
+#: Refusal reason: the version (its text plus the open sides) would be too
+#: large to reach a member household behind a GFS.
+TOO_LARGE = "too_large"
+
+
+def page_state_bytes(
+    title: str | None, content: str | None, sides: Sequence[PageConflictSide] = ()
+) -> int:
+    """The bytes of a page's state as it travels (JSON strings): its title
+    and content plus the title and content of every open conflict side —
+    what one event and one sync record must carry together."""
+    texts = [title, content, *(t for s in sides for t in (s.title, s.content))]
+    return sum(len(orjson.dumps(t)) for t in texts if t)
+
 
 #: The largest ``seq`` anyone commits or accepts (a JSON-safe integer).
 MAX_SEQ = 2**53
@@ -666,12 +683,14 @@ class PageConflictService(BusPublisherMixin):
         "_own_instance_id",
         "_pages",
         "_spaces",
+        "_state_limit",
     )
 
     def __init__(
         self, page_repo: AbstractPageRepo, *, bus: EventBus | None = None
     ) -> None:
         self._pages = page_repo
+        self._state_limit: Callable[[str], Awaitable[int | None]] | None = None
         self._bus = bus
         self._locks: weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock] = (
             weakref.WeakValueDictionary()
@@ -927,11 +946,44 @@ class PageConflictService(BusPublisherMixin):
                 proposer_instance=proposer_instance,
             )
 
+    def attach_state_limit(
+        self, limit: Callable[[str], Awaitable[int | None]] | None
+    ) -> None:
+        """Wire ``limit(space_id)``: the most bytes a page's state (its
+        text plus every open side's, :func:`page_state_bytes`) may have in
+        that space, or ``None`` for no limit. The host of a space with a
+        household behind a GFS refuses (``too_large``) a proposal that
+        would grow a page past it — its own people's and a member
+        household's alike — so no version is sequenced that such a
+        household could never be sent."""
+        self._state_limit = limit
+
+    async def _over_state_limit(
+        self,
+        space_id: str,
+        title: str,
+        content: str,
+        sides: Sequence[PageConflictSide],
+        *,
+        was: int = 0,
+    ) -> bool:
+        """Whether that state passes the space's limit — and is larger than
+        it *was* (an edit that shrinks an old oversize page is welcome)."""
+        if self._state_limit is None:
+            return False
+        limit = await self._state_limit(space_id)
+        if limit is None:
+            return False
+        size = page_state_bytes(title, content, sides)
+        return size > limit and size > was
+
     async def _sequence_create(
         self, space_id: str, page_id: str, proposal: Proposal
     ) -> SequenceResult:
         if proposal.base_seq not in (None, 0) or not proposal.created_by:
             return SequenceResult(SequenceOutcome.REFUSED, "gone")
+        if await self._over_state_limit(space_id, proposal.title, proposal.content, ()):
+            return SequenceResult(SequenceOutcome.REFUSED, TOO_LARGE)
         now = _now()
         page = Page(
             id=page_id,
@@ -958,6 +1010,7 @@ class PageConflictService(BusPublisherMixin):
     ) -> SequenceResult:
         previous = page
         state = _HostState(page=page, sides=await self.sides(space_id, page.id))
+        sides_before = list(state.sides)
         before_sides = [s.hash for s in state.sides]
         cur_hash = await asyncio.to_thread(_page_hash, page)
         ph = await asyncio.to_thread(
@@ -1050,6 +1103,23 @@ class PageConflictService(BusPublisherMixin):
         changed_sides = [s.hash for s in state.sides] != before_sides
         if not changed_body and not changed_sides and not unsequenced and not regressed:
             return SequenceResult(SequenceOutcome.DUPLICATE, None, page)
+        # The state this would commit — the body and every side kept open —
+        # must still reach a household behind a GFS (one frame, live and by
+        # sync). A version that would not is refused, never sequenced: the
+        # proposer is told (``too_large``), nobody is left behind silently.
+        next_title, next_content = (
+            (new_body[0], new_body[1])
+            if changed_body and new_body is not None
+            else (page.title, page.content)
+        )
+        if await self._over_state_limit(
+            space_id,
+            next_title,
+            next_content,
+            state.sides,
+            was=page_state_bytes(page.title, page.content, sides_before),
+        ):
+            return SequenceResult(SequenceOutcome.REFUSED, TOO_LARGE, page)
         now = _now()
         history = [self._version_of(page, side, space_id) for side in state.retired]
         updated = replace(page, seq=page.seq + 1, updated_at=now)
@@ -1898,6 +1968,11 @@ class PageConflictService(BusPublisherMixin):
         anything else restores the host's version (or, without state, our
         own draft base)."""
         reason = seq_.reason or "access"
+        if reason == TOO_LARGE and page.pending_base_seq is not None:
+            # The host could not take our draft (it would not reach a
+            # household behind a GFS). The words go to the page's history
+            # before the host's version comes back on top — never lost.
+            await self._remember_page(page, space_id)
         if reason == "gone":
             await self._pages.save(
                 replace(page, pending_base_seq=None), space_id=space_id

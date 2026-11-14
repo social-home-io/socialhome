@@ -2684,12 +2684,6 @@ class SpaceService(
         (:meth:`on_tier_change`). A public space never touches a GFS.
         """
         space = await self._require_space(space_id)
-        if self._text_size_check is not None:
-            await self._text_size_check(
-                space_id,
-                description,
-                about_markdown if isinstance(about_markdown, str) else None,
-            )
         if _games_list_only(
             space,
             features,
@@ -2714,6 +2708,14 @@ class SpaceService(
             await self._require_content_authority(space, actor_username)
         else:
             await self._require_admin_or_owner(space, actor_username)
+        if self._text_size_check is not None:
+            # After the authorization above: a person without the right
+            # must not learn from a 413 what households the space has.
+            await self._text_size_check(
+                space_id,
+                description,
+                about_markdown if isinstance(about_markdown, str) else None,
+            )
 
         if category is not None and category not in SPACE_CATEGORIES:
             raise ValueError(f"unknown category {category!r}")

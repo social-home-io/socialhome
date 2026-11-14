@@ -116,10 +116,51 @@ RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES: int = (
     RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES - SYNC_CHUNK_WRAP_ALLOWANCE_BYTES
 )
 
-#: The largest text (as JSON) a person may save into a space that has a
-#: household reached only through a GFS — a page's title and content, a
-#: description: the live bound less room for the event's other fields.
-SPACE_TEXT_MAX_BYTES_BEHIND_GFS: int = RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES - 8 * 1024
+#: The largest §25.6 record (as JSON) a stream to a requester behind a GFS
+#: carries: with the chunk's wrapper it fills the frame. The same number as
+#: the live bound, by construction.
+SYNC_RECORD_MAX_BYTES_BEHIND_GFS: int = RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES
+
+# What a person may save into a space that has a household reached only
+# through a GFS. The text is not all that has to fit: the event and — the
+# larger of the two — the item's sync record carry lists and fields next to
+# it. Each limit is the bound less the HARD CAP of everything that can ride
+# with that kind of item, so nothing that passed can become undeliverable
+# when a list grows later (``tests/federation/test_space_text_limits.py``
+# builds each worst case).
+
+#: Next to a page's text in its record and event: the files' descriptors
+#: (``MAX_PAGE_DESCRIPTOR_ENTRIES`` = 64, ~330 bytes each with their hash),
+#: the wrapper of up to three conflict sides, the cover, ids and stamps.
+SPACE_PAGE_RESERVE_BYTES: int = 40 * 1024
+
+#: A page's STATE — its title and content plus the title and content of
+#: every open conflict side (a side is a whole other version, and its text
+#: is not capped on its own): what the host keeps and every member mirrors.
+#: 475,038 bytes (~463 KiB).
+SPACE_PAGE_STATE_MAX_BYTES: int = (
+    RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES - SPACE_PAGE_RESERVE_BYTES
+)
+
+#: Next to a calendar event's text in its record: up to
+#: ``MAX_RSVPS_PER_EVENT`` (500) RSVPs (~200 bytes each), the cover's file
+#: descriptors, the recurrence rule, ids and stamps.
+SPACE_CALENDAR_RESERVE_BYTES: int = 128 * 1024
+
+#: A space calendar event's summary + description. 384,926 bytes (~375 KiB).
+SPACE_CALENDAR_TEXT_MAX_BYTES: int = (
+    RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES - SPACE_CALENDAR_RESERVE_BYTES
+)
+
+#: Next to a space's description / about text in ``SPACE_CONFIG_CHANGED``:
+#: the relay variant's cover and icon (64 + 16 KiB, base64'ed), the feature
+#: set and the other settings.
+SPACE_CONFIG_RESERVE_BYTES: int = 128 * 1024
+
+#: A space's description + about text. 384,926 bytes (~375 KiB).
+SPACE_CONFIG_TEXT_MAX_BYTES: int = (
+    RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES - SPACE_CONFIG_RESERVE_BYTES
+)
 
 #: The GFS capability (signed ``/gfs/info`` block) that says it carries these
 #: bodies, and the hello ``accepts`` label a household lists so the GFS
@@ -180,9 +221,15 @@ __all__ = [
     "RELAY_MEDIA_SIZE_BUCKETS",
     "RELAY_MEDIA_TO_CHARS",
     "RELAY_MEDIA_VERSION_1",
-    "SPACE_TEXT_MAX_BYTES_BEHIND_GFS",
+    "SPACE_CALENDAR_RESERVE_BYTES",
+    "SPACE_CALENDAR_TEXT_MAX_BYTES",
+    "SPACE_CONFIG_RESERVE_BYTES",
+    "SPACE_CONFIG_TEXT_MAX_BYTES",
+    "SPACE_PAGE_RESERVE_BYTES",
+    "SPACE_PAGE_STATE_MAX_BYTES",
     "SUPPORTED_RELAY_MEDIA_VERSIONS",
     "SYNC_CHUNK_WRAP_ALLOWANCE_BYTES",
+    "SYNC_RECORD_MAX_BYTES_BEHIND_GFS",
     "VALID_SEALED_LENGTHS",
     "InvalidRelayMediaBody",
     "build_relay_media_body",

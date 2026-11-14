@@ -36,7 +36,7 @@ import builtins
 import contextlib
 import pathlib
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -86,6 +86,7 @@ from .page_conflict_service import (
     NoActiveConflictError,
     PageConflictStaleError,
     PageMode,
+    page_state_bytes,
 )
 from .space_moderation_service import ApplyResult, item_payload_snapshot
 from .space_service import SpaceService
@@ -195,6 +196,38 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         (:meth:`FederationService.check_space_text_size`) — called before
         anything is stored, so nothing shows as saved that cannot arrive."""
         self._text_size_check = check
+
+    async def _require_size(
+        self,
+        space_id: str,
+        title: str | None,
+        content: str | None,
+        *,
+        page_id: str | None = None,
+        resolves: Sequence[str] = (),
+        was: Page | None = None,
+    ) -> None:
+        """413 for a page whose state — this text plus every conflict side
+        left open — would not reach a household behind a GFS. A save that
+        makes an old oversize page no larger is let through."""
+        if self._text_size_check is None:
+            return
+        sides = (
+            [
+                s
+                for s in await self.conflict_sides(space_id, page_id)
+                if s.hash not in resolves
+            ]
+            if page_id is not None
+            else []
+        )
+        if was is not None and page_state_bytes(
+            title, content, sides
+        ) <= page_state_bytes(was.title, was.content, sides):
+            return
+        await self._text_size_check(
+            space_id, title, content, *(t for s in sides for t in (s.title, s.content))
+        )
 
     def attach_files_reach_host(self, check: Callable[[str], Awaitable[bool]]) -> None:
         """Wire ``check(space_id)``: whether a page's new files can reach
@@ -445,9 +478,6 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         item minted. The page stays the actor's."""
         clean_title = _title(title)
         body = strip_signed_media_in_markdown(content or "") or ""
-        if self._text_size_check is not None:
-            # Reviewed or not: before the gate, the queue and the store.
-            await self._text_size_check(space_id, clean_title, body)
         cover = optional_local_media_ref(
             strip_signature_query(cover_image_url) if cover_image_url else None,
             field="cover_image_url",
@@ -484,6 +514,10 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
                     "cover_image_url": cover,
                 },
             )
+        # After the gate (a person without the right learns nothing about
+        # the space from a 413) and before anything is stored. A reviewed
+        # create was queued above — the queue has its own, smaller cap.
+        await self._require_size(space_id, clean_title, body)
         page = new_page(
             title=clean_title,
             content=body,
@@ -558,14 +592,6 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         )
         if "content" in patch:
             patch["content"] = mapped_content
-        if self._text_size_check is not None and (
-            "content" in patch or "title" in patch
-        ):
-            await self._text_size_check(
-                space_id,
-                patch.get("title", page.title),
-                patch.get("content", page.content),
-            )
         if "cover_image_url" in patch:
             patch["cover_image_url"] = mapped_cover
         _require_page_file_cap(
@@ -641,6 +667,18 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
                 hashes = [s.hash for s in await self.conflict_sides(space_id, page_id)]
                 if set(sides_seen) != set(hashes):
                     raise PageConflictStaleError(hashes)
+            # EVERY local write passes here (an edit, a resolution, an
+            # approved item's replay), already authorized: the page as it
+            # would be — its text and the sides left open — must still reach
+            # a household behind a GFS.
+            await self._require_size(
+                space_id,
+                patch.get("title", current.title),
+                patch.get("content", current.content),
+                page_id=page_id,
+                resolves=resolves or (),
+                was=current,
+            )
 
         mode = await self._mode(space_id)
         if mode is PageMode.HOST:

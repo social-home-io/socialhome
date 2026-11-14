@@ -2794,10 +2794,12 @@ async def test_an_items_files_go_only_where_the_item_goes(
 
 async def test_a_page_or_description_too_large_for_a_gfs_member_is_refused(mesh):
     """A space with a household behind a GFS: a page, a calendar description
-    or a space description over what one relay frame (and the sync chunk
-    that re-delivers it) carries answers 413 ``SPACE_ITEM_TOO_LARGE`` and
-    nothing is stored — reviewed or not. Without such a household the same
-    text is taken, as on any local path."""
+    or a space description over what one relay frame (and the sync record
+    that re-delivers it) carries answers 413 ``SPACE_ITEM_TOO_LARGE`` with
+    the limit for that kind of item, and nothing is stored. Without such a
+    household the same text is taken, as on any local path. A person
+    without the right gets the 403 they always got — never a 413 that says
+    what households the space has."""
     a, h = mesh["A"], mesh["H"]
     big = secrets.token_hex(260 * 1024)  # 520 KiB of text
     event = {
@@ -2812,34 +2814,43 @@ async def test_a_page_or_description_too_large_for_a_gfs_member_is_refused(mesh)
         json={"title": "Big", "content": big},
         headers=h.headers,
     )
-    assert r.status in (200, 201), await r.text()
+    assert r.status in (200, 201)
     host_pages = await _pages(h)
-    pages_before = await _pages(a)
-    queue_before = await _queue_rows(a)
     for house in (a, h):
         peer = h if house is a else a
         await house.db.enqueue(
             "UPDATE remote_instances SET source='space_session' WHERE id=?",
             (peer.iid,),
         )
-    for house, method, path, body in (
-        (a, "post", f"/api/spaces/{SID}/pages", {"title": "Big", "content": big}),
-        (h, "post", f"/api/spaces/{SID}/pages", {"title": "Big", "content": big}),
-        (h, "post", f"/api/spaces/{SID}/calendar/events", event),
-        (h, "patch", f"/api/spaces/{SID}", {"description": big}),
+    for method, path, body, max_kb in (
+        ("post", f"/api/spaces/{SID}/pages", {"title": "Big", "content": big}, 463),
+        ("post", f"/api/spaces/{SID}/calendar/events", event, 375),
+        ("patch", f"/api/spaces/{SID}", {"description": big}, 375),
     ):
-        r = await getattr(house.tc, method)(path, json=body, headers=house.headers)
-        assert r.status == 413, (path, await r.text())
+        r = await getattr(h.tc, method)(path, json=body, headers=h.headers)
+        assert r.status == 413, path
         error = (await r.json())["error"]
-        assert error["code"] == "SPACE_ITEM_TOO_LARGE"
-        assert error["params"]["max_kb"] == 495
-    assert await _pages(a) == pages_before
-    assert await _queue_rows(a) == queue_before
+        assert error["code"] == "SPACE_ITEM_TOO_LARGE", path
+        assert error["params"] == {"max_kb": max_kb}, path
     assert await _pages(h) == host_pages
+    # A's person is a plain member: not allowed to change the space.
+    r = await a.tc.patch(
+        f"/api/spaces/{SID}", json={"description": big}, headers=a.headers
+    )
+    assert r.status == 403
+    # …and its pages are reviewed: the queue's own (smaller) cap answers.
+    queue_before = await _queue_rows(a)
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/pages",
+        json={"title": "Big", "content": big},
+        headers=a.headers,
+    )
+    assert r.status == 413
+    assert await _queue_rows(a) == queue_before
     # A page under the bound is taken as ever.
     r = await h.tc.post(
         f"/api/spaces/{SID}/pages",
         json={"title": "Fits", "content": secrets.token_hex(120 * 1024)},
         headers=h.headers,
     )
-    assert r.status in (200, 201), await r.text()
+    assert r.status in (200, 201)

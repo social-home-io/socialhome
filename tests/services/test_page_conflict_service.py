@@ -38,6 +38,7 @@ from socialhome.services.page_conflict_service import (
     canonical_extras,
     canonical_from_wire,
     diff3_merge,
+    page_state_bytes,
     proposal_from_wire,
     side_to_wire,
 )
@@ -1103,3 +1104,109 @@ async def test_mark_sent_ignores_a_changed_draft(member):
     await env.svc.mark_sent(SID, env.pid, version_hash("T", "one"))
     base = await env.repo.get_draft_base(env.pid, space_id=SID)
     assert base.sent == version_hash("T", "one")
+
+
+# ─── Host: no version a household behind a GFS could never be sent ───────
+
+
+def _limited(env, limit: int | None = 2000) -> None:
+    async def _limit(space_id: str) -> int | None:
+        return limit if space_id == SID else None
+
+    env.svc.attach_state_limit(_limit)
+
+
+async def test_the_host_refuses_a_proposal_that_would_be_too_large(env):
+    """A member household's edit reaches the host by its inbox — its own
+    413 never fired (it holds no row behind a GFS). The host applies the
+    same rule before it sequences: refused ``too_large``, the proposer is
+    told, nothing is stored or broadcast."""
+    _limited(env)
+    before = await _page(env)
+    r = await _propose(env, "x" * 3000)
+    assert (r.outcome, r.reason) == (SequenceOutcome.REFUSED, "too_large")
+    assert await _page(env) == before
+    to, _event_type, payload = env.fed.sent[-1]
+    assert to == "iid-a" and payload["sequenced"]["outcome"] == "refused"
+    assert payload["sequenced"]["reason"] == "too_large"
+    assert not env.bus.of(PageUpdated)
+    # Under the limit: sequenced as ever.
+    ok = await _propose(env, "x" * 1000)
+    assert ok.outcome is SequenceOutcome.APPLIED
+
+
+async def test_the_host_refuses_a_proposed_create_that_is_too_large(env):
+    _limited(env)
+    r = await env.svc.sequence(
+        space_id=SID,
+        page_id="pg-big",
+        proposal=Proposal(
+            title="N",
+            content="x" * 3000,
+            actor_user_id="u-a",
+            base_seq=0,
+            created_by="u-a",
+        ),
+        proposer_instance="iid-a",
+    )
+    assert (r.outcome, r.reason) == (SequenceOutcome.REFUSED, "too_large")
+    assert await env.repo.get_space_page("pg-big", space_id=SID) is None
+    assert env.fed.sent[-1][2]["sequenced"]["reason"] == "too_large"
+
+
+async def test_a_side_that_would_not_fit_beside_the_page_is_refused(env):
+    """A conflict side is a whole other version, and its text is not capped
+    on its own: the page plus the sides left open is what one event and one
+    sync record must carry, so a side that would push that past the limit
+    is refused instead of kept — a list never grows a page out of reach."""
+    _limited(env)
+    await _propose(env, "a" * 1200, by="u-a")
+    r = await _propose(env, "b" * 1200, by="u-b", proposer="iid-b")
+    assert (r.outcome, r.reason) == (SequenceOutcome.REFUSED, "too_large")
+    assert await _sides(env) == []
+    assert (await _page(env)).content == "a" * 1200
+    # A smaller concurrent edit still becomes a side.
+    kept = await _propose(env, "c" * 300, by="u-c", proposer="iid-c")
+    assert kept.outcome is SequenceOutcome.SIDE
+    assert page_state_bytes("T", "a" * 1200, await env.svc.sides(SID, env.pid)) <= 2000
+
+
+async def test_an_edit_that_shrinks_an_old_oversize_page_is_taken(env):
+    await _propose(env, "x" * 5000)  # stored before the space had the limit
+    _limited(env)
+    grow = await _propose(env, "x" * 5001, base_seq=2, base="x" * 5000)
+    assert (grow.outcome, grow.reason) == (SequenceOutcome.REFUSED, "too_large")
+    shrink = await _propose(env, "x" * 4000, base_seq=2, base="x" * 5000)
+    assert shrink.outcome is SequenceOutcome.APPLIED
+
+
+async def test_a_space_without_the_limit_sequences_any_size(env):
+    _limited(env, None)
+    assert (await _propose(env, "x" * 50_000)).outcome is SequenceOutcome.APPLIED
+
+
+async def test_a_too_large_refusal_keeps_the_authors_words_in_history(member):
+    """The author's household saved the draft (its own check had nothing to
+    refuse). When the host answers ``too_large`` the page shows the host's
+    version again — and the draft's words are in the page's history, never
+    lost; the SPA is told through ``PageProposalSettled``."""
+    env = member
+    await _draft(env, "my long words")
+    page = await _page(env)
+    refused = Sequenced(
+        proposer_instance="me",
+        proposal_hash=version_hash("T", "my long words"),
+        outcome="refused",
+        reason="too_large",
+    )
+    await env.svc.mirror(
+        space_id=SID,
+        page_id=env.pid,
+        version=_version(page, BASE, 1, sequenced=refused),
+    )
+    page = await _page(env)
+    assert (page.content, page.pending_base_seq) == (BASE, None)
+    history = await env.repo.list_versions(env.pid, space_id=SID)
+    assert "my long words" in [v.content for v in history]
+    settled = env.bus.of(PageProposalSettled)[-1]
+    assert (settled.outcome, settled.reason) == ("refused", "too_large")
