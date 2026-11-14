@@ -1064,6 +1064,9 @@ def _build_gfs_mailboxes(
         identity_pk=identity.identity_public_key,
         keywrap_pk=identity.keywrap_public_key,
         keywrap_sig=identity.keywrap_sig,
+        # Who acts as a space's host: its owner, or the delegated admin
+        # that invited us (``federation/host_equivalence.py``).
+        remote_member_repo=repos.space_remote_member,
     )
     return mailboxes, directory
 
@@ -1856,7 +1859,14 @@ def _wire_federation_stack(
     sync_windows = SyncWindows(space_repo)
     exporters: dict = {
         "bans": BansExporter(space_repo),
-        "members": MembersExporter(space_repo, profile_picture_repo),
+        "members": MembersExporter(
+            space_repo,
+            profile_picture_repo,
+            # A household that does not own the space never streams the
+            # owner household's member rows (they come from the owner).
+            own_instance_id=federation_service.own_instance_id,
+            remote_member_repo=space_remote_member_repo,
+        ),
         "member_pictures": MemberPicturesExporter(
             space_repo,
             profile_picture_repo,
@@ -5291,8 +5301,10 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         host_hop = HostHop(
             own_instance_id=real_instance_id,
-            card_of=member_directory.card_of,
-            host_of=member_directory.host_of,
+            card_of=member_directory.usable_card_of,
+            hosts_of=member_directory.hop_hosts,
+            acting_hosts=member_directory.hosts_of,
+            serves=member_directory.serves,
             keywrap_private_key=identity.keywrap_private_key,
             keywrap_public_key=identity.keywrap_public_key,
             ask_host=member_directory.ask_host,

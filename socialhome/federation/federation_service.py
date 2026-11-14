@@ -2302,6 +2302,11 @@ class FederationService:
             return DeliveryResult(
                 instance_id=to_instance_id, ok=False, error="unknown_instance"
             )
+        log.info(
+            "fed send: %s for %s queued behind its pending outbox row(s)",
+            event_type.value,
+            to_instance_id,
+        )
         if self._outbox_wake is not None:
             self._outbox_wake()
         return DeliveryResult(
@@ -2309,6 +2314,7 @@ class FederationService:
             ok=False,
             error=DELIVERY_ERROR_QUEUED,
             via="gfs_relay",
+            held_in_order=True,
         )
 
     async def send_event_once(
@@ -2728,6 +2734,11 @@ class FederationService:
                 # or it has none): the space's host is the one hop. Never
                 # past a row it still has queued: the same rule as a live
                 # send (:meth:`_must_queue_behind`), in the seat's turn.
+                log.info(
+                    "member mesh: no mailbox of %s we reach for %s — through the host",
+                    to_instance_id,
+                    event_type.value,
+                )
                 async with self._seat_turn(instance, event_type):
                     if await self._must_queue_behind(instance, event_type):
                         return await self._queue_behind(

@@ -10,18 +10,22 @@ from datetime import UTC, datetime
 
 import pytest
 
+from socialhome.crypto import ed25519_public_key
 from socialhome.domain.space import (
     JoinMode,
     Space,
     SpaceFeatures,
+    SpaceMember,
     SpaceRole,
     SpaceType,
 )
 from socialhome.federation.host_equivalence import (
     acts_as_host,
     is_trusted_inviter,
+    serves_as_host,
     touches_owner_household,
 )
+from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
@@ -184,3 +188,71 @@ async def test_the_trust_is_bound_to_the_proven_epoch(env):
     assert await _check(env, ADMIN) == (False, False)
     await spaces.set_invited_by_epoch("sp-1", 1)
     assert await _check(env, ADMIN) == (True, True)
+
+
+# ── serves_as_host: the sending side ─────────────────────────────────────
+
+SEED = b"\x51" * 32
+
+
+@pytest.fixture
+async def admin_side(db):
+    """A delegated admin household's copy: delegation on, a local admin,
+    the seed of the pinned authority key."""
+    spaces = SqliteSpaceRepo(db, key_manager=KeyManager(b"\x0c" * 32))
+    await spaces.save(
+        Space(
+            id="sp-2",
+            name="S",
+            owner_instance_id=OWNER,
+            owner_username="owner",
+            identity_public_key=ed25519_public_key(SEED).hex(),
+            config_sequence=1,
+            features=SpaceFeatures(delegated_admin_authority=True),
+            space_type=SpaceType.PRIVATE,
+            join_mode=JoinMode.INVITE_ONLY,
+        )
+    )
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES('u', 'u-1', 'U')"
+    )
+    await spaces.save_member(
+        SpaceMember(
+            space_id="sp-2",
+            user_id="u-1",
+            role=SpaceRole.ADMIN.value,
+            joined_at="2026-11-13T00:00:00+00:00",
+        )
+    )
+    await spaces.set_space_seed("sp-2", SEED)
+    return spaces
+
+
+async def _serves(spaces, own: str = ADMIN) -> bool:
+    return await serves_as_host(spaces, await spaces.get("sp-2"), own_instance_id=own)
+
+
+async def test_the_owner_and_a_delegated_admin_serve(admin_side):
+    assert await _serves(admin_side, OWNER) is True
+    assert await _serves(admin_side) is True
+    assert await serves_as_host(admin_side, None, own_instance_id=ADMIN) is False
+    assert await _serves(admin_side, "") is False
+
+
+async def test_no_serving_without_delegation(admin_side):
+    space = await admin_side.get("sp-2")
+    await admin_side.save(replace(space, features=SpaceFeatures()))
+    assert await _serves(admin_side) is False
+    assert await _serves(admin_side, OWNER) is True
+
+
+async def test_no_serving_without_a_local_admin_seat(admin_side):
+    await admin_side.set_role("sp-2", "u-1", SpaceRole.MODERATOR.value)
+    assert await _serves(admin_side) is False
+
+
+async def test_no_serving_without_the_seed_of_the_pinned_key(admin_side, db):
+    await admin_side.set_space_seed("sp-2", b"\x09" * 32)  # a retired key's
+    assert await _serves(admin_side) is False
+    await db.enqueue("UPDATE spaces SET identity_private_key=NULL WHERE id='sp-2'")
+    assert await _serves(admin_side) is False

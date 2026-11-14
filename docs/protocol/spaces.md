@@ -2283,7 +2283,18 @@ be the invitee's only way into the space:
   `SPACE_MEMBER_UNBANNED`, `SPACE_REMOTE_MEMBER_REMOVED`,
   `SPACE_ADMIN_PROPOSAL_UPDATED` mirrors and `SPACE_ADMIN_KEY_SHARE` (the
   seed must still be the private half of the pinned key) apply, and the host
-  exemption of the space-writer gate covers it.
+  exemption of the space-writer gate covers it;
+- its member directory (`SPACE_MAILBOX_DIRECTORY`) is taken like the
+  owner's, on its own version line, and it may be the middle of the host
+  hop — the invitee gives it its member card and its `dir_seq` echo too
+  (gfs-relay.md, "Who is the host"). Its directory never removes the owner
+  household.
+
+"The host" for content, sync, the member directory and the host hop
+always means this: the owner or the trusted inviting admin
+(`acts_as_host` / `acting_hosts`; `serves_as_host` on the sending side).
+A test scans those modules for comparisons with `owner_instance_id`
+(`tests/federation/test_host_notion_guard.py`).
 
 **Owner-only stays owner-only**: the owner-signed GFS list, `private_gfs`,
 the authority cert / `host_identity_pk`, the config

@@ -2671,3 +2671,42 @@ async def test_a_left_seat_is_announced_as_ended(handler):
     assert [(e.space_id, e.instance_id, e.user_id) for e in ended] == [
         ("sp-gossip", "inst-bye", "u-bye")
     ]
+
+
+async def test_the_last_seats_row_is_gone_before_the_seat_is_announced_ended(handler):
+    """Review round 3 (#1361): listeners of ``SpaceRemoteSeatEnded`` (the
+    member directory ends that household's lazy seat once no shared space
+    is left) must not still see its ``space_instances`` row."""
+    payload = {
+        "space_id": "sp-gossip",
+        "user_id": "u-bye",
+        "instance_id": "inst-bye",
+        "member_version": 4,
+    }
+    ev = _event("SPACE_MEMBER_LEFT", payload, from_instance="inst-bye")
+    handler.remote_members.apply_member_event = AsyncMock(return_value=True)
+    handler.remote_members.list_for_instance = AsyncMock(return_value=[])
+    handler.space_repo.get = AsyncMock(
+        return_value=SimpleNamespace(
+            id="sp-gossip", owner_instance_id="host-1", authority_key_epoch=0
+        )
+    )
+    order: list[str] = []
+    handler.space_repo.remove_space_instance = AsyncMock(
+        side_effect=lambda *_a: order.append("row dropped")
+    )
+    publish = handler.bus.publish
+
+    async def recording_publish(event):
+        if isinstance(event, SpaceRemoteSeatEnded):
+            order.append("seat ended")
+        return await publish(event)
+
+    handler.bus.publish = recording_publish
+    with patch.object(
+        PrivateSpaceInviteHandler,
+        "_verify_roster_gossip",
+        AsyncMock(return_value=("sp-gossip", payload, 0)),
+    ):
+        await handler.h._on_space_member_left(ev)
+    assert order == ["row dropped", "seat ended"]
