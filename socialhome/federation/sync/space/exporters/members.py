@@ -6,9 +6,13 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from .....domain.space import SpaceRole
+from ....host_equivalence import touches_owner_household
 
 if TYPE_CHECKING:
     from .....repositories.profile_picture_repo import AbstractProfilePictureRepo
+    from .....repositories.space_remote_member_repo import (
+        AbstractSpaceRemoteMemberRepo,
+    )
     from .....repositories.space_repo import AbstractSpaceRepo
     from ..exporter import ResourceExporter
 
@@ -23,22 +27,44 @@ class MembersExporter:
     could not be repaired — migration 0099) leaves the key out, which a
     receiver reads as "says nothing". Without a picture repo the blob
     state is unknown, so a ``null`` is never claimed.
+
+    The owner household's people (the owner seat, any seat its household
+    holds) are the OWNER's to stream: a household that does not own the
+    space — a delegated admin that synced with the owner holds those rows
+    too — leaves them out (``own_instance_id`` given). A receiver drops
+    them from anybody but the owner anyway, with a WARNING
+    (``SpaceSyncReceiver._spare_owner_people``) that an honest stream must
+    not trip.
     """
 
     resource = "members"
 
-    __slots__ = ("_pictures", "_repo")
+    __slots__ = ("_own_instance_id", "_pictures", "_repo", "_seats")
 
     def __init__(
         self,
         space_repo: AbstractSpaceRepo,
         profile_picture_repo: AbstractProfilePictureRepo | None = None,
+        *,
+        own_instance_id: str | None = None,
+        remote_member_repo: AbstractSpaceRemoteMemberRepo | None = None,
     ) -> None:
         self._repo = space_repo
         self._pictures = profile_picture_repo
+        self._own_instance_id = own_instance_id
+        self._seats = remote_member_repo
 
     async def list_records(self, space_id: str) -> list[dict[str, Any]]:
         members = await self._repo.list_members(space_id)
+        space = await self._repo.get(space_id) if self._own_instance_id else None
+        if space is not None and space.owner_instance_id != self._own_instance_id:
+            members = [
+                m
+                for m in members
+                if not await touches_owner_household(
+                    self._repo, self._seats, space, user_id=m.user_id
+                )
+            ]
         records = [asdict(m) for m in members]
         if not any(r["picture_hash"] is None for r in records):
             return records

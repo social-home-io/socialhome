@@ -670,6 +670,21 @@ async def test_a_live_send_with_nothing_queued_goes_live_and_paired_pay_no_read(
     assert s.outbox.rescheduled == []
 
 
+async def test_a_send_held_behind_a_pending_row_says_so():
+    """#1361: the ordering gate's result is told apart from a send that
+    failed — it is in the outbox in order (``held_in_order``), which a
+    caller with its own retry (the picture sync) must not take for a
+    failure."""
+    s = _Sender()
+    seat = await s.seat()
+    await s.outbox.enqueue(instance_id=seat, event_type=POST, payload_json="{}")
+    result = await s.svc.send_event(
+        to_instance_id=seat, event_type=POST, payload={"p": 1}, space_id=_SPACE
+    )
+    assert not result.ok and result.held_in_order is True
+    assert s.transport.per_recipient_ids() == []
+
+
 async def test_a_send_racing_a_slow_live_send_to_one_seat_queues_behind_it():
     """A create still in flight on a slow GFS, then a delete to the same
     seat: the delete must not go out live before the create fails and is
