@@ -100,6 +100,11 @@ _MAX_JOIN_REQUEST_ID_LEN = 128
 #: a malformed or hostile snapshot can cause.
 _MAX_ROSTER_SNAPSHOT_ENTRIES = 5000
 
+#: Most parts one roster send may have, and the longest ``snapshot_id`` —
+#: what the receiver tracks of a send in progress (one per space and host).
+_MAX_ROSTER_SNAPSHOT_PARTS = 512
+_MAX_SNAPSHOT_ID_LEN = 64
+
 #: Receive-side caps on pending private invitations holding a join snapshot
 #: (migration 0093 stores each one until the user answers): per issuing
 #: household, and per (space id, issuing household) — the latter sized for
@@ -236,6 +241,7 @@ class PrivateSpaceInviteHandler:
         "_own_instance_id",
         "_remote_locations",
         "_remote_members",
+        "_snapshot_parts",
         "_space_crypto",
         "_space_repo",
         "_space_service",
@@ -279,6 +285,11 @@ class PrivateSpaceInviteHandler:
         #: path (rotation, role-check, broadcast). Tests that don't
         #: exercise admin actions can omit it.
         self._space_service = space_service
+        #: A roster send in parts still arriving, per (space, host): its
+        #: ``(snapshot_id, parts, roster_version)`` and the parts applied.
+        self._snapshot_parts: dict[
+            tuple[str, str], tuple[tuple[str, int, int], set[int]]
+        ] = {}
         #: Optional — multi-admin approval workflow (v_16). Dispatches the
         #: ``propose`` / ``vote`` verbs and the ``SPACE_ADMIN_PROPOSAL_UPDATED``
         #: mirror. Wired post-construction like ``_space_service``.
@@ -2019,6 +2030,10 @@ class PrivateSpaceInviteHandler:
         # echoed on our next BEGIN to the host, it spares us the periodic
         # resend of what we hold. Only a snapshot from the host, every entry
         # of which verified — anything less, and the host keeps sending.
+        # A large roster comes in parts (``roster_snapshot_parts``): the
+        # version is noted only once EVERY part of one send was applied
+        # this way — a lost part, or one we could not verify, leaves nothing
+        # noted, and the host's next send heals it.
         roster_version = p.get("roster_version")
         if (
             from_host
@@ -2026,10 +2041,41 @@ class PrivateSpaceInviteHandler:
             and isinstance(roster_version, int)
             and not isinstance(roster_version, bool)
             and all(reason is None for reason in reasons)
+            and self._snapshot_complete(space_id, event.from_instance, p)
         ):
             self._space_service.note_roster_snapshot_applied(
                 space_id, event.from_instance, roster_version
             )
+
+    def _snapshot_complete(self, space_id: str, host: str, p: dict) -> bool:
+        """Whether the fully verified snapshot event *p* completes the
+        host's roster: a single event does; a part (``snapshot_id`` /
+        ``part`` / ``parts``) only when it is the last missing one of its
+        send. One send is tracked per (space, host); a part of another send
+        starts over. A malformed part completes nothing."""
+        if "parts" not in p and "part" not in p and "snapshot_id" not in p:
+            return True
+        snapshot_id, part, parts = p.get("snapshot_id"), p.get("part"), p.get("parts")
+        if (
+            not isinstance(snapshot_id, str)
+            or not 0 < len(snapshot_id) <= _MAX_SNAPSHOT_ID_LEN
+            or type(part) is not int
+            or type(parts) is not int
+            or not 0 <= part < parts <= _MAX_ROSTER_SNAPSHOT_PARTS
+            or type(p.get("roster_version")) is not int
+        ):
+            return False
+        key = (space_id, host)
+        tracked = self._snapshot_parts.get(key)
+        stamp = (snapshot_id, parts, p["roster_version"])
+        if tracked is None or tracked[0] != stamp:
+            tracked = (stamp, set())
+            self._snapshot_parts[key] = tracked
+        tracked[1].add(part)
+        if len(tracked[1]) < parts:
+            return False
+        del self._snapshot_parts[key]
+        return True
 
     @staticmethod
     def _check_snapshot_sigs_sync(

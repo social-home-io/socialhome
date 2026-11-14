@@ -451,7 +451,7 @@ ROSTER_SNAPSHOT_PART_BYTES: int = 96 * 1024
 def _roster_parts(entries: list[dict]) -> list[list[dict]]:
     """*entries* cut into parts of at most
     :data:`ROSTER_SNAPSHOT_PART_BYTES` (at least one entry each), in order.
-    A roster that fits is one part — the snapshot as it always was."""
+    A roster that fits is one part."""
     parts: list[list[dict]] = [[]]
     size = 0
     for entry in entries:
@@ -462,6 +462,46 @@ def _roster_parts(entries: list[dict]) -> list[list[dict]]:
         parts[-1].append(entry)
         size += entry_size
     return parts
+
+
+def roster_snapshot_parts(
+    space_id: str,
+    entries: list[dict],
+    *,
+    roster_version: int,
+    authority_cert: dict | None = None,
+    extras: dict | None = None,
+) -> list[dict]:
+    """The ``SPACE_ROSTER_SNAPSHOT`` payloads that carry *entries*.
+
+    A roster that fits one part is the event it always was. A larger one
+    goes in parts — each an ordinary snapshot event, small enough for a
+    JSON envelope on the GFS relay, whose entries are signed and merged one
+    by one — that say which send they belong to: ``snapshot_id`` (fresh per
+    send), ``part`` (0-based) and ``parts``. **Every** part carries the
+    version the roster is complete up to and the owner's authority cert, so
+    each can be verified on its own, in any order; a receiver records the
+    version only once it applied every part of one send
+    (``PrivateSpaceInviteHandler``) — a lost or unverifiable part leaves
+    nothing recorded and the host's next send heals it. *extras* (the
+    receiver's own credentials) ride the first part."""
+    cut = _roster_parts(entries)
+    snapshot_id = uuid.uuid4().hex
+    payloads: list[dict] = []
+    for index, part in enumerate(cut):
+        payload: dict = {
+            "space_id": space_id,
+            "entries": part,
+            "roster_version": roster_version,
+        }
+        if len(cut) > 1:
+            payload.update(snapshot_id=snapshot_id, part=index, parts=len(cut))
+        if authority_cert is not None:
+            payload["authority_cert"] = authority_cert
+        if index == 0 and extras:
+            payload.update(extras)
+        payloads.append(payload)
+    return payloads
 
 
 class SpaceService(
@@ -1854,49 +1894,11 @@ class SpaceService(
         )
         if not entries:
             return False
-        # A large roster goes in parts (each a snapshot event of its own:
-        # every entry is signed and merged on its own, so a receiver needs
-        # no change): none is too large for a household behind a GFS, whose
-        # relay takes ~191 KiB per JSON envelope. Only the last part says
-        # what the roster is complete up to — and only when every earlier
-        # part got out, so a lost part is sent again on the next tick.
-        *earlier, entries = _roster_parts(entries)
-        complete = True
-        for part in earlier:
-            try:
-                sent = await self._federation.send_with_mesh_fallback(
-                    to_instance_id=to_instance_id,
-                    event_type=FederationEventType.SPACE_ROSTER_SNAPSHOT,
-                    payload={"space_id": space.id, "entries": part},
-                    space_id=space.id,
-                )
-            except Exception:
-                log.exception(
-                    "roster-snapshot: send to %s failed for %s",
-                    to_instance_id,
-                    space.id,
-                )
-                return False
-            if not (
-                getattr(sent, "ok", True)
-                or getattr(sent, "error", None) == DELIVERY_ERROR_QUEUED
-            ):
-                complete = False
-        # The version this snapshot is complete up to — the member echoes it
-        # back on its next BEGIN (additive: an older receiver ignores it).
-        payload: dict = {"space_id": space.id, "entries": entries}
-        if complete:
-            payload["roster_version"] = current
-        # v_44 — the periodic heal also carries the owner's cert for the
-        # current authority key, so a household that missed the rotation
-        # bundle re-pins before verifying these (new-key-signed) entries.
-        # Additive: an older receiver ignores the field.
-        cert = owner_authority_cert_via(self._federation, space)
-        if cert is not None:
-            payload["authority_cert"] = cert
+        # Sent with the roster, to this one household: its own credentials.
+        extras: dict = {}
         if self._writer_certs is not None:
             if writer_cert is not None:
-                payload["writer_cert"] = writer_cert
+                extras["writer_cert"] = writer_cert
                 # v_50 — the epoch's writer group key too (a v_90 publisher of a
                 # publicly readable space).
                 try:
@@ -1911,27 +1913,44 @@ class SpaceService(
                     )
                     writer_key = None
                 if writer_key is not None:
-                    payload["writer_key"] = writer_key
+                    extras["writer_key"] = writer_key
             # v_51 — the recipient's private-space channel grant (readers
             # too, so not nested under the cert).
             grant = await self._writer_certs.channel_grant_for_peer(
                 space.id, to_instance_id
             )
             if grant is not None:
-                payload["gfs_channel"] = grant
-        try:
-            result = await self._federation.send_with_mesh_fallback(
-                to_instance_id=to_instance_id,
-                event_type=FederationEventType.SPACE_ROSTER_SNAPSHOT,
-                payload=payload,
-                space_id=space.id,
-            )
-        except Exception:
-            log.exception(
-                "roster-snapshot: send to %s failed for %s", to_instance_id, space.id
-            )
-            return False
-        return bool(getattr(result, "ok", True))
+                extras["gfs_channel"] = grant
+        payloads = roster_snapshot_parts(
+            space.id,
+            entries,
+            # The version this snapshot is complete up to — the member echoes
+            # it back on its next BEGIN once it applied every part.
+            roster_version=current,
+            # v_44 — the owner's cert for the current authority key, so a
+            # household that missed the rotation bundle re-pins before
+            # verifying these (new-key-signed) entries.
+            authority_cert=owner_authority_cert_via(self._federation, space),
+            extras=extras,
+        )
+        ok = True
+        for payload in payloads:
+            try:
+                result = await self._federation.send_with_mesh_fallback(
+                    to_instance_id=to_instance_id,
+                    event_type=FederationEventType.SPACE_ROSTER_SNAPSHOT,
+                    payload=payload,
+                    space_id=space.id,
+                )
+            except Exception:
+                log.exception(
+                    "roster-snapshot: send to %s failed for %s",
+                    to_instance_id,
+                    space.id,
+                )
+                return False
+            ok = ok and bool(getattr(result, "ok", True))
+        return ok
 
     async def roster_snapshot_entries(
         self,
