@@ -25,6 +25,7 @@ import pytest
 
 from socialhome.app import _redeliver_envelope
 from socialhome.crypto import (
+    b64url_encode,
     derive_instance_id,
     generate_identity_keypair,
     generate_x25519_keypair,
@@ -66,6 +67,11 @@ from socialhome.federation.media_envelope import (
     RELAY_FRAME_EVENT_TYPES,
     build_media_envelope,
     encode_media_body,
+)
+from socialhome.federation.relay_event_body import (
+    EVENT_BODY_SUITE_FIELD,
+    EVENT_BODY_SUITE_JSON,
+    UnsupportedEventBodySuite,
 )
 from socialhome.federation.transport import FederationTransport
 from socialhome.infrastructure.event_bus import EventBus
@@ -469,7 +475,7 @@ def _frame(sender: _House, to: _House, event_type, payload: dict, **meta) -> dic
         to_instance=to.id,
         sig_suite=row.sig_suite or sender.svc._encoder.sig_suite,
         event_type=event_type,
-        payload=meta,
+        payload={EVENT_BODY_SUITE_FIELD: EVENT_BODY_SUITE_JSON, **meta},
         raw_chunk=orjson.dumps(payload),
         space_id=SPACE,
     )
@@ -552,7 +558,7 @@ async def test_a_frame_whose_bytes_are_not_a_json_object_is_refused(raw):
         to_instance=w.member.id,
         sig_suite=row.sig_suite or w.host.svc._encoder.sig_suite,
         event_type=PAGE,
-        payload={},
+        payload={EVENT_BODY_SUITE_FIELD: EVENT_BODY_SUITE_JSON},
         raw_chunk=raw,
         space_id=SPACE,
     )
@@ -579,7 +585,7 @@ async def test_a_frame_whose_bytes_were_swapped_is_refused():
         to_instance=w.member.id,
         sig_suite=row.sig_suite or w.host.svc._encoder.sig_suite,
         event_type=PAGE,
-        payload={},
+        payload={EVENT_BODY_SUITE_FIELD: EVENT_BODY_SUITE_JSON},
         raw_chunk=orjson.dumps(_page(4)),
         space_id=SPACE,
     )
@@ -741,9 +747,10 @@ def _payload_of(size: int) -> dict:
 
 def _chunk_of(record: dict) -> dict:
     """The §25.6 chunk event that carries *record* as its one record, the
-    way ``ChunkBuilder`` builds it: the records JSON AES-GCM-sealed and
-    base64'ed inside a signed chunk envelope, serialised into the event."""
-    sealed = os.urandom(12) + orjson.dumps({"records": [record]}) + os.urandom(16)
+    way ``ChunkBuilder`` and ``encrypt_chunk`` build it: the records JSON
+    AES-GCM-sealed, ``b64url(nonce):b64url(ciphertext)`` inside a signed
+    chunk envelope, serialised into the event."""
+    ciphertext = orjson.dumps({"records": [record], "chunk_index": 3}) + os.urandom(16)
     envelope = {
         "sync_id": "s" * 32,
         "resource": "pages",
@@ -752,18 +759,24 @@ def _chunk_of(record: dict) -> dict:
         "seq_start": 0,
         "seq_end": 1,
         "is_last": False,
-        "encrypted_payload": base64.b64encode(sealed).decode(),
+        "encrypted_payload": b64url_encode(os.urandom(12))
+        + ":"
+        + b64url_encode(ciphertext),
         # A hybrid signature set: the larger of the two shapes.
         "signatures": {"ed25519": "s" * 88, "mldsa65": "p" * 4412},
     }
     return {"sync_id": "s" * 32, "chunk": orjson.dumps(envelope).decode()}
 
 
-async def test_a_payload_at_the_bound_goes_live_and_heals_by_sync():
-    """The live bound is derived from the frame's so that the same item
-    fits the sync chunk: the GFS drops the live frame (its media queue
-    keeps a frame one hour), the catch-up still brings the item."""
-    w = _world()
+@pytest.mark.parametrize("mailbox", [False, True], ids=["relay-seat", "mailbox"])
+async def test_a_payload_at_the_bound_goes_live_and_heals_by_sync(mailbox):
+    """ONE bound: the live bound is derived from the frame's so that the
+    same item fits the sync chunk. The GFS drops the live frame (its media
+    queue keeps a frame one hour); the catch-up still brings the item — its
+    record's ciphertext rides the frame raw, so the chunk costs only its
+    wrapper."""
+    w = _world(mailbox=mailbox)
+    assert RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES >= 500 * 1024
     page = _payload_of(RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES)
     assert (await w.send(w.host, w.member, PAGE, page)).ok
     w.gfs._queue.clear()  # accepted with a 202, then dropped by the GFS
@@ -771,12 +784,66 @@ async def test_a_payload_at_the_bound_goes_live_and_heals_by_sync():
     # The record of the same page, with the fields a record adds.
     record = {**page, "version_hash": "h" * 64, "updated_at": "t" * 32, "seq": 9}
     chunk = _chunk_of(record)
-    assert len(orjson.dumps(chunk)) <= RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES
+    # As JSON the chunk would not fit any frame; raw it does.
+    assert len(orjson.dumps(chunk)) > RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES
     result = await w.send(w.host, w.member, CHUNK, chunk)
     assert result.ok and result.via == "gfs_relay"
+    assert len(w.gfs.seen[-1][2]) <= RELAY_MEDIA_MAX_BODY_BYTES
     assert await w.gfs.deliver() == [{"status": "ok"}]
     [event] = w.member.received
     assert event.event_type is CHUNK and event.payload == chunk
+    assert event.media_bytes is None
+
+
+async def test_a_sync_chunk_to_a_paired_peer_is_not_touched():
+    """The raw layout exists inside a relay frame only: toward a paired
+    peer (DataChannel / inbox) the rule does not apply at all."""
+    w = _world()
+    row = dataclasses.replace(
+        w.host.repo._instances[w.member.id], source=InstanceSource.MANUAL
+    )
+    chunk = _chunk_of(_payload_of(300 * 1024))
+    envelope = w.host.svc._seal_envelope(
+        row, event_type=CHUNK, payload=chunk, space_id=SPACE
+    )
+    assert (
+        await w.host.svc.relay_event_frame(
+            row,
+            envelope,
+            event_type=CHUNK,
+            payload_json=lambda: orjson.dumps(chunk).decode(),
+            space_id=SPACE,
+        )
+        is None
+    )
+    assert w.gfs.seen == []
+
+
+async def test_a_framed_event_without_a_known_body_suite_is_refused():
+    w = _world()
+    for meta in ({EVENT_BODY_SUITE_FIELD: "json-v9"}, {EVENT_BODY_SUITE_FIELD: None}):
+        row = w.host.repo._instances[w.member.id]
+        header, sealed = build_media_envelope(
+            encoder=w.host.svc._encoder,
+            session_key=w.host.km.decrypt(row.key_self_to_remote),
+            from_instance=w.host.id,
+            to_instance=w.member.id,
+            sig_suite=row.sig_suite or w.host.svc._encoder.sig_suite,
+            event_type=PAGE,
+            payload=meta,
+            raw_chunk=orjson.dumps(_page(100)),
+            space_id=SPACE,
+        )
+        body = seal_relay_media(
+            to_instance=w.member.id,
+            media_body=encode_media_body(header, sealed),
+            recipient_keywrap_pub=w.member.kw.public_key,
+        )
+        with pytest.raises(UnsupportedEventBodySuite):
+            await w.member.inbound.handle_frame(
+                {"type": "envelope_media", "body": body}, gfs_url=GFS
+            )
+    assert w.member.received == []
 
 
 async def test_a_live_payload_over_the_bound_is_refused_though_a_frame_could_take_it(
@@ -809,10 +876,9 @@ def test_the_live_bound_is_derived_from_the_frame_bound():
         RELAY_MEDIA_MAX_PLAINTEXT_BYTES - RELAY_EVENT_FRAME_ALLOWANCE_BYTES
     )
     assert RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES == (
-        (RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES - SYNC_CHUNK_WRAP_ALLOWANCE_BYTES) * 3 // 4
+        RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES - SYNC_CHUNK_WRAP_ALLOWANCE_BYTES
     )
-    # A reviewed item (256 KiB cap) is well inside it.
-    assert RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES > 300 * 1024
+    assert RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES == 515_998  # ~503 KiB
 
 
 # ── Only a household behind a GFS frames events ───────────────────────────

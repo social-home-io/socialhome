@@ -441,6 +441,29 @@ def _require_link_publishable(space: Space) -> None:
     raise SpaceNotPublishableError()
 
 
+#: Entry bytes (as JSON) one ``SPACE_ROSTER_SNAPSHOT`` part carries: sealed
+#: and base64'ed it stays under the GFS relay's JSON envelope (~191 KiB), so
+#: a roster of any size reaches a household behind a GFS — about 190 seats a
+#: part.
+ROSTER_SNAPSHOT_PART_BYTES: int = 96 * 1024
+
+
+def _roster_parts(entries: list[dict]) -> list[list[dict]]:
+    """*entries* cut into parts of at most
+    :data:`ROSTER_SNAPSHOT_PART_BYTES` (at least one entry each), in order.
+    A roster that fits is one part — the snapshot as it always was."""
+    parts: list[list[dict]] = [[]]
+    size = 0
+    for entry in entries:
+        entry_size = len(orjson.dumps(entry))
+        if parts[-1] and size + entry_size > ROSTER_SNAPSHOT_PART_BYTES:
+            parts.append([])
+            size = 0
+        parts[-1].append(entry)
+        size += entry_size
+    return parts
+
+
 class SpaceService(
     MediaRefGuardedMixin, SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixin
 ):
@@ -1831,13 +1854,39 @@ class SpaceService(
         )
         if not entries:
             return False
+        # A large roster goes in parts (each a snapshot event of its own:
+        # every entry is signed and merged on its own, so a receiver needs
+        # no change): none is too large for a household behind a GFS, whose
+        # relay takes ~191 KiB per JSON envelope. Only the last part says
+        # what the roster is complete up to — and only when every earlier
+        # part got out, so a lost part is sent again on the next tick.
+        *earlier, entries = _roster_parts(entries)
+        complete = True
+        for part in earlier:
+            try:
+                sent = await self._federation.send_with_mesh_fallback(
+                    to_instance_id=to_instance_id,
+                    event_type=FederationEventType.SPACE_ROSTER_SNAPSHOT,
+                    payload={"space_id": space.id, "entries": part},
+                    space_id=space.id,
+                )
+            except Exception:
+                log.exception(
+                    "roster-snapshot: send to %s failed for %s",
+                    to_instance_id,
+                    space.id,
+                )
+                return False
+            if not (
+                getattr(sent, "ok", True)
+                or getattr(sent, "error", None) == DELIVERY_ERROR_QUEUED
+            ):
+                complete = False
         # The version this snapshot is complete up to — the member echoes it
         # back on its next BEGIN (additive: an older receiver ignores it).
-        payload: dict = {
-            "space_id": space.id,
-            "entries": entries,
-            "roster_version": current,
-        }
+        payload: dict = {"space_id": space.id, "entries": entries}
+        if complete:
+            payload["roster_version"] = current
         # v_44 — the periodic heal also carries the owner's cert for the
         # current authority key, so a household that missed the rotation
         # bundle re-pins before verifying these (new-key-signed) entries.

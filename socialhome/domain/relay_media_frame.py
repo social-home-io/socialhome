@@ -84,12 +84,13 @@ VALID_SEALED_LENGTHS: frozenset[int] = frozenset(
 # ── A space event in a frame: one bound, live and by sync ────────────────
 #
 # A space event too large for a JSON relay envelope rides one frame, its
-# payload JSON as the frame's bytes. The same item must also fit the §25.6
-# sync chunk that heals a lost frame (the GFS keeps a frame one hour, a JSON
-# envelope a day), and a chunk carries its record encrypted and base64'ed
-# (x 4/3) inside the ``SPACE_SYNC_CHUNK`` event that rides the very same
-# frame. So the bound of a live event is DERIVED from the frame's, and
-# whatever travels live also fits a sync chunk.
+# payload as the frame's bytes. The same item must also fit the §25.6 sync
+# chunk that heals a lost frame (the GFS keeps a frame one hour, a JSON
+# envelope a day). A framed ``SPACE_SYNC_CHUNK`` carries its record's
+# ciphertext RAW (``federation/relay_event_body.py`` — no base64), so a
+# chunk costs only its wrapper on top of the record. The bound of a live
+# event is DERIVED from the frame's: whatever travels live also fits a sync
+# chunk.
 
 #: Bytes a framed event needs beside its payload: the length field, the
 #: media-body magic and framing, the signed header (a hybrid signature
@@ -102,17 +103,17 @@ RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES: int = (
     RELAY_MEDIA_MAX_PLAINTEXT_BYTES - RELAY_EVENT_FRAME_ALLOWANCE_BYTES
 )
 
-#: What a sync chunk adds around its one record besides the x 4/3: the
-#: chunk envelope's fields and signatures, the ``records`` wrapper, the
-#: AEAD nonce and tag, and the fields a record has that the live event
-#: lacks.
+#: What a framed sync chunk adds around its one record: the chunk
+#: envelope's fields and signatures (a hybrid set included), the
+#: ``records`` wrapper, the AEAD nonce and tag, the raw layout's meta, and
+#: the fields a record has that the live event lacks.
 SYNC_CHUNK_WRAP_ALLOWANCE_BYTES: int = 16 * 1024
 
 #: The largest payload JSON of any OTHER framed event (a page, a pending
 #: item, a config change): it fits a sync chunk's record, so the catch-up
-#: can always re-deliver what went live. ~378 KiB.
+#: can always re-deliver what went live. 515,998 bytes (~503 KiB).
 RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES: int = (
-    (RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES - SYNC_CHUNK_WRAP_ALLOWANCE_BYTES) * 3 // 4
+    RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES - SYNC_CHUNK_WRAP_ALLOWANCE_BYTES
 )
 
 #: The largest text (as JSON) a person may save into a space that has a

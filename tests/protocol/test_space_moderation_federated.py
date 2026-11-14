@@ -2799,7 +2799,7 @@ async def test_a_page_or_description_too_large_for_a_gfs_member_is_refused(mesh)
     nothing is stored — reviewed or not. Without such a household the same
     text is taken, as on any local path."""
     a, h = mesh["A"], mesh["H"]
-    big = secrets.token_hex(200 * 1024)  # 400 KiB of text
+    big = secrets.token_hex(260 * 1024)  # 520 KiB of text
     event = {
         "summary": "Long",
         "start": "2027-04-01T10:00:00Z",
@@ -2832,7 +2832,7 @@ async def test_a_page_or_description_too_large_for_a_gfs_member_is_refused(mesh)
         assert r.status == 413, (path, await r.text())
         error = (await r.json())["error"]
         assert error["code"] == "SPACE_ITEM_TOO_LARGE"
-        assert error["params"]["max_kb"] > 300
+        assert error["params"]["max_kb"] == 495
     assert await _pages(a) == pages_before
     assert await _queue_rows(a) == queue_before
     assert await _pages(h) == host_pages

@@ -48,7 +48,7 @@ from ..crypto import (
     derive_instance_id,
 )
 from ..db import AsyncDatabase
-from ..domain.errors import SpaceItemTooLargeError, WrongTypeError
+from ..domain.errors import SpaceItemTooLargeError
 from ..domain.events import (
     ConnectionReachable,
     ConnectionUnreachable,
@@ -187,6 +187,11 @@ from .pairing_coordinator import PairingCoordinator
 from .pairing_gfs_reach import PairingGfsReach
 from .peer_pairing_client import PeerPairingClient
 from .pq_signer import PqSigner
+from .relay_event_body import (
+    EVENT_BODY_SUITE_FIELD,
+    pack_event_body,
+    unpack_event_body,
+)
 
 
 def _dumps_text(text: str) -> bytes:
@@ -812,7 +817,9 @@ class FederationService:
             # has its inbox for large events.
             raise ValueError("framed event from a household that is not behind a GFS")
         meta = event.payload if isinstance(event.payload, dict) else None
-        if meta is None or not set(meta) <= FRAME_BINDING_FIELDS:
+        if meta is None or not set(meta) <= FRAME_BINDING_FIELDS | {
+            EVENT_BODY_SUITE_FIELD
+        }:
             # Nothing rides next to the bytes: one place for the payload.
             raise ValueError("framed event metadata carries more than the binding")
         raw = self._open_frame_bytes(
@@ -822,12 +829,8 @@ class FederationService:
             # A frame is for what no JSON envelope carries — never a second
             # lane (with the media leg's budgets) for ordinary events.
             raise ValueError("framed event is small enough for a JSON envelope")
-        try:
-            payload = _loads(raw)
-        except Exception as exc:
-            raise ValueError("framed event payload is not JSON") from exc
-        if not isinstance(payload, dict):
-            raise WrongTypeError("framed event payload is not a JSON object")
+        # How the bytes carry the payload: named, required, never guessed.
+        payload = unpack_event_body(meta.get(EVENT_BODY_SUITE_FIELD), raw)
         ctx.event = replace(event, payload=payload)
 
     def _build_rtc_inbound_pipeline(self):
@@ -2463,9 +2466,10 @@ class FederationService:
                 exc_info=True,
             )
             return None
-        raw_payload = payload_json().encode("utf-8")
-        # A sync chunk may fill the frame; anything else must also fit the
-        # sync chunk that heals a lost frame (one bound, derived).
+        # A sync chunk rides with its record's ciphertext raw and may fill
+        # the frame; anything else must also fit the sync chunk that heals a
+        # lost frame (one bound, derived).
+        body_suite, raw_payload = pack_event_body(event_type, payload_json())
         limit = (
             RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES
             if event_type is FederationEventType.SPACE_SYNC_CHUNK
@@ -2496,8 +2500,9 @@ class FederationService:
             to_instance=instance.id,
             sig_suite=instance.sig_suite or self._encoder.sig_suite,
             event_type=event_type,
-            # The signed metadata holds only what binds the bytes.
-            payload={},
+            # The signed metadata holds only what binds the bytes and
+            # names how they carry the payload.
+            payload={EVENT_BODY_SUITE_FIELD: body_suite},
             raw_chunk=raw_payload,
             space_id=space_id,
             msg_id=envelope_dict["msg_id"],
