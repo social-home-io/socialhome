@@ -399,6 +399,13 @@ truth; the panel follows it.
   relay-seated members.
   Only **followers** (subscribers) may get a subset, decided per feature
   and written down there — never a member role.
+- **"Host" for content and sync means `acts_as_host`** — the owner or the
+  delegated admin household that invited this household
+  (`federation/host_equivalence.py`: `acts_as_host`, `acting_hosts`,
+  `serves_as_host`). A new host check uses those helpers, never a
+  comparison with `owner_instance_id`, unless the action is owner-only
+  (GFS list, config, dissolve, age gate) —
+  `tests/federation/test_host_notion_guard.py` lists the allowed ones.
 - GPS coordinates: truncate to 4 decimal places before any storage or
   transmission — `round(float(lat), 4)`, never raw device precision.
 - **People's locations are never shared by design.** A person's or a

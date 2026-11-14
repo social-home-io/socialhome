@@ -820,11 +820,99 @@ mailbox gate refuses a frame for a space its person is not seated in yet.
 
 **The member directory.** The host passes the cards on as
 `SPACE_MAILBOX_DIRECTORY {cards, removed, snapshot, part, parts, members,
-gfs_reached, dir_seq, base_seq}`
+gfs_reached, via_seated, dir_seq, base_seq}`
 (routing `space_id`, everything else encrypted), only to **writer-seat**
 member households at v_89 (`only_instances`), never to followers.
-Receivers take it from the space's host only (the §24.11 envelope is
-host-signed).
+Receivers take it only from a household that **acts as the space's host
+for them** (the §24.11 envelope is signed by it): the owner, or the
+delegated admin household that invited them — see "Who is the host" below.
+
+**Who is the host** (owner decision 2026-11-13). Everywhere in this
+section "the host" is the one notion of
+`federation/host_equivalence.py`: the owner household, and — on a
+household a delegated admin invited — that admin household, only while
+`delegated_admin_authority` is on, it holds a live admin seat and it
+proved the seed for the current authority epoch (`acts_as_host`,
+`acting_hosts`; see spaces.md, "The invitee's view of the inviting
+admin"). A household an admin seated may have no link of its own to the
+owner, and the owner may be offline: without this it got no directory, no
+member's card and no host hop.
+
+- **The delegated admin keeps a directory for the households that come to
+  it.** A household gives its card (and its `dir_seq` echo) to every
+  household acting as its host, owner first. A delegated admin
+  (`serves_as_host`: delegation on, a local admin seat, the seed of the
+  pinned key) answers those households — and only those — like the owner
+  does: a snapshot, then deltas of every card it holds (what the owner's
+  directory gave it, and the cards given to it directly). It adds no
+  trust: each receiver decides with `acts_as_host` on its own rows, so a
+  household the owner invited never takes an admin's directory.
+- **One version line per issuer.** A member keeps `dir_seq` on the row of
+  the household that sent it, so the owner's and the admin's directories
+  never mix versions, and remembers on each card who lists it (`by`).
+- **The roster decides, the directory only supplies cards.** A card is
+  keys and an address; who is a member is the member's OWN roster mirror's
+  to say. Every valid card from a household acting as host is kept and
+  every frame moves that issuer's `dir_seq` — but a card never creates,
+  keeps or removes a seat, a `space_instances` row or a delivery target:
+  - the card goes on its household's `space_instances` row, which the
+    roster creates and removes (a live seat). When the roster mirror holds
+    a live writer seat but no row yet (a seat learned from the join
+    snapshot or a sync), seat + card make the row. With no member's seat
+    — a follower's row does not count — the card waits on the issuer's row
+    (`wait`, the newest 100) and is taken the moment the seat goes live
+    (`SpaceRemoteSeatLive`; the sweep is the backstop). Past 100 waiting
+    cards per issuer the oldest is dropped although the version moves on:
+    that household's card comes again only with its next change or a
+    fresh snapshot (accepted: it takes a roster more than 100 member
+    households behind, which the roster's own catch-up repairs first);
+  - whether a card may be USED — a fan-out or mailbox target, a frame
+    taken from that household, the end of a host hop — is asked of the
+    roster at that moment: a live writer seat of that household
+    (`SpaceWriterHouseholds.may_receive`). A removal in the roster ends
+    use at once, whoever still lists the card, and ends the lazy seat
+    (the roster's handler drops the household's row before it announces
+    the ended seat; the directory never drops a row). The roster check is
+    skipped only for a household acting as host, and — while WE act as
+    host — for a household that gave us its card itself (a follower
+    seated by link holds no writer seat); a demoted admin stops at once;
+  - a `removed` (or a household missing from a whole directory) only
+    withdraws THAT issuer's listing of the card: the card goes when no
+    household acting as host lists it any more. So an admin that missed a
+    removal and still lists the household changes nothing (no seat → the
+    card waits), and a household the admin invites again after the owner
+    removed it is usable again as soon as its new seat is in the roster.
+- **The admin passes a newcomer's card on to the owner**:
+  `SPACE_MEMBER_CARD {space_id, forwarded: true, card, gfs_reached}`. The
+  owner takes it only from a household holding a live admin seat while
+  delegation is on, only for a household its own roster already names,
+  and the card is self-certifying — the admin carries it, it cannot forge
+  it. The owner seats that household lazily and lists it for everyone;
+  from then on the newcomer talks to the owner itself. One ~0.8 KiB frame
+  to one household when the card arrives or changes, repeated every 6 h
+  while the owner still does not list it — at most 4 times per card `rev`;
+  an owner's whole directory that still lacks the card starts the count
+  again (one more frame per such snapshot). Only in a space that has a
+  directory at all (some card carries a mailbox). An owner below this
+  build drops it (the card is not the sender's).
+- **When the trust ends** (delegation off, the admin demoted, a rotation
+  without a fresh proof) the member drops the admin's frames at once, its
+  mailbox gate stops counting a card only that admin listed, and the
+  admin's version line and the households only it listed go (on the
+  refused frame, else at the next sweep). The owner's directory is what
+  counts again.
+- **Not covered:** a household the OWNER invited learns a newcomer the
+  admin seated only from the owner (once the owner is back online and
+  lists it) — it does not take the admin's directory. The private-channel
+  grant re-send on "seated" stays the owner's (`private_gfs` is an
+  owner-only setting).
+- **Cost:** a household an admin invited gets each directory change
+  twice while both hosts reach it (2 × ~0.7 KiB per card change); every
+  other household is unchanged. A join through an admin: one snapshot
+  from the admin, one forwarded card, one delta from the owner to its N
+  writers (as for any join), one snapshot from the owner to the newcomer.
+  No version bump: a v_94 household below this build drops an admin's
+  directory ("not from the space's host") and a forwarded card.
 
 - **One version.** Every directory change gets a new `dir_seq`
   (`max(last + 1, wall ms)`), kept on the host's own row; every delta and
@@ -921,9 +1009,25 @@ a paired member not connected to that GFS) sends through the space's host: a thr
 routing `space_id`, sealed to the target's key-wrap key from its card — no
 route discovery. The host relays without reading. A `space_session` seat
 may send or be forwarded a `SPACE_ROUTED` in exactly this shape: three
-hops, the routing space's host in the middle, and both ends carded on the
-host (the other end on an end). Anything else from that peer class is
-dropped (`federation/host_hop.py`, `SpaceRoutedHandler._touches_seat`).
+hops, a household acting as the routing space's host in the middle, and
+both ends carded on the host (the other end on an end). Anything else from
+that peer class is dropped (`federation/host_hop.py`,
+`SpaceRoutedHandler._touches_seat`). The hop is the owner or the
+delegated inviting admin ("Who is the host" above): the sender picks the
+owner when it holds a link of its own to it (a pairing, or the seat the
+owner gave it) and the owner's directory lists the target — every member
+takes the owner; the hop relays only while it acts as host itself; and an
+end takes the envelope only through a household acting as host for IT. So
+a household the owner invited never takes a hop through an admin, and the
+sender does not try one: it uses its inviting admin only toward a
+household that admin says it seated itself (`via_seated` in the admin's
+directory frames, kept as `via` on the card's row — such a household
+takes that admin as host too). The hops are tried in that order: when the
+first cannot take the envelope now (it only sits in our outbox for it),
+the next is tried — the target takes a second copy as the same event. The
+send is `ok` only when a hop took it; else it reports the queued error,
+or `host_hop_unavailable` when there is no hop the target takes — never a
+delivery that cannot happen.
 The inner event must be one the seat may send directly
 (`SPACE_SESSION_ALLOWED_EVENT_TYPES`): the hop never widens a seat's
 vocabulary. The routing `space_id` is re-signed by the host on its leg, so

@@ -7,6 +7,7 @@ real wire is in ``tests/federation/test_invite_bootstrap_gfs_e2e.py`` (v_89).
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import orjson
@@ -14,10 +15,12 @@ import orjson
 from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
+    ed25519_public_key,
     generate_identity_keypair,
     generate_x25519_keypair,
     sign_ed25519,
 )
+from socialhome.domain.events import SpaceRemoteSeatEnded, SpaceRemoteSeatLive
 from socialhome.domain.federation import (
     DELIVERY_ERROR_QUEUED,
     FederationEvent,
@@ -37,6 +40,7 @@ from socialhome.services.space_member_directory import (
 )
 
 GFS = "https://gfs.example.org"
+SPACE_SEED = b"\x51" * 32
 OTHER_GFS = "https://other-gfs.example.org"
 SPACE = "space-1"
 SPACE_2 = "space-2"
@@ -86,7 +90,7 @@ class FakeSpaceRepo:
     async def list_members(self, space_id):
         # Our local people hold a member's (writer) seat.
         return [
-            SimpleNamespace(user_id=u, role=SpaceRole.MEMBER)
+            SimpleNamespace(user_id=u, role=self.local_role)
             for u in self.local.get(space_id, [])
         ]
 
@@ -95,17 +99,46 @@ class FakeSpaceRepo:
         self.dissolved: set[str] = set()
         self.local: dict[str, list[str]] = {}
         self.rows: dict[str, dict[str, str | None]] = {}
+        # Delegation (``federation/host_equivalence.py``): off by default.
+        self.delegated: set[str] = set()
+        self.invited_by: dict[str, str] = {}
+        self.seed: dict[str, bytes] = {}
+        self.local_role = SpaceRole.MEMBER
 
     async def get(self, space_id):
         owner = self.owner.get(space_id)
         if not owner:
             return None
+        key = ed25519_public_key(SPACE_SEED).hex()
         return SimpleNamespace(
+            id=space_id,
             owner_instance_id=owner,
             dissolved=space_id in self.dissolved,
             archived=space_id in self.dissolved,
             archived_reason="dissolved" if space_id in self.dissolved else None,
+            features=SimpleNamespace(
+                delegated_admin_authority=space_id in self.delegated
+            ),
+            identity_public_key=key,
+            authority_key_epoch=0,
+            # The owner's (already verified) statement for the pinned key.
+            owner_statement=orjson.dumps(
+                {
+                    "authority_pk": key,
+                    "authority_key_epoch": 0,
+                    "issued_at": int(time.time() * 1000),
+                }
+            ).decode(),
         )
+
+    async def get_invited_by(self, space_id):
+        return self.invited_by.get(space_id)
+
+    async def get_invited_by_epoch(self, space_id):
+        return 0 if space_id in self.invited_by else None
+
+    async def get_space_seed(self, space_id):
+        return self.seed.get(space_id)
 
     async def list_local_member_user_ids(self, space_id):
         return list(self.local.get(space_id, []))
@@ -146,6 +179,18 @@ class FakeSpaceRepo:
         ).decode()
 
 
+class FakeSeats:
+    """The roster mirror: which households hold an admin seat."""
+
+    def __init__(self) -> None:
+        self.admins: dict[str, set[str]] = {}
+
+    async def list_for_instance(self, space_id, instance_id, *, include_tombstoned):
+        if instance_id in self.admins.get(space_id, set()):
+            return [SimpleNamespace(role=SpaceRole.ADMIN.value)]
+        return []
+
+
 class FakeFederationRepo:
     def __init__(self) -> None:
         self.instances: dict[str, SimpleNamespace] = {}
@@ -161,9 +206,15 @@ class FakeFederationRepo:
 class FakeWriters:
     def __init__(self) -> None:
         self.writers: dict[str, set[str]] = {}
+        #: Our roster mirror holds a live writer seat for every household
+        #: (``_invitee_with`` narrows it to the ones it names).
+        self.everyone = True
 
     async def writer_households(self, space_id):
         return frozenset(self.writers.get(space_id, set()))
+
+    async def may_receive(self, space_id, instance_id):
+        return self.everyone or instance_id in self.writers.get(space_id, set())
 
 
 class FakeMailboxes:
@@ -302,6 +353,7 @@ class World:
         self.writers = FakeWriters()
         self.mailboxes = FakeMailboxes()
         self.fed = FakeFederation()
+        self.seats = FakeSeats()
         self.seated: list[str] = []
         self._seq = 0
         self.dir = SpaceMemberDirectory(
@@ -314,6 +366,7 @@ class World:
             identity_pk=self.me["pk"],
             keywrap_pk=self.me["kw_pub"],
             keywrap_sig=self.me["kw_sig"],
+            remote_member_repo=self.seats,
         )
         self.dir.attach_to(self.fed)
 
@@ -354,7 +407,8 @@ class World:
             payload = {**payload, "dir_seq": self._seq}
         if not payload.get("snapshot") and "base_seq" not in payload:
             # In order: the delta builds on the version we hold.
-            held = self.spaces.doc(SPACE, self.host["id"]).get("dir_seq") or 0
+            issuer = sender or self.host["id"]
+            held = self.spaces.doc(SPACE, issuer).get("dir_seq") or 0
             payload = {**payload, "base_seq": held}
         await self.dir._on_directory(
             _event(
@@ -673,7 +727,7 @@ async def test_a_snapshot_clears_unlisted_cards_but_never_the_hosts():
     )
     # Review round 1 (#1336): the household's ROW goes too (no fan-out of
     # the space reaches it any more) and its seat is ended if unused.
-    assert gone["id"] not in w.spaces.rows[SPACE]
+    assert "card" not in w.spaces.doc(SPACE, gone["id"])
     assert ended == [gone["id"]]
     assert w.spaces.doc(SPACE, host["id"])["card"] == host_card.to_wire()
     assert w.spaces.doc(SPACE, a["id"])["card"]["instance_id"] == a["id"]
@@ -687,7 +741,7 @@ async def test_a_delta_keeps_unlisted_cards_and_removed_clears():
     w.spaces.put_card(SPACE, _card(keep, gfs=GFS))
     w.spaces.put_card(SPACE, _card(gone, gfs=GFS))
     await w.directory({"cards": [], "removed": [gone["id"], host["id"]]})
-    assert gone["id"] not in w.spaces.rows[SPACE]
+    assert "card" not in w.spaces.doc(SPACE, gone["id"])
     assert w.spaces.doc(SPACE, keep["id"])["card"]["instance_id"] == keep["id"]
     assert w.spaces.doc(SPACE, host["id"])["card"] == host_card.to_wire()
 
@@ -1214,7 +1268,7 @@ async def test_a_lost_removal_is_repaired_by_the_next_sync():
 
     m.dir.attach_seat_ender(ender)
     await m.directory(snap["payload"])
-    assert gone["id"] not in m.spaces.rows[SPACE]
+    assert "card" not in m.spaces.doc(SPACE, gone["id"])
     assert ended == [gone["id"]]
 
 
@@ -1224,9 +1278,9 @@ async def test_a_late_old_delta_never_re_adds_a_removed_household():
     x = _hh()
     w.member(x)
     await w.directory({"cards": [], "removed": [x["id"]], "dir_seq": 10})
-    assert x["id"] not in w.spaces.rows[SPACE]
+    assert "card" not in w.spaces.doc(SPACE, x["id"])
     await w.directory({"cards": [_card(x, gfs=GFS).to_wire()], "dir_seq": 5})
-    assert x["id"] not in w.spaces.rows[SPACE]
+    assert "card" not in w.spaces.doc(SPACE, x["id"])
     await w.directory({"cards": [_card(x, gfs=GFS).to_wire()], "dir_seq": 11})
     assert x["id"] in w.spaces.rows[SPACE]
 
@@ -1254,7 +1308,7 @@ async def test_a_dissolved_or_left_space_drops_its_directory():
             w.spaces.local[SPACE] = []
         assert not await w.dir.sender_allowed(x["id"], SPACE)
         await w.dir.sweep_once()
-        assert x["id"] not in w.spaces.rows[SPACE]
+        assert "card" not in w.spaces.doc(SPACE, x["id"])
         assert ended == [x["id"]]
         assert "card" not in w.spaces.doc(SPACE, host["id"])
 
@@ -1383,7 +1437,7 @@ async def test_a_lost_removal_is_repaired_in_a_space_past_500_households():
     m.member(gone)
     m.spaces.put_card(SPACE, _card(gone, gfs=GFS))
     await m.directory(parts[-1])
-    assert gone["id"] not in m.spaces.rows[SPACE]
+    assert "card" not in m.spaces.doc(SPACE, gone["id"])
 
 
 # ── Owner decision 2026-11-09: paired members own a mailbox too ─────────
@@ -1740,10 +1794,10 @@ async def test_a_forgotten_space_drops_its_unfinished_snapshot(monkeypatch):
     await host.dir.reconcile(SPACE, snapshot_to={member["id"]})
     snap = [d["payload"] for d in host.fed.raw_to(member["id"])]
     await m.directory(snap[0])
-    assert SPACE in m.dir._snap_in
+    assert (SPACE, host.me["id"]) in m.dir._snap_in
     m.spaces.local[SPACE] = []  # we left
     await m.dir.sweep_once()
-    assert SPACE not in m.dir._snap_in
+    assert m.dir._snap_in == {}
 
 
 async def test_our_own_mailbox_change_reaches_hosted_spaces_and_hosts_at_once():
@@ -1813,3 +1867,807 @@ async def test_a_part_of_an_older_snapshot_is_dropped(monkeypatch):
     late = old[0]
     await m.directory(late)
     assert m.dir._snap_in == {}
+
+
+# ── "Host" = the owner OR the delegated admin that invited us ────────────
+#
+# Owner decision 2026-11-13 (``federation/host_equivalence.py``): a member
+# takes the directory from every household acting as its host, each with
+# its own version line; a delegated admin keeps one for the households it
+# invited and passes their cards on to the owner.
+
+
+def _invitee_world() -> tuple[World, dict, dict]:
+    """A member household the delegated admin household invited."""
+    owner, admin = _hh(), _hh()
+    m = World(host=owner)
+    m.member(admin)
+    m.spaces.delegated.add(SPACE)
+    m.spaces.invited_by[SPACE] = admin["id"]
+    m.seats.admins[SPACE] = {admin["id"]}
+    return m, owner, admin
+
+
+def _admin_world() -> tuple[World, dict]:
+    """A delegated admin household: delegation on, an admin of ours, the
+    seed of the pinned authority key held."""
+    owner = _hh()
+    a = World(host=owner)
+    a.spaces.delegated.add(SPACE)
+    a.spaces.seed[SPACE] = SPACE_SEED
+    a.spaces.local_role = SpaceRole.ADMIN
+    return a, owner
+
+
+async def test_a_member_takes_the_directory_of_the_admin_that_invited_it():
+    m, owner, admin = _invitee_world()
+    e = _hh()
+    card_e, card_o = _card(e), _card(owner)
+    await m.directory(
+        {
+            "cards": [card_e.to_wire(), card_o.to_wire()],
+            "gfs_reached": [e["id"]],
+            "dir_seq": 40,
+            "snapshot": True,
+            "part": 0,
+            "parts": 1,
+        },
+        sender=admin["id"],
+    )
+    assert m.spaces.doc(SPACE, e["id"])["card"] == card_e.to_wire()
+    assert m.spaces.doc(SPACE, e["id"])["by"] == [admin["id"]]
+    assert m.spaces.doc(SPACE, e["id"])["gfs_reached"] is True
+    # The owner's card came with it: the owner is seated lazily too.
+    assert set(m.seated) == {e["id"], owner["id"]}
+    # Each host has its own version line.
+    assert await m.dir.directory_seq(SPACE, admin["id"]) == 40
+    assert await m.dir.directory_seq(SPACE, owner["id"]) == 0
+    # Our card went to the admin (its answer) and to the owner.
+    assert {c["to"] for c in m.fed.cards} == {admin["id"], owner["id"]}
+
+
+async def test_a_directory_from_an_admin_that_did_not_invite_us_is_ignored():
+    m, _owner, admin = _invitee_world()
+    other = _hh()
+    m.member(other)
+    m.seats.admins[SPACE].add(other["id"])
+    e = _hh()
+    await m.directory({"cards": [_card(e).to_wire()]}, sender=other["id"])
+    assert e["id"] not in m.spaces.rows[SPACE]
+    assert await m.dir.directory_seq(SPACE, other["id"]) is None
+    assert admin["id"] in await m.dir.hosts_of(SPACE)
+
+
+async def test_the_inviting_admin_is_host_only_while_every_condition_holds():
+    m, owner, admin = _invitee_world()
+    assert await m.dir.hosts_of(SPACE) == [owner["id"], admin["id"]]
+    m.seats.admins[SPACE].clear()  # demoted
+    assert await m.dir.hosts_of(SPACE) == [owner["id"]]
+    m.seats.admins[SPACE] = {admin["id"]}
+    m.spaces.delegated.clear()  # delegation off
+    assert await m.dir.hosts_of(SPACE) == [owner["id"]]
+    # Without a roster mirror only the owner.
+    m.spaces.delegated.add(SPACE)
+    m.dir._seats = None
+    assert await m.dir.hosts_of(SPACE) == [owner["id"]]
+
+
+async def test_an_admins_removal_never_takes_out_the_owner_household():
+    m, owner, admin = _invitee_world()
+    card_o = _card(owner)
+    await m.directory({"cards": [card_o.to_wire()]}, sender=admin["id"])
+    await m.directory({"cards": [], "removed": [owner["id"]]}, sender=admin["id"])
+    assert m.spaces.doc(SPACE, owner["id"])["card"] == card_o.to_wire()
+    # Nor does a whole directory of the admin that leaves the owner out.
+    await m.directory(
+        {"cards": [], "members": [], "snapshot": True, "part": 0, "parts": 1},
+        sender=admin["id"],
+    )
+    assert m.spaces.doc(SPACE, owner["id"])["card"] == card_o.to_wire()
+    assert owner["id"] in m.spaces.rows[SPACE]
+
+
+async def test_a_household_both_hosts_list_goes_only_when_both_drop_it():
+    m, owner, admin = _invitee_world()
+    e = _hh()
+    card_e = _card(e)
+    await m.directory({"cards": [card_e.to_wire()]})  # the owner's
+    await m.directory({"cards": [card_e.to_wire()]}, sender=admin["id"])
+    assert m.spaces.doc(SPACE, e["id"])["by"] == sorted([owner["id"], admin["id"]])
+    await m.directory({"cards": [], "removed": [e["id"]]}, sender=admin["id"])
+    assert m.spaces.doc(SPACE, e["id"])["card"] == card_e.to_wire()
+    assert m.spaces.doc(SPACE, e["id"])["by"] == [owner["id"]]
+    await m.directory({"cards": [], "removed": [e["id"]]})
+    assert "card" not in m.spaces.doc(SPACE, e["id"])
+
+
+async def test_one_hosts_whole_directory_never_drops_what_only_the_other_lists():
+    m, _owner, admin = _invitee_world()
+    by_owner, by_admin = _hh(), _hh()
+    await m.directory({"cards": [_card(by_owner).to_wire()]})
+    await m.directory({"cards": [_card(by_admin).to_wire()]}, sender=admin["id"])
+    whole = {"cards": [], "members": [], "snapshot": True, "part": 0, "parts": 1}
+    # The admin's whole directory lists nobody: only ITS household goes.
+    await m.directory(dict(whole), sender=admin["id"])
+    assert by_owner["id"] in m.spaces.rows[SPACE]
+    assert "card" not in m.spaces.doc(SPACE, by_admin["id"])
+    await m.directory({"cards": [_card(by_admin).to_wire()]}, sender=admin["id"])
+    # And the owner's lists nobody: the admin's household stays.
+    await m.directory(dict(whole))
+    assert "card" not in m.spaces.doc(SPACE, by_owner["id"])
+    assert by_admin["id"] in m.spaces.rows[SPACE]
+
+
+async def test_a_card_from_before_issuers_were_recorded_counts_as_the_owners():
+    m, _owner, admin = _invitee_world()
+    e = _hh()
+    m.spaces.put_card(SPACE, _card(e))  # a row written by an older build
+    await m.directory({"cards": [], "removed": [e["id"]]}, sender=admin["id"])
+    assert e["id"] in m.spaces.rows[SPACE]  # the admin never listed it
+    await m.directory({"cards": [], "removed": [e["id"]]})
+    assert "card" not in m.spaces.doc(SPACE, e["id"])
+
+
+async def test_when_the_trust_ends_the_admins_directory_stops_at_once():
+    m, owner, admin = _invitee_world()
+    only_admin, both = _hh(), _hh()
+    await m.directory({"cards": [_card(both).to_wire()]})
+    await m.directory(
+        {"cards": [_card(only_admin).to_wire(), _card(both).to_wire()]},
+        sender=admin["id"],
+    )
+    assert await m.dir.sender_allowed(only_admin["id"], SPACE)
+    m.spaces.delegated.clear()  # the owner turned delegation off
+    # At once, before any frame or sweep: its listing counts for nothing.
+    assert not await m.dir.sender_allowed(only_admin["id"], SPACE)
+    assert await m.dir.sender_allowed(both["id"], SPACE)
+    assert await m.dir.directory_seq(SPACE, admin["id"]) is None
+    late = _hh()
+    await m.directory({"cards": [_card(late).to_wire()]}, sender=admin["id"])
+    assert "card" not in m.spaces.doc(SPACE, late["id"])
+    # That refused frame dropped what only the admin listed and its
+    # version line; the owner's directory is what counts.
+    assert "card" not in m.spaces.doc(SPACE, only_admin["id"])
+    assert both["id"] in m.spaces.rows[SPACE]
+    assert "dir_seq" not in m.spaces.doc(SPACE, admin["id"])
+    assert await m.dir.directory_seq(SPACE, owner["id"]) > 0
+
+
+async def test_the_sweep_drops_what_a_lapsed_admin_listed():
+    m, _owner, admin = _invitee_world()
+    only_admin = _hh()
+    await m.directory({"cards": [_card(only_admin).to_wire()]}, sender=admin["id"])
+    m.seats.admins[SPACE].clear()  # demoted
+    await m.dir.sweep_once()
+    assert "card" not in m.spaces.doc(SPACE, only_admin["id"])
+    assert "sent" not in m.spaces.doc(SPACE, admin["id"])
+    # The trust resumes: its line starts from a fresh snapshot.
+    m.seats.admins[SPACE] = {admin["id"]}
+    assert await m.dir.directory_seq(SPACE, admin["id"]) == 0
+
+
+async def test_our_card_and_the_echo_go_to_every_acting_host_owner_first():
+    m, owner, admin = _invitee_world()
+    assert await m.dir.publish_cards() == 2
+    assert [c["to"] for c in m.fed.cards] == [owner["id"], admin["id"]]
+    assert await m.dir.publish_cards() == 0  # once per host and rev
+    m.fed.cards.clear()
+    await m.dir.ask_host(SPACE)
+    assert [c["to"] for c in m.fed.cards] == [owner["id"], admin["id"]]
+    await m.dir.ask_host(SPACE)  # at most once per HELLO_RESNAPSHOT_S a host
+    assert len(m.fed.cards) == 2
+
+
+async def test_a_delta_on_a_version_we_lack_asks_only_that_host():
+    m, _owner, admin = _invitee_world()
+    await m.dir.publish_cards()
+    m.fed.cards.clear()
+    await m.directory({"cards": [], "dir_seq": 9, "base_seq": 5}, sender=admin["id"])
+    assert [c["to"] for c in m.fed.cards] == [admin["id"]]
+
+
+# ── The delegated admin household ────────────────────────────────────────
+
+
+async def test_a_delegated_admin_serves_only_with_delegation_seat_and_seed():
+    a, _owner = _admin_world()
+    assert await a.dir.serves(SPACE)
+    a.spaces.local_role = SpaceRole.MEMBER
+    assert not await a.dir.serves(SPACE)
+    a.spaces.local_role = SpaceRole.ADMIN
+    a.spaces.seed[SPACE] = b"\x09" * 32  # not the pinned key's seed
+    assert not await a.dir.serves(SPACE)
+    a.spaces.seed[SPACE] = SPACE_SEED
+    a.spaces.delegated.clear()
+    assert not await a.dir.serves(SPACE)
+
+
+async def test_an_admin_answers_its_invitee_and_passes_its_card_to_the_owner():
+    a, owner = _admin_world()
+    m, e = _hh(), _hh()
+    a.member(m, e)
+    a.writers.writers[SPACE] = {m["id"], e["id"], owner["id"]}
+    a.mailboxes.add_box(GFS)
+    a.mailboxes.rev = 1
+    # What the owner's directory gave us.
+    card_e = _card(e)
+    await a.directory({"cards": [card_e.to_wire()], "gfs_reached": [e["id"]]})
+    assert a.fed.directories == []  # nobody takes us as host yet
+    a.fed.cards.clear()
+    a.fed_repo.instances[m["id"]] = SimpleNamespace(
+        source=InstanceSource.SPACE_SESSION, relay_via=GFS
+    )
+    card_m = _card(m)
+    await a.card_from(m, card_m)
+    # m gets the whole directory from us: e (still flagged GFS-reached,
+    # as the owner said) and our own card.
+    (snap,) = a.fed.to(m["id"])
+    assert snap["payload"]["snapshot"] is True
+    assert _ids(snap) == {e["id"], a.me["id"]}
+    assert snap["payload"]["gfs_reached"] == [e["id"]]
+    # Only m: e and the owner never asked us.
+    assert {d["to"] for d in a.fed.directories} == {m["id"]}
+    # m's card goes on to the owner, once, flagged as GFS-reached.
+    (fwd,) = a.fed.cards
+    assert fwd["to"] == owner["id"]
+    assert fwd["type"] is FederationEventType.SPACE_MEMBER_CARD
+    assert fwd["payload"] == {
+        "space_id": SPACE,
+        "forwarded": True,
+        "card": card_m.to_wire(),
+        "gfs_reached": True,
+    }
+    await a.dir.sweep_once()
+    assert len(a.fed.cards) == 1
+
+
+async def test_what_the_owner_tells_the_admin_goes_on_to_its_invitees():
+    a, owner = _admin_world()
+    m, e = _hh(), _hh()
+    a.member(m)
+    a.writers.writers[SPACE] = {m["id"], owner["id"]}
+    a.mailboxes.add_box(GFS)
+    a.mailboxes.rev = 1
+    await a.card_from(m, _card(m))
+    a.fed.directories.clear()
+    a.writers.writers[SPACE].add(e["id"])
+    card_e = _card(e)
+    await a.directory({"cards": [card_e.to_wire()]})
+    (delta,) = a.fed.to(m["id"])
+    assert "snapshot" not in delta["payload"]
+    assert _ids(delta) == {e["id"]}
+    a.fed.directories.clear()
+    # And the owner's removal: e leaves our directory too.
+    await a.directory({"cards": [], "removed": [e["id"]]})
+    (gone,) = a.fed.to(m["id"])
+    assert gone["payload"]["removed"] == [e["id"]]
+
+
+async def test_the_owners_directory_never_drops_a_card_the_household_gave_us():
+    a, owner = _admin_world()
+    m = _hh()
+    a.member(m)
+    a.writers.writers[SPACE] = {m["id"], owner["id"]}
+    now = [1_800_000_000.0]
+    a.dir._wall_clock = lambda: now[0]
+    card_m = _card(m)
+    await a.card_from(m, card_m)
+
+    def passed_on() -> int:
+        return len([c for c in a.fed.cards if c["payload"].get("forwarded")])
+
+    assert passed_on() == 1
+    # The owner's whole directory does not list m (it never got the card
+    # we passed on): m stays here.
+    await a.directory(
+        {"cards": [], "members": [], "snapshot": True, "part": 0, "parts": 1}
+    )
+    assert a.spaces.doc(SPACE, m["id"])["card"] == card_m.to_wire()
+    # That frame is the evidence the owner did not take it: passed on once
+    # more, at once — and not at every sweep.
+    assert passed_on() == 2
+    await a.dir.sweep_once()
+    assert passed_on() == 2
+    # Still unlisted hours later: passed on again (a lost frame).
+    now[0] += smd.FORWARD_RETRY_S
+    await a.dir.sweep_once()
+    assert passed_on() == 3
+    # Once the owner lists it, nothing more goes.
+    await a.directory({"cards": [card_m.to_wire()]})
+    now[0] += smd.FORWARD_RETRY_S
+    await a.dir.sweep_once()
+    assert passed_on() == 3
+
+
+async def test_a_card_of_a_household_without_a_writer_seat_is_not_passed_on():
+    a, owner = _admin_world()
+    m = _hh()
+    a.member(m)
+    a.writers.writers[SPACE] = {owner["id"]}  # m only follows
+    await a.card_from(m, _card(m))
+    assert [c for c in a.fed.cards if c["payload"].get("forwarded")] == []
+
+
+async def test_a_household_that_stopped_serving_forgets_who_came_to_it():
+    a, owner = _admin_world()
+    m = _hh()
+    a.member(m)
+    a.writers.writers[SPACE] = {m["id"], owner["id"]}
+    await a.card_from(m, _card(m))
+    assert a.spaces.doc(SPACE, m["id"])["direct"] is True
+    a.spaces.local_role = SpaceRole.MEMBER  # demoted
+    a.fed.directories.clear()
+    await a.dir.sweep_once()
+    assert a.fed.directories == []
+    assert "direct" not in a.spaces.doc(SPACE, m["id"])
+    # Now only the owner's directory keeps m here.
+    await a.directory({"cards": [], "removed": [m["id"]]})
+    assert "card" not in a.spaces.doc(SPACE, m["id"])
+
+
+# ── The owner takes a card a delegated admin passes on ───────────────────
+
+
+def _owner_with_admin() -> tuple[World, dict, dict]:
+    o = World()
+    admin, m = _hh(), _hh()
+    o.member(admin, m)
+    o.spaces.delegated.add(SPACE)
+    o.seats.admins[SPACE] = {admin["id"]}
+    o.writers.writers[SPACE] = {admin["id"], m["id"]}
+    o.mailboxes.add_box(GFS)
+    o.mailboxes.rev = 1
+    return o, admin, m
+
+
+async def _forward(o: World, sender: dict, card, *, reached: bool = True) -> None:
+    await o.dir._on_member_card(
+        _event(
+            FederationEventType.SPACE_MEMBER_CARD,
+            sender["id"],
+            o.me["id"],
+            {
+                "space_id": SPACE,
+                "forwarded": True,
+                "card": card.to_wire(),
+                "gfs_reached": reached,
+            },
+        )
+    )
+
+
+async def test_the_owner_lists_a_card_its_delegated_admin_passes_on():
+    o, admin, m = _owner_with_admin()
+    await o.card_from(admin, _card(admin))
+    o.fed.directories.clear()
+    card_m = _card(m)
+    await _forward(o, admin, card_m)
+    assert o.spaces.doc(SPACE, m["id"])["card"] == card_m.to_wire()
+    assert o.spaces.doc(SPACE, m["id"])["gfs_reached"] is True
+    assert o.seated == [m["id"]]  # a lazy seat: its own card now verifies
+    # Every member hears of m, flagged as GFS-reached.
+    (delta,) = o.fed.to(admin["id"])
+    assert _ids(delta) == {m["id"]}
+    assert delta["payload"]["gfs_reached"] == [m["id"]]
+    # The same card again changes nothing.
+    o.fed.directories.clear()
+    await _forward(o, admin, card_m)
+    assert o.fed.directories == []
+    # m is not "seated" by this: it gets no frame until it says so itself.
+    assert "seated" not in o.spaces.doc(SPACE, m["id"])
+
+
+async def test_a_passed_on_card_is_taken_only_from_a_delegated_admin():
+    o, admin, m = _owner_with_admin()
+    member = _hh()
+    o.member(member)
+    await _forward(o, member, _card(m))  # a plain member household
+    assert "card" not in o.spaces.doc(SPACE, m["id"])
+    o.spaces.delegated.clear()  # delegation off
+    await _forward(o, admin, _card(m))
+    assert "card" not in o.spaces.doc(SPACE, m["id"])
+    o.spaces.delegated.add(SPACE)
+    stranger = _hh()  # not a member household by OUR roster
+    await _forward(o, admin, _card(stranger))
+    assert stranger["id"] not in o.spaces.rows[SPACE]
+    forged = {**_card(m).to_wire(), "keywrap_pk": _card(_hh()).to_wire()["keywrap_pk"]}
+    await o.dir._on_member_card(
+        _event(
+            FederationEventType.SPACE_MEMBER_CARD,
+            admin["id"],
+            o.me["id"],
+            {"space_id": SPACE, "forwarded": True, "card": forged},
+        )
+    )
+    assert "card" not in o.spaces.doc(SPACE, m["id"])
+    assert o.fed.directories == []
+
+
+async def test_only_the_owner_takes_a_passed_on_card():
+    a, _owner = _admin_world()
+    other, m = _hh(), _hh()
+    a.member(other, m)
+    a.seats.admins[SPACE] = {other["id"]}
+    await _forward(a, other, _card(m))
+    assert "card" not in a.spaces.doc(SPACE, m["id"])
+
+
+# ── Review rounds 1 + 2 (#1361): the roster decides, cards only supply ──
+#
+# A card is keys and an address. Who is a member — whom we send to, take
+# frames from, seat lazily — is our own roster mirror's to say, at use time.
+
+
+def _invitee_with(*households: dict) -> tuple[World, dict, dict]:
+    """:func:`_invitee_world` whose roster mirror holds a live writer seat
+    for each of *households* only (and the two hosts)."""
+    m, owner, admin = _invitee_world()
+    m.writers.everyone = False
+    m.writers.writers[SPACE] = {
+        owner["id"],
+        admin["id"],
+        *(h["id"] for h in households),
+    }
+    return m, owner, admin
+
+
+async def _seat_live(m: World, h: dict) -> None:
+    """Roster gossip: *h*'s seat goes live here."""
+    m.writers.writers.setdefault(SPACE, set()).add(h["id"])
+    await m.dir._on_seat_change(
+        SpaceRemoteSeatLive(space_id=SPACE, instance_id=h["id"], user_id="u")
+    )
+
+
+async def _seat_ended(m: World, h: dict) -> None:
+    """Roster gossip: *h*'s last seat ended here (its row goes with it)."""
+    m.writers.writers.setdefault(SPACE, set()).discard(h["id"])
+    await m.dir._on_seat_change(
+        SpaceRemoteSeatEnded(space_id=SPACE, instance_id=h["id"], user_id="u")
+    )
+    m.spaces.rows[SPACE].pop(h["id"], None)
+
+
+async def test_a_card_makes_no_row_seat_or_target_without_a_roster_seat():
+    """A card arriving BEFORE its roster seat — from the owner too: it is
+    kept (the issuer's version moves on), and nothing else happens until
+    the seat goes live."""
+    x, y = _hh(), _hh()
+    m, owner, admin = _invitee_with(y)
+    for issuer, seq in ((owner, 3), (admin, 7)):
+        await m.directory(
+            {"cards": [_card(x).to_wire(), _card(y).to_wire()], "dir_seq": seq},
+            sender=issuer["id"],
+        )
+        assert await m.dir.directory_seq(SPACE, issuer["id"]) == seq
+    assert x["id"] not in m.spaces.rows[SPACE]
+    assert m.seated == [y["id"], y["id"]]
+    assert await m.dir.target_for(x["id"], SPACE) is None
+    assert not await m.dir.sender_allowed(x["id"], SPACE)
+    # The version line is not stalled: the next delta builds on it.
+    z = _hh()
+    m.writers.writers[SPACE].add(z["id"])
+    await m.directory({"cards": [_card(z).to_wire()], "dir_seq": 8}, sender=admin["id"])
+    assert await m.dir.card_of(SPACE, z["id"]) is not None
+    # The seat arrives: the waiting card is usable at once.
+    m.seated.clear()
+    await _seat_live(m, x)
+    assert m.spaces.doc(SPACE, x["id"])["by"] == sorted([owner["id"], admin["id"]])
+    assert m.seated == [x["id"]]
+    assert await m.dir.target_for(x["id"], SPACE) is not None
+    assert await m.dir.sender_allowed(x["id"], SPACE)
+    assert "wait" not in m.spaces.doc(SPACE, admin["id"])
+    assert "wait" not in m.spaces.doc(SPACE, owner["id"])
+
+
+async def test_a_roster_removal_ends_use_at_once_whoever_still_lists_the_card():
+    x = _hh()
+    m, _owner, admin = _invitee_with(x)
+    cx = _card(x)
+    await m.directory({"cards": [cx.to_wire()]})
+    await m.directory({"cards": [cx.to_wire()]}, sender=admin["id"])
+    assert await m.dir.sender_allowed(x["id"], SPACE)
+    ended: list[str] = []
+
+    async def ender(inst):
+        ended.append(inst)
+
+    m.dir.attach_seat_ender(ender)
+    # Before any event handler ran: the roster itself is what is asked.
+    m.writers.writers[SPACE].discard(x["id"])
+    assert not await m.dir.sender_allowed(x["id"], SPACE)
+    assert await m.dir.target_for(x["id"], SPACE) is None
+    assert await m.dir.usable_card_of(SPACE, x["id"]) is None
+    await _seat_ended(m, x)
+    assert ended == [x["id"]]
+    assert x["id"] not in m.spaces.rows[SPACE]
+
+
+async def test_an_owner_removed_from_the_directory_only_unlists_the_card():
+    """``removed`` is about the issuer's listing, not about membership: the
+    card stays while another host lists it and the roster holds the seat."""
+    x = _hh()
+    m, _owner, admin = _invitee_with(x)
+    cx = _card(x)
+    await m.directory({"cards": [cx.to_wire()]})
+    await m.directory({"cards": [cx.to_wire()]}, sender=admin["id"])
+    await m.directory({"cards": [], "removed": [x["id"]]})
+    assert m.spaces.doc(SPACE, x["id"])["by"] == [admin["id"]]
+    assert await m.dir.sender_allowed(x["id"], SPACE)
+    await m.directory({"cards": [], "removed": [x["id"]]}, sender=admin["id"])
+    assert "card" not in m.spaces.doc(SPACE, x["id"])
+    assert x["id"] in m.spaces.rows[SPACE]  # the row is the roster's
+
+
+async def test_an_admins_stale_listing_never_revives_a_removed_household():
+    """The owner removed X (the roster event reached us); the admin, offline
+    then, still lists X. Its card waits — no row, no seat, nothing sent or
+    taken."""
+    x = _hh()
+    m, _owner, admin = _invitee_with(x)
+    cx = _card(x)
+    await m.directory({"cards": [cx.to_wire()]})
+    await m.directory({"cards": [cx.to_wire()]}, sender=admin["id"])
+    await _seat_ended(m, x)
+    m.seated.clear()
+    for n in range(3):
+        await m.directory(
+            {
+                "cards": [cx.to_wire()],
+                "members": [x["id"]],
+                "snapshot": True,
+                "part": 0,
+                "parts": 1,
+                "dir_seq": 50 + n,
+            },
+            sender=admin["id"],
+        )
+    assert x["id"] not in m.spaces.rows[SPACE]
+    assert m.seated == []
+    assert not await m.dir.sender_allowed(x["id"], SPACE)
+    assert await m.dir.target_for(x["id"], SPACE) is None
+    assert await m.dir.directory_seq(SPACE, admin["id"]) == 52
+
+
+async def test_a_household_the_admin_invites_again_is_usable_again():
+    """Round 2: the owner removed X, then the admin re-invites X while the
+    owner is offline — X holds a live roster seat again, so the admin's
+    card for it is taken (nothing remembers the old removal)."""
+    x = _hh()
+    m, _owner, admin = _invitee_with(x)
+    await m.directory({"cards": [_card(x).to_wire()]})
+    await m.directory({"cards": [], "removed": [x["id"]]})
+    await _seat_ended(m, x)
+    m.member(x)  # roster gossip of the new seat: the row is back
+    m.writers.writers[SPACE].add(x["id"])
+    again = _card(x, rev=5)
+    await m.directory(
+        {"cards": [again.to_wire()], "via_seated": [x["id"]]}, sender=admin["id"]
+    )
+    assert await m.dir.card_of(SPACE, x["id"]) == again
+    assert await m.dir.sender_allowed(x["id"], SPACE)
+    assert m.spaces.doc(SPACE, x["id"])["via"] == admin["id"]
+
+
+async def test_an_admins_removal_never_drops_a_row_it_did_not_list():
+    m, _owner, admin = _invitee_world()
+    x = _hh()
+    m.member(x)  # a roster row, no card held (we have no mailbox)
+    await m.directory({"cards": [], "removed": [x["id"]]}, sender=admin["id"])
+    assert x["id"] in m.spaces.rows[SPACE]
+    # Nor a household only the owner lists.
+    y = _hh()
+    await m.directory({"cards": [_card(y).to_wire()]})
+    await m.directory({"cards": [], "removed": [y["id"]]}, sender=admin["id"])
+    assert "card" in m.spaces.doc(SPACE, y["id"])
+
+
+async def test_the_waiting_cards_are_bounded_and_go_with_the_listing():
+    m, owner, _admin = _invitee_with()
+    many = [_hh() for _ in range(smd.WAIT_MAX + 5)]
+    await m.directory({"cards": [_card(h, gfs=None).to_wire() for h in many]})
+    wait = m.spaces.doc(SPACE, owner["id"])["wait"]
+    assert len(wait) == smd.WAIT_MAX and many[-1]["id"] in wait
+    await m.directory({"cards": [], "removed": [many[-1]["id"]]})
+    assert many[-1]["id"] not in m.spaces.doc(SPACE, owner["id"])["wait"]
+    await m.directory(
+        {"cards": [], "members": [], "snapshot": True, "part": 0, "parts": 1}
+    )
+    assert "wait" not in m.spaces.doc(SPACE, owner["id"])
+
+
+# ── Review round 1 (#1361): passing a card on is bounded ─────────────────
+
+
+async def test_no_card_is_passed_on_in_a_space_without_any_mailbox():
+    a, owner = _admin_world()
+    m = _hh()
+    a.member(m)
+    a.writers.writers[SPACE] = {m["id"], owner["id"]}
+    now = [1_800_000_000.0]
+    a.dir._wall_clock = lambda: now[0]
+    await a.card_from(m, _card(m, gfs=None))
+    for _ in range(8):
+        now[0] += smd.FORWARD_RETRY_S
+        await a.dir.sweep_once()
+    assert [c for c in a.fed.cards if c["payload"].get("forwarded")] == []
+    assert a.fed.directories == []
+
+
+async def test_a_card_the_owner_never_takes_is_passed_on_a_few_times_only():
+    a, owner = _admin_world()
+    m = _hh()
+    a.member(m)
+    a.writers.writers[SPACE] = {m["id"], owner["id"]}
+    now = [1_800_000_000.0]
+    a.dir._wall_clock = lambda: now[0]
+    await a.card_from(m, _card(m))
+
+    def passed_on() -> int:
+        return len([c for c in a.fed.cards if c["payload"].get("forwarded")])
+
+    for _ in range(smd.FORWARD_TRIES + 6):
+        now[0] += smd.FORWARD_RETRY_S
+        await a.dir.sweep_once()
+    assert passed_on() == smd.FORWARD_TRIES
+    # A changed card starts again.
+    await a.card_from(m, _card(m, rev=2))
+    assert passed_on() == smd.FORWARD_TRIES + 1
+
+
+# ── Review round 1 (#1361): the hop a target takes ───────────────────────
+
+
+def _linked(m: World, host: dict, *, card_only: bool = False) -> None:
+    m.fed_repo.instances[host["id"]] = SimpleNamespace(
+        source=InstanceSource.SPACE_SESSION if card_only else InstanceSource.MANUAL,
+        relay_via=None,
+        status=PairingStatus.CONFIRMED,
+    )
+
+
+async def test_the_hop_is_the_owner_whenever_we_hold_a_link_to_it():
+    t = _hh()
+    m, owner, admin = _invitee_with(t)
+    _linked(m, owner)
+    _linked(m, admin)
+    await m.directory(
+        {"cards": [_card(t).to_wire()], "via_seated": [t["id"]]}, sender=admin["id"]
+    )
+    # The owner does not list the target (it holds no card of it): a hop
+    # through it would be dropped there — only the admin that seated it.
+    assert await m.dir.hop_hosts(SPACE, t["id"]) == [admin["id"]]
+    await m.directory({"cards": [_card(t).to_wire()]})
+    # Now it does: every target takes the owner, so it is tried first, the
+    # admin next.
+    assert await m.dir.hop_hosts(SPACE, t["id"]) == [owner["id"], admin["id"]]
+
+
+async def test_the_hop_is_the_admin_only_for_a_target_the_admin_seated():
+    seated, other = _hh(), _hh()
+    m, owner, admin = _invitee_with(seated, other)
+    _linked(m, owner, card_only=True)  # known from a card only: no hop leg
+    _linked(m, admin)
+    await m.directory(
+        {
+            "cards": [_card(seated).to_wire(), _card(other).to_wire()],
+            "via_seated": [seated["id"]],
+        },
+        sender=admin["id"],
+    )
+    assert m.spaces.doc(SPACE, seated["id"])["via"] == admin["id"]
+    assert "via" not in m.spaces.doc(SPACE, other["id"])
+    assert await m.dir.hop_hosts(SPACE, seated["id"]) == [admin["id"]]
+    # The owner invited ``other``: it refuses a hop through our admin, so
+    # there is no hop at all — reported, not sent into the void.
+    assert await m.dir.hop_hosts(SPACE, other["id"]) == []
+    # The trust in the admin ended: no hop through it.
+    m.spaces.delegated.clear()
+    assert await m.dir.hop_hosts(SPACE, seated["id"]) == []
+
+
+async def test_only_the_admin_itself_says_whom_it_seated():
+    t = _hh()
+    m, _owner, _admin = _invitee_with(t)
+    await m.directory({"cards": [_card(t).to_wire()], "via_seated": [t["id"]]})
+    assert "via" not in m.spaces.doc(SPACE, t["id"])  # the owner's frame
+
+
+async def test_an_admins_frame_names_the_households_it_seated():
+    a, owner = _admin_world()
+    m, m2, e = _hh(), _hh(), _hh()
+    a.member(m, m2)
+    a.writers.writers[SPACE] = {m["id"], m2["id"], e["id"], owner["id"]}
+    a.mailboxes.add_box(GFS)
+    a.mailboxes.rev = 1
+    await a.directory({"cards": [_card(e).to_wire()]})
+    await a.card_from(m2, _card(m2))
+    await a.card_from(m, _card(m))
+    named = [
+        i for d in a.fed.raw_to(m["id"]) for i in d["payload"].get("via_seated", [])
+    ]
+    assert named == [m2["id"]]  # not e: the owner's
+
+
+# ── Review round 3 (#1361) ───────────────────────────────────────────────
+
+
+async def test_a_waiting_card_survives_a_seat_event_that_is_no_members_seat():
+    """A follower of household X goes live first (a row, no writer seat):
+    the waiting card stays where it is, and is taken when X's member seat
+    arrives."""
+    x = _hh()
+    m, owner, _admin = _invitee_with()
+    await m.directory({"cards": [_card(x).to_wire()]})
+    assert x["id"] in m.spaces.doc(SPACE, owner["id"])["wait"]
+    m.member(x)  # the roster's row for the follower seat
+    await m.dir._on_seat_change(
+        SpaceRemoteSeatLive(space_id=SPACE, instance_id=x["id"], user_id="bob")
+    )
+    assert x["id"] in m.spaces.doc(SPACE, owner["id"])["wait"]
+    assert await m.dir.card_of(SPACE, x["id"]) is None
+    await _seat_live(m, x)
+    assert await m.dir.card_of(SPACE, x["id"]) is not None
+
+
+async def test_a_card_waits_while_the_household_holds_only_a_followers_seat():
+    """A row alone is not a member's seat: no card on it, no lazy seat."""
+    x = _hh()
+    m, _owner, admin = _invitee_with()
+    m.member(x)  # X only follows the space here
+    m.mailboxes.add_box(GFS)
+    await m.directory({"cards": [_card(x).to_wire()]}, sender=admin["id"])
+    assert "card" not in m.spaces.doc(SPACE, x["id"])
+    assert m.seated == []
+    assert x["id"] in m.spaces.doc(SPACE, admin["id"])["wait"]
+    await m.dir.sweep_once()  # the backstop does not take it either
+    assert m.seated == []
+    await _seat_live(m, x)
+    assert m.seated == [x["id"]]
+
+
+async def test_a_demoted_admin_stops_honouring_a_card_given_to_it_at_once():
+    """``direct`` exempts a card from the roster check only while WE act as
+    host: after our demotion — before any sweep — the roster decides."""
+    a, owner = _admin_world()
+    x = _hh()
+    a.member(x)
+    a.writers.everyone = False
+    a.writers.writers[SPACE] = {owner["id"]}  # X: a follower seated by link
+    await a.card_from(x, _card(x))
+    assert await a.dir.sender_allowed(x["id"], SPACE)
+    assert await a.dir.target_for(x["id"], SPACE) is not None
+    a.spaces.local_role = SpaceRole.MEMBER
+    assert not await a.dir.sender_allowed(x["id"], SPACE)
+    assert await a.dir.target_for(x["id"], SPACE) is None
+
+
+async def test_a_serving_admin_ends_its_seat_with_a_household_the_owner_removed():
+    a, owner = _admin_world()
+    x = _hh()
+    a.member(x)
+    a.writers.everyone = False
+    a.writers.writers[SPACE] = {x["id"], owner["id"]}
+    await a.card_from(x, _card(x))
+    ended: list[str] = []
+
+    async def ender(inst):
+        ended.append(inst)
+
+    a.dir.attach_seat_ender(ender)
+    await _seat_ended(a, x)  # the owner's removal, by roster gossip
+    assert ended == [x["id"]]
+
+
+async def test_the_directory_never_drops_a_roster_row():
+    """The row is the roster's: its handler drops it (before it announces
+    the ended seat) — the directory only ends use."""
+    x = _hh()
+    m, _owner, admin = _invitee_with(x)
+    await m.directory({"cards": [_card(x).to_wire()]}, sender=admin["id"])
+    m.writers.writers[SPACE].discard(x["id"])
+    await m.dir._on_seat_change(
+        SpaceRemoteSeatEnded(space_id=SPACE, instance_id=x["id"], user_id="u")
+    )
+    assert x["id"] in m.spaces.rows[SPACE]
+    assert "card" not in m.spaces.doc(SPACE, x["id"])

@@ -94,7 +94,12 @@ from typing import TYPE_CHECKING
 import orjson
 
 from ..crypto import derive_instance_id
-from ..domain.federation import FederationEvent, FederationEventType, InstanceSource
+from ..domain.federation import (
+    DeliveryResult,
+    FederationEvent,
+    FederationEventType,
+    InstanceSource,
+)
 from ..domain.federation_capabilities import FederationCapability
 from . import routed_crypto
 from .inbound_validator import (
@@ -421,8 +426,12 @@ class SpaceRoutedHandler:
         target_identity_pk: str = "",
         is_retry: bool = False,
         space_id: str | None = None,
+        first_leg: list[DeliveryResult] | None = None,
     ) -> str:
         """Ship ``inner_event_type`` along ``path`` (origin → … → target).
+
+        ``first_leg``, when given, receives the first leg's delivery result
+        (the host hop reports honestly whether its hop took the envelope).
 
         ``path[0]`` MUST equal the local instance id; ``path[-1]`` is
         the ultimate target. ``target_eph_pk_b64`` is the target's
@@ -511,7 +520,7 @@ class SpaceRoutedHandler:
         # Origin-side dedup: if this same route_id loops back to us
         # (shouldn't happen with a valid path, but defensive), drop.
         self._seen_routes[route_id] = now + self._seen_ttl_s
-        await self._federation.send_event(
+        result = await self._federation.send_event(
             to_instance_id=path[1],
             event_type=FederationEventType.SPACE_ROUTED,
             payload={
@@ -524,6 +533,8 @@ class SpaceRoutedHandler:
             },
             space_id=space_id,
         )
+        if first_leg is not None:
+            first_leg.append(result)
         return route_id
 
     async def send_routed_reply(

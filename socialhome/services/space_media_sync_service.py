@@ -579,7 +579,11 @@ class SpaceMediaSyncService:
                 raise RuntimeError(
                     f"timeout: no progress for {CHUNK_IDLE_TIMEOUT_S:.0f} s"
                 ) from None
-            if not result.ok:
+            if not result.ok and not result.held_in_order:
+                # ``held_in_order``: the chunk is in the federation outbox
+                # behind the seat's pending rows (the post it belongs to
+                # went there as one multi upload a moment ago) and goes out
+                # in order — sent, as far as this file is concerned.
                 raise RuntimeError(result.error or "delivery_failed")
 
         # Marked before the first chunk goes: a nack can arrive while later

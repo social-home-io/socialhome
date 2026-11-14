@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING
 
 import orjson
 
+from ..crypto import ed25519_public_key
 from ..domain.space import SpaceRole
 from ..space_owner_statement import MAX_STATEMENT_AGE_MS
 
@@ -154,6 +155,39 @@ async def acting_hosts(
     return targets
 
 
+async def serves_as_host(
+    space_repo: AbstractSpaceRepo, space: Space | None, *, own_instance_id: str
+) -> bool:
+    """The other side of :func:`acts_as_host`: whether THIS household may
+    act as *space*'s host toward other member households — it owns the
+    space, or it is a delegated admin household: delegation is on, one of
+    its people holds a live ``admin`` seat, and it holds the seed of the
+    authority key the space pins (what its inviter proof is signed with).
+
+    This grants nothing: every receiver still decides with
+    :func:`acts_as_host` on its own rows. It only keeps a household nobody
+    would listen to from sending."""
+    if space is None or not own_instance_id:
+        return False
+    if space.owner_instance_id == own_instance_id:
+        return True
+    features = getattr(space, "features", None)
+    if not getattr(features, "delegated_admin_authority", False):
+        return False
+    local = set(await space_repo.list_local_member_user_ids(space.id))
+    if not any(
+        m.user_id in local and m.role == SpaceRole.ADMIN
+        for m in await space_repo.list_members(space.id)
+    ):
+        return False
+    seed = await space_repo.get_space_seed(space.id)
+    return (
+        seed is not None
+        and ed25519_public_key(seed).hex()
+        == str(space.identity_public_key or "").lower()
+    )
+
+
 async def touches_owner_household(
     space_repo: AbstractSpaceRepo,
     seat_repo: AbstractSpaceRemoteMemberRepo | None,
@@ -183,5 +217,6 @@ __all__ = [
     "acts_as_host",
     "is_trusted_inviter",
     "owner_statement_current",
+    "serves_as_host",
     "touches_owner_household",
 ]

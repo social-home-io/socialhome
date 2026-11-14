@@ -754,7 +754,12 @@ mirrors the host's members (a host stream lands there), whose rows and
 pictures every receiver refuses from it. Its own people's `members` rows
 still go because they carry the picture resets only their household may
 make (see "Receiver side" below). The session shape changes with the
-resource set, so the first session after the upgrade is a full one.
+resource set, so the first session after the upgrade is a full one. Nor does any household but the owner stream the owner
+household's own member rows (the owner seat, any seat its household holds):
+a delegated admin that synced with the owner holds them too, but they may
+only come from the owner (`MembersExporter`), and a receiver drops one that
+still arrives from anybody else, with a WARNING
+(`SpaceSyncReceiver._spare_owner_people`).
 
 Its **content** goes the same way (step 16, `provider._OWN_CONTENT_OWNERS`):
 it mirrors the whole space, but every receiver adds a row from it only

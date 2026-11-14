@@ -1694,6 +1694,12 @@ class DeliveryResult:
     #: Set on the :data:`DELIVERY_ERROR_ROUTE_COOLDOWN` path (the remaining
     #: negative-cooldown window); ``None`` everywhere else.
     retry_after_s: float | None = None
+    #: ``True`` (with ``ok=False`` and :data:`DELIVERY_ERROR_QUEUED`) when
+    #: nothing failed: the outbox ordering gate holds this live send behind
+    #: the seat's pending rows (``FederationService._must_queue_behind``).
+    #: It is in the durable outbox and goes out in order — a caller with its
+    #: own retry (the space picture sync) must not send it again.
+    held_in_order: bool = False
 
 
 def is_relay_only(
