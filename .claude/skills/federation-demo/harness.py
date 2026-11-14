@@ -24210,9 +24210,12 @@ def _parity_admin_invitee(state: dict, results: list[tuple[str, str, str]]) -> N
     guest_mailbox = on_e["mailbox"]["mailbox_id"]
     e_mailbox = on_guest["mailbox"]["mailbox_id"]
 
-    # 3. Owner offline again: the guest and e exchange a post.
-    gfs_off = _gfs_log_size()
+    # 3. Owner offline again: the guest and e exchange a post. The GFS log
+    #    is read from AFTER the owner stopped: while a is up (it just came
+    #    back) a paired household's relay fallback may still reach it
+    #    instance-addressed, which is not what this window is about.
     _kill_household("a", a)
+    gfs_off = _gfs_log_size()
     try:
         for author, reader in ((guest, "e"), ("e", guest)):
             text = f"Acting-host post by {author} {tag}"
