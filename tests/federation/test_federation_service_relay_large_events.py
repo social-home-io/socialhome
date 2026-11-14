@@ -29,6 +29,7 @@ from socialhome.crypto import (
     generate_identity_keypair,
     generate_x25519_keypair,
 )
+from socialhome.domain.errors import SpaceItemTooLargeError
 from socialhome.domain.federation import (
     DELIVERY_ERROR_QUEUED,
     DELIVERY_ERROR_RELAY_THROTTLED,
@@ -42,7 +43,13 @@ from socialhome.domain.federation import (
 from socialhome.domain.federation_capabilities import OURS, FederationCapability
 from socialhome.domain.outbox import DeliveryOutcome
 from socialhome.domain.relay_media_frame import (
+    RELAY_EVENT_FRAME_ALLOWANCE_BYTES,
+    RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES,
+    RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES,
     RELAY_MEDIA_MAX_BODY_BYTES,
+    RELAY_MEDIA_MAX_PLAINTEXT_BYTES,
+    SPACE_TEXT_MAX_BYTES_BEHIND_GFS,
+    SYNC_CHUNK_WRAP_ALLOWANCE_BYTES,
     parse_relay_media_body,
 )
 from socialhome.federation.federation_service import FederationService
@@ -719,3 +726,138 @@ async def test_a_framed_event_from_a_paired_peer_needs_the_relay_opt_in():
             _frame(w.host, w.member, PAGE, _page(100)), gfs_url=GFS
         )
     assert w.member.received == []
+
+
+# ── One bound: what goes live also heals by sync ──────────────────────────
+
+
+def _payload_of(size: int) -> dict:
+    """A page payload whose JSON is exactly *size* bytes."""
+    base = {"space_id": SPACE, "page_id": "page-at-the-bound", "content": ""}
+    payload = {**base, "content": "x" * (size - len(orjson.dumps(base)))}
+    assert len(orjson.dumps(payload)) == size
+    return payload
+
+
+def _chunk_of(record: dict) -> dict:
+    """The §25.6 chunk event that carries *record* as its one record, the
+    way ``ChunkBuilder`` builds it: the records JSON AES-GCM-sealed and
+    base64'ed inside a signed chunk envelope, serialised into the event."""
+    sealed = os.urandom(12) + orjson.dumps({"records": [record]}) + os.urandom(16)
+    envelope = {
+        "sync_id": "s" * 32,
+        "resource": "pages",
+        "space_id": SPACE,
+        "epoch": 7,
+        "seq_start": 0,
+        "seq_end": 1,
+        "is_last": False,
+        "encrypted_payload": base64.b64encode(sealed).decode(),
+        # A hybrid signature set: the larger of the two shapes.
+        "signatures": {"ed25519": "s" * 88, "mldsa65": "p" * 4412},
+    }
+    return {"sync_id": "s" * 32, "chunk": orjson.dumps(envelope).decode()}
+
+
+async def test_a_payload_at_the_bound_goes_live_and_heals_by_sync():
+    """The live bound is derived from the frame's so that the same item
+    fits the sync chunk: the GFS drops the live frame (its media queue
+    keeps a frame one hour), the catch-up still brings the item."""
+    w = _world()
+    page = _payload_of(RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES)
+    assert (await w.send(w.host, w.member, PAGE, page)).ok
+    w.gfs._queue.clear()  # accepted with a 202, then dropped by the GFS
+    assert w.member.received == []
+    # The record of the same page, with the fields a record adds.
+    record = {**page, "version_hash": "h" * 64, "updated_at": "t" * 32, "seq": 9}
+    chunk = _chunk_of(record)
+    assert len(orjson.dumps(chunk)) <= RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES
+    result = await w.send(w.host, w.member, CHUNK, chunk)
+    assert result.ok and result.via == "gfs_relay"
+    assert await w.gfs.deliver() == [{"status": "ok"}]
+    [event] = w.member.received
+    assert event.event_type is CHUNK and event.payload == chunk
+
+
+async def test_a_live_payload_over_the_bound_is_refused_though_a_frame_could_take_it(
+    caplog,
+):
+    w = _world()
+    page = _payload_of(RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES + 1)
+    with caplog.at_level(logging.WARNING):
+        result = await w.send(w.host, w.member, PAGE, page)
+    assert not result.ok and result.error == DELIVERY_ERROR_RELAY_TOO_LARGE
+    assert w.gfs.seen == [] and w.host.outbox.enqueued == []
+    assert "does not fit" in caplog.text
+
+
+async def test_a_sync_chunk_may_fill_the_frame():
+    w = _world()
+    chunk = {"sync_id": "s" * 32, "chunk": ""}
+    chunk["chunk"] = "c" * (
+        RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES - len(orjson.dumps(chunk))
+    )
+    assert (await w.send(w.host, w.member, CHUNK, chunk)).ok
+    assert await w.gfs.deliver() == [{"status": "ok"}]
+    over = {**chunk, "chunk": chunk["chunk"] + "c"}
+    result = await w.send(w.host, w.member, CHUNK, over)
+    assert result.error == DELIVERY_ERROR_RELAY_TOO_LARGE
+
+
+def test_the_live_bound_is_derived_from_the_frame_bound():
+    assert RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES == (
+        RELAY_MEDIA_MAX_PLAINTEXT_BYTES - RELAY_EVENT_FRAME_ALLOWANCE_BYTES
+    )
+    assert RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES == (
+        (RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES - SYNC_CHUNK_WRAP_ALLOWANCE_BYTES) * 3 // 4
+    )
+    # A reviewed item (256 KiB cap) is well inside it.
+    assert RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES > 300 * 1024
+
+
+# ── Only a household behind a GFS frames events ───────────────────────────
+
+
+async def test_a_framed_event_from_a_paired_peer_with_the_opt_in_is_refused():
+    """The sender frames only toward a household behind a GFS; the receiver
+    takes a framed event only from one — a paired peer on the relay opt-in
+    has its inbox for large events."""
+    w = _world()
+    row = w.member.repo._instances[w.host.id]
+    w.member.repo._instances[w.host.id] = dataclasses.replace(
+        row, source=InstanceSource.MANUAL, gfs_relay=True
+    )
+    with pytest.raises(ValueError, match="not behind a GFS"):
+        await w.member.inbound.handle_frame(
+            _frame(w.host, w.member, PAGE, _page(100)), gfs_url=GFS
+        )
+    assert w.member.received == []
+
+
+# ── A local save is refused up front, never shown as saved ────────────────
+
+
+async def test_a_text_no_frame_carries_is_refused_before_it_is_stored():
+    w = _world()
+    fits = "x" * (SPACE_TEXT_MAX_BYTES_BEHIND_GFS - 64)
+    await w.host.svc.check_space_text_size(SPACE, "Title", fits)
+    with pytest.raises(SpaceItemTooLargeError) as refused:
+        await w.host.svc.check_space_text_size(SPACE, "Title", fits + "x" * 128)
+    assert refused.value.status == 413
+    assert refused.value.code == "SPACE_ITEM_TOO_LARGE"
+    assert refused.value.params == {"max_kb": SPACE_TEXT_MAX_BYTES_BEHIND_GFS // 1024}
+    # Measured as it travels: JSON escapes count.
+    with pytest.raises(SpaceItemTooLargeError):
+        await w.host.svc.check_space_text_size(
+            SPACE, '"' * (SPACE_TEXT_MAX_BYTES_BEHIND_GFS // 2 + 64)
+        )
+
+
+async def test_a_space_without_a_household_behind_a_gfs_keeps_its_limits():
+    w = _world()
+    row = w.host.repo._instances[w.member.id]
+    w.host.repo._instances[w.member.id] = dataclasses.replace(
+        row, source=InstanceSource.MANUAL
+    )
+    await w.host.svc.check_space_text_size(SPACE, "x" * 900_000)
+    await w.host.svc.check_space_text_size("another-space", "x" * 900_000)

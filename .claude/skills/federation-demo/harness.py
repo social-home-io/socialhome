@@ -24709,6 +24709,13 @@ def cmd_members_parity() -> None:
     # and holds up d's catch-up: a's re-sent edit can reach d before the
     # row it edits, and d says so once. The row arrives with d's sync — the
     # "catch-up: edit" comparison below proves it.
+    # TEMPORARY — this window masks a real WARNING caused by a bug that is on
+    # main already: an oversized inner event on a mesh route is lost
+    # (``routed_envelope.py`` logs it at INFO; only ``SPACE_MEDIA_BLOB`` has
+    # a lost-inner listener). Its fix is its own PR on branch
+    # ``fix/mesh-large-inner-lost``, which MUST remove this window (and
+    # assert d in the "catch-up: 240 KiB page" comparison below). Do not
+    # widen it: one line shape, one witness, one sender.
     mesh_lag = _open_noise_window(
         about="a",
         reason="members-parity: a large page in the away window delays d's "

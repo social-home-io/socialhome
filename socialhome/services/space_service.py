@@ -42,6 +42,7 @@ import re
 import unicodedata
 import uuid
 import weakref
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -484,6 +485,7 @@ class SpaceService(
         "_space_crypto",
         "_spaces",
         "_subscriber_keys",
+        "_text_size_check",
         "_users",
         "_writer_certs",
     )
@@ -547,6 +549,7 @@ class SpaceService(
         #: inbound pipeline (:meth:`_on_remote_join_request_approved_bus`).
         self._join_approvals: set[asyncio.Task] = set()
         self._federation = None
+        self._text_size_check: Callable[..., Awaitable[None]] | None = None
         self._remote_members = None
         self._redeem_coordinator = None
         #: "Ask to join" through the GFS (v_84) — both ends; unwired, an
@@ -730,6 +733,16 @@ class SpaceService(
                 event.space_id,
                 event.instance_id,
             )
+
+    def attach_text_size_check(
+        self, check: Callable[..., Awaitable[None]] | None
+    ) -> None:
+        """Wire ``check(space_id, *texts)``: refuses (413,
+        :class:`~socialhome.domain.errors.SpaceItemTooLargeError`) a text
+        too large to reach a member household behind a GFS
+        (:meth:`FederationService.check_space_text_size`) — called before
+        anything is stored, so nothing shows as saved that cannot arrive."""
+        self._text_size_check = check
 
     def attach_federation(
         self,
@@ -2603,6 +2616,12 @@ class SpaceService(
         (:meth:`on_tier_change`). A public space never touches a GFS.
         """
         space = await self._require_space(space_id)
+        if self._text_size_check is not None:
+            await self._text_size_check(
+                space_id,
+                description,
+                about_markdown if isinstance(about_markdown, str) else None,
+            )
         if _games_list_only(
             space,
             features,

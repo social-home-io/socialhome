@@ -1423,8 +1423,10 @@ from __future__ import annotations
 #:   type, signature, encryption and ``msg_id``, the payload JSON as the
 #:   frame's bytes (``FederationService.relay_event_frame``). The receiver
 #:   takes a framed event of ``SPACE_SESSION_ALLOWED_EVENT_TYPES`` and runs
-#:   every §24.11 step on its real payload. A payload over ~527 KiB fits no
-#:   frame and is refused at the sender; so is a large event to a peer below
+#:   every §24.11 step on its real payload. A payload over ~378 KiB (the
+#:   frame's bound less what the sync chunk that heals it adds) is refused
+#:   at the sender, and a page or description that large with 413 where it
+#:   is saved; so is a large event to a peer below
 #:   v_87 or through a GFS without ``envelope_media`` (WARNING, never
 #:   queued).
 #: * **v_88** (2026-11-08) — per-space GFS mailboxes (GFS redesign PR 2,

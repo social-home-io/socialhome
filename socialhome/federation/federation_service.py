@@ -48,7 +48,7 @@ from ..crypto import (
     derive_instance_id,
 )
 from ..db import AsyncDatabase
-from ..domain.errors import WrongTypeError
+from ..domain.errors import SpaceItemTooLargeError, WrongTypeError
 from ..domain.events import (
     ConnectionReachable,
     ConnectionUnreachable,
@@ -99,6 +99,11 @@ from ..domain.media_chunking import (
 )
 from ..domain.media_validator import validate_inbound_media_meta
 from ..domain.outbox import DeliveryOutcome, OutboxEntry, OutboxPayload, RetryAfter
+from ..domain.relay_media_frame import (
+    RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES,
+    RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES,
+    SPACE_TEXT_MAX_BYTES_BEHIND_GFS,
+)
 from ..domain.space import parse_have_seq
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
@@ -114,7 +119,6 @@ from .app_framing import (
 )
 from .encoder import FederationEncoder
 from .event_dispatch_registry import EventDispatchRegistry
-from .gfs_relay_media import RELAY_MEDIA_MAX_MEDIA_BODY_BYTES
 from .gfs_relay_transport import (
     RELAY_STATUS_THROTTLED,
     RELAY_STATUS_TOO_LARGE,
@@ -183,6 +187,11 @@ from .pairing_coordinator import PairingCoordinator
 from .pairing_gfs_reach import PairingGfsReach
 from .peer_pairing_client import PeerPairingClient
 from .pq_signer import PqSigner
+
+
+def _dumps_text(text: str) -> bytes:
+    """*text* as it travels inside an event payload: a JSON string."""
+    return _orjson.dumps(text)
 
 
 def _dumps(obj: dict) -> str:
@@ -797,6 +806,11 @@ class FederationService:
         event = ctx.event
         if event is None or event.event_type in MEDIA_HTTPS_EVENT_TYPES:
             return
+        if getattr(ctx.instance, "source", None) is not InstanceSource.SPACE_SESSION:
+            # Only a household behind a GFS is ever sent an event this way,
+            # so only one may send it: a paired peer on the relay opt-in
+            # has its inbox for large events.
+            raise ValueError("framed event from a household that is not behind a GFS")
         meta = event.payload if isinstance(event.payload, dict) else None
         if meta is None or not set(meta) <= FRAME_BINDING_FIELDS:
             # Nothing rides next to the bytes: one place for the payload.
@@ -2450,6 +2464,31 @@ class FederationService:
             )
             return None
         raw_payload = payload_json().encode("utf-8")
+        # A sync chunk may fill the frame; anything else must also fit the
+        # sync chunk that heals a lost frame (one bound, derived).
+        limit = (
+            RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES
+            if event_type is FederationEventType.SPACE_SYNC_CHUNK
+            else RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES
+        )
+        if len(raw_payload) > limit:
+            log.warning(
+                "send_event: a %d-byte %r payload for %s does not fit — a "
+                "household behind a GFS takes at most %d bytes of it (one "
+                "binary relay frame, and the sync chunk that re-delivers "
+                "it); refused, not sent",
+                len(raw_payload),
+                event_type.value,
+                instance.id,
+                limit,
+            )
+            return DeliveryResult(
+                instance_id=instance.id,
+                ok=False,
+                status_code=RELAY_STATUS_TOO_LARGE,
+                error=DELIVERY_ERROR_RELAY_TOO_LARGE,
+                via="gfs_relay",
+            )
         header, sealed = build_media_envelope(
             encoder=self._encoder,
             session_key=session_key,
@@ -2463,20 +2502,32 @@ class FederationService:
             space_id=space_id,
             msg_id=envelope_dict["msg_id"],
         )
-        result = await self._transport.send_event_frame(
+        return await self._transport.send_event_frame(
             instance=instance, header_dict=header, payload_bytes=sealed
         )
-        if result.error == DELIVERY_ERROR_RELAY_TOO_LARGE:
-            log.warning(
-                "send_event: a %d-byte %r payload for %s does not fit one "
-                "binary relay frame (at most %d bytes with its header) — "
-                "refused, not sent",
-                len(raw_payload),
-                event_type.value,
-                instance.id,
-                RELAY_MEDIA_MAX_MEDIA_BODY_BYTES,
-            )
-        return result
+
+    async def check_space_text_size(self, space_id: str, *texts: str | None) -> None:
+        """Refuse (:class:`SpaceItemTooLargeError`, 413) a text a person is
+        about to save into *space_id* — a page's title and content, a
+        description — that could not reach a member household behind a GFS:
+        over :data:`SPACE_TEXT_MAX_BYTES_BEHIND_GFS` as JSON while the space
+        has a household reached only through one. For a local action to
+        call BEFORE it stores anything, so nothing is shown as saved that
+        can never arrive. A space without such a household keeps the
+        limits of local federation."""
+        size = sum(len(_dumps_text(t)) for t in texts if t)
+        if size <= SPACE_TEXT_MAX_BYTES_BEHIND_GFS:
+            return
+        for row in await self._federation_repo.list_instances_in_space(space_id):
+            if row.source is InstanceSource.SPACE_SESSION:
+                log.warning(
+                    "space %s: a %d-byte text is refused — a member household "
+                    "behind a GFS takes at most %d bytes",
+                    space_id,
+                    size,
+                    SPACE_TEXT_MAX_BYTES_BEHIND_GFS,
+                )
+                raise SpaceItemTooLargeError(SPACE_TEXT_MAX_BYTES_BEHIND_GFS)
 
     async def send_event_once(
         self,

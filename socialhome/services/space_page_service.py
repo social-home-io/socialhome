@@ -162,6 +162,7 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         "_moderation",
         "_pages",
         "_spaces",
+        "_text_size_check",
     )
 
     def __init__(
@@ -183,6 +184,17 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         #: space's host (``None``: always).
         self._files_reach_host: Callable[[str], Awaitable[bool]] | None = None
         self._moderation: ModerationSubmitter | None = None
+        self._text_size_check: Callable[..., Awaitable[None]] | None = None
+
+    def attach_text_size_check(
+        self, check: Callable[..., Awaitable[None]] | None
+    ) -> None:
+        """Wire ``check(space_id, *texts)``: refuses (413,
+        :class:`~socialhome.domain.errors.SpaceItemTooLargeError`) a text
+        too large to reach a member household behind a GFS
+        (:meth:`FederationService.check_space_text_size`) — called before
+        anything is stored, so nothing shows as saved that cannot arrive."""
+        self._text_size_check = check
 
     def attach_files_reach_host(self, check: Callable[[str], Awaitable[bool]]) -> None:
         """Wire ``check(space_id)``: whether a page's new files can reach
@@ -433,6 +445,9 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         item minted. The page stays the actor's."""
         clean_title = _title(title)
         body = strip_signed_media_in_markdown(content or "") or ""
+        if self._text_size_check is not None:
+            # Reviewed or not: before the gate, the queue and the store.
+            await self._text_size_check(space_id, clean_title, body)
         cover = optional_local_media_ref(
             strip_signature_query(cover_image_url) if cover_image_url else None,
             field="cover_image_url",
@@ -543,6 +558,14 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         )
         if "content" in patch:
             patch["content"] = mapped_content
+        if self._text_size_check is not None and (
+            "content" in patch or "title" in patch
+        ):
+            await self._text_size_check(
+                space_id,
+                patch.get("title", page.title),
+                patch.get("content", page.content),
+            )
         if "cover_image_url" in patch:
             patch["cover_image_url"] = mapped_cover
         _require_page_file_cap(

@@ -4955,6 +4955,14 @@ def create_app(config: Config | None = None) -> web.Application:
             federation_repo=federation_repo,
             remote_member_repo=repos.space_remote_member,
         )
+        # A page or a description no relay frame carries is refused where
+        # it is saved (413), when the space has a household behind a GFS.
+        for text_owner in (
+            real_space_service,
+            app[K.space_page_service_key],
+            app[K.space_cal_service_key],
+        ):
+            text_owner.attach_text_size_check(federation_service.check_space_text_size)
         writer_certs.attach_federation(federation_service)
         relay_coverage.attach_peer_supports(federation_service.space_member_supports)
         if gfs_channels is not None:

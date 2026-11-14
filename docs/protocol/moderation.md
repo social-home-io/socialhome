@@ -748,7 +748,7 @@ back).
   (`check_reaches_host`).
 - **A large published item reaches a member behind a GFS** (closed: large events ride the v_87 frame): the released `SPACE_*` event and the §25.6 `SPACE_SYNC_CHUNK`
   that carries the row later both cross the relay as one frame. What one
-  frame cannot carry (a payload over ~527 KiB — no reviewed item is that
+  frame and its sync chunk cannot carry (a payload over ~378 KiB — no reviewed item is that
   large, the queue cap is 256 KiB) is listed in
   [gfs-relay.md](./gfs-relay.md#large-events-in-a-binary-frame).
 - **An echoed rejection is the household's word**, like its

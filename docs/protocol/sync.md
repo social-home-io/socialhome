@@ -604,11 +604,15 @@ strikes and the page never arrived). The chunk is not re-sized: the
 transport sends any event too large for the JSON envelope as one binary
 relay frame (528 KiB, the event's payload as its bytes —
 [gfs-relay.md](./gfs-relay.md#large-events-in-a-binary-frame)), so
-the tightest hop for a record is about the same on every path: a chunk
-payload of ~527 KiB, i.e. a record of ~390 KiB before the chunk's own
-encryption and base64. A record past that (a page with
-more content than that; pages have no size cap) is refused at the
-provider with a WARNING and counts a strike, as before. A requester
+a chunk payload may be ~520 KiB, i.e. a record of ~378 KiB before the
+chunk's own encryption and base64 — and that is exactly the bound of a
+live event toward such a household (`RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES`
+is derived from the frame's), so every item that reached it live also
+fits its catch-up. The GFS keeps a frame one hour (a JSON envelope a
+day): for a large item the sync, not the queue, is the heal. A record
+past the bound (saved before the space had a household behind a GFS —
+later saves are refused with 413) is refused at the provider with a
+WARNING and counts a strike, as before. A requester
 below v_87, or a GFS without `envelope_media`, keeps the pre-v_87
 behaviour. The stream's records are unchanged — no sync line.
 

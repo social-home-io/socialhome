@@ -460,7 +460,10 @@ rare event — not worth it.
 chunk or any event of the vocabulary a seat may send at all
 (`RELAY_FRAME_EVENT_TYPES` = the media chunks +
 `SPACE_SESSION_ALLOWED_EVENT_TYPES`; this replaced the single
-moderation entry of the unreleased #1359). Straight after the header's
+moderation entry of the unreleased #1359), and a framed event only from a
+household behind a GFS (`space_session`) — the only kind a sender frames
+for; a paired peer on the relay opt-in has its inbox for large events and
+is refused. Straight after the header's
 decrypt, one extra step (`_open_framed_event`) opens the bytes (suites,
 AEAD, the signed `chunk_sha256`), requires a JSON object and makes it the
 event's payload. It refuses a frame whose signed metadata holds anything
@@ -475,28 +478,61 @@ sender card, relay opt-in, timestamp, signature, unpair tombstone and
 replay. The handler gets an ordinary event (`media_bytes` unset). The
 inbox's binary route and the `fed-media-v1` channel are unchanged.
 
-**Bounds.** One frame carries a media body of at most 540,570 bytes
-(`RELAY_MEDIA_MAX_MEDIA_BODY_BYTES`): the payload JSON may be about
-**527 KiB** (measured; the signed header takes under 1 KiB, a few
-KiB more with a hybrid signature). What fits, with the sender's own caps:
+**Bounds — one, live and by sync.** One frame carries a payload JSON of
+`RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES` (~520 KiB: the frame's plaintext
+less 8 KiB for the length field, the framing, the signed header — a hybrid
+signature included — and the AEAD overhead). But a frame is accepted with
+a 202 and never retried, and the GFS keeps it **one hour** (a JSON
+envelope: 24 hours) — the §25.6 sync is what heals a lost one, and a sync
+chunk carries its record encrypted and base64'ed (× 4/3) inside the
+`SPACE_SYNC_CHUNK` event that rides the very same frame. So the bound of
+every other framed event is **derived** from the frame's
+(`domain/relay_media_frame.py`):
 
-| Event | Largest payload | Fits one frame |
+```
+RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES =
+    (RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES - SYNC_CHUNK_WRAP_ALLOWANCE_BYTES) * 3 // 4   # ~378 KiB
+```
+
+Whatever travels live also fits the sync chunk that re-delivers it; only
+a `SPACE_SYNC_CHUNK` may fill the frame. (Raising the sync side instead
+would need the chunk's record out of its base64 — a wire change.) A
+member behind a GFS that was offline for more than an hour therefore
+still gets the page with its next sync, before any later small edit of it
+could be refused for a missing row.
+
+| Event | Largest payload | Fits |
 |---|---|---|
 | `SPACE_MODERATION_SUBMITTED` | 256 KiB item cap + ~2 KiB | yes |
-| `SPACE_PAGE_*`, page proposals | the content as JSON text (+ conflict sides); a 256 KiB page is ~260 KiB | yes, up to ~500 KiB of content |
-| `SPACE_SYNC_CHUNK` with one large record | record × 4/3 (encrypted, base64) — a 256 KiB page ≈ 345 KiB | yes up to ~390 KiB of record |
-| `SPACE_CONFIG_CHANGED` with cover + icon | ~430 KiB | yes |
-| posts, comments, bazaar, tasks, polls, timetables, app tables, directory parts | ≤ ~175 KiB | yes (most fit the JSON envelope) |
+| `SPACE_PAGE_*`, page proposals | the content as JSON text; a 256 KiB page is ~260 KiB | yes, up to ~370 KiB of text |
+| `SPACE_SYNC_CHUNK` with one large record | record × 4/3 + ~6 KiB | yes, for every record that went live |
+| posts, comments, bazaar, tasks, polls, timetables, app tables, directory parts, config (relay variant) | ≤ ~175 KiB | yes (most fit the JSON envelope) |
 
-What can exceed one frame, because the product has no cap on it (only
-the 1 MiB request body): a page over ~500 KiB of content (~390 KiB for
-its sync record), a calendar event description or a space description
-of that size, and a `SPACE_ROSTER_SNAPSHOT` of a space with more than
-about a thousand members. Those are **refused at the sender**
-(`relay_too_large`, a WARNING naming the household, the event and the
-size; never queued, never silently dropped) toward a household behind a
-GFS, and still reach paired and mesh members. Carrying them needs the
-event split over several frames — an open follow-up, not a smaller limit.
+What the product does not cap (only the 1 MiB request body) and can pass
+the bound: a page, a calendar event description, a space description or
+"about" text. **The person is told where they save it**: when the space
+has a household reached only through a GFS, a text over
+`SPACE_TEXT_MAX_BYTES_BEHIND_GFS` (~370 KiB as JSON) is refused with
+**413 `SPACE_ITEM_TOO_LARGE`** (`max_kb`) before anything is stored —
+pages reviewed or not, space calendar events, the space's description
+(`FederationService.check_space_text_size`). A space with no such
+household keeps the limits of local federation (owner decision: no limit
+is shrunk for them). Behind that check the sender still refuses any event
+over the bound toward a household behind a GFS (`relay_too_large`, a
+WARNING naming the household, the event and the size; never queued,
+never silently dropped) — e.g. an item saved before such a household
+joined. That item then reaches paired and mesh members only; splitting an
+event over several frames is the open follow-up.
+
+A `SPACE_ROSTER_SNAPSHOT` (one event with every seat, ~0.5 KiB each)
+passes the bound at roughly 750 members and is refused the same way.
+That is harmless for the roster itself: every member household gets the
+seats through the §25.6 `members` resource (`sync/space/exporters/members.py`
+— one record per seat, 8 KiB chunks, never one large record) on its
+join and on every later sync, and the households it must reach through
+the host's member directory, which is already sent in parts
+(`SPACE_MAILBOX_DIRECTORY`, 150 per part). The snapshot is the fast
+path; the sync is the complete one.
 
 **Versioning — no new version.** The gate is the one of the frame
 itself: a peer at v_87 (`MIN_FOR_RELAY_MEDIA` — it reads binary relay
@@ -537,6 +573,15 @@ see that. Handlers already tolerate it — an update for a row not held
 is what a lost live event looks like on any path — and the same sync
 settles the row. Toward an online household both are pushed at once,
 in order.
+
+**Contention.** The frames of one save share the sender's per-IP byte
+budget at the GFS (64 MiB / min per node) with its pictures: a large page
+saved into a space with 200 households behind a GFS is 200 × 256 KiB ≈
+50 MiB — most of a minute's budget, during which that household's
+picture chunks wait in its outbox (throttled sends are queued, never
+dropped). Storing the sealed body once on the GFS and fanning out a key
+per recipient — what the v_91 multi upload does for small events — is
+the named follow-up for large ones.
 
 **Cost.** One large event to N households behind a GFS = N frames of one
 bucket each: a 240 KiB page is N × 256 KiB up (N × 516 KiB once the
