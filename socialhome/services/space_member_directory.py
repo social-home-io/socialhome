@@ -276,14 +276,40 @@ class SpaceMemberDirectory:
             space_id, inst = event.space_id, event.instance_id
             if isinstance(event, SpaceRemoteSeatLive):
                 await self._adopt(space_id, inst)
-            elif self._seat_ender is not None and inst != self._instance_id:
-                await self._seat_ender(inst)
+            elif inst != self._instance_id and not await self._writers.may_receive(
+                space_id, inst
+            ):
+                await self._seat_ended(space_id, inst)
             if await self.serves(space_id):
                 await self.reconcile(space_id)
         except Exception:
             log.warning(
                 "directory: reconcile after a seat change failed", exc_info=True
             )
+
+    async def _seat_ended(self, space_id: str, instance_id: str) -> None:
+        """The roster ended *instance_id*'s last member seat in *space_id*:
+        a card a directory gave us goes with it, and its lazy seat ends once
+        no space we share justifies it. The roster's handler drops the
+        household's ``space_instances`` row right after it told us (when no
+        seat of any kind is left); the seat's "still shared?" check must not
+        see that row, so it is dropped here the same way first."""
+        if await self.serves(space_id):
+            # We act as host: our own removal path owns that household's
+            # row and seat (it still has to tell the household).
+            return
+        hosts = await self.hosts_of(space_id)
+        if instance_id not in hosts:
+            await self._clear(space_id, instance_id)
+        if (
+            self._seats is not None
+            and instance_id not in hosts
+            and not await self._seats.list_for_instance(
+                space_id, instance_id, include_tombstoned=False
+            )
+        ):
+            await self._spaces.remove_space_instance(space_id, instance_id)
+        await self._end_seat(instance_id)
 
     def attach_seat_ender(self, ender: Callable[[str], Awaitable[object]]) -> None:
         """How a household that left the directory loses its seat once no
@@ -842,6 +868,12 @@ class SpaceMemberDirectory:
         waiting: dict[str, Any] = {}
         for card in cards.values():
             inst = card.instance_id
+            if inst not in rows and await self._writers.may_receive(space_id, inst):
+                # Our roster holds a live writer seat for that household
+                # (from the join snapshot or a sync, which make no
+                # ``space_instances`` row): seat + card make the row.
+                await self._spaces.add_space_instance(space_id, inst)
+                rows.add(inst)
             if inst not in rows:
                 # No seat of that household in our roster (yet).
                 waiting[inst] = {
@@ -904,6 +936,7 @@ class SpaceMemberDirectory:
         on the household's row now — the row the roster creates for a live
         seat — and its lazy seat is made."""
         acting = await self.hosts_of(space_id)
+        adopted = False
         for issuer in acting:
             if issuer == self._instance_id:
                 continue
@@ -919,6 +952,8 @@ class SpaceMemberDirectory:
                 card = parse_card(entry.get("card"))
             except InvalidMemberCard:
                 continue
+            if not await self._writers.may_receive(space_id, instance_id):
+                continue  # not a member's seat: the card is of no use here
             await self._spaces.add_space_instance(space_id, instance_id)
             fresh = "card" not in await self._doc(space_id, instance_id)
             await self._store(space_id, card)
@@ -931,9 +966,10 @@ class SpaceMemberDirectory:
                 fresh=fresh,
                 seated=entry.get("via") is True,
             )
-            held = await self.card_of(space_id, instance_id)
-            if held is not None:
-                await self._seat(held)
+            adopted = True
+        held = await self.card_of(space_id, instance_id) if adopted else None
+        if held is not None:
+            await self._seat(held)
 
     async def _listed_by(
         self,
@@ -1647,6 +1683,39 @@ class SpaceMemberDirectory:
 
     # ── Transport + inbound ──────────────────────────────────────────────
 
+    async def _usable(
+        self, space_id: str, instance_id: str, doc: dict[str, Any], hosts: list[str]
+    ) -> bool:
+        """Whether the card on row *doc* may be USED now — to send to that
+        household, to take a frame from it, as the end of a host hop. Holding
+        a card decides nothing: our own roster mirror does.
+
+        * a household acting as host here, or one that gave us its card
+          itself while we act as host (its seat is ours to know — a follower
+          seated by link included), or any card on the space's owner (it
+          takes cards only from the household or for a roster member);
+        * else a card a household acting as host lists, AND a live writer
+          seat of that household in our roster (``may_receive``): a removal
+          in the roster ends use at once, whoever still lists the card."""
+        if instance_id in hosts or doc.get("direct") is True:
+            return True
+        if hosts[:1] == [self._instance_id]:
+            return True
+        return self._still_listed(doc, hosts) and await self._writers.may_receive(
+            space_id, instance_id
+        )
+
+    async def usable_card_of(
+        self, space_id: str, instance_id: str
+    ) -> MemberCard | None:
+        """:meth:`card_of`, only while the card may be used (:meth:`_usable`)."""
+        doc = await self._doc(space_id, instance_id)
+        card = _card(doc)
+        if card is None or card.instance_id != instance_id:
+            return None
+        hosts = await self.hosts_of(space_id)
+        return card if await self._usable(space_id, instance_id, doc, hosts) else None
+
     async def _any_card(self, instance_id: str) -> MemberCard | None:
         """A verified card of *instance_id* from any space, one with a
         mailbox first (the household has ONE mailbox per GFS, so any space's
@@ -1671,7 +1740,7 @@ class SpaceMemberDirectory:
         # Another space's card only for a SPACE-LESS envelope: one of space X
         # never goes to a household on the strength of its card in Y.
         card = (
-            await self.card_of(space_id, instance_id)
+            await self.usable_card_of(space_id, instance_id)
             if space_id is not None
             else await self._any_card(instance_id)
         )
@@ -1697,9 +1766,10 @@ class SpaceMemberDirectory:
         doc = await self._doc(space_id, sender)
         card = _card(doc)
         if card is not None and card.instance_id == sender:
-            # A card only a household that no longer acts as host listed
-            # counts for nothing — at once, not at the next sweep.
-            return sender in hosts or self._still_listed(doc, hosts)
+            # The roster decides, at once: a card only a household that no
+            # longer acts as host listed, or one of a household our roster
+            # holds no member's seat for, counts for nothing.
+            return await self._usable(space_id, sender, doc, hosts)
         # A card of another space counts only where the roster is ours to
         # trust: the sender acts as the space's host here (a second space
         # joined over the existing seat carries no card), or WE do (its

@@ -5294,7 +5294,7 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         host_hop = HostHop(
             own_instance_id=real_instance_id,
-            card_of=member_directory.card_of,
+            card_of=member_directory.usable_card_of,
             hosts_of=member_directory.hop_hosts,
             acting_hosts=member_directory.hosts_of,
             serves=member_directory.serves,

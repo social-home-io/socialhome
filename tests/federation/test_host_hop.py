@@ -21,6 +21,7 @@ from socialhome.crypto import (
     sign_ed25519,
 )
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_QUEUED,
     SPACE_SESSION_ALLOWED_EVENT_TYPES,
     FederationEvent,
     FederationEventType,
@@ -628,3 +629,103 @@ async def test_no_hop_the_target_would_refuse_is_reported_as_sent():
     )
     assert not result.ok and result.error == HOST_HOP_UNAVAILABLE
     assert sent == []
+
+
+# ── Review round 2 (#1361): the hops are tried in order ──────────────────
+
+
+def _hop_with(results: dict[str, Any], hosts: list[str]):
+    """A hop whose routed first leg toward each host answers *results*."""
+    sent: list[str] = []
+    ids, idents = _identity_chain()
+    target = ids[0]
+    kw = generate_x25519_keypair()
+    card = build_card(
+        instance_id=target,
+        identity_seed=idents[target].private_key,
+        identity_pk=idents[target].public_key,
+        keywrap_pk=kw.public_key,
+        keywrap_sig=b64url_encode(
+            sign_ed25519(idents[target].private_key, kw.public_key)
+        ),
+        proto_version=89,
+        rev=1,
+        mailbox=None,
+    )
+
+    class _Routed:
+        async def send_routed(self, *, path, first_leg, **_kw):
+            sent.append(path[1])
+            first_leg.append(results[path[1]])
+            return "route"
+
+    async def card_of(_s, _i):
+        return card
+
+    async def hosts_of(_s, _t):
+        return hosts
+
+    async def acting(_s):
+        return hosts
+
+    async def serves(_s):
+        return False
+
+    hop = HostHop(
+        own_instance_id="me",
+        card_of=card_of,
+        hosts_of=hosts_of,
+        acting_hosts=acting,
+        serves=serves,
+        keywrap_private_key=kw.private_key,
+        keywrap_public_key=kw.public_key,
+    )
+    hop.attach_routed(_Routed())  # type: ignore[arg-type]
+
+    async def send():
+        return await hop.send(
+            to_instance_id=target,
+            event_type=FederationEventType.SPACE_POST_CREATED,
+            payload={},
+            space_id=SPACE,
+        )
+
+    return send, sent
+
+
+def _leg(ok: bool, error: str | None = None):
+    return SimpleNamespace(ok=ok, error=error)
+
+
+async def test_a_hop_that_is_unreachable_now_gives_way_to_the_next():
+    """The owner is offline (the envelope only sits in our outbox for it):
+    the admin that seated both ends is online and takes it."""
+    send, sent = _hop_with(
+        {"owner": _leg(False, DELIVERY_ERROR_QUEUED), "admin": _leg(True)},
+        ["owner", "admin"],
+    )
+    result = await send()
+    assert result.ok and result.via == "host_hop"
+    assert sent == ["owner", "admin"]
+
+
+async def test_the_first_hop_that_takes_it_is_the_only_one_used():
+    send, sent = _hop_with(
+        {"owner": _leg(True), "admin": _leg(True)}, ["owner", "admin"]
+    )
+    assert (await send()).ok
+    assert sent == ["owner"]
+
+
+async def test_no_hop_took_it_is_never_reported_as_delivered():
+    send, sent = _hop_with(
+        {"owner": _leg(False, DELIVERY_ERROR_QUEUED), "admin": _leg(False, "nope")},
+        ["owner", "admin"],
+    )
+    result = await send()
+    # Queued for the owner: it redelivers on its own — said as such.
+    assert not result.ok and result.error == DELIVERY_ERROR_QUEUED
+    assert sent == ["owner", "admin"]
+    send, _sent = _hop_with({"admin": _leg(False, "nope")}, ["admin"])
+    result = await send()
+    assert not result.ok and result.error == HOST_HOP_UNAVAILABLE
