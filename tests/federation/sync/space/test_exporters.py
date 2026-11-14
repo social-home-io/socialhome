@@ -152,6 +152,65 @@ async def test_members_exporter():
     assert recs[0]["role"] == "member"
 
 
+class _OwnerAwareSpaceRepo(_FakeSpaceRepo):
+    """A space owned by household ``owner-hh`` whose owner is ``u-owner``."""
+
+    async def get(self, space_id):
+        return SimpleNamespace(id=space_id, owner_instance_id="owner-hh")
+
+    async def get_owner_user_id(self, space_id):
+        return "u-owner"
+
+
+class _OwnerSeats:
+    """The roster mirror: ``u-owner-2`` is a second person of the owner."""
+
+    async def get(self, space_id, instance_id, user_id):
+        held = instance_id == "owner-hh" and user_id == "u-owner-2"
+        return SimpleNamespace(user_id=user_id) if held else None
+
+
+def _roster_rows():
+    return [
+        SpaceMember(space_id="sp-1", user_id=uid, role=role, joined_at="t")
+        for uid, role in (
+            ("u-owner", "owner"),
+            ("u-owner-2", "member"),
+            ("u-admin", "admin"),
+            ("u-other", "member"),
+        )
+    ]
+
+
+async def test_a_non_owner_never_streams_the_owner_households_member_rows():
+    """Review round 3 (#1361): a delegated admin that synced with the owner
+    holds the owner household's member rows, but those may only come from
+    the owner — the receiver drops them from anybody else (and warns). An
+    honest admin does not send them."""
+    from socialhome.federation.sync.space.exporters import MembersExporter
+
+    ex = MembersExporter(
+        _OwnerAwareSpaceRepo(members=_roster_rows()),
+        own_instance_id="admin-hh",
+        remote_member_repo=_OwnerSeats(),
+    )
+    assert [r["user_id"] for r in await ex.list_records("sp-1")] == [
+        "u-admin",
+        "u-other",
+    ]
+
+
+async def test_the_owner_streams_its_own_households_member_rows():
+    from socialhome.federation.sync.space.exporters import MembersExporter
+
+    ex = MembersExporter(
+        _OwnerAwareSpaceRepo(members=_roster_rows()),
+        own_instance_id="owner-hh",
+        remote_member_repo=_OwnerSeats(),
+    )
+    assert len(await ex.list_records("sp-1")) == 4
+
+
 class _FakePictureRepo:
     def __init__(self, held: set[str]):
         self._held = held

@@ -858,17 +858,24 @@ member's card and no host hop.
   - the card goes on its household's `space_instances` row, which the
     roster creates and removes (a live seat). When the roster mirror holds
     a live writer seat but no row yet (a seat learned from the join
-    snapshot or a sync), seat + card make the row. With no seat the card
-    waits on the issuer's row (`wait`, the newest 100) and is taken the
-    moment the seat goes live (`SpaceRemoteSeatLive`; the sweep is the
-    backstop);
+    snapshot or a sync), seat + card make the row. With no member's seat
+    — a follower's row does not count — the card waits on the issuer's row
+    (`wait`, the newest 100) and is taken the moment the seat goes live
+    (`SpaceRemoteSeatLive`; the sweep is the backstop). Past 100 waiting
+    cards per issuer the oldest is dropped although the version moves on:
+    that household's card comes again only with its next change or a
+    fresh snapshot (accepted: it takes a roster more than 100 member
+    households behind, which the roster's own catch-up repairs first);
   - whether a card may be USED — a fan-out or mailbox target, a frame
     taken from that household, the end of a host hop — is asked of the
     roster at that moment: a live writer seat of that household
     (`SpaceWriterHouseholds.may_receive`). A removal in the roster ends
-    use at once, whoever still lists the card, and ends the lazy seat. A
-    household acting as host, and a household that gave its card to the
-    host itself, need no listing;
+    use at once, whoever still lists the card, and ends the lazy seat
+    (the roster's handler drops the household's row before it announces
+    the ended seat; the directory never drops a row). The roster check is
+    skipped only for a household acting as host, and — while WE act as
+    host — for a household that gave us its card itself (a follower
+    seated by link holds no writer seat); a demoted admin stops at once;
   - a `removed` (or a household missing from a whole directory) only
     withdraws THAT issuer's listing of the card: the card goes when no
     household acting as host lists it any more. So an admin that missed a

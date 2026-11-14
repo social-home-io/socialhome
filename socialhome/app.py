@@ -1859,7 +1859,14 @@ def _wire_federation_stack(
     sync_windows = SyncWindows(space_repo)
     exporters: dict = {
         "bans": BansExporter(space_repo),
-        "members": MembersExporter(space_repo, profile_picture_repo),
+        "members": MembersExporter(
+            space_repo,
+            profile_picture_repo,
+            # A household that does not own the space never streams the
+            # owner household's member rows (they come from the owner).
+            own_instance_id=federation_service.own_instance_id,
+            remote_member_repo=space_remote_member_repo,
+        ),
         "member_pictures": MemberPicturesExporter(
             space_repo,
             profile_picture_repo,

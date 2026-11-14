@@ -1830,6 +1830,25 @@ class PrivateSpaceInviteHandler:
                     space_id=space_id, instance_id=instance_id, user_id=user_id
                 )
             )
+        if (
+            applied
+            and tombstoned
+            and space is not None
+            and instance_id != space.owner_instance_id
+            and not await self._remote_members.list_for_instance(
+                space_id, instance_id, include_tombstoned=False
+            )
+        ):
+            # The household's LAST seat just went: stop treating it as a
+            # member household, exactly as the host's own
+            # ``remove_remote_member`` does — otherwise every later fan-out
+            # (posts, rekeys, a rotation bundle) still reaches it (v_44: a
+            # lingering target would receive the next rekey or rotation
+            # bundle). Before the seat is announced as ended: a listener
+            # that asks "do we still share a space with that household?"
+            # (the member directory ending its lazy seat) must not see the
+            # row.
+            await self._space_repo.remove_space_instance(space_id, instance_id)
         if applied and tombstoned:
             await self._bus.publish(
                 SpaceRemoteSeatEnded(
@@ -1856,27 +1875,14 @@ class PrivateSpaceInviteHandler:
         # ``broadcast_to_space_members`` (config edits, posts, rekeys) would
         # never reach them. This is exactly the offline-of-owner case: a
         # delegated admin must be able to fan a change out to every member it
-        # knows, not just the host it accepted from. On a LEFT
-        # tombstone the household stays a target only while it still holds
-        # another live seat (v_44: a lingering target would receive the next
-        # rekey or rotation bundle). ``add_space_instance`` is an idempotent upsert and
+        # knows, not just the host it accepted from. (On a LEFT tombstone
+        # the household stays a target only while it still holds another
+        # live seat — its row went above, before the seat was announced.)
+        # ``add_space_instance`` is an idempotent upsert and
         # ``broadcast_to_space_members`` already excludes our own household, so
         # a gossip row naming our instance is harmless.
         if not tombstoned:
             await self._space_repo.add_space_instance(space_id, instance_id)
-        elif (
-            applied
-            and space is not None
-            and instance_id != space.owner_instance_id
-            and not await self._remote_members.list_for_instance(
-                space_id, instance_id, include_tombstoned=False
-            )
-        ):
-            # The household's LAST seat just went: stop treating it as a
-            # member household, exactly as the host's own
-            # ``remove_remote_member`` does — otherwise every later fan-out
-            # (posts, rekeys, a rotation bundle) still reaches it.
-            await self._space_repo.remove_space_instance(space_id, instance_id)
 
     async def _on_space_member_joined(self, event: FederationEvent) -> None:
         """Authority-signed roster JOINED (v_23) — apply (upsert) the member."""

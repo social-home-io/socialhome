@@ -2587,3 +2587,87 @@ async def test_an_admins_frame_names_the_households_it_seated():
         i for d in a.fed.raw_to(m["id"]) for i in d["payload"].get("via_seated", [])
     ]
     assert named == [m2["id"]]  # not e: the owner's
+
+
+# ── Review round 3 (#1361) ───────────────────────────────────────────────
+
+
+async def test_a_waiting_card_survives_a_seat_event_that_is_no_members_seat():
+    """A follower of household X goes live first (a row, no writer seat):
+    the waiting card stays where it is, and is taken when X's member seat
+    arrives."""
+    x = _hh()
+    m, owner, _admin = _invitee_with()
+    await m.directory({"cards": [_card(x).to_wire()]})
+    assert x["id"] in m.spaces.doc(SPACE, owner["id"])["wait"]
+    m.member(x)  # the roster's row for the follower seat
+    await m.dir._on_seat_change(
+        SpaceRemoteSeatLive(space_id=SPACE, instance_id=x["id"], user_id="bob")
+    )
+    assert x["id"] in m.spaces.doc(SPACE, owner["id"])["wait"]
+    assert await m.dir.card_of(SPACE, x["id"]) is None
+    await _seat_live(m, x)
+    assert await m.dir.card_of(SPACE, x["id"]) is not None
+
+
+async def test_a_card_waits_while_the_household_holds_only_a_followers_seat():
+    """A row alone is not a member's seat: no card on it, no lazy seat."""
+    x = _hh()
+    m, _owner, admin = _invitee_with()
+    m.member(x)  # X only follows the space here
+    m.mailboxes.add_box(GFS)
+    await m.directory({"cards": [_card(x).to_wire()]}, sender=admin["id"])
+    assert "card" not in m.spaces.doc(SPACE, x["id"])
+    assert m.seated == []
+    assert x["id"] in m.spaces.doc(SPACE, admin["id"])["wait"]
+    await m.dir.sweep_once()  # the backstop does not take it either
+    assert m.seated == []
+    await _seat_live(m, x)
+    assert m.seated == [x["id"]]
+
+
+async def test_a_demoted_admin_stops_honouring_a_card_given_to_it_at_once():
+    """``direct`` exempts a card from the roster check only while WE act as
+    host: after our demotion — before any sweep — the roster decides."""
+    a, owner = _admin_world()
+    x = _hh()
+    a.member(x)
+    a.writers.everyone = False
+    a.writers.writers[SPACE] = {owner["id"]}  # X: a follower seated by link
+    await a.card_from(x, _card(x))
+    assert await a.dir.sender_allowed(x["id"], SPACE)
+    assert await a.dir.target_for(x["id"], SPACE) is not None
+    a.spaces.local_role = SpaceRole.MEMBER
+    assert not await a.dir.sender_allowed(x["id"], SPACE)
+    assert await a.dir.target_for(x["id"], SPACE) is None
+
+
+async def test_a_serving_admin_ends_its_seat_with_a_household_the_owner_removed():
+    a, owner = _admin_world()
+    x = _hh()
+    a.member(x)
+    a.writers.everyone = False
+    a.writers.writers[SPACE] = {x["id"], owner["id"]}
+    await a.card_from(x, _card(x))
+    ended: list[str] = []
+
+    async def ender(inst):
+        ended.append(inst)
+
+    a.dir.attach_seat_ender(ender)
+    await _seat_ended(a, x)  # the owner's removal, by roster gossip
+    assert ended == [x["id"]]
+
+
+async def test_the_directory_never_drops_a_roster_row():
+    """The row is the roster's: its handler drops it (before it announces
+    the ended seat) — the directory only ends use."""
+    x = _hh()
+    m, _owner, admin = _invitee_with(x)
+    await m.directory({"cards": [_card(x).to_wire()]}, sender=admin["id"])
+    m.writers.writers[SPACE].discard(x["id"])
+    await m.dir._on_seat_change(
+        SpaceRemoteSeatEnded(space_id=SPACE, instance_id=x["id"], user_id="u")
+    )
+    assert x["id"] in m.spaces.rows[SPACE]
+    assert "card" not in m.spaces.doc(SPACE, x["id"])
