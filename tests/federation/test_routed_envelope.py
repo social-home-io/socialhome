@@ -2215,31 +2215,79 @@ async def test_route_stale_at_origin_nacked_retry_gives_up(caplog):
     assert not any(r.levelno >= logging.WARNING for r in caplog.records)
 
 
-async def test_route_stale_at_origin_oversized_inner_invalidates_without_retransmit(
-    caplog,
-):
-    """An inner over ``_MAX_RETAINED_INNER_BYTES`` is retained with
-    ``inner_payload_json=None`` — the nack still invalidates the route, but
-    nothing is retransmitted (with no listener for its event type the inner
-    is simply gone)."""
+async def test_route_stale_at_origin_large_inner_is_retransmitted(caplog):
+    """A space event whose inner is over ``_MAX_RETAINED_INNER_BYTES`` (a
+    long page, a space cover) is kept like a small one and retransmitted
+    once when the target nacks it. Before this the mesh kept only its head:
+    the page a host sent while a mesh-only member was restarting was lost on
+    that member, logged at INFO on the sender and nowhere else."""
     a, b, c, rs = _origin_with_route_service()
     path = [a.instance_id, b.instance_id, c.instance_id]
-    rs.discovery = (list(path), _mint_target_eph(c))
-    big = {"chunk": "x" * (_MAX_RETAINED_INNER_BYTES + 1)}
+    fresh_pub = _mint_target_eph(c)
+    rs.discovery = (list(path), fresh_pub)
+    big = {"id": "page-1", "content": "x" * (4 * _MAX_RETAINED_INNER_BYTES)}
     with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
         route_id, _dead, _ = await _send_under_dead_key(
-            a, path, payload=big, pin=c.fed.own_identity_pk.hex()
+            a,
+            path,
+            payload=big,
+            pin=c.fed.own_identity_pk.hex(),
+            inner_event_type=FederationEventType.SPACE_PAGE_CREATED,
         )
-        pending = a.handler._pending_routed[route_id]
-        assert pending.inner_payload_json is None
-        assert pending.target_instance_id == c.instance_id
         await _settle()
     assert rs.invalidated == [c.instance_id]
-    assert rs.discover_calls == []
-    assert len(_routed_sends(a)) == 1
+    routed = _routed_sends(a)
+    assert len(routed) == 2, "expected the original + exactly one retransmit"
+    assert routed[1]["payload"]["sealed"]["target_eph_pk"] == fresh_pub
+    assert [(e.event_type, e.payload) for e in c.dispatched] == [
+        (FederationEventType.SPACE_PAGE_CREATED, big)
+    ]
     assert route_id not in a.handler._pending_routed
+    assert any(_RETRANSMIT_MSG in r.message for r in caplog.records)
+    assert not any("oversized" in r.message for r in caplog.records)
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def test_send_routed_keeps_large_inners_within_one_byte_budget(caplog):
+    """Large inners are kept while their total stays under
+    ``_MAX_RETAINED_LARGE_BYTES``; one past it is recorded by its head only
+    — the nack still invalidates the route, nothing is retransmitted, and
+    the sender says so at WARNING. Small inners never count."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    rs.discovery = (list(path), _mint_target_eph(c))
+    pin = c.fed.own_identity_pk.hex()
+    big = {"id": "page-1", "content": "x" * (2 * _MAX_RETAINED_INNER_BYTES)}
+    size = len(json.dumps(big, separators=(",", ":"), sort_keys=True))
+    with patch.object(routed_envelope_mod, "_MAX_RETAINED_LARGE_BYTES", 2 * size):
+        kept = [
+            (await _send_under_dead_key(a, path, payload=big, pin=pin))[0]
+            for _ in range(2)
+        ]
+        small = (await _send_under_dead_key(a, path, pin=pin))[0]
+        over, dead_pub, _ = await _send_under_dead_key(a, path, payload=big, pin=pin)
+        h = a.handler
+        assert all(h._pending_routed[r].inner_payload_json for r in kept)
+        assert h._pending_routed[small].inner_payload_json is not None
+        assert h._pending_routed[over].inner_payload_json is None
+        assert h._pending_routed[over].inner_head == {"id": "page-1"}
+        # A kept one answered (its record is gone) frees its share.
+        del h._pending_routed[kept[0]]
+        again = (await _send_under_dead_key(a, path, payload=big, pin=pin))[0]
+        assert h._pending_routed[again].inner_payload_json is not None
+    sends = len(_routed_sends(a))
+    with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
+        await _deliver_to_origin(
+            a, _origin_nack(target=c, path=path, route_id=over, stale_pub=dead_pub)
+        )
+    assert rs.invalidated == [c.instance_id]
+    assert len(_routed_sends(a)) == sends
     assert any(
-        r.levelno == logging.INFO and "oversized" in r.message for r in caplog.records
+        r.levelno == logging.WARNING
+        and "not retransmitted" in r.message
+        and "space_post_created" in r.message
+        for r in caplog.records
     )
 
 
