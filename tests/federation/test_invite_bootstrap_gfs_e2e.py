@@ -488,6 +488,7 @@ async def _household(
         space_service.attach_space_mailboxes(mailbox_service)
         directory.attach_seat_ender(space_service.end_space_session_if_unused)
         directory.attach_to(federation)
+        directory.wire(bus)
         federation._mailbox_sender_check = directory.sender_allowed
         fed_transport._mailbox_targets = directory.target_for
 

@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 
 from ..crypto import b64url_encode
 from ..domain.federation import (
+    DELIVERY_ERROR_QUEUED,
     SPACE_SESSION_ALLOWED_EVENT_TYPES,
     DeliveryResult,
     FederationEventType,
@@ -119,43 +120,54 @@ class HostHop:
         space_id: str,
     ) -> DeliveryResult:
         """Ship one event of *space_id* to *to_instance_id* through a
-        household acting as the space's host for BOTH ends — the first of
-        ``hosts_of(space, target)``: the owner (every member takes it), else
-        our inviting admin when it seated the target too. A hop the target
-        would refuse is never sent: with no such host the send fails
-        (:data:`HOST_HOP_UNAVAILABLE`) instead of reporting a delivery that
+        household acting as the space's host for BOTH ends that holds both
+        ends' cards — ``hosts_of(space, target)``, tried in order: the owner
+        (every member takes it), then our inviting admin when it seated the
+        target too. ``ok`` only when a hop took the envelope; a hop that is
+        unreachable now leaves it in our outbox and the next hop is tried
+        (the target takes a second copy as the same event); when none took
+        it the result is the queued error, and with no hop at all
+        :data:`HOST_HOP_UNAVAILABLE` — never ``ok`` for a delivery that
         cannot happen. Never raises."""
         failed = DeliveryResult(
             instance_id=to_instance_id, ok=False, error=HOST_HOP_UNAVAILABLE
         )
         if self._routed is None or not space_id:
             return failed
-        host = next(
-            (
-                h
-                for h in await self._hosts_of(space_id, to_instance_id)
-                if h not in (self._own_instance_id, to_instance_id)
-            ),
-            None,
-        )
-        if host is None:
-            return failed
-        card = await self._card_of(space_id, to_instance_id)
-        if card is None:
-            return failed
-        try:
-            await self._routed.send_routed(
-                path=[self._own_instance_id, host, to_instance_id],
-                target_eph_pk_b64=b64url_encode(bytes.fromhex(card.keywrap_pk)),
-                inner_event_type=event_type,
-                inner_payload=payload,
-                target_identity_pk=card.identity_pk,
-                space_id=space_id,
+        card = None
+        queued = False
+        for host in await self._hosts_of(space_id, to_instance_id):
+            if host in (self._own_instance_id, to_instance_id):
+                continue
+            card = card or await self._card_of(space_id, to_instance_id)
+            if card is None:
+                return failed
+            leg: list[DeliveryResult] = []
+            try:
+                await self._routed.send_routed(
+                    path=[self._own_instance_id, host, to_instance_id],
+                    target_eph_pk_b64=b64url_encode(bytes.fromhex(card.keywrap_pk)),
+                    inner_event_type=event_type,
+                    inner_payload=payload,
+                    target_identity_pk=card.identity_pk,
+                    space_id=space_id,
+                    first_leg=leg,
+                )
+            except Exception:
+                log.warning("host hop: routed send failed", exc_info=True)
+                continue
+            if not leg or leg[0].ok:
+                return DeliveryResult(
+                    instance_id=to_instance_id, ok=True, via="host_hop"
+                )
+            # That hop did not take it now (it is in our outbox for it at
+            # best): the next one that holds both ends' cards is tried.
+            queued = queued or leg[0].error == DELIVERY_ERROR_QUEUED
+        if queued:
+            return DeliveryResult(
+                instance_id=to_instance_id, ok=False, error=DELIVERY_ERROR_QUEUED
             )
-        except Exception:
-            log.warning("host hop: routed send failed", exc_info=True)
-            return failed
-        return DeliveryResult(instance_id=to_instance_id, ok=True, via="host_hop")
+        return failed
 
     async def allows(
         self,
