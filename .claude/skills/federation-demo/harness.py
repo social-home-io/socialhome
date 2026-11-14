@@ -23760,7 +23760,7 @@ _PARITY_MEMBERS: tuple[str, ...] = ("d", "e")
 _PARITY_DAY = ("2027-04-01T00:00:00Z", "2027-04-02T00:00:00Z")
 #: A page too large for a JSON envelope on the GFS relay (~191 KiB) that
 #: one binary relay frame carries (v_87).
-_PARITY_BIG_PAGE_BYTES = 240 * 1024
+_PARITY_BIG_PAGE_BYTES = 450 * 1024
 
 
 def _parity_get(state: dict, label: str, path: str) -> tuple[int, Any]:
@@ -23915,7 +23915,7 @@ def _parity_big_page(
 def _parity_create_big_page(
     state: dict, label: str, space_id: str, tag: str
 ) -> tuple[str, dict]:
-    """``label`` creates a ~240 KiB page — over the GFS relay's JSON
+    """``label`` creates a ~450 KiB page — over the GFS relay's JSON
     envelope (~191 KiB), under one binary relay frame (v_87). Returns its
     id and what every household must show."""
     text = secrets.token_hex(_PARITY_BIG_PAGE_BYTES // 2)
@@ -23928,7 +23928,7 @@ def _parity_create_big_page(
         {"title": title, "content": text},
     )
     page = _must(
-        f"members-parity: {label} creates a 240 KiB page", s, page, ok=(200, 201)
+        f"members-parity: {label} creates a 450 KiB page", s, page, ok=(200, 201)
     )
     return page["id"], {
         "exists": True,
@@ -24579,7 +24579,7 @@ def cmd_members_parity() -> None:
         want={"exists": True, "title": title},
     )
 
-    # 7b. v_87 — a ~240 KiB page, created by the paired member d and by the
+    # 7b. v_87 — a ~450 KiB page, created by the paired member d and by the
     #     GFS-only member e: a, d and e show it byte-identical. e's goes to
     #     the host, and d's reaches e, as one binary relay frame each.
     for author in _PARITY_MEMBERS:
@@ -24587,7 +24587,7 @@ def cmd_members_parity() -> None:
         _parity_compare(
             state,
             results,
-            f"240 KiB page by {author}",
+            f"450 KiB page by {author}",
             lambda label, cache, big_id=big_id: _parity_big_page(
                 state, label, space_id, big_id, cache
             ),
@@ -24698,7 +24698,7 @@ def cmd_members_parity() -> None:
             expired = _parity_expire_new_blobs(space_id, since)
         old_new = expired
         print(f"  expired {len(expired)} GFS cache blob(s) as 30-day-old content")
-        # v_87 — a 240 KiB page they both missed: the catch-up carries it
+        # v_87 — a 450 KiB page they both missed: the catch-up carries it
         # (to e as a §25.6 chunk in one binary relay frame). Last in the
         # window, so it sits behind the small events on the way to d.
         away_page, away_want = _parity_create_big_page(state, "a", space_id, tag)
@@ -24714,7 +24714,7 @@ def cmd_members_parity() -> None:
     # (``routed_envelope.py`` logs it at INFO; only ``SPACE_MEDIA_BLOB`` has
     # a lost-inner listener). Its fix is its own PR on branch
     # ``fix/mesh-large-inner-lost``, which MUST remove this window (and
-    # assert d in the "catch-up: 240 KiB page" comparison below). Do not
+    # assert d in the "catch-up: 450 KiB page" comparison below). Do not
     # widen it: one line shape, one witness, one sender.
     mesh_lag = _open_noise_window(
         about="a",
@@ -24742,7 +24742,7 @@ def cmd_members_parity() -> None:
     _parity_compare(
         state,
         results,
-        "catch-up: 240 KiB page (e, behind the GFS)",
+        "catch-up: 450 KiB page (e, behind the GFS)",
         lambda label, cache: _parity_big_page(
             state, label, space_id, away_page, cache
         ),
@@ -24758,7 +24758,7 @@ def cmd_members_parity() -> None:
         (away_page,),
     )
     print(
-        "  catch-up: 240 KiB page on d (mesh path, not asserted — open mesh "
+        "  catch-up: 450 KiB page on d (mesh path, not asserted — open mesh "
         f"limit): {'holds it' if d_holds else 'not there'}"
     )
     _parity_compare(

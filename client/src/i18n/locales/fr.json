@@ -3571,6 +3571,7 @@
   "error.video_too_long": "Cette vidéo dure {length} – la galerie garde les vidéos jusqu’à {max} minutes.",
   "error.video_unreadable": "Impossible d’ouvrir cette vidéo. Essayez un fichier MP4, MOV ou WebM.",
   "error.transcode_queue_full": "Votre maison convertit encore beaucoup de vidéos. Réessayez plus tard.",
+  "error.space_item_too_large": "C’est trop volumineux pour un espace dont des foyers passent par un GFS ({max_kb} Ko de texte au maximum). Raccourcissez-le ou divisez-le.",
   "connections.map.you_pin": "Vous",
   "space.notif.muted_toast": "En sourdine — vous ne recevrez plus de notifications pour les nouvelles publications de cet espace.",
   "space.notif.mentions_toast": "Vous ne serez averti que si quelqu'un vous @mentionne.",

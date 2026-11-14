@@ -100,7 +100,7 @@ class SpaceItemTooLargeError(CodedError, ValueError):
     """A page or a description too large to reach every member household.
 
     A household that reaches a space only through a GFS gets a large item
-    as one relay frame, which carries about 370 KiB of text. Saving more
+    as one relay frame, which carries about 495 KiB of text. Saving more
     into a space with such a household is refused up front (413) — it
     would show as saved here and never arrive there.
     """

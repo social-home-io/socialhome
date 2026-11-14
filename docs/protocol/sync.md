@@ -598,23 +598,26 @@ is sized to ≤ ~150 KB typical (user and option ids are 32 chars):
 
 **A requester behind a GFS (v_87).** Its chunks ride
 `SPACE_SYNC_CHUNK` events over the GFS relay, whose JSON envelope takes
-~191 KiB — less than one large record (a 240 KiB page is a ~437 KiB
-envelope, refused before v_87, so the stream was abandoned after three
-strikes and the page never arrived). The chunk is not re-sized: the
-transport sends any event too large for the JSON envelope as one binary
-relay frame (528 KiB, the event's payload as its bytes —
-[gfs-relay.md](./gfs-relay.md#large-events-in-a-binary-frame)), so
-a chunk payload may be ~520 KiB, i.e. a record of ~378 KiB before the
-chunk's own encryption and base64 — and that is exactly the bound of a
-live event toward such a household (`RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES`
-is derived from the frame's), so every item that reached it live also
-fits its catch-up. The GFS keeps a frame one hour (a JSON envelope a
-day): for a large item the sync, not the queue, is the heal. A record
-past the bound (saved before the space had a household behind a GFS —
-later saves are refused with 413) is refused at the provider with a
-WARNING and counts a strike, as before. A requester
-below v_87, or a GFS without `envelope_media`, keeps the pre-v_87
-behaviour. The stream's records are unchanged — no sync line.
+~191 KiB — less than one large record (a 240 KiB page was a ~437 KiB
+envelope and refused, so the stream was abandoned after three strikes and
+the page never arrived). A chunk event too large for the JSON envelope
+now goes as one binary relay frame
+([gfs-relay.md](./gfs-relay.md#large-events-in-a-binary-frame)), and
+inside the frame its record's ciphertext rides **raw** instead of as
+base64url text (body suite `sync-chunk-raw-v1`; the receiver rebuilds the
+identical `{sync_id, chunk}` payload, so the chunk's signature and AEAD
+are untouched). **Record bound on this path: ~505 KiB** — the frame's
+532,382 bytes less the chunk's wrapper — which is by construction what a
+live event toward such a household may be (`RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES`,
+515,998 bytes, derived from the frame's): every item that reached it
+live also fits its catch-up. The GFS keeps a frame one hour (a JSON
+envelope a day), so for a large item the sync, not the queue, is the
+heal. A record past the bound (saved before the space had a household
+behind a GFS — later saves are refused with 413) is refused at the
+provider with a WARNING and counts a strike, as before. Nothing changes
+on the DataChannel, the inbox or the mesh, in the records or in the
+resources — no sync line. A requester below v_87, or a GFS without
+`envelope_media`, keeps the JSON envelope and its ~191 KiB.
 
 A cut list is marked (`votes_partial`, `responses_partial`,
 `rsvps_partial`) and the receiver then deletes nothing it could not see; a

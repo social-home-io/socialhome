@@ -3571,6 +3571,7 @@
   "error.video_too_long": "Dieses Video ist {length} lang – die Galerie behält Videos bis zu {max} Minuten.",
   "error.video_unreadable": "Dieses Video konnte nicht geöffnet werden. Versuch es mit einer MP4-, MOV- oder WebM-Datei.",
   "error.transcode_queue_full": "Dein Zuhause wandelt gerade viele Videos um. Versuch es später noch mal.",
+  "error.space_item_too_large": "Das ist zu groß für einen Space mit Haushalten, die ihn über einen GFS erreichen (höchstens {max_kb} KB Text). Kürze es oder teile es auf.",
   "connections.map.you_pin": "Du",
   "space.notif.muted_toast": "Stumm – du bekommst keine Mitteilungen mehr über neue Beiträge in diesem Space.",
   "space.notif.mentions_toast": "Du bekommst nur noch eine Mitteilung, wenn dich jemand @erwähnt.",

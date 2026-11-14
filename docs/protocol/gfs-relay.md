@@ -478,61 +478,85 @@ sender card, relay opt-in, timestamp, signature, unpair tombstone and
 replay. The handler gets an ordinary event (`media_bytes` unset). The
 inbox's binary route and the `fed-media-v1` channel are unchanged.
 
-**Bounds — one, live and by sync.** One frame carries a payload JSON of
-`RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES` (~520 KiB: the frame's plaintext
-less 8 KiB for the length field, the framing, the signed header — a hybrid
-signature included — and the AEAD overhead). But a frame is accepted with
-a 202 and never retried, and the GFS keeps it **one hour** (a JSON
-envelope: 24 hours) — the §25.6 sync is what heals a lost one, and a sync
-chunk carries its record encrypted and base64'ed (× 4/3) inside the
-`SPACE_SYNC_CHUNK` event that rides the very same frame. So the bound of
-every other framed event is **derived** from the frame's
-(`domain/relay_media_frame.py`):
+**Bounds — one, live and by sync (~503 KiB; before: ~191 KiB).** One
+frame carries a body of `RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES` (532,382
+bytes: the frame's plaintext less 8 KiB for the length field, the framing,
+the signed header — a hybrid signature included — and the AEAD overhead).
+A frame is accepted with a 202 and never retried, and the GFS keeps it
+**one hour** (a JSON envelope: 24 hours) — so the §25.6 sync is what heals
+a lost one, and whatever travels live must also fit a sync chunk (owner
+decision 2026-11-14: one bound, not a smaller live one).
+
+A sync chunk used to cost a third more than its record: the record's
+ciphertext sits as base64url text inside the chunk envelope inside the
+event. **Inside a relay frame it now rides raw** — the body suite
+`sync-chunk-raw-v1` (`federation/relay_event_body.py`):
+
+```
+frame bytes = u32 BE meta length | meta JSON | raw part 1 | raw part 2 …
+meta        = {"payload": {sync_id, chunk: <chunk envelope, encrypted_payload "">},
+               "parts": [<byte length of each raw part>]}       # nonce, ciphertext
+```
+
+The receiver re-encodes the parts and rebuilds the very same
+`{sync_id, chunk}` payload (the sender checks that round trip before it
+picks the suite and falls back to JSON otherwise), so the chunk envelope's
+own signature and content-key AEAD verify unchanged, and the §25.6 stream
+itself — its records, its resources, the DataChannel and inbox paths — is
+untouched (no sync line). The signed header metadata names the suite
+(`event_body_suite`: `json` or `sync-chunk-raw-v1`); a framed event without
+a known one is refused, never defaulted.
+
+A chunk then costs only its wrapper, and the live bound is the frame's
+less that (`domain/relay_media_frame.py`):
 
 ```
 RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES =
-    (RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES - SYNC_CHUNK_WRAP_ALLOWANCE_BYTES) * 3 // 4   # ~378 KiB
+    RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES - SYNC_CHUNK_WRAP_ALLOWANCE_BYTES   # 515,998 B, ~503 KiB
 ```
 
-Whatever travels live also fits the sync chunk that re-delivers it; only
-a `SPACE_SYNC_CHUNK` may fill the frame. (Raising the sync side instead
-would need the chunk's record out of its base64 — a wire change.) A
-member behind a GFS that was offline for more than an hour therefore
-still gets the page with its next sync, before any later small edit of it
-could be refused for a missing row.
+(16 KiB for the chunk envelope's fields and signatures, the `records`
+wrapper, the nonce and tag, the raw layout's meta and the fields a record
+has that the live event lacks.) A member behind a GFS that was offline for
+more than an hour therefore still gets a page of any allowed size with its
+next sync, before a later small edit of it could be refused for a missing
+row.
 
 | Event | Largest payload | Fits |
 |---|---|---|
 | `SPACE_MODERATION_SUBMITTED` | 256 KiB item cap + ~2 KiB | yes |
-| `SPACE_PAGE_*`, page proposals | the content as JSON text; a 256 KiB page is ~260 KiB | yes, up to ~370 KiB of text |
-| `SPACE_SYNC_CHUNK` with one large record | record × 4/3 + ~6 KiB | yes, for every record that went live |
+| `SPACE_PAGE_*`, page proposals | the content as JSON text | yes, up to ~495 KiB of text |
+| `SPACE_SYNC_CHUNK` with one large record | record + ~6 KiB (raw) | yes, for every record that went live |
+| `SPACE_ROSTER_SNAPSHOT` | parts of 96 KiB of entries | yes, any roster size |
 | posts, comments, bazaar, tasks, polls, timetables, app tables, directory parts, config (relay variant) | ≤ ~175 KiB | yes (most fit the JSON envelope) |
 
 What the product does not cap (only the 1 MiB request body) and can pass
 the bound: a page, a calendar event description, a space description or
 "about" text. **The person is told where they save it**: when the space
 has a household reached only through a GFS, a text over
-`SPACE_TEXT_MAX_BYTES_BEHIND_GFS` (~370 KiB as JSON) is refused with
-**413 `SPACE_ITEM_TOO_LARGE`** (`max_kb`) before anything is stored —
-pages reviewed or not, space calendar events, the space's description
-(`FederationService.check_space_text_size`). A space with no such
-household keeps the limits of local federation (owner decision: no limit
-is shrunk for them). Behind that check the sender still refuses any event
-over the bound toward a household behind a GFS (`relay_too_large`, a
-WARNING naming the household, the event and the size; never queued,
-never silently dropped) — e.g. an item saved before such a household
-joined. That item then reaches paired and mesh members only; splitting an
-event over several frames is the open follow-up.
+`SPACE_TEXT_MAX_BYTES_BEHIND_GFS` (507,806 bytes as JSON, ~495 KiB) is
+refused with **413 `SPACE_ITEM_TOO_LARGE`** (`max_kb`; translated in the
+SPA) before anything is stored — pages reviewed or not, space calendar
+events, the space's description (`FederationService.check_space_text_size`).
+A space with no such household keeps the limits of local federation.
+Behind that check the sender still refuses any event over the bound
+toward a household behind a GFS (`relay_too_large`, a WARNING naming the
+household, the event and the size; never queued, never silently dropped)
+— an item saved before such a household joined, or a page whose open
+conflict sides push its event past the bound until the conflict is
+resolved. That item reaches paired and mesh members meanwhile; splitting
+one event over several frames is not built.
 
-A `SPACE_ROSTER_SNAPSHOT` (one event with every seat, ~0.5 KiB each)
-passes the bound at roughly 750 members and is refused the same way.
-That is harmless for the roster itself: every member household gets the
-seats through the §25.6 `members` resource (`sync/space/exporters/members.py`
-— one record per seat, 8 KiB chunks, never one large record) on its
-join and on every later sync, and the households it must reach through
-the host's member directory, which is already sent in parts
-(`SPACE_MAILBOX_DIRECTORY`, 150 per part). The snapshot is the fast
-path; the sync is the complete one.
+**Roster.** `SPACE_ROSTER_SNAPSHOT` used to be one event with every seat
+(~0.5 KiB each): past roughly a thousand seats no frame carried it, and
+the snapshot is how a member's roster mirror heals. It now goes in parts
+of at most 96 KiB of entries (`ROSTER_SNAPSHOT_PART_BYTES`, ~190 seats),
+each an ordinary snapshot event small enough for a JSON relay envelope —
+entries are signed and merged one by one, so the receiver is unchanged.
+Only the last part carries `roster_version` (what the roster is complete
+up to, echoed on the next sync BEGIN), and only when every earlier part
+got out; otherwise the next tick sends the roster again. A roster that
+fits one part is the event it always was.
 
 **Versioning — no new version.** The gate is the one of the frame
 itself: a peer at v_87 (`MIN_FOR_RELAY_MEDIA` — it reads binary relay

@@ -185,6 +185,10 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
     }),
   VIDEO_UNREADABLE: () => t('error.video_unreadable'),
   TRANSCODE_QUEUE_FULL: () => t('error.transcode_queue_full'),
+  // A page or description too long for a household behind a GFS (413).
+  SPACE_ITEM_TOO_LARGE: (_b, p) => p.max_kb === undefined
+    ? null
+    : t('error.space_item_too_large', { max_kb: str(p, 'max_kb') }),
   // Private albums (D7): privacy follows the upload.
   // Never names the person: apiErrors stays free of stores (no import cycle).
   ALBUM_AUDIENCE: (_b, p) => {

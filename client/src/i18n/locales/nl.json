@@ -3571,6 +3571,7 @@
   "error.video_too_long": "Deze video is {length} lang – de galerij bewaart video's tot {max} minuten.",
   "error.video_unreadable": "Deze video kon niet worden geopend. Probeer een MP4-, MOV- of WebM-bestand.",
   "error.transcode_queue_full": "Je thuis is nog veel video's aan het omzetten. Probeer het later opnieuw.",
+  "error.space_item_too_large": "Dit is te groot voor een space met huishoudens die hem via een GFS bereiken (hooguit {max_kb} KB tekst). Kort het in of splits het op.",
   "connections.map.you_pin": "Jij",
   "space.notif.muted_toast": "Gedempt — je krijgt geen meldingen meer over nieuwe berichten in deze space.",
   "space.notif.mentions_toast": "Je krijgt alleen nog een melding als iemand je @vermeldt.",
