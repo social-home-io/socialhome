@@ -57,7 +57,7 @@ from socialhome.domain.media_constraints import (
     SPACE_COVER_SNAPSHOT_MAX_BYTES,
     SPACE_ICON_SNAPSHOT_MAX_BYTES,
 )
-from socialhome.domain.post import PostType
+from socialhome.domain.post import FileMeta, PostType
 from socialhome.domain.relay_media_frame import SPACE_CONFIG_ITEM_MAX_BYTES as _CFG_MAX
 from socialhome.domain.space import (
     AlreadyMemberError,
@@ -3420,16 +3420,14 @@ async def test_dissolve_hard_deletes_content_and_unlinks_media(tmp_dir):
     )
 
     # Sanity: media is collectable + files present pre-dissolve.
-    assert set(await post_repo.list_space_media_urls(space.id)) == {
-        "api/media/pic.webp",
-        "api/media/img2.webp",
-    }
-    assert set(await gallery.list_space_item_filenames(space.id)) == {
+    refs = SqliteMediaReferenceRepo(db)
+    assert set(await refs.space_files(space.id)) == {
+        "pic.webp",
+        "img2.webp",
         "gal.webp",
         "galthumb.webp",
+        "baz.webp",
     }
-
-    assert await bazaar.list_space_media_urls(space.id) == ["api/media/baz.webp"]
 
     await svc.dissolve_space(space.id, actor_username="anna")
 
@@ -3443,9 +3441,7 @@ async def test_dissolve_hard_deletes_content_and_unlinks_media(tmp_dir):
     # Space + all content rows gone (cascade).
     with pytest.raises(SpacePermissionError):
         await svc.list_feed(space.id, viewer_user_id=anna.user_id)
-    assert await post_repo.list_space_media_urls(space.id) == []
-    assert await gallery.list_space_item_filenames(space.id) == []
-    assert await bazaar.list_space_media_urls(space.id) == []
+    assert await refs.space_files(space.id) == []
     assert await space_repo.get(space.id) is None
 
     # Every owned media file unlinked; the unrelated file survives.
@@ -12007,3 +12003,164 @@ def test_no_larger_holds_only_for_a_config_stored_over_the_limit():
     legacy = _cfg(description="o" * (_CFG_MAX + 5000))
     same = replace(legacy, name="Clux", config_sequence=99)
     assert _within(same, held=legacy, source="t") is same
+
+
+async def test_deleting_a_file_post_removes_its_attachment(stack, tmp_dir):
+    """A post's attached file (``file_meta.url``) is one of its files (the
+    registry's ``posts`` fields): deleting the post unlinks it when no
+    other row names it."""
+    media_dir = tmp_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svc = SpaceService(
+        stack.space_repo,
+        stack.space_post_repo,
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        own_instance_id=stack.iid,
+        media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
+    )
+    a = await stack.provision_user("anna")
+    space = await svc.create_space(owner_username="anna", name="S")
+    (media_dir / "doc.pdf").write_bytes(b"%PDF")
+    p = await svc.create_post(
+        space.id,
+        author_user_id=a.user_id,
+        type=PostType.FILE,
+        file_meta=FileMeta(
+            url="api/media/doc.pdf",
+            mime_type="application/pdf",
+            original_name="doc.pdf",
+            size_bytes=4,
+        ),
+    )
+    assert (media_dir / "doc.pdf").exists()
+    await svc.delete_post(p.id, actor_user_id=a.user_id)
+    assert not (media_dir / "doc.pdf").exists()
+
+
+async def test_deleting_a_post_never_unlinks_a_reserved_attachment(stack, tmp_dir):
+    """A legacy synced post whose attachment names a DM's (``dm-``) file
+    — never validated — must not take that file with it on delete."""
+    media_dir = tmp_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svc = SpaceService(
+        stack.space_repo,
+        stack.space_post_repo,
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        own_instance_id=stack.iid,
+        media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
+    )
+    a = await stack.provision_user("anna")
+    space = await svc.create_space(owner_username="anna", name="S")
+    dm = "dm-0123456789abcdef0123456789abcdef01234567.pdf"
+    (media_dir / dm).write_bytes(b"%PDF")
+    p = await svc.create_post(
+        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="x"
+    )
+    meta = orjson.dumps(
+        {
+            "url": f"api/media/{dm}",
+            "mime_type": "application/pdf",
+            "original_name": "d.pdf",
+            "size_bytes": 4,
+        }
+    ).decode()
+    await stack.db.enqueue(
+        "UPDATE space_posts SET type='file', file_meta_json=? WHERE id=?",
+        (meta, p.id),
+    )
+    await svc.delete_post(p.id, actor_user_id=a.user_id)
+    assert (media_dir / dm).exists()
+
+
+async def test_deleting_a_post_removes_its_gfs_reader_copies(stack, tmp_dir):
+    """A post a GFS reader household holds names its pictures by their
+    ``sg-`` reader copies: deleting it frees the copies this space's
+    ``space_media_refs`` map — never one mapped to another space."""
+    media_dir = tmp_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svc = SpaceService(
+        stack.space_repo,
+        stack.space_post_repo,
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        own_instance_id=stack.iid,
+        media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
+    )
+    a = await stack.provision_user("anna")
+    space = await svc.create_space(owner_username="anna", name="S")
+    other = await svc.create_space(owner_username="anna", name="O")
+    own = "sg-" + "a1" * 20 + ".webp"
+    foreign = "sg-" + "b2" * 20 + ".webp"
+    for name in (own, foreign):
+        (media_dir / name).write_bytes(b"x")
+    p = await svc.create_post(
+        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="x"
+    )
+    await stack.db.enqueue(
+        "UPDATE space_posts SET type='image', image_urls_json=? WHERE id=?",
+        (orjson.dumps([f"api/media/{own}", f"api/media/{foreign}"]).decode(), p.id),
+    )
+    await stack.db.enqueue(
+        "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id, suite, epoch, size, scope, addr_suite, item_id, origin) VALUES(?, 'f.webp', ?, ?, 'aesgcm-256-pad-det', 1, 10, 'space', 'sm1', ?, 'o')",
+        (own, space.id, "c" * 64, p.id),
+    )
+    await stack.db.enqueue(
+        "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id, suite, epoch, size, scope, addr_suite, item_id, origin) VALUES(?, 'f.webp', ?, ?, 'aesgcm-256-pad-det', 1, 10, 'space', 'sm1', ?, 'o')",
+        (foreign, other.id, "d" * 64, "p9"),
+    )
+    await svc.delete_post(p.id, actor_user_id=a.user_id)
+    assert not (media_dir / own).exists()
+    assert (media_dir / foreign).exists()
+
+
+async def test_a_freed_gfs_reader_copy_takes_its_descriptor_row_with_it(stack, tmp_dir):
+    """The ``space_media_refs`` row of an ``sg-`` copy a post delete freed
+    goes too (nothing names the file any more); a copy another item still
+    shows keeps both its file and its row."""
+    media_dir = tmp_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svc = SpaceService(
+        stack.space_repo,
+        stack.space_post_repo,
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        own_instance_id=stack.iid,
+        media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
+    )
+    a = await stack.provision_user("anna")
+    space = await svc.create_space(owner_username="anna", name="S")
+    freed = "sg-" + "c3" * 20 + ".webp"
+    shared = "sg-" + "d4" * 20 + ".webp"
+    for name in (freed, shared):
+        (media_dir / name).write_bytes(b"x")
+    p1 = await svc.create_post(
+        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="x"
+    )
+    p2 = await svc.create_post(
+        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="y"
+    )
+    await stack.db.enqueue(
+        "UPDATE space_posts SET type='image', image_urls_json=? WHERE id=?",
+        (orjson.dumps([f"api/media/{freed}", f"api/media/{shared}"]).decode(), p1.id),
+    )
+    await stack.db.enqueue(
+        "UPDATE space_posts SET type='image', image_urls_json=? WHERE id=?",
+        (orjson.dumps([f"api/media/{shared}"]).decode(), p2.id),
+    )
+    for name, blob in ((freed, "e" * 64), (shared, "f" * 64)):
+        await stack.db.enqueue(
+            "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id,"
+            " suite, epoch, size, scope, addr_suite, item_id, origin) VALUES(?,"
+            " 'f.webp', ?, ?, 'aesgcm-256-pad-det', 1, 10, 'space', 'sm1', ?, 'o')",
+            (name, space.id, blob, p1.id),
+        )
+    await svc.delete_post(p1.id, actor_user_id=a.user_id)
+    rows = await stack.db.fetchall("SELECT local_name FROM space_media_refs")
+    assert {r["local_name"] for r in rows} == {shared}
+    assert not (media_dir / freed).exists() and (media_dir / shared).exists()

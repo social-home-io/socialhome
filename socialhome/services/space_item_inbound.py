@@ -123,7 +123,7 @@ from ..federation.pending_parent_buffer import (
 from ..infrastructure.event_bus import EventBus
 from ..media.profile_picture import public_profile_picture
 from ..utils.datetime import parse_iso8601_lenient
-from .inbound_media_store import local_media_ref
+from .space_media_names import comment_media_ref
 
 if TYPE_CHECKING:
     from ..domain.space import Space
@@ -491,7 +491,9 @@ class SpaceItemInbound:
             created_at=parse_iso8601_lenient(item.inner.get("created_at")),
             parent_id=str(parent) if isinstance(parent, str) and parent else None,
             content=content if isinstance(content, str) else None,
-            media_url=local_media_ref(media_url),
+            # The same rule as the paired live path and §25.6 sync: never a
+            # name another receiving path owns, nor a raw content name.
+            media_url=comment_media_ref(item.space.id, media_url, None),
             edited_at=item.stamp if edited else None,
         )
         if not await self._posts.add_comment(comment, space_id=item.space.id):

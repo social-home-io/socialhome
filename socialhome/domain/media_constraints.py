@@ -11,6 +11,8 @@ constants to produce conformant output.  Inbound federation validation
 
 from __future__ import annotations
 
+import re
+
 # ─── Image constraints ──────────────────────────────────────────────────────
 
 #: Longest-side cap for uploaded photos / post images. 2560 px is a
@@ -242,3 +244,91 @@ SPACE_PAGE_MEDIA_PREFIX: str = "sp-"
 #: and a ``SPACE_MEDIA_BLOB`` names its file by its hash, never by a raw
 #: ``sc-`` file name.
 SPACE_CONTENT_MEDIA_PREFIX: str = "sc-"
+
+
+#: DM transients (``<msg>.preview.webp`` and the legacy ``.part<N>`` /
+#: ``.assembled`` names). No ``media_url`` column holds them, so neither the
+#: media sweep nor a per-row cleanup (``unlink_unreferenced``) touches them —
+#: ``dm_gc`` owns them; a space blob never takes such a name.
+TRANSIENT_DM_MEDIA_RE: re.Pattern[str] = re.compile(
+    r"(\.preview\.webp|\.part\d+|\.assembled)", re.IGNORECASE
+)
+
+
+# ─── Local media references (pure; re-exported by inbound_media_store) ───
+
+#: A peer-supplied media file name / id that becomes one path component.
+SAFE_MEDIA_NAME: re.Pattern[str] = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._:-]{0,199}")
+
+#: The path prefix every stored local media reference carries.
+MEDIA_REF_PREFIX: str = "api/media/"
+
+#: Prefix of a received DM attachment's file name (:func:`dm_media_name`).
+DM_MEDIA_PREFIX: str = "dm-"
+
+#: Prefix of a space file fetched from a GFS media cache
+#: (:func:`gfs_space_media_name`).
+GFS_SPACE_MEDIA_PREFIX: str = "sg-"
+
+#: Name prefixes owned by one receiving path each — a ``SPACE_MEDIA_BLOB``
+#: never writes them, and a received space item never names them: ``dm-``
+#: received DM attachments, ``gm-`` moment media fetched from a GFS
+#: (``moment_public_media_inbound``), ``sg-`` space files fetched from a GFS
+#: (``space_media_gfs_fetcher``).
+RESERVED_MEDIA_PREFIXES: tuple[str, ...] = (
+    DM_MEDIA_PREFIX,
+    "gm-",
+    GFS_SPACE_MEDIA_PREFIX,
+    SPACE_PAGE_MEDIA_PREFIX,
+)
+
+
+def is_safe_media_name(name: str) -> bool:
+    """``True`` when ``name`` is usable as a single file name under media."""
+    return bool(name) and SAFE_MEDIA_NAME.fullmatch(name) is not None
+
+
+def is_reserved_media_name(name: str) -> bool:
+    """``True`` for a name a ``SPACE_MEDIA_BLOB`` must never write: one
+    another receiving path owns (:data:`RESERVED_MEDIA_PREFIXES`) or a DM
+    transient (:data:`TRANSIENT_DM_MEDIA_RE`)."""
+    return name.lower().startswith(RESERVED_MEDIA_PREFIXES) or bool(
+        TRANSIENT_DM_MEDIA_RE.search(name)
+    )
+
+
+def local_media_ref(value: object) -> str | None:
+    """A peer-supplied media reference in the canonical local shape.
+
+    Accepts ``api/media/<name>`` (a leading ``/`` and a ``?query`` are
+    tolerated and dropped) where ``<name>`` is :func:`is_safe_media_name`;
+    returns the normalised ``api/media/<name>``, or ``None`` for anything
+    else — a bare name, another path, a full URL, a non-string.
+    """
+    if not isinstance(value, str):
+        return None
+    path = value.split("?", 1)[0].removeprefix("/")
+    if not path.startswith(MEDIA_REF_PREFIX):
+        return None
+    name = path[len(MEDIA_REF_PREFIX) :]
+    if not is_safe_media_name(name):
+        return None
+    return MEDIA_REF_PREFIX + name
+
+
+def space_media_ref(value: object) -> str | None:
+    """:func:`local_media_ref` for a SPACE item another household sent (a
+    post's media, a calendar cover, a gallery file): also ``None`` for a
+    name another receiving path owns (:func:`is_reserved_media_name` —
+    DM and moment media). Such a reference would show, and through the GFS
+    media cache re-publish, a file that belongs to someone else."""
+    ref = local_media_ref(value)
+    if ref is None or is_reserved_media_name(ref[len(MEDIA_REF_PREFIX) :]):
+        return None
+    return ref
+
+
+def is_gfs_space_media_name(name: str) -> bool:
+    """``True`` for a GFS reader copy's name (``gfs_space_media_name`` —
+    the only names the GFS space media fetcher writes)."""
+    return name.startswith(GFS_SPACE_MEDIA_PREFIX) and is_safe_media_name(name)

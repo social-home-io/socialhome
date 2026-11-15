@@ -22,6 +22,7 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.gallery_federation_outbound import (
     GalleryFederationOutbound,
 )
+from tests.space_media_items import expected_urls, synthetic_object
 
 
 class _FakeFederationService:
@@ -574,3 +575,32 @@ async def test_a_space_photo_carries_media_refs_for_link_joined_members():
     assert by_target["peer-2"]["media_refs"] == _GalleryPlan().wire()
     assert "media_refs" not in by_target["peer-1"]
     assert len(media.uploaded) == 1
+
+
+# ─── Registry tripwire: every registered field ships ─────────────────────
+
+
+async def test_a_gallery_item_ships_every_registered_field():
+    bus = EventBus()
+    fed = _FakeFederationService()
+    item = synthetic_object("gallery", item_id="it-reg")
+    gallery = _FakeGalleryRepo(
+        albums={"album-1": _album("album-1", space_id="sp-reg")},
+        items={"it-reg": item},
+    )
+    media_sync = AsyncMock()
+    media_sync.enqueue_for_blob = AsyncMock()
+    GalleryFederationOutbound(
+        bus=bus,
+        federation_service=fed,
+        gallery_repo=gallery,
+        space_repo=_FakeSpaceRepo({"sp-reg": ["peer-a"]}),
+        media_sync=media_sync,
+    ).wire()
+    await bus.publish(
+        GalleryItemUploaded(
+            item_id="it-reg", album_id="album-1", item_type="photo", uploader="u"
+        ),
+    )
+    call = media_sync.enqueue_for_blob.call_args
+    assert call.kwargs["media_urls"] == expected_urls("gallery", stored_only=True)

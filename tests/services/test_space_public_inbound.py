@@ -54,6 +54,7 @@ from socialhome.domain.space_item import (
     pad_json_object,
     zlib_item_plaintext,
 )
+from socialhome.domain.space_media_fields import SPACE_MEDIA_ITEMS, item_media_urls
 from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
@@ -80,9 +81,13 @@ from socialhome.services.space_public_author import (
     link_preview_signing_bytes,
     media_refs_signing_bytes,
 )
-from socialhome.services.space_public_inbound import SpacePublicInbound
+from socialhome.services.space_public_inbound import (
+    SpacePublicInbound,
+    _only_described_files,
+)
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
+from tests.space_media_items import synthetic_object
 
 
 @pytest.fixture
@@ -2532,3 +2537,22 @@ async def test_a_real_edit_heals_a_post_a_stripped_copy_created(item_env):
     _sid, post = await item_env["post_repo"].get("post-1")
     assert post.image_urls == ("api/media/sg-p.webp",)
     assert sink.kept == [{"p.webp": "sg-p.webp"}]
+
+
+# ─── Registry tripwire: the relay path filters every post field ──────────
+
+
+def test_only_described_files_filters_every_registered_post_field():
+    """``_only_described_files`` (hand-written over the typed Post) keeps a
+    described ``sg-`` name and drops any other — in EVERY field the
+    registry lists for a post."""
+    post = synthetic_object("posts")
+    urls = item_media_urls("posts", post)
+    assert len(urls) == len(SPACE_MEDIA_ITEMS["posts"].fields)
+    assert item_media_urls("posts", _only_described_files(post)) == []
+    names = {u.rsplit("/", 1)[-1]: "sg-" + u.rsplit("/", 1)[-1] for u in urls}
+    described = SpaceMediaLocalization(names=names).post(post)
+    kept = item_media_urls("posts", _only_described_files(described))
+    assert kept == item_media_urls("posts", described)
+    assert len(kept) == len(urls)
+    assert all(u.rsplit("/", 1)[-1].startswith("sg-") for u in kept)

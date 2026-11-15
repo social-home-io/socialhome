@@ -1346,6 +1346,26 @@ same `_stop`/`_wake` `asyncio.Event` scheduler family as the other
 background services, with jittered exponential backoff that flips a job
 to `status='failed'` after its retry budget.
 
+### Space media fields (one registry)
+
+Which fields of a space item are files is declared once, in
+`SPACE_MEDIA_ITEMS` (`socialhome/domain/space_media_fields.py`): posts
+(`media_url`, `image_urls`, `file_meta.url`, the link card's
+`thumbnail_url`), comments, calendar covers, gallery items, bazaar listings
+and pages (cover + markdown body, plus a resolution's wire-only
+`merged_content`), each field with its shape (one / list / markdown), its
+DB column and its inbound limit. Every consumer reads it: the descriptor
+and hash-map rules (`record_media_urls`, `record_file_urls`), the send
+hooks and the `SPACE_MEDIA_BLOB` scope check (`item_media_urls`), space
+moderation (what a queued item names, its renames, the inbound sanitizer)
+and the media reference repo, whose space rows are generated from
+`space_media_columns()` with per-table condition maps (a missing condition
+fails at import; household tables stay hand-listed). One pattern,
+`LOCAL_MEDIA_REF_RE`, reads a markdown body for the signer, the repo and a
+page's renames. The same registry drives what a deleted post and a purged space free (`space_files`: only canonical, non-reserved space files and the space's own `sg-` GFS reader copies, never a DM's or a transient). Tripwire tests (`tests/domain/test_space_media_fields.py`
+plus each consumer's) fail when a file-like domain field is neither
+registered nor named as not-a-file, or a consumer misses a field.
+
 ### Host-sequenced documents (space pages, v_48)
 
 A space page is shared by every member household, and any writer may

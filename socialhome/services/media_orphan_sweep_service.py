@@ -33,8 +33,9 @@ from typing import TYPE_CHECKING
 
 import aiofiles.os
 
+from ..domain.media_constraints import TRANSIENT_DM_MEDIA_RE
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
-from .inbound_media_store import TRANSIENT_DM_MEDIA_RE, drop_parts
+from .inbound_media_store import drop_parts
 
 if TYPE_CHECKING:
     from ..repositories.media_transcode_repo import AbstractMediaTranscodeRepo

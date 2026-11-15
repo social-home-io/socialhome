@@ -29,6 +29,7 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
 from socialhome.services.bazaar_outbound import BazaarOutbound
 from socialhome.services.moderation_release import release_scope
+from tests.space_media_items import expected_urls, synthetic_object
 
 
 def _make_listing(**overrides) -> BazaarListing:
@@ -1063,3 +1064,34 @@ async def test_a_failed_faq_send_is_logged_not_raised(federation_service):
     bus = _outbound(federation_service, users=_users("u-seller"))
     await bus.publish(_faq_changed())
     federation_service.broadcast_to_space_members.assert_awaited_once()
+
+
+# ─── Registry tripwire: every registered field ships ─────────────────────
+
+
+async def test_a_listing_ships_every_registered_field(
+    federation_service, media_sync, federation_repo
+):
+    bus = EventBus()
+    bazaar_repo = MagicMock()
+    listing = synthetic_object("bazaar", item_id="bzr-reg", space_id="sp-1")
+    bazaar_repo.get_listing = AsyncMock(return_value=listing)
+    BazaarOutbound(
+        bus=bus,
+        federation_service=federation_service,
+        bazaar_repo=bazaar_repo,
+        media_sync=media_sync,
+        federation_repo=federation_repo,
+    )
+    await bus.publish(
+        BazaarListingCreated(
+            listing_post_id="bzr-reg",
+            space_id="sp-1",
+            seller_user_id="u",
+            mode="fixed",
+            title="T",
+            occurred_at=datetime.fromisoformat("2026-05-23T10:00:00+00:00"),
+        ),
+    )
+    call = media_sync.enqueue_for_blob.call_args
+    assert call.kwargs["media_urls"] == expected_urls("bazaar", stored_only=True)

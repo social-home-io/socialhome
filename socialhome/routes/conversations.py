@@ -21,6 +21,7 @@ from ..app_keys import (
 )
 from ..domain.child_protection import name_only
 from ..domain.conversation import Conversation, ConversationType, mute_active
+from ..domain.media_constraints import local_media_ref
 from ..domain.user import _picture_url
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..repositories.conversation_repo import AbstractConversationRepo
@@ -28,7 +29,6 @@ from ..repositories.user_repo import AbstractUserRepo
 from ..security import error_response, sanitise_for_api
 from ..services.bazaar_thread_service import BazaarThreadService
 from ..services.dm_service import DmService
-from ..services.inbound_media_store import local_media_ref
 from .base import BaseView
 from .bazaar import listing_thread_dict
 from .media_status import READY, media_filename, video_poster_path

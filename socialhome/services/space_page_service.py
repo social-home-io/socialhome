@@ -50,6 +50,7 @@ from ..domain.errors import (
 )
 from ..domain.events import PageCreated, PageDeleted, PageUpdated
 from ..domain.file_hashes import is_space_content_media_name
+from ..domain.media_constraints import is_reserved_media_name
 from ..domain.page import MAX_PAGE_TITLE_LENGTH, Page, PageVersion
 from ..domain.page_version import PageConflictSide, is_version_hash, version_hash
 from ..domain.relay_media_frame import SPACE_PAGE_ITEM_MAX_BYTES
@@ -79,7 +80,6 @@ from ..repositories.page_repo import mint_page_id, new_page
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
 from .inbound_media_store import (
-    is_reserved_media_name,
     is_space_direct_media_name,
     is_space_page_media_name,
     media_basename,

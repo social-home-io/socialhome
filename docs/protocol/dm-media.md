@@ -317,7 +317,7 @@ entitled to send:
 - **One media directory, two namespaces.** Space files and DM
   attachments share `media_dir`, and a `SPACE_MEDIA_BLOB` for a row not
   seen yet is accepted by name. A space blob never writes a reserved
-  name (`inbound_media_store.is_reserved_media_name`: the `dm-` and
+  name (`domain/media_constraints.is_reserved_media_name`: the `dm-` and
   `gm-` prefixes and the DM transients `*.preview.webp` / `*.part<N>` /
   `*.assembled`), so no household can plant a DM's file through a space
   — before the DM arrives or while it waits for its bytes. Before

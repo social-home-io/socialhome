@@ -44,7 +44,7 @@ import time
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
 
-from .domain.space_media_ref import LOCAL_MEDIA_REF_RE
+from .domain.space_media_fields import LOCAL_MEDIA_REF_RE
 
 #: Domain-separation tag for HKDF — bumping the version invalidates
 #: all signed URLs in flight without rotating the identity seed.

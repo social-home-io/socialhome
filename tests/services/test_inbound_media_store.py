@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+from socialhome.domain import media_constraints
 from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.media_constraints import (
@@ -19,22 +20,6 @@ from socialhome.domain.media_constraints import (
 )
 from socialhome.domain.space_media_ref import space_page_media_name
 from socialhome.services import inbound_media_store as store
-
-
-@pytest.mark.parametrize(
-    "name",
-    ["0f3a9c.webp", "a1b2-c3d4", "m-1.part00001", "blob:instance", "x_y.webm"],
-)
-def test_safe_names_accepted(name):
-    assert store.is_safe_media_name(name)
-
-
-@pytest.mark.parametrize(
-    "name",
-    ["", "../x", "a/b", "a\\b", ".hidden", "..", "a\x00b", "a b", "a" * 201, "é.webp"],
-)
-def test_unsafe_names_rejected(name):
-    assert not store.is_safe_media_name(name)
 
 
 @pytest.mark.parametrize(
@@ -58,7 +43,7 @@ def test_partial_key_binds_sender_transfer_and_chunk_count():
     assert a != store.partial_key("peer-a", "tx2", chunk_count=2)
     # A retry chunked for another tier never shares a directory.
     assert a != store.partial_key("peer-a", "tx", chunk_count=5)
-    assert store.is_safe_media_name(a)
+    assert media_constraints.is_safe_media_name(a)
 
 
 @pytest.mark.parametrize(
@@ -131,28 +116,6 @@ async def test_note_existing_levels(tmp_path, caplog):
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 2
     assert "not replacing" in warnings[0].getMessage()
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ("api/media/0f3a9c.webp", "api/media/0f3a9c.webp"),
-        ("/api/media/0f3a9c.webp", "api/media/0f3a9c.webp"),
-        ("api/media/0f3a9c.webp?exp=1&sig=x", "api/media/0f3a9c.webp"),
-        ("0f3a9c.webp", None),
-        ("https://example.org/api/media/x.webp", None),
-        ("api/media/../secret", None),
-        ("api/media/a/b.webp", None),
-        ("api/media/.hidden", None),
-        ("api/media/", None),
-        ("api/other/x.webp", None),
-        ("", None),
-        (None, None),
-        (42, None),
-    ],
-)
-def test_local_media_ref(value, expected):
-    assert store.local_media_ref(value) == expected
 
 
 def test_local_media_refs_keeps_only_canonical_strings_capped():
@@ -385,32 +348,16 @@ async def test_store_chunk_readiness_check_is_linear(tmp_path):
 
 def test_dm_media_name_binds_the_sending_household_and_message():
     name = store.dm_media_name("peer-a", "m-1", ".webp")
-    assert name.startswith(store.DM_MEDIA_PREFIX) and name.endswith(".webp")
-    assert store.is_safe_media_name(name)
+    assert name.startswith(media_constraints.DM_MEDIA_PREFIX) and name.endswith(".webp")
+    assert media_constraints.is_safe_media_name(name)
     assert name == store.dm_media_name("peer-a", "m-1", ".webp")
     assert name != store.dm_media_name("peer-b", "m-1", ".webp")
     assert name != store.dm_media_name("peer-a", "m-2", ".webp")
     # Fixed length whatever the id: always one safe component.
     long_id = "m" * 200
-    assert store.is_safe_media_name(store.dm_media_name("p", long_id, ".webp"))
-
-
-@pytest.mark.parametrize(
-    ("name", "reserved"),
-    [
-        ("dm-" + "0" * 40 + ".webp", True),
-        ("DM-x.webp", True),
-        ("gm-" + "a" * 40 + ".webm", True),
-        ("m-1.preview.webp", True),
-        ("m-1.part0003", True),
-        ("x.assembled", True),
-        ("0123abcd" * 4 + ".webp", False),
-        ("a1.webp", False),
-        ("admin.webp", False),
-    ],
-)
-def test_is_reserved_media_name(name, reserved):
-    assert store.is_reserved_media_name(name) is reserved
+    assert media_constraints.is_safe_media_name(
+        store.dm_media_name("p", long_id, ".webp")
+    )
 
 
 # ── Size caps ──────────────────────────────────────────────────────────
@@ -519,11 +466,6 @@ def test_space_media_ref_drops_reserved_names():
     household never names a file the DM or moment-media paths own: such a
     reference would show — and, through the GFS cache, re-publish — a file
     that belongs to someone else."""
-    assert store.space_media_ref("api/media/a.webp") == "api/media/a.webp"
-    assert store.space_media_ref("/api/media/a.webp?sig=x") == "api/media/a.webp"
-    assert store.space_media_ref("api/media/gm-abc.webp") is None
-    assert store.space_media_ref("api/media/dm-abc.webp") is None
-    assert store.space_media_ref("https://evil.example/a.webp") is None
     assert store.space_media_refs(
         ["api/media/a.webp", "api/media/gm-x.webp", "api/media/b.webp"], limit=10
     ) == ("api/media/a.webp", "api/media/b.webp")
@@ -570,10 +512,10 @@ async def test_write_once_publishes_and_never_replaces(tmp_path):
 def test_gfs_space_media_name_is_bound_to_space_household_and_file():
     name = store.gfs_space_media_name("sp-1", "inst-a", "post-1", "abc.webp")
     assert name == store.gfs_space_media_name("sp-1", "inst-a", "post-1", "abc.webp")
-    assert name.startswith(store.GFS_SPACE_MEDIA_PREFIX)
+    assert name.startswith(media_constraints.GFS_SPACE_MEDIA_PREFIX)
     assert name.endswith(".webp")
-    assert store.is_safe_media_name(name)
-    assert store.is_gfs_space_media_name(name)
+    assert media_constraints.is_safe_media_name(name)
+    assert media_constraints.is_gfs_space_media_name(name)
     others = {
         store.gfs_space_media_name("sp-2", "inst-a", "post-1", "abc.webp"),
         store.gfs_space_media_name("sp-1", "inst-m", "post-1", "abc.webp"),
@@ -589,10 +531,10 @@ def test_a_gfs_space_media_name_is_reserved():
     """Only the GFS fetcher writes these: a space item naming one, or a
     SPACE_MEDIA_BLOB for one, is refused like a DM or moment name."""
     name = store.gfs_space_media_name("sp-1", "inst-a", "post-1", "abc.webp")
-    assert store.is_reserved_media_name(name)
-    assert store.space_media_ref("api/media/" + name) is None
-    assert not store.is_gfs_space_media_name("abc.webp")
-    assert not store.is_gfs_space_media_name("dm-" + "0" * 40 + ".webp")
+    assert media_constraints.is_reserved_media_name(name)
+    assert media_constraints.space_media_ref("api/media/" + name) is None
+    assert not media_constraints.is_gfs_space_media_name("abc.webp")
+    assert not media_constraints.is_gfs_space_media_name("dm-" + "0" * 40 + ".webp")
 
 
 def test_a_page_scoped_name_is_reserved():
@@ -601,8 +543,8 @@ def test_a_page_scoped_name_is_reserved():
     one, is refused."""
     name = space_page_media_name("sp-1", "abc.webp")
     assert store.is_space_page_media_name(name)
-    assert store.is_reserved_media_name(name)
-    assert store.space_media_ref("api/media/" + name) is None
+    assert media_constraints.is_reserved_media_name(name)
+    assert media_constraints.space_media_ref("api/media/" + name) is None
     assert not store.is_space_page_media_name("abc.webp")
 
 

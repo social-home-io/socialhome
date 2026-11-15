@@ -45,6 +45,7 @@ from socialhome.domain.post import (
     PostType,
 )
 from socialhome.domain.space import JoinMode, SpaceMember, SpaceType
+from socialhome.domain.space_media_fields import SPACE_MEDIA_ITEMS
 from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.domain.user import UserStatus
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
@@ -67,8 +68,10 @@ from socialhome.services.federation_inbound_service import (
 )
 from socialhome.services.inbound_media_store import (
     dm_media_name,
+    media_basename,
     space_direct_media_name,
 )
+from tests.space_media_items import expected_urls, synthetic_object
 
 
 @pytest.fixture
@@ -5771,3 +5774,108 @@ async def test_a_space_posts_hash_map_reaches_the_gfs_namer(db, bus, inbound):
         )
     )
     assert {n: fh.h for n, fh in sink.hashes.items()} == {"a.webp": "a" * 64}
+
+
+# ─── Registry tripwire: a SPACE_MEDIA_BLOB lands for every field ─────────
+
+
+class _Rows:
+    """Fake repos holding one synthetic item of each space item type."""
+
+    def __init__(self, space_id: str) -> None:
+        self.space_id = space_id
+        self.objects = {
+            r: synthetic_object(r, item_id=f"id-{r}", space_id=space_id)
+            for r in SPACE_MEDIA_ITEMS
+        }
+        # A bazaar listing rides a BAZAAR wrapper post of the same id.
+        self.wrapper = Post(
+            id="id-bazaar",
+            author="u",
+            type=PostType.BAZAAR,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        self.parent = Post(
+            id="post-1",
+            author="u",
+            type=PostType.TEXT,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+    async def get(self, item_id):  # posts + pages
+        if item_id == "id-posts":
+            return self.space_id, self.objects["posts"]
+        if item_id == "id-bazaar":
+            return self.space_id, self.wrapper
+        if item_id == "post-1":
+            return self.space_id, self.parent
+        return None
+
+    async def get_comment(self, item_id):
+        return self.objects["comments"] if item_id == "id-comments" else None
+
+    async def get_listing(self, item_id):
+        return self.objects["bazaar"] if item_id == "id-bazaar" else None
+
+    async def get_item(self, item_id):
+        return self.objects["gallery"] if item_id == "id-gallery" else None
+
+    async def get_album(self, album_id):
+        return SimpleNamespace(space_id=self.space_id)
+
+    async def get_event(self, item_id):
+        if item_id == "id-calendar":
+            return self.space_id, self.objects["calendar"]
+        return None
+
+    async def get_moderation_item(self, item_id):
+        return None
+
+
+class _Pages:
+    def __init__(self, rows: _Rows) -> None:
+        self._rows = rows
+
+    async def get(self, item_id):
+        return self._rows.objects["pages"] if item_id == "id-pages" else None
+
+
+@pytest.mark.parametrize("resource", sorted(SPACE_MEDIA_ITEMS))
+async def test_a_space_media_blob_lands_for_every_registered_field(
+    bus, tmp_path, resource
+):
+    rows = _Rows("sp-reg")
+    service = FederationInboundService(
+        bus=bus,
+        conversation_repo=MagicMock(),
+        space_post_repo=rows,
+        space_repo=rows,
+        user_repo=MagicMock(),
+        media_dir=tmp_path,
+        gallery_repo=rows,
+        bazaar_repo=rows,
+        space_calendar_repo=rows,
+        page_repo=_Pages(rows),
+    )
+    for url in expected_urls(resource, stored_only=True):
+        name = media_basename(url)
+        assert (
+            await service._space_media_in_scope(
+                space_id="sp-reg",
+                correlation_id=f"id-{resource}",
+                filename=name,
+                known_only=True,
+                sent=name,
+            )
+            is None
+        ), url
+    assert (
+        await service._space_media_in_scope(
+            space_id="sp-reg",
+            correlation_id=f"id-{resource}",
+            filename="not-shown.webp",
+            known_only=True,
+            sent="not-shown.webp",
+        )
+        is not None
+    )

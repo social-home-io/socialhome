@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING
 
 import aiofiles.os
 
+from ..domain.media_constraints import TRANSIENT_DM_MEDIA_RE
+
 if TYPE_CHECKING:
     from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 
@@ -92,8 +94,11 @@ async def unlink_unreferenced(
     names: list[str] = []
     for url in media_urls:
         name = media_basename(url)
-        if name is not None and name not in names:
-            names.append(name)
+        # A DM transient is ``dm_gc``'s — never a row's, so a reference
+        # check alone would always free it (the orphan sweep skips it too).
+        if name is None or name in names or TRANSIENT_DM_MEDIA_RE.search(name):
+            continue
+        names.append(name)
     if not names:
         return 0
     try:

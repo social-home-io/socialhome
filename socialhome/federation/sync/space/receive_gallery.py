@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ....domain.events import GalleryAlbumDeleted, GalleryItemDeleted
 from ....domain.federation import FederationEvent
 from ....domain.gallery import GalleryAlbum, GalleryItem, valid_taken_day
-from ....domain.media_constraints import CAPTION_MAX
+from ....domain.media_constraints import CAPTION_MAX, space_media_ref
+from ....domain.space_media_fields import item_media_urls
 from ....media.cleanup import unlink_unreferenced
-from ....services.inbound_media_store import space_media_ref
 from ...owner_bound_id import (
     GALLERY_ALBUM_KIND,
     GALLERY_ITEM_KIND,
@@ -243,7 +242,7 @@ class GalleryMixin(ReceiverBase):
                     await unlink_unreferenced(
                         self._media_dir,
                         self._media_refs,
-                        [held.url, held.thumbnail_url],
+                        item_media_urls("gallery", held),
                     )
                     await self._bus.publish(
                         GalleryItemDeleted(
@@ -450,22 +449,7 @@ class GalleryMixin(ReceiverBase):
         ):
             log.debug("sync: gallery item %s was deleted here — skipped", record["id"])
             return False
-        item = GalleryItem(
-            id=str(record["id"]),
-            album_id=album_id,
-            uploaded_by=str(record.get("uploaded_by") or record.get("uploader") or ""),
-            item_type=str(record.get("item_type") or "photo"),
-            # Only the canonical local ``api/media/<name>`` shape is stored.
-            url=space_media_ref(record.get("url")) or "",
-            thumbnail_url=space_media_ref(record.get("thumbnail_url")) or "",
-            width=int(record.get("width") or 0),
-            height=int(record.get("height") or 0),
-            duration_s=record.get("duration_s"),
-            caption=record.get("caption"),
-            taken_at=record.get("taken_at") or record.get("day_taken"),
-            sort_order=int(record.get("sort_order") or 0),
-            created_at=record.get("created_at"),
-        )
+        item = _gallery_item_from_record(record, album_id)
         held = (
             await self._gallery_repo.get_item(item.id)
             if from_host or self._gfs_media is not None
@@ -500,16 +484,12 @@ class GalleryMixin(ReceiverBase):
             space_id,
             record,
             item.id,
-            [u for u in (item.thumbnail_url, item.url) if u],
+            item_media_urls("gallery", item),
             provider=provider,
             takes_descriptor=held_elsewhere is None,
             from_host=from_host,
         )
-        item = replace(
-            item,
-            url=media.url(item.url) or "",
-            thumbnail_url=media.url(item.thumbnail_url) or "",
-        )
+        item = media.item("gallery", item)
         try:
             # ``bump_count=False``: the caller recounts the album once the
             # chunk is in. The album must belong to this sync's space.
@@ -554,6 +534,27 @@ def _item_edited(held: GalleryItem, streamed: GalleryItem) -> bool:
         held.album_id != streamed.album_id
         or held.caption != streamed.caption
         or held.taken_at != streamed.taken_at
+    )
+
+
+def _gallery_item_from_record(record: dict[str, Any], album_id: str) -> GalleryItem:
+    """A ``gallery`` item record as the row it streams; its files only as
+    space media references (:func:`space_media_ref`)."""
+    return GalleryItem(
+        id=str(record["id"]),
+        album_id=album_id,
+        uploaded_by=str(record.get("uploaded_by") or record.get("uploader") or ""),
+        item_type=str(record.get("item_type") or "photo"),
+        # Only the canonical local ``api/media/<name>`` shape is stored.
+        url=space_media_ref(record.get("url")) or "",
+        thumbnail_url=space_media_ref(record.get("thumbnail_url")) or "",
+        width=int(record.get("width") or 0),
+        height=int(record.get("height") or 0),
+        duration_s=record.get("duration_s"),
+        caption=record.get("caption"),
+        taken_at=record.get("taken_at") or record.get("day_taken"),
+        sort_order=int(record.get("sort_order") or 0),
+        created_at=record.get("created_at"),
     )
 
 

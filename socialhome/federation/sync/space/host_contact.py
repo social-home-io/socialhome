@@ -2,7 +2,7 @@
 
 The receiver marks a space *heard* whenever the household acting as its
 host here (the owner, or the delegated admin household that invited us —
-``receiver._acts_as_host``) answers our ``SPACE_SYNC_BEGIN``: any signed
+``receiver_base._acts_as_host``) answers our ``SPACE_SYNC_BEGIN``: any signed
 sync chunk of that space we verify — the ``__complete__`` sentinel of an
 up-to-date empty incremental session included, which is all a quiet space
 sends back — and the scheduler marks it on any signed refusal of our BEGIN by

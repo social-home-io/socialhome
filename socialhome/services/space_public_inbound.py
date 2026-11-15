@@ -93,6 +93,7 @@ from ..domain.gfs_member_publish import (
     SpaceItemFrame,
 )
 from ..domain.link_preview import card_survives_edit
+from ..domain.media_constraints import is_gfs_space_media_name, space_media_ref
 from ..domain.post import FEED_POST_MAX_IMAGES, LocationData, Post, PostType
 from ..domain.presence import truncate_coord
 from ..domain.space import SpaceRole
@@ -111,6 +112,7 @@ from ..domain.space_item import (
     required_scope,
     stamp_to_db,
 )
+from ..domain.space_media_fields import replace_item_media
 from ..domain.space_media_ref import SpaceMediaLocalization, post_media_urls
 from ..domain.writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE, WriterCert
 from ..federation.pending_parent_buffer import (
@@ -123,12 +125,7 @@ from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
 from ..writer_cert import verify_writer_users
 from .gfs_member_publish_service import parse_item_plaintext
-from .inbound_media_store import (
-    is_gfs_space_media_name,
-    media_basename,
-    space_media_ref,
-    space_media_refs,
-)
+from .inbound_media_store import media_basename, space_media_refs
 from .link_preview_service import (
     space_wire_link_preview,
 )
@@ -1308,24 +1305,15 @@ def _only_described_files(post: Post) -> Post:
     ``sd-`` file received from some household over federation, or a plain
     name that may be one of this household's own uploads, from another
     space even — would show a file the relayed author never sent. Apply
-    after the localization. The link card stays; only its picture goes."""
+    after the localization. The link card stays; only its picture goes.
+
+    Every field the space media-field registry lists for a post
+    (:func:`replace_item_media`)."""
 
     def keep(url: str | None) -> bool:
         return bool(url) and is_gfs_space_media_name(media_basename(url))
 
-    preview = post.link_preview
-    file_meta = post.file_meta
-    return replace(
-        post,
-        media_url=post.media_url if keep(post.media_url) else None,
-        image_urls=tuple(u for u in post.image_urls or () if keep(u)),
-        link_preview=(
-            replace(preview, thumbnail_url=None)
-            if preview is not None and not keep(preview.thumbnail_url)
-            else preview
-        ),
-        file_meta=file_meta if file_meta is None or keep(file_meta.url) else None,
-    )
+    return replace_item_media("posts", post, lambda u: u if keep(u) else None)
 
 
 def _retained_bytes(frame: dict) -> int:

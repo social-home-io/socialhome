@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -89,7 +90,7 @@ from ...domain.federation import FederationEventType
 from ...domain.file_hashes import parse_file_hashes
 from ...domain.gallery import GalleryAlbum, GalleryItem, valid_taken_day
 from ...domain.item_merge import change_stamp
-from ...domain.media_constraints import CAPTION_MAX
+from ...domain.media_constraints import CAPTION_MAX, space_media_ref
 from ...domain.page import MAX_PAGE_TITLE_LENGTH, Page
 from ...domain.page_version import version_hash
 from ...domain.post import (
@@ -119,13 +120,13 @@ from ...domain.space import (
     validate_zone_name,
     validate_zone_radius,
 )
+from ...domain.space_media_fields import item_media_urls, replace_item_media
 from ...domain.space_media_ref import (
     MAX_PAGE_FILES,
     MEDIA_REFS_FIELD,
     SpaceMediaLocalization,
     page_file_count,
     page_media_urls,
-    rewrite_page_body_media,
 )
 from ...domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ...domain.task import Task, TaskList, task_from_wire_dict, task_list_from_wire_dict
@@ -171,11 +172,7 @@ from ..calendar_service import (
     log_calendar_event_not_stored,
 )
 from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
-from ..inbound_media_store import (
-    space_media_ref,
-    space_media_refs,
-    verbatim_local_media_ref,
-)
+from ..inbound_media_store import space_media_refs, verbatim_local_media_ref
 from ..page_conflict_service import (
     CanonicalVersion,
     PageMode,
@@ -349,9 +346,9 @@ class SpaceContentInboundHandlers:
         event: FederationEvent,
         space_id: str,
         item_id: str,
-        urls: list[str | None],
+        urls: Sequence[str | None],
         *,
-        held: list[str | None] | None = None,
+        held: Sequence[str | None] | None = None,
     ) -> SpaceMediaLocalization:
         """This household's names for an item's files, as delivered by the
         envelope's authenticated sender: its direct names
@@ -1256,15 +1253,8 @@ class SpaceContentInboundHandlers:
         settles its draft. A file another receiving path owns (a DM
         attachment, GFS moment media, a GFS reader copy) is dropped."""
         sent = proposal
-        cover = proposal.cover_image_url
-        if cover and space_media_ref(cover) is None:
-            cover = None
-        proposal = replace(
-            proposal,
-            content=rewrite_page_body_media(
-                proposal.content, lambda ref: ref if space_media_ref(ref) else ""
-            ),
-            cover_image_url=cover,
+        proposal = replace_item_media(
+            "pages", proposal, lambda ref: ref if space_media_ref(ref) else None
         )
         urls = page_media_urls(proposal.cover_image_url, proposal.content)
         if not urls:
@@ -1285,13 +1275,7 @@ class SpaceContentInboundHandlers:
         names = self._media_names.localize(
             space_id, event.from_instance, urls, held=held
         )
-        proposal = replace(
-            proposal,
-            content=rewrite_page_body_media(
-                proposal.content, lambda ref: names.url(ref) or ref
-            ),
-            cover_image_url=names.url(proposal.cover_image_url),
-        )
+        proposal = names.item("pages", proposal)
         await self._fetch_proposed_files(
             event, space_id, page_id, sent, dict(names.names)
         )
@@ -1786,10 +1770,14 @@ class SpaceContentInboundHandlers:
             event,
             space_id,
             ev.id,
-            [ev.cover_url],
-            held=[existing[1].cover_url] if existing is not None else None,
+            item_media_urls("calendar", ev),
+            held=(
+                item_media_urls("calendar", existing[1])
+                if existing is not None
+                else None
+            ),
         )
-        ev = replace(ev, cover_url=media.url(ev.cover_url))
+        ev = media.item("calendar", ev)
         if not await self._calendar_repo.save_event(ev, space_id=space_id):
             log_cross_space_refusal(
                 event, space_id=space_id, what="calendar event", row_id=event_id
@@ -2776,13 +2764,9 @@ class SpaceContentInboundHandlers:
             return
         is_new = await self._gallery_repo.get_item(item_id) is None
         media = await self._localize_media(
-            event, space_id, item.id, [item.thumbnail_url, item.url]
+            event, space_id, item.id, item_media_urls("gallery", item)
         )
-        item = replace(
-            item,
-            url=media.url(item.url) or "",
-            thumbnail_url=media.url(item.thumbnail_url) or "",
-        )
+        item = media.item("gallery", item)
         try:
             if not await self._gallery_repo.create_item_in_space(
                 item, space_id=space_id
@@ -2961,7 +2945,7 @@ class SpaceContentInboundHandlers:
         # Same rule as ``GalleryService.delete_item``: the files go unless
         # another row still names them.
         await unlink_unreferenced(
-            self._media_dir, self._media_refs, [item.url, item.thumbnail_url]
+            self._media_dir, self._media_refs, item_media_urls("gallery", item)
         )
         await self._bus.publish(
             GalleryItemDeleted(
@@ -3467,13 +3451,10 @@ class SpaceContentInboundHandlers:
         names = self._media_names.localize(
             space_id,
             event.from_instance,
-            list(listing.image_urls),
+            item_media_urls("bazaar", listing),
             hashes=parse_file_hashes(event.payload),
         )
-        listing = replace(
-            listing,
-            image_urls=tuple(names.url(u) or u for u in listing.image_urls),
-        )
+        listing = names.item("bazaar", listing)
         try:
             if not await self._bazaar_repo.save_listing(listing, space_id=space_id):
                 # The wrapper post is not in this space (or has not landed
