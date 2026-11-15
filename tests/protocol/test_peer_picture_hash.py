@@ -37,7 +37,8 @@ from socialhome.domain.space import (
     SpaceType,
 )
 from socialhome.domain.user import DisplayableUser, UserIdentityAssertion
-from socialhome.federation.sync.space.receiver import HeldBack, SpaceSyncReceiver
+from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
+from socialhome.federation.sync.space.stream_health import HeldBack
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories import (
     SqliteConversationRepo,

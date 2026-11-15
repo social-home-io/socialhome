@@ -1653,11 +1653,13 @@ and the sync handlers make no HTTP request.
   (`SyncWindow`, `SyncWindows`) and keyset paging (`SYNC_PAGE_SIZE`,
   `iter_pages`, `iter_tombstone_pages`).
 - `socialhome/federation/sync/space/exporters/{posts_deleted,comments_deleted}.py`
-  and `receiver.py` (`_persist_post_tombstones`,
+  and `receive_posts.py` (`_persist_post_tombstones`,
   `_persist_comment_tombstones`) — post / comment tombstones.
 - `socialhome/federation/sync/space/exporters/{row_tombstones,stickies_deleted,calendar_deleted,gallery_deleted,zones_deleted}.py`
-  and `receiver.py` (`_persist_{sticky,calendar,album,item,zone}_tombstones`,
-  `_writer_delete_admits`) — the migration-0085 tombstones.
+  and `receive_{stickies,calendar,gallery,zones}.py`
+  (`_persist_{sticky,calendar,album,item,zone}_tombstones`), with
+  `receiver_base.py` (`_writer_delete_admits`) — the migration-0085
+  tombstones.
 - `socialhome/federation/sync/space/watermark.py` (`SyncWatermarks`,
   `session_shape`, `FULL_RESYNC_INTERVAL_S`),
   `socialhome/repositories/space_sync_watermark_repo.py`,

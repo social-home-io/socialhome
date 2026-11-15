@@ -178,7 +178,7 @@ left, or whose timetable feature is off, is silently ignored
   `_timetable_write_allowed`.
 - `socialhome/federation/space_authorship.py` — `admin_as`.
 - `socialhome/federation/sync/space/exporters/timetables.py`,
-  `socialhome/federation/sync/space/receiver.py` (`timetables` resource).
+  `socialhome/federation/sync/space/receive_timetables.py` (`timetables` resource).
 - `socialhome/repositories/timetable_repo.py` — `SqliteSpaceTimetableRepo`
   (CAS save, last-writer-wins `apply_remote`, `tombstone`).
 - Tests: `tests/protocol/test_space_timetable_federation.py`, and the
