@@ -179,6 +179,7 @@ from ..domain.media_constraints import (
     SPACE_ICON_MAX_DIMENSION,
     SPACE_ICON_SNAPSHOT_MAX_BYTES,
     SPACE_IMAGE_EMBED_MAX_BYTES,
+    space_media_ref,
 )
 from ..domain.mention import Mention
 from ..domain.picture_hash import compute_picture_hash
@@ -267,6 +268,7 @@ from ..domain.space import (
 )
 from ..domain.space_app_table import SpaceAppNotAllowedError
 from ..domain.space_item import reaction_emoji_ok
+from ..domain.space_media_fields import item_media_urls
 from ..domain.space_place import PlacePin, validate_place_pin
 from ..domain.user import User
 from ..domain.writer_cert import WriterEntitlement
@@ -276,7 +278,7 @@ from ..federation.invite_link_forward import (
     REVOKE_INVITE_LINK_ACTION,
 )
 from ..infrastructure.event_bus import EventBus
-from ..media.cleanup import unlink_unreferenced
+from ..media.cleanup import media_basename, unlink_unreferenced
 from ..media.image_processor import ImageProcessor
 from ..media.profile_picture import (
     PROFILE_PICTURE_MAX_DIMENSION,
@@ -1426,9 +1428,6 @@ class SpaceService(
         member_instances = await self._spaces.list_member_instances(space_id)
         await purge_space_and_media(
             space_repo=self._spaces,
-            post_repo=self._posts,
-            gallery_repo=self._gallery,
-            bazaar_repo=self._bazaar,
             media_dir=self._media_dir,
             media_refs=self._media_refs,
             space_id=space_id,
@@ -6866,9 +6865,6 @@ class SpaceService(
             await self._spaces.remove_space_instance(space_id, instance_id)
         await purge_space_and_media(
             space_repo=self._spaces,
-            post_repo=self._posts,
-            gallery_repo=self._gallery,
-            bazaar_repo=self._bazaar,
             media_dir=self._media_dir,
             media_refs=self._media_refs,
             space_id=space_id,
@@ -8379,12 +8375,23 @@ class SpaceService(
         if post.deleted:
             return
         # Capture media URLs before soft_delete nulls them; unlinked after
-        # the PostDeleted publish unmirrors the shared gallery item.
-        media = [
-            post.media_url,
-            *post.image_urls,
-            post.link_preview.thumbnail_url if post.link_preview else None,
-        ]
+        # the PostDeleted publish unmirrors the shared gallery item. Every
+        # file the post shows (the registry's ``posts`` fields — its
+        # attachment included) that is a space file — never a reserved
+        # (DM / GFS copy / transient) name or junk a legacy synced row kept
+        # unvalidated. A bazaar wrapper's photos live on its listing row,
+        # which outlives the post and keeps them referenced.
+        # Its GFS reader copies (``sg-``) go too when this space's
+        # ``space_media_refs`` name them.
+        urls = item_media_urls("posts", post)
+        copies = (
+            await self._media_refs.gfs_copies_in_space(
+                space_id, [n for n in map(media_basename, urls) if n]
+            )
+            if self._media_refs is not None
+            else set()
+        )
+        media = [u for u in urls if space_media_ref(u) or media_basename(u) in copies]
         moderated_by: str | None = None
         if post.author != actor_user_id:
             # Moderation path — actor needs content authority
@@ -8431,6 +8438,9 @@ class SpaceService(
         # so a file goes only when no other row (any space, feed, DM,
         # gallery, …) still points at it.
         await unlink_unreferenced(self._media_dir, self._media_refs, media)
+        if copies and self._media_refs is not None:
+            # A freed reader copy's descriptor row goes too.
+            await self._media_refs.forget_freed_gfs_copies(space_id, copies)
 
     async def add_reaction(
         self,
@@ -9083,9 +9093,6 @@ class SpaceService(
         await self._gfs_mirror.unsubscribe(space_id)
         await purge_space_and_media(
             space_repo=self._spaces,
-            post_repo=self._posts,
-            gallery_repo=self._gallery,
-            bazaar_repo=self._bazaar,
             media_dir=self._media_dir,
             media_refs=self._media_refs,
             space_id=space_id,

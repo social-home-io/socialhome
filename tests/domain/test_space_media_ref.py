@@ -8,6 +8,7 @@ import pytest
 
 from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import FileMeta, Post, PostType
+from socialhome.domain.space_media_fields import item_media_urls
 from socialhome.domain.space_media_ref import (
     FILE_HASH_RESOURCES,
     MAX_DESCRIPTOR_ENTRIES,
@@ -31,6 +32,7 @@ from socialhome.domain.space_media_ref import (
 )
 from socialhome.moment_public_media import MAX_BLOB_BYTES
 from socialhome.space_media_seal import SPACE_MEDIA_SUITE_AESGCM256_PADDED
+from tests.space_media_items import synthetic_object
 
 SUITE = SPACE_MEDIA_SUITE_AESGCM256_PADDED
 BID = "a" * 64
@@ -396,4 +398,19 @@ def test_file_hash_resources_never_include_pages():
     ]
     assert record_file_urls("bazaar", {"image_urls": ["api/media/b.webp", 3]}) == [
         "api/media/b.webp"
+    ]
+
+
+# ─── Registry tripwire: a GFS localization renames every post field ──────
+
+
+def test_localization_renames_every_registered_post_field() -> None:
+    """``SpaceMediaLocalization.post`` (hand-written over the Post type)
+    renames every file the registry lists for a post."""
+    post = synthetic_object("posts")
+    urls = item_media_urls("posts", post)
+    names = {u.rsplit("/", 1)[-1]: "sg-" + u.rsplit("/", 1)[-1] for u in urls}
+    renamed = SpaceMediaLocalization(names=names).post(post)
+    assert item_media_urls("posts", renamed) == [
+        u.rsplit("/", 1)[0] + "/sg-" + u.rsplit("/", 1)[-1] for u in urls
     ]

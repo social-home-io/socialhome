@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 from types import SimpleNamespace
 
 import orjson
@@ -20,12 +21,10 @@ class _FakeCrypto:
         self.epoch = 0
 
     async def encrypt_chunk(self, *, space_id, sync_id, plaintext):
-        import base64
 
         return self.epoch, base64.urlsafe_b64encode(plaintext).decode("ascii")
 
     async def decrypt_chunk(self, *, space_id, epoch, sync_id, ciphertext):
-        import base64
 
         return base64.urlsafe_b64decode(ciphertext)
 

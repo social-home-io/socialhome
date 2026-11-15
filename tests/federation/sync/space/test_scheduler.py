@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ from socialhome.domain.space import (
     SpaceType,
 )
 from socialhome.federation.sync.space import scheduler as scheduler_mod
+from socialhome.federation.sync.space.host_contact import HostContact
 from socialhome.federation.sync.space.scheduler import (
     MAX_MESH_CATCHUP_ATTEMPTS,
     STALE_SESSION_TTL_SECONDS,
@@ -1908,7 +1910,6 @@ def _helper_sched(
     newest: dict[str, str | list[tuple[int, str]]] | None = None,
     marks: tuple[int, int] | None = None,
 ):
-    from socialhome.federation.sync.space.host_contact import HostContact
 
     held = newest if newest is not None else {}
 
@@ -2261,7 +2262,6 @@ async def test_the_helper_rotates_one_step_per_round(
 async def test_no_helper_means_nothing_is_sent(
     bus, queue, sync_manager, quick_answer_wait, caplog
 ):
-    import logging
 
     sched, _contact, resume = _helper_sched(
         bus, queue, sync_manager, helpers=["self", "host"]
@@ -2358,7 +2358,6 @@ async def test_a_helper_below_v92_is_never_asked_for_a_resume(
 ):
     """A helper below v_92 would replay everyone's rows: only v_92 helpers
     (``space_member_supports``) are picked; none → wait for the host."""
-    import logging
 
     sched, _contact, resume = _helper_sched(
         bus, queue, sync_manager, helpers=["admin-a", "mod-b"]

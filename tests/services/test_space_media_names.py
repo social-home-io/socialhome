@@ -2,21 +2,34 @@
 
 from __future__ import annotations
 
+import pytest
+
 from socialhome.domain.file_hashes import FileHash, space_content_media_name
+from socialhome.domain.media_constraints import (
+    is_reserved_media_name,
+    is_safe_media_name,
+)
+from socialhome.domain.space_media_fields import (
+    SPACE_MEDIA_ITEMS,
+    moderation_item,
+)
 from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.services.inbound_media_store import (
     SPACE_DIRECT_MEDIA_PREFIX,
-    is_reserved_media_name,
-    is_safe_media_name,
     is_space_direct_media_name,
     space_direct_media_name,
 )
 from socialhome.services.space_media_names import (
     SpaceMediaNamer,
+    comment_media_ref,
     feature_media_urls,
     renamed_media,
     same_file,
     space_own_files,
+)
+from tests.space_media_items import (
+    expected_moderation_urls,
+    synthetic_moderation_payload,
 )
 
 SP = "sp-1"
@@ -322,3 +335,57 @@ def test_a_legacy_row_keeps_its_senders_file_when_an_edit_carries_hashes():
         hashes={"f.webp": _fh(_HA)},
     )
     assert got.names == {"f.webp": sd("hh-a", "f.webp")}
+
+
+# ─── Registry tripwire: every registered field of a reviewed item ────────
+
+
+_REVIEWED = sorted(
+    i.moderation_feature for i in SPACE_MEDIA_ITEMS.values() if i.moderation_feature
+)
+
+
+@pytest.mark.parametrize("feature", _REVIEWED)
+def test_feature_media_urls_sees_every_registered_field(feature):
+    payload = synthetic_moderation_payload(feature)
+    assert feature_media_urls(feature, payload) == expected_moderation_urls(feature)
+
+
+@pytest.mark.parametrize(
+    "feature", [f for f in _REVIEWED if moderation_item(f).moderation_patch]
+)
+def test_feature_media_urls_reads_an_edits_patch(feature):
+    payload = synthetic_moderation_payload(feature, patch=True)
+    assert feature_media_urls(feature, payload) == expected_moderation_urls(feature)
+
+
+@pytest.mark.parametrize("feature", _REVIEWED)
+def test_renamed_media_renames_every_registered_field(feature):
+    payload = synthetic_moderation_payload(feature)
+    out = renamed_media(feature, payload, lambda u: u and u.replace(".webp", "-r.webp"))
+    assert feature_media_urls(feature, out) == [
+        u.replace(".webp", "-r.webp") for u in expected_moderation_urls(feature)
+    ]
+
+
+def test_a_comments_picture_is_never_a_name_another_path_owns():
+    """Live and synced comments: a DM's (``dm-``) name is no space file —
+    dropped, like on every other space item field."""
+    dm = "api/media/dm-0123456789abcdef0123456789abcdef01234567.webp"
+    assert comment_media_ref(SP, dm, None) is None
+    assert comment_media_ref(SP, "/api/media/pic.webp?x=1", None) == (
+        "api/media/pic.webp"
+    )
+
+
+def test_renamed_media_renames_a_calendar_edits_proposed_preview():
+    out = renamed_media(
+        "calendar",
+        {
+            "patch": {"cover_url": "api/media/c.webp"},
+            "proposed": {"cover_url": "api/media/c.webp", "summary": "S"},
+        },
+        lambda u: u and u.replace("c.webp", "sd-c.webp"),
+    )
+    assert out["patch"]["cover_url"] == "api/media/sd-c.webp"
+    assert out["proposed"] == {"cover_url": "api/media/sd-c.webp", "summary": "S"}

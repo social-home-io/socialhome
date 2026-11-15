@@ -41,6 +41,7 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.space_media_fields import item_media_urls
 from ..infrastructure.event_bus import EventBus
 from .file_hashes_sender import FileHashesMixin
 from .media_file_hasher import MediaFileHasher
@@ -146,7 +147,8 @@ class BazaarOutbound(FileHashesMixin):
         # A listing riding a reviewed post is published by its approval,
         # which it names (v_43).
         with_release(payload)
-        payload = await self._with_file_hashes(payload, list(listing.image_urls))
+        files = item_media_urls("bazaar", listing)
+        payload = await self._with_file_hashes(payload, files)
         try:
             await self._federation.broadcast_to_space_members(
                 listing.space_id,
@@ -163,11 +165,7 @@ class BazaarOutbound(FileHashesMixin):
         # Hand off image bytes to the shared media outbox. Same pattern
         # as SpacePostOutbound: enqueue per-peer rows so the scheduler
         # can chunk + retry independently of the metadata broadcast.
-        if (
-            self._media_sync is not None
-            and self._federation_repo is not None
-            and listing.image_urls
-        ):
+        if self._media_sync is not None and self._federation_repo is not None and files:
             try:
                 targets = await self._federation_repo.list_member_instance_ids(
                     listing.space_id,
@@ -187,7 +185,7 @@ class BazaarOutbound(FileHashesMixin):
                         space_id=listing.space_id,
                         correlation_id=listing.post_id,
                         target_instance_ids=targets,
-                        media_urls=list(listing.image_urls),
+                        media_urls=files,
                     )
                 except Exception:
                     log.exception(

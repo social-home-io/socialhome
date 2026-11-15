@@ -13,7 +13,9 @@ import pytest
 from socialhome.domain.calendar import CalendarEvent
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.gallery import GalleryAlbum, GalleryItem
+from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.page import Page, PageTombstone
+from socialhome.domain.page_version import DraftBase
 from socialhome.domain.post import Comment, CommentType, LocationData, Post, PostType
 from socialhome.domain.sticky import Sticky
 from socialhome.domain.task import (
@@ -768,7 +770,6 @@ async def test_no_page_is_replayed_to_the_v48_host(provider_factory):
 
 
 async def test_a_draft_is_replayed_as_its_canonical_base(provider_factory):
-    from socialhome.domain.page_version import DraftBase
 
     base = datetime(2026, 4, 1, tzinfo=UTC)
     iso = (base + timedelta(minutes=1)).isoformat()
@@ -1155,7 +1156,6 @@ async def test_resume_replays_every_album_state_the_peer_may_have_missed(
 def test_post_to_payload_carries_link_preview_only_when_set():
     """A resumed SPACE_POST_CREATED replays the author-built card so a
     catching-up member still never fetches the URL."""
-    from socialhome.domain.link_preview import LinkPreview
 
     base = {
         "id": "p-lp",

@@ -53,7 +53,7 @@ from ..domain.space_item import (
     ITEM_TYPE_REACTION_ADD,
     ITEM_TYPE_REACTION_REMOVE,
 )
-from ..domain.space_media_ref import post_media_urls
+from ..domain.space_media_fields import item_media_urls
 from ..infrastructure.event_bus import EventBus
 from .file_hashes_sender import FileHashesMixin
 from .moderation_release import current_release, with_release
@@ -290,7 +290,10 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             # IS the post: it carries the signed descriptor too (uploads
             # already stored are not repeated).
             media_plan = await self._plan_media_refs(
-                space_id, post_media_urls(post), item_id=post.id, followers=True
+                space_id,
+                item_media_urls("posts", post),
+                item_id=post.id,
+                followers=True,
             )
             inner = build_signed_author_inner(
                 post=post,
@@ -475,7 +478,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         # copy of the payload (``per_peer``), followers inside the relayed
         # inner — planned first, because the author signs the descriptor
         # there (a separate ``media_refs_sig``, not in the main author bytes).
-        media_urls = post_media_urls(post)
+        media_urls = item_media_urls("posts", post)
         media_plan = await self._plan_media_refs(
             event.space_id,
             media_urls,
@@ -727,7 +730,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             "parent_id": c.parent_id,
             "occurred_at": c.created_at.isoformat() if c.created_at else None,
         }
-        media_urls = [c.media_url] if c.media_url else []
+        media_urls = item_media_urls("comments", c)
         payload = await self._with_file_hashes(payload, media_urls)
         try:
             await self._federation.broadcast_to_space_members(

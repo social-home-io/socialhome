@@ -137,7 +137,6 @@ class AbstractBazaarRepo(Protocol):
         ...
 
     async def list_by_seller(self, seller_user_id: str) -> list[BazaarListing]: ...
-    async def list_space_media_urls(self, space_id: str) -> list[str]: ...
     async def list_expired(
         self, *, now_iso: str | None = None
     ) -> list[BazaarListing]: ...
@@ -529,21 +528,6 @@ class SqliteBazaarRepo:
             (seller_user_id,),
         )
         return [lst for lst in (_row_to_listing(d) for d in rows_to_dicts(rows)) if lst]
-
-    async def list_space_media_urls(self, space_id: str) -> list[str]:
-        """Every ``api/media/<file>`` URL the space's bazaar listings
-        reference, for on-disk cleanup on hard delete. Listing photos live
-        only here (the wrapper post carries no images), so they'd leak
-        otherwise. Must be called before the rows are dropped.
-        """
-        rows = await self._db.fetchall(
-            "SELECT image_urls_json FROM bazaar_listings WHERE space_id=?",
-            (space_id,),
-        )
-        urls: list[str] = []
-        for r in rows:
-            urls.extend(load_json(r["image_urls_json"], []))
-        return urls
 
     async def list_expired(
         self,

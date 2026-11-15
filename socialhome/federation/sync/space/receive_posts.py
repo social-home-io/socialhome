@@ -18,6 +18,7 @@ from ....domain.events import (
 )
 from ....domain.federation import FederationEvent
 from ....domain.file_hashes import parse_file_hashes
+from ....domain.media_constraints import space_media_ref
 from ....domain.post import (
     FEED_POST_MAX_IMAGES,
     MAX_POLL_OPTIONS,
@@ -30,11 +31,7 @@ from ....domain.post import (
 from ....domain.space import ContentAction
 from ....domain.space_item import reaction_emoji_ok, stamp_to_db, stored_stamp
 from ....domain.space_media_ref import post_media_urls
-from ....services.inbound_media_store import (
-    local_media_ref,
-    space_media_ref,
-    space_media_refs,
-)
+from ....services.inbound_media_store import space_media_refs
 from ....services.link_preview_service import space_wire_link_preview
 from ....services.space_media_names import comment_media_ref
 from ...owner_bound_id import (
@@ -660,13 +657,6 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
         post_type = PostType(str(r.get("type") or "text"))
     except ValueError:
         post_type = PostType.TEXT
-    file_meta_dict = r.get("file_meta")
-    file_meta = None
-    if isinstance(file_meta_dict, dict):
-        try:
-            file_meta = FileMeta(**file_meta_dict)
-        except TypeError:
-            file_meta = None
     return Post(
         id=str(post_id),
         author=str(author),
@@ -680,7 +670,7 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
         deleted=bool(r.get("deleted", False)),
         edited_at=_parse_iso(r.get("edited_at")) if r.get("edited_at") else None,
         moderated=bool(r.get("moderated", False)),
-        file_meta=file_meta,
+        file_meta=_file_meta_from_record(r.get("file_meta")),
         # An unannounced listing / event anchor must stay out of the
         # joiner's feed exactly as it is out of the provider's.
         hidden_from_feed=bool(r.get("hidden_from_feed", False)),
@@ -693,6 +683,23 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
         # its own — see the ``posts`` branch).
         reactions=_reactions_from_record(r.get("reactions")),
     )
+
+
+def _file_meta_from_record(raw: object) -> FileMeta | None:
+    """A record's file attachment, kept only when its ``url`` is a space
+    file (:func:`space_media_ref` — never a name another receiving path
+    owns, a foreign URL or junk), normalised. A file post means nothing
+    without its file, so a refused url drops the whole attachment (the
+    registry's ``parent_requires``)."""
+    if not isinstance(raw, dict):
+        return None
+    url = space_media_ref(raw.get("url"))
+    if url is None:
+        return None
+    try:
+        return FileMeta(**{**raw, "url": url})
+    except TypeError:
+        return None
 
 
 def _reactions_from_record(raw: object) -> dict[str, frozenset[str]]:
@@ -725,5 +732,6 @@ def _comment_from_record(r: dict[str, Any]) -> Comment | None:
         created_at=_parse_iso(r.get("created_at")),
         parent_id=r.get("parent_id"),
         content=r.get("content"),
-        media_url=local_media_ref(r.get("media_url")),
+        # A space file only — never a DM's / moment's (reserved) name.
+        media_url=space_media_ref(r.get("media_url")),
     )

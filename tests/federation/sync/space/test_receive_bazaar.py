@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 
 import pytest
 
@@ -38,7 +39,6 @@ async def test_bazaar_catchup_save_failure_is_a_warning_naming_the_listing(
     DEBUG for every unannounced listing on every joiner, so the only
     trace was the writer's "1/N statements failed" count.
     """
-    import sqlite3
 
     peer, _ = peer_setup
     kp_self = generate_identity_keypair()

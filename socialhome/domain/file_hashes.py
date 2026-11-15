@@ -62,7 +62,7 @@ MAX_FILE_HASH_ENTRIES: int = 16
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 #: The author's file name: one safe path component (the shape
-#: ``inbound_media_store.SAFE_MEDIA_NAME`` accepts).
+#: ``media_constraints.SAFE_MEDIA_NAME`` accepts).
 _NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._:-]{0,199}")
 
 

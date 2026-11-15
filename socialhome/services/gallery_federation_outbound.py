@@ -48,6 +48,7 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.space_media_fields import item_media_urls
 from ..infrastructure.event_bus import EventBus
 from .file_hashes_sender import FileHashesMixin
 from .space_media_refs import SpaceMediaRefsMixin
@@ -169,9 +170,7 @@ class GalleryFederationOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         # SPACE_MEDIA_BLOB scope check and the zoom view both read it).
         payload = item.to_federation_dict()
         # v_80 — a link-joined member gets the files as ``media_refs``.
-        files = [item.thumbnail_url]
-        if item.url and item.url != item.thumbnail_url:
-            files.append(item.url)
+        files = list(dict.fromkeys(item_media_urls("gallery", item)))
         media_plan = await self._plan_media_refs(
             space_id, files, item_id=item.id, followers=False
         )
@@ -188,11 +187,7 @@ class GalleryFederationOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         # gallery item carries TWO URLs (thumbnail + full); both get
         # an outbox row per peer. Same pattern post media uses.
         if self._media_sync is not None:
-            media_urls: list[str] = []
-            if item.thumbnail_url:
-                media_urls.append(item.thumbnail_url)
-            if item.url and item.url != item.thumbnail_url:
-                media_urls.append(item.url)
+            media_urls = files
             if media_urls:
                 try:
                     peers = await self._space_repo.list_member_instances(

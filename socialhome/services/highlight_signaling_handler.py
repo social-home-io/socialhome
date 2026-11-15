@@ -41,6 +41,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from ..canonical_json import canonical_bytes
 from ..crypto import b64url_encode, sign_ed25519
+from ..domain.media_constraints import MEDIA_REF_PREFIX, local_media_ref
 from ..media.profile_picture import PublicPictureCache
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.highlight_repo import AbstractHighlightRepo
@@ -50,7 +51,7 @@ from ..webrtc_ice import rtc_configuration
 from . import highlight_public_framing as framing
 from .highlight_public_profile import parse_viewer_key, seal_profile
 from .highlight_public_seal import StreamSealer, link_secret, token_digest, usable_token
-from .inbound_media_store import MEDIA_REF_PREFIX, local_media_ref, media_file_path
+from .inbound_media_store import media_file_path
 from .protection_gate import ProtectionGateMixin
 
 log = logging.getLogger(__name__)

@@ -36,6 +36,7 @@ from socialhome.services.space_public_author import (
     verify_signed_author_inner,
 )
 from tests.services.test_space_public_author import _v25_author_signing_bytes
+from tests.space_media_items import expected_urls, synthetic_object
 
 
 @dataclass
@@ -1777,3 +1778,58 @@ async def test_a_reaction_carries_one_stamp_on_both_paths():
     at = datetime(2026, 11, 11, 9, 30, 0, 123456, tzinfo=UTC)
     await bus.publish(_reaction_event(uid=uid, at=at))
     assert datetime.fromisoformat(member.scheduled[0][3]["ts"]) == at
+
+
+# ─── Registry tripwire: every registered field ships ─────────────────────
+
+
+def _write_files(tmp_path, urls):
+    for url in urls:
+        (tmp_path / url.rsplit("/", 1)[-1]).write_bytes(url.encode())
+
+
+async def test_a_post_ships_and_hashes_every_registered_field(tmp_path):
+    urls = expected_urls("posts", stored_only=True)
+    _write_files(tmp_path, urls)
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    federation._own_instance_id = "self-id"
+    fed_repo = AsyncMock()
+    fed_repo.list_member_instance_ids = AsyncMock(return_value=["peer-a"])
+    media_sync = AsyncMock()
+    outbound = _make_outbound(
+        bus=bus, federation=federation, media_sync=media_sync, federation_repo=fed_repo
+    )
+    outbound.attach_file_hasher(MediaFileHasher(tmp_path))
+    post = synthetic_object("posts", item_id="p-reg")
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    payload = federation.broadcast_to_space_members.call_args.args[2]
+    assert set(payload["files"]) == {u.rsplit("/", 1)[-1] for u in urls}
+    assert media_sync.enqueue_for_post.call_args.kwargs["media_urls"] == urls
+
+
+async def test_a_comment_ships_and_hashes_every_registered_field(tmp_path):
+    urls = expected_urls("comments", stored_only=True)
+    _write_files(tmp_path, urls)
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    federation.own_instance_id = "us"
+
+    async def _supports(iid, *, min_version):
+        return True
+
+    federation.space_member_supports = _supports
+    media_sync = AsyncMock()
+    fed_repo = AsyncMock()
+    fed_repo.list_member_instance_ids = AsyncMock(return_value=["us", "peer-b"])
+    outbound = _make_outbound(
+        bus=bus, federation=federation, media_sync=media_sync, federation_repo=fed_repo
+    )
+    outbound.attach_file_hasher(MediaFileHasher(tmp_path))
+    comment = synthetic_object("comments", item_id="c-reg")
+    await bus.publish(CommentAdded(post_id="p-1", comment=comment, space_id="sp-1"))
+    payload = federation.broadcast_to_space_members.call_args.args[2]
+    assert set(payload["files"]) == {u.rsplit("/", 1)[-1] for u in urls}
+    assert media_sync.enqueue_for_blob.call_args.kwargs["media_urls"] == urls

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from socialhome.services.page_conflict_service import PageMode
 from tests.federation.sync.space.receiver_fakes import _SYNC_REFS, _GfsMediaSink, _send
 
 
@@ -32,7 +33,6 @@ class _FakeConflicts:
     """The v_48 engine: mode + recorded mirrors."""
 
     def __init__(self, mode: str = "member", host: str = "peer-a") -> None:
-        from socialhome.services.page_conflict_service import PageMode
 
         self.mode_ = PageMode(mode)
         self.host = host

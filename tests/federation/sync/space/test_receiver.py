@@ -5,6 +5,7 @@ paths are tested in ``test_receive_*.py``."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -14,12 +15,29 @@ import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.domain.events import SpaceContentKeyImported, SpaceSyncComplete
+from socialhome.domain.space_media_fields import (
+    SPACE_MEDIA_ITEMS,
+    item_media_urls,
+)
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.owner_bound_id import (
     SPACE_CHAT_MESSAGE_KIND,
     mint_owner_bound_id,
 )
 from socialhome.federation.sync.space.exporter import SENTINEL_RESOURCE, serialise_chunk
+from socialhome.federation.sync.space.receive_bazaar import (
+    _bazaar_listing_from_record,
+)
+from socialhome.federation.sync.space.receive_calendar import (
+    _calendar_from_record,
+)
+from socialhome.federation.sync.space.receive_gallery import (
+    _gallery_item_from_record,
+)
+from socialhome.federation.sync.space.receive_posts import (
+    _comment_from_record,
+    _post_from_record,
+)
 from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
 from socialhome.federation.sync.space.stream_health import (
     HELD_BACK_LIMIT,
@@ -39,6 +57,7 @@ from tests.federation.sync.space.receiver_fakes import (
     _sign_as_peer,
     _Stub,
 )
+from tests.space_media_items import expected_urls, synthetic_record
 
 
 async def test_on_chunk_persists_members(receiver, peer_setup):
@@ -181,12 +200,10 @@ class _MissingKeyCrypto:
         self.attempts = 0
 
     async def encrypt_chunk(self, *, space_id, sync_id, plaintext):
-        import base64
 
         return 5, base64.urlsafe_b64encode(plaintext).decode("ascii")
 
     async def decrypt_chunk(self, *, space_id, epoch, sync_id, ciphertext):
-        import base64
 
         self.attempts += 1
         if self.attempts == 1:
@@ -204,8 +221,6 @@ async def test_decrypt_missing_epoch_stashes_in_cache_and_replays(
     'missing epoch', the receiver stashes the redeliver in the cache,
     and the matching SpaceContentKeyImported event triggers a replay
     that succeeds. End state: row was persisted on the second try."""
-    from socialhome.domain.events import SpaceContentKeyImported
-    from socialhome.services.pending_decrypts_cache import PendingDecryptsCache
 
     peer, kp = peer_setup
     kp_self = generate_identity_keypair()
@@ -238,7 +253,6 @@ async def test_decrypt_missing_epoch_stashes_in_cache_and_replays(
             ],
         }
     )
-    import base64
 
     ciphertext = base64.urlsafe_b64encode(plaintext).decode("ascii")
     envelope = {
@@ -273,7 +287,6 @@ async def test_decrypt_failure_other_than_missing_key_still_drops(
     """A tampered ciphertext (decrypt raises but NOT with 'missing
     epoch' in the message) MUST NOT stash — those failures are not
     race-recoverable and stashing them would be a leak."""
-    from socialhome.services.pending_decrypts_cache import PendingDecryptsCache
 
     class _BadCrypto:
         async def encrypt_chunk(self, *, space_id, sync_id, plaintext):
@@ -1188,3 +1201,85 @@ async def test_a_chat_record_held_for_its_seat_keeps_the_chunk_unsettled(setup):
 async def test_chat_records_are_dropped_without_a_sink(setup):
     r, _collector, kp = setup
     await _send(r, kp, "chat_messages", [_chat_record()])  # no raise
+
+
+# ─── Registry tripwire: every synced file field is sanitized ─────────────
+
+
+#: Each registry item's §25.6 record parser, with the non-file fields a
+#: record needs. A new registry item fails here until it is listed.
+_PARSERS = {
+    "posts": lambda r: _post_from_record(
+        {
+            **r,
+            "id": "p",
+            "author": "u",
+            "type": "file",
+            "file_meta": {
+                **r["file_meta"],
+                "mime_type": "application/pdf",
+                "original_name": "f.pdf",
+                "size_bytes": 1,
+            },
+            "link_preview": {
+                **r["link_preview"],
+                "url": "https://example.org/",
+                "title": "T",
+            },
+        }
+    ),
+    "comments": lambda r: _comment_from_record(
+        {**r, "id": "c", "post_id": "p", "author": "u", "type": "image"}
+    ),
+    "calendar": lambda r: _calendar_from_record(
+        {
+            **r,
+            "id": "e",
+            "calendar_id": "sp",
+            "summary": "S",
+            "created_by": "u",
+            "start": "2026-01-01T10:00:00+00:00",
+            "end": "2026-01-01T11:00:00+00:00",
+        },
+        provider="peer",
+    ),
+    "gallery": lambda r: _gallery_item_from_record({**r, "id": "g"}, "al"),
+    "bazaar": lambda r: _bazaar_listing_from_record(
+        {**r, "post_id": "p", "seller_user_id": "u", "mode": "fixed", "title": "T"},
+        "sp",
+    ),
+}
+#: Named exclusion: a page keeps its HOST's names byte for byte (v_82); a
+#: member never reads them as its own files — it maps each to a
+#: page-scoped ``sp-`` name at read time (``space_page_media_name``).
+_NOT_SANITIZED_ON_SYNC = frozenset({"pages"})
+
+
+def _reserved(record: object) -> object:
+    if isinstance(record, dict):
+        return {k: _reserved(v) for k, v in record.items()}
+    if isinstance(record, list):
+        return [_reserved(v) for v in record]
+    if isinstance(record, str):
+        return record.replace("api/media/", "api/media/dm-")
+    return record
+
+
+def test_every_registry_item_has_a_record_parser():
+    assert set(_PARSERS) | _NOT_SANITIZED_ON_SYNC == set(SPACE_MEDIA_ITEMS)
+
+
+@pytest.mark.parametrize("resource", sorted(_PARSERS))
+def test_a_synced_record_keeps_every_registered_space_file(resource):
+    item = _PARSERS[resource](synthetic_record(resource))
+    assert item is not None
+    assert item_media_urls(resource, item) == expected_urls(resource, stored_only=True)
+
+
+@pytest.mark.parametrize("resource", sorted(_PARSERS))
+def test_a_synced_record_drops_a_reserved_name_in_every_registered_field(resource):
+    """A DM's (``dm-``) name in any file field of a §25.6 record never
+    lands as a space item's file."""
+    item = _PARSERS[resource](_reserved(synthetic_record(resource)))
+    assert item is not None
+    assert item_media_urls(resource, item) == []

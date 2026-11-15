@@ -57,6 +57,7 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol
 
 import aiofiles.os
@@ -67,7 +68,8 @@ from ....domain.link_preview import link_preview_to_dict
 from ....domain.page import page_tombstone_to_wire_dict
 from ....domain.page_version import version_hash
 from ....domain.post import PostType, poll_to_wire_dict
-from ....domain.space_media_ref import page_media_urls, post_media_urls
+from ....domain.space_media_fields import item_media_urls
+from ....domain.space_media_ref import page_media_urls
 from ....domain.task import (
     task_list_to_wire_dict,
     task_list_tombstone_to_wire_dict,
@@ -440,7 +442,7 @@ class SpaceSyncResumeProvider:
         space's roster authority (the host, or a seed-holding delegated
         admin), else only our own people — every receiver takes other
         people's rows only from the household acting as host
-        (``receiver._acts_as_host``), so sending them is wasted bytes. Not
+        (``receiver_base._acts_as_host``), so sending them is wasted bytes. Not
         wired (``None``): every row, as before."""
         if self._roster_authority is None or self._own_members is None:
             return None
@@ -549,7 +551,7 @@ class SpaceSyncResumeProvider:
             space_id=space_id,
             to=to,
             own=own,
-            media_of=post_media_urls,
+            media_of=partial(item_media_urls, "posts"),
             media=media,
         )
         return sent + await self._replay_polls(posts, space_id=space_id, to=to, own=own)
@@ -620,7 +622,7 @@ class SpaceSyncResumeProvider:
             to=to,
             own=own,
             # A comment's picture (v_92): the same fill as a post's.
-            media_of=lambda comment: [comment.media_url] if comment.media_url else [],
+            media_of=partial(item_media_urls, "comments"),
             media=media,
         )
 
@@ -887,7 +889,7 @@ class SpaceSyncResumeProvider:
             space_id=space_id,
             to=to,
             own=own,
-            media_of=lambda ev: [ev.cover_url] if ev.cover_url else [],
+            media_of=partial(item_media_urls, "calendar"),
             media=media,
         )
 
@@ -988,7 +990,7 @@ class SpaceSyncResumeProvider:
             space_id=space_id,
             to=to,
             own=own,
-            media_of=lambda item: [u for u in (item.thumbnail_url, item.url) if u],
+            media_of=partial(item_media_urls, "gallery"),
             media=media,
         )
 

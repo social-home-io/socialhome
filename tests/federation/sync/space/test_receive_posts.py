@@ -2,9 +2,26 @@
 
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, datetime
 
+import pytest
+
+from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import SpaceCommentSynced
+from socialhome.domain.link_preview import LinkPreview
+from socialhome.domain.post import (
+    FEED_POST_MAX_IMAGES,
+    Comment,
+    CommentType,
+    Post,
+    PostType,
+)
+from socialhome.federation.sync.space.exporters.posts import _post_to_dict
+from socialhome.federation.sync.space.receive_posts import (
+    _comment_from_record,
+    _post_from_record,
+)
+from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from tests.federation.sync.space.receiver_fakes import _here, _send
 
 
@@ -39,12 +56,6 @@ async def test_dispatch_keeps_a_hidden_anchor_post_out_of_the_joiners_feed(recei
 def test_synced_post_record_keeps_a_validated_link_preview():
     """A sync record round-trips the author-built card (exporter → receiver);
     the receiver re-validates it and keeps only a local image reference."""
-    from datetime import datetime
-
-    from socialhome.domain.link_preview import LinkPreview
-    from socialhome.domain.post import Post, PostType
-    from socialhome.federation.sync.space.exporters.posts import _post_to_dict
-    from socialhome.federation.sync.space.receive_posts import _post_from_record
 
     card = LinkPreview(
         url="https://example.com/", title="T", thumbnail_url="api/media/lp.webp"
@@ -93,9 +104,6 @@ async def test_a_post_deleted_here_is_never_resurrected_by_a_sync(setup):
     """v_49: a delete can overtake its create (a member-published delete
     leaves a soft-deleted row); a provider that missed the delete must not
     bring the post back."""
-    from datetime import datetime
-
-    from socialhome.domain.post import Post, PostType
 
     r, c, kp = setup
     c.held_posts["p-gone"] = Post(
@@ -119,7 +127,6 @@ async def test_posts_keep_their_image_urls(setup):
     """The exporter ships ``image_urls``; a joiner must keep them — the
     media bytes that follow are matched against them, and the feed renders
     from them. Strings only, capped at the feed maximum."""
-    from socialhome.domain.post import FEED_POST_MAX_IMAGES
 
     r, c, kp = setup
     await _send(
@@ -294,11 +301,6 @@ async def test_a_held_comment_mid_chunk_never_stops_the_rest(setup, tmp_dir):
     delete-before-create tombstone, used to make the plain INSERT raise and
     lose the rest of the chunk. Held rows stay as they are; the later
     records land."""
-    from datetime import datetime
-
-    from socialhome.db.database import AsyncDatabase
-    from socialhome.domain.post import Comment, CommentType, Post, PostType
-    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 
     r, _c, kp = setup
     db = AsyncDatabase(tmp_dir / "sync.db", batch_timeout_ms=10)
@@ -360,9 +362,6 @@ async def test_a_sync_keeps_a_held_posts_reactions_and_comment_count(setup):
     """Review repro S1: re-sending a held post must not wipe the reactions
     (or comment count) held here — the stamps would then refuse the copy
     that could restore them."""
-    from datetime import datetime
-
-    from socialhome.domain.post import Post, PostType
 
     r, c, kp = setup
     c.held_posts["p-1"] = Post(
@@ -397,11 +396,6 @@ async def test_a_new_post_from_a_sync_carries_its_reactions(setup):
 async def test_relayed_reactions_survive_a_sync_end_to_end(setup, tmp_dir):
     """S1 on real SQLite: a relayed reaction, a sync re-sending the post, a
     duplicate copy of the add — the reaction is still there."""
-    from datetime import datetime
-
-    from socialhome.db.database import AsyncDatabase
-    from socialhome.domain.post import Post, PostType
-    from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 
     r, _c, kp = setup
     db = AsyncDatabase(tmp_dir / "sync.db", batch_timeout_ms=10)
@@ -435,3 +429,59 @@ async def test_relayed_reactions_survive_a_sync_end_to_end(setup, tmp_dir):
         assert "u-2" in (await repo.get("p-1"))[1].reactions["👍"]
     finally:
         await db.shutdown()
+
+
+# ─── A synced post's attachment / a comment's picture is a space file ────
+
+
+def _file_record(url: object) -> dict:
+    return {
+        "id": "p-file",
+        "author": "u-1",
+        "type": "file",
+        "file_meta": {
+            "url": url,
+            "mime_type": "application/pdf",
+            "original_name": "doc.pdf",
+            "size_bytes": 4,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "api/media/dm-0123456789abcdef0123456789abcdef01234567.pdf",
+        "https://tracker.example/doc.pdf",
+        "../../etc/passwd",
+        None,
+    ],
+)
+def test_a_synced_attachment_that_is_no_space_file_is_dropped(url):
+    """§25.6: a record's ``file_meta.url`` passes the same rule as the
+    post's other files (``space_media_ref``): a name another receiving
+    path owns (a DM's ``dm-``), a foreign URL or junk drops the attachment
+    (``parent_requires`` — a file post means nothing without its file)."""
+    post = _post_from_record(_file_record(url))
+    assert post is not None and post.file_meta is None
+
+
+def test_a_synced_attachment_that_is_a_space_file_is_kept():
+    post = _post_from_record(_file_record("/api/media/doc.pdf?sig=x"))
+    assert post is not None and post.file_meta is not None
+    assert post.file_meta.url == "api/media/doc.pdf"
+    assert post.file_meta.original_name == "doc.pdf"
+
+
+def test_a_synced_comments_reserved_picture_is_dropped():
+    record = {
+        "id": "c-1",
+        "post_id": "p-1",
+        "author": "u-1",
+        "type": "image",
+        "media_url": "api/media/dm-0123456789abcdef0123456789abcdef01234567.webp",
+    }
+    comment = _comment_from_record(record)
+    assert comment is not None and comment.media_url is None
+    record["media_url"] = "api/media/pic.webp"
+    assert _comment_from_record(record).media_url == "api/media/pic.webp"

@@ -7,6 +7,7 @@ so the receiver has JSON-serialisable input.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import fields, replace
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
@@ -15,8 +16,16 @@ from socialhome.domain.calendar import CalendarEvent
 from socialhome.domain.conversation import ConversationMessage, SystemChatScope
 from socialhome.domain.gallery import GalleryAlbum, GalleryItem
 from socialhome.domain.page import Page
-from socialhome.domain.post import Comment, CommentType, Post, PostType
-from socialhome.domain.space import SpaceMember
+from socialhome.domain.post import (
+    BazaarListing,
+    BazaarMode,
+    BazaarStatus,
+    Comment,
+    CommentType,
+    Post,
+    PostType,
+)
+from socialhome.domain.space import SpaceMember, SpaceZone
 from socialhome.domain.sticky import Sticky
 from socialhome.domain.task import (
     RecurrenceRule,
@@ -41,6 +50,7 @@ from socialhome.federation.sync.space.exporters import (
     CommentsDeletedExporter,
     CommentsExporter,
     GalleryExporter,
+    MemberPicturesExporter,
     MembersExporter,
     PagesDeletedExporter,
     PagesExporter,
@@ -57,6 +67,10 @@ from socialhome.federation.sync.space.exporters import (
     TasksExporter,
     TimetablesExporter,
     ZonesExporter,
+)
+from socialhome.federation.sync.space.exporters import polls as polls_mod
+from socialhome.federation.sync.space.exporters.members import (
+    PreModeratorMembersExporter,
 )
 from socialhome.federation.sync.space.window import SyncWindows
 from socialhome.repositories.bazaar_repo import SqliteBazaarRepo
@@ -138,7 +152,6 @@ class _FakeSpaceRepo:
 
 
 async def test_members_exporter():
-    from socialhome.federation.sync.space.exporters import MembersExporter
 
     member = SpaceMember(
         space_id="sp-1",
@@ -187,7 +200,6 @@ async def test_a_non_owner_never_streams_the_owner_households_member_rows():
     holds the owner household's member rows, but those may only come from
     the owner — the receiver drops them from anybody else (and warns). An
     honest admin does not send them."""
-    from socialhome.federation.sync.space.exporters import MembersExporter
 
     ex = MembersExporter(
         _OwnerAwareSpaceRepo(members=_roster_rows()),
@@ -201,7 +213,6 @@ async def test_a_non_owner_never_streams_the_owner_households_member_rows():
 
 
 async def test_the_owner_streams_its_own_households_member_rows():
-    from socialhome.federation.sync.space.exporters import MembersExporter
 
     ex = MembersExporter(
         _OwnerAwareSpaceRepo(members=_roster_rows()),
@@ -224,7 +235,6 @@ async def test_members_exporter_says_no_picture_only_without_a_blob():
     hash is NULL while this household still holds the blob (an old wipe
     whose blob hash was not repairable) must not say "no picture": the key
     is left out. A seat with no blob says ``null``; a hash ships as is."""
-    from socialhome.federation.sync.space.exporters import MembersExporter
 
     rows = [
         SpaceMember(space_id="sp-1", user_id="u-none", role="member", joined_at="t"),
@@ -249,10 +259,6 @@ async def test_members_exporter_says_no_picture_only_without_a_blob():
 
 
 async def test_pre_moderator_members_exporter_downgrades_only_moderators():
-    from socialhome.federation.sync.space.exporters import MembersExporter
-    from socialhome.federation.sync.space.exporters.members import (
-        PreModeratorMembersExporter,
-    )
 
     rows = [
         SpaceMember(space_id="sp-1", user_id=uid, role=role, joined_at="2026")
@@ -275,7 +281,6 @@ async def test_pre_moderator_members_exporter_downgrades_only_moderators():
 
 
 async def test_bans_exporter():
-    from socialhome.federation.sync.space.exporters import BansExporter
 
     ex = BansExporter(
         _FakeSpaceRepo(
@@ -288,7 +293,6 @@ async def test_bans_exporter():
 
 
 async def test_posts_exporter_serialises_enums_and_datetimes():
-    from socialhome.federation.sync.space.exporters import PostsExporter
 
     post = Post(
         id="p-1",
@@ -313,7 +317,6 @@ async def test_posts_exporter_ships_hidden_anchor_posts_with_their_flag():
     ships ``hidden_from_feed`` so the joiner's feed stays as clean as the
     provider's.
     """
-    from socialhome.federation.sync.space.exporters import PostsExporter
 
     when = datetime(2026, 9, 19, tzinfo=UTC)
     shown = Post(
@@ -335,7 +338,6 @@ async def test_posts_exporter_ships_hidden_anchor_posts_with_their_flag():
 
 
 async def test_comments_exporter_walks_posts():
-    from socialhome.federation.sync.space.exporters import CommentsExporter
 
     post = Post(
         id="p-1",
@@ -360,7 +362,6 @@ async def test_comments_exporter_walks_posts():
 
 
 async def test_tasks_exporter_normalises_status_and_assignees():
-    from socialhome.federation.sync.space.exporters import TasksExporter
 
     now = datetime.now(UTC)
     task = Task(
@@ -394,7 +395,6 @@ async def test_tasks_exporter_normalises_status_and_assignees():
 
 
 async def test_tasks_exporters_carry_priority_labels_and_archived_at():
-    from socialhome.federation.sync.space.exporters import TasksArchivedExporter
 
     now = datetime(2026, 9, 1, tzinfo=UTC)
     task = Task(
@@ -426,10 +426,6 @@ async def test_tasks_archived_filters_to_archived_at():
     regardless of their status (a DONE task is *not* archived unless
     the user explicitly archived it).
     """
-    from socialhome.federation.sync.space.exporters import (
-        TasksArchivedExporter,
-        TasksExporter,
-    )
 
     now = datetime.now(UTC)
     active = Task(
@@ -476,7 +472,6 @@ async def test_tasks_archived_filters_to_archived_at():
 
 
 async def test_pages_exporter():
-    from socialhome.federation.sync.space.exporters import PagesExporter
 
     page = Page(
         id="pg-1",
@@ -501,7 +496,6 @@ async def test_pages_exporter():
 
 
 async def test_stickies_exporter():
-    from socialhome.federation.sync.space.exporters import StickiesExporter
 
     sticky = Sticky(
         id="s-1",
@@ -524,7 +518,6 @@ async def test_stickies_exporter():
 
 
 async def test_calendar_exporter_serialises_datetimes():
-    from socialhome.federation.sync.space.exporters import CalendarExporter
 
     event = CalendarEvent(
         id="e-1",
@@ -572,8 +565,6 @@ async def test_calendar_exporter_streams_a_series_once_whatever_its_age(db):
 
 
 async def test_gallery_exporter_emits_albums_then_items():
-    from socialhome.domain.gallery import GalleryAlbum, GalleryItem
-    from socialhome.federation.sync.space.exporters import GalleryExporter
 
     album = GalleryAlbum(
         id="a-1",
@@ -664,7 +655,6 @@ async def test_a_favourite_never_rides_the_gallery_sync(db):
 
 
 async def test_polls_exporter_walks_posts_with_polls():
-    from socialhome.federation.sync.space.exporters import PollsExporter
 
     post = SimpleNamespace(id="p-1")
 
@@ -705,8 +695,6 @@ async def test_polls_exporter_walks_posts_with_polls():
 async def test_polls_exporter_cuts_votes_at_a_whole_voter(monkeypatch):
     """One record must fit one chunk: past ``MAX_VOTES_PER_POLL`` the list
     is cut — never through a voter — and marked partial."""
-    from socialhome.federation.sync.space.exporters import PollsExporter
-    from socialhome.federation.sync.space.exporters import polls as polls_mod
 
     monkeypatch.setattr(polls_mod, "MAX_VOTES_PER_POLL", 3)
     post = SimpleNamespace(id="p-1")
@@ -743,7 +731,6 @@ async def test_polls_exporter_cuts_votes_at_a_whole_voter(monkeypatch):
 
 
 async def test_polls_exporter_skips_posts_without_polls():
-    from socialhome.federation.sync.space.exporters import PollsExporter
 
     post = SimpleNamespace(id="p-2")
 
@@ -767,8 +754,6 @@ async def test_zones_exporter_serialises_catalogue():
     member instance joining mid-life picks up every zone, not only
     the ones added after the join. The exporter is a thin asdict
     over what the repo returns."""
-    from socialhome.domain.space import SpaceZone
-    from socialhome.federation.sync.space.exporters import ZonesExporter
 
     z = SpaceZone(
         id="z_office",
@@ -805,8 +790,6 @@ async def test_bazaar_exporter_serialises_listings():
     """F4: bazaar listings ship under the ``bazaar`` resource so a
     catch-up sync rebuilds full listing cards (mode / price / photos /
     status) on the receiver — not just the wrapper post's caption."""
-    from socialhome.domain.post import BazaarListing, BazaarMode, BazaarStatus
-    from socialhome.federation.sync.space.exporters import BazaarExporter
 
     listing = BazaarListing(
         post_id="bzr-1",
@@ -854,8 +837,6 @@ async def test_bazaar_exporter_serialises_listings():
 async def test_member_pictures_exporter_inlines_webp_bytes():
     """F6: per-space avatars catch up so a new joiner sees existing
     members' faces instead of broken <img>."""
-    from socialhome.domain.space import SpaceMember
-    from socialhome.federation.sync.space.exporters import MemberPicturesExporter
 
     members = [
         SpaceMember(
@@ -892,7 +873,6 @@ async def test_member_pictures_exporter_inlines_webp_bytes():
     assert r["user_id"] == "u-alice"
     assert r["picture_hash"] == "abc123"
     # base64 round-trips.
-    import base64
 
     assert base64.b64decode(r["picture_webp_base64"]) == b"\x89WEBP-bytes"
 
@@ -901,11 +881,6 @@ async def test_member_pictures_exporter_streams_only_changed_pictures():
     """§25.6 incremental (migration 0122): a periodic session ships only
     the pictures stamped after the watermark — of members who still use
     a per-space picture."""
-    import base64
-
-    from socialhome.domain.space import SpaceMember
-    from socialhome.federation.sync.space.exporter import IncrementalExporter
-    from socialhome.federation.sync.space.exporters import MemberPicturesExporter
 
     members = [
         SpaceMember(
@@ -944,8 +919,6 @@ async def test_member_pictures_exporter_streams_only_changed_pictures():
 async def test_member_pictures_exporter_skips_when_picture_missing():
     """Member row has hash but the bytes vanished (race / dropped row)
     — skip rather than ship a hash with no bytes."""
-    from socialhome.domain.space import SpaceMember
-    from socialhome.federation.sync.space.exporters import MemberPicturesExporter
 
     class _SpaceRepo:
         async def list_members(self, space_id):
@@ -972,10 +945,6 @@ async def test_member_pictures_exporter_skips_when_picture_missing():
 async def test_schedules_exporter_emits_slot_defs():
     """F5: schedule polls catch up via the ``schedules`` resource so a
     remote member's slot picker isn't empty after §25.6 sync."""
-    from datetime import datetime
-
-    from socialhome.domain.post import Post, PostType
-    from socialhome.federation.sync.space.exporters import SchedulesExporter
 
     post = Post(
         id="p-sched",
@@ -1282,7 +1251,6 @@ def test_the_roster_stays_full():
 
 
 async def test_members_exporter_without_a_picture_repo_never_claims_a_reset():
-    from socialhome.federation.sync.space.exporters import MembersExporter
 
     member = SpaceMember(space_id="sp-1", user_id="u-1", role="member", joined_at="t")
     recs = await MembersExporter(_FakeSpaceRepo(members=[member])).list_records("sp-1")

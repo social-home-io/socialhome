@@ -128,3 +128,16 @@ async def test_unlink_unreferenced_keeps_files_when_the_check_fails(tmp_path):
 
     assert await unlink_unreferenced(tmp_path, _Broken(), ["api/media/abc.webp"]) == 0
     assert p.exists()
+
+
+async def test_unlink_unreferenced_never_removes_a_dm_transient(tmp_path):
+    """A DM transient (``.preview.webp`` / ``.part<N>`` / ``.assembled``)
+    is ``dm_gc``'s: no row references it, so a reference check alone would
+    remove it — skipped, as the orphan sweep skips it."""
+    names = ["m1.preview.webp", "m2.part0003", "m3.assembled"]
+    files = [await _touch(tmp_path, n) for n in names]
+    removed = await unlink_unreferenced(
+        tmp_path, _Refs(), [f"api/media/{n}" for n in names]
+    )
+    assert removed == 0
+    assert all(f.exists() for f in files)

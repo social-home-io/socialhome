@@ -27,14 +27,15 @@ from ..csp import media_response_headers, media_type_for
 from ..domain.errors import CodedError
 from ..domain.media_constraints import (
     AUDIO_ACCEPTED_MIMES,
+    DM_MEDIA_PREFIX,
     FILE_DENIED_EXTENSIONS,
     FILE_MAX_UPLOAD_BYTES,
     VIDEO_MAX_UPLOAD_BYTES,
+    is_safe_media_name,
 )
 from ..media.audio_processor import AudioProcessor
 from ..media.image_processor import ImageProcessor, sniff_image_mime
 from ..security import error_response
-from ..services.inbound_media_store import DM_MEDIA_PREFIX, is_safe_media_name
 from .base import BaseView
 
 log = logging.getLogger(__name__)
