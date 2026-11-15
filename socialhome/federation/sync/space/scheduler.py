@@ -617,6 +617,9 @@ class SpaceSyncScheduler:
             space_id=event.space_id,
             host_instance_id=owner,
             extra_payload=await self._echo_for(event.space_id, owner),
+            # Every member BEGIN to the host carries the digest: one without
+            # it from this version asks for no roster repair.
+            roster_digest=await self._roster_digest_for(event.space_id, owner),
         )
 
     async def _on_space_sync_complete(self, event: SpaceSyncComplete) -> None:

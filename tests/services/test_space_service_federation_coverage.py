@@ -1891,6 +1891,19 @@ async def test_accept_stores_an_over_cap_cover_as_a_rendition(stack):
     assert webp[8:12] == b"WEBP"
 
 
+async def test_the_accepts_mesh_begin_carries_the_roster_digest(stack):
+    """S1: the accept's catch-up BEGIN to a mesh-only host carries our
+    roster digest, like every member BEGIN to the host."""
+    bob = await _user(stack, "bobdigest")
+    await _snapshot_invite(stack, bob.user_id, token="t-dig", issuer="peer")
+    await stack.svc.accept_remote_invite(token="t-dig", user_id=bob.user_id)
+    kwargs = stack.fed_svc.begin_mesh_catchup_sync.await_args.kwargs
+    assert kwargs["host_instance_id"] == "peer"
+    assert kwargs["roster_digest"] == await stack.svc.roster_digest_for(
+        "sp-snap", "peer"
+    )
+
+
 async def test_accept_refuses_a_space_held_under_another_owner(stack):
     bob = await _user(stack, "bobclash")
     await _snapshot_invite(stack, bob.user_id, token="t-peer", issuer="peer")

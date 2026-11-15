@@ -1571,7 +1571,9 @@ from __future__ import annotations
 #:   same in every household". Also in this batch: ONE space cover / icon
 #:   cap for every member; an over-cap image is refused from a sender at
 #:   ``MIN_FOR_CAPPED_SPACE_IMAGES`` (v_81, the first unreleased line) and
-#:   re-encoded from the released v_80 line. Wire unchanged.
+#:   re-encoded from the released v_80 line; the host repairs a member's
+#:   roster only on a ``roster_digest`` mismatch (``MIN_FOR_ROSTER_DIGEST``,
+#:   v_81). Wire otherwise unchanged.
 OURS: int = 94
 
 
@@ -2283,6 +2285,10 @@ class FederationCapability:
     #: it (the released v_80 line sent paired members up to 256 KiB) the
     #: receiver re-encodes the image instead. Wire unchanged.
     MIN_FOR_CAPPED_SPACE_IMAGES = 81
+    #: v_81 (shipped with v_94) — a member household at or above it sends a
+    #: ``roster_digest`` on every BEGIN to its host; a BEGIN without one
+    #: from it asks for no roster repair (only an older one's echo does).
+    MIN_FOR_ROSTER_DIGEST = 81
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so

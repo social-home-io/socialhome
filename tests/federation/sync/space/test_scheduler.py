@@ -1171,6 +1171,25 @@ async def test_echo_due_reaches_a_mesh_only_owner_over_the_mesh(
     assert fed.mesh_extras == [{"key_epoch": 7}]
 
 
+async def test_the_echo_due_mesh_begin_carries_the_roster_digest(
+    bus, queue, sync_manager
+):
+    """S1: every member BEGIN to the host carries the digest — a v_81+
+    BEGIN without one asks for no repair, so this path must not drop it."""
+    fed = _FakeFederation()
+    sched, _ = _echo_sched(bus, queue, sync_manager, fed)
+    digest = {"suite": "rd1-sha256", "digest": "e" * 64, "cert_epoch": None}
+
+    async def _roster_digest(space_id, to):
+        return digest if to == "owner-o" else None
+
+    sched.attach_roster_digest(_roster_digest)
+    await bus.publish(
+        SpaceAuthorityEchoDue(space_id="sp-1", owner_instance_id="owner-o")
+    )
+    assert fed.mesh_fields[-1]["roster_digest"] == digest
+
+
 async def test_echo_due_for_our_own_space_is_ignored(bus, queue, sync_manager):
     fed = _FakeFederation()
     _echo_sched(bus, queue, sync_manager, fed)
