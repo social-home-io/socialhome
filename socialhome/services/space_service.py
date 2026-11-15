@@ -163,6 +163,7 @@ from ..domain.federation_capabilities import (
     space_feature_keys_missing_below,
     space_features_missing_below,
 )
+from ..domain.federation_retention import roster_snapshot_key_prefix
 from ..domain.gfs_server import SignedGfsServerList
 from ..domain.link_preview import card_survives_edit
 from ..domain.local_community import (
@@ -1980,6 +1981,16 @@ class SpaceService(
             authority_cert=owner_authority_cert_via(self._federation, space),
             extras=extras,
         )
+        # Supersede the whole older snapshot still queued for this household
+        # (every part — the new one may have fewer).
+        try:
+            await self._federation.drop_queued_with_key_prefix(
+                to_instance_id, roster_snapshot_key_prefix(space.id)
+            )
+        except Exception:
+            log.exception(
+                "roster-snapshot: dropping queued parts for %s failed", space.id
+            )
         ok = True
         for payload in payloads:
             try:

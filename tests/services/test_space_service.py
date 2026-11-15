@@ -8595,6 +8595,31 @@ async def test_a_missing_writer_cert_still_gets_a_snapshot(stack, monkeypatch):
     certs.issue_for_instance.assert_not_awaited()
 
 
+async def test_a_new_snapshot_drops_every_queued_part_of_an_older_one(stack):
+    """M2: a newer snapshot with fewer parts would leave the older send's
+    higher parts queued — every queued part to that household for that
+    space is dropped before the new one goes."""
+    from socialhome.domain.federation_retention import roster_snapshot_key_prefix
+
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    order: list[str] = []
+    fed.drop_queued_with_key_prefix = AsyncMock(
+        side_effect=lambda *a, **kw: order.append("drop") or 0
+    )
+    real_send = fed.send_with_mesh_fallback
+
+    async def _send(**kw):
+        order.append("send")
+        return await real_send(**kw)
+
+    fed.send_with_mesh_fallback = _send
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-0")
+    fed.drop_queued_with_key_prefix.assert_awaited_once_with(
+        "peer-0", roster_snapshot_key_prefix(space.id)
+    )
+    assert order[0] == "drop" and "send" in order
+
+
 async def test_the_repair_memory_holds_thousands_of_pairs(stack, monkeypatch):
     """I4: bounded by live seats, not by an LRU that thrashes — 5000 member
     households answered once are each held back by the cooldown."""

@@ -21,6 +21,7 @@ from socialhome.domain.federation_retention import (
     moment_delete_key,
     relayed_delete_prefix,
     retention_expires_at,
+    roster_snapshot_key_prefix,
     supersede_key,
 )
 from socialhome.domain.moment import MOMENT_MAX_LIFETIME_DAYS
@@ -319,3 +320,5 @@ def test_a_roster_snapshot_supersedes_per_space_and_part():
     assert key(space="s2") != key()
     assert key(space=None) is None
     assert key(part="x") is None
+    assert key().startswith(roster_snapshot_key_prefix("s1"))
+    assert not key(space="s10").startswith(roster_snapshot_key_prefix("s1"))

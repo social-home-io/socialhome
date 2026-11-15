@@ -236,7 +236,7 @@ def supersede_key(
         part = payload.get("part", 0)
         if not space_id or not isinstance(part, int) or isinstance(part, bool):
             return None
-        return f"roster-snapshot:{space_id}:{part}"
+        return f"{roster_snapshot_key_prefix(space_id)}{part}"
     user_id = payload.get("user_id")
     if not isinstance(user_id, str) or not user_id:
         return None
@@ -252,6 +252,13 @@ def supersede_key(
         if isinstance(post_id, str) and post_id and isinstance(emoji, str) and emoji:
             return f"reaction:{space_id}:{post_id}:{user_id}:{emoji}"
     return None
+
+
+def roster_snapshot_key_prefix(space_id: str) -> str:
+    """What the outbox key of every queued ``SPACE_ROSTER_SNAPSHOT`` part
+    of *space_id* starts with — a new snapshot drops them all first, so a
+    shorter send never leaves an older one's higher parts behind."""
+    return f"roster-snapshot:{space_id}:"
 
 
 def retention_expires_at(
