@@ -359,6 +359,34 @@ async def test_create_answer_after_a_close_mid_way_is_a_connection_error():
     assert pc.closed and pc.destroyed
 
 
+async def test_a_loop_wide_cancel_never_closes_under_the_executor_job():
+    """Loop shutdown cancels every task, the call's own task included,
+    while its executor thread is still in libdatachannel. The session must
+    not take that as "the call returned" and delete the handle under it:
+    the pc is left to the binding's exit sweep instead — now, and for a
+    later ``close()``."""
+    s, pc = _session("requester")
+    caller = asyncio.create_task(s.add_ice_candidate(_CAND))
+    await pc.reached.wait()
+    s.close()
+    (call,) = [
+        t
+        for t in asyncio.all_tasks()
+        if t.get_coro().__qualname__ == "_RacyPc.add_remote_candidate"
+    ]
+    call.cancel()
+    caller.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    pc.gate.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert pc.after_destroy == []
+    assert not pc.closed
+    s.close()  # a second close does not close it either
+    assert not pc.closed
+
+
 async def test_a_cancelled_caller_still_holds_off_the_close():
     """The SPACE_SYNC_ICE handler cancelled mid-call (shutdown): the
     executor job runs on regardless, so the close still waits for it."""

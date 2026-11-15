@@ -104,6 +104,7 @@ class SyncRtcSession:
         "_loop",
         "_on_local_ice",
         "_pc",
+        "_pc_abandoned",
         "_pc_to_close",
         "_ready",
         "_remote_sdp",
@@ -153,6 +154,9 @@ class SyncRtcSession:
         # until the last one returns (see :meth:`_apply_remote`).
         self._in_flight = 0
         self._pc_to_close: Any = None
+        # A call's own task was cancelled (loop shutdown) while its
+        # executor job may still be in libdatachannel: never close then.
+        self._pc_abandoned = False
         # Optional callback fired for every LOCAL ICE candidate the
         # PeerConnection gathers. The federation service wires this
         # up to forward each candidate to the peer via
@@ -385,7 +389,12 @@ class SyncRtcSession:
 
         The call runs as its own task, counted until *it* finishes: a
         cancelled caller does not stop the executor thread, so it must not
-        let the close through early either.
+        let the close through early either. Nor does cancelling that task
+        itself (loop shutdown cancels every task): its executor job may
+        still be in libdatachannel, so the session then never closes the
+        PeerConnection. The job keeps the native object alive and the
+        binding's exit sweep (``_atexit_destroy_all``, after the executor
+        threads are joined) frees it.
         """
         pc = self._pc
         if pc is None:
@@ -396,12 +405,24 @@ class SyncRtcSession:
         await asyncio.shield(call)
 
     def _remote_call_done(self, call: asyncio.Future) -> None:
-        if not call.cancelled():
+        if call.cancelled():
+            self._pc_abandoned = True
+        else:
             call.exception()  # retrieved here or by the awaiting caller
         self._in_flight -= 1
         if not self._in_flight and self._pc_to_close is not None:
             closing, self._pc_to_close = self._pc_to_close, None
-            self._close_pc(closing)
+            self._close_pc_unless_abandoned(closing)
+
+    def _close_pc_unless_abandoned(self, pc: Any) -> None:
+        if self._pc_abandoned:
+            log.debug(
+                "SyncRtcSession[%s]: PeerConnection left to the binding's exit"
+                " sweep — a cancelled call may still be in libdatachannel",
+                self.sync_id,
+            )
+            return
+        self._close_pc(pc)
 
     @staticmethod
     def _close_pc(pc: Any) -> None:
@@ -487,7 +508,7 @@ class SyncRtcSession:
         if self._in_flight:
             self._pc_to_close = pc
         else:
-            self._close_pc(pc)
+            self._close_pc_unless_abandoned(pc)
 
 
 # ─── Stateful helpers used by the manager ────────────────────────────────
