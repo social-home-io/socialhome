@@ -98,10 +98,7 @@ from ..domain.media_chunking import (
 )
 from ..domain.media_validator import validate_inbound_media_meta
 from ..domain.outbox import DeliveryOutcome, OutboxEntry, OutboxPayload, RetryAfter
-from ..domain.relay_media_frame import (
-    RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES,
-    RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES,
-)
+from ..domain.relay_media_frame import relay_event_payload_limit
 from ..domain.space import parse_have_seq
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
@@ -2470,14 +2467,11 @@ class FederationService:
             )
             return None
         # A sync chunk rides with its record's ciphertext raw and may fill
-        # the frame; anything else must also fit the sync chunk that heals a
-        # lost frame (one bound, derived).
+        # the frame, and so may a routed wrapper (its sealed inner raw);
+        # anything else must also fit the sync chunk that heals a lost frame
+        # (one bound, derived).
         body_suite, raw_payload = pack_event_body(event_type, payload_json())
-        limit = (
-            RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES
-            if event_type is FederationEventType.SPACE_SYNC_CHUNK
-            else RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES
-        )
+        limit = relay_event_payload_limit(event_type)
         if len(raw_payload) > limit:
             log.warning(
                 "send_event: a %d-byte %r payload for %s does not fit — a "
@@ -2917,8 +2911,14 @@ class FederationService:
         event_type: FederationEventType,
         payload: dict,
         space_id: str | None = None,
+        routed_raw_body: bool = False,
     ) -> DeliveryResult:
         """Deliver to ``to_instance_id`` direct when CONFIRMED, else via mesh.
+
+        ``routed_raw_body`` — the target reads a raw sealed body (the caller
+        knows its version, e.g. a §25.6 requester at v_87): a mesh route
+        may then seal a sync chunk with its ciphertext raw
+        (:meth:`SpaceRoutedHandler.send_routed`).
 
         Behaviour:
 
@@ -3024,6 +3024,7 @@ class FederationService:
                 inner_event_type=event_type,
                 inner_payload=payload,
                 target_identity_pk=pinned_pk,
+                raw_body_ok=routed_raw_body,
             )
         except Exception as exc:
             # The cached path is the prime suspect — a relay that has since
@@ -3062,6 +3063,7 @@ class FederationService:
                         self._route_service.cached_target_identity_pk(to_instance_id)
                         or ""
                     ),
+                    raw_body_ok=routed_raw_body,
                 )
             except Exception as retry_exc:
                 log.warning(

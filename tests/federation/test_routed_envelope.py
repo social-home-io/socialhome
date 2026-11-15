@@ -27,6 +27,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -37,6 +38,7 @@ import pytest
 
 from socialhome.crypto import (
     Ed25519Keypair,
+    b64url_encode,
     derive_instance_id,
     generate_identity_keypair,
 )
@@ -1020,7 +1022,9 @@ async def test_forward_unwrap_non_json_drops(caplog):
         sealed=sealed,
     )
     with (
-        patch.object(routed_crypto, "unseal_inner_payload", return_value="not json"),
+        patch.object(
+            routed_crypto, "unseal_inner_body", return_value=("json", b"not json")
+        ),
         caplog.at_level(
             logging.WARNING, logger="socialhome.federation.routed_envelope"
         ),
@@ -1049,7 +1053,7 @@ async def test_forward_unwrap_non_dict_json_drops(caplog):
         sealed=sealed,
     )
     with (
-        patch.object(routed_crypto, "unseal_inner_payload", return_value="[]"),
+        patch.object(routed_crypto, "unseal_inner_body", return_value=("json", b"[]")),
         caplog.at_level(
             logging.WARNING, logger="socialhome.federation.routed_envelope"
         ),
@@ -3969,3 +3973,142 @@ async def test_reply_leg_genuine_origin_is_dispatched():
     assert len(nodes["a"].dispatched) == 1
     assert nodes["a"].dispatched[0].from_instance == "c"
     assert nodes["a"].dispatched[0].payload == {"ok": True}
+
+
+# ── A sync chunk too large for a JSON hop is sealed raw ──────────────────
+
+
+def _sync_chunk_payload(record_bytes: int) -> dict:
+    """A ``SPACE_SYNC_CHUNK`` payload the way the provider sends it: one
+    record of *record_bytes* JSON, AES-GCM-sized ciphertext, base64url in a
+    signed chunk envelope (a hybrid signature set), serialised as a string."""
+    record = {"id": "page-1", "content": ""}
+    record["content"] = "x" * (record_bytes - len(json.dumps(record)))
+    plaintext = json.dumps({"records": [record], "chunk_index": 3}).encode()
+    envelope = {
+        "sync_id": "s" * 32,
+        "resource": "pages",
+        "space_id": "sp-1",
+        "epoch": 7,
+        "seq_start": 0,
+        "seq_end": 1,
+        "is_last": False,
+        "encrypted_payload": b64url_encode(os.urandom(12))
+        + ":"
+        + b64url_encode(os.urandom(len(plaintext) + 16)),
+        "signatures": {"ed25519": "s" * 86, "mldsa65": "p" * 4412},
+    }
+    return {
+        "sync_id": "s" * 32,
+        "chunk": json.dumps(envelope, separators=(",", ":")),
+    }
+
+
+async def _send_chunk(record_bytes: int, *, raw_body_ok: bool) -> tuple:
+    a, b, c = _build_identity_chain(3)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    payload = _sync_chunk_payload(record_bytes)
+    await a.handler.send_routed(
+        path=path,
+        target_eph_pk_b64=_mint_target_eph(c),
+        inner_event_type=FederationEventType.SPACE_SYNC_CHUNK,
+        inner_payload=payload,
+        raw_body_ok=raw_body_ok,
+    )
+    await _settle()
+    return a, c, payload
+
+
+async def test_a_sync_chunk_too_large_for_a_json_hop_is_sealed_raw_and_arrives_whole():
+    """Its record's ciphertext is already base64url text in the chunk; the
+    route's seal and the hop's encryption would base64 it twice more. Sealed
+    raw (the relay frame's ``sync-chunk-raw-v1`` layout), the target rebuilds
+    the identical payload, so the chunk's own signature still verifies."""
+    a, c, payload = await _send_chunk(500_000, raw_body_ok=True)
+    sealed = _routed_sends(a)[0]["payload"]["sealed"]
+    assert sealed["event_body_suite"] == "sync-chunk-raw-v1"
+    [got] = c.dispatched
+    assert got.event_type is FederationEventType.SPACE_SYNC_CHUNK
+    assert got.payload == payload
+
+
+async def test_a_sync_chunk_that_fits_a_json_hop_stays_json():
+    a, c, payload = await _send_chunk(100_000, raw_body_ok=True)
+    assert "event_body_suite" not in _routed_sends(a)[0]["payload"]["sealed"]
+    assert [e.payload for e in c.dispatched] == [payload]
+
+
+async def test_a_requester_that_reads_no_raw_body_gets_json():
+    """``raw_body_ok`` is False for a requester below v_87 (a released
+    build): it never sees the raw shape, whatever the size."""
+    a, _c, _payload = await _send_chunk(500_000, raw_body_ok=False)
+    assert "event_body_suite" not in _routed_sends(a)[0]["payload"]["sealed"]
+
+
+async def test_only_a_sync_chunk_is_sealed_raw():
+    a, b, c = _build_identity_chain(3)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    page = {"id": "p", "content": "x" * 590_000}
+    await a.handler.send_routed(
+        path=path,
+        target_eph_pk_b64=_mint_target_eph(c),
+        inner_event_type=FederationEventType.SPACE_PAGE_UPDATED,
+        inner_payload=page,
+        raw_body_ok=True,
+    )
+    await _settle()
+    assert "event_body_suite" not in _routed_sends(a)[0]["payload"]["sealed"]
+    assert [e.payload for e in c.dispatched] == [page]
+
+
+async def test_a_nacked_raw_chunk_is_retransmitted_raw():
+    """The retransmit seals the kept JSON again under the same rule."""
+    a, b, c, rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    rs.discovery = (list(path), _mint_target_eph(c))
+    payload = _sync_chunk_payload(500_000)
+    _dead_priv, dead = routed_crypto.generate_ephemeral_keypair()
+    await a.handler.send_routed(
+        path=path,
+        target_eph_pk_b64=dead,
+        inner_event_type=FederationEventType.SPACE_SYNC_CHUNK,
+        inner_payload=payload,
+        target_identity_pk=c.fed.own_identity_pk.hex(),
+        raw_body_ok=True,
+    )
+    await _settle()
+    routed = _routed_sends(a)
+    assert len(routed) == 2
+    assert all(
+        r["payload"]["sealed"]["event_body_suite"] == "sync-chunk-raw-v1"
+        for r in routed
+    )
+    assert [e.payload for e in c.dispatched] == [payload]
+
+
+async def test_a_sealed_body_of_an_unknown_suite_is_dropped_not_nacked(caplog):
+    a, b, c = _build_identity_chain(3)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    real_send = a.fed.send_event
+
+    async def _rename(**kw: Any) -> Any:
+        kw["payload"]["sealed"]["event_body_suite"] = "zip-v9"
+        return await real_send(**kw)
+
+    a.fed.send_event = _rename  # type: ignore[method-assign]
+    with caplog.at_level(logging.INFO, logger=_RS_LOGGER):
+        await a.handler.send_routed(
+            path=path,
+            target_eph_pk_b64=_mint_target_eph(c),
+            inner_event_type=FederationEventType.SPACE_SYNC_CHUNK,
+            inner_payload=_sync_chunk_payload(500_000),
+            raw_body_ok=True,
+        )
+        await _settle()
+    assert c.dispatched == []
+    assert not [
+        s
+        for s in c.fed.sent
+        if s["event_type"] is FederationEventType.SPACE_ROUTE_STALE
+    ]
+    assert any("unknown event_body_suite" in r.getMessage() for r in caplog.records)

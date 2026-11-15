@@ -41,6 +41,7 @@ from ..domain.federation import (
     DeliveryResult,
     FederationEventType,
 )
+from ..domain.federation_capabilities import FederationCapability
 from ..domain.member_card import MemberCard
 
 if TYPE_CHECKING:
@@ -155,6 +156,10 @@ class HostHop:
                     # Sealed to a static key: never nacked, so nothing is
                     # kept for a retransmit.
                     retain=False,
+                    # The card's version says whether the target reads a
+                    # raw sealed body (a sync chunk's ciphertext unwrapped).
+                    raw_body_ok=card.proto_version
+                    >= FederationCapability.MIN_FOR_RELAY_MEDIA,
                 )
             except Exception:
                 log.warning("host hop: routed send failed", exc_info=True)

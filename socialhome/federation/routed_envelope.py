@@ -95,6 +95,7 @@ from typing import TYPE_CHECKING
 import orjson
 
 from ..crypto import derive_instance_id
+from ..domain.errors import WrongTypeError
 from ..domain.federation import (
     DeliveryResult,
     FederationEvent,
@@ -102,11 +103,19 @@ from ..domain.federation import (
     InstanceSource,
 )
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.media_chunking import ADVERTISED_MAX_MESSAGE_BYTES
+from ..hardening import DEFAULT_JSON_MAX_BYTES
 from . import routed_crypto
 from .inbound_validator import (
     InboundContext,
     make_check_peer_class,
     run_post_decrypt_gates,
+)
+from .relay_event_body import (
+    EVENT_BODY_SUITE_JSON,
+    UnsupportedEventBodySuite,
+    pack_event_body,
+    unpack_event_body,
 )
 from .route_discovery import ROUTE_CACHE_TTL_S, cap_by_expiry
 
@@ -211,6 +220,34 @@ _MAX_RETAINED_INNER_BYTES: int = 64 * 1024
 #: retry on its own: its row is done once the first hop took the chunk.
 _MAX_RETAINED_LARGE_BYTES: int = 16 * 1024 * 1024
 
+#: The most one hop carries: the HTTPS inbox body and the data channel
+#: message (each 1 MiB). A routed envelope is checked against it before it
+#: is sent (:func:`_fits_one_hop`).
+_HOP_MAX_BYTES: int = min(DEFAULT_JSON_MAX_BYTES, ADVERTISED_MAX_MESSAGE_BYTES)
+
+#: What a hop's envelope adds around its encrypted payload, at its largest:
+#: ``msg_id``, event type, both instance ids, timestamp, routing space id,
+#: version, suite and a hybrid (Ed25519 + ML-DSA-65) signature set — about
+#: 5 KB measured — with room for the route origin's own signature to turn
+#: hybrid too (+4.4 KB; Ed25519 only today). ``tests/federation/
+#: test_mesh_item_limits.py`` checks it against the real envelope builder.
+_HOP_ENVELOPE_ALLOWANCE_BYTES: int = 12 * 1024
+
+
+def _b64_len(n: int) -> int:
+    """Characters of *n* bytes as unpadded base64url."""
+    return -(-n * 4 // 3)
+
+
+def _fits_one_hop(routed_payload_json_bytes: int) -> bool:
+    """Whether a ``SPACE_ROUTED`` payload of that many JSON bytes fits one
+    hop's envelope whatever signs it: AES-GCM-encrypted (nonce + 16-byte
+    tag) and base64url'd as ``nonce:ciphertext`` by the hop, plus
+    :data:`_HOP_ENVELOPE_ALLOWANCE_BYTES`."""
+    encrypted = _b64_len(12) + 1 + _b64_len(routed_payload_json_bytes + 16)
+    return encrypted + _HOP_ENVELOPE_ALLOWANCE_BYTES <= _HOP_MAX_BYTES
+
+
 #: Longest string value kept in the head of a large inner that is not kept
 #: (:attr:`_PendingRouted.inner_head`): ids and names pass, the bulk
 #: (a chunk's base64 bytes) does not.
@@ -270,6 +307,9 @@ class _PendingRouted:
     #: top-level scalar fields (ids, names, sequencing — never the bulk),
     #: handed to the event type's lost-inner listener on a verified nack.
     inner_head: dict[str, str | int | float | bool] | None = None
+    #: The send may seal its inner as a raw body (:meth:`SpaceRoutedHandler
+    #: .send_routed` ``raw_body_ok``); the retransmit decides the same way.
+    raw_body_ok: bool = False
 
 
 def _inner_head(payload: dict) -> dict[str, str | int | float | bool]:
@@ -466,6 +506,7 @@ class SpaceRoutedHandler:
         space_id: str | None = None,
         first_leg: list[DeliveryResult] | None = None,
         retain: bool = True,
+        raw_body_ok: bool = False,
     ) -> str:
         """Ship ``inner_event_type`` along ``path`` (origin → … → target).
 
@@ -495,6 +536,16 @@ class SpaceRoutedHandler:
         A send that raises leaves nothing behind (the caller's retry goes
         out under a new route_id).
 
+        ``raw_body_ok`` — the target reads a raw sealed body (a requester at
+        v_87 or later; the caller knows its version). A body that is already
+        ciphertext — a §25.6 sync chunk, whose record is base64url text in
+        the chunk — is then sealed in its raw layout (``sync-chunk-raw-v1``,
+        :mod:`socialhome.federation.relay_event_body`) whenever its JSON
+        envelope would not fit one hop, so the route does not base64 that
+        ciphertext twice more. Decided on the actual encoded size of this
+        envelope plus the largest header a hop adds, so nothing that would
+        not fit as JSON is sent as JSON.
+
         Returns the generated ``route_id`` so the caller can correlate
         the eventual reply (the reply arrives via the dispatcher with
         :attr:`FederationEvent.routed_route_id` set to this value).
@@ -520,21 +571,27 @@ class SpaceRoutedHandler:
         # for the reply leg.
         origin_priv_b64, origin_pub_b64 = routed_crypto.generate_ephemeral_keypair()
         inner_bytes = orjson.dumps(inner_payload, option=orjson.OPT_SORT_KEYS)
-        sealed = routed_crypto.seal_inner_payload(
-            inner_payload_json=inner_bytes.decode(),
-            origin_eph_priv_b64=origin_priv_b64,
-            origin_eph_pub_b64=origin_pub_b64,
-            target_eph_pub_b64=target_eph_pk_b64,
+        routed_payload = self._sealed_forward(
             route_id=route_id,
-            inner_event_type=inner_event_type.value,
-        )
-        self._attach_origin_auth(
-            sealed=sealed,
-            route_id=route_id,
-            direction="forward",
             path=path,
-            inner_event_type=inner_event_type.value,
+            inner_event_type=inner_event_type,
+            body=inner_bytes,
+            body_suite=EVENT_BODY_SUITE_JSON,
+            origin_keys=(origin_priv_b64, origin_pub_b64),
+            target_eph_pk_b64=target_eph_pk_b64,
         )
+        if raw_body_ok and not _fits_one_hop(len(orjson.dumps(routed_payload))):
+            suite, raw = pack_event_body(inner_event_type, inner_bytes.decode())
+            if suite != EVENT_BODY_SUITE_JSON:
+                routed_payload = self._sealed_forward(
+                    route_id=route_id,
+                    path=path,
+                    inner_event_type=inner_event_type,
+                    body=raw,
+                    body_suite=suite,
+                    origin_keys=(origin_priv_b64, origin_pub_b64),
+                    target_eph_pk_b64=target_eph_pk_b64,
+                )
         self._origin_eph_state[route_id] = (
             origin_priv_b64,
             origin_pub_b64,
@@ -551,6 +608,7 @@ class SpaceRoutedHandler:
                 inner_bytes=inner_bytes,
                 is_retry=is_retry,
                 now=now,
+                raw_body_ok=raw_body_ok,
             )
         # Origin-side dedup: if this same route_id loops back to us
         # (shouldn't happen with a valid path, but defensive), drop.
@@ -559,14 +617,7 @@ class SpaceRoutedHandler:
             result = await self._federation.send_event(
                 to_instance_id=path[1],
                 event_type=FederationEventType.SPACE_ROUTED,
-                payload={
-                    "route_id": route_id,
-                    "path": list(path),
-                    "position": 0,
-                    "direction": "forward",
-                    "inner_event_type": inner_event_type.value,
-                    "sealed": sealed,
-                },
+                payload=routed_payload,
                 space_id=space_id,
             )
         except BaseException:
@@ -578,6 +629,45 @@ class SpaceRoutedHandler:
         if first_leg is not None:
             first_leg.append(result)
         return route_id
+
+    def _sealed_forward(
+        self,
+        *,
+        route_id: str,
+        path: list[str],
+        inner_event_type: FederationEventType,
+        body: bytes,
+        body_suite: str,
+        origin_keys: tuple[str, str],
+        target_eph_pk_b64: str,
+    ) -> dict:
+        """The forward ``SPACE_ROUTED`` payload: *body* sealed for the target
+        under *body_suite*, with the origin's signature over the routing
+        claim and the sealed material."""
+        sealed = routed_crypto.seal_inner_body(
+            body=body,
+            body_suite=body_suite,
+            origin_eph_priv_b64=origin_keys[0],
+            origin_eph_pub_b64=origin_keys[1],
+            target_eph_pub_b64=target_eph_pk_b64,
+            route_id=route_id,
+            inner_event_type=inner_event_type.value,
+        )
+        self._attach_origin_auth(
+            sealed=sealed,
+            route_id=route_id,
+            direction="forward",
+            path=path,
+            inner_event_type=inner_event_type.value,
+        )
+        return {
+            "route_id": route_id,
+            "path": list(path),
+            "position": 0,
+            "direction": "forward",
+            "inner_event_type": inner_event_type.value,
+            "sealed": sealed,
+        }
 
     def _record_pending(
         self,
@@ -591,6 +681,7 @@ class SpaceRoutedHandler:
         inner_bytes: bytes,
         is_retry: bool,
         now: float,
+        raw_body_ok: bool,
     ) -> None:
         """Retain what a ``SPACE_ROUTE_STALE`` nack needs: the compact JSON
         already built for the seal (the same bytes that go on the wire —
@@ -620,6 +711,7 @@ class SpaceRoutedHandler:
             is_retry=is_retry,
             expires_at=now + _PENDING_ROUTED_TTL_S,
             inner_head=head,
+            raw_body_ok=raw_body_ok,
         )
 
     def _make_room_for_large(self, size: int) -> bool:
@@ -1022,12 +1114,21 @@ class SpaceRoutedHandler:
                 )
                 return
             try:
-                inner_payload_json = routed_crypto.unseal_inner_payload(
+                body_suite, body = routed_crypto.unseal_inner_body(
                     sealed=sealed,
                     target_eph_priv_b64=target_priv,
                     route_id=route_id,
                     inner_event_type=inner_type_raw,
                 )
+            except UnsupportedEventBodySuite as exc:
+                # A body laid out in a way this build does not read: never
+                # guessed, never nacked (nothing on the route is stale).
+                log.info(
+                    "SPACE_ROUTED route_id=%s: %s; dropping",
+                    route_id[:8],
+                    exc,
+                )
+                return
             except Exception:
                 log.warning(
                     "SPACE_ROUTED route_id=%s: forward unseal failed; dropping",
@@ -1036,18 +1137,22 @@ class SpaceRoutedHandler:
                 )
                 return
             try:
-                inner_payload = orjson.loads(inner_payload_json)
-            except ValueError, TypeError:
-                log.warning(
-                    "SPACE_ROUTED route_id=%s: inner_payload JSON parse failed",
-                    route_id[:8],
+                inner_payload = unpack_event_body(
+                    body_suite, body, event_type=inner_type
                 )
-                return
-            if not isinstance(inner_payload, dict):
+            except WrongTypeError:
                 log.warning(
                     "SPACE_ROUTED route_id=%s: decoded inner_payload is not a"
                     " dict; dropping",
                     route_id[:8],
+                )
+                return
+            except ValueError:
+                log.warning(
+                    "SPACE_ROUTED route_id=%s: inner_payload JSON parse failed"
+                    " (%s body)",
+                    route_id[:8],
+                    body_suite,
                 )
                 return
             inner_space = inner_payload.get("space_id")
@@ -1987,6 +2092,7 @@ class SpaceRoutedHandler:
                 target_identity_pk=route_service.cached_target_identity_pk(target)
                 or "",
                 is_retry=True,
+                raw_body_ok=pending.raw_body_ok,
             )
 
     @staticmethod

@@ -550,9 +550,12 @@ async def test_an_end_takes_the_hop_only_through_a_household_acting_as_its_host(
 async def test_the_hop_goes_through_the_first_host_that_is_not_an_end():
     sent: list[list[str]] = []
 
+    kwargs: list[dict] = []
+
     class _Routed:
-        async def send_routed(self, *, path, **_kw):
+        async def send_routed(self, *, path, **kw):
             sent.append(path)
+            kwargs.append(kw)
             return "route"
 
     ids, idents = _identity_chain()
@@ -601,6 +604,9 @@ async def test_the_hop_goes_through_the_first_host_that_is_not_an_end():
         space_id=SPACE,
     )
     assert result.ok and sent == [["me", "the-admin", target]]
+    # A carded member (v_89+) reads a raw sealed body: a sync chunk may ride
+    # the hop with its ciphertext raw. Never nacked, so nothing is kept.
+    assert [(k["raw_body_ok"], k["retain"]) for k in kwargs] == [(True, False)]
 
 
 async def test_no_hop_the_target_would_refuse_is_reported_as_sent():

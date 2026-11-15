@@ -126,6 +126,13 @@ SYNC_VERSION_HISTORY_THROUGH: int = 64
 #:   bytes; an item it already holds keeps its names. A gate in
 #:   ``provider._exporter_for``. A household crossing it gets one full
 #:   stream.
+#: * 87 — over a mesh route a chunk to a v_87 requester may carry its
+#:   record's ciphertext raw inside the route's seal (``sync-chunk-raw-v1``,
+#:   ``routed_raw_body`` in ``provider._send``), so a record too large for a
+#:   JSON hop (~433 kB and up) now reaches a mesh-only member. A household
+#:   crossing it gets one full stream, so such records it was never sent
+#:   while older reach it. (Every released household crosses 92 and 94 in
+#:   the same step, so this costs no extra stream.)
 #: * 92 — a v_92 receiver stores every hashed file of a streamed record
 #:   under its content name (``sc-``), GFS-described ones too (before, a
 #:   described file kept a reader-specific ``sg-`` name nobody else could
@@ -146,7 +153,7 @@ SYNC_VERSION_HISTORY_THROUGH: int = 64
 #:   ``PollsExporter.unstamped_votes``): the crossing full stream brings
 #:   every poll's stamps, so votes it took unstamped while older are
 #:   ordered from then on.
-SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 82, 85, 92, 94)
+SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80, 82, 85, 87, 92, 94)
 
 
 def sync_version_bucket(peer_version: int) -> int:

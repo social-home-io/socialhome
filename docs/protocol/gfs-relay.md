@@ -504,8 +504,22 @@ picks the suite and falls back to JSON otherwise), so the chunk envelope's
 own signature and content-key AEAD verify unchanged, and the §25.6 stream
 itself — its records, its resources, the DataChannel and inbox paths — is
 untouched (no sync line). The signed header metadata names the suite
-(`event_body_suite`: `json` or `sync-chunk-raw-v1`); a framed event without
-a known one is refused, never defaulted.
+(`event_body_suite`: `json`, `sync-chunk-raw-v1` or `space-routed-raw-v1`);
+a framed event without a known one is refused, never defaulted, and each raw
+suite is refused on any event type but its own.
+
+**The host hop's leg (`space-routed-raw-v1`).** A v_89 host hop's leg from
+the host to a seat behind a GFS is a `SPACE_ROUTED` wrapper whose sealed
+inner is already ciphertext. In a frame it rides in the same layout with one
+part: the wrapper with `sealed.ciphertext` emptied as the meta, the sealed
+ciphertext raw after it. A wrapper may fill the frame, like a sync chunk
+(`relay_event_payload_limit`), since its inner was bounded where it was sent:
+measured with the real builders, a live event at the bound is a 521,113-byte
+framed wrapper and a sync chunk with a record at the bound (sealed raw by
+its origin) 526,026 bytes, of 532,382 — each with a hybrid-sized origin
+signature. As JSON (the inner base64'd inside the wrapper) the leg took
+about 392 KB of live inner. The rule behind both raw suites is one: a body
+that is already ciphertext is carried raw wherever it is wrapped again.
 
 A chunk then costs only its wrapper, and the live bound is the frame's
 less that (`domain/relay_media_frame.py`):
@@ -712,9 +726,9 @@ Stated plainly, after all of the above:
 5. **Order toward an offline household** (below): a small later change
    can arrive before the large event it changes; the sync settles it.
 6. **A directory seat with no reachable mailbox** goes through the host
-   hop; the rule applies per hop, but no test covers a large event there.
-7. Not the relay's: a household reached over the **mesh** loses a large
-   event sent while it was down (`fix/mesh-large-inner-lost`).
+   hop; its leg toward the seat takes a live event at the bound and a sync
+   chunk with a record at the bound, each as one frame
+   (`space-routed-raw-v1`, above; `tests/federation/test_mesh_item_limits.py`).
 
 **Versioning — no new version.** The gate is the one of the frame
 itself: a peer at v_87 (`MIN_FOR_RELAY_MEDIA` — it reads binary relay

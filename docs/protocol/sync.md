@@ -606,7 +606,11 @@ now goes as one binary relay frame
 inside the frame its record's ciphertext rides **raw** instead of as
 base64url text (body suite `sync-chunk-raw-v1`; the receiver rebuilds the
 identical `{sync_id, chunk}` payload, so the chunk's signature and AEAD
-are untouched). **Record bound on this path: ~505 KiB** — the frame's
+are untouched). The same layout carries a chunk over a **mesh route**
+inside the route's seal when its JSON would not fit one hop, toward a
+requester at v_87+ ([spaces.md](./spaces.md#mesh-routing-space_routed)), so
+a mesh-only member is healed up to the same record bound. **Record bound
+on this path: ~505 KiB** — the frame's
 532,382 bytes less the chunk's wrapper — which is by construction what a
 live event toward such a household may be (`RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES`,
 515,998 bytes, derived from the frame's): every item that reached it
@@ -618,9 +622,14 @@ naming its resource, id and size, before it takes a chunk index: the
 stream stays whole and clean and the watermark moves on. (Before, the
 refused chunk made the stream unclean, so every later sync re-sent it
 from the old watermark.) Nothing changes
-on the DataChannel, the inbox or the mesh, in the records or in the
-resources — no sync line. A requester below v_87, or a GFS without
-`envelope_media`, keeps the JSON envelope and its ~191 KiB.
+on the DataChannel or the inbox, in the records or in the resources. On
+the **mesh** the same raw layout rides inside the route's seal toward a
+v_87 requester (above), which brings a record a mesh-only member could not
+get before (over ~433 kB) — **sync line 87** (`SYNC_RECORD_LINES`): a
+household crossing v_87 gets one full stream (every released household
+crosses 92 and 94 in the same step, so it costs no extra stream). A
+requester below v_87, or a GFS without `envelope_media`, keeps the JSON
+envelope and its ~191 KiB.
 
 A cut list is marked (`votes_partial`, `responses_partial`,
 `rsvps_partial`) and the receiver then deletes nothing it could not see; a

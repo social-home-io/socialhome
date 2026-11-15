@@ -12,6 +12,7 @@ from socialhome.crypto import b64url_encode
 from socialhome.domain.federation import FederationEventType
 from socialhome.federation.relay_event_body import (
     EVENT_BODY_SUITE_JSON,
+    EVENT_BODY_SUITE_ROUTED_RAW,
     EVENT_BODY_SUITE_SYNC_CHUNK_RAW,
     SUPPORTED_EVENT_BODY_SUITES,
     UnsupportedEventBodySuite,
@@ -84,7 +85,11 @@ def test_a_chunk_that_would_not_round_trip_stays_json(payload):
 
 
 def test_an_unknown_suite_is_refused_never_defaulted():
-    assert SUPPORTED_EVENT_BODY_SUITES == {"json", "sync-chunk-raw-v1"}
+    assert SUPPORTED_EVENT_BODY_SUITES == {
+        "json",
+        "sync-chunk-raw-v1",
+        "space-routed-raw-v1",
+    }
     for suite in (None, "", "json-v2", 1):
         with pytest.raises(UnsupportedEventBodySuite):
             unpack_event_body(suite, b"{}", event_type=PAGE)
@@ -169,3 +174,103 @@ def test_the_raw_suite_is_for_sync_chunks_only():
     for other in (PAGE, FederationEventType.SPACE_ROSTER_SNAPSHOT):
         with pytest.raises(UnsupportedEventBodySuite):
             unpack_event_body(suite, raw, event_type=other)
+
+
+# ── A SPACE_ROUTED wrapper with its sealed ciphertext raw (host hop) ─────
+
+ROUTED = FederationEventType.SPACE_ROUTED
+
+
+def _routed_payload(ciphertext_bytes: int = 300_000, **sealed_extra) -> dict:
+    """A ``SPACE_ROUTED`` payload as ``SpaceRoutedHandler.send_routed``
+    builds it: routing fields plus the sealed blob, its ciphertext b64url."""
+    return {
+        "route_id": "r" * 32,
+        "path": ["a" * 32, "h" * 32, "b" * 32],
+        "position": 0,
+        "direction": "forward",
+        "inner_event_type": "space_page_updated",
+        "sealed": {
+            "kem_suite": "x25519",
+            "origin_eph_pk": "o" * 43,
+            "target_eph_pk": "t" * 43,
+            "nonce": b64url_encode(os.urandom(12)),
+            "ciphertext": b64url_encode(os.urandom(ciphertext_bytes)),
+            "origin_identity_pk": "p" * 64,
+            "origin_sig_suite": "ed25519",
+            "origin_sig": "s" * 86,
+            **sealed_extra,
+        },
+    }
+
+
+def test_a_routed_wrapper_rides_with_its_sealed_ciphertext_raw():
+    """The host hop's leg toward a household behind a GFS: the sealed inner
+    is already ciphertext, so it rides the frame raw, not base64'd."""
+    payload = _routed_payload()
+    as_json = orjson.dumps(payload)
+    suite, raw = pack_event_body(ROUTED, as_json.decode())
+    assert suite == EVENT_BODY_SUITE_ROUTED_RAW
+    assert suite in SUPPORTED_EVENT_BODY_SUITES
+    assert len(raw) < len(as_json) * 0.76
+    assert unpack_event_body(suite, raw, event_type=ROUTED) == payload
+
+
+def test_a_routed_wrapper_around_a_raw_body_keeps_its_suite():
+    payload = _routed_payload(event_body_suite=EVENT_BODY_SUITE_SYNC_CHUNK_RAW)
+    suite, raw = pack_event_body(ROUTED, orjson.dumps(payload).decode())
+    assert suite == EVENT_BODY_SUITE_ROUTED_RAW
+    assert unpack_event_body(suite, raw, event_type=ROUTED) == payload
+
+
+def _framed(meta: dict, body: bytes) -> bytes:
+    raw_meta = orjson.dumps(meta)
+    return len(raw_meta).to_bytes(4, "big") + raw_meta + body
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"route_id": "r", "sealed": "not-a-dict"},
+        {"route_id": "r", "sealed": {"ciphertext": "!!not base64!!"}},
+        {"route_id": "r", "sealed": {"nonce": "n"}},
+        {"route_id": "r"},
+    ],
+)
+def test_a_routed_wrapper_that_would_not_round_trip_stays_json(payload):
+    suite, raw = pack_event_body(ROUTED, orjson.dumps(payload).decode())
+    assert suite == EVENT_BODY_SUITE_JSON
+    assert orjson.loads(raw) == payload
+
+
+def test_the_routed_raw_suite_is_for_routed_wrappers_only():
+    _suite, raw = pack_event_body(ROUTED, orjson.dumps(_routed_payload()).decode())
+    for event_type in (PAGE, CHUNK):
+        with pytest.raises(UnsupportedEventBodySuite):
+            unpack_event_body(EVENT_BODY_SUITE_ROUTED_RAW, raw, event_type=event_type)
+    _suite, chunk_raw = pack_event_body(CHUNK, orjson.dumps(_chunk_payload()).decode())
+    with pytest.raises(UnsupportedEventBodySuite):
+        unpack_event_body(EVENT_BODY_SUITE_SYNC_CHUNK_RAW, chunk_raw, event_type=ROUTED)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"",
+        b"\x00\x00\x00\xff{}",
+        b"\x00\x00\x00\x02{}",
+        # The sealed blob without its emptied ciphertext slot.
+        _framed({"payload": {"sealed": {}}, "parts": [1]}, b"x"),
+        # A ciphertext slot that was not emptied (a second, JSON copy).
+        _framed({"payload": {"sealed": {"ciphertext": "x"}}, "parts": [1]}, b"x"),
+        # Part lengths that do not add up to the bytes after the meta.
+        _framed({"payload": {"sealed": {"ciphertext": ""}}, "parts": [5]}, b"x"),
+        # More than one part: a routed wrapper carries one ciphertext.
+        _framed({"payload": {"sealed": {"ciphertext": ""}}, "parts": [1, 1]}, b"xy"),
+        # No sealed blob at all.
+        _framed({"payload": {"route_id": "r"}, "parts": [1]}, b"x"),
+    ],
+)
+def test_a_malformed_raw_routed_wrapper_is_refused(raw):
+    with pytest.raises(ValueError):
+        unpack_event_body(EVENT_BODY_SUITE_ROUTED_RAW, raw, event_type=ROUTED)

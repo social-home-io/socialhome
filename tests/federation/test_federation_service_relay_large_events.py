@@ -48,9 +48,12 @@ from socialhome.domain.relay_media_frame import (
     RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES,
     RELAY_MEDIA_MAX_BODY_BYTES,
     RELAY_MEDIA_MAX_PLAINTEXT_BYTES,
+    RELAY_SYNC_RECORD_MAX_BYTES,
     SYNC_CHUNK_WRAP_ALLOWANCE_BYTES,
     parse_relay_media_body,
+    relay_event_payload_limit,
 )
+from socialhome.federation import routed_crypto
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.gfs_mailbox import derive_mailbox_keys
 from socialhome.federation.gfs_relay_media import seal_relay_media
@@ -1005,3 +1008,84 @@ def test_a_frame_at_the_exact_bound_fits_with_a_hybrid_outer_signature(event_typ
     )
     assert len(body) <= RELAY_MEDIA_MAX_BODY_BYTES
     parse_relay_media_body(body)
+
+
+# ── The host hop's leg: a SPACE_ROUTED wrapper in one frame ──────────────
+
+ROUTED = FederationEventType.SPACE_ROUTED
+
+
+def _host_hop_leg(inner_event_type, inner: dict, *, raw_sync: bool = False) -> dict:
+    """The ``SPACE_ROUTED`` payload the host forwards to the target seat on
+    a v_89 host hop ``[origin, host, target]``: the inner sealed end to end
+    (raw for a sync chunk, as the origin seals one too large for a JSON hop),
+    the origin's signature beside it (a hybrid-sized one)."""
+    o_priv, o_pub = routed_crypto.generate_ephemeral_keypair()
+    _t_priv, t_pub = routed_crypto.generate_ephemeral_keypair()
+    inner_json = orjson.dumps(inner, option=orjson.OPT_SORT_KEYS).decode()
+    suite, body = (
+        pack_event_body(inner_event_type, inner_json)
+        if raw_sync
+        else (EVENT_BODY_SUITE_JSON, inner_json.encode())
+    )
+    sealed = routed_crypto.seal_inner_body(
+        body=body,
+        body_suite=suite,
+        origin_eph_priv_b64=o_priv,
+        origin_eph_pub_b64=o_pub,
+        target_eph_pub_b64=t_pub,
+        route_id="r" * 32,
+        inner_event_type=inner_event_type.value,
+    )
+    sealed["origin_identity_pk"] = "o" * 64
+    sealed["origin_sig_suite"] = "ed25519+mldsa65"
+    sealed["origin_sig"] = "s" * (86 + _MLDSA65_SIG_CHARS)
+    return {
+        "route_id": "r" * 32,
+        "path": ["o" * 32, "h" * 32, "t" * 32],
+        "position": 1,
+        "direction": "forward",
+        "inner_event_type": inner_event_type.value,
+        "sealed": sealed,
+    }
+
+
+@pytest.mark.parametrize("mailbox", [False, True], ids=["relay-seat", "mailbox"])
+@pytest.mark.parametrize("item", ["live-event", "sync-chunk"])
+async def test_a_host_hop_carries_the_largest_item_in_one_frame(mailbox, item):
+    """The host → seat leg of a host hop rides the GFS relay. Its sealed
+    inner is already ciphertext, so the frame carries it raw
+    (``space-routed-raw-v1``): the leg takes the live bound and the largest
+    sync record, as every other path does — before, base64'd in the
+    wrapper's JSON, it took about 392 KB."""
+    w = _world(mailbox=mailbox)
+    got: list = []
+
+    async def _record(event) -> None:
+        got.append(event)
+
+    w.member.svc._event_registry._handlers[ROUTED] = [_record]
+    if item == "live-event":
+        leg = _host_hop_leg(PAGE, _payload_of(RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES))
+    else:
+        record = {"id": "page-at-the-bound", "content": ""}
+        record["content"] = "x" * (
+            RELAY_SYNC_RECORD_MAX_BYTES - len(orjson.dumps(record))
+        )
+        leg = _host_hop_leg(CHUNK, _chunk_of(record), raw_sync=True)
+        assert leg["sealed"][EVENT_BODY_SUITE_FIELD] == EVENT_BODY_SUITE_SYNC_CHUNK_RAW
+    result = await w.send(w.host, w.member, ROUTED, leg)
+    assert result.ok and result.via == "gfs_relay"
+    assert len(w.gfs.seen[-1][2]) <= RELAY_MEDIA_MAX_BODY_BYTES
+    assert await w.gfs.deliver() == [{"status": "ok"}]
+    [event] = got
+    assert event.event_type is ROUTED and event.payload == leg
+
+
+def test_a_routed_wrapper_may_fill_the_frame_like_a_sync_chunk():
+    """Its inner is bounded where it was sent (the live bound, or a sync
+    chunk that fills the frame), so the wrapper's only limit is the
+    frame's."""
+    assert relay_event_payload_limit(ROUTED) == RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES
+    assert relay_event_payload_limit(CHUNK) == RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES
+    assert relay_event_payload_limit(PAGE) == RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES

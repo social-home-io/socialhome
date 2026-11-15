@@ -3366,16 +3366,60 @@ twice), so a burst of nacks never multiplies that. A `send_routed` whose
 first hop raises keeps nothing (the caller's retry goes out under a new
 `route_id`).
 
-What one hop carries: 1 MiB of envelope (the HTTPS inbox body, the data
-channel message). A live event is sealed for the route and encrypted for
-the hop (base64 twice, ×16/9): measured with the real seal and a
-hybrid-signed envelope on an 8-hop path, a 515,998-byte payload is
-929,369 bytes on the hop and the largest that fits is ~583,000 bytes. A
-§25.6 sync chunk is base64'd once more (its record's ciphertext is
-base64url text inside the chunk): the largest record that fits one hop
-is ~433,000 bytes, so a larger record does not yet reach a mesh-only
-member by sync (an open gap: the chunk's ciphertext is to ride raw inside
-the seal).
+**What one hop carries — the uniform limit, live and by sync.** A hop
+takes 1 MiB of envelope (the HTTPS inbox body, the data channel message).
+Every space item has one limit per kind on every path (a live payload up to
+515,998 bytes, a §25.6 record up to the same; `domain/relay_media_frame.py`),
+and the mesh carries both at the limit:
+
+* **A live event** is sealed for the route and encrypted for the hop
+  (base64 twice): at the live bound it is 929,278 bytes on a hop of the
+  longest route (8 households), hybrid-sized signatures throughout.
+* **A §25.6 sync chunk** carries its record's ciphertext as base64url text,
+  which the seal and the hop would base64 twice more (a record over
+  ~433,000 bytes would not fit). So when the chunk's JSON would not fit one
+  hop, `send_routed` seals its **raw layout** instead (`sync-chunk-raw-v1`,
+  the layout a GFS relay frame uses — `federation/relay_event_body.py`),
+  naming the suite in the sealed blob (`event_body_suite`) and binding it
+  into the AEAD; the target rebuilds the identical payload, so the chunk's
+  own signature and content-key AEAD are untouched. At the record bound
+  that is 937,995 bytes on a hop. The choice is made on the **encoded size
+  of the envelope** (the routed payload's JSON as it will be encrypted,
+  plus 12 KiB for the largest header a hop adds — a hybrid signature set,
+  and a route-origin signature that turns hybrid), so no record size falls
+  between "fits as JSON" and "sent raw" (`tests/federation/
+  test_mesh_item_limits.py` sweeps every 256 bytes from 400,000 to the
+  bound). Only toward a target known to read it: the §25.6 provider passes
+  its requester's version (v_87+, `MIN_FOR_RELAY_MEDIA`); a host hop reads
+  the target's card. A released build (v_80) is never sent a raw body, so
+  no version bump: v_81–v_94 ship together.
+* **The host hop's leg to a seat behind a GFS** rides one relay frame with
+  the wrapper's sealed ciphertext raw (`space-routed-raw-v1`,
+  [gfs-relay.md](./gfs-relay.md#large-events-in-a-binary-frame)): 521,113
+  bytes for a live event at the bound, 526,026 for a sync chunk at the
+  bound, of the frame's 532,382.
+
+Cost: none for what fits as JSON (no second seal); a chunk over the
+threshold is sealed twice (JSON, measured, then raw) and travels ~25 %
+smaller on every hop than its JSON would.
+
+**What can still be lost live, and what heals it.** Everything below is
+healed by the member's next §25.6 sync (on its restart and at least every
+30 minutes), which over the mesh now carries every record up to the bound:
+
+| Case | How often | Heal |
+|---|---|---|
+| The target was away longer than the origin's pending window (270 s) | every longer outage | its catch-up sync on restart |
+| The record was demoted under the 16 MiB budget (newer large sends) | > ~32 frame-sized sends within 270 s | sync; the newest of a page's saves is the one kept |
+| The retransmit itself was nacked (the target restarted twice) | rare | sync |
+| The one deferred attempt still found no route | the target stayed unreachable > ~35 s after its nack | sync |
+| The origin restarted inside the window (its pending records are in RAM) | rare | sync from the host, which holds the item (the origin had sent it there too) |
+| A hop toward the target is reachable only through its GFS relay fallback (a paired peer whose inbox is down; the JSON relay envelope takes ~191 KiB) | while that pair's direct path is down | sync once the direct path is back — the stream crosses the same hop |
+| The space's host is restarting while it is the only path (host hop) | while it restarts | the leg is queued in the host's outbox; sync |
+
+A host hop is never nacked (it is sealed to the target's long-term
+key-wrap key, which a restart does not change), so it keeps nothing for a
+retransmit; its leg toward a seat is queued like any other send.
 
 Before this every inner over 64 KiB was treated like a media chunk —
 recorded by its head only — though nothing but the media outbox can send
