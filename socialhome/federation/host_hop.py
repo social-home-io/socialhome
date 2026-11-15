@@ -152,6 +152,9 @@ class HostHop:
                     target_identity_pk=card.identity_pk,
                     space_id=space_id,
                     first_leg=leg,
+                    # Sealed to a static key: never nacked, so nothing is
+                    # kept for a retransmit.
+                    retain=False,
                 )
             except Exception:
                 log.warning("host hop: routed send failed", exc_info=True)

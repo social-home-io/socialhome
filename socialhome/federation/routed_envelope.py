@@ -88,7 +88,8 @@ import logging
 import secrets
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from contextlib import nullcontext
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import orjson
@@ -189,18 +190,18 @@ _MAX_RETAINED_INNER_BYTES: int = 64 * 1024
 
 #: Bytes of large inners (each over :data:`_MAX_RETAINED_INNER_BYTES`: a long
 #: page, a space cover, a sync chunk with one big record) the origin keeps at
-#: once for a retransmit. The mesh has no size limit of its own below the
-#: hop's: a hop carries 1 MiB of envelope, i.e. an inner of ~576 KiB
-#: (base64 twice) — more than one GFS relay frame of plaintext (540,574
-#: bytes, a 528 KiB frame), the largest a household behind a GFS can get
-#: (``test_one_relay_frame_of_space_item_fits_one_routed_hop``). So this
-#: covers some 120 sends of that size inside one pending window (270 s) —
-#: such a page saved a dozen times for ten mesh-only member households.
-#: One past it gets a head-only record (the nack still invalidates the
-#: route; nothing is retransmitted, WARNING on the sender) — a memory
-#: bound, not the design; what the space's host holds still reaches the
-#: member with its next §25.6 sync. The budget counts the kept bytes: the
-#: records in the table and the ones waiting on their one deferred attempt.
+#: once for a retransmit: some 32 of the largest space item (~0.5 MB) inside
+#: one pending window (270 s) — a household runs on a Raspberry Pi next to
+#: Home Assistant. A new large send that would pass it demotes the OLDEST
+#: kept large records to head-only until it fits: the newest send is the
+#: one worth retransmitting (a page autosaves every couple of seconds, each
+#: save the whole page, so an older one is superseded anyway). A demoted
+#: record's nack still invalidates the route; nothing is retransmitted
+#: (WARNING on the sender) and the member gets the item with its next §25.6
+#: sync. The budget counts every large inner this household holds for a
+#: retransmit: the records in the table, the ones whose nack is being
+#: handled and the ones waiting on their one deferred attempt (those last
+#: two are never demoted; if they alone fill it, the new send is not kept).
 #:
 #: Never kept, whatever the budget: an inner whose event type has a
 #: lost-inner listener (a media chunk). Its sender holds the bytes on disk,
@@ -208,7 +209,7 @@ _MAX_RETAINED_INNER_BYTES: int = 64 * 1024
 #: inner's small head to the listener, which queues the file again
 #: (``SpaceMediaSyncService.on_mesh_chunk_lost``). The media outbox does not
 #: retry on its own: its row is done once the first hop took the chunk.
-_MAX_RETAINED_LARGE_BYTES: int = 64 * 1024 * 1024
+_MAX_RETAINED_LARGE_BYTES: int = 16 * 1024 * 1024
 
 #: Longest string value kept in the head of a large inner that is not kept
 #: (:attr:`_PendingRouted.inner_head`): ids and names pass, the bulk
@@ -223,7 +224,7 @@ LostInnerListener = Callable[[str, dict], Awaitable[None]]
 #: Ceiling on ``_pending_routed`` entries. A small inner is bounded by
 #: ``_MAX_RETAINED_INNER_BYTES`` and the large ones together by
 #: ``_MAX_RETAINED_LARGE_BYTES``, so this caps the retained-inner memory at
-#: ~192 MiB worst case (2000 × ≤ 64 KiB + 64 MiB — those bounds and the cap
+#: ~144 MiB worst case (2000 × ≤ 64 KiB + 16 MiB — those bounds and the cap
 #: are what bound memory; the :data:`_PENDING_ROUTED_TTL_S` window only sets
 #: how long an entry lives) while comfortably covering the sends a household
 #: makes inside one pending window (270 s). Eviction is oldest-expiry-first
@@ -256,8 +257,8 @@ class _PendingRouted:
     #: The exact compact-JSON wire bytes that were measured and sealed
     #: (``orjson.loads`` at retransmit), or ``None`` when nothing is kept:
     #: the retransmit itself (its nack gives up), a media chunk, or a large
-    #: inner past :data:`_MAX_RETAINED_LARGE_BYTES` (invalidate-only, no
-    #: retransmit). The serialized bytes, not the caller's dict: a shallow
+    #: inner that did not stay inside :data:`_MAX_RETAINED_LARGE_BYTES`
+    #: (invalidate-only, no retransmit). The serialized bytes, not the caller's dict: a shallow
     #: copy would share nested structures the caller may mutate after the
     #: send — and bytes cost what the budget counts (a ``str`` with one
     #: emoji takes four times its UTF-8 size).
@@ -285,13 +286,14 @@ class SpaceRoutedHandler:
     """Wraps + unwraps :data:`FederationEventType.SPACE_ROUTED`."""
 
     __slots__ = (
-        "_deferred_large_bytes",
         "_deferred_retransmits",
         "_dispatcher",
         "_eph_ttl_s",
         "_federation",
         "_federation_repo",
+        "_held_large_bytes",
         "_host_hop",
+        "_large_retransmit_lock",
         "_lost_inner_listeners",
         "_origin_eph_state",
         "_pending_routed",
@@ -365,9 +367,14 @@ class SpaceRoutedHandler:
         #: the pending cap of them alive) living
         #: ``cooldown + _DEFERRED_RETRANSMIT_DELAY_S`` (≤ ~35 s) longer.
         self._deferred_retransmits: dict[str, asyncio.Task[None]] = {}
-        #: The large inners those tasks hold (``route_id`` → bytes): they
-        #: left the table but still count toward the large-inner budget.
-        self._deferred_large_bytes: dict[str, int] = {}
+        #: Large inners that left the table but are still held for their
+        #: retransmit (``route_id`` → bytes): a nack being handled, or a
+        #: deferred task waiting. They count toward the large-inner budget
+        #: and are never demoted.
+        self._held_large_bytes: dict[str, int] = {}
+        #: One large retransmit at a time: sealing and encrypting one holds
+        #: several copies of the inner (JSON, ciphertext, base64 twice).
+        self._large_retransmit_lock = asyncio.Lock()
         #: Set by :meth:`attach_route_service` (called from
         #: ``FederationService.attach_mesh``). ``None`` → a verified nack
         #: is consumed but nothing is invalidated or retransmitted.
@@ -419,7 +426,7 @@ class SpaceRoutedHandler:
         tasks = [t for t in self._deferred_retransmits.values() if not t.done()]
         if not tasks:
             self._deferred_retransmits.clear()
-            self._deferred_large_bytes.clear()
+            self._held_large_bytes.clear()
             return
         for task in tasks:
             task.cancel()
@@ -428,7 +435,7 @@ class SpaceRoutedHandler:
         # every task here settles as cancelled and gather returns promptly.
         await asyncio.gather(*tasks, return_exceptions=True)
         self._deferred_retransmits.clear()
-        self._deferred_large_bytes.clear()
+        self._held_large_bytes.clear()
         log.debug(
             "SPACE_ROUTED: cancelled %d pending deferred retransmit(s) on stop",
             len(tasks),
@@ -458,6 +465,7 @@ class SpaceRoutedHandler:
         is_retry: bool = False,
         space_id: str | None = None,
         first_leg: list[DeliveryResult] | None = None,
+        retain: bool = True,
     ) -> str:
         """Ship ``inner_event_type`` along ``path`` (origin → … → target).
 
@@ -480,7 +488,12 @@ class SpaceRoutedHandler:
         of looping. ``space_id`` (v_89 host hop) rides as the envelope's
         routing field on every leg: the host checks the route against that
         space, and a target reached through its GFS mailbox takes the frame
-        only for a space it is in.
+        only for a space it is in. ``retain=False`` keeps no record for a
+        ``SPACE_ROUTE_STALE`` nack: a send that can never be nacked (a host
+        hop, sealed to the target's static key-wrap key).
+
+        A send that raises leaves nothing behind (the caller's retry goes
+        out under a new route_id).
 
         Returns the generated ``route_id`` so the caller can correlate
         the eventual reply (the reply arrives via the dispatcher with
@@ -527,23 +540,77 @@ class SpaceRoutedHandler:
             origin_pub_b64,
             now + self._eph_ttl_s,
         )
-        # Retain what a SPACE_ROUTE_STALE nack needs: the compact JSON
-        # already built for the seal (the same bytes that go on the wire —
-        # exact, and immune to the caller mutating its dict afterwards). A
-        # large inner whose sender keeps its own copy, or one past the byte
-        # budget → invalidate-only record. The retransmit itself keeps
-        # nothing: a nack for it gives up before any payload is read.
+        if retain:
+            self._record_pending(
+                route_id=route_id,
+                path=path,
+                target_identity_pk=target_identity_pk,
+                target_eph_pk_b64=target_eph_pk_b64,
+                inner_event_type=inner_event_type,
+                inner_payload=inner_payload,
+                inner_bytes=inner_bytes,
+                is_retry=is_retry,
+                now=now,
+            )
+        # Origin-side dedup: if this same route_id loops back to us
+        # (shouldn't happen with a valid path, but defensive), drop.
+        self._seen_routes[route_id] = now + self._seen_ttl_s
+        try:
+            result = await self._federation.send_event(
+                to_instance_id=path[1],
+                event_type=FederationEventType.SPACE_ROUTED,
+                payload={
+                    "route_id": route_id,
+                    "path": list(path),
+                    "position": 0,
+                    "direction": "forward",
+                    "inner_event_type": inner_event_type.value,
+                    "sealed": sealed,
+                },
+                space_id=space_id,
+            )
+        except BaseException:
+            # The caller's retry goes out under a new route_id: nothing of
+            # this one may linger for the pending window.
+            self._pending_routed.pop(route_id, None)
+            self._origin_eph_state.pop(route_id, None)
+            raise
+        if first_leg is not None:
+            first_leg.append(result)
+        return route_id
+
+    def _record_pending(
+        self,
+        *,
+        route_id: str,
+        path: list[str],
+        target_identity_pk: str,
+        target_eph_pk_b64: str,
+        inner_event_type: FederationEventType,
+        inner_payload: dict,
+        inner_bytes: bytes,
+        is_retry: bool,
+        now: float,
+    ) -> None:
+        """Retain what a ``SPACE_ROUTE_STALE`` nack needs: the compact JSON
+        already built for the seal (the same bytes that go on the wire —
+        exact, and immune to the caller mutating its dict afterwards). The
+        retransmit itself keeps nothing: a nack for it gives up before any
+        payload is read. A large inner whose sender keeps its own copy gets
+        an invalidate-only record; any other large one is kept, the oldest
+        large records giving way to it under the budget."""
         retained: bytes | None = inner_bytes
         head: dict[str, str | int | float | bool] | None = None
         size = len(inner_bytes)
         if is_retry:
             retained = None
-        elif size > _MAX_RETAINED_INNER_BYTES and (
-            inner_event_type in self._lost_inner_listeners
-            or self._retained_large_bytes() + size > _MAX_RETAINED_LARGE_BYTES
-        ):
-            retained = None
+        elif size > _MAX_RETAINED_INNER_BYTES:
             head = _inner_head(inner_payload)
+            if (
+                inner_event_type in self._lost_inner_listeners
+                or not self._make_room_for_large(size)
+            ):
+                retained = None
         self._pending_routed[route_id] = _PendingRouted(
             target_instance_id=path[-1],
             target_identity_pk=target_identity_pk,
@@ -554,32 +621,42 @@ class SpaceRoutedHandler:
             expires_at=now + _PENDING_ROUTED_TTL_S,
             inner_head=head,
         )
-        # Origin-side dedup: if this same route_id loops back to us
-        # (shouldn't happen with a valid path, but defensive), drop.
-        self._seen_routes[route_id] = now + self._seen_ttl_s
-        result = await self._federation.send_event(
-            to_instance_id=path[1],
-            event_type=FederationEventType.SPACE_ROUTED,
-            payload={
-                "route_id": route_id,
-                "path": list(path),
-                "position": 0,
-                "direction": "forward",
-                "inner_event_type": inner_event_type.value,
-                "sealed": sealed,
-            },
-            space_id=space_id,
+
+    def _make_room_for_large(self, size: int) -> bool:
+        """Demote the oldest kept large records to head-only until *size*
+        more bytes fit :data:`_MAX_RETAINED_LARGE_BYTES`. ``False`` when they
+        cannot (the held ones alone fill it) — nothing is demoted then."""
+        over = self._retained_large_bytes() + size - _MAX_RETAINED_LARGE_BYTES
+        if over <= 0:
+            return True
+        kept = sorted(
+            (p.expires_at, route_id, len(p.inner_payload_json))
+            for route_id, p in self._pending_routed.items()
+            if p.inner_payload_json is not None
+            and len(p.inner_payload_json) > _MAX_RETAINED_INNER_BYTES
         )
-        if first_leg is not None:
-            first_leg.append(result)
-        return route_id
+        if sum(n for _, _, n in kept) < over:
+            return False
+        for _expires, route_id, n in kept:
+            if over <= 0:
+                break
+            self._pending_routed[route_id] = replace(
+                self._pending_routed[route_id], inner_payload_json=None
+            )
+            over -= n
+            log.info(
+                "SPACE_ROUTED route_id=%s: a newer large send takes its place"
+                " in the large-inner budget; not kept for a retransmit",
+                route_id[:8],
+            )
+        return True
 
     def _retained_large_bytes(self) -> int:
         """Bytes of the large inners kept right now: in ``_pending_routed``
-        and with the deferred retransmits. The table's share is summed on
+        and held for a retransmit (:attr:`_held_large_bytes`). The table's share is summed on
         demand (only a large send asks; ≤ 2000 ``len`` calls) rather than
         counted, so no path that drops a record can let it drift."""
-        return sum(self._deferred_large_bytes.values()) + sum(
+        return sum(self._held_large_bytes.values()) + sum(
             size
             for p in self._pending_routed.values()
             if p.inner_payload_json is not None
@@ -1745,6 +1822,26 @@ class SpaceRoutedHandler:
         # Verified. One nack per envelope: consume the record before any
         # await so a concurrent duplicate finds nothing.
         self._pending_routed.pop(route_id, None)
+        # A kept large inner stays counted in the budget while its nack is
+        # handled (and while a deferred attempt holds it).
+        kept = pending.inner_payload_json
+        if kept is not None and len(kept) > _MAX_RETAINED_INNER_BYTES:
+            self._held_large_bytes[route_id] = len(kept)
+        try:
+            await self._act_on_verified_nack(
+                route_id=route_id, pending=pending, stale_eph_pk=stale_eph_pk
+            )
+        finally:
+            if route_id not in self._deferred_retransmits:
+                self._held_large_bytes.pop(route_id, None)
+
+    async def _act_on_verified_nack(
+        self, *, route_id: str, pending: _PendingRouted, stale_eph_pk: str
+    ) -> None:
+        """Invalidate, rediscover and retransmit for a verified nack whose
+        record was already consumed (steps 6–9 of :meth:`_on_route_stale`).
+        Never raises."""
+        target = pending.target_instance_id
         route_service = self._route_service
         if route_service is None:
             log.info(
@@ -1781,7 +1878,7 @@ class SpaceRoutedHandler:
             if pending.inner_payload_json is None:
                 listener = self._lost_inner_listeners.get(pending.inner_event_type)
                 # With a listener the sender sends it again (INFO). Without
-                # one the large-inner budget was full when it was sent: this
+                # one, newer large sends took the large-inner budget: this
                 # household cannot send it again, and says so.
                 log.log(
                     logging.INFO if listener is not None else logging.WARNING,
@@ -1793,7 +1890,7 @@ class SpaceRoutedHandler:
                     pending.inner_event_type.value,
                     "its sender is told"
                     if listener is not None
-                    else "the large-inner budget was full",
+                    else "not kept: newer sends took the large-inner budget",
                 )
                 if listener is not None:
                     await self._report_lost_inner(listener, pending)
@@ -1878,14 +1975,19 @@ class SpaceRoutedHandler:
         retained wire bytes under the identity pk the cache pins now."""
         new_path, new_eph = discovery
         target = pending.target_instance_id
-        return await self.send_routed(
-            path=new_path,
-            target_eph_pk_b64=new_eph,
-            inner_event_type=pending.inner_event_type,
-            inner_payload=orjson.loads(inner_payload_json),
-            target_identity_pk=route_service.cached_target_identity_pk(target) or "",
-            is_retry=True,
-        )
+        # A large one holds several copies while it is sealed and encrypted:
+        # one at a time, so a burst of nacks never multiplies that.
+        large = len(inner_payload_json) > _MAX_RETAINED_INNER_BYTES
+        async with self._large_retransmit_lock if large else nullcontext():
+            return await self.send_routed(
+                path=new_path,
+                target_eph_pk_b64=new_eph,
+                inner_event_type=pending.inner_event_type,
+                inner_payload=orjson.loads(inner_payload_json),
+                target_identity_pk=route_service.cached_target_identity_pk(target)
+                or "",
+                is_retry=True,
+            )
 
     @staticmethod
     def _deferred_retransmit_delay_s(
@@ -1935,8 +2037,6 @@ class SpaceRoutedHandler:
             )
         )
         self._deferred_retransmits[route_id] = task
-        if len(pending.inner_payload_json) > _MAX_RETAINED_INNER_BYTES:
-            self._deferred_large_bytes[route_id] = len(pending.inner_payload_json)
         task.add_done_callback(functools.partial(self._discard_deferred, route_id))
         log.info(
             "SPACE_ROUTE_STALE route_id=%s: route to %s %s; %s; deferring one"
@@ -1952,7 +2052,7 @@ class SpaceRoutedHandler:
     def _discard_deferred(self, route_id: str, _task: asyncio.Task[None]) -> None:
         """Done-callback: drop the finished task's strong ref + guard slot."""
         self._deferred_retransmits.pop(route_id, None)
-        self._deferred_large_bytes.pop(route_id, None)
+        self._held_large_bytes.pop(route_id, None)
 
     async def _run_deferred_retransmit(
         self,

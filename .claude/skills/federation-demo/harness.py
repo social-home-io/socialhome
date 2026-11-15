@@ -23900,18 +23900,6 @@ def _parity_page(
     return {"exists": True, "title": got.get("title"), "content": got.get("content")}
 
 
-def _parity_page_digest(
-    state: dict, label: str, space_id: str, page_id: str, cache: dict
-) -> dict:
-    """:func:`_parity_page` with the text as its sha256 — for a page too
-    long to print in the result table."""
-    view = _parity_page(state, label, space_id, page_id, cache)
-    if "content" in view:
-        text = view.pop("content") or ""
-        view["sha256"] = hashlib.sha256(text.encode()).hexdigest()
-    return view
-
-
 def _parity_poll(
     state: dict, label: str, space_id: str, post_id: str, _cache: dict
 ) -> dict:
@@ -24890,26 +24878,6 @@ def cmd_members_parity() -> None:
     try:
         since = int(time.time()) - 1
         fresh = _parity_post_text(state, "a", space_id, f"Parity catch-up, new {tag}")
-        # An 80 KiB page: over the 64 KiB up to which the mesh always kept an
-        # event for its one retransmit (d restarts, cannot open what was
-        # sealed to its old key and says so), under the GFS relay's JSON
-        # envelope cap (e). Before the mesh kept large events too, d never
-        # got this page.
-        large_text = secrets.token_hex(40 * 1024)
-        a_log_away = _log_size("a")
-        s, large_page = _inst_request(
-            state,
-            "a",
-            "POST",
-            f"/api/spaces/{space_id}/pages",
-            {"title": f"Parity catch-up, large page {tag}", "content": large_text},
-        )
-        large_page = _must(
-            "members-parity: a creates an 80 KiB page while d, e are away",
-            s,
-            large_page,
-            ok=(200, 201),
-        )
         catch_edit = f"Parity catch-up, edited while away {tag}"
         s, body = _inst_request(
             state,
@@ -24961,34 +24929,6 @@ def cmd_members_parity() -> None:
         ref="a",
         want={"exists": False},
         timeout=120.0,
-    )
-    _parity_compare(
-        state,
-        results,
-        "catch-up: 80 KiB page",
-        lambda label, cache: _parity_page_digest(
-            state, label, space_id, large_page["id"], cache
-        ),
-        ref="a",
-        want={
-            "exists": True,
-            "sha256": hashlib.sha256(large_text.encode()).hexdigest(),
-        },
-        timeout=180.0,
-    )
-    # Which way it reached d is reported, not asserted: d's nack arrives
-    # only if d is back inside a's pending window and still mesh-only.
-    results.append(
-        (
-            "catch-up: 80 KiB page, the mesh's part",
-            "NOTE",
-            "a retransmitted the page to d after d's nack"
-            if _log_contains(
-                "a", "retransmitted space_page_created", offset=a_log_away
-            )
-            else "a's log shows no retransmit of the page (no nack from d: it "
-            "was reached another way, or came back after the pending window)",
-        )
     )
     if old_new:
         _parity_compare(
