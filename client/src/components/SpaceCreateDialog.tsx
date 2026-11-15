@@ -23,6 +23,7 @@ import { areaLabel, radiusLabel } from '@/utils/localArea'
 import { coordLabel } from '@/utils/coordLabel'
 import { loadSpaces } from '@/store/spaces'
 import { Modal } from './Modal'
+import { LengthCounter } from './LengthCounter'
 import { Button } from './Button'
 import { ProtectedNotice, isRestricted } from './ProtectedNotice'
 import { EmojiField } from './EmojiField'
@@ -206,12 +207,14 @@ export function SpaceCreateDialog() {
             onInput={(e) => name.value = (e.target as HTMLInputElement).value}
             placeholder={t('space.create.name_placeholder')} />
         </label>
+        <LengthCounter value={name.value} max={120} />
         <label>
           {t('space.create.description')}
           <textarea value={description.value} maxLength={300}
             onInput={(e) => description.value = (e.target as HTMLTextAreaElement).value}
             placeholder={t('space.create.description_placeholder')} rows={2} />
         </label>
+        <LengthCounter value={description.value} max={300} />
         <EmojiField value={emoji} openKey="space-create-icon" offerHaSymbol />
         <RadioCardGroup
           legend={t('space.create.visibility')}
