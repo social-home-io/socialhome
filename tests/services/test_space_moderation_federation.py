@@ -28,6 +28,10 @@ from socialhome.domain.space import (
     SpaceModerationItem,
     SpaceType,
 )
+from socialhome.domain.space_media_fields import (
+    SPACE_MEDIA_ITEMS,
+    moderation_item,
+)
 from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
 from socialhome.services.media_file_hasher import MediaFileHasher
 from socialhome.services.space_moderation_federation import (
@@ -39,6 +43,10 @@ from socialhome.services.space_moderation_federation import (
 from socialhome.services.space_public_author import (
     build_signed_author_inner,
     verify_signed_author_inner,
+)
+from tests.space_media_items import (
+    expected_moderation_urls,
+    synthetic_moderation_payload,
 )
 
 FET = FederationEventType
@@ -706,3 +714,48 @@ async def test_a_post_with_a_signed_follower_copy_carries_no_hashes(
     )
     await out.send_submitted(SPACE, post, ["host"])
     assert "files" not in fed.sent[0][2]
+
+
+# ─── Registry tripwire: the sanitizer sees every registered field ────────
+
+
+_REVIEWED = sorted(
+    i.moderation_feature for i in SPACE_MEDIA_ITEMS.values() if i.moderation_feature
+)
+
+
+def _foreign(payload: object) -> object:
+    """*payload* with every space file reference renamed to a name another
+    receiving path owns (a DM attachment's ``dm-``) — never a space file."""
+    if isinstance(payload, dict):
+        return {k: _foreign(v) for k, v in payload.items()}
+    if isinstance(payload, list):
+        return [_foreign(v) for v in payload]
+    if isinstance(payload, str):
+        return payload.replace("api/media/", "api/media/dm-")
+    return payload
+
+
+@pytest.mark.parametrize("feature", _REVIEWED)
+def test_sanitize_keeps_every_registered_space_file(feature):
+    payload = synthetic_moderation_payload(feature)
+    out = sanitize_remote_payload(feature, payload)
+    assert moderation_media_urls(
+        SimpleNamespace(feature=feature, payload=out)
+    ) == expected_moderation_urls(feature)
+
+
+@pytest.mark.parametrize("feature", _REVIEWED)
+def test_sanitize_refuses_a_foreign_file_in_every_registered_field(feature):
+    payload = _foreign(synthetic_moderation_payload(feature))
+    out = sanitize_remote_payload(feature, payload)
+    assert moderation_media_urls(SimpleNamespace(feature=feature, payload=out)) == []
+
+
+@pytest.mark.parametrize(
+    "feature", [f for f in _REVIEWED if moderation_item(f).moderation_patch]
+)
+def test_sanitize_refuses_a_foreign_file_in_every_patch_field(feature):
+    payload = _foreign(synthetic_moderation_payload(feature, patch=True))
+    out = sanitize_remote_payload(feature, payload)
+    assert moderation_media_urls(SimpleNamespace(feature=feature, payload=out)) == []

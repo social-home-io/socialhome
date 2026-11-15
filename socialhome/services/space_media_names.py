@@ -42,11 +42,11 @@ from ..domain.file_hashes import (
     is_space_content_media_name,
     space_content_media_name,
 )
-from ..domain.space_media_ref import (
-    SpaceMediaLocalization,
-    page_media_urls,
-    rewrite_page_body_media,
+from ..domain.space_media_fields import (
+    moderation_payload_urls,
+    rename_moderation_payload,
 )
+from ..domain.space_media_ref import SpaceMediaLocalization
 from .inbound_media_store import (
     MEDIA_REF_PREFIX,
     is_reserved_media_name,
@@ -192,130 +192,17 @@ async def space_own_files(
 
 def feature_media_urls(feature: str, payload: dict) -> list[str]:
     """Every local media file a moderation queue payload of *feature* (or
-    the matching wire event / held row) references."""
-    match feature:
-        case "posts":
-            return _post_media_urls(payload)
-        case "calendar":
-            return _calendar_cover_urls(payload)
-        case "pages":
-            return _page_media_urls(payload)
-        case _:
-            return []
+    the matching wire event / held row) references — the registry's fields
+    of the item (an edit's ``patch`` for a type that has one) and of each
+    attached item (a post's bazaar listing):
+    :func:`~socialhome.domain.space_media_fields.moderation_payload_urls`."""
+    return moderation_payload_urls(feature, payload)
 
 
 def renamed_media(
     feature: str, payload: dict, rename: Callable[[str | None], str | None]
 ) -> dict:
     """*payload* with every file :func:`feature_media_urls` lists passed through
-    *rename* (same shape, a new dict)."""
-
-    def one(value: object) -> object:
-        return rename(value) if isinstance(value, str) and value else value
-
-    def many(values: object) -> object:
-        return [one(v) for v in values] if isinstance(values, list | tuple) else values
-
-    out = dict(payload)
-    match feature:
-        case "posts":
-            if "media_url" in out:
-                out["media_url"] = one(out["media_url"])
-            if "image_urls" in out:
-                out["image_urls"] = many(out["image_urls"])
-            for key, field in (("file_meta", "url"), ("link_preview", "thumbnail_url")):
-                inner = out.get(key)
-                if isinstance(inner, dict) and field in inner:
-                    out[key] = {**inner, field: one(inner[field])}
-            attachments = out.get("attachments")
-            if isinstance(attachments, dict) and isinstance(
-                attachments.get("bazaar"), dict
-            ):
-                bazaar = attachments["bazaar"]
-                out["attachments"] = {
-                    **attachments,
-                    "bazaar": {**bazaar, "image_urls": many(bazaar.get("image_urls"))},
-                }
-        case "calendar":
-            patch = out.get("patch")
-            if isinstance(patch, dict):
-                if "cover_url" in patch:
-                    out["patch"] = {**patch, "cover_url": one(patch["cover_url"])}
-            elif "cover_url" in out:
-                out["cover_url"] = one(out["cover_url"])
-        case "pages":
-            patch = out.get("patch")
-            if isinstance(patch, dict):
-                out["patch"] = _renamed_page_fields(patch, rename)
-            else:
-                out = _renamed_page_fields(out, rename)
-    return out
-
-
-def _renamed_page_fields(
-    fields: dict, rename: Callable[[str | None], str | None]
-) -> dict:
-    """*fields* (a page create, an edit's patch, a resolution, the wire
-    event) with its cover and every body picture renamed — a body
-    reference renamed to nothing is emptied (a new dict)."""
-    out = dict(fields)
-    cover = out.get("cover_image_url")
-    if isinstance(cover, str) and cover:
-        out["cover_image_url"] = rename(cover)
-    for key in _PAGE_BODY_KEYS:
-        text = out.get(key)
-        if isinstance(text, str) and text:
-            out[key] = rewrite_page_body_media(text, lambda u: rename(u) or "")
-    return out
-
-
-#: The markdown bodies a page payload carries: a create's / edit's
-#: ``content``, a merged conflict resolution's ``merged_content``.
-_PAGE_BODY_KEYS: tuple[str, ...] = ("content", "merged_content")
-
-
-def _page_media_urls(payload: dict) -> list[str]:
-    """The files a queued page create (or its wire event / held row), an
-    edit's ``patch`` or a merged resolution shows: the cover, then each
-    body picture."""
-    patch = payload.get("patch")
-    fields = patch if isinstance(patch, dict) else payload
-    urls = page_media_urls(fields.get("cover_image_url"), fields.get("content"))
-    for url in page_media_urls(None, fields.get("merged_content")):
-        if url not in urls:
-            urls.append(url)
-    return urls
-
-
-def _calendar_cover_urls(payload: dict) -> list[str]:
-    """The cover a queued calendar create (``cover_url``) or edit
-    (``patch.cover_url``) sets — a cleared or unchanged cover sends none."""
-    patch = payload.get("patch")
-    url = (
-        patch.get("cover_url") if isinstance(patch, dict) else payload.get("cover_url")
-    )
-    return [url] if isinstance(url, str) and url else []
-
-
-def _post_media_urls(payload: dict) -> list[str]:
-    """Every local media file a queued post (and its listing) references."""
-    urls: list[str] = []
-    for url in (payload.get("media_url"), *(payload.get("image_urls") or ())):
-        if isinstance(url, str) and url:
-            urls.append(url)
-    fm = payload.get("file_meta")
-    if isinstance(fm, dict) and isinstance(fm.get("url"), str) and fm["url"]:
-        urls.append(fm["url"])
-    lp = payload.get("link_preview")
-    if (
-        isinstance(lp, dict)
-        and isinstance(lp.get("thumbnail_url"), str)
-        and lp["thumbnail_url"]
-    ):
-        urls.append(lp["thumbnail_url"])
-    bazaar = (payload.get("attachments") or {}).get("bazaar")
-    if isinstance(bazaar, dict):
-        for url in bazaar.get("image_urls") or ():
-            if isinstance(url, str) and url:
-                urls.append(url)
-    return urls
+    *rename* (same shape, a new dict; a page body reference renamed to
+    nothing is emptied)."""
+    return rename_moderation_payload(feature, payload, rename)

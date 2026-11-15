@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
+
 from socialhome.domain.file_hashes import FileHash, space_content_media_name
+from socialhome.domain.space_media_fields import (
+    SPACE_MEDIA_ITEMS,
+    moderation_item,
+)
 from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.services.inbound_media_store import (
     SPACE_DIRECT_MEDIA_PREFIX,
@@ -17,6 +23,10 @@ from socialhome.services.space_media_names import (
     renamed_media,
     same_file,
     space_own_files,
+)
+from tests.space_media_items import (
+    expected_moderation_urls,
+    synthetic_moderation_payload,
 )
 
 SP = "sp-1"
@@ -322,3 +332,34 @@ def test_a_legacy_row_keeps_its_senders_file_when_an_edit_carries_hashes():
         hashes={"f.webp": _fh(_HA)},
     )
     assert got.names == {"f.webp": sd("hh-a", "f.webp")}
+
+
+# ─── Registry tripwire: every registered field of a reviewed item ────────
+
+
+_REVIEWED = sorted(
+    i.moderation_feature for i in SPACE_MEDIA_ITEMS.values() if i.moderation_feature
+)
+
+
+@pytest.mark.parametrize("feature", _REVIEWED)
+def test_feature_media_urls_sees_every_registered_field(feature):
+    payload = synthetic_moderation_payload(feature)
+    assert feature_media_urls(feature, payload) == expected_moderation_urls(feature)
+
+
+@pytest.mark.parametrize(
+    "feature", [f for f in _REVIEWED if moderation_item(f).moderation_patch]
+)
+def test_feature_media_urls_reads_an_edits_patch(feature):
+    payload = synthetic_moderation_payload(feature, patch=True)
+    assert feature_media_urls(feature, payload) == expected_moderation_urls(feature)
+
+
+@pytest.mark.parametrize("feature", _REVIEWED)
+def test_renamed_media_renames_every_registered_field(feature):
+    payload = synthetic_moderation_payload(feature)
+    out = renamed_media(feature, payload, lambda u: u and u.replace(".webp", "-r.webp"))
+    assert feature_media_urls(feature, out) == [
+        u.replace(".webp", "-r.webp") for u in expected_moderation_urls(feature)
+    ]

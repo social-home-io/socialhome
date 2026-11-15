@@ -95,7 +95,6 @@ from ..domain.federation import (
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.file_hashes import parse_file_hashes
-from ..domain.post import BAZAAR_MAX_IMAGES, FEED_POST_MAX_IMAGES
 from ..domain.presence import truncate_coord
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
@@ -110,7 +109,7 @@ from ..domain.space import (
     SpaceModerationItem,
     SpaceRole,
 )
-from ..domain.space_media_ref import rewrite_page_body_media
+from ..domain.space_media_fields import sanitize_moderation_payload
 from ..federation.gfs_relay_transport import RELAY_MAX_ENVELOPE_BYTES
 from ..federation.owner_bound_id import (
     SPACE_CALENDAR_EVENT_KIND,
@@ -1408,86 +1407,27 @@ def _space_ref(value: object) -> str | None:
     return value if isinstance(value, str) and space_media_ref(value) else None
 
 
-def _space_body(text: object) -> object:
-    """A page body with every picture that is no space file emptied."""
-    if not isinstance(text, str) or not text:
-        return text
-    return rewrite_page_body_media(text, lambda ref: _space_ref(ref) or "")
-
-
-def _local_refs(values: object, *, limit: int) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    return [v for v in values if _space_ref(v)][:limit]
-
-
 def sanitize_remote_payload(feature: str, payload: dict) -> dict:
     """A remote submission's payload under the inbound media rules: every
-    media field (a page body's pictures included) a space file
-    (:func:`_space_ref`) or nothing, coordinates at 4
-    decimal places. Everything else is the handler's ``validate``."""
-    out = dict(payload)
-    match feature:
-        case "posts":
-            out["media_url"] = _space_ref(out.get("media_url"))
-            out["image_urls"] = _local_refs(
-                out.get("image_urls"), limit=FEED_POST_MAX_IMAGES
-            )
-            fm = out.get("file_meta")
-            out["file_meta"] = (
-                dict(fm) if isinstance(fm, dict) and _space_ref(fm.get("url")) else None
-            )
-            loc = out.get("location")
-            if isinstance(loc, dict):
-                try:
-                    out["location"] = {
-                        "lat": truncate_coord(float(loc["lat"])),
-                        "lon": truncate_coord(float(loc["lon"])),
-                        "label": loc.get("label"),
-                    }
-                except KeyError, TypeError, ValueError:
-                    out["location"] = None
-            else:
-                out["location"] = None
-            lp = out.get("link_preview")
-            if (
-                isinstance(lp, dict)
-                and lp.get("thumbnail_url")
-                and not _space_ref(lp.get("thumbnail_url"))
-            ):
-                out["link_preview"] = {**lp, "thumbnail_url": None}
-            attachments = out.get("attachments")
-            if isinstance(attachments, dict) and isinstance(
-                attachments.get("bazaar"), dict
-            ):
-                bazaar = dict(attachments["bazaar"])
-                bazaar["image_urls"] = _local_refs(
-                    bazaar.get("image_urls"), limit=BAZAAR_MAX_IMAGES
-                )
-                out["attachments"] = {**attachments, "bazaar": bazaar}
-        case "pages":
-            if "cover_image_url" in out:
-                out["cover_image_url"] = _space_ref(out["cover_image_url"])
-            for key in ("content", "merged_content"):
-                if key in out:
-                    out[key] = _space_body(out[key])
-            patch = out.get("patch")
-            if isinstance(patch, dict):
-                patch = dict(patch)
-                if "cover_image_url" in patch:
-                    patch["cover_image_url"] = _space_ref(patch["cover_image_url"])
-                if "content" in patch:
-                    patch["content"] = _space_body(patch["content"])
-                out["patch"] = patch
-        case "calendar":
-            if "cover_url" in out:
-                out["cover_url"] = _space_ref(out["cover_url"])
-            patch = out.get("patch")
-            if isinstance(patch, dict) and "cover_url" in patch:
-                out["patch"] = {
-                    **patch,
-                    "cover_url": _space_ref(patch["cover_url"]),
+    media field the registry names (:mod:`~socialhome.domain.space_media_fields`
+    — an edit's ``patch``, a post's attached listing and a page body's
+    pictures included) a space file (:func:`_space_ref`) or nothing,
+    coordinates at 4 decimal places. Everything else is the handler's
+    ``validate``."""
+    out = sanitize_moderation_payload(feature, payload, _space_ref)
+    if feature == "posts":
+        loc = out.get("location")
+        if isinstance(loc, dict):
+            try:
+                out["location"] = {
+                    "lat": truncate_coord(float(loc["lat"])),
+                    "lon": truncate_coord(float(loc["lon"])),
+                    "label": loc.get("label"),
                 }
+            except KeyError, TypeError, ValueError:
+                out["location"] = None
+        else:
+            out["location"] = None
     return out
 
 
