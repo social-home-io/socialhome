@@ -233,6 +233,20 @@ async def world(aiohttp_client, tmp_dir, monkeypatch):
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
+async def _m_plays_an_admin(w: World) -> None:
+    """Household M plays an ADMIN household: one of its own people holds a
+    live admin seat (a seed is taken only by such a household)."""
+    me = await w.m_app[user_service_key].provision(username="mia", display_name="Mia")
+    await w.m_app[space_repo_key].save_member(
+        SpaceMember(
+            space_id=w.space_id,
+            user_id=me.user_id,
+            role=SpaceRole.ADMIN.value,
+            joined_at="2026-01-01 00:00:00",
+        )
+    )
+
+
 async def _deliver(app, *, sender: str, event_type, payload: dict) -> None:
     fed = app[federation_service_key]
     await fed._event_registry.dispatch(
@@ -644,6 +658,7 @@ async def test_remaining_admin_gets_the_new_seed_and_its_k2_events_land(world):
     assert "authority_cert" in share
     # Play household A on the member app: it accepts K2 (the cert re-pins
     # first, then the seed matches the pin) …
+    await _m_plays_an_admin(w)
     await _deliver(
         w.m_app, sender=w.o_id, event_type=FET.SPACE_ADMIN_KEY_SHARE, payload=share
     )
@@ -1227,6 +1242,7 @@ async def test_k1_seed_share_cannot_be_stored_after_the_pin_moved(world, monkeyp
     """The key-share handler checks seed-vs-pin, then stores. A rotation in
     between must not leave the OLD seed stored next to the NEW pin."""
     w = world
+    await _m_plays_an_admin(w)
     await w.m_app[space_repo_key].set_space_seed(w.space_id, w.k1_seed)
     await _demote_b(w)
     bundle = w.outbound(to=w.m_id, event_type=FET.SPACE_AUTHORITY_ROTATED)[-1]

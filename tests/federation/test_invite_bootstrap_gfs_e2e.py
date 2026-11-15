@@ -14,6 +14,7 @@ crossed it, never saw the token, the space, the users or who was asking.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import dataclasses
 import io
@@ -1475,7 +1476,7 @@ async def test_a_link_joined_household_cannot_push_non_space_events(
         assert result.ok is True, "the relay accepts everything by design"
     await gfs.drain()
 
-    assert len(NON_SPACE_PROBE_TYPES) == 18
+    assert len(NON_SPACE_PROBE_TYPES) == 17
     assert dispatched == [], f"host dispatched {dispatched} from a link-joined peer"
 
 
@@ -2618,3 +2619,58 @@ async def test_a_stale_admin_listing_never_brings_back_whom_the_owner_removed(
     await gfs.drain()
     assert e_mailbox not in [to for to, _ in gfs.mailbox]
     assert e.received == []
+
+
+# ─── Every admin is equal on every path (owner decision 2026-11-15) ──────
+
+
+async def test_the_host_hands_its_signing_seed_to_a_link_joined_admin(households, gfs):
+    """An admin household reached only through the GFS takes the space
+    signing seed like a paired one: over the relay, sealed under the seat's
+    session key — the connection server carries ciphertext only (no seed,
+    no space id, no event type)."""
+    a, b = households
+    space = await _join(a, b, gfs)
+    # Delegation on, as the owner's config carries it to both rows; a's
+    # person is an admin (the owner's role change, as applied there).
+    for h in (a, b):
+        await h.db.enqueue(
+            "UPDATE spaces SET delegated_admin_authority=1 WHERE id=?", (space.id,)
+        )
+    await a.space_repo.set_role(space.id, a.user_id, "admin")
+    await b.federation_repo.set_proto_version(a.instance_id, OURS)
+    gfs.mailbox.clear()
+
+    await b.space_service.share_admin_signing_seed(
+        await b.space_repo.get(space.id), instance_id=a.instance_id
+    )
+    await gfs.drain()
+
+    seed = await b.space_repo.get_space_seed(space.id)
+    assert seed is not None
+    assert await a.space_repo.get_space_seed(space.id) == seed
+    assert gfs.mailbox, "the share rode the relay"
+    seed_b64 = base64.urlsafe_b64encode(seed).decode("ascii")
+    for _to, body in gfs.mailbox:
+        seen = json.dumps(body)
+        assert seed_b64 not in seen
+        assert seed.hex() not in seen
+        assert space.id not in seen
+        assert "space_admin_key_share" not in seen
+
+
+async def test_a_link_joined_member_never_takes_the_seed(households, gfs):
+    """Without an admin seat of its own the household refuses the seed,
+    whoever sends it."""
+    a, b = households
+    space = await _join(a, b, gfs)
+    for h in (a, b):
+        await h.db.enqueue(
+            "UPDATE spaces SET delegated_admin_authority=1 WHERE id=?", (space.id,)
+        )
+    await b.federation_repo.set_proto_version(a.instance_id, OURS)
+    await b.space_service.share_admin_signing_seed(
+        await b.space_repo.get(space.id), instance_id=a.instance_id
+    )
+    await gfs.drain()
+    assert await a.space_repo.get_space_seed(space.id) is None

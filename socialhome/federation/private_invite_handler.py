@@ -77,7 +77,7 @@ from ..services.space_service import (
     seal_join_snapshot,
 )
 from ..services.space_writer_households import holds_member_seat
-from .host_equivalence import acts_as_host
+from .host_equivalence import acts_as_host, holds_local_admin_seat
 from .invite_link_forward import FORWARDED_INVITE_LINK_ACTIONS
 
 if TYPE_CHECKING:
@@ -1541,6 +1541,17 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
             return
+        if event.space_id and event.space_id != space_id:
+            # The pipeline's gates (mailbox sender, ban) judged the envelope's
+            # signed ``space_id``; the payload must name the same space.
+            log.warning(
+                "SPACE_ADMIN_KEY_SHARE from %s names space %s in its payload "
+                "but %s on its envelope — dropping",
+                event.from_instance,
+                space_id,
+                event.space_id,
+            )
+            return
         space = await self._space_repo.get(space_id)
         if space is None:
             log.warning(
@@ -1569,6 +1580,19 @@ class PrivateSpaceInviteHandler:
             log.warning(
                 "SPACE_ADMIN_KEY_SHARE: delegated_admin_authority is OFF "
                 "locally for %s — refusing signing-seed share from %s",
+                space_id,
+                event.from_instance,
+            )
+            return
+        # SECURITY: only a household one of whose people holds a live ADMIN
+        # seat takes the seed — never a plain member's household (a share
+        # that outlived a demotion or kick, queued in an outbox or a GFS; an
+        # inviting admin pushing it at an invitee). A share that beat the
+        # promotion here is re-sent through the admin's authority epoch echo.
+        if not await holds_local_admin_seat(self._space_repo, space_id):
+            log.warning(
+                "SPACE_ADMIN_KEY_SHARE: none of our people holds an admin seat "
+                "in %s — refusing signing-seed share from %s",
                 space_id,
                 event.from_instance,
             )
