@@ -11,6 +11,8 @@ constants to produce conformant output.  Inbound federation validation
 
 from __future__ import annotations
 
+import re
+
 # ─── Image constraints ──────────────────────────────────────────────────────
 
 #: Longest-side cap for uploaded photos / post images. 2560 px is a
@@ -242,3 +244,12 @@ SPACE_PAGE_MEDIA_PREFIX: str = "sp-"
 #: and a ``SPACE_MEDIA_BLOB`` names its file by its hash, never by a raw
 #: ``sc-`` file name.
 SPACE_CONTENT_MEDIA_PREFIX: str = "sc-"
+
+
+#: DM transients (``<msg>.preview.webp`` and the legacy ``.part<N>`` /
+#: ``.assembled`` names). No ``media_url`` column holds them, so neither the
+#: media sweep nor a per-row cleanup (``unlink_unreferenced``) touches them —
+#: ``dm_gc`` owns them; a space blob never takes such a name.
+TRANSIENT_DM_MEDIA_RE: re.Pattern[str] = re.compile(
+    r"(\.preview\.webp|\.part\d+|\.assembled)", re.IGNORECASE
+)

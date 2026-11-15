@@ -77,6 +77,7 @@ from ..domain.media_constraints import (
     IMAGE_MAX_UPLOAD_BYTES,
     SPACE_DIRECT_MEDIA_PREFIX,
     SPACE_PAGE_MEDIA_PREFIX,
+    TRANSIENT_DM_MEDIA_RE,
     VIDEO_MAX_UPLOAD_BYTES,
 )
 
@@ -107,12 +108,6 @@ RESERVED_MEDIA_PREFIXES: tuple[str, ...] = (
     SPACE_PAGE_MEDIA_PREFIX,
 )
 
-#: DM transients (``<msg>.preview.webp`` and the legacy ``.part<N>`` /
-#: ``.assembled`` names). No ``media_url`` column holds them, so the media
-#: sweep leaves them to ``dm_gc``; a space blob never takes such a name.
-TRANSIENT_DM_MEDIA_RE: re.Pattern[str] = re.compile(
-    r"(\.preview\.webp|\.part\d+|\.assembled)", re.IGNORECASE
-)
 
 #: The largest whole file a ``SPACE_MEDIA_BLOB`` may carry: a space post's
 #: video is the biggest thing a space ships (``VIDEO_MAX_UPLOAD_BYTES``,
