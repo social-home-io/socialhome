@@ -370,14 +370,20 @@ class _Plan:
 
 
 class _GfsUploader:
-    def __init__(self, *, reader: bool, authorized: bool = True) -> None:
+    def __init__(
+        self, *, reader: bool, authorized: bool = True, frames: bool = False
+    ) -> None:
         self.reader = reader
         self.authorized = authorized
+        self.frames = frames
         self.planned: list[tuple] = []
         self.uploaded: list = []
 
     async def is_relay_reader(self, iid):
         return self.reader and iid == HOST
+
+    async def takes_relay_frames(self, iid):
+        return self.frames and iid == HOST
 
     async def can_upload(self, space_id):
         return self.authorized
@@ -412,6 +418,24 @@ async def test_a_link_joined_proposer_describes_its_new_files(env, media):
     assert set(payload["media_refs"]) == {"a.webp", "b.webp"}
     assert len(gfs.uploaded) == 1
     assert media.calls == []
+
+
+async def test_a_link_joined_proposer_pushes_to_a_host_that_takes_relay_frames(
+    env, media
+):
+    """Members equal: a host reached only through a GFS that takes binary
+    relay frames (v_87) gets the new files pushed by the outbox like from
+    any member — one recipient gains nothing from the GFS cache, so nothing
+    is sealed or uploaded there."""
+    env.fed.own_instance_id = "me"
+    gfs = _GfsUploader(reader=True, frames=True)
+    env.fwd.attach_media_gfs(gfs)
+    env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    assert await env.fwd.kick(SID, "pg")
+    assert "media_refs" not in env.fed.sent[0][2]
+    assert gfs.planned == [] and gfs.uploaded == []
+    assert [c["target_instance_ids"] for c in media.calls] == [[HOST]]
+    assert [c["media_urls"] for c in media.calls] == [["api/media/a.webp"]]
 
 
 async def test_a_paired_proposer_still_ships_through_the_outbox(env, media):

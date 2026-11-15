@@ -136,11 +136,15 @@ class _FedRepo:
 class _Fed:
     own_instance_id = OWN
 
-    def __init__(self, versions):
+    def __init__(self, versions, frames=()):
         self.versions = versions
+        self.frames = set(frames)
 
     async def peer_supports(self, iid, *, min_version):
         return self.versions.get(iid, 0) >= min_version
+
+    async def relay_media_ok(self, instance):
+        return instance.id in self.frames
 
 
 class _Crypto:
@@ -272,6 +276,25 @@ async def test_relay_reader_needs_a_link_seat_at_v80(tmp_path):
     assert await u.is_relay_reader("b") is False
     assert await u.is_relay_reader("old") is False
     assert await u.is_relay_reader("nobody") is False
+
+
+async def test_takes_relay_frames_asks_the_federation_for_the_seat_row(tmp_path):
+    """A seat whose relay carries binary frames (v_87) takes the media push
+    like any member; an unknown household or one without frames does not."""
+    u = _uploader(tmp_path, gfs=_Gfs([]), instances=[RELAY, PAIRED])
+    u.attach_federation(_Fed({}, frames={"e"}))
+    assert await u.takes_relay_frames("e") is True
+    assert await u.takes_relay_frames("b") is False
+    assert await u.takes_relay_frames("nobody") is False
+    no_fed = SpaceMediaGfsUploader(
+        space_repo=_Spaces(None),
+        space_crypto=_Crypto(),
+        federation_repo=_FedRepo([RELAY]),
+        gfs_service=_Gfs([]),
+        media_refs=_MediaRefs(),
+        media_dir=tmp_path,
+    )
+    assert await no_fed.takes_relay_frames("e") is False
 
 
 # ── Planning ─────────────────────────────────────────────────────────────
