@@ -334,8 +334,9 @@ household they never address the shared store.
   (`SpacePageService.media_view`, used by every space page route, conflict
   sides included); writes map them back (`_as_stored`), so what a member
   edits and proposes always carries the host's names. One pattern
-  (`LOCAL_MEDIA_REF_RE`) decides what a body's media links are — for the
-  read-time signer, the write-time guard and these renames alike — so every
+  (`LOCAL_MEDIA_REF_RE`, `domain/space_media_fields`) decides what a body's
+  media links are — for the read-time signer, the write-time guard, the
+  media reference repo and these renames alike — so every
   link the signer would sign in a page is one the page maps; a path inside
   another URL or path (`./api/media/x`, `x/api/media/x`, `%2Fapi/media/x`)
   is never signed, and a reserved name (`dm-` / `gm-` / `sg-` / `sp-`) is

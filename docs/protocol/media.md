@@ -497,8 +497,11 @@ encrypted payload (live events) and in each §25.6 record:
 * **Cleanup:** an `sc-` file may back several items of its space. Per-row
   delete paths remove a file only once no row references it
   (`unlink_unreferenced`), and the orphan sweep drops an unreferenced one
-  after its 24 h grace — both read `media_reference_repo`, which already
-  covers every column an `sc-` name lives in.
+  after its 24 h grace — both read `media_reference_repo`, whose space
+  rows (the sweep's reference set, `may_reference`, `live_in_space`,
+  `confined_to_space`, a space item's files) are generated from the same
+  registry (`space_media_columns()`), so every column an `sc-` name lives
+  in — a post's attachment (`file_meta_json` `$.url`) included — counts.
 * **Pages carry no map.** A page body keeps its host's names byte for byte
   (v_82) and a member's `sp-` name is derived at read time; only the host
   fills a page's files. A content name would need the hash at read time,
@@ -856,9 +859,12 @@ Paired and mesh members keep the `SPACE_MEDIA_BLOB` push above, unchanged.
 ```
 
 one entry per file of the item. Which files an item has is ONE rule,
-`record_media_urls` / `post_media_urls` (`domain/space_media_ref`): a post's
+the space media-field registry `SPACE_MEDIA_ITEMS`
+(`domain/space_media_fields`, read through `record_media_urls` /
+`post_media_urls` in `domain/space_media_ref`): a post's
 media, pictures, attached file and link-card thumbnail; an event's cover; a
-gallery item's thumbnail and full file — the sender describes exactly these
+gallery item's thumbnail and full file; a page's cover and body pictures —
+the sender describes exactly these
 and every receiver (live, follower, §25.6) allows exactly the files ITS
 stored copy of the item shows. A receiver drops an entry for a file it
 doesn't show and keeps the rest; a descriptor of more than 16 entries is
@@ -1237,7 +1243,7 @@ follower subset above). A GFS without `on_demand` is never asked.
 - Receiver assembly: [`federation_inbound_service.py`](../../socialhome/services/federation_inbound_service.py)
 - Capability: [`socialhome/domain/federation_capabilities.py`](../../socialhome/domain/federation_capabilities.py) (`MIN_FOR_MEDIA_CHANNEL`, `MIN_FOR_SPACE_MEDIA_REFS`, `MIN_FOR_PAGE_MEDIA`, `MIN_FOR_SPACE_MEDIA_ON_DEMAND`)
 - Page files (v_82): [`page_federation_outbound.py`](../../socialhome/services/page_federation_outbound.py) (`_ship_files`), [`page_proposal_forwarder.py`](../../socialhome/services/page_proposal_forwarder.py) (`_ship_files`), [`federation_inbound/space_content.py`](../../socialhome/services/federation_inbound/space_content.py) (`_localized_proposal`, `_keep_page_media`), [`space_media_names.py`](../../socialhome/services/space_media_names.py) (`pages`)
-- GFS media cache (v_80): [`space_media_seal.py`](../../socialhome/space_media_seal.py), [`domain/space_media_ref.py`](../../socialhome/domain/space_media_ref.py), [`space_media_gfs_uploader.py`](../../socialhome/services/space_media_gfs_uploader.py), [`space_media_gfs_fetcher.py`](../../socialhome/services/space_media_gfs_fetcher.py), [`space_media_refs.py`](../../socialhome/services/space_media_refs.py), [`sync/space/media_refs.py`](../../socialhome/federation/sync/space/media_refs.py)
+- GFS media cache (v_80): [`space_media_seal.py`](../../socialhome/space_media_seal.py), [`domain/space_media_ref.py`](../../socialhome/domain/space_media_ref.py), [`domain/space_media_fields.py`](../../socialhome/domain/space_media_fields.py) (the space media-field registry), [`space_media_gfs_uploader.py`](../../socialhome/services/space_media_gfs_uploader.py), [`space_media_gfs_fetcher.py`](../../socialhome/services/space_media_gfs_fetcher.py), [`space_media_refs.py`](../../socialhome/services/space_media_refs.py), [`sync/space/media_refs.py`](../../socialhome/federation/sync/space/media_refs.py)
 - Older files on view (v_92): [`space_media_wanted.py`](../../socialhome/services/space_media_wanted.py) (`SpaceMediaWanted`, `SpaceMediaWantedProvider`), [`media_reference_repo.py`](../../socialhome/repositories/media_reference_repo.py) (`space_rows_of`, `live_item_files`), [`routes/media.py`](../../socialhome/routes/media.py) (`MediaServeView`), [`space_media_sync_service.py`](../../socialhome/services/space_media_sync_service.py) (`enqueue_for_blob(push=True)`)
 - Space media on demand (v_83): [`space_media_hint.py`](../../socialhome/space_media_hint.py), [`domain/gfs_space_media_on_demand.py`](../../socialhome/domain/gfs_space_media_on_demand.py), [`space_media_gfs_responder.py`](../../socialhome/services/space_media_gfs_responder.py), [`space_media_gfs_fetcher.py`](../../socialhome/services/space_media_gfs_fetcher.py) (`_want`), [`gfs_connection_service.py`](../../socialhome/services/gfs_connection_service.py) (`want_space_media`, `serve_space_media`, `space_media_on_demand_wait`), GFS [`space_media_on_demand.py`](../../socialhome/global_server/space_media_on_demand.py) + [`routes/space_media_on_demand.py`](../../socialhome/global_server/routes/space_media_on_demand.py)
 
