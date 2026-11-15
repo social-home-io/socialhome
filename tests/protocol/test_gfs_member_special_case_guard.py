@@ -23,6 +23,7 @@ keywords and exact string constants), never comments or docstrings.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -212,12 +213,158 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
             "the space cover / icon sized for the relay's envelope cap",
         ),
     },
+    # The source as a string: ``InstanceSource("space_session")``,
+    # ``== "space_session"``, SQL text naming it.
+    "space_session": {
+        "socialhome/domain/federation.py": (
+            "validator",
+            "the InstanceSource enum value itself",
+        ),
+        "socialhome/federation/invite_token_redeem.py": (
+            "seat",
+            "the redeem's space_session= flag that seats a household",
+        ),
+        "socialhome/services/dm_service.py": (
+            "non-space exclusion",
+            "DMs are for paired households",
+        ),
+        "socialhome/repositories/outbox_repo.py": (
+            "transport",
+            "the v_91 ordering gate for rows a multi upload can carry",
+        ),
+    },
+    "relay_media_ok": {
+        "socialhome/federation/federation_service.py": (
+            "transport",
+            "defines it: binary relay frames to a seat",
+        ),
+        "socialhome/services/space_media_gfs_uploader.py": (
+            "transport",
+            "takes_relay_frames asks it",
+        ),
+    },
+    "takes_relay_frames": {
+        "socialhome/services/space_media_gfs_uploader.py": (
+            "transport",
+            "defines it",
+        ),
+        "socialhome/app.py": (
+            "transport",
+            "page files reach a frame-taking host by push",
+        ),
+        "socialhome/services/page_proposal_forwarder.py": (
+            "transport",
+            "a proposal's files go by push to a frame-taking host",
+        ),
+        "socialhome/federation/sync/space/provider.py": (
+            "transport",
+            "the narrow v_92 descriptor only when pushes go as frames",
+        ),
+    },
+    "stored_on_gfs": {
+        "socialhome/services/space_media_gfs_uploader.py": (
+            "GFS cache (live content)",
+            "defines it",
+        ),
+        "socialhome/federation/sync/space/provider.py": (
+            "GFS cache (live content)",
+            "a v_92 catch-up describes only blobs its GFS holds",
+        ),
+    },
+    # The non-social filter: a seat is no social relationship.
+    "list_social_instances": {
+        "socialhome/repositories/federation_repo.py": (
+            "non-space exclusion",
+            "defines it",
+        ),
+        "socialhome/federation/federation_service.py": (
+            "non-space exclusion",
+            "peer broadcasts and home-location fan-out",
+        ),
+        "socialhome/federation/route_discovery.py": (
+            "non-space exclusion",
+            "mesh routes run over social peers",
+        ),
+        "socialhome/routes/calendar.py": (
+            "non-space exclusion",
+            "personal calendar sharing",
+        ),
+        "socialhome/services/app_federation_service.py": (
+            "non-space exclusion",
+            "household apps",
+        ),
+        "socialhome/services/calendar_service.py": (
+            "non-space exclusion",
+            "personal calendar sharing",
+        ),
+        "socialhome/services/dm_routing_service.py": (
+            "non-space exclusion",
+            "DM routing",
+        ),
+        "socialhome/services/friends_service.py": (
+            "non-space exclusion",
+            "friends",
+        ),
+        "socialhome/services/online_status_service.py": (
+            "non-space exclusion",
+            "presence",
+        ),
+        "socialhome/services/peer_directory_service.py": (
+            "non-space exclusion",
+            "the social peer directory",
+        ),
+        "socialhome/services/peer_outbound.py": (
+            "non-space exclusion",
+            "confirmed-peer broadcasts",
+        ),
+        "socialhome/services/resync_on_upgrade.py": (
+            "non-space exclusion",
+            "capability re-ask on upgrade",
+        ),
+    },
 }
+
+#: Functions that must stay free of every marker: the periodic roster
+#: snapshot reaches every member household by one rule.
+_MARKER_FREE: dict[str, tuple[str, ...]] = {
+    "socialhome/services/space_service.py": (
+        "send_hosted_roster_snapshots",
+        "send_roster_snapshot",
+    ),
+}
+
+#: Functions that MUST keep a seat check (defence in depth): the binary
+#: HTTPS media leg never POSTs to a household met through a GFS, even if a
+#: seat row somehow held an address.
+_SEAT_CHECKED: dict[str, tuple[str, ...]] = {
+    "socialhome/federation/federation_service.py": ("_send_media_direct",),
+}
+
+_SPACE_SESSION_WORD = re.compile(r"\bspace_session\b")
+
+
+def _docstrings(tree: ast.AST) -> set[int]:
+    out: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            body = node.body
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+            ):
+                out.add(id(body[0].value))
+    return out
 
 
 def _code_names(tree: ast.AST) -> set[str]:
-    """Names the code uses — never comments (not in the AST) nor docstrings
-    (only an exact string constant counts, e.g. ``kwargs["relay_payload"]``)."""
+    """Names the code uses — never comments (not in the AST) nor docstrings.
+    A string constant counts when it equals a marker
+    (``kwargs["relay_payload"]``), and as ``space_session`` when it names
+    that word (SQL text, ``== "space_session"``)."""
+    docs = _docstrings(tree)
     out: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute):
@@ -232,9 +379,29 @@ def _code_names(tree: ast.AST) -> set[str]:
             and node.arg is not None
         ):
             out.add(node.arg)
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docs
+        ):
             out.add(node.value)
+            if _SPACE_SESSION_WORD.search(node.value):
+                out.add("space_session")
     return out
+
+
+def _functions(path: str) -> dict[str, ast.AST]:
+    tree = ast.parse((_ROOT / path).read_text(encoding="utf-8"))
+    return {
+        n.name: n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _body_names(fn: ast.AST) -> set[str]:
+    """:func:`_code_names` of a function body (its own name left out)."""
+    return _code_names(ast.Module(body=list(fn.body), type_ignores=[]))
 
 
 def _modules_referencing() -> dict[str, set[str]]:
@@ -288,3 +455,45 @@ def test_the_scan_ignores_comments_and_docstrings():
         'kw["relay_payload"] = 1\n'
     )
     assert {"SPACE_SESSION", "is_relay_reader", "relay_payload"} <= _code_names(code)
+
+
+def test_the_periodic_roster_snapshot_has_no_seat_special_case():
+    for path, names in _MARKER_FREE.items():
+        fns = _functions(path)
+        for name in names:
+            hit = _body_names(fns[name]) & set(_ALLOWED)
+            assert not hit, (
+                f"{path}:{name} references {sorted(hit)}: the roster snapshot "
+                "reaches every member household by one rule (CLAUDE.md, "
+                "'Every space member is equal')."
+            )
+
+
+def test_the_https_media_leg_keeps_its_seat_check():
+    """Every branch of the leg that reads ``remote_inbox_url`` (the POST
+    target) also checks the seat source in the same condition."""
+    for path, names in _SEAT_CHECKED.items():
+        fns = _functions(path)
+        for name in names:
+            posts = [
+                n.test
+                for n in ast.walk(fns[name])
+                if isinstance(n, ast.If) and "remote_inbox_url" in _code_names(n.test)
+            ]
+            assert posts, f"{path}:{name} has no inbox branch any more"
+            for test in posts:
+                assert "SPACE_SESSION" in _code_names(test), (
+                    f"{path}:{name} lost its seat check: a household met "
+                    "through a GFS is never POSTed to directly (defence in "
+                    "depth)."
+                )
+
+
+def test_the_scan_finds_the_source_as_a_string_but_not_in_docstrings():
+    code = ast.parse(
+        'def f():\n    """A ``space_session`` seat."""\n'
+        "    return \"WHERE source <> 'space_session'\"\n"
+    )
+    assert "space_session" in _code_names(code)
+    doc_only = ast.parse('def f():\n    """A ``space_session`` seat."""\n')
+    assert "space_session" not in _code_names(doc_only)
