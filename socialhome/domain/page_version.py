@@ -27,6 +27,7 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..canonical_json import canonical_utf8_str
+from .relay_media_frame import COUNTER_MAX, WIDEST_ID, WIDEST_STAMP
 
 if TYPE_CHECKING:
     from .page import Page
@@ -104,23 +105,61 @@ def side_to_wire(side: PageConflictSide) -> dict[str, Any]:
 #: :func:`page_record` puts in place of the hash when it only measures.
 _MEASURE_HASH = f"{VERSION_HASH_SUITE}:" + "0" * 64
 
+#: A page's ids and stamps — they differ between the household that saves
+#: it, the host that sequences it and every receiver — and its counter.
+_PAGE_IDS = (
+    "id",
+    "space_id",
+    "created_by",
+    "last_editor_user_id",
+    "locked_by",
+    "delete_requested_by",
+    "delete_approved_by",
+)
+_PAGE_STAMPS = (
+    "created_at",
+    "updated_at",
+    "last_edited_at",
+    "locked_at",
+    "lock_expires_at",
+    "delete_requested_at",
+    "delete_approved_at",
+)
+
 
 def page_record(
     page: Page, sides: Sequence[PageConflictSide], *, measure: bool = False
 ) -> dict[str, Any]:
     """A space page as it travels: its §25.6 ``pages`` record — the row
     (not this household's draft marker), its version hash and every open
-    conflict side. What a page's size is measured on (every field, the
-    sides' whole text included), and what the exporter streams.
+    conflict side. What the exporter streams.
 
-    *measure*: only its size is wanted — the hash (fixed length) is not
-    computed over the page's text."""
+    *measure*: the record a page's size is measured on — the same, with
+    every id, stamp and counter at its widest (and the fixed-length hash
+    not computed), so the household that saves a page, the host that
+    sequences it and every receiver measure the same number for the same
+    words. Receivers bound those fields to that width
+    (``domain/relay_media_frame.py``), so what travels is never larger."""
     record = asdict(page)
     record.pop("pending_base_seq", None)
-    record["version_hash"] = (
-        _MEASURE_HASH
-        if measure
-        else version_hash(page.title, page.content, page.cover_image_url)
+    if measure:
+        record.update(dict.fromkeys(_PAGE_IDS, WIDEST_ID))
+        record.update(dict.fromkeys(_PAGE_STAMPS, WIDEST_STAMP))
+        record["seq"] = COUNTER_MAX
+        record["version_hash"] = _MEASURE_HASH
+        record["conflict"] = [
+            {
+                **side_to_wire(s),
+                "side_id": _MEASURE_HASH,
+                "by": WIDEST_ID,
+                "at": WIDEST_STAMP,
+                "base_seq": COUNTER_MAX,
+            }
+            for s in sides
+        ]
+        return record
+    record["version_hash"] = version_hash(
+        page.title, page.content, page.cover_image_url
     )
     record["conflict"] = [side_to_wire(s) for s in sides]
     return record

@@ -55,13 +55,18 @@ from ..crypto import (
 )
 from ..domain.emoji import MAX_EMOJI_CODEPOINTS
 from ..domain.errors import (
+    SpaceEmojiTooLongError,
     SpaceItemTooLargeError,
+    SpaceNameTooLongError,
     SpaceNotPublishableError,
     TierChangeRequiredError,
     WrongTypeError,
 )
 from ..domain.relay_media_frame import (
+    COUNTER_MAX,
     SPACE_CONFIG_ITEM_MAX_BYTES,
+    bounded_counter,
+    bounded_id,
     space_item_bytes,
     space_item_too_large,
 )
@@ -79,6 +84,7 @@ from ..federation.owner_bound_id import (
     mint_owner_bound_id,
 )
 from ..gfs_server_list_sig import verify_gfs_server_list
+from ..infrastructure.hlc import HLC
 from ..infrastructure.key_manager import KeyManagerError
 from ..space_owner_statement import (
     MAX_STATEMENT_FUTURE_SKEW_MS,
@@ -278,6 +284,7 @@ from ..repositories.space_remote_member_repo import SpaceRemoteMember
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
 from ..task_drain import wait_tasks_done
+from ..utils.timezones import coerce_tz
 from .content_access import ContentAccessMixin
 from .gfs_connection_service import GfsConnectionError
 from .inbound_media_store import optional_local_media_ref, require_local_media_refs
@@ -9680,103 +9687,82 @@ def space_metadata_fields(space: Space) -> dict:
     }
 
 
-#: A space's config counters: they grow on every edit by design, so a
-#: config stored before the limit is judged "no larger" on the rest — never
-#: failed by a longer sequence number.
-_CONFIG_COUNTERS = ("config_sequence", "config_hlc", "roster_sequence")
-
-
-def _config_record(space: Space, held: Space | None) -> dict | None:
-    """*held*'s config as it travels, with *space*'s counters — what "no
-    larger" compares *space* against (``None`` when nothing is held)."""
-    if held is None:
-        return None
+def _config_measure(space: Space) -> dict:
+    """A space's config as the rule measures it: :func:`space_metadata_fields`
+    with its counters at their widest — they move on every edit and differ
+    between the household that saves and every receiver, so all of them
+    measure the same number for the same settings and texts. Receivers
+    bound them to that width (:func:`stub_space_from_metadata`)."""
     return space_metadata_fields(
-        replace(held, **{f: getattr(space, f) for f in _CONFIG_COUNTERS})
+        replace(
+            space,
+            config_sequence=COUNTER_MAX,
+            roster_sequence=COUNTER_MAX,
+            config_hlc=str(HLC(COUNTER_MAX, COUNTER_MAX)),
+        )
     )
+
+
+def config_item_bytes(space: Space) -> int:
+    """A space's config size as the rule measures it."""
+    return space_item_bytes(_config_measure(space))
 
 
 def _config_too_large(space: Space, held: Space | None) -> bool:
     return space_item_too_large(
-        space_metadata_fields(space),
+        _config_measure(space),
         limit=SPACE_CONFIG_ITEM_MAX_BYTES,
-        was=_config_record(space, held),
+        was=_config_measure(held) if held is not None else None,
     )
 
 
 def require_config_fits(space: Space, *, was: Space | None = None) -> None:
     """413 (``SPACE_ITEM_TOO_LARGE``) for a space whose config — measured
-    whole: :func:`space_metadata_fields` as it travels, every setting — is
-    over the limit every space has (``SPACE_CONFIG_ITEM_MAX_BYTES``) and
-    larger than *was*: a save that makes a config stored before the limit
-    no larger passes."""
+    whole (:func:`config_item_bytes`), every setting — is over the limit
+    every space has (``SPACE_CONFIG_ITEM_MAX_BYTES``). *was* matters only
+    when it is itself over the limit (stored before the limit existed):
+    then a save no larger passes."""
     if _config_too_large(space, was):
         raise SpaceItemTooLargeError(SPACE_CONFIG_ITEM_MAX_BYTES)
 
 
 def require_space_name_and_emoji(name: str | None, emoji: str | None) -> None:
-    """A space's name and emoji within their own caps (422)."""
+    """A space's name and emoji within their own caps (422, coded)."""
     if name is not None and len(name) > SPACE_NAME_MAX_CHARS:
-        raise ValueError(
-            f"space name must be at most {SPACE_NAME_MAX_CHARS} characters"
-        )
+        raise SpaceNameTooLongError(SPACE_NAME_MAX_CHARS)
     if emoji is not None and len(emoji) > MAX_EMOJI_CODEPOINTS:
-        raise ValueError(
-            f"space emoji must be at most {MAX_EMOJI_CODEPOINTS} characters"
-        )
+        raise SpaceEmojiTooLongError(MAX_EMOJI_CODEPOINTS)
 
 
-def config_within_limit(
-    space: Space, *, held: Space | None, source: str
-) -> Space | None:
+def config_within_limit(space: Space, *, held: Space | None, source: str) -> Space:
     """The one receiver rule for a space's config (``SPACE_CONFIG_CHANGED``,
     ``SPACE_CREATED``, a join snapshot, a rotation's config, a GFS
-    listing): a config over the limit and larger than the copy held keeps
-    the held TEXT — the description and about text, then (if still too
-    large) the name and emoji; nothing held → no description / about, the
-    name and emoji cut to their caps — with a WARNING. Its settings (access
-    levels, join mode, archive, delegation…) are taken: a long text never
-    leaves a household enforcing stale settings.
+    listing): a config over the limit (and, when the copy held is itself
+    over it, larger than that copy) keeps the held description and about
+    text — nothing held → none — with a WARNING. Every setting is taken,
+    and every security step after it runs: a long text never leaves a
+    household enforcing stale settings.
 
-    ``None`` — not stored, WARNING — only when the config is still too
-    large without its text: its SETTINGS themselves are oversize (a forged
-    list or id no honest household sends)."""
+    The rest of a config is bounded where it is read
+    (:func:`stub_space_from_metadata`: name, emoji, ids, counters, zone,
+    hashes, lists), far below the limit, so the config without its two
+    free texts always fits."""
     if not _config_too_large(space, held):
         return space
-    kept = replace(
+    log.warning(
+        "%s for space %s: its config is over the limit of its kind (%d of "
+        "%d bytes) — its settings apply, its description / about text is "
+        "not taken",
+        source,
+        space.id,
+        config_item_bytes(space),
+        SPACE_CONFIG_ITEM_MAX_BYTES,
+    )
+    return replace(
         space,
         description=held.description if held is not None else None,
         about_markdown=held.about_markdown if held is not None else None,
     )
-    if _config_too_large(kept, held):
-        kept = replace(
-            kept,
-            name=held.name if held is not None else space.name[:SPACE_NAME_MAX_CHARS],
-            emoji=held.emoji
-            if held is not None
-            else (space.emoji or "")[:MAX_EMOJI_CODEPOINTS] or None,
-        )
-    size = space_item_bytes(space_metadata_fields(space))
-    if _config_too_large(kept, held):
-        log.warning(
-            "%s for space %s: its config is over the limit of its kind (%d of "
-            "%d bytes) even without its text — not stored",
-            source,
-            space.id,
-            size,
-            SPACE_CONFIG_ITEM_MAX_BYTES,
-        )
-        return None
-    log.warning(
-        "%s for space %s: its config is over the limit of its kind (%d of "
-        "%d bytes) and larger than the copy held — its settings apply, "
-        "its text is not taken",
-        source,
-        space.id,
-        size,
-        SPACE_CONFIG_ITEM_MAX_BYTES,
-    )
-    return kept
 
 
 async def apply_space_content_key_from_metadata(
@@ -10099,31 +10085,36 @@ def stub_space_from_metadata(
     features = SpaceFeatures.from_wire_dict(feats_in)
     return Space(
         id=space_id,
-        name=str(meta.get("name") or "Untitled space"),
-        emoji=meta.get("emoji"),
-        description=meta.get("description"),
+        # Everything but the two free texts is bounded here, where it is
+        # read — so the config without them always fits its limit
+        # (:func:`config_within_limit`) and the counters never pass the
+        # width the size rule measures them at.
+        name=(str(meta.get("name") or "") or "Untitled space")[:SPACE_NAME_MAX_CHARS],
+        emoji=_bounded_emoji(meta.get("emoji")),
+        description=_text_or_none(meta.get("description")),
         # The caller decides the owner (see the docstring); this function
         # never reads meta["owner_instance_id"] itself. Every owner-only
         # fact applied later (authority cert, signed GFS list) is verified
         # against that owner's own identity key.
         owner_instance_id=host_instance_id,
-        owner_username=str(meta.get("owner_username") or ""),
-        identity_public_key=str(meta.get("identity_public_key") or ""),
-        config_sequence=int(meta.get("config_sequence") or 0),
+        owner_username=bounded_id(meta.get("owner_username")),
+        identity_public_key=bounded_id(meta.get("identity_public_key")),
+        config_sequence=bounded_counter(meta.get("config_sequence")),
         # Adopt the winning edit's HLC (migration 0037) so a subsequent LOCAL
         # edit ticks causally after it. Fail-soft to "0-0" for an older sender,
         # which ties under the LWW and falls back to the author tie-break.
-        config_hlc=str(meta.get("config_hlc") or "0-0"),
+        # Stored as parsed and bounded — never the raw string.
+        config_hlc=_bounded_hlc(meta.get("config_hlc")),
         # Anchor the stub's roster counter to the host's, failing soft to
         # config_sequence on an older sender (see _coerce_roster_sequence).
         roster_sequence=_coerce_roster_sequence(meta),
         features=features,
         space_type=_coerce_space_type(meta.get("space_type") or "private"),
         join_mode=_coerce_join_mode(meta.get("join_mode") or "invite_only"),
-        tz=str(meta.get("tz") or "UTC"),
-        cover_hash=meta.get("cover_hash"),
-        icon_hash=meta.get("icon_hash"),
-        about_markdown=meta.get("about_markdown"),
+        tz=coerce_tz(meta.get("tz"), context="space config"),
+        cover_hash=bounded_id(meta.get("cover_hash")) or None,
+        icon_hash=bounded_id(meta.get("icon_hash")) or None,
+        about_markdown=_text_or_none(meta.get("about_markdown")),
         archived=bool(meta.get("archived", False)),
         # §CP.F1 — carry the host's age gate into the stub so the joiner
         # household enforces it locally. Fail-soft: older sender omits it
@@ -10574,8 +10565,6 @@ async def seat_join_stub(
         held=await space_repo.get(space_id),
         source=f"join snapshot from {issuer_instance_id}",
     )
-    if stub is None:
-        raise ValueError("the space's settings are over the size limit")
     await space_repo.save(stub)
     # Pin the epoch the owner's cert names FIRST (a replayed older cert can
     # never move the pin back), then record the inviting admin + the owner's
@@ -10849,7 +10838,29 @@ def _coerce_roster_sequence(meta: dict) -> int:
     raw = meta.get("roster_sequence")
     if raw is None:
         raw = meta.get("config_sequence") or 0
-    return int(raw)
+    return bounded_counter(raw)
+
+
+def _bounded_hlc(raw: object) -> str:
+    """A config HLC read from the wire, parsed and bounded (each part a
+    64-bit counter): ``"0-0"`` for anything else."""
+    hlc = HLC.parse(raw)
+    if not (0 <= hlc.physical_ms <= COUNTER_MAX and 0 <= hlc.counter <= COUNTER_MAX):
+        return str(HLC())
+    return str(hlc)
+
+
+def _bounded_emoji(raw: object) -> str | None:
+    """A space emoji read from the wire: within its cap, else none."""
+    if not isinstance(raw, str) or not raw or len(raw) > MAX_EMOJI_CODEPOINTS:
+        return None
+    return raw
+
+
+def _text_or_none(raw: object) -> str | None:
+    """A free text of a space's config read from the wire (measured with
+    the config): a string, else none."""
+    return raw if isinstance(raw, str) else None
 
 
 def _coerce_min_age(value: object) -> int:

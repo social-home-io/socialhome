@@ -215,6 +215,8 @@ async def test_a_calendar_event_is_measured_whole(mesh):
         {"rrule": "NOT A RULE"},
         {"rrule": "FREQ=HOURLY"},
         {"rrule": 5},
+        # An iCalendar property smuggled into the rule (the ICS feed).
+        {"rrule": "FREQ=WEEKLY;X=1\r\nURL:https://evil.example/x"},
     ],
     ids=lambda e: next(iter(e)),
 )
@@ -223,6 +225,9 @@ async def test_attendees_and_the_rule_are_validated_where_a_person_saves(mesh, e
     url = f"/api/spaces/{SID}/calendar/events"
     r = await h.tc.post(url, json=_event_body(**extra), headers=h.headers)
     assert r.status == 422, (await r.text())[:300]
+    # A coded refusal the SPA translates.
+    code = (await r.json())["error"]["code"]
+    assert code in ("CALENDAR_ATTENDEES_INVALID", "CALENDAR_RRULE_INVALID")
     assert await _calendar_rows(h) == []
     # And on an edit.
     r = await h.tc.post(url, json=_event_body(summary="Ok"), headers=h.headers)
@@ -313,13 +318,22 @@ async def test_a_new_space_is_held_to_the_config_limit_and_its_caps(mesh):
     422 — and nothing is created."""
     h = mesh["H"]
     count = (await h.db.fetchone("SELECT COUNT(*) AS n FROM spaces", ()))["n"]
-    for body, status in (
-        ({"name": "Big", "description": "d" * SPACE_CONFIG_ITEM_MAX_BYTES}, 413),
-        ({"name": "N" * (SPACE_NAME_MAX_CHARS + 1)}, 422),
-        ({"name": "Ok", "emoji": "🏡" * (MAX_EMOJI_CODEPOINTS + 1)}, 422),
+    for body, status, code in (
+        (
+            {"name": "Big", "description": "d" * SPACE_CONFIG_ITEM_MAX_BYTES},
+            413,
+            "SPACE_ITEM_TOO_LARGE",
+        ),
+        ({"name": "N" * (SPACE_NAME_MAX_CHARS + 1)}, 422, "SPACE_NAME_TOO_LONG"),
+        (
+            {"name": "Ok", "emoji": "🏡" * (MAX_EMOJI_CODEPOINTS + 1)},
+            422,
+            "SPACE_EMOJI_TOO_LONG",
+        ),
     ):
         r = await h.tc.post("/api/spaces", json=body, headers=h.headers)
         assert r.status == status, (body.keys(), (await r.text())[:300])
+        assert (await r.json())["error"]["code"] == code
     assert (await h.db.fetchone("SELECT COUNT(*) AS n FROM spaces", ()))["n"] == count
     # The same caps on an edit.
     for body in (
@@ -385,6 +399,22 @@ async def test_an_over_limit_calendar_event_from_a_member_is_not_stored(mesh, ca
                 **created,
                 "description": "x" * (SPACE_CALENDAR_ITEM_MAX_BYTES - 200),
                 "location": "L" * 400,
+            },
+            c,
+        ),
+    )
+    assert await _calendar_rows(c) == [("Picnic", 10)]
+    # A rule smuggling a property in is refused on the way in (the event,
+    # not just its rule: an honest household never sends one).
+    await _receive(
+        c,
+        _event(
+            h,
+            FET.SPACE_CALENDAR_EVENT_UPDATED,
+            {
+                **created,
+                "rrule": "FREQ=BOGUS\nATTACH:https://evil.example/a",
+                "summary": "Bad",
             },
             c,
         ),

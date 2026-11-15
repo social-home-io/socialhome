@@ -1043,6 +1043,7 @@ async def test_an_invalid_calendar_record_is_skipped(setup, caplog):
         "calendar",
         [
             _calendar_record("e-rule", rrule="FREQ=DAILY;" + "X" * 600),
+            _calendar_record("e-crlf", rrule="FREQ=DAILY\r\nURL:https://e.example"),
             # Saved before the checks: stays deliverable, cleaned.
             _calendar_record(
                 "e-old", attendees=["", "u-1", "u-1", 5], rrule="FREQ=HOURLY"
@@ -1055,7 +1056,7 @@ async def test_an_invalid_calendar_record_is_skipped(setup, caplog):
         ("u-1",),
         "FREQ=HOURLY",
     )
-    assert "e-rule" in caplog.text
+    assert "e-rule" in caplog.text and "e-crlf" in caplog.text
 
 
 async def test_a_calendar_event_held_over_the_limit_syncs_no_larger(

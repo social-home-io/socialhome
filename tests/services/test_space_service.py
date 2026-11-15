@@ -60,7 +60,6 @@ from socialhome.domain.media_constraints import (
 from socialhome.domain.post import PostType
 from socialhome.domain.relay_media_frame import SPACE_CONFIG_ITEM_MAX_BYTES as _CFG_MAX
 from socialhome.domain.space import (
-    SPACE_NAME_MAX_CHARS,
     AlreadyMemberError,
     ContentAction,
     ContentQueuedForReview,
@@ -115,8 +114,11 @@ from socialhome.services.space_service import (
     SPACE_CATEGORIES,
     SpaceService,
     build_space_snapshot_for_federation,
+    config_item_bytes,
     keep_local_space_state,
     normalize_category,
+    space_metadata_fields,
+    stub_space_from_metadata,
 )
 from socialhome.services.space_service import config_within_limit as _within
 from socialhome.services.space_writer_cert_service import (
@@ -11914,28 +11916,94 @@ def test_config_within_limit_with_nothing_held_drops_the_text(caplog):
     caplog.set_level(logging.WARNING)
     space = _cfg(description="d" * _CFG_MAX, about_markdown="a")
     kept = _within(space, held=None, source="SPACE_CREATED from x")
-    assert kept is not None
     assert (kept.description, kept.about_markdown, kept.name) == (None, None, "Club")
-    assert "its text is not taken" in caplog.text
+    assert "its settings apply" in caplog.text
 
 
-def test_config_within_limit_cuts_the_name_and_emoji_when_still_too_large():
-    space = _cfg(name="N" * _CFG_MAX, emoji="🏡" * 50)
-    kept = _within(space, held=None, source="t")
-    assert kept is not None
-    assert len(kept.name) == SPACE_NAME_MAX_CHARS and len(kept.emoji or "") == 16
-
-
-def test_config_within_limit_keeps_the_held_name_too():
-    held = _cfg(name="Held", description="h")
-    space = replace(held, name="N" * _CFG_MAX, description="d" * _CFG_MAX)
+def test_config_within_limit_keeps_the_held_text_and_takes_the_settings():
+    held = _cfg(description="h", about_markdown="about")
+    space = replace(
+        held,
+        name="Renamed",
+        description="d" * _CFG_MAX,
+        join_mode=JoinMode.OPEN,
+    )
     kept = _within(space, held=held, source="t")
-    assert kept is not None and (kept.name, kept.description) == ("Held", "h")
+    assert (kept.name, kept.description, kept.about_markdown, kept.join_mode) == (
+        "Renamed",
+        "h",
+        "about",
+        JoinMode.OPEN,
+    )
 
 
-def test_config_within_limit_refuses_oversize_settings(caplog):
-    """No honest household sends settings this large: not stored."""
-    caplog.set_level(logging.WARNING)
-    space = _cfg(owner_username="o" * _CFG_MAX)
-    assert _within(space, held=_cfg(), source="t") is None
-    assert "even without its text" in caplog.text
+def test_a_config_without_its_texts_always_fits():
+    """Everything but the description and the about text is bounded where
+    it is read, far below the limit — so keeping the held texts always
+    brings a config within it (no "settings alone too large" case)."""
+    meta = {
+        "name": "\x01" * 10_000,
+        "emoji": "🏡" * 10_000,
+        "owner_username": "o" * 10_000,
+        "identity_public_key": "k" * 10_000,
+        "tz": "x" * 10_000,
+        "cover_hash": "c" * 10_000,
+        "icon_hash": "i" * 10_000,
+        "category": "c" * 10_000,
+        "features": {
+            "allowed_post_types": [f"t{n}" * 30 for n in range(10_000)],
+            "allowed_apps": [f"a{n}" for n in range(10_000)],
+        },
+        "retention_exempt_types": ["x" * 100] * 10_000,
+    }
+    space = stub_space_from_metadata("s" * 32, host_instance_id="h" * 32, meta=meta)
+    assert config_item_bytes(space) < 16 * 1024
+
+
+def test_a_config_stamp_never_grows_a_stored_config():
+    """A delegated admin's signed ``config_hlc`` of 300,000 digits (or a
+    sequence past 64 bits) is bounded where the config is parsed — the
+    stored config never carries it, and a later joiner's snapshot of it
+    always fits."""
+    meta = {
+        "name": "S",
+        "identity_public_key": "k" * 64,
+        "config_sequence": 2,
+        "config_hlc": "9" * 300_000,
+        "roster_sequence": 10**30,
+        "owner_username": "o" * 10_000,
+        "tz": "Not/AZone" * 1000,
+        "cover_hash": "c" * 10_000,
+    }
+    space = stub_space_from_metadata("sp", host_instance_id="own", meta=meta)
+    assert space.config_hlc == "0-0"
+    assert space.roster_sequence == 0
+    assert len(space.owner_username) <= 128 and len(space.cover_hash or "") <= 128
+    assert space.tz == "UTC"
+    orjson.dumps(space_metadata_fields(space))  # a 64-bit-safe int
+    for big in (1e23, 2**64, -1, True, "7"):
+        bounded = stub_space_from_metadata(
+            "sp", host_instance_id="own", meta={**meta, "config_sequence": big}
+        )
+        assert 0 <= bounded.config_sequence < 2**63
+        orjson.dumps(space_metadata_fields(bounded))
+
+
+def test_a_config_measures_the_same_whatever_its_counters():
+    """The local save, the receivers and the host measure one number for
+    the same config: the counters are measured at their widest."""
+    small = _cfg(description="d")
+    grown = replace(small, config_sequence=2**62, roster_sequence=2**62)
+    grown = replace(grown, config_hlc=f"{2**62}-{2**62}")
+    assert config_item_bytes(small) == config_item_bytes(grown)
+
+
+def test_no_larger_holds_only_for_a_config_stored_over_the_limit():
+    """Within the limit the rule is strict; the "no larger" exception is
+    only for a config that was stored over the limit before it existed."""
+    held = _cfg(description="d" * (_CFG_MAX - 2000))
+    over = replace(held, description="d" * (_CFG_MAX + 10))
+    assert _within(over, held=held, source="t").description == held.description
+    legacy = _cfg(description="o" * (_CFG_MAX + 5000))
+    same = replace(legacy, name="Clux", config_sequence=99)
+    assert _within(same, held=legacy, source="t") is same

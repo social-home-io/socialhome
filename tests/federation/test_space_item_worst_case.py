@@ -53,12 +53,15 @@ from socialhome.domain.media_constraints import (
 from socialhome.domain.page import MAX_PAGE_TITLE_LENGTH
 from socialhome.domain.page_version import page_record, version_hash
 from socialhome.domain.relay_media_frame import (
+    COUNTER_MAX,
     RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES,
     RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES,
     RELAY_SYNC_RECORD_MAX_BYTES,
     SPACE_CALENDAR_ITEM_MAX_BYTES,
     SPACE_CONFIG_ITEM_MAX_BYTES,
     SPACE_PAGE_ITEM_MAX_BYTES,
+    WIDEST_ID,
+    WIDEST_STAMP,
     space_item_bytes,
 )
 from socialhome.domain.space import (
@@ -101,14 +104,15 @@ from socialhome.services.page_conflict_service import (
     PageConflictSide,
     Sequenced,
     canonical_extras,
+    page_item_bytes,
     page_too_large,
 )
 from socialhome.services.page_federation_outbound import PageFederationOutbound
 from socialhome.services.space_config_outbound import SpaceConfigOutbound
 from socialhome.services.space_service import (
     ROSTER_SNAPSHOT_PART_BYTES,
+    config_item_bytes,
     require_config_fits,
-    space_metadata_fields,
 )
 from socialhome.utils.rrule import MAX_RRULE_CHARS, clean_rrule
 
@@ -192,14 +196,14 @@ async def _assert_record_crosses(resource: str, record: dict) -> None:
     assert unpack_event_body(suite, raw, event_type=CHUNK) == payload
 
 
-def _fill(build, limit: int) -> str:
-    """The text that makes ``build(text)`` (a record) exactly *limit* bytes:
-    an adversarial block, then single-byte padding."""
+def _fill(measure, limit: int) -> str:
+    """The text that makes ``measure(text)`` (the kind's measure) exactly
+    *limit* bytes: an adversarial block, then single-byte padding."""
     block = ADVERSARIAL * 200
-    pad = limit - space_item_bytes(build(block))
+    pad = limit - measure(block)
     assert pad >= 0, pad
     text = block + "x" * pad
-    assert space_item_bytes(build(text)) == limit
+    assert measure(text) == limit
     return text
 
 
@@ -280,10 +284,10 @@ def _side(n: int, content: str) -> PageConflictSide:
         hash=version_hash(title, content, cover),
         title=title,
         content=content,
-        by="" if n == 0 else "u",  # empty and one-character ids
-        at=datetime.now(UTC).isoformat(timespec="microseconds"),
+        by=WIDEST_ID,  # every id, stamp and counter at the widest the
+        at=WIDEST_STAMP,  # receivers keep (``bounded_*``) — the measure
         cover_image_url=cover,
-        base_seq=2**53,
+        base_seq=COUNTER_MAX,
     )
 
 
@@ -295,21 +299,32 @@ def _page_at_limit():
         new_page(
             title=(ADVERSARIAL * 30)[:MAX_PAGE_TITLE_LENGTH],
             content="",
-            created_by="u",
-            space_id=SPACE,
+            created_by=WIDEST_ID,
+            space_id=WIDEST_ID,
+            page_id=WIDEST_ID,
         ),
         cover_image_url="api/media/" + "c" * 60 + ".webp",
-        last_editor_user_id="",
-        locked_by="u" * 32,
-        locked_at=datetime.now(UTC).isoformat(),
-        lock_expires_at=datetime.now(UTC).isoformat(),
-        seq=2**53,
+        created_at=WIDEST_STAMP,
+        updated_at=WIDEST_STAMP,
+        last_editor_user_id=WIDEST_ID,
+        last_edited_at=WIDEST_STAMP,
+        locked_by=WIDEST_ID,
+        locked_at=WIDEST_STAMP,
+        lock_expires_at=WIDEST_STAMP,
+        delete_requested_by=WIDEST_ID,
+        delete_requested_at=WIDEST_STAMP,
+        delete_approved_by=WIDEST_ID,
+        delete_approved_at=WIDEST_STAMP,
+        seq=COUNTER_MAX,
     )
     content = _fill(
-        lambda text: page_record(replace(page, content=text), sides),
+        lambda text: page_item_bytes(replace(page, content=text), sides),
         SPACE_PAGE_ITEM_MAX_BYTES,
     )
-    return replace(page, content=content), sides
+    page = replace(page, content=content)
+    # At its widest, what travels is exactly what was measured.
+    assert space_item_bytes(page_record(page, sides)) == SPACE_PAGE_ITEM_MAX_BYTES
+    return page, sides
 
 
 class _PageRepo:
@@ -435,7 +450,9 @@ def _event_at_limit() -> CalendarEvent:
         announce_in_feed=False,
     )
     description = _fill(
-        lambda text: calendar_record(replace(event, description=text)),
+        lambda text: space_item_bytes(
+            calendar_record(replace(event, description=text))
+        ),
         SPACE_CALENDAR_ITEM_MAX_BYTES,
     )
     return replace(event, description=description)
@@ -494,9 +511,9 @@ async def test_a_config_at_its_limit_fits_with_the_pictures_and_the_gfs_list():
         owner_instance_id="h" * 32,
         owner_username="anna",
         identity_public_key=key.public_key.hex(),
-        config_sequence=2**53,
-        roster_sequence=2**53,
-        config_hlc=f"{2**53}-{2**31}",
+        config_sequence=COUNTER_MAX,
+        roster_sequence=COUNTER_MAX,
+        config_hlc=f"{COUNTER_MAX}-{COUNTER_MAX}",
         features=SpaceFeatures(),
         space_type=SpaceType.GLOBAL,
         join_mode=JoinMode.INVITE_ONLY,
@@ -507,7 +524,7 @@ async def test_a_config_at_its_limit_fits_with_the_pictures_and_the_gfs_list():
         retention_days=2**31,
     )
     description = _fill(
-        lambda text: space_metadata_fields(replace(space, description=text)),
+        lambda text: config_item_bytes(replace(space, description=text)),
         SPACE_CONFIG_ITEM_MAX_BYTES,
     )
     space = replace(space, description=description)

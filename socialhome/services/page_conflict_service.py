@@ -63,6 +63,8 @@ from ..domain.page_version import (
 )
 from ..domain.relay_media_frame import (
     SPACE_PAGE_ITEM_MAX_BYTES,
+    bounded_id,
+    bounded_stamp,
     space_item_bytes,
     space_item_too_large,
 )
@@ -114,21 +116,11 @@ _STATELESS_REFUSALS = frozenset({"rate_limited", "archived"})
 TOO_LARGE = "too_large"
 
 
-#: A page's who / when stamps and its counter: they change on every save by
-#: design (or are not carried by every version — a live update names no
-#: creator), so a page stored before the limit is judged "no larger" on the
-#: rest — its words, cover and sides — never failed by a longer ``seq``.
-_PAGE_STAMPS = (
-    "created_by",
-    "created_at",
-    "updated_at",
-    "last_editor_user_id",
-    "last_edited_at",
-    "locked_by",
-    "locked_at",
-    "lock_expires_at",
-    "seq",
-)
+def page_item_bytes(page: Page, sides: Sequence[PageConflictSide]) -> int:
+    """A page's size as the rule measures it: its record with its open
+    sides, every id, stamp and counter at its widest — the same number on
+    the household that saves it, the host and every receiver."""
+    return space_item_bytes(page_record(page, sides, measure=True))
 
 
 def page_too_large(
@@ -137,21 +129,15 @@ def page_too_large(
     *,
     was: tuple[Page, Sequence[PageConflictSide]] | None = None,
 ) -> bool:
-    """Whether a page — measured whole: its record as it travels
-    (:func:`~socialhome.domain.page_version.page_record`, every open side
-    included) — is over the limit every space has
-    (``SPACE_PAGE_ITEM_MAX_BYTES``) and larger than *was* (the page and
-    sides held now): a save that makes a page stored before the limit no
-    larger is not too large."""
-    held: dict[str, Any] | None = None
-    if was is not None:
-        held_page, held_sides = was
-        stamps = {f: getattr(page, f) for f in _PAGE_STAMPS}
-        held = page_record(replace(held_page, **stamps), held_sides, measure=True)
+    """Whether a page (with its open sides, :func:`page_item_bytes`) is
+    over the limit every space has (``SPACE_PAGE_ITEM_MAX_BYTES``). *was*
+    (the page and sides held now) matters only when it is itself over the
+    limit — stored before the limit existed: then a version no larger is
+    taken."""
     return space_item_too_large(
         page_record(page, sides, measure=True),
         limit=SPACE_PAGE_ITEM_MAX_BYTES,
-        was=held,
+        was=page_record(*was, measure=True) if was is not None else None,
     )
 
 
@@ -562,11 +548,11 @@ def proposal_from_wire(p: Mapping[str, Any]) -> Proposal | None:
         title=str(p.get("title") or ""),
         content=str(p.get("content") or ""),
         cover_image_url=cover if isinstance(cover, str) and cover else None,
-        actor_user_id=str(p.get("actor_user_id") or ""),
+        actor_user_id=bounded_id(p.get("actor_user_id")),
         base_seq=base_seq,
         base_hash=base_hash,
         resolves=resolves,
-        created_by=str(p.get("created_by") or ""),
+        created_by=bounded_id(p.get("created_by")),
     )
 
 
@@ -579,7 +565,12 @@ def _side_from_wire(raw: object) -> PageConflictSide | None:
         raw.get("by"),
         raw.get("at"),
     )
-    if not all(isinstance(v, str) for v in (title, content, by, at)) or not at:
+    if not all(isinstance(v, str) for v in (title, content, by, at)):
+        return None
+    # Ids and stamps bounded where they are read (the size rule measures
+    # them at their widest).
+    by, at = bounded_id(by), bounded_stamp(at)
+    if not at:
         return None
     cover = raw.get("cover")
     cover_s = cover if isinstance(cover, str) and cover else None
@@ -589,8 +580,8 @@ def _side_from_wire(raw: object) -> PageConflictSide | None:
         title=str(title),
         content=str(content),
         cover_image_url=cover_s,
-        by=str(by),
-        at=str(at),
+        by=by,
+        at=at,
         base_seq=max(0, base_seq),
     )
 
@@ -623,10 +614,12 @@ def canonical_from_wire(p: Mapping[str, Any]) -> CanonicalVersion | None:
         title=str(title or ""),
         content=str(p.get("content") or ""),
         cover_image_url=cover if isinstance(cover, str) and cover else None,
-        created_by=str(p.get("created_by") or ""),
-        created_at=str(p.get("created_at") or p.get("occurred_at") or ""),
-        updated_at=str(p.get("updated_at") or p.get("occurred_at") or ""),
-        last_editor_user_id=str(p.get("last_editor_user_id") or ""),
+        # Ids and stamps bounded where they are read (the size rule
+        # measures them at their widest); one that is not is none.
+        created_by=bounded_id(p.get("created_by")),
+        created_at=bounded_stamp(p.get("created_at") or p.get("occurred_at")),
+        updated_at=bounded_stamp(p.get("updated_at") or p.get("occurred_at")),
+        last_editor_user_id=bounded_id(p.get("last_editor_user_id")),
         conflict=tuple(sides),
         sequenced=sequenced,
         has_state=has_state,

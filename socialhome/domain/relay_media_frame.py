@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 import orjson
@@ -213,11 +214,72 @@ def space_item_too_large(
     item: Mapping[str, Any], *, limit: int, was: Mapping[str, Any] | None = None
 ) -> bool:
     """Whether *item* is over *limit* — the limit of its kind, the same in
-    every space — and larger than *was*, the record of the item as held
-    now. A save that makes an item stored before the limit no larger is
-    not too large: such an item stays readable and can be edited down."""
+    every space. Strict, with one exception: when *was* (the item as held
+    now) is ITSELF over the limit — stored before the limit existed — a
+    version no larger than it is not too large, so such an item stays
+    readable and can be edited down. Both are measured the same way (the
+    kind's measure, stamps at their widest)."""
     size = space_item_bytes(item)
-    return size > limit and (was is None or size > space_item_bytes(was))
+    if size <= limit:
+        return False
+    if was is None:
+        return True
+    held = space_item_bytes(was)
+    return held <= limit or size > held
+
+
+# ── Stamps, ids and counters: bounded where they are read ─────────────────
+#
+# A record's who / when / which-version fields are not what a person
+# writes: they differ between the household that saves an item, the host
+# that sequences it and every household that receives it. Each kind's
+# measure counts them at their WIDEST (so all of them get the same number
+# for the same content), and every path that reads them from the wire
+# bounds them to that width — so the record that travels is never larger
+# than the one measured.
+
+#: The longest timestamp kept (ISO 8601, microseconds and an offset fit).
+STAMP_MAX_CHARS: int = 64
+
+#: The longest id kept (a user, an item, a household, a key) — the
+#: roster's own user id cap.
+ITEM_ID_MAX_CHARS: int = 128
+
+#: The largest counter (a sequence number) kept: a signed 64-bit integer,
+#: what SQLite stores and orjson writes.
+COUNTER_MAX: int = 2**63 - 1
+
+#: Each at its widest, for the measure.
+WIDEST_STAMP: str = "9" * STAMP_MAX_CHARS
+WIDEST_ID: str = "9" * ITEM_ID_MAX_CHARS
+
+
+def bounded_stamp(value: object) -> str:
+    """A timestamp read from the wire: an ISO 8601 string of at most
+    :data:`STAMP_MAX_CHARS` that parses; anything else is ``""`` (none)."""
+    if not isinstance(value, str) or not value or len(value) > STAMP_MAX_CHARS:
+        return ""
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return ""
+    return value
+
+
+def bounded_id(value: object) -> str:
+    """An id read from the wire: a string of at most
+    :data:`ITEM_ID_MAX_CHARS`; anything else is ``""`` (none)."""
+    if not isinstance(value, str) or len(value) > ITEM_ID_MAX_CHARS:
+        return ""
+    return value
+
+
+def bounded_counter(value: object, default: int = 0) -> int:
+    """A counter read from the wire: an integer (never a bool or a float)
+    in ``0..COUNTER_MAX``; anything else is *default*."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    return value if 0 <= value <= COUNTER_MAX else default
 
 
 def require_space_item_fits(
@@ -276,7 +338,9 @@ def parse_relay_media_body(buf: bytes) -> tuple[str, memoryview]:
 
 
 __all__ = [
+    "COUNTER_MAX",
     "ENVELOPE_MEDIA_CAPABILITY",
+    "ITEM_ID_MAX_CHARS",
     "RELAY_EVENT_FRAME_ALLOWANCE_BYTES",
     "RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES",
     "RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES",
@@ -295,10 +359,16 @@ __all__ = [
     "SPACE_CONFIG_RESERVE_BYTES",
     "SPACE_PAGE_ITEM_MAX_BYTES",
     "SPACE_PAGE_RESERVE_BYTES",
+    "STAMP_MAX_CHARS",
     "SUPPORTED_RELAY_MEDIA_VERSIONS",
     "SYNC_CHUNK_WRAP_ALLOWANCE_BYTES",
     "VALID_SEALED_LENGTHS",
+    "WIDEST_ID",
+    "WIDEST_STAMP",
     "InvalidRelayMediaBody",
+    "bounded_counter",
+    "bounded_id",
+    "bounded_stamp",
     "build_relay_media_body",
     "is_relay_media_body",
     "parse_relay_media_body",

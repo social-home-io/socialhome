@@ -138,3 +138,40 @@ def test_the_item_limits_are_derived_from_the_bound():
     assert rf.SPACE_CALENDAR_ITEM_MAX_BYTES == bound - rf.SPACE_CALENDAR_RESERVE_BYTES
     # Config: the event carries the item twice (flat + ``space_meta``).
     assert rf.SPACE_CONFIG_ITEM_MAX_BYTES * 2 + rf.SPACE_CONFIG_RESERVE_BYTES <= bound
+
+
+def test_no_larger_holds_only_when_the_held_copy_is_itself_over_the_limit():
+    """Within the limit the rule is strict: a held copy under it gives no
+    slack, however large the incoming version is next to it."""
+    limit = 1000
+    under = {"x": "a" * 900}
+    assert rf.space_item_too_large({"x": "a" * 1100}, limit=limit, was=under)
+    over = {"x": "a" * 5000}
+    assert not rf.space_item_too_large({"x": "b" * 5000}, limit=limit, was=over)
+    assert rf.space_item_too_large({"x": "b" * 5001}, limit=limit, was=over)
+
+
+@pytest.mark.parametrize(
+    ("value", "kept"),
+    [
+        ("2026-11-15T09:00:00.123456+00:00", True),
+        ("2026-11-15T09:00:00Z", True),
+        ("2026-11-15 09:00:00", True),
+        ("x" * 600_000, False),
+        ("2026-11-15T09:00:00" + " " * 60, False),
+        ("not a time", False),
+        (5, False),
+        (None, False),
+    ],
+)
+def test_a_stamp_is_kept_only_when_it_parses_and_is_short(value, kept):
+    assert rf.bounded_stamp(value) == (value if kept else "")
+
+
+def test_ids_and_counters_are_bounded():
+    assert rf.bounded_id("u" * rf.ITEM_ID_MAX_CHARS) == "u" * rf.ITEM_ID_MAX_CHARS
+    assert rf.bounded_id("u" * (rf.ITEM_ID_MAX_CHARS + 1)) == ""
+    assert rf.bounded_id(7) == ""
+    assert rf.bounded_counter(rf.COUNTER_MAX) == rf.COUNTER_MAX
+    for bad in (rf.COUNTER_MAX + 1, -1, True, 1e23, "7", None):
+        assert rf.bounded_counter(bad, default=3) == 3

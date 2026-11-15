@@ -406,6 +406,12 @@ SPACE_ALLOWED_APPS_MAX: int = 20
 _APP_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 
+#: How many post types, and how long a name, a wire config's
+#: ``allowed_post_types`` keeps.
+_POST_TYPES_MAX = 32
+_POST_TYPE_MAX_CHARS = 32
+
+
 def normalize_allowed_apps(raw: object, *, strict: bool = False) -> tuple[str, ...]:
     """A space's games list as stored: distinct app ids, sorted, at most
     :data:`SPACE_ALLOWED_APPS_MAX`.
@@ -833,11 +839,22 @@ class SpaceFeatures:
             "zone_only" if location_mode_raw == "zone_only" else "gps"
         )
         allowed_raw = raw.get("allowed_post_types")
+        # Bounded where it is read (a newer peer's type is kept): distinct
+        # short names, a few dozen at most — a config's settings stay far
+        # below its size limit.
         allowed = (
-            tuple(sorted(str(t) for t in allowed_raw))
+            tuple(
+                sorted(
+                    {
+                        t
+                        for t in allowed_raw
+                        if isinstance(t, str) and 0 < len(t) <= _POST_TYPE_MAX_CHARS
+                    }
+                )
+            )[:_POST_TYPES_MAX]
             if isinstance(allowed_raw, (list, tuple)) and allowed_raw
-            else defaults.allowed_post_types
-        )
+            else ()
+        ) or defaults.allowed_post_types
         return cls(
             calendar=bool(raw.get("calendar", defaults.calendar)),
             todo=bool(raw.get("todo", defaults.todo)),

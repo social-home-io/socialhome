@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -104,8 +105,22 @@ def test_page_record_is_the_row_its_hash_and_every_side():
     assert record["seq"] == 3 and record["content"] == "body"
 
 
-def test_measuring_a_page_skips_the_hash_but_not_its_length():
-    full = page_record(_page(), [])
-    measured = page_record(_page(), [], measure=True)
-    assert measured["version_hash"] != full["version_hash"]
-    assert len(json.dumps(measured)) == len(json.dumps(full))
+def test_measuring_a_page_counts_ids_stamps_and_counters_at_their_widest():
+    """Whoever measures (the saving household, the host, a receiver) gets
+    one number for the same words, whatever its stamps say — and never less
+    than what travels."""
+    plain = _page()
+    stamped = replace(
+        plain,
+        created_at="2026-11-15T09:00:00.123456+00:00",
+        updated_at="2026-11-15 09:00:00",
+        last_editor_user_id="u-" + "a" * 32,
+        seq=2**53,
+    )
+    measured = {
+        len(json.dumps(page_record(p, [], measure=True), ensure_ascii=False))
+        for p in (plain, stamped)
+    }
+    assert len(measured) == 1
+    full = len(json.dumps(page_record(stamped, []), ensure_ascii=False))
+    assert full < measured.pop()

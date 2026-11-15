@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from socialhome.domain.errors import CalendarRuleInvalidError
 from socialhome.utils.rrule import (
     MAX_RRULE_CHARS,
     clean_rrule,
@@ -283,5 +284,5 @@ def test_clean_rrule_on_receive_keeps_an_older_rule_and_drops_a_non_string():
 def test_clean_rrule_length_cap_holds_either_way(strict):
     at_cap = ("FREQ=DAILY;" + "X" * MAX_RRULE_CHARS)[:MAX_RRULE_CHARS]
     assert clean_rrule(at_cap, strict=strict) == at_cap
-    with pytest.raises(ValueError, match="longer than"):
+    with pytest.raises(CalendarRuleInvalidError):
         clean_rrule(at_cap + "X", strict=strict)

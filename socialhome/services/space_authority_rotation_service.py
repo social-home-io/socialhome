@@ -1443,14 +1443,11 @@ class SpaceAuthorityRotationService:
         refreshed = stub_space_from_metadata(
             space.id, host_instance_id=owner, meta=meta
         )
-        kept = config_within_limit(
+        refreshed = config_within_limit(
             keep_local_space_state(refreshed, existing=space, meta=meta, we_host=False),
             held=space,
             source=f"SPACE_AUTHORITY_ROTATED by {owner}",
         )
-        if kept is None:
-            return
-        refreshed = kept
         # Conditional in the SAME transaction as the save: a config applied
         # under the new key in the meantime (an inline-cert edit racing this
         # bundle) already stands and is never rolled back.

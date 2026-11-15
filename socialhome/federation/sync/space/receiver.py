@@ -82,6 +82,7 @@ from ....domain.post import (
     Post,
     PostType,
 )
+from ....domain.relay_media_frame import bounded_id, bounded_stamp
 from ....domain.space import (
     ContentAction,
     SpaceMember,
@@ -4244,15 +4245,18 @@ def _comment_from_record(r: dict[str, Any]) -> Comment | None:
 
 
 def _page_from_record(r: dict[str, Any], space_id: str) -> Page | None:
-    if not r.get("id") or not r.get("title"):
+    page_id = bounded_id(r.get("id"))
+    if not page_id or not r.get("title"):
         return None
+    # Ids and stamps bounded where they are read (the size rule measures
+    # them at their widest).
     return Page(
-        id=str(r["id"]),
+        id=page_id,
         title=str(r["title"]),
         content=str(r.get("content") or ""),
-        created_by=str(r.get("created_by") or ""),
-        created_at=str(r.get("created_at") or ""),
-        updated_at=str(r.get("updated_at") or ""),
+        created_by=bounded_id(r.get("created_by")),
+        created_at=bounded_stamp(r.get("created_at")),
+        updated_at=bounded_stamp(r.get("updated_at")),
         space_id=space_id or r.get("space_id"),
         cover_image_url=r.get("cover_image_url"),
     )

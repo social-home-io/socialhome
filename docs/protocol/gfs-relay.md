@@ -564,16 +564,47 @@ description and an 8,000-character about text; the demo's 450 KiB page
 fits. Next to the limit, each kind keeps small input caps of its own
 (sanity, not size): a calendar event's attendee ids are non-empty
 strings, each kept once, at most 1,000 (`MAX_EVENT_ATTENDEES`); its rule
-is at most 512 characters (`MAX_RRULE_CHARS`) and must parse
+is at most 512 characters (`MAX_RRULE_CHARS`) of RFC 5545 RECUR text
+only (`[A-Za-z0-9=;,+-]` — never a line break or a `:` that would start
+another iCalendar property in the ICS feed) and must parse
 (`FREQ=DAILY|WEEKLY|MONTHLY|YEARLY`, `utils/rrule.py`); its location is
 cut at 500 characters; a space's name is at most 120 characters
 (`SPACE_NAME_MAX_CHARS`, the SPA's field) and its emoji at most 16 code
-points (`MAX_EMOJI_CODEPOINTS`). Those hold where a person saves (422).
+points (`MAX_EMOJI_CODEPOINTS`). Those hold where a person saves (422,
+coded: `CALENDAR_ATTENDEES_INVALID`, `CALENDAR_RRULE_INVALID`,
+`SPACE_NAME_TOO_LONG`, `SPACE_EMOJI_TOO_LONG` — translated in the SPA).
 Where a household receives, an event saved before these checks stays
 deliverable: bad attendee ids are dropped and the list cut at its cap, a
 rule this build cannot read is kept as it is (it expands to its first
-occurrence, as before); only a rule over its length cap is refused
-(WARNING). The size is the whole item's rule either way.
+occurrence, as before); a rule over its length cap or with anything but
+RECUR text refuses the event (WARNING). The ICS writer also writes a rule
+only when it is RECUR text, and escapes SUMMARY / DESCRIPTION / LOCATION
+as RFC 5545 TEXT (a line break escaped; a CR, every other control
+character and U+2028 / U+2029 dropped). The size is the whole item's
+rule either way.
+
+**Ids, stamps and counters are measured at their widest.** A record's
+who / when / which-version fields differ between the household that
+saves an item, the host that sequences it and every receiver (a member's
+new page has no editor yet and `seq` 0; the host's has both). Each kind's
+measure counts them at their widest, so all of them get **the same number
+for the same content**, and every path that reads them from the wire
+bounds them to that width, so what travels is never larger than what was
+measured:
+
+| Field | Bound where read | Measured as |
+|---|---|---|
+| timestamps (a page's `created_at`, `updated_at`, `last_edited_at`, lock and delete stamps; a side's `at`) | ISO 8601 that parses, ≤ 64 characters (`STAMP_MAX_CHARS`), else none | 64 characters |
+| ids (a page's id, space, creator, editor, lock / delete actors; a side's `by`; a proposal's actor; a config's `owner_username`, `identity_public_key`, cover / icon hash) | a string ≤ 128 characters (`ITEM_ID_MAX_CHARS`, the roster's user id cap), else none (a page id over it: not stored) | 128 characters (page fields) |
+| counters (`seq`, a side's `base_seq`, `config_sequence`, `roster_sequence`, a calendar `capacity`) | an integer (never a bool or float) in 0..2^63−1 (`COUNTER_MAX`), else 0 / none | 2^63−1 |
+| a config's `config_hlc` | parsed and stored as `str(HLC)`, each part in 0..2^63−1, else `"0-0"` — never the raw string | its widest |
+| a config's name / emoji / zone / post types | name cut at 120, emoji over 16 code points → none, zone validated (≤ 64 characters), `allowed_post_types` ≤ 32 names of ≤ 32 | as they are |
+
+So everything in a config but its description and about text is bounded
+far below the config limit (under 16 KiB): keeping the held texts always
+brings a config within it, and **every setting and every security step
+after it** (the owner's GFS list and statement, the seed handling of a
+delegation change) **always runs**.
 
 Where it is enforced — unconditionally:
 
@@ -616,12 +647,10 @@ Where it is enforced — unconditionally:
   archive state, delegation and every other setting are applied; only
   its text is not taken — the description and about text are kept as
   held (then the name and emoji too, if that is still not enough;
-  nothing held → no description or about text, the name and emoji cut to
-  their caps), with a WARNING. A household never keeps enforcing a stale
-  access level because a description was too long. Only a config whose
-  **settings themselves** are over the limit without any text — a forged
-  list or id no honest household sends — is not stored at all (WARNING;
-  a join snapshot like that fails the join).
+  nothing held → none), with a WARNING. A household never keeps
+  enforcing a stale access level because a description was too long, and
+  the security steps after it always run (the rest of a config is bounded
+  where it is read, above, so it always fits).
 - **At the sender, behind all of it**: an event over the frame bound
   toward a household behind a GFS is refused (`relay_too_large`, WARNING
   naming household, event and size; never queued, never silently
@@ -632,11 +661,10 @@ Where it is enforced — unconditionally:
   stream stays whole and clean and the requester's watermark moves on.
 
 **An item that is already over its limit** (saved before this, or by a
-household on an older build) stays as it is. "No larger" compares the
-whole item, except the stamps and counters that change on every save by
-design (a page's `seq`, editor and edit times, lock fields; a config's
-`config_sequence`, `config_hlc`, `roster_sequence`), which are taken from
-the new version — so a longer sequence number never counts as growth:
+household on an older build) stays as it is. The rule is strict, with
+one exception: when the copy held is **itself** over the limit, a version
+no larger than it (on the same measure — stamps at their widest) is
+taken. A held copy within the limit gives no slack at all:
 
 | | What happens |
 |---|---|

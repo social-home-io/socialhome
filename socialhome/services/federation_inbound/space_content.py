@@ -108,6 +108,7 @@ from ...domain.post import (
     poll_deadline_passed,
     poll_options_from_wire,
 )
+from ...domain.relay_media_frame import ITEM_ID_MAX_CHARS, bounded_id, bounded_stamp
 from ...domain.space import (
     MODERATION_BLOCK_KEY,
     ContentAction,
@@ -245,13 +246,15 @@ def _page_from_payload(p: dict, page_id: str, space_id: str) -> Page:
         id=page_id,
         title=str(p.get("title") or ""),
         content=str(p.get("content") or ""),
-        created_by=str(p.get("created_by") or ""),
-        created_at=str(p.get("created_at") or p.get("occurred_at") or ""),
-        updated_at=str(p.get("updated_at") or p.get("occurred_at") or ""),
+        # Ids and stamps bounded where they are read (the size rule
+        # measures them at their widest).
+        created_by=bounded_id(p.get("created_by")),
+        created_at=bounded_stamp(p.get("created_at") or p.get("occurred_at")),
+        updated_at=bounded_stamp(p.get("updated_at") or p.get("occurred_at")),
         space_id=space_id,
         cover_image_url=cover if isinstance(cover, str) else None,
-        last_editor_user_id=str(
-            p.get("last_editor_user_id") or p.get("actor_user_id") or ""
+        last_editor_user_id=bounded_id(
+            p.get("last_editor_user_id") or p.get("actor_user_id")
         )
         or None,
     )
@@ -956,8 +959,12 @@ class SpaceContentInboundHandlers:
         p = event.payload
         page_id = str(p.get("id") or p.get("page_id") or "")
         title = str(p.get("title") or "")
-        if not page_id or (not title and "sequenced" not in p):
-            log.debug("SPACE_PAGE_* missing required field")
+        if (
+            not page_id
+            or len(page_id) > ITEM_ID_MAX_CHARS
+            or (not title and "sequenced" not in p)
+        ):
+            log.debug("SPACE_PAGE_* missing or oversize required field")
             return
         existing = await self._page_repo.get(page_id)
         if existing is not None and existing.space_id != space_id:

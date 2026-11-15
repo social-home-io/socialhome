@@ -31,8 +31,11 @@ naive); this is the legacy behaviour kept for ICS round-trip code.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
+
+from ..domain.errors import CalendarRuleInvalidError
 
 _WEEKDAYS = {
     "MO": 0,
@@ -132,30 +135,43 @@ def parse_rrule(rrule: str) -> dict:
 #: well under 100 characters.
 MAX_RRULE_CHARS: int = 512
 
+_RRULE_TEXT = re.compile(r"[A-Za-z0-9=;,+\-]+")
+
+
+def is_rrule_text(rule: str) -> bool:
+    """Whether *rule* holds only what an RFC 5545 RECUR value can (§3.3.10:
+    ``NAME=VALUE`` parts joined by ``;``, list items by ``,``; values are
+    letters, digits and a ``+`` / ``-`` sign) — never a line break or a
+    ``:`` that would start another iCalendar property."""
+    return _RRULE_TEXT.fullmatch(rule) is not None
+
 
 def clean_rrule(value: object, *, strict: bool = True) -> str | None:
     """A recurrence rule as a space calendar event stores it: ``None`` /
-    blank → no rule; else a string of at most :data:`MAX_RRULE_CHARS`
-    characters whose ``FREQ`` this parser knows (:func:`parse_rrule`).
-    Raises :class:`ValueError` on anything else.
+    blank → no rule; else at most :data:`MAX_RRULE_CHARS` characters of
+    RECUR text (:func:`is_rrule_text`) whose ``FREQ`` this parser knows
+    (:func:`parse_rrule`). Anything else raises
+    :class:`~socialhome.domain.errors.CalendarRuleInvalidError` (a
+    ``ValueError``; 422 where a person saves).
 
     Not *strict* (where a household receives): a rule saved before these
     checks whose ``FREQ`` this parser does not know is kept as it is (it
     expands to its first occurrence, as it always did); a non-string is
-    no rule. The length cap holds either way."""
+    no rule. The length cap and the RECUR text hold either way — the
+    event is then not stored."""
     if value is None:
         return None
     rule = value.strip() if isinstance(value, str) else None
     if rule is None:
         if not strict:
             return None
-        raise ValueError("rrule must be a string")
+        raise CalendarRuleInvalidError(MAX_RRULE_CHARS)
     if not rule:
         return None
-    if len(rule) > MAX_RRULE_CHARS:
-        raise ValueError(f"rrule is longer than {MAX_RRULE_CHARS} characters")
+    if len(rule) > MAX_RRULE_CHARS or not is_rrule_text(rule):
+        raise CalendarRuleInvalidError(MAX_RRULE_CHARS)
     if strict and parse_rrule(rule)["FREQ"] is None:
-        raise ValueError("rrule needs FREQ=DAILY, WEEKLY, MONTHLY or YEARLY")
+        raise CalendarRuleInvalidError(MAX_RRULE_CHARS)
     return rule
 
 

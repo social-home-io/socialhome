@@ -13,13 +13,17 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from ..utils.timezones import is_valid_tz, local_date, zone_of
-from .errors import CodedError
+from .errors import CalendarAttendeesInvalidError, CodedError
 
 #: Joins a recurring event's id and an occurrence's start in the id of a
 #: virtual occurrence (``<event id>@<start iso>``) — what reading a range
 #: expands a series into. Never a stored row's id: the §25.6 sync streams
 #: and stores the series row, and refuses an occurrence id.
 OCCURRENCE_ID_SEPARATOR: str = "@"
+
+#: The largest capacity kept: a signed 64-bit integer (what SQLite stores
+#: and orjson writes).
+CAPACITY_MAX: int = 2**63 - 1
 
 
 #: The most attendee ids one space calendar event names. Measured with the
@@ -63,18 +67,18 @@ def clean_attendees(value: object, *, strict: bool = True) -> tuple[str, ...]:
     )
     if listed is None:
         if strict:
-            raise ValueError("attendees must be a list of user ids")
+            raise CalendarAttendeesInvalidError(MAX_EVENT_ATTENDEES)
         return ()
     ids: dict[str, None] = {}
     for raw in listed:
         if not isinstance(raw, str) or not raw.strip():
             if strict:
-                raise ValueError("an attendee id must be a non-empty string")
+                raise CalendarAttendeesInvalidError(MAX_EVENT_ATTENDEES)
             continue
         ids[raw.strip()] = None
     if len(ids) > MAX_EVENT_ATTENDEES:
         if strict:
-            raise ValueError(f"at most {MAX_EVENT_ATTENDEES} attendees")
+            raise CalendarAttendeesInvalidError(MAX_EVENT_ATTENDEES)
         return tuple(ids)[:MAX_EVENT_ATTENDEES]
     return tuple(ids)
 
@@ -104,7 +108,11 @@ def calendar_record(event: CalendarEvent) -> dict[str, Any]:
 def coerce_capacity(value: object) -> int | None:
     """A peer-supplied per-occurrence ``capacity``: a non-negative integer,
     else ``None`` (no cap)."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= CAPACITY_MAX
+    ):
         return None
     return value
 
@@ -117,7 +125,11 @@ def validate_capacity(value: object) -> int | None:
     :class:`ValueError`."""
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= CAPACITY_MAX
+    ):
         raise ValueError("capacity must be a non-negative integer")
     return value
 

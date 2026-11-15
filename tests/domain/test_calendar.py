@@ -24,6 +24,7 @@ from socialhome.domain.calendar import (
     is_occurrence_id,
     material_changes,
 )
+from socialhome.domain.errors import CalendarAttendeesInvalidError
 
 
 def test_calendar_construction():
@@ -309,7 +310,7 @@ def test_clean_attendees_refuses_where_a_person_saves(bad):
 def test_clean_attendees_cap():
     ids = [str(n) for n in range(MAX_EVENT_ATTENDEES)]
     assert len(clean_attendees(ids)) == MAX_EVENT_ATTENDEES
-    with pytest.raises(ValueError, match="at most"):
+    with pytest.raises(CalendarAttendeesInvalidError):
         clean_attendees([*ids, "one more"])
     # Where a household receives: cut, not refused.
     assert len(clean_attendees([*ids, "x"], strict=False)) == MAX_EVENT_ATTENDEES

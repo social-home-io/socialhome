@@ -19,7 +19,7 @@ from socialhome.domain.events import (
     PageProposalSettled,
     PageUpdated,
 )
-from socialhome.domain.page import PageVersion
+from socialhome.domain.page import Page, PageVersion
 from socialhome.domain.page_version import PageConflictSide, version_hash
 from socialhome.repositories.page_repo import (
     PageNotFoundError,
@@ -39,6 +39,7 @@ from socialhome.services.page_conflict_service import (
     canonical_extras,
     canonical_from_wire,
     diff3_merge,
+    page_item_bytes,
     page_too_large,
     proposal_from_wire,
     side_to_wire,
@@ -196,7 +197,7 @@ def test_canonical_round_trip():
         title="T",
         content="s",
         by="u2",
-        at="t1",
+        at="2026-10-03T00:00:00+00:00",
         base_seq=2,
     )
     page = replace(
@@ -1110,10 +1111,16 @@ async def test_mark_sent_ignores_a_changed_draft(member):
 # ─── Host: no version over the page limit every space has ────────────────
 
 
+#: A page limit small enough to test with: the measure counts every id and
+#: stamp at its widest (~1.6 KB of a page and ~0.6 KB per side), plus room
+#: for ~1.5 KB of words.
+LIMIT = 3700
+
+
 @pytest.fixture
 def limited(monkeypatch):
     """The page limit (the whole record), small enough to test with."""
-    monkeypatch.setattr(mod, "SPACE_PAGE_ITEM_MAX_BYTES", 3000)
+    monkeypatch.setattr(mod, "SPACE_PAGE_ITEM_MAX_BYTES", LIMIT)
 
 
 async def test_the_host_refuses_a_proposal_that_would_be_too_large(env, limited):
@@ -1172,7 +1179,7 @@ async def test_an_edit_that_shrinks_an_old_oversize_page_is_taken(env, monkeypat
     """A page stored before the limit stays readable, and can be edited —
     as long as the edit does not make it larger."""
     await _propose(env, "x" * 5000)  # stored before the limit
-    monkeypatch.setattr(mod, "SPACE_PAGE_ITEM_MAX_BYTES", 3000)
+    monkeypatch.setattr(mod, "SPACE_PAGE_ITEM_MAX_BYTES", LIMIT)
     assert (await _page(env)).content == "x" * 5000
     grow = await _propose(env, "x" * 5001, base_seq=2, base="x" * 5000)
     assert (grow.outcome, grow.reason) == (SequenceOutcome.REFUSED, "too_large")
@@ -1276,7 +1283,7 @@ async def test_a_page_stored_over_the_limit_keeps_mirroring_no_larger(
     await env.svc.mirror(
         space_id=SID, page_id=env.pid, version=_version(page, "x" * 5000, 2)
     )
-    monkeypatch.setattr(mod, "SPACE_PAGE_ITEM_MAX_BYTES", 3000)
+    monkeypatch.setattr(mod, "SPACE_PAGE_ITEM_MAX_BYTES", LIMIT)
     page = await _page(env)
     same = replace(_version(page, "y" * 5000, 10_000), last_editor_user_id="u-z" * 3)
     assert await env.svc.mirror(space_id=SID, page_id=env.pid, version=same)
@@ -1298,7 +1305,7 @@ async def test_a_refusal_restores_a_page_stored_over_the_limit_over_our_draft(
         space_id=SID, page_id=env.pid, version=_version(page, "x" * 5000, 2)
     )
     await _draft(env, "short")
-    monkeypatch.setattr(mod, "SPACE_PAGE_ITEM_MAX_BYTES", 3000)
+    monkeypatch.setattr(mod, "SPACE_PAGE_ITEM_MAX_BYTES", LIMIT)
     refused = Sequenced(
         proposer_instance="me",
         proposal_hash=version_hash("T", "short"),
@@ -1312,3 +1319,56 @@ async def test_a_refusal_restores_a_page_stored_over_the_limit_over_our_draft(
     )
     page = await _page(env)
     assert (page.content, page.pending_base_seq) == ("x" * 5000, None)
+
+
+def test_stamps_never_hide_growth():
+    """Stamps are measured at their widest: an incoming version cannot
+    carry 600 KB in ``updated_at`` past a small held page — and the stamp
+    itself is bounded where a version is parsed."""
+    held = Page(
+        id="p",
+        title="t",
+        content="hello",
+        created_by="u",
+        created_at="2026-01-01",
+        updated_at="2026-01-01",
+        space_id="s",
+    )
+    grown = replace(held, updated_at="x" * 600_000, last_editor_user_id="y" * 100_000)
+    assert page_item_bytes(grown, ()) == page_item_bytes(held, ())
+    version = canonical_from_wire(
+        {
+            "seq": 2,
+            "title": "t",
+            "content": "c",
+            "updated_at": "x" * 600_000,
+            "last_editor_user_id": "y" * 100_000,
+            "created_by": "z" * 1000,
+        }
+    )
+    assert version is not None
+    assert version.updated_at == "" and version.last_editor_user_id == ""
+    assert version.created_by == ""
+
+
+def test_the_member_the_host_and_a_receiver_measure_the_same_page():
+    """A page at exactly its limit where a member saves it is at exactly
+    its limit where the host sequences it and where a receiver stores it —
+    no draft is ever stuck between two different numbers."""
+    uid = "u-0123456789abcdef0123456789abcdef"
+    member = new_page(title="T", content="", created_by=uid, space_id="sp-1")
+    base = page_item_bytes(member, ())
+    member = replace(member, content="a" * (mod.SPACE_PAGE_ITEM_MAX_BYTES - base))
+    now = "2026-11-15T09:00:00.123456+00:00"
+    host = replace(
+        member,
+        created_at=now,
+        updated_at=now,
+        last_editor_user_id=uid,
+        last_edited_at=now,
+        seq=1,
+    )
+    receiver = replace(host, seq=2**53, updated_at="2026-11-15 09:00:00")
+    sizes = {page_item_bytes(p, ()) for p in (member, host, receiver)}
+    assert sizes == {mod.SPACE_PAGE_ITEM_MAX_BYTES}
+    assert not any(page_too_large(p, ()) for p in (member, host, receiver))
