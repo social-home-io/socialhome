@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import orjson
 
+from ..domain.errors import NotFoundError
 from ..domain.events import (
     SpaceConfigChanged,
     SpaceMemberLeft,
@@ -675,7 +676,7 @@ class SpaceModerationService(BusPublisherMixin):
     async def _space(self, space_id: str) -> Space:
         space = await self._spaces.get(space_id)
         if space is None or space.dissolved:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         return space
 
     async def _require_content_authority(self, space_id: str, user_id: str) -> str:
@@ -725,7 +726,7 @@ class SpaceModerationService(BusPublisherMixin):
     async def get_item(self, space_id: str, item_id: str) -> SpaceModerationItem:
         item = await self._spaces.get_moderation_item(item_id)
         if item is None or item.space_id != space_id:
-            raise KeyError(f"moderation item {item_id!r} not found")
+            raise NotFoundError(f"moderation item {item_id!r} not found")
         if not item.feature:
             # A tombstone: decided elsewhere before it ever reached us.
             raise ModerationAlreadyDecidedError(

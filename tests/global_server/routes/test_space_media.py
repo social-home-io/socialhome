@@ -282,7 +282,9 @@ async def test_every_auth_failure_is_the_same_403(gfs, case):
     elif case == "stale_ts":
         headers = _authority_header(_claim(data, ts=int(time.time()) - 301))
     elif case == "future_ts":
-        headers = _authority_header(_claim(data, ts=int(time.time()) + 301))
+        # Well past the window: ``now + 301`` became in-window as soon as
+        # one second passed before the GFS checked it (a loaded test run).
+        headers = _authority_header(_claim(data, ts=int(time.time()) + 360))
     else:  # signed for another blob than the path names
         headers = _authority_header(_claim(os.urandom(SMALL)))
     r = await gfs.put(_put_url(data), data=data, headers=headers)

@@ -1,6 +1,9 @@
 """Tests for socialhome.routes.tasks."""
 
+from unittest.mock import AsyncMock, patch
+
 from socialhome.auth import sha256_token_hash
+from socialhome.repositories.task_repo import SqliteSpaceTaskRepo
 
 from .conftest import _auth
 
@@ -723,3 +726,22 @@ async def test_space_task_list_roster_carries_open_count(client):
     r = await client.get(f"{base}/lists", headers=h)
     assert r.status == 200
     assert [(row["id"], row["open_count"]) for row in await r.json()] == [(lid, 2)]
+
+
+async def test_a_task_save_the_repo_refuses_is_a_logged_404(client, caplog):
+    """The space-scoped save refused (the row moved space / vanished under
+    the edit): a 404 for the caller and an operator WARNING."""
+    _bob, _lid, tid = await _cross_space_env(client)
+    admin = _auth(client._tok)
+    caplog.set_level("WARNING", logger="socialhome.services.task_service")
+    refused = AsyncMock(return_value=False)
+    with patch.object(SqliteSpaceTaskRepo, "save", refused):
+        r = await client.patch(
+            f"/api/spaces/sp-b/tasks/{tid}", json={"title": "x"}, headers=admin
+        )
+        assert r.status == 404, await r.text()
+        assert "refused to save" in caplog.text
+        caplog.clear()
+        r = await client.post(f"/api/spaces/sp-b/tasks/{tid}/archive", headers=admin)
+        assert r.status == 404, await r.text()
+        assert "refused to save" in caplog.text

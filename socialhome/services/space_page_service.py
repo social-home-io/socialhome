@@ -43,7 +43,11 @@ from typing import TYPE_CHECKING, Any
 
 import aiofiles.os
 
-from ..domain.errors import PageFilesNotShareableError, SpaceItemTooLargeError
+from ..domain.errors import (
+    NotFoundError,
+    PageFilesNotShareableError,
+    SpaceItemTooLargeError,
+)
 from ..domain.events import PageCreated, PageDeleted, PageUpdated
 from ..domain.file_hashes import is_space_content_media_name
 from ..domain.page import MAX_PAGE_TITLE_LENGTH, Page, PageVersion
@@ -406,7 +410,7 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         """
         space = await self._spaces.get(space_id)
         if space is None or space.dissolved:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         if space.archived:
             raise SpaceArchivedError()
         member = await self._spaces.get_member(space_id, user_id)
@@ -422,7 +426,7 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
     async def get(self, space_id: str, page_id: str) -> Page:
         page = await self._pages.get_space_page(page_id, space_id=space_id)
         if page is None:
-            raise KeyError(f"page {page_id!r} not found in this space")
+            raise NotFoundError(f"page {page_id!r} not found in this space")
         return page
 
     async def versions(self, space_id: str, page_id: str) -> builtins.list[PageVersion]:

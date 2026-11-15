@@ -23,6 +23,7 @@ import orjson
 
 from ..crypto import derive_user_id, generate_identity_keypair
 from ..domain.child_protection import ProtectedCapability
+from ..domain.errors import NotFoundError
 from ..domain.events import (
     UserBlocked,
     UserDeprovisioned,
@@ -267,7 +268,7 @@ class UserService(ProtectionGateMixin):
         """
         existing = await self._repo.get(username)
         if existing is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         await self._repo.soft_delete(username, grace_days=grace_days)
         await self._bus.publish(
             UserDeprovisioned(user_id=existing.user_id, username=username),
@@ -285,7 +286,7 @@ class UserService(ProtectionGateMixin):
         """
         existing = await self._repo.get(username)
         if existing is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         if existing.source != "ha":
             raise PermissionError(
                 f"user {username!r} is not HA-synced (source={{existing.source!r}})",
@@ -298,7 +299,7 @@ class UserService(ProtectionGateMixin):
     async def set_admin(self, username: str, is_admin: bool) -> User:
         user = await self._repo.get(username)
         if user is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         await self._repo.set_admin(username, is_admin)
         return replace(user, is_admin=is_admin)
 
@@ -320,7 +321,7 @@ class UserService(ProtectionGateMixin):
         """
         user = await self._repo.get(username)
         if user is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         if user.source != "manual":
             raise PermissionError(
                 f"username {username!r} is controlled by Home Assistant",
@@ -419,7 +420,7 @@ class UserService(ProtectionGateMixin):
         """
         user = await self._repo.get(username)
         if user is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         new_handle = new_handle.strip()
         if new_handle == user.handle:
             return
@@ -456,7 +457,7 @@ class UserService(ProtectionGateMixin):
         """
         user = await self._repo.get(username)
         if user is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
 
         next_display = user.display_name
         if not isinstance(display_name, _Unset):
@@ -510,7 +511,7 @@ class UserService(ProtectionGateMixin):
             raise RuntimeError("profile picture repo not attached")
         user = await self._repo.get_by_user_id(user_id)
         if user is None:
-            raise KeyError(f"user_id {user_id!r} not found")
+            raise NotFoundError(f"user_id {user_id!r} not found")
         webp_bytes, hash_ = await normalize_profile_picture(raw_bytes)
         await self._pictures.set_user_picture(
             user_id,
@@ -539,7 +540,7 @@ class UserService(ProtectionGateMixin):
             raise RuntimeError("profile picture repo not attached")
         user = await self._repo.get_by_user_id(user_id)
         if user is None:
-            raise KeyError(f"user_id {user_id!r} not found")
+            raise NotFoundError(f"user_id {user_id!r} not found")
         await self._pictures.clear_user_picture(user_id)
         await self._repo.set_picture_hash(user_id, None)
         await self._bus.publish(
@@ -580,7 +581,7 @@ class UserService(ProtectionGateMixin):
             raise ValueError(f"unknown IANA timezone {tz!r}") from exc
         user = await self._repo.get(username)
         if user is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         if user.tz == tz:
             return user
         await self._repo.set_tz(username, tz)
@@ -598,7 +599,7 @@ class UserService(ProtectionGateMixin):
         """
         user = await self._repo.get(username)
         if user is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         ha_opt_in = patch.get(HA_AUTOMATION_EVENTS_KEY)
         if ha_opt_in is not None and not isinstance(ha_opt_in, bool):
             raise ValueError(f"{HA_AUTOMATION_EVENTS_KEY} must be true or false")
@@ -643,7 +644,7 @@ class UserService(ProtectionGateMixin):
         """
         user = await self._repo.get(username)
         if user is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         now = now or datetime.now(UTC)
         clean_emoji = clean_status_emoji(emoji)
         clean_text = clean_status_text(text)
@@ -687,7 +688,7 @@ class UserService(ProtectionGateMixin):
     async def clear_onboarding(self, username: str) -> None:
         user = await self._repo.get(username)
         if user is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         if user.is_new_member:
             await self._repo.save(replace(user, is_new_member=False))
 
@@ -707,7 +708,7 @@ class UserService(ProtectionGateMixin):
         """
         user = await self._repo.get(username)
         if user is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         # §CP.R: a protected account doesn't hand a bearer credential to an
         # external tool. Browser sign-ins mint through the platform adapter,
         # not here, so logging in is unaffected.
@@ -748,13 +749,13 @@ class UserService(ProtectionGateMixin):
         """
         user = await self._repo.get(username)
         if user is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         await self._repo.revoke_api_token_for_user(user.user_id, token_id)
 
     async def list_api_tokens(self, username: str) -> list[dict]:
         user = await self._repo.get(username)
         if user is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         return await self._repo.list_api_tokens(user.user_id)
 
     # ── Blocks ──────────────────────────────────────────────────────────
@@ -762,7 +763,7 @@ class UserService(ProtectionGateMixin):
     async def block(self, blocker_username: str, blocked_user_id: str) -> None:
         blocker = await self._repo.get(blocker_username)
         if blocker is None:
-            raise KeyError(f"user {blocker_username!r} not found")
+            raise NotFoundError(f"user {blocker_username!r} not found")
         if blocker.user_id == blocked_user_id:
             raise ValueError("Cannot block yourself")
         await self._repo.block(blocker.user_id, blocked_user_id)
@@ -776,7 +777,7 @@ class UserService(ProtectionGateMixin):
     async def unblock(self, blocker_username: str, blocked_user_id: str) -> None:
         blocker = await self._repo.get(blocker_username)
         if blocker is None:
-            raise KeyError(f"user {blocker_username!r} not found")
+            raise NotFoundError(f"user {blocker_username!r} not found")
         await self._repo.unblock(blocker.user_id, blocked_user_id)
         await self._bus.publish(
             UserUnblocked(
@@ -800,7 +801,7 @@ class UserService(ProtectionGateMixin):
         """
         blocker = await self._repo.get(blocker_username)
         if blocker is None:
-            raise KeyError(f"user {blocker_username!r} not found")
+            raise NotFoundError(f"user {blocker_username!r} not found")
         rows = await self._repo.list_blocked(blocker.user_id)
         return [{"user_id": uid, "blocked_at": at} for uid, at in rows]
 
@@ -809,7 +810,7 @@ class UserService(ProtectionGateMixin):
     async def follow(self, follower_username: str, followed_user_id: str) -> None:
         follower = await self._repo.get(follower_username)
         if follower is None:
-            raise KeyError(f"user {follower_username!r} not found")
+            raise NotFoundError(f"user {follower_username!r} not found")
         if follower.user_id == followed_user_id:
             raise ValueError("Cannot follow yourself")
         await self._repo.follow(follower.user_id, followed_user_id)
@@ -823,7 +824,7 @@ class UserService(ProtectionGateMixin):
     async def unfollow(self, follower_username: str, followed_user_id: str) -> None:
         follower = await self._repo.get(follower_username)
         if follower is None:
-            raise KeyError(f"user {follower_username!r} not found")
+            raise NotFoundError(f"user {follower_username!r} not found")
         await self._repo.unfollow(follower.user_id, followed_user_id)
         await self._bus.publish(
             UserUnfollowed(
@@ -836,7 +837,7 @@ class UserService(ProtectionGateMixin):
         """Return ``[{user_id, created_at}, …]`` for the follower."""
         follower = await self._repo.get(follower_username)
         if follower is None:
-            raise KeyError(f"user {follower_username!r} not found")
+            raise NotFoundError(f"user {follower_username!r} not found")
         rows = await self._repo.list_following(follower.user_id)
         return [{"user_id": uid, "created_at": at} for uid, at in rows]
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import aiolibdatachannel as rtc
@@ -249,6 +250,196 @@ async def test_ice_candidate_the_native_layer_rejects_does_not_raise():
     s._pc.add_remote_candidate = AsyncMock(side_effect=rtc.RTCError("no transport"))
     await s.add_ice_candidate(_CAND)
     s._pc.add_remote_candidate.assert_awaited_once()
+
+
+class _RacyPc(rtc.PeerConnection):
+    """aiolibdatachannel's PeerConnection as far as this race goes: a call
+    that applies remote state runs in an executor thread (here: waits for
+    :attr:`gate`) and only then reaches the native handle, while
+    ``close()`` schedules the teardown that deletes that handle on its
+    own. A call that reaches a deleted handle is what libdatachannel logs
+    as ``PeerConnection ID does not exist`` (ERROR) — recorded in
+    :attr:`after_destroy`."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+        self.reached = asyncio.Event()
+        self.destroyed = False
+        self.after_destroy: list[str] = []
+
+    async def _native_call(self, name: str) -> None:
+        # The executor job outlives a cancelled awaiter, like
+        # ``run_in_executor``'s thread does.
+        self.reached.set()
+        await asyncio.shield(asyncio.ensure_future(self._job(name)))
+
+    async def _job(self, name: str) -> None:
+        await self.gate.wait()
+        if self.destroyed:
+            self.after_destroy.append(name)
+
+    async def add_remote_candidate(self, candidate: str, mid: str = "") -> None:
+        await self._native_call("add_remote_candidate")
+
+    async def set_remote_description(self, sdp: str, type_: str) -> None:
+        await super().set_remote_description(sdp, type_)
+        await self._native_call("set_remote_description")
+
+    def close(self) -> None:
+        super().close()
+        asyncio.get_running_loop().call_soon(setattr, self, "destroyed", True)
+
+
+def _session(role: str) -> tuple[SyncRtcSession, _RacyPc]:
+    s = SyncRtcSession(
+        sync_id="sid",
+        space_id="sp1",
+        requester_instance_id="r",
+        provider_instance_id="p",
+        role=role,
+    )
+    s._pc = pc = _RacyPc()
+    return s, pc
+
+
+async def _close_while_in_flight(s: SyncRtcSession, pc: _RacyPc, call) -> None:
+    """``close()`` while ``call`` is in the executor; then let it land."""
+    task = asyncio.create_task(call)
+    await pc.reached.wait()
+    s.close()
+    for _ in range(3):  # the teardown runs before the executor job lands
+        await asyncio.sleep(0)
+    pc.gate.set()
+    try:
+        await task
+    except ConnectionError:
+        pass
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+
+async def test_close_never_deletes_the_pc_under_an_in_flight_ice_candidate():
+    """A remote candidate that arrives as the stream ends (the provider's
+    late srflx candidate, trickled via SPACE_SYNC_ICE) passes the closed
+    check and goes to the executor — and ``close()`` deleted the native
+    peer connection before the executor thread reached it: libdatachannel's
+    ``PeerConnection ID does not exist`` ERROR in the federation demo.
+    ``close()`` now waits for the in-flight call, then closes."""
+    s, pc = _session("requester")
+    await _close_while_in_flight(s, pc, s.add_ice_candidate(_CAND))
+    assert pc.after_destroy == []
+    assert pc.closed and pc.destroyed
+    assert s.is_closed
+
+
+async def test_close_never_deletes_the_pc_under_an_in_flight_answer():
+    """The same window for the provider applying the requester's answer."""
+    s, pc = _session("provider")
+    await s.create_offer()
+    await _close_while_in_flight(s, pc, s.set_answer("v=0\r\nanswer\r\n"))
+    assert pc.after_destroy == []
+    assert pc.closed and pc.destroyed
+
+
+async def test_create_answer_after_a_close_mid_way_is_a_connection_error():
+    """``close()`` landing while the requester applies the offer: no
+    answer is built on the torn-down session (used to be an
+    ``AttributeError`` on ``None``), and nothing reaches a deleted pc."""
+    s, pc = _session("requester")
+    task = asyncio.create_task(s.create_answer("v=0\r\noffer\r\n"))
+    await pc.reached.wait()
+    s.close()
+    await asyncio.sleep(0)
+    pc.gate.set()
+    with pytest.raises(ConnectionError):
+        await task
+    await asyncio.sleep(0)
+    assert pc.after_destroy == []
+    assert pc.closed and pc.destroyed
+
+
+async def test_a_loop_wide_cancel_never_closes_under_the_executor_job():
+    """Loop shutdown cancels every task, the call's own task included,
+    while its executor thread is still in libdatachannel. The session must
+    not take that as "the call returned" and delete the handle under it:
+    the pc is left to the binding's exit sweep instead — now, and for a
+    later ``close()``."""
+    s, pc = _session("requester")
+    caller = asyncio.create_task(s.add_ice_candidate(_CAND))
+    await pc.reached.wait()
+    s.close()
+    (call,) = [
+        t
+        for t in asyncio.all_tasks()
+        if t.get_coro().__qualname__ == "_RacyPc.add_remote_candidate"
+    ]
+    call.cancel()
+    caller.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    pc.gate.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert pc.after_destroy == []
+    assert not pc.closed
+    s.close()  # a second close does not close it either
+    assert not pc.closed
+
+
+async def test_a_cancelled_caller_still_holds_off_the_close():
+    """The SPACE_SYNC_ICE handler cancelled mid-call (shutdown): the
+    executor job runs on regardless, so the close still waits for it."""
+    s, pc = _session("requester")
+    task = asyncio.create_task(s.add_ice_candidate(_CAND))
+    await pc.reached.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    s.close()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert not pc.closed
+    pc.gate.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert pc.after_destroy == []
+    assert pc.closed and pc.destroyed
+
+
+async def test_watchers_stand_down_while_the_close_waits():
+    """Between ``close()`` and the deferred ``pc.close()`` the pc's
+    watcher tasks still run: a data channel arriving then is not adopted
+    (it used to be, then ``spawn_task`` on ``None`` raised), and the
+    session does not turn ready again."""
+    s, pc = _session("requester")
+    watcher = pc.spawn_task(s._watch_incoming())
+    in_flight = asyncio.create_task(s.add_ice_candidate(_CAND))
+    await pc.reached.wait()
+    s.close()
+    channel = await pc.create_data_channel(CHANNEL_LABEL)
+    pc._incoming_queue.put_nowait(channel)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert watcher.done() and watcher.exception() is None
+    assert s._channel is None
+    await s._watch_channel(channel)
+    assert not s.is_ready
+    pc.gate.set()
+    await in_flight
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert pc.closed and pc.after_destroy == []
+
+
+async def test_no_native_call_starts_after_close():
+    s, pc = _session("requester")
+    s.close()
+    await asyncio.sleep(0)
+    with pytest.raises(ConnectionError):
+        await s.create_answer("v=0\r\noffer\r\n")
+    await s.add_ice_candidate(_CAND)  # dropped quietly, as before
+    assert not pc.reached.is_set()
 
 
 # ─── Lifecycle ────────────────────────────────────────────────────────────

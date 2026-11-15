@@ -18,6 +18,7 @@ from socialhome.domain.errors import (
     ImageTooLargeError,
     ImageUnreadableError,
     InvalidMediaRefError,
+    NotFoundError,
     PayloadTooLargeError,
     SpaceNotPublishableError,
     TierChangeRequiredError,
@@ -382,3 +383,22 @@ def test_video_unreadable_and_queue_full():
     full = TranscodeQueueFullError()
     assert (full.status, full.code) == (503, "TRANSCODE_QUEUE_FULL")
     assert not isinstance(full, ValueError)
+
+
+# ─── Not found ───────────────────────────────────────────────────────────
+
+
+def test_not_found_is_a_coded_404_that_is_still_a_key_error():
+    """Callers that caught the old bare ``KeyError`` keep catching it; the
+    client sees only the fixed detail, never the id in ``what``."""
+    exc = NotFoundError("space post 'p1' not found")
+    assert isinstance(exc, KeyError)
+    assert (exc.status, exc.code, exc.detail) == (
+        404,
+        "NOT_FOUND",
+        "Resource not found.",
+    )
+    assert exc.params == {}
+    assert str(exc) == str(KeyError("space post 'p1' not found"))
+    with pytest.raises(KeyError, match="p1"):
+        raise exc

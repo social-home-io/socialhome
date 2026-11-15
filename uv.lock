@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.14"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -149,13 +149,13 @@ speedups = [
 
 [[package]]
 name = "aiolibdatachannel"
-version = "2026.11.10"
+version = "2026.11.15"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/21/1b/b6abb82fa3a9e689fa83d6e621afa72b39ce546bd1012b3c90cc111d6035/aiolibdatachannel-2026.11.10.tar.gz", hash = "sha256:1e7c49bcec11a927bd4fa1c048a8f3a3a39f830f66b285d88b83cae1b703c56b", size = 11708912, upload-time = "2026-11-10T15:40:17.606Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9c/41/18ffb3bf0a5aa1b6c5b1eba77cf9146c8ac844958fcd1d976eedeb602d30/aiolibdatachannel-2026.11.15.tar.gz", hash = "sha256:0f655686b8ead48124269f87c25c92da285bfd8cb8b95dc632b1358907876270", size = 11712070, upload-time = "2026-11-15T15:35:13.93Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d3/1f/ba646c6e4dcbdcd4155f2146605f96b9e7defc0373599d4afc618baa9b72/aiolibdatachannel-2026.11.10-cp314-cp314-macosx_26_0_arm64.whl", hash = "sha256:eddfa5bf40c2342a0023c19932e6c88c4d4e5762da83af716afaf348c07b2780", size = 4419943, upload-time = "2026-11-10T15:40:12.685Z" },
-    { url = "https://files.pythonhosted.org/packages/8f/52/d5e20ee17646b7f13f299adb8189843c55e7b10ffbcca3f8ec6ca0c26be6/aiolibdatachannel-2026.11.10-cp314-cp314-manylinux_2_34_aarch64.whl", hash = "sha256:65915e7a708c2dd7a37bf03174844b1c7c7355044976fecd043348691469bb0a", size = 4867571, upload-time = "2026-11-10T15:40:14.216Z" },
-    { url = "https://files.pythonhosted.org/packages/6d/fd/76684d467be9f8a31476e9dbf6206a2df53bd08370ba1171df7c9bd44d88/aiolibdatachannel-2026.11.10-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "sha256:83bc0c214bf3590031159b1b9b0303c51a76ec424c0f92e03bf573a9e3c5cf35", size = 5176692, upload-time = "2026-11-10T15:40:15.966Z" },
+    { url = "https://files.pythonhosted.org/packages/44/6c/f1060f1e824e0e66a4287b5629caa87b37718f591880b412f40e95544273/aiolibdatachannel-2026.11.15-cp314-cp314-macosx_26_0_arm64.whl", hash = "sha256:2cfee7a0930654e16c7bf325ba3025e17475f64c5d9ecdb29428cdb65c12a6fa", size = 4420850, upload-time = "2026-11-15T15:35:08.662Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/14/757e8cdda03d5422ab959ac6dff7f6395a849d0a57ef06ecffecba44034e/aiolibdatachannel-2026.11.15-cp314-cp314-manylinux_2_34_aarch64.whl", hash = "sha256:40546c8f1ac9eb637657e3b7aac4e4a6dde9ce98f4b60f34043f790c40e5c449", size = 4868488, upload-time = "2026-11-15T15:35:10.355Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/72/21cfd254538645c57a8ff32f57e9497df7c7ca28bf40135661f90953283f/aiolibdatachannel-2026.11.15-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "sha256:f1a9534f74660eb58389f7934b389afd4f4d3c4c3841e83320e930d979ee26e8", size = 5177571, upload-time = "2026-11-15T15:35:12.375Z" },
 ]
 
 [[package]]
@@ -1688,7 +1688,7 @@ requires-dist = [
     { name = "aiofiles", specifier = "==25.1.0" },
     { name = "aiohttp", specifier = "==3.14.5" },
     { name = "aiohttp", extras = ["speedups"], marker = "extra == 'dev'", specifier = "==3.14.5" },
-    { name = "aiolibdatachannel", specifier = "==2026.11.10" },
+    { name = "aiolibdatachannel", specifier = "==2026.11.15" },
     { name = "aiosqlite", specifier = "==0.22.1" },
     { name = "av", specifier = "==19.0.2" },
     { name = "bcrypt", marker = "extra == 'dev'", specifier = "==5.0.0" },

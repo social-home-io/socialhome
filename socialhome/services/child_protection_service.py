@@ -37,6 +37,7 @@ from ..domain.child_protection import (
     AccountProtectedError,
     ProtectedCapability,
 )
+from ..domain.errors import NotFoundError
 from ..domain.events import (
     CpBlockAdded,
     CpBlockRemoved,
@@ -745,7 +746,7 @@ class ChildProtectionService:
             raise ValueError(f"min_age must be one of {sorted(_VALID_MIN_AGES)}")
         # Confirm the space exists so we don't silently swallow typos.
         if not await self._repo.space_exists(space_id):
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         await self._repo.update_space_age_gate(space_id=space_id, min_age=min_age)
         await self._bus.publish(
             CpSpaceAgeGateChanged(space_id=space_id, min_age=min_age)
