@@ -9,10 +9,14 @@ a real peer connection.
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
+import random
 import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from PIL import Image
 
 from socialhome.crypto import (
     derive_instance_id,
@@ -37,6 +41,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.domain.media_constraints import SPACE_COVER_MAX_BYTES
 from socialhome.domain.space import (
     AgeRestrictedError,
     HostUnreachableError,
@@ -1843,6 +1848,47 @@ async def test_accept_seats_the_stub_from_the_snapshot_and_expires_the_rest(stac
     assert (await stack.space_repo.get_invitation_by_token("t-other"))[
         "status"
     ] == "expired"
+
+
+class _Covers:
+    """The cover repo, recording what the accept stores."""
+
+    def __init__(self) -> None:
+        self.stored: tuple[bytes, str] | None = None
+
+    async def get(self, space_id):
+        return self.stored
+
+    async def set(self, space_id, *, bytes_webp, hash, width, height):
+        self.stored = (bytes_webp, hash)
+
+
+async def test_accept_stores_an_over_cap_cover_as_a_rendition(stack):
+    """I4 (invitation-accept caller) + the edge case: a join snapshot is
+    always taken leniently — its cover was sealed when the invitation was
+    made, maybe by a host that upgraded since — so a cover over the one
+    cap is stored as a rendition within it, never dropped."""
+    img = Image.frombytes("RGB", (700, 500), random.Random(7).randbytes(700 * 500 * 3))
+    buf = io.BytesIO()
+    img.save(buf, format="WEBP", quality=75)
+    big = buf.getvalue()
+    assert SPACE_COVER_MAX_BYTES < len(big) <= 256 * 1024
+    bob = await _user(stack, "bobcover")
+    await _snapshot_invite(
+        stack,
+        bob.user_id,
+        token="t-cover",
+        issuer="peer",
+        cover_hash="c-host",
+        cover_webp_base64=base64.b64encode(big).decode("ascii"),
+    )
+    covers = _Covers()
+    stack.svc._covers = covers
+    await stack.svc.accept_remote_invite(token="t-cover", user_id=bob.user_id)
+    assert covers.stored is not None
+    webp, hash_ = covers.stored
+    assert hash_ == "c-host" and len(webp) <= SPACE_COVER_MAX_BYTES
+    assert webp[8:12] == b"WEBP"
 
 
 async def test_accept_refuses_a_space_held_under_another_owner(stack):

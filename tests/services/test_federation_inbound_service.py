@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import random
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -36,7 +37,10 @@ from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.gfs_server import GfsServer
 from socialhome.domain.link_preview import LinkPreview
-from socialhome.domain.media_constraints import SPACE_COVER_MAX_DIMENSION
+from socialhome.domain.media_constraints import (
+    SPACE_COVER_MAX_BYTES,
+    SPACE_COVER_MAX_DIMENSION,
+)
 from socialhome.domain.post import (
     FEED_POST_MAX_IMAGES,
     Comment,
@@ -2868,6 +2872,48 @@ async def test_a_cover_over_the_dimension_cap_is_refused(db, image_inbound):
         ),
     )
     assert await image_inbound.covers.get("sp-img") == (old, "h-old")
+
+
+def _noisy_webp(width: int, height: int) -> bytes:
+    img = PILImage.frombytes(
+        "RGB", (width, height), random.Random(width).randbytes(width * height * 3)
+    )
+    out = io.BytesIO()
+    img.save(out, format="WEBP", quality=75)
+    return out.getvalue()
+
+
+@pytest.mark.parametrize(("version", "stored"), [(80, True), (95, False)])
+async def test_an_over_cap_cover_from_a_released_host_is_re_encoded(
+    db, image_inbound, version, stored
+):
+    """I4 (config-change caller): a cover over the one cap from a host below
+    v_95 (the released line sends paired members up to 256 KiB) is stored as
+    a rendition within the cap; from a v_95 host it is refused and the held
+    cover kept."""
+    old = await _seed_cover_space(db, image_inbound)
+
+    async def _supports(iid, *, min_version):
+        return version >= min_version
+
+    image_inbound.service._federation_service = SimpleNamespace(
+        own_instance_id="self-iid", space_member_supports=_supports
+    )
+    big = _noisy_webp(700, 500)
+    assert SPACE_COVER_MAX_BYTES < len(big) <= 256 * 1024
+    await image_inbound.service._on_space_config_changed(
+        _image_event(
+            cover_hash="h-new",
+            icon_hash="i-old",
+            cover_webp_base64=base64.b64encode(big).decode("ascii"),
+        ),
+    )
+    got = await image_inbound.covers.get("sp-img")
+    if stored:
+        assert got[1] == "h-new" and len(got[0]) <= SPACE_COVER_MAX_BYTES
+        assert got[0][8:12] == b"WEBP"
+    else:
+        assert got == (old, "h-old")
 
 
 async def test_a_stale_cover_change_never_lands(db, image_inbound):

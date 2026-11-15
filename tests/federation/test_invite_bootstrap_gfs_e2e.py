@@ -100,6 +100,7 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services import space_service as space_service_module
 from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.gfs_envelope_sender import GfsEnvelopeSender
 from socialhome.services.gfs_mailbox_service import (
@@ -696,6 +697,45 @@ async def test_a_space_with_a_big_cover_is_still_joinable_by_link(households, gf
         webp, _hash = got
         assert webp == (await theirs.get(space.id))[0]
         Image.open(io.BytesIO(webp)).verify()
+
+
+async def test_a_released_hosts_over_cap_cover_is_re_encoded_by_the_joiner(
+    households, gfs, monkeypatch
+):
+    """I4 (invite-link redeem caller): a host that does not cap its images
+    (a released one — modelled by shipping its stored cover verbatim) sends
+    a cover over the one cap in the ACK. The joiner takes a join snapshot
+    leniently: the cover is stored as a rendition within the cap under the
+    host's hash, not dropped."""
+    a, b = households
+    space, hint = await _mint_invite(b, gfs.url)
+    noisy = Image.frombytes(
+        "RGB", (500, 350), random.Random(5).randbytes(500 * 350 * 3)
+    )
+    buf = io.BytesIO()
+    noisy.save(buf, format="WEBP", quality=75)
+    big = buf.getvalue()
+    assert SPACE_COVER_MAX_BYTES < len(big) <= 128 * 1024
+    await b.cover_repo.set(space.id, bytes_webp=big, hash="c-old", width=0, height=0)
+    await b.space_repo.set_cover_hash(space.id, "c-old")
+
+    async def _verbatim(webp, **_kw):
+        return webp
+
+    monkeypatch.setattr(space_service_module, "_bounded_space_image", _verbatim)
+    result = await a.space_service.redeem_invite_token(
+        TOKEN_MARKER,
+        user_id=a.user_id,
+        issuer_instance_id=b.instance_id,
+        bootstrap=hint,
+    )
+    await gfs.drain()
+    assert result["space_id"] == space.id
+    got = await a.cover_repo.get(space.id)
+    assert got is not None
+    webp, hash_ = got
+    assert hash_ == "c-old" and len(webp) <= SPACE_COVER_MAX_BYTES
+    assert webp[8:12] == b"WEBP"
 
 
 def _ack_overflows(*, with_images_only: bool):

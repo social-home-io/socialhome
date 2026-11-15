@@ -37,7 +37,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import functools
 import logging
 import re
 import time
@@ -7152,9 +7151,6 @@ class SpaceService(
                     icon_repo=self._icons,
                     space_crypto_service=self._space_crypto,
                     inviter_identity_pk=opened.inviter_identity_pk,
-                    sender_caps=functools.partial(
-                        sender_caps_space_images, self._federation, host_instance
-                    ),
                 )
             result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=host_instance,
@@ -10253,6 +10249,12 @@ async def sender_caps_space_images(federation, instance_id: str) -> bool:
     )
 
 
+async def _join_snapshot() -> bool:
+    """:data:`SenderCaps` of a join snapshot: lenient (see
+    :func:`seat_join_stub`)."""
+    return False
+
+
 async def apply_space_cover_from_metadata(
     space_id: str,
     *,
@@ -10896,7 +10898,6 @@ async def seat_join_stub(
     icon_repo=None,
     space_crypto_service=None,
     inviter_identity_pk: object = None,
-    sender_caps: SenderCaps | None = None,
 ) -> None:
     """Seat the local stub of a remote space from an admitted join snapshot
     (:func:`admit_join`) — the private-invite accept and the invite-link
@@ -10935,11 +10936,14 @@ async def seat_join_stub(
         claimed_pk_hex=inviter_identity_pk,
         owner_instance_id=owner_instance,
     )
+    # A join snapshot is always taken leniently: it was sealed when the
+    # invitation was made, maybe by a host that upgraded since, so its image
+    # over the cap is re-encoded rather than dropped.
     await apply_space_cover_from_metadata(
-        space_id, meta=meta, cover_repo=cover_repo, sender_caps=sender_caps
+        space_id, meta=meta, cover_repo=cover_repo, sender_caps=_join_snapshot
     )
     await apply_space_icon_from_metadata(
-        space_id, meta=meta, icon_repo=icon_repo, sender_caps=sender_caps
+        space_id, meta=meta, icon_repo=icon_repo, sender_caps=_join_snapshot
     )
     await apply_space_content_key_from_metadata(
         space_id, meta=meta, space_crypto_service=space_crypto_service

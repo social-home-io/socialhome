@@ -96,9 +96,12 @@ Before storing, it checks the bytes on every inbound path (config change
 and catch-up, join snapshot): at most the cap — an image over it is NOT
 stored, the one already held stays, and a WARNING names the cap — and a
 WebP that fully decodes (Pillow, off the event loop) within 1200 px /
-256 px. The refusal holds for a sender that caps its images
-(`FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES`, v_95 — this build;
-`sender_caps_space_images`, judged by `space_member_version`). A host on
+256 px. The refusal holds for a config change from a sender that caps its
+images (`FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES`, v_95 — this
+build; `sender_caps_space_images`, judged by `space_member_version`). A
+join snapshot (invitation accept, invite-link / redeem ACK) is always taken
+leniently — it was sealed when the invitation was made, maybe by a host
+that upgraded since — so its over-cap image is re-encoded as below. A host on
 the released v_80 line still sends a paired member covers of up to
 256 KiB: from such a sender (or one whose version is unknown) an image
 over the cap but within `SPACE_IMAGE_EMBED_MAX_BYTES` is re-encoded on
