@@ -376,3 +376,16 @@ def test_a_comments_picture_is_never_a_name_another_path_owns():
     assert comment_media_ref(SP, "/api/media/pic.webp?x=1", None) == (
         "api/media/pic.webp"
     )
+
+
+def test_renamed_media_renames_a_calendar_edits_proposed_preview():
+    out = renamed_media(
+        "calendar",
+        {
+            "patch": {"cover_url": "api/media/c.webp"},
+            "proposed": {"cover_url": "api/media/c.webp", "summary": "S"},
+        },
+        lambda u: u and u.replace("c.webp", "sd-c.webp"),
+    )
+    assert out["patch"]["cover_url"] == "api/media/sd-c.webp"
+    assert out["proposed"] == {"cover_url": "api/media/sd-c.webp", "summary": "S"}

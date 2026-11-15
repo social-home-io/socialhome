@@ -759,3 +759,30 @@ def test_sanitize_refuses_a_foreign_file_in_every_patch_field(feature):
     payload = _foreign(synthetic_moderation_payload(feature, patch=True))
     out = sanitize_remote_payload(feature, payload)
     assert moderation_media_urls(SimpleNamespace(feature=feature, payload=out)) == []
+
+
+def test_a_calendar_edits_proposed_preview_follows_its_patch():
+    """A calendar edit carries its after-values for the reviewers
+    (``proposed``): its cover is the patch's, sanitized like it — a
+    remote ``proposed`` can never show a file the patch does not name."""
+    out = sanitize_remote_payload(
+        "calendar",
+        {
+            "entity": "event",
+            "target_id": "e1",
+            "patch": {"cover_url": "api/media/new.webp"},
+            "proposed": {
+                "summary": "S",
+                "cover_url": "api/media/dm-" + "ab" * 20 + ".webp",
+            },
+        },
+    )
+    assert out["proposed"] == {"summary": "S", "cover_url": "api/media/new.webp"}
+    cleared = sanitize_remote_payload(
+        "calendar",
+        {
+            "patch": {"summary": "T"},
+            "proposed": {"summary": "T", "cover_url": "api/media/other.webp"},
+        },
+    )
+    assert "cover_url" not in cleared["proposed"]
