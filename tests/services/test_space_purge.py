@@ -6,36 +6,19 @@ import pathlib
 
 import pytest
 
-from socialhome.services.space_purge import (
-    collect_space_media_urls,
-    purge_space_and_media,
-)
+from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.services.space_purge import purge_space_and_media
 
 pytestmark = pytest.mark.asyncio
-
-
-class _FakePostRepo:
-    def __init__(self, urls: list[str]) -> None:
-        self._urls = urls
-
-    async def list_space_media_urls(self, space_id: str) -> list[str]:
-        return list(self._urls)
-
-
-class _FakeGalleryRepo:
-    def __init__(self, names: list[str]) -> None:
-        self._names = names
-
-    async def list_space_item_filenames(self, space_id: str) -> list[str]:
-        return list(self._names)
 
 
 class _FakeRefs:
     """Files other rows (outside the purged space) still reference."""
 
-    def __init__(self, *live: str) -> None:
+    def __init__(self, *live: str, space: tuple[str, ...] = ()) -> None:
         self._live = set(live)
-        self.space: list[str] = []
+        self.space: list[str] = list(space)
 
     async def referenced_basenames(self) -> set[str]:
         return set(self._live)
@@ -55,26 +38,6 @@ class _FakeSpaceRepo:
         self.purged.append(space_id)
 
 
-async def test_collect_dedupes_exact_duplicates_order_preserving():
-    # Exact-string dedup (e.g. a post listed twice); the differing
-    # post-URL vs bare-basename forms are NOT collapsed, which is fine —
-    # unlinking the same basename twice is an idempotent no-op.
-    posts = _FakePostRepo(["api/media/a.webp", "api/media/b.webp", "api/media/a.webp"])
-    gallery = _FakeGalleryRepo(["g1.webp", "g2.webp", "g1.webp"])
-    urls = await collect_space_media_urls(
-        post_repo=posts, gallery_repo=gallery, space_id="sp-1"
-    )
-    assert urls == ["api/media/a.webp", "api/media/b.webp", "g1.webp", "g2.webp"]
-
-
-async def test_collect_without_gallery_repo():
-    posts = _FakePostRepo(["api/media/x.webp"])
-    urls = await collect_space_media_urls(
-        post_repo=posts, gallery_repo=None, space_id="sp-1"
-    )
-    assert urls == ["api/media/x.webp"]
-
-
 async def test_purge_drops_rows_and_unlinks_files(tmp_path: pathlib.Path):
     # Two real files; one referenced by a post, one by the gallery.
     (tmp_path / "post.webp").write_bytes(b"P")
@@ -83,10 +46,13 @@ async def test_purge_drops_rows_and_unlinks_files(tmp_path: pathlib.Path):
     space_repo = _FakeSpaceRepo()
     removed = await purge_space_and_media(
         space_repo=space_repo,
-        post_repo=_FakePostRepo(["api/media/post.webp"]),
-        gallery_repo=_FakeGalleryRepo(["gallery.webp"]),
         media_dir=tmp_path,
-        media_refs=_FakeRefs(),
+        media_refs=_FakeRefs(
+            space=(
+                "post.webp",
+                "gallery.webp",
+            )
+        ),
         space_id="sp-1",
     )
     assert space_repo.purged == ["sp-1"]  # rows dropped (cascade)
@@ -100,8 +66,6 @@ async def test_purge_without_media_dir_still_drops_rows():
     space_repo = _FakeSpaceRepo()
     removed = await purge_space_and_media(
         space_repo=space_repo,
-        post_repo=_FakePostRepo(["api/media/x.webp"]),
-        gallery_repo=None,
         media_dir=None,
         space_id="sp-9",
     )
@@ -113,10 +77,8 @@ async def test_purge_tolerates_missing_files(tmp_path: pathlib.Path):
     space_repo = _FakeSpaceRepo()
     removed = await purge_space_and_media(
         space_repo=space_repo,
-        post_repo=_FakePostRepo(["api/media/gone.webp"]),
-        gallery_repo=None,
         media_dir=tmp_path,
-        media_refs=_FakeRefs(),
+        media_refs=_FakeRefs(space=("gone.webp",)),
         space_id="sp-2",
     )
     assert space_repo.purged == ["sp-2"]
@@ -130,10 +92,14 @@ async def test_purge_keeps_files_other_rows_still_reference(tmp_path: pathlib.Pa
     (tmp_path / "own.webp").write_bytes(b"O")
     removed = await purge_space_and_media(
         space_repo=_FakeSpaceRepo(),
-        post_repo=_FakePostRepo(["api/media/borrowed.webp", "api/media/own.webp"]),
-        gallery_repo=None,
         media_dir=tmp_path,
-        media_refs=_FakeRefs("borrowed.webp"),
+        media_refs=_FakeRefs(
+            "borrowed.webp",
+            space=(
+                "borrowed.webp",
+                "own.webp",
+            ),
+        ),
         space_id="sp-3",
     )
     assert removed == 1
@@ -145,8 +111,6 @@ async def test_purge_without_a_reference_check_keeps_files(tmp_path: pathlib.Pat
     (tmp_path / "post.webp").write_bytes(b"P")
     removed = await purge_space_and_media(
         space_repo=_FakeSpaceRepo(),
-        post_repo=_FakePostRepo(["api/media/post.webp"]),
-        gallery_repo=None,
         media_dir=tmp_path,
         space_id="sp-4",
     )
@@ -164,8 +128,6 @@ async def test_purge_frees_every_registry_file_of_the_space(tmp_path: pathlib.Pa
     refs.space = ["doc.pdf", "card.webp", "cover.webp", "kept.webp"]
     removed = await purge_space_and_media(
         space_repo=_FakeSpaceRepo(),
-        post_repo=_FakePostRepo([]),
-        gallery_repo=None,
         media_dir=tmp_path,
         media_refs=refs,
         space_id="sp-5",
@@ -173,3 +135,56 @@ async def test_purge_frees_every_registry_file_of_the_space(tmp_path: pathlib.Pa
     assert removed == 3
     assert (tmp_path / "kept.webp").exists()
     assert not (tmp_path / "doc.pdf").exists()
+
+
+_DM = "dm-" + "ab" * 20 + ".webp"
+
+
+async def test_purge_never_frees_a_reserved_name_a_legacy_row_holds(db, tmp_path):
+    """A legacy row of the purged space naming a DM's (``dm-``) file — in
+    a post, a comment, a gallery item or a listing — never takes that file
+    with the space (real repos + the registry's ``space_files``); the
+    space's own file still goes."""
+    await db.enqueue(
+        "INSERT INTO users(user_id, username, display_name) VALUES('u1', 'u1', 'U')"
+    )
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp1', 'S', 'self', 'u1', 'k')"
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, media_url,"
+        " image_urls_json) VALUES('p1', 'sp1', 'u1', 'image', ?, ?)",
+        (f"api/media/{_DM}", f'["api/media/{_DM}", "api/media/own.webp"]'),
+    )
+    await db.enqueue(
+        "INSERT INTO space_post_comments(id, post_id, author, media_url)"
+        " VALUES('c1', 'p1', 'u1', ?)",
+        (f"api/media/{_DM}",),
+    )
+    await db.enqueue(
+        "INSERT INTO gallery_albums(id, space_id, name) VALUES('al', 'sp1', 'A')"
+    )
+    await db.enqueue(
+        "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type, filename,"
+        " thumbnail_filename, width, height) VALUES('g1', 'al', 'u1', 'photo',"
+        " ?, ?, 1, 1)",
+        (_DM, _DM),
+    )
+    await db.enqueue(
+        "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode, title,"
+        " end_time, currency, image_urls_json) VALUES('p1', 'sp1', 'u1', 'fixed',"
+        " 'T', '2099-01-01', 'EUR', ?)",
+        (f'["api/media/{_DM}"]',),
+    )
+    (tmp_path / _DM).write_bytes(b"dm")
+    (tmp_path / "own.webp").write_bytes(b"own")
+    removed = await purge_space_and_media(
+        space_repo=SqliteSpaceRepo(db),
+        media_dir=tmp_path,
+        media_refs=SqliteMediaReferenceRepo(db),
+        space_id="sp1",
+    )
+    assert (tmp_path / _DM).exists()
+    assert not (tmp_path / "own.webp").exists()
+    assert removed == 1

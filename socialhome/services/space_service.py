@@ -1415,9 +1415,6 @@ class SpaceService(
         member_instances = await self._spaces.list_member_instances(space_id)
         await purge_space_and_media(
             space_repo=self._spaces,
-            post_repo=self._posts,
-            gallery_repo=self._gallery,
-            bazaar_repo=self._bazaar,
             media_dir=self._media_dir,
             media_refs=self._media_refs,
             space_id=space_id,
@@ -6763,9 +6760,6 @@ class SpaceService(
             await self._spaces.remove_space_instance(space_id, instance_id)
         await purge_space_and_media(
             space_repo=self._spaces,
-            post_repo=self._posts,
-            gallery_repo=self._gallery,
-            bazaar_repo=self._bazaar,
             media_dir=self._media_dir,
             media_refs=self._media_refs,
             space_id=space_id,
@@ -8981,9 +8975,6 @@ class SpaceService(
         await self._gfs_mirror.unsubscribe(space_id)
         await purge_space_and_media(
             space_repo=self._spaces,
-            post_repo=self._posts,
-            gallery_repo=self._gallery,
-            bazaar_repo=self._bazaar,
             media_dir=self._media_dir,
             media_refs=self._media_refs,
             space_id=space_id,

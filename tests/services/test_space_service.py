@@ -3420,16 +3420,14 @@ async def test_dissolve_hard_deletes_content_and_unlinks_media(tmp_dir):
     )
 
     # Sanity: media is collectable + files present pre-dissolve.
-    assert set(await post_repo.list_space_media_urls(space.id)) == {
-        "api/media/pic.webp",
-        "api/media/img2.webp",
-    }
-    assert set(await gallery.list_space_item_filenames(space.id)) == {
+    refs = SqliteMediaReferenceRepo(db)
+    assert set(await refs.space_files(space.id)) == {
+        "pic.webp",
+        "img2.webp",
         "gal.webp",
         "galthumb.webp",
+        "baz.webp",
     }
-
-    assert await bazaar.list_space_media_urls(space.id) == ["api/media/baz.webp"]
 
     await svc.dissolve_space(space.id, actor_username="anna")
 
@@ -3443,9 +3441,7 @@ async def test_dissolve_hard_deletes_content_and_unlinks_media(tmp_dir):
     # Space + all content rows gone (cascade).
     with pytest.raises(SpacePermissionError):
         await svc.list_feed(space.id, viewer_user_id=anna.user_id)
-    assert await post_repo.list_space_media_urls(space.id) == []
-    assert await gallery.list_space_item_filenames(space.id) == []
-    assert await bazaar.list_space_media_urls(space.id) == []
+    assert await refs.space_files(space.id) == []
     assert await space_repo.get(space.id) is None
 
     # Every owned media file unlinked; the unrelated file survives.
