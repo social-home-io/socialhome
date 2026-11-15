@@ -77,11 +77,15 @@ tightest leg the image travels: base64'ed (4·⌈65,536/3⌉ = 87,384 B and
 holds next to a space's config inside ONE GFS-relay envelope
 (`domain/relay_media_frame.py`), and together (~107 KiB of base64) they leave
 ~85 KiB of the 256 KiB sealed invite-link ACK for config, content key and
-roster. Where the image is SET, `SpaceService.set_cover` / `set_icon`
+roster — an ACK whose config and roster need more is resent without both
+images (and DENY'd if even that does not fit), the one case an image is
+dropped on the way. Where the image is SET, `SpaceService.set_cover` / `set_icon`
 re-encode the upload to a WebP within the cap (1200 px / 256 px, then
 `ImageProcessor.fit_within` shrinks it, off the event loop) — an ordinary
-photo always fits; only an image that does not decode is refused
-(`IMAGE_UNREADABLE`). Every path ships that one image: the config change,
+photo always fits. An image that does not decode, or whose header declares
+more than `SPACE_IMAGE_MAX_SOURCE_PIXELS` (40 M), is refused
+(`IMAGE_UNREADABLE`); one not even a 64 px rendition of fits, with
+`IMAGE_TOO_LARGE`. Every path ships that one image: the config change,
 the join snapshot (§D1b invitation, §D2 / §D2b ACKs, join-request ACK) —
 there is no per-transport variant any more (`relay_payload` is gone). A
 cover stored before the cap (up to a few hundred KiB) is re-encoded within
@@ -89,7 +93,13 @@ it the first time a send carries it (`embed_space_images`), and the
 rendition is kept under the same `cover_hash`, so it is re-encoded once;
 until the owner changes it, every member — paired or behind a GFS — gets
 that rendition, which a GFS-reached member already got before (it was the
-relay variant). The member applies the image only after the change passes
+relay variant). The write-back is compare-and-set on the version tag
+(`replace_bytes_if_hash`), so a cover set or cleared while the re-encode
+runs is never undone; a stored cover that cannot be made to fit is left
+out of every send and remembered (in memory) per space and version, so it
+is not re-encoded on each send. The GFS directory listing publishes the
+stored bytes, so a pre-cap cover is published at its old size until its
+first send rewrites it. The member applies the image only after the change passes
 the owner / authority and last-writer-wins gates, so an out-of-order older
 change cannot roll the picture back (`apply_space_images_from_config_change`).
 Before storing, it checks the bytes on every inbound path (config change

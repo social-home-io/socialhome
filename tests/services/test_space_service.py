@@ -27,6 +27,8 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.errors import (
+    ImageTooLargeError,
+    ImageUnreadableError,
     InvalidMediaRefError,
     SpaceNotPublishableError,
     TierChangeRequiredError,
@@ -46,6 +48,7 @@ from socialhome.domain.federation import (
     DeliveryResult,
     FederationEvent,
     FederationEventType,
+    InstanceSource,
     PairingStatus,
 )
 from socialhome.domain.federation import FederationEventType as _RosterFET
@@ -53,6 +56,7 @@ from socialhome.domain.federation_capabilities import (
     FederationCapability,
     space_feature_keys_missing_below,
 )
+from socialhome.domain.federation_retention import roster_snapshot_key_prefix
 from socialhome.domain.media_constraints import (
     SPACE_COVER_MAX_BYTES,
     SPACE_ICON_MAX_BYTES,
@@ -81,9 +85,15 @@ from socialhome.domain.space import (
     SpacePermissionError,
     SpaceRole,
     SpaceType,
+    mirrorable_remote_role,
 )
 from socialhome.domain.space_app_table import SpaceAppNotAllowedError
 from socialhome.domain.space_key import SpaceKey
+from socialhome.domain.space_roster_digest import (
+    ROSTER_DIGEST_SUITE_SHA256,
+    roster_digest,
+    roster_digest_wire,
+)
 from socialhome.domain.writer_cert import WriterCert, WriterEntitlement
 from socialhome.domain.writer_key import WriterKeyGrant
 from socialhome.federation.gfs_relay_transport import RELAY_MAX_ENVELOPE_BYTES
@@ -95,6 +105,7 @@ from socialhome.federation.owner_bound_id import (
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.media import image_processor as ip_mod
 from socialhome.repositories.cp_repo import SqliteCpRepo
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
@@ -104,6 +115,7 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services import space_service as ss_mod
 from socialhome.services.child_protection_service import ChildProtectionService
 from socialhome.services.gfs_connection_service import GfsConnectionError
 from socialhome.services.space_crypto_service import SpaceContentEncryption
@@ -113,10 +125,14 @@ from socialhome.services.space_service import (
     ROSTER_SNAPSHOT_PART_BYTES,
     SPACE_CATEGORIES,
     SpaceService,
+    apply_space_cover_from_metadata,
+    apply_space_icon_from_metadata,
+    apply_space_images_from_config_change,
     build_space_snapshot_for_federation,
     config_item_bytes,
     keep_local_space_state,
     normalize_category,
+    sender_caps_space_images,
     space_metadata_fields,
     stub_space_from_metadata,
 )
@@ -3786,12 +3802,6 @@ async def test_a_peers_image_over_the_one_cap_is_not_stored(
     ``seat_join_stub`` → ``apply_space_*_from_metadata``) and an applied
     ``SPACE_CONFIG_CHANGED`` (live and the config catch-up). The image
     already held stays, and a WARNING says why."""
-    from socialhome.services.space_service import (
-        apply_space_cover_from_metadata,
-        apply_space_icon_from_metadata,
-        apply_space_images_from_config_change,
-    )
-
     held = _noise_webp(32, 32)
     big = _noise_webp(*dims)
     assert len(big) > cap
@@ -3849,11 +3859,6 @@ async def test_a_released_v80_hosts_big_image_is_stored_as_a_rendition(
     cap is not refused — re-encoded here, off the event loop, and the
     rendition (within the cap) stored, at INFO. A current host's over-cap
     image is still refused, and the held one kept."""
-    from socialhome.services.space_service import (
-        apply_space_cover_from_metadata,
-        apply_space_icon_from_metadata,
-        apply_space_images_from_config_change,
-    )
 
     async def _released():
         return False
@@ -3909,8 +3914,6 @@ async def test_which_senders_cap_their_space_images():
     """The released v_80 line ships images over the cap; this build and
     later never do (``MIN_FOR_CAPPED_SPACE_IMAGES``). An unknown version
     reads as the released line (the lenient path)."""
-    from socialhome.services.space_service import sender_caps_space_images
-
     fed = MagicMock()
     versions = {"v80": 80, "cur": FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES}
 
@@ -5625,7 +5628,6 @@ async def test_a_follower_household_is_kicked_like_any_member(stack):
     from socialhome.domain.federation import (
         DeliveryResult,
         FederationEventType,
-        InstanceSource,
     )
 
     await stack.provision_user("anna")
@@ -5680,8 +5682,6 @@ async def test_space_session_cleanup_without_a_purger_drops_nothing(stack):
     """Unwired, the seat is never dropped by a bare row delete that would
     leave its queued envelopes behind."""
     from unittest.mock import MagicMock
-
-    from socialhome.domain.federation import InstanceSource
 
     fed_repo = MagicMock()
     fed_repo.get_instance = AsyncMock(
@@ -8127,7 +8127,6 @@ async def test_promote_relay_only_admin_withholds_the_signing_seed(stack):
     """
     from unittest.mock import AsyncMock, MagicMock
 
-    from socialhome.domain.federation import InstanceSource
     from socialhome.domain.space import SpaceFeatures, SpaceRole
 
     await stack.provision_user("anna")
@@ -8533,8 +8532,6 @@ def _begin_with_echo(space_id: str, sender: str, echo: object):
 async def _digest_begin(stack, space, sender, *, digest=None, cert_epoch=None):
     """A BEGIN carrying *sender*'s roster digest — by default the one the
     host computes for it (its mirror is right)."""
-    from socialhome.domain.space_roster_digest import roster_digest_wire
-
     if digest is None:
         row = await stack.space_repo.get(space.id)
         digest = await stack.space_svc.roster_digest_of(row, sender)
@@ -8559,8 +8556,6 @@ def test_the_host_runs_no_roster_timer():
     """Blocker 1: no snapshot on the host's own timer — a household that
     never sends a BEGIN (a follower-only household of a global space) gets
     nothing periodic, only seat / upgrade snapshots and live gossip."""
-    from socialhome.services.space_service import SpaceService
-
     assert not hasattr(SpaceService, "send_hosted_roster_snapshots")
 
 
@@ -8568,9 +8563,6 @@ async def test_the_digest_is_what_a_snapshot_leaves_on_the_member(stack):
     """The host's digest for a household is exactly the digest of the live
     seats a snapshot to it carries, as the member mirrors them (the
     owner's ``owner`` mirrored as ``member``)."""
-    from socialhome.domain.space import mirrorable_remote_role
-    from socialhome.domain.space_roster_digest import roster_digest
-
     space, fed, remote, _insts = await _members_with_households(stack, 3)
     await _seat(remote, space.id, "peer-1", "u-admin", role="admin")
     await _seat(remote, space.id, "peer-2", "u-gone")
@@ -8596,7 +8588,6 @@ async def test_the_digest_is_what_a_snapshot_leaves_on_the_member(stack):
 async def test_a_member_whose_mirror_is_right_is_sent_nothing(stack, source):
     """No change → 0 envelopes, whatever the path the household is reached
     by (paired, or seated from an invite link over the GFS relay)."""
-    from socialhome.domain.federation import InstanceSource
 
     space, fed, _remote, insts = await _members_with_households(
         stack, 3, source=InstanceSource(source) if source else None
@@ -8613,7 +8604,6 @@ class _Clock:
     """The roster repair's monotonic clock, moved by hand."""
 
     def __init__(self, monkeypatch) -> None:
-        from socialhome.services import space_service as ss_mod
 
         self.now = 1000.0
         monkeypatch.setattr(ss_mod, "_monotonic", lambda: self.now)
@@ -8659,8 +8649,6 @@ async def test_fifty_random_digests_in_half_an_hour_buy_one_snapshot(
 ):
     """Review C1(b): a member varying its digest on every BEGIN still gets
     at most one repair per 30 min — the echo path the same."""
-    import os
-
     clock = _Clock(monkeypatch)
     space, fed, _remote, _insts = await _members_with_households(stack, 1)
     for _ in range(50):
@@ -8749,8 +8737,6 @@ async def test_a_new_snapshot_drops_every_queued_part_of_an_older_one(stack):
     """M2: a newer snapshot with fewer parts would leave the older send's
     higher parts queued — every queued part to that household for that
     space is dropped before the new one goes."""
-    from socialhome.domain.federation_retention import roster_snapshot_key_prefix
-
     space, fed, _remote, _insts = await _members_with_households(stack, 1)
     order: list[str] = []
     fed.drop_queued_with_key_prefix = AsyncMock(
@@ -8780,8 +8766,6 @@ async def test_the_repair_memory_holds_thousands_of_pairs(stack, monkeypatch):
     async def _send(space_id, *, to_instance_id, known_version=None):
         sent.append(to_instance_id)
         return True
-
-    from socialhome.services.space_service import SpaceService
 
     monkeypatch.setattr(
         SpaceService, "send_roster_snapshot", lambda self, *a, **kw: _send(*a, **kw)
@@ -8919,12 +8903,6 @@ async def test_a_begin_from_a_non_member_or_for_a_space_we_do_not_host_is_ignore
 async def test_the_members_digest_is_of_the_mirror_it_holds(stack):
     """Member side: the digest of every live seat it mirrors outside its
     own household, only toward the space's host."""
-    from socialhome.domain.space import SpaceFeatureAccess
-    from socialhome.domain.space_roster_digest import (
-        ROSTER_DIGEST_SUITE_SHA256,
-        roster_digest,
-    )
-
     sid, _uid = await _seat_remote_space_with_posts_access(
         stack, actor="mia", posts_access=SpaceFeatureAccess.OPEN
     )
@@ -9049,6 +9027,71 @@ async def test_an_uploaded_cover_or_icon_is_stored_within_the_one_cap(
     assert Image.open(io.BytesIO(stored)).format == "WEBP"
 
 
+async def test_an_upload_nothing_fits_is_a_cap_error_not_unreadable(stack, monkeypatch):
+    """Minor: when not even the smallest rendition fits the cap, the owner
+    is told the image is too large (422 IMAGE_TOO_LARGE) — honest, not
+    IMAGE_UNREADABLE. Decodable images practically always fit."""
+
+    async def _never(self, data, max_bytes, **kw):
+        return None
+
+    monkeypatch.setattr(ip_mod.ImageProcessor, "fit_within", _never)
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    stack.space_svc._covers = _RecordingImageRepo()
+    with pytest.raises(ImageTooLargeError):
+        await stack.space_svc.set_cover(
+            space.id, actor_username="anna", raw_bytes=_noise_png(120, 80)
+        )
+
+
+async def test_an_upload_over_the_source_pixel_cap_is_refused_before_decoding(
+    stack, monkeypatch
+):
+    """Minor: the set-time thumbnail is bounded by
+    ``SPACE_IMAGE_MAX_SOURCE_PIXELS`` (checked on the header, before any
+    pixel is decoded), like a profile picture."""
+    monkeypatch.setattr(ss_mod, "SPACE_IMAGE_MAX_SOURCE_PIXELS", 100)
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    stack.space_svc._covers = _RecordingImageRepo()
+    with pytest.raises(ImageUnreadableError):
+        await stack.space_svc.set_cover(
+            space.id, actor_username="anna", raw_bytes=_noise_png(120, 80)
+        )
+
+
+async def test_a_pre_cap_cover_that_cannot_fit_is_not_retried_every_send(
+    stack, monkeypatch
+):
+    """Minor: a cover stored before the cap that cannot be made to fit is
+    left out (nothing stored) and remembered per (space, version), so the
+    next send does not re-encode it again."""
+    calls: list[int] = []
+
+    async def _never(self, data, max_bytes, **kw):
+        calls.append(len(data))
+
+    monkeypatch.setattr(ip_mod.ImageProcessor, "fit_within", _never)
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    space = dataclasses.replace(space, cover_hash="c-unfit", icon_hash=None)
+    covers = _RecordingImageRepo(_noise_webp(1200, 800))
+    covers.hash = "c-unfit"
+    for _ in range(3):
+        snap = await build_space_snapshot_for_federation(
+            space,
+            space_repo=stack.space_repo,
+            remote_member_repo=None,
+            user_repo=stack.space_svc._users,
+            own_instance_id=stack.iid,
+            cover_repo=covers,
+        )
+        assert "cover_webp_base64" not in snap
+    assert len(calls) == 1
+    assert covers.sets == []
+
+
 async def _snapshot_with_images(stack, cover: bytes, icon: bytes, **kw):
     await stack.provision_user("anna")
     space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
@@ -9126,8 +9169,6 @@ async def test_a_cover_change_during_the_re_encode_is_not_undone(
     """I2: the re-encode of a pre-cap cover runs in a thread; a set_cover or
     clear_cover meanwhile must not be overwritten by the old version's
     rendition (compare-and-set on the version tag)."""
-    from socialhome.media import image_processor as ip_mod
-
     await stack.provision_user("anna")
     space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
     space = dataclasses.replace(space, cover_hash="c", icon_hash=None)
@@ -9162,8 +9203,6 @@ async def test_a_cover_change_during_the_re_encode_is_not_undone(
 async def test_snapshot_omits_an_image_it_cannot_fit(stack, caplog, monkeypatch):
     """Undecodable bytes over the cap, or a cap nothing fits under, leave
     the image out (WARNING) — the rest of the snapshot still ships."""
-    from socialhome.services import space_service as ss_mod
-
     monkeypatch.setattr(ss_mod, "SPACE_COVER_MAX_BYTES", 16)
     monkeypatch.setattr(ss_mod, "SPACE_ICON_MAX_BYTES", 16)
     with caplog.at_level(logging.WARNING, logger="socialhome.services.space_service"):
@@ -11017,7 +11056,6 @@ async def _cert_space(stack, *, version: int = 49):
     """A hosted space with a content epoch, a v_``version`` federation double
     and a REAL :class:`SpaceWriterCertService` over the stack's repos.
     Returns ``(space, fed, remote, peer_pk)``."""
-
     _owner, space, fed, remote = await _hosted_space_with_seats(stack)
     keys = SqliteSpaceKeyRepo(stack.db)
     await keys.save(SpaceKey(space_id=space.id, epoch=0, content_key_hex="k"))
@@ -11204,7 +11242,6 @@ async def _rekeys(stack, monkeypatch):
 async def test_a_scope_reducing_remote_role_change_rotates(stack, monkeypatch):
     """write → comment: the household's old write cert must die with the
     epoch, so the content key rotates."""
-
     space, _fed, remote, _pks = await _cert_space(stack)
     await stack.db.enqueue(
         "UPDATE spaces SET allow_subscriber_comment=1 WHERE id=?", (space.id,)

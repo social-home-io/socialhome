@@ -198,14 +198,24 @@ SPACE_IMAGE_EMBED_MAX_BYTES: int = 1536 * 1024
 #: ``invite_bootstrap.MAX_SEALED_BLOB_BYTES`` (256 KiB of base64 ciphertext,
 #: ~192 KiB of plaintext): both images cost ~107 KiB of it, leaving ~85 KiB
 #: for the config, content key and member roster. A 1200 px cover photo
-#: re-encodes to it at a smaller size; the image is never dropped for it.
+#: re-encodes to it at a smaller size. An image travels whole or not at all:
+#: only an invite-link ACK whose config and roster leave no room under the
+#: sealed-blob cap is resent without both images (and DENY'd if even that
+#: does not fit) — see ``SpaceInviteTokenRedeemCoordinator``.
 SPACE_COVER_MAX_BYTES: int = 64 * 1024
 SPACE_ICON_MAX_BYTES: int = 16 * 1024
 
-#: Smallest longest-side an image is shrunk to while fitting it into one of
-#: the byte bounds above. Below this the art is no longer worth shipping, so
-#: it is omitted instead (logged at WARNING).
+#: Smallest longest-side ``ImageProcessor.fit_within`` shrinks an image to
+#: while fitting it under a byte cap. If even this rendition is over the cap,
+#: the fit gives up: a stored image is left out of what is sent (WARNING), an
+#: upload is refused (422 ``IMAGE_TOO_LARGE``).
 SPACE_IMAGE_FIT_MIN_DIMENSION: int = 64
+
+#: Largest source image (declared ``width × height``) a space cover / icon
+#: upload is decoded from — checked on the header, before any pixel is
+#: decoded, so a decompression bomb costs a header parse (as for a profile
+#: picture).
+SPACE_IMAGE_MAX_SOURCE_PIXELS: int = 40_000_000
 
 #: ``data:`` URI prefix the publish embeds images under.
 SPACE_IMAGE_DATA_URI_PREFIX: str = "data:image/webp;base64,"

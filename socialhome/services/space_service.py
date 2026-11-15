@@ -43,6 +43,7 @@ import time
 import unicodedata
 import uuid
 import weakref
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -57,7 +58,7 @@ from ..crypto import (
 )
 from ..domain.emoji import MAX_EMOJI_CODEPOINTS
 from ..domain.errors import (
-    ImageUnreadableError,
+    ImageTooLargeError,
     NotFoundError,
     SpaceEmojiTooLongError,
     SpaceItemTooLargeError,
@@ -180,7 +181,7 @@ from ..domain.media_constraints import (
     SPACE_ICON_MAX_BYTES,
     SPACE_ICON_MAX_DIMENSION,
     SPACE_IMAGE_EMBED_MAX_BYTES,
-    SPACE_IMAGE_FIT_MIN_DIMENSION,
+    SPACE_IMAGE_MAX_SOURCE_PIXELS,
     space_media_ref,
 )
 from ..domain.mention import Mention
@@ -9523,20 +9524,25 @@ async def _space_image_within_cap(raw: bytes, *, size: int, max_bytes: int) -> b
     """An uploaded cover / icon as the WebP every member gets: bounded to
     *size* px, then re-encoded smaller until it is at most *max_bytes* (the
     one cap, :data:`SPACE_COVER_MAX_BYTES` / :data:`SPACE_ICON_MAX_BYTES`).
-    Pillow runs off the event loop. An ordinary photo always fits; only an
-    image that does not decode is refused (``ImageUnreadableError``)."""
+    Pillow runs off the event loop. An ordinary photo always fits. An image
+    that does not decode, or whose header declares more than
+    :data:`SPACE_IMAGE_MAX_SOURCE_PIXELS`, is ``ImageUnreadableError``; one
+    not even a :data:`SPACE_IMAGE_FIT_MIN_DIMENSION` px rendition of fits is
+    ``ImageTooLargeError`` (422 ``IMAGE_TOO_LARGE``)."""
     processor = ImageProcessor()
-    webp = await processor.generate_thumbnail(raw, size=size)
+    webp = await processor.generate_thumbnail(
+        raw, size=size, max_source_pixels=SPACE_IMAGE_MAX_SOURCE_PIXELS
+    )
     fitted = await processor.fit_within(webp, max_bytes)
     if fitted is None:
-        # Not even the smallest rendition the fit tries fits: take a
-        # thumbnail at that size outright (a few KiB for any real image).
-        fitted = await processor.generate_thumbnail(
-            webp, size=SPACE_IMAGE_FIT_MIN_DIMENSION
-        )
-        if len(fitted) > max_bytes:
-            raise ImageUnreadableError()
+        raise ImageTooLargeError(max_bytes)
     return fitted
+
+
+#: (space, cover / icon, image version) whose stored bytes cannot be made to fit the cap —
+#: left out of every send without re-encoding them again. In memory, bounded.
+_UNFITTABLE: OrderedDict[tuple[str, str, str], None] = OrderedDict()
+_UNFITTABLE_MAX = 1024
 
 
 async def embed_space_images(
@@ -9586,6 +9592,8 @@ async def embed_space_images(
         if stored is None:
             continue
         webp, stored_hash = stored
+        if (space.id, what, stored_hash) in _UNFITTABLE:
+            continue
         fitted = await _bounded_space_image(
             webp,
             max_bytes=max_bytes,
@@ -9593,6 +9601,9 @@ async def embed_space_images(
             space_id=space.id,
         )
         if fitted is None:
+            _UNFITTABLE[(space.id, what, stored_hash)] = None
+            while len(_UNFITTABLE) > _UNFITTABLE_MAX:
+                _UNFITTABLE.popitem(last=False)
             continue
         if fitted is not webp:
             # Stored before the one cap: keep the rendition every member
