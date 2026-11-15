@@ -194,8 +194,9 @@ async def test_is_referenced_matches_the_whole_file_name(db):
 
 
 async def test_a_deleted_post_no_longer_references_its_images(db):
-    """Soft delete clears ``media_url`` but keeps ``image_urls_json``; a
-    deleted row must not pin the files forever."""
+    """Soft delete clears ``media_url`` and ``link_preview_json`` but keeps
+    ``image_urls_json`` (and ``file_meta_json``); a deleted row must not pin
+    the files forever."""
     await _seed_parents(db)
     await db.enqueue(
         "INSERT INTO space_posts(id, space_id, author, type, image_urls_json, "

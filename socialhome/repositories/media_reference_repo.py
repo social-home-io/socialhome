@@ -161,7 +161,9 @@ _LIST_COLUMNS: tuple[tuple[str, str, str], ...] = (
 
 #: ``(table, JSON column, JSON path, live-row filter)`` for a reference
 #: inside a JSON object. Soft-deleting a post NULLs its
-#: ``link_preview_json``, so a card needs no live filter.
+#: ``link_preview_json`` (a card needs no live filter) but keeps its
+#: ``file_meta_json`` — the attachment counts only while the post is live
+#: (:data:`_SPACE_REFERENCE_LIVE_COLUMN`).
 _JSON_FIELD_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
     ("feed_posts", "link_preview_json", "$.thumbnail_url", ""),
     *(

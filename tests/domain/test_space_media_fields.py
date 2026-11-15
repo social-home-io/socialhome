@@ -356,6 +356,8 @@ def test_unknown_feature_payloads_pass_through() -> None:
 #: A field looks like a file when its name is one of these.
 _FILE_LIKE = re.compile(
     r"^(url|content|.*_url|.*_urls|cover_.*|thumbnail_.*|.*_file|.*_filename)$"
+    r"|(^|_)(image|images|photo|photos|picture|media|attachment|attachments"
+    r"|avatar|poster|banner|icon)(_|$)"
 )
 
 #: Space item types (and the objects nested in them) scanned for file
@@ -391,6 +393,10 @@ NOT_A_SPACE_FILE: dict[tuple[str, str], str] = {
         "media path (DM_MEDIA_BLOB), not a space item's; the reference repo "
         "lists conversation_messages.media_url by hand"
     ),
+    ("ConversationMessage", "media_blob_id"): (
+        "the DM_MEDIA_BLOB transfer id, not a file reference"
+    ),
+    ("ConversationMessage", "media_sync_status"): "a sync state, not a file",
     ("GalleryAlbum", "cover_item_id"): "an item id, not a file",
     ("GalleryAlbum", "cover_url"): (
         "not persisted — filled from the cover item, whose files are registered"
