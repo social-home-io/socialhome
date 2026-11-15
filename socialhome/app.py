@@ -5137,9 +5137,10 @@ def create_app(config: Config | None = None) -> web.Application:
         app[K.space_sync_scheduler_key].attach_roster_digest(
             real_space_service.roster_digest_for
         )
-        federation_service._event_registry.register(
-            FederationEventType.SPACE_SYNC_BEGIN,
-            real_space_service.on_sync_begin_roster,
+        # …only for a BEGIN the sync admission let in (S-6: 5/h per
+        # household), never for a refused one.
+        federation_service.attach_sync_begin_admitted(
+            real_space_service.on_sync_begin_roster
         )
         # Multi-admin approval (quorum) — rebuild with the real instance_id
         # (mirrors the real_space_service rebuild) and wire federation + the

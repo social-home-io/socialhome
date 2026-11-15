@@ -59,6 +59,7 @@ def svc():
     s._transport = None
     s._call_signaling = None
     s._sync_manager = None
+    s._sync_begin_admitted = None
     s._space_sync_service = None
     s._space_sync_receiver = None
     # #648 — the mesh BEGIN path drops the cached route to the requester
@@ -439,6 +440,46 @@ async def test_handle_space_sync_begin_accepted_no_prefer_direct(svc):
     await asyncio.sleep(0)
     assert record.transport_mode == "https"
     svc._space_sync_service.stream_initial.assert_awaited_once_with(record)
+
+
+@pytest.mark.parametrize(("accepted", "called"), [(True, True), (False, False)])
+async def test_only_an_admitted_begin_reaches_the_roster_repair(svc, accepted, called):
+    """Review C1: the roster repair runs only for a BEGIN the S-6 / S-8
+    admission let in — never for one refused (rate limited, too many
+    sessions), so a member cannot buy a snapshot per BEGIN past 5/h."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(
+            accepted=accepted,
+            next_event=None
+            if accepted
+            else FederationEventType.SPACE_SYNC_DIRECT_FAILED,
+            next_payload=None if accepted else {"reason": "rate_limited"},
+        ),
+    )
+    svc._sync_manager.get_session = MagicMock(
+        return_value=SimpleNamespace(sync_id="s", rtc=None, transport_mode="rtc")
+    )
+    svc._space_sync_service = MagicMock()
+    svc._space_sync_service.stream_initial = AsyncMock()
+    seen: list = []
+
+    async def _admitted(event):
+        seen.append(event)
+
+    svc.attach_sync_begin_admitted(_admitted)
+    event = _event(
+        "SPACE_SYNC_BEGIN",
+        {"sync_id": "s", "space_id": "sp", "sync_mode": "incremental"},
+        space_id="sp",
+    )
+    with patch.object(
+        FederationService, "send_with_mesh_fallback", new_callable=AsyncMock
+    ):
+        await svc._handle_space_sync_begin(event)
+        await asyncio.sleep(0)
+    assert (seen == [event]) is called
+    assert bool(seen) is called
 
 
 @pytest.mark.parametrize(

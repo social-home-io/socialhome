@@ -8459,73 +8459,221 @@ async def test_a_member_whose_mirror_is_right_is_sent_nothing(stack, source):
     assert _snapshots(fed) == []
 
 
-async def test_a_missed_gossip_gets_exactly_one_snapshot(stack):
-    """A household whose digest differs gets ONE snapshot in reply to its
-    BEGIN — and not the same one again while neither digest moves (a
-    snapshot that did not change its digest would not next time either);
-    a later roster change is answered again."""
-    space, fed, remote, _insts = await _members_with_households(stack, 2)
-    stale = "0" * 64
-    for _ in range(3):
-        await stack.space_svc.on_sync_begin_roster(
-            await _digest_begin(stack, space, "peer-0", digest=stale)
-        )
-    assert [to for to, _ in _snapshots(fed)] == ["peer-0"]
-    # The other household's mirror is right: nothing for it.
-    await stack.space_svc.on_sync_begin_roster(
-        await _digest_begin(stack, space, "peer-1")
-    )
-    assert len(_snapshots(fed)) == 1
-    await _seat(remote, space.id, "peer-1", "u-new")
-    await stack.space_svc.on_sync_begin_roster(
-        await _digest_begin(stack, space, "peer-0", digest=stale)
-    )
-    assert [to for to, _ in _snapshots(fed)] == ["peer-0", "peer-0"]
+class _Clock:
+    """The roster repair's monotonic clock, moved by hand."""
+
+    def __init__(self, monkeypatch) -> None:
+        from socialhome.services import space_service as ss_mod
+
+        self.now = 1000.0
+        monkeypatch.setattr(ss_mod, "_monotonic", lambda: self.now)
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
-async def test_a_missing_writer_cert_still_gets_a_snapshot(stack):
-    """The digest is right, but the household lacks the writer cert we would
-    issue: the snapshot (which carries it) goes, as before."""
-    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+async def _answer(stack, event) -> None:
+    """Hand *event* to the repair (an admitted BEGIN) and let the repair
+    snapshot it schedules go out."""
+    await stack.space_svc.on_sync_begin_roster(event)
+    await stack.space_svc.wait_roster_repairs()
+
+
+def _certs(epoch: int | None):
     certs = MagicMock()
-    certs.cert_for_peer = AsyncMock(return_value={"epoch": 7})
+    certs.cert_epoch_for_peer = AsyncMock(return_value=epoch)
+    certs.cert_for_peer = AsyncMock(
+        return_value=None if epoch is None else {"epoch": epoch}
+    )
     certs.writer_key_for_peer = AsyncMock(return_value=None)
     certs.channel_grant_for_peer = AsyncMock(return_value=None)
+    certs.issue_for_instance = AsyncMock(side_effect=AssertionError("signed"))
+    return certs
+
+
+async def test_a_missed_gossip_gets_exactly_one_snapshot(stack, monkeypatch):
+    """A household whose digest differs gets ONE snapshot in reply to its
+    BEGIN; the other household, whose mirror is right, nothing."""
+    _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 2)
+    for _ in range(3):
+        await _answer(
+            stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64)
+        )
+    await _answer(stack, await _digest_begin(stack, space, "peer-1"))
+    assert [to for to, _ in _snapshots(fed)] == ["peer-0"]
+
+
+async def test_fifty_random_digests_in_half_an_hour_buy_one_snapshot(
+    stack, monkeypatch
+):
+    """Review C1(b): a member varying its digest on every BEGIN still gets
+    at most one repair per 30 min — the echo path the same."""
+    import os
+
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    for _ in range(50):
+        await _answer(
+            stack,
+            await _digest_begin(stack, space, "peer-0", digest=os.urandom(32).hex()),
+        )
+        clock.advance(30)
+    assert len(_snapshots(fed)) == 1
+    for _ in range(10):  # no digest and no echo: the whole roster — once
+        await _answer(stack, _begin(space.id, "peer-0"))
+    assert len(_snapshots(fed)) == 1
+    clock.advance(30 * 60)
+    await _answer(
+        stack, await _digest_begin(stack, space, "peer-0", digest=os.urandom(32).hex())
+    )
+    assert len(_snapshots(fed)) == 2
+
+
+async def test_the_same_answer_is_repeated_after_a_backoff(stack, monkeypatch):
+    """I2/I4: a lost (or partly applied) snapshot heals — the same answer is
+    sent again after 1 h, then 2 h, 4 h … up to a day; never sooner."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+
+    async def stale():
+        await _answer(
+            stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64)
+        )
+
+    await stale()
+    assert len(_snapshots(fed)) == 1
+    clock.advance(59 * 60)
+    await stale()
+    assert len(_snapshots(fed)) == 1
+    clock.advance(60)
+    await stale()  # 1 h after: resent
+    assert len(_snapshots(fed)) == 2
+    clock.advance(60 * 60)
+    await stale()  # the backoff doubled to 2 h
+    assert len(_snapshots(fed)) == 2
+    clock.advance(60 * 60)
+    await stale()
+    assert len(_snapshots(fed)) == 3
+    for _ in range(10):
+        clock.advance(24 * 60 * 60)
+        await stale()
+    # Capped at one a day.
+    assert len(_snapshots(fed)) == 13
+
+
+async def test_a_host_cert_rotation_is_answered_with_an_unchanged_member(
+    stack, monkeypatch
+):
+    """I1: the answer includes the HOST's cert epoch — a rotation is a new
+    answer (after the cooldown), not a repeat held back by the backoff."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    stack.space_svc._writer_certs = _certs(7)
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=6))
+    assert len(_snapshots(fed)) == 1
+    stack.space_svc._writer_certs = _certs(8)
+    clock.advance(31 * 60)
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=6))
+    assert len(_snapshots(fed)) == 2
+
+
+async def test_a_missing_writer_cert_still_gets_a_snapshot(stack, monkeypatch):
+    """The digest is right, but the household lacks the writer cert we would
+    issue: the snapshot (which carries it) goes. The epoch is read without
+    signing a cert (I5)."""
+    _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    certs = _certs(7)
     stack.space_svc._writer_certs = certs
-    await stack.space_svc.on_sync_begin_roster(
-        await _digest_begin(stack, space, "peer-0", cert_epoch=7)
-    )
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=7))
     assert _snapshots(fed) == []
-    await stack.space_svc.on_sync_begin_roster(
-        await _digest_begin(stack, space, "peer-0", cert_epoch=6)
-    )
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=6))
     (_to, entries) = _snapshots(fed, to="peer-0")[-1]
     # Never empty: the owner is always a local seat of a space we host.
     assert any(e["payload"]["role"] == "owner" for e in entries)
+    certs.issue_for_instance.assert_not_awaited()
 
 
-async def test_an_unknown_suite_or_a_malformed_digest_repairs_nothing(stack, caplog):
+async def test_the_repair_memory_holds_thousands_of_pairs(stack, monkeypatch):
+    """I4: bounded by live seats, not by an LRU that thrashes — 5000 member
+    households answered once are each held back by the cooldown."""
+    _Clock(monkeypatch)
+    svc = stack.space_svc
+    sent: list[str] = []
+
+    async def _send(space_id, *, to_instance_id, known_version=None):
+        sent.append(to_instance_id)
+        return True
+
+    from socialhome.services.space_service import SpaceService
+
+    monkeypatch.setattr(
+        SpaceService, "send_roster_snapshot", lambda self, *a, **kw: _send(*a, **kw)
+    )
+    for round_ in range(2):
+        for i in range(5000):
+            svc._schedule_roster_repair(
+                "sp",
+                f"peer-{i}",
+                answer=("digest", "a", str(round_)),
+                known_version=None,
+            )
+        await svc.wait_roster_repairs()
+    assert len(sent) == 5000
+    assert len(svc._roster_repairs) == 5000
+
+
+async def test_a_household_that_left_is_forgotten_by_the_repair_memory(
+    stack, monkeypatch
+):
+    _Clock(monkeypatch)
+    space, _fed, _remote, insts = await _members_with_households(stack, 2)
+    await _answer(stack, await _digest_begin(stack, space, insts[0], digest="0" * 64))
+    assert (space.id, insts[0]) in stack.space_svc._roster_repairs
+    await stack.space_repo.remove_space_instance(space.id, insts[0])
+    await _answer(stack, await _digest_begin(stack, space, insts[1]))
+    assert (space.id, insts[0]) not in stack.space_svc._roster_repairs
+
+
+async def test_an_unknown_suite_uses_the_echo_and_a_malformed_digest_nothing(
+    stack, caplog, monkeypatch
+):
+    clock = _Clock(monkeypatch)
     space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    current = (await stack.space_repo.get(space.id)).roster_sequence
     with caplog.at_level("WARNING"):
-        await stack.space_svc.on_sync_begin_roster(
-            _begin(space.id, "peer-0", roster_digest={"suite": "rd9", "digest": "a"})
+        await _answer(
+            stack,
+            _begin(
+                space.id,
+                "peer-0",
+                roster_digest={"suite": "rd9", "digest": "a"},
+                roster_echo={"roster_version": current, "cert_epoch": None},
+            ),
         )
     assert "unknown suite" in caplog.text
-    await stack.space_svc.on_sync_begin_roster(
+    assert _snapshots(fed) == []  # its echo is current
+    await _answer(
+        stack,
         _begin(
-            space.id,
-            "peer-0",
-            roster_digest={"suite": "rd1-sha256", "digest": "nope"},
-        )
+            space.id, "peer-0", roster_digest={"suite": "rd1-sha256", "digest": "x"}
+        ),
     )
     assert _snapshots(fed) == []
+    clock.advance(1)
+    await _answer(
+        stack, _begin(space.id, "peer-0", roster_digest={"suite": "rd9", "digest": "a"})
+    )
+    assert len(_snapshots(fed)) == 1  # no echo: the whole roster
 
 
-async def test_an_older_household_keeps_the_echo_rule(stack):
+async def test_an_older_household_keeps_the_echo_rule(stack, monkeypatch):
     """v_80 (released) sends only ``roster_echo``: nothing while it echoes
     the current roster; a stale echo gets every live seat without the
-    removals at or below it; no echo at all gets the whole roster, on each
-    BEGIN until it echoes — as the periodic tick did, now in reply."""
+    removals at or below it; no echo at all the whole roster — each at most
+    once per cooldown."""
+    clock = _Clock(monkeypatch)
     space, fed, remote, _insts = await _members_with_households(stack, 1)
     space_row = await stack.space_repo.get(space.id)
     for user in ("u-gone-1", "u-gone-2"):
@@ -8541,11 +8689,8 @@ async def test_an_older_household_keeps_the_echo_rule(stack):
             tombstoned=True,
         )
     echoed = (await stack.space_repo.get(space.id)).roster_sequence
-    await stack.space_svc.on_sync_begin_roster(
-        _begin_with_echo(
-            space.id, "peer-0", {"roster_version": echoed, "cert_epoch": None}
-        )
-    )
+    echo = {"roster_version": echoed, "cert_epoch": None}
+    await _answer(stack, _begin_with_echo(space.id, "peer-0", echo))
     assert _snapshots(fed) == []
     await _seat(remote, space.id, "peer-x", "u-gone-3")
     await remote.remove(space.id, "peer-x", "u-gone-3")
@@ -8558,11 +8703,7 @@ async def test_an_older_household_keeps_the_echo_rule(stack):
         role="member",
         tombstoned=True,
     )
-    await stack.space_svc.on_sync_begin_roster(
-        _begin_with_echo(
-            space.id, "peer-0", {"roster_version": echoed, "cert_epoch": None}
-        )
-    )
+    await _answer(stack, _begin_with_echo(space.id, "peer-0", echo))
     entries = _snapshots(fed, to="peer-0")[-1][1]
     left = [
         e["payload"]["user_id"]
@@ -8570,19 +8711,20 @@ async def test_an_older_household_keeps_the_echo_rule(stack):
         if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
     ]
     assert left == ["u-gone-3"]
-    # Every live seat ships (a seat's version is no host-counter invariant).
     assert "u-0" not in {e["payload"]["user_id"] for e in entries}  # its own
     assert any(e["payload"]["role"] == "owner" for e in entries)
-    # No echo at all: the whole roster, on each BEGIN.
-    for _ in range(2):
-        await stack.space_svc.on_sync_begin_roster(_begin(space.id, "peer-0"))
+    # No echo at all: the whole roster — after the cooldown.
+    await _answer(stack, _begin(space.id, "peer-0"))
+    assert len(_snapshots(fed, to="peer-0")) == 1
+    clock.advance(30 * 60)
+    await _answer(stack, _begin(space.id, "peer-0"))
     left_all = sorted(
         e["payload"]["user_id"]
         for e in _snapshots(fed, to="peer-0")[-1][1]
         if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
     )
     assert left_all == ["u-gone-1", "u-gone-2", "u-gone-3"]
-    assert len(_snapshots(fed, to="peer-0")) == 3
+    assert len(_snapshots(fed, to="peer-0")) == 2
 
 
 async def test_a_begin_from_a_non_member_or_for_a_space_we_do_not_host_is_ignored(

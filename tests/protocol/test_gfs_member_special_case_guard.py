@@ -432,6 +432,8 @@ _MARKER_FREE: dict[str, tuple[str, ...]] = {
         "on_sync_begin_roster",
         "_repair_by_digest",
         "_repair_by_echo",
+        "_schedule_roster_repair",
+        "_roster_seats_of",
         "roster_digest_of",
         "roster_digest_for",
         "send_roster_snapshot",
@@ -636,9 +638,7 @@ def test_re_adding_the_removed_seat_skip_fails_the_guard():
     path — is caught both by the helper-following pin and by the count."""
     path = "socialhome/services/space_service.py"
     src = (_ROOT / path).read_text(encoding="utf-8")
-    anchor = (
-        "        if sender not in await self._spaces.list_member_instances(space_id):\n"
-    )
+    anchor = "        if sender not in members:\n"
     assert anchor in src
     mutated = src.replace(
         anchor,

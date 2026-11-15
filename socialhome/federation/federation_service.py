@@ -497,6 +497,7 @@ class FederationService:
         "_state_send_seq",
         "_state_sends",
         "_stopping",
+        "_sync_begin_admitted",
         "_sync_manager",
         "_transport",
         "_typing_service",
@@ -630,6 +631,10 @@ class FederationService:
         self._mesh_claim_answer_tasks: set[asyncio.Task[None]] = set()
         #: See :meth:`attach_space_applied`.
         self._space_applied: Callable[[str], None] | None = None
+        #: See :meth:`attach_sync_begin_admitted`.
+        self._sync_begin_admitted: (
+            Callable[[FederationEvent], Awaitable[None]] | None
+        ) = None
         self._deferred_mesh_tasks: dict[str, asyncio.Task[None]] = {}
         #: Per pending target: set to cut its drain task's wait short when a
         #: route to it is learned (:meth:`on_route_learned`).
@@ -1265,6 +1270,16 @@ class FederationService:
         catch-up — so the files of the rows it stored that never arrived
         are asked for without waiting for a view. O(1) per event."""
         self._space_applied = applied
+
+    def attach_sync_begin_admitted(
+        self, admitted: Callable[[FederationEvent], Awaitable[None]]
+    ) -> None:
+        """Wire ``admitted(event)`` (``SpaceService.on_sync_begin_roster``):
+        called for a ``SPACE_SYNC_BEGIN`` only once the S-6 / S-8 admission
+        let it in — never for one refused (rate limited, too many sessions,
+        not a member) — so whatever it answers costs at most what an
+        admitted BEGIN may. Fail-soft."""
+        self._sync_begin_admitted = admitted
 
     def attach_mesh_claim_answer(
         self, answer: Callable[[str], Awaitable[bool]]
@@ -5373,6 +5388,11 @@ class FederationService:
                 space_id=space_id,
             )
             return
+        if decision.accepted and self._sync_begin_admitted is not None:
+            try:
+                await self._sync_begin_admitted(event)
+            except Exception:
+                log.exception("sync %s: admitted-BEGIN hook failed", sync_id)
 
         # A requester reachable only via the mesh (not a CONFIRMED direct
         # peer) cannot complete the WebRTC handshake — ICE can't traverse a

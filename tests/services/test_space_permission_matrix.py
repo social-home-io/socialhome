@@ -281,6 +281,7 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # sends. No actor, no route.
         "on_sync_begin_roster",
         "roster_digest_of",
+        "wait_roster_repairs",
         "roster_digest_for",
         "roster_echo_for",
         # Internal seam the invite-redeem coordinator calls after it has
