@@ -10,8 +10,10 @@ calendar rows, never a space event (404).
 """
 
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, patch
 
 from socialhome.auth import sha256_token_hash
+from socialhome.repositories.calendar_repo import SqliteSpaceCalendarRepo
 
 from .conftest import _auth
 
@@ -577,3 +579,36 @@ async def test_approving_a_request_that_is_not_there_echoes_nothing(client):
         "code": "NOT_FOUND",
         "detail": "Resource not found.",
     }
+
+
+async def test_an_event_id_another_space_owns_is_a_logged_404(client, caplog):
+    """The repo refuses to save an event whose id another space already
+    owns (a submitted id on the moderation-apply path, or a collision): a
+    404 for the caller — and an operator line, since it is an integrity
+    refusal, not a missing resource."""
+    await _seed_space(client, "sp-b", client._uid, "owner")
+    caplog.set_level("WARNING", logger="socialhome.services.calendar_service")
+    start = datetime.now(UTC) + timedelta(hours=2)
+    body = {
+        "summary": "x",
+        "start": start.isoformat(),
+        "end": (start + timedelta(hours=1)).isoformat(),
+    }
+    refused = AsyncMock(return_value=False)
+    with patch.object(SqliteSpaceCalendarRepo, "save_event", refused):
+        r = await client.post(
+            "/api/spaces/sp-b/calendar/events", json=body, headers=_auth(client._tok)
+        )
+    assert r.status == 404, await r.text()
+    assert "another space" in caplog.text
+
+    eid = await _create_event(client, "sp-b", _auth(client._tok))
+    caplog.clear()
+    with patch.object(SqliteSpaceCalendarRepo, "save_event", refused):
+        r = await client.patch(
+            f"/api/spaces/sp-b/calendar/events/{eid}",
+            json={"summary": "renamed"},
+            headers=_auth(client._tok),
+        )
+    assert r.status == 404, await r.text()
+    assert "refused to save" in caplog.text

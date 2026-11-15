@@ -1314,6 +1314,13 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
             labels=labels,
         )
         if not await self._repo.save(updated, space_id=space_id):
+            # Read in this space a moment ago, refused by the space-scoped
+            # save now: the row moved or went — an integrity line.
+            log.warning(
+                "tasks: repo refused to save task %s in space %s",
+                updated.id,
+                space_id,
+            )
             raise NotFoundError(f"space task {updated.id!r} not found in this space")
         saved = updated
         if self._bus is not None:
@@ -1495,6 +1502,13 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
             updated_at=now,
         )
         if not await self._repo.save(updated, space_id=space_id):
+            # Read in this space a moment ago, refused by the space-scoped
+            # save now: the row moved or went — an integrity line.
+            log.warning(
+                "tasks: repo refused to save task %s in space %s",
+                updated.id,
+                space_id,
+            )
             raise NotFoundError(f"space task {updated.id!r} not found in this space")
         saved = updated
         await self._emit(

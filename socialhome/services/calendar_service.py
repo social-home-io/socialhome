@@ -1614,6 +1614,14 @@ class SpaceCalendarService(
                 queue_announce = refusal == "moderated"
         event = replace(event, announce_in_feed=announce_in_feed)
         if not await self._repo.save_event(event, space_id=space_id):
+            # An integrity refusal, not a missing resource: the id is owned
+            # by another space (a submitted id, a collision). 404 for the
+            # caller; an operator line here.
+            log.warning(
+                "calendar: event %s exists in another space — not saved in %s",
+                event.id,
+                space_id,
+            )
             raise NotFoundError(f"calendar event {event.id!r} exists in another space")
         saved = event
         await self._emit(CalendarEventCreated(event=saved))
@@ -2059,6 +2067,13 @@ class SpaceCalendarService(
                 snapshot={k: before[k] for k in shown},
             )
         if not await self._repo.save_event(updated, space_id=space_id):
+            # Read in this space a moment ago, refused by the space-scoped
+            # save now: the row moved or went — an integrity line.
+            log.warning(
+                "calendar: repo refused to save event %s in space %s",
+                updated.id,
+                space_id,
+            )
             raise NotFoundError(
                 f"calendar event {updated.id!r} not found in this space"
             )
