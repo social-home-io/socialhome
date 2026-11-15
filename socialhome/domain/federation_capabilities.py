@@ -1569,7 +1569,20 @@ from __future__ import annotations
 #:   v_94 receiver applies as before v_94 (it replaces everybody's votes
 #:   but its own people's). Space-scoped. Labelled "Poll votes count the
 #:   same in every household".
-OURS: int = 94
+#: * **v_95** (2026-11-15) — **one space cover / icon size for every member**
+#:   (owner decision 2026-11-15): a household at v_95 stores and sends a
+#:   space's cover / icon within ONE cap per kind (64 KiB / 16 KiB WebP,
+#:   ``SPACE_COVER_MAX_BYTES`` / ``SPACE_ICON_MAX_BYTES``) on every path —
+#:   the config change, the join snapshot, the invite-link ACK — and the
+#:   ``relay_payload`` copy for invite-link seats is gone. A receiver
+#:   refuses an over-cap image from a sender at v_95
+#:   (``MIN_FOR_CAPPED_SPACE_IMAGES``) and keeps the one it holds.
+#:   **Fallback**: from a sender below v_95 (the released v_80 line, and
+#:   builds of main up to v_94, which send paired members up to 256 KiB) an
+#:   over-cap image within ``SPACE_IMAGE_EMBED_MAX_BYTES`` is re-encoded on
+#:   the receiver and the rendition stored. Wire unchanged, no sync-stream
+#:   change, not space-scoped. Labelled "The same space cover for every member".
+OURS: int = 95
 
 
 class FederationCapability:
@@ -2273,12 +2286,13 @@ class FederationCapability:
     #: ``SPACE_POLL_VOTE_CAST``) is additive and goes to everyone. A
     #: ``SYNC_RECORD_LINES`` entry (94).
     MIN_FOR_ITEM_MERGE_STAMPS = 94
-    #: v_94 — a household at or above it sends a space's cover / icon
+    #: v_95 — a household at or above it sends a space's cover / icon
     #: within the one cap (``SPACE_COVER_MAX_BYTES`` / ``SPACE_ICON_MAX_BYTES``,
     #: owner decision 2026-11-15), so an image over it from such a sender is
-    #: refused. Below it (the released v_80 line sent paired members up to
-    #: 256 KiB) the receiver re-encodes the image instead. Wire unchanged.
-    MIN_FOR_CAPPED_SPACE_IMAGES = 94
+    #: refused. Below it (the released v_80 line and builds of main up to
+    #: v_94 sent paired members up to 256 KiB) the receiver re-encodes the
+    #: image instead. Wire unchanged.
+    MIN_FOR_CAPPED_SPACE_IMAGES = 95
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2637,6 +2651,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS,
         "Poll votes count the same in every household",
     ),
+    (
+        FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES,
+        "The same space cover for every member",
+    ),
 ]
 
 
@@ -2741,6 +2759,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED: "space_media_wanted",
     FederationCapability.MIN_FOR_SPACE_POST_REACTIONS: "space_post_reactions",
     FederationCapability.MIN_FOR_ITEM_MERGE_STAMPS: "poll_vote_stamps",
+    FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES: "space_image_cap",
 }
 
 
