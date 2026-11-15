@@ -3336,9 +3336,12 @@ class FederationService:
                 space_id=space_id,
             )
         if (
-            # A seat has no inbox address (``remote_inbox_url=""`` from the
-            # redeem; ``URL_UPDATED`` is outside its vocabulary): never here.
-            instance.remote_inbox_url
+            # Defence in depth: a seat has no inbox address (the redeem
+            # stores ``""`` and ``URL_UPDATED`` from a seat is ignored), and a
+            # household met through a GFS is never POSTed to directly even
+            # if it somehow had one.
+            instance.source is not InstanceSource.SPACE_SESSION
+            and instance.remote_inbox_url
             # A peer already known to be away gets the JSON leg straight
             # away (relay / outbox) — never two timed-out POSTs per chunk.
             and instance.unreachable_since is None

@@ -146,6 +146,10 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
             "seat",
             "seat teardown, no-seed rule, private-GFS link check, join routing",
         ),
+        "socialhome/services/federation_inbound/pairing.py": (
+            "non-space exclusion",
+            "a seat never takes an inbox address (URL_UPDATED ignored)",
+        ),
         "socialhome/services/url_update_outbound.py": (
             "non-space exclusion",
             "a seat never learns an address",
