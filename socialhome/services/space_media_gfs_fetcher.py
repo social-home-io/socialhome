@@ -90,6 +90,7 @@ from ..domain.file_hashes import (
     space_content_media_name,
 )
 from ..domain.gfs_space_media import SCOPE_CHANNEL, SCOPE_SPACE, space_media_address
+from ..domain.media_constraints import is_gfs_space_media_name, is_reserved_media_name
 from ..domain.space_media_ref import (
     MAX_PAGE_DESCRIPTOR_ENTRIES,
     MAX_PAGE_FILES,
@@ -108,8 +109,6 @@ from ..space_media_seal import (
 from ..task_drain import wait_tasks_done
 from .inbound_media_store import (
     gfs_space_media_name,
-    is_gfs_space_media_name,
-    is_reserved_media_name,
     is_space_direct_media_name,
     is_space_page_media_name,
     media_file_path,

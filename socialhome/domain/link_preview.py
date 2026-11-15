@@ -12,7 +12,7 @@ bounds a received preview is held to. What a peer sends is untrusted, so
 :func:`link_preview_from_dict` re-checks every field (types, lengths, URL
 scheme) and drops the whole preview on a malformed URL rather than trusting
 it. The image reference is normalised by the caller-supplied
-``image_ref`` (``inbound_media_store.local_media_ref`` for peer data): only
+``image_ref`` (``media_constraints.local_media_ref`` for peer data): only
 a local ``api/media/<name>`` reference survives, never a remote URL.
 """
 

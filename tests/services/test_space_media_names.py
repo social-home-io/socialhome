@@ -5,6 +5,10 @@ from __future__ import annotations
 import pytest
 
 from socialhome.domain.file_hashes import FileHash, space_content_media_name
+from socialhome.domain.media_constraints import (
+    is_reserved_media_name,
+    is_safe_media_name,
+)
 from socialhome.domain.space_media_fields import (
     SPACE_MEDIA_ITEMS,
     moderation_item,
@@ -12,8 +16,6 @@ from socialhome.domain.space_media_fields import (
 from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.services.inbound_media_store import (
     SPACE_DIRECT_MEDIA_PREFIX,
-    is_reserved_media_name,
-    is_safe_media_name,
     is_space_direct_media_name,
     space_direct_media_name,
 )

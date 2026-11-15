@@ -80,6 +80,7 @@ from ..domain.gfs_space_media_on_demand import (
     InvalidOnDemandWire,
     MediaRequestFrame,
 )
+from ..domain.media_constraints import is_reserved_media_name, is_safe_media_name
 from ..domain.space_media_ref import space_page_media_name
 from ..space_media_hint import (
     InvalidSpaceMediaHint,
@@ -91,8 +92,6 @@ from ..space_media_seal import MAX_SPACE_MEDIA_BYTES
 from ..task_drain import wait_tasks_done
 from .inbound_media_store import (
     gfs_space_media_name,
-    is_reserved_media_name,
-    is_safe_media_name,
     media_file_path,
     space_direct_media_name,
 )

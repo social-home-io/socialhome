@@ -176,6 +176,7 @@ from ..domain.media_constraints import (
     SPACE_ICON_MAX_DIMENSION,
     SPACE_ICON_SNAPSHOT_MAX_BYTES,
     SPACE_IMAGE_EMBED_MAX_BYTES,
+    space_media_ref,
 )
 from ..domain.mention import Mention
 from ..domain.picture_hash import compute_picture_hash
@@ -289,11 +290,7 @@ from ..task_drain import wait_tasks_done
 from ..utils.timezones import coerce_tz
 from .content_access import ContentAccessMixin
 from .gfs_connection_service import GfsConnectionError
-from .inbound_media_store import (
-    optional_local_media_ref,
-    require_local_media_refs,
-    space_media_ref,
-)
+from .inbound_media_store import optional_local_media_ref, require_local_media_refs
 from .local_community import (
     LocalAreaBudget,
     hosted_local_area,

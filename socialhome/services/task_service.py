@@ -32,6 +32,7 @@ from ..domain.events import (
     TaskListUpdated,
     TaskUpdated,
 )
+from ..domain.media_constraints import local_media_ref
 from ..domain.space import (
     AccessDecision,
     ContentAction,
@@ -75,7 +76,6 @@ from ..repositories.user_repo import AbstractUserRepo
 from ..utils.timezones import DEFAULT_TZ, local_date
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
-from .inbound_media_store import local_media_ref
 from .media_ref_guard import MediaRefGuardedMixin
 from .space_moderation_service import ApplyResult, item_payload_snapshot
 from .space_service import SpaceService

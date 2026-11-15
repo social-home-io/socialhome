@@ -14,7 +14,7 @@ from ....domain.conversation import (
 from ....domain.dm_location import normalise_location_content
 from ....domain.events import DmHistorySyncComplete
 from ....domain.federation import FederationEventType
-from ....services.inbound_media_store import local_media_ref
+from ....domain.media_constraints import local_media_ref
 from ....services.protection_gate import ProtectionGateMixin
 from ...dm_scope import DmScope, refuse
 

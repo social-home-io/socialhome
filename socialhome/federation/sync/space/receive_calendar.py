@@ -19,13 +19,14 @@ from ....domain.calendar import (
 )
 from ....domain.events import CalendarEventDeleted
 from ....domain.federation import FederationEvent
+from ....domain.media_constraints import space_media_ref
 from ....domain.space_item import stored_stamp
 from ....domain.space_media_fields import item_media_urls
 from ....services.calendar_service import (
     calendar_event_too_large,
     log_calendar_event_not_stored,
 )
-from ....services.inbound_media_store import space_media_ref, verbatim_local_media_ref
+from ....services.inbound_media_store import verbatim_local_media_ref
 from ....utils.rrule import clean_rrule
 from ....utils.timezones import coerce_tz
 from ...owner_bound_id import SPACE_CALENDAR_EVENT_KIND

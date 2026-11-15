@@ -93,6 +93,7 @@ from ..domain.gfs_member_publish import (
     SpaceItemFrame,
 )
 from ..domain.link_preview import card_survives_edit
+from ..domain.media_constraints import is_gfs_space_media_name, space_media_ref
 from ..domain.post import FEED_POST_MAX_IMAGES, LocationData, Post, PostType
 from ..domain.presence import truncate_coord
 from ..domain.space import SpaceRole
@@ -124,12 +125,7 @@ from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
 from ..writer_cert import verify_writer_users
 from .gfs_member_publish_service import parse_item_plaintext
-from .inbound_media_store import (
-    is_gfs_space_media_name,
-    media_basename,
-    space_media_ref,
-    space_media_refs,
-)
+from .inbound_media_store import media_basename, space_media_refs
 from .link_preview_service import (
     space_wire_link_preview,
 )

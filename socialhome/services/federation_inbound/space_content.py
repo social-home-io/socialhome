@@ -90,7 +90,7 @@ from ...domain.federation import FederationEventType
 from ...domain.file_hashes import parse_file_hashes
 from ...domain.gallery import GalleryAlbum, GalleryItem, valid_taken_day
 from ...domain.item_merge import change_stamp
-from ...domain.media_constraints import CAPTION_MAX
+from ...domain.media_constraints import CAPTION_MAX, space_media_ref
 from ...domain.page import MAX_PAGE_TITLE_LENGTH, Page
 from ...domain.page_version import version_hash
 from ...domain.post import (
@@ -173,11 +173,7 @@ from ..calendar_service import (
     log_calendar_event_not_stored,
 )
 from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
-from ..inbound_media_store import (
-    space_media_ref,
-    space_media_refs,
-    verbatim_local_media_ref,
-)
+from ..inbound_media_store import space_media_refs, verbatim_local_media_ref
 from ..page_conflict_service import (
     CanonicalVersion,
     PageMode,

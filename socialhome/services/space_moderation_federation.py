@@ -95,6 +95,7 @@ from ..domain.federation import (
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.file_hashes import parse_file_hashes
+from ..domain.media_constraints import space_media_ref
 from ..domain.presence import truncate_coord
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
@@ -125,7 +126,7 @@ from ..federation.space_scope import resolve_space_id
 from ..repositories.base import dump_json, load_json
 from ..utils.datetime import parse_iso8601_optional
 from .file_hashes_sender import FileHashesMixin
-from .inbound_media_store import media_basename, space_media_ref
+from .inbound_media_store import media_basename
 from .space_media_names import SpaceMediaNamer, feature_media_urls, renamed_media
 from .space_moderation_service import (
     MAX_PAYLOAD_BYTES,

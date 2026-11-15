@@ -42,18 +42,17 @@ from ..domain.file_hashes import (
     is_space_content_media_name,
     space_content_media_name,
 )
+from ..domain.media_constraints import (
+    MEDIA_REF_PREFIX,
+    is_reserved_media_name,
+    space_media_ref,
+)
 from ..domain.space_media_fields import (
     moderation_payload_urls,
     rename_moderation_payload,
 )
 from ..domain.space_media_ref import SpaceMediaLocalization
-from .inbound_media_store import (
-    MEDIA_REF_PREFIX,
-    is_reserved_media_name,
-    media_basename,
-    space_direct_media_name,
-    space_media_ref,
-)
+from .inbound_media_store import media_basename, space_direct_media_name
 
 
 class _ConfinedFiles(Protocol):

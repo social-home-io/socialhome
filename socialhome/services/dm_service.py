@@ -55,6 +55,7 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..domain.household_dashboard import ACK_EMOJI
+from ..domain.media_constraints import local_media_ref
 from ..federation import compat
 from ..federation.owner_bound_id import SPACE_CHAT_MESSAGE_KIND, mint_owner_bound_id
 from ..infrastructure.event_bus import EventBus
@@ -65,7 +66,6 @@ from ..repositories.user_repo import AbstractUserRepo
 from .dm_audience import local_audience
 from .dm_group_service import DmGroupService, clean_group_name
 from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
-from .inbound_media_store import local_media_ref
 from .media_ref_guard import MediaRefGuardedMixin
 from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin

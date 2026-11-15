@@ -8,10 +8,9 @@ from typing import TYPE_CHECKING, Any
 from ....domain.events import GalleryAlbumDeleted, GalleryItemDeleted
 from ....domain.federation import FederationEvent
 from ....domain.gallery import GalleryAlbum, GalleryItem, valid_taken_day
-from ....domain.media_constraints import CAPTION_MAX
+from ....domain.media_constraints import CAPTION_MAX, space_media_ref
 from ....domain.space_media_fields import item_media_urls
 from ....media.cleanup import unlink_unreferenced
-from ....services.inbound_media_store import space_media_ref
 from ...owner_bound_id import (
     GALLERY_ALBUM_KIND,
     GALLERY_ITEM_KIND,

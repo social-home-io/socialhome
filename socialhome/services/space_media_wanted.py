@@ -103,6 +103,7 @@ from ..domain.file_hashes import (
     is_space_content_media_name,
     space_content_media_name,
 )
+from ..domain.media_constraints import is_safe_media_name
 from ..federation.host_equivalence import acting_hosts
 from ..federation.sync.space.file_gate import (
     CatchUpFileGates,
@@ -111,7 +112,6 @@ from ..federation.sync.space.file_gate import (
 )
 from ..federation.sync.space.trusted_helpers import helper_offset, trusted_helpers
 from .inbound_media_store import (
-    is_safe_media_name,
     is_space_direct_media_name,
     media_file_path,
     space_direct_media_name,

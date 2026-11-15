@@ -70,25 +70,15 @@ from ..domain.file_hashes import (
     space_content_media_name,
 )
 from ..domain.media_chunking import MAX_MEDIA_CHUNKS
-
-# The pure local-reference rules live in the domain (the media reference
-# repo reads them too); re-exported here, where every receiving path has
-# always imported them from.
-from ..domain.media_constraints import (  # noqa: F401
+from ..domain.media_constraints import (
     AUDIO_MAX_UPLOAD_BYTES,
     DM_MEDIA_PREFIX,
     FILE_MAX_UPLOAD_BYTES,
     GFS_SPACE_MEDIA_PREFIX,
     IMAGE_MAX_UPLOAD_BYTES,
-    MEDIA_REF_PREFIX,
-    RESERVED_MEDIA_PREFIXES,
-    SAFE_MEDIA_NAME,
     SPACE_DIRECT_MEDIA_PREFIX,
     SPACE_PAGE_MEDIA_PREFIX,
-    TRANSIENT_DM_MEDIA_RE,
     VIDEO_MAX_UPLOAD_BYTES,
-    is_gfs_space_media_name,
-    is_reserved_media_name,
     is_safe_media_name,
     local_media_ref,
     space_media_ref,

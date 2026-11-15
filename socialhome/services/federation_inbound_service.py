@@ -81,6 +81,12 @@ from ..domain.highlight import (
     HighlightFrameType,
 )
 from ..domain.link_preview import card_survives_edit
+from ..domain.media_constraints import (
+    is_reserved_media_name,
+    is_safe_media_name,
+    local_media_ref,
+    space_media_ref,
+)
 from ..domain.mention import Mention
 from ..domain.moment import (
     MOMENT_MAX_LIFETIME_DAYS,
@@ -167,17 +173,13 @@ from .inbound_media_store import (
     dm_media_name,
     drop_parts,
     inbound_size_refusal,
-    is_reserved_media_name,
-    is_safe_media_name,
     link_once,
-    local_media_ref,
     media_basename,
     media_file_path,
     note_existing,
     parse_chunk_meta,
     partial_key,
     space_direct_media_name,
-    space_media_ref,
     space_media_refs,
     store_chunk,
     verbatim_local_media_ref,

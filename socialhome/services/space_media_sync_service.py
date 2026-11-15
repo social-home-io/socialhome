@@ -42,12 +42,13 @@ import aiofiles.os
 from ..domain.federation import FederationEventType
 from ..domain.file_hashes import blob_hash_fields, sha256_hex
 from ..domain.media_chunking import split_into_chunks
+from ..domain.media_constraints import is_safe_media_name
 from ..repositories.space_media_outbox_repo import (
     AbstractSpaceMediaOutboxRepo,
     SpaceMediaOutboxEntry,
 )
 from .backoff import jittered_backoff_seconds
-from .inbound_media_store import is_safe_media_name, media_basename, media_file_path
+from .inbound_media_store import media_basename, media_file_path
 from .media_chunk_pipeline import send_chunks
 from .media_file_hasher import MediaFileHasher
 from .peer_unpair_service import is_unpair_tombstone
