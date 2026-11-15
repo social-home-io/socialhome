@@ -417,6 +417,7 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ("feed_posts", "media_url", "one", _HOUSEHOLD),
     ("feed_posts", "image_urls_json", "list", _HOUSEHOLD),
     ("feed_posts", "link_preview_json", "json:$.thumbnail_url", _HOUSEHOLD),
+    ("feed_posts", "file_meta_json", "json:$.url", _HOUSEHOLD),
     ("post_comments", "media_url", "one", _HOUSEHOLD),
     (
         "highlight_frames",
