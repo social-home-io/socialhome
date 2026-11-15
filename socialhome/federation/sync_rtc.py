@@ -99,10 +99,12 @@ class SyncRtcSession:
         "_closed",
         "_ice_candidates",
         "_ice_servers",
+        "_in_flight",
         "_local_sdp",
         "_loop",
         "_on_local_ice",
         "_pc",
+        "_pc_to_close",
         "_ready",
         "_remote_sdp",
         "provider_instance_id",
@@ -146,6 +148,11 @@ class SyncRtcSession:
         self._ice_candidates: list[str] = []
         self._loop = loop
         self._closed = False
+        # Calls that apply remote state run in an aiolibdatachannel
+        # executor thread; ``close()`` defers the PeerConnection's close
+        # until the last one returns (see :meth:`_apply_remote`).
+        self._in_flight = 0
+        self._pc_to_close: Any = None
         # Optional callback fired for every LOCAL ICE candidate the
         # PeerConnection gathers. The federation service wires this
         # up to forward each candidate to the peer via
@@ -172,6 +179,8 @@ class SyncRtcSession:
         """
         if self._channel is not None:
             return
+        if self._pc is None:
+            raise ConnectionError("sync session closed")
         if self.role == "provider":
             self._channel = await self._pc.create_data_channel(CHANNEL_LABEL)
             self._channel.set_buffered_amount_low_threshold(
@@ -270,6 +279,8 @@ class SyncRtcSession:
             raise RuntimeError("create_offer is only valid for provider sessions")
 
         await self._open_channel_async()
+        if self._pc is None:
+            raise ConnectionError("sync session closed")
         local = await self._pc.set_local_description("offer")
         self._local_sdp = local.sdp
         return local.sdp
@@ -287,7 +298,7 @@ class SyncRtcSession:
             raise ValueError("Empty SDP answer")
 
         self._remote_sdp = sdp_answer
-        await self._pc.set_remote_description(sdp_answer, "answer")
+        await self._apply_remote("set_remote_description", sdp_answer, "answer")
 
     # ─── Requester role ───────────────────────────────────────────────────
 
@@ -300,7 +311,9 @@ class SyncRtcSession:
 
         await self._open_channel_async()
         self._remote_sdp = sdp_offer
-        await self._pc.set_remote_description(sdp_offer, "offer")
+        await self._apply_remote("set_remote_description", sdp_offer, "offer")
+        if self._pc is None:
+            raise ConnectionError("sync session closed")
         local = await self._pc.set_local_description("answer")
         self._local_sdp = local.sdp
         return local.sdp
@@ -324,6 +337,7 @@ class SyncRtcSession:
         # same late candidate the federation PeerConnection drops at debug.
         if (
             self._closed
+            or self._pc is None
             or self._pc.closed
             or self._pc.state is rtc.RTCState.CLOSED
             or self._pc.ice_state is rtc.ICEState.CLOSED
@@ -334,13 +348,53 @@ class SyncRtcSession:
             )
             return
         try:
-            await self._pc.add_remote_candidate(candidate, sdp_mid)
+            await self._apply_remote("add_remote_candidate", candidate, sdp_mid)
         except rtc.RTCError as exc:
             log.debug(
                 "SyncRtcSession[%s]: add_remote_candidate failed: %s",
                 self.sync_id,
                 exc,
             )
+
+    async def _apply_remote(self, method: str, *args: str) -> None:
+        """Run ``set_remote_description`` / ``add_remote_candidate`` on the
+        PeerConnection, holding off its close until the call returns.
+
+        aiolibdatachannel runs both in an executor thread, and its
+        ``close()`` deletes the native handle from another executor thread
+        — with no lock between the two. A ``close()`` landing while such a
+        call waited for its thread (a remote candidate trickling in as the
+        stream ends) deleted the handle under it: libdatachannel's
+        ``PeerConnection ID does not exist`` at ERROR. So :meth:`close`
+        hands the PeerConnection to the last in-flight call to close, and
+        no call starts once the session is closed.
+
+        The call runs as its own task, counted until *it* finishes: a
+        cancelled caller does not stop the executor thread, so it must not
+        let the close through early either.
+        """
+        pc = self._pc
+        if pc is None:
+            raise ConnectionError("sync session closed")
+        call = asyncio.ensure_future(getattr(pc, method)(*args))
+        self._in_flight += 1
+        call.add_done_callback(self._remote_call_done)
+        await asyncio.shield(call)
+
+    def _remote_call_done(self, call: asyncio.Future) -> None:
+        if not call.cancelled():
+            call.exception()  # retrieved here or by the awaiting caller
+        self._in_flight -= 1
+        if not self._in_flight and self._pc_to_close is not None:
+            closing, self._pc_to_close = self._pc_to_close, None
+            self._close_pc(closing)
+
+    @staticmethod
+    def _close_pc(pc: Any) -> None:
+        try:
+            pc.close()
+        except rtc.RTCError:
+            pass
 
     async def wait_ready(self, timeout: float = ICE_TIMEOUT_SECONDS) -> bool:
         """Block until the DataChannel is open, or *timeout* seconds elapse.
@@ -406,17 +460,20 @@ class SyncRtcSession:
         """Close the underlying connection and mark the session closed.
 
         ``pc.close()`` tears down the PeerConnection; aiolibdatachannel
-        auto-cancels any tasks registered via ``pc.spawn_task``.
+        auto-cancels any tasks registered via ``pc.spawn_task``. While a
+        call applying remote state is in flight, that call closes it as it
+        returns (:meth:`_apply_remote`).
         """
         self._closed = True
         self._ready.clear()
-        if self._pc is not None:
-            try:
-                self._pc.close()
-            except rtc.RTCError:
-                pass
-        self._pc = None
+        pc, self._pc = self._pc, None
         self._channel = None
+        if pc is None:
+            return
+        if self._in_flight:
+            self._pc_to_close = pc
+        else:
+            self._close_pc(pc)
 
 
 # ─── Stateful helpers used by the manager ────────────────────────────────
