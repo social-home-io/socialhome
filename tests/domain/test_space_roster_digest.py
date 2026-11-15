@@ -91,3 +91,27 @@ def test_the_sorted_seats_hash_like_the_raw_ones_without_one_household():
     assert digest_of_roster_seats(seats, exclude_instance="x") == roster_digest(
         [("h", "u1", "member")]
     )
+
+
+def test_the_wire_carries_the_applied_roster_version_and_key_epoch():
+    """S2 / N6: the member also says which roster version it has applied
+    and which content-key epoch it holds, so the host can tell "behind
+    while gossip is in flight" and "key not caught up yet" apart."""
+    wire = roster_digest_wire("a" * 64, 7, roster_version=12, key_epoch=7)
+    assert wire["roster_version"] == 12 and wire["key_epoch"] == 7
+    assert parse_roster_digest(wire) == RosterDigest(
+        digest="a" * 64, cert_epoch=7, roster_version=12, key_epoch=7
+    )
+    bare = roster_digest_wire("b" * 64, None)
+    assert parse_roster_digest(bare) == RosterDigest(
+        digest="b" * 64, cert_epoch=None, roster_version=None, key_epoch=None
+    )
+
+
+@pytest.mark.parametrize(
+    "field", [("roster_version", -1), ("roster_version", "1"), ("key_epoch", True)]
+)
+def test_a_malformed_version_or_epoch_is_none(field):
+    wire = roster_digest_wire("a" * 64, None)
+    wire[field[0]] = field[1]
+    assert parse_roster_digest(wire) is None

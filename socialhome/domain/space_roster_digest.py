@@ -24,7 +24,13 @@ repair backoff bounds it to one snapshot a day. An authoritative full
 snapshot (with host-local tombstones) is the open fix.
 
 Wire shape (``roster_digest`` on the BEGIN): ``{"suite": ..., "digest":
-<64 hex>, "cert_epoch": <int|null>}``. A receiver refuses an unknown suite.
+<64 hex>, "cert_epoch": <int|null>, "roster_version": <int|null>,
+"key_epoch": <int|null>}`` — the writer-cert epoch the member holds, the
+highest roster version it has applied (its mirror's newest
+``member_version``, so the host can tell a member that is merely behind
+while gossip is in flight from one that drifted) and the content-key epoch
+it holds (a cert-only repair waits until its key caught up). A receiver
+refuses an unknown suite — no repair, never a fallback.
 """
 
 from __future__ import annotations
@@ -53,11 +59,14 @@ class UnsupportedRosterDigestSuite(ValueError):
 
 @dataclass(slots=True, frozen=True)
 class RosterDigest:
-    """A parsed ``roster_digest``: the seats' hash and the writer-cert
-    epoch the member holds (``None``: none)."""
+    """A parsed ``roster_digest``: the seats' hash, the writer-cert epoch
+    the member holds, the newest roster version it has applied and its
+    content-key epoch (each ``None``: none / not said)."""
 
     digest: str
     cert_epoch: int | None
+    roster_version: int | None = None
+    key_epoch: int | None = None
 
 
 def roster_seats(seats: Iterable[tuple[str, str, str]]) -> tuple[RosterSeat, ...]:
@@ -88,13 +97,30 @@ def roster_digest(seats: Iterable[tuple[str, str, str]]) -> str:
     return digest_of_roster_seats(roster_seats(seats))
 
 
-def roster_digest_wire(digest: str, cert_epoch: int | None) -> dict:
+def roster_digest_wire(
+    digest: str,
+    cert_epoch: int | None,
+    *,
+    roster_version: int | None = None,
+    key_epoch: int | None = None,
+) -> dict:
     """The ``roster_digest`` field of a BEGIN."""
     return {
         "suite": ROSTER_DIGEST_SUITE_SHA256,
         "digest": digest,
         "cert_epoch": cert_epoch,
+        "roster_version": roster_version,
+        "key_epoch": key_epoch,
     }
+
+
+def _opt_nonneg_int(value: object) -> tuple[bool, int | None]:
+    """``(ok, value)`` for an optional non-negative int field."""
+    if value is None:
+        return True, None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return False, None
+    return True, value
 
 
 def parse_roster_digest(raw: object) -> RosterDigest | None:
@@ -107,11 +133,18 @@ def parse_roster_digest(raw: object) -> RosterDigest | None:
     if suite not in SUPPORTED_ROSTER_DIGEST_SUITES:
         raise UnsupportedRosterDigestSuite(str(suite))
     digest = raw.get("digest")
-    cert_epoch = raw.get("cert_epoch")
     if not isinstance(digest, str) or not _HEX64.fullmatch(digest):
         return None
-    if cert_epoch is not None and (
-        not isinstance(cert_epoch, int) or isinstance(cert_epoch, bool)
-    ):
-        return None
-    return RosterDigest(digest=digest, cert_epoch=cert_epoch)
+    fields: list[int | None] = []
+    for name in ("cert_epoch", "roster_version", "key_epoch"):
+        ok, value = _opt_nonneg_int(raw.get(name))
+        if not ok:
+            return None
+        fields.append(value)
+    cert_epoch, roster_version, key_epoch = fields
+    return RosterDigest(
+        digest=digest,
+        cert_epoch=cert_epoch,
+        roster_version=roster_version,
+        key_epoch=key_epoch,
+    )
