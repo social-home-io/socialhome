@@ -561,9 +561,10 @@ member household, not only on the host:
   demotion or kick in between would otherwise never reach it), when a
   member household first advertises v_32, and on the periodic sync tick.
   Not sent after an invite-link redeem (the ACK's roster is taken at seat
-  time, and the redeemer has no space row yet) nor, on the timer, to a
-  link-joined household (a timed envelope over the connection-server relay
-  would be new traffic metadata for it). The host signs a snapshot's
+  time, and the redeemer has no space row yet). On the timer it goes to
+  every member household alike — paired, mesh-only or seated from an invite
+  link over the GFS relay — and the `roster_echo` below keeps a household
+  that holds the current roster at zero envelopes. The host signs a snapshot's
   entries, and the receiver verifies them, in a worker thread, off the
   event loop.
 - **Only what changed, on the timer.** A snapshot names the
@@ -636,9 +637,6 @@ member household, not only on the host:
 
 Known edges of the snapshot, all self-limiting:
 
-- A **link-joined household** gets no periodic snapshot (see above); its
-  mirror heals when it is seated again or first advertises v_32 after an
-  upgrade, and live gossip keeps reaching it in between.
 - A **v_32 receiver behind an older host** gets no snapshots at all — the
   host does not send them — and converges on live gossip and the §25.6
   catch-up stream as before.
