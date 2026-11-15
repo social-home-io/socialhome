@@ -4245,6 +4245,93 @@ async def test_same_space_post_lifecycle_unchanged(db, bus, inbound, two_spaces)
     assert [e.space_id for e in deleted] == ["sp-a"]
 
 
+# ── An edit that passed its gate and still wrote nothing ─────────────────
+
+
+async def _edit_that_writes_nothing(db, inbound, *, then: str):
+    """Seed ``post-a`` / ``cmt-a`` in sp-a, then deliver an edit of each whose
+    write finds the row changed under it: ``then`` is the SQL run on the row
+    at the moment of the write (the race between the gate and the edit)."""
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {"id": "post-a", "author": "u-a", "type": "text", "content": "hi"},
+            space_id="sp-a",
+        )
+    )
+    await inbound._on_space_comment_added(
+        _event(
+            FederationEventType.SPACE_COMMENT_CREATED,
+            {
+                "id": "cmt-a",
+                "post_id": "post-a",
+                "author": "u-a",
+                "type": "text",
+                "content": "reply",
+            },
+            space_id="sp-a",
+        )
+    )
+    assert (await _comment_row(db, "cmt-a"))["post_id"] == "post-a"
+    repo = inbound._space_post_repo
+
+    async def _post_raced(post_id, *_a, **_kw):
+        await db.enqueue(then.format(table="space_posts"), (post_id,))
+        return False
+
+    async def _comment_raced(comment_id, *_a, **_kw):
+        await db.enqueue(then.format(table="space_post_comments"), (comment_id,))
+        return False
+
+    repo.edit = _post_raced
+    repo.edit_comment = _comment_raced
+    # The comment first: the post's race would otherwise take its parent.
+    await inbound._on_space_comment_updated(
+        _event(
+            FederationEventType.SPACE_COMMENT_UPDATED,
+            {"id": "cmt-a", "content": "edited"},
+            space_id="sp-a",
+        )
+    )
+    await inbound._on_space_post_updated(
+        _event(
+            FederationEventType.SPACE_POST_UPDATED,
+            {"id": "post-a", "content": "edited"},
+            space_id="sp-a",
+        )
+    )
+
+
+async def test_an_edit_whose_row_is_gone_is_still_the_cross_space_warning(
+    db, inbound, two_spaces, caplog
+):
+    """No row in the gated space to hold the edit: the WARNING refusal."""
+    with caplog.at_level(logging.DEBUG):
+        await _edit_that_writes_nothing(
+            db, inbound, then="DELETE FROM {table} WHERE id=?"
+        )
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("post post-a is not in space sp-a" in m for m in warned)
+    assert any("comment cmt-a is not in space sp-a" in m for m in warned)
+    assert "not applied" not in caplog.text
+
+
+async def test_an_edit_of_a_row_deleted_meanwhile_says_so_at_debug(
+    db, inbound, two_spaces, caplog
+):
+    """The row is in the gated space but was deleted between the gate and
+    the write: a benign no-op, logged as what it is — not "not newer"."""
+    with caplog.at_level(logging.DEBUG):
+        await _edit_that_writes_nothing(
+            db, inbound, then="UPDATE {table} SET deleted=1 WHERE id=?"
+        )
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    held = [r.getMessage() for r in caplog.records if "not applied" in r.getMessage()]
+    assert any("post post-a" in m and "deleted here" in m for m in held)
+    assert any("comment cmt-a" in m and "deleted here" in m for m in held)
+    assert "not newer" not in caplog.text
+
+
 async def test_same_space_comment_lifecycle_unchanged(db, bus, inbound, two_spaces):
     """Comment add → update → delete inside B's own space all land."""
     from socialhome.domain.events import CommentDeleted, CommentUpdated

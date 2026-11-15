@@ -41,6 +41,7 @@ from ..domain.federation import (
     DeliveryResult,
     FederationEventType,
 )
+from ..domain.federation_capabilities import FederationCapability
 from ..domain.member_card import MemberCard
 
 if TYPE_CHECKING:
@@ -152,6 +153,15 @@ class HostHop:
                     target_identity_pk=card.identity_pk,
                     space_id=space_id,
                     first_leg=leg,
+                    # Sealed to a static key: never nacked, so nothing is
+                    # kept for a retransmit.
+                    retain=False,
+                    # The card's version says whether the target reads a
+                    # raw sealed body (a sync chunk's ciphertext unwrapped).
+                    raw_body_ok=card.proto_version
+                    >= FederationCapability.MIN_FOR_RELAY_MEDIA,
+                    # The host's leg to the target is a GFS relay frame.
+                    relay_frame_leg=True,
                 )
             except Exception:
                 log.warning("host hop: routed send failed", exc_info=True)

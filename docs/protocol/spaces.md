@@ -3338,10 +3338,114 @@ already run. The origin then applies, in order, each a fail-closed drop:
    makes the target mint a new ephemeral) and `send_routed` the retained
    inner event **once**, flagged as a retry.
 
+**What the origin keeps.** One rule for every inner event type, by size
+of the inner's compact JSON (UTF-8 bytes):
+
+| Inner | Kept for the retransmit |
+|---|---|
+| ≤ 64 KiB | always |
+| > 64 KiB (a long page, a space cover, a §25.6 chunk with one big record) | yes, under one budget for all of them: 16 MiB (`_MAX_RETAINED_LARGE_BYTES`). A new one that would pass it demotes the **oldest** kept large records to head-only until it fits |
+| > 64 KiB of a type whose sender holds the bytes itself (`SPACE_MEDIA_BLOB`: the file is on disk) | no — the sender is told and queues the file again (below) |
+| a host hop (v_89), whatever its size | no record at all: it is sealed to the target's static key-wrap key and never nacked |
+| the retransmit itself | no copy: a nack for it gives up |
+
+The newest send wins the budget because it is the one worth sending again:
+a page autosaves a couple of seconds after typing stops, each save the
+whole page, so an older large record is superseded anyway. 16 MiB is some
+32 of the largest space item (~0.5 MB) inside one pending window (270 s);
+a household runs on a Raspberry Pi next to Home Assistant. The budget
+counts every large inner held for a retransmit: the records in the table,
+the ones whose nack is being handled, and the ones waiting on their one
+deferred attempt — those last two are never demoted (if they alone fill
+the budget, the new send is not kept). A demoted record's nack invalidates
+the route and resends nothing, with one `WARNING` on the sender ("not
+kept: newer sends took the large-inner budget"); the member gets the item
+with its next §25.6 sync. Large retransmits run **one at a time**: sealing
+and encrypting one holds several copies of it (JSON, ciphertext, base64
+twice), so a burst of nacks never multiplies that. A `send_routed` whose
+first hop raises keeps nothing (the caller's retry goes out under a new
+`route_id`).
+
+**What one hop carries — the uniform limit, live and by sync.** A hop
+takes 1 MiB of envelope (the HTTPS inbox body, the data channel message).
+Every space item has one limit per kind on every path (a live payload up to
+515,998 bytes, a §25.6 record up to the same; `domain/relay_media_frame.py`),
+and the mesh carries both at the limit:
+
+* **A live event** is sealed for the route and encrypted for the hop
+  (base64 twice): at the live bound it is 929,278 bytes on a hop of the
+  longest route (8 households), hybrid-sized signatures throughout.
+* **A §25.6 sync chunk** carries its record's ciphertext as base64url text,
+  which the seal and the hop would base64 twice more (a record over
+  ~433,000 bytes would not fit). So when the chunk's JSON would not fit one
+  hop, `send_routed` seals its **raw layout** instead (`sync-chunk-raw-v1`,
+  the layout a GFS relay frame uses — `federation/relay_event_body.py`),
+  naming the suite in the sealed blob (`event_body_suite`) and binding it
+  into the AEAD; the target rebuilds the identical payload, so the chunk's
+  own signature and content-key AEAD are untouched. At the record bound
+  that is 937,995 bytes on a hop. The choice is made on the **encoded size
+  of the envelope** (the routed payload's JSON as it will be encrypted,
+  plus 12 KiB for the largest header a hop adds — a hybrid signature set,
+  and a route-origin signature that turns hybrid). On a **host hop** the
+  host's leg to the seat is a GFS relay frame (532,382 bytes), which binds
+  first: there the routed payload must also fit that frame as it would be
+  framed, with room for a hybrid origin signature, or the chunk is sealed
+  raw. So no record size falls between "fits as JSON" and "sent raw" on
+  either kind of route (`tests/federation/test_mesh_item_limits.py`
+  sweeps every 256 bytes from 400,000 to the bound over 8 households, and
+  every 2,048 bytes from 300,000 over a host hop into a frame). Only toward a target known to read it: the §25.6 provider passes
+  its requester's version (v_87+, `MIN_FOR_RELAY_MEDIA`); a host hop reads
+  the target's card. A released build (v_80) is never sent a raw body, so
+  no version bump: v_81–v_94 ship together.
+* **The host hop's leg to a seat behind a GFS** rides one relay frame with
+  the wrapper's sealed ciphertext raw (`space-routed-raw-v1`,
+  [gfs-relay.md](./gfs-relay.md#large-events-in-a-binary-frame)): 521,113
+  bytes for a live event at the bound, 526,026 for a sync chunk at the
+  bound, of the frame's 532,382.
+
+Cost: none for what fits as JSON (no second seal); a chunk over the
+threshold is sealed twice (JSON, measured, then raw) and travels ~25 %
+smaller on every hop than its JSON would. Large retransmits run one at a
+time for the whole send (the seal, the hop's encryption and the first
+hop's write each hold copies of the inner), so a slow first hop delays the
+next large retransmit — never a small one.
+
+**What can still be lost live, and what heals it.** Everything below is
+healed by the member's next §25.6 sync (on its restart and at least every
+30 minutes), which over the mesh now carries every record up to the bound:
+
+| Case | How often | Heal |
+|---|---|---|
+| The target was away longer than the origin's pending window (270 s) | every longer outage | its catch-up sync on restart |
+| The record was demoted under the 16 MiB budget (newer large sends) | > ~32 frame-sized sends within 270 s | sync; the newest of a page's saves is the one kept |
+| The retransmit itself was nacked (the target restarted twice) | rare | sync |
+| The one deferred attempt still found no route | the target stayed unreachable > ~35 s after its nack | sync |
+| The origin restarted inside the window (its pending records are in RAM) | rare | sync from the host, which holds the item (the origin had sent it there too) |
+| A hop toward the target is reachable only through its GFS relay fallback (a paired peer whose inbox is down; the JSON relay envelope takes ~191 KiB) | while that pair's direct path is down | sync once the direct path is back — the stream crosses the same hop |
+| The space's host is down while it is the only path (host hop) | while it is down | the origin's leg to the host is queued in the origin's outbox and sent when the host is back; sync |
+
+A host hop is never nacked (it is sealed to the target's long-term
+key-wrap key, which a restart does not change), so it keeps nothing for a
+retransmit; its leg toward a seat is queued like any other send.
+
+Before this every inner over 64 KiB was treated like a media chunk —
+recorded by its head only — though nothing but the media outbox can send
+its event again: a long page a household sent while a mesh-only member
+was restarting was dropped with one `INFO` line on the sender. Cost of a
+large retransmit: the event's bytes once more, to the one household that
+could not open them (≤ ~1 MiB per hop, ≤ 8 hops), never a fan-out.
+
+The retransmit may arrive after a copy that came another way (the
+member's §25.6 catch-up, a GFS `space_item`). Creates and saves are
+upserts; a post or comment edit that is not newer than the held row
+changes nothing (last writer wins) and is logged at `DEBUG` ("not
+applied — not newer than what is held here", or "— deleted here" for a
+row deleted meanwhile), not as a cross-space refusal.
+
 Step 8 is skipped — route invalidated, nothing resent — when the nacked
 send was itself the retry (a target that nacks twice gets one `INFO`
-line, not a loop) or when the inner exceeds 64 KiB — a media chunk, whose
-bytes the mesh does not keep. The chunk's first hop had taken it, so the
+line, not a loop) or when the inner was not kept. For a media chunk the
+first hop had taken it, so the
 `space_media_outbox` row was already done: the handler hands the inner's
 small head (`blob_id`, …, never the bytes) to the media outbox
 (`SpaceRoutedHandler.attach_lost_inner_listener` →
@@ -3382,7 +3486,8 @@ visits each hop at most once; replays are no-ops); one retransmit per
 original send (the retry's pending record is flagged so its own nack
 cannot trigger another) plus at most one deferred re-attempt; a
 bounded pending table (2000 entries, oldest
-expiry evicted first, ≤ 64 KiB retained inner each); and
+expiry evicted first, ≤ 64 KiB retained inner each plus ≤ 16 MiB of
+large ones in all, one large retransmit at a time); and
 `discover_route` single-flights per target and honours the negative
 cooldown, so a burst of nacks for one target costs one flood.
 

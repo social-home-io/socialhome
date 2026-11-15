@@ -1443,6 +1443,10 @@ class SpaceSyncService:
             # topology — silently, since the failure surfaces as a
             # warning inside the send. JSON is UTF-8 by definition so the
             # decode is lossless, and ``parse_chunk`` takes ``bytes | str``.
+            #
+            # Over a mesh route the record's ciphertext rides raw inside the
+            # seal (``sync-chunk-raw-v1``) when the JSON would not fit a hop
+            # — only toward a requester that reads that layout (v_87).
             result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=session.requester_instance_id,
                 event_type=FederationEventType.SPACE_SYNC_CHUNK,
@@ -1451,6 +1455,8 @@ class SpaceSyncService:
                     "chunk": serialise_chunk(envelope).decode(),
                 },
                 space_id=session.space_id,
+                routed_raw_body=await self._session_version(session)
+                >= FederationCapability.MIN_FOR_RELAY_MEDIA,
             )
             # Don't swallow a broken stream. Every chunk failing is what
             # left a mesh member with a space, a content key and media

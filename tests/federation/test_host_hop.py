@@ -189,6 +189,24 @@ async def test_a_member_reaches_another_through_the_host_sealed_end_to_end():
     assert {s["space_id"] for s in nodes[host].fed.sent} == {SPACE}
 
 
+async def test_a_host_hop_send_keeps_no_inner_for_a_retransmit():
+    """A host hop is sealed to the target's static key-wrap key and is never
+    nacked (nothing on it goes stale), so its origin keeps no copy for a
+    retransmit — a large one would only take the large-inner budget from
+    mesh sends that can be nacked."""
+    nodes, (origin, _host, target) = _wire(cards_at=_ALL_CARDS)
+    result = await _hop(nodes[origin]).send(
+        to_instance_id=target,
+        event_type=FederationEventType.SPACE_PAGE_UPDATED,
+        payload={"content": "x" * (256 * 1024)},
+        space_id=SPACE,
+    )
+    await _settle()
+    assert result.ok
+    assert nodes[origin].handler._pending_routed == {}
+    assert nodes[origin].handler._retained_large_bytes() == 0
+
+
 async def test_the_host_drops_a_route_to_a_member_it_holds_no_card_of():
     nodes, (origin, host, target) = _wire(
         cards_at={"origin": {"target"}, "host": {"origin"}, "target": {"origin"}}
@@ -532,9 +550,12 @@ async def test_an_end_takes_the_hop_only_through_a_household_acting_as_its_host(
 async def test_the_hop_goes_through_the_first_host_that_is_not_an_end():
     sent: list[list[str]] = []
 
+    kwargs: list[dict] = []
+
     class _Routed:
-        async def send_routed(self, *, path, **_kw):
+        async def send_routed(self, *, path, **kw):
             sent.append(path)
+            kwargs.append(kw)
             return "route"
 
     ids, idents = _identity_chain()
@@ -583,6 +604,11 @@ async def test_the_hop_goes_through_the_first_host_that_is_not_an_end():
         space_id=SPACE,
     )
     assert result.ok and sent == [["me", "the-admin", target]]
+    # A carded member (v_89+) reads a raw sealed body: a sync chunk may ride
+    # the hop with its ciphertext raw. Never nacked, so nothing is kept.
+    assert [(k["raw_body_ok"], k["retain"], k["relay_frame_leg"]) for k in kwargs] == [
+        (True, False, True)
+    ]
 
 
 async def test_no_hop_the_target_would_refuse_is_reported_as_sent():

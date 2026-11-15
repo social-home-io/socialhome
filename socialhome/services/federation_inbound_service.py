@@ -2780,11 +2780,14 @@ class FederationInboundService(ProtectionGateMixin):
             clear_link_preview=clear_card,
             edited_at=_edit_stamp(event),
         ):
-            log_cross_space_refusal(
+            held = await self._space_post_repo.get(post_id)
+            self._log_edit_not_written(
                 event,
                 space_id=gated_space_id,
                 what="post",
                 row_id=post_id,
+                held_here=held is not None and held[0] == gated_space_id,
+                deleted=held is not None and held[1].deleted,
             )
             return
         refreshed = await self._space_post_repo.get(post_id)
@@ -3135,11 +3138,20 @@ class FederationInboundService(ProtectionGateMixin):
             space_id=space_id,
             edited_at=_edit_stamp(event),
         ):
-            log_cross_space_refusal(
+            held = await self._space_post_repo.get_comment(comment_id)
+            parent = (
+                await self._space_post_repo.get(held.post_id)
+                if held is not None
+                else None
+            )
+            self._log_edit_not_written(
                 event,
                 space_id=space_id,
                 what="comment",
                 row_id=comment_id,
+                held_here=parent is not None and parent[0] == space_id,
+                deleted=(held is not None and held.deleted)
+                or (parent is not None and parent[1].deleted),
             )
             return
         refreshed = await self._space_post_repo.get_comment(comment_id)
@@ -3236,6 +3248,37 @@ class FederationInboundService(ProtectionGateMixin):
         ):
             return ()
         return await self._mentions.added(space_id, before, after, author_id=author_id)
+
+    @staticmethod
+    def _log_edit_not_written(
+        event: FederationEvent,
+        *,
+        space_id: str,
+        what: str,
+        row_id: str,
+        held_here: bool,
+        deleted: bool,
+    ) -> None:
+        """An edit that passed its gate and still wrote nothing.
+
+        ``held_here`` — the row is in ``space_id``: the edit is not newer
+        than what this household holds (last writer wins), or the row was
+        deleted here meanwhile (``deleted``). The same edit
+        over a second path does that all the time (a GFS ``space_item`` and
+        the federated event; the mesh's retransmit to a member that
+        restarted), so it is a benign no-op at DEBUG. Anything else is the
+        cross-space refusal at WARNING, as before."""
+        if held_here:
+            log_not_applied(
+                event,
+                what=what,
+                row_id=row_id,
+                reason="deleted here"
+                if deleted
+                else "not newer than what is held here",
+            )
+            return
+        log_cross_space_refusal(event, space_id=space_id, what=what, row_id=row_id)
 
     def _hold_for_parent(
         self,

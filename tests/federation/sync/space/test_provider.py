@@ -2292,3 +2292,30 @@ async def test_a_trusted_non_host_full_catch_up_ships_only_its_own_peoples_files
         for c in media_sync.enqueue_for_blob.call_args_list
     }
     assert shipped == {"p-ours": [sc, legacy]}
+
+
+@pytest.mark.parametrize(
+    ("version", "raw"),
+    [(0, False), (80, False), (86, False), (87, True), (94, True)],
+)
+async def test_a_chunk_may_ride_a_route_raw_only_to_a_requester_that_reads_it(
+    provider, version, raw
+):
+    """A record's ciphertext rides a mesh route raw (``sync-chunk-raw-v1``
+    in the seal) only toward a requester at v_87 or later — the version that
+    reads that layout. A released build (v_80) or one we cannot ask (``0``)
+    never sees it, whatever the size."""
+    from unittest.mock import AsyncMock
+
+    session = _FakeSession()
+    session.rtc = None
+    session.transport_mode = "https"
+    session.peer_version = version
+    federation = AsyncMock()
+    provider.attach_federation(federation)
+
+    await provider.stream_initial(session)
+
+    calls = federation.send_with_mesh_fallback.await_args_list
+    assert calls
+    assert {c.kwargs["routed_raw_body"] for c in calls} == {raw}

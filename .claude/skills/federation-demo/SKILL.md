@@ -996,6 +996,7 @@ python .claude/skills/federation-demo/harness.py gfs-invite-link
 python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py gfs-media-on-demand
 python .claude/skills/federation-demo/harness.py gfs-member-mesh
+python .claude/skills/federation-demo/harness.py members-mesh-restart
 python .claude/skills/federation-demo/harness.py gfs-moderator-parity
 python .claude/skills/federation-demo/harness.py members-parity
 python .claude/skills/federation-demo/harness.py gfs-space-healing
@@ -1979,7 +1980,7 @@ check polls (3 s, bounded timeout, 429-aware); no sleep is a check.
 | page | a | title + content |
 | 450 KiB page | d, then e | size + SHA-256 on a, d and e — over the relay's JSON envelope, one binary relay frame |
 | poll vote | d votes Pizza, e Sushi | ``…/poll`` counts |
-| catch-up | a, while d and e are killed | new post, edit, deletion after both respawn; a 450 KiB page — asserted for e (one binary relay frame in its §25.6 catch-up), only reported for d: the mesh path does not re-send a `SPACE_ROUTED` inner over 64 KiB to a restarted target (open mesh limit, not the GFS relay's) |
+| catch-up | a, while d and e are killed | new post, edit, deletion after both respawn; a 450 KiB page — asserted for both, read from each member's database: e gets it as one binary relay frame in its §25.6 catch-up, d over the mesh (a re-sends the routed page after d's nack, and d's catch-up carries the record raw inside the route's seal) |
 | old picture | a, while d and e are killed | the blob is expired from the GFS cache as 30-day-old content (as ``gfs-media-on-demand``'s old leg), then both must show the picture; SKIP if a cached nothing |
 | host offline | d and e, a killed | each one's picture post on the other |
 | admin rights | a promotes e's person; e deletes d's post | role on both; the post gone on both (e is put back to member) |
@@ -2003,6 +2004,22 @@ invited it, holds d's card); then a is stopped again and d and e each post
 — the other must show it,
 mailbox to mailbox — and no GFS envelope / mailbox line names an instance
 id, a mailbox id or the space.
+
+### ``members-mesh-restart`` — a large space event reaches a mesh-only member that restarts
+
+Prereqs: the chain through ``gfs-member-mesh``, and before
+``members-parity`` (a hosts the link-joined space; d is a member a reaches
+over the mesh, through b — the step fails if a holds a direct row for d:
+``members-parity``'s last action seats d with a in another space). a posts and d must show it, so a holds a fresh route
+sealed to d's ephemeral key. d is killed; a creates a **450 KiB page**,
+sealed to d's old key and taken by b; d is respawned and b delivers it. The
+restarted d cannot open it and nacks (``SPACE_ROUTE_STALE``): a's log must
+show ``retransmitted space_page_created`` naming d, and d must show the page
+(title + sha256 of its text) within 240 s. 450 KiB is over the 64 KiB up to
+which the mesh used to keep an event for its retransmit and over what one
+§25.6 sync record can be on a mesh hop, so on a build without the large
+retransmit nothing brings the page to d and the step fails. Kills d, so it
+is an ``@_offline_step``.
 
 ### ``gfs-space-healing`` — a GFS-only member heals from a helper while the host is offline (v_92)
 

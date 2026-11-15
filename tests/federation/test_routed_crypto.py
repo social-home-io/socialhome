@@ -13,6 +13,13 @@ from cryptography.exceptions import InvalidTag
 
 from socialhome.crypto import generate_identity_keypair
 from socialhome.federation import routed_crypto as rc
+from socialhome.federation.relay_event_body import (
+    EVENT_BODY_SUITE_FIELD,
+    EVENT_BODY_SUITE_JSON,
+    EVENT_BODY_SUITE_ROUTED_RAW,
+    EVENT_BODY_SUITE_SYNC_CHUNK_RAW,
+    UnsupportedEventBodySuite,
+)
 from socialhome.federation.route_discovery import _route_found_signing_bytes
 
 # ── Round-trip ─────────────────────────────────────────────────────────
@@ -553,3 +560,85 @@ def test_verify_routed_origin_unknown_suite_raises(suite):
     sig = rc.sign_routed_origin(seed=seed, **kwargs)
     with pytest.raises(rc.UnsupportedRoutedOriginSuite):
         rc.verify_routed_origin(identity_pk=pk, sig_b64=sig, sig_suite=suite, **kwargs)
+
+
+# ── A body that is already ciphertext rides raw inside the seal ─────────
+
+
+def _seal_body(body: bytes, suite: str, *, route_id: str = "r-raw") -> tuple:
+    o_priv, o_pub, t_priv, t_pub = _ephemeral_pair()
+    sealed = rc.seal_inner_body(
+        body=body,
+        body_suite=suite,
+        origin_eph_priv_b64=o_priv,
+        origin_eph_pub_b64=o_pub,
+        target_eph_pub_b64=t_pub,
+        route_id=route_id,
+        inner_event_type="space_sync_chunk",
+    )
+    return sealed, t_priv
+
+
+def _unseal_body(sealed: dict, t_priv: str, *, route_id: str = "r-raw"):
+    return rc.unseal_inner_body(
+        sealed=sealed,
+        target_eph_priv_b64=t_priv,
+        route_id=route_id,
+        inner_event_type="space_sync_chunk",
+    )
+
+
+def test_a_raw_body_round_trips_with_its_suite_named():
+    body = b"\x00\x01raw sync chunk body\xff"
+    sealed, t_priv = _seal_body(body, EVENT_BODY_SUITE_SYNC_CHUNK_RAW)
+    assert sealed[EVENT_BODY_SUITE_FIELD] == EVENT_BODY_SUITE_SYNC_CHUNK_RAW
+    assert _unseal_body(sealed, t_priv) == (EVENT_BODY_SUITE_SYNC_CHUNK_RAW, body)
+
+
+def test_a_json_body_keeps_todays_wire_shape():
+    """No suite field for JSON: the sealed blob an older target opens with
+    :func:`unseal_inner_payload` is unchanged."""
+    sealed, t_priv = _seal_body(b'{"a":1}', EVENT_BODY_SUITE_JSON)
+    assert EVENT_BODY_SUITE_FIELD not in sealed
+    assert _unseal_body(sealed, t_priv) == (EVENT_BODY_SUITE_JSON, b'{"a":1}')
+    assert (
+        rc.unseal_inner_payload(
+            sealed=sealed,
+            target_eph_priv_b64=t_priv,
+            route_id="r-raw",
+            inner_event_type="space_sync_chunk",
+        )
+        == '{"a":1}'
+    )
+
+
+@pytest.mark.parametrize("swap", [None, EVENT_BODY_SUITE_ROUTED_RAW])
+def test_the_body_suite_is_bound_into_the_aad(swap):
+    """A relay that strips the suite (so the target reads raw bytes as JSON)
+    or renames it breaks the AEAD tag."""
+    sealed, t_priv = _seal_body(b"raw", EVENT_BODY_SUITE_SYNC_CHUNK_RAW)
+    if swap is None:
+        sealed.pop(EVENT_BODY_SUITE_FIELD)
+    else:
+        sealed[EVENT_BODY_SUITE_FIELD] = swap
+    with pytest.raises(InvalidTag):
+        _unseal_body(sealed, t_priv)
+
+
+def test_an_unknown_body_suite_is_refused_never_defaulted():
+    sealed, t_priv = _seal_body(b"raw", EVENT_BODY_SUITE_SYNC_CHUNK_RAW)
+    sealed[EVENT_BODY_SUITE_FIELD] = "zip-v9"
+    with pytest.raises(UnsupportedEventBodySuite):
+        _unseal_body(sealed, t_priv)
+    with pytest.raises(UnsupportedEventBodySuite):
+        _seal_body(b"raw", "zip-v9")
+
+
+@pytest.mark.parametrize("named", [EVENT_BODY_SUITE_JSON, ["sync-chunk-raw-v1"], 7])
+def test_a_named_suite_must_be_a_raw_suite_string(named):
+    """A sender never names the JSON suite (no field = JSON), and a suite
+    that is not a string is refused cleanly, never a TypeError."""
+    sealed, t_priv = _seal_body(b"raw", EVENT_BODY_SUITE_SYNC_CHUNK_RAW)
+    sealed[EVENT_BODY_SUITE_FIELD] = named
+    with pytest.raises(UnsupportedEventBodySuite):
+        _unseal_body(sealed, t_priv)

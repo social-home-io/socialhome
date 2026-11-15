@@ -23917,6 +23917,27 @@ def _parity_big_page(
     return view
 
 
+def _db_page_view(label: str, page_id: str) -> dict:
+    """A page as ``label``'s database holds it: title, size and SHA-256 of
+    its text. For a household that may not hold it yet — a REST GET of a
+    page it lacks logs a WARNING the log audit would flag."""
+    rows = _rows(
+        label,
+        "SELECT title, content FROM space_pages WHERE id=? AND deleted_at IS NULL",
+        (page_id,),
+    )
+    if not rows:
+        return {"exists": False}
+    title, content = rows[0]
+    raw = (content or "").encode()
+    return {
+        "exists": True,
+        "title": title,
+        "bytes": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
 def _parity_create_big_page(
     state: dict, label: str, space_id: str, tag: str
 ) -> tuple[str, dict]:
@@ -24937,25 +24958,6 @@ def cmd_members_parity() -> None:
     finally:
         for label in _PARITY_MEMBERS:
             _respawn(state, label)
-    # d is reached over the mesh, where the large page is lost (see below)
-    # and holds up d's catch-up: a's re-sent edit can reach d before the
-    # row it edits, and d says so once. The row arrives with d's sync — the
-    # "catch-up: edit" comparison below proves it.
-    # TEMPORARY — this window masks a real WARNING caused by a bug that is on
-    # main already: an oversized inner event on a mesh route is lost
-    # (``routed_envelope.py`` logs it at INFO; only ``SPACE_MEDIA_BLOB`` has
-    # a lost-inner listener). Its fix is its own PR on branch
-    # ``fix/mesh-large-inner-lost``, which MUST remove this window (and
-    # assert d in the "catch-up: 450 KiB page" comparison below). Do not
-    # widen it: one line shape, one witness, one sender.
-    mesh_lag = _open_noise_window(
-        about="a",
-        reason="members-parity: a large page in the away window delays d's "
-        "mesh catch-up, so an edit reaches d before its row",
-        witnesses=("d",),
-        named=("is not in space",),
-        names=[state["instances"]["a"]["instance_id"]],
-    )
     _parity_compare(
         state,
         results,
@@ -24965,33 +24967,23 @@ def cmd_members_parity() -> None:
         want={"exists": True},
         timeout=180.0,
     )
-    # Asserted for e, the member behind the GFS (this step's subject for
-    # large items). d is reached over the MESH here, and the mesh has its own
-    # open limit: a ``SPACE_ROUTED`` inner over 64 KiB sent while the target
-    # was down is not re-sent after its restart ("oversized inner … not
-    # retransmitted (lost)", ``routed_envelope.py``), and d's next streams
-    # did not bring the page within minutes either. Reported, not asserted.
+    # Both members miss it while away and must hold it after: e through its
+    # §25.6 catch-up in one binary relay frame, d over the mesh (a re-sends
+    # the routed page once d's nack says it restarted, and d's catch-up
+    # carries the record raw inside the route's seal). Read from each
+    # member's database: a GET of a page it lacks would log a WARNING.
     _parity_compare(
         state,
         results,
-        "catch-up: 450 KiB page (e, behind the GFS)",
-        lambda label, cache: _parity_big_page(
-            state, label, space_id, away_page, cache
+        "catch-up: 450 KiB page",
+        lambda label, cache: (
+            _parity_big_page(state, label, space_id, away_page, cache)
+            if label == "a"
+            else _db_page_view(label, away_page)
         ),
         ref="a",
         want=away_want,
         timeout=180.0,
-        members=("e",),
-    )
-    # Read from d's database: a GET of a page it lacks would log a WARNING.
-    d_holds = _rows(
-        "d",
-        "SELECT length(content) FROM space_pages WHERE id=? AND deleted_at IS NULL",
-        (away_page,),
-    )
-    print(
-        "  catch-up: 450 KiB page on d (mesh path, not asserted — open mesh "
-        f"limit): {'holds it' if d_holds else 'not there'}"
     )
     _parity_compare(
         state,
@@ -25011,7 +25003,6 @@ def cmd_members_parity() -> None:
         want={"exists": False},
         timeout=120.0,
     )
-    _close_noise_windows(mesh_lag)
     if old_new:
         _parity_compare(
             state,
@@ -25184,6 +25175,108 @@ def _check_members_parity(state: dict, failures: list[str]) -> None:
                         f"members-parity: {m} shows {kind} post {pid} as {views[m]}, "
                         f"a as {views['a']}"
                     )
+
+
+#: ``members-mesh-restart``: the page's text, 450 KiB — over the 64 KiB up to
+#: which the mesh used to keep an event for its one retransmit, and over the
+#: ~433 KB a §25.6 sync record can be on one mesh hop, so only the live
+#: event's retransmit can bring it to the restarted member.
+_MESH_RESTART_PAGE_BYTES: int = 450 * 1024
+
+
+@_offline_step
+def cmd_members_mesh_restart() -> None:
+    """A large space event reaches a mesh-only member that restarts.
+
+    Prereqs: the gfs chain through ``gfs-member-mesh``, before
+    ``members-parity`` (a hosts the link-joined space, d is a member reached
+    over the mesh through b; ``members-parity`` ends by seating d with a).
+
+    1. a posts in the space and d must show it: a holds a fresh route to d,
+       sealed to d's ephemeral key.
+    2. d is killed. a creates a 450 KiB page: sealed to d's old key, taken
+       by b, which delivers it once d is back. d is respawned.
+    3. The restarted d cannot open it and nacks (``SPACE_ROUTE_STALE``); a
+       must retransmit the page to d (asserted in a's log) and d must show
+       it (title + sha256 of its text).
+
+    Fails on a build that kept only events up to 64 KiB for the retransmit:
+    the page is too large for one §25.6 sync record over the mesh, so
+    nothing else brings it to d.
+    """
+    state = _load()
+    space_id = (state or {}).get("gfs_invite_space_id")
+    if not state or not _gfs_alive(state) or not space_id:
+        raise SystemExit("run the gfs chain through 'gfs-member-mesh' first")
+    step = "members-mesh-restart"
+    a, d = state["instances"]["a"], state["instances"]["d"]
+    if d["instance_id"] in _peer_ids(a, confirmed_only=True):
+        raise SystemExit(
+            f"{step}: needs d reached from a over the mesh, but a holds a direct"
+            " row for d (paired or seated) — run it before 'members-parity'"
+        )
+    tag = time.time_ns()
+
+    # 1. A fresh route a → d.
+    warm = _parity_post_text(state, "a", space_id, f"Mesh restart, warm-up {tag}")
+    _poll(
+        f"{step}: d shows a's warm-up post",
+        lambda: (
+            _parity_get(state, "d", f"/api/spaces/{space_id}/posts/{warm}")[0] == 200
+        ),
+        timeout=120.0,
+        interval=3.0,
+    )
+    print("  d shows a's warm-up post (route a → d is fresh) ✓")
+
+    # 2. d away while a creates the page.
+    text = secrets.token_hex(_MESH_RESTART_PAGE_BYTES // 2)
+    title = f"Mesh restart, large page {tag}"
+    a_log = _log_size("a")
+    _kill_household("d", d)
+    try:
+        s, page = _inst_request(
+            state,
+            "a",
+            "POST",
+            f"/api/spaces/{space_id}/pages",
+            {"title": title, "content": text},
+        )
+        page = _must(f"{step}: a creates a 450 KiB page", s, page, ok=(200, 201))
+    finally:
+        _respawn(state, "d")
+
+    # 3. d nacks, a retransmits, d holds the page.
+    want = {
+        "exists": True,
+        "title": title,
+        "bytes": len(text),
+        "sha256": hashlib.sha256(text.encode()).hexdigest(),
+    }
+
+    # From d's database: a GET of a page it lacks would log a WARNING.
+    def _d_page() -> bool:
+        return _db_page_view("d", page["id"]) == want
+
+    _poll(f"{step}: d shows the 450 KiB page", _d_page, timeout=240.0, interval=3.0)
+    print("  d shows the 450 KiB page (title + sha256) ✓")
+    resent = [
+        line
+        for line in _log_lines_matching(
+            "a", "retransmitted space_page_created", offset=a_log
+        )
+        if d["instance_id"] in line
+    ]
+    if not resent:
+        raise SystemExit(
+            f"{step}: d shows the page, but a's log has no retransmit of it to "
+            f"{d['instance_id']} — the check did not exercise the mesh's nack "
+            f"(see {_log_path('a')})"
+        )
+    print(
+        f"  a retransmitted the page to d after d's nack ✓ ({resent[0].strip()[:120]})"
+    )
+    print(f"{step}: ok")
 
 
 def main() -> None:

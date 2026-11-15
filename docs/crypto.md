@@ -423,6 +423,22 @@ probe and ships the public via `SPACE_ROUTE_FOUND`; the origin
 generates its own ephemeral on `send_routed` and stashes the priv
 for the matching reply. Relays only ever see the opaque ciphertext.
 
+**Body suite of the sealed inner.** The sealed plaintext is the inner
+payload's JSON — or, for a body that is already ciphertext, its raw layout,
+so the route does not base64 that ciphertext twice more: a §25.6
+`SPACE_SYNC_CHUNK` whose record would not fit one hop as JSON is sealed in
+the `sync-chunk-raw-v1` layout of `federation/relay_event_body.py` (the same
+one a GFS relay frame uses). A raw body names its suite in the sealed blob,
+`event_body_suite`, and the AEAD binds it (AAD `…|<inner_event_type>|body=
+<suite>`), so a relay can neither strip nor rename it. No field = JSON, the
+shape and AAD every older target reads. A target refuses a suite outside
+`SUPPORTED_EVENT_BODY_SUITES` (`UnsupportedEventBodySuite`, never a default)
+and drops the envelope without a nack. Only a target known to read raw
+bodies (a §25.6 requester at v_87+, a carded host-hop target) is sent one.
+The same rule carries a `SPACE_ROUTED` wrapper through a GFS relay frame
+with its sealed ciphertext raw (`space-routed-raw-v1`). Symmetric layouts —
+the PQ lever stays the route's `kem_suite`.
+
 **Routed-origin signature (v_31, #692).** The seal proves *confidentiality*
 to the target, not *authorship*: the ephemeral X25519 exchange is anonymous,
 so any peer that learned the target's `target_eph_pk` can produce a blob the

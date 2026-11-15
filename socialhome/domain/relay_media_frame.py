@@ -36,6 +36,7 @@ import orjson
 
 from .calendar import MAX_RSVPS_PER_EVENT, RSVP_RECORD_MAX_BYTES
 from .errors import SpaceItemTooLargeError
+from .federation import FederationEventType
 from .gfs_server import MAX_GFS_SERVERS_JSON_BYTES
 from .media_constraints import (
     SPACE_COVER_BOOTSTRAP_MAX_BYTES,
@@ -133,6 +134,25 @@ RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES: int = (
 #: with the chunk's wrapper it fills the frame. The same number as the live
 #: bound, by construction.
 RELAY_SYNC_RECORD_MAX_BYTES: int = RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES
+
+#: Framed events whose bytes may fill the frame: a §25.6 chunk (its record
+#: is bounded by :data:`RELAY_SYNC_RECORD_MAX_BYTES`, its wrapper fills the
+#: rest) and a ``SPACE_ROUTED`` wrapper (the host hop's leg — its sealed
+#: inner, raw in the frame, is a live event or a sync chunk already bounded
+#: where it was sent; the wrapper adds only the route's fields).
+_FRAME_FILLING_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
+    {FederationEventType.SPACE_SYNC_CHUNK, FederationEventType.SPACE_ROUTED}
+)
+
+
+def relay_event_payload_limit(event_type: FederationEventType) -> int:
+    """The most bytes a framed *event_type* payload may be: the frame's for
+    a sync chunk and a routed wrapper, the live bound for anything else (so
+    it also fits the sync chunk that heals a lost frame)."""
+    if event_type in _FRAME_FILLING_EVENT_TYPES:
+        return RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES
+    return RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES
+
 
 # ── How large a space item may be: one limit per kind, everywhere ───────
 #

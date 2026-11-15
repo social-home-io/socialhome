@@ -108,6 +108,12 @@ from ..crypto import (
     verify_ed25519,
     x25519_exchange,
 )
+from .relay_event_body import (
+    EVENT_BODY_SUITE_FIELD,
+    EVENT_BODY_SUITE_JSON,
+    SUPPORTED_EVENT_BODY_SUITES,
+    UnsupportedEventBodySuite,
+)
 
 #: Default TTL on the target's cached ephemeral private half, measured
 #: from the moment the key is MINTED (never extended on use — that would
@@ -227,7 +233,13 @@ def derive_directional_keys(
     return key_t_to_o, key_o_to_t
 
 
-def _aad(route_id: str, inner_event_type: str, *, ack: bool = False) -> bytes:
+def _aad(
+    route_id: str,
+    inner_event_type: str,
+    *,
+    ack: bool = False,
+    body_suite: str | None = None,
+) -> bytes:
     """Additional-authenticated-data binding the ciphertext to its
     routing context.
 
@@ -237,9 +249,14 @@ def _aad(route_id: str, inner_event_type: str, *, ack: bool = False) -> bytes:
     cut-and-pasted into another with a different ``route_id`` or a
     different ``inner_event_type`` because the AEAD tag won't verify.
     ``ack=True`` further partitions forward vs. reply on the same
-    shared secret.
+    shared secret. ``body_suite`` — the inner's body suite when the sealed
+    blob names one (a raw body, :func:`seal_inner_body`): bound too, so a
+    relay can neither strip nor rename it. A JSON inner names none and
+    keeps the AAD it always had.
     """
     suffix = b"|ack" if ack else b""
+    if body_suite is not None:
+        suffix += b"|body=" + body_suite.encode("utf-8")
     return (
         b"socialhome/space_routed/v1|"
         + route_id.encode("utf-8")
@@ -258,7 +275,7 @@ def seal_inner_payload(
     route_id: str,
     inner_event_type: str,
 ) -> dict[str, str]:
-    """Origin → target seal of an inner payload.
+    """Origin → target seal of an inner payload (its JSON).
 
     Derives the origin→target directional key from
     ``DH(origin_priv, target_pub)`` + HKDF and AES-GCM-encrypts with
@@ -266,45 +283,84 @@ def seal_inner_payload(
     wire-shape dict the :class:`SpaceRoutedHandler` embeds inside
     its envelope.
     """
+    return seal_inner_body(
+        body=inner_payload_json.encode("utf-8"),
+        body_suite=EVENT_BODY_SUITE_JSON,
+        origin_eph_priv_b64=origin_eph_priv_b64,
+        origin_eph_pub_b64=origin_eph_pub_b64,
+        target_eph_pub_b64=target_eph_pub_b64,
+        route_id=route_id,
+        inner_event_type=inner_event_type,
+    )
+
+
+def seal_inner_body(
+    *,
+    body: bytes,
+    body_suite: str,
+    origin_eph_priv_b64: str,
+    origin_eph_pub_b64: str,
+    target_eph_pub_b64: str,
+    route_id: str,
+    inner_event_type: str,
+) -> dict[str, str]:
+    """Origin → target seal of an inner payload laid out under *body_suite*
+    (:mod:`socialhome.federation.relay_event_body`): its JSON, or — for a
+    body that is already ciphertext, a §25.6 sync chunk — the raw layout,
+    so the route does not base64 that ciphertext once more. A raw body's
+    suite rides in the sealed blob (``event_body_suite``) and in the AAD; a
+    JSON one names none, the shape every older target reads. Raises
+    :class:`UnsupportedEventBodySuite` for a suite this build does not
+    know."""
+    if body_suite not in SUPPORTED_EVENT_BODY_SUITES:
+        raise UnsupportedEventBodySuite(f"unknown event_body_suite: {body_suite!r}")
+    named = None if body_suite == EVENT_BODY_SUITE_JSON else body_suite
     send_key, _recv = derive_directional_keys(
         my_priv_b64=origin_eph_priv_b64,
         peer_pub_b64=target_eph_pub_b64,
         is_origin=True,
     )
     nonce = _fresh_nonce()
-    aesgcm = AESGCM(send_key)
-    ct = aesgcm.encrypt(
-        nonce,
-        inner_payload_json.encode("utf-8"),
-        _aad(route_id, inner_event_type),
+    ct = AESGCM(send_key).encrypt(
+        nonce, body, _aad(route_id, inner_event_type, body_suite=named)
     )
-    return {
+    sealed = {
         "kem_suite": KEM_SUITE_X25519,
         "origin_eph_pk": origin_eph_pub_b64,
         "target_eph_pk": target_eph_pub_b64,
         "nonce": b64url_encode(nonce),
         "ciphertext": b64url_encode(ct),
     }
+    if named is not None:
+        sealed[EVENT_BODY_SUITE_FIELD] = named
+    return sealed
 
 
-def unseal_inner_payload(
+def unseal_inner_body(
     *,
     sealed: dict[str, str],
     target_eph_priv_b64: str,
     route_id: str,
     inner_event_type: str,
-) -> str:
-    """Target → origin unseal.
+) -> tuple[str, bytes]:
+    """Target side of :func:`seal_inner_body`: ``(body_suite, body)``.
 
-    Caller looks up its cached ephemeral private half via
-    ``sealed["target_eph_pk"]`` and passes it in. Derives the
-    matching origin→target key (this side is the target, so it's
-    its ``recv_key``) and AES-GCM-decrypts with the same AAD.
-
-    Raises :class:`ValueError` on wire-format problems and
-    :class:`cryptography.exceptions.InvalidTag` on a failed AEAD tag.
-    """
+    No ``event_body_suite`` → the JSON suite (the shape before raw bodies).
+    One that is named must be a raw suite this build knows — an unknown one
+    raises :class:`UnsupportedEventBodySuite`, never a default — and is
+    bound into the AAD, so a stripped or renamed suite fails the tag
+    (:class:`cryptography.exceptions.InvalidTag`). Raises
+    :class:`ValueError` on wire-format problems."""
     _require_known_suite(sealed)
+    named = sealed.get(EVENT_BODY_SUITE_FIELD)
+    if named is not None and (
+        not isinstance(named, str)
+        or named == EVENT_BODY_SUITE_JSON
+        or named not in SUPPORTED_EVENT_BODY_SUITES
+    ):
+        # Only a raw suite is ever named (no field = JSON): one encoding
+        # for each, and anything else refused, never guessed.
+        raise UnsupportedEventBodySuite(f"unknown event_body_suite: {named!r}")
     try:
         origin_pub = sealed["origin_eph_pk"]
         nonce_b64 = sealed["nonce"]
@@ -317,14 +373,38 @@ def unseal_inner_payload(
         peer_pub_b64=origin_pub,
         is_origin=False,
     )
-    aesgcm = AESGCM(recv_key)
-    nonce = b64url_decode(nonce_b64)
-    ct = b64url_decode(ct_b64)
-    return aesgcm.decrypt(
-        nonce,
-        ct,
-        _aad(route_id, inner_event_type),
-    ).decode("utf-8")
+    body = AESGCM(recv_key).decrypt(
+        b64url_decode(nonce_b64),
+        b64url_decode(ct_b64),
+        _aad(route_id, inner_event_type, body_suite=named),
+    )
+    return (named or EVENT_BODY_SUITE_JSON), body
+
+
+def unseal_inner_payload(
+    *,
+    sealed: dict[str, str],
+    target_eph_priv_b64: str,
+    route_id: str,
+    inner_event_type: str,
+) -> str:
+    """Target → origin unseal of a JSON inner (:func:`unseal_inner_body`
+    for one that may be raw).
+
+    Caller looks up its cached ephemeral private half via
+    ``sealed["target_eph_pk"]`` and passes it in. Raises
+    :class:`ValueError` on wire-format problems (a raw body included) and
+    :class:`cryptography.exceptions.InvalidTag` on a failed AEAD tag.
+    """
+    suite, body = unseal_inner_body(
+        sealed=sealed,
+        target_eph_priv_b64=target_eph_priv_b64,
+        route_id=route_id,
+        inner_event_type=inner_event_type,
+    )
+    if suite != EVENT_BODY_SUITE_JSON:
+        raise ValueError(f"sealed inner is a {suite!r} body, not JSON")
+    return body.decode("utf-8")
 
 
 def seal_reply_payload(
@@ -606,10 +686,12 @@ __all__ = [
     "generate_ephemeral_keypair",
     "route_stale_signing_bytes",
     "routed_origin_signing_bytes",
+    "seal_inner_body",
     "seal_inner_payload",
     "seal_reply_payload",
     "sign_route_stale",
     "sign_routed_origin",
+    "unseal_inner_body",
     "unseal_inner_payload",
     "unseal_reply_payload",
     "verify_route_stale",

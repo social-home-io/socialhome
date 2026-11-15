@@ -2345,3 +2345,22 @@ async def test_the_sentinel_marks_the_stream_ended(svc):
             )
         )
     assert record.sentinel_landed
+
+
+@pytest.mark.parametrize("raw", [False, True])
+async def test_send_with_mesh_fallback_hands_the_raw_body_choice_to_the_route(svc, raw):
+    """Whether the target reads a raw sealed body is the caller's knowledge
+    (a §25.6 provider knows its requester's version); the mesh route only
+    carries it to ``send_routed``, on the first try and on the retry."""
+    _unpair(svc)
+    send_routed = _attach_mesh(svc, target="mesh-member")
+    send_routed.side_effect = [ConnectionError("hop gone"), "route-2"]
+    result = await svc.send_with_mesh_fallback(
+        to_instance_id="mesh-member",
+        event_type=FederationEventType.SPACE_SYNC_CHUNK,
+        payload={"sync_id": "s", "chunk": "{}"},
+        space_id="sp",
+        routed_raw_body=raw,
+    )
+    assert result.ok
+    assert [c.kwargs["raw_body_ok"] for c in send_routed.await_args_list] == [raw, raw]
