@@ -123,6 +123,23 @@ describe('PostCard', () => {
     }
   })
 
+  it('marks the viewer\'s own reactions, so "remove one" has an answer', () => {
+    currentUser.value = { user_id: 'me', username: 'me', display_name: 'Me', is_admin: false } as never
+    try {
+      const reactions = { '😀': ['a', 'me'], '😁': ['a'] }
+      const { container } = render(<PostCard post={{ ...mockPost, reactions }} />)
+      const chips = Array.from(container.querySelectorAll('.sh-reaction-chip'))
+      const mine = chips.find((c) => c.textContent?.includes('😀')) as HTMLElement
+      const theirs = chips.find((c) => c.textContent?.includes('😁')) as HTMLElement
+      expect(mine.classList.contains('sh-reaction-chip--mine')).toBe(true)
+      expect(mine.getAttribute('aria-pressed')).toBe('true')
+      expect(theirs.classList.contains('sh-reaction-chip--mine')).toBe(false)
+      expect(theirs.getAttribute('aria-pressed')).toBe('false')
+    } finally {
+      currentUser.value = null
+    }
+  })
+
   it('shows every reaction when there are at most six', () => {
     const reactions = { '😀': ['a'], '😁': ['a'], '😂': ['a', 'b'] }
     const { container } = render(<PostCard post={{ ...mockPost, reactions }} />)

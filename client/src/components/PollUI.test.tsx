@@ -61,6 +61,23 @@ describe('PollUI', () => {
     }
   })
 
+  it('a follower is told why the options do not respond', async () => {
+    get.mockResolvedValue(poll({ can_vote: false, space_id: 'sp1' }))
+    render(<PollUI postId="p1" currentUserId="u1" spaceId="sp1" />)
+    const hint = await screen.findByTestId('poll-readonly')
+    expect(hint.textContent).toBe('Only members can vote. As a follower, you see the results.')
+    for (const option of screen.getAllByRole('button')) {
+      expect(option.getAttribute('aria-describedby')).toBe(hint.id)
+    }
+  })
+
+  it('a closed poll needs no follower hint', async () => {
+    get.mockResolvedValue(poll({ can_vote: false, closed: true, space_id: 'sp1' }))
+    render(<PollUI postId="p1" currentUserId="u1" spaceId="sp1" />)
+    await waitFor(() => expect(screen.getByText('Closed')).toBeTruthy())
+    expect(screen.queryByTestId('poll-readonly')).toBeNull()
+  })
+
   it('a member can press an option', async () => {
     get.mockResolvedValue(poll({ can_vote: true, space_id: 'sp1' }))
     render(<PollUI postId="p1" currentUserId="u1" spaceId="sp1" />)
@@ -68,5 +85,6 @@ describe('PollUI', () => {
     for (const option of screen.getAllByRole('button')) {
       expect((option as HTMLButtonElement).disabled).toBe(false)
     }
+    expect(screen.queryByTestId('poll-readonly')).toBeNull()
   })
 })

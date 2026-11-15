@@ -3161,6 +3161,12 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
  * add chip and Comment beside them (the chat bubble's chips below stay
  * compact on a fine pointer). */
 .sh-reactions .sh-reaction-chip { min-height: 36px; }
+/* The "+k" / "−" fold is a tap target like the chips: never narrower
+ * than it is tall (a lone "−" was 25 px wide on a phone). */
+.sh-reactions .sh-reaction-more {
+  min-width: 36px;
+  justify-content: center;
+}
 .sh-reaction-chip:hover {
   background: var(--sh-primary-soft);
   border-color: var(--sh-primary);
@@ -15719,6 +15725,12 @@ a.sh-space-hero-members:focus-visible,
   font-weight: 600;
 }
 .sh-poll-option--voted .sh-poll-option-count { color: var(--sh-primary-text); }
+/* A follower's poll: why the result rows don't respond (#1353). */
+.sh-poll-readonly {
+  margin: var(--sh-space-sm) 0 0;
+  font-size: var(--sh-font-size-xs);
+  overflow-wrap: anywhere;
+}
 .sh-poll-footer {
   margin-top: var(--sh-space-sm);
   padding-top: var(--sh-space-sm);
@@ -30441,3 +30453,16 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
   .sh-cp-table__actions .sh-btn { margin: 0; min-height: 44px; white-space: normal; }
   .sh-cp-table .sh-cp-guardians-row { padding: 0 0 var(--sh-space-sm); }
 }
+
+/* LengthCounter — "n/max" under a capped text field near its cap. */
+.sh-length-counter {
+  display: block;
+  margin-top: 2px;
+  text-align: end;
+  font-size: var(--sh-font-size-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--sh-text-muted);
+}
+.sh-length-counter--full { color: var(--sh-danger); }
+/* Directly under its field, not a form gap away. */
+.sh-form > .sh-length-counter { margin-top: calc(2px - var(--sh-space-md)); }

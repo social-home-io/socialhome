@@ -899,5 +899,6 @@
   "gallery.item_ready_in_min": "On a video tile while the household converts it. {n} is a rough estimate in minutes.",
   "gallery.search.placeholder": "Placeholder of the gallery's search field. The examples must work as typed in your language: the 'added by' word the search understands is by / von / door / par / por (and from), and the month name is your language's full month name. Keep it short enough for a phone (about 45 characters).",
   "gallery.search.empty_body": "Shown when a gallery search finds nothing. The quoted examples must work as typed in your language (see gallery.search.placeholder). Search never looks at faces, objects or places — say that plainly.",
-  "search.in_gallery": "A link under the global search's filter chips: the gallery's own search found {n} photos and videos for the same words. Opens the gallery's search."
+  "search.in_gallery": "A link under the global search's filter chips: the gallery's own search found {n} photos and videos for the same words. Opens the gallery's search.",
+  "poll.followers_read_only": "Under a space poll a follower (read-only subscriber) sees; the result rows are not pressable. Use the glossary word for 'follower'."
 }

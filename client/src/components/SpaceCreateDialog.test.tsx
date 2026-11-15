@@ -87,6 +87,14 @@ describe('SpaceCreateDialog — local community', () => {
     expect(description.maxLength).toBe(300)
   })
 
+  it('counts the name once it nears its cap, so typing stopping at 120 makes sense', async () => {
+    const { container } = await open()
+    const name = container.querySelector('.sh-form label input') as HTMLInputElement
+    expect(container.querySelector('.sh-length-counter')).toBeNull()
+    await act(async () => { fireEvent.input(name, { target: { value: 'x'.repeat(120) } }) })
+    expect(container.querySelector('.sh-length-counter')?.textContent).toBe('120/120')
+  })
+
   it('module exports exist', () => {
     expect(typeof SpaceCreateDialog).toBe('function')
     expect(typeof openSpaceCreate).toBe('function')

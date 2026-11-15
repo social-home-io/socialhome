@@ -15,6 +15,7 @@ import { api } from '@/api'
 import { Button } from '@/components/Button'
 import { confirmDialog } from '@/components/confirm'
 import { EmojiField } from '@/components/EmojiField'
+import { LengthCounter } from '@/components/LengthCounter'
 import { MarkdownView } from '@/components/MarkdownView'
 import { SpaceThemeStudio, type ThemeDraft } from '@/components/SpaceThemeStudio'
 import { showToast } from '@/components/Toast'
@@ -138,6 +139,7 @@ export function BasicsSection({ space, form, isRemoteSpace, onUpdate, onThemeDra
           <input value={name.value} required maxLength={120}
                  onInput={(e) => { name.value = (e.target as HTMLInputElement).value }} />
         </label>
+        <LengthCounter value={name.value} max={120} />
         <div class="sh-ss-basics__field">
           <label for="space-settings-description">
             {t('space.settings_page.basics.short_description')}
@@ -145,6 +147,7 @@ export function BasicsSection({ space, form, isRemoteSpace, onUpdate, onThemeDra
           <input id="space-settings-description" value={description.value} maxLength={300}
                  aria-describedby="space-settings-description-hint"
                  onInput={(e) => { description.value = (e.target as HTMLInputElement).value }} />
+          <LengthCounter value={description.value} max={300} />
           <span id="space-settings-description-hint" class="sh-ss-hint">
             {t('space.settings_page.basics.short_description_hint')}
           </span>
