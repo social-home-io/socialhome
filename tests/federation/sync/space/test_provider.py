@@ -1833,15 +1833,19 @@ class _ReaderPlan:
 
 
 class _ReaderUploader:
-    def __init__(self, readers=("peer-e",), stored=()):
+    def __init__(self, readers=("peer-e",), stored=(), frames=True):
         self.readers = set(readers)
         self.stored = set(stored)
+        self.frames = frames
         self.planned: list = []
         self.items: list = []
         self.uploaded: list = []
 
     async def is_relay_reader(self, iid):
         return iid in self.readers
+
+    async def takes_relay_frames(self, iid):
+        return self.frames and iid in self.readers
 
     def stored_on_gfs(self, plan):
         if plan is None:
@@ -1928,6 +1932,22 @@ async def test_a_v92_link_joined_requester_gets_refs_only_for_files_on_its_gfs(
     (event,) = _streamed_records(session, "calendar")
     assert set(event["media_refs"]) == {"c.webp"}
     assert uploader.uploaded == []
+
+
+async def test_a_v92_requester_whose_relay_takes_no_frames_keeps_the_full_descriptor(
+    encoder,
+):
+    """Without ``envelope_media`` its pushes fall back to small JSON chunks
+    through the relay, so the GFS cache stays the catch-up path: every file
+    is described and uploaded, as for a v_80 reader."""
+    uploader = _ReaderUploader(stored={"c.webp"}, frames=False)
+    svc = _media_provider(encoder, uploader)
+    session = _FakeSession(requester="peer-e")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    posts = {r["id"]: r for r in _streamed_records(session, "posts")}
+    assert set(posts["p-1"]["media_refs"]) == {"a.webp"}
+    assert len(uploader.uploaded) == 2
 
 
 async def test_a_v80_link_joined_requester_keeps_the_full_descriptor(encoder):
