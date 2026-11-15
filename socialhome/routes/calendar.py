@@ -946,8 +946,6 @@ class CalendarEventApprovalView(BaseView):
                     occurrence_at=occurrence_at,
                 )
                 new_status = None
-        except KeyError as exc:
-            return error_response(404, "NOT_FOUND", str(exc))
         except ValueError as exc:
             return error_response(422, "UNPROCESSABLE", str(exc))
 

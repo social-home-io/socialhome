@@ -560,3 +560,20 @@ async def test_ics_feed_of_a_banned_users_leftover_seat_is_refused(client):
         (client._uid,),
     )
     assert (await client.get(feed)).status == 401
+
+
+async def test_approving_a_request_that_is_not_there_echoes_nothing(client):
+    """No pending request for that user: 404 with the fixed detail, never
+    the user id the caller sent."""
+    await _seed_space(client, "sp-b", client._uid, "owner")
+    eid = await _create_event(client, "sp-b", _auth(client._tok), capacity=1)
+    r = await client.post(
+        f"/api/calendars/events/{eid}/approve",
+        json={"user_id": "nobody-id", "action": "approve"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 404, await r.text()
+    assert (await r.json())["error"] == {
+        "code": "NOT_FOUND",
+        "detail": "Resource not found.",
+    }
