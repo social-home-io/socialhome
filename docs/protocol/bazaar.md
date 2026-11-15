@@ -572,7 +572,7 @@ each), ≤ ~10 KB per listing.
 - `socialhome/repositories/bazaar_repo.py` — `add_faq_entry`,
   `edit_faq_entry`, `remove_faq_entry`, `apply_faq_entry`.
 - `socialhome/federation/sync/space/exporters/bazaar.py` /
-  `receiver.py` — the `faq` field of the `bazaar` record.
+  `receive_bazaar.py` — the `faq` field of the `bazaar` record.
 - Migration `0135_bazaar_listing_faq.sql`.
 - Tests: `tests/protocol/test_bazaar_faq_federation.py` (six real
   households: every member household at v_75 gets it, the older one and

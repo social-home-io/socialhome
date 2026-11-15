@@ -468,7 +468,7 @@ enough) or the household's next full stream.
   `PERSONAL_CALENDAR_EVENT_*` and `PERSONAL_CALENDAR_RSVP_*`.
 - `socialhome/repositories/calendar_repo.py`.
 - `socialhome/federation/sync/space/exporters/calendar_deleted.py` and
-  `receiver.py` (`_persist_calendar_tombstones`) — the event tombstones.
+  `receive_calendar.py` (`_persist_calendar_tombstones`) — the event tombstones.
 - `socialhome/routes/calendar_routes.py`.
 
 ## Spec references

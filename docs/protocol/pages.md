@@ -693,7 +693,7 @@ Legacy (uuid4) ids keep the first-come rule. See
   broadcast plus the legacy payload. Proposals are never broadcast.
 - `socialhome/services/federation_inbound/space_content.py`: host
   proposal / member mirror routing.
-- `socialhome/federation/sync/space/{exporters/pages.py,exporters/pages_deleted.py,receiver.py,resume.py}`:
+- `socialhome/federation/sync/space/{exporters/pages.py,exporters/pages_deleted.py,receive_pages.py,resume.py}`:
   sync records and resume by `seq`, tombstones, the host's seq hints.
 - `socialhome/repositories/page_repo.py`: `seq` / `pending_base_seq`,
   history, conflict sides and the draft base (`space_page_snapshots`).
