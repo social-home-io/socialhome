@@ -454,7 +454,7 @@ relay takes binary media frames (v_87 `envelope_media`,
 catch-up's files like any member — the bounded catch-up push, then
 `SPACE_MEDIA_WANTED` for an older file it opens — so its records carry
 `media_refs` only for files the provider already uploaded to that
-requester's GFS, matched by blob address — file, epoch, item and origin (`SpaceMediaGfsUploader.stored_on_gfs`, the ≤ 3-day
+requester's GFS, matched by blob address — file, epoch, item and origin (`SpaceMediaGfsUploader.stored_plan_for_reader`: looked up, never sealed; only a described record spends the 500-record budget; the ≤ 3-day
 cache memory); nothing new is sealed or uploaded for the stream. A v_80
 requester keeps the full descriptor and the uploads (it can ask for
 nothing). Same sync line 92 (already in `SYNC_RECORD_LINES`). Cost toward

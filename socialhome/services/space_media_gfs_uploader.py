@@ -503,12 +503,19 @@ class SpaceMediaGfsUploader:
         )
 
     async def _describe_names(
-        self, space_id: str, names: list[str], item_id: str
+        self,
+        space_id: str,
+        names: list[str],
+        item_id: str,
+        *,
+        cached_only: bool = False,
     ) -> list[SpaceMediaRef]:
         """Each file's descriptor entry, sealed for item *item_id* by this
         household — the household a reader authenticates as delivering the
         item, so both are in the blob's AAD (:mod:`~socialhome.space_media_seal`).
-        Nothing before this household knows its own id."""
+        Nothing before this household knows its own id. ``cached_only``:
+        never seal — only entries described before (every uploaded blob
+        was)."""
         origin = self._federation.own_instance_id if self._federation else ""
         if not origin or not item_id:
             return []
@@ -529,6 +536,8 @@ class SpaceMediaGfsUploader:
             if cached is not None:
                 self._described.move_to_end(cache_key)
                 refs.append(cached)
+                continue
+            if cached_only:
                 continue
             data = await self._read(name)
             if data is None:
@@ -796,6 +805,30 @@ class SpaceMediaGfsUploader:
         if conn is None:
             return False
         return self._stored_names.get((conn.id, filename), 0.0) > _monotonic()
+
+    async def stored_plan_for_reader(
+        self,
+        space_id: str,
+        media_urls: Iterable[str | None],
+        instance_id: str,
+        *,
+        item_id: str,
+    ) -> SpaceMediaPlan | None:
+        """The plan for ONE reader holding only the blobs its GFS is known
+        to hold now (:meth:`stored_on_gfs`). Nothing is sealed: a blob we
+        uploaded was described (and its entry kept) when it was planned, so
+        a file with no kept entry cannot be on the GFS and costs nothing
+        here. ``None`` when no such blob."""
+        names = media_names(media_urls)
+        conn = await self._reader_conn(instance_id) if names else None
+        if conn is None:
+            return None
+        refs = await self._describe_names(space_id, names, item_id, cached_only=True)
+        if not refs:
+            return None
+        return self.stored_on_gfs(
+            SpaceMediaPlan(space_id=space_id, refs=tuple(refs), targets=(conn,))
+        )
 
     def stored_on_gfs(self, plan: SpaceMediaPlan | None) -> SpaceMediaPlan | None:
         """*plan* narrowed to the refs whose exact blob (the address: file,

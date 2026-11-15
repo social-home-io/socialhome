@@ -266,6 +266,12 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
             "GFS cache (live content)",
             "defines it",
         ),
+    },
+    "stored_plan_for_reader": {
+        "socialhome/services/space_media_gfs_uploader.py": (
+            "GFS cache (live content)",
+            "defines it",
+        ),
         "socialhome/federation/sync/space/provider.py": (
             "GFS cache (live content)",
             "a v_92 catch-up describes only blobs its GFS holds",
