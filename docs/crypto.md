@@ -847,7 +847,14 @@ identity key a member will pin (`SUPPORTED_GFS_KEY_SUITES`,
 remote admin household so it can sign space-authority events offline.
 The seed rides the encrypted peer-pair path (the directional session
 key, same AES-256-GCM channel as every other federation event to that
-peer) addressed to that one household — **never broadcast**. The
+peer) addressed to that one household — **never broadcast**, never in a
+v_91 multi frame. To an admin household reached only through a GFS
+(v_94) that is the seat's static–static session key, then the mailbox
+seal; the GFS carries ciphertext only. That leg has no forward secrecy,
+which costs nothing here: a recorded share reveals only the seed of its
+own epoch, and reading it later takes the owner's or the admin's key-wrap
+key — a household that already holds that epoch's seed — while every
+retired epoch's seed is worthless after the re-pins. The
 payload carries a `seed_suite` field (today only `"ed25519-seed"`,
 validated against `SUPPORTED_SEED_SUITES`, rejected-not-defaulted on
 unknown) so a future hybrid PQ signing key is a wire-additive suite

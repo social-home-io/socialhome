@@ -563,7 +563,9 @@ class SpaceFeatures:
     #: authorised admins to act on the space's behalf (moderate, invite,
     #: publish) even while the owner is offline. Flipping it on distributes
     #: the space's Ed25519 signing seed to remote admin households via
-    #: ``SPACE_ADMIN_KEY_SHARE`` (v_22); flipping it off rotates the space
+    #: ``SPACE_ADMIN_KEY_SHARE`` (v_22) — every admin household, whichever
+    #: way it is reached (paired, mesh or only through a GFS, v_94);
+    #: flipping it off rotates the space
     #: authority key so every shared seed stops verifying (v_44, see
     #: ``SpaceAuthorityRotationService``). Toggling it is
     #: OWNER-only (a host-local admin can't enact it). Defaults OFF

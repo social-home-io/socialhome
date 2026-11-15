@@ -704,7 +704,7 @@ class until somebody classifies it on purpose.
 | Space media bytes (`SPACE_MEDIA_BLOB`) | sent | **accepted** |
 | Space roster + config + age gate | sent | **accepted** |
 | Space content key (`SPACE_KEY_EXCHANGE` / `_ACK` / `_REKEY`) | sent | **accepted** |
-| Space seed delegation (`SPACE_ADMIN_KEY_SHARE`) | never | rejected — handing the space authority seed to a household that walked in off a public link is never right |
+| Space seed delegation (`SPACE_ADMIN_KEY_SHARE`, v_94) | sent to an admin household the owner approved, while delegation is on | **accepted** — only from the acting host, only with a live admin seat of our own, only a seed that is the private half of the pinned key; never in a multi frame |
 | Catch-up sync chunks (`SPACE_SYNC_BEGIN` … `_COMPLETE`) | sent | **accepted** |
 | Direct-sync RTC signalling (`SPACE_SYNC_OFFER` / `_ANSWER` / `_ICE` / `_DIRECT_*`) | never | rejected — it exists to negotiate a *direct* connection, and neither household has the other's address by design |
 | Join requests (`SPACE_JOIN_REQUEST*`) | excluded | rejected — they are already a member; this is the ask-an-admin flow |
@@ -1221,39 +1221,45 @@ for a local member, `set_remote_member_role` for a remote one — so an
 admin who is not the owner cannot approve an admin grant either. Denying
 or letting it expire leaves the person a member.
 
-#### An admin met through a link never holds the signing seed
+#### An admin met through a link holds the signing seed like any admin
 
-A household that redeems an invite link into an `admin` seat gets the
-ADMIN **role** and not the space's Ed25519 signing seed. This is settled,
-and it holds regardless of the space's `delegated_admin_authority`
-setting — the setting decides whether an admin the owner *knows* may
-hold authority, and a peer met through a public link is not that.
+Every space admin is equal, whichever way its household is reached (owner
+decision 2026-11-15, v_94). This retires the earlier rule that a household
+met through a link or a connection server never holds the space's Ed25519
+signing seed.
 
-Two reasons, either sufficient:
+An `admin` link still does not grant admin straight through. The
+redeeming household is seated as a member with the admin role **pending**,
+and only the owner's click (`set_remote_member_role`) makes it an admin. From
+then on it is an admin like a paired one. While the owner lets admins act for
+it (`delegated_admin_authority`), the owner hands it the seed with
+`SPACE_ADMIN_KEY_SHARE`, sealed under the seat's session key and carried by
+the GFS mailbox or relay as ciphertext. The connection server sees one sealed
+frame for one mailbox: no space id, no event type, no key. With delegation
+off, no admin holds the seed on any path, and a link-joined admin acts
+through the host (`SPACE_REMOTE_ADMIN_ACTION`) like a paired one.
 
-- **Taking the seed back is not guaranteed everywhere.** Since v_44 the
-  owner rotates the space authority key when an admin household is
-  revoked, and a connection server re-pins from the owner's cert — but only
-  households and connection servers that support it follow (a v_43 member
-  or a GFS without `authority_rotation` keeps the old key, which the revoked
-  household still holds). A credential whose revocation depends on every
-  party being upgraded must not be handed to someone whose only
-  introduction was a string anyone could have copied.
-- **A link is not an acquaintance.** An invite link is, by design,
-  redeemable by whoever holds it. The owner chose to open a seat, not to
-  vouch for the person who walked through it.
+The two old reasons no longer hold:
 
-Such an admin therefore manages the space exactly as a delegated admin
-*without* authority does: its moderation and roster actions go out as
-`SPACE_REMOTE_ADMIN_ACTION`, forwarded to the host, which checks them
-and signs on its own behalf. The admin experience is the same; only the
-key custody differs. An owner who later wants a link-joined admin to
-hold authority promotes them through the normal path, where the decision
-is about a household the owner can now name. Even then, the promote path
-(`_share_admin_signing_seed`) withholds the seed from a **relay-only**
-(`InstanceSource.SPACE_SESSION`) household — one met purely through a
-connection server — because the revocation argument above still applies
-to it; such an admin keeps acting through the host.
+- **Taking the seed back works on every path.** When the household's last
+  admin seat ends, the owner rotates the space authority key (v_44). The
+  rotation bundle reaches link-joined members too (`SPACE_AUTHORITY_ROTATED`
+  is in the seat vocabulary). Every GFS that lists the space re-pins from the
+  owner's cert *before* the per-member bundles go out. Any seed share still
+  queued is dropped. The pin on a GFS moves only on a publish signed by the
+  owner household carrying an owner-household cert with a higher epoch, so a
+  revoked admin can neither re-pin nor rotate. The owner shares no seed with
+  any admin while a GFS that lists the space has not proved
+  `authority_rotation`.
+- **A link is not an acquaintance, but the owner's click is.** The seed goes
+  only to a household the owner itself approved as admin. On the space it
+  hosts, the owner refuses seed-signed gossip that keeps or sets an admin
+  seat, so no other admin can mint one either.
+
+A link-seated admin household below v_94 refuses the type at its peer-class
+gate, so the owner skips it (WARNING) and that admin acts through the host
+until it upgrades. Full flow:
+[spaces.md](./spaces.md#delegated-admin-signing-seed-share-space_admin_key_share-v_22).
 
 #### A Follower link works across households (v_30)
 
