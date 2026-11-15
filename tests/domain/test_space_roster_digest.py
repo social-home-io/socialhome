@@ -8,9 +8,11 @@ from socialhome.domain.space_roster_digest import (
     ROSTER_DIGEST_SUITE_SHA256,
     RosterDigest,
     UnsupportedRosterDigestSuite,
+    digest_of_roster_seats,
     parse_roster_digest,
     roster_digest,
     roster_digest_wire,
+    roster_seats,
 )
 
 
@@ -66,3 +68,26 @@ def test_an_unknown_suite_is_refused():
         parse_roster_digest({"suite": "rd2", "digest": "a" * 64})
     with pytest.raises(UnsupportedRosterDigestSuite):
         parse_roster_digest({"digest": "a" * 64})
+
+
+def test_a_separator_inside_an_id_never_collides():
+    """M1: the seats are hashed as a canonical JSON list, not joined text —
+    an id that contains a separator cannot forge another seat list."""
+    assert roster_digest([("a\x1fb", "c", "member")]) != roster_digest(
+        [("a", "b\x1fc", "member")]
+    )
+    assert roster_digest([("a", "b", "member"), ("c", "d", "member")]) != (
+        roster_digest([("a", "b\nc", "member"), ("", "d", "member")])
+    )
+
+
+def test_the_sorted_seats_hash_like_the_raw_ones_without_one_household():
+    """The host caches the sorted, mirrored seats once and leaves out the
+    requester's own household when it hashes."""
+    raw = [("x", "u2", "owner"), ("h", "u1", "member"), ("x", "u2", "owner")]
+    seats = roster_seats(raw)
+    assert seats == (("h", "u1", "member"), ("x", "u2", "member"))
+    assert digest_of_roster_seats(seats) == roster_digest(raw)
+    assert digest_of_roster_seats(seats, exclude_instance="x") == roster_digest(
+        [("h", "u1", "member")]
+    )
