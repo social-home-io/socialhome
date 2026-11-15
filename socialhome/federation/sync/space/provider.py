@@ -223,6 +223,8 @@ MAX_CATCHUP_MEDIA_RECORDS: int = 500
 class _MediaPlanner(Protocol):
     async def is_relay_reader(self, instance_id: str) -> bool: ...
 
+    async def takes_relay_frames(self, instance_id: str) -> bool: ...
+
     def stored_on_gfs(self, plan: Any) -> Any: ...
 
     async def plan_for_reader(
@@ -240,8 +242,9 @@ class _WithMediaRefs:
     At most :data:`MAX_CATCHUP_MEDIA_RECORDS` records per resource per
     stream.
 
-    ``stored_only`` (a v_92 requester, which gets a catch-up's files like
-    any member — the bounded catch-up push and ``SPACE_MEDIA_WANTED``):
+    ``stored_only`` (a v_92 requester whose relay takes binary frames,
+    which gets a catch-up's files like any member — the bounded catch-up
+    push and ``SPACE_MEDIA_WANTED``):
     only the files its GFS is already known to hold are described, and
     nothing is uploaded. Otherwise (a v_80 requester, which can ask for
     nothing) every file is described and queued for upload to its GFS."""
@@ -747,8 +750,14 @@ class SpaceSyncService:
                 exporter,
                 self._media_gfs,
                 session.requester_instance_id,
+                # v_92 AND full-size relay frames: the bounded catch-up
+                # push carries its files. Without frames they would go as
+                # small JSON chunks — the GFS cache stays the path then.
                 stored_only=await self._session_version(session)
-                >= FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
+                >= FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
+                and await self._media_gfs.takes_relay_frames(
+                    session.requester_instance_id
+                ),
             )
         return exporter
 
