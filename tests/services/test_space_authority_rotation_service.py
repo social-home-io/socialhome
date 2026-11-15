@@ -30,6 +30,7 @@ from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
 )
+from socialhome.domain.federation_retention import admin_seed_key_prefix
 from socialhome.domain.relay_media_frame import SPACE_CONFIG_ITEM_MAX_BYTES
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
@@ -59,6 +60,10 @@ class _Fed:
         self.own_instance_id = derive_instance_id(kp.public_key)
         self._versions = versions
         self.sent: list[tuple[str, FederationEventType, dict]] = []
+        #: (instance, outbox-key prefix) per dropped-queue call, and the
+        #: order of drops and sends (``("drop", iid)`` / ``("send", iid, et)``).
+        self.dropped: list[tuple[str, str]] = []
+        self.log: list[tuple] = []
         self.registered: dict = {}
         self._event_registry = SimpleNamespace(
             register=lambda et, h: self.registered.__setitem__(et, h)
@@ -71,7 +76,13 @@ class _Fed:
         self, *, to_instance_id, event_type, payload, space_id=None
     ):
         self.sent.append((to_instance_id, event_type, payload))
+        self.log.append(("send", to_instance_id, event_type))
         return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+    async def drop_queued_with_key_prefix(self, instance_id, prefix):
+        self.dropped.append((instance_id, prefix))
+        self.log.append(("drop", instance_id))
+        return 0
 
 
 class _FedRepo:
@@ -1255,3 +1266,76 @@ async def test_the_bundle_config_over_the_limit_keeps_the_text_and_the_owner_ste
     got = await env.spaces.get(SPACE)
     assert (got.name, got.description) == ("Baseline", space.description)
     assert got.gfs_servers == gfs_list
+
+
+# ─── Every admin is equal on every path (owner decision 2026-11-15) ──────
+
+
+async def test_rotation_drops_every_queued_seed_share_before_sharing_again(env):
+    """A seed share still queued (outbox, a slow GFS) when an admin is
+    revoked must never land after it: the rotation drops every queued share
+    of the space — to each member household AND the revoked one, which may
+    hold no seat any more — before the new seed goes to the admins it keeps."""
+    await env.remote.set_role(SPACE, "v44", "u-v44", "admin")
+
+    class _SpaceSvc:
+        async def share_admin_signing_seed(self, space, *, instance_id):
+            await env.fed.send_with_mesh_fallback(
+                to_instance_id=instance_id,
+                event_type=FET.SPACE_ADMIN_KEY_SHARE,
+                payload={},
+                space_id=space.id,
+            )
+
+        async def roster_snapshot_entries(self, space, *, seed, to_instance_id):
+            return []
+
+    env.svc.attach_space_service(_SpaceSvc())
+    await env.svc.rotate(SPACE, revoked_instance="gone")
+    prefix = admin_seed_key_prefix(SPACE)
+    assert {i for i, p in env.fed.dropped if p == prefix} >= {
+        "v44",
+        "v43",
+        "mesh",
+        "gone",
+    }
+    first_share = next(
+        n
+        for n, e in enumerate(env.fed.log)
+        if e[0] == "send" and e[2] is FET.SPACE_ADMIN_KEY_SHARE
+    )
+    last_drop = max(n for n, e in enumerate(env.fed.log) if e[0] == "drop")
+    assert last_drop < first_share
+
+
+async def test_rotation_repins_every_gfs_before_the_bundles_go_out(env):
+    """The revoked holder can use a GFS that still pins the old key until
+    it re-pins: the re-publish runs as soon as the new key AND its content
+    epoch exist, before the per-member bundles (N sends), and the
+    subscriber re-seal still follows it."""
+    calls: list[str] = []
+    epoch_before = await env.crypto.get_current_epoch(SPACE)
+
+    class _Gfs:
+        async def republish_space(self, space_id):
+            assert await env.crypto.get_current_epoch(space_id) > epoch_before
+            assert not any(
+                e[0] == "send" and e[2] is FET.SPACE_AUTHORITY_ROTATED
+                for e in env.fed.log
+            )
+            calls.append("republish")
+            return 1
+
+    class _Keys:
+        async def reconcile_space_everywhere(self, space_id):
+            assert any(
+                e[0] == "send" and e[2] is FET.SPACE_AUTHORITY_ROTATED
+                for e in env.fed.log
+            )
+            calls.append("reseal")
+
+    env.svc.attach_gfs(_Gfs())
+    env.svc.attach_subscriber_keys(_Keys())
+    await env.db.enqueue("UPDATE spaces SET space_type='global' WHERE id=?", (SPACE,))
+    await env.svc.rotate(SPACE)
+    assert calls == ["republish", "reseal"]

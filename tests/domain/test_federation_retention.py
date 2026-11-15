@@ -16,6 +16,7 @@ from socialhome.domain.federation_retention import (
     SHORT_LIVED,
     SHORT_LIVED_TTL,
     TERMINAL_GRACE,
+    admin_seed_key_prefix,
     capped_delete_key,
     is_long_lived,
     moment_delete_key,
@@ -298,3 +299,19 @@ def test_a_space_post_reaction_keeps_only_its_latest_toggle_queued():
     assert (
         supersede_key(FET.SPACE_POST_REACTION, space_id=None, payload=payload) is None
     )
+
+
+def test_a_seed_share_supersedes_per_space_and_names_its_space():
+    """A household needs only the newest seed share of a space: a queued
+    older one would carry the seed of a retired key. One slot per (peer,
+    space) — and the key starts with ``admin_seed_key_prefix`` so a rotation
+    drops every queued share for that space (a stale one must never land
+    after a revocation)."""
+    t = FederationEventType.SPACE_ADMIN_KEY_SHARE
+    a = supersede_key(t, space_id="s1", payload={"space_seed": "x"})
+    assert a is not None
+    assert a == supersede_key(t, space_id="s1", payload={"space_seed": "y"})
+    assert a != supersede_key(t, space_id="s2", payload={"space_seed": "x"})
+    assert a.startswith(admin_seed_key_prefix("s1"))
+    assert not a.startswith(admin_seed_key_prefix("s"))
+    assert supersede_key(t, space_id=None, payload={}) is None
