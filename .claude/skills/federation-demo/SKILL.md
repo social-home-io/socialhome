@@ -998,6 +998,7 @@ python .claude/skills/federation-demo/harness.py gfs-media-on-demand
 python .claude/skills/federation-demo/harness.py gfs-member-mesh
 python .claude/skills/federation-demo/harness.py gfs-moderator-parity
 python .claude/skills/federation-demo/harness.py members-parity
+python .claude/skills/federation-demo/harness.py members-mesh-restart
 python .claude/skills/federation-demo/harness.py gfs-space-healing
 python .claude/skills/federation-demo/harness.py gfs-relay-media
 python .claude/skills/federation-demo/harness.py gfs-member-publish
@@ -2002,6 +2003,21 @@ invited it, holds d's card); then a is stopped again and d and e each post
 — the other must show it,
 mailbox to mailbox — and no GFS envelope / mailbox line names an instance
 id, a mailbox id or the space.
+
+### ``members-mesh-restart`` — a large space event reaches a mesh-only member that restarts
+
+Prereqs: the chain through ``gfs-member-mesh`` (a hosts the link-joined
+space; d is a member a reaches over the mesh, through b — the step fails if
+a and d are paired). a posts and d must show it, so a holds a fresh route
+sealed to d's ephemeral key. d is killed; a creates a **450 KiB page**,
+sealed to d's old key and taken by b; d is respawned and b delivers it. The
+restarted d cannot open it and nacks (``SPACE_ROUTE_STALE``): a's log must
+show ``retransmitted space_page_created`` naming d, and d must show the page
+(title + sha256 of its text) within 240 s. 450 KiB is over the 64 KiB up to
+which the mesh used to keep an event for its retransmit and over what one
+§25.6 sync record can be on a mesh hop, so on a build without the large
+retransmit nothing brings the page to d and the step fails. Kills d, so it
+is an ``@_offline_step``.
 
 ### ``gfs-space-healing`` — a GFS-only member heals from a helper while the host is offline (v_92)
 

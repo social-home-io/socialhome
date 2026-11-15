@@ -25104,6 +25104,105 @@ def _check_members_parity(state: dict, failures: list[str]) -> None:
                     )
 
 
+#: ``members-mesh-restart``: the page's text, 450 KiB — over the 64 KiB up to
+#: which the mesh used to keep an event for its one retransmit, and over the
+#: ~433 KB a §25.6 sync record can be on one mesh hop, so only the live
+#: event's retransmit can bring it to the restarted member.
+_MESH_RESTART_PAGE_BYTES: int = 450 * 1024
+
+
+@_offline_step
+def cmd_members_mesh_restart() -> None:
+    """A large space event reaches a mesh-only member that restarts.
+
+    Prereqs: the gfs chain through ``gfs-member-mesh`` (a hosts the
+    link-joined space, d is a member reached over the mesh through b).
+
+    1. a posts in the space and d must show it: a holds a fresh route to d,
+       sealed to d's ephemeral key.
+    2. d is killed. a creates a 450 KiB page: sealed to d's old key, taken
+       by b, which delivers it once d is back. d is respawned.
+    3. The restarted d cannot open it and nacks (``SPACE_ROUTE_STALE``); a
+       must retransmit the page to d (asserted in a's log) and d must show
+       it (title + sha256 of its text).
+
+    Fails on a build that kept only events up to 64 KiB for the retransmit:
+    the page is too large for one §25.6 sync record over the mesh, so
+    nothing else brings it to d.
+    """
+    state = _load()
+    space_id = (state or {}).get("gfs_invite_space_id")
+    if not state or not _gfs_alive(state) or not space_id:
+        raise SystemExit("run the gfs chain through 'gfs-member-mesh' first")
+    step = "members-mesh-restart"
+    a, d = state["instances"]["a"], state["instances"]["d"]
+    if d["instance_id"] in _peer_ids(a, confirmed_only=True):
+        raise SystemExit(f"{step}: needs d reached from a over the mesh, not paired")
+    tag = time.time_ns()
+
+    # 1. A fresh route a → d.
+    warm = _parity_post_text(state, "a", space_id, f"Mesh restart, warm-up {tag}")
+    _poll(
+        f"{step}: d shows a's warm-up post",
+        lambda: (
+            _parity_get(state, "d", f"/api/spaces/{space_id}/posts/{warm}")[0] == 200
+        ),
+        timeout=120.0,
+        interval=3.0,
+    )
+    print("  d shows a's warm-up post (route a → d is fresh) ✓")
+
+    # 2. d away while a creates the page.
+    text = secrets.token_hex(_MESH_RESTART_PAGE_BYTES // 2)
+    title = f"Mesh restart, large page {tag}"
+    a_log = _log_size("a")
+    _kill_household("d", d)
+    try:
+        s, page = _inst_request(
+            state,
+            "a",
+            "POST",
+            f"/api/spaces/{space_id}/pages",
+            {"title": title, "content": text},
+        )
+        page = _must(f"{step}: a creates a 450 KiB page", s, page, ok=(200, 201))
+    finally:
+        _respawn(state, "d")
+
+    # 3. d nacks, a retransmits, d shows the page.
+    want = hashlib.sha256(text.encode()).hexdigest()
+
+    def _d_page() -> bool:
+        s, got = _parity_get(state, "d", f"/api/spaces/{space_id}/pages/{page['id']}")
+        if s != 200 or not isinstance(got, dict):
+            return False
+        content = str(got.get("content") or "")
+        return (
+            got.get("title") == title
+            and hashlib.sha256(content.encode()).hexdigest() == want
+        )
+
+    _poll(f"{step}: d shows the 450 KiB page", _d_page, timeout=240.0, interval=3.0)
+    print("  d shows the 450 KiB page (title + sha256) ✓")
+    resent = [
+        line
+        for line in _log_lines_matching(
+            "a", "retransmitted space_page_created", offset=a_log
+        )
+        if d["instance_id"] in line
+    ]
+    if not resent:
+        raise SystemExit(
+            f"{step}: d shows the page, but a's log has no retransmit of it to "
+            f"{d['instance_id']} — the check did not exercise the mesh's nack "
+            f"(see {_log_path('a')})"
+        )
+    print(
+        f"  a retransmitted the page to d after d's nack ✓ ({resent[0].strip()[:120]})"
+    )
+    print(f"{step}: ok")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
