@@ -996,9 +996,9 @@ python .claude/skills/federation-demo/harness.py gfs-invite-link
 python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py gfs-media-on-demand
 python .claude/skills/federation-demo/harness.py gfs-member-mesh
+python .claude/skills/federation-demo/harness.py members-mesh-restart
 python .claude/skills/federation-demo/harness.py gfs-moderator-parity
 python .claude/skills/federation-demo/harness.py members-parity
-python .claude/skills/federation-demo/harness.py members-mesh-restart
 python .claude/skills/federation-demo/harness.py gfs-space-healing
 python .claude/skills/federation-demo/harness.py gfs-relay-media
 python .claude/skills/federation-demo/harness.py gfs-member-publish
@@ -2007,9 +2007,10 @@ id, a mailbox id or the space.
 
 ### ``members-mesh-restart`` — a large space event reaches a mesh-only member that restarts
 
-Prereqs: the chain through ``gfs-member-mesh`` (a hosts the link-joined
-space; d is a member a reaches over the mesh, through b — the step fails if
-a and d are paired). a posts and d must show it, so a holds a fresh route
+Prereqs: the chain through ``gfs-member-mesh``, and before
+``members-parity`` (a hosts the link-joined space; d is a member a reaches
+over the mesh, through b — the step fails if a holds a direct row for d:
+``members-parity``'s last action seats d with a in another space). a posts and d must show it, so a holds a fresh route
 sealed to d's ephemeral key. d is killed; a creates a **450 KiB page**,
 sealed to d's old key and taken by b; d is respawned and b delivers it. The
 restarted d cannot open it and nacks (``SPACE_ROUTE_STALE``): a's log must

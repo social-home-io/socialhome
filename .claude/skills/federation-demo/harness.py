@@ -25188,8 +25188,9 @@ _MESH_RESTART_PAGE_BYTES: int = 450 * 1024
 def cmd_members_mesh_restart() -> None:
     """A large space event reaches a mesh-only member that restarts.
 
-    Prereqs: the gfs chain through ``gfs-member-mesh`` (a hosts the
-    link-joined space, d is a member reached over the mesh through b).
+    Prereqs: the gfs chain through ``gfs-member-mesh``, before
+    ``members-parity`` (a hosts the link-joined space, d is a member reached
+    over the mesh through b; ``members-parity`` ends by seating d with a).
 
     1. a posts in the space and d must show it: a holds a fresh route to d,
        sealed to d's ephemeral key.
@@ -25210,7 +25211,10 @@ def cmd_members_mesh_restart() -> None:
     step = "members-mesh-restart"
     a, d = state["instances"]["a"], state["instances"]["d"]
     if d["instance_id"] in _peer_ids(a, confirmed_only=True):
-        raise SystemExit(f"{step}: needs d reached from a over the mesh, not paired")
+        raise SystemExit(
+            f"{step}: needs d reached from a over the mesh, but a holds a direct"
+            " row for d (paired or seated) — run it before 'members-parity'"
+        )
     tag = time.time_ns()
 
     # 1. A fresh route a → d.
