@@ -120,14 +120,13 @@ from ...domain.space import (
     validate_zone_name,
     validate_zone_radius,
 )
-from ...domain.space_media_fields import item_media_urls
+from ...domain.space_media_fields import item_media_urls, replace_item_media
 from ...domain.space_media_ref import (
     MAX_PAGE_FILES,
     MEDIA_REFS_FIELD,
     SpaceMediaLocalization,
     page_file_count,
     page_media_urls,
-    rewrite_page_body_media,
 )
 from ...domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ...domain.task import Task, TaskList, task_from_wire_dict, task_list_from_wire_dict
@@ -1254,15 +1253,8 @@ class SpaceContentInboundHandlers:
         settles its draft. A file another receiving path owns (a DM
         attachment, GFS moment media, a GFS reader copy) is dropped."""
         sent = proposal
-        cover = proposal.cover_image_url
-        if cover and space_media_ref(cover) is None:
-            cover = None
-        proposal = replace(
-            proposal,
-            content=rewrite_page_body_media(
-                proposal.content, lambda ref: ref if space_media_ref(ref) else ""
-            ),
-            cover_image_url=cover,
+        proposal = replace_item_media(
+            "pages", proposal, lambda ref: ref if space_media_ref(ref) else None
         )
         urls = page_media_urls(proposal.cover_image_url, proposal.content)
         if not urls:
@@ -1283,13 +1275,7 @@ class SpaceContentInboundHandlers:
         names = self._media_names.localize(
             space_id, event.from_instance, urls, held=held
         )
-        proposal = replace(
-            proposal,
-            content=rewrite_page_body_media(
-                proposal.content, lambda ref: names.url(ref) or ref
-            ),
-            cover_image_url=names.url(proposal.cover_image_url),
-        )
+        proposal = names.item("pages", proposal)
         await self._fetch_proposed_files(
             event, space_id, page_id, sent, dict(names.names)
         )
