@@ -442,7 +442,7 @@ class SpaceSyncResumeProvider:
         space's roster authority (the host, or a seed-holding delegated
         admin), else only our own people — every receiver takes other
         people's rows only from the household acting as host
-        (``receiver._acts_as_host``), so sending them is wasted bytes. Not
+        (``receiver_base._acts_as_host``), so sending them is wasted bytes. Not
         wired (``None``): every row, as before."""
         if self._roster_authority is None or self._own_members is None:
             return None

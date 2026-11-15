@@ -1362,7 +1362,7 @@ and the media reference repo, whose space rows are generated from
 `space_media_columns()` with per-table condition maps (a missing condition
 fails at import; household tables stay hand-listed). One pattern,
 `LOCAL_MEDIA_REF_RE`, reads a markdown body for the signer, the repo and a
-page's renames. Tripwire tests (`tests/domain/test_space_media_fields.py`
+page's renames. The same registry drives what a deleted post and a purged space free (`space_files`: only canonical, non-reserved space files and the space's own `sg-` GFS reader copies, never a DM's or a transient). Tripwire tests (`tests/domain/test_space_media_fields.py`
 plus each consumer's) fail when a file-like domain field is neither
 registered nor named as not-a-file, or a consumer misses a field.
 

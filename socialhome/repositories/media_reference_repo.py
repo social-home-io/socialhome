@@ -38,10 +38,11 @@ noted:
     ``space_page_snapshots.body``
   * ``task_attachments.url``
   * ``post_drafts.media_url``
-  * ``feed_posts.link_preview_json`` → ``$.thumbnail_url`` and
-    ``feed_posts.file_meta_json`` → ``$.url`` (a household file post, while live)
-    (the re-encoded link-preview image; one file may back several posts
-    that linked the same page)
+  * ``feed_posts.link_preview_json`` → ``$.thumbnail_url`` (the re-encoded
+    link-preview image; one file may back several posts that linked the
+    same page)
+  * ``feed_posts.file_meta_json`` → ``$.url`` (a household file post's
+    attachment, while the post is live)
 
   * ``space_moderation_queue.payload_json`` of PENDING items — a queued
     post / page / event / listing publishes its media only on approval

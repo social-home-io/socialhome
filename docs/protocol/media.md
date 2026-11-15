@@ -565,7 +565,7 @@ Unchanged:
 - **Unhashed files** (`sd-` / `sg-` / `sp-`) keep the owner-only fill
   (#1311, above). A moderator's push for a legacy row is refused.
 - **Rows** of other people still come only from the host or a delegated
-  admin (`receiver._acts_as_host`, `may_author`); a helper sends files
+  admin (`receiver_base._acts_as_host`, `may_author`); a helper sends files
   only.
 - **A row not held here:** a blob that overtakes its row still lands
   (verified, under the content name and the sender's `sd-` name); the

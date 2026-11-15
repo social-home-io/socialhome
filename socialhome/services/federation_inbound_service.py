@@ -2409,7 +2409,7 @@ class FederationInboundService(ProtectionGateMixin):
         delegated admin, a live ``admin`` or ``moderator`` seat
         (:meth:`SpaceAuthorship.has_content_authority`). Nobody fills a
         deleted row's file. Only files: rows still come from the host or a
-        delegated admin alone (§25.6 ``receiver._acts_as_host``)."""
+        delegated admin alone (§25.6 ``receiver_base._acts_as_host``)."""
         authorship = self._space_authorship(event)
         if authorship is None:
             return False
