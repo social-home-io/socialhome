@@ -13,6 +13,8 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from socialhome.crypto import (
     b64url_encode,
     derive_instance_id,
@@ -547,7 +549,10 @@ async def test_an_end_takes_the_hop_only_through_a_household_acting_as_its_host(
     assert nodes[target].dispatched == []
 
 
-async def test_the_hop_goes_through_the_first_host_that_is_not_an_end():
+# A card is minted only by v_89+ code (with its OURS): whatever version it
+# claims, its holder reads a raw sealed body.
+@pytest.mark.parametrize("card_version", [89, 80])
+async def test_the_hop_goes_through_the_first_host_that_is_not_an_end(card_version):
     sent: list[list[str]] = []
 
     kwargs: list[dict] = []
@@ -569,7 +574,7 @@ async def test_the_hop_goes_through_the_first_host_that_is_not_an_end():
         keywrap_sig=b64url_encode(
             sign_ed25519(idents[target].private_key, kw.public_key)
         ),
-        proto_version=89,
+        proto_version=card_version,
         rev=1,
         mailbox=None,
     )

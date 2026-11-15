@@ -252,12 +252,16 @@ async def test_three_seats_on_one_gfs_are_one_payload_and_one_upload():
     assert s.repo.reachable_calls == [peer]
 
 
-async def test_a_seat_below_v90_goes_per_recipient():
+async def test_a_seat_is_judged_by_its_mailbox_not_its_row_version():
+    """A mailbox card exists only from v_89, and no released household is in
+    [v_89, v_91): a seat with a mailbox takes the multi frame whatever its
+    row says; one without (a v_80 seat) goes per recipient."""
     s = _Sender()
     new = [await s.seat() for _ in range(2)]
-    old = await s.seat(version=V90 - 1)
+    low = await s.seat(version=V90 - 1)
+    old = await s.seat(version=80, mailbox=False)
     await s.broadcast()
-    assert list(_queued(s).values()) == [sorted(new)]
+    assert list(_queued(s).values()) == [sorted([*new, low])]
     assert s.transport.per_recipient_ids() == [old]
 
 
