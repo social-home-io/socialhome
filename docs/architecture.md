@@ -575,13 +575,15 @@ without `envelope_media`) takes the same push as JSON chunks of
 be the only way — a member's page proposal to such a host, a v_92 catch-up
 to such a member — the GFS media cache stays the path instead. What stays specific to it is listed, with
 a reason, in `tests/protocol/test_gfs_member_special_case_guard.py`: the
-seat itself (redeem, teardown, the owner's no-seed rule), the transport
+seat itself (redeem, teardown), the transport
 (relay sizes and frames, mailboxes and multi uploads, no direct-sync
 signalling, no inbox POST), the seat's inbound vocabulary, the member
 directory, exclusions from non-space surfaces (DMs, moments, pairing) and
 the GFS media cache — a reader whose GFS keeps one is described its files
 (`media_refs`), and its push is skipped only while that cache is known to
-hold the file.
+hold the file. One open pre-release gap is not an exception: GFS-only admins and
+moderators don't get the space signing seed yet (a safe seed handoff with
+the same rights as paired admins is tracked separately).
 
 A tier-4 success is an **acceptance, not a delivery**: the relay answers
 a uniform `202` whether the recipient is online, offline or not one of

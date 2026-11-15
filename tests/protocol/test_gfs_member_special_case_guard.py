@@ -146,7 +146,11 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
         ),
         "socialhome/services/space_service.py": (
             "seat",
-            "seat teardown, no-seed rule, private-GFS link check, join routing",
+            (
+                "seat teardown, private-GFS link check, join routing; open "
+                "pre-release gap (seed handoff for GFS-only admins), tracked "
+                "separately"
+            ),
         ),
         "socialhome/services/federation_inbound/pairing.py": (
             "non-space exclusion",
