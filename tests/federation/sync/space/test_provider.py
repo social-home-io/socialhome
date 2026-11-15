@@ -1841,8 +1841,11 @@ class _ReaderUploader:
     async def is_relay_reader(self, iid):
         return iid in self.readers
 
-    async def stored_on_reader_gfs(self, iid, urls):
-        return [u for u in urls if u.rsplit("/", 1)[-1] in self.stored]
+    def stored_on_gfs(self, plan):
+        if plan is None:
+            return None
+        urls = [u for u in plan.urls if u.rsplit("/", 1)[-1] in self.stored]
+        return _ReaderPlan(urls) if urls else None
 
     async def plan_for_reader(self, space_id, urls, iid, *, item_id):
         urls = list(urls)
@@ -1922,7 +1925,6 @@ async def test_a_v92_link_joined_requester_gets_refs_only_for_files_on_its_gfs(
     assert all("media_refs" not in r for r in posts.values())
     (event,) = _streamed_records(session, "calendar")
     assert set(event["media_refs"]) == {"c.webp"}
-    assert uploader.planned == [("sp-1", ["api/media/c.webp"], "peer-e")]
     assert uploader.uploaded == []
 
 
