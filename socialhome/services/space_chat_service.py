@@ -41,6 +41,7 @@ from ..domain.conversation import (
     SystemChatSummary,
     mute_active,
 )
+from ..domain.errors import NotFoundError
 from ..domain.events import (
     RemoteSpaceMemberBanned,
     SpaceConfigChanged,
@@ -102,7 +103,7 @@ class SpaceChatService:
             return chat
         space = await self._spaces.get(space_id)
         if space is None or space.dissolved:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         return await self._convos.create_system_chat(
             SystemChatScope.SPACE, space_id=space_id
         )
@@ -159,10 +160,10 @@ class SpaceChatService:
         user = await self._users.get(username)
         space = await self._spaces.get(space_id)
         if user is None or space is None or space.dissolved:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         member = await self._spaces.get_member(space_id, user.user_id)
         if member is None or await self._spaces.is_banned(space_id, user.user_id):
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         if str(member.role) == SpaceRole.SUBSCRIBER.value or not space.features.chat:
             return SystemChatSummary(enabled=False)
         chat = await self.reconcile(space_id)

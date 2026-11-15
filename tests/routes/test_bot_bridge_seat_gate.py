@@ -9,7 +9,12 @@ Regression for two holes found on a live instance:
   made before the ban — the token outlives the seat.
 """
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
+
+from socialhome.domain.errors import NotFoundError
+from socialhome.services.bot_bridge_service import BotBridgeService
 
 from .test_space_read_gate import _add_user, _seat, _seed_space
 
@@ -92,3 +97,19 @@ async def test_a_members_bot_stops_when_the_member_leaves(seeded):
     r = await _bot_post(client, bot["token"])
     assert r.status == 403, await r.text()
     assert await _bot_posts(client) == []
+
+
+async def test_a_bot_whose_space_is_gone_gets_a_404_that_echoes_nothing(seeded):
+    """The bot outlived its space (a delete racing the post): 404 with the
+    fixed detail, never the space id."""
+    client, hdr = seeded
+    status, bot = await _make_bot(client, hdr["bob"])
+    assert status == 201, bot
+    gone = AsyncMock(side_effect=NotFoundError(f"space {_SID!r} not found"))
+    with patch.object(BotBridgeService, "notify_space", gone):
+        r = await _bot_post(client, bot["token"])
+    assert r.status == 404
+    assert (await r.json())["error"] == {
+        "code": "NOT_FOUND",
+        "detail": "Resource not found.",
+    }

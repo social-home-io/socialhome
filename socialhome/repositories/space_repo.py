@@ -32,6 +32,7 @@ from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..db.unit_of_work import UnitOfWork
+from ..domain.errors import NotFoundError
 from ..domain.gfs_server import (
     SignedGfsServerList,
     signed_gfs_server_list_from_column,
@@ -1687,7 +1688,7 @@ class SqliteSpaceRepo:
                 (space_id,),
             ).fetchone()
             if row is None:
-                raise KeyError(f"space {space_id!r} not found")
+                raise NotFoundError(f"space {space_id!r} not found")
             new_hlc = HLC.parse(row[1]).tick(now_ms)
             conn.execute(
                 "UPDATE spaces SET config_sequence = config_sequence + 1, "
@@ -1713,7 +1714,7 @@ class SqliteSpaceRepo:
                 (space_id,),
             )
             if cur.rowcount == 0:
-                raise KeyError(f"space {space_id!r} not found")
+                raise NotFoundError(f"space {space_id!r} not found")
             row = conn.execute(
                 "SELECT roster_sequence FROM spaces WHERE id=?",
                 (space_id,),

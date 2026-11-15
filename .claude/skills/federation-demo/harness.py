@@ -14825,24 +14825,14 @@ _LOG_BENIGN: tuple[str, ...] = (
     # harness audit. A different webrtc_ice WARNING (e.g. ICE
     # gathering failure, bad TURN credentials) would still surface.
     "WebRTC: no TURN server configured",
-    # The harness's OWN negative control in the ``gfs-*`` chain. Both
-    # ``cmd_gfs_space_post`` step 5 and ``cmd_verify`` 13c ask **c** — a
-    # household that is deliberately not a member, not a subscriber and not
-    # GFS-paired — for the global space's feed, to prove the §"non-member
-    # households MUST NOT see space content" rule on the real wire. c does not
-    # hold that space, so ``SpaceFeedView`` maps a ``KeyError`` to 404 and
-    # ``BaseView`` logs the mapping at WARNING. The 404 IS the expected
-    # outcome; the assertion that matters (c holds no ``space_posts`` row and
-    # its feed exposes neither post) runs regardless. Only fires when the
-    # opt-in GFS chain is run in the same session as ``verify``.
-    "SpaceFeedView: KeyError surfaced from handler",
-    # ``members-parity`` (and its ``verify`` hook) reads each deleted post's
-    # permalink on a, d and e to prove it is GONE: ``SpacePostItemView``
-    # maps the ``KeyError`` to 404 and ``BaseView`` logs it at WARNING. The
-    # 404 is the outcome the check asserts.
-    "SpacePostItemView: KeyError surfaced from handler",
     # Earlier entries removed because the underlying conditions
     # were fixed upstream (instead of permanently allowlisted):
+    # * ``SpaceFeedView: KeyError surfaced from handler`` /
+    #   ``SpacePostItemView: KeyError surfaced from handler`` — a space or
+    #   post that is not there (c asking for a space it does not hold, a
+    #   deleted post's permalink) was a bare ``KeyError`` that ``BaseView``
+    #   logged at WARNING. Services raise ``NotFoundError`` now: a quiet
+    #   404. The line coming back means a real programming error.
     # * ``FederationEventType.FEDERATION_RTC_ICE`` /
     #   ``rtcAddRemoteCandidate: runtime failure`` /
     #   ``Got a remote candidate without remote description``

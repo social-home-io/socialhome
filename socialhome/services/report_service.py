@@ -73,6 +73,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from ..domain.errors import NotFoundError
 from ..domain.events import (
     RemoteSpaceDissolved,
     ReportFiled,
@@ -481,17 +482,17 @@ class ReportService:
         if tt is ReportTargetType.USER:
             if requested is None:
                 if not await self._user_known(target_id):
-                    raise KeyError(_NOT_FOUND)
+                    raise NotFoundError(_NOT_FOUND)
                 return None, target_id
             await self._require_reporter_member(requested, reporter)
             if not await self._is_space_member(requested, target_id):
-                raise KeyError(_NOT_FOUND)
+                raise NotFoundError(_NOT_FOUND)
             return requested, target_id
         scope = await self._scope.of(tt, target_id)
         if not scope.found:
-            raise KeyError(_NOT_FOUND)
+            raise NotFoundError(_NOT_FOUND)
         if requested is not None and scope.space_id != requested:
-            raise KeyError(_NOT_FOUND)  # a cross-space id
+            raise NotFoundError(_NOT_FOUND)  # a cross-space id
         if scope.space_id is None:
             return None, scope.author
         await self._require_reporter_member(scope.space_id, reporter)
@@ -503,10 +504,10 @@ class ReportService:
         try:
             space = await self._live_space(space_id)
         except KeyError:
-            raise KeyError(_NOT_FOUND) from None
+            raise NotFoundError(_NOT_FOUND) from None
         assert self._space_repo is not None  # _live_space checked it
         if await self._space_repo.get_member(space.id, user_id) is None:
-            raise KeyError(_NOT_FOUND)
+            raise NotFoundError(_NOT_FOUND)
 
     async def _require_reportable_space(self, space_id: str, reporter: str) -> None:
         """A space report names a space this household knows, and — unless
@@ -515,11 +516,11 @@ class ReportService:
             return
         space = await self._space_repo.get(space_id)
         if space is None:
-            raise KeyError(_NOT_FOUND)
+            raise NotFoundError(_NOT_FOUND)
         if space.space_type in PUBLIC_SPACE_TIERS:
             return
         if await self._space_repo.get_member(space_id, reporter) is None:
-            raise KeyError(_NOT_FOUND)
+            raise NotFoundError(_NOT_FOUND)
 
     async def _user_known(self, user_id: str) -> bool:
         if not user_id:
@@ -631,10 +632,10 @@ class ReportService:
 
     async def _live_space(self, space_id: str) -> Space:
         if self._space_repo is None:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         space = await self._space_repo.get(space_id)
         if space is None or space.dissolved:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         return space
 
     async def _is_space_member(self, space_id: str, user_id: str) -> bool:
@@ -1119,13 +1120,13 @@ class ReportService:
         existing = await self._reports.get(report_id)
         if existing is None or existing.space_id is not None:
             # A space report is not the household admin's to see.
-            raise KeyError(f"report {report_id!r} not found")
+            raise NotFoundError(f"report {report_id!r} not found")
         await self._decide(existing, actor.user_id, dismissed=dismissed)
 
     async def _require_admin(self, username: str):
         user = await self._users.get(username)
         if user is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         if not getattr(user, "is_admin", False):
             raise PermissionError("household admin required")
         return user
@@ -1211,12 +1212,12 @@ class ReportService:
         await self._require_content_authority(space_id, actor_user_id)
         existing = await self._reports.get(report_id)
         if existing is None or existing.space_id != space_id:
-            raise KeyError(f"report {report_id!r} not found")
+            raise NotFoundError(f"report {report_id!r} not found")
         if await self._subject(existing) == actor_user_id:
             if existing.sole_reviewer_user_id != actor_user_id or not (
                 await self._is_sole_owner(space_id, actor_user_id)
             ):
-                raise KeyError(f"report {report_id!r} not found")
+                raise NotFoundError(f"report {report_id!r} not found")
             if not dismissed:
                 raise SpacePermissionError(
                     "a report about yourself can only be dismissed"
