@@ -125,6 +125,7 @@ from socialhome.services.space_service import (
     ROSTER_SNAPSHOT_PART_BYTES,
     SPACE_CATEGORIES,
     SpaceService,
+    UnfittableImages,
     apply_space_cover_from_metadata,
     apply_space_icon_from_metadata,
     apply_space_images_from_config_change,
@@ -9235,6 +9236,9 @@ async def test_a_pre_cap_cover_that_cannot_fit_is_not_retried_every_send(
     space = dataclasses.replace(space, cover_hash="c-unfit", icon_hash=None)
     covers = _RecordingImageRepo(_noise_webp(1200, 800))
     covers.hash = "c-unfit"
+    # N12: the memory is the sender's own (instance state), not a module
+    # global — a fresh one starts empty.
+    memory = UnfittableImages()
     for _ in range(3):
         snap = await build_space_snapshot_for_federation(
             space,
@@ -9243,10 +9247,14 @@ async def test_a_pre_cap_cover_that_cannot_fit_is_not_retried_every_send(
             user_repo=stack.space_svc._users,
             own_instance_id=stack.iid,
             cover_repo=covers,
+            unfittable=memory,
         )
         assert "cover_webp_base64" not in snap
     assert len(calls) == 1
     assert covers.sets == []
+    assert (space.id, "cover", "c-unfit") in memory
+    assert not hasattr(ss_mod, "_UNFITTABLE")
+    assert isinstance(stack.space_svc._unfittable, UnfittableImages)
 
 
 async def _snapshot_with_images(stack, cover: bytes, icon: bytes, **kw):

@@ -34,7 +34,11 @@ from ..domain.space import SpaceConfigEventType
 from ..infrastructure.event_bus import EventBus
 from .space_authority_pin import owner_authority_cert_via, owner_statement_via
 from .space_crypto_service import sign_authority_event, strip_authority_sig_fields
-from .space_service import embed_space_images, space_metadata_for_federation
+from .space_service import (
+    UnfittableImages,
+    embed_space_images,
+    space_metadata_for_federation,
+)
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -64,7 +68,14 @@ _ROSTER_EVENT_TYPES = {
 class SpaceConfigOutbound:
     """Bus-event → federation broadcaster for space config changes."""
 
-    __slots__ = ("_bus", "_cover_repo", "_federation", "_icon_repo", "_space_repo")
+    __slots__ = (
+        "_bus",
+        "_cover_repo",
+        "_federation",
+        "_icon_repo",
+        "_space_repo",
+        "_unfittable",
+    )
 
     def __init__(
         self,
@@ -82,6 +93,8 @@ class SpaceConfigOutbound:
         #: from here — before, members only ever got the new hash.
         self._cover_repo = cover_repo
         self._icon_repo = icon_repo
+        #: Stored images that cannot fit the cap (not re-encoded each send).
+        self._unfittable = UnfittableImages()
 
     def wire(self) -> None:
         self._bus.subscribe(SpaceConfigChanged, self._on_config_changed)
@@ -270,6 +283,7 @@ class SpaceConfigOutbound:
                 icon_repo=self._icon_repo,
                 cover=cover,
                 icon=icon,
+                unfittable=self._unfittable,
             )
         if seed is not None:
             # Record THIS household as the author of the edit (the v_24 LWW

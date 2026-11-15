@@ -84,6 +84,7 @@ from ..services.space_authority_pin import (
     owner_statement_via,
 )
 from ..services.space_service import (
+    UnfittableImages,
     _coerce_min_age,
     admit_join,
     build_space_snapshot_for_federation,
@@ -375,6 +376,7 @@ class SpaceInviteTokenRedeemCoordinator:
         "_space_service",
         "_spaces",
         "_timeout",
+        "_unfittable",
         "_users",
         "_writer_certs",
     )
@@ -413,6 +415,8 @@ class SpaceInviteTokenRedeemCoordinator:
         #: placeholder (§D1b #116).
         self._cover_repo = cover_repo
         self._icon_repo = icon_repo
+        #: Stored images that cannot fit the cap (not re-encoded each send).
+        self._unfittable = UnfittableImages()
         #: Optional — when wired, the issuer ships the current
         #: epoch's space content key in the ACK and the receiver
         #: imports it into its local space_keys (#117).
@@ -1694,6 +1698,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 # a redeemer whose old stub pins a retired key re-pins.
                 authority_cert=owner_authority_cert_via(self._federation, space),
                 owner_statement=owner_statement_via(self._federation, space),
+                unfittable=self._unfittable,
             )
         return ack_body
 

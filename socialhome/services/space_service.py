@@ -638,6 +638,7 @@ class SpaceService(
         "_space_crypto",
         "_spaces",
         "_subscriber_keys",
+        "_unfittable",
         "_users",
         "_writer_certs",
     )
@@ -699,6 +700,8 @@ class SpaceService(
         ] = {}
         #: Repair snapshots in flight (tracked; see :meth:`wait_roster_repairs`).
         self._roster_tasks: set[asyncio.Task] = set()
+        #: Stored covers / icons that cannot be made to fit the cap.
+        self._unfittable = UnfittableImages()
         #: Member side — space → (host, roster version of the last snapshot
         #: we applied from it), echoed on our BEGIN to that host.
         self._roster_applied: dict[str, tuple[str, int]] = {}
@@ -7151,6 +7154,7 @@ class SpaceService(
                     space_crypto_service=self._space_crypto,
                     authority_cert=owner_authority_cert_via(self._federation, space),
                     owner_statement=owner_statement_via(self._federation, space),
+                    unfittable=self._unfittable,
                 ),
             },
         )
@@ -9727,10 +9731,25 @@ async def _space_image_within_cap(raw: bytes, *, size: int, max_bytes: int) -> b
     return fitted
 
 
-#: (space, cover / icon, image version) whose stored bytes cannot be made to fit the cap —
-#: left out of every send without re-encoding them again. In memory, bounded.
-_UNFITTABLE: OrderedDict[tuple[str, str, str], None] = OrderedDict()
-_UNFITTABLE_MAX = 1024
+class UnfittableImages:
+    """(space, cover / icon, image version) whose stored bytes cannot be made
+    to fit the cap — left out of every send without re-encoding them again.
+    Owned by each sender (instance state), in memory, bounded."""
+
+    __slots__ = ("_seen",)
+    MAX = 1024
+
+    def __init__(self) -> None:
+        self._seen: OrderedDict[tuple[str, str, str], None] = OrderedDict()
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._seen
+
+    def add(self, key: tuple[str, str, str]) -> None:
+        self._seen[key] = None
+        self._seen.move_to_end(key)
+        while len(self._seen) > self.MAX:
+            self._seen.popitem(last=False)
 
 
 async def embed_space_images(
@@ -9741,6 +9760,7 @@ async def embed_space_images(
     icon_repo=None,
     cover: bool = True,
     icon: bool = True,
+    unfittable: UnfittableImages | None = None,
 ) -> None:
     """Add ``cover_webp_base64`` / ``icon_webp_base64`` to ``meta``.
 
@@ -9780,7 +9800,8 @@ async def embed_space_images(
         if stored is None:
             continue
         webp, stored_hash = stored
-        if (space.id, what, stored_hash) in _UNFITTABLE:
+        fit_key = (space.id, what, stored_hash)
+        if unfittable is not None and fit_key in unfittable:
             continue
         fitted = await _bounded_space_image(
             webp,
@@ -9789,9 +9810,8 @@ async def embed_space_images(
             space_id=space.id,
         )
         if fitted is None:
-            _UNFITTABLE[(space.id, what, stored_hash)] = None
-            while len(_UNFITTABLE) > _UNFITTABLE_MAX:
-                _UNFITTABLE.popitem(last=False)
+            if unfittable is not None:
+                unfittable.add(fit_key)
             continue
         if fitted is not webp:
             # Stored before the one cap: keep the rendition every member
@@ -9816,6 +9836,7 @@ async def build_space_snapshot_for_federation(
     space_crypto_service=None,
     authority_cert: dict | None = None,
     owner_statement: dict | None = None,
+    unfittable: UnfittableImages | None = None,
 ) -> dict:
     """:func:`space_metadata_for_federation` + a roster of every
     member of this space.
@@ -9930,6 +9951,7 @@ async def build_space_snapshot_for_federation(
         space,
         cover_repo=cover_repo,
         icon_repo=icon_repo,
+        unfittable=unfittable,
     )
     # §D1b content-key handoff (#117) — the space content key is the
     # symmetric AES-256 secret that decrypts every event in this
