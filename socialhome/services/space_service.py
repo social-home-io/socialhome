@@ -1765,6 +1765,22 @@ class SpaceService(
             )
             return
         space = current
+        # Last word, right before the send: the household must STILL hold a
+        # live admin seat here and delegation must still be on. A share that
+        # waited (a GFS probe, an echo-triggered re-share) must not hand the
+        # new seed to a household a rotation revoked meanwhile.
+        if not space.features.delegated_admin_authority or (
+            self._remote_members is not None
+            and instance_id
+            not in await self._remote_members.list_admin_instances(space.id)
+        ):
+            log.info(
+                "delegated-admin: %s holds no admin seat in %s (or delegation "
+                "is off) — no seed share",
+                instance_id,
+                space.id,
+            )
+            return
         payload: dict = {
             "space_id": space.id,
             "space_seed": base64.urlsafe_b64encode(seed).decode("ascii"),

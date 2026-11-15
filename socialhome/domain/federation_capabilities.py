@@ -1570,7 +1570,7 @@ from __future__ import annotations
 #:   receiver takes it only with a live admin seat of its own; the owner
 #:   host refuses seed-signed roster gossip from anyone else that keeps or
 #:   sets an admin seat (only the owner makes admins); an admin's
-#:   ``authority_epoch_echo`` carries ``seed_epoch`` so a lost share is
+#:   ``authority_epoch_echo`` carries ``seed_held`` so a lost share is
 #:   re-sent. **Fallback**: a link-seated admin below v_94 is skipped
 #:   (WARNING) and acts through the host.
 OURS: int = 94

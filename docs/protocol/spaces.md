@@ -2212,7 +2212,9 @@ household's last admin seat goes (or the flag is turned off). It cannot
 make admins, though: on the space it hosts the owner refuses seed-signed
 gossip that keeps or sets an ADMIN seat (D5, 2026-11-15) — so a kicked
 admin cannot re-assert its own seat at a higher version and turn a
-delegated admin's kick stale before the owner sees it.
+delegated admin's kick stale on the owner, which then rotates when it learns
+of the kick. Other member households may still mirror such a re-assertion
+until the owner's rotation; the rotation stops that household signing.
 
 Gated on `FederationCapability.MIN_FOR_SPACE_ADMIN_KEY_SHARE`: against
 a sub-v_22 admin household (no handler) the owner SKIPS the send and
@@ -2472,10 +2474,13 @@ re-publish a public / global space to every GFS that already lists it — each
 re-pins from the cert, so from here on no GFS takes the retired key's relays,
 epoch notices or media uploads (this runs BEFORE the per-member sends, which
 can take minutes in a large space; a rotation never tells a new GFS the space
-exists); (3b) drop every `SPACE_ADMIN_KEY_SHARE` still queued for the space —
-to each member household and to the revoked one, which may hold no seat any
-more — so no share sealed before the revocation lands after it (a seed share
-also supersedes per space in the outbox); (4) send
+exists) and re-announce its epoch; (3b) drop every `SPACE_ADMIN_KEY_SHARE`
+of the space still queued in the owner's outbox — to each member household
+and to the revoked one, which may hold no seat any more (a seed share also
+supersedes per space there). A frame a GFS already accepted is out of reach:
+it carries the retired key's seed, which every re-pinned receiver refuses
+(residual: a member that missed the rotation still verifies that key until
+its cert arrives); (4) send
 each member household `SPACE_AUTHORITY_ROTATED` over its encrypted
 pairwise path — only `space_id` is plaintext; the payload carries the
 cert, the owner's full `space_meta` (signed with the new key, including
@@ -2483,8 +2488,8 @@ the cert, `authority_key_epoch` and `config_sequence`), the content key
 (signed with the new key) and the household's roster entries (as in a
 roster snapshot, signed with the new key); (5) if delegation is still on,
 re-share the new seed with the cert to every remaining admin household;
-(6) re-announce the content epoch and re-seal the content key to GFS
-subscribers (after the re-pin of step 3a). The remaining
+(6) re-seal the content key to GFS subscribers (after the re-pin of step
+3a). The remaining
 admins' seed share (step 5) is sent BEFORE the bundles, and the bundle and
 legacy rekey go only to households that still hold a live seat — a
 household whose last seat was just tombstoned (also through gossip, which

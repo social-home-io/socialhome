@@ -1246,7 +1246,7 @@ The two old reasons no longer hold:
   rotation bundle reaches link-joined members too (`SPACE_AUTHORITY_ROTATED`
   is in the seat vocabulary). Every GFS that lists the space re-pins from the
   owner's cert *before* the per-member bundles go out. Any seed share still
-  queued is dropped. The pin on a GFS moves only on a publish signed by the
+  queued in the owner's outbox is dropped (one a GFS already holds carries the retired key's seed, which every re-pinned household refuses). The pin on a GFS moves only on a publish signed by the
   owner household carrying an owner-household cert with a higher epoch, so a
   revoked admin can neither re-pin nor rotate. The owner shares no seed with
   any admin while a GFS that lists the space has not proved

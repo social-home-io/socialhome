@@ -2669,3 +2669,26 @@ async def test_a_failing_moderation_echo_never_blocks_the_begin(
 
     sched.attach_moderation_echo(boom)
     assert await sched._moderation_echo_for("sp-1", "host") is None
+
+
+async def test_a_caught_up_gfs_only_owner_gets_the_authority_echo_every_tick(
+    bus, queue, sync_manager, quick_answer_wait
+):
+    """An admin reached only through a GFS reports a lost seed share
+    (``seed_held: false``) on every periodic BEGIN to the owner, as a
+    paired admin does — not once per process on the full catch-up only."""
+    sched, _contact, _resume = _helper_sched(
+        bus, queue, sync_manager, helpers=["admin-a"]
+    )
+    sched._federation.confirmed = set()
+    sched._federation_repo = _FakeFedRepo([])
+    sched._mesh_catchup_done.add(("sp-1", "host"))
+
+    async def _echo(space_id, to):
+        return {"key_epoch": 0, "seed_held": False} if to == "host" else None
+
+    sched.attach_authority_echo(_echo)
+    await _round(sched)
+    await _wait_checks(sched)
+    assert sched._federation.mesh_fields[0]["sync_mode"] == "incremental"
+    assert sched._federation.mesh_extras == [{"key_epoch": 0, "seed_held": False}]

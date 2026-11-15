@@ -7966,7 +7966,7 @@ async def test_a_non_owner_admin_cannot_consume_an_admin_elevation(stack):
     assert (await stack.space_repo.get_member(space.id, b.user_id)).role == "admin"
 
 
-async def _relay_admin_space(stack, *, supports=None, result=None):
+async def _relay_admin_space(stack, *, supports=None, result=None, role="admin"):
     """An owned, delegation-ON space with one remote member ``ru1`` on the
     household ``relay-peer`` — seated from an invite link / the GFS
     directory (``InstanceSource.SPACE_SESSION``). ``supports`` decides
@@ -8002,6 +8002,7 @@ async def _relay_admin_space(stack, *, supports=None, result=None):
         user_id="ru1",
         user_pk=None,
         display_name=None,
+        role=role,
     )
     return space, fed
 
@@ -8025,7 +8026,7 @@ async def test_promote_relay_only_admin_shares_the_signing_seed(stack):
     v_44 rotation, which reaches such households and re-pins every GFS."""
     from socialhome.domain.space import SpaceRole
 
-    space, fed = await _relay_admin_space(stack)
+    space, fed = await _relay_admin_space(stack, role="member")
     await stack.space_svc.set_remote_member_role(
         space.id,
         actor_username="anna",
@@ -8055,6 +8056,7 @@ async def test_relay_admin_below_v94_is_skipped_with_a_warning(stack, caplog):
     space, fed = await _relay_admin_space(
         stack,
         supports=lambda v: v < FederationCapability.MIN_FOR_RELAY_ADMIN_KEY_SHARE,
+        role="member",
     )
     with caplog.at_level(logging.WARNING):
         await stack.space_svc.set_remote_member_role(
@@ -8116,6 +8118,60 @@ async def test_seed_share_goes_out_when_every_gfs_can_rotate_the_key(stack):
     stack.space_svc._gfs = gfs
     await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
     assert len(_seed_shares(fed)) == 1
+
+
+async def test_seed_share_rechecks_the_admin_seat_right_before_sending(stack):
+    """A share that waited (a GFS probe, an echo-triggered re-share) while
+    the owner revoked that household must not hand it the seed: the seat
+    and the delegation are checked again right before the send."""
+    space, fed = await _relay_admin_space(stack)
+    gfs = MagicMock()
+
+    async def kicked_while_probing(_space_id):
+        await stack.space_svc._remote_members.set_role(
+            space.id, "relay-peer", "ru1", "member"
+        )
+        return True
+
+    gfs.authority_key_revocable = kicked_while_probing
+    stack.space_svc._gfs = gfs
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert _seed_shares(fed) == []
+
+
+async def test_seed_share_never_goes_out_with_delegation_turned_off_meanwhile(stack):
+    space, fed = await _relay_admin_space(stack)
+    gfs = MagicMock()
+
+    async def delegation_off_while_probing(_space_id):
+        current = await stack.space_repo.get(space.id)
+        await stack.space_repo.save(
+            replace(
+                current,
+                features=replace(current.features, delegated_admin_authority=False),
+            )
+        )
+        return True
+
+    gfs.authority_key_revocable = delegation_off_while_probing
+    stack.space_svc._gfs = gfs
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert _seed_shares(fed) == []
+
+
+async def test_seed_share_with_no_gfs_wired_skips_the_gfs_gate(stack):
+    space, fed = await _relay_admin_space(stack)
+    stack.space_svc._gfs = None
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert len(_seed_shares(fed)) == 1
+
+
+async def test_a_seed_share_that_raises_counts_as_out(stack):
+    """Whether a raising send left is unknown: counted as shared."""
+    space, fed = await _relay_admin_space(stack)
+    fed.send_with_mesh_fallback = AsyncMock(side_effect=RuntimeError("boom"))
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert await stack.space_repo.get_seed_shared_epoch(space.id) is not None
 
 
 async def test_seed_share_never_pairs_a_seed_with_another_key(stack):

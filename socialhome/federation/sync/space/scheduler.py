@@ -1315,6 +1315,15 @@ class SpaceSyncScheduler:
                 dir_seq=dir_seq,
                 have_seq=fields.get("have_seq"),
                 mod_held=await self._moderation_echo_for(space.id, host),
+                # The authority echo (v_46, and an admin's ``seed_held``)
+                # rides every periodic BEGIN to the owner, as it does to a
+                # paired owner — or a seat reached only through a GFS would
+                # report a lost seed share once per process at most.
+                extra_payload=(
+                    await self._echo_for(space.id, host)
+                    if host == space.owner_instance_id
+                    else None
+                ),
             )
         except Exception:  # pragma: no cover — fail-soft
             log.debug("mesh incremental BEGIN failed", exc_info=True)

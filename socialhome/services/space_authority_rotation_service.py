@@ -571,9 +571,11 @@ class SpaceAuthorityRotationService:
             # takes the retired key's relays and epoch notices from whoever
             # holds that seed — so not after N per-member sends.
             await self._repin_gfs(space)
-            # No seed share still queued from before (an outbox, a slow
-            # GFS) may land after this revocation: drop them all; the
-            # admins this rotation keeps get the new seed right below.
+            # No seed share still queued in OUR outbox may land after this
+            # revocation: drop them all; the admins this rotation keeps get
+            # the new seed right below. (A frame a GFS already accepted is
+            # out of reach — it carries the retired key's seed, which every
+            # re-pinned receiver refuses.)
             await self._drop_queued_seed_shares(space_id, revoked_instance)
             # The remaining admins' new seed goes out FIRST: their bundle
             # clears the old seed, and a share that trailed it (or was lost)
@@ -854,23 +856,19 @@ class SpaceAuthorityRotationService:
     async def _repin_gfs(self, space: Space) -> None:
         """Re-publish a public/global space to every GFS that already lists
         it: each re-pins from the owner's cert, which retires the old key
-        there (relays, epoch notices, writer-key pins, media auth)."""
-        if space.space_type not in PUBLIC_SPACE_TIERS or self._gfs is None:
-            return
-        try:
-            await self._gfs.republish_space(space.id)
-        except Exception:
-            log.exception("authority rotation: GFS re-publish failed for %s", space.id)
-
-    async def _refresh_gfs(self, space: Space) -> None:
-        """After the bundles: re-announce the epoch and re-seal the content
-        key to subscribers of a public/global space — the handoff is signed
-        with the new key, which a GFS only accepts once it re-pinned
-        (:meth:`_repin_gfs`, run before the bundles)."""
+        there (relays, epoch notices, writer-key pins, media auth). The
+        re-pin cleared each GFS's epoch state, so the current epoch is
+        re-announced right away (v_49, the owner's household-signed form) —
+        members' anonymous publishes are taken again before the bundles."""
         if space.space_type not in PUBLIC_SPACE_TIERS:
             return
-        # v_49 — the re-pin cleared the GFS's epoch state: re-announce (the
-        # owner's household-signed form) before the re-seal.
+        if self._gfs is not None:
+            try:
+                await self._gfs.republish_space(space.id)
+            except Exception:
+                log.exception(
+                    "authority rotation: GFS re-publish failed for %s", space.id
+                )
         if self._member_gfs is not None:
             try:
                 await self._member_gfs.announce_epoch(space.id)
@@ -878,6 +876,14 @@ class SpaceAuthorityRotationService:
                 log.exception(
                     "authority rotation: GFS epoch notice failed for %s", space.id
                 )
+
+    async def _refresh_gfs(self, space: Space) -> None:
+        """After the bundles: re-seal the content key to subscribers of a
+        public/global space — the handoff is signed with the new key, which
+        a GFS only accepts once it re-pinned (:meth:`_repin_gfs`, run
+        before the bundles)."""
+        if space.space_type not in PUBLIC_SPACE_TIERS:
+            return
         if self._subscriber_keys is not None:
             try:
                 await self._subscriber_keys.reconcile_space_everywhere(space.id)
@@ -1081,10 +1087,25 @@ class SpaceAuthorityRotationService:
             space.id,
             sender,
         )
-        self._spawn(
-            self._space_service.share_admin_signing_seed(space, instance_id=sender),
-            f"reshare-{space.id}",
-        )
+        self._spawn(self._reshare_seed(space.id, sender), f"reshare-{space.id}")
+
+    async def _reshare_seed(self, space_id: str, instance_id: str) -> None:
+        """The echo-triggered re-share, under the rotation's per-space lock:
+        a rotation (a revocation of that very household) either finishes
+        first — then the share re-checks the seat and sends the new key's
+        seed only to a household still an admin — or starts after it, and
+        drops the share from the outbox. Never while we hold no seed: the
+        share would re-mint it through :meth:`rotate`, which takes this
+        same lock."""
+        if self._space_service is None:
+            return
+        async with self._lock(space_id):
+            space = await self._spaces.get(space_id)
+            if space is None or await self._spaces.get_space_seed(space_id) is None:
+                return
+            await self._space_service.share_admin_signing_seed(
+                space, instance_id=instance_id
+            )
 
     def _spawn(self, coro, name: str) -> None:
         if self._closed:

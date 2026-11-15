@@ -1339,3 +1339,89 @@ async def test_rotation_repins_every_gfs_before_the_bundles_go_out(env):
     await env.db.enqueue("UPDATE spaces SET space_type='global' WHERE id=?", (SPACE,))
     await env.svc.rotate(SPACE)
     assert calls == ["republish", "reseal"]
+
+
+async def test_rotation_reannounces_the_epoch_with_the_repin_before_the_bundles(env):
+    """The re-pin clears each GFS's epoch state: the owner re-announces right
+    away, so members' anonymous publishes are not refused for the length of
+    N bundle sends."""
+    order: list[str] = []
+
+    class _Gfs:
+        async def republish_space(self, space_id):
+            order.append("republish")
+            return 1
+
+    class _MemberGfs:
+        async def retire_channel(self, space_id):
+            return None
+
+        async def reconcile_channel(self, space_id):
+            return None
+
+        async def announce_epoch(self, space_id):
+            assert not any(
+                e[0] == "send" and e[2] is FET.SPACE_AUTHORITY_ROTATED
+                for e in env.fed.log
+            )
+            order.append("announce")
+
+    env.svc.attach_gfs(_Gfs())
+    env.svc.attach_member_gfs(_MemberGfs())
+    await env.db.enqueue("UPDATE spaces SET space_type='global' WHERE id=?", (SPACE,))
+    await env.svc.rotate(SPACE)
+    assert order == ["republish", "announce"]
+
+
+async def test_a_failing_drop_never_stops_the_rotation(env):
+    async def boom(instance_id, prefix):
+        raise RuntimeError("boom")
+
+    env.fed.drop_queued_with_key_prefix = boom
+    assert await env.svc.rotate(SPACE) is not None
+    assert _sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)
+
+
+async def test_the_owner_never_reshares_while_delegation_is_off(env):
+    """An admin's ``seed_held: false`` earns nothing once the owner stopped
+    letting admins act for it."""
+    await env.remote.set_role(SPACE, "v44", "u-v44", "admin")
+    shared: list[str] = []
+
+    class _SpaceSvc:
+        async def share_admin_signing_seed(self, space, *, instance_id):
+            shared.append(instance_id)
+
+    env.svc.attach_space_service(_SpaceSvc())
+    await env.db.enqueue(
+        "UPDATE spaces SET delegated_admin_authority=0 WHERE id=?", (SPACE,)
+    )
+    space = await env.spaces.get(SPACE)
+    seats = await env.remote.list_for_instance(SPACE, "v44", include_tombstoned=False)
+    env.svc._maybe_reshare_seed(space, "v44", seats)
+    await env.svc.wait_idle()
+    assert shared == []
+
+
+async def test_the_echo_reshare_runs_under_the_rotation_lock(env):
+    """A rotation in progress (the revocation of that very household)
+    finishes before an echo-triggered re-share reads the space."""
+    await env.remote.set_role(SPACE, "v44", "u-v44", "admin")
+    seen: list[int] = []
+
+    class _SpaceSvc:
+        async def share_admin_signing_seed(self, space, *, instance_id):
+            seen.append(space.authority_key_epoch)
+
+    env.svc.attach_space_service(_SpaceSvc())
+    space = await env.spaces.get(SPACE)
+    seats = await env.remote.list_for_instance(SPACE, "v44", include_tombstoned=False)
+    async with env.svc._lock(SPACE):
+        env.svc._maybe_reshare_seed(space, "v44", seats)
+        await asyncio.sleep(0.01)
+        assert seen == []
+        await env.db.enqueue(
+            "UPDATE spaces SET authority_key_epoch=5 WHERE id=?", (SPACE,)
+        )
+    await env.svc.wait_idle()
+    assert seen == [5]
