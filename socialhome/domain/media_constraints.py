@@ -326,3 +326,9 @@ def space_media_ref(value: object) -> str | None:
     if ref is None or is_reserved_media_name(ref[len(MEDIA_REF_PREFIX) :]):
         return None
     return ref
+
+
+def is_gfs_space_media_name(name: str) -> bool:
+    """``True`` for a GFS reader copy's name (``gfs_space_media_name`` —
+    the only names the GFS space media fetcher writes)."""
+    return name.startswith(GFS_SPACE_MEDIA_PREFIX) and is_safe_media_name(name)

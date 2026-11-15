@@ -87,6 +87,7 @@ from ..domain.media_constraints import (  # noqa: F401
     SPACE_PAGE_MEDIA_PREFIX,
     TRANSIENT_DM_MEDIA_RE,
     VIDEO_MAX_UPLOAD_BYTES,
+    is_gfs_space_media_name,
     is_reserved_media_name,
     is_safe_media_name,
     local_media_ref,
@@ -193,12 +194,6 @@ def is_space_page_media_name(name: str) -> bool:
     """``True`` for a ``space_page_media_name`` — a space page's file as a
     member household keeps it (v_82)."""
     return name.startswith(SPACE_PAGE_MEDIA_PREFIX)
-
-
-def is_gfs_space_media_name(name: str) -> bool:
-    """``True`` for a :func:`gfs_space_media_name` (the only names the GFS
-    space media fetcher writes)."""
-    return name.startswith(GFS_SPACE_MEDIA_PREFIX) and is_safe_media_name(name)
 
 
 def dm_media_max_bytes(mime_type: str) -> int:

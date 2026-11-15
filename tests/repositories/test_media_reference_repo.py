@@ -1504,3 +1504,31 @@ async def test_space_files_never_name_a_reserved_or_junk_reference(db):
         )
     repo = SqliteMediaReferenceRepo(db)
     assert await repo.space_files("sp1") == ["ok.pdf"]
+
+
+_SG_OWN = "sg-" + "a1" * 20 + ".webp"
+_SG_OTHER = "sg-" + "b2" * 20 + ".webp"
+
+
+async def test_space_files_take_this_spaces_gfs_reader_copies(db):
+    """A GFS reader copy (``sg-``) an item of THIS space shows is the
+    space's file (its ``space_media_refs`` row names the space) — freed
+    with the space; one another space's row maps stays."""
+    await _two_spaces(db)
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, image_urls_json)"
+        " VALUES('p1', 'sp1', 'u1', 'image', ?)",
+        (f'["api/media/{_SG_OWN}", "api/media/{_SG_OTHER}"]',),
+    )
+    await db.enqueue(
+        "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id, suite, epoch, size, scope, addr_suite, item_id, origin) VALUES(?, 'f.webp', ?, ?, 'aesgcm-256-pad-det', 1, 10, 'space', 'sm1', ?, 'o')",
+        (_SG_OWN, "sp1", "c" * 64, "p1"),
+    )
+    await db.enqueue(
+        "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id, suite, epoch, size, scope, addr_suite, item_id, origin) VALUES(?, 'f.webp', ?, ?, 'aesgcm-256-pad-det', 1, 10, 'space', 'sm1', ?, 'o')",
+        (_SG_OTHER, "sp2", "d" * 64, "p9"),
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.space_files("sp1") == [_SG_OWN]
+    assert await repo.gfs_copies_in_space("sp1", [_SG_OWN, _SG_OTHER]) == {_SG_OWN}
+    assert await repo.gfs_copies_in_space("sp1", []) == set()

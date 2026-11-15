@@ -274,7 +274,7 @@ from ..federation.invite_link_forward import (
     REVOKE_INVITE_LINK_ACTION,
 )
 from ..infrastructure.event_bus import EventBus
-from ..media.cleanup import unlink_unreferenced
+from ..media.cleanup import media_basename, unlink_unreferenced
 from ..media.image_processor import ImageProcessor
 from ..media.profile_picture import (
     PROFILE_PICTURE_MAX_DIMENSION,
@@ -8276,7 +8276,17 @@ class SpaceService(
         # (DM / GFS copy / transient) name or junk a legacy synced row kept
         # unvalidated. A bazaar wrapper's photos live on its listing row,
         # which outlives the post and keeps them referenced.
-        media = [u for u in item_media_urls("posts", post) if space_media_ref(u)]
+        # Its GFS reader copies (``sg-``) go too when this space's
+        # ``space_media_refs`` name them.
+        urls = item_media_urls("posts", post)
+        copies = (
+            await self._media_refs.gfs_copies_in_space(
+                space_id, [n for n in map(media_basename, urls) if n]
+            )
+            if self._media_refs is not None
+            else set()
+        )
+        media = [u for u in urls if space_media_ref(u) or media_basename(u) in copies]
         moderated_by: str | None = None
         if post.author != actor_user_id:
             # Moderation path — actor needs content authority

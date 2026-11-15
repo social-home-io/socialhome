@@ -12074,3 +12074,45 @@ async def test_deleting_a_post_never_unlinks_a_reserved_attachment(stack, tmp_di
     )
     await svc.delete_post(p.id, actor_user_id=a.user_id)
     assert (media_dir / dm).exists()
+
+
+async def test_deleting_a_post_removes_its_gfs_reader_copies(stack, tmp_dir):
+    """A post a GFS reader household holds names its pictures by their
+    ``sg-`` reader copies: deleting it frees the copies this space's
+    ``space_media_refs`` map — never one mapped to another space."""
+    media_dir = tmp_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svc = SpaceService(
+        stack.space_repo,
+        stack.space_post_repo,
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        own_instance_id=stack.iid,
+        media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
+    )
+    a = await stack.provision_user("anna")
+    space = await svc.create_space(owner_username="anna", name="S")
+    other = await svc.create_space(owner_username="anna", name="O")
+    own = "sg-" + "a1" * 20 + ".webp"
+    foreign = "sg-" + "b2" * 20 + ".webp"
+    for name in (own, foreign):
+        (media_dir / name).write_bytes(b"x")
+    p = await svc.create_post(
+        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="x"
+    )
+    await stack.db.enqueue(
+        "UPDATE space_posts SET type='image', image_urls_json=? WHERE id=?",
+        (orjson.dumps([f"api/media/{own}", f"api/media/{foreign}"]).decode(), p.id),
+    )
+    await stack.db.enqueue(
+        "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id, suite, epoch, size, scope, addr_suite, item_id, origin) VALUES(?, 'f.webp', ?, ?, 'aesgcm-256-pad-det', 1, 10, 'space', 'sm1', ?, 'o')",
+        (own, space.id, "c" * 64, p.id),
+    )
+    await stack.db.enqueue(
+        "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id, suite, epoch, size, scope, addr_suite, item_id, origin) VALUES(?, 'f.webp', ?, ?, 'aesgcm-256-pad-det', 1, 10, 'space', 'sm1', ?, 'o')",
+        (foreign, other.id, "d" * 64, "p9"),
+    )
+    await svc.delete_post(p.id, actor_user_id=a.user_id)
+    assert not (media_dir / own).exists()
+    assert (media_dir / foreign).exists()
