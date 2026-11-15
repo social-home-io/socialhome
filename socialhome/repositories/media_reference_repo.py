@@ -677,6 +677,13 @@ class AbstractMediaReferenceRepo(Protocol):
         of space *space_id* (its ``space_media_refs`` rows)."""
         ...
 
+    async def forget_freed_gfs_copies(
+        self, space_id: str, names: Iterable[str]
+    ) -> None:
+        """Drop the ``space_media_refs`` row of each of *names* (GFS reader
+        copies of space *space_id*) that no row references any more."""
+        ...
+
     async def content_names_of_item(self, item_id: str) -> list[str]:
         """The content-addressed (``sc-``, v_85) files the space item
         *item_id* (a post, comment, calendar event, gallery item or bazaar
@@ -1127,6 +1134,20 @@ class SqliteMediaReferenceRepo:
             (space_id, *wanted),
         )
         return {str(r["n"]) for r in rows}
+
+    async def forget_freed_gfs_copies(
+        self, space_id: str, names: Iterable[str]
+    ) -> None:
+        """Drop the ``space_media_refs`` row of each of *names* — GFS
+        reader copies (``sg-``) of space *space_id* — that no row
+        references any more (its file was freed with the item that showed
+        it); one still shown keeps its row."""
+        for name in sorted({n for n in names if is_gfs_space_media_name(n)}):
+            if space_id and not await self._is_referenced(name):
+                await self._db.enqueue(
+                    "DELETE FROM space_media_refs WHERE space_id = ? AND local_name = ?",
+                    (space_id, name),
+                )
 
     async def content_names_of_item(self, item_id: str) -> list[str]:
         """The content-addressed (``sc-``, v_85) files item *item_id* shows

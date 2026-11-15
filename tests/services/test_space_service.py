@@ -12116,3 +12116,51 @@ async def test_deleting_a_post_removes_its_gfs_reader_copies(stack, tmp_dir):
     await svc.delete_post(p.id, actor_user_id=a.user_id)
     assert not (media_dir / own).exists()
     assert (media_dir / foreign).exists()
+
+
+async def test_a_freed_gfs_reader_copy_takes_its_descriptor_row_with_it(stack, tmp_dir):
+    """The ``space_media_refs`` row of an ``sg-`` copy a post delete freed
+    goes too (nothing names the file any more); a copy another item still
+    shows keeps both its file and its row."""
+    media_dir = tmp_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svc = SpaceService(
+        stack.space_repo,
+        stack.space_post_repo,
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        own_instance_id=stack.iid,
+        media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
+    )
+    a = await stack.provision_user("anna")
+    space = await svc.create_space(owner_username="anna", name="S")
+    freed = "sg-" + "c3" * 20 + ".webp"
+    shared = "sg-" + "d4" * 20 + ".webp"
+    for name in (freed, shared):
+        (media_dir / name).write_bytes(b"x")
+    p1 = await svc.create_post(
+        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="x"
+    )
+    p2 = await svc.create_post(
+        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="y"
+    )
+    await stack.db.enqueue(
+        "UPDATE space_posts SET type='image', image_urls_json=? WHERE id=?",
+        (orjson.dumps([f"api/media/{freed}", f"api/media/{shared}"]).decode(), p1.id),
+    )
+    await stack.db.enqueue(
+        "UPDATE space_posts SET type='image', image_urls_json=? WHERE id=?",
+        (orjson.dumps([f"api/media/{shared}"]).decode(), p2.id),
+    )
+    for name, blob in ((freed, "e" * 64), (shared, "f" * 64)):
+        await stack.db.enqueue(
+            "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id,"
+            " suite, epoch, size, scope, addr_suite, item_id, origin) VALUES(?,"
+            " 'f.webp', ?, ?, 'aesgcm-256-pad-det', 1, 10, 'space', 'sm1', ?, 'o')",
+            (name, space.id, blob, p1.id),
+        )
+    await svc.delete_post(p1.id, actor_user_id=a.user_id)
+    rows = await stack.db.fetchall("SELECT local_name FROM space_media_refs")
+    assert {r["local_name"] for r in rows} == {shared}
+    assert not (media_dir / freed).exists() and (media_dir / shared).exists()
