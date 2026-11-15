@@ -69,6 +69,7 @@ from ..domain.apps import (
     new_permissions,
     unknown_capabilities,
 )
+from ..domain.errors import NotFoundError
 from ..domain.events import (
     AppEnabledChanged,
     AppInstalled,
@@ -1062,7 +1063,7 @@ class AppService(BusPublisherMixin):
         await self.require_app_permission(app_id, user_id, PERMISSION_STORAGE)
         entry = await self._repo.kv_get(app_id, user_id, key)
         if entry is None:
-            raise KeyError(key)
+            raise NotFoundError(key)
         return orjson.loads(entry.value_json)
 
     async def store_list(self, app_id: str, user_id: str) -> dict[str, object]:

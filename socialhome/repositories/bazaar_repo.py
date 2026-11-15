@@ -28,6 +28,7 @@ from ..domain.bazaar_faq import (
     BazaarFaqFullError,
     BazaarFaqUsedUpError,
 )
+from ..domain.errors import NotFoundError
 from ..domain.item_merge import advance
 from ..domain.post import (
     BAZAAR_CURRENCIES,
@@ -1043,7 +1044,7 @@ class SqliteBazaarRepo:
                 (offer_id,),
             ).fetchone()
             if row is None:
-                raise KeyError(f"offer {offer_id!r} not found")
+                raise NotFoundError(f"offer {offer_id!r} not found")
             current = row[0]
             legal = BAZAAR_OFFER_TRANSITIONS.get(current, frozenset())
             if new_status not in legal:

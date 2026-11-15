@@ -17,6 +17,7 @@ Raises the usual domain exceptions:
 
 from __future__ import annotations
 
+from ..domain.errors import NotFoundError
 from ..domain.events import (
     ShoppingItemAdded,
     ShoppingItemRemoved,
@@ -116,7 +117,7 @@ class ShoppingService(BusPublisherMixin):
     async def get_item(self, item_id: str) -> ShoppingItem:
         item = await self._repo.get(item_id)
         if item is None:
-            raise KeyError(f"shopping item {item_id!r} not found")
+            raise NotFoundError(f"shopping item {item_id!r} not found")
         return item
 
     async def list_items(
@@ -153,7 +154,7 @@ class ShoppingService(BusPublisherMixin):
             store=cleaned_store,
         )
         if updated is None:
-            raise KeyError(f"shopping item {item_id!r} not found")
+            raise NotFoundError(f"shopping item {item_id!r} not found")
         await self._emit(
             ShoppingItemUpdated(
                 item_id=updated.id,
@@ -166,7 +167,7 @@ class ShoppingService(BusPublisherMixin):
     async def complete_item(self, item_id: str) -> None:
         item = await self._repo.get(item_id)
         if item is None:
-            raise KeyError(f"shopping item {item_id!r} not found")
+            raise NotFoundError(f"shopping item {item_id!r} not found")
         await self._repo.complete(item_id)
         await self._emit(
             ShoppingItemToggled(
@@ -178,7 +179,7 @@ class ShoppingService(BusPublisherMixin):
     async def uncomplete_item(self, item_id: str) -> None:
         item = await self._repo.get(item_id)
         if item is None:
-            raise KeyError(f"shopping item {item_id!r} not found")
+            raise NotFoundError(f"shopping item {item_id!r} not found")
         await self._repo.uncomplete(item_id)
         await self._emit(
             ShoppingItemToggled(
@@ -190,7 +191,7 @@ class ShoppingService(BusPublisherMixin):
     async def delete_item(self, item_id: str) -> None:
         item = await self._repo.get(item_id)
         if item is None:
-            raise KeyError(f"shopping item {item_id!r} not found")
+            raise NotFoundError(f"shopping item {item_id!r} not found")
         await self._repo.delete(item_id)
         await self._emit(ShoppingItemRemoved(item_id=item_id))
 

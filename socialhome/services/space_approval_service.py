@@ -35,6 +35,7 @@ from ..domain.child_protection import (
     PROTECTED_OWNER_PUBLISH_DETAIL,
     ProtectedCapability,
 )
+from ..domain.errors import NotFoundError
 from ..domain.events import SpaceProposalUpdated
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
@@ -781,13 +782,13 @@ class SpaceApprovalService(ProtectionGateMixin):
     async def _require_space(self, space_id: str):
         space = await self._spaces.get(space_id)
         if space is None:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         return space
 
     async def _require_local_admin(self, space_id: str, actor_username: str):
         actor = await self._users.get(actor_username)
         if actor is None:
-            raise KeyError(f"actor {actor_username!r} not found")
+            raise NotFoundError(f"actor {actor_username!r} not found")
         member = await self._spaces.get_member(space_id, actor.user_id)
         if member is None or member.role not in SETTINGS_AUTHORITY_ROLES:
             raise SpacePermissionError("only an admin can propose or vote")

@@ -152,8 +152,5 @@ class HaUserProvisionView(BaseView):
             return resp
         username = self.match("username")
         user_service = self.svc(user_service_key)
-        try:
-            await user_service.deprovision_ha_user(username)
-        except KeyError as exc:
-            return error_response(404, "NOT_FOUND", str(exc).strip("'\""))
+        await user_service.deprovision_ha_user(username)
         return web.json_response({"username": username, "synced": False})

@@ -36,7 +36,7 @@ from ..domain.calendar import (
     validate_capacity,
 )
 from ..domain.child_protection import ProtectedCapability
-from ..domain.errors import WrongTypeError
+from ..domain.errors import NotFoundError, WrongTypeError
 from ..domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
@@ -481,7 +481,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
     async def get_calendar(self, calendar_id: str) -> Calendar:
         result = await self._repo.get_calendar(calendar_id)
         if result is None:
-            raise KeyError(f"calendar {calendar_id!r} not found")
+            raise NotFoundError(f"calendar {calendar_id!r} not found")
         return result
 
     async def list_calendars(
@@ -504,7 +504,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
     async def delete_calendar(self, calendar_id: str) -> None:
         result = await self._repo.get_calendar(calendar_id)
         if result is None:
-            raise KeyError(f"calendar {calendar_id!r} not found")
+            raise NotFoundError(f"calendar {calendar_id!r} not found")
         await self._repo.delete_calendar(calendar_id)
 
     # ── Default-calendar seeding ─────────────────────────────────────────
@@ -688,7 +688,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
         # Validate calendar exists
         cal = await self._repo.get_calendar(calendar_id)
         if cal is None:
-            raise KeyError(f"calendar {calendar_id!r} not found")
+            raise NotFoundError(f"calendar {calendar_id!r} not found")
 
         # The tz first: a date-only bound names a day in the event's zone.
         event_tz = await self._resolve_personal_tz(
@@ -867,7 +867,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
     async def get_event(self, event_id: str) -> CalendarEvent:
         result = await self._repo.get_event(event_id)
         if result is None:
-            raise KeyError(f"calendar event {event_id!r} not found")
+            raise NotFoundError(f"calendar event {event_id!r} not found")
         return result
 
     async def list_events_in_range(
@@ -886,7 +886,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
     async def delete_event(self, event_id: str) -> None:
         existing = await self._repo.get_event(event_id)
         if existing is None:
-            raise KeyError(f"calendar event {event_id!r} not found")
+            raise NotFoundError(f"calendar event {event_id!r} not found")
         cal = await self._repo.get_calendar(existing.calendar_id)
         await self._repo.delete_event(event_id)
         await self._emit(CalendarEventDeleted(event_id=event_id))
@@ -945,7 +945,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
         """
         existing = await self._repo.get_event(event_id)
         if existing is None:
-            raise KeyError(f"calendar event {event_id!r} not found")
+            raise NotFoundError(f"calendar event {event_id!r} not found")
         new_summary = (summary or existing.summary).strip()
         if not new_summary:
             raise ValueError("event summary must not be empty")
@@ -1091,7 +1091,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
             )
         existing = await self._repo.get_event(event_id)
         if existing is None:
-            raise KeyError(f"calendar event {event_id!r} not found")
+            raise NotFoundError(f"calendar event {event_id!r} not found")
         if existing.origin != "remote_invite":
             raise ValueError(
                 "RSVPs only apply to inbound invites — local events have "
@@ -1615,7 +1615,15 @@ class SpaceCalendarService(
                 queue_announce = refusal == "moderated"
         event = replace(event, announce_in_feed=announce_in_feed)
         if not await self._repo.save_event(event, space_id=space_id):
-            raise KeyError(f"calendar event {event.id!r} exists in another space")
+            # An integrity refusal, not a missing resource: the id is owned
+            # by another space (a submitted id, a collision). 404 for the
+            # caller; an operator line here.
+            log.warning(
+                "calendar: event %s exists in another space — not saved in %s",
+                event.id,
+                space_id,
+            )
+            raise NotFoundError(f"calendar event {event.id!r} exists in another space")
         saved = event
         await self._emit(CalendarEventCreated(event=saved))
         if queue_announce:
@@ -1764,7 +1772,7 @@ class SpaceCalendarService(
         """
         space = await self._spaces_or_raise().get(space_id)
         if space is None or space.dissolved:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         if space.archived:
             raise SpaceArchivedError()
         return space
@@ -1817,7 +1825,9 @@ class SpaceCalendarService(
         """
         result = await self._repo.get_event(event_id)
         if result is None or result[0] != space_id:
-            raise KeyError(f"space calendar event {event_id!r} not found in this space")
+            raise NotFoundError(
+                f"space calendar event {event_id!r} not found in this space"
+            )
         return result[1]
 
     async def delete_event(
@@ -1862,7 +1872,9 @@ class SpaceCalendarService(
         if not await self._repo.delete_event(
             event_id, space_id=space_id, deleted_by=approved_by or actor_user_id
         ):
-            raise KeyError(f"space calendar event {event_id!r} not found in this space")
+            raise NotFoundError(
+                f"space calendar event {event_id!r} not found in this space"
+            )
         await self._emit(
             CalendarEventDeleted(
                 event_id=event_id,
@@ -2056,7 +2068,16 @@ class SpaceCalendarService(
                 snapshot={k: before[k] for k in shown},
             )
         if not await self._repo.save_event(updated, space_id=space_id):
-            raise KeyError(f"calendar event {updated.id!r} not found in this space")
+            # Read in this space a moment ago, refused by the space-scoped
+            # save now: the row moved or went — an integrity line.
+            log.warning(
+                "calendar: repo refused to save event %s in space %s",
+                updated.id,
+                space_id,
+            )
+            raise NotFoundError(
+                f"calendar event {updated.id!r} not found in this space"
+            )
         await self._publish_federation_event_saved(
             space_id=space_id,
             event=updated,
@@ -2110,7 +2131,7 @@ class SpaceCalendarService(
             )
         result = await self._repo.get_event(event_id)
         if result is None:
-            raise KeyError(f"event {event_id!r} not found")
+            raise NotFoundError(f"event {event_id!r} not found")
         space_id, event = result
         occ_dt = self._resolve_occurrence(event, occurrence_at)
         # Phase E: past-event RSVP lock. Once an occurrence has *ended*
@@ -2260,7 +2281,7 @@ class SpaceCalendarService(
             raise ValueError("minutes_before must be >= 0")
         result = await self._repo.get_event(event_id)
         if result is None:
-            raise KeyError(f"event {event_id!r} not found")
+            raise NotFoundError(f"event {event_id!r} not found")
         _space_id, event = result
         occ_dt = self._resolve_occurrence(event, occurrence_at)
         fire_at_dt = occ_dt - timedelta(minutes=minutes_before)
@@ -2353,13 +2374,13 @@ class SpaceCalendarService(
         """
         result = await self._repo.get_event(event_id)
         if result is None:
-            raise KeyError(f"event {event_id!r} not found")
+            raise NotFoundError(f"event {event_id!r} not found")
         space_id, event = result
         occ_dt = self._resolve_occurrence(event, occurrence_at)
         occ_iso = occ_dt.isoformat()
         existing = await self._existing_rsvp(event_id, user_id, occ_iso)
         if existing != RSVPStatus.REQUESTED:
-            raise KeyError(
+            raise NotFoundError(
                 f"no pending request for user {user_id!r} on this occurrence",
             )
         new_status = (
@@ -2406,13 +2427,13 @@ class SpaceCalendarService(
         """Deny a pending request-to-join — removes the row entirely."""
         result = await self._repo.get_event(event_id)
         if result is None:
-            raise KeyError(f"event {event_id!r} not found")
+            raise NotFoundError(f"event {event_id!r} not found")
         _space_id, event = result
         occ_dt = self._resolve_occurrence(event, occurrence_at)
         occ_iso = occ_dt.isoformat()
         existing = await self._existing_rsvp(event_id, user_id, occ_iso)
         if existing != RSVPStatus.REQUESTED:
-            raise KeyError(
+            raise NotFoundError(
                 f"no pending request for user {user_id!r} on this occurrence",
             )
         # Reuse remove_rsvp so federation propagation + waitlist

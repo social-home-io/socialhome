@@ -35,7 +35,7 @@ from __future__ import annotations
 import builtins
 from typing import TYPE_CHECKING, Any
 
-from ..domain.errors import WrongTypeError
+from ..domain.errors import NotFoundError, WrongTypeError
 from ..domain.events import StickyCreated, StickyDeleted, StickyUpdated
 from ..domain.space import (
     AccessDecision,
@@ -129,7 +129,7 @@ class StickyService(BusPublisherMixin, ContentAccessMixin):
         """
         space = await self._spaces.get(space_id)
         if space is None or space.dissolved:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         if space.archived:
             raise SpaceArchivedError()
         member = await self._spaces.get_member(space_id, user_id)
@@ -152,7 +152,7 @@ class StickyService(BusPublisherMixin, ContentAccessMixin):
     async def _get_or_404(self, sticky_id: str, space_id: str | None) -> Sticky:
         sticky = await self._repo.get_scoped(sticky_id, space_id=space_id)
         if sticky is None:
-            raise KeyError(f"sticky {sticky_id!r} not found")
+            raise NotFoundError(f"sticky {sticky_id!r} not found")
         return sticky
 
     # ── Mutations ────────────────────────────────────────────────────────
@@ -355,7 +355,7 @@ class StickyService(BusPublisherMixin, ContentAccessMixin):
         if not await self._repo.delete(
             sticky_id, space_id=space_id, deleted_by=approved_by or actor_user_id
         ):
-            raise KeyError(f"sticky {sticky_id!r} not found")
+            raise NotFoundError(f"sticky {sticky_id!r} not found")
         await self._emit(
             StickyDeleted(
                 sticky_id=sticky_id, space_id=space_id, actor_user_id=actor_user_id

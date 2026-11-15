@@ -55,6 +55,7 @@ from ..crypto import (
 )
 from ..domain.emoji import MAX_EMOJI_CODEPOINTS
 from ..domain.errors import (
+    NotFoundError,
     SpaceEmojiTooLongError,
     SpaceItemTooLargeError,
     SpaceNameTooLongError,
@@ -1209,7 +1210,7 @@ class SpaceService(
         a public space is never on a GFS."""
         owner = await self._users.get(owner_username)
         if owner is None:
-            raise KeyError(f"owner {owner_username!r} not found")
+            raise NotFoundError(f"owner {owner_username!r} not found")
         if not name.strip():
             raise ValueError("space name must not be empty")
         require_space_name_and_emoji(name.strip(), emoji)
@@ -1339,7 +1340,7 @@ class SpaceService(
         """
         space = await self._spaces.get(space_id)
         if space is None:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
 
         existing = await self._spaces.get_space_seed(space_id)
         if existing is not None:
@@ -1577,7 +1578,7 @@ class SpaceService(
             )
         actor = await self._users.get(actor_username)
         if actor is None:
-            raise KeyError(f"actor {actor_username!r} not found")
+            raise NotFoundError(f"actor {actor_username!r} not found")
         result = await self._federation.send_with_mesh_fallback(
             to_instance_id=space.owner_instance_id,
             event_type=FederationEventType.SPACE_REMOTE_ADMIN_ACTION,
@@ -3871,7 +3872,7 @@ class SpaceService(
         """
         row = await self._spaces.get_invitation(invitation_id)
         if row is None:
-            raise KeyError(invitation_id)
+            raise NotFoundError(invitation_id)
         if row.get("invited_user_id") != user_id:
             raise SpacePermissionError(
                 "invite belongs to a different user",
@@ -3932,7 +3933,7 @@ class SpaceService(
         second decline (or accept-after-decline) is a no-op."""
         row = await self._spaces.get_invitation(invitation_id)
         if row is None:
-            raise KeyError(invitation_id)
+            raise NotFoundError(invitation_id)
         if row.get("invited_user_id") != user_id:
             raise SpacePermissionError(
                 "invite belongs to a different user",
@@ -3975,7 +3976,7 @@ class SpaceService(
         space = await self._require_space(space_id)
         actor = await self._users.get(actor_username)
         if actor is None:
-            raise KeyError(f"actor {actor_username!r} not found")
+            raise NotFoundError(f"actor {actor_username!r} not found")
         is_self = actor.user_id == user_id
         if not is_self:
             await self._require_admin_or_owner(space, actor_username)
@@ -4188,7 +4189,7 @@ class SpaceService(
         actor = await self._require_admin_or_owner(space, actor_username)
         target = await self._spaces.get_member(space_id, user_id)
         if target is None:
-            raise KeyError(f"user {user_id!r} is not a member")
+            raise NotFoundError(f"user {user_id!r} is not a member")
         self._check_role_change(actor.role, target.role, role)
         if self._hosted_elsewhere(space):
             if target.role == role:
@@ -5063,7 +5064,7 @@ class SpaceService(
         actor = await self._require_admin_or_owner(space, actor_username)
         target = await self._remote_members.get(space_id, instance_id, user_id)
         if target is None:
-            raise KeyError(
+            raise NotFoundError(
                 f"remote member {user_id!r}@{instance_id!r} not found in {space_id!r}",
             )
         if target.role == role:
@@ -5266,7 +5267,7 @@ class SpaceService(
         Only the member themselves or a space admin may patch."""
         member = await self._spaces.get_member(space_id, user_id)
         if member is None:
-            raise KeyError(f"user {user_id!r} is not a member")
+            raise NotFoundError(f"user {user_id!r} is not a member")
         await self._require_self_or_space_admin(
             space_id,
             member=member,
@@ -5304,7 +5305,7 @@ class SpaceService(
             raise RuntimeError("profile picture repo not attached")
         member = await self._spaces.get_member(space_id, user_id)
         if member is None:
-            raise KeyError(f"user {user_id!r} is not a member")
+            raise NotFoundError(f"user {user_id!r} is not a member")
         await self._require_self_or_space_admin(
             space_id,
             member=member,
@@ -5348,7 +5349,7 @@ class SpaceService(
             raise RuntimeError("profile picture repo not attached")
         member = await self._spaces.get_member(space_id, user_id)
         if member is None:
-            raise KeyError(f"user {user_id!r} is not a member")
+            raise NotFoundError(f"user {user_id!r} is not a member")
         await self._require_self_or_space_admin(
             space_id,
             member=member,
@@ -5489,7 +5490,7 @@ class SpaceService(
         if new_owner_member is None:
             if await self._live_remote_seat(space.id, to_user_id) is not None:
                 raise OwnerTransferNotLocalError()
-            raise KeyError(f"user {to_user_id!r} is not a member")
+            raise NotFoundError(f"user {to_user_id!r} is not a member")
         if new_owner_member.role == SpaceRole.SUBSCRIBER:
             raise OwnerTransferFollowerError()
         if new_owner_member.role == SpaceRole.OWNER:
@@ -7581,7 +7582,7 @@ class SpaceService(
         who won, not an error)."""
         row = await self._spaces.get_join_request(request_id)
         if row is None or (space_id is not None and row["space_id"] != space_id):
-            raise KeyError(f"join request {request_id!r} not found")
+            raise NotFoundError(f"join request {request_id!r} not found")
         space = await self._require_space(row["space_id"])
         actor_member = await self._require_admin_or_owner(space, actor_username)
         if str(row.get("status") or "pending") != "pending":
@@ -7625,7 +7626,7 @@ class SpaceService(
             return
         row = await self._spaces.get_join_request(request_id)
         if row is None:
-            raise KeyError(f"join request {request_id!r} not found")
+            raise NotFoundError(f"join request {request_id!r} not found")
         raise await self._join_request_handled(row)
 
     async def approve_join_request(
@@ -8056,7 +8057,7 @@ class SpaceService(
         space = await self._require_writable_space(space_id)
         author = await self._users.get_by_user_id(author_user_id)
         if author is None:
-            raise KeyError(f"user {author_user_id!r} not found")
+            raise NotFoundError(f"user {author_user_id!r} not found")
         member = await self._spaces.get_member(space_id, author_user_id)
         if member is None:
             raise SpacePermissionError("not a member of this space")
@@ -8264,7 +8265,7 @@ class SpaceService(
         ``/api/spaces/{id}/…`` must refuse a row of a different space."""
         got = await self._posts.get(post_id)
         if got is None or (space_id is not None and got[0] != space_id):
-            raise KeyError(f"space post {post_id!r} not found in this space")
+            raise NotFoundError(f"space post {post_id!r} not found in this space")
         return got
 
     async def edit_post(
@@ -8280,7 +8281,7 @@ class SpaceService(
         (→ 404, never 403, so the answer confirms nothing) and unchanged."""
         space_id, post = await self._post_in_space(post_id, space_id)
         if post.deleted:
-            raise KeyError("post already deleted")
+            raise NotFoundError("post already deleted")
         # Verifies space exists + is writable (not archived) — raises if not.
         space = await self._require_writable_space(space_id)
         if post.author != editor_user_id:
@@ -8487,10 +8488,10 @@ class SpaceService(
     ) -> Comment:
         got = await self._posts.get(post_id)
         if got is None:
-            raise KeyError(f"space post {post_id!r} not found")
+            raise NotFoundError(f"space post {post_id!r} not found")
         space_id, post = got
         if post.deleted:
-            raise KeyError("cannot comment on deleted post")
+            raise NotFoundError("cannot comment on deleted post")
         await self._require_writable_space(space_id)
         # Membership check
         member = await self._spaces.get_member(space_id, author_user_id)
@@ -8517,7 +8518,7 @@ class SpaceService(
         if parent_id is not None:
             parent = await self._posts.get_comment(parent_id)
             if parent is None or parent.post_id != post_id:
-                raise KeyError(f"parent comment {parent_id!r} not in this post")
+                raise NotFoundError(f"parent comment {parent_id!r} not in this post")
         comment = Comment(
             id=mint_owner_bound_id(
                 SPACE_COMMENT_KIND, space_id=space_id, owner_user_id=author_user_id
@@ -8570,12 +8571,12 @@ class SpaceService(
         """Edit a space comment's body. Author or content authority only."""
         comment = await self._posts.get_comment(comment_id)
         if comment is None or comment.deleted:
-            raise KeyError(f"comment {comment_id!r} not found")
+            raise NotFoundError(f"comment {comment_id!r} not found")
         if comment.type is not CommentType.TEXT:
             raise ValueError("only text comments can be edited")
         got = await self._posts.get(comment.post_id)
         if got is None:
-            raise KeyError("post disappeared")
+            raise NotFoundError("post disappeared")
         space_id, _post = got
         await self._require_writable_space(space_id)
         if comment.author != editor_user_id:
@@ -8615,12 +8616,12 @@ class SpaceService(
     ) -> None:
         comment = await self._posts.get_comment(comment_id)
         if comment is None:
-            raise KeyError(f"comment {comment_id!r} not found")
+            raise NotFoundError(f"comment {comment_id!r} not found")
         if comment.deleted:
             return
         got = await self._posts.get(comment.post_id)
         if got is None:
-            raise KeyError("post disappeared")
+            raise NotFoundError("post disappeared")
         space_id, _post = got
         if comment.author != actor_user_id:
             member = await self._spaces.get_member(space_id, actor_user_id)
@@ -8792,7 +8793,7 @@ class SpaceService(
         await self.require_reader(space_id, viewer_user_id)
         post = await self.get_space_post(space_id, post_id)
         if post is None or post.deleted:
-            raise KeyError(f"space post {post_id!r} not found")
+            raise NotFoundError(f"space post {post_id!r} not found")
         return post
 
     async def get_space(self, space_id: str) -> Space | None:
@@ -8878,7 +8879,7 @@ class SpaceService(
                 # A space hidden from the caller (private, another
                 # household's household space) answers exactly like an
                 # unknown id — no existence oracle.
-                raise KeyError(f"space {space_id!r} not found")
+                raise NotFoundError(f"space {space_id!r} not found")
             raise SubscribeNotAllowedError(
                 "only public / global spaces can be subscribed to",
             )
@@ -9119,7 +9120,7 @@ class SpaceService(
     ) -> None:
         link = await self._spaces.get_link(link_id)
         if link is None:
-            raise KeyError(f"link {link_id!r} not found")
+            raise NotFoundError(f"link {link_id!r} not found")
         space = await self._require_space(link["space_id"])
         await self._require_admin_or_owner(space, actor_username)
         await self._spaces.delete_link(link_id)
@@ -9129,7 +9130,7 @@ class SpaceService(
     async def _require_space(self, space_id: str) -> Space:
         space = await self._spaces.get(space_id)
         if space is None or space.dissolved:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         return space
 
     async def _require_writable_space(self, space_id: str) -> Space:
