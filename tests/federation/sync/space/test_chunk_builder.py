@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import orjson
@@ -49,7 +50,6 @@ class _FakeCrypto:
         plaintext: bytes,
     ) -> tuple[int, str]:
         self.last_aad = f"{space_id}:{self.epoch}:{sync_id}".encode()
-        import base64
 
         return self.epoch, base64.urlsafe_b64encode(plaintext).decode("ascii")
 
@@ -61,7 +61,6 @@ class _FakeCrypto:
         sync_id: str,
         ciphertext: str,
     ) -> bytes:
-        import base64
 
         return base64.urlsafe_b64decode(ciphertext)
 

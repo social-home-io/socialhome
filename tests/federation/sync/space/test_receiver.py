@@ -5,6 +5,7 @@ paths are tested in ``test_receive_*.py``."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -199,12 +200,10 @@ class _MissingKeyCrypto:
         self.attempts = 0
 
     async def encrypt_chunk(self, *, space_id, sync_id, plaintext):
-        import base64
 
         return 5, base64.urlsafe_b64encode(plaintext).decode("ascii")
 
     async def decrypt_chunk(self, *, space_id, epoch, sync_id, ciphertext):
-        import base64
 
         self.attempts += 1
         if self.attempts == 1:
@@ -222,8 +221,6 @@ async def test_decrypt_missing_epoch_stashes_in_cache_and_replays(
     'missing epoch', the receiver stashes the redeliver in the cache,
     and the matching SpaceContentKeyImported event triggers a replay
     that succeeds. End state: row was persisted on the second try."""
-    from socialhome.domain.events import SpaceContentKeyImported
-    from socialhome.services.pending_decrypts_cache import PendingDecryptsCache
 
     peer, kp = peer_setup
     kp_self = generate_identity_keypair()
@@ -256,7 +253,6 @@ async def test_decrypt_missing_epoch_stashes_in_cache_and_replays(
             ],
         }
     )
-    import base64
 
     ciphertext = base64.urlsafe_b64encode(plaintext).decode("ascii")
     envelope = {
@@ -291,7 +287,6 @@ async def test_decrypt_failure_other_than_missing_key_still_drops(
     """A tampered ciphertext (decrypt raises but NOT with 'missing
     epoch' in the message) MUST NOT stash — those failures are not
     race-recoverable and stashing them would be a leak."""
-    from socialhome.services.pending_decrypts_cache import PendingDecryptsCache
 
     class _BadCrypto:
         async def encrypt_chunk(self, *, space_id, sync_id, plaintext):
