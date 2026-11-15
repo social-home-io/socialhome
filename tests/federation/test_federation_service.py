@@ -2122,6 +2122,32 @@ async def test_begin_mesh_catchup_sync_carries_the_authority_echo():
 
 
 @pytest.mark.asyncio
+async def test_begin_mesh_catchup_sync_carries_the_roster_digest():
+    """Should-fix 4: a mesh-only member's BEGIN carries its roster digest,
+    so its host repairs its mirror by the same rule as a paired member's;
+    the digest is recorded with the request for a relay re-BEGIN."""
+    svc, _ = _make_service()
+    sync_manager = MagicMock()
+    sync_manager.register_requester_https_session = MagicMock(return_value=True)
+    svc.attach_sync_manager(sync_manager)
+    send_mock = AsyncMock(
+        return_value=DeliveryResult(instance_id="host-1", ok=True),
+    )
+    digest = {"suite": "rd1-sha256", "digest": "d" * 64, "cert_epoch": 2}
+    with (
+        patch.object(
+            FederationService, "is_confirmed_peer", AsyncMock(return_value=False)
+        ),
+        patch.object(FederationService, "send_with_mesh_fallback", send_mock),
+    ):
+        await svc.begin_mesh_catchup_sync(
+            space_id="sp-1", host_instance_id="host-1", roster_digest=digest
+        )
+    assert send_mock.call_args.kwargs["payload"]["roster_digest"] == digest
+    assert sync_manager.record_sync_request.call_args.kwargs["roster_digest"] == digest
+
+
+@pytest.mark.asyncio
 async def test_begin_mesh_catchup_sync_carries_the_moderation_echo():
     """A reviewer household's BEGIN to a mesh-only host echoes the pending
     moderation items it holds — an empty list is an echo too."""

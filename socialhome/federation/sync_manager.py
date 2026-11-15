@@ -104,6 +104,9 @@ class PendingSyncRequest:
     #: same stream instead of a full one.
     sync_mode: str = "initial"
     have_seq: int | None = None
+    #: The ``roster_digest`` the BEGIN carried — a relay re-BEGIN carries it
+    #: too (the host repairs a roster mirror only on a digest mismatch).
+    roster_digest: dict | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -219,6 +222,7 @@ class SyncSessionManager:
         provider_instance_id: str,
         sync_mode: str = "initial",
         have_seq: int | None = None,
+        roster_digest: dict | None = None,
     ) -> None:
         """Remember a ``SPACE_SYNC_BEGIN`` we are about to send.
 
@@ -236,6 +240,7 @@ class SyncSessionManager:
             created_at=time.time(),
             sync_mode=sync_mode,
             have_seq=have_seq,
+            roster_digest=roster_digest,
         )
 
     def pending_sync_request(self, sync_id: str) -> PendingSyncRequest | None:
@@ -603,6 +608,7 @@ class SyncSessionManager:
         sync_mode: str = "initial",
         ice_servers: list[dict] | None = None,
         have_seq: int | None = None,
+        roster_digest: dict | None = None,
     ) -> str:
         """Requester-side handling of ``SPACE_SYNC_OFFER``.
 
@@ -644,6 +650,7 @@ class SyncSessionManager:
                 rtc=rtc,
                 created_at=time.time(),
                 have_seq=have_seq,
+                roster_digest=roster_digest,
             )
             self._sessions[sync_id] = record
 
@@ -731,6 +738,10 @@ class SyncSessionManager:
         # §25.6: the same incremental stream the direct BEGIN asked for.
         if record.have_seq is not None:
             payload["have_seq"] = record.have_seq
+        # …and the roster digest: a BEGIN without one is an older
+        # household's to the host, which repairs its mirror by the echo.
+        if record.roster_digest is not None:
+            payload["roster_digest"] = record.roster_digest
         return SyncDecision(
             accepted=True,
             reason="relay_fallback",

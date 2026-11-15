@@ -981,3 +981,35 @@ def test_restarted_recently_covers_the_pending_request_horizon():
         return_value=time.time() + PENDING_REQUEST_TTL_SECONDS + 1,
     ):
         assert mgr.restarted_recently() is False
+
+
+async def test_the_relay_retry_carries_the_roster_digest_of_its_begin():
+    """The host repairs a roster mirror only on a digest mismatch, and a
+    BEGIN WITHOUT a digest is treated as an older household's: the relay
+    re-BEGIN after an ICE timeout carries the digest the first BEGIN did."""
+    digest = {"suite": "rd1-sha256", "digest": "c" * 64, "cert_epoch": None}
+    mgr = _mgr()
+    mgr.record_sync_request(
+        sync_id="s1",
+        space_id="sp",
+        provider_instance_id="host",
+        sync_mode="incremental",
+        roster_digest=digest,
+    )
+    pending = mgr.pending_sync_request("s1")
+    assert pending.roster_digest == digest
+    with patch(
+        "socialhome.federation.sync_manager.SyncRtcSession",
+        MagicMock(return_value=MagicMock(create_answer=AsyncMock(return_value="a"))),
+    ):
+        await mgr.apply_offer(
+            sync_id="s1",
+            sdp_offer="o",
+            requester_instance_id="us",
+            provider_instance_id="host",
+            space_id="sp",
+            sync_mode=pending.sync_mode,
+            roster_digest=pending.roster_digest,
+        )
+    decision = await mgr.trigger_relay_sync("s1")
+    assert decision.next_payload["roster_digest"] == digest

@@ -331,10 +331,14 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
 }
 
 #: Functions that must stay free of every marker: the periodic roster
-#: snapshot reaches every member household by one rule.
+#: repair reaches every member household by one rule.
 _MARKER_FREE: dict[str, tuple[str, ...]] = {
     "socialhome/services/space_service.py": (
-        "send_hosted_roster_snapshots",
+        "on_sync_begin_roster",
+        "_repair_by_digest",
+        "_repair_by_echo",
+        "roster_digest_of",
+        "roster_digest_for",
         "send_roster_snapshot",
     ),
 }

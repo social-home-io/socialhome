@@ -8345,45 +8345,6 @@ async def test_a_kick_before_the_accept_reaches_the_joiner_as_a_removal(stack):
     assert entry["payload"]["member_version"] > invite_version
 
 
-async def test_the_periodic_refresh_reaches_link_joined_households_like_any_member(
-    stack,
-):
-    """A household seated from an invite link is a member like any other
-    (CLAUDE.md, "Every space member is equal"): the periodic tick heals its
-    roster mirror too, and the ``roster_echo`` its sync BEGIN carries keeps
-    it at zero envelopes once it holds the current roster."""
-    from socialhome.domain.federation import InstanceSource
-
-    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
-    await _seat(remote, space.id, "peer-direct", "u-d")
-    await _seat(remote, space.id, "peer-link", "u-l")
-    for inst in ("peer-direct", "peer-link"):
-        await stack.space_repo.add_space_instance(space.id, inst)
-
-    async def _get_instance(iid):
-        source = (
-            InstanceSource.SPACE_SESSION
-            if iid == "peer-link"
-            else InstanceSource.MANUAL
-        )
-        return SimpleNamespace(id=iid, source=source)
-
-    stack.space_svc._federation_repo.get_instance = _get_instance
-    _past_restart_grace(stack)
-    sent = await stack.space_svc.send_hosted_roster_snapshots()
-    assert sent == 2
-    assert sorted(to for to, _ in _snapshots(fed)) == ["peer-direct", "peer-link"]
-    current = (await stack.space_repo.get(space.id)).roster_sequence
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, "peer-link", {"roster_version": current, "cert_epoch": None}
-        )
-    )
-    # The seat echoed the current roster: skipped; the silent one healed.
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 1
-    assert [to for to, _ in _snapshots(fed)][2:] == ["peer-direct"]
-
-
 async def test_an_upgrade_to_v32_triggers_a_snapshot(stack):
     from socialhome.domain.events import PeerProtoVersionRaised
 
@@ -8402,30 +8363,40 @@ async def test_an_upgrade_to_v32_triggers_a_snapshot(stack):
     assert len(_snapshots(fed)) == 1
 
 
-def _begin_with_echo(space_id: str, sender: str, echo: object):
+def _begin(space_id: str, sender: str, **fields):
+    """A member household's SPACE_SYNC_BEGIN with *fields*."""
     return FederationEvent(
         msg_id="m-begin",
         event_type=FederationEventType.SPACE_SYNC_BEGIN,
         from_instance=sender,
         to_instance="self",
         timestamp="2026-10-22T00:00:00+00:00",
-        payload={"sync_id": "s", "space_id": space_id, "roster_echo": echo},
+        payload={"sync_id": "s", "space_id": space_id, **fields},
         space_id=space_id,
     )
 
 
-def _past_restart_grace(stack) -> None:
-    """The host has run past its restart grace: a household it has not
-    heard from is sent the snapshot (see ``ROSTER_ECHO_GRACE_TICKS``)."""
-    from socialhome.services.space_service import ROSTER_ECHO_GRACE_TICKS
-
-    stack.space_svc._roster_ticks = ROSTER_ECHO_GRACE_TICKS
+def _begin_with_echo(space_id: str, sender: str, echo: object):
+    return _begin(space_id, sender, roster_echo=echo)
 
 
-async def _members_with_households(stack, n: int):
+async def _digest_begin(stack, space, sender, *, digest=None, cert_epoch=None):
+    """A BEGIN carrying *sender*'s roster digest — by default the one the
+    host computes for it (its mirror is right)."""
+    from socialhome.domain.space_roster_digest import roster_digest_wire
+
+    if digest is None:
+        row = await stack.space_repo.get(space.id)
+        digest = await stack.space_svc.roster_digest_of(row, sender)
+    return _begin(
+        space.id, sender, roster_digest=roster_digest_wire(digest, cert_epoch)
+    )
+
+
+async def _members_with_households(stack, n: int, *, source=None):
     _owner, space, fed, remote = await _hosted_space_with_seats(stack)
     stack.space_svc._federation_repo.get_instance = AsyncMock(
-        return_value=SimpleNamespace(source=None)
+        return_value=SimpleNamespace(source=source)
     )
     insts = [f"peer-{i}" for i in range(n)]
     for i, inst in enumerate(insts):
@@ -8434,208 +8405,127 @@ async def _members_with_households(stack, n: int):
     return space, fed, remote, insts
 
 
-async def test_an_unchanged_roster_is_sent_once_not_every_tick(stack):
-    """15 member households, 48 periodic ticks a day, roster unchanged.
-    Before: 15 × 48 = 720 snapshots a day (every seat, every time). Now the
-    first tick sends 15; each household then echoes the version it applied
-    on its next sync BEGIN, and the remaining 47 ticks send nothing."""
-    space, fed, _remote, insts = await _members_with_households(stack, 15)
-    _past_restart_grace(stack)
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 15
-    current = (await stack.space_repo.get(space.id)).roster_sequence
-    for inst in insts:
-        _to, payload = next(
-            (c.kwargs["to_instance_id"], c.kwargs["payload"])
-            for c in fed.send_with_mesh_fallback.await_args_list
-            if c.kwargs["to_instance_id"] == inst
+def test_the_host_runs_no_roster_timer():
+    """Blocker 1: no snapshot on the host's own timer — a household that
+    never sends a BEGIN (a follower-only household of a global space) gets
+    nothing periodic, only seat / upgrade snapshots and live gossip."""
+    from socialhome.services.space_service import SpaceService
+
+    assert not hasattr(SpaceService, "send_hosted_roster_snapshots")
+
+
+async def test_the_digest_is_what_a_snapshot_leaves_on_the_member(stack):
+    """The host's digest for a household is exactly the digest of the live
+    seats a snapshot to it carries, as the member mirrors them (the
+    owner's ``owner`` mirrored as ``member``)."""
+    from socialhome.domain.space import mirrorable_remote_role
+    from socialhome.domain.space_roster_digest import roster_digest
+
+    space, fed, remote, _insts = await _members_with_households(stack, 3)
+    await _seat(remote, space.id, "peer-1", "u-admin", role="admin")
+    await _seat(remote, space.id, "peer-2", "u-gone")
+    await remote.remove(space.id, "peer-2", "u-gone")
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-0")
+    (_to, entries) = _snapshots(fed, to="peer-0")[-1]
+    mirrored = [
+        (
+            e["payload"]["instance_id"],
+            e["payload"]["user_id"],
+            mirrorable_remote_role(e["payload"]["role"]),
         )
-        assert payload["roster_version"] == current
-        await stack.space_svc.on_sync_begin_roster_echo(
-            _begin_with_echo(
-                space.id,
-                inst,
-                {"roster_version": payload["roster_version"], "cert_epoch": None},
-            )
-        )
-    for _ in range(47):
-        assert await stack.space_svc.send_hosted_roster_snapshots() == 0
-    assert len(_snapshots(fed)) == 15
-
-
-async def test_a_roster_change_is_sent_again(stack):
-    space, _fed, remote, insts = await _members_with_households(stack, 2)
-    await stack.space_svc.send_hosted_roster_snapshots()
-    current = (await stack.space_repo.get(space.id)).roster_sequence
-    for inst in insts:
-        await stack.space_svc.on_sync_begin_roster_echo(
-            _begin_with_echo(
-                space.id, inst, {"roster_version": current, "cert_epoch": None}
-            )
-        )
-    await _seat(remote, space.id, "peer-0", "u-extra")
-    space_row = await stack.space_repo.get(space.id)
-    await stack.space_svc._emit_member_roster_gossip(
-        space_row,
-        user_id="u-extra",
-        instance_id="peer-0",
-        display_name="E",
-        user_pk=None,
-        role="member",
-        tombstoned=False,
-    )
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 2
-
-
-async def test_a_household_whose_begin_carries_no_echo_keeps_getting_it(stack):
-    """A household that holds no snapshot of ours sends its BEGIN without
-    ``roster_echo``: it is healed every tick, from the first one after a
-    restart — nothing is skipped on a guess."""
-    space, fed, _remote, _insts = await _members_with_households(stack, 1)
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(space.id, "peer-0", None)
-    )
-    for _ in range(3):
-        assert await stack.space_svc.send_hosted_roster_snapshots() == 1
-    assert len(_snapshots(fed)) == 3
-
-
-async def test_after_a_restart_the_host_waits_for_each_households_echo(stack):
-    """The host's echo memory is in memory only. After a restart it sends
-    nothing to a household it has not heard from during the first two
-    ticks: one that echoes the current roster then is never sent the
-    roster at all; one never heard gets it from the third tick on."""
-    space, fed, _remote, insts = await _members_with_households(stack, 3)
-    current = (await stack.space_repo.get(space.id)).roster_sequence
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 0
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, insts[0], {"roster_version": current, "cert_epoch": None}
-        )
-    )
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 0
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, insts[1], {"roster_version": current, "cert_epoch": None}
-        )
-    )
-    # Third tick: the two that echoed get nothing; the silent one is healed.
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 1
-    assert [to for to, _ in _snapshots(fed)] == [insts[2]]
-
-
-async def test_a_stale_echo_gets_every_live_seat_again(stack):
-    """After a roster change, a household whose echo is stale gets every
-    live seat again — also one whose version is at or below its echo. A
-    seat's version is not a host-counter invariant (a seat applied from a
-    delegated admin's gossip keeps that admin's version, a restored host
-    reuses versions), so only removals at or below the echo are left out."""
-    space, fed, remote, insts = await _members_with_households(stack, 3)
-    current = (await stack.space_repo.get(space.id)).roster_sequence
-    for inst in insts:
-        await stack.space_svc.on_sync_begin_roster_echo(
-            _begin_with_echo(
-                space.id, inst, {"roster_version": current, "cert_epoch": None}
-            )
-        )
-    await _seat(remote, space.id, "peer-0", "u-extra")
-    await stack.space_svc._emit_member_roster_gossip(
-        await stack.space_repo.get(space.id),
-        user_id="u-extra",
-        instance_id="peer-0",
-        display_name="E",
-        user_pk=None,
-        role="member",
-        tombstoned=False,
-    )
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 3
-    entries = _snapshots(fed, to="peer-1")[-1][1]
-    remote_users = {
-        e["payload"]["user_id"]
         for e in entries
-        if e["payload"]["instance_id"] != stack.iid
-    }
-    assert remote_users == {"u-0", "u-2", "u-extra"}
-    # u-0's seat is at or below the echoed version — still sent.
-    u0 = next(e for e in entries if e["payload"]["user_id"] == "u-0")
-    assert u0["payload"]["member_version"] <= current
+        if e["event_type"] == FederationEventType.SPACE_MEMBER_JOINED.value
+    ]
+    row = await stack.space_repo.get(space.id)
+    assert roster_digest(mirrored) == await stack.space_svc.roster_digest_of(
+        row, "peer-0"
+    )
 
 
-async def test_a_household_that_left_is_forgotten_by_the_echo_memory(stack):
-    """M1: the host's echo memory follows the roster — a household that left
-    the space (its ``space_instances`` row gone) is dropped on the next
-    tick, so neither map outlives a seat."""
-    space, _fed, _remote, insts = await _members_with_households(stack, 2)
-    current = (await stack.space_repo.get(space.id)).roster_sequence
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, insts[0], {"roster_version": current, "cert_epoch": None}
+@pytest.mark.parametrize("source", [None, "space_session"])
+async def test_a_member_whose_mirror_is_right_is_sent_nothing(stack, source):
+    """No change → 0 envelopes, whatever the path the household is reached
+    by (paired, or seated from an invite link over the GFS relay)."""
+    from socialhome.domain.federation import InstanceSource
+
+    space, fed, _remote, insts = await _members_with_households(
+        stack, 3, source=InstanceSource(source) if source else None
+    )
+    for _ in range(48):
+        for inst in insts:
+            await stack.space_svc.on_sync_begin_roster(
+                await _digest_begin(stack, space, inst)
+            )
+    assert _snapshots(fed) == []
+
+
+async def test_a_missed_gossip_gets_exactly_one_snapshot(stack):
+    """A household whose digest differs gets ONE snapshot in reply to its
+    BEGIN — and not the same one again while neither digest moves (a
+    snapshot that did not change its digest would not next time either);
+    a later roster change is answered again."""
+    space, fed, remote, _insts = await _members_with_households(stack, 2)
+    stale = "0" * 64
+    for _ in range(3):
+        await stack.space_svc.on_sync_begin_roster(
+            await _digest_begin(stack, space, "peer-0", digest=stale)
         )
+    assert [to for to, _ in _snapshots(fed)] == ["peer-0"]
+    # The other household's mirror is right: nothing for it.
+    await stack.space_svc.on_sync_begin_roster(
+        await _digest_begin(stack, space, "peer-1")
     )
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(space.id, insts[1], None)
+    assert len(_snapshots(fed)) == 1
+    await _seat(remote, space.id, "peer-1", "u-new")
+    await stack.space_svc.on_sync_begin_roster(
+        await _digest_begin(stack, space, "peer-0", digest=stale)
     )
-    await stack.space_repo.remove_space_instance(space.id, insts[0])
-    await stack.space_repo.remove_space_instance(space.id, insts[1])
-    await stack.space_svc.send_hosted_roster_snapshots()
-    assert stack.space_svc._roster_heard == {}
-    assert stack.space_svc._roster_unechoed == set()
+    assert [to for to, _ in _snapshots(fed)] == ["peer-0", "peer-0"]
 
 
-async def test_a_snapshot_always_carries_the_owners_seat(stack):
-    """Review (d): the owner is a local seat of every space we host, so a
-    snapshot — even to the only member household, with an echo that drops
-    every removal — is never empty and part 0 can carry its credentials."""
+async def test_a_missing_writer_cert_still_gets_a_snapshot(stack):
+    """The digest is right, but the household lacks the writer cert we would
+    issue: the snapshot (which carries it) goes, as before."""
     space, fed, _remote, _insts = await _members_with_households(stack, 1)
-    current = (await stack.space_repo.get(space.id)).roster_sequence
     certs = MagicMock()
     certs.cert_for_peer = AsyncMock(return_value={"epoch": 7})
     certs.writer_key_for_peer = AsyncMock(return_value=None)
     certs.channel_grant_for_peer = AsyncMock(return_value=None)
     stack.space_svc._writer_certs = certs
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, "peer-0", {"roster_version": current, "cert_epoch": 6}
-        )
+    await stack.space_svc.on_sync_begin_roster(
+        await _digest_begin(stack, space, "peer-0", cert_epoch=7)
     )
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 1
+    assert _snapshots(fed) == []
+    await stack.space_svc.on_sync_begin_roster(
+        await _digest_begin(stack, space, "peer-0", cert_epoch=6)
+    )
     (_to, entries) = _snapshots(fed, to="peer-0")[-1]
+    # Never empty: the owner is always a local seat of a space we host.
     assert any(e["payload"]["role"] == "owner" for e in entries)
 
 
-async def test_a_stale_echo_or_a_missing_writer_cert_is_sent_again(stack):
-    space, _fed, _remote, _insts = await _members_with_households(stack, 1)
-    _past_restart_grace(stack)
-    current = (await stack.space_repo.get(space.id)).roster_sequence
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, "peer-0", {"roster_version": current - 1, "cert_epoch": None}
+async def test_an_unknown_suite_or_a_malformed_digest_repairs_nothing(stack, caplog):
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    with caplog.at_level("WARNING"):
+        await stack.space_svc.on_sync_begin_roster(
+            _begin(space.id, "peer-0", roster_digest={"suite": "rd9", "digest": "a"})
+        )
+    assert "unknown suite" in caplog.text
+    await stack.space_svc.on_sync_begin_roster(
+        _begin(
+            space.id,
+            "peer-0",
+            roster_digest={"suite": "rd1-sha256", "digest": "nope"},
         )
     )
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 1
-    # Version right, but the household lacks the writer cert we would issue.
-    certs = MagicMock()
-    certs.cert_for_peer = AsyncMock(return_value={"epoch": 7})
-    certs.writer_key_for_peer = AsyncMock(return_value=None)
-    certs.channel_grant_for_peer = AsyncMock(return_value=None)
-    stack.space_svc._writer_certs = certs
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, "peer-0", {"roster_version": current, "cert_epoch": 6}
-        )
-    )
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 1
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, "peer-0", {"roster_version": current, "cert_epoch": 7}
-        )
-    )
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 0
+    assert _snapshots(fed) == []
 
 
-async def test_tombstones_a_household_already_holds_are_not_resent(stack):
-    """A snapshot to a household that echoed version R carries no removal
-    at or below R — it applied a full snapshot holding every one of them.
-    A removal after R, and a household without an echo, get them all."""
+async def test_an_older_household_keeps_the_echo_rule(stack):
+    """v_80 (released) sends only ``roster_echo``: nothing while it echoes
+    the current roster; a stale echo gets every live seat without the
+    removals at or below it; no echo at all gets the whole roster, on each
+    BEGIN until it echoes — as the periodic tick did, now in reply."""
     space, fed, remote, _insts = await _members_with_households(stack, 1)
     space_row = await stack.space_repo.get(space.id)
     for user in ("u-gone-1", "u-gone-2"):
@@ -8651,11 +8541,12 @@ async def test_tombstones_a_household_already_holds_are_not_resent(stack):
             tombstoned=True,
         )
     echoed = (await stack.space_repo.get(space.id)).roster_sequence
-    await stack.space_svc.on_sync_begin_roster_echo(
+    await stack.space_svc.on_sync_begin_roster(
         _begin_with_echo(
             space.id, "peer-0", {"roster_version": echoed, "cert_epoch": None}
         )
     )
+    assert _snapshots(fed) == []
     await _seat(remote, space.id, "peer-x", "u-gone-3")
     await remote.remove(space.id, "peer-x", "u-gone-3")
     await stack.space_svc._emit_member_roster_gossip(
@@ -8667,37 +8558,76 @@ async def test_tombstones_a_household_already_holds_are_not_resent(stack):
         role="member",
         tombstoned=True,
     )
-    await stack.space_svc.send_hosted_roster_snapshots()
+    await stack.space_svc.on_sync_begin_roster(
+        _begin_with_echo(
+            space.id, "peer-0", {"roster_version": echoed, "cert_epoch": None}
+        )
+    )
+    entries = _snapshots(fed, to="peer-0")[-1][1]
     left = [
         e["payload"]["user_id"]
-        for e in _snapshots(fed, to="peer-0")[-1][1]
+        for e in entries
         if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
     ]
     assert left == ["u-gone-3"]
-    # A household with no echo gets every removal.
-    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-new")
-    left_new = sorted(
+    # Every live seat ships (a seat's version is no host-counter invariant).
+    assert "u-0" not in {e["payload"]["user_id"] for e in entries}  # its own
+    assert any(e["payload"]["role"] == "owner" for e in entries)
+    # No echo at all: the whole roster, on each BEGIN.
+    for _ in range(2):
+        await stack.space_svc.on_sync_begin_roster(_begin(space.id, "peer-0"))
+    left_all = sorted(
         e["payload"]["user_id"]
-        for e in _snapshots(fed, to="peer-new")[-1][1]
+        for e in _snapshots(fed, to="peer-0")[-1][1]
         if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
     )
-    assert left_new == ["u-gone-1", "u-gone-2", "u-gone-3"]
+    assert left_all == ["u-gone-1", "u-gone-2", "u-gone-3"]
+    assert len(_snapshots(fed, to="peer-0")) == 3
 
 
-async def test_an_echo_from_a_non_member_or_for_a_space_we_do_not_host_is_ignored(
+async def test_a_begin_from_a_non_member_or_for_a_space_we_do_not_host_is_ignored(
     stack,
 ):
-    space, _fed, _remote, _insts = await _members_with_households(stack, 1)
-    for space_id, sender, echo in (
-        (space.id, "stranger", {"roster_version": 1, "cert_epoch": None}),
-        ("unknown-space", "peer-0", {"roster_version": 1, "cert_epoch": None}),
-        (space.id, "peer-0", {"roster_version": "x"}),
-        (space.id, "peer-0", "junk"),
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    for event in (
+        _begin(space.id, "stranger"),
+        _begin("unknown-space", "peer-0"),
+        _begin_with_echo(space.id, "peer-0", {"roster_version": "x"}),
+        _begin_with_echo(space.id, "peer-0", {"roster_version": 1, "cert_epoch": "x"}),
     ):
-        await stack.space_svc.on_sync_begin_roster_echo(
-            _begin_with_echo(space_id, sender, echo)
-        )
-    assert stack.space_svc._roster_heard == {}
+        await stack.space_svc.on_sync_begin_roster(event)
+    assert _snapshots(fed) == []
+
+
+async def test_the_members_digest_is_of_the_mirror_it_holds(stack):
+    """Member side: the digest of every live seat it mirrors outside its
+    own household, only toward the space's host."""
+    from socialhome.domain.space import SpaceFeatureAccess
+    from socialhome.domain.space_roster_digest import (
+        ROSTER_DIGEST_SUITE_SHA256,
+        roster_digest,
+    )
+
+    sid, _uid = await _seat_remote_space_with_posts_access(
+        stack, actor="mia", posts_access=SpaceFeatureAccess.OPEN
+    )
+    remote = await _wire_remote_members(stack)
+    stack.space_svc._remote_members = remote
+    await _seat(remote, sid, "inst-remote-owner", "u-owner")
+    await _seat(remote, sid, "peer-z", "u-z", role="admin")
+    await _seat(remote, sid, stack.iid, "u-self")
+    await _seat(remote, sid, "peer-z", "u-gone")
+    await remote.remove(sid, "peer-z", "u-gone")
+    got = await stack.space_svc.roster_digest_for(sid, "inst-remote-owner")
+    assert got == {
+        "suite": ROSTER_DIGEST_SUITE_SHA256,
+        "digest": roster_digest(
+            [("inst-remote-owner", "u-owner", "member"), ("peer-z", "u-z", "admin")]
+        ),
+        "cert_epoch": None,
+    }
+    assert await stack.space_svc.roster_digest_for(sid, "peer-z") is None
+    assert await stack.space_svc.roster_digest_for("no-space", "x") is None
 
 
 async def test_the_members_echo_is_what_it_applied_from_the_host(stack):

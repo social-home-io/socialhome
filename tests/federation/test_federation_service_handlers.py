@@ -882,6 +882,7 @@ def _solicited(svc, *, provider="peer-1", space_id="sp"):
             provider_instance_id=provider,
             sync_mode="incremental",
             have_seq=41,
+            roster_digest=None,
         ),
     )
 
@@ -2193,6 +2194,7 @@ async def test_a_deferred_periodic_sync_stays_incremental(svc):
             created_at=0,
             sync_mode="incremental",
             have_seq=41,
+            roster_digest=None,
         )
     )
     svc._sync_manager.forget_sync_request = MagicMock()

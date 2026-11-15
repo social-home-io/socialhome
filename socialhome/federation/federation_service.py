@@ -1063,6 +1063,7 @@ class FederationService:
         provider_instance_id: str,
         sync_mode: str = "initial",
         have_seq: int | None = None,
+        roster_digest: dict | None = None,
     ) -> None:
         """Note a ``SPACE_SYNC_BEGIN`` we are sending (§25.6).
 
@@ -1079,6 +1080,7 @@ class FederationService:
             provider_instance_id=provider_instance_id,
             sync_mode=sync_mode,
             have_seq=have_seq,
+            roster_digest=roster_digest,
         )
 
     def attach_sync_manager(self, sync_manager) -> None:
@@ -3089,6 +3091,7 @@ class FederationService:
         dir_seq: int | None = None,
         have_seq: int | None = None,
         mod_held: dict | None = None,
+        roster_digest: dict | None = None,
     ) -> bool:
         """Initiate a §25.6 catch-up sync FROM a mesh-only host.
 
@@ -3099,7 +3102,9 @@ class FederationService:
         (with its ``have_seq``) is the periodic BEGIN after catch-up that
         carries it. ``mod_held`` is the moderation queue echo of a
         household that reviews the space (the items it holds, by state),
-        carried by that same incremental BEGIN.
+        carried by that same incremental BEGIN. ``roster_digest`` is the
+        digest of our roster mirror for the space (only toward its host):
+        the host repairs it only on a mismatch, as for a paired member.
 
         For a space whose host is NOT a confirmed direct peer (we joined over a
         relay), the normal SpaceSyncScheduler never triggers (it only syncs with
@@ -3129,6 +3134,7 @@ class FederationService:
                 provider_instance_id=host_instance_id,
                 sync_mode=sync_mode,
                 have_seq=have_seq,
+                roster_digest=roster_digest,
             )
             self._sync_manager.register_requester_https_session(
                 sync_id=sync_id,
@@ -3150,6 +3156,8 @@ class FederationService:
                 payload["have_seq"] = have_seq
             if mod_held is not None:
                 payload["mod_held"] = mod_held
+            if roster_digest is not None:
+                payload["roster_digest"] = roster_digest
             result = await self.send_with_mesh_fallback(
                 to_instance_id=host_instance_id,
                 event_type=FederationEventType.SPACE_SYNC_BEGIN,
@@ -5570,6 +5578,7 @@ class FederationService:
                 # periodic sync behind a NAT stays incremental.
                 sync_mode=pending.sync_mode,
                 have_seq=pending.have_seq,
+                roster_digest=pending.roster_digest,
             )
         except ConnectionError:
             # Closed while the offer was applied (reaped, superseded):
