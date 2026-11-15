@@ -29,6 +29,10 @@ from __future__ import annotations
 
 import re
 
+import orjson
+
+from .errors import SpaceItemTooLargeError
+
 #: First bytes of a binary relay media body (household → GFS → household).
 RELAY_MEDIA_MAGIC: bytes = b"\x00SHR"
 
@@ -116,18 +120,22 @@ RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES: int = (
     RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES - SYNC_CHUNK_WRAP_ALLOWANCE_BYTES
 )
 
-#: The largest §25.6 record (as JSON) a stream to a requester behind a GFS
-#: carries: with the chunk's wrapper it fills the frame. The same number as
-#: the live bound, by construction.
-SYNC_RECORD_MAX_BYTES_BEHIND_GFS: int = RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES
+#: The largest §25.6 record (as JSON) a stream over the GFS relay carries:
+#: with the chunk's wrapper it fills the frame. The same number as the live
+#: bound, by construction.
+RELAY_SYNC_RECORD_MAX_BYTES: int = RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES
 
-# What a person may save into a space that has a household reached only
-# through a GFS. The text is not all that has to fit: the event and — the
-# larger of the two — the item's sync record carry lists and fields next to
-# it. Each limit is the bound less the HARD CAP of everything that can ride
-# with that kind of item, so nothing that passed can become undeliverable
-# when a list grows later (``tests/federation/test_space_text_limits.py``
-# builds each worst case).
+# ── How large a space item's text may be: one limit per kind, everywhere ──
+#
+# Owner decision 2026-11-14: "Size should not matter if GFS or federation.
+# In the end members are equal." So these limits hold in EVERY space and on
+# every path — not only where a household is reached through a GFS — sized
+# so that the worst-case event and the worst-case sync record of the item
+# fit one relay frame. The text is not all that rides there: each limit is
+# the bound less the HARD CAP of every list and field that can sit next to
+# that kind of item, so nothing that passed can become undeliverable when
+# a list grows later (``tests/federation/test_space_text_limits.py`` builds
+# each worst case with the real builders).
 
 #: Next to a page's text in its record and event: the files' descriptors
 #: (``MAX_PAGE_DESCRIPTOR_ENTRIES`` = 64, ~330 bytes each with their hash),
@@ -161,6 +169,27 @@ SPACE_CONFIG_RESERVE_BYTES: int = 128 * 1024
 SPACE_CONFIG_TEXT_MAX_BYTES: int = (
     RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES - SPACE_CONFIG_RESERVE_BYTES
 )
+
+
+def space_text_bytes(*texts: str | None) -> int:
+    """The bytes *texts* take inside an event payload or a sync record: each
+    as a JSON string (escapes count)."""
+    return sum(len(orjson.dumps(t)) for t in texts if t)
+
+
+def require_space_text_fits(
+    *texts: str | None, limit: int, was: tuple[str | None, ...] = ()
+) -> None:
+    """Refuse (:class:`~socialhome.domain.errors.SpaceItemTooLargeError`,
+    413) space text over *limit* — the limit of its kind of item, the same
+    in every space. *was*: the text the item holds now; a save that makes
+    an item stored before the limit no larger is let through, so such an
+    item stays readable and can always be edited down."""
+    size = space_text_bytes(*texts)
+    if size <= limit or (was and size <= space_text_bytes(*was)):
+        return
+    raise SpaceItemTooLargeError(limit)
+
 
 #: The GFS capability (signed ``/gfs/info`` block) that says it carries these
 #: bodies, and the hello ``accepts`` label a household lists so the GFS
@@ -221,6 +250,7 @@ __all__ = [
     "RELAY_MEDIA_SIZE_BUCKETS",
     "RELAY_MEDIA_TO_CHARS",
     "RELAY_MEDIA_VERSION_1",
+    "RELAY_SYNC_RECORD_MAX_BYTES",
     "SPACE_CALENDAR_RESERVE_BYTES",
     "SPACE_CALENDAR_TEXT_MAX_BYTES",
     "SPACE_CONFIG_RESERVE_BYTES",
@@ -229,10 +259,11 @@ __all__ = [
     "SPACE_PAGE_STATE_MAX_BYTES",
     "SUPPORTED_RELAY_MEDIA_VERSIONS",
     "SYNC_CHUNK_WRAP_ALLOWANCE_BYTES",
-    "SYNC_RECORD_MAX_BYTES_BEHIND_GFS",
     "VALID_SEALED_LENGTHS",
     "InvalidRelayMediaBody",
     "build_relay_media_body",
     "is_relay_media_body",
     "parse_relay_media_body",
+    "require_space_text_fits",
+    "space_text_bytes",
 ]

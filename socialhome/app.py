@@ -22,7 +22,6 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Awaitable, Callable
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -69,11 +68,6 @@ from .domain.federation import (
     PairingStatus,
 )
 from .domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
-from .domain.relay_media_frame import (
-    SPACE_CALENDAR_TEXT_MAX_BYTES,
-    SPACE_CONFIG_TEXT_MAX_BYTES,
-    SPACE_PAGE_STATE_MAX_BYTES,
-)
 from .domain.space import ContentAction
 from .exception_text import describe_exception
 from .federation.auto_pair_coordinator import AutoPairCoordinator
@@ -985,20 +979,6 @@ async def _redeliver_via_gfs_relay(
         # size, so this drop is not silent.
         return DeliveryOutcome.PERMANENT
     return DeliveryOutcome.TRANSIENT
-
-
-def _build_page_state_limit(
-    federation_service: FederationService,
-) -> Callable[[str], Awaitable[int | None]]:
-    """The page-state limit of a space for the host's sequencer: the bound
-    while the space has a household reached only through a GFS, else none."""
-
-    async def _limit(space_id: str) -> int | None:
-        if await federation_service.space_has_gfs_only_household(space_id):
-            return SPACE_PAGE_STATE_MAX_BYTES
-        return None
-
-    return _limit
 
 
 def _build_gfs_route_resolver(
@@ -4984,21 +4964,6 @@ def create_app(config: Config | None = None) -> web.Application:
             federation_service=federation_service,
             federation_repo=federation_repo,
             remote_member_repo=repos.space_remote_member,
-        )
-        # A page or a description no relay frame carries is refused where
-        # it is saved (413), when the space has a household behind a GFS.
-        for text_owner, text_limit in (
-            (real_space_service, SPACE_CONFIG_TEXT_MAX_BYTES),
-            (app[K.space_page_service_key], SPACE_PAGE_STATE_MAX_BYTES),
-            (app[K.space_cal_service_key], SPACE_CALENDAR_TEXT_MAX_BYTES),
-        ):
-            text_owner.attach_text_size_check(
-                partial(federation_service.check_space_text_size, limit=text_limit)
-            )
-        # …and the host applies the same page rule to every version it
-        # sequences, a member household's proposal included.
-        app[K.page_conflict_service_key].attach_state_limit(
-            _build_page_state_limit(federation_service)
         )
         writer_certs.attach_federation(federation_service)
         relay_coverage.attach_peer_supports(federation_service.space_member_supports)

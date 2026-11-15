@@ -33,7 +33,7 @@ from ....domain.federation import (
 )
 from ....domain.federation_capabilities import FederationCapability
 from ....domain.file_hashes import file_hashes_to_wire
-from ....domain.relay_media_frame import SYNC_RECORD_MAX_BYTES_BEHIND_GFS
+from ....domain.relay_media_frame import RELAY_SYNC_RECORD_MAX_BYTES
 from ....domain.space_media_ref import (
     FILE_HASH_RESOURCES,
     MEDIA_REF_RESOURCES,
@@ -802,14 +802,14 @@ class SpaceSyncService:
     async def _record_limit(self, session: SyncSessionRecord) -> int | None:
         """The largest record a stream to this requester carries, or
         ``None``: a household behind a GFS gets each chunk as one relay
-        frame (:data:`SYNC_RECORD_MAX_BYTES_BEHIND_GFS`); every other path
+        frame (:data:`RELAY_SYNC_RECORD_MAX_BYTES`); every other path
         takes what it always took."""
         if self._federation is None or getattr(session, "transport_mode", "") != (
             "https"
         ):
             return None
         if await self._federation.is_space_session_peer(session.requester_instance_id):
-            return SYNC_RECORD_MAX_BYTES_BEHIND_GFS
+            return RELAY_SYNC_RECORD_MAX_BYTES
         return None
 
     async def _session_version(self, session: SyncSessionRecord) -> int:

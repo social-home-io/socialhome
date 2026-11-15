@@ -15,7 +15,7 @@ import logging
 import secrets
 import sqlite3
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -44,6 +44,10 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.relay_media_frame import (
+    SPACE_CALENDAR_TEXT_MAX_BYTES,
+    require_space_text_fits,
+)
 from ..domain.space import (
     MODERATION_BLOCK_KEY,
     AccessDecision,
@@ -1272,7 +1276,6 @@ class SpaceCalendarService(
         "_moderation",
         "_repo",
         "_space_repo",
-        "_text_size_check",
     )
 
     def __init__(
@@ -1283,7 +1286,6 @@ class SpaceCalendarService(
         self._repo = space_calendar_repo
         self._bus = bus
         self._federation = None
-        self._text_size_check: Callable[..., Awaitable[None]] | None = None
         # Optional helpers used solely for the tz resolution chain at
         # event create time. Tests that don't touch tz can skip both.
         self._space_repo: AbstractSpaceRepo | None = None
@@ -1326,16 +1328,6 @@ class SpaceCalendarService(
         if await self._is_restricted(owner[0], ProtectedCapability.CALENDAR_FEEDS):
             return None
         return owner
-
-    def attach_text_size_check(
-        self, check: Callable[..., Awaitable[None]] | None
-    ) -> None:
-        """Wire ``check(space_id, *texts)``: refuses (413,
-        :class:`~socialhome.domain.errors.SpaceItemTooLargeError`) a text
-        too large to reach a member household behind a GFS
-        (:meth:`FederationService.check_space_text_size`) — called before
-        anything is stored, so nothing shows as saved that cannot arrive."""
-        self._text_size_check = check
 
     def attach_federation(self, federation_service) -> None:
         """Wire outbound federation for RSVPs.
@@ -1498,8 +1490,9 @@ class SpaceCalendarService(
         summary = (summary or "").strip()
         if not summary:
             raise ValueError("summary must not be empty")
-        if self._text_size_check is not None:
-            await self._text_size_check(space_id, summary, description)
+        require_space_text_fits(
+            summary, description, limit=SPACE_CALENDAR_TEXT_MAX_BYTES
+        )
         capacity = validate_capacity(capacity)
         # The tz first: a date-only bound names a day in the event's zone.
         event_tz = await self._resolve_space_event_tz(tz, space_id=space_id)
@@ -1909,8 +1902,14 @@ class SpaceCalendarService(
         new_summary = (summary if summary is not None else existing.summary).strip()
         if not new_summary:
             raise ValueError("event summary must not be empty")
-        if self._text_size_check is not None and description is not None:
-            await self._text_size_check(space_id, new_summary, description)
+        # After the gate above; an event stored before the limit can still
+        # be saved no larger.
+        require_space_text_fits(
+            new_summary,
+            description if description is not None else existing.description,
+            limit=SPACE_CALENDAR_TEXT_MAX_BYTES,
+            was=(existing.summary, existing.description),
+        )
         # The tz first: a date-only bound names a day in the event's zone.
         if tz is not None:
             if not is_valid_tz(tz):

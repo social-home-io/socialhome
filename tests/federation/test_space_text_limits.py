@@ -27,10 +27,10 @@ from socialhome.domain.file_hashes import FILES_FIELD, FILES_SUITE_FIELD
 from socialhome.domain.relay_media_frame import (
     RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES,
     RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES,
+    RELAY_SYNC_RECORD_MAX_BYTES,
     SPACE_CALENDAR_TEXT_MAX_BYTES,
     SPACE_CONFIG_TEXT_MAX_BYTES,
     SPACE_PAGE_STATE_MAX_BYTES,
-    SYNC_RECORD_MAX_BYTES_BEHIND_GFS,
 )
 from socialhome.domain.space_media_ref import (
     MAX_PAGE_DESCRIPTOR_ENTRIES,
@@ -111,9 +111,9 @@ async def _assert_record_crosses(resource: str, record: dict) -> None:
     """*record* is within the record bound, and its chunk — built by the
     real builder, laid out raw — fits one frame with room for a hybrid
     signature set."""
-    assert len(orjson.dumps(record)) <= SYNC_RECORD_MAX_BYTES_BEHIND_GFS
+    assert len(orjson.dumps(record)) <= RELAY_SYNC_RECORD_MAX_BYTES
     [payload] = await _chunk_events(
-        resource, [record], max_record_bytes=SYNC_RECORD_MAX_BYTES_BEHIND_GFS
+        resource, [record], max_record_bytes=RELAY_SYNC_RECORD_MAX_BYTES
     )
     suite, raw = pack_event_body(CHUNK, orjson.dumps(payload).decode())
     assert suite == EVENT_BODY_SUITE_SYNC_CHUNK_RAW
@@ -325,12 +325,12 @@ async def test_a_record_over_the_bound_is_left_out_and_the_stream_stays_whole(ca
     watermark moves on and the same stream is not sent again on every
     sync."""
     small = [{"id": f"p{n}", "content": "x" * 3000} for n in range(4)]
-    big = {"id": "p-big", "content": "x" * (SYNC_RECORD_MAX_BYTES_BEHIND_GFS + 1)}
+    big = {"id": "p-big", "content": "x" * (RELAY_SYNC_RECORD_MAX_BYTES + 1)}
     with caplog.at_level(logging.WARNING):
         payloads = await _chunk_events(
             "pages",
             [*small[:2], big, *small[2:]],
-            max_record_bytes=SYNC_RECORD_MAX_BYTES_BEHIND_GFS,
+            max_record_bytes=RELAY_SYNC_RECORD_MAX_BYTES,
         )
     assert "p-big" in caplog.text and "left out" in caplog.text
     assert "x" * 100 not in caplog.text  # its id and size, never its text
@@ -351,7 +351,7 @@ async def test_a_record_over_the_bound_is_left_out_and_the_stream_stays_whole(ca
 
 
 def test_the_limits_are_derived_from_the_bound_and_stay_generous():
-    assert SYNC_RECORD_MAX_BYTES_BEHIND_GFS == RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES
+    assert RELAY_SYNC_RECORD_MAX_BYTES == RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES
     assert SPACE_PAGE_STATE_MAX_BYTES == 475_038
     assert SPACE_CALENDAR_TEXT_MAX_BYTES == 384_926
     assert SPACE_CONFIG_TEXT_MAX_BYTES == 384_926

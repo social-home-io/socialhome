@@ -1106,22 +1106,20 @@ async def test_mark_sent_ignores_a_changed_draft(member):
     assert base.sent == version_hash("T", "one")
 
 
-# ─── Host: no version a household behind a GFS could never be sent ───────
+# ─── Host: no version over the page limit every space has ────────────────
 
 
-def _limited(env, limit: int | None = 2000) -> None:
-    async def _limit(space_id: str) -> int | None:
-        return limit if space_id == SID else None
+@pytest.fixture
+def limited(monkeypatch):
+    """The page-state limit, small enough to test with."""
+    monkeypatch.setattr(mod, "SPACE_PAGE_STATE_MAX_BYTES", 2000)
 
-    env.svc.attach_state_limit(_limit)
 
-
-async def test_the_host_refuses_a_proposal_that_would_be_too_large(env):
-    """A member household's edit reaches the host by its inbox — its own
-    413 never fired (it holds no row behind a GFS). The host applies the
-    same rule before it sequences: refused ``too_large``, the proposer is
+async def test_the_host_refuses_a_proposal_that_would_be_too_large(env, limited):
+    """A member household's edit reaches the host from a build that did
+    not check it (or checked it against an older state). The host applies
+    the same rule before it sequences: refused ``too_large``, the proposer is
     told, nothing is stored or broadcast."""
-    _limited(env)
     before = await _page(env)
     r = await _propose(env, "x" * 3000)
     assert (r.outcome, r.reason) == (SequenceOutcome.REFUSED, "too_large")
@@ -1135,8 +1133,7 @@ async def test_the_host_refuses_a_proposal_that_would_be_too_large(env):
     assert ok.outcome is SequenceOutcome.APPLIED
 
 
-async def test_the_host_refuses_a_proposed_create_that_is_too_large(env):
-    _limited(env)
+async def test_the_host_refuses_a_proposed_create_that_is_too_large(env, limited):
     r = await env.svc.sequence(
         space_id=SID,
         page_id="pg-big",
@@ -1154,12 +1151,11 @@ async def test_the_host_refuses_a_proposed_create_that_is_too_large(env):
     assert env.fed.sent[-1][2]["sequenced"]["reason"] == "too_large"
 
 
-async def test_a_side_that_would_not_fit_beside_the_page_is_refused(env):
+async def test_a_side_that_would_not_fit_beside_the_page_is_refused(env, limited):
     """A conflict side is a whole other version, and its text is not capped
     on its own: the page plus the sides left open is what one event and one
     sync record must carry, so a side that would push that past the limit
     is refused instead of kept — a list never grows a page out of reach."""
-    _limited(env)
     await _propose(env, "a" * 1200, by="u-a")
     r = await _propose(env, "b" * 1200, by="u-b", proposer="iid-b")
     assert (r.outcome, r.reason) == (SequenceOutcome.REFUSED, "too_large")
@@ -1171,18 +1167,16 @@ async def test_a_side_that_would_not_fit_beside_the_page_is_refused(env):
     assert page_state_bytes("T", "a" * 1200, await env.svc.sides(SID, env.pid)) <= 2000
 
 
-async def test_an_edit_that_shrinks_an_old_oversize_page_is_taken(env):
-    await _propose(env, "x" * 5000)  # stored before the space had the limit
-    _limited(env)
+async def test_an_edit_that_shrinks_an_old_oversize_page_is_taken(env, monkeypatch):
+    """A page stored before the limit stays readable, and can be edited —
+    as long as the edit does not make it larger."""
+    await _propose(env, "x" * 5000)  # stored before the limit
+    monkeypatch.setattr(mod, "SPACE_PAGE_STATE_MAX_BYTES", 2000)
+    assert (await _page(env)).content == "x" * 5000
     grow = await _propose(env, "x" * 5001, base_seq=2, base="x" * 5000)
     assert (grow.outcome, grow.reason) == (SequenceOutcome.REFUSED, "too_large")
     shrink = await _propose(env, "x" * 4000, base_seq=2, base="x" * 5000)
     assert shrink.outcome is SequenceOutcome.APPLIED
-
-
-async def test_a_space_without_the_limit_sequences_any_size(env):
-    _limited(env, None)
-    assert (await _propose(env, "x" * 50_000)).outcome is SequenceOutcome.APPLIED
 
 
 async def test_a_too_large_refusal_keeps_the_authors_words_in_history(member):

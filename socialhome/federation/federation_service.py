@@ -48,7 +48,6 @@ from ..crypto import (
     derive_instance_id,
 )
 from ..db import AsyncDatabase
-from ..domain.errors import SpaceItemTooLargeError
 from ..domain.events import (
     ConnectionReachable,
     ConnectionUnreachable,
@@ -191,12 +190,6 @@ from .relay_event_body import (
     pack_event_body,
     unpack_event_body,
 )
-
-
-def space_text_bytes(*texts: str | None) -> int:
-    """The bytes *texts* take inside an event payload or a sync record: each
-    as a JSON string (escapes count)."""
-    return sum(len(_orjson.dumps(t)) for t in texts if t)
 
 
 def _dumps(obj: dict) -> str:
@@ -2520,41 +2513,6 @@ class FederationService:
         return await self._transport.send_event_frame(
             instance=instance, header_dict=header, payload_bytes=sealed
         )
-
-    async def space_has_gfs_only_household(self, space_id: str) -> bool:
-        """Whether a member household of *space_id* is reached only through
-        a GFS (a ``space_session`` row) — the households the size rule for
-        large items protects."""
-        return any(
-            row.source is InstanceSource.SPACE_SESSION
-            for row in await self._federation_repo.list_instances_in_space(space_id)
-        )
-
-    async def check_space_text_size(
-        self, space_id: str, *texts: str | None, limit: int
-    ) -> None:
-        """Refuse (:class:`SpaceItemTooLargeError`, 413) text a person is
-        about to save into *space_id* that could not reach a member
-        household behind a GFS: over *limit* as JSON — the bound for its kind
-        of item (``SPACE_PAGE_STATE_MAX_BYTES`` for a page's whole state,
-        ``SPACE_CALENDAR_TEXT_MAX_BYTES``, ``SPACE_CONFIG_TEXT_MAX_BYTES``:
-        the frame's bound less the hard cap of everything that rides with
-        the text) — while the space has such a household. For a local
-        action to call AFTER it authorized the actor and BEFORE it stores
-        anything, so nothing is shown as saved that can never arrive. A
-        space without such a household keeps the limits of local
-        federation."""
-        size = space_text_bytes(*texts)
-        if size <= limit or not await self.space_has_gfs_only_household(space_id):
-            return
-        log.warning(
-            "space %s: a %d-byte text is refused — a member household behind "
-            "a GFS takes at most %d bytes of it",
-            space_id,
-            size,
-            limit,
-        )
-        raise SpaceItemTooLargeError(limit)
 
     async def send_event_once(
         self,

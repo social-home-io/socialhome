@@ -34,14 +34,14 @@ describe('apiErrorMessage — known codes', () => {
       .toBe('Your home is still converting a lot of videos. Try again later.')
   })
 
-  it('says a page is too long for a household behind a GFS, with the limit', () => {
+  it('says a space item is too large, with the limit', () => {
     expect(apiErrorMessage(413, '/api/spaces/s/pages', {
-      code: 'SPACE_ITEM_TOO_LARGE', detail: 'x', params: { max_kb: 495 },
-    })).toBe('This is too large for a space with households that reach it through a GFS (at most 495 KB of text). Shorten it or split it up.')
+      code: 'SPACE_ITEM_TOO_LARGE', detail: 'x', params: { max_kb: 463 },
+    })).toBe('This is too large (at most 463 KB of text). Shorten it or split it up.')
     // Without the limit: the server's own words.
     expect(apiErrorMessage(413, '/api/spaces/s/pages', {
-      code: 'SPACE_ITEM_TOO_LARGE', detail: 'Too large for a GFS household.',
-    })).toBe('Too large for a GFS household.')
+      code: 'SPACE_ITEM_TOO_LARGE', detail: 'Too large.',
+    })).toBe('Too large.')
   })
 
   it('tells an app turned off by an admin from one that is not for this account', () => {

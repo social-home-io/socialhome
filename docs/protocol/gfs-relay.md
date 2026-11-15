@@ -532,57 +532,71 @@ row.
 | `SPACE_ROSTER_SNAPSHOT` | parts of 96 KiB of entries | yes, any roster size |
 | posts, comments, bazaar, tasks, polls, timetables, app tables, directory parts | ≤ ~175 KiB | yes (most fit the JSON envelope) |
 
-**The size rule measures what has to fit — not the text alone.** Pages,
-calendar event descriptions and a space's description / about text have
-no product cap (only the 1 MiB request body). Next to the text, the event
-and — the larger of the two — the item's sync record carry lists and
-fields. Each limit is the bound less the **hard cap** of everything that
-can ride with that kind of item (`domain/relay_media_frame.py`;
+**One limit per kind of space item — the same in every space, on every
+path.** Owner decision 2026-11-14: *"Size should not matter if GFS or
+federation. In the end members are equal."* Pages, calendar event
+descriptions and a space's description / about text had no product cap
+(only the 1 MiB request body). They now have one fixed limit each, which
+does not look at how any household is reached: it is what the worst-case
+event **and** the worst-case sync record of that kind of item take to
+cross one relay frame. Next to the text those carry lists and fields, so
+each limit is the bound less the **hard cap** of everything that can ride
+with the item (`domain/relay_media_frame.py`;
 `tests/federation/test_space_text_limits.py` builds each worst case with
-the real exporters and `ChunkBuilder`), so nothing that passed can become
+the real exporters and `ChunkBuilder`) — nothing that passed can become
 undeliverable when a list grows later:
 
 | Kind | What is measured | Limit | Reserve, and what it covers |
 |---|---|---|---|
-| Page | its **state**: title + content + the title and content of every open conflict side | `SPACE_PAGE_STATE_MAX_BYTES` = 475,038 B (~463 KiB) | 40 KiB: 64 file descriptors with their hashes, the wrapper of ≤ 3 sides, cover, ids, stamps |
-| Space calendar event | summary + description | `SPACE_CALENDAR_TEXT_MAX_BYTES` = 384,926 B (~375 KiB) | 128 KiB: 500 RSVPs (`MAX_RSVPS_PER_EVENT`, ~200 B each), the cover's descriptors, the rule, ids |
-| Space description + about | both texts | `SPACE_CONFIG_TEXT_MAX_BYTES` = 384,926 B (~375 KiB) | 128 KiB: the relay variant's cover and icon (64 + 16 KiB, base64'ed), features, settings |
+| Page | its **state**: title + content + the title and content of every open conflict side | `SPACE_PAGE_STATE_MAX_BYTES` = 515,998 − 40,960 = **475,038 B** (~463 KiB) | 40 KiB: 64 file descriptors with their hashes, the wrapper of ≤ 3 sides, cover, ids, stamps |
+| Space calendar event | summary + description | `SPACE_CALENDAR_TEXT_MAX_BYTES` = 515,998 − 131,072 = **384,926 B** (~375 KiB) | 128 KiB: 500 RSVPs (`MAX_RSVPS_PER_EVENT`, ~200 B each), the cover's descriptors, the rule, ids |
+| Space description + about | both texts | `SPACE_CONFIG_TEXT_MAX_BYTES` = 515,998 − 131,072 = **384,926 B** (~375 KiB) | 128 KiB: the relay variant's cover and icon (64 + 16 KiB, base64'ed), features, settings |
 
-A conflict side is a whole other version of the page and its text is not
+(Texts are measured as they travel: JSON strings, escapes included.) A
+conflict side is a whole other version of the page and its text is not
 capped on its own (a single side is always kept), which is why the page
 rule measures the state, not the body: a 463 KiB page with no open
 conflict passes, and so do a 230 KiB page and a 230 KiB side.
 
-Where it is enforced, only in a space that has a household reached only
-through a GFS (every other space keeps the limits of local federation):
+Where it is enforced — unconditionally:
 
-- **Where a person saves** (`FederationService.check_space_text_size`,
-  after the actor was authorized — a person without the right gets the
-  403 as ever — and before anything is stored): **413
-  `SPACE_ITEM_TOO_LARGE`** with `max_kb`, translated in the SPA. Pages:
-  in `SpacePageService._write`, which every local write passes (an edit,
-  a conflict resolution, an approved item's replay) and on create;
-  calendar: create and update; the space: `update_config`.
+- **Where a person saves** (`require_space_text_fits`, after the actor
+  was authorized and before anything is stored): **413
+  `SPACE_ITEM_TOO_LARGE`** with `max_kb`, translated in the SPA ("This is
+  too large (at most … KB of text)"). Pages: in `SpacePageService._write`,
+  which every local write passes (an edit, a conflict resolution, an
+  approved item's replay), and on create; calendar: create and update;
+  the space: `update_config`.
 - **On the host, for every page version it sequences**
-  (`PageConflictService`, `attach_state_limit`): its own people's and a
-  member household's proposal alike. A paired household that does not
-  itself hold a row behind a GFS never ran the check; the host refuses
-  the proposal `too_large` through the existing refusal answer instead of
-  sequencing a version it could not send on. The proposer's draft is
-  moved to the page's history and the host's version comes back on top
-  (`PageProposalSettled` refused / `too_large`). The same rule refuses a
-  concurrent edit that would have to be kept as a conflict side when page
-  + sides would pass the limit — a side never grows a page out of reach.
-  An edit that makes an old oversize page no larger is taken.
-- **At the sender, behind all of it**: any event over the bound toward a
-  household behind a GFS is refused (`relay_too_large`, WARNING naming
-  household, event and size; never queued, never silently dropped).
-- **In the sync stream**: a record over `SYNC_RECORD_MAX_BYTES_BEHIND_GFS`
-  (the bound) is left out of a stream to a household behind a GFS with a
-  WARNING naming its resource, id and size, *before* it takes a chunk
-  index — so the stream stays whole and clean and the requester's
-  watermark moves on. (Before, one such record made every later sync
-  re-send the whole stream from the old watermark.)
+  (`PageConflictService._over_state_limit`): its own people's and a
+  member household's proposal alike (a household on a build without the
+  limit, or one whose draft met a larger state on the host). Refused
+  `too_large` through the existing refusal answer, never sequenced; the
+  proposer's draft is moved to the page's history and the host's version
+  comes back on top (`PageProposalSettled` refused / `too_large`). The
+  same rule refuses a concurrent edit that would have to be kept as a
+  conflict side when page + sides would pass the limit — a side never
+  grows a page out of reach.
+- **At the sender, behind all of it**: an event over the frame bound
+  toward a household behind a GFS is refused (`relay_too_large`, WARNING
+  naming household, event and size; never queued, never silently
+  dropped).
+- **In a sync stream over the relay**: a record over
+  `RELAY_SYNC_RECORD_MAX_BYTES` (the bound) is left out with a WARNING
+  naming its resource, id and size, *before* it takes a chunk index — the
+  stream stays whole and clean and the requester's watermark moves on.
+  (Before, one such record made every later sync re-send the whole stream
+  from the old watermark.)
+
+**An item that is already over its limit** (saved before this, or by a
+household on an older build) stays as it is:
+
+| | What happens |
+|---|---|
+| Reading it | unchanged, on every household that holds it |
+| Editing it | allowed as long as the save does not make it larger (the same size or smaller passes: `was=` in `require_space_text_fits`, `_over_state_limit`); a save that grows it answers 413 |
+| Paired / mesh households | get it live and by sync as before (their paths carry it) |
+| A household behind a GFS | does not get it: the live event is refused at the sender and the record is left out of its stream (WARNING both times), until somebody saves it within the limit |
 
 **Roster.** `SPACE_ROSTER_SNAPSHOT` used to be one event with every seat
 (~0.5 KiB each): past a few hundred seats no JSON envelope, and past
@@ -606,17 +620,16 @@ Stated plainly, after all of the above:
 1. **Its build or its GFS takes no frames** (below v_87, or no
    `envelope_media`): every event over the JSON envelope is refused at
    the sender (WARNING); a large moderation submission answers 413.
-2. **An item over the bound that was saved without the rule**: before the
-   space had a household behind a GFS, or by a household that does not
-   know of one yet (its seat for that member is made lazily). Pages: the
-   host refuses the version once it knows of such a household, so this is
-   left for pages saved earlier. Calendar events and the space's
-   description arriving at the host **from another household** (a
-   member's event, a delegated admin's config edit) are **not** refused
-   by the host — there is no refusal answer on those paths. Such an item
-   is refused at each sender toward the household behind a GFS and left
-   out of its sync stream (WARNING both times); it reaches that household
-   only once somebody saves it smaller.
+2. **An item already over its limit** — saved before the limits
+   existed, or arriving from a household on a build without them. Pages:
+   the host refuses such a version (`too_large`), so only pages stored
+   earlier are left. A calendar event or a space description arriving at
+   the host **from another household** (a member's event, a delegated
+   admin's signed config edit) is **not** refused by the host — those
+   paths have no refusal answer; the limit there is the sending
+   household's own. Such an item is refused at each sender toward the
+   household behind a GFS and left out of its sync stream (WARNING both
+   times); it arrives once somebody saves it within the limit.
 3. **A calendar event's `attendees`** (a list of user ids) is not capped
    and not in the calendar reserve; an event with thousands of attendees
    next to a description near the limit can pass the bound and is then

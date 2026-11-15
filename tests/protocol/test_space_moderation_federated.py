@@ -2789,17 +2789,15 @@ async def test_an_items_files_go_only_where_the_item_goes(
     assert sorted(r["target_instance_id"] for r in rows) == sorted(wanted)
 
 
-# ── A text no relay frame carries is refused where it is saved ───────────
+# ── Space text over the limit of its kind is refused where it is saved ────
 
 
-async def test_a_page_or_description_too_large_for_a_gfs_member_is_refused(mesh):
-    """A space with a household behind a GFS: a page, a calendar description
-    or a space description over what one relay frame (and the sync record
-    that re-delivers it) carries answers 413 ``SPACE_ITEM_TOO_LARGE`` with
-    the limit for that kind of item, and nothing is stored. Without such a
-    household the same text is taken, as on any local path. A person
-    without the right gets the 403 they always got — never a 413 that says
-    what households the space has."""
+async def test_a_page_or_description_over_its_limit_is_refused_in_any_space(mesh):
+    """One limit per kind of item, the same in every space and on every
+    path (members are equal, however their household is reached): a page, a
+    calendar description or a space description over it answers 413
+    ``SPACE_ITEM_TOO_LARGE`` with the limit, and nothing is stored. This
+    space has no household behind a GFS — the rule does not look."""
     a, h = mesh["A"], mesh["H"]
     big = secrets.token_hex(260 * 1024)  # 520 KiB of text
     event = {
@@ -2808,20 +2806,7 @@ async def test_a_page_or_description_too_large_for_a_gfs_member_is_refused(mesh)
         "end": "2027-04-01T11:00:00Z",
         "description": big,
     }
-    # No household behind a GFS: the owner's large page is taken.
-    r = await h.tc.post(
-        f"/api/spaces/{SID}/pages",
-        json={"title": "Big", "content": big},
-        headers=h.headers,
-    )
-    assert r.status in (200, 201)
     host_pages = await _pages(h)
-    for house in (a, h):
-        peer = h if house is a else a
-        await house.db.enqueue(
-            "UPDATE remote_instances SET source='space_session' WHERE id=?",
-            (peer.iid,),
-        )
     for method, path, body, max_kb in (
         ("post", f"/api/spaces/{SID}/pages", {"title": "Big", "content": big}, 463),
         ("post", f"/api/spaces/{SID}/calendar/events", event, 375),
@@ -2833,12 +2818,12 @@ async def test_a_page_or_description_too_large_for_a_gfs_member_is_refused(mesh)
         assert error["code"] == "SPACE_ITEM_TOO_LARGE", path
         assert error["params"] == {"max_kb": max_kb}, path
     assert await _pages(h) == host_pages
-    # A's person is a plain member: not allowed to change the space.
+    # A person without the right gets the 403 they always got.
     r = await a.tc.patch(
         f"/api/spaces/{SID}", json={"description": big}, headers=a.headers
     )
     assert r.status == 403
-    # …and its pages are reviewed: the queue's own (smaller) cap answers.
+    # A's pages are reviewed: the queue's own (smaller) cap answers.
     queue_before = await _queue_rows(a)
     r = await a.tc.post(
         f"/api/spaces/{SID}/pages",
@@ -2847,10 +2832,10 @@ async def test_a_page_or_description_too_large_for_a_gfs_member_is_refused(mesh)
     )
     assert r.status == 413
     assert await _queue_rows(a) == queue_before
-    # A page under the bound is taken as ever.
+    # Under the limit — 450 KiB, more than any JSON relay envelope: taken.
     r = await h.tc.post(
         f"/api/spaces/{SID}/pages",
-        json={"title": "Fits", "content": secrets.token_hex(120 * 1024)},
+        json={"title": "Fits", "content": secrets.token_hex(225 * 1024)},
         headers=h.headers,
     )
     assert r.status in (200, 201)

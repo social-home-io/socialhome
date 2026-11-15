@@ -612,9 +612,8 @@ live event toward such a household may be (`RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES`,
 515,998 bytes, derived from the frame's): every item that reached it
 live also fits its catch-up. The GFS keeps a frame one hour (a JSON
 envelope a day), so for a large item the sync, not the queue, is the
-heal. A record past the bound (`SYNC_RECORD_MAX_BYTES_BEHIND_GFS`; saved
-before the space had a household behind a GFS — later saves are refused
-with 413) is **left out** of a stream to such a household with a WARNING
+heal. A record past the bound (`RELAY_SYNC_RECORD_MAX_BYTES`; an item saved
+before the size limits — every save since is refused with 413) is **left out** of a stream to such a household with a WARNING
 naming its resource, id and size, before it takes a chunk index: the
 stream stays whole and clean and the watermark moves on. (Before, the
 refused chunk made the stream unclean, so every later sync re-sent it

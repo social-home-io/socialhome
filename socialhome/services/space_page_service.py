@@ -43,11 +43,12 @@ from typing import TYPE_CHECKING, Any
 
 import aiofiles.os
 
-from ..domain.errors import PageFilesNotShareableError
+from ..domain.errors import PageFilesNotShareableError, SpaceItemTooLargeError
 from ..domain.events import PageCreated, PageDeleted, PageUpdated
 from ..domain.file_hashes import is_space_content_media_name
 from ..domain.page import MAX_PAGE_TITLE_LENGTH, Page, PageVersion
 from ..domain.page_version import PageConflictSide, is_version_hash, version_hash
+from ..domain.relay_media_frame import SPACE_PAGE_STATE_MAX_BYTES
 from ..domain.space import (
     AccessDecision,
     ContentAction,
@@ -163,7 +164,6 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         "_moderation",
         "_pages",
         "_spaces",
-        "_text_size_check",
     )
 
     def __init__(
@@ -185,17 +185,6 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         #: space's host (``None``: always).
         self._files_reach_host: Callable[[str], Awaitable[bool]] | None = None
         self._moderation: ModerationSubmitter | None = None
-        self._text_size_check: Callable[..., Awaitable[None]] | None = None
-
-    def attach_text_size_check(
-        self, check: Callable[..., Awaitable[None]] | None
-    ) -> None:
-        """Wire ``check(space_id, *texts)``: refuses (413,
-        :class:`~socialhome.domain.errors.SpaceItemTooLargeError`) a text
-        too large to reach a member household behind a GFS
-        (:meth:`FederationService.check_space_text_size`) — called before
-        anything is stored, so nothing shows as saved that cannot arrive."""
-        self._text_size_check = check
 
     async def _require_size(
         self,
@@ -208,10 +197,9 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         was: Page | None = None,
     ) -> None:
         """413 for a page whose state — this text plus every conflict side
-        left open — would not reach a household behind a GFS. A save that
-        makes an old oversize page no larger is let through."""
-        if self._text_size_check is None:
-            return
+        left open — is over the limit every space has
+        (``SPACE_PAGE_STATE_MAX_BYTES``). A save that makes a page stored
+        before the limit no larger is let through: it stays editable."""
         sides = (
             [
                 s
@@ -221,13 +209,12 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
             if page_id is not None
             else []
         )
-        if was is not None and page_state_bytes(
-            title, content, sides
-        ) <= page_state_bytes(was.title, was.content, sides):
+        size = page_state_bytes(title, content, sides)
+        if size <= SPACE_PAGE_STATE_MAX_BYTES or (
+            was is not None and size <= page_state_bytes(was.title, was.content, sides)
+        ):
             return
-        await self._text_size_check(
-            space_id, title, content, *(t for s in sides for t in (s.title, s.content))
-        )
+        raise SpaceItemTooLargeError(SPACE_PAGE_STATE_MAX_BYTES)
 
     def attach_files_reach_host(self, check: Callable[[str], Awaitable[bool]]) -> None:
         """Wire ``check(space_id)``: whether a page's new files can reach
@@ -514,9 +501,8 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
                     "cover_image_url": cover,
                 },
             )
-        # After the gate (a person without the right learns nothing about
-        # the space from a 413) and before anything is stored. A reviewed
-        # create was queued above — the queue has its own, smaller cap.
+        # After the gate and before anything is stored. A reviewed create
+        # was queued above — the queue has its own, smaller cap.
         await self._require_size(space_id, clean_title, body)
         page = new_page(
             title=clean_title,
@@ -669,8 +655,8 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
                     raise PageConflictStaleError(hashes)
             # EVERY local write passes here (an edit, a resolution, an
             # approved item's replay), already authorized: the page as it
-            # would be — its text and the sides left open — must still reach
-            # a household behind a GFS.
+            # would be — its text and the sides left open — stays within the
+            # limit every space has.
             await self._require_size(
                 space_id,
                 patch.get("title", current.title),

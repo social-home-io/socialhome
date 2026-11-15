@@ -61,6 +61,7 @@ from ..domain.page_version import (
     merge_scalar,
     version_hash,
 )
+from ..domain.relay_media_frame import SPACE_PAGE_STATE_MAX_BYTES
 from ..domain.space_media_ref import page_media_urls
 from ..rate_limiter import RateLimiter
 from ..repositories.page_repo import AbstractPageRepo, PageNotFoundError
@@ -104,8 +105,8 @@ REFUSALS_PER_SENDER_PER_MINUTE = 30
 #: own copy, and nothing of the page is revealed to the sender.
 _STATELESS_REFUSALS = frozenset({"rate_limited", "archived"})
 
-#: Refusal reason: the version (its text plus the open sides) would be too
-#: large to reach a member household behind a GFS.
+#: Refusal reason: the version (its text plus the open sides) is over the
+#: page limit every space has.
 TOO_LARGE = "too_large"
 
 
@@ -683,14 +684,12 @@ class PageConflictService(BusPublisherMixin):
         "_own_instance_id",
         "_pages",
         "_spaces",
-        "_state_limit",
     )
 
     def __init__(
         self, page_repo: AbstractPageRepo, *, bus: EventBus | None = None
     ) -> None:
         self._pages = page_repo
-        self._state_limit: Callable[[str], Awaitable[int | None]] | None = None
         self._bus = bus
         self._locks: weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock] = (
             weakref.WeakValueDictionary()
@@ -946,43 +945,30 @@ class PageConflictService(BusPublisherMixin):
                 proposer_instance=proposer_instance,
             )
 
-    def attach_state_limit(
-        self, limit: Callable[[str], Awaitable[int | None]] | None
-    ) -> None:
-        """Wire ``limit(space_id)``: the most bytes a page's state (its
-        text plus every open side's, :func:`page_state_bytes`) may have in
-        that space, or ``None`` for no limit. The host of a space with a
-        household behind a GFS refuses (``too_large``) a proposal that
-        would grow a page past it — its own people's and a member
-        household's alike — so no version is sequenced that such a
-        household could never be sent."""
-        self._state_limit = limit
-
-    async def _over_state_limit(
-        self,
-        space_id: str,
+    @staticmethod
+    def _over_state_limit(
         title: str,
         content: str,
         sides: Sequence[PageConflictSide],
         *,
         was: int = 0,
     ) -> bool:
-        """Whether that state passes the space's limit — and is larger than
-        it *was* (an edit that shrinks an old oversize page is welcome)."""
-        if self._state_limit is None:
-            return False
-        limit = await self._state_limit(space_id)
-        if limit is None:
-            return False
+        """Whether that state (the text plus every open side's,
+        :func:`page_state_bytes`) passes the limit every space has
+        (``SPACE_PAGE_STATE_MAX_BYTES``) — and is larger than it *was*: an
+        edit that makes a page stored before the limit no larger is taken.
+        The host refuses (``too_large``) a version over it, its own people's
+        and a member household's alike, so none is sequenced that could not
+        be sent on in one relay frame, live and by sync."""
         size = page_state_bytes(title, content, sides)
-        return size > limit and size > was
+        return size > SPACE_PAGE_STATE_MAX_BYTES and size > was
 
     async def _sequence_create(
         self, space_id: str, page_id: str, proposal: Proposal
     ) -> SequenceResult:
         if proposal.base_seq not in (None, 0) or not proposal.created_by:
             return SequenceResult(SequenceOutcome.REFUSED, "gone")
-        if await self._over_state_limit(space_id, proposal.title, proposal.content, ()):
+        if self._over_state_limit(proposal.title, proposal.content, ()):
             return SequenceResult(SequenceOutcome.REFUSED, TOO_LARGE)
         now = _now()
         page = Page(
@@ -1104,16 +1090,15 @@ class PageConflictService(BusPublisherMixin):
         if not changed_body and not changed_sides and not unsequenced and not regressed:
             return SequenceResult(SequenceOutcome.DUPLICATE, None, page)
         # The state this would commit — the body and every side kept open —
-        # must still reach a household behind a GFS (one frame, live and by
-        # sync). A version that would not is refused, never sequenced: the
-        # proposer is told (``too_large``), nobody is left behind silently.
+        # stays within the limit every space has (it must cross one relay
+        # frame, live and by sync). A version over it is refused, never
+        # sequenced: the proposer is told (``too_large``).
         next_title, next_content = (
             (new_body[0], new_body[1])
             if changed_body and new_body is not None
             else (page.title, page.content)
         )
-        if await self._over_state_limit(
-            space_id,
+        if self._over_state_limit(
             next_title,
             next_content,
             state.sides,
@@ -1969,8 +1954,8 @@ class PageConflictService(BusPublisherMixin):
         own draft base)."""
         reason = seq_.reason or "access"
         if reason == TOO_LARGE and page.pending_base_seq is not None:
-            # The host could not take our draft (it would not reach a
-            # household behind a GFS). The words go to the page's history
+            # The host could not take our draft (over the page limit — a
+            # build without the limit saved it). The words go to the history
             # before the host's version comes back on top — never lost.
             await self._remember_page(page, space_id)
         if reason == "gone":

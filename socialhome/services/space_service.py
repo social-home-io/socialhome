@@ -42,7 +42,6 @@ import re
 import unicodedata
 import uuid
 import weakref
-from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -58,6 +57,10 @@ from ..domain.errors import (
     SpaceNotPublishableError,
     TierChangeRequiredError,
     WrongTypeError,
+)
+from ..domain.relay_media_frame import (
+    SPACE_CONFIG_TEXT_MAX_BYTES,
+    require_space_text_fits,
 )
 from ..federation.gfs_join_request import APPROVAL_TOKEN_TTL, unverified_names
 from ..federation.host_equivalence import acts_as_host
@@ -548,7 +551,6 @@ class SpaceService(
         "_space_crypto",
         "_spaces",
         "_subscriber_keys",
-        "_text_size_check",
         "_users",
         "_writer_certs",
     )
@@ -612,7 +614,6 @@ class SpaceService(
         #: inbound pipeline (:meth:`_on_remote_join_request_approved_bus`).
         self._join_approvals: set[asyncio.Task] = set()
         self._federation = None
-        self._text_size_check: Callable[..., Awaitable[None]] | None = None
         self._remote_members = None
         self._redeem_coordinator = None
         #: "Ask to join" through the GFS (v_84) — both ends; unwired, an
@@ -796,16 +797,6 @@ class SpaceService(
                 event.space_id,
                 event.instance_id,
             )
-
-    def attach_text_size_check(
-        self, check: Callable[..., Awaitable[None]] | None
-    ) -> None:
-        """Wire ``check(space_id, *texts)``: refuses (413,
-        :class:`~socialhome.domain.errors.SpaceItemTooLargeError`) a text
-        too large to reach a member household behind a GFS
-        (:meth:`FederationService.check_space_text_size`) — called before
-        anything is stored, so nothing shows as saved that cannot arrive."""
-        self._text_size_check = check
 
     def attach_federation(
         self,
@@ -2708,14 +2699,16 @@ class SpaceService(
             await self._require_content_authority(space, actor_username)
         else:
             await self._require_admin_or_owner(space, actor_username)
-        if self._text_size_check is not None:
-            # After the authorization above: a person without the right
-            # must not learn from a 413 what households the space has.
-            await self._text_size_check(
-                space_id,
-                description,
-                about_markdown if isinstance(about_markdown, str) else None,
-            )
+        # The texts as they would be (an unsent one stays as it is), within
+        # the limit every space has; a space stored before it can still be
+        # saved no larger.
+        about_now = space.about_markdown
+        require_space_text_fits(
+            description if description is not None else space.description,
+            about_markdown if isinstance(about_markdown, str) else about_now,
+            limit=SPACE_CONFIG_TEXT_MAX_BYTES,
+            was=(space.description, about_now),
+        )
 
         if category is not None and category not in SPACE_CATEGORIES:
             raise ValueError(f"unknown category {category!r}")

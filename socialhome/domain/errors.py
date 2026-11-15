@@ -97,21 +97,18 @@ class PayloadTooLargeError(CodedError):
 
 
 class SpaceItemTooLargeError(CodedError, ValueError):
-    """A page or a description too large to reach every member household.
+    """A space page, calendar description or space description over the
+    limit of its kind (``domain/relay_media_frame.py``).
 
-    A household that reaches a space only through a GFS gets a large item
-    as one relay frame; with what rides next to the text that is ~463 KiB
-    for a page and ~375 KiB for a description. Saving more
-    into a space with such a household is refused up front (413) — it
-    would show as saved here and never arrive there.
+    The limit is the same in every space and on every path — members are
+    equal however their household is reached — and is what one item, with
+    everything that rides next to its text, takes to cross to any of them.
+    Refused where it is saved (413), before anything is stored.
     """
 
     status = 413
     code = "SPACE_ITEM_TOO_LARGE"
-    detail = (
-        "This is too large for a space with households that reach it "
-        "through a GFS. Shorten it or split it."
-    )
+    detail = "This is too large. Shorten it or split it up."
 
     def __init__(self, max_bytes: int) -> None:
         super().__init__(params={"max_kb": max_bytes // 1024})

@@ -52,6 +52,7 @@ from socialhome.domain.relay_media_frame import (
     SPACE_PAGE_STATE_MAX_BYTES,
     SYNC_CHUNK_WRAP_ALLOWANCE_BYTES,
     parse_relay_media_body,
+    require_space_text_fits,
 )
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.gfs_mailbox import derive_mailbox_keys
@@ -907,31 +908,30 @@ async def test_a_framed_event_from_a_paired_peer_with_the_opt_in_is_refused():
 # ── A local save is refused up front, never shown as saved ────────────────
 
 
-async def test_a_text_no_frame_carries_is_refused_before_it_is_stored():
-    w = _world()
+def test_text_over_the_limit_of_its_kind_is_refused_before_it_is_stored():
     limit = SPACE_PAGE_STATE_MAX_BYTES
-    check = w.host.svc.check_space_text_size
     fits = "x" * (limit - 64)
-    await check(SPACE, "Title", fits, limit=limit)
+    require_space_text_fits("Title", fits, limit=limit)
     with pytest.raises(SpaceItemTooLargeError) as refused:
-        await check(SPACE, "Title", fits + "x" * 128, limit=limit)
+        require_space_text_fits("Title", fits + "x" * 128, limit=limit)
     assert refused.value.status == 413
     assert refused.value.code == "SPACE_ITEM_TOO_LARGE"
     assert refused.value.params == {"max_kb": limit // 1024}
     # Measured as it travels: JSON escapes count.
     with pytest.raises(SpaceItemTooLargeError):
-        await check(SPACE, '"' * (limit // 2 + 64), limit=limit)
+        require_space_text_fits('"' * (limit // 2 + 64), limit=limit)
 
 
-async def test_a_space_without_a_household_behind_a_gfs_keeps_its_limits():
-    w = _world()
-    row = w.host.repo._instances[w.member.id]
-    w.host.repo._instances[w.member.id] = dataclasses.replace(
-        row, source=InstanceSource.MANUAL
-    )
-    assert not await w.host.svc.space_has_gfs_only_household(SPACE)
-    await w.host.svc.check_space_text_size(SPACE, "x" * 900_000, limit=1000)
-    await w.host.svc.check_space_text_size("another-space", "x" * 900_000, limit=1000)
+def test_an_item_stored_before_the_limit_can_be_saved_no_larger():
+    """It stays readable, and editable down (or as it is) — never up."""
+    old = "x" * 5000
+    require_space_text_fits("S", old, limit=1000, was=("S", old))
+    require_space_text_fits("S", old[:-1], limit=1000, was=("S", old))
+    require_space_text_fits("S", "short", limit=1000, was=("S", old))
+    with pytest.raises(SpaceItemTooLargeError):
+        require_space_text_fits("S", old + "y", limit=1000, was=("S", old))
+    with pytest.raises(SpaceItemTooLargeError):
+        require_space_text_fits("S", old, limit=1000)
 
 
 # ── The body suite is bound to the event type ─────────────────────────────

@@ -9,12 +9,11 @@ from socialhome.app_keys import (
     federation_service_key,
     page_conflict_service_key,
     page_repo_key,
-    space_page_service_key,
 )
-from socialhome.domain.errors import SpaceItemTooLargeError
 from socialhome.domain.events import PageUpdated
 from socialhome.domain.page_version import version_hash
 from socialhome.repositories.page_repo import new_page
+from socialhome.services import space_page_service
 
 from .conftest import _auth
 
@@ -303,33 +302,28 @@ async def test_resolve_side_needs_a_side_and_sides_a_list(client):
         assert r.status == 422, body
 
 
-async def test_resolve_conflict_with_text_too_large_for_a_gfs_member_is_413(client):
+async def test_resolve_conflict_with_text_over_the_page_limit_is_413(
+    client, monkeypatch
+):
     """A resolution writes a page like any edit: its merged text passes the
     same size rule (it used to skip it), and nothing is stored."""
     page = await _seed_conflict(client)
-    seen: list[int] = []
-
-    async def _check(space_id, *texts):
-        size = sum(len(t) for t in texts if t)
-        seen.append(size)
-        if size > 1000:
-            raise SpaceItemTooLargeError(1024)
-
-    client.app[space_page_service_key].attach_text_size_check(_check)
+    monkeypatch.setattr(space_page_service, "SPACE_PAGE_STATE_MAX_BYTES", 1000)
     r = await client.post(
         f"/api/spaces/sp-1/pages/{page.id}/resolve-conflict",
         json={"resolution": "merged_content", "content": "x" * 5000},
         headers=_auth(client._tok),
     )
     assert r.status == 413
-    assert (await r.json())["error"]["code"] == "SPACE_ITEM_TOO_LARGE"
+    error = (await r.json())["error"]
+    assert error["code"] == "SPACE_ITEM_TOO_LARGE"
+    assert error["params"] == {"max_kb": 0}
     stored = await client.app[page_repo_key].get_space_page(page.id, space_id="sp-1")
     assert stored.content == page.content
-    # A resolution that fits goes through the same check and is stored.
+    # A resolution that fits is stored.
     r = await client.post(
         f"/api/spaces/sp-1/pages/{page.id}/resolve-conflict",
         json={"resolution": "merged_content", "content": "joined!"},
         headers=_auth(client._tok),
     )
-    assert r.status == 200, await r.text()
-    assert seen and seen[0] > 1000
+    assert r.status == 200
