@@ -563,11 +563,17 @@ metadata this tier concedes.
 **A member behind a GFS is a member like any other.** Tier 4 is only a
 transport: a space member household reached through it gets the same
 content and the same flows as a paired or mesh-only one — the periodic
-roster snapshot (kept at zero envelopes by its `roster_echo`), the media
-outbox's `SPACE_MEDIA_BLOB` pushes (as v_87 binary relay frames, or JSON
-chunks the relay carries), page files it proposes pushed to a host whose
-relay takes frames, and from v_92 the same bounded catch-up push and
-`SPACE_MEDIA_WANTED` as everyone. What stays specific to it is listed, with
+roster snapshot (kept at zero envelopes by its `roster_echo`, and only
+the seats changed since after a roster change), the media outbox's
+`SPACE_MEDIA_BLOB` pushes, page files it proposes, and from v_92 the same
+bounded catch-up push and `SPACE_MEDIA_WANTED` as everyone. How the bytes
+travel depends on the far end: a seat at v_87 or above whose GFS proves
+`envelope_media` takes full 512 KiB binary relay frames
+(`FederationService.relay_media_ok`); any other seat (v_80–86, or a GFS
+without `envelope_media`) takes the same push as JSON chunks of
+`RELAY_JSON_CHUNK_BYTES` through the relay. Where those small chunks would
+be the only way — a member's page proposal to such a host, a v_92 catch-up
+to such a member — the GFS media cache stays the path instead. What stays specific to it is listed, with
 a reason, in `tests/protocol/test_gfs_member_special_case_guard.py`: the
 seat itself (redeem, teardown, the owner's no-seed rule), the transport
 (relay sizes and frames, mailboxes and multi uploads, no direct-sync
@@ -2587,7 +2593,8 @@ Because every author is bound to the roster mirror, the mirror must heal on
 its own: the host sends a v_32 roster snapshot on seat, on a member's
 upgrade and on the periodic sync tick — on the tick only to a household
 whose last sync BEGIN did not echo the current roster version
-(`roster_echo`), and then without the removals it already holds — and a
+(`roster_echo`), and then only the seats changed since its echo; after a
+host restart it waits two ticks for each household's echo — and a
 write that beat the gossip
 seating its author or household waits in a bounded in-memory buffer until
 the seat lands. The per-family table is in
