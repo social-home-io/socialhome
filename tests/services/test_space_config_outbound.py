@@ -505,6 +505,7 @@ def _image_repo(data: bytes | None, hash_: str = "h-new"):
     repo = MagicMock()
     repo.get = AsyncMock(return_value=(data, hash_) if data is not None else None)
     repo.set = AsyncMock()
+    repo.replace_bytes_if_hash = AsyncMock(return_value=True)
     return repo
 
 

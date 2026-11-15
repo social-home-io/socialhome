@@ -9600,9 +9600,11 @@ async def embed_space_images(
             continue
         if fitted is not webp:
             # Stored before the one cap: keep the rendition every member
-            # gets, so the next send does not re-encode it again.
-            await repo.set(
-                space.id, bytes_webp=fitted, hash=stored_hash, width=0, height=0
+            # gets, so the next send does not re-encode it again — only over
+            # the very version it was made from (a set / clear while the
+            # re-encode ran stays).
+            await repo.replace_bytes_if_hash(
+                space.id, bytes_webp=fitted, hash=stored_hash
             )
         meta[key] = base64.b64encode(fitted).decode("ascii")
 

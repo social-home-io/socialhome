@@ -9001,6 +9001,13 @@ class _RecordingImageRepo:
         self.webp, self.hash = bytes_webp, hash
         self.sets.append(bytes_webp)
 
+    async def replace_bytes_if_hash(self, space_id, *, bytes_webp, hash):
+        if self.webp is None or self.hash != hash:
+            return False
+        self.webp = bytes_webp
+        self.sets.append(bytes_webp)
+        return True
+
     async def clear(self, space_id):
         self.webp = None
 
@@ -9110,6 +9117,46 @@ async def test_a_cover_stored_over_the_cap_is_replaced_by_the_rendition_sent(
     assert len(shipped) <= SPACE_COVER_MAX_BYTES
     assert covers.sets == [shipped] and covers.hash == "c"
     assert icons.sets == []  # within the cap: untouched
+
+
+@pytest.mark.parametrize("change", ["replace", "clear"])
+async def test_a_cover_change_during_the_re_encode_is_not_undone(
+    stack, monkeypatch, change
+):
+    """I2: the re-encode of a pre-cap cover runs in a thread; a set_cover or
+    clear_cover meanwhile must not be overwritten by the old version's
+    rendition (compare-and-set on the version tag)."""
+    from socialhome.media import image_processor as ip_mod
+
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    space = dataclasses.replace(space, cover_hash="c", icon_hash=None)
+    covers = _RecordingImageRepo(_noise_webp(1200, 800))
+    covers.hash = "c"
+    real_fit = ip_mod.ImageProcessor.fit_within
+
+    async def _fit_with_a_change(self, data, max_bytes, **kw):
+        out = await real_fit(self, data, max_bytes, **kw)
+        if change == "replace":
+            covers.webp, covers.hash = b"RIFFnew-cover", "c2"
+        else:
+            covers.webp = None
+        return out
+
+    monkeypatch.setattr(ip_mod.ImageProcessor, "fit_within", _fit_with_a_change)
+    await build_space_snapshot_for_federation(
+        space,
+        space_repo=stack.space_repo,
+        remote_member_repo=None,
+        user_repo=stack.space_svc._users,
+        own_instance_id=stack.iid,
+        cover_repo=covers,
+    )
+    if change == "replace":
+        assert (covers.webp, covers.hash) == (b"RIFFnew-cover", "c2")
+    else:
+        assert covers.webp is None
+    assert covers.sets == []
 
 
 async def test_snapshot_omits_an_image_it_cannot_fit(stack, caplog, monkeypatch):
