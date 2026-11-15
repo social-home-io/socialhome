@@ -1702,20 +1702,19 @@ class SpaceService(
         if self._federation is None:
             return
         # A relay-only household (met through a connection server via an
-        # invite link, ``InstanceSource.SPACE_SESSION``) never receives the
-        # signing seed — the standing rule for a link-joined admin. A
-        # connection server sits between the two households, and the
-        # owner-certified rotation (v_44) only retires a key on a GFS that
-        # supports it; such an admin acts through the host instead. This
-        # keeps that invariant now that an admin/mod elevation is approved
-        # through :meth:`set_remote_member_role` rather than seated directly.
+        # invite link, ``InstanceSource.SPACE_SESSION``) does not receive the
+        # signing seed yet — an open pre-release gap (seed handoff for
+        # GFS-only admins), tracked separately. Until then such an admin
+        # acts through the host. The check also holds when an admin/mod
+        # elevation is approved through :meth:`set_remote_member_role`
+        # rather than seated directly.
         if self._federation_repo is not None:
             peer = await self._federation_repo.get_instance(instance_id)
             if peer is not None and peer.source is InstanceSource.SPACE_SESSION:
                 log.info(
                     "delegated-admin: not sharing the signing seed with "
-                    "relay-only household %s for space %s (link-joined admin "
-                    "acts through the host)",
+                    "relay-only household %s for space %s (open pre-release "
+                    "gap: no seed handoff for GFS-only admins yet)",
                     instance_id,
                     space.id,
                 )
