@@ -48,8 +48,11 @@ from socialhome.domain.federation import (
     PairingStatus,
 )
 from socialhome.domain.federation_capabilities import FederationCapability
+from socialhome.domain.media_chunking import ADVERTISED_MAX_MESSAGE_BYTES
+from socialhome.domain.relay_media_frame import RELAY_MEDIA_MAX_PLAINTEXT_BYTES
 from socialhome.federation import routed_crypto
 from socialhome.federation import routed_envelope as routed_envelope_mod
+from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.route_discovery import (
     ROUTE_CACHE_TTL_S,
     RouteDiscoveryService,
@@ -65,6 +68,7 @@ from socialhome.federation.routed_envelope import (
     SpaceRoutedHandler,
     _PendingRouted,
 )
+from socialhome.routes.federation import INBOX_MAX_BODY_BYTES
 
 # ── Test doubles ──────────────────────────────────────────────────────
 
@@ -2246,6 +2250,45 @@ async def test_route_stale_at_origin_large_inner_is_retransmitted(caplog):
     assert any(_RETRANSMIT_MSG in r.message for r in caplog.records)
     assert not any("oversized" in r.message for r in caplog.records)
     assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+async def test_the_largest_space_item_fits_one_routed_hop():
+    """No mesh-specific size limit: the largest thing any path carries for a
+    space — one GFS relay frame of plaintext — still fits ONE hop's envelope
+    (the HTTPS inbox body and the data channel message, 1 MiB each) after
+    the route's seal and the hop's own encryption (base64 twice), hybrid
+    signatures included. And it is kept for the retransmit."""
+    a, b, c = _build_identity_chain(3)
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    inner = {"c": "x" * (RELAY_MEDIA_MAX_PLAINTEXT_BYTES - 8)}
+    assert len(json.dumps(inner, separators=(",", ":"))) == (
+        RELAY_MEDIA_MAX_PLAINTEXT_BYTES
+    )
+    route_id, _dead, _ = await _send_under_dead_key(
+        a, path, payload=inner, inner_event_type=FederationEventType.SPACE_SYNC_CHUNK
+    )
+    assert a.handler._pending_routed[route_id].inner_payload_json is not None
+    routed = _routed_sends(a)[0]["payload"]
+    routed["sealed"]["origin_sig"] = "A" * 4500  # a hybrid origin signature
+    encoder = FederationEncoder(b"\x01" * 32)
+    envelope = {
+        "msg_id": "0" * 36,
+        "event_type": "space_routed",
+        "from_instance": a.instance_id,
+        "to_instance": b.instance_id,
+        "timestamp": "2026-11-15T00:00:00.000000+00:00",
+        "encrypted_payload": encoder.encrypt_payload(
+            json.dumps(routed, separators=(",", ":")), b"\x02" * 32
+        ),
+        "space_id": "s" * 32,
+        "proto_version": 1,
+        "sig_suite": "ed25519+mldsa65",
+        "signatures": {"ed25519": "A" * 88, "mldsa65": "A" * 4500},
+    }
+    wire = len(json.dumps(envelope, separators=(",", ":")))
+    assert wire <= INBOX_MAX_BODY_BYTES
+    assert wire <= ADVERTISED_MAX_MESSAGE_BYTES
 
 
 async def test_send_routed_keeps_large_inners_within_one_byte_budget(caplog):

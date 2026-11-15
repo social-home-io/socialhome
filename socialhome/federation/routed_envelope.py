@@ -189,12 +189,16 @@ _MAX_RETAINED_INNER_BYTES: int = 64 * 1024
 
 #: Bytes of large inners (each over :data:`_MAX_RETAINED_INNER_BYTES`: a long
 #: page, a space cover, a sync chunk with one big record) the origin keeps at
-#: once for a retransmit. A hop carries at most ~1 MiB of envelope, i.e. an
-#: inner of ~570 KiB, so this covers some 28 of the largest inside one
-#: pending window (270 s). One past it gets a head-only record (the nack
-#: still invalidates the route; nothing is retransmitted, WARNING on the
-#: sender) — a memory bound, not the design; what the space's host holds
-#: still reaches the member with its next §25.6 sync.
+#: once for a retransmit. The mesh has no size limit of its own below the
+#: hop's: a hop carries ~1 MiB of envelope, i.e. an inner of ~580 KiB — more
+#: than one GFS relay frame holds (540 KiB), the largest a space item can be
+#: on any path (``test_the_largest_space_item_fits_one_routed_hop``). So
+#: this covers some 120 sends of the largest item inside one pending window
+#: (270 s) — a page that size saved a dozen times for ten mesh-only member
+#: households. One past it gets a head-only record (the nack still
+#: invalidates the route; nothing is retransmitted, WARNING on the sender)
+#: — a memory bound, not the design; what the space's host holds still
+#: reaches the member with its next §25.6 sync.
 #:
 #: Never kept, whatever the budget: an inner whose event type has a
 #: lost-inner listener (a media chunk). Its sender holds the bytes on disk,
@@ -202,7 +206,7 @@ _MAX_RETAINED_INNER_BYTES: int = 64 * 1024
 #: inner's small head to the listener, which queues the file again
 #: (``SpaceMediaSyncService.on_mesh_chunk_lost``). The media outbox does not
 #: retry on its own: its row is done once the first hop took the chunk.
-_MAX_RETAINED_LARGE_BYTES: int = 16 * 1024 * 1024
+_MAX_RETAINED_LARGE_BYTES: int = 64 * 1024 * 1024
 
 #: Longest string value kept in the head of a large inner that is not kept
 #: (:attr:`_PendingRouted.inner_head`): ids and names pass, the bulk
@@ -217,7 +221,7 @@ LostInnerListener = Callable[[str, dict], Awaitable[None]]
 #: Ceiling on ``_pending_routed`` entries. A small inner is bounded by
 #: ``_MAX_RETAINED_INNER_BYTES`` and the large ones together by
 #: ``_MAX_RETAINED_LARGE_BYTES``, so this caps the retained-inner memory at
-#: ~144 MiB worst case (2000 × ≤ 64 KiB + 16 MiB — those bounds and the cap
+#: ~192 MiB worst case (2000 × ≤ 64 KiB + 64 MiB — those bounds and the cap
 #: are what bound memory; the :data:`_PENDING_ROUTED_TTL_S` window only sets
 #: how long an entry lives) while comfortably covering the sends a household
 #: makes inside one pending window (270 s). Eviction is oldest-expiry-first

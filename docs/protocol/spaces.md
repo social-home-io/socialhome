@@ -3344,12 +3344,17 @@ of the inner's compact JSON:
 | Inner | Kept for the retransmit |
 |---|---|
 | ≤ 64 KiB | always |
-| > 64 KiB (a long page, a space cover, a §25.6 chunk with one big record) | yes, while all kept large inners together stay ≤ 16 MiB (`_MAX_RETAINED_LARGE_BYTES`) |
+| > 64 KiB (a long page, a space cover, a §25.6 chunk with one big record) | yes, while all kept large inners together stay ≤ 64 MiB (`_MAX_RETAINED_LARGE_BYTES`) |
 | > 64 KiB of a type whose sender holds the bytes itself (`SPACE_MEDIA_BLOB`: the file is on disk) | no — the sender is told and queues the file again (below) |
 
-A hop carries at most ~1 MiB of envelope (an inner of ~570 KiB), so the
-16 MiB cover some 28 of the largest events one household sends over the
-mesh inside one pending window; one past it is recorded by its head only
+The mesh sets no size limit of its own. A hop carries ~1 MiB of envelope;
+sealed for the route (base64 twice, ×16/9) that is an inner of ~580 KiB —
+more than one GFS relay frame holds (540 KiB), the largest a space item
+can be on any path. Measured: a 515,998-byte event is 929 KiB on the hop,
+a 532 KiB sync chunk 958 KiB, of 1,024 KiB. The 64 MiB are a memory bound
+only: some 120 sends of the largest item inside one pending window (a
+page that size saved a dozen times for ten mesh-only member households);
+one past it is recorded by its head only
 (route invalidated, nothing resent, one `WARNING` on the sender). Before
 this every inner over 64 KiB was treated like a media chunk — recorded by
 its head only — though nothing but the media outbox can send its event
@@ -3408,7 +3413,7 @@ visits each hop at most once; replays are no-ops); one retransmit per
 original send (the retry's pending record is flagged so its own nack
 cannot trigger another) plus at most one deferred re-attempt; a
 bounded pending table (2000 entries, oldest
-expiry evicted first, ≤ 64 KiB retained inner each plus ≤ 16 MiB of
+expiry evicted first, ≤ 64 KiB retained inner each plus ≤ 64 MiB of
 large ones in all); and
 `discover_route` single-flights per target and honours the negative
 cooldown, so a burst of nacks for one target costs one flood.
