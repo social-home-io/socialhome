@@ -40,6 +40,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 from ..domain import timetable as td
+from ..domain.errors import NotFoundError
 from ..domain.events import TimetableDeleted, TimetableSaved
 from ..domain.preferences import FeatureDisabledError
 from ..domain.space import SETTINGS_AUTHORITY_ROLES, SpacePermissionError
@@ -201,7 +202,7 @@ def _find[T: (td.TimetableEntry, td.TimetableOverride)](
     for item in items:
         if item.id == item_id:
             return item
-    raise KeyError(f"{what} not found")
+    raise NotFoundError(f"{what} not found")
 
 
 class TimetableEditorMixin:
@@ -604,7 +605,7 @@ class TimetableService(BusPublisherMixin, TimetableEditorMixin):
     async def _load(self, timetable_id: str) -> Timetable:
         tt = await self._repo.get(timetable_id)
         if tt is None:
-            raise KeyError("timetable not found")
+            raise NotFoundError("timetable not found")
         return td.drop_invalid_icons(tt)
 
     async def _store(self, tt: Timetable, *, expected_version: int) -> bool:
@@ -692,7 +693,7 @@ class TimetableService(BusPublisherMixin, TimetableEditorMixin):
         await self._require_enabled()
         await self._load(timetable_id)
         if not await self._repo.delete(timetable_id):
-            raise KeyError("timetable not found")
+            raise NotFoundError("timetable not found")
         log.debug("timetable %s deleted by %s", timetable_id, by)
         await self._emit(TimetableDeleted(timetable_id=timetable_id))
 
@@ -894,7 +895,7 @@ class SpaceTimetableScope(BusPublisherMixin, TimetableEditorMixin):
     async def _load(self, timetable_id: str) -> Timetable:
         got = await self._svc._repo.get(timetable_id)
         if got is None or got[0] != self._space_id:
-            raise KeyError("timetable not found")
+            raise NotFoundError("timetable not found")
         return td.drop_invalid_icons(got[1])
 
     async def _store(self, tt: Timetable, *, expected_version: int) -> bool:
@@ -937,7 +938,7 @@ class SpaceTimetableScope(BusPublisherMixin, TimetableEditorMixin):
         tt = td.prune_overrides(tt, self.today_in(tt.tz))
         td.validate(tt)
         if not await self._svc._repo.insert(tt, space_id=self._space_id):
-            raise KeyError("space not found")
+            raise NotFoundError("space not found")
         await self._emit(TimetableSaved(timetable=tt, space_id=self._space_id))
         return tt
 
@@ -990,7 +991,7 @@ class SpaceTimetableScope(BusPublisherMixin, TimetableEditorMixin):
         if not await self._svc._repo.soft_delete(
             timetable_id, space_id=self._space_id, at=_utcnow()
         ):
-            raise KeyError("timetable not found")
+            raise NotFoundError("timetable not found")
         log.debug(
             "space %s: timetable %s deleted by %s", self._space_id, timetable_id, by
         )

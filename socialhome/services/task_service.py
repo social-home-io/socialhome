@@ -21,7 +21,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from ..domain.errors import WrongTypeError
+from ..domain.errors import NotFoundError, WrongTypeError
 from ..domain.events import (
     TaskAssigned,
     TaskCompleted,
@@ -336,7 +336,7 @@ class TaskService(MediaRefGuardedMixin, BusPublisherMixin):
         name = parse_list_name(name)
         current = await self._repo.get_list(list_id)
         if current is None:
-            raise KeyError(f"task list {list_id!r} not found")
+            raise NotFoundError(f"task list {list_id!r} not found")
         updated = replace(current, name=name)
         saved = await self._repo.save_list(updated)
         await self._emit(
@@ -350,7 +350,7 @@ class TaskService(MediaRefGuardedMixin, BusPublisherMixin):
     async def get_list(self, list_id: str) -> TaskList:
         result = await self._repo.get_list(list_id)
         if result is None:
-            raise KeyError(f"task list {list_id!r} not found")
+            raise NotFoundError(f"task list {list_id!r} not found")
         return result
 
     async def list_lists(self) -> list[TaskList]:
@@ -363,7 +363,7 @@ class TaskService(MediaRefGuardedMixin, BusPublisherMixin):
     async def delete_list(self, list_id: str) -> None:
         result = await self._repo.get_list(list_id)
         if result is None:
-            raise KeyError(f"task list {list_id!r} not found")
+            raise NotFoundError(f"task list {list_id!r} not found")
         await self._repo.delete_list(list_id)
         await self._emit(TaskListDeleted(list_id=list_id))
 
@@ -398,7 +398,7 @@ class TaskService(MediaRefGuardedMixin, BusPublisherMixin):
         # Ensure list exists
         task_list = await self._repo.get_list(list_id)
         if task_list is None:
-            raise KeyError(f"task list {list_id!r} not found")
+            raise NotFoundError(f"task list {list_id!r} not found")
         await self._require_local_assignees(parsed_assignees)
 
         now = datetime.now(UTC)
@@ -466,7 +466,7 @@ class TaskService(MediaRefGuardedMixin, BusPublisherMixin):
     async def get_task(self, task_id: str) -> Task:
         result = await self._repo.get(task_id)
         if result is None:
-            raise KeyError(f"task {task_id!r} not found")
+            raise NotFoundError(f"task {task_id!r} not found")
         return result
 
     async def list_tasks(
@@ -634,10 +634,10 @@ class TaskService(MediaRefGuardedMixin, BusPublisherMixin):
         """
         _require_moved_id(moved_id, ordered_ids)
         if await self._repo.get_list(list_id) is None:
-            raise KeyError(f"task list {list_id!r} not found")
+            raise NotFoundError(f"task list {list_id!r} not found")
         moved = await self._repo.get(moved_id)
         if moved is None or moved.list_id != list_id:
-            raise KeyError(f"task {moved_id!r} not found in this list")
+            raise NotFoundError(f"task {moved_id!r} not found in this list")
         await self._require_editor(moved, actor_user_id)
         held: dict[str, Task] = {}
         for tid in ordered_ids:
@@ -915,7 +915,7 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
         """
         space = await self._spaces.get(space_id)
         if space is None or space.dissolved:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         if space.archived:
             raise SpaceArchivedError()
         member = await self._spaces.get_member(space_id, user_id)
@@ -971,13 +971,13 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
     async def _list_in_space(self, list_id: str, space_id: str) -> TaskList:
         result = await self._repo.get_list(list_id)
         if result is None or result[0] != space_id:
-            raise KeyError(f"task list {list_id!r} not found in this space")
+            raise NotFoundError(f"task list {list_id!r} not found in this space")
         return result[1]
 
     async def _task_in_space(self, task_id: str, space_id: str) -> Task:
         result = await self._repo.get(task_id)
         if result is None or result[0] != space_id:
-            raise KeyError(f"space task {task_id!r} not found in this space")
+            raise NotFoundError(f"space task {task_id!r} not found in this space")
         return result[1]
 
     # ── Lists ────────────────────────────────────────────────────────────
@@ -1064,7 +1064,7 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
             )
         updated = replace(current, name=name)
         if not await self._repo.save_list(updated, space_id=space_id):
-            raise KeyError(f"task list {list_id!r} not found")
+            raise NotFoundError(f"task list {list_id!r} not found")
         saved = updated
         await self._emit(
             TaskListUpdated(
@@ -1202,7 +1202,7 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
             labels=task_labels,
         )
         if not await self._repo.save(task, space_id=space_id):
-            raise KeyError(f"task list {list_id!r} not found in this space")
+            raise NotFoundError(f"task list {list_id!r} not found in this space")
         saved = task
         if self._bus is not None:
             await self._bus.publish(
@@ -1314,7 +1314,7 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
             labels=labels,
         )
         if not await self._repo.save(updated, space_id=space_id):
-            raise KeyError(f"space task {updated.id!r} not found in this space")
+            raise NotFoundError(f"space task {updated.id!r} not found in this space")
         saved = updated
         if self._bus is not None:
             await self._bus.publish(
@@ -1367,7 +1367,7 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
         await self._list_in_space(list_id, space_id)
         moved = await self._task_in_space(moved_id, space_id)
         if moved.list_id != list_id:
-            raise KeyError(f"space task {moved_id!r} not found in this list")
+            raise NotFoundError(f"space task {moved_id!r} not found in this list")
         await self._gate(
             space_id,
             actor_user_id,
@@ -1495,7 +1495,7 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
             updated_at=now,
         )
         if not await self._repo.save(updated, space_id=space_id):
-            raise KeyError(f"space task {updated.id!r} not found in this space")
+            raise NotFoundError(f"space task {updated.id!r} not found in this space")
         saved = updated
         await self._emit(
             TaskUpdated(task=saved, space_id=space_id, actor_user_id=actor_user_id)

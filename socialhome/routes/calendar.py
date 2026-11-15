@@ -16,7 +16,7 @@ from ..app_keys import (
 )
 from ..domain.calendar import CalendarEvent, CalendarEventCopy
 from ..domain.child_protection import name_only
-from ..domain.errors import CodedError
+from ..domain.errors import CodedError, NotFoundError
 from ..domain.space import CONTENT_AUTHORITY_ROLES, SpaceMember
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response
@@ -882,10 +882,10 @@ async def event_access(
     svc = view.svc(K.space_cal_service_key)
     space_id = await svc.resolve_space_id(event_id)
     if space_id is None:
-        raise KeyError(f"event {event_id!r} not found")
+        raise NotFoundError(f"event {event_id!r} not found")
     member = await view.svc(K.space_repo_key).get_member(space_id, user_id)
     if member is None:
-        raise KeyError(f"event {event_id!r} not found")
+        raise NotFoundError(f"event {event_id!r} not found")
     await view.require_space_feature(space_id, "calendar")
     if write:
         await svc.require_writer(space_id, user_id, action=action)

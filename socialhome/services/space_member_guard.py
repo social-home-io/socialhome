@@ -38,6 +38,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ..domain.errors import NotFoundError
 from ..domain.space import WRITER_ROLES, SpacePermissionError
 
 if TYPE_CHECKING:
@@ -95,7 +96,7 @@ class SpaceMemberGuardMixin:
         """
         actor = await self._users.get(username)
         if actor is None:
-            raise KeyError(f"{label} {username!r} not found")
+            raise NotFoundError(f"{label} {username!r} not found")
         return actor
 
 

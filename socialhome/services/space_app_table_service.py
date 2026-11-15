@@ -83,6 +83,7 @@ from ..domain.app_group import (
     TableCard,
 )
 from ..domain.apps import PERMISSION_FEDERATION, PERMISSION_PEOPLE, SESSION_INVITED
+from ..domain.errors import NotFoundError
 from ..domain.events import (
     AppTableAnnounced,
     AppTableClosed,
@@ -282,10 +283,10 @@ class SpaceTableService(BusPublisherMixin):
         space = await self._spaces.get(space_id)
         member = await self._spaces.get_member(space_id, user_id)
         if space is None or space.dissolved or member is None:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         SpaceService.assert_writable_member(member, action="post", space=space)
         if await self._spaces.is_banned(space_id, user_id):
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         return space, member
 
     @staticmethod

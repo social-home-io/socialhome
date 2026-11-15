@@ -122,3 +122,19 @@ async def test_get_a_post_needs_a_seat(client):
     outsider = await _add_user(client, "outsider", "u-outsider")
     r = await client.get(f"/api/spaces/sp-b/posts/{pid}", headers=outsider)
     assert r.status == 403
+
+
+async def test_a_missing_post_is_a_quiet_404(client, caplog):
+    """A post that is gone (the SPA polls a permalink after a delete) is a
+    normal 404 — not a ``KeyError surfaced from handler`` WARNING, which is
+    kept for genuine programming errors."""
+    owner = _auth(client._tok)
+    await _seed_space(client, "sp-a")
+    caplog.set_level("WARNING", logger="socialhome.routes.base")
+    r = await client.get("/api/spaces/sp-a/posts/no-such-post", headers=owner)
+    assert r.status == 404
+    assert (await r.json())["error"] == {
+        "code": "NOT_FOUND",
+        "detail": "Resource not found.",
+    }
+    assert "KeyError surfaced" not in caplog.text

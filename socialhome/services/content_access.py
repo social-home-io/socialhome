@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, NoReturn
 
+from ..domain.errors import NotFoundError
 from ..domain.space import (
     AccessAdminOnlyError,
     AccessDecision,
@@ -81,7 +82,7 @@ class ContentAccessMixin:
         else:
             space = await repo.get(space_or_id)
         if space is None:
-            raise KeyError(f"space {space_or_id!r} not found")
+            raise NotFoundError(f"space {space_or_id!r} not found")
         level = space.features.access_level(feature)
         if level is SpaceFeatureAccess.OPEN:
             return AccessDecision.PROCEED
@@ -135,7 +136,7 @@ class ContentAccessMixin:
             raise SpacePermissionError(f"{feature} here needs review, which is off")
         space = await self._access_space_repo().get(space_id)
         if space is None:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         item = await submitter.submit(
             space,
             feature=feature,

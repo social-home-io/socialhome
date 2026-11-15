@@ -80,6 +80,7 @@ from urllib.parse import quote
 from ..domain.errors import (
     GfsSelectionInvalidError,
     GfsSelectionRequiredError,
+    NotFoundError,
     SpaceNotPublishableError,
     TierChangeRequiredError,
 )
@@ -600,7 +601,7 @@ class GfsServerSelectionService:
         async with _space_lock(self._locks, space.id):
             current = await self._spaces.get(space.id)
             if current is None:
-                raise KeyError(f"space {space.id!r} not found")
+                raise NotFoundError(f"space {space.id!r} not found")
             await self._store_locked(
                 space.id, current.gfs_servers, self._entries_of(space.id, conns)
             )
@@ -781,7 +782,7 @@ class GfsServerSelectionService:
                 for p in await self._gfs.list_publications_for_space(space_id)
             }
             if gfs_id not in rows:
-                raise KeyError(f"space {space_id!r} is not listed on {gfs_id!r}")
+                raise NotFoundError(f"space {space_id!r} is not listed on {gfs_id!r}")
             try:
                 await publisher.unpublish_space(space_id, gfs_id, announce=False)
             finally:
@@ -1240,7 +1241,7 @@ class GfsServerSelectionService:
     async def _require_owned(self, space_id: str) -> Space:
         space = await self._spaces.get(space_id)
         if space is None or space.dissolved:
-            raise KeyError(f"space {space_id!r} not found")
+            raise NotFoundError(f"space {space_id!r} not found")
         if (
             not self._own_instance_id
             or space.owner_instance_id != self._own_instance_id

@@ -16,6 +16,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from ..app_keys import space_poll_service_key, space_repo_key, space_service_key
+from ..domain.errors import NotFoundError
 from ..domain.space import (
     AccessDecision,
     ContentAction,
@@ -50,7 +51,7 @@ class _SpacePollBase(BaseView):
             space_id, self.match("pid")
         )
         if post is None:
-            raise KeyError("post not found in this space")
+            raise NotFoundError("post not found in this space")
         return True
 
     async def _require_post_access(self, space_id: str, user_id: str) -> None:

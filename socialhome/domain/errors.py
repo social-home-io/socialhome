@@ -30,6 +30,7 @@ __all__ = [
     "ImageTooLargeError",
     "ImageUnreadableError",
     "InvalidMediaRefError",
+    "NotFoundError",
     "PayloadTooLargeError",
     "SpaceNotPublishableError",
     "TierChangeRequiredError",
@@ -65,6 +66,29 @@ class CodedError(Exception):
             self.code = code
         self.params: dict[str, ParamValue] = dict(params or {})
         super().__init__(self.detail)
+
+
+class NotFoundError(CodedError, KeyError):
+    """The thing a request names is not there (or not visible to the
+    caller): a post deleted while the SPA polls its permalink, a member
+    who left, a stale id. A normal 404, answered without a log line.
+
+    Subclasses :class:`KeyError` — what these sites raised before — so
+    every existing ``except KeyError`` keeps catching it. ``what`` is the
+    internal description (ids included) for callers and tests; the client
+    only ever sees the fixed :attr:`detail`. A *bare* ``KeyError`` that
+    reaches :meth:`BaseView._iter` is still logged at WARNING: that one is
+    a programming error (a missing dict key), not a missing resource.
+    """
+
+    status = 404
+    code = "NOT_FOUND"
+    detail = "Resource not found."
+
+    def __init__(self, what: str = "") -> None:
+        super().__init__()
+        # ``str()`` / ``args`` read as the plain ``KeyError(what)`` did.
+        self.args = (what,)
 
 
 class ImageTooLargeError(CodedError):
