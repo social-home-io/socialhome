@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
+import sqlite3
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,6 +17,7 @@ import orjson
 import pytest
 
 from socialhome.crypto import generate_identity_keypair
+from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
     DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
@@ -34,6 +37,7 @@ from socialhome.federation.sync.space.provider import (
     SpaceSyncService,
 )
 from socialhome.federation.sync.space.window import KEEP_FOREVER
+from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 
 
 class _FakeExporter:
@@ -47,7 +51,6 @@ class _FakeExporter:
 
 class _FakeCrypto:
     async def encrypt_chunk(self, *, space_id, sync_id, plaintext):
-        import base64
 
         return 0, base64.urlsafe_b64encode(plaintext).decode("ascii")
 
@@ -147,7 +150,6 @@ async def test_stream_initial_uses_https_when_session_marked(provider):
     and isn't a confirmed direct peer — receives the chunks via
     ``SPACE_ROUTED``; a confirmed peer still gets the direct path
     internally."""
-    from unittest.mock import AsyncMock
 
     session = _FakeSession()
     session.rtc = None
@@ -184,8 +186,6 @@ async def test_stream_initial_https_chunk_payload_is_json_serialisable(provider)
     the relayed topology. ``parse_chunk`` accepts ``bytes | str``, so
     shipping UTF-8 text is lossless for the receiver.
     """
-    import json
-    from unittest.mock import AsyncMock
 
     session = _FakeSession()
     session.rtc = None
@@ -349,7 +349,6 @@ async def test_stream_initial_enqueues_catchup_media(encoder):
 async def test_catchup_media_is_bounded_to_the_last_30_days(encoder):
     """Only items created in the last :data:`CATCHUP_MEDIA_MAX_AGE_S` are
     candidates (older files arrive on view, ``SPACE_MEDIA_WANTED``)."""
-    from datetime import datetime, timedelta
 
     svc, _media_sync = _catchup_provider(encoder, [])
     await svc.stream_initial(_FakeSession())
@@ -421,7 +420,6 @@ async def test_stream_initial_no_media_sync_wired_is_noop(encoder):
 async def test_a_failed_item_read_ships_no_catchup_media(encoder):
     """A SQLite error reading the candidates is logged, the stream still
     completes (the next catch-up retries)."""
-    import sqlite3
 
     class _Broken:
         async def recent_item_files(self, space_id, *, cutoff, limit):
@@ -445,12 +443,6 @@ async def test_a_failed_item_read_ships_no_catchup_media(encoder):
 async def test_stream_initial_catchup_real_repos(tmp_dir, encoder):
     """Catch-up reads the real repo: a recent post, a comment picture and a
     gallery item ship; a post older than 30 days does not."""
-    from datetime import datetime, timedelta
-
-    from socialhome.db.database import AsyncDatabase
-    from socialhome.repositories.media_reference_repo import (
-        SqliteMediaReferenceRepo,
-    )
 
     def _ago(days: int) -> str:
         return (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
@@ -530,7 +522,6 @@ async def test_stream_initial_abandons_after_consecutive_chunk_failures(
     so continuing to push a whole space's metadata into a path that is not
     working is pure cost. Recovery is the requester's re-BEGIN.
     """
-    from unittest.mock import AsyncMock
 
     session = _FakeSession()
     session.rtc = None
@@ -616,7 +607,6 @@ async def test_stream_request_more_stops_on_closed_channel(provider):
 
 async def test_stream_initial_failure_budget_resets_on_success(provider):
     """An isolated failure doesn't abandon a stream that recovers."""
-    from unittest.mock import AsyncMock
 
     session = _FakeSession()
     session.rtc = None
@@ -660,7 +650,6 @@ async def test_abandoned_stream_closes_its_session(provider):
     would fix it. That is what kept `sync-https-fallback` red even once
     the route came back seconds later (#648).
     """
-    from unittest.mock import AsyncMock, MagicMock
 
     session = _FakeSession()
     session.rtc = None
@@ -685,7 +674,6 @@ async def test_successful_stream_leaves_the_session_alone(provider):
     The requester closes it on the sentinel; closing it here would race
     that and drop late chunks.
     """
-    from unittest.mock import AsyncMock, MagicMock
 
     session = _FakeSession()
     session.rtc = None
@@ -717,7 +705,6 @@ def _cooldown_result(retry_after_s: float = 0.01):
 
 async def _baseline_send_count(provider) -> int:
     """How many sends a fully-successful HTTPS stream makes."""
-    from unittest.mock import AsyncMock
 
     session = _FakeSession(sync_id="sync-baseline")
     session.rtc = None
@@ -742,7 +729,6 @@ async def test_route_cooldown_failure_waits_and_retries_the_same_chunk(provider)
     route was seconds from warming up. Wait the cooldown out and retry the
     same chunk instead.
     """
-    from unittest.mock import AsyncMock
 
     expected = await _baseline_send_count(provider)
     assert expected > 1
@@ -778,7 +764,6 @@ async def test_route_cooldown_waits_are_bounded(provider):
     Waiting out a cooldown is bounded per stream — otherwise a household
     that is simply gone parks the provider's task forever.
     """
-    from unittest.mock import AsyncMock
 
     session = _FakeSession()
     session.rtc = None
@@ -807,7 +792,6 @@ async def test_route_cooldown_waits_are_bounded(provider):
 async def test_non_cooldown_failure_still_counts_a_strike(provider):
     """Only the cooldown reason buys a wait — every other failure keeps
     today's behaviour exactly (fail fast, count a strike, abandon)."""
-    from unittest.mock import AsyncMock
 
     session = _FakeSession()
     session.rtc = None
@@ -854,7 +838,6 @@ async def test_a_relay_throttle_waits_and_retries_the_same_chunk(provider):
     window. Counting a 429 as a chunk failure abandoned the whole
     backfill after three of them — which is what a few hundred chunks
     hitting the window produces in under a second."""
-    from unittest.mock import AsyncMock
 
     expected = await _baseline_send_count(provider)
     assert expected > 1
@@ -884,7 +867,6 @@ async def test_a_relay_throttle_waits_and_retries_the_same_chunk(provider):
 async def test_relay_throttle_waits_are_bounded(provider):
     """A relay that never lets us through still terminates the stream
     rather than parking the provider task forever."""
-    from unittest.mock import AsyncMock
 
     session = _FakeSession()
     session.rtc = None
@@ -912,7 +894,6 @@ async def test_the_two_waitable_reasons_keep_separate_budgets(provider):
     """A stream that waits out a route cooldown must not arrive at the
     relay window with its patience already spent — the two conditions
     are unrelated and a backfill routinely meets both."""
-    from unittest.mock import AsyncMock
 
     expected = await _baseline_send_count(provider)
 
@@ -961,7 +942,6 @@ def _members_provider(encoder):
 
 
 def _member_roles(session) -> dict[str, str]:
-    import base64
 
     roles: dict[str, str] = {}
     for raw in session.rtc.sent:
@@ -990,7 +970,6 @@ async def test_members_stream_degrades_moderator_for_a_v40_requester(
     session's version (``space_member_version``), so a member reached only
     over the mesh — no paired row, ``peer_supports`` False — at v_41 gets
     its moderators as moderators."""
-    from unittest.mock import AsyncMock
 
     svc = _members_provider(encoder)
     federation = AsyncMock()
@@ -1046,7 +1025,6 @@ def _resources(session) -> list[str]:
 async def test_chat_streams_only_to_a_v55_writer_household(
     encoder, supports, writer, streamed
 ):
-    from unittest.mock import AsyncMock
 
     svc = _chat_provider(encoder)
     federation = AsyncMock()
@@ -1536,7 +1514,6 @@ async def test_the_requesters_version_is_read_once_per_session(encoder):
     """Every version gate of a session — the calendar's record set, the chat,
     the shape, the chunk numbering — follows ONE reading of the requester's
     version, so they cannot disagree mid-session."""
-    from unittest.mock import AsyncMock
 
     svc = _chat_provider(encoder)
     federation = AsyncMock()
@@ -1571,7 +1548,6 @@ async def test_a_request_more_slice_mid_stream_takes_fresh_indices(encoder):
     """A REQUEST_MORE slice streamed while the stream runs draws from the
     session's one index counter: no index is reused, and the sentinel counts
     every index the session handed out."""
-    from unittest.mock import AsyncMock
 
     svc = _chat_provider(encoder)
     federation = AsyncMock()
@@ -2419,7 +2395,6 @@ async def test_a_chunk_may_ride_a_route_raw_only_to_a_requester_that_reads_it(
     in the seal) only toward a requester at v_87 or later — the version that
     reads that layout. A released build (v_80) or one we cannot ask (``0``)
     never sees it, whatever the size."""
-    from unittest.mock import AsyncMock
 
     session = _FakeSession()
     session.rtc = None

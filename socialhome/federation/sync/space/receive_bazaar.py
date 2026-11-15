@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ....domain.bazaar_faq import (
@@ -20,6 +19,7 @@ from ....domain.post import (
     BazaarMode,
     BazaarStatus,
 )
+from ....domain.space_media_fields import item_media_urls
 from ....services.inbound_media_store import space_media_refs
 from .receiver_base import ReceiverBase
 from .stream_health import HeldBack
@@ -59,19 +59,16 @@ class BazaarMixin(ReceiverBase):
                 names = self._media_names.localize(
                     space_id,
                     provider,
-                    list(listing.image_urls),
+                    item_media_urls("bazaar", listing),
                     held=(
-                        list(held_listing.image_urls)
+                        item_media_urls("bazaar", held_listing)
                         if held_listing is not None
                         else ()
                     ),
                     # v_85 — the host's hashes only.
                     hashes=parse_file_hashes(r) if bazaar_from_host else None,
                 )
-                listing = replace(
-                    listing,
-                    image_urls=tuple(names.url(u) or u for u in listing.image_urls),
-                )
+                listing = names.item("bazaar", listing)
                 try:
                     if not await self._bazaar_repo.save_listing(
                         listing, space_id=space_id

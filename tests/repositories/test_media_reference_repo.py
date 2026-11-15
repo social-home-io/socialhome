@@ -1504,3 +1504,48 @@ async def test_space_files_never_name_a_reserved_or_junk_reference(db):
         )
     repo = SqliteMediaReferenceRepo(db)
     assert await repo.space_files("sp1") == ["ok.pdf"]
+
+
+_SG_OWN = "sg-" + "a1" * 20 + ".webp"
+_SG_OTHER = "sg-" + "b2" * 20 + ".webp"
+
+
+async def test_space_files_take_this_spaces_gfs_reader_copies(db):
+    """A GFS reader copy (``sg-``) an item of THIS space shows is the
+    space's file (its ``space_media_refs`` row names the space) — freed
+    with the space; one another space's row maps stays."""
+    await _two_spaces(db)
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, image_urls_json)"
+        " VALUES('p1', 'sp1', 'u1', 'image', ?)",
+        (f'["api/media/{_SG_OWN}", "api/media/{_SG_OTHER}"]',),
+    )
+    await db.enqueue(
+        "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id, suite, epoch, size, scope, addr_suite, item_id, origin) VALUES(?, 'f.webp', ?, ?, 'aesgcm-256-pad-det', 1, 10, 'space', 'sm1', ?, 'o')",
+        (_SG_OWN, "sp1", "c" * 64, "p1"),
+    )
+    await db.enqueue(
+        "INSERT INTO space_media_refs(local_name, filename, space_id, blob_id, suite, epoch, size, scope, addr_suite, item_id, origin) VALUES(?, 'f.webp', ?, ?, 'aesgcm-256-pad-det', 1, 10, 'space', 'sm1', ?, 'o')",
+        (_SG_OTHER, "sp2", "d" * 64, "p9"),
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.space_files("sp1") == [_SG_OWN]
+    assert await repo.gfs_copies_in_space("sp1", [_SG_OWN, _SG_OTHER]) == {_SG_OWN}
+    assert await repo.gfs_copies_in_space("sp1", []) == set()
+
+
+async def test_a_household_feed_posts_attachment_is_never_swept(db):
+    """``feed_posts.file_meta_json`` ``$.url`` is in the reference set
+    while the post is live — the orphan sweep never deletes a household
+    feed attachment."""
+    await _seed_parents(db)
+    await db.enqueue(
+        "INSERT INTO feed_posts(id, author, type, file_meta_json, deleted)"
+        " VALUES('ff', 'u1', 'file', ?, 0), ('fg', 'u1', 'file', ?, 1)",
+        ('{"url": "api/media/feeddoc.pdf"}', '{"url": "api/media/gonedoc.pdf"}'),
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    referenced = await repo.referenced_basenames()
+    assert "feeddoc.pdf" in referenced
+    assert await repo.is_referenced("feeddoc.pdf")
+    assert "gonedoc.pdf" not in referenced

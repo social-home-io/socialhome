@@ -32,6 +32,7 @@ import aiofiles
 import aiofiles.os
 import aiohttp
 
+from ..domain.media_constraints import local_media_ref
 from ..domain.moment import Moment
 from ..moment_public_media import (
     CONTENT_TYPE_BY_EXT,
@@ -41,7 +42,7 @@ from ..moment_public_media import (
     seal_media,
 )
 from ..moment_public_seal import sign_wire
-from .inbound_media_store import local_media_ref, media_file_path
+from .inbound_media_store import media_file_path
 
 if TYPE_CHECKING:
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo

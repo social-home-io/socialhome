@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import Collection, Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ..moment_public_media import MAX_BLOB_BYTES, is_blob_id
@@ -41,6 +41,7 @@ from .space_media_fields import (
     SPACE_MEDIA_ITEMS,
     item_media_urls,
     page_body_media_refs,
+    replace_item_media,
     rewrite_page_body_media,
 )
 
@@ -140,27 +141,16 @@ class SpaceMediaLocalization:
             return value
         return f"{head}{slash}{local}{sep}{query}"
 
+    def item[T](self, resource: str, obj: T) -> T:
+        """The domain object *obj* of *resource* with every file the
+        registry lists for it renamed (:func:`replace_item_media`)."""
+        if not self.names:
+            return obj
+        return replace_item_media(resource, obj, lambda u: self.url(u) or u)
+
     def post(self, post: Post) -> Post:
         """*post* with every file :func:`post_media_urls` lists renamed."""
-        if not self.names:
-            return post
-        preview = post.link_preview
-        file_meta = post.file_meta
-        return replace(
-            post,
-            media_url=self.url(post.media_url),
-            image_urls=tuple(self.url(u) or u for u in post.image_urls or ()),
-            link_preview=(
-                replace(preview, thumbnail_url=self.url(preview.thumbnail_url))
-                if preview is not None
-                else None
-            ),
-            file_meta=(
-                replace(file_meta, url=self.url(file_meta.url) or file_meta.url)
-                if file_meta is not None
-                else None
-            ),
-        )
+        return self.item("posts", post)
 
 
 def media_refs_to_wire(refs: Iterable[SpaceMediaRef]) -> dict[str, dict]:

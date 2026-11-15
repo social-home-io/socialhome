@@ -178,6 +178,7 @@ from ..domain.media_constraints import (
     SPACE_ICON_MAX_DIMENSION,
     SPACE_ICON_SNAPSHOT_MAX_BYTES,
     SPACE_IMAGE_EMBED_MAX_BYTES,
+    space_media_ref,
 )
 from ..domain.mention import Mention
 from ..domain.picture_hash import compute_picture_hash
@@ -286,7 +287,7 @@ from ..federation.invite_link_forward import (
     REVOKE_INVITE_LINK_ACTION,
 )
 from ..infrastructure.event_bus import EventBus
-from ..media.cleanup import unlink_unreferenced
+from ..media.cleanup import media_basename, unlink_unreferenced
 from ..media.image_processor import ImageProcessor
 from ..media.profile_picture import (
     PROFILE_PICTURE_MAX_DIMENSION,
@@ -301,11 +302,7 @@ from ..task_drain import wait_tasks_done
 from ..utils.timezones import coerce_tz
 from .content_access import ContentAccessMixin
 from .gfs_connection_service import GfsConnectionError
-from .inbound_media_store import (
-    optional_local_media_ref,
-    require_local_media_refs,
-    space_media_ref,
-)
+from .inbound_media_store import optional_local_media_ref, require_local_media_refs
 from .local_community import (
     LocalAreaBudget,
     hosted_local_area,
@@ -1452,9 +1449,6 @@ class SpaceService(
         member_instances = await self._spaces.list_member_instances(space_id)
         await purge_space_and_media(
             space_repo=self._spaces,
-            post_repo=self._posts,
-            gallery_repo=self._gallery,
-            bazaar_repo=self._bazaar,
             media_dir=self._media_dir,
             media_refs=self._media_refs,
             space_id=space_id,
@@ -6990,9 +6984,6 @@ class SpaceService(
             await self._spaces.remove_space_instance(space_id, instance_id)
         await purge_space_and_media(
             space_repo=self._spaces,
-            post_repo=self._posts,
-            gallery_repo=self._gallery,
-            bazaar_repo=self._bazaar,
             media_dir=self._media_dir,
             media_refs=self._media_refs,
             space_id=space_id,
@@ -8509,7 +8500,17 @@ class SpaceService(
         # (DM / GFS copy / transient) name or junk a legacy synced row kept
         # unvalidated. A bazaar wrapper's photos live on its listing row,
         # which outlives the post and keeps them referenced.
-        media = [u for u in item_media_urls("posts", post) if space_media_ref(u)]
+        # Its GFS reader copies (``sg-``) go too when this space's
+        # ``space_media_refs`` name them.
+        urls = item_media_urls("posts", post)
+        copies = (
+            await self._media_refs.gfs_copies_in_space(
+                space_id, [n for n in map(media_basename, urls) if n]
+            )
+            if self._media_refs is not None
+            else set()
+        )
+        media = [u for u in urls if space_media_ref(u) or media_basename(u) in copies]
         moderated_by: str | None = None
         if post.author != actor_user_id:
             # Moderation path — actor needs content authority
@@ -9208,9 +9209,6 @@ class SpaceService(
         await self._gfs_mirror.unsubscribe(space_id)
         await purge_space_and_media(
             space_repo=self._spaces,
-            post_repo=self._posts,
-            gallery_repo=self._gallery,
-            bazaar_repo=self._bazaar,
             media_dir=self._media_dir,
             media_refs=self._media_refs,
             space_id=space_id,

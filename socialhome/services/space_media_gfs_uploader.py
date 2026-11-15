@@ -87,6 +87,11 @@ from ..domain.gfs_space_media import (
     SpaceMediaUploadAuth,
     space_media_address,
 )
+from ..domain.media_constraints import (
+    MEDIA_REF_PREFIX,
+    is_reserved_media_name,
+    local_media_ref,
+)
 from ..domain.space import SpaceType
 from ..domain.space_media_ref import SpaceMediaRef, media_refs_to_wire
 from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
@@ -97,12 +102,7 @@ from ..space_media_seal import (
     seal_space_media,
 )
 from ..writer_key import sign_with_writer_key
-from .inbound_media_store import (
-    MEDIA_REF_PREFIX,
-    is_reserved_media_name,
-    local_media_ref,
-    media_file_path,
-)
+from .inbound_media_store import media_file_path
 from .space_crypto_service import AUTHORITY_SIG_SUITE_ED25519
 
 if TYPE_CHECKING:

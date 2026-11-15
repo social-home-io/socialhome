@@ -38,9 +38,11 @@ noted:
     ``space_page_snapshots.body``
   * ``task_attachments.url``
   * ``post_drafts.media_url``
-  * ``feed_posts.link_preview_json`` → ``$.thumbnail_url``
-    (the re-encoded link-preview image; one file may back several posts
-    that linked the same page)
+  * ``feed_posts.link_preview_json`` → ``$.thumbnail_url`` (the re-encoded
+    link-preview image; one file may back several posts that linked the
+    same page)
+  * ``feed_posts.file_meta_json`` → ``$.url`` (a household file post's
+    attachment, while the post is live)
 
   * ``space_moderation_queue.payload_json`` of PENDING items — a queued
     post / page / event / listing publishes its media only on approval
@@ -59,6 +61,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Collection, Iterable
 from typing import Protocol, runtime_checkable
 
 import orjson
@@ -69,6 +72,8 @@ from ..domain.media_constraints import (
     MEDIA_REF_PREFIX,
     SPACE_DIRECT_MEDIA_PREFIX,
     SPACE_PAGE_MEDIA_PREFIX,
+    is_gfs_space_media_name,
+    local_media_ref,
     space_media_ref,
 )
 from ..domain.space_media_fields import (
@@ -166,6 +171,8 @@ _LIST_COLUMNS: tuple[tuple[str, str, str], ...] = (
 #: (:data:`_SPACE_REFERENCE_LIVE_COLUMN`).
 _JSON_FIELD_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
     ("feed_posts", "link_preview_json", "$.thumbnail_url", ""),
+    # A household FILE post's attachment (a soft delete keeps it).
+    ("feed_posts", "file_meta_json", "$.url", "deleted=0"),
     *(
         (table, col, shape[len("json:") :], _space_reference_live(table, col))
         for table, col, shape in space_media_columns()
@@ -281,15 +288,23 @@ _SPACE_ROWS: dict[str, tuple[str, str, str]] = {
 _BARE_NAME_TABLES: frozenset[str] = frozenset({"gallery_items"})
 
 
-def _space_file(raw: object, *, bare: bool) -> str | None:
+def _space_file(
+    raw: object, *, bare: bool, gfs_copies: Collection[str] = ()
+) -> str | None:
     """The file name of a stored space reference *raw* when it is a
     canonical, non-reserved space file (:func:`space_media_ref` — never a
-    DM's, a GFS reader copy, a DM transient, a foreign URL or junk a
-    legacy row kept unvalidated), else ``None``."""
+    DM's, a DM transient, a foreign URL or junk a legacy row kept
+    unvalidated) or one of *gfs_copies* (this space's GFS reader copies,
+    :meth:`SqliteMediaReferenceRepo.gfs_copies_in_space`), else ``None``."""
     if not isinstance(raw, str) or not raw:
         return None
-    ref = space_media_ref(MEDIA_REF_PREFIX + raw if bare else raw)
-    return ref[len(MEDIA_REF_PREFIX) :] if ref is not None else None
+    value = MEDIA_REF_PREFIX + raw if bare else raw
+    ref = space_media_ref(value)
+    if ref is not None:
+        return ref[len(MEDIA_REF_PREFIX) :]
+    local = local_media_ref(value)
+    name = local[len(MEDIA_REF_PREFIX) :] if local is not None else None
+    return name if name is not None and name in gfs_copies else None
 
 
 #: A moderation queue item still to publish its files: pending, or
@@ -652,6 +667,13 @@ class AbstractMediaReferenceRepo(Protocol):
     async def space_files(self, space_id: str) -> list[str]:
         """Every file a row of space *space_id* names in a registry column
         (live or not) — what a hard purge of the space may free."""
+        ...
+
+    async def gfs_copies_in_space(
+        self, space_id: str, names: Iterable[str]
+    ) -> set[str]:
+        """Those of *names* that are GFS reader copies (``sg-``) of items
+        of space *space_id* (its ``space_media_refs`` rows)."""
         ...
 
     async def content_names_of_item(self, item_id: str) -> list[str]:
@@ -1048,6 +1070,13 @@ class SqliteMediaReferenceRepo:
             return []
         out: list[str] = []
         seen: set[str] = set()
+        gfs_copies = {
+            str(r["n"])
+            for r in await self._db.fetchall(
+                "SELECT local_name AS n FROM space_media_refs WHERE space_id = ?",
+                (space_id,),
+            )
+        }
         for table, col, shape in space_media_columns():
             source, space, here = _SPACE_ROWS[table]
             bare = table in _BARE_NAME_TABLES
@@ -1071,7 +1100,7 @@ class SqliteMediaReferenceRepo:
                 else:
                     refs = [raw]
                 for ref in refs:
-                    name = _space_file(ref, bare=bare)
+                    name = _space_file(ref, bare=bare, gfs_copies=gfs_copies)
                     if name is not None and name not in seen:
                         seen.add(name)
                         out.append(name)
@@ -1080,6 +1109,23 @@ class SqliteMediaReferenceRepo:
                 seen.add(name)
                 out.append(name)
         return out
+
+    async def gfs_copies_in_space(
+        self, space_id: str, names: Iterable[str]
+    ) -> set[str]:
+        """Those of *names* that are GFS reader copies (``sg-``) of items
+        of space *space_id*: a ``space_media_refs`` row of the space names
+        them. What a post delete may free besides its space files."""
+        wanted = sorted({n for n in names if n and is_gfs_space_media_name(n)})
+        if not space_id or not wanted:
+            return set()
+        marks = ", ".join("?" for _ in wanted)
+        rows = await self._db.fetchall(
+            "SELECT local_name AS n FROM space_media_refs"
+            f" WHERE space_id = ? AND local_name IN ({marks})",
+            (space_id, *wanted),
+        )
+        return {str(r["n"]) for r in rows}
 
     async def content_names_of_item(self, item_id: str) -> list[str]:
         """The content-addressed (``sc-``, v_85) files item *item_id* shows

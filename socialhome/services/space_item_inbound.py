@@ -84,6 +84,7 @@ from ..domain.events import (
     PostDeleted,
     PostReactionChanged,
 )
+from ..domain.media_constraints import local_media_ref
 from ..domain.post import Comment, CommentType, Post, PostType
 from ..domain.space_author_profile import (
     PROFILE_PICTURE_FIELD,
@@ -123,7 +124,6 @@ from ..federation.pending_parent_buffer import (
 from ..infrastructure.event_bus import EventBus
 from ..media.profile_picture import public_profile_picture
 from ..utils.datetime import parse_iso8601_lenient
-from .inbound_media_store import local_media_ref
 
 if TYPE_CHECKING:
     from ..domain.space import Space

@@ -18,6 +18,7 @@ from ....domain.events import (
 )
 from ....domain.federation import FederationEvent
 from ....domain.file_hashes import parse_file_hashes
+from ....domain.media_constraints import space_media_ref
 from ....domain.post import (
     FEED_POST_MAX_IMAGES,
     MAX_POLL_OPTIONS,
@@ -30,10 +31,7 @@ from ....domain.post import (
 from ....domain.space import ContentAction
 from ....domain.space_item import reaction_emoji_ok, stamp_to_db, stored_stamp
 from ....domain.space_media_ref import post_media_urls
-from ....services.inbound_media_store import (
-    space_media_ref,
-    space_media_refs,
-)
+from ....services.inbound_media_store import space_media_refs
 from ....services.link_preview_service import space_wire_link_preview
 from ....services.space_media_names import comment_media_ref
 from ...owner_bound_id import (

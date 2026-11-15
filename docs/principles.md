@@ -1197,7 +1197,7 @@ content are blocked entirely.**
 1. **Only local pictures render.** A picture shows only when it is this
    household's own media (`api/…` — an upload, a space cover, a profile
    picture). Federated media fields are cut to that shape on receipt
-   (`services/inbound_media_store.local_media_ref`), and the local
+   (`domain/media_constraints.local_media_ref`), and the local
    create / edit paths refuse the same thing up front — a highlight frame,
    moment, post / comment, Bazaar listing, event cover or page cover whose
    media is not a local upload is `422 INVALID_MEDIA_URL`
