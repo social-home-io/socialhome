@@ -1532,3 +1532,20 @@ async def test_space_files_take_this_spaces_gfs_reader_copies(db):
     assert await repo.space_files("sp1") == [_SG_OWN]
     assert await repo.gfs_copies_in_space("sp1", [_SG_OWN, _SG_OTHER]) == {_SG_OWN}
     assert await repo.gfs_copies_in_space("sp1", []) == set()
+
+
+async def test_a_household_feed_posts_attachment_is_never_swept(db):
+    """``feed_posts.file_meta_json`` ``$.url`` is in the reference set
+    while the post is live — the orphan sweep never deletes a household
+    feed attachment."""
+    await _seed_parents(db)
+    await db.enqueue(
+        "INSERT INTO feed_posts(id, author, type, file_meta_json, deleted)"
+        " VALUES('ff', 'u1', 'file', ?, 0), ('fg', 'u1', 'file', ?, 1)",
+        ('{"url": "api/media/feeddoc.pdf"}', '{"url": "api/media/gonedoc.pdf"}'),
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    referenced = await repo.referenced_basenames()
+    assert "feeddoc.pdf" in referenced
+    assert await repo.is_referenced("feeddoc.pdf")
+    assert "gonedoc.pdf" not in referenced

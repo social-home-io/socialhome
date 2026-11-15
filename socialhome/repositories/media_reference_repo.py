@@ -38,7 +38,8 @@ noted:
     ``space_page_snapshots.body``
   * ``task_attachments.url``
   * ``post_drafts.media_url``
-  * ``feed_posts.link_preview_json`` → ``$.thumbnail_url``
+  * ``feed_posts.link_preview_json`` → ``$.thumbnail_url`` and
+    ``feed_posts.file_meta_json`` → ``$.url`` (a household file post, while live)
     (the re-encoded link-preview image; one file may back several posts
     that linked the same page)
 
@@ -169,6 +170,8 @@ _LIST_COLUMNS: tuple[tuple[str, str, str], ...] = (
 #: (:data:`_SPACE_REFERENCE_LIVE_COLUMN`).
 _JSON_FIELD_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
     ("feed_posts", "link_preview_json", "$.thumbnail_url", ""),
+    # A household FILE post's attachment (a soft delete keeps it).
+    ("feed_posts", "file_meta_json", "$.url", "deleted=0"),
     *(
         (table, col, shape[len("json:") :], _space_reference_live(table, col))
         for table, col, shape in space_media_columns()
