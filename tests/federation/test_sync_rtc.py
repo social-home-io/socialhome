@@ -379,6 +379,31 @@ async def test_a_cancelled_caller_still_holds_off_the_close():
     assert pc.closed and pc.destroyed
 
 
+async def test_watchers_stand_down_while_the_close_waits():
+    """Between ``close()`` and the deferred ``pc.close()`` the pc's
+    watcher tasks still run: a data channel arriving then is not adopted
+    (it used to be, then ``spawn_task`` on ``None`` raised), and the
+    session does not turn ready again."""
+    s, pc = _session("requester")
+    watcher = pc.spawn_task(s._watch_incoming())
+    in_flight = asyncio.create_task(s.add_ice_candidate(_CAND))
+    await pc.reached.wait()
+    s.close()
+    channel = await pc.create_data_channel(CHANNEL_LABEL)
+    pc._incoming_queue.put_nowait(channel)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert watcher.done() and watcher.exception() is None
+    assert s._channel is None
+    await s._watch_channel(channel)
+    assert not s.is_ready
+    pc.gate.set()
+    await in_flight
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert pc.closed and pc.after_destroy == []
+
+
 async def test_no_native_call_starts_after_close():
     s, pc = _session("requester")
     s.close()

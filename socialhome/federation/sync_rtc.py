@@ -208,10 +208,15 @@ class SyncRtcSession:
         candidates.
         """
         on_ice = self._on_local_ice
-        if on_ice is None:
+        pc = self._pc
+        if on_ice is None or pc is None:
             return
         try:
-            async for cand in self._pc.ice_candidates():
+            async for cand in pc.ice_candidates():
+                if self._closed:
+                    # Closed, its pc waiting for an in-flight call
+                    # (:meth:`_apply_remote`): nothing left to send to.
+                    return
                 try:
                     await on_ice(self.sync_id, cand.candidate, cand.mid)
                 except Exception as exc:  # noqa: BLE001 — defensive
@@ -230,13 +235,20 @@ class SyncRtcSession:
             )
 
     async def _watch_incoming(self) -> None:
+        pc = self._pc
+        if pc is None:
+            return
         try:
-            async for ch in self._pc.incoming_data_channels():
+            async for ch in pc.incoming_data_channels():
+                if self._closed:
+                    # Closed while its pc waits for an in-flight call
+                    # (:meth:`_apply_remote`): the channel goes with it.
+                    return
                 if ch.label != CHANNEL_LABEL:
                     continue
                 self._channel = ch
                 ch.set_buffered_amount_low_threshold(SEND_HWM_BYTES // 2)
-                self._pc.spawn_task(self._watch_channel(ch))
+                pc.spawn_task(self._watch_channel(ch))
                 return
         except asyncio.CancelledError:
             raise
@@ -256,6 +268,8 @@ class SyncRtcSession:
                 self.sync_id,
                 exc,
             )
+            return
+        if self._closed:
             return
         log.info(
             "SyncRtcSession[%s]: DataChannel open (space=%s, mode=%s)",
