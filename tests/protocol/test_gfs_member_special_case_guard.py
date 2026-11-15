@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ast
 import re
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -330,8 +331,102 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
     },
 }
 
-#: Functions that must stay free of every marker: the periodic roster
-#: repair reaches every member household by one rule.
+#: EXACT count of each marker's code occurrences per allowed module: a new
+#: special case inside an allowed module (the removed ``_is_relay_only_peer``
+#: re-added, say) moves the count and fails. Update a count only with the
+#: reason the new occurrence is allowed.
+_COUNTS: dict[str, dict[str, int]] = {
+    "SPACE_SESSION": {
+        "socialhome/app.py": 1,
+        "socialhome/domain/federation.py": 1,
+        "socialhome/federation/auto_pair_coordinator.py": 1,
+        "socialhome/federation/federation_service.py": 17,
+        "socialhome/federation/inbound_validator.py": 3,
+        "socialhome/federation/invite_token_redeem.py": 5,
+        "socialhome/federation/routed_envelope.py": 1,
+        "socialhome/federation/sync/space/scheduler.py": 1,
+        "socialhome/federation/transport.py": 6,
+        "socialhome/repositories/federation_repo.py": 1,
+        "socialhome/routes/pairing.py": 1,
+        "socialhome/routes/public_spaces.py": 1,
+        "socialhome/services/bazaar_thread_service.py": 1,
+        "socialhome/services/capabilities_outbound.py": 1,
+        "socialhome/services/dm_group_service.py": 2,
+        "socialhome/services/federation_inbound/pairing.py": 1,
+        "socialhome/services/gfs_channel_service.py": 1,
+        "socialhome/services/gfs_route_discovery_service.py": 1,
+        "socialhome/services/moment_reaction_router.py": 1,
+        "socialhome/services/moment_service.py": 1,
+        "socialhome/services/peer_directory_service.py": 1,
+        "socialhome/services/space_media_gfs_fetcher.py": 1,
+        "socialhome/services/space_media_gfs_uploader.py": 1,
+        "socialhome/services/space_member_directory.py": 4,
+        "socialhome/services/space_service.py": 4,
+        "socialhome/services/url_update_outbound.py": 1,
+    },
+    "is_relay_reader": {
+        "socialhome/app.py": 1,
+        "socialhome/federation/sync/space/provider.py": 3,
+        "socialhome/services/page_federation_outbound.py": 1,
+        "socialhome/services/page_proposal_forwarder.py": 1,
+        "socialhome/services/space_media_gfs_uploader.py": 2,
+        "socialhome/services/space_media_refs.py": 1,
+    },
+    "reads_from_gfs": {
+        "socialhome/services/space_media_gfs_uploader.py": 1,
+        "socialhome/services/space_media_sync_service.py": 2,
+    },
+    "is_space_session_peer": {
+        "socialhome/federation/federation_service.py": 3,
+        "socialhome/federation/sync/space/provider.py": 1,
+        "socialhome/federation/sync/space/scheduler.py": 1,
+    },
+    "relay_payload": {
+        "socialhome/federation/federation_service.py": 3,
+        "socialhome/services/space_config_outbound.py": 1,
+    },
+    "space_session": {
+        "socialhome/domain/federation.py": 1,
+        "socialhome/federation/invite_token_redeem.py": 4,
+        "socialhome/repositories/outbox_repo.py": 1,
+        "socialhome/services/dm_service.py": 2,
+    },
+    "relay_media_ok": {
+        "socialhome/federation/federation_service.py": 3,
+        "socialhome/services/space_media_gfs_uploader.py": 1,
+    },
+    "takes_relay_frames": {
+        "socialhome/app.py": 1,
+        "socialhome/federation/sync/space/provider.py": 2,
+        "socialhome/services/page_proposal_forwarder.py": 1,
+        "socialhome/services/space_media_gfs_uploader.py": 1,
+    },
+    "stored_on_gfs": {
+        "socialhome/services/space_media_gfs_uploader.py": 2,
+    },
+    "stored_plan_for_reader": {
+        "socialhome/federation/sync/space/provider.py": 2,
+        "socialhome/services/space_media_gfs_uploader.py": 1,
+    },
+    "list_social_instances": {
+        "socialhome/federation/federation_service.py": 2,
+        "socialhome/federation/route_discovery.py": 1,
+        "socialhome/repositories/federation_repo.py": 2,
+        "socialhome/routes/calendar.py": 1,
+        "socialhome/services/app_federation_service.py": 1,
+        "socialhome/services/calendar_service.py": 1,
+        "socialhome/services/dm_routing_service.py": 1,
+        "socialhome/services/friends_service.py": 2,
+        "socialhome/services/online_status_service.py": 3,
+        "socialhome/services/peer_directory_service.py": 1,
+        "socialhome/services/peer_outbound.py": 1,
+        "socialhome/services/resync_on_upgrade.py": 1,
+    },
+}
+
+#: Functions that must stay free of every marker — and so must every
+#: ``self._helper`` they call (followed one level): the roster repair
+#: reaches every member household by one rule.
 _MARKER_FREE: dict[str, tuple[str, ...]] = {
     "socialhome/services/space_service.py": (
         "on_sync_begin_roster",
@@ -369,34 +464,67 @@ def _docstrings(tree: ast.AST) -> set[int]:
     return out
 
 
-def _code_names(tree: ast.AST) -> set[str]:
-    """Names the code uses — never comments (not in the AST) nor docstrings.
-    A string constant counts when it equals a marker
+def _code_name_list(tree: ast.AST) -> list[str]:
+    """Names the code uses, one per occurrence — never comments (not in the
+    AST) nor docstrings. A string constant counts when it equals a marker
     (``kwargs["relay_payload"]``), and as ``space_session`` when it names
     that word (SQL text, ``== "space_session"``)."""
     docs = _docstrings(tree)
-    out: set[str] = set()
+    out: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute):
-            out.add(node.attr)
+            out.append(node.attr)
         elif isinstance(node, ast.Name):
-            out.add(node.id)
+            out.append(node.id)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            out.add(node.name)
-        elif (
-            isinstance(node, ast.arg)
-            or isinstance(node, ast.keyword)
-            and node.arg is not None
+            out.append(node.name)
+        elif isinstance(node, ast.arg) or (
+            isinstance(node, ast.keyword) and node.arg is not None
         ):
-            out.add(node.arg)
+            out.append(node.arg)
         elif (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
             and id(node) not in docs
         ):
-            out.add(node.value)
-            if _SPACE_SESSION_WORD.search(node.value):
-                out.add("space_session")
+            if node.value != "space_session" and _SPACE_SESSION_WORD.search(node.value):
+                out.append("space_session")
+            out.append(node.value)
+    return out
+
+
+def _code_names(tree: ast.AST) -> set[str]:
+    return set(_code_name_list(tree))
+
+
+def _marker_counts(tree: ast.AST) -> Counter[str]:
+    return Counter(n for n in _code_name_list(tree) if n in _ALLOWED)
+
+
+def _marker_free_hits(tree: ast.AST, names: tuple[str, ...]) -> dict[str, set[str]]:
+    """Markers in each of *names*' bodies and in the ``self._helper``
+    methods they call (one level)."""
+    fns = {
+        n.name: n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    out: dict[str, set[str]] = {}
+    for name in names:
+        fn = fns[name]
+        hit = _body_names(fn) & set(_ALLOWED)
+        helpers = {
+            n.attr
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Attribute)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == "self"
+            and n.attr.startswith("_")
+            and n.attr in fns
+        }
+        for helper in helpers:
+            hit |= _body_names(fns[helper]) & set(_ALLOWED)
+        out[name] = hit
     return out
 
 
@@ -414,15 +542,19 @@ def _body_names(fn: ast.AST) -> set[str]:
     return _code_names(ast.Module(body=list(fn.body), type_ignores=[]))
 
 
-def _modules_referencing() -> dict[str, set[str]]:
-    found: dict[str, set[str]] = {marker: set() for marker in _ALLOWED}
+def _scan() -> dict[str, dict[str, int]]:
+    """marker → module → occurrences, over every module under socialhome/."""
+    found: dict[str, dict[str, int]] = {marker: {} for marker in _ALLOWED}
     for path in sorted(_PKG.rglob("*.py")):
-        names = _code_names(ast.parse(path.read_text(encoding="utf-8")))
+        counts = _marker_counts(ast.parse(path.read_text(encoding="utf-8")))
         module = path.relative_to(_ROOT).as_posix()
-        for marker in _ALLOWED:
-            if marker in names:
-                found[marker].add(module)
+        for marker, n in counts.items():
+            found[marker][module] = n
     return found
+
+
+def _modules_referencing() -> dict[str, set[str]]:
+    return {marker: set(mods) for marker, mods in _scan().items()}
 
 
 def test_every_reason_is_a_known_category():
@@ -467,16 +599,65 @@ def test_the_scan_ignores_comments_and_docstrings():
     assert {"SPACE_SESSION", "is_relay_reader", "relay_payload"} <= _code_names(code)
 
 
-def test_the_periodic_roster_snapshot_has_no_seat_special_case():
-    for path, names in _MARKER_FREE.items():
-        fns = _functions(path)
-        for name in names:
-            hit = _body_names(fns[name]) & set(_ALLOWED)
-            assert not hit, (
-                f"{path}:{name} references {sorted(hit)}: the roster snapshot "
-                "reaches every member household by one rule (CLAUDE.md, "
-                "'Every space member is equal')."
+def test_each_allowed_module_keeps_its_exact_count():
+    """A new special case inside an already-allowed module fails too."""
+    assert set(_COUNTS) == set(_ALLOWED)
+    for marker, modules in _ALLOWED.items():
+        assert set(_COUNTS[marker]) == set(modules), marker
+    found = _scan()
+    for marker, counts in _COUNTS.items():
+        for module, n in counts.items():
+            got = found[marker].get(module, 0)
+            assert got == n, (
+                f"{module} references {marker!r} {got} times, allowed {n}: "
+                "a member reached through a GFS must be treated like any "
+                "other (CLAUDE.md, 'Every space member is equal'). Add an "
+                "occurrence only for a seat / transport / validator / "
+                "directory / non-space / follower / GFS-cache reason, and "
+                f"update _COUNTS in {Path(__file__).name}."
             )
+
+
+def test_the_roster_repair_has_no_seat_special_case():
+    for path, names in _MARKER_FREE.items():
+        tree = ast.parse((_ROOT / path).read_text(encoding="utf-8"))
+        for name, hit in _marker_free_hits(tree, names).items():
+            assert not hit, (
+                f"{path}:{name} (or a self._helper it calls) references "
+                f"{sorted(hit)}: the roster repair reaches every member "
+                "household by one rule (CLAUDE.md, 'Every space member is "
+                "equal')."
+            )
+
+
+def test_re_adding_the_removed_seat_skip_fails_the_guard():
+    """Review should-fix 3: the exact special case this work removed —
+    ``_is_relay_only_peer`` (a SPACE_SESSION check) called from the roster
+    path — is caught both by the helper-following pin and by the count."""
+    path = "socialhome/services/space_service.py"
+    src = (_ROOT / path).read_text(encoding="utf-8")
+    anchor = (
+        "        if sender not in await self._spaces.list_member_instances(space_id):\n"
+    )
+    assert anchor in src
+    mutated = src.replace(
+        anchor,
+        "        if await self._is_relay_only_peer(sender):\n            return\n"
+        + anchor,
+        1,
+    ).replace(
+        "    async def _cert_epoch_for(",
+        "    async def _is_relay_only_peer(self, instance_id):\n"
+        "        row = await self._federation_repo.get_instance(instance_id)\n"
+        "        return row is not None and row.source is "
+        "InstanceSource.SPACE_SESSION\n\n"
+        "    async def _cert_epoch_for(",
+        1,
+    )
+    tree = ast.parse(mutated)
+    hits = _marker_free_hits(tree, _MARKER_FREE[path])
+    assert "SPACE_SESSION" in hits["on_sync_begin_roster"]
+    assert _marker_counts(tree)["SPACE_SESSION"] == _COUNTS["SPACE_SESSION"][path] + 1
 
 
 def test_the_https_media_leg_keeps_its_seat_check():
