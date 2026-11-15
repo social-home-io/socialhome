@@ -104,6 +104,7 @@ from ..domain.federation import (
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.media_chunking import ADVERTISED_MAX_MESSAGE_BYTES
+from ..domain.relay_media_frame import relay_event_payload_limit
 from ..hardening import DEFAULT_JSON_MAX_BYTES
 from . import routed_crypto
 from .inbound_validator import (
@@ -239,6 +240,11 @@ def _b64_len(n: int) -> int:
     return -(-n * 4 // 3)
 
 
+#: Room for the route origin's signature to turn hybrid (Ed25519 only
+#: today; an ML-DSA-65 signature is 4,412 base64url characters).
+_ORIGIN_SIG_ROOM_BYTES: int = 4608
+
+
 def _fits_one_hop(routed_payload_json_bytes: int) -> bool:
     """Whether a ``SPACE_ROUTED`` payload of that many JSON bytes fits one
     hop's envelope whatever signs it: AES-GCM-encrypted (nonce + 16-byte
@@ -246,6 +252,23 @@ def _fits_one_hop(routed_payload_json_bytes: int) -> bool:
     :data:`_HOP_ENVELOPE_ALLOWANCE_BYTES`."""
     encrypted = _b64_len(12) + 1 + _b64_len(routed_payload_json_bytes + 16)
     return encrypted + _HOP_ENVELOPE_ALLOWANCE_BYTES <= _HOP_MAX_BYTES
+
+
+def _fits_as_json(routed_payload: dict, *, relay_frame_leg: bool) -> bool:
+    """Whether *routed_payload* (its inner sealed as JSON) fits every leg of
+    its route: one mesh hop, and — on a host hop, whose leg to the seat is a
+    GFS relay frame — that frame too, measured as the frame would carry it
+    (``space-routed-raw-v1``) with room for a hybrid origin signature."""
+    routed_json = orjson.dumps(routed_payload)
+    if not _fits_one_hop(len(routed_json)):
+        return False
+    if not relay_frame_leg:
+        return True
+    _suite, framed = pack_event_body(
+        FederationEventType.SPACE_ROUTED, routed_json.decode()
+    )
+    limit = relay_event_payload_limit(FederationEventType.SPACE_ROUTED)
+    return len(framed) + _ORIGIN_SIG_ROOM_BYTES <= limit
 
 
 #: Longest string value kept in the head of a large inner that is not kept
@@ -507,6 +530,7 @@ class SpaceRoutedHandler:
         first_leg: list[DeliveryResult] | None = None,
         retain: bool = True,
         raw_body_ok: bool = False,
+        relay_frame_leg: bool = False,
     ) -> str:
         """Ship ``inner_event_type`` along ``path`` (origin → … → target).
 
@@ -544,7 +568,8 @@ class SpaceRoutedHandler:
         envelope would not fit one hop, so the route does not base64 that
         ciphertext twice more. Decided on the actual encoded size of this
         envelope plus the largest header a hop adds, so nothing that would
-        not fit as JSON is sent as JSON.
+        not fit as JSON is sent as JSON. ``relay_frame_leg`` (a host hop):
+        a leg of the route is a GFS relay frame, which must fit too.
 
         Returns the generated ``route_id`` so the caller can correlate
         the eventual reply (the reply arrives via the dispatcher with
@@ -580,7 +605,9 @@ class SpaceRoutedHandler:
             origin_keys=(origin_priv_b64, origin_pub_b64),
             target_eph_pk_b64=target_eph_pk_b64,
         )
-        if raw_body_ok and not _fits_one_hop(len(orjson.dumps(routed_payload))):
+        if raw_body_ok and not _fits_as_json(
+            routed_payload, relay_frame_leg=relay_frame_leg
+        ):
             suite, raw = pack_event_body(inner_event_type, inner_bytes.decode())
             if suite != EVENT_BODY_SUITE_JSON:
                 routed_payload = self._sealed_forward(
@@ -597,8 +624,9 @@ class SpaceRoutedHandler:
             origin_pub_b64,
             now + self._eph_ttl_s,
         )
+        demoted: dict[str, bytes] = {}
         if retain:
-            self._record_pending(
+            demoted = self._record_pending(
                 route_id=route_id,
                 path=path,
                 target_identity_pk=target_identity_pk,
@@ -625,6 +653,10 @@ class SpaceRoutedHandler:
             # this one may linger for the pending window.
             self._pending_routed.pop(route_id, None)
             self._origin_eph_state.pop(route_id, None)
+            # ... and what made room for it is kept again.
+            for rid, kept in demoted.items():
+                if (p := self._pending_routed.get(rid)) is not None:
+                    self._pending_routed[rid] = replace(p, inner_payload_json=kept)
             raise
         if first_leg is not None:
             first_leg.append(result)
@@ -682,26 +714,33 @@ class SpaceRoutedHandler:
         is_retry: bool,
         now: float,
         raw_body_ok: bool,
-    ) -> None:
+    ) -> dict[str, bytes]:
         """Retain what a ``SPACE_ROUTE_STALE`` nack needs: the compact JSON
         already built for the seal (the same bytes that go on the wire —
         exact, and immune to the caller mutating its dict afterwards). The
         retransmit itself keeps nothing: a nack for it gives up before any
         payload is read. A large inner whose sender keeps its own copy gets
         an invalidate-only record; any other large one is kept, the oldest
-        large records giving way to it under the budget."""
+        large records giving way to it under the budget. Returns the records
+        demoted for it (``route_id`` → their inner), so a send that fails
+        can keep them again."""
         retained: bytes | None = inner_bytes
         head: dict[str, str | int | float | bool] | None = None
+        demoted: dict[str, bytes] = {}
         size = len(inner_bytes)
         if is_retry:
             retained = None
         elif size > _MAX_RETAINED_INNER_BYTES:
             head = _inner_head(inner_payload)
-            if (
-                inner_event_type in self._lost_inner_listeners
-                or not self._make_room_for_large(size)
-            ):
+            room = (
+                None
+                if inner_event_type in self._lost_inner_listeners
+                else self._make_room_for_large(size)
+            )
+            if room is None:
                 retained = None
+            else:
+                demoted = room
         self._pending_routed[route_id] = _PendingRouted(
             target_instance_id=path[-1],
             target_identity_pk=target_identity_pk,
@@ -713,14 +752,16 @@ class SpaceRoutedHandler:
             inner_head=head,
             raw_body_ok=raw_body_ok,
         )
+        return demoted
 
-    def _make_room_for_large(self, size: int) -> bool:
+    def _make_room_for_large(self, size: int) -> dict[str, bytes] | None:
         """Demote the oldest kept large records to head-only until *size*
-        more bytes fit :data:`_MAX_RETAINED_LARGE_BYTES`. ``False`` when they
-        cannot (the held ones alone fill it) — nothing is demoted then."""
+        more bytes fit :data:`_MAX_RETAINED_LARGE_BYTES`; returns what was
+        demoted (``route_id`` → its inner). ``None`` when they cannot make
+        room (the held ones alone fill it) — nothing is demoted then."""
         over = self._retained_large_bytes() + size - _MAX_RETAINED_LARGE_BYTES
         if over <= 0:
-            return True
+            return {}
         kept = sorted(
             (p.expires_at, route_id, len(p.inner_payload_json))
             for route_id, p in self._pending_routed.items()
@@ -728,20 +769,21 @@ class SpaceRoutedHandler:
             and len(p.inner_payload_json) > _MAX_RETAINED_INNER_BYTES
         )
         if sum(n for _, _, n in kept) < over:
-            return False
+            return None
+        demoted: dict[str, bytes] = {}
         for _expires, route_id, n in kept:
             if over <= 0:
                 break
-            self._pending_routed[route_id] = replace(
-                self._pending_routed[route_id], inner_payload_json=None
-            )
+            record = self._pending_routed[route_id]
+            demoted[route_id] = record.inner_payload_json or b""
+            self._pending_routed[route_id] = replace(record, inner_payload_json=None)
             over -= n
             log.info(
                 "SPACE_ROUTED route_id=%s: a newer large send takes its place"
                 " in the large-inner budget; not kept for a retransmit",
                 route_id[:8],
             )
-        return True
+        return demoted
 
     def _retained_large_bytes(self) -> int:
         """Bytes of the large inners kept right now: in ``_pending_routed``

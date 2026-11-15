@@ -346,14 +346,20 @@ def unseal_inner_body(
     """Target side of :func:`seal_inner_body`: ``(body_suite, body)``.
 
     No ``event_body_suite`` → the JSON suite (the shape before raw bodies).
-    One that is named must be a suite this build knows — an unknown one
+    One that is named must be a raw suite this build knows — an unknown one
     raises :class:`UnsupportedEventBodySuite`, never a default — and is
     bound into the AAD, so a stripped or renamed suite fails the tag
     (:class:`cryptography.exceptions.InvalidTag`). Raises
     :class:`ValueError` on wire-format problems."""
     _require_known_suite(sealed)
     named = sealed.get(EVENT_BODY_SUITE_FIELD)
-    if named is not None and named not in SUPPORTED_EVENT_BODY_SUITES:
+    if named is not None and (
+        not isinstance(named, str)
+        or named == EVENT_BODY_SUITE_JSON
+        or named not in SUPPORTED_EVENT_BODY_SUITES
+    ):
+        # Only a raw suite is ever named (no field = JSON): one encoding
+        # for each, and anything else refused, never guessed.
         raise UnsupportedEventBodySuite(f"unknown event_body_suite: {named!r}")
     try:
         origin_pub = sealed["origin_eph_pk"]

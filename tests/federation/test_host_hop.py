@@ -606,7 +606,9 @@ async def test_the_hop_goes_through_the_first_host_that_is_not_an_end():
     assert result.ok and sent == [["me", "the-admin", target]]
     # A carded member (v_89+) reads a raw sealed body: a sync chunk may ride
     # the hop with its ciphertext raw. Never nacked, so nothing is kept.
-    assert [(k["raw_body_ok"], k["retain"]) for k in kwargs] == [(True, False)]
+    assert [(k["raw_body_ok"], k["retain"], k["relay_frame_leg"]) for k in kwargs] == [
+        (True, False, True)
+    ]
 
 
 async def test_no_hop_the_target_would_refuse_is_reported_as_sent():

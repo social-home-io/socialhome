@@ -4112,3 +4112,25 @@ async def test_a_sealed_body_of_an_unknown_suite_is_dropped_not_nacked(caplog):
         if s["event_type"] is FederationEventType.SPACE_ROUTE_STALE
     ]
     assert any("unknown event_body_suite" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_large_send_that_raises_demotes_nothing():
+    """A new large send makes room by demoting the oldest kept record; if
+    its first hop then raises, that record is kept again — nothing is lost
+    for a send that never left (found in review)."""
+    a, b, c, _rs = _origin_with_route_service()
+    path = [a.instance_id, b.instance_id, c.instance_id]
+    a.fed.peers.clear()
+    big = {"id": "page-1", "content": "x" * (2 * _MAX_RETAINED_INNER_BYTES)}
+    size = len(json.dumps(big, separators=(",", ":"), sort_keys=True))
+    with patch.object(routed_envelope_mod, "_MAX_RETAINED_LARGE_BYTES", 2 * size):
+        kept = [(await _send_under_dead_key(a, path, payload=big))[0] for _ in "12"]
+
+        async def _boom(**_kw: Any) -> Any:
+            raise ConnectionError("first hop gone")
+
+        a.fed.send_event = _boom  # type: ignore[method-assign]
+        with pytest.raises(ConnectionError):
+            await _send_under_dead_key(a, path, payload=big)
+    assert all(a.handler._pending_routed[r].inner_payload_json for r in kept)
+    assert a.handler._retained_large_bytes() == 2 * size

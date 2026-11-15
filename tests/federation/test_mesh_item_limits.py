@@ -146,7 +146,11 @@ def _hop_envelope_bytes(routed_payload: dict) -> int:
 
 
 async def _route(
-    nodes: list[_Node], event_type: FederationEventType, payload: dict
+    nodes: list[_Node],
+    event_type: FederationEventType,
+    payload: dict,
+    *,
+    relay_frame_leg: bool = False,
 ) -> None:
     await nodes[0].handler.send_routed(
         path=[n.instance_id for n in nodes],
@@ -154,8 +158,42 @@ async def _route(
         inner_event_type=event_type,
         inner_payload=payload,
         raw_body_ok=True,
+        relay_frame_leg=relay_frame_leg,
     )
     await _settle()
+
+
+async def _host_hop_leg_reaches_the_seat(
+    event_type: FederationEventType, payload: dict, *, mailbox: bool
+) -> None:
+    """The v_89 host hop ``[member, host, seat]``: the route's seal from the
+    real ``send_routed`` (as ``HostHop.send`` calls it), then the host's leg
+    to the seat over the GFS relay; the seat gets the identical wrapper."""
+    origin, host, target = _build_identity_chain(3)
+    await _route([origin, host, target], event_type, payload, relay_frame_leg=True)
+    [leg] = [s["payload"] for s in _routed_sends(host)]
+    leg = {
+        **leg,
+        "sealed": {
+            **leg["sealed"],
+            "origin_sig_suite": "ed25519+mldsa65",
+            "origin_sig": HYBRID_ORIGIN_SIG,
+        },
+    }
+    w = _world(mailbox=mailbox)
+    got: list = []
+
+    async def _record(event) -> None:
+        got.append(event)
+
+    w.member.svc._event_registry._handlers[ROUTED] = [_record]
+    result = await w.send(w.host, w.member, ROUTED, leg)
+    assert result.ok, result
+    if w.gfs.seen[-1][0] == "media":
+        assert len(w.gfs.seen[-1][2]) <= RELAY_MEDIA_MAX_BODY_BYTES
+    assert await w.gfs.deliver() == [{"status": "ok"}]
+    [event] = got
+    assert event.payload == leg
 
 
 def test_the_hop_allowance_covers_a_hybrid_signed_header():
@@ -218,34 +256,24 @@ async def test_no_sync_record_size_falls_between_json_and_raw():
 async def test_the_largest_item_crosses_a_host_hop_to_a_household_behind_a_gfs(
     mailbox, item
 ):
-    """The v_89 host hop ``[member, host, seat]``: the route's seal from the
-    real ``send_routed``, then the host's leg to the seat over the GFS relay
-    as one binary frame (the wrapper's sealed inner raw)."""
-    origin, host, target = _build_identity_chain(3)
+    """The host's leg to the seat rides the GFS relay as one binary frame
+    (the wrapper's sealed inner raw, ``space-routed-raw-v1``)."""
     if item == "live-event":
-        event_type, payload = PAGE, _live_page()
+        await _host_hop_leg_reaches_the_seat(PAGE, _live_page(), mailbox=mailbox)
     else:
-        event_type, payload = CHUNK, await _sync_chunk(RELAY_SYNC_RECORD_MAX_BYTES)
-    await _route([origin, host, target], event_type, payload)
-    [leg] = [s["payload"] for s in _routed_sends(host)]
-    leg = {
-        **leg,
-        "sealed": {
-            **leg["sealed"],
-            "origin_sig_suite": "ed25519+mldsa65",
-            "origin_sig": HYBRID_ORIGIN_SIG,
-        },
-    }
-    w = _world(mailbox=mailbox)
-    got: list = []
+        payload = await _sync_chunk(RELAY_SYNC_RECORD_MAX_BYTES)
+        await _host_hop_leg_reaches_the_seat(CHUNK, payload, mailbox=mailbox)
 
-    async def _record(event) -> None:
-        got.append(event)
 
-    w.member.svc._event_registry._handlers[ROUTED] = [_record]
-    result = await w.send(w.host, w.member, ROUTED, leg)
-    assert result.ok and result.via == "gfs_relay"
-    assert len(w.gfs.seen[-1][2]) <= RELAY_MEDIA_MAX_BODY_BYTES
-    assert await w.gfs.deliver() == [{"status": "ok"}]
-    [event] = got
-    assert event.payload == leg
+async def test_no_sync_record_size_falls_through_on_a_host_hop():
+    """The host hop's binding leg is the GFS relay frame (532,382 bytes),
+    not a 1 MiB mesh hop: a record that would fit a mesh hop as JSON but not
+    that frame must be sealed raw too (found in review: 395–433 kB were
+    refused with a 413 at the host)."""
+    for size in [*range(300_000, RELAY_SYNC_RECORD_MAX_BYTES, 2048)]:
+        await _host_hop_leg_reaches_the_seat(
+            CHUNK, await _sync_chunk(size), mailbox=False
+        )
+    await _host_hop_leg_reaches_the_seat(
+        CHUNK, await _sync_chunk(RELAY_SYNC_RECORD_MAX_BYTES), mailbox=False
+    )

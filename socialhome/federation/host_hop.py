@@ -160,6 +160,8 @@ class HostHop:
                     # raw sealed body (a sync chunk's ciphertext unwrapped).
                     raw_body_ok=card.proto_version
                     >= FederationCapability.MIN_FOR_RELAY_MEDIA,
+                    # The host's leg to the target is a GFS relay frame.
+                    relay_frame_leg=True,
                 )
             except Exception:
                 log.warning("host hop: routed send failed", exc_info=True)

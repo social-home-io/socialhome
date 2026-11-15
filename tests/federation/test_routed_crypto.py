@@ -16,6 +16,7 @@ from socialhome.federation import routed_crypto as rc
 from socialhome.federation.relay_event_body import (
     EVENT_BODY_SUITE_FIELD,
     EVENT_BODY_SUITE_JSON,
+    EVENT_BODY_SUITE_ROUTED_RAW,
     EVENT_BODY_SUITE_SYNC_CHUNK_RAW,
     UnsupportedEventBodySuite,
 )
@@ -611,7 +612,7 @@ def test_a_json_body_keeps_todays_wire_shape():
     )
 
 
-@pytest.mark.parametrize("swap", [None, EVENT_BODY_SUITE_JSON])
+@pytest.mark.parametrize("swap", [None, EVENT_BODY_SUITE_ROUTED_RAW])
 def test_the_body_suite_is_bound_into_the_aad(swap):
     """A relay that strips the suite (so the target reads raw bytes as JSON)
     or renames it breaks the AEAD tag."""
@@ -631,3 +632,13 @@ def test_an_unknown_body_suite_is_refused_never_defaulted():
         _unseal_body(sealed, t_priv)
     with pytest.raises(UnsupportedEventBodySuite):
         _seal_body(b"raw", "zip-v9")
+
+
+@pytest.mark.parametrize("named", [EVENT_BODY_SUITE_JSON, ["sync-chunk-raw-v1"], 7])
+def test_a_named_suite_must_be_a_raw_suite_string(named):
+    """A sender never names the JSON suite (no field = JSON), and a suite
+    that is not a string is refused cleanly, never a TypeError."""
+    sealed, t_priv = _seal_body(b"raw", EVENT_BODY_SUITE_SYNC_CHUNK_RAW)
+    sealed[EVENT_BODY_SUITE_FIELD] = named
+    with pytest.raises(UnsupportedEventBodySuite):
+        _unseal_body(sealed, t_priv)
