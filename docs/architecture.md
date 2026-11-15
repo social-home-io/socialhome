@@ -562,9 +562,9 @@ metadata this tier concedes.
 
 **A member behind a GFS is a member like any other.** Tier 4 is only a
 transport: a space member household reached through it gets the same
-content and the same flows as a paired or mesh-only one — the periodic
-roster snapshot (kept at zero envelopes by its `roster_echo` while the
-roster is unchanged), the media outbox's
+content and the same flows as a paired or mesh-only one — the roster
+repair its sync BEGIN asks for (a snapshot only when the roster digest it
+carries is wrong), the media outbox's
 `SPACE_MEDIA_BLOB` pushes, page files it proposes, and from v_92 the same
 bounded catch-up push and `SPACE_MEDIA_WANTED` as everyone. How the bytes
 travel depends on the far end: a seat at v_87 or above whose GFS proves
@@ -2591,10 +2591,11 @@ never mid-stream; see
 [incremental sessions](./protocol/sync.md#incremental-sessions-change-stamps--per-household-watermark).
 Because every author is bound to the roster mirror, the mirror must heal on
 its own: the host sends a v_32 roster snapshot on seat, on a member's
-upgrade and on the periodic sync tick — on the tick only to a household
-whose last sync BEGIN did not echo the current roster version
-(`roster_echo`), and then without the removals it already holds; after a
-host restart it waits two ticks for each household's echo — and a
+upgrade, and in reply to a member's sync BEGIN whose `roster_digest` (a
+SHA-256 of the live seats it mirrors, `domain/space_roster_digest.py`)
+differs from the host's for it — never on the host's own timer, so with
+gossip working a roster repair costs zero envelopes (an older household's
+`roster_echo` is answered the same way) — and a
 write that beat the gossip
 seating its author or household waits in a bounded in-memory buffer until
 the seat lands. The per-family table is in

@@ -559,70 +559,68 @@ member household, not only on the host:
   seat — and a host-local member the current `roster_sequence`. Sent when
   the host seats a household (its invitation's roster may be stale: a
   demotion or kick in between would otherwise never reach it), when a
-  member household first advertises v_32, and on the periodic sync tick.
-  Not sent after an invite-link redeem (the ACK's roster is taken at seat
-  time, and the redeemer has no space row yet). On the timer it goes to
-  every member household alike — paired, mesh-only or seated from an invite
-  link over the GFS relay — and the `roster_echo` below keeps a household
-  that holds the current roster at zero envelopes. The host signs a snapshot's
-  entries, and the receiver verifies them, in a worker thread, off the
-  event loop.
-- **Only what changed, on the timer.** A snapshot names the
-  `roster_version` it is complete up to (the host's `roster_sequence`).
-  A member household that applied one from the host — every entry
-  verified — echoes it on its next `SPACE_SYNC_BEGIN` to the host as
-  `roster_echo {roster_version, cert_epoch}` (`cert_epoch`: the epoch of
-  the writer cert it holds, or `null`). The periodic tick then skips that
-  household while the echo still matches the current `roster_sequence`
-  and the writer cert the host would send; after a roster change it sends
-  the household every live seat **without the removals at or below the
-  echoed version** (it applied them in that full snapshot). The same
-  BEGIN also echoes `dir_seq`, the version of the space's member directory
-  the household holds (v_89, see
+  member household first advertises v_32, and in reply to a member's sync
+  BEGIN whose mirror is wrong (below). Not sent after an invite-link redeem
+  (the ACK's roster is taken at seat time, and the redeemer has no space row
+  yet). The host signs a snapshot's entries, and the receiver verifies
+  them, in a worker thread, off the event loop.
+- **Repair on a digest mismatch, in reply to a BEGIN.** The host never
+  sends a roster snapshot on its own timer. Every `SPACE_SYNC_BEGIN` a
+  member household sends to the space's host — direct, the mesh catch-up
+  and incremental BEGINs, and the relay re-BEGIN after an ICE timeout —
+  carries `roster_digest {suite: "rd1-sha256", digest, cert_epoch}`
+  (`domain/space_roster_digest.py`): SHA-256 over the sorted lines
+  `instance_id ␟ user_id ␟ role` of every LIVE seat it mirrors outside its
+  own household, the role as every receiver stores it (the host's `owner`
+  as `member`), and the epoch of the writer cert it holds. The host
+  computes the same digest for that household from its own roster
+  (`SpaceService.roster_digest_of`) and answers with ONE snapshot only when
+  the digests differ or the household lacks the writer cert it would issue
+  — never the same answer twice for an unchanged pair of digests (a
+  snapshot that did not change the member's digest would not the next time
+  either; in memory, bounded). One rule for every member household,
+  however it is reached (paired, mesh, or seated from an invite link over
+  the GFS relay). An unknown suite is refused (no repair). A household that
+  never sends a BEGIN — a follower-only household of a global space, which
+  the scheduler does not sync — gets no periodic repair at all: only seat /
+  upgrade snapshots and live gossip. A queued snapshot is replaced by a
+  newer one to the same household (outbox supersede key per space and
+  part). The same BEGIN also echoes `dir_seq`, the version of the space's
+  member directory the household holds (v_89, see
   [gfs-relay.md](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89));
-  a host whose directory is newer answers with one directory snapshot. Seat and
-  upgrade snapshots are sent whole, as before. Both sides keep this in
-  memory. So that a host restart does not send every household its whole
-  roster, a household the host has not heard a BEGIN from since startup
-  is sent nothing during the first two ticks (`ROSTER_ECHO_GRACE_TICKS`;
-  every member asks its host on each 30-min tick, so its echo arrives in
-  time), then the whole roster — the tick runs at start-up, so the first
-  snapshot after a restart to a household still silent goes about 60 min
-  later. A household whose BEGIN carries **no** echo
-  (it holds no snapshot of ours — e.g. it restarted) gets the whole roster
-  on every tick until it echoes, as before. One rule for every member
-  household, however it is reached (paired, mesh, or seated from an invite
-  link over the GFS relay). A stale echo is answered on the next tick, not
-  after two: a member advances its echo only when it applies a snapshot,
-  never on live gossip, so waiting longer would only delay the heal. Additive:
-  an older host ignores `roster_echo`, an older member ignores
-  `roster_version`. Credentials that change without a roster change heal
-  through their own paths (the rekey / rotation per-peer fan-outs, the
-  channel service, the v_46 authority echo) and still ride every snapshot
-  that is sent. Cost: a space with 50 seats, ~100 removals and 15 member
-  households used to send 15 × ~150 entries × ~400 B ≈ 900 KB every
-  30 minutes (≈ 43 MB a day; a busy space with thousands of seats or
-  removals far more); unchanged, it now sends nothing.
-  **Cost per trigger** (one seat per household, ~500 B per entry, parts
-  of 96 KiB):
-
-  | Trigger | Before this rule | Now |
-  |---|---|---|
-  | Host restart, 200 households | 200 × 200 entries ≈ 20 MB, ~400 envelopes | 0 for every household that echoes within two ticks |
-  | Host restart, 1000 households | 1000 × 1000 entries ≈ 500 MB, ~6000 envelopes | 0 (same) |
-  | One seat joins, 200 households | ≈ 20 MB, ~400 envelopes | the same ≈ 20 MB, ~400 envelopes (every household's echo is stale) |
-  | One seat joins, 1000 households | ≈ 500 MB, ~6000 envelopes | the same ≈ 500 MB, ~6000 envelopes |
-
-  A roster change still costs N households × the full live roster on the
-  next tick — what paired members already paid; households behind a GFS now
-  pay it too. **Open optimisation:** sending only the seats changed since
-  the echo needs a host-counter invariant the roster does not have yet —
-  seats applied from a delegated admin's gossip re-stamped with the host's
-  counter, a restore epoch so a host restored from backup never reuses
-  versions, the member clearing its echo on leave / rejoin / kick, and a
-  v_80 receiver (which records the version after every part) healing a lost
-  part. A household that never echoes still costs its whole roster per
-  tick, as before.
+  a host whose directory is newer answers with one directory snapshot.
+  Credentials that change without a roster change heal through their own
+  paths (the rekey / rotation per-peer fan-outs, the channel service, the
+  v_46 authority echo) and ride every snapshot that is sent.
+- **Older households (v_80) keep the echo.** A snapshot names the
+  `roster_version` it is complete up to; a member that applied one echoes
+  it on its BEGIN as `roster_echo {roster_version, cert_epoch}`. A BEGIN
+  with no `roster_digest` is answered by that echo as before, now in reply
+  to the BEGIN instead of on a timer: nothing while it echoes the current
+  `roster_sequence` and the writer cert the host would send; a stale echo
+  gets every live seat without the removals at or below it; no echo at all
+  (it holds no snapshot of ours) the whole roster, on each BEGIN until it
+  echoes. Our members send both fields, so an older host keeps working.
+  No version bump: `roster_digest` is an optional BEGIN field an older host
+  ignores, every current BEGIN path carries it, and the sync stream's
+  contents do not change (no sync line).
+- **Cost.** ~500 B per roster entry, parts of 96 KiB (~255 KiB sealed for
+  the GFS relay). Per periodic BEGIN with nothing changed: the
+  ~110 B digest field and **0 snapshot bytes** (before this rule: the whole
+  roster to every household with a stale or missing echo, on every tick).
+  Per roster change: the live gossip only (one envelope per member
+  household, as always); a snapshot goes only to a household whose gossip
+  was lost, and only once. Worst case, a space with 1000 member households
+  and 10 000 follower seats (followers are roster seats: ~11 000 entries
+  ≈ 5.5 MB, ~60 parts): periodic — 1000 BEGINs × ~110 B per 30 min ≈
+  110 KB, no snapshots; the host computes one digest per BEGIN (a read of
+  the space's live seats). A member whose gossip was lost costs ONE
+  5.5 MB repair (a burst of ~60 parts to that one household, only on a
+  digest mismatch). Followers get no periodic repair (they send no BEGIN);
+  they do receive the member roster in seat / upgrade snapshots and live
+  gossip as they did before — unchanged here. The v_80 echo path costs
+  what it did (the whole roster once per roster change per v_80 household
+  — few, and paired).
 - **Held writes.** A write naming a user the space has **no record of at
   all** — or, at the Follower gate, coming from a household it holds no
   row for — may simply have beaten the gossip seating them. It is held in a
@@ -1347,7 +1345,8 @@ binding and comments on the host path.
 paired joiner receives), on a role change that alters the household's write /
 comment rights, on every content-key rotation (`SPACE_KEY_EXCHANGE_REKEY`)
 and on every authority rotation (`SPACE_AUTHORITY_ROTATED`, signed with the
-new key), plus the v_49 upgrade and the periodic roster-snapshot tick.
+new key), plus the v_49 upgrade and the roster repair a member's sync
+BEGIN asks for (a digest mismatch or a writer-cert epoch it lacks).
 
 **Delivery — existing channels only.** Each household is delivered ITS OWN
 cert, inside that household's encrypted per-peer envelope (a cert is not

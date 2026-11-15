@@ -44,7 +44,7 @@ sequenceDiagram
     autonumber
     participant R as Requester (HFS)
     participant P as Provider (HFS)
-    R->>P: SPACE_SYNC_BEGIN<br/>(space_id, sync_mode, have_seq,<br/>prefer_direct, quiet_relay)
+    R->>P: SPACE_SYNC_BEGIN<br/>(space_id, sync_mode, have_seq,<br/>prefer_direct, quiet_relay, roster_digest)
     P->>R: SPACE_SYNC_OFFER<br/>(SDP, ICE)
     R->>P: SPACE_SYNC_ANSWER<br/>(SDP, ICE)
     R-->>P: SPACE_SYNC_ICE (trickle)
@@ -688,7 +688,7 @@ module, `tests/federation/sync/space/test_sync_item_state.py`.
 
 | Item type | Live events | Stream resource | Resume (§4.4) | Deletes heal | Notes |
 |---|---|---|---|---|---|
-| Roster: members, roles, bans | `SPACE_MEMBER_*`, `SPACE_ROSTER_SNAPSHOT` | `members`, `bans` (host only) | — | removals / unbans via `SPACE_ROSTER_SNAPSHOT` | member households never stream the roster |
+| Roster: members, roles, bans | `SPACE_MEMBER_*`, `SPACE_ROSTER_SNAPSHOT` | `members`, `bans` (host only) | — | removals / unbans via `SPACE_ROSTER_SNAPSHOT`, sent in reply to a member's BEGIN whose `roster_digest` differs from the host's ([spaces.md](./spaces.md)) | member households never stream the roster |
 | Member pictures | `SPACE_MEMBER_PROFILE_UPDATED` | `member_pictures` | — | reset via `members` (v_58) | re-encoded on receipt |
 | Posts (create, edit) | `SPACE_POST_CREATED` / `_UPDATED` | `posts` (incremental) | yes | `posts_deleted` | |
 | Post reactions | `SPACE_POST_REACTION` (v_93) | `posts.reaction_stamps` (v_92, incremental) | — | removals as stamps only (30 days) | before v_92 a held post kept its own reactions |

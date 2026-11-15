@@ -1459,7 +1459,8 @@ redeem and the GFS-mirror subscribe, re-reading the invitation and the space
 row inside it, so two joins for one space id never both seat. The stub is
 seated BEFORE the ACCEPT goes out, so the host's `SPACE_ROSTER_SNAPSHOT`
 (writer cert / key, channel grant) always finds it — the host re-sends that
-snapshot on its periodic sync tick too. A failed seat, or a send that
+snapshot in reply to the member's sync BEGIN when its roster digest or
+writer cert is behind. A failed seat, or a send that
 definitively cannot reach the host (not confirmed, no route, too large),
 rolls a fresh stub back and leaves the invitation pending; an ACCEPT parked
 for redelivery (durable outbox, relay throttle, mesh retry) reaches the
