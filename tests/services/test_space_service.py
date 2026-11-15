@@ -3770,6 +3770,70 @@ async def test_apply_space_icon_from_metadata_persists_bytes(stack):
     assert repo3.saved is None
 
 
+@pytest.mark.parametrize(
+    ("what", "cap", "dims"),
+    [
+        ("cover", SPACE_COVER_MAX_BYTES, (1200, 800)),
+        ("icon", SPACE_ICON_MAX_BYTES, (256, 256)),
+    ],
+)
+async def test_a_peers_image_over_the_one_cap_is_not_stored(
+    stack, caplog, what, cap, dims
+):
+    """Item 3: a cover / icon over the one cap from another household is
+    refused on every inbound path — the join snapshot (invitation accept,
+    invite-link and join-request ACKs all seat through
+    ``seat_join_stub`` → ``apply_space_*_from_metadata``) and an applied
+    ``SPACE_CONFIG_CHANGED`` (live and the config catch-up). The image
+    already held stays, and a WARNING says why."""
+    from socialhome.services.space_service import (
+        apply_space_cover_from_metadata,
+        apply_space_icon_from_metadata,
+        apply_space_images_from_config_change,
+    )
+
+    held = _noise_webp(32, 32)
+    big = _noise_webp(*dims)
+    assert len(big) > cap
+    meta = {
+        f"{what}_hash": "new",
+        f"{what}_webp_base64": base64.b64encode(big).decode("ascii"),
+    }
+    apply = (
+        apply_space_cover_from_metadata
+        if what == "cover"
+        else apply_space_icon_from_metadata
+    )
+    repo = _RecordingImageRepo(held)
+    with caplog.at_level(logging.WARNING, logger="socialhome.services.space_service"):
+        stored = await apply("sp-x", meta=meta, **{f"{what}_repo": repo})
+    assert stored is False
+    assert repo.sets == [] and repo.webp == held
+    assert "over the" in caplog.text
+    repo = _RecordingImageRepo(held)
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    previous = dataclasses.replace(space, cover_hash="old", icon_hash="old")
+    await apply_space_images_from_config_change(
+        "sp-x",
+        meta=meta,
+        previous=previous,
+        cover_repo=repo if what == "cover" else None,
+        icon_repo=repo if what == "icon" else None,
+    )
+    assert repo.sets == [] and repo.webp == held
+    # At the cap: stored.
+    fits = _noise_webp(64, 64)
+    assert len(fits) <= cap
+    repo = _RecordingImageRepo(held)
+    ok = {
+        f"{what}_hash": "new",
+        f"{what}_webp_base64": base64.b64encode(fits).decode("ascii"),
+    }
+    assert await apply("sp-x", meta=ok, **{f"{what}_repo": repo})
+    assert repo.sets == [fits]
+
+
 async def test_allowed_post_types_federate_via_space_meta(stack):
     """The per-space post-type allow-list rides the federation metadata so a
     member household enforces the same restriction when its users compose."""

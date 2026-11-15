@@ -178,7 +178,6 @@ from ..domain.media_constraints import (
     SPACE_COVER_MAX_DIMENSION,
     SPACE_ICON_MAX_BYTES,
     SPACE_ICON_MAX_DIMENSION,
-    SPACE_IMAGE_EMBED_MAX_BYTES,
     SPACE_IMAGE_FIT_MIN_DIMENSION,
     space_media_ref,
 )
@@ -10123,13 +10122,15 @@ async def _apply_space_image_from_metadata(
     b64_key: str,
     hash_key: str,
     max_dimension: int,
+    max_bytes: int,
 ) -> bool:
     """Persist one space image a host shipped in ``meta``; ``True`` if stored.
 
     Bytes from another household are checked before they are kept: at most
-    :data:`SPACE_IMAGE_EMBED_MAX_BYTES` (the largest any sender ships), and
-    a WebP that fully decodes within ``max_dimension`` (Pillow, off the
-    event loop). Anything else is dropped at WARNING and the stored image
+    ``max_bytes`` — the one cap every path carries
+    (:data:`SPACE_COVER_MAX_BYTES` / :data:`SPACE_ICON_MAX_BYTES`) — and a
+    WebP that fully decodes within ``max_dimension`` (Pillow, off the event
+    loop). Anything else is dropped at WARNING and the stored image
     is left alone. The bytes are stored under the announced hash — the
     host's version tag for the image, which a shrunken rendition does not
     digest to — so the SPA's ``?v=<hash>`` cache-buster follows the host.
@@ -10145,18 +10146,26 @@ async def _apply_space_image_from_metadata(
     if not image_hash:
         return False
     # 4/3 base64 overhead: refuse an oversize blob before decoding it.
-    if len(b64) > 4 * -(-SPACE_IMAGE_EMBED_MAX_BYTES // 3):
+    if len(b64) > 4 * -(-max_bytes // 3):
         log.warning(
-            "space %s: shipped %s is over %d bytes — ignoring it",
+            "space %s: shipped %s is over the %d-byte cap — keeping the one held",
             space_id,
             what,
-            SPACE_IMAGE_EMBED_MAX_BYTES,
+            max_bytes,
         )
         return False
     try:
         webp = base64.b64decode(b64, validate=True)
     except binascii.Error, ValueError:
         log.warning("space %s: shipped %s is not valid base64", space_id, what)
+        return False
+    if len(webp) > max_bytes:
+        log.warning(
+            "space %s: shipped %s is over the %d-byte cap — keeping the one held",
+            space_id,
+            what,
+            max_bytes,
+        )
         return False
     if not await ImageProcessor().is_valid_webp(webp, max_dimension=max_dimension):
         log.warning(
@@ -10202,6 +10211,7 @@ async def apply_space_cover_from_metadata(
         b64_key="cover_webp_base64",
         hash_key="cover_hash",
         max_dimension=SPACE_COVER_MAX_DIMENSION,
+        max_bytes=SPACE_COVER_MAX_BYTES,
     )
 
 
@@ -10222,6 +10232,7 @@ async def apply_space_icon_from_metadata(
         b64_key="icon_webp_base64",
         hash_key="icon_hash",
         max_dimension=SPACE_ICON_MAX_DIMENSION,
+        max_bytes=SPACE_ICON_MAX_BYTES,
     )
 
 
@@ -10245,7 +10256,7 @@ async def apply_space_images_from_config_change(
     Only a ``space_meta`` that carries the hash key at all is considered,
     so an old flat-shaped payload never clears anything.
     """
-    for repo, what, hash_key, b64_key, old_hash, max_dimension in (
+    for repo, what, hash_key, b64_key, old_hash, max_dimension, max_bytes in (
         (
             cover_repo,
             "cover",
@@ -10253,6 +10264,7 @@ async def apply_space_images_from_config_change(
             "cover_webp_base64",
             previous.cover_hash,
             SPACE_COVER_MAX_DIMENSION,
+            SPACE_COVER_MAX_BYTES,
         ),
         (
             icon_repo,
@@ -10261,6 +10273,7 @@ async def apply_space_images_from_config_change(
             "icon_webp_base64",
             previous.icon_hash,
             SPACE_ICON_MAX_DIMENSION,
+            SPACE_ICON_MAX_BYTES,
         ),
     ):
         if repo is None or hash_key not in meta:
@@ -10274,6 +10287,7 @@ async def apply_space_images_from_config_change(
                 b64_key=b64_key,
                 hash_key=hash_key,
                 max_dimension=max_dimension,
+                max_bytes=max_bytes,
             )
         elif not meta.get(hash_key) and old_hash:
             await repo.clear(space_id)
