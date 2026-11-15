@@ -2205,3 +2205,76 @@ async def test_echo_before_the_post_restore_rotation_shares_no_seed(world):
     _open_rotation_window(w)
     await _echo_to_owner(w, sender=w.m_id, echo=echo)
     assert len(w.outbound(event_type=FET.SPACE_ADMIN_KEY_SHARE)) == shares_before
+
+
+# ── Every admin is equal on every path (2026-11-15): the seed heal ───────
+
+
+async def test_an_admin_without_the_seed_says_so_in_its_echo_from_epoch_0(world):
+    """An admin household whose share was lost (a 24 h GFS queue, an outbox
+    row dropped) echoes ``seed_held: false`` — even at key epoch 0, when
+    there is nothing else to report — so the owner can send it again."""
+    w = world
+    await _m_plays_an_admin(w)
+    rotation = w.m_app[space_authority_rotation_key]
+    echo = await rotation.authority_epoch_echo(w.space_id, w.o_id)
+    assert echo is not None
+    assert echo["seed_held"] is False
+    assert echo["key_epoch"] == 0
+
+
+async def test_an_admin_holding_the_seed_says_so(world):
+    w = world
+    await _m_plays_an_admin(w)
+    await w.m_app[space_repo_key].set_space_seed(w.space_id, w.k1_seed)
+    rotation = w.m_app[space_authority_rotation_key]
+    echo = await rotation.authority_epoch_echo(w.space_id, w.o_id)
+    assert echo is not None and echo["seed_held"] is True
+
+
+async def test_a_plain_member_echoes_nothing_about_a_seed(world):
+    w = world
+    rotation = w.m_app[space_authority_rotation_key]
+    echo = await rotation.authority_epoch_echo(w.space_id, w.o_id)
+    assert echo is None or "seed_held" not in echo
+
+
+async def test_the_owner_reshares_to_an_admin_echoing_no_seed_once_per_window(world):
+    w = world
+    echo = {
+        "key_epoch": 0,
+        "baseline_epoch": 0,
+        "owed_epoch": 0,
+        "forgotten_epoch": 0,
+        "seed_held": False,
+    }
+    await _echo_to_owner(w, sender=A_ID, echo=echo)
+    shares = w.outbound(to=A_ID, event_type=FET.SPACE_ADMIN_KEY_SHARE)
+    assert len(shares) == 1
+    await _echo_to_owner(w, sender=A_ID, echo=echo)
+    assert len(w.outbound(to=A_ID, event_type=FET.SPACE_ADMIN_KEY_SHARE)) == 1
+
+
+async def test_the_owner_never_reshares_on_a_missing_or_true_field(world):
+    """A missing field is "unknown" (an older or paired admin that never
+    says), never "no seed": no re-share hourly to every admin."""
+    w = world
+    base = {"key_epoch": 0, "baseline_epoch": 0, "owed_epoch": 0, "forgotten_epoch": 0}
+    await _echo_to_owner(w, sender=A_ID, echo=dict(base))
+    await _echo_to_owner(w, sender=B_ID, echo={**base, "seed_held": True})
+    assert not w.outbound(event_type=FET.SPACE_ADMIN_KEY_SHARE)
+
+
+async def test_the_owner_never_shares_a_seed_with_a_member_echoing_no_seed(world):
+    """The echo is the sender's claim: a household without a live admin
+    seat on the owner's roster gets nothing, whatever it says."""
+    w = world
+    echo = {
+        "key_epoch": 0,
+        "baseline_epoch": 0,
+        "owed_epoch": 0,
+        "forgotten_epoch": 0,
+        "seed_held": False,
+    }
+    await _echo_to_owner(w, sender=w.m_id, echo=echo)
+    assert not w.outbound(event_type=FET.SPACE_ADMIN_KEY_SHARE)

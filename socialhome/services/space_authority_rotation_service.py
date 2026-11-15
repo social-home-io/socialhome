@@ -86,7 +86,7 @@ from ..authority_sig import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
-from ..crypto import generate_identity_keypair
+from ..crypto import ed25519_public_key, generate_identity_keypair
 from ..domain.events import (
     SpaceAdminAuthorityRevoked,
     SpaceAdminSeedsRetiredAfterRestore,
@@ -97,6 +97,7 @@ from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.federation_retention import admin_seed_key_prefix
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole, mirrorable_remote_role
+from ..federation.host_equivalence import holds_local_admin_seat
 from ..infrastructure.event_bus import EventBus
 from ..task_drain import wait_tasks_done
 from .space_authority_pin import (
@@ -180,6 +181,7 @@ class SpaceAuthorityRotationService:
         "_own_instance_id",
         "_remote_members",
         "_restore_pending",
+        "_seed_reshared",
         "_space_crypto",
         "_space_service",
         "_spaces",
@@ -224,6 +226,10 @@ class SpaceAuthorityRotationService:
         #: member can trigger.
         self._echo_reacted: dict[tuple[str, str], float] = {}
         self._echo_rotated: dict[str, float] = {}
+        #: Owner side: last seed re-share per ``(space_id, household)`` an
+        #: admin's ``seed_held: false`` echo triggered, monotonic seconds.
+        #: Only live admin seats get an entry.
+        self._seed_reshared: dict[tuple[str, str], float] = {}
         #: Owner side: the highest cert-proven forgotten epoch per space that
         #: arrived while the rotation window was closed — rotated past when
         #: it opens (on the next echo for the space), never dropped.
@@ -945,6 +951,8 @@ class SpaceAuthorityRotationService:
             )
             return
         assert isinstance(echo, dict)
+        if echo.get("seed_held") is False:
+            self._maybe_reshare_seed(space, sender, seats)
         held, baseline, owed, forgotten = parsed
         own = space.authority_key_epoch
         record = await self._spaces.get_authority_echo(space_id)
@@ -1047,6 +1055,36 @@ class SpaceAuthorityRotationService:
             f"rotate-{space_id}",
         )
         return True
+
+    def _maybe_reshare_seed(self, space: Space, sender: str, seats: list) -> None:
+        """An admin household echoed ``seed_held: false`` (only an explicit
+        ``false`` — a missing field is "unknown"): send it the seed again,
+        at most once per (space, household) per
+        :data:`ECHO_REACTION_INTERVAL_S`, only while delegation is on and it
+        holds a live admin seat on OUR roster. The share itself re-checks
+        every gate (owner, versions, D1, key consistency)."""
+        if (
+            self._space_service is None
+            or not space.features.delegated_admin_authority
+            or not any(r.role == SpaceRole.ADMIN for r in seats)
+        ):
+            return
+        key = (space.id, sender)
+        now = time.monotonic()
+        last = self._seed_reshared.get(key)
+        if last is not None and now - last < ECHO_REACTION_INTERVAL_S:
+            return
+        self._seed_reshared[key] = now
+        log.info(
+            "space %s: admin household %s holds no seed of the current key — "
+            "sharing it again",
+            space.id,
+            sender,
+        )
+        self._spawn(
+            self._space_service.share_admin_signing_seed(space, instance_id=sender),
+            f"reshare-{space.id}",
+        )
 
     def _spawn(self, coro, name: str) -> None:
         if self._closed:
@@ -1217,7 +1255,23 @@ class SpaceAuthorityRotationService:
         baseline, owed = await self._spaces.get_authority_baseline(space_id)
         state = await self._spaces.get_authority_echo(space_id)
         forgotten = _nonneg_int(state.get("forgotten_epoch")) or 0
-        if not (space.authority_key_epoch or baseline or owed or forgotten):
+        # An admin household of a delegating space says whether it holds the
+        # seed of the key it pins — so a share lost on the way (a GFS queue's
+        # 24 h, a dropped outbox row) is sent again, from key epoch 0 on.
+        seed_held: bool | None = None
+        if space.features.delegated_admin_authority and await holds_local_admin_seat(
+            self._spaces, space_id
+        ):
+            seed = await self._spaces.get_space_seed(space_id)
+            seed_held = (
+                seed is not None
+                and ed25519_public_key(seed).hex()
+                == (space.identity_public_key or "").lower()
+            )
+        if (
+            not (space.authority_key_epoch or baseline or owed or forgotten)
+            and seed_held is None
+        ):
             return None
         echo: dict = {
             "key_epoch": space.authority_key_epoch,
@@ -1225,6 +1279,8 @@ class SpaceAuthorityRotationService:
             "owed_epoch": owed,
             "forgotten_epoch": forgotten,
         }
+        if seed_held is not None:
+            echo["seed_held"] = seed_held
         cert = await self._spaces.get_authority_cert(space_id)
         if cert is not None and cert.get("key_epoch") == space.authority_key_epoch:
             echo["key_cert"] = cert
