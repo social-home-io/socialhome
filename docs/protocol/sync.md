@@ -447,6 +447,18 @@ with it the pictures of content it was sent while older. Cost: ~150 B of descrip
 file per record; one upload per file to the requester's GFS (`200
 already_stored` when it is there already).
 
+**From v_92 the descriptor shrinks to what the GFS holds.** A link-joined
+requester at v_92 (`FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED`) gets a
+catch-up's files like any member — the bounded catch-up push, then
+`SPACE_MEDIA_WANTED` for an older file it opens — so its records carry
+`media_refs` only for files the provider already uploaded to that
+requester's GFS (`SpaceMediaGfsUploader.stored_on_reader_gfs`, the ≤ 3-day
+cache memory); nothing new is sealed or uploaded for the stream. A v_80
+requester keeps the full descriptor and the uploads (it can ask for
+nothing). Same sync line 92 (already in `SYNC_RECORD_LINES`). Cost toward
+a v_92 requester: no catch-up upload to its GFS; the catch-up push is the
+same bounded one every member gets (≤ 200 files / 30 days per stream).
+
 **Page files come from the host (v_82).** A page keeps the names the host's
 version shows on every household (its hash is the version's identity); a
 member household keeps the files page-scoped (`sp-`) and takes them from the

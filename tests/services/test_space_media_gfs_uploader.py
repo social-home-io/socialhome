@@ -1205,3 +1205,29 @@ async def test_a_reader_reads_a_file_from_its_gfs_only_once_it_is_stored_there(
     for version in (V, OURS):
         fresh = _uploader(tmp_path, gfs=gfs, instances=[RELAY], versions={"e": version})
         assert await fresh.reads_from_gfs("e", "a.webp") is False, version
+
+
+async def test_stored_on_reader_gfs_lists_only_files_its_gfs_holds(tmp_path):
+    """The v_92 catch-up describes only what the reader's GFS is known to
+    hold: files we uploaded there, within the cache's TTL."""
+    _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1], status=200)
+    u = _uploader(
+        tmp_path,
+        gfs=gfs,
+        instances=[RELAY, PAIRED],
+        versions={"e": V},
+        seed=b"\2" * 32,
+    )
+    urls = ["api/media/a.webp", "api/media/b.webp", None]
+    assert await u.stored_on_reader_gfs("e", urls) == []
+    plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    await u.start()
+    try:
+        u.upload(plan)
+        await asyncio.wait_for(u.drain(), timeout=5)
+    finally:
+        await u.stop()
+    assert await u.stored_on_reader_gfs("e", urls) == ["api/media/a.webp"]
+    assert await u.stored_on_reader_gfs("b", urls) == []  # no reader
