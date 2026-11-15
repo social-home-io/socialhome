@@ -126,6 +126,7 @@ def svc():
     s._bus.publish = AsyncMock()
     s._transport = None
     s._sync_manager = MagicMock()
+    s._sync_begin_admitted = None
     s._space_sync_service = MagicMock()
     s._space_sync_service.stream_initial = AsyncMock()
     s._space_sync_receiver = None
