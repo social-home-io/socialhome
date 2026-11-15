@@ -393,6 +393,17 @@ class SpaceMediaGfsUploader:
         )
         return True
 
+    async def takes_relay_frames(self, instance_id: str) -> bool:
+        """Whether *instance_id* — a household seated from an invite link —
+        takes a media push as binary relay frames (v_87, its relay proved
+        ``envelope_media``; :meth:`FederationService.relay_media_ok`). Such
+        a household gets ``SPACE_MEDIA_BLOB`` through the outbox like any
+        member, so a file meant for it alone needs no GFS cache."""
+        if self._federation is None:
+            return False
+        inst = await self._federation_repo.get_instance(instance_id)
+        return inst is not None and await self._federation.relay_media_ok(inst)
+
     async def _reader_conn(self, instance_id: str) -> GfsConnection | None:
         if not await self.is_relay_reader(instance_id):
             return None

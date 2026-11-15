@@ -361,10 +361,13 @@ household they never address the shared store.
   `sp-`) is dropped. A renamed proposal's answer names it **as sent**
   (`Proposal.answers`).
 - **Who ships.** The proposer ships its new files **to the host alone**
-  (`PageProposalForwarder._ship_files`, paired or mesh-only host, each file
-  queued once per draft). A member **seated from an invite link** reaches
-  the host only through the GFS relay, which refuses bytes: its proposal
-  carries its new files (≤ `MAX_PAGE_FILES`) as a `media_refs` descriptor
+  (`PageProposalForwarder._ship_files`, paired, mesh-only or reached
+  through a GFS relay that takes binary relay frames (v_87,
+  `relay_media_ok`), each file queued once per draft) — one recipient
+  gains nothing from a GFS cache. Only a member **seated from an invite
+  link** whose host's relay takes no frames (a v_80–86 seat, a GFS without
+  `envelope_media`) cannot push the bytes: its proposal carries its new
+  files (≤ `MAX_PAGE_FILES`) as a `media_refs` descriptor
   instead — each file sealed once for this page and household and uploaded
   to its GFS media cache by the same uploader as every space picture
   (`plan_for_reader`, authorized as a space writer: writer key or writer
@@ -409,8 +412,9 @@ household they never address the shared store.
   to a shared file only on the host. An edit's media check covers only the
   files it adds (the page, its history and sides are its own).
 - **No upload rights, no new pictures.** A household seated from an invite
-  link without an upload authorization (no writer key, cert or channel
-  grant) can't hand the host a page's new files: such an edit is refused
+  link whose host's relay takes no binary frames, without an upload
+  authorization (no writer key, cert or channel grant), can't hand the host
+  a page's new files: such an edit is refused
   (422 `PAGE_FILES_NOT_SHAREABLE`, translated in the SPA) instead of
   landing with pictures broken for everyone; words alone still save.
 

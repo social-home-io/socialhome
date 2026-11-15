@@ -310,13 +310,17 @@ class PageProposalForwarder:
         self, space_id: str, page_id: str, proposal: Proposal, host: str
     ) -> SpaceMediaPlan | None:
         """The upload plan for the draft's new files when the host reads us
-        only through a GFS (a link-joined v_82 pair): sealed for this page
-        and our household, at the address on the GFS that relays us to the
-        host. ``None`` otherwise (the outbox carries them) or on any
-        failure (the draft goes out without them; logged)."""
+        only through a GFS whose relay cannot carry the push (a link-joined
+        v_82 pair below v_87 frames): sealed for this page and our
+        household, at the address on the GFS that relays us to the host.
+        ``None`` otherwise — the outbox pushes them, as from any member (a
+        host taking binary relay frames gains nothing from a cache for one
+        recipient) — or on any failure (the draft goes out without them;
+        logged)."""
         if (
             self._media_gfs is None
             or not await self._media_gfs.is_relay_reader(host)
+            or await self._media_gfs.takes_relay_frames(host)
             or not await self._federation.space_member_supports(
                 host, min_version=FederationCapability.MIN_FOR_PAGE_MEDIA
             )

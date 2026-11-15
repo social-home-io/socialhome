@@ -2519,15 +2519,19 @@ def _build_page_files_reach_host(
     page_conflicts: PageConflictService, uploader: SpaceMediaGfsUploader
 ) -> Callable[[str], Awaitable[bool]]:
     """``check(space_id)``: whether a page's new files can reach the space's
-    host from here (v_82). A household seated from an invite link hands
-    them over only through its GFS media cache, which it needs an upload
-    authorization for; any other member uses the outbox."""
+    host from here (v_82). Every member pushes them through the outbox —
+    also over the GFS relay when the host takes binary relay frames (v_87).
+    Only a household whose host's relay cannot carry the push (a v_80–86
+    seat, a GFS without ``envelope_media``) hands them over through its GFS
+    media cache, which it needs an upload authorization for."""
 
     async def _reach(space_id: str) -> bool:
         mode, host = await page_conflicts.mode(space_id)
         if mode is not PageMode.MEMBER or not host:
             return True
         if not await uploader.is_relay_reader(host):
+            return True
+        if await uploader.takes_relay_frames(host):
             return True
         return await uploader.can_upload(space_id)
 

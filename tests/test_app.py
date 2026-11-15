@@ -998,22 +998,32 @@ async def test_page_files_reach_the_host_unless_a_link_seat_lacks_upload_rights(
             return self.mode_, "host"
 
     class _Uploader:
-        def __init__(self, reader, can):
-            self.reader, self.can = reader, can
+        def __init__(self, reader, can, frames):
+            self.reader, self.can, self.frames = reader, can, frames
 
         async def is_relay_reader(self, iid):
             return self.reader
 
+        async def takes_relay_frames(self, iid):
+            return self.frames
+
         async def can_upload(self, space_id):
             return self.can
 
-    async def _check(mode, reader, can):
-        reach = _build_page_files_reach_host(_Conflicts(mode), _Uploader(reader, can))
+    async def _check(mode, reader, can, frames=False):
+        reach = _build_page_files_reach_host(
+            _Conflicts(mode), _Uploader(reader, can, frames)
+        )
         return await reach("sp")
 
     assert await _check(PageMode.HOST, True, False)
     assert await _check(PageMode.MEMBER, False, False)
     assert await _check(PageMode.MEMBER, True, True)
+    # A host behind a GFS that takes binary relay frames (v_87) gets the
+    # files pushed, like from any member: no upload authorization needed.
+    assert await _check(PageMode.MEMBER, True, False, frames=True)
+    # Only a host that cannot take the push (v_80 seat, a GFS without
+    # ``envelope_media``) still needs the GFS cache.
     assert not await _check(PageMode.MEMBER, True, False)
 
 
