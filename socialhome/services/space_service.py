@@ -2089,10 +2089,11 @@ class SpaceService(
     async def send_hosted_roster_snapshots(self) -> int:
         """Periodic self-heal: every space we host → each member household.
 
-        Skips households seated from an invite link: those ride the
-        connection-server relay, and a timed envelope there would be new
-        traffic metadata for the relay; they get a snapshot when they
-        advertise a new protocol version instead.
+        Every member household alike, however it is reached (paired, mesh,
+        or seated from an invite link over the GFS relay). The
+        ``roster_echo`` dedup in :meth:`send_roster_snapshot` keeps a
+        household that already holds the current roster at zero envelopes,
+        so an unchanged space sends nothing on the tick.
         """
         own = self._own_instance_id
         if self._federation is None or not own:
@@ -2102,7 +2103,7 @@ class SpaceService(
             if space.owner_instance_id != own:
                 continue
             for inst in await self._spaces.list_member_instances(space.id):
-                if inst == own or await self._is_relay_only_peer(inst):
+                if inst == own:
                     continue
                 if await self.send_roster_snapshot(
                     space.id, to_instance_id=inst, periodic=True
@@ -2196,12 +2197,6 @@ class SpaceService(
                 await self.send_roster_snapshot(
                     space.id, to_instance_id=event.instance_id
                 )
-
-    async def _is_relay_only_peer(self, instance_id: str) -> bool:
-        if self._federation_repo is None:
-            return False
-        instance = await self._federation_repo.get_instance(instance_id)
-        return instance is not None and instance.source is InstanceSource.SPACE_SESSION
 
     async def _emit_member_roster_gossip(
         self,
