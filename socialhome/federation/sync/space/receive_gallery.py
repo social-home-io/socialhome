@@ -450,22 +450,7 @@ class GalleryMixin(ReceiverBase):
         ):
             log.debug("sync: gallery item %s was deleted here — skipped", record["id"])
             return False
-        item = GalleryItem(
-            id=str(record["id"]),
-            album_id=album_id,
-            uploaded_by=str(record.get("uploaded_by") or record.get("uploader") or ""),
-            item_type=str(record.get("item_type") or "photo"),
-            # Only the canonical local ``api/media/<name>`` shape is stored.
-            url=space_media_ref(record.get("url")) or "",
-            thumbnail_url=space_media_ref(record.get("thumbnail_url")) or "",
-            width=int(record.get("width") or 0),
-            height=int(record.get("height") or 0),
-            duration_s=record.get("duration_s"),
-            caption=record.get("caption"),
-            taken_at=record.get("taken_at") or record.get("day_taken"),
-            sort_order=int(record.get("sort_order") or 0),
-            created_at=record.get("created_at"),
-        )
+        item = _gallery_item_from_record(record, album_id)
         held = (
             await self._gallery_repo.get_item(item.id)
             if from_host or self._gfs_media is not None
@@ -554,6 +539,27 @@ def _item_edited(held: GalleryItem, streamed: GalleryItem) -> bool:
         held.album_id != streamed.album_id
         or held.caption != streamed.caption
         or held.taken_at != streamed.taken_at
+    )
+
+
+def _gallery_item_from_record(record: dict[str, Any], album_id: str) -> GalleryItem:
+    """A ``gallery`` item record as the row it streams; its files only as
+    space media references (:func:`space_media_ref`)."""
+    return GalleryItem(
+        id=str(record["id"]),
+        album_id=album_id,
+        uploaded_by=str(record.get("uploaded_by") or record.get("uploader") or ""),
+        item_type=str(record.get("item_type") or "photo"),
+        # Only the canonical local ``api/media/<name>`` shape is stored.
+        url=space_media_ref(record.get("url")) or "",
+        thumbnail_url=space_media_ref(record.get("thumbnail_url")) or "",
+        width=int(record.get("width") or 0),
+        height=int(record.get("height") or 0),
+        duration_s=record.get("duration_s"),
+        caption=record.get("caption"),
+        taken_at=record.get("taken_at") or record.get("day_taken"),
+        sort_order=int(record.get("sort_order") or 0),
+        created_at=record.get("created_at"),
     )
 
 

@@ -19,6 +19,7 @@ from socialhome.services.inbound_media_store import (
 )
 from socialhome.services.space_media_names import (
     SpaceMediaNamer,
+    comment_media_ref,
     feature_media_urls,
     renamed_media,
     same_file,
@@ -363,3 +364,13 @@ def test_renamed_media_renames_every_registered_field(feature):
     assert feature_media_urls(feature, out) == [
         u.replace(".webp", "-r.webp") for u in expected_moderation_urls(feature)
     ]
+
+
+def test_a_comments_picture_is_never_a_name_another_path_owns():
+    """Live and synced comments: a DM's (``dm-``) name is no space file —
+    dropped, like on every other space item field."""
+    dm = "api/media/dm-0123456789abcdef0123456789abcdef01234567.webp"
+    assert comment_media_ref(SP, dm, None) is None
+    assert comment_media_ref(SP, "/api/media/pic.webp?x=1", None) == (
+        "api/media/pic.webp"
+    )

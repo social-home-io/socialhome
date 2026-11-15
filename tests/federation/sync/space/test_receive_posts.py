@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from datetime import UTC
 
+import pytest
+
 from socialhome.domain.events import SpaceCommentSynced
+from socialhome.federation.sync.space.receive_posts import (
+    _comment_from_record,
+    _post_from_record,
+)
 from tests.federation.sync.space.receiver_fakes import _here, _send
 
 
@@ -435,3 +441,59 @@ async def test_relayed_reactions_survive_a_sync_end_to_end(setup, tmp_dir):
         assert "u-2" in (await repo.get("p-1"))[1].reactions["👍"]
     finally:
         await db.shutdown()
+
+
+# ─── A synced post's attachment / a comment's picture is a space file ────
+
+
+def _file_record(url: object) -> dict:
+    return {
+        "id": "p-file",
+        "author": "u-1",
+        "type": "file",
+        "file_meta": {
+            "url": url,
+            "mime_type": "application/pdf",
+            "original_name": "doc.pdf",
+            "size_bytes": 4,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "api/media/dm-0123456789abcdef0123456789abcdef01234567.pdf",
+        "https://tracker.example/doc.pdf",
+        "../../etc/passwd",
+        None,
+    ],
+)
+def test_a_synced_attachment_that_is_no_space_file_is_dropped(url):
+    """§25.6: a record's ``file_meta.url`` passes the same rule as the
+    post's other files (``space_media_ref``): a name another receiving
+    path owns (a DM's ``dm-``), a foreign URL or junk drops the attachment
+    (``parent_requires`` — a file post means nothing without its file)."""
+    post = _post_from_record(_file_record(url))
+    assert post is not None and post.file_meta is None
+
+
+def test_a_synced_attachment_that_is_a_space_file_is_kept():
+    post = _post_from_record(_file_record("/api/media/doc.pdf?sig=x"))
+    assert post is not None and post.file_meta is not None
+    assert post.file_meta.url == "api/media/doc.pdf"
+    assert post.file_meta.original_name == "doc.pdf"
+
+
+def test_a_synced_comments_reserved_picture_is_dropped():
+    record = {
+        "id": "c-1",
+        "post_id": "p-1",
+        "author": "u-1",
+        "type": "image",
+        "media_url": "api/media/dm-0123456789abcdef0123456789abcdef01234567.webp",
+    }
+    comment = _comment_from_record(record)
+    assert comment is not None and comment.media_url is None
+    record["media_url"] = "api/media/pic.webp"
+    assert _comment_from_record(record).media_url == "api/media/pic.webp"

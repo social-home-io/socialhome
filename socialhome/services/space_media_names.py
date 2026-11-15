@@ -50,9 +50,9 @@ from ..domain.space_media_ref import SpaceMediaLocalization
 from .inbound_media_store import (
     MEDIA_REF_PREFIX,
     is_reserved_media_name,
-    local_media_ref,
     media_basename,
     space_direct_media_name,
+    space_media_ref,
 )
 
 
@@ -162,8 +162,9 @@ def comment_media_ref(
     """A received space comment's picture as stored here: its content
     name when the comment's valid hash map (v_85) covers it, else the
     reference as sent (comments keep their sender's name, as before v_85) —
-    never a raw ``sc-`` name, which only a hash may produce."""
-    ref = local_media_ref(value)
+    never a raw ``sc-`` name, which only a hash may produce, nor a name
+    another receiving path owns (``space_media_ref``: a DM's ``dm-``)."""
+    ref = space_media_ref(value)
     if ref is None:
         return None
     name = ref[len(MEDIA_REF_PREFIX) :]
