@@ -22,9 +22,14 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING, Any
 
 from ..canonical_json import canonical_utf8_str
+
+if TYPE_CHECKING:
+    from .page import Page
 
 #: The suite tag of a version hash — the only one this build speaks.
 VERSION_HASH_SUITE = "sha256"
@@ -80,6 +85,33 @@ def version_hash(title: str, content: str, cover_image_url: str | None = None) -
         }
     )
     return f"{VERSION_HASH_SUITE}:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def side_to_wire(side: PageConflictSide) -> dict[str, Any]:
+    """One open conflict side as it travels (``conflict`` entries)."""
+    return {
+        "side_id": side.hash,
+        "title": side.title,
+        "content": side.content,
+        "cover": side.cover_image_url,
+        "by": side.by,
+        "base_seq": side.base_seq,
+        "at": side.at,
+    }
+
+
+def page_record(page: Page, sides: Sequence[PageConflictSide]) -> dict[str, Any]:
+    """A space page as it travels: its §25.6 ``pages`` record — the row
+    (not this household's draft marker), its version hash and every open
+    conflict side. What a page's size is measured on (every field, the
+    sides' whole text included), and what the exporter streams."""
+    record = asdict(page)
+    record.pop("pending_base_seq", None)
+    record["version_hash"] = version_hash(
+        page.title, page.content, page.cover_image_url
+    )
+    record["conflict"] = [side_to_wire(s) for s in sides]
+    return record
 
 
 def is_version_hash(value: object) -> bool:

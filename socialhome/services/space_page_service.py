@@ -48,7 +48,7 @@ from ..domain.events import PageCreated, PageDeleted, PageUpdated
 from ..domain.file_hashes import is_space_content_media_name
 from ..domain.page import MAX_PAGE_TITLE_LENGTH, Page, PageVersion
 from ..domain.page_version import PageConflictSide, is_version_hash, version_hash
-from ..domain.relay_media_frame import SPACE_PAGE_STATE_MAX_BYTES
+from ..domain.relay_media_frame import SPACE_PAGE_ITEM_MAX_BYTES
 from ..domain.space import (
     AccessDecision,
     ContentAction,
@@ -87,7 +87,7 @@ from .page_conflict_service import (
     NoActiveConflictError,
     PageConflictStaleError,
     PageMode,
-    page_state_bytes,
+    page_too_large,
 )
 from .space_moderation_service import ApplyResult, item_payload_snapshot
 from .space_service import SpaceService
@@ -187,34 +187,17 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         self._moderation: ModerationSubmitter | None = None
 
     async def _require_size(
-        self,
-        space_id: str,
-        title: str | None,
-        content: str | None,
-        *,
-        page_id: str | None = None,
-        resolves: Sequence[str] = (),
-        was: Page | None = None,
+        self, page: Page, *, resolves: Sequence[str] = (), was: Page | None = None
     ) -> None:
-        """413 for a page whose state — this text plus every conflict side
+        """413 for a page that — measured whole, with every conflict side
         left open — is over the limit every space has
-        (``SPACE_PAGE_STATE_MAX_BYTES``). A save that makes a page stored
+        (``SPACE_PAGE_ITEM_MAX_BYTES``). A save that makes a page stored
         before the limit no larger is let through: it stays editable."""
-        sides = (
-            [
-                s
-                for s in await self.conflict_sides(space_id, page_id)
-                if s.hash not in resolves
-            ]
-            if page_id is not None
-            else []
-        )
-        size = page_state_bytes(title, content, sides)
-        if size <= SPACE_PAGE_STATE_MAX_BYTES or (
-            was is not None and size <= page_state_bytes(was.title, was.content, sides)
-        ):
-            return
-        raise SpaceItemTooLargeError(SPACE_PAGE_STATE_MAX_BYTES)
+        space_id = page.space_id or ""
+        held = await self.conflict_sides(space_id, page.id) if was is not None else []
+        sides = [s for s in held if s.hash not in resolves]
+        if page_too_large(page, sides, was=(was, held) if was is not None else None):
+            raise SpaceItemTooLargeError(SPACE_PAGE_ITEM_MAX_BYTES)
 
     def attach_files_reach_host(self, check: Callable[[str], Awaitable[bool]]) -> None:
         """Wire ``check(space_id)``: whether a page's new files can reach
@@ -501,9 +484,6 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
                     "cover_image_url": cover,
                 },
             )
-        # After the gate and before anything is stored. A reviewed create
-        # was queued above — the queue has its own, smaller cap.
-        await self._require_size(space_id, clean_title, body)
         page = new_page(
             title=clean_title,
             content=body,
@@ -512,6 +492,9 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
             cover_image_url=cover,
             page_id=page_id,
         )
+        # After the gate and before anything is stored. A reviewed create
+        # was queued above — the queue has its own, smaller cap.
+        await self._require_size(page)
         mode = await self._mode(space_id)
         if mode is PageMode.HOST:
             assert self._conflicts is not None
@@ -658,10 +641,7 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
             # would be — its text and the sides left open — stays within the
             # limit every space has.
             await self._require_size(
-                space_id,
-                patch.get("title", current.title),
-                patch.get("content", current.content),
-                page_id=page_id,
+                replace(current, **patch, last_editor_user_id=actor_user_id),
                 resolves=resolves or (),
                 was=current,
             )

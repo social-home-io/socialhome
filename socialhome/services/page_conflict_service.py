@@ -42,8 +42,6 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-import orjson
-
 from ..domain.events import (
     PageConflictEmitted,
     PageCreated,
@@ -59,9 +57,15 @@ from ..domain.page_version import (
     PageConflictSide,
     is_version_hash,
     merge_scalar,
+    page_record,
+    side_to_wire,
     version_hash,
 )
-from ..domain.relay_media_frame import SPACE_PAGE_STATE_MAX_BYTES
+from ..domain.relay_media_frame import (
+    SPACE_PAGE_ITEM_MAX_BYTES,
+    space_item_bytes,
+    space_item_too_large,
+)
 from ..domain.space_media_ref import page_media_urls
 from ..rate_limiter import RateLimiter
 from ..repositories.page_repo import AbstractPageRepo, PageNotFoundError
@@ -105,19 +109,62 @@ REFUSALS_PER_SENDER_PER_MINUTE = 30
 #: own copy, and nothing of the page is revealed to the sender.
 _STATELESS_REFUSALS = frozenset({"rate_limited", "archived"})
 
-#: Refusal reason: the version (its text plus the open sides) is over the
-#: page limit every space has.
+#: Refusal reason: the version (the page with its open sides, measured
+#: whole) is over the page limit every space has.
 TOO_LARGE = "too_large"
 
 
-def page_state_bytes(
-    title: str | None, content: str | None, sides: Sequence[PageConflictSide] = ()
-) -> int:
-    """The bytes of a page's state as it travels (JSON strings): its title
-    and content plus the title and content of every open conflict side —
-    what one event and one sync record must carry together."""
-    texts = [title, content, *(t for s in sides for t in (s.title, s.content))]
-    return sum(len(orjson.dumps(t)) for t in texts if t)
+#: A page's who / when stamps and its counter: they change on every save by
+#: design, so a page stored before the limit is judged "no larger" on the
+#: rest — its words, cover and sides — never failed by a longer ``seq``.
+_PAGE_STAMPS = (
+    "updated_at",
+    "last_editor_user_id",
+    "last_edited_at",
+    "locked_by",
+    "locked_at",
+    "lock_expires_at",
+    "seq",
+)
+
+
+def page_too_large(
+    page: Page,
+    sides: Sequence[PageConflictSide],
+    *,
+    was: tuple[Page, Sequence[PageConflictSide]] | None = None,
+) -> bool:
+    """Whether a page — measured whole: its record as it travels
+    (:func:`~socialhome.domain.page_version.page_record`, every open side
+    included) — is over the limit every space has
+    (``SPACE_PAGE_ITEM_MAX_BYTES``) and larger than *was* (the page and
+    sides held now): a save that makes a page stored before the limit no
+    larger is not too large."""
+    held: dict[str, Any] | None = None
+    if was is not None:
+        held_page, held_sides = was
+        stamps = {f: getattr(page, f) for f in _PAGE_STAMPS}
+        held = page_record(replace(held_page, **stamps), held_sides)
+    return space_item_too_large(
+        page_record(page, sides), limit=SPACE_PAGE_ITEM_MAX_BYTES, was=held
+    )
+
+
+def log_page_not_stored(
+    what: str, page: Page, sides: Sequence[PageConflictSide], source: str
+) -> None:
+    """The WARNING a receiver writes when it does not store a page version
+    over the limit (larger than its copy)."""
+    log.warning(
+        "%s from %s: page %s in space %s is over the limit of its kind (%d of "
+        "%d bytes) and larger than the copy held — not stored",
+        what,
+        source,
+        page.id,
+        page.space_id,
+        space_item_bytes(page_record(page, sides)),
+        SPACE_PAGE_ITEM_MAX_BYTES,
+    )
 
 
 #: The largest ``seq`` anyone commits or accepts (a JSON-safe integer).
@@ -581,18 +628,6 @@ def canonical_from_wire(p: Mapping[str, Any]) -> CanonicalVersion | None:
     )
 
 
-def side_to_wire(side: PageConflictSide) -> dict[str, Any]:
-    return {
-        "side_id": side.hash,
-        "title": side.title,
-        "content": side.content,
-        "cover": side.cover_image_url,
-        "by": side.by,
-        "base_seq": side.base_seq,
-        "at": side.at,
-    }
-
-
 def canonical_extras(
     page: Page, sides: Sequence[PageConflictSide], sequenced: Sequenced | None = None
 ) -> dict[str, Any]:
@@ -945,31 +980,11 @@ class PageConflictService(BusPublisherMixin):
                 proposer_instance=proposer_instance,
             )
 
-    @staticmethod
-    def _over_state_limit(
-        title: str,
-        content: str,
-        sides: Sequence[PageConflictSide],
-        *,
-        was: int = 0,
-    ) -> bool:
-        """Whether that state (the text plus every open side's,
-        :func:`page_state_bytes`) passes the limit every space has
-        (``SPACE_PAGE_STATE_MAX_BYTES``) — and is larger than it *was*: an
-        edit that makes a page stored before the limit no larger is taken.
-        The host refuses (``too_large``) a version over it, its own people's
-        and a member household's alike, so none is sequenced that could not
-        be sent on in one relay frame, live and by sync."""
-        size = page_state_bytes(title, content, sides)
-        return size > SPACE_PAGE_STATE_MAX_BYTES and size > was
-
     async def _sequence_create(
         self, space_id: str, page_id: str, proposal: Proposal
     ) -> SequenceResult:
         if proposal.base_seq not in (None, 0) or not proposal.created_by:
             return SequenceResult(SequenceOutcome.REFUSED, "gone")
-        if self._over_state_limit(proposal.title, proposal.content, ()):
-            return SequenceResult(SequenceOutcome.REFUSED, TOO_LARGE)
         now = _now()
         page = Page(
             id=page_id,
@@ -984,6 +999,10 @@ class PageConflictService(BusPublisherMixin):
             last_edited_at=now,
             seq=1,
         )
+        if page_too_large(page, ()):
+            # The host sequences nothing over the limit every space has (it
+            # must cross one relay frame, live and by sync): ``too_large``.
+            return SequenceResult(SequenceOutcome.REFUSED, TOO_LARGE)
         if not await self._pages.save(page, space_id=space_id):
             return SequenceResult(SequenceOutcome.REFUSED, "gone")
         stored = await self._pages.get_space_page(page_id, space_id=space_id)
@@ -1089,22 +1108,6 @@ class PageConflictService(BusPublisherMixin):
         changed_sides = [s.hash for s in state.sides] != before_sides
         if not changed_body and not changed_sides and not unsequenced and not regressed:
             return SequenceResult(SequenceOutcome.DUPLICATE, None, page)
-        # The state this would commit — the body and every side kept open —
-        # stays within the limit every space has (it must cross one relay
-        # frame, live and by sync). A version over it is refused, never
-        # sequenced: the proposer is told (``too_large``).
-        next_title, next_content = (
-            (new_body[0], new_body[1])
-            if changed_body and new_body is not None
-            else (page.title, page.content)
-        )
-        if self._over_state_limit(
-            next_title,
-            next_content,
-            state.sides,
-            was=page_state_bytes(page.title, page.content, sides_before),
-        ):
-            return SequenceResult(SequenceOutcome.REFUSED, TOO_LARGE, page)
         now = _now()
         history = [self._version_of(page, side, space_id) for side in state.retired]
         updated = replace(page, seq=page.seq + 1, updated_at=now)
@@ -1140,6 +1143,13 @@ class PageConflictService(BusPublisherMixin):
                 last_editor_user_id=proposal.actor_user_id or page.last_editor_user_id,
                 last_edited_at=now,
             )
+        # What this would commit — the page and every side kept open,
+        # measured whole — stays within the limit every space has (it must
+        # cross one relay frame, live and by sync). A version over it (and
+        # larger than the page held) is refused, never sequenced: the
+        # proposer is told (``too_large``). So is a side that would grow it.
+        if page_too_large(updated, state.sides, was=(page, sides_before)):
+            return SequenceResult(SequenceOutcome.REFUSED, TOO_LARGE, page)
         # One transaction: history, the page row and its sides together;
         # the canonical version is published only after it commits.
         if not await self._pages.commit_version(
@@ -1700,6 +1710,10 @@ class PageConflictService(BusPublisherMixin):
         revived = False
         async with self.lock_for(space_id, page_id):
             page = await self._pages.get_space_page(page_id, space_id=space_id)
+            if version.has_state and await self._version_too_large(
+                space_id, page_id, page, version
+            ):
+                return False
             if page is None and version.has_state and version.seq >= 1:
                 # Our tombstone the host never confirmed (another member's
                 # delete, or our own) yields to the host still holding the
@@ -1793,6 +1807,37 @@ class PageConflictService(BusPublisherMixin):
         if settled is not None:
             await self._emit(settled)
         return changed
+
+    async def _version_too_large(
+        self,
+        space_id: str,
+        page_id: str,
+        held: Page | None,
+        version: CanonicalVersion,
+    ) -> bool:
+        """The one receiver rule, for every host version a member stores —
+        live, a refusal answer, the §25.6 stream: a version over the page
+        limit and larger than the copy held (with its sides) is not stored
+        (WARNING). An honest host never sequences one."""
+        now = _now()
+        incoming = Page(
+            id=page_id,
+            title=version.title,
+            content=version.content,
+            created_by=version.created_by,
+            created_at=version.created_at or now,
+            updated_at=version.updated_at or now,
+            space_id=space_id,
+            cover_image_url=version.cover_image_url,
+            last_editor_user_id=version.last_editor_user_id or version.created_by,
+            last_edited_at=version.updated_at or now,
+            seq=version.seq,
+        )
+        was = (held, await self.sides(space_id, page_id)) if held is not None else None
+        if not page_too_large(incoming, version.conflict, was=was):
+            return False
+        log_page_not_stored("the host's version", incoming, version.conflict, "host")
+        return True
 
     async def _holds_sent_draft(
         self, space_id: str, page: Page, draft_hash: str, version: CanonicalVersion

@@ -36,8 +36,8 @@ describe('apiErrorMessage — known codes', () => {
 
   it('says a space item is too large, with the limit', () => {
     expect(apiErrorMessage(413, '/api/spaces/s/pages', {
-      code: 'SPACE_ITEM_TOO_LARGE', detail: 'x', params: { max_kb: 463 },
-    })).toBe('This is too large (at most 463 KB of text). Shorten it or split it up.')
+      code: 'SPACE_ITEM_TOO_LARGE', detail: 'x', params: { max_kb: 475 },
+    })).toBe('This is too large to share with the space (at most 475 kB in total). Shorten it or split it up.')
     // Without the limit: the server's own words.
     expect(apiErrorMessage(413, '/api/spaces/s/pages', {
       code: 'SPACE_ITEM_TOO_LARGE', detail: 'Too large.',

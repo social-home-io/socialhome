@@ -127,6 +127,31 @@ def parse_rrule(rrule: str) -> dict:
     return out
 
 
+#: The longest recurrence rule a space calendar event takes. A real rule
+#: (``FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE,FR;UNTIL=20271231T235959Z``) is
+#: well under 100 characters.
+MAX_RRULE_CHARS: int = 512
+
+
+def clean_rrule(value: object) -> str | None:
+    """A recurrence rule as a space calendar event stores it: ``None`` /
+    blank → no rule; else a string of at most :data:`MAX_RRULE_CHARS`
+    characters whose ``FREQ`` this parser knows (:func:`parse_rrule`).
+    Raises :class:`ValueError` on anything else."""
+    if value is None:
+        return None
+    rule = value.strip() if isinstance(value, str) else None
+    if rule is None:
+        raise ValueError("rrule must be a string")
+    if not rule:
+        return None
+    if len(rule) > MAX_RRULE_CHARS:
+        raise ValueError(f"rrule is longer than {MAX_RRULE_CHARS} characters")
+    if parse_rrule(rule)["FREQ"] is None:
+        raise ValueError("rrule needs FREQ=DAILY, WEEKLY, MONTHLY or YEARLY")
+    return rule
+
+
 def expand_rrule(
     seed_start: datetime,
     seed_end: datetime,

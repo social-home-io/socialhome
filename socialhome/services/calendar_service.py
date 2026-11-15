@@ -29,6 +29,9 @@ from ..domain.calendar import (
     EventReminder,
     RsvpPastError,
     RSVPStatus,
+    calendar_record,
+    clean_attendees,
+    clean_location,
     material_changes,
     validate_capacity,
 )
@@ -45,9 +48,10 @@ from ..domain.events import (
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.relay_media_frame import (
-    SPACE_CALENDAR_TEXT_MAX_BYTES,
-    calendar_texts,
-    require_space_text_fits,
+    SPACE_CALENDAR_ITEM_MAX_BYTES,
+    require_space_item_fits,
+    space_item_bytes,
+    space_item_too_large,
 )
 from ..domain.space import (
     MODERATION_BLOCK_KEY,
@@ -71,7 +75,7 @@ from ..media_signer import strip_signature_query
 from ..repositories.calendar_repo import AbstractCalendarRepo, AbstractSpaceCalendarRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..utils.datetime import as_utc
-from ..utils.rrule import expand_rrule
+from ..utils.rrule import clean_rrule, expand_rrule
 from ..utils.timezones import is_valid_tz, parse_all_day_bound, parse_event_bound
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
@@ -167,25 +171,51 @@ def _updated_cover_url(value: str | None, stored: str | None) -> str | None:
     return _clean_cover_url(value)
 
 
-#: Upper bound on the ``location`` text so a hostile client can't push
-#: a 1 MB blob into every event row. Matches the iCal RFC 5545
-#: practical-limit guidance (line folding kicks in long before this).
-_LOCATION_MAX = 500
-
-
 def _clean_location(value: str | None) -> str | None:
-    """Normalise a location string from the client.
+    """Normalise a location string from the client (``clean_location``:
+    trimmed, blank → ``None``, cut at ``LOCATION_MAX_CHARS``)."""
+    return clean_location(value)
 
-    Trims surrounding whitespace, collapses an empty string to ``None``
-    (so blank input doesn't store as a literal empty value), and
-    truncates anything past :data:`_LOCATION_MAX` characters.
-    """
-    if value is None:
-        return None
-    trimmed = value.strip()
-    if not trimmed:
-        return None
-    return trimmed[:_LOCATION_MAX]
+
+def calendar_event_too_large(
+    event: CalendarEvent, *, was: CalendarEvent | None = None
+) -> bool:
+    """Whether a space calendar event — measured whole: its record as it
+    travels (:func:`~socialhome.domain.calendar.calendar_record`, every
+    field) — is over the limit every space has
+    (``SPACE_CALENDAR_ITEM_MAX_BYTES``) and larger than *was*, the event as
+    held now: an edit that makes an event stored before the limit no
+    larger is not too large."""
+    return space_item_too_large(
+        calendar_record(event),
+        limit=SPACE_CALENDAR_ITEM_MAX_BYTES,
+        was=calendar_record(was) if was is not None else None,
+    )
+
+
+def require_calendar_event_fits(
+    event: CalendarEvent, *, was: CalendarEvent | None = None
+) -> None:
+    """413 (``SPACE_ITEM_TOO_LARGE``) for :func:`calendar_event_too_large`."""
+    require_space_item_fits(
+        calendar_record(event),
+        limit=SPACE_CALENDAR_ITEM_MAX_BYTES,
+        was=calendar_record(was) if was is not None else None,
+    )
+
+
+def log_calendar_event_not_stored(what: str, event: CalendarEvent, source: str) -> None:
+    """The WARNING a receiver writes when it does not store a calendar
+    event over the limit (larger than its copy)."""
+    log.warning(
+        "%s from %s: calendar event %s is over the limit of its kind (%d of "
+        "%d bytes) and larger than the copy held — not stored",
+        what,
+        source,
+        event.id,
+        space_item_bytes(calendar_record(event)),
+        SPACE_CALENDAR_ITEM_MAX_BYTES,
+    )
 
 
 def _event_bound(
@@ -1467,7 +1497,7 @@ class SpaceCalendarService(
         created_by: str,
         description: str | None = None,
         all_day: bool = False,
-        attendees: tuple[str, ...] = (),
+        attendees: Sequence[str] | None = (),
         rrule: str | None = None,
         capacity: int | None = None,
         cover_url: str | None = None,
@@ -1491,10 +1521,8 @@ class SpaceCalendarService(
         summary = (summary or "").strip()
         if not summary:
             raise ValueError("summary must not be empty")
-        require_space_text_fits(
-            *calendar_texts(summary, description, attendees),
-            limit=SPACE_CALENDAR_TEXT_MAX_BYTES,
-        )
+        attendees = clean_attendees(attendees)
+        rrule = clean_rrule(rrule)
         capacity = validate_capacity(capacity)
         # The tz first: a date-only bound names a day in the event's zone.
         event_tz = await self._resolve_space_event_tz(tz, space_id=space_id)
@@ -1519,6 +1547,29 @@ class SpaceCalendarService(
             _clean_cover_url(cover_url), user_id=created_by
         )
         clean_location = _clean_location(location)
+        event = CalendarEvent(
+            # Owner-bound (v_36): no other household can announce this id
+            # first as its own user's event.
+            id=event_id or _mint_event_id(space_id, created_by),
+            calendar_id=space_id,  # space-scoped events use space_id as calendar_id
+            summary=summary,
+            description=description,
+            start=start_dt,
+            end=end_dt,
+            all_day=all_day,
+            attendees=attendees,
+            created_by=created_by,
+            rrule=rrule,
+            capacity=capacity,
+            cover_url=clean_cover,
+            location=clean_location,
+            tz=event_tz,
+            # The longer spelling, so the check holds for either outcome.
+            announce_in_feed=False,
+        )
+        # After the gate above, before anything is stored or queued: the
+        # event, measured whole, within the limit every space has.
+        require_calendar_event_fits(event)
         if decision is AccessDecision.QUEUE:
             await self._submit_for_review(
                 space_id,
@@ -1566,25 +1617,7 @@ class SpaceCalendarService(
                 # to the event instead (below); the route tells the creator.
                 announce_in_feed = False
                 queue_announce = refusal == "moderated"
-        event = CalendarEvent(
-            # Owner-bound (v_36): no other household can announce this id
-            # first as its own user's event.
-            id=event_id or _mint_event_id(space_id, created_by),
-            calendar_id=space_id,  # space-scoped events use space_id as calendar_id
-            summary=summary,
-            description=description,
-            start=start_dt,
-            end=end_dt,
-            all_day=all_day,
-            attendees=tuple(attendees),
-            created_by=created_by,
-            rrule=rrule,
-            capacity=capacity,
-            cover_url=clean_cover,
-            location=clean_location,
-            tz=event_tz,
-            announce_in_feed=announce_in_feed,
-        )
+        event = replace(event, announce_in_feed=announce_in_feed)
         if not await self._repo.save_event(event, space_id=space_id):
             raise KeyError(f"calendar event {event.id!r} exists in another space")
         saved = event
@@ -1872,7 +1905,7 @@ class SpaceCalendarService(
         end: str | None = None,
         all_day: bool | None = None,
         description: str | None = None,
-        attendees: tuple[str, ...] | None = None,
+        attendees: Sequence[str] | None = None,
         rrule: str | None = None,
         capacity: int | None = None,
         clear_capacity: bool = False,
@@ -1904,19 +1937,11 @@ class SpaceCalendarService(
         new_summary = (summary if summary is not None else existing.summary).strip()
         if not new_summary:
             raise ValueError("event summary must not be empty")
-        # After the gate above; an event stored before the limit can still
-        # be saved no larger.
-        require_space_text_fits(
-            *calendar_texts(
-                new_summary,
-                description if description is not None else existing.description,
-                attendees if attendees is not None else existing.attendees,
-            ),
-            limit=SPACE_CALENDAR_TEXT_MAX_BYTES,
-            was=calendar_texts(
-                existing.summary, existing.description, existing.attendees
-            ),
-        )
+        if attendees is not None:
+            attendees = clean_attendees(attendees)
+        if rrule is not None:
+            # A blank rule clears it, as before (stored blank).
+            rrule = clean_rrule(rrule) or ""
         # The tz first: a date-only bound names a day in the event's zone.
         if tz is not None:
             if not is_valid_tz(tz):
@@ -1987,6 +2012,10 @@ class SpaceCalendarService(
             location=new_location,
             tz=new_tz,
         )
+        # After the gate above, before anything is stored or queued: the
+        # event as it would be, measured whole. One stored before the limit
+        # can still be saved no larger.
+        require_calendar_event_fits(updated, was=existing)
         if decision is AccessDecision.QUEUE:
             # Validated above; the patch carries exactly what was sent.
             sent: dict[str, Any] = {

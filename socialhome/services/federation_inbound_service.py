@@ -42,7 +42,6 @@ from ..domain.conversation import (
     RemoteConversationMember,
 )
 from ..domain.dm_location import normalise_location_content
-from ..domain.errors import SpaceItemTooLargeError
 from ..domain.events import (
     CommentAdded,
     CommentDeleted,
@@ -101,11 +100,6 @@ from ..domain.post import (
     PostType,
 )
 from ..domain.presence import truncate_coord
-from ..domain.relay_media_frame import (
-    SPACE_CONFIG_TEXT_MAX_BYTES,
-    config_texts,
-    require_space_text_fits,
-)
 from ..domain.space import (
     MODERATION_BLOCK_KEY,
     ContentAction,
@@ -205,6 +199,7 @@ from .space_service import (
     apply_gfs_servers_from_metadata,
     apply_owner_statement_from_metadata,
     apply_space_images_from_config_change,
+    config_within_limit,
     keep_local_space_state,
     stub_space_from_metadata,
 )
@@ -234,12 +229,6 @@ if TYPE_CHECKING:
     from .space_media_gfs_fetcher import SpaceMediaGfsFetcher
 
 log = logging.getLogger(__name__)
-
-
-def _text_or(value: object, held: str | None) -> str | None:
-    """A text field of an inbound config: the sent string, else what we
-    hold (an absent field changes nothing)."""
-    return value if isinstance(value, str) else held
 
 
 #: v_93 — most applied ``SPACE_POST_REACTION`` events ANNOUNCED on the bus
@@ -3737,29 +3726,6 @@ class FederationInboundService(ProtectionGateMixin):
         if not (is_owner or authority_verified):
             # Non-owner, no valid signature → not authorised.
             return
-        # The limit every household holds for a space's texts. An honest
-        # sender never passes it (its own save answers 413), so an edit that
-        # would GROW our copy past it is dropped whole — never stored, never
-        # passed on. A space stored before the limit keeps arriving as long
-        # as it does not grow.
-        try:
-            require_space_text_fits(
-                *config_texts(
-                    _text_or(meta.get("description"), existing.description),
-                    _text_or(meta.get("about_markdown"), existing.about_markdown),
-                ),
-                limit=SPACE_CONFIG_TEXT_MAX_BYTES,
-                was=config_texts(existing.description, existing.about_markdown),
-            )
-        except SpaceItemTooLargeError:
-            log.warning(
-                "SPACE_CONFIG_CHANGED for %s from %s: its description / about "
-                "text is over the limit (%d bytes) — dropping",
-                space_id,
-                event.from_instance,
-                SPACE_CONFIG_TEXT_MAX_BYTES,
-            )
-            return
         # ── Last-writer-wins ordering (v_24) ────────────────────────────────
         # With #459, every config edit broadcasts a SPACE_CONFIG_CHANGED, AND
         # the §D1b catch-up path (_push_config_to) still ships a snapshot on
@@ -3906,6 +3872,15 @@ class FederationInboundService(ProtectionGateMixin):
             meta=meta,
             we_host=bool(own_instance_id)
             and existing.owner_instance_id == own_instance_id,
+        )
+        # The one receiver rule (after authorization and ordering): a config
+        # over the limit every household holds and larger than ours keeps
+        # our text — its settings still apply, so no household keeps
+        # enforcing a stale access level for a size reason.
+        refreshed = config_within_limit(
+            refreshed,
+            held=existing,
+            source=f"SPACE_CONFIG_CHANGED from {event.from_instance}",
         )
         if authority_verified:
             # v_44 — the save lands only while the space still pins the key

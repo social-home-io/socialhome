@@ -40,6 +40,11 @@ if TYPE_CHECKING:
     from .post import PostType
 
 
+#: The longest space name (characters) — what the SPA's name field allows.
+#: The emoji is capped at ``domain.emoji.MAX_EMOJI_CODEPOINTS``.
+SPACE_NAME_MAX_CHARS: int = 120
+
+
 # ─── Discovery categories (§23.50) ────────────────────────────────────────
 
 #: Discovery categories (§23.50). A space's ``category`` is one of these;

@@ -37,6 +37,7 @@ from ..child_protection_service import _VALID_MIN_AGES
 from ..space_authority_pin import owner_authority_cert_via, owner_statement_via
 from ..space_service import (
     can_seat_remote_stub,
+    config_within_limit,
     space_metadata_for_federation,
     store_owner_statement,
 )
@@ -152,6 +153,13 @@ class SpaceMembershipInboundHandlers:
             join_mode=join_mode,
             description=p.get("description"),
             emoji=p.get("emoji"),
+        )
+        # The one receiver rule for a space's config: over the limit and
+        # larger than what we hold → seated without that text.
+        space = config_within_limit(
+            space,
+            held=await self._space_repo.get(space_id),
+            source=f"SPACE_CREATED from {event.from_instance}",
         )
         await self._space_repo.save(space)
         await self._bus.publish(

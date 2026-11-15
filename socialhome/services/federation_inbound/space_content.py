@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import functools
 import logging
-from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -51,10 +50,11 @@ from ...domain.calendar import (
     CalendarEvent,
     CalendarRSVP,
     RSVPStatus,
+    clean_attendees,
+    clean_location,
     coerce_capacity,
     material_changes,
 )
-from ...domain.errors import SpaceItemTooLargeError
 from ...domain.events import (
     BazaarBidPlaced,
     BazaarBidWithdrawn,
@@ -107,12 +107,6 @@ from ...domain.post import (
     poll_closes_at_from_wire,
     poll_deadline_passed,
     poll_options_from_wire,
-)
-from ...domain.relay_media_frame import (
-    SPACE_CALENDAR_TEXT_MAX_BYTES,
-    SPACE_PAGE_STATE_MAX_BYTES,
-    calendar_texts,
-    require_space_text_fits,
 )
 from ...domain.space import (
     MODERATION_BLOCK_KEY,
@@ -169,7 +163,12 @@ from ...infrastructure.event_bus import EventBus
 from ...media.cleanup import unlink_unreferenced
 from ...repositories.bazaar_repo import OfferStateError
 from ...utils.datetime import parse_iso8601_optional
+from ...utils.rrule import clean_rrule
 from ...utils.timezones import coerce_tz
+from ..calendar_service import (
+    calendar_event_too_large,
+    log_calendar_event_not_stored,
+)
 from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
 from ..inbound_media_store import (
     space_media_ref,
@@ -178,11 +177,11 @@ from ..inbound_media_store import (
 )
 from ..page_conflict_service import (
     CanonicalVersion,
-    PageConflictSide,
     PageMode,
     Proposal,
     canonical_from_wire,
-    page_state_bytes,
+    log_page_not_stored,
+    page_too_large,
     proposal_from_wire,
 )
 from ..space_media_names import SpaceMediaNamer
@@ -1023,9 +1022,11 @@ class SpaceContentInboundHandlers:
             return  # an update of a page we never held, not from the host
         if not await self._page_write_gates(event, space_id, page_id, page, existing):
             return
-        if self._page_over_limit(
-            event, space_id, page_id, page.title, page.content, (), existing, ()
+        if page_too_large(
+            page, (), was=(existing, ()) if existing is not None else None
         ):
+            # The one receiver rule: over the limit and larger than our copy.
+            log_page_not_stored(event.event_type, page, (), event.from_instance)
             return
         if existing is not None and engine is not None:
             # A pre-v_48 host: last write wins, the old body kept in history.
@@ -1383,21 +1384,8 @@ class SpaceContentInboundHandlers:
                 row_owner=existing.created_by if existing else page.created_by,
             ):
                 return
-        if (
-            version.has_state
-            and not refusal
-            and self._page_over_limit(
-                event,
-                space_id,
-                page_id,
-                version.title,
-                version.content,
-                version.conflict,
-                existing,
-                await engine.sides(space_id, page_id),
-            )
-        ):
-            return
+        # The size rule is the engine's (``mirror``): one rule for every
+        # host version — live, a refusal answer, the §25.6 stream.
         await engine.mirror(space_id=space_id, page_id=page_id, version=version)
         if version.has_state and not refusal:
             await self._keep_page_media(event, space_id, page_id, version)
@@ -1663,41 +1651,6 @@ class SpaceContentInboundHandlers:
                 event, space_id=space_id, what="sticky", row_id=sticky_id
             )
 
-    @staticmethod
-    def _page_over_limit(
-        event: FederationEvent,
-        space_id: str,
-        page_id: str,
-        title: str | None,
-        content: str | None,
-        sides: Sequence[PageConflictSide],
-        existing: Page | None,
-        our_sides: Sequence[PageConflictSide],
-    ) -> bool:
-        """Whether a LIVE page version must be dropped: its state (text
-        plus open sides) is over the limit every household holds and larger
-        than our copy. An honest host never sequences one; a page stored
-        before the limit keeps arriving as long as it does not grow (and
-        the §25.6 stream, which mirrors stored state, is not judged here)."""
-        size = page_state_bytes(title, content, sides)
-        if size <= SPACE_PAGE_STATE_MAX_BYTES:
-            return False
-        if existing is not None and size <= page_state_bytes(
-            existing.title, existing.content, our_sides
-        ):
-            return False
-        log.warning(
-            "%s from %s: page %s in space %s is over the page limit (%d of "
-            "%d bytes) — dropping",
-            event.event_type,
-            event.from_instance,
-            page_id,
-            space_id,
-            size,
-            SPACE_PAGE_STATE_MAX_BYTES,
-        )
-        return True
-
     # ─── Calendar events ─────────────────────────────────────────────────
 
     async def _on_calendar_saved(self, event: FederationEvent) -> None:
@@ -1726,7 +1679,21 @@ class SpaceContentInboundHandlers:
         cover = verbatim_local_media_ref(p.get("cover_url"))
         if cover is not None and space_media_ref(cover) is None:
             cover = None  # a reserved (DM / moment) name is never a cover
-        location = p.get("location")
+        try:
+            # The same checks as where a person saves (ids once each, a
+            # cap; a rule this build reads, a length cap).
+            attendees = clean_attendees(p.get("attendees"))
+            rrule = clean_rrule(p.get("rrule"))
+        except ValueError as exc:
+            log.warning(
+                "%s from %s: calendar event %s in space %s — %s; not stored",
+                event.event_type,
+                event.from_instance,
+                event_id,
+                space_id,
+                exc,
+            )
+            return
         ev = CalendarEvent(
             id=event_id,
             calendar_id=calendar_id,
@@ -1736,15 +1703,15 @@ class SpaceContentInboundHandlers:
             created_by=created_by,
             description=p.get("description"),
             all_day=bool(p.get("all_day", False)),
-            attendees=tuple(str(a) for a in (p.get("attendees") or ())),
+            attendees=attendees,
             mirrored_from=p.get("mirrored_from"),
-            rrule=p.get("rrule"),
+            rrule=rrule,
             # The per-occurrence cap members enforce on RSVPs; anything but
             # a non-negative integer (or an older sender's absent field) is
             # no cap.
             capacity=coerce_capacity(p.get("capacity")),
             cover_url=cover,
-            location=location if isinstance(location, str) and location else None,
+            location=clean_location(p.get("location")),
             # IANA wall-clock anchor. Old peers omit; default ``"UTC"``.
             # Peer-supplied, so validated here: an unknown zone name
             # makes ``Intl`` throw in the SPA and one bad row breaks
@@ -1797,35 +1764,14 @@ class SpaceContentInboundHandlers:
             row_owner=created_by if existing is None else existing[1].created_by,
         ):
             return
-        # The limit every household holds for a calendar event's text. An
-        # honest sender never passes it (its own save answers 413), so an
-        # event that is over it and larger than our copy is dropped — never
-        # stored. One stored before the limit keeps arriving as long as it
-        # does not grow.
-        try:
-            require_space_text_fits(
-                *calendar_texts(ev.summary, ev.description, ev.attendees),
-                limit=SPACE_CALENDAR_TEXT_MAX_BYTES,
-                was=(
-                    calendar_texts(
-                        existing[1].summary,
-                        existing[1].description,
-                        existing[1].attendees,
-                    )
-                    if existing is not None
-                    else ()
-                ),
-            )
-        except SpaceItemTooLargeError:
-            log.warning(
-                "%s from %s: calendar event %s in space %s is over the text "
-                "limit (%d bytes) — dropping",
-                event.event_type,
-                event.from_instance,
-                event_id,
-                space_id,
-                SPACE_CALENDAR_TEXT_MAX_BYTES,
-            )
+        # The one receiver rule: an event over the limit every household
+        # holds (measured whole) AND larger than our copy is not stored. An
+        # honest sender never passes it (its own save answers 413); one
+        # stored before the limit keeps arriving as long as it does not grow.
+        if calendar_event_too_large(
+            ev, was=existing[1] if existing is not None else None
+        ):
+            log_calendar_event_not_stored(event.event_type, ev, event.from_instance)
             return
         media = await self._localize_media(
             event,

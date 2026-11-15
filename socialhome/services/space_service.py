@@ -53,15 +53,17 @@ from ..crypto import (
     ed25519_public_key,
     generate_identity_keypair,
 )
+from ..domain.emoji import MAX_EMOJI_CODEPOINTS
 from ..domain.errors import (
+    SpaceItemTooLargeError,
     SpaceNotPublishableError,
     TierChangeRequiredError,
     WrongTypeError,
 )
 from ..domain.relay_media_frame import (
-    SPACE_CONFIG_TEXT_MAX_BYTES,
-    config_texts,
-    require_space_text_fits,
+    SPACE_CONFIG_ITEM_MAX_BYTES,
+    space_item_bytes,
+    space_item_too_large,
 )
 from ..federation.gfs_join_request import APPROVAL_TOKEN_TTL, unverified_names
 from ..federation.host_equivalence import acts_as_host
@@ -193,6 +195,7 @@ from ..domain.space import (
     PUBLIC_SPACE_TIERS,
     SETTINGS_AUTHORITY_ROLES,
     SPACE_CATEGORIES,
+    SPACE_NAME_MAX_CHARS,
     WRITER_ROLES,
     AccessDecision,
     AgeRestrictedError,
@@ -1182,6 +1185,7 @@ class SpaceService(
             raise KeyError(f"owner {owner_username!r} not found")
         if not name.strip():
             raise ValueError("space name must not be empty")
+        require_space_name_and_emoji(name.strip(), emoji)
 
         stype = _coerce_space_type(space_type)
         jmode = _coerce_join_mode(join_mode)
@@ -1256,6 +1260,9 @@ class SpaceService(
                 else None
             ),
         )
+        # The new config, measured whole, within the limit every space has
+        # — before anything is stored.
+        require_config_fits(space)
         await self._spaces.save(space)
         # Persist the space's Ed25519 PRIVATE seed (KEK-wrapped at rest) so
         # this household — the space owner — can later sign space-authority
@@ -2700,17 +2707,32 @@ class SpaceService(
             await self._require_content_authority(space, actor_username)
         else:
             await self._require_admin_or_owner(space, actor_username)
-        # The texts as they would be (an unsent one stays as it is), within
-        # the limit every space has; a space stored before it can still be
-        # saved no larger.
-        about_now = space.about_markdown
-        require_space_text_fits(
-            *config_texts(
-                description if description is not None else space.description,
-                about_markdown if isinstance(about_markdown, str) else about_now,
+        # After authorization, before anything leaves this household: the
+        # name and emoji within their caps, and the config with its texts as
+        # they would be (an unsent one stays as it is) within the limit
+        # every space has — a space stored before it can still be saved no
+        # larger. The whole new config is checked again before it is stored.
+        require_space_name_and_emoji(
+            name.strip() if name is not None else None,
+            (emoji or None) if emoji is not None else None,
+        )
+        require_config_fits(
+            replace(
+                space,
+                name=name.strip() if name is not None else space.name,
+                description=(
+                    (description.strip() or None)
+                    if description is not None
+                    else space.description
+                ),
+                emoji=(emoji or None) if emoji is not None else space.emoji,
+                about_markdown=(
+                    ((about_markdown or "").strip() or None)  # type: ignore[attr-defined]
+                    if about_markdown is not _UNSET_MEMBER_PROFILE
+                    else space.about_markdown
+                ),
             ),
-            limit=SPACE_CONFIG_TEXT_MAX_BYTES,
-            was=config_texts(space.description, about_now),
+            was=space,
         )
 
         if category is not None and category not in SPACE_CATEGORIES:
@@ -3071,6 +3093,7 @@ class SpaceService(
             return space
 
         updated = replace(space, **new_fields)
+        require_config_fits(updated, was=space)
         await self._spaces.save(updated)
         sequence = await self._spaces.increment_config_sequence(space_id)
         # v_24 LWW: record THIS household as the last-applied config author so
@@ -9657,6 +9680,86 @@ def space_metadata_fields(space: Space) -> dict:
     }
 
 
+#: A space's config counters: they grow on every edit by design, so a
+#: config stored before the limit is judged "no larger" on the rest — never
+#: failed by a longer sequence number.
+_CONFIG_COUNTERS = ("config_sequence", "config_hlc", "roster_sequence")
+
+
+def _config_record(space: Space, held: Space | None) -> dict | None:
+    """*held*'s config as it travels, with *space*'s counters — what "no
+    larger" compares *space* against (``None`` when nothing is held)."""
+    if held is None:
+        return None
+    return space_metadata_fields(
+        replace(held, **{f: getattr(space, f) for f in _CONFIG_COUNTERS})
+    )
+
+
+def _config_too_large(space: Space, held: Space | None) -> bool:
+    return space_item_too_large(
+        space_metadata_fields(space),
+        limit=SPACE_CONFIG_ITEM_MAX_BYTES,
+        was=_config_record(space, held),
+    )
+
+
+def require_config_fits(space: Space, *, was: Space | None = None) -> None:
+    """413 (``SPACE_ITEM_TOO_LARGE``) for a space whose config — measured
+    whole: :func:`space_metadata_fields` as it travels, every setting — is
+    over the limit every space has (``SPACE_CONFIG_ITEM_MAX_BYTES``) and
+    larger than *was*: a save that makes a config stored before the limit
+    no larger passes."""
+    if _config_too_large(space, was):
+        raise SpaceItemTooLargeError(SPACE_CONFIG_ITEM_MAX_BYTES)
+
+
+def require_space_name_and_emoji(name: str | None, emoji: str | None) -> None:
+    """A space's name and emoji within their own caps (422)."""
+    if name is not None and len(name) > SPACE_NAME_MAX_CHARS:
+        raise ValueError(
+            f"space name must be at most {SPACE_NAME_MAX_CHARS} characters"
+        )
+    if emoji is not None and len(emoji) > MAX_EMOJI_CODEPOINTS:
+        raise ValueError(
+            f"space emoji must be at most {MAX_EMOJI_CODEPOINTS} characters"
+        )
+
+
+def config_within_limit(space: Space, *, held: Space | None, source: str) -> Space:
+    """The one receiver rule for a space's config (``SPACE_CONFIG_CHANGED``,
+    ``SPACE_CREATED``, a join snapshot, a rotation's config): a config over
+    the limit and larger than the copy held keeps the held TEXT — the
+    description and about text, then (if still too large) the name and
+    emoji; nothing held → none — with a WARNING. Its settings (access
+    levels, join mode, archive, delegation…) are always taken: a size
+    reason never leaves a household enforcing stale settings."""
+    if not _config_too_large(space, held):
+        return space
+    kept = replace(
+        space,
+        description=held.description if held is not None else None,
+        about_markdown=held.about_markdown if held is not None else None,
+    )
+    if _config_too_large(kept, held):
+        kept = replace(
+            kept,
+            name=held.name if held is not None else space.id[:8],
+            emoji=held.emoji if held is not None else None,
+        )
+    if kept != space:
+        log.warning(
+            "%s for space %s: its config is over the limit of its kind (%d of "
+            "%d bytes) and larger than the copy held — its settings apply, "
+            "its text is not taken",
+            source,
+            space.id,
+            space_item_bytes(space_metadata_fields(space)),
+            SPACE_CONFIG_ITEM_MAX_BYTES,
+        )
+    return kept
+
+
 async def apply_space_content_key_from_metadata(
     space_id: str,
     *,
@@ -10445,8 +10548,16 @@ async def seat_join_stub(
     ``join.owner_instance_id``; the joining user's own ``space_members`` row
     is the caller's (its role differs per path)."""
     owner_instance = join.owner_instance_id
+    # The one receiver rule for a space's config: over the limit and larger
+    # than what we hold → seated without that text.
     await space_repo.save(
-        stub_space_from_metadata(space_id, host_instance_id=owner_instance, meta=meta)
+        config_within_limit(
+            stub_space_from_metadata(
+                space_id, host_instance_id=owner_instance, meta=meta
+            ),
+            held=await space_repo.get(space_id),
+            source=f"join snapshot from {issuer_instance_id}",
+        )
     )
     # Pin the epoch the owner's cert names FIRST (a replayed older cert can
     # never move the pin back), then record the inviting admin + the owner's

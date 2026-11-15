@@ -13,7 +13,7 @@ from socialhome.app_keys import (
 from socialhome.domain.events import PageUpdated
 from socialhome.domain.page_version import version_hash
 from socialhome.repositories.page_repo import new_page
-from socialhome.services import space_page_service
+from socialhome.services import page_conflict_service, space_page_service
 
 from .conftest import _auth
 
@@ -308,7 +308,8 @@ async def test_resolve_conflict_with_text_over_the_page_limit_is_413(
     """A resolution writes a page like any edit: its merged text passes the
     same size rule (it used to skip it), and nothing is stored."""
     page = await _seed_conflict(client)
-    monkeypatch.setattr(space_page_service, "SPACE_PAGE_STATE_MAX_BYTES", 1000)
+    for module in (space_page_service, page_conflict_service):
+        monkeypatch.setattr(module, "SPACE_PAGE_ITEM_MAX_BYTES", 3000)
     r = await client.post(
         f"/api/spaces/sp-1/pages/{page.id}/resolve-conflict",
         json={"resolution": "merged_content", "content": "x" * 5000},
@@ -317,7 +318,7 @@ async def test_resolve_conflict_with_text_over_the_page_limit_is_413(
     assert r.status == 413
     error = (await r.json())["error"]
     assert error["code"] == "SPACE_ITEM_TOO_LARGE"
-    assert error["params"] == {"max_kb": 0}
+    assert error["params"] == {"max_kb": 3}
     stored = await client.app[page_repo_key].get_space_page(page.id, space_id="sp-1")
     assert stored.content == page.content
     # A resolution that fits is stored.

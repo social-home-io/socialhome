@@ -185,7 +185,8 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
     }),
   VIDEO_UNREADABLE: () => t('error.video_unreadable'),
   TRANSCODE_QUEUE_FULL: () => t('error.transcode_queue_full'),
-  // A space page or description over the limit of its kind (413).
+  // A space page, calendar event or space settings over the limit of its
+  // kind, measured as a whole (413); max_kb is that limit (1 kB = 1000 B).
   SPACE_ITEM_TOO_LARGE: (_b, p) => p.max_kb === undefined
     ? null
     : t('error.space_item_too_large', { max_kb: str(p, 'max_kb') }),

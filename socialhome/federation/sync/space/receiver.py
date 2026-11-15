@@ -39,6 +39,8 @@ from ....domain.calendar import (
     CalendarEvent,
     CalendarRSVP,
     RSVPStatus,
+    clean_attendees,
+    clean_location,
     coerce_capacity,
     is_occurrence_id,
 )
@@ -114,6 +116,10 @@ from ....media.profile_picture import (
     PROFILE_PICTURE_MAX_DIMENSION,
     reencode_peer_picture,
 )
+from ....services.calendar_service import (
+    calendar_event_too_large,
+    log_calendar_event_not_stored,
+)
 from ....services.inbound_media_store import (
     local_media_ref,
     space_media_ref,
@@ -123,13 +129,19 @@ from ....services.inbound_media_store import (
 from ....services.link_preview_service import (
     space_wire_link_preview,
 )
-from ....services.page_conflict_service import PageMode, canonical_from_wire
+from ....services.page_conflict_service import (
+    PageMode,
+    canonical_from_wire,
+    log_page_not_stored,
+    page_too_large,
+)
 from ....services.space_media_names import SpaceMediaNamer, comment_media_ref
 from ....services.space_service import (
     apply_inviter_reproof,
     apply_owner_statement_from_metadata,
 )
 from ....services.space_writer_households import holds_member_seat
+from ....utils.rrule import clean_rrule
 from ....utils.timezones import coerce_tz
 from ...host_equivalence import touches_owner_household
 from ...owner_bound_id import (
@@ -1749,6 +1761,17 @@ class SpaceSyncReceiver:
                     continue
                 if await self._apply_page_version(page, r, space_id, provider):
                     continue
+                # The one receiver rule (a host version's is the engine's):
+                # over the limit and larger than our copy → not stored. The
+                # stream goes on; the watermark moves.
+                held_page = await self._page_repo.get_space_page(
+                    page.id, space_id=space_id
+                )
+                if page_too_large(
+                    page, (), was=(held_page, ()) if held_page is not None else None
+                ):
+                    log_page_not_stored("space sync", page, (), provider)
+                    continue
                 if not await self._page_repo.save(page, space_id=space_id):
                     _log_sync_refusal("page", page.id, space_id)
         elif resource == "stickies_deleted":
@@ -1782,6 +1805,19 @@ class SpaceSyncReceiver:
                     log.debug("sync: event %s was deleted here — skipped", event.id)
                     continue
                 held_event = await self._space_calendar_repo.get_event(event.id)
+                # The one receiver rule: over the limit (measured whole) and
+                # larger than our copy → not stored. The stream goes on; the
+                # watermark moves.
+                if calendar_event_too_large(
+                    event,
+                    was=(
+                        held_event[1]
+                        if held_event is not None and held_event[0] == space_id
+                        else None
+                    ),
+                ):
+                    log_calendar_event_not_stored("space sync", event, provider)
+                    continue
                 media = await self._localize_record(
                     space_id,
                     r,
@@ -4322,8 +4358,15 @@ def _calendar_from_record(r: dict[str, Any], *, provider: str) -> CalendarEvent 
         return None
     start = _parse_iso(r.get("start"))
     end = _parse_iso(r.get("end"))
-    rrule = r.get("rrule")
-    location = r.get("location")
+    try:
+        # The same checks as where a person saves and on a live event.
+        attendees = clean_attendees(r.get("attendees"))
+        rrule = clean_rrule(r.get("rrule"))
+    except ValueError as exc:
+        log.warning(
+            "space sync: calendar event %s from %s — %s; skipped", rid, provider, exc
+        )
+        return None
     return CalendarEvent(
         id=rid,
         calendar_id=str(r["calendar_id"]),
@@ -4333,9 +4376,9 @@ def _calendar_from_record(r: dict[str, Any], *, provider: str) -> CalendarEvent 
         created_by=str(r["created_by"]),
         description=r.get("description"),
         all_day=bool(r.get("all_day", False)),
-        attendees=tuple(str(a) for a in (r.get("attendees") or ())),
+        attendees=attendees,
         mirrored_from=r.get("mirrored_from"),
-        rrule=rrule if isinstance(rrule, str) and rrule else None,
+        rrule=rrule,
         capacity=coerce_capacity(r.get("capacity")),
         # Rendered as ``<img src>`` for every member: only a local media
         # reference — a third-party URL would leak their IPs.
@@ -4345,7 +4388,7 @@ def _calendar_from_record(r: dict[str, Any], *, provider: str) -> CalendarEvent 
             and space_media_ref(cover)
             else None
         ),
-        location=location if isinstance(location, str) and location else None,
+        location=clean_location(r.get("location")),
         # IANA wall-clock anchor — validated as on the live event; an older
         # peer omits it and gets ``"UTC"``.
         tz=coerce_tz(r.get("tz"), context=f"space sync calendar from {provider}"),

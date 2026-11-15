@@ -30,7 +30,6 @@ from socialhome.crypto import (
     generate_identity_keypair,
     generate_x25519_keypair,
 )
-from socialhome.domain.errors import SpaceItemTooLargeError
 from socialhome.domain.federation import (
     DELIVERY_ERROR_QUEUED,
     DELIVERY_ERROR_RELAY_THROTTLED,
@@ -49,10 +48,8 @@ from socialhome.domain.relay_media_frame import (
     RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES,
     RELAY_MEDIA_MAX_BODY_BYTES,
     RELAY_MEDIA_MAX_PLAINTEXT_BYTES,
-    SPACE_PAGE_STATE_MAX_BYTES,
     SYNC_CHUNK_WRAP_ALLOWANCE_BYTES,
     parse_relay_media_body,
-    require_space_text_fits,
 )
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.gfs_mailbox import derive_mailbox_keys
@@ -903,35 +900,6 @@ async def test_a_framed_event_from_a_paired_peer_with_the_opt_in_is_refused():
             _frame(w.host, w.member, PAGE, _page(100)), gfs_url=GFS
         )
     assert w.member.received == []
-
-
-# ── A local save is refused up front, never shown as saved ────────────────
-
-
-def test_text_over_the_limit_of_its_kind_is_refused_before_it_is_stored():
-    limit = SPACE_PAGE_STATE_MAX_BYTES
-    fits = "x" * (limit - 64)
-    require_space_text_fits("Title", fits, limit=limit)
-    with pytest.raises(SpaceItemTooLargeError) as refused:
-        require_space_text_fits("Title", fits + "x" * 128, limit=limit)
-    assert refused.value.status == 413
-    assert refused.value.code == "SPACE_ITEM_TOO_LARGE"
-    assert refused.value.params == {"max_kb": limit // 1024}
-    # Measured as it travels: JSON escapes count.
-    with pytest.raises(SpaceItemTooLargeError):
-        require_space_text_fits('"' * (limit // 2 + 64), limit=limit)
-
-
-def test_an_item_stored_before_the_limit_can_be_saved_no_larger():
-    """It stays readable, and editable down (or as it is) — never up."""
-    old = "x" * 5000
-    require_space_text_fits("S", old, limit=1000, was=("S", old))
-    require_space_text_fits("S", old[:-1], limit=1000, was=("S", old))
-    require_space_text_fits("S", "short", limit=1000, was=("S", old))
-    with pytest.raises(SpaceItemTooLargeError):
-        require_space_text_fits("S", old + "y", limit=1000, was=("S", old))
-    with pytest.raises(SpaceItemTooLargeError):
-        require_space_text_fits("S", old, limit=1000)
 
 
 # ── The body suite is bound to the event type ─────────────────────────────

@@ -28,11 +28,18 @@ either.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Mapping
+from typing import Any
 
 import orjson
 
+from .calendar import MAX_RSVPS_PER_EVENT, RSVP_RECORD_MAX_BYTES
 from .errors import SpaceItemTooLargeError
+from .gfs_server import MAX_GFS_SERVERS_JSON_BYTES
+from .media_constraints import (
+    SPACE_COVER_BOOTSTRAP_MAX_BYTES,
+    SPACE_ICON_BOOTSTRAP_MAX_BYTES,
+)
 
 #: First bytes of a binary relay media body (household → GFS → household).
 RELAY_MEDIA_MAGIC: bytes = b"\x00SHR"
@@ -126,91 +133,100 @@ RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES: int = (
 #: bound, by construction.
 RELAY_SYNC_RECORD_MAX_BYTES: int = RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES
 
-# ── How large a space item's text may be: one limit per kind, everywhere ──
+# ── How large a space item may be: one limit per kind, everywhere ───────
 #
 # Owner decision 2026-11-14: "Size should not matter if GFS or federation.
 # In the end members are equal." So these limits hold in EVERY space and on
 # every path — not only where a household is reached through a GFS — sized
 # so that the worst-case event and the worst-case sync record of the item
-# fit one relay frame. The text is not all that rides there: each limit is
-# the bound less the HARD CAP of every list and field that can sit next to
-# that kind of item, so nothing that passed can become undeliverable when
-# a list grows later (``tests/federation/test_space_text_limits.py`` builds
-# each worst case with the real builders).
+# fit one relay frame.
+#
+# An item is measured WHOLE: its record exactly as it travels (orjson, as
+# every payload is written), every field — so no field, today's or a future
+# one, can grow it unseen. Held out is only what OTHER people add after it
+# was saved, each under its own hard cap, and reserved next to the limit
+# (``tests/federation/test_space_item_worst_case.py`` builds each worst case
+# with the real builders).
 
-#: Next to a page's text in its record and event: the files' descriptors
-#: (``MAX_PAGE_DESCRIPTOR_ENTRIES`` = 64, ~330 bytes each with their hash),
-#: the wrapper of up to three conflict sides, the cover, ids and stamps.
+#: Next to a page's record in its event and its sync record: the files'
+#: descriptors and hashes the provider adds per requester
+#: (``MAX_PAGE_DESCRIPTOR_ENTRIES`` = 64, ~450 bytes each) and the few
+#: fields the live event has that the record lacks.
 SPACE_PAGE_RESERVE_BYTES: int = 40 * 1024
 
-#: A page's STATE — its title and content plus the title and content of
-#: every open conflict side (a side is a whole other version, and its text
-#: is not capped on its own): what the host keeps and every member mirrors.
-#: 475,038 bytes (~463 KiB).
-SPACE_PAGE_STATE_MAX_BYTES: int = (
+#: A page: its §25.6 record (``domain.page_version.page_record``) — title,
+#: content, cover, ids, stamps AND every open conflict side (a side is a
+#: whole other version, added only by the host, which refuses one that
+#: would pass this). 475,038 bytes (~475 kB).
+SPACE_PAGE_ITEM_MAX_BYTES: int = (
     RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES - SPACE_PAGE_RESERVE_BYTES
 )
 
-#: Next to a calendar event's text in its record: up to
-#: ``MAX_RSVPS_PER_EVENT`` (500) RSVPs (~200 bytes each), the cover's file
-#: descriptors, the recurrence rule, ids and stamps.
-SPACE_CALENDAR_RESERVE_BYTES: int = 128 * 1024
+#: Next to a calendar event's record: up to ``MAX_RSVPS_PER_EVENT`` RSVPs
+#: of at most ``RSVP_RECORD_MAX_BYTES`` each (added by other people after
+#: the event was saved), plus 4 KiB for the RSVP fields, the cover's file
+#: descriptor and the few fields the live event has that the record lacks.
+SPACE_CALENDAR_RESERVE_BYTES: int = (
+    MAX_RSVPS_PER_EVENT * (RSVP_RECORD_MAX_BYTES + 1) + 4 * 1024
+)
 
-#: A space calendar event's summary + description + attendee ids (the one
-#: list on the record with no cap of its own, so it is measured, not
-#: reserved). 384,926 bytes (~375 KiB).
-SPACE_CALENDAR_TEXT_MAX_BYTES: int = (
+#: A space calendar event: its §25.6 record
+#: (``domain.calendar.calendar_record``) — summary, description, attendee
+#: ids, rule, location, cover, ids, stamps. 383,402 bytes (~383 kB).
+SPACE_CALENDAR_ITEM_MAX_BYTES: int = (
     RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES - SPACE_CALENDAR_RESERVE_BYTES
 )
 
-#: Next to a space's description / about text in ``SPACE_CONFIG_CHANGED``:
-#: the relay variant's cover and icon (64 + 16 KiB, base64'ed), the feature
-#: set and the other settings.
-SPACE_CONFIG_RESERVE_BYTES: int = 128 * 1024
 
-#: A space's description (counted TWICE: ``SPACE_CONFIG_CHANGED`` carries
-#: it in the flat legacy shape and again inside ``space_meta``) + its about
-#: text. 384,926 bytes (~375 KiB) — a description alone up to ~187 KiB.
-SPACE_CONFIG_TEXT_MAX_BYTES: int = (
-    RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES - SPACE_CONFIG_RESERVE_BYTES
+def _base64_len(n: int) -> int:
+    return 4 * -(-n // 3)
+
+
+#: Next to a space's config in ``SPACE_CONFIG_CHANGED``: the relay variant's
+#: cover and icon at their caps (base64'ed), the owner's signed GFS list at
+#: its cap, and 16 KiB for the authority cert, the owner's statement, the
+#: signatures (a hybrid set included) and the event's own fields.
+SPACE_CONFIG_RESERVE_BYTES: int = (
+    _base64_len(SPACE_COVER_BOOTSTRAP_MAX_BYTES)
+    + _base64_len(SPACE_ICON_BOOTSTRAP_MAX_BYTES)
+    + MAX_GFS_SERVERS_JSON_BYTES
+    + 16 * 1024
 )
 
-
-def calendar_texts(
-    summary: str | None, description: str | None, attendees: Iterable[str] = ()
-) -> tuple[str | None, ...]:
-    """What of a space calendar event counts against
-    :data:`SPACE_CALENDAR_TEXT_MAX_BYTES`."""
-    return (summary, description, *attendees)
-
-
-def config_texts(
-    description: str | None, about_markdown: str | None
-) -> tuple[str | None, ...]:
-    """What of a space's config counts against
-    :data:`SPACE_CONFIG_TEXT_MAX_BYTES`: the description twice (the event
-    carries it in both of its shapes), the about text once."""
-    return (description, description, about_markdown)
+#: A space's config: its plain config fields as they travel
+#: (``services.space_service.space_metadata_fields`` — name, emoji,
+#: description, about text, features, every setting). The event carries it
+#: TWICE (the flat legacy shape and ``space_meta``), so the limit is half
+#: of what is left. 178,807 bytes (~178 kB).
+SPACE_CONFIG_ITEM_MAX_BYTES: int = (
+    RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES - SPACE_CONFIG_RESERVE_BYTES
+) // 2
 
 
-def space_text_bytes(*texts: str | None) -> int:
-    """The bytes *texts* take inside an event payload or a sync record: each
-    as a JSON string (escapes count)."""
-    return sum(len(orjson.dumps(t)) for t in texts if t)
+def space_item_bytes(item: Mapping[str, Any]) -> int:
+    """The bytes *item* (a space item's record) takes on the wire: its JSON
+    exactly as a payload is written — every field, separators, escapes."""
+    return len(orjson.dumps(item))
 
 
-def require_space_text_fits(
-    *texts: str | None, limit: int, was: tuple[str | None, ...] = ()
+def space_item_too_large(
+    item: Mapping[str, Any], *, limit: int, was: Mapping[str, Any] | None = None
+) -> bool:
+    """Whether *item* is over *limit* — the limit of its kind, the same in
+    every space — and larger than *was*, the record of the item as held
+    now. A save that makes an item stored before the limit no larger is
+    not too large: such an item stays readable and can be edited down."""
+    size = space_item_bytes(item)
+    return size > limit and (was is None or size > space_item_bytes(was))
+
+
+def require_space_item_fits(
+    item: Mapping[str, Any], *, limit: int, was: Mapping[str, Any] | None = None
 ) -> None:
     """Refuse (:class:`~socialhome.domain.errors.SpaceItemTooLargeError`,
-    413) space text over *limit* — the limit of its kind of item, the same
-    in every space. *was*: the text the item holds now; a save that makes
-    an item stored before the limit no larger is let through, so such an
-    item stays readable and can always be edited down."""
-    size = space_text_bytes(*texts)
-    if size <= limit or (was and size <= space_text_bytes(*was)):
-        return
-    raise SpaceItemTooLargeError(limit)
+    413) an item :func:`space_item_too_large` says is too large."""
+    if space_item_too_large(item, limit=limit, was=was):
+        raise SpaceItemTooLargeError(limit)
 
 
 #: The GFS capability (signed ``/gfs/info`` block) that says it carries these
@@ -273,21 +289,20 @@ __all__ = [
     "RELAY_MEDIA_TO_CHARS",
     "RELAY_MEDIA_VERSION_1",
     "RELAY_SYNC_RECORD_MAX_BYTES",
+    "SPACE_CALENDAR_ITEM_MAX_BYTES",
     "SPACE_CALENDAR_RESERVE_BYTES",
-    "SPACE_CALENDAR_TEXT_MAX_BYTES",
+    "SPACE_CONFIG_ITEM_MAX_BYTES",
     "SPACE_CONFIG_RESERVE_BYTES",
-    "SPACE_CONFIG_TEXT_MAX_BYTES",
+    "SPACE_PAGE_ITEM_MAX_BYTES",
     "SPACE_PAGE_RESERVE_BYTES",
-    "SPACE_PAGE_STATE_MAX_BYTES",
     "SUPPORTED_RELAY_MEDIA_VERSIONS",
     "SYNC_CHUNK_WRAP_ALLOWANCE_BYTES",
     "VALID_SEALED_LENGTHS",
     "InvalidRelayMediaBody",
     "build_relay_media_body",
-    "calendar_texts",
-    "config_texts",
     "is_relay_media_body",
     "parse_relay_media_body",
-    "require_space_text_fits",
-    "space_text_bytes",
+    "require_space_item_fits",
+    "space_item_bytes",
+    "space_item_too_large",
 ]

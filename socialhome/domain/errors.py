@@ -97,21 +97,24 @@ class PayloadTooLargeError(CodedError):
 
 
 class SpaceItemTooLargeError(CodedError, ValueError):
-    """A space page, calendar description or space description over the
-    limit of its kind (``domain/relay_media_frame.py``).
+    """A space page, calendar event or space config over the limit of its
+    kind, measured whole (``domain/relay_media_frame.py``).
 
     The limit is the same in every space and on every path — members are
     equal however their household is reached — and is what one item, with
-    everything that rides next to its text, takes to cross to any of them.
-    Refused where it is saved (413), before anything is stored.
+    what others add to it later, takes to cross to any of them. Refused
+    where it is saved (413), after authorization, before anything is
+    stored.
     """
 
     status = 413
     code = "SPACE_ITEM_TOO_LARGE"
-    detail = "This is too large. Shorten it or split it up."
+    detail = "This is too large to share with the space. Shorten it or split it up."
 
     def __init__(self, max_bytes: int) -> None:
-        super().__init__(params={"max_kb": max_bytes // 1024})
+        # The item's limit as a whole, in kB (1000 bytes) — what the SPA
+        # shows ("at most … kB in total").
+        super().__init__(params={"max_kb": max_bytes // 1000})
 
 
 class DownloadTooLargeError(CodedError):
