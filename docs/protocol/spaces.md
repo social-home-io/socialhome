@@ -586,7 +586,9 @@ member household, not only on the host:
   roster, a household the host has not heard a BEGIN from since startup
   is sent nothing during the first two ticks (`ROSTER_ECHO_GRACE_TICKS`;
   every member asks its host on each 30-min tick, so its echo arrives in
-  time), then the whole roster. A household whose BEGIN carries **no** echo
+  time), then the whole roster — the tick runs at start-up, so the first
+  snapshot after a restart to a household still silent goes about 60 min
+  later. A household whose BEGIN carries **no** echo
   (it holds no snapshot of ours — e.g. it restarted) gets the whole roster
   on every tick until it echoes, as before. One rule for every member
   household, however it is reached (paired, mesh, or seated from an invite

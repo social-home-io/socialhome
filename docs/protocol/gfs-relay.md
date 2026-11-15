@@ -312,12 +312,13 @@ bucket plus the 61-byte seal overhead (`VALID_SEALED_LENGTHS`).
 
 - **Scope:** a household seated from an invite link (`space_session`) at
   v_87, whose `relay_via` GFS proved the signed `envelope_media` capability.
-  Today this carries `SPACE_MEDIA_BLOB` to a link-joined member whose GFS
-  keeps **no** space media cache (its signed block carries no
-  `space_media`); live pictures otherwise keep using the cache. A member
-  that misses a file no longer in the cache asks for it with
-  `SPACE_MEDIA_WANTED` (v_92), answered over this relay; the GFS's v_83
-  on-demand path is for followers.
+  It carries `SPACE_MEDIA_BLOB` to a link-joined member like to any
+  member: live pictures, page files (also a member's page proposal to a
+  host behind such a GFS), the v_92 §25.6 catch-up and the answers to
+  `SPACE_MEDIA_WANTED`. The media outbox skips a live push only while the
+  member's GFS media cache is known to hold the file; a member whose GFS
+  keeps no cache simply gets every push. The GFS's v_83 on-demand path is
+  for followers.
 - **Fallback:** a peer below v_87, or a GFS without `envelope_media`, gets
   JSON chunks of at most 96 KiB (`RELAY_JSON_CHUNK_BYTES`), which fit the
   JSON relay. A binary frame that the relay throttles (429) is waited out;

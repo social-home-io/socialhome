@@ -992,9 +992,15 @@ its `sg-` name (an `sc-` name only once the bytes hash to it). An unknown suite,
 blob not at its address (or a channel scope with no channel id known here)
 or a failed decrypt is refused with a WARNING and writes nothing.
 
-**No byte push to them.** `SPACE_MEDIA_BLOB` is no longer queued to a
-link-joined v_80 member (live posts / gallery / covers), nor to any
-link-joined requester of a §25.6 catch-up — the relay refuses those bytes.
+**They are pushed like every member.** `SPACE_MEDIA_BLOB` is queued to a
+link-joined member as to any other (live posts / gallery / covers, page
+files, a §25.6 catch-up); the relay carries it as v_87 binary frames (a GFS
+proving `envelope_media`) or as JSON chunks of `RELAY_JSON_CHUNK_BYTES`.
+The media outbox skips a push only while the reader's GFS is known to hold
+the file (we uploaded it there, within the cache's TTL —
+`SpaceMediaGfsUploader.reads_from_gfs`); a catch-up row of a v_92 reader
+behind frames, and a row it asked for (`SPACE_MEDIA_WANTED`), is never
+skipped.
 
 ```mermaid
 sequenceDiagram

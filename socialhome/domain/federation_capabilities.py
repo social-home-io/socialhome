@@ -1278,6 +1278,9 @@ from __future__ import annotations
 #:   same descriptor (sync line 80). No ``SPACE_MEDIA_BLOB`` push is queued
 #:   to a v_80 link-joined member (live), nor to ANY link-joined requester of
 #:   a §25.6 catch-up (the relay refuses those bytes whatever the version).
+#:   **Since v_92 (one member path):** such a member is pushed like every
+#:   member again — as v_87 relay frames or JSON chunks — and the media
+#:   outbox skips a push only while its GFS is known to hold the file.
 #:   Followers of a global space get the descriptor in the relayed post's
 #:   inner under the author's own separate signature (``media_refs_sig``,
 #:   suite ``ed25519``; taken only when it verifies) — gated on the GFS's
@@ -1348,6 +1351,10 @@ from __future__ import annotations
 #:   listed the label and is never asked; a link-joined reader below v_83
 #:   keeps eager video uploads. No household-to-household event, no sync
 #:   stream change. Labelled "Older space pictures come back on view".
+#:   **Since v_92 (one member path):** the household side never counts a
+#:   member as one that asks its GFS (that [v_83, v_92) window was dropped
+#:   before release): a large video is lazy only where no member household
+#:   reads the space through a GFS; the GFS path is for followers.
 #: * **v_84** (2026-11-07) — **Ask to join a global space through the GFS**.
 #:   A household that found a global space in a GFS directory and is not
 #:   paired with its host gets the host's sealing keys from that GFS
@@ -2176,8 +2183,9 @@ class FederationCapability:
     #: media cache) on space posts / calendar events / gallery items and
     #: their §25.6 records, toward a member household seated from an invite
     #: link at or above it (:meth:`FederationService.peer_supports`). Below
-    #: it: no descriptor (live, the old ``SPACE_MEDIA_BLOB`` push; a catch-up
-    #: never pushes bytes to any link-joined requester).
+    #: it: no descriptor (live, the old ``SPACE_MEDIA_BLOB`` push). Since
+    #: v_92 every member is pushed (relay frames or JSON chunks); the outbox
+    #: skips a push only while the member's GFS is known to hold the file.
     MIN_FOR_SPACE_MEDIA_REFS = 80
     #: v_81 — media chunks to a CONFIRMED direct peer ride
     #: the peer's inbox URL as one binary ``fed-media-v1`` body when no
@@ -2190,10 +2198,11 @@ class FederationCapability:
     #: a draft's new files to a host at or above it. Below it: no page file.
     MIN_FOR_PAGE_MEDIA = 82
     #: v_83 — space media on demand: a reader asks a GFS for a blob it
-    #: missed and a holder re-uploads or streams it on request. The
-    #: household-side gate: a large video is uploaded lazily (only when
-    #: wanted) toward link-joined readers at or above it; any reader below
-    #: it on that GFS keeps the eager upload.
+    #: missed and a holder re-uploads or streams it on request. Since v_92
+    #: only followers use it (a member asks with ``SPACE_MEDIA_WANTED``), so
+    #: the household side no longer reads this constant: a large video is
+    #: uploaded lazily only where no member household reads the space
+    #: through a GFS. Kept for the version history.
     MIN_FOR_SPACE_MEDIA_ON_DEMAND = 83
     #: v_84 — a host at or above it takes an "Ask to join" sealed to it over
     #: the GFS relay from a household it never paired with

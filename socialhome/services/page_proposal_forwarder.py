@@ -242,9 +242,9 @@ class PageProposalForwarder:
         creates = proposal.base_seq == 0
         if creates:
             payload["created_by"] = proposal.created_by
-        # A host reached only through a GFS relay (we were seated from an
-        # invite link) can't take our bytes: the draft's new files ride its
-        # GFS media cache, described in the proposal (v_82).
+        # A host reached only through a GFS relay whose relay takes no
+        # binary frames can't take our bytes: the draft's new files ride
+        # its GFS media cache, described in the proposal (v_82).
         plan = await self._describe_files(space_id, page_id, proposal, host)
         if plan is not None:
             # Inside the proposal's encrypted payload, under the envelope's
