@@ -1237,6 +1237,16 @@ stays missing for it, as before). A holder below v_83 never listed
 keeps eager video uploads; a follower below v_83 gets no lazy video (the
 follower subset above). A GFS without `on_demand` is never asked.
 
+## A space's cover and icon
+
+Not media chunks: a space's cover and icon travel inline (`cover_webp_base64` /
+`icon_webp_base64`) in the config change and the join snapshot, within ONE
+cap per image kind for every member however its household is reached —
+`SPACE_COVER_MAX_BYTES` 64 KiB, `SPACE_ICON_MAX_BYTES` 16 KiB (owner decision
+2026-11-15). An upload is re-encoded within it where it is set; a peer's image
+over it is not stored (the held one stays, WARNING). See "One cover size for
+every member" in [spaces.md](./spaces.md).
+
 ## Implementation pointers
 
 - Framing: [`socialhome/federation/media_framing.py`](../../socialhome/federation/media_framing.py) (`encode` / `decode` for the channel; `encode_body` / `decode_body` / `is_media_body` for the inbox)

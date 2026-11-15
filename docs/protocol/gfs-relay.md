@@ -542,7 +542,7 @@ row.
 | `SPACE_MODERATION_SUBMITTED` | 256 KiB item cap + ~2 KiB | yes |
 | `SPACE_PAGE_*`, page proposals | the page item + ≤ 40 KiB | yes, by the page limit below |
 | `SPACE_CALENDAR_EVENT_*` | the event item + small fields | yes, by the calendar limit below |
-| `SPACE_CONFIG_CHANGED` (relay variant) | the config item twice + ≤ 155 KiB | yes, by the config limit below |
+| `SPACE_CONFIG_CHANGED` | the config item twice + ≤ 155 KiB | yes, by the config limit below |
 | `SPACE_SYNC_CHUNK` with one large record | record + ≤ 16 KiB (raw) | yes, for every record within the record bound |
 | `SPACE_ROSTER_SNAPSHOT` | parts of 96 KiB of entries | yes, any roster size |
 | posts, comments, bazaar, tasks, polls, timetables, app tables, directory parts | ≤ ~175 KiB | yes (most fit the JSON envelope) |
@@ -572,7 +572,7 @@ set):
 |---|---|---|---|
 | Page | its §25.6 record, `page_record`: the row, its version hash and **every open conflict side** (a side is a whole other version, added only by the host, which refuses one that would pass the limit) | `SPACE_PAGE_ITEM_MAX_BYTES` = 515,998 − 40,960 = **475,038 B** (~475 kB) | 40 KiB: the files' descriptors and hashes the provider adds per requester (≤ 64, `MAX_PAGE_DESCRIPTOR_ENTRIES`), the live event's extra fields |
 | Space calendar event | its §25.6 record, `calendar_record`: summary, description, attendee ids, rule, location, cover, ids, stamps | `SPACE_CALENDAR_ITEM_MAX_BYTES` = 515,998 − 132,596 = **383,402 B** (~383 kB) | the RSVPs (added by others): ≤ 500 (`MAX_RSVPS_PER_EVENT`) of ≤ 256 B each (`RSVP_RECORD_MAX_BYTES`; a larger held entry is left out of the record and the list marked `rsvps_partial`) = 500 × 257 + 4 KiB for the RSVP fields, the cover's descriptor and the live event's extra fields |
-| Space config | its plain config fields as they travel, `space_metadata_fields`: name, emoji, description, about text, features, every setting | `SPACE_CONFIG_ITEM_MAX_BYTES` = (515,998 − 158,384) / 2 = **178,807 B** (~178 kB) — halved because `SPACE_CONFIG_CHANGED` carries the config twice (the flat legacy shape and `space_meta`) | the relay variant's cover and icon at their caps (base64), the owner's signed GFS list at its cap (32 KiB), 16 KiB for the authority cert, the owner's statement and the signatures |
+| Space config | its plain config fields as they travel, `space_metadata_fields`: name, emoji, description, about text, features, every setting | `SPACE_CONFIG_ITEM_MAX_BYTES` = (515,998 − 158,384) / 2 = **178,807 B** (~178 kB) — halved because `SPACE_CONFIG_CHANGED` carries the config twice (the flat legacy shape and `space_meta`) | the cover and icon at the one cap every member gets (base64: 87,384 + 21,848 B), the owner's signed GFS list at its cap (32 KiB), 16 KiB for the authority cert, the owner's statement and the signatures |
 
 Real items sit far below: the SPA allows a 300-character space
 description and an 8,000-character about text; the demo's 450 KiB page
@@ -1566,7 +1566,7 @@ released household is in [v_89, v_91), so every seat holding one opens a
 multi frame.
 
 **What goes multi — one path.** `broadcast_to_space_members` computes
-every target's final payload as before (legacy / relay variants,
+every target's final payload as before (legacy variants,
 `per_peer`, file maps). Targets that are mailbox seats (`space_session`
 rows with a card mailbox), on a GFS that proves `envelope_multi`,
 with no deferred mesh queue and an event type in `MULTI_EVENT_TYPES` are

@@ -790,7 +790,7 @@ reports it as `mesh_retry_scheduled` (not a terminal failure). While the
 FIFO exists, every later broadcast to the same member queues behind it
 instead of overtaking, so the member sees events in broadcast order. One
 task per target sends the queue in order from the head, on a private copy of
-the exact payload variant that member was sent (legacy / relay variants
+the exact payload variant that member was sent (legacy variants
 included). A delivered item is popped and the next goes; a deferrable miss
 keeps the head first and **backs off**: re-send *n* waits at least
 `MESH_DEFERRED_RETRY_BACKOFF_S[n-1]` (0 s, 60 s, 120 s, 240 s), never inside

@@ -66,19 +66,43 @@ uses), not just `cover_hash` / `icon_hash`. Before, every member (paired or
 link-joined) kept the image from its join time. The bytes sit inside the
 encrypted payload, and under the authority signature when the edit is signed.
 They go only to space members (`broadcast_to_space_members`) and only on the
-edit that changed the image, so a rename ships no bytes. They are bounded per
-transport through `embed_space_images` / `ImageProcessor.fit_within`. A paired
-or mesh-routed member gets the image under `SPACE_*_SNAPSHOT_MAX_BYTES`
-(256 KiB cover / 64 KiB icon, ~1 MiB envelope). A member seated from an
-invite link (`space_session`) sits behind the connection-server relay
-(~191 KiB envelope), so `broadcast_to_space_members(..., relay_payload=…)`
-sends it a separately signed variant under `SPACE_*_BOOTSTRAP_MAX_BYTES`
-(64 / 16 KiB). The member applies the image only after the change passes
+edit that changed the image, so a rename ships no bytes.
+
+**One cover size for every member** (owner decision 2026-11-15). A space's
+cover and icon have ONE cap each, whichever way a member household is
+reached: `SPACE_COVER_MAX_BYTES` = 64 KiB and `SPACE_ICON_MAX_BYTES` =
+16 KiB of WebP (`domain/media_constraints.py`). They are sized to the
+tightest leg the image travels: base64'ed (4·⌈65,536/3⌉ = 87,384 B and
+4·⌈16,384/3⌉ = 21,848 B) they are exactly what `SPACE_CONFIG_RESERVE_BYTES`
+holds next to a space's config inside ONE GFS-relay envelope
+(`domain/relay_media_frame.py`), and together (~107 KiB of base64) they leave
+~85 KiB of the 256 KiB sealed invite-link ACK for config, content key and
+roster. Where the image is SET, `SpaceService.set_cover` / `set_icon`
+re-encode the upload to a WebP within the cap (1200 px / 256 px, then
+`ImageProcessor.fit_within` shrinks it, off the event loop) — an ordinary
+photo always fits; only an image that does not decode is refused
+(`IMAGE_UNREADABLE`). Every path ships that one image: the config change,
+the join snapshot (§D1b invitation, §D2 / §D2b ACKs, join-request ACK) —
+there is no per-transport variant any more (`relay_payload` is gone). A
+cover stored before the cap (up to a few hundred KiB) is re-encoded within
+it the first time a send carries it (`embed_space_images`), and the
+rendition is kept under the same `cover_hash`, so it is re-encoded once;
+until the owner changes it, every member — paired or behind a GFS — gets
+that rendition, which a GFS-reached member already got before (it was the
+relay variant). The member applies the image only after the change passes
 the owner / authority and last-writer-wins gates, so an out-of-order older
 change cannot roll the picture back (`apply_space_images_from_config_change`).
-Before storing, it checks the bytes: at most `SPACE_IMAGE_EMBED_MAX_BYTES`, and
-a WebP that fully decodes (Pillow, off the event loop) within 1200 px / 256 px.
-The join-snapshot path runs the same check. A shrunken rendition does not
+Before storing, it checks the bytes on every inbound path (config change
+and catch-up, join snapshot): at most the cap — an image over it is NOT
+stored, the one already held stays, and a WARNING names the cap — and a
+WebP that fully decodes (Pillow, off the event loop) within 1200 px /
+256 px. A host still on the released v_80 sends a paired member a cover of
+up to 256 KiB; until it upgrades, such a member keeps its previous cover
+(or none) for a cover over 64 KiB — the GFS-reached member of that host
+got the 64 KiB variant all along. No protocol version: the wire shape is
+unchanged and a v_80 receiver accepts any image up to
+`SPACE_IMAGE_EMBED_MAX_BYTES` (1.5 MiB), so the capped image is accepted
+everywhere. A shrunken rendition does not
 digest to the host's hash, so the bytes are stored under the announced hash,
 which works as a version tag. A cleared hash removes the stored image. No
 protocol version is involved: an older member ignores the extra keys, as it
