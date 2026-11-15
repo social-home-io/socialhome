@@ -353,7 +353,9 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
         <div class="sh-post-actions">
           <div class="sh-reactions">
             {shownChips.map(([emoji, count]) => (
-              <button key={emoji} class="sh-reaction-chip"
+              <button key={emoji}
+                class={`sh-reaction-chip${mine(emoji) ? ' sh-reaction-chip--mine' : ''}`}
+                aria-pressed={mine(emoji)}
                 onClick={() => onReact?.(emoji)}>
                 {emoji} {count}
               </button>

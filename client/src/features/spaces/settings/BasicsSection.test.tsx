@@ -53,6 +53,12 @@ describe('BasicsSection', () => {
     expect(here.getByText('Space theme')).toBeTruthy()
   })
 
+  it('counts a long name against its 120-character cap', () => {
+    const long = { ...base, name: 'x'.repeat(110) }
+    const view = render(<BasicsSection space={long} form={form(long)} isRemoteSpace onUpdate={vi.fn()} />)
+    expect(view.container.querySelector('.sh-length-counter')?.textContent).toBe('110/120')
+  })
+
   it('About has a preview', () => {
     const f = form({ ...base, about_markdown: '**hi**' })
     const view = render(<BasicsSection space={base} form={f} isRemoteSpace onUpdate={vi.fn()} />)
