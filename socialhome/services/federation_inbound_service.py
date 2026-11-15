@@ -2785,6 +2785,7 @@ class FederationInboundService(ProtectionGateMixin):
                 what="post",
                 row_id=post_id,
                 held_here=held is not None and held[0] == gated_space_id,
+                deleted=held is not None and held[1].deleted,
             )
             return
         refreshed = await self._space_post_repo.get(post_id)
@@ -3147,6 +3148,8 @@ class FederationInboundService(ProtectionGateMixin):
                 what="comment",
                 row_id=comment_id,
                 held_here=parent is not None and parent[0] == space_id,
+                deleted=(held is not None and held.deleted)
+                or (parent is not None and parent[1].deleted),
             )
             return
         refreshed = await self._space_post_repo.get_comment(comment_id)
@@ -3252,12 +3255,13 @@ class FederationInboundService(ProtectionGateMixin):
         what: str,
         row_id: str,
         held_here: bool,
+        deleted: bool,
     ) -> None:
         """An edit that passed its gate and still wrote nothing.
 
         ``held_here`` — the row is in ``space_id``: the edit is not newer
-        than what this household holds (last writer wins; a row deleted
-        meanwhile reads the same). The same edit
+        than what this household holds (last writer wins), or the row was
+        deleted here meanwhile (``deleted``). The same edit
         over a second path does that all the time (a GFS ``space_item`` and
         the federated event; the mesh's retransmit to a member that
         restarted), so it is a benign no-op at DEBUG. Anything else is the
@@ -3267,7 +3271,9 @@ class FederationInboundService(ProtectionGateMixin):
                 event,
                 what=what,
                 row_id=row_id,
-                reason="not newer than what is held here",
+                reason="deleted here"
+                if deleted
+                else "not newer than what is held here",
             )
             return
         log_cross_space_refusal(event, space_id=space_id, what=what, row_id=row_id)
