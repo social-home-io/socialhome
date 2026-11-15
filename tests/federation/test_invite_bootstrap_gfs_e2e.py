@@ -1442,7 +1442,6 @@ NON_SPACE_PROBE_TYPES = [
     # SPACE_ROUTED passes the peer-class gate since v_89 (the host hop); the
     # routed handler takes it from a seat only in the three-hop host shape
     # (tests/federation/test_host_hop.py).
-    FederationEventType.SPACE_ADMIN_KEY_SHARE,
     FederationEventType.SPACE_JOIN_REQUEST,
     FederationEventType.SPACE_DIRECTORY_SYNC,
 ]
