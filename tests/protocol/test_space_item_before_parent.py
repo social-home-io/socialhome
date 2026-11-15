@@ -652,8 +652,8 @@ async def test_direct_an_edit_delivered_twice_is_not_called_a_cross_space_write(
     assert "is not in space" not in caplog.text
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     held = [r.getMessage() for r in caplog.records if "not applied" in r.getMessage()]
-    assert any("post post-a" in m and "newer edit" in m for m in held)
-    assert any("comment cmt-a" in m and "newer edit" in m for m in held)
+    assert any("post post-a" in m and "not newer" in m for m in held)
+    assert any("comment cmt-a" in m and "not newer" in m for m in held)
 
 
 async def test_direct_a_reply_that_cannot_be_held_is_refused_never_orphaned(direct):

@@ -24890,12 +24890,12 @@ def cmd_members_parity() -> None:
     try:
         since = int(time.time()) - 1
         fresh = _parity_post_text(state, "a", space_id, f"Parity catch-up, new {tag}")
-        # A 96 KiB page: over the 64 KiB up to which the mesh always kept an
+        # An 80 KiB page: over the 64 KiB up to which the mesh always kept an
         # event for its one retransmit (d restarts, cannot open what was
         # sealed to its old key and says so), under the GFS relay's JSON
         # envelope cap (e). Before the mesh kept large events too, d never
         # got this page.
-        large_text = secrets.token_hex(48 * 1024)
+        large_text = secrets.token_hex(40 * 1024)
         a_log_away = _log_size("a")
         s, large_page = _inst_request(
             state,
@@ -24905,7 +24905,7 @@ def cmd_members_parity() -> None:
             {"title": f"Parity catch-up, large page {tag}", "content": large_text},
         )
         large_page = _must(
-            "members-parity: a creates a 96 KiB page while d, e are away",
+            "members-parity: a creates an 80 KiB page while d, e are away",
             s,
             large_page,
             ok=(200, 201),
@@ -24965,7 +24965,7 @@ def cmd_members_parity() -> None:
     _parity_compare(
         state,
         results,
-        "catch-up: 96 KiB page",
+        "catch-up: 80 KiB page",
         lambda label, cache: _parity_page_digest(
             state, label, space_id, large_page["id"], cache
         ),
@@ -24980,7 +24980,7 @@ def cmd_members_parity() -> None:
     # only if d is back inside a's pending window and still mesh-only.
     results.append(
         (
-            "catch-up: 96 KiB page, the mesh's part",
+            "catch-up: 80 KiB page, the mesh's part",
             "NOTE",
             "a retransmitted the page to d after d's nack"
             if _log_contains(

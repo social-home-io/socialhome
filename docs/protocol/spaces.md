@@ -3347,14 +3347,20 @@ of the inner's compact JSON:
 | > 64 KiB (a long page, a space cover, a §25.6 chunk with one big record) | yes, while all kept large inners together stay ≤ 64 MiB (`_MAX_RETAINED_LARGE_BYTES`) |
 | > 64 KiB of a type whose sender holds the bytes itself (`SPACE_MEDIA_BLOB`: the file is on disk) | no — the sender is told and queues the file again (below) |
 
-The mesh sets no size limit of its own. A hop carries ~1 MiB of envelope;
-sealed for the route (base64 twice, ×16/9) that is an inner of ~580 KiB —
-more than one GFS relay frame holds (540 KiB), the largest a space item
-can be on any path. Measured: a 515,998-byte event is 929 KiB on the hop,
-a 532 KiB sync chunk 958 KiB, of 1,024 KiB. The 64 MiB are a memory bound
-only: some 120 sends of the largest item inside one pending window (a
-page that size saved a dozen times for ten mesh-only member households);
-one past it is recorded by its head only
+The route carries what a household behind a GFS can get. A hop takes
+1 MiB of envelope (the HTTPS inbox body, the data channel message);
+sealed for the route (base64 twice, ×16/9) that is an inner of ~576 KiB —
+more than one GFS relay frame of plaintext (540,574 bytes, a 528 KiB
+frame). Measured with the real seal and a hybrid-signed envelope: an
+inner of 515,998 bytes is 929,015 bytes on the hop, one of 532,382 bytes
+958,142, of 1,048,576. (A paired household's single hop, sealed once,
+takes ~768 KiB: an item between the two reaches a paired member and not
+a mesh one until the one size limit per kind of space item, sized to the
+relay frame, is in.) The 64 MiB are a memory bound only: some 120 sends
+of a frame-sized item inside one pending window (such a page saved a
+dozen times for ten mesh-only member households), counting the records
+that wait on their one deferred attempt; the retransmit itself keeps
+nothing. One past it is recorded by its head only
 (route invalidated, nothing resent, one `WARNING` on the sender). Before
 this every inner over 64 KiB was treated like a media chunk — recorded by
 its head only — though nothing but the media outbox can send its event

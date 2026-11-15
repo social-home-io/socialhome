@@ -3256,7 +3256,8 @@ class FederationInboundService(ProtectionGateMixin):
         """An edit that passed its gate and still wrote nothing.
 
         ``held_here`` — the row is in ``space_id``: the edit is not newer
-        than what this household holds (last writer wins). The same edit
+        than what this household holds (last writer wins; a row deleted
+        meanwhile reads the same). The same edit
         over a second path does that all the time (a GFS ``space_item`` and
         the federated event; the mesh's retransmit to a member that
         restarted), so it is a benign no-op at DEBUG. Anything else is the
@@ -3266,7 +3267,7 @@ class FederationInboundService(ProtectionGateMixin):
                 event,
                 what=what,
                 row_id=row_id,
-                reason="a newer edit (or this one) is already here",
+                reason="not newer than what is held here",
             )
             return
         log_cross_space_refusal(event, space_id=space_id, what=what, row_id=row_id)

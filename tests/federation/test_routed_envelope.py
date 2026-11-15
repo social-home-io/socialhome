@@ -1929,7 +1929,8 @@ async def test_route_stale_at_origin_verifies_invalidates_and_retransmits_once(
     assert route_id not in a.handler._pending_routed
     retry = a.handler._pending_routed[new_route_id]
     assert retry.is_retry is True
-    assert json.loads(retry.inner_payload_json) == payload
+    # The retransmit keeps nothing: a nack for it gives up.
+    assert retry.inner_payload_json is None
     assert retry.target_identity_pk == c.fed.own_identity_pk.hex()
     assert retry.target_eph_pk == fresh_pub
     assert rs.invalidate_eph_calls == [(c.instance_id, _dead)]
@@ -2252,7 +2253,7 @@ async def test_route_stale_at_origin_large_inner_is_retransmitted(caplog):
     assert not any(r.levelno >= logging.WARNING for r in caplog.records)
 
 
-async def test_the_largest_space_item_fits_one_routed_hop():
+async def test_one_relay_frame_of_space_item_fits_one_routed_hop():
     """No mesh-specific size limit: the largest thing any path carries for a
     space — one GFS relay frame of plaintext — still fits ONE hop's envelope
     (the HTTPS inbox body and the data channel message, 1 MiB each) after
@@ -2304,10 +2305,8 @@ async def test_send_routed_keeps_large_inners_within_one_byte_budget(caplog):
     big = {"id": "page-1", "content": "x" * (2 * _MAX_RETAINED_INNER_BYTES)}
     size = len(json.dumps(big, separators=(",", ":"), sort_keys=True))
     with patch.object(routed_envelope_mod, "_MAX_RETAINED_LARGE_BYTES", 2 * size):
-        kept = [
-            (await _send_under_dead_key(a, path, payload=big, pin=pin))[0]
-            for _ in range(2)
-        ]
+        first, dead_0, _ = await _send_under_dead_key(a, path, payload=big, pin=pin)
+        kept = [first, (await _send_under_dead_key(a, path, payload=big, pin=pin))[0]]
         small = (await _send_under_dead_key(a, path, pin=pin))[0]
         over, dead_pub, _ = await _send_under_dead_key(a, path, payload=big, pin=pin)
         h = a.handler
@@ -2315,16 +2314,32 @@ async def test_send_routed_keeps_large_inners_within_one_byte_budget(caplog):
         assert h._pending_routed[small].inner_payload_json is not None
         assert h._pending_routed[over].inner_payload_json is None
         assert h._pending_routed[over].inner_head == {"id": "page-1"}
-        # A kept one answered (its record is gone) frees its share.
-        del h._pending_routed[kept[0]]
+        # A kept one whose nack found no route waits on its one deferred
+        # attempt: out of the table, still counted.
+        rs.discovery = None
+        await _deliver_to_origin(
+            a, _origin_nack(target=c, path=path, route_id=kept[0], stale_pub=dead_0)
+        )
+        assert kept[0] not in h._pending_routed
+        assert h._deferred_large_bytes == {kept[0]: size}
+        waiting = (await _send_under_dead_key(a, path, payload=big, pin=pin))[0]
+        assert h._pending_routed[waiting].inner_payload_json is None
+        # Once that attempt is over its share is free again.
+        await h.stop()
+        assert h._deferred_large_bytes == {}
         again = (await _send_under_dead_key(a, path, payload=big, pin=pin))[0]
         assert h._pending_routed[again].inner_payload_json is not None
+        # Non-ASCII text is counted in bytes, the size it is kept at.
+        emoji = {"id": "p", "content": "\U0001f600" * _MAX_RETAINED_INNER_BYTES}
+        wide = (await _send_under_dead_key(a, path, payload=emoji, pin=pin))[0]
+        assert h._pending_routed[wide].inner_payload_json is None
+        rs.discovery = (list(path), _mint_target_eph(c))
     sends = len(_routed_sends(a))
     with caplog.at_level(logging.DEBUG, logger=_RS_LOGGER):
         await _deliver_to_origin(
             a, _origin_nack(target=c, path=path, route_id=over, stale_pub=dead_pub)
         )
-    assert rs.invalidated == [c.instance_id]
+    assert rs.invalidated == [c.instance_id] * 2  # the deferred one, then this
     assert len(_routed_sends(a)) == sends
     assert any(
         r.levelno == logging.WARNING
@@ -2415,8 +2430,9 @@ async def test_route_stale_at_origin_small_inner_is_retained_intact():
     )
     pending = a.handler._pending_routed[route_id]
     # The retained form IS the measured wire bytes — compact, sorted JSON.
-    assert pending.inner_payload_json == json.dumps(
-        payload, separators=(",", ":"), sort_keys=True
+    assert (
+        pending.inner_payload_json
+        == json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     )
     assert json.loads(pending.inner_payload_json) == payload
     assert pending.target_eph_pk == _dead
@@ -2642,7 +2658,8 @@ async def test_deferred_retransmit_uses_a_late_route_found_with_zero_floods(capl
     assert c.dispatched[0].routed_route_id == new_route_id
     retry = a.handler._pending_routed[new_route_id]
     assert retry.is_retry is True
-    assert json.loads(retry.inner_payload_json) == payload
+    # The retransmit keeps nothing: a nack for it gives up.
+    assert retry.inner_payload_json is None
     assert retry.target_identity_pk == c.fed.own_identity_pk.hex()
     assert a.handler._deferred_retransmits == {}
     infos = [r for r in caplog.records if r.levelno == logging.INFO]
@@ -3050,7 +3067,7 @@ def _pending_template() -> _PendingRouted:
         target_identity_pk="",
         target_eph_pk="",
         inner_event_type=FederationEventType.SPACE_POST_CREATED,
-        inner_payload_json="{}",
+        inner_payload_json=b"{}",
         is_retry=False,
         expires_at=0.0,
     )

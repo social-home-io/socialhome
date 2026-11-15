@@ -1978,7 +1978,7 @@ check polls (3 s, bounded timeout, 429-aware); no sleep is a check.
 | gallery item | a (space album) | item + full and thumbnail hashes |
 | page | a | title + content |
 | poll vote | d votes Pizza, e Sushi | ``…/poll`` counts |
-| catch-up | a, while d and e are killed | new post, edit, deletion after both respawn; a 96 KiB page (title + sha256 of its text) — over the 64 KiB up to which the mesh always kept an event for its one retransmit. A NOTE line reports whether a retransmitted the page after d's nack (not asserted: no nack comes when d was reached another way) |
+| catch-up | a, while d and e are killed | new post, edit, deletion after both respawn; an 80 KiB page (title + sha256 of its text) — over the 64 KiB up to which the mesh always kept an event for its one retransmit. A NOTE line reports whether a retransmitted the page after d's nack (not asserted: no nack comes when d was reached another way) |
 | old picture | a, while d and e are killed | the blob is expired from the GFS cache as 30-day-old content (as ``gfs-media-on-demand``'s old leg), then both must show the picture; SKIP if a cached nothing |
 | host offline | d and e, a killed | each one's picture post on the other |
 | admin rights | a promotes e's person; e deletes d's post | role on both; the post gone on both (e is put back to member) |
