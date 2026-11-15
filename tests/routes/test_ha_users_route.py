@@ -273,3 +273,17 @@ async def test_501_in_standalone_mode(client):
         headers=_auth(client._admin_token),
     )
     assert resp.status == 501
+
+
+async def test_deprovision_unknown_user_is_a_404_that_echoes_nothing(make_client):
+    """The 404 carries the fixed detail, never the username back."""
+    client = await make_client([])
+    resp = await client.delete(
+        "/api/admin/ha-users/ghost/provision",
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 404
+    assert (await resp.json())["error"] == {
+        "code": "NOT_FOUND",
+        "detail": "Resource not found.",
+    }

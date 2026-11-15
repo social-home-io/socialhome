@@ -27,6 +27,7 @@ from ..domain.conversation import (
     mute_active,
     mute_until_for,
 )
+from ..domain.errors import NotFoundError
 from ..domain.notification import SpaceNotifLevel, default_space_notif_level
 from ..domain.notification_kinds import (
     KIND_CHOICES,
@@ -149,7 +150,7 @@ class NotificationSettingsService:
         if not mutable_post_key(key):
             raise ValueError("not a post")
         if await self._post_line(user, key) is None:
-            raise KeyError(key)
+            raise NotFoundError(key)
         now = datetime.now(UTC)
         current = parse_notif_settings(user.preferences_json)
         posts = current.with_muted_post(key, now=now)
@@ -176,7 +177,7 @@ class NotificationSettingsService:
             raise PermissionError("Not a space member.")
         space = await self._spaces.get(space_id)
         if space is None:
-            raise KeyError(space_id)
+            raise NotFoundError(space_id)
         return space, member
 
     async def space_choice(self, user_id: str, space_id: str) -> dict:
@@ -382,7 +383,7 @@ class NotificationSettingsService:
         """The local user *username* (:class:`KeyError` when unknown)."""
         user = await self._users.get(username)
         if user is None:
-            raise KeyError(username)
+            raise NotFoundError(username)
         return user
 
 

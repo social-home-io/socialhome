@@ -107,8 +107,10 @@ class BotBridgeSpacePostView(web.View):
             return error_response(
                 403, "FORBIDDEN", "This bot may not post in this space."
             )
-        except KeyError as exc:
-            return error_response(404, "NOT_FOUND", str(exc).strip("'\""))
+        except KeyError:
+            # Not a BaseView (a public path, bearer resolved inline), so the
+            # 404 is mapped here — with the fixed detail, never the id.
+            return error_response(404, "NOT_FOUND", "Resource not found.")
         except ValueError as exc:
             return error_response(422, "UNPROCESSABLE", str(exc))
         return web.json_response(

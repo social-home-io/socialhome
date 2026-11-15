@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 
+from ..domain.errors import NotFoundError
 from ..domain.task import TaskStatus
 from ..repositories.bazaar_repo import AbstractBazaarRepo
 from ..repositories.calendar_repo import AbstractSpaceCalendarRepo
@@ -75,7 +76,7 @@ class SpaceSummaryService:
         await require_seat(self._spaces, space_id, user_id)
         space = await self._spaces.get(space_id)
         if space is None:
-            raise KeyError(f"Space {space_id!r} not found")
+            raise NotFoundError(f"Space {space_id!r} not found")
         f = space.features
         return {
             "tasks": await self._task_counts(space_id, user_id) if f.todo else None,

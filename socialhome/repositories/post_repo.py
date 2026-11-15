@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..domain.errors import NotFoundError
 from ..domain.link_preview import (
     LinkPreview,
     link_preview_from_dict,
@@ -302,7 +303,7 @@ class SqlitePostRepo:
                 (post_id,),
             ).fetchone()
             if row is None:
-                raise KeyError(f"post {post_id!r} not found or deleted")
+                raise NotFoundError(f"post {post_id!r} not found or deleted")
             row_dict = dict(row)
             reactions = _decode_reactions(row_dict["reactions"])
             if (
@@ -344,7 +345,7 @@ class SqlitePostRepo:
                 (post_id,),
             ).fetchone()
             if row is None:
-                raise KeyError(f"post {post_id!r} not found")
+                raise NotFoundError(f"post {post_id!r} not found")
             row_dict = dict(row)
             reactions = _decode_reactions(row_dict["reactions"])
             bucket = reactions.get(emoji)

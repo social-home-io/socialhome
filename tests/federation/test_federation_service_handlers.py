@@ -1495,6 +1495,42 @@ async def test_handle_space_sync_answer_happy(svc):
     svc._sync_manager.apply_answer.assert_awaited_once()
 
 
+async def test_a_sync_closed_during_the_answer_is_a_debug_line(svc, caplog):
+    """The session closed while the provider applied the answer (the
+    requester gave up, the reaper ran): ``ConnectionError``, which must not
+    reach the dispatch registry's ``log.error`` with a traceback."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.apply_answer = AsyncMock(
+        side_effect=ConnectionError("sync session closed")
+    )
+    caplog.set_level("DEBUG", logger="socialhome.federation.federation_service")
+    await svc._handle_space_sync_answer(
+        _event("SPACE_SYNC_ANSWER", {"sync_id": "s1", "sdp_answer": "a"})
+    )
+    (rec,) = [r for r in caplog.records if "closed during handshake" in r.message]
+    assert rec.levelname == "DEBUG"
+
+
+async def test_a_sync_closed_during_the_offer_sends_no_answer(svc, caplog):
+    svc._sync_manager = MagicMock()
+    _solicited(svc)
+    svc._sync_manager.apply_offer = AsyncMock(
+        side_effect=ConnectionError("sync session closed")
+    )
+    caplog.set_level("DEBUG", logger="socialhome.federation.federation_service")
+    with patch.object(FederationService, "send_event", new_callable=AsyncMock) as send:
+        await svc._handle_space_sync_offer(
+            _event(
+                "SPACE_SYNC_OFFER",
+                {"sync_id": "s1", "sdp_offer": "sdp-x", "ice_servers": []},
+                space_id="sp",
+            )
+        )
+    send.assert_not_awaited()
+    (rec,) = [r for r in caplog.records if "closed during handshake" in r.message]
+    assert rec.levelname == "DEBUG"
+
+
 # ─── _handle_space_sync_ice ────────────────────────────────────────
 
 

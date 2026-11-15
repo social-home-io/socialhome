@@ -5555,18 +5555,24 @@ class FederationService:
                 event.from_instance,
             )
             return
-        sdp_answer = await self._sync_manager.apply_offer(
-            sync_id=sync_id,
-            sdp_offer=sdp_offer,
-            requester_instance_id=self._own_instance_id,
-            provider_instance_id=event.from_instance,
-            space_id=space_id,
-            ice_servers=payload.get("ice_servers"),
-            # What our BEGIN asked for — a relay retry re-sends it, so a
-            # periodic sync behind a NAT stays incremental.
-            sync_mode=pending.sync_mode,
-            have_seq=pending.have_seq,
-        )
+        try:
+            sdp_answer = await self._sync_manager.apply_offer(
+                sync_id=sync_id,
+                sdp_offer=sdp_offer,
+                requester_instance_id=self._own_instance_id,
+                provider_instance_id=event.from_instance,
+                space_id=space_id,
+                ice_servers=payload.get("ice_servers"),
+                # What our BEGIN asked for — a relay retry re-sends it, so a
+                # periodic sync behind a NAT stays incremental.
+                sync_mode=pending.sync_mode,
+                have_seq=pending.have_seq,
+            )
+        except ConnectionError:
+            # Closed while the offer was applied (reaped, superseded):
+            # nothing to answer for.
+            log.debug("sync %s: sync session closed during handshake", sync_id)
+            return
         await self.send_event(
             to_instance_id=event.from_instance,
             event_type=FederationEventType.SPACE_SYNC_ANSWER,
@@ -5749,11 +5755,16 @@ class FederationService:
         sdp_answer = payload.get("sdp_answer") or ""
         if not sync_id or not sdp_answer:
             return
-        await self._sync_manager.apply_answer(
-            sync_id=sync_id,
-            sdp_answer=sdp_answer,
-            from_instance=event.from_instance,
-        )
+        try:
+            await self._sync_manager.apply_answer(
+                sync_id=sync_id,
+                sdp_answer=sdp_answer,
+                from_instance=event.from_instance,
+            )
+        except ConnectionError:
+            # Closed while the answer was applied (the requester gave up,
+            # the reaper ran): the stream simply doesn't start.
+            log.debug("sync %s: sync session closed during handshake", sync_id)
 
     async def _handle_space_sync_ice(self, event) -> None:
         """Either side: trickle an ICE candidate through with S-7 validation."""

@@ -22,6 +22,7 @@ from typing import Protocol, runtime_checkable
 import orjson
 
 from ..db import AsyncDatabase
+from ..domain.errors import NotFoundError
 from ..domain.item_merge import (
     TOMBSTONE_HORIZON_S,
     decode_stamp_map,
@@ -741,7 +742,7 @@ class SqliteSpacePostRepo:
                 (post_id, space_id),
             ).fetchone()
             if row is None:
-                raise KeyError(f"space post {post_id!r} not found")
+                raise NotFoundError(f"space post {post_id!r} not found")
             row_dict = dict(row)
             stamps = _decode_stamps(row_dict.get("reaction_stamps_json"))
             key = f"{user_id}\x00{emoji}"

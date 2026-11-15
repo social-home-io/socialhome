@@ -46,6 +46,7 @@ from ..domain.bazaar_thread import (
 )
 from ..domain.child_protection import ProtectedCapability
 from ..domain.conversation import Conversation
+from ..domain.errors import NotFoundError
 from ..domain.federation import InstanceSource, PairingStatus
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.post import BazaarListing
@@ -186,7 +187,7 @@ class BazaarThreadService(ProtectionGateMixin):
         """
         user = await self._users.get(username)
         if user is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         listing = await self._bazaar.tradeable_listing(post_id, user.user_id)
         if listing.seller_user_id == user.user_id:
             raise OwnListingError()
@@ -301,7 +302,7 @@ class BazaarThreadService(ProtectionGateMixin):
         can't see."""
         user = await self._users.get(username)
         if user is None:
-            raise KeyError(f"user {username!r} not found")
+            raise NotFoundError(f"user {username!r} not found")
         listing = await self._bazaar.get_visible_listing(post_id, user.user_id)
         out: list[tuple[Conversation, ListingThreadInfo]] = []
         for conv in await self._convos.list_listing_threads(listing.post_id, username):
