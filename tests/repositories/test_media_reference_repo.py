@@ -1549,3 +1549,19 @@ async def test_a_household_feed_posts_attachment_is_never_swept(db):
     assert "feeddoc.pdf" in referenced
     assert await repo.is_referenced("feeddoc.pdf")
     assert "gonedoc.pdf" not in referenced
+
+
+async def test_a_page_copy_another_row_names_is_referenced(db):
+    """``is_referenced`` has one rule for every name: a page-scoped
+    (``sp-``) copy no page shows is still referenced while a feed post
+    (or any other row) names it."""
+    await _seed_parents(db)
+    name = space_page_media_name("sp1", "x.webp")
+    repo = SqliteMediaReferenceRepo(db)
+    assert not await repo.is_referenced(name)
+    await db.enqueue(
+        "INSERT INTO feed_posts(id, author, type, media_url)"
+        " VALUES('f9', 'u1', 'image', ?)",
+        (f"api/media/{name}",),
+    )
+    assert await repo.is_referenced(name)

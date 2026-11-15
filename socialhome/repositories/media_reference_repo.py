@@ -1148,10 +1148,13 @@ class SqliteMediaReferenceRepo:
         return out
 
     async def is_referenced(self, basename: str) -> bool:
-        """``True`` when any row still points at the file ``basename``
-        (a page-scoped ``sp-`` name: when a space page here shows its file)."""
-        if basename.startswith(SPACE_PAGE_MEDIA_PREFIX):
-            return basename in await self._page_scoped_names()
+        """``True`` when any row still points at the file ``basename`` —
+        one rule for every name: a row naming it (any table), or, for a
+        page-scoped ``sp-`` copy, a space page here showing its file."""
+        if basename.startswith(SPACE_PAGE_MEDIA_PREFIX) and (
+            basename in await self._page_scoped_names()
+        ):
+            return True
         return await self._is_referenced(basename)
 
     async def _is_referenced(self, basename: str) -> bool:
