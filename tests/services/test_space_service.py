@@ -3911,17 +3911,19 @@ async def test_a_released_v80_hosts_big_image_is_stored_as_a_rendition(
 
 
 async def test_which_senders_cap_their_space_images():
-    """The released v_80 line ships images over the cap; this build and
-    later never do (``MIN_FOR_CAPPED_SPACE_IMAGES``). An unknown version
-    reads as the released line (the lenient path)."""
+    """The released v_80 line ships images over the cap; every later build
+    caps them (``MIN_FOR_CAPPED_SPACE_IMAGES`` = v_81 — v_81–v_94 are
+    unreleased and ship together). An unknown version reads as the released
+    line (the lenient path)."""
     fed = MagicMock()
-    versions = {"v80": 80, "cur": FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES}
+    versions = {"v80": 80, "v81": 81, "cur": 94}
 
     async def _supports(iid, *, min_version):
         return versions.get(iid, 0) >= min_version
 
     fed.space_member_supports = _supports
     assert await sender_caps_space_images(fed, "cur") is True
+    assert await sender_caps_space_images(fed, "v81") is True
     assert await sender_caps_space_images(fed, "v80") is False
     assert await sender_caps_space_images(fed, "unknown") is False
     assert await sender_caps_space_images(None, "cur") is True

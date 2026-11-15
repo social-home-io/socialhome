@@ -2883,7 +2883,7 @@ def _noisy_webp(width: int, height: int) -> bytes:
     return out.getvalue()
 
 
-@pytest.mark.parametrize(("version", "stored"), [(80, True), (95, False)])
+@pytest.mark.parametrize(("version", "stored"), [(80, True), (81, False), (94, False)])
 async def test_an_over_cap_cover_from_a_released_host_is_re_encoded(
     db, image_inbound, version, stored
 ):

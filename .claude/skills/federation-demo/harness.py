@@ -12347,18 +12347,6 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_94 item merge stamps gate in place ✓")
-    # v_95 — one space cover size for every member: a receiver refuses an
-    # over-cap image only from a sender at >= v_95 (older ones are
-    # re-encoded), so the OURS round-trip above is what proves every pair
-    # holds every other to the cap; ``gfs-invite-link`` proves e holds a's
-    # cover byte-for-byte.
-    if int(_Cap.MIN_FOR_CAPPED_SPACE_IMAGES) != 95 or _OURS < 95:
-        failures.append(
-            "MIN_FOR_CAPPED_SPACE_IMAGES moved off v_95 (or OURS fell below "
-            "it) — members would hold space covers of different sizes"
-        )
-    else:
-        print("  v_95 one space cover size gate in place ✓")
     # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
     # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
     # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key
