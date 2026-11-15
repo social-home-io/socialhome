@@ -486,7 +486,9 @@ async def test_stream_initial_catchup_real_repos(tmp_dir, encoder):
         assert _shipped(media_sync) == [
             ("c-1", ["comment.webp"]),
             ("p-int-1", ["integration.webp"]),
-            ("g-int-1", ["full.webp", "thumb.webp"]),
+            # Registry order (SPACE_MEDIA_ITEMS): the thumbnail, then the
+            # full file — as the live send ships them.
+            ("g-int-1", ["thumb.webp", "full.webp"]),
         ]
         for c in media_sync.enqueue_for_blob.call_args_list:
             assert c.kwargs["target_instance_ids"] == ["p"]
