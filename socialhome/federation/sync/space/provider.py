@@ -760,16 +760,23 @@ class SpaceSyncService:
                 exporter,
                 self._media_gfs,
                 session.requester_instance_id,
-                # v_92 AND full-size relay frames: the bounded catch-up
-                # push carries its files. Without frames they would go as
-                # small JSON chunks — the GFS cache stays the path then.
-                stored_only=await self._session_version(session)
-                >= FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
-                and await self._media_gfs.takes_relay_frames(
-                    session.requester_instance_id
-                ),
+                stored_only=await self._narrow_gfs_catchup(session),
             )
         return exporter
+
+    async def _narrow_gfs_catchup(self, session: SyncSessionRecord) -> bool:
+        """Whether this requester — a member reading a GFS media cache — is
+        at v_92 behind a relay that takes full-size binary frames: the
+        bounded catch-up push then carries its files (descriptors only for
+        blobs its GFS holds). Without frames the pushes would go as small
+        JSON chunks — the GFS cache stays its path."""
+        return (
+            self._media_gfs is not None
+            and await self._session_version(session)
+            >= FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
+            and await self._media_gfs.is_relay_reader(session.requester_instance_id)
+            and await self._media_gfs.takes_relay_frames(session.requester_instance_id)
+        )
 
     async def _shaped_exporter(
         self, resource: str, session: SyncSessionRecord
@@ -986,6 +993,11 @@ class SpaceSyncService:
             await self._enqueue_catchup_media(
                 space_id,
                 session.requester_instance_id,
+                # The narrow v_92 descriptor matches blobs by address, the
+                # outbox's "reads from its GFS" skip by file name: a file
+                # held under another item or epoch would lose both. Its
+                # catch-up rows go as ``push`` rows, never skipped.
+                push=await self._narrow_gfs_catchup(session),
             )
         except Exception:  # pragma: no cover
             log.exception(
@@ -1235,6 +1247,8 @@ class SpaceSyncService:
         self,
         space_id: str,
         target_instance_id: str,
+        *,
+        push: bool = False,
     ) -> None:
         """Enqueue the files of the space's RECENT items for the requester —
         bounded on every path (paired, mesh, GFS-reached member alike).
@@ -1292,11 +1306,15 @@ class SpaceSyncService:
                 # — nor charged to the stream's budget.
                 urls = (await self._media_sync.held_files(urls))[:budget]
                 budget -= len(urls)
-                await self._enqueue_media(space_id, target_instance_id, item_id, urls)
+                await self._enqueue_media(
+                    space_id, target_instance_id, item_id, urls, push=push
+                )
         # Page files — the host's catch-up only (v_82).
-        await self._enqueue_page_media(space_id, target_instance_id)
+        await self._enqueue_page_media(space_id, target_instance_id, push=push)
 
-    async def _enqueue_page_media(self, space_id: str, target_instance_id: str) -> None:
+    async def _enqueue_page_media(
+        self, space_id: str, target_instance_id: str, *, push: bool = False
+    ) -> None:
         """v_82 — every live page's files, from the space's host only."""
         if self._page_repo is None or not await self._takes_page_media(
             space_id, target_instance_id
@@ -1342,7 +1360,9 @@ class SpaceSyncService:
             # attempt would fail on the missing source.
             if self._media_sync is not None:
                 own = await self._media_sync.held_files(own)
-            await self._enqueue_media(space_id, target_instance_id, page.id, own)
+            await self._enqueue_media(
+                space_id, target_instance_id, page.id, own, push=push
+            )
 
     async def _enqueue_media(
         self,
@@ -1350,18 +1370,23 @@ class SpaceSyncService:
         target_instance_id: str,
         correlation_id: str,
         urls: list[str],
+        *,
+        push: bool = False,
     ) -> None:
         """Enqueue one row's media for the requester. One outbox insert
         hitting a transient SQLite error (lock, disk full) must not kill
-        the whole walk — the next sync re-enqueues."""
+        the whole walk — the next sync re-enqueues. ``push``: never
+        dropped for "reads from its GFS" (:meth:`_enqueue_catchup_media`)."""
         if not urls or self._media_sync is None:
             return
         try:
+            kwargs: dict[str, Any] = {"push": True} if push else {}
             await self._media_sync.enqueue_for_blob(
                 space_id=space_id,
                 correlation_id=correlation_id,
                 target_instance_ids=[target_instance_id],
                 media_urls=urls,
+                **kwargs,
             )
         except sqlite3.Error:
             log.exception(

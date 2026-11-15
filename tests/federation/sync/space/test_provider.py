@@ -280,6 +280,28 @@ async def test_an_incremental_resync_ships_no_catchup_media(encoder):
     assert parsed["resource"] == SENTINEL_RESOURCE
 
 
+@pytest.mark.parametrize(
+    ("requester", "push"),
+    [("peer-e", True), ("peer-paired", False)],
+)
+async def test_a_narrow_v92_catchup_push_is_never_dropped(encoder, requester, push):
+    """Final review I1: a v_92 member behind a frame-taking GFS gets
+    descriptors only for blobs its GFS holds, matched by ADDRESS; the
+    outbox's "reads from its GFS" skip matches by FILE NAME. The same file
+    stored under another item (or an older epoch) would lose both — so its
+    catch-up rows go as ``push`` rows, which the skip never drops. Any
+    other requester keeps the plain rows."""
+    svc, media_sync = _catchup_provider(
+        encoder, [("2026-11-01 10:00:00", "p-1", "u-1", ["a.webp"])]
+    )
+    svc.attach_media_gfs(_ReaderUploader(stored={"a.webp"}))
+    session = _FakeSession(requester=requester)
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    (call,) = media_sync.enqueue_for_blob.call_args_list
+    assert call.kwargs.get("push", False) is push
+
+
 async def test_catchup_never_queues_a_file_this_household_does_not_hold(encoder):
     """The host holds a member's post whose picture never arrived (the
     member posted while the host was down). Its catch-up must not queue

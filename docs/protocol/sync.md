@@ -455,7 +455,7 @@ catch-up's files like any member — the bounded catch-up push, then
 `SPACE_MEDIA_WANTED` for an older file it opens — so its records carry
 `media_refs` only for files the provider already uploaded to that
 requester's GFS, matched by blob address — file, epoch, item and origin (`SpaceMediaGfsUploader.stored_plan_for_reader`: looked up, never sealed; only a described record spends the 500-record budget; the ≤ 3-day
-cache memory); nothing new is sealed or uploaded for the stream. A v_80
+cache memory); nothing new is sealed or uploaded for the stream. Its catch-up rows go as `push` rows (like `SPACE_MEDIA_WANTED`), which the outbox never skips for "reads from its GFS": that skip matches by file name, the descriptor by blob address, so a file held there under another item or epoch would otherwise get neither. A v_80
 requester keeps the full descriptor and the uploads (it can ask for
 nothing). Same sync line 92 (already in `SYNC_RECORD_LINES`). Cost toward
 a v_92 requester: no catch-up upload to its GFS; the catch-up push is the
