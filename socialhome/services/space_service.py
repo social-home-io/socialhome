@@ -1989,11 +1989,11 @@ class SpaceService(
         """Every seat of a space we host, authority-signed with ``seed``, as
         ``SPACE_ROSTER_SNAPSHOT`` entries for household ``to_instance_id``.
 
-        ``known_version``: the household applied a snapshot complete up to
-        that roster version, so every remote seat — live or removed — at or
-        below it is left out (it holds that very version; the receiver's
-        version-guarded merge would drop it as a duplicate anyway). Local
-        members carry the current ``roster_sequence`` and always ship.
+        ``known_version``: the household applied a full snapshot complete up
+        to that roster version, so removals at or below it are left out.
+        Every live seat always ships: a seat's version is not a host-counter
+        invariant (one applied from a delegated admin's gossip keeps that
+        admin's version; a host restored from backup reuses versions).
 
         Shared by :meth:`send_roster_snapshot` and the v_44 rotation bundle
         (which signs with the NEW key). The receiver's own seats are left out
@@ -2052,8 +2052,8 @@ class SpaceService(
             if inst == to_instance_id:
                 # The receiver's own members live in its ``space_members``.
                 continue
-            if known_version is not None and inst != own and version <= known_version:
-                # It holds this seat's version already (see ``known_version``).
+            if gone and known_version is not None and version <= known_version:
+                # It holds this removal already (see ``known_version``).
                 continue
             if role == SpaceRole.SUBSCRIBER.value and not subscriber_ok:
                 continue
@@ -2112,8 +2112,9 @@ class SpaceService(
 
         - its last sync BEGIN echoed the current roster (``roster_echo``)
           and writer cert → nothing;
-        - it echoed an older version → only the seats that changed since
-          (:meth:`roster_snapshot_entries` ``known_version``);
+        - it echoed an older version → every live seat, without the
+          removals at or below its echo (:meth:`roster_snapshot_entries`
+          ``known_version``);
         - its BEGIN carried no echo (it holds no snapshot of ours) → the
           whole roster, every tick until it echoes;
         - not heard since startup → nothing during the first
