@@ -502,6 +502,7 @@
   "error.space_emoji_too_long": "Shown when a space's icon is more than one emoji.",
   "error.calendar_rrule_invalid": "Shown when a calendar event's repeat rule can't be used (only daily, weekly, monthly or yearly repeats work).",
   "error.calendar_attendees_invalid": "Shown when a calendar event's guest list can't be saved. {max} is the most people one event can list.",
+  "error.image_too_large_kb": "Shown when a space's cover picture or icon cannot be re-encoded small enough for the space, even at a small size (usually a very detailed or noisy picture). {max_kb} is a number of kilobytes (1 kB = 1000 bytes). Do not mention servers or other households.",
   "error.space_item_too_large": "Shown when someone saves a space page, a space calendar event or a space's settings (name, description, about text) that is too large as a whole. {max_kb} is a number of kilobytes (1 kB = 1000 bytes) and is the limit of the whole item, not just the text the person typed. Do not mention servers or other households.",
   "post.more_reactions": "Screen-reader label of the \"+{n}\" chip under a post that hides the least used emoji reactions; selecting it shows them. {n} is 2 or more (post.more_reactions_one is the form for 1).",
   "post.fewer_reactions": "Screen-reader label of the same chip once the hidden emoji reactions are shown; selecting it hides them again.",

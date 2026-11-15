@@ -99,7 +99,13 @@ class ImageTooLargeError(CodedError):
     detail = "Upload exceeds size limit."
 
     def __init__(self, max_bytes: int) -> None:
-        super().__init__(params={"max_mb": max(1, max_bytes // (1024 * 1024))})
+        # A cap under a megabyte (a space cover / icon) is told in kB
+        # (1 kB = 1000 B) so it never reads as "under 1 MB".
+        if max_bytes < 1024 * 1024:
+            params = {"max_kb": max(1, max_bytes // 1000)}
+        else:
+            params = {"max_mb": max_bytes // (1024 * 1024)}
+        super().__init__(params=params)
 
 
 class PayloadTooLargeError(CodedError):

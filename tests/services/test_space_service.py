@@ -9197,10 +9197,12 @@ async def test_an_upload_nothing_fits_is_a_cap_error_not_unreadable(stack, monke
     await stack.provision_user("anna")
     space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
     stack.space_svc._covers = _RecordingImageRepo()
-    with pytest.raises(ImageTooLargeError):
+    with pytest.raises(ImageTooLargeError) as err:
         await stack.space_svc.set_cover(
             space.id, actor_username="anna", raw_bytes=_noise_png(120, 80)
         )
+    # N10: the real cap, in kB — not "under 1 MB".
+    assert err.value.params == {"max_kb": SPACE_COVER_MAX_BYTES // 1000}
 
 
 async def test_an_upload_over_the_source_pixel_cap_is_refused_before_decoding(
