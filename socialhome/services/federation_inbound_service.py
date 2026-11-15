@@ -113,10 +113,10 @@ from ..domain.space_item import (
     reaction_emoji_ok,
     stamp_to_db,
 )
+from ..domain.space_media_fields import item_media_urls
 from ..domain.space_media_ref import (
     MEDIA_REFS_FIELD,
     SpaceMediaLocalization,
-    page_media_urls,
     post_media_urls,
     space_page_media_name,
 )
@@ -266,6 +266,12 @@ def _scoped(shows_file: bool) -> str | None:
     return None if shows_file else _NOT_ITS_FILE
 
 
+def _item_names(resource: str, item: object) -> set[str]:
+    """The file names a space item of *resource* shows — the registry's
+    fields (:func:`~socialhome.domain.space_media_fields.item_media_urls`)."""
+    return {media_basename(u) for u in item_media_urls(resource, item)}
+
+
 def _moment_expired(expires_at: object) -> bool:
     """True iff ``expires_at`` parses and is already in the past.
 
@@ -369,9 +375,7 @@ def _page_scope(
     bound to its sender is filled by nobody else."""
     if page.space_id != space_id:
         return _ROW_ELSEWHERE
-    shown = {
-        media_basename(u) for u in page_media_urls(page.cover_image_url, page.content)
-    }
+    shown = _item_names("pages", page)
     if filename in shown:
         return None
     if known_only or sent in shown:
@@ -2584,15 +2588,7 @@ class FederationInboundService(ProtectionGateMixin):
             post_space, post = found
             if post_space != space_id:
                 return _ROW_ELSEWHERE
-            names = {
-                media_basename(post.media_url),
-                *(media_basename(u) for u in post.image_urls or ()),
-                media_basename(post.file_meta.url if post.file_meta else None),
-                media_basename(
-                    post.link_preview.thumbnail_url if post.link_preview else None
-                ),
-            }
-            if filename in names:
+            if filename in _item_names("posts", post):
                 return None
             if post.type != PostType.BAZAAR:
                 return _NOT_ITS_FILE
@@ -2606,24 +2602,21 @@ class FederationInboundService(ProtectionGateMixin):
                 return _NOT_ITS_FILE if known_only else None
             if listing.space_id != space_id:
                 return _ROW_ELSEWHERE
-            return _scoped(filename in {media_basename(u) for u in listing.image_urls})
+            return _scoped(filename in _item_names("bazaar", listing))
         # A space comment's picture (v_85 ships it).
         comment = await self._space_post_repo.get_comment(correlation_id)
         if comment is not None:
             parent = await self._space_post_repo.get(comment.post_id)
             if parent is None or parent[0] != space_id:
                 return _ROW_ELSEWHERE
-            return _scoped(filename == media_basename(comment.media_url))
+            return _scoped(filename in _item_names("comments", comment))
         if self._gallery_repo is not None:
             item = await self._gallery_repo.get_item(correlation_id)
             if item is not None:
                 album = await self._gallery_repo.get_album(item.album_id)
                 if album is None or album.space_id != space_id:
                     return _ROW_ELSEWHERE
-                return _scoped(
-                    filename
-                    in {media_basename(item.url), media_basename(item.thumbnail_url)}
-                )
+                return _scoped(filename in _item_names("gallery", item))
         if self._space_calendar_repo is not None:
             # A space calendar event's cover.
             found_event = await self._space_calendar_repo.get_event(correlation_id)
@@ -2631,7 +2624,7 @@ class FederationInboundService(ProtectionGateMixin):
                 event_space, event = found_event
                 if event_space != space_id:
                     return _ROW_ELSEWHERE
-                return _scoped(filename == media_basename(event.cover_url))
+                return _scoped(filename in _item_names("calendar", event))
         if self._page_repo is not None:
             page = await self._page_repo.get(correlation_id)
             if page is not None:

@@ -4,6 +4,22 @@ the tripwire fixtures each consumer's test feeds through that consumer."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
+from socialhome.domain.calendar import CalendarEvent
+from socialhome.domain.gallery import GalleryItem
+from socialhome.domain.link_preview import LinkPreview
+from socialhome.domain.page import Page
+from socialhome.domain.post import (
+    BazaarListing,
+    BazaarMode,
+    BazaarStatus,
+    Comment,
+    CommentType,
+    FileMeta,
+    Post,
+    PostType,
+)
 from socialhome.domain.space_media_fields import (
     SPACE_MEDIA_ITEMS,
     FieldShape,
@@ -68,3 +84,86 @@ def expected_moderation_urls(feature: str) -> list[str]:
     for _path, resource in item.attached:
         urls += expected_urls(resource)
     return urls
+
+
+def synthetic_object(resource: str, *, item_id: str = "item-1", space_id: str = "sp"):
+    """The domain object of *resource* with :func:`synthetic_record`'s file
+    in each stored field (a wire-only field — a page's ``merged_content`` —
+    has no attribute)."""
+    r = synthetic_record(resource)
+    when = datetime(2026, 1, 1, tzinfo=UTC)
+    match resource:
+        case "posts":
+            return Post(
+                id=item_id,
+                author="u",
+                type=PostType.FILE,
+                created_at=when,
+                media_url=r["media_url"],
+                image_urls=tuple(r["image_urls"]),
+                file_meta=FileMeta(
+                    url=r["file_meta"]["url"],
+                    mime_type="application/pdf",
+                    original_name="f.pdf",
+                    size_bytes=1,
+                ),
+                link_preview=LinkPreview(
+                    url="https://example.org/",
+                    thumbnail_url=r["link_preview"]["thumbnail_url"],
+                ),
+            )
+        case "comments":
+            return Comment(
+                id=item_id,
+                post_id="post-1",
+                author="u",
+                type=CommentType.IMAGE,
+                created_at=when,
+                media_url=r["media_url"],
+            )
+        case "calendar":
+            return CalendarEvent(
+                id=item_id,
+                calendar_id=space_id,
+                summary="S",
+                start=when,
+                end=when,
+                created_by="u",
+                cover_url=r["cover_url"],
+            )
+        case "gallery":
+            return GalleryItem(
+                id=item_id,
+                album_id="album-1",
+                uploaded_by="u",
+                item_type="photo",
+                url=r["url"],
+                thumbnail_url=r["thumbnail_url"],
+                width=1,
+                height=1,
+            )
+        case "bazaar":
+            return BazaarListing(
+                post_id=item_id,
+                space_id=space_id,
+                seller_user_id="u",
+                mode=BazaarMode.FIXED,
+                title="T",
+                end_time="2099-01-01",
+                currency="EUR",
+                status=BazaarStatus.ACTIVE,
+                created_at="2026-01-01",
+                image_urls=tuple(r["image_urls"]),
+            )
+        case "pages":
+            return Page(
+                id=item_id,
+                title="P",
+                content=r["content"],
+                created_by="u",
+                created_at="2026-01-01",
+                updated_at="2026-01-01",
+                space_id=space_id,
+                cover_image_url=r["cover_image_url"],
+            )
+    raise KeyError(resource)

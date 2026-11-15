@@ -65,6 +65,7 @@ from ..domain.space import (
     SpaceModerationItem,
     SpacePermissionError,
 )
+from ..domain.space_media_fields import item_media_urls
 from ..federation.owner_bound_id import (
     SPACE_CALENDAR_EVENT_KIND,
     SPACE_POST_KIND,
@@ -2580,11 +2581,12 @@ class SpaceCalendarService(
         in its own copy of the payload, and is uploaded once per GFS."""
         if self._federation is None:
             return
+        fresh = _new_event_files(event, previous_cover)
         media_plan = (
             await self._plan_media_refs(
-                space_id, [event.cover_url], item_id=event.id, followers=False
+                space_id, fresh, item_id=event.id, followers=False
             )
-            if event.cover_url and event.cover_url != previous_cover
+            if fresh
             else None
         )
         per_peer = self._media_refs_per_peer(media_plan)
@@ -2627,7 +2629,9 @@ class SpaceCalendarService(
         payload["capacity"] = event.capacity
         # A write released from the moderation queue names it (v_43).
         payload = with_release(payload)
-        payload = await self._with_file_hashes(payload, [event.cover_url])
+        payload = await self._with_file_hashes(
+            payload, item_media_urls("calendar", event)
+        )
         if MODERATION_BLOCK_KEY not in payload:
             await self._federation.broadcast_to_space_members(
                 space_id, evt_type, payload, **extra
@@ -2659,13 +2663,8 @@ class SpaceCalendarService(
         no bytes). One outbox row per household: N members × one picture
         (≤ the WebP cap) per cover change. Fail-soft: the event itself has
         already gone out."""
-        cover = event.cover_url
-        if (
-            self._media_sync is None
-            or self._space_repo is None
-            or not cover
-            or cover == previous_cover
-        ):
+        fresh = _new_event_files(event, previous_cover)
+        if self._media_sync is None or self._space_repo is None or not fresh:
             return
         own = self._federation.own_instance_id if self._federation is not None else ""
         try:
@@ -2677,7 +2676,7 @@ class SpaceCalendarService(
                 space_id=space_id,
                 correlation_id=event.id,
                 target_instance_ids=targets,
-                media_urls=[cover],
+                media_urls=fresh,
             )
         except Exception:
             log.exception(
@@ -2971,3 +2970,10 @@ class CalendarModerationHandler:
         if item.action == ContentAction.DELETE.value:
             return item_payload_snapshot(item) or {}
         return {k: p.get(k) for k in _EVENT_CREATE_FIELDS}
+
+
+def _new_event_files(event: CalendarEvent, previous_cover: str | None) -> list[str]:
+    """The files a space calendar event shows (the registry's
+    ``calendar`` fields — its cover) that its previous version did not
+    (*previous_cover*): an edit that keeps the cover ships no bytes."""
+    return [u for u in item_media_urls("calendar", event) if u != previous_cover]
