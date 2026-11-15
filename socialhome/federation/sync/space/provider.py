@@ -225,7 +225,9 @@ class _MediaPlanner(Protocol):
 
     async def takes_relay_frames(self, instance_id: str) -> bool: ...
 
-    def stored_on_gfs(self, plan: Any) -> Any: ...
+    async def stored_plan_for_reader(
+        self, space_id: str, media_urls: list[str], instance_id: str, *, item_id: str
+    ) -> Any: ...
 
     async def plan_for_reader(
         self, space_id: str, media_urls: list[str], instance_id: str, *, item_id: str
@@ -280,16 +282,22 @@ class _WithMediaRefs:
         for row in rows:
             urls = record_media_urls(self.resource, row)
             if urls and self._budget > 0:
-                self._budget -= 1
+                item_id = str(row.get("id") or "")
                 try:
-                    # Sealed for the record's own item — the id the
-                    # reader keeps the descriptor (and opens the blob) under.
-                    plan = await self._media.plan_for_reader(
-                        space_id,
-                        urls,
-                        self._requester,
-                        item_id=str(row.get("id") or ""),
-                    )
+                    if self._stored_only:
+                        # Only blobs its GFS is known to hold, address for
+                        # address — looked up, never sealed; nothing is
+                        # uploaded.
+                        plan = await self._media.stored_plan_for_reader(
+                            space_id, urls, self._requester, item_id=item_id
+                        )
+                    else:
+                        # Sealed for the record's own item — the id the
+                        # reader keeps the descriptor (and opens the blob)
+                        # under.
+                        plan = await self._media.plan_for_reader(
+                            space_id, urls, self._requester, item_id=item_id
+                        )
                 except Exception:
                     log.warning(
                         "sync: media of a %s record not described for %s",
@@ -298,11 +306,13 @@ class _WithMediaRefs:
                         exc_info=True,
                     )
                     plan = None
-                if self._stored_only:
-                    # Only blobs its GFS is known to hold, address for
-                    # address; nothing is uploaded.
-                    plan = self._media.stored_on_gfs(plan)
+                if not self._stored_only:
+                    # Every described record costs a seal and an upload.
+                    self._budget -= 1
                 if plan is not None:
+                    if self._stored_only:
+                        # Only a descriptor that goes out spends the budget.
+                        self._budget -= 1
                     row = {**row, MEDIA_REFS_FIELD: plan.wire()}
                     if not self._stored_only:
                         self._media.upload(plan)

@@ -1837,6 +1837,7 @@ class _ReaderUploader:
         self.readers = set(readers)
         self.stored = set(stored)
         self.frames = frames
+        self.stored_asks: list = []
         self.planned: list = []
         self.items: list = []
         self.uploaded: list = []
@@ -1847,10 +1848,9 @@ class _ReaderUploader:
     async def takes_relay_frames(self, iid):
         return self.frames and iid in self.readers
 
-    def stored_on_gfs(self, plan):
-        if plan is None:
-            return None
-        urls = [u for u in plan.urls if u.rsplit("/", 1)[-1] in self.stored]
+    async def stored_plan_for_reader(self, space_id, urls, iid, *, item_id):
+        self.stored_asks.append(item_id)
+        urls = [u for u in urls if u.rsplit("/", 1)[-1] in self.stored]
         return _ReaderPlan(urls) if urls else None
 
     async def plan_for_reader(self, space_id, urls, iid, *, item_id):
@@ -1948,6 +1948,36 @@ async def test_a_v92_requester_whose_relay_takes_no_frames_keeps_the_full_descri
     posts = {r["id"]: r for r in _streamed_records(session, "posts")}
     assert set(posts["p-1"]["media_refs"]) == {"a.webp"}
     assert len(uploader.uploaded) == 2
+
+
+async def test_a_v92_requester_spends_no_budget_on_files_its_gfs_lacks(
+    encoder, monkeypatch
+):
+    """Review 9: in the narrow v_92 mode nothing is sealed for a file its
+    GFS lacks (only remembered blobs are looked up), and only a record that
+    gets a descriptor spends the per-resource budget — so a stored blob
+    after many unstored ones still gets its descriptor."""
+    monkeypatch.setattr(provider_mod, "MAX_CATCHUP_MEDIA_RECORDS", 1)
+    uploader = _ReaderUploader(stored={"9.webp"})
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    pictures = [
+        {"id": f"p-{i}", "author": "u-1", "image_urls": [f"api/media/{i}.webp"]}
+        for i in range(10)
+    ]
+    svc = SpaceSyncService(
+        builder=builder,
+        exporters={"posts": _FakeExporter("posts", pictures)},
+        sig_suite="ed25519",
+    )
+    svc.attach_media_gfs(uploader)
+    session = _FakeSession(requester="peer-e")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    described = [
+        r["id"] for r in _streamed_records(session, "posts") if "media_refs" in r
+    ]
+    assert described == ["p-9"]
+    assert uploader.planned == [] and uploader.uploaded == []
 
 
 async def test_a_v80_link_joined_requester_keeps_the_full_descriptor(encoder):

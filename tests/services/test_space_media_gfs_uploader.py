@@ -1250,3 +1250,30 @@ async def test_stored_on_gfs_keeps_only_blobs_the_gfs_holds(tmp_path):
     # Another item showing the same file is another blob as well.
     other = await u.plan_for_reader(SPACE, urls, "e", item_id="post-2")
     assert u.stored_on_gfs(other) is None
+
+
+async def test_stored_plan_for_reader_seals_nothing(tmp_path):
+    """Review 9: the narrow v_92 lookup never seals — a file with no kept
+    description cannot be on the GFS; one uploaded there is described."""
+    _write(tmp_path, "a.webp", 10)
+    _write(tmp_path, "b.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1], status=200)
+    u = _uploader(
+        tmp_path, gfs=gfs, instances=[RELAY], versions={"e": V}, seed=b"\2" * 32
+    )
+    urls = ["api/media/a.webp", "api/media/b.webp"]
+    assert await u.stored_plan_for_reader(SPACE, urls, "e", item_id=ITEM) is None
+    assert len(u._described) == 0  # nothing sealed
+    stored = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    await u.start()
+    try:
+        u.upload(stored)
+        await asyncio.wait_for(u.drain(), timeout=5)
+    finally:
+        await u.stop()
+    sealed = len(u._described)
+    plan = await u.stored_plan_for_reader(SPACE, urls, "e", item_id=ITEM)
+    assert set(plan.wire()) == {"a.webp"}
+    assert len(u._described) == sealed  # b.webp still not sealed
+    assert await u.stored_plan_for_reader(SPACE, urls, "b", item_id=ITEM) is None
