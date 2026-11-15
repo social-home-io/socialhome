@@ -1,8 +1,8 @@
-"""§25.6 space sync — per-space member pictures survive and land re-encoded.
+"""``receive_members``: roster, member pictures and bans by §25.6 sync.
 
-Real SQLite repos: the bugs pinned here live in the interplay between the
-``members`` resource's roster upsert, ``space_members.picture_hash`` and the
-``member_pictures`` blob table.
+The member-picture tests use real SQLite repos: the bugs pinned there live
+in the interplay between the ``members`` resource's roster upsert,
+``space_members.picture_hash`` and the ``member_pictures`` blob table.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import pytest
 from PIL import Image
 
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import SpaceMemberProfileUpdated
+from socialhome.domain.events import RemoteSpaceMemberBanned, SpaceMemberProfileUpdated
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.picture_hash import compute_picture_hash
 from socialhome.domain.space import (
@@ -30,25 +30,93 @@ from socialhome.domain.space import (
     SpaceType,
 )
 from socialhome.federation.space_authorship import SpaceAuthorship
-from socialhome.federation.sync.space.receiver import HeldBack, SpaceSyncReceiver
+from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
+from socialhome.federation.sync.space.stream_health import HeldBack
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.ws_manager import WebSocketManager
 from socialhome.media.profile_picture import PROFILE_PICTURE_MAX_DIMENSION
 from socialhome.repositories.profile_picture_repo import SqliteProfilePictureRepo
-from socialhome.repositories.space_remote_member_repo import (
-    SqliteSpaceRemoteMemberRepo,
-)
+from socialhome.repositories.space_remote_member_repo import SqliteSpaceRemoteMemberRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.realtime_service import RealtimeService
 from socialhome.services.space_member_profile_federation_outbound import (
     SpaceMemberProfileFederationOutbound,
 )
+from tests.federation.sync.space.receiver_fakes import _send
+
+
+async def test_bans(setup):
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "bans",
+        [
+            {"user_id": "u-x", "banned_by": "admin-a", "reason": "spam"},
+        ],
+    )
+    assert c.bans == [("sp-1", "u-x", "admin-a", "spam")]
+
+
+async def test_a_synced_ban_of_a_seated_member_is_published(setup, bus):
+    """Like the live ban: the seat's dependents (space chat, GFS seats)
+    hear of it. A ban of someone not seated here publishes nothing."""
+    r, _c, kp = setup
+    got: list = []
+
+    async def _rec(event):
+        got.append((event.space_id, event.user_id, event.banned_by))
+
+    bus.subscribe(RemoteSpaceMemberBanned, _rec)
+    await _send(
+        r,
+        kp,
+        "bans",
+        [
+            {"user_id": "u-seated", "banned_by": "admin-a"},
+            {"user_id": "u-x", "banned_by": "admin-a"},
+        ],
+    )
+    assert got == [("sp-1", "u-seated", "admin-a")]
+
+
+async def test_member_without_user_id_records_nothing(setup):
+    """SpaceMember requires user_id; a record without one still
+    constructs with user_id='' — not crashing is enough here."""
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "members",
+        [
+            {"role": "member", "joined_at": "2026-04-18T00:00:00+00:00"},
+        ],
+    )
+    # member row is saved with empty user_id — receiver doesn't filter,
+    # the DB FK would catch it in production. Here we just confirm the
+    # branch ran without raising.
+    assert len(c.members) == 1
+
+
+async def test_ban_missing_user_id_drops(setup):
+    r, c, kp = setup
+    await _send(r, kp, "bans", [{"banned_by": "admin"}])
+    assert c.bans == []
+
 
 HOST = "host-household"
+
+
 SPACE_ID = "sp-sync-pic"
+
+
 MEMBER = "u-remote"
+
+
 MEMBER_HOME = "member-household"
+
+
 LOCAL = "u-local"
 
 
@@ -154,9 +222,6 @@ def _picture_record(raw: bytes, user_id: str = MEMBER) -> dict:
     }
 
 
-# ── Bug 1: the ``members`` catch-up must not wipe the per-space picture ──
-
-
 async def test_members_catch_up_keeps_an_existing_per_space_picture(stack):
     await stack.spaces.set_member_profile(
         SPACE_ID, MEMBER, space_display_name="Remy", picture_hash="0123456789abcdef"
@@ -193,9 +258,6 @@ async def test_members_catch_up_seats_a_new_member_without_a_picture(stack):
     member = await stack.spaces.get_member(SPACE_ID, "u-new")
     assert member is not None
     assert member.picture_hash is None
-
-
-# ── Bug 2: ``member_pictures`` re-encodes like the live handlers ──────────
 
 
 async def test_member_picture_is_reencoded_and_its_hash_is_ours(stack):
@@ -277,9 +339,6 @@ async def test_a_truncated_picture_is_dropped_and_the_rest_of_the_chunk_lands(
     b64 = _picture_record(truncated)["picture_webp_base64"]
     for r in caplog.records:
         assert b64[:40] not in r.getMessage()
-
-
-# ── Bug 3: a picture reset missed while offline converges on catch-up ──
 
 
 async def _stale_picture(stack, user_id: str = MEMBER) -> str:
@@ -493,9 +552,6 @@ async def test_reset_of_a_member_without_a_picture_is_a_no_op(stack):
     member = await stack.spaces.get_member(SPACE_ID, MEMBER)
     assert member is not None and member.picture_hash is None
     assert await stack.pictures.get_member_picture(SPACE_ID, MEMBER) is None
-
-
-# ── Live nudge: an open SPA hears about a picture a catch-up changed ──
 
 
 class _Socket:

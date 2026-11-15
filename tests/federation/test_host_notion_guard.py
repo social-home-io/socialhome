@@ -49,13 +49,13 @@ ALLOWED: dict[tuple[str, str], str] = {
         "which stored key verifies an unpaired provider: the owner's pinned "
         "host key, else that household's own — authentication, not authority"
     ),
-    ("federation/sync/space/receiver.py", "_spare_owner_people"): (
+    ("federation/sync/space/receive_members.py", "_spare_owner_people"): (
         "a trusted inviting admin never touches the owner household's people"
     ),
-    ("federation/sync/space/receiver.py", "_persist_page_tombstones"): (
+    ("federation/sync/space/receive_pages.py", "_persist_page_tombstones"): (
         "are WE the owner: only the owner sequences pages (v_48)"
     ),
-    ("federation/sync/space/receiver.py", "_acts_as_host"): (
+    ("federation/sync/space/receiver_base.py", "_acts_as_host"): (
         "the owner shortcut of acts_as_host itself (no binder → owner only)"
     ),
     ("federation/sync/space/resume.py", "_replay_pages"): (

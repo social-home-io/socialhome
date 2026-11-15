@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
-from socialhome.federation.sync.space.receiver import _post_from_record
+from socialhome.federation.sync.space.receive_posts import _post_from_record
 from socialhome.outbound_fetch import OutboundFetcher
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
