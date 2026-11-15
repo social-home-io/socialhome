@@ -1437,3 +1437,29 @@ async def test_every_registry_item_column_is_an_item_file(db):
         if name.startswith("spacepages-"):
             continue  # pages: v_82 named exclusion
         assert await repo.space_rows_of(name), name
+
+
+async def test_space_files_are_every_registry_column_of_the_space(db):
+    """A space purge frees every file field of every space item — a post's
+    attachment and link card, a calendar cover, a page — not only a post's
+    pictures, a comment's, a gallery item's and a listing's."""
+    names = await _registry_rows(db)
+    repo = SqliteMediaReferenceRepo(db)
+    files = set(await repo.space_files("sp1"))
+    assert set(names) <= files
+    # The rest: the page's page-scoped (``sp-``) names, harmless on a host.
+    assert all(f.startswith("sp-") for f in files - set(names))
+    assert await repo.space_files("sp2") == []
+    assert await repo.space_files("") == []
+
+
+async def test_space_files_of_a_member_take_a_pages_scoped_copies(db):
+    """On a member household a page's raw names are its host's: the purge
+    frees the page-scoped ``sp-`` copies instead, never a shared name."""
+    await _seed_parents(db)  # sp1 is NOT hosted here
+    await db.enqueue(
+        "INSERT INTO space_pages(id, space_id, title, created_by, cover_image_url)"
+        " VALUES('pg', 'sp1', 'P', 'u1', 'api/media/host.webp')"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.space_files("sp1") == [space_page_media_name("sp1", "host.webp")]

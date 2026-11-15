@@ -35,12 +35,16 @@ class _FakeRefs:
 
     def __init__(self, *live: str) -> None:
         self._live = set(live)
+        self.space: list[str] = []
 
     async def referenced_basenames(self) -> set[str]:
         return set(self._live)
 
     async def is_referenced(self, basename: str) -> bool:
         return basename in self._live
+
+    async def space_files(self, space_id: str) -> list[str]:
+        return list(self.space)
 
 
 class _FakeSpaceRepo:
@@ -148,3 +152,24 @@ async def test_purge_without_a_reference_check_keeps_files(tmp_path: pathlib.Pat
     )
     assert removed == 0
     assert (tmp_path / "post.webp").exists()
+
+
+async def test_purge_frees_every_registry_file_of_the_space(tmp_path: pathlib.Path):
+    """A post's attachment, a link card, a calendar cover or a page's file
+    (``media_refs.space_files`` — the registry's columns) goes with the
+    space, unless another row names it."""
+    for name in ("doc.pdf", "card.webp", "cover.webp", "kept.webp"):
+        (tmp_path / name).write_bytes(b"x")
+    refs = _FakeRefs("kept.webp")
+    refs.space = ["doc.pdf", "card.webp", "cover.webp", "kept.webp"]
+    removed = await purge_space_and_media(
+        space_repo=_FakeSpaceRepo(),
+        post_repo=_FakePostRepo([]),
+        gallery_repo=None,
+        media_dir=tmp_path,
+        media_refs=refs,
+        space_id="sp-5",
+    )
+    assert removed == 3
+    assert (tmp_path / "kept.webp").exists()
+    assert not (tmp_path / "doc.pdf").exists()

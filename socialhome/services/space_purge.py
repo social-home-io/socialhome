@@ -91,6 +91,10 @@ async def purge_space_and_media(
         bazaar_repo=bazaar_repo,
         space_id=space_id,
     )
+    if media_refs is not None:
+        # Every file field of every space item (the registry's columns —
+        # a post's attachment and link card, a calendar cover, a page).
+        media.extend(await media_refs.space_files(space_id))
     await space_repo.purge(space_id)
     # Rows in this space may name files other rows (another space, the
     # feed, a DM) still use; only files nothing references any more go.

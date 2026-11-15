@@ -259,6 +259,19 @@ _SPACE_ITEM_FILES: tuple[tuple[str, str, str, str, str, str, str], ...] = (
     _space_item_files()
 )
 
+#: ``(FROM clause over the row t, space, names-are-ours filter)`` of every
+#: registry table — what a space purge collects (:meth:`space_files`). A
+#: page's RAW names count only where they are our own files
+#: (:data:`_SPACE_PAGE_HERE`); a member's page-scoped ``sp-`` copies are
+#: added from :meth:`SqliteMediaReferenceRepo._page_names_of`.
+_SPACE_ROWS: dict[str, tuple[str, str, str]] = {
+    **{
+        t: (src, space, "")
+        for t, (src, _k, space, _l, _o) in _SPACE_ITEM_SOURCE.items()
+    },
+    "space_pages": ("space_pages t", "t.space_id", f" AND {_SPACE_PAGE_HERE}"),
+}
+
 
 #: A moderation queue item still to publish its files: pending, or
 #: approved inside its review window — the approve claims the item before
@@ -604,6 +617,11 @@ class AbstractMediaReferenceRepo(Protocol):
         """``(created_at, item_id, owner, basenames)`` of the LIVE items of
         *space_id* created at or after *cutoff* that show files, newest
         first (the §25.6 bounded catch-up media)."""
+        ...
+
+    async def space_files(self, space_id: str) -> list[str]:
+        """Every file a row of space *space_id* names in a registry column
+        (live or not) — what a hard purge of the space may free."""
         ...
 
     async def content_names_of_item(self, item_id: str) -> list[str]:
@@ -986,6 +1004,38 @@ class SqliteMediaReferenceRepo:
                     else:
                         names |= _names_in_markdown(raw)
         return {space_page_media_name(space_id, n) for n in names}
+
+    async def space_files(self, space_id: str) -> list[str]:
+        """Every file a row of space *space_id* names in a registry column
+        (:func:`space_media_columns`, live or not), each once — what a hard
+        purge of the space may free (``unlink_unreferenced`` still keeps a
+        file another row names)."""
+        if not space_id:
+            return []
+        out: list[str] = []
+        for table, col, shape in space_media_columns():
+            source, space, here = _SPACE_ROWS[table]
+            value = f"t.{col}"
+            if shape.startswith("json:"):
+                value = (
+                    f"CASE WHEN json_valid(t.{col})"
+                    f" THEN json_extract(t.{col}, '{shape[len('json:') :]}') END"
+                )
+            rows = await self._db.fetchall(
+                f"SELECT {value} AS v FROM {source} WHERE {space} = ?{here}",
+                (space_id,),
+            )
+            for r in rows_to_dicts(rows):
+                raw = r.get("v")
+                if shape == "list":
+                    names = _names_in_list(raw)
+                elif shape == "markdown":
+                    names = sorted(_names_in_markdown(raw))
+                else:
+                    names = [n for n in (media_basename(raw),) if n]
+                out.extend(n for n in names if n not in (".", "..") and n not in out)
+        out.extend(sorted(await self._page_names_of(space_id, live=False)))
+        return out
 
     async def content_names_of_item(self, item_id: str) -> list[str]:
         """The content-addressed (``sc-``, v_85) files item *item_id* shows
