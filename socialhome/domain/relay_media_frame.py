@@ -28,6 +28,7 @@ either.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 
 import orjson
 
@@ -155,7 +156,9 @@ SPACE_PAGE_STATE_MAX_BYTES: int = (
 #: descriptors, the recurrence rule, ids and stamps.
 SPACE_CALENDAR_RESERVE_BYTES: int = 128 * 1024
 
-#: A space calendar event's summary + description. 384,926 bytes (~375 KiB).
+#: A space calendar event's summary + description + attendee ids (the one
+#: list on the record with no cap of its own, so it is measured, not
+#: reserved). 384,926 bytes (~375 KiB).
 SPACE_CALENDAR_TEXT_MAX_BYTES: int = (
     RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES - SPACE_CALENDAR_RESERVE_BYTES
 )
@@ -165,10 +168,29 @@ SPACE_CALENDAR_TEXT_MAX_BYTES: int = (
 #: set and the other settings.
 SPACE_CONFIG_RESERVE_BYTES: int = 128 * 1024
 
-#: A space's description + about text. 384,926 bytes (~375 KiB).
+#: A space's description (counted TWICE: ``SPACE_CONFIG_CHANGED`` carries
+#: it in the flat legacy shape and again inside ``space_meta``) + its about
+#: text. 384,926 bytes (~375 KiB) — a description alone up to ~187 KiB.
 SPACE_CONFIG_TEXT_MAX_BYTES: int = (
     RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES - SPACE_CONFIG_RESERVE_BYTES
 )
+
+
+def calendar_texts(
+    summary: str | None, description: str | None, attendees: Iterable[str] = ()
+) -> tuple[str | None, ...]:
+    """What of a space calendar event counts against
+    :data:`SPACE_CALENDAR_TEXT_MAX_BYTES`."""
+    return (summary, description, *attendees)
+
+
+def config_texts(
+    description: str | None, about_markdown: str | None
+) -> tuple[str | None, ...]:
+    """What of a space's config counts against
+    :data:`SPACE_CONFIG_TEXT_MAX_BYTES`: the description twice (the event
+    carries it in both of its shapes), the about text once."""
+    return (description, description, about_markdown)
 
 
 def space_text_bytes(*texts: str | None) -> int:
@@ -262,6 +284,8 @@ __all__ = [
     "VALID_SEALED_LENGTHS",
     "InvalidRelayMediaBody",
     "build_relay_media_body",
+    "calendar_texts",
+    "config_texts",
     "is_relay_media_body",
     "parse_relay_media_body",
     "require_space_text_fits",

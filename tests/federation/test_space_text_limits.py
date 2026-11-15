@@ -17,13 +17,24 @@ import logging
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import orjson
+import pytest
 
-from socialhome.crypto import b64url_encode, generate_identity_keypair
+from socialhome.crypto import (
+    b64url_encode,
+    generate_identity_keypair,
+    generate_space_keypair,
+)
 from socialhome.domain.calendar import CalendarEvent
+from socialhome.domain.errors import SpaceItemTooLargeError
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.file_hashes import FILES_FIELD, FILES_SUITE_FIELD
+from socialhome.domain.media_constraints import (
+    SPACE_COVER_BOOTSTRAP_MAX_BYTES,
+    SPACE_ICON_BOOTSTRAP_MAX_BYTES,
+)
 from socialhome.domain.relay_media_frame import (
     RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES,
     RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES,
@@ -31,7 +42,12 @@ from socialhome.domain.relay_media_frame import (
     SPACE_CALENDAR_TEXT_MAX_BYTES,
     SPACE_CONFIG_TEXT_MAX_BYTES,
     SPACE_PAGE_STATE_MAX_BYTES,
+    calendar_texts,
+    config_texts,
+    require_space_text_fits,
+    space_text_bytes,
 )
+from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.domain.space_media_ref import (
     MAX_PAGE_DESCRIPTOR_ENTRIES,
     MEDIA_REFS_FIELD,
@@ -55,6 +71,7 @@ from socialhome.services.page_conflict_service import (
     canonical_extras,
     page_state_bytes,
 )
+from socialhome.services.space_config_outbound import SpaceConfigOutbound
 from socialhome.services.space_service import ROSTER_SNAPSHOT_PART_BYTES
 
 SPACE = "s" * 32
@@ -211,7 +228,11 @@ async def test_a_page_at_its_state_limit_crosses_with_every_list_at_its_cap():
     page, sides = _worst_page()
     refs, hashes = _descriptors()
     [record] = await PagesExporter(_PageRepo(page, sides)).list_records(SPACE)  # type: ignore[arg-type]
-    assert len(record["conflict"]) == MAX_CONFLICT_SIDES
+    # Every list on a page record, and what bounds it.
+    lists = {k for k, v in record.items() if isinstance(v, (list, tuple, dict))}
+    assert lists == {"conflict"}
+    assert len(record["conflict"]) == MAX_CONFLICT_SIDES == 3  # text: in the state
+    assert MAX_PAGE_DESCRIPTOR_ENTRIES == 64  # the provider's media_refs / files
     # What the provider adds for a household behind a GFS.
     record = {
         **record,
@@ -261,9 +282,20 @@ class _CalendarRepo:
 
 async def test_a_calendar_event_at_its_text_limit_crosses_with_500_rsvps():
     """RSVPs are added long after the event was saved: the reserve is their
-    hard cap, so no RSVP can push a saved event out of reach."""
+    hard cap, so no RSVP can push a saved event out of reach. The attendee
+    ids have no cap of their own — they are measured with the text."""
     summary = "S" * 500
-    description = "d" * (SPACE_CALENDAR_TEXT_MAX_BYTES - len(summary) - 4)
+    attendees = tuple(f"{n:032d}" for n in range(3000))
+    taken = space_text_bytes(*calendar_texts(summary, None, attendees))
+    description = "d" * (SPACE_CALENDAR_TEXT_MAX_BYTES - taken - 2)
+    texts = calendar_texts(summary, description, attendees)
+    assert space_text_bytes(*texts) == SPACE_CALENDAR_TEXT_MAX_BYTES
+    require_space_text_fits(*texts, limit=SPACE_CALENDAR_TEXT_MAX_BYTES)
+    with pytest.raises(SpaceItemTooLargeError):
+        require_space_text_fits(
+            *calendar_texts(summary, description, (*attendees, "a" * 32)),
+            limit=SPACE_CALENDAR_TEXT_MAX_BYTES,
+        )
     event = CalendarEvent(
         id="e" * 32 + "@2027-04-01T10:00:00+00:00",
         calendar_id=SPACE,
@@ -272,6 +304,7 @@ async def test_a_calendar_event_at_its_text_limit_crosses_with_500_rsvps():
         end=datetime(2027, 4, 1, 11, tzinfo=UTC),
         created_by="u" * 32,
         description=description,
+        attendees=attendees,
         rrule="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;COUNT=500",
         capacity=10**6,
         rsvp_enabled=True,
@@ -279,14 +312,19 @@ async def test_a_calendar_event_at_its_text_limit_crosses_with_500_rsvps():
     exporter = CalendarExporter(_CalendarRepo(event, MAX_RSVPS_PER_EVENT + 50))  # type: ignore[arg-type]
     [records] = [batch async for batch in exporter.iter_batches(SPACE)]
     [record] = records
-    assert len(record["rsvps"]) == MAX_RSVPS_PER_EVENT and record["rsvps_partial"]
+    # Every list on a calendar record, and what bounds it.
+    lists = {k for k, v in record.items() if isinstance(v, (list, tuple, dict))}
+    assert lists == {"attendees", "rsvps"}
+    assert len(record["attendees"]) == len(attendees)  # measured with the text
+    assert len(record["rsvps"]) == MAX_RSVPS_PER_EVENT == 500  # hard cap
+    assert record["rsvps_partial"]
     refs, hashes = _descriptors()
     one = next(iter(refs))
     record = {
         **record,
         "cover_url": "api/media/" + "c" * 60 + ".webp",
         "location": "L" * 500,
-        MEDIA_REFS_FIELD: {one: refs[one]},
+        MEDIA_REFS_FIELD: {one: refs[one]},  # the cover: one file
         FILES_FIELD: {one: hashes[one]},
     }
     await _assert_record_crosses("calendar", record)
@@ -295,23 +333,78 @@ async def test_a_calendar_event_at_its_text_limit_crosses_with_500_rsvps():
 # ── Config: the description, the relay variant's cover and icon ───────────
 
 
-def test_a_config_change_at_its_text_limit_fits_with_the_relay_pictures():
-    description = "d" * (SPACE_CONFIG_TEXT_MAX_BYTES // 2 - 2)
-    about = "a" * (SPACE_CONFIG_TEXT_MAX_BYTES - len(description) - 4)
-    payload = {
-        "space_id": SPACE,
-        "sequence": 2**53,
-        "name": "N" * 200,
-        "description": description,
-        "about_markdown": about,
-        "emoji": "🏡",
-        # The relay variant's pictures (64 KiB + 16 KiB), base64'ed.
-        "cover_webp_base64": "c" * (64 * 1024 * 4 // 3 + 4),
-        "icon_webp_base64": "i" * (16 * 1024 * 4 // 3 + 4),
-        "features": {f"feature_{n}": "moderated" for n in range(120)},
-        "authority_sig": "s" * 128,
-        "authority_cert": {"cert": "x" * 2048},
+async def test_a_config_change_at_its_text_limit_fits_with_the_relay_pictures():
+    """Built by the real ``SpaceConfigOutbound``: the event carries the
+    description TWICE (the flat legacy shape and ``space_meta``), which is
+    why the rule counts it twice."""
+    key = generate_space_keypair()
+    about = "a" * 8000  # its own cap (``update_config``)
+    room = SPACE_CONFIG_TEXT_MAX_BYTES - space_text_bytes(about)
+    description = "d" * (room // 2 - 2)
+    texts = config_texts(description, about)
+    assert SPACE_CONFIG_TEXT_MAX_BYTES - 4 <= space_text_bytes(*texts)
+    require_space_text_fits(*texts, limit=SPACE_CONFIG_TEXT_MAX_BYTES)
+    with pytest.raises(SpaceItemTooLargeError):
+        require_space_text_fits(
+            *config_texts(description + "dddd", about),
+            limit=SPACE_CONFIG_TEXT_MAX_BYTES,
+        )
+    space = Space(
+        id=SPACE,
+        name="N" * 200,
+        owner_instance_id="h" * 32,
+        owner_username="anna",
+        identity_public_key=key.public_key.hex(),
+        config_sequence=2**53,
+        features=SpaceFeatures(),
+        space_type=SpaceType.PRIVATE,
+        join_mode=JoinMode.INVITE_ONLY,
+        description=description,
+        about_markdown=about,
+        emoji="🏡",
+    )
+    outbound = SpaceConfigOutbound(
+        bus=None,  # type: ignore[arg-type]
+        federation_service=SimpleNamespace(own_instance_id="x" * 32),  # type: ignore[arg-type]
+        space_repo=None,  # type: ignore[arg-type]
+    )
+    payload = await outbound._build_payload(
+        space,
+        "updated",
+        seed=key.private_key,
+        own="x" * 32,
+        cover=False,
+        icon=False,
+        cover_max_bytes=SPACE_COVER_BOOTSTRAP_MAX_BYTES,
+        icon_max_bytes=SPACE_ICON_BOOTSTRAP_MAX_BYTES,
+    )
+    as_json = orjson.dumps(payload).decode()
+    assert as_json.count(description) == 2 and as_json.count(about) == 1
+    # The relay variant's pictures at their caps, and an authority cert.
+    payload["space_meta"]["cover_webp_base64"] = "c" * (
+        SPACE_COVER_BOOTSTRAP_MAX_BYTES * 4 // 3 + 4
+    )
+    payload["space_meta"]["icon_webp_base64"] = "i" * (
+        SPACE_ICON_BOOTSTRAP_MAX_BYTES * 4 // 3 + 4
+    )
+    payload["space_meta"]["authority_cert"] = {"cert": "x" * 4096}
+    # Every list on a config event is a fixed set of settings.
+    lists = {
+        k
+        for part in (payload, payload["space_meta"])
+        for k, v in part.items()
+        if isinstance(v, (list, tuple, dict)) and k != "space_meta"
     }
+    assert lists <= {
+        "features",
+        "retention_exempt_types",
+        "authority_cert",
+        "owner_statement",
+        "gfs_servers",
+        "local_area",
+        "place_pin",
+        "games",
+    }, lists
     assert len(orjson.dumps(payload)) <= RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES
 
 

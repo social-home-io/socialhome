@@ -549,8 +549,20 @@ undeliverable when a list grows later:
 | Kind | What is measured | Limit | Reserve, and what it covers |
 |---|---|---|---|
 | Page | its **state**: title + content + the title and content of every open conflict side | `SPACE_PAGE_STATE_MAX_BYTES` = 515,998 − 40,960 = **475,038 B** (~463 KiB) | 40 KiB: 64 file descriptors with their hashes, the wrapper of ≤ 3 sides, cover, ids, stamps |
-| Space calendar event | summary + description | `SPACE_CALENDAR_TEXT_MAX_BYTES` = 515,998 − 131,072 = **384,926 B** (~375 KiB) | 128 KiB: 500 RSVPs (`MAX_RSVPS_PER_EVENT`, ~200 B each), the cover's descriptors, the rule, ids |
-| Space description + about | both texts | `SPACE_CONFIG_TEXT_MAX_BYTES` = 515,998 − 131,072 = **384,926 B** (~375 KiB) | 128 KiB: the relay variant's cover and icon (64 + 16 KiB, base64'ed), features, settings |
+| Space calendar event | summary + description + the attendee ids (`calendar_texts`) | `SPACE_CALENDAR_TEXT_MAX_BYTES` = 515,998 − 131,072 = **384,926 B** (~375 KiB) | 128 KiB: 500 RSVPs (`MAX_RSVPS_PER_EVENT`, ~200 B each), the cover's descriptors, the rule, ids |
+| Space description + about | the description **twice** + the about text (`config_texts`: `SPACE_CONFIG_CHANGED` carries the description in its flat legacy shape and again in `space_meta`) | `SPACE_CONFIG_TEXT_MAX_BYTES` = 515,998 − 131,072 = **384,926 B** — a description alone up to ~187 KiB | 128 KiB: the relay variant's cover and icon (64 + 16 KiB, base64'ed), features, settings |
+
+Every list on the three record / event shapes, and what bounds it (the
+worst-case tests assert the set, so a new list fails them):
+
+| Shape | List | Bound |
+|---|---|---|
+| page record / event | `conflict` (open sides) | ≤ 3 (`MAX_CONFLICT_SIDES`); their text is part of the measured state |
+| page record / event | `media_refs`, `files` (added per requester) | ≤ 64 entries (`MAX_PAGE_DESCRIPTOR_ENTRIES`) — in the reserve |
+| calendar record | `rsvps` | ≤ 500 (`MAX_RSVPS_PER_EVENT`, `rsvps_partial` past it) — in the reserve |
+| calendar record / event | `attendees` (user ids) | no cap of its own → **measured with the text** |
+| calendar record / event | `media_refs`, `files` | the cover: one file — in the reserve |
+| config event | `features`, `retention_exempt_types`, `gfs_servers`, the cert / statement objects | fixed sets of settings — in the reserve |
 
 (Texts are measured as they travel: JSON strings, escapes included.) A
 conflict side is a whole other version of the page and its text is not
@@ -577,6 +589,19 @@ Where it is enforced — unconditionally:
   same rule refuses a concurrent edit that would have to be kept as a
   conflict side when page + sides would pass the limit — a side never
   grows a page out of reach.
+- **Where a household receives** — the limit is held by sender and
+  receiver. An honest sender never passes it, so no refusal answer is
+  needed: a **live** event whose text is over the limit **and larger
+  than the copy the receiver holds** is dropped with a WARNING — not
+  stored, not passed on (`require_space_text_fits` with `was=`, the same
+  "a save that does not make it larger passes" rule as locally):
+  `SPACE_CALENDAR_EVENT_CREATED / _UPDATED` from any member household,
+  `SPACE_CONFIG_CHANGED` from the owner or signed by a delegated admin
+  (after its authorization, the whole edit), and a page version from the
+  host or — under a pre-v_48 host — a member's page event. Not judged:
+  the §25.6 sync stream and the config catch-up, which mirror stored
+  state — that is how an item saved before the limit keeps reaching
+  paired and mesh households.
 - **At the sender, behind all of it**: an event over the frame bound
   toward a household behind a GFS is refused (`relay_too_large`, WARNING
   naming household, event and size; never queued, never silently
@@ -617,23 +642,20 @@ skipped. A roster that fits one part is the event it always was.
 
 Stated plainly, after all of the above:
 
-1. **Its build or its GFS takes no frames** (below v_87, or no
-   `envelope_media`): every event over the JSON envelope is refused at
-   the sender (WARNING); a large moderation submission answers 413.
+1. **Its build or its GFS takes no frames** — the household is below
+   v_87, or the GFS that reaches it does not prove `envelope_media`:
+   every item between the JSON envelope (~191 KiB sealed, about 140 KiB
+   of payload) and the limit is **lost toward that household**, refused
+   at the sender with a WARNING naming it, the event and the size (never
+   queued). It heals when the household or the GFS is updated and the
+   next sync runs. A large moderation submission that could not reach
+   the space's host that way answers 413 instead.
 2. **An item already over its limit** — saved before the limits
-   existed, or arriving from a household on a build without them. Pages:
-   the host refuses such a version (`too_large`), so only pages stored
-   earlier are left. A calendar event or a space description arriving at
-   the host **from another household** (a member's event, a delegated
-   admin's signed config edit) is **not** refused by the host — those
-   paths have no refusal answer; the limit there is the sending
-   household's own. Such an item is refused at each sender toward the
-   household behind a GFS and left out of its sync stream (WARNING both
-   times); it arrives once somebody saves it within the limit.
-3. **A calendar event's `attendees`** (a list of user ids) is not capped
-   and not in the calendar reserve; an event with thousands of attendees
-   next to a description near the limit can pass the bound and is then
-   case 2.
+   existed, or by a household on a build without them. A live create or
+   edit that grows it is dropped by every receiver on this build (above);
+   what was stored earlier is refused at each sender toward the household
+   behind a GFS and left out of its sync stream (WARNING both times). It
+   arrives once somebody saves it within the limit.
 4. **A frame the GFS dropped after its 202** (media queue: one hour,
    16 MiB per recipient): healed by the next §25.6 sync, not lost.
 5. **Order toward an offline household** (below): a small later change

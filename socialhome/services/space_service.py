@@ -60,6 +60,7 @@ from ..domain.errors import (
 )
 from ..domain.relay_media_frame import (
     SPACE_CONFIG_TEXT_MAX_BYTES,
+    config_texts,
     require_space_text_fits,
 )
 from ..federation.gfs_join_request import APPROVAL_TOKEN_TTL, unverified_names
@@ -2704,10 +2705,12 @@ class SpaceService(
         # saved no larger.
         about_now = space.about_markdown
         require_space_text_fits(
-            description if description is not None else space.description,
-            about_markdown if isinstance(about_markdown, str) else about_now,
+            *config_texts(
+                description if description is not None else space.description,
+                about_markdown if isinstance(about_markdown, str) else about_now,
+            ),
             limit=SPACE_CONFIG_TEXT_MAX_BYTES,
-            was=(space.description, about_now),
+            was=config_texts(space.description, about_now),
         )
 
         if category is not None and category not in SPACE_CATEGORIES:

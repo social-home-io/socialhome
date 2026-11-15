@@ -46,6 +46,7 @@ from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.relay_media_frame import (
     SPACE_CALENDAR_TEXT_MAX_BYTES,
+    calendar_texts,
     require_space_text_fits,
 )
 from ..domain.space import (
@@ -1491,7 +1492,8 @@ class SpaceCalendarService(
         if not summary:
             raise ValueError("summary must not be empty")
         require_space_text_fits(
-            summary, description, limit=SPACE_CALENDAR_TEXT_MAX_BYTES
+            *calendar_texts(summary, description, attendees),
+            limit=SPACE_CALENDAR_TEXT_MAX_BYTES,
         )
         capacity = validate_capacity(capacity)
         # The tz first: a date-only bound names a day in the event's zone.
@@ -1905,10 +1907,15 @@ class SpaceCalendarService(
         # After the gate above; an event stored before the limit can still
         # be saved no larger.
         require_space_text_fits(
-            new_summary,
-            description if description is not None else existing.description,
+            *calendar_texts(
+                new_summary,
+                description if description is not None else existing.description,
+                attendees if attendees is not None else existing.attendees,
+            ),
             limit=SPACE_CALENDAR_TEXT_MAX_BYTES,
-            was=(existing.summary, existing.description),
+            was=calendar_texts(
+                existing.summary, existing.description, existing.attendees
+            ),
         )
         # The tz first: a date-only bound names a day in the event's zone.
         if tz is not None:

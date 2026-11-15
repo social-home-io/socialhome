@@ -42,6 +42,7 @@ from ..domain.conversation import (
     RemoteConversationMember,
 )
 from ..domain.dm_location import normalise_location_content
+from ..domain.errors import SpaceItemTooLargeError
 from ..domain.events import (
     CommentAdded,
     CommentDeleted,
@@ -100,6 +101,11 @@ from ..domain.post import (
     PostType,
 )
 from ..domain.presence import truncate_coord
+from ..domain.relay_media_frame import (
+    SPACE_CONFIG_TEXT_MAX_BYTES,
+    config_texts,
+    require_space_text_fits,
+)
 from ..domain.space import (
     MODERATION_BLOCK_KEY,
     ContentAction,
@@ -228,6 +234,13 @@ if TYPE_CHECKING:
     from .space_media_gfs_fetcher import SpaceMediaGfsFetcher
 
 log = logging.getLogger(__name__)
+
+
+def _text_or(value: object, held: str | None) -> str | None:
+    """A text field of an inbound config: the sent string, else what we
+    hold (an absent field changes nothing)."""
+    return value if isinstance(value, str) else held
+
 
 #: v_93 — most applied ``SPACE_POST_REACTION`` events ANNOUNCED on the bus
 #: (notifications) from one household in one space per minute; one past it
@@ -3723,6 +3736,29 @@ class FederationInboundService(ProtectionGateMixin):
                 return
         if not (is_owner or authority_verified):
             # Non-owner, no valid signature → not authorised.
+            return
+        # The limit every household holds for a space's texts. An honest
+        # sender never passes it (its own save answers 413), so an edit that
+        # would GROW our copy past it is dropped whole — never stored, never
+        # passed on. A space stored before the limit keeps arriving as long
+        # as it does not grow.
+        try:
+            require_space_text_fits(
+                *config_texts(
+                    _text_or(meta.get("description"), existing.description),
+                    _text_or(meta.get("about_markdown"), existing.about_markdown),
+                ),
+                limit=SPACE_CONFIG_TEXT_MAX_BYTES,
+                was=config_texts(existing.description, existing.about_markdown),
+            )
+        except SpaceItemTooLargeError:
+            log.warning(
+                "SPACE_CONFIG_CHANGED for %s from %s: its description / about "
+                "text is over the limit (%d bytes) — dropping",
+                space_id,
+                event.from_instance,
+                SPACE_CONFIG_TEXT_MAX_BYTES,
+            )
             return
         # ── Last-writer-wins ordering (v_24) ────────────────────────────────
         # With #459, every config edit broadcasts a SPACE_CONFIG_CHANGED, AND

@@ -59,6 +59,7 @@ from socialhome.app_keys import (
 )
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
+from socialhome.crypto import generate_space_keypair
 from socialhome.domain.federation import (
     DeliveryResult,
     FederationEvent,
@@ -85,6 +86,10 @@ from socialhome.federation.owner_bound_id import (
 )
 from socialhome.services import space_moderation_federation as moderation_federation
 from socialhome.services.inbound_media_store import space_direct_media_name
+from socialhome.services.space_crypto_service import (
+    sign_authority_event,
+    strip_authority_sig_fields,
+)
 from socialhome.services.space_moderation_federation import (
     MAX_EXPIRY,
     MAX_PENDING_PER_HOUSEHOLD,
@@ -2839,3 +2844,152 @@ async def test_a_page_or_description_over_its_limit_is_refused_in_any_space(mesh
         headers=h.headers,
     )
     assert r.status in (200, 201)
+
+
+# ── The receiver holds the same limit: an over-limit item is dropped ─────
+
+
+async def _calendar_rows(house: House) -> list[tuple[str, int]]:
+    rows = await house.db.fetchall(
+        "SELECT summary, length(coalesce(description, '')) AS n"
+        " FROM space_calendar_events ORDER BY summary",
+        (),
+    )
+    return [(r["summary"], r["n"]) for r in rows]
+
+
+async def test_a_forged_over_limit_calendar_event_from_a_member_is_dropped(mesh):
+    """An honest household never sends a calendar event over the limit (its
+    own save answers 413), so a receiver needs no answer for one: a live
+    event whose text is over the limit and larger than the copy it holds is
+    dropped with a WARNING — not stored, on the host or on any member. An
+    edit within the limit from the same household is taken as ever."""
+    h, c, d = mesh["H"], mesh["C"], mesh["D"]
+    start = datetime.now(UTC) + timedelta(days=3)
+    r = await h.tc.post(
+        f"/api/spaces/{SID}/calendar/events",
+        json={
+            "summary": "Picnic",
+            "start": start.isoformat(),
+            "end": (start + timedelta(hours=1)).isoformat(),
+            "description": "Bring cake",
+        },
+        headers=h.headers,
+    )
+    assert r.status in (200, 201)
+    ((_to, created),) = _sends(h, FET.SPACE_CALENDAR_EVENT_CREATED)[:1]
+    await _pump(mesh)
+    assert await _calendar_rows(c) == [("Picnic", 10)]
+    big = "x" * 500_000
+    # A forged edit that grows it past the limit: dropped on every receiver.
+    for house in (c, d):
+        await _receive(
+            house,
+            _event(
+                h,
+                FET.SPACE_CALENDAR_EVENT_UPDATED,
+                {**created, "description": big},
+                house,
+            ),
+        )
+        assert await _calendar_rows(house) == [("Picnic", 10)]
+    # So is one that hides its size in the attendee list.
+    await _receive(
+        c,
+        _event(
+            h,
+            FET.SPACE_CALENDAR_EVENT_UPDATED,
+            {**created, "attendees": [f"{n:032d}" for n in range(15_000)]},
+            c,
+        ),
+    )
+    row = await c.db.fetchone("SELECT attendees_json FROM space_calendar_events", ())
+    assert len(row["attendees_json"] or "") < 1000
+    # Within the limit: applied.
+    await _receive(
+        c,
+        _event(
+            h,
+            FET.SPACE_CALENDAR_EVENT_UPDATED,
+            {**created, "description": "y" * 300_000},
+            c,
+        ),
+    )
+    assert await _calendar_rows(c) == [("Picnic", 300_000)]
+
+
+async def test_a_forged_over_limit_config_change_is_dropped(mesh):
+    """The space's description + about text has its limit on every
+    household: a config change over it — the owner's, or one signed with
+    the space key by a delegated admin's household — is dropped with a
+    WARNING and changes nothing. The same change within the limit is
+    applied (so it is the size, not the signature, that refused it)."""
+    a, h, c = mesh["A"], mesh["H"], mesh["C"]
+    key = generate_space_keypair()
+    await a.db.enqueue(
+        "UPDATE spaces SET identity_public_key=? WHERE id=?",
+        (key.public_key.hex(), SID),
+    )
+
+    async def _description() -> str | None:
+        row = await a.db.fetchone("SELECT description FROM spaces WHERE id=?", (SID,))
+        return row["description"]
+
+    def _signed(description: str, sequence: int) -> dict:
+        meta = {
+            "name": "Reviewed",
+            "description": description,
+            "config_sequence": sequence,
+            "config_author_instance": c.iid,
+        }
+        meta.update(
+            sign_authority_event(
+                event_type="space_config_changed",
+                space_id=SID,
+                payload=strip_authority_sig_fields(meta),
+                space_seed=key.private_key,
+            )
+        )
+        return {"space_id": SID, "sequence": sequence, "space_meta": meta}
+
+    before = await _description()
+    big = "x" * 400_000
+    # The owner's own push (no signature needed), over the limit.
+    await _receive(
+        a,
+        _event(
+            h,
+            FET.SPACE_CONFIG_CHANGED,
+            {"space_id": SID, "sequence": 50, "name": "Reviewed", "description": big},
+            a,
+        ),
+    )
+    assert await _description() == before
+    # A delegated admin's household, validly signed, over the limit.
+    await _receive(a, _event(c, FET.SPACE_CONFIG_CHANGED, _signed(big, 60), a))
+    assert await _description() == before
+    # The same, within the limit: applied.
+    await _receive(a, _event(c, FET.SPACE_CONFIG_CHANGED, _signed("short", 70), a))
+    assert await _description() == "short"
+
+
+async def test_a_forged_over_limit_page_version_from_the_host_is_dropped(mesh):
+    """The host never sequences a page over the limit; a live version that
+    is over it and larger than the copy held is dropped on a member — a
+    version within the limit from the same host is mirrored."""
+    h, d = mesh["H"], mesh["D"]
+    r = await h.tc.post(
+        f"/api/spaces/{SID}/pages",
+        json={"title": "Plan", "content": "short"},
+        headers=h.headers,
+    )
+    assert r.status in (200, 201)
+    ((_to, created),) = _sends(h, FET.SPACE_PAGE_CREATED)[:1]
+    big = {**created, "content": "x" * 600_000}
+    await _receive(d, _event(h, FET.SPACE_PAGE_CREATED, big, d))
+    assert await _pages(d) == []
+    await _receive(d, _event(h, FET.SPACE_PAGE_CREATED, created, d))
+    assert [content for _title, content in await _pages(d)] == ["short"]
+    # …and an edit that grows the held page past the limit.
+    await _receive(d, _event(h, FET.SPACE_PAGE_UPDATED, {**big, "seq": 2}, d))
+    assert [content for _title, content in await _pages(d)] == ["short"]
