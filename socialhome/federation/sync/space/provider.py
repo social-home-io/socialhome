@@ -223,6 +223,10 @@ MAX_CATCHUP_MEDIA_RECORDS: int = 500
 class _MediaPlanner(Protocol):
     async def is_relay_reader(self, instance_id: str) -> bool: ...
 
+    async def stored_on_reader_gfs(
+        self, instance_id: str, media_urls: list[str]
+    ) -> list[str]: ...
+
     async def plan_for_reader(
         self, space_id: str, media_urls: list[str], instance_id: str, *, item_id: str
     ) -> Any: ...
@@ -232,21 +236,39 @@ class _MediaPlanner(Protocol):
 
 class _WithMediaRefs:
     """v_80 — a resource streamed to a member household seated from an
-    invite link (reached only through a GFS relay, which refuses the
-    ``SPACE_MEDIA_BLOB`` bytes): each record that shows files carries their
-    ``media_refs`` descriptor (computed from our copy of the file — the
-    deterministic seal gives the same address every time) and the blobs are
-    queued for upload to that member's GFS. At most
-    :data:`MAX_CATCHUP_MEDIA_RECORDS` records per resource per stream."""
+    invite link whose GFS keeps a space media cache: each record that shows
+    files carries their ``media_refs`` descriptor (computed from our copy of
+    the file — the deterministic seal gives the same address every time).
+    At most :data:`MAX_CATCHUP_MEDIA_RECORDS` records per resource per
+    stream.
 
-    __slots__ = ("_budget", "_inner", "_media", "_requester", "resource")
+    ``stored_only`` (a v_92 requester, which gets a catch-up's files like
+    any member — the bounded catch-up push and ``SPACE_MEDIA_WANTED``):
+    only the files its GFS is already known to hold are described, and
+    nothing is uploaded. Otherwise (a v_80 requester, which can ask for
+    nothing) every file is described and queued for upload to its GFS."""
+
+    __slots__ = (
+        "_budget",
+        "_inner",
+        "_media",
+        "_requester",
+        "_stored_only",
+        "resource",
+    )
 
     def __init__(
-        self, inner: ResourceExporter, media: _MediaPlanner, requester: str
+        self,
+        inner: ResourceExporter,
+        media: _MediaPlanner,
+        requester: str,
+        *,
+        stored_only: bool = False,
     ) -> None:
         self._inner = inner
         self._media = media
         self._requester = requester
+        self._stored_only = stored_only
         self._budget = MAX_CATCHUP_MEDIA_RECORDS
         self.resource = inner.resource
 
@@ -256,6 +278,8 @@ class _WithMediaRefs:
         out: list[dict[str, Any]] = []
         for row in rows:
             urls = record_media_urls(self.resource, row)
+            if urls and self._stored_only:
+                urls = await self._media.stored_on_reader_gfs(self._requester, urls)
             if urls and self._budget > 0:
                 self._budget -= 1
                 try:
@@ -277,7 +301,8 @@ class _WithMediaRefs:
                     plan = None
                 if plan is not None:
                     row = {**row, MEDIA_REFS_FIELD: plan.wire()}
-                    self._media.upload(plan)
+                    if not self._stored_only:
+                        self._media.upload(plan)
             out.append(row)
         return out
 
@@ -719,7 +744,11 @@ class SpaceSyncService:
             )
         ):
             exporter = _WithMediaRefs(
-                exporter, self._media_gfs, session.requester_instance_id
+                exporter,
+                self._media_gfs,
+                session.requester_instance_id,
+                stored_only=await self._session_version(session)
+                >= FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
             )
         return exporter
 

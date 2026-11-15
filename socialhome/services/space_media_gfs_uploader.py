@@ -794,6 +794,25 @@ class SpaceMediaGfsUploader:
             return False
         return self._stored_names.get((conn.id, filename), 0.0) > _monotonic()
 
+    async def stored_on_reader_gfs(
+        self, instance_id: str, media_urls: Iterable[str | None]
+    ) -> list[str]:
+        """Those of *media_urls* whose file the GFS that relays reader
+        *instance_id* is known to hold now (we uploaded it there, within the
+        cache's TTL — :meth:`_remember`). Empty for no reader."""
+        conn = await self._reader_conn(instance_id)
+        if conn is None:
+            return []
+        now = _monotonic()
+        out: list[str] = []
+        for url in media_urls:
+            if url is None:
+                continue
+            names = media_names([url])
+            if names and self._stored_names.get((conn.id, names[0]), 0.0) > now:
+                out.append(url)
+        return out
+
     async def _reseal(
         self, ref: SpaceMediaRef, scope: str, scope_id: str
     ) -> bytes | None:
