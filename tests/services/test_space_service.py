@@ -8345,9 +8345,13 @@ async def test_a_kick_before_the_accept_reaches_the_joiner_as_a_removal(stack):
     assert entry["payload"]["member_version"] > invite_version
 
 
-async def test_the_periodic_refresh_skips_link_joined_households(stack):
-    """Timed envelopes to a household seated from an invite link would ride
-    the connection-server relay — new traffic metadata for it."""
+async def test_the_periodic_refresh_reaches_link_joined_households_like_any_member(
+    stack,
+):
+    """A household seated from an invite link is a member like any other
+    (CLAUDE.md, "Every space member is equal"): the periodic tick heals its
+    roster mirror too, and the ``roster_echo`` its sync BEGIN carries keeps
+    it at zero envelopes once it holds the current roster."""
     from socialhome.domain.federation import InstanceSource
 
     _owner, space, fed, remote = await _hosted_space_with_seats(stack)
@@ -8366,8 +8370,17 @@ async def test_the_periodic_refresh_skips_link_joined_households(stack):
 
     stack.space_svc._federation_repo.get_instance = _get_instance
     sent = await stack.space_svc.send_hosted_roster_snapshots()
-    assert sent == 1
-    assert [to for to, _ in _snapshots(fed)] == ["peer-direct"]
+    assert sent == 2
+    assert sorted(to for to, _ in _snapshots(fed)) == ["peer-direct", "peer-link"]
+    current = (await stack.space_repo.get(space.id)).roster_sequence
+    await stack.space_svc.on_sync_begin_roster_echo(
+        _begin_with_echo(
+            space.id, "peer-link", {"roster_version": current, "cert_epoch": None}
+        )
+    )
+    # The seat echoed the current roster: skipped; the silent one healed.
+    assert await stack.space_svc.send_hosted_roster_snapshots() == 1
+    assert [to for to, _ in _snapshots(fed)][2:] == ["peer-direct"]
 
 
 async def test_an_upgrade_to_v32_triggers_a_snapshot(stack):
