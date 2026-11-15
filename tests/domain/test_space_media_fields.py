@@ -8,25 +8,36 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 import re
+import typing
 from datetime import UTC, datetime
 
 import pytest
 
 from socialhome import media_signer
 from socialhome.domain import space_media_ref
-from socialhome.domain.calendar import CalendarEvent
+from socialhome.domain.bazaar_faq import BazaarFaqEntry
+from socialhome.domain.calendar import CalendarEvent, CalendarRSVP
 from socialhome.domain.conversation import ConversationMessage
 from socialhome.domain.gallery import GalleryAlbum, GalleryItem
 from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.page import Page
+from socialhome.domain.page_version import PageConflictSide
 from socialhome.domain.post import (
     BAZAAR_MAX_IMAGES,
     FEED_POST_MAX_IMAGES,
+    BazaarBid,
     BazaarListing,
     Comment,
     FileMeta,
+    Poll,
+    PollOption,
+    PollVote,
     Post,
+    SchedulePoll,
+    ScheduleResponse,
+    ScheduleSlot,
 )
+from socialhome.domain.space import SpaceZone
 from socialhome.domain.space_media_fields import (
     FILE_HASH_RESOURCES,
     LOCAL_MEDIA_REF_RE,
@@ -49,8 +60,14 @@ from socialhome.domain.space_media_ref import (
     record_media_urls,
 )
 from socialhome.domain.sticky import Sticky
-from socialhome.domain.task import Task, TaskAttachment
-from socialhome.domain.theme import SpaceTheme
+from socialhome.domain.task import Task, TaskList
+from socialhome.domain.timetable import (
+    Timetable,
+    TimetableEntry,
+    TimetableOverride,
+    TimetableValidity,
+)
+from socialhome.federation.sync.space import exporter
 from socialhome.repositories import media_reference_repo
 from tests.space_media_items import (
     expected_moderation_urls,
@@ -356,93 +373,157 @@ def test_unknown_feature_payloads_pass_through() -> None:
 
 # ─── Structural tripwire: every file-like field is registered ────────────
 
-#: A field looks like a file when its name is one of these.
+#: A field looks like a file when its name is ``content`` / ``url`` or has
+#: one of these words.
 _FILE_LIKE = re.compile(
-    r"^(url|content|.*_url|.*_urls|cover_.*|thumbnail_.*|.*_file|.*_filename)$"
-    r"|(^|_)(image|images|photo|photos|picture|media|attachment|attachments"
-    r"|avatar|poster|banner|icon)(_|$)"
+    r"^(content|body)$|(^|_)(url|urls|file|files|filename|image|images|photo"
+    r"|photos|picture|media|attachment|attachments|avatar|poster|banner|icon"
+    r"|video|audio|voice|gif|clip|asset|assets|thumbnail|thumb|cover)(_|$)"
 )
 
-#: Space item types (and the objects nested in them) scanned for file
-#: fields: ``(class, resource or None, path prefix)``.
-_SCANNED: tuple[tuple[type, str | None, tuple[str, ...]], ...] = (
-    (Post, "posts", ()),
-    (FileMeta, "posts", ("file_meta",)),
-    (LinkPreview, "posts", ("link_preview",)),
-    (Comment, "comments", ()),
-    (CalendarEvent, "calendar", ()),
-    (GalleryItem, "gallery", ()),
-    (BazaarListing, "bazaar", ()),
-    (Page, "pages", ()),
-    (Sticky, None, ()),
-    (Task, None, ()),
-    (TaskAttachment, None, ()),
-    (ConversationMessage, None, ()),
-    (GalleryAlbum, None, ()),
-    (SpaceTheme, None, ()),
-)
+#: The domain row types every §25.6 content resource streams — keyed by
+#: the exporter's resource names (roster and removal resources carry no
+#: files). A new resource fails :func:`test_synced_types_cover_every_resource`
+#: until it is listed here, so its fields are scanned.
+SYNCED_TYPES: dict[str, tuple[type, ...]] = {
+    "posts": (Post,),
+    "comments": (Comment,),
+    "task_lists": (TaskList,),
+    "tasks": (Task,),
+    "tasks_archived": (Task,),
+    "pages": (Page, PageConflictSide),
+    "stickies": (Sticky,),
+    "calendar": (CalendarEvent, CalendarRSVP),
+    "gallery": (GalleryItem, GalleryAlbum),
+    "polls": (Poll, PollOption, PollVote),
+    "schedules": (SchedulePoll, ScheduleSlot, ScheduleResponse),
+    "space_zones": (SpaceZone,),
+    "bazaar": (BazaarListing, BazaarBid, BazaarFaqEntry),
+    "timetables": (Timetable, TimetableEntry, TimetableOverride, TimetableValidity),
+    "chat_messages": (ConversationMessage,),
+}
+
+#: The registry item a synced row type IS (its fields are registry paths).
+_ITEM_CLASS: dict[type, str] = {
+    Post: "posts",
+    Comment: "comments",
+    CalendarEvent: "calendar",
+    GalleryItem: "gallery",
+    BazaarListing: "bazaar",
+    Page: "pages",
+}
 
 #: Fields that look like a file but are not a space item's file — each
-#: with its reason.
-NOT_A_SPACE_FILE: dict[tuple[str, str], str] = {
-    ("Post", "content"): "plain text; only a page body is signed as markdown",
-    ("Comment", "content"): "plain text; only a page body is signed as markdown",
-    ("LinkPreview", "url"): "the linked web page, never a local file",
-    ("Sticky", "content"): "plain text; stickies carry no files",
-    ("TaskAttachment", "url"): "household-only (task lists are not space items)",
-    ("ConversationMessage", "content"): "chat text",
-    ("ConversationMessage", "media_url"): (
+#: with its reason (``Class.field``).
+NOT_A_SPACE_FILE: dict[str, str] = {
+    "Post.content": "plain text; only a page body is signed as markdown",
+    "Comment.content": "plain text; only a page body is signed as markdown",
+    "LinkPreview.url": "the linked web page, never a local file",
+    "Sticky.content": "plain text; stickies carry no files",
+    "PageConflictSide.content": (
+        "an open conflict side's body: host-only page names (v_82), read by "
+        "the page paths (space_page_snapshots), never a registry item"
+    ),
+    "PageConflictSide.cover_image_url": (
+        "an open conflict side's cover: host-only page names (v_82), read "
+        "by the page paths (space_page_snapshots), never a registry item"
+    ),
+    "ConversationMessage.content": "chat text",
+    "ConversationMessage.media_url": (
         "chat media (DMs, group and space chats) rides the conversation "
         "media path (DM_MEDIA_BLOB), not a space item's; the reference repo "
         "lists conversation_messages.media_url by hand"
     ),
-    ("ConversationMessage", "media_blob_id"): (
+    "ConversationMessage.media_blob_id": (
         "the DM_MEDIA_BLOB transfer id, not a file reference"
     ),
-    ("ConversationMessage", "media_sync_status"): "a sync state, not a file",
-    ("GalleryAlbum", "cover_item_id"): "an item id, not a file",
-    ("GalleryAlbum", "cover_url"): (
+    "ConversationMessage.media_sync_status": "a sync state, not a file",
+    "ConversationMessage.file_name": "the attachment's display label",
+    "ConversationMessage.file_size_bytes": "the attachment's byte count",
+    "GalleryAlbum.cover_item_id": "an item id, not a file",
+    "GalleryAlbum.cover_url": (
         "not persisted — filled from the cover item, whose files are registered"
     ),
-    ("SpaceTheme", "header_image_file"): (
-        "GFS branding only; no core space item writes it"
-    ),
+    "SpaceZone.icon": "one emoji (domain.space.validate_zone_icon), never a file",
+    "TimetableEntry.icon": "one emoji (timetable._check_icon), never a file",
+    "TimetableOverride.icon": "one emoji (timetable._check_icon), never a file",
 }
 
 
-def _registered_paths(resource: str) -> set[tuple[str, ...]]:
-    return {f.path for f in SPACE_MEDIA_ITEMS[resource].fields}
+def _nested_dataclasses(tp: object) -> list[type]:
+    """The dataclasses a field annotation holds (``X | None``,
+    ``tuple[X, ...]``, ``list[X]`` …)."""
+    if isinstance(tp, type) and dataclasses.is_dataclass(tp):
+        return [tp]
+    out: list[type] = []
+    for arg in typing.get_args(tp):
+        out.extend(_nested_dataclasses(arg))
+    return out
+
+
+def _scan(
+    cls: type,
+    resource: str | None,
+    prefix: tuple[str, ...],
+    missing: list[str],
+    seen: set[tuple[type, tuple[str, ...]]],
+) -> None:
+    if (cls, prefix) in seen:
+        return
+    seen.add((cls, prefix))
+    hints = typing.get_type_hints(cls)
+    paths = {f.path for f in SPACE_MEDIA_ITEMS[resource].fields} if resource else set()
+    for f in dataclasses.fields(cls):
+        nested = _nested_dataclasses(hints.get(f.name))
+        # A field holding an object (a post's ``file_meta``) is scanned
+        # inside, not judged by its own name.
+        if _FILE_LIKE.search(f.name) and not nested:
+            named = f"{cls.__name__}.{f.name}" in NOT_A_SPACE_FILE
+            registered = (*prefix, f.name) in paths
+            if named == registered:
+                missing.append(f"{cls.__name__}.{f.name}")
+        for inner in nested:
+            if inner is not cls:  # a self-nesting type (a comment's replies)
+                _scan(inner, resource, (*prefix, f.name), missing, seen)
+
+
+def test_synced_types_cover_every_resource() -> None:
+    """Derived from the §25.6 exporter: every content resource it streams
+    has its row types listed (so their fields are scanned)."""
+    content = (
+        set(exporter.RESOURCE_ORDER)
+        - exporter.ROSTER_RESOURCES
+        - exporter.REMOVAL_RESOURCES
+    )
+    assert set(SYNCED_TYPES) == content
+    assert set(_ITEM_CLASS.values()) == set(SPACE_MEDIA_ITEMS)
 
 
 def test_every_file_like_field_is_registered_or_named() -> None:
     missing: list[str] = []
-    for cls, resource, prefix in _SCANNED:
-        for f in dataclasses.fields(cls):
-            if not _FILE_LIKE.match(f.name):
-                continue
-            named = (cls.__name__, f.name) in NOT_A_SPACE_FILE
-            registered = resource is not None and (
-                (*prefix, f.name) in _registered_paths(resource)
-            )
-            if named == registered:
-                missing.append(f"{cls.__name__}.{f.name}")
+    seen: set[tuple[type, tuple[str, ...]]] = set()
+    for types in SYNCED_TYPES.values():
+        for cls in types:
+            _scan(cls, _ITEM_CLASS.get(cls), (), missing, seen)
     assert not missing, (
         "a file-like field must be in SPACE_MEDIA_ITEMS or NOT_A_SPACE_FILE "
-        f"(exactly one): {missing}"
+        f"(exactly one): {sorted(set(missing))}"
     )
 
 
 def test_every_registered_path_exists_on_its_domain_object() -> None:
-    owners = {r: cls for cls, r, prefix in _SCANNED if r and not prefix}
-    nested = {(r, prefix[0]): cls for cls, r, prefix in _SCANNED if r and prefix}
+    by_resource = {r: cls for cls, r in _ITEM_CLASS.items()}
     for resource, item in SPACE_MEDIA_ITEMS.items():
         for f in item.fields:
             if f.column is None:
                 continue  # wire-only (a page resolution's merged body)
-            cls = (
-                owners[resource] if len(f.path) == 1 else nested[(resource, f.path[0])]
-            )
-            assert f.path[-1] in {x.name for x in dataclasses.fields(cls)}, f.path
+            cls: object = by_resource[resource]
+            for key in f.path:
+                assert dataclasses.is_dataclass(cls), f.path
+                hints = typing.get_type_hints(cls)
+                assert key in hints, f.path
+                inner = _nested_dataclasses(hints[key])
+                cls = inner[0] if inner else None
 
 
 # ─── One markdown pattern ────────────────────────────────────────────────
