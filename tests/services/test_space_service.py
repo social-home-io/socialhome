@@ -8369,6 +8369,7 @@ async def test_the_periodic_refresh_reaches_link_joined_households_like_any_memb
         return SimpleNamespace(id=iid, source=source)
 
     stack.space_svc._federation_repo.get_instance = _get_instance
+    _past_restart_grace(stack)
     sent = await stack.space_svc.send_hosted_roster_snapshots()
     assert sent == 2
     assert sorted(to for to, _ in _snapshots(fed)) == ["peer-direct", "peer-link"]
@@ -8413,6 +8414,14 @@ def _begin_with_echo(space_id: str, sender: str, echo: object):
     )
 
 
+def _past_restart_grace(stack) -> None:
+    """The host has run past its restart grace: a household it has not
+    heard from is sent the snapshot (see ``ROSTER_ECHO_GRACE_TICKS``)."""
+    from socialhome.services.space_service import ROSTER_ECHO_GRACE_TICKS
+
+    stack.space_svc._roster_ticks = ROSTER_ECHO_GRACE_TICKS
+
+
 async def _members_with_households(stack, n: int):
     _owner, space, fed, remote = await _hosted_space_with_seats(stack)
     stack.space_svc._federation_repo.get_instance = AsyncMock(
@@ -8431,6 +8440,7 @@ async def test_an_unchanged_roster_is_sent_once_not_every_tick(stack):
     first tick sends 15; each household then echoes the version it applied
     on its next sync BEGIN, and the remaining 47 ticks send nothing."""
     space, fed, _remote, insts = await _members_with_households(stack, 15)
+    _past_restart_grace(stack)
     assert await stack.space_svc.send_hosted_roster_snapshots() == 15
     current = (await stack.space_repo.get(space.id)).roster_sequence
     for inst in insts:
@@ -8476,17 +8486,77 @@ async def test_a_roster_change_is_sent_again(stack):
     assert await stack.space_svc.send_hosted_roster_snapshots() == 2
 
 
-async def test_a_household_that_never_echoes_keeps_getting_the_snapshot(stack):
-    """An older member household sends no echo: it is healed every tick, as
-    before — nothing is skipped on a guess."""
-    _space, fed, _remote, _insts = await _members_with_households(stack, 1)
+async def test_a_household_whose_begin_carries_no_echo_keeps_getting_it(stack):
+    """A household that holds no snapshot of ours sends its BEGIN without
+    ``roster_echo``: it is healed every tick, from the first one after a
+    restart — nothing is skipped on a guess."""
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    await stack.space_svc.on_sync_begin_roster_echo(
+        _begin_with_echo(space.id, "peer-0", None)
+    )
     for _ in range(3):
         assert await stack.space_svc.send_hosted_roster_snapshots() == 1
     assert len(_snapshots(fed)) == 3
 
 
+async def test_after_a_restart_the_host_waits_for_each_households_echo(stack):
+    """The host's echo memory is in memory only. After a restart it sends
+    nothing to a household it has not heard from during the first two
+    ticks: one that echoes the current roster then is never sent the
+    roster at all; one never heard gets it from the third tick on."""
+    space, fed, _remote, insts = await _members_with_households(stack, 3)
+    current = (await stack.space_repo.get(space.id)).roster_sequence
+    assert await stack.space_svc.send_hosted_roster_snapshots() == 0
+    await stack.space_svc.on_sync_begin_roster_echo(
+        _begin_with_echo(
+            space.id, insts[0], {"roster_version": current, "cert_epoch": None}
+        )
+    )
+    assert await stack.space_svc.send_hosted_roster_snapshots() == 0
+    await stack.space_svc.on_sync_begin_roster_echo(
+        _begin_with_echo(
+            space.id, insts[1], {"roster_version": current, "cert_epoch": None}
+        )
+    )
+    # Third tick: the two that echoed get nothing; the silent one is healed.
+    assert await stack.space_svc.send_hosted_roster_snapshots() == 1
+    assert [to for to, _ in _snapshots(fed)] == [insts[2]]
+
+
+async def test_a_stale_echo_gets_only_the_seats_changed_since(stack):
+    """After a roster change, a household that echoed version R gets the
+    seats whose version is above R (and the host's own members), never the
+    whole roster again: it applied a snapshot complete up to R."""
+    space, fed, remote, insts = await _members_with_households(stack, 3)
+    current = (await stack.space_repo.get(space.id)).roster_sequence
+    for inst in insts:
+        await stack.space_svc.on_sync_begin_roster_echo(
+            _begin_with_echo(
+                space.id, inst, {"roster_version": current, "cert_epoch": None}
+            )
+        )
+    await _seat(remote, space.id, "peer-0", "u-extra")
+    await stack.space_svc._emit_member_roster_gossip(
+        await stack.space_repo.get(space.id),
+        user_id="u-extra",
+        instance_id="peer-0",
+        display_name="E",
+        user_pk=None,
+        role="member",
+        tombstoned=False,
+    )
+    assert await stack.space_svc.send_hosted_roster_snapshots() == 3
+    remote_users = {
+        e["payload"]["user_id"]
+        for e in _snapshots(fed, to="peer-1")[-1][1]
+        if e["payload"]["instance_id"] != stack.iid
+    }
+    assert remote_users == {"u-extra"}
+
+
 async def test_a_stale_echo_or_a_missing_writer_cert_is_sent_again(stack):
     space, _fed, _remote, _insts = await _members_with_households(stack, 1)
+    _past_restart_grace(stack)
     current = (await stack.space_repo.get(space.id)).roster_sequence
     await stack.space_svc.on_sync_begin_roster_echo(
         _begin_with_echo(

@@ -461,6 +461,14 @@ def _require_link_publishable(space: Space) -> None:
 #: part.
 ROSTER_SNAPSHOT_PART_BYTES: int = 96 * 1024
 
+#: Periodic roster ticks after startup during which a member household the
+#: host has not heard a sync BEGIN from yet is not sent a snapshot: its next
+#: BEGIN (every member asks its host on each 30-min tick) carries the
+#: ``roster_echo`` that tells the host whether it needs one. The host's echo
+#: memory is in memory only, so without this a restart sent every household
+#: of every hosted space a full snapshot on the first tick.
+ROSTER_ECHO_GRACE_TICKS: int = 2
+
 
 def _roster_parts(entries: list[dict]) -> list[list[dict]]:
     """*entries* cut into parts of at most
@@ -559,6 +567,8 @@ class SpaceService(
         "_remote_members",
         "_roster_applied",
         "_roster_heard",
+        "_roster_ticks",
+        "_roster_unechoed",
         "_space_crypto",
         "_spaces",
         "_subscriber_keys",
@@ -610,9 +620,14 @@ class SpaceService(
         #: last sync BEGIN carried: (roster version of the last snapshot it
         #: applied from us, writer-cert epoch it holds). The periodic
         #: snapshot is skipped while both still match. In memory: after a
-        #: restart every household gets one snapshot until it echoes again.
+        #: restart a household is waited for (``ROSTER_ECHO_GRACE_TICKS``).
         #: Bounded by hosted spaces × their member households.
         self._roster_heard: dict[tuple[str, str], tuple[int, int | None]] = {}
+        #: Host side — (space, member household) whose sync BEGIN carried no
+        #: ``roster_echo`` (it holds no snapshot of ours): not waited for.
+        self._roster_unechoed: set[tuple[str, str]] = set()
+        #: Host side — periodic roster ticks since startup.
+        self._roster_ticks = 0
         #: Member side — space → (host, roster version of the last snapshot
         #: we applied from it), echoed on our BEGIN to that host.
         self._roster_applied: dict[str, tuple[str, int]] = {}
@@ -1969,8 +1984,11 @@ class SpaceService(
         """Every seat of a space we host, authority-signed with ``seed``, as
         ``SPACE_ROSTER_SNAPSHOT`` entries for household ``to_instance_id``.
 
-        ``known_version``: the household applied a full snapshot complete up
-        to that roster version, so removals at or below it are left out.
+        ``known_version``: the household applied a snapshot complete up to
+        that roster version, so every remote seat — live or removed — at or
+        below it is left out (it holds that very version; the receiver's
+        version-guarded merge would drop it as a duplicate anyway). Local
+        members carry the current ``roster_sequence`` and always ship.
 
         Shared by :meth:`send_roster_snapshot` and the v_44 rotation bundle
         (which signs with the NEW key). The receiver's own seats are left out
@@ -2029,8 +2047,8 @@ class SpaceService(
             if inst == to_instance_id:
                 # The receiver's own members live in its ``space_members``.
                 continue
-            if gone and known_version is not None and version <= known_version:
-                # It holds this removal already (see ``known_version``).
+            if known_version is not None and inst != own and version <= known_version:
+                # It holds this seat's version already (see ``known_version``).
                 continue
             if role == SpaceRole.SUBSCRIBER.value and not subscriber_ok:
                 continue
@@ -2085,20 +2103,36 @@ class SpaceService(
         """Periodic self-heal: every space we host → each member household.
 
         Every member household alike, however it is reached (paired, mesh,
-        or seated from an invite link over the GFS relay). The
-        ``roster_echo`` dedup in :meth:`send_roster_snapshot` keeps a
-        household that already holds the current roster at zero envelopes,
-        so an unchanged space sends nothing on the tick.
+        or seated from an invite link over the GFS relay), by one rule:
+
+        - its last sync BEGIN echoed the current roster (``roster_echo``)
+          and writer cert → nothing;
+        - it echoed an older version → only the seats that changed since
+          (:meth:`roster_snapshot_entries` ``known_version``);
+        - its BEGIN carried no echo (it holds no snapshot of ours) → the
+          whole roster, every tick until it echoes;
+        - not heard since startup → nothing during the first
+          :data:`ROSTER_ECHO_GRACE_TICKS` ticks (its BEGIN tells us), then
+          the whole roster.
         """
         own = self._own_instance_id
         if self._federation is None or not own:
             return 0
+        self._roster_ticks += 1
+        grace = self._roster_ticks <= ROSTER_ECHO_GRACE_TICKS
         sent = 0
         for space in await self._spaces.list_all():
             if space.owner_instance_id != own:
                 continue
             for inst in await self._spaces.list_member_instances(space.id):
                 if inst == own:
+                    continue
+                key = (space.id, inst)
+                if (
+                    grace
+                    and key not in self._roster_heard
+                    and key not in self._roster_unechoed
+                ):
                     continue
                 if await self.send_roster_snapshot(
                     space.id, to_instance_id=inst, periodic=True
@@ -2117,6 +2151,7 @@ class SpaceService(
         p = event.payload if isinstance(event.payload, dict) else {}
         echo = p.get("roster_echo")
         if not isinstance(echo, dict):
+            await self._note_unechoed_begin(event, p)
             return
         version = echo.get("roster_version")
         cert_epoch = echo.get("cert_epoch")
@@ -2138,6 +2173,24 @@ class SpaceService(
         if sender not in await self._spaces.list_member_instances(space_id):
             return
         self._roster_heard[(space_id, sender)] = (version, cert_epoch)
+        self._roster_unechoed.discard((space_id, sender))
+
+    async def _note_unechoed_begin(self, event: FederationEvent, p: dict) -> None:
+        """A member household's BEGIN without ``roster_echo``: it holds no
+        snapshot of ours — the restart grace does not wait for it. Same
+        bounds as the echo (a space we host, a household seated in it)."""
+        space_id = str(event.space_id or p.get("space_id") or "")
+        sender = event.from_instance
+        own = self._own_instance_id
+        if not space_id or not sender or sender == own:
+            return
+        space = await self._spaces.get(space_id)
+        if space is None or not own or space.owner_instance_id != own:
+            return
+        if sender not in await self._spaces.list_member_instances(space_id):
+            return
+        self._roster_heard.pop((space_id, sender), None)
+        self._roster_unechoed.add((space_id, sender))
 
     def note_roster_snapshot_applied(
         self, space_id: str, host_instance_id: str, roster_version: int
