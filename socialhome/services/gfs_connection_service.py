@@ -3284,6 +3284,25 @@ class GfsConnectionService:
             raise TierChangeRequiredError()
         raise SpaceNotPublishableError()
 
+    async def authority_key_revocable(self, space_id: str) -> bool:
+        """Whether every GFS that holds state tied to *space_id*'s authority
+        key could be moved onto a new key by a rotation — the gate on handing
+        the space's signing seed to any admin household (D1, owner decision
+        2026-11-15): a seed whose revocation one GFS would not follow must not
+        go out.
+
+        Today that state is the listing's pin, so: every GFS listing the
+        space proved the signed ``authority_rotation`` capability (an
+        unreachable or unproven one answers ``False`` — fail closed; the
+        caller retries on a later share). No listing → ``True``.
+        """
+        for conn in await self._repo.list_gfs_for_space(space_id):
+            if not await self._signed_capability_supported(
+                conn, "authority_rotation", self._authority_rotation
+            ):
+                return False
+        return True
+
     async def republish_space(self, space_id: str) -> int:
         """Re-publish ``space_id`` to every GFS it is ALREADY published to.
 

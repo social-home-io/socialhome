@@ -5338,3 +5338,35 @@ async def test_an_item_with_only_the_dictionary_copy_skips_zlib1(env):
         compressed_payloads={"zlib1+dict1": _DICT_ENV},
     )
     assert [b["payload"] for _u, b in session.posts] == [_JSON_ENV]
+
+
+# ── D1 (2026-11-15): a seed goes out only where its revocation can follow ──
+
+
+async def test_authority_key_revocable_with_no_listing(env):
+    """A space listed on no GFS holds no GFS pin: nothing blocks a seed."""
+    session = _AnonSession(info=_signed_info(gfs_instance_id="inst-g1"))
+    svc, _owner, _owner_id, _k2 = await _rotated_publish_svc(env, session)
+    assert await svc.authority_key_revocable("sp-rot") is True
+
+
+async def test_authority_key_revocable_when_every_listing_rotates(env):
+    session = _AnonSession(
+        info=_signed_info(
+            gfs_instance_id="inst-g1",
+            capabilities={"anonymous_publish": True, "authority_rotation": True},
+        )
+    )
+    svc, _owner, _owner_id, _k2 = await _rotated_publish_svc(env, session)
+    await svc.publish_space("sp-rot", "g1")
+    assert await svc.authority_key_revocable("sp-rot") is True
+
+
+async def test_authority_key_not_revocable_on_a_listing_without_rotation(env):
+    """A GFS that never proved the signed ``authority_rotation`` capability
+    keeps the old pin after a rotation — so no seed may go out while the
+    space is listed there (a revoked admin would keep the key there)."""
+    session = _AnonSession(info=_signed_info(gfs_instance_id="inst-g1"))
+    svc, _owner, _owner_id, _k2 = await _rotated_publish_svc(env, session)
+    await svc.publish_space("sp-rot", "g1")
+    assert await svc.authority_key_revocable("sp-rot") is False

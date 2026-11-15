@@ -7966,19 +7966,13 @@ async def test_a_non_owner_admin_cannot_consume_an_admin_elevation(stack):
     assert (await stack.space_repo.get_member(space.id, b.user_id)).role == "admin"
 
 
-async def test_promote_relay_only_admin_withholds_the_signing_seed(stack):
-    """A household met through an invite link over a connection server
-    (``InstanceSource.SPACE_SESSION``) never receives the signing seed, even
-    when delegation is on and the owner approves its admin elevation. The
-    GFS pins the space authority key TOFU-immutably, so there is no rotation
-    on a later kick — a link-joined admin acts through the host, it does not
-    sign locally. This holds now that an admin/mod elevation is approved
-    through ``set_remote_member_role``.
-    """
-    from unittest.mock import AsyncMock, MagicMock
-
-    from socialhome.domain.federation import InstanceSource
-    from socialhome.domain.space import SpaceFeatures, SpaceRole
+async def _relay_admin_space(stack, *, supports=None, result=None):
+    """An owned, delegation-ON space with one remote member ``ru1`` on the
+    household ``relay-peer`` — seated from an invite link / the GFS
+    directory (``InstanceSource.SPACE_SESSION``). ``supports`` decides
+    ``peer_supports(min_version)``; ``result`` is the send's outcome."""
+    from socialhome.domain.federation import DeliveryResult, InstanceSource
+    from socialhome.domain.space import SpaceFeatures
 
     await stack.provision_user("anna")
     space = await stack.space_svc.create_space(
@@ -7987,6 +7981,14 @@ async def test_promote_relay_only_admin_withholds_the_signing_seed(stack):
         features=SpaceFeatures(delegated_admin_authority=True),
     )
     fed = _seed_share_fed()
+    if supports is not None:
+        fed.peer_supports = AsyncMock(
+            side_effect=lambda _iid, *, min_version: supports(min_version)
+        )
+    if result is not None:
+        fed.send_with_mesh_fallback = AsyncMock(
+            return_value=DeliveryResult(instance_id="relay-peer", **result)
+        )
     stack.space_svc._federation = fed
     fed_repo = MagicMock()
     fed_repo.get_instance = AsyncMock(
@@ -8001,6 +8003,29 @@ async def test_promote_relay_only_admin_withholds_the_signing_seed(stack):
         user_pk=None,
         display_name=None,
     )
+    return space, fed
+
+
+def _seed_shares(fed) -> list[dict]:
+    from socialhome.domain.federation import FederationEventType
+
+    return [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_ADMIN_KEY_SHARE
+    ]
+
+
+async def test_promote_relay_only_admin_shares_the_signing_seed(stack):
+    """Every space admin is equal, whichever way its household is reached
+    (owner decision 2026-11-15): an admin household seated from an invite
+    link / the GFS directory (``InstanceSource.SPACE_SESSION``) gets the
+    signing seed when the owner promotes it in a delegation-ON space —
+    the same share, suite and path as a paired admin. Revocation is the
+    v_44 rotation, which reaches such households and re-pins every GFS."""
+    from socialhome.domain.space import SpaceRole
+
+    space, fed = await _relay_admin_space(stack)
     await stack.space_svc.set_remote_member_role(
         space.id,
         actor_username="anna",
@@ -8008,10 +8033,114 @@ async def test_promote_relay_only_admin_withholds_the_signing_seed(stack):
         user_id="ru1",
         role=SpaceRole.ADMIN,
     )
-    # The role change still federates…
     fed.broadcast_to_space_members.assert_awaited()
-    # …but NO seed share went out to the relay-only household.
-    fed.send_with_mesh_fallback.assert_not_awaited()
+    shares = _seed_shares(fed)
+    assert len(shares) == 1
+    assert shares[0]["to_instance_id"] == "relay-peer"
+    p = shares[0]["payload"]
+    assert p["seed_suite"] == "ed25519-seed"
+    assert base64.urlsafe_b64decode(
+        p["space_seed"]
+    ) == await stack.space_repo.get_space_seed(space.id)
+    assert await stack.space_repo.get_seed_shared_epoch(space.id) is not None
+
+
+async def test_relay_admin_below_v94_is_skipped_with_a_warning(stack, caplog):
+    """A link-seated admin household below
+    ``MIN_FOR_RELAY_ADMIN_KEY_SHARE`` (a released v_80 build) refuses the
+    type at its peer-class gate: no share is sent, nothing is marked, and
+    the owner says so at WARNING (the admin acts through the host)."""
+    from socialhome.domain.space import SpaceRole
+
+    space, fed = await _relay_admin_space(
+        stack,
+        supports=lambda v: v < FederationCapability.MIN_FOR_RELAY_ADMIN_KEY_SHARE,
+    )
+    with caplog.at_level(logging.WARNING):
+        await stack.space_svc.set_remote_member_role(
+            space.id,
+            actor_username="anna",
+            instance_id="relay-peer",
+            user_id="ru1",
+            role=SpaceRole.ADMIN,
+        )
+    assert _seed_shares(fed) == []
+    assert await stack.space_repo.get_seed_shared_epoch(space.id) is None
+    assert "relay-peer" in caplog.text and "v_94" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error", ["not_confirmed", "no_route", "route_cooldown", "host_hop_unavailable"]
+)
+async def test_a_seed_share_that_cannot_go_out_leaves_no_shared_mark(stack, error):
+    """A definitive non-delivery (no seat, no route, no host hop) put no seed
+    anywhere, so it does not count as shared."""
+    space, _fed = await _relay_admin_space(stack, result={"ok": False, "error": error})
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert await stack.space_repo.get_seed_shared_epoch(space.id) is None
+
+
+async def test_a_queued_seed_share_counts_as_shared(stack):
+    """A share the outbox (or a host hop) queued may still land — the mark
+    means "a seed may be out", which is what makes a later revocation
+    rotate even with delegation off by then."""
+    space, _fed = await _relay_admin_space(
+        stack, result={"ok": False, "error": "delivery_failed"}
+    )
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert await stack.space_repo.get_seed_shared_epoch(space.id) is not None
+
+
+async def test_no_seed_share_while_a_listing_gfs_cannot_rotate_the_key(stack, caplog):
+    """D1 (owner decision 2026-11-15): while a GFS that holds state tied to
+    the space's current authority key cannot be brought onto a new key
+    (e.g. it never proved ``authority_rotation``), no admin household —
+    paired or GFS-only — gets the seed: its revocation could not be
+    enforced there."""
+    space, fed = await _relay_admin_space(stack)
+    gfs = MagicMock()
+    gfs.authority_key_revocable = AsyncMock(return_value=False)
+    stack.space_svc._gfs = gfs
+    with caplog.at_level(logging.WARNING):
+        await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert _seed_shares(fed) == []
+    assert await stack.space_repo.get_seed_shared_epoch(space.id) is None
+    gfs.authority_key_revocable.assert_awaited_once_with(space.id)
+    assert "revocation" in caplog.text
+
+
+async def test_seed_share_goes_out_when_every_gfs_can_rotate_the_key(stack):
+    space, fed = await _relay_admin_space(stack)
+    gfs = MagicMock()
+    gfs.authority_key_revocable = AsyncMock(return_value=True)
+    stack.space_svc._gfs = gfs
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert len(_seed_shares(fed)) == 1
+
+
+async def test_seed_share_never_pairs_a_seed_with_another_key(stack):
+    """A rotation that swaps the key between the share's reads must not
+    ship the new seed under the old key / cert: the share is skipped (the
+    rotation re-shares to the remaining admins itself)."""
+    space, fed = await _relay_admin_space(stack)
+    other = generate_identity_keypair()
+    repo = stack.space_svc._spaces
+    real_get_seed = repo.get_space_seed
+
+    async def seed_then_rotate(space_id):
+        seed = await real_get_seed(space_id)
+        await repo.rotate_authority_key(
+            space_id,
+            public_key_hex=other.public_key.hex(),
+            seed=other.private_key,
+            key_epoch=space.authority_key_epoch + 1,
+        )
+        repo.get_space_seed = real_get_seed
+        return seed
+
+    repo.get_space_seed = seed_then_rotate
+    await stack.space_svc.share_admin_signing_seed(space, instance_id="relay-peer")
+    assert _seed_shares(fed) == []
 
 
 async def test_list_pending_join_requests_resolves_applicant_display_names(stack):
