@@ -213,6 +213,9 @@ def supersede_key(
     the outbox holds at most one pending row per (peer, key): a new one
     replaces it, and a newer one delivered directly drops it.
 
+    A space's roster snapshot to one household is state too (per space
+    and part).
+
     The key is local-only (an outbox column, never on the wire)."""
     if event_type is FederationEventType.SPACE_POLL_VOTE_CAST:
         post_id, voter = payload.get("post_id"), payload.get("voter_user_id")
@@ -225,6 +228,15 @@ def supersede_key(
         ):
             return None
         return f"poll-vote:{space_id}:{post_id}:{voter}"
+    if event_type is FederationEventType.SPACE_ROSTER_SNAPSHOT:
+        # The host's whole roster for one space, to one household: a newer
+        # one makes a queued older one worthless (the receiver merges by
+        # version, so only the slot is saved). Per part — a multi-part
+        # send's parts replace the older send's same-numbered parts.
+        part = payload.get("part", 0)
+        if not space_id or not isinstance(part, int) or isinstance(part, bool):
+            return None
+        return f"roster-snapshot:{space_id}:{part}"
     user_id = payload.get("user_id")
     if not isinstance(user_id, str) or not user_id:
         return None

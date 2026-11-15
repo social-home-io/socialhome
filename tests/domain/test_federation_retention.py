@@ -298,3 +298,24 @@ def test_a_space_post_reaction_keeps_only_its_latest_toggle_queued():
     assert (
         supersede_key(FET.SPACE_POST_REACTION, space_id=None, payload=payload) is None
     )
+
+
+def test_a_roster_snapshot_supersedes_per_space_and_part():
+    """Should-fix 5: a newer roster snapshot to a household replaces the
+    queued older one (per peer — the outbox key is per recipient — space
+    and part), so a household away for a while holds one snapshot, not
+    one per repair."""
+
+    def key(space="s1", **payload):
+        return supersede_key(
+            FederationEventType.SPACE_ROSTER_SNAPSHOT,
+            space_id=space,
+            payload={"space_id": space, "entries": [], **payload},
+        )
+
+    assert key() == "roster-snapshot:s1:0"
+    assert key(snapshot_id="a", part=0, parts=2) == key()
+    assert key(snapshot_id="a", part=1, parts=2) == "roster-snapshot:s1:1"
+    assert key(space="s2") != key()
+    assert key(space=None) is None
+    assert key(part="x") is None
