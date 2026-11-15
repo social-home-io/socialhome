@@ -111,6 +111,7 @@ from ..domain.space_item import (
     required_scope,
     stamp_to_db,
 )
+from ..domain.space_media_fields import replace_item_media
 from ..domain.space_media_ref import SpaceMediaLocalization, post_media_urls
 from ..domain.writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE, WriterCert
 from ..federation.pending_parent_buffer import (
@@ -1310,26 +1311,13 @@ def _only_described_files(post: Post) -> Post:
     space even — would show a file the relayed author never sent. Apply
     after the localization. The link card stays; only its picture goes.
 
-    Hand-written over the typed :class:`Post` (``replace`` per field); a
-    tripwire test checks it covers every field the space media-field
-    registry lists for a post (``SPACE_MEDIA_ITEMS["posts"]``)."""
+    Every field the space media-field registry lists for a post
+    (:func:`replace_item_media`)."""
 
     def keep(url: str | None) -> bool:
         return bool(url) and is_gfs_space_media_name(media_basename(url))
 
-    preview = post.link_preview
-    file_meta = post.file_meta
-    return replace(
-        post,
-        media_url=post.media_url if keep(post.media_url) else None,
-        image_urls=tuple(u for u in post.image_urls or () if keep(u)),
-        link_preview=(
-            replace(preview, thumbnail_url=None)
-            if preview is not None and not keep(preview.thumbnail_url)
-            else preview
-        ),
-        file_meta=file_meta if file_meta is None or keep(file_meta.url) else None,
-    )
+    return replace_item_media("posts", post, lambda u: u if keep(u) else None)
 
 
 def _retained_bytes(frame: dict) -> int:

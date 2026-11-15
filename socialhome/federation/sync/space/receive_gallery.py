@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ....domain.events import GalleryAlbumDeleted, GalleryItemDeleted
 from ....domain.federation import FederationEvent
 from ....domain.gallery import GalleryAlbum, GalleryItem, valid_taken_day
 from ....domain.media_constraints import CAPTION_MAX
+from ....domain.space_media_fields import item_media_urls
 from ....media.cleanup import unlink_unreferenced
 from ....services.inbound_media_store import space_media_ref
 from ...owner_bound_id import (
@@ -243,7 +243,7 @@ class GalleryMixin(ReceiverBase):
                     await unlink_unreferenced(
                         self._media_dir,
                         self._media_refs,
-                        [held.url, held.thumbnail_url],
+                        item_media_urls("gallery", held),
                     )
                     await self._bus.publish(
                         GalleryItemDeleted(
@@ -485,16 +485,12 @@ class GalleryMixin(ReceiverBase):
             space_id,
             record,
             item.id,
-            [u for u in (item.thumbnail_url, item.url) if u],
+            item_media_urls("gallery", item),
             provider=provider,
             takes_descriptor=held_elsewhere is None,
             from_host=from_host,
         )
-        item = replace(
-            item,
-            url=media.url(item.url) or "",
-            thumbnail_url=media.url(item.thumbnail_url) or "",
-        )
+        item = media.item("gallery", item)
         try:
             # ``bump_count=False``: the caller recounts the album once the
             # chunk is in. The album must belong to this sync's space.

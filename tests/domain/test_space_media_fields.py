@@ -6,6 +6,7 @@ as not one."""
 from __future__ import annotations
 
 import dataclasses
+import pathlib
 import re
 from datetime import UTC, datetime
 
@@ -38,6 +39,7 @@ from socialhome.domain.space_media_fields import (
     moderation_payload_urls,
     rename_item_media,
     rename_moderation_payload,
+    replace_item_media,
     sanitize_item_media,
     sanitize_moderation_payload,
     space_media_columns,
@@ -54,6 +56,7 @@ from tests.space_media_items import (
     expected_moderation_urls,
     expected_urls,
     synthetic_moderation_payload,
+    synthetic_object,
     synthetic_record,
 )
 
@@ -454,3 +457,69 @@ def test_one_markdown_pattern_everywhere() -> None:
     # Behaviour: the repo's markdown reader skips the path inside a URL.
     body = "![a](api/media/a.webp) https://h/api/media/b.webp ./api/media/c.webp"
     assert media_reference_repo._names_in_markdown(body) == {"a.webp"}
+
+
+# ─── replace_item_media: the domain-object rename ────────────────────────
+
+
+@pytest.mark.parametrize("resource", sorted(SPACE_MEDIA_ITEMS))
+def test_replace_item_media_renames_every_registered_field(resource: str) -> None:
+    obj = synthetic_object(resource)
+    out = replace_item_media(resource, obj, lambda u: u.replace(".webp", "-r.webp"))
+    assert item_media_urls(resource, out) == [
+        u.replace(".webp", "-r.webp") for u in expected_urls(resource, stored_only=True)
+    ]
+
+
+@pytest.mark.parametrize("resource", sorted(SPACE_MEDIA_ITEMS))
+def test_replace_item_media_drops_every_registered_field(resource: str) -> None:
+    out = replace_item_media(resource, synthetic_object(resource), lambda u: None)
+    assert item_media_urls(resource, out) == []
+
+
+def test_replace_item_media_drop_shapes() -> None:
+    """A dropped attachment drops the file meta, a dropped card picture
+    keeps the card, a str-typed field takes ``""``."""
+    post = replace_item_media("posts", synthetic_object("posts"), lambda u: None)
+    assert post.media_url is None and post.image_urls == ()
+    assert post.file_meta is None
+    assert post.link_preview is not None and post.link_preview.thumbnail_url is None
+    item = replace_item_media("gallery", synthetic_object("gallery"), lambda u: None)
+    assert item.url == "" and item.thumbnail_url == ""
+    obj = synthetic_object("calendar")
+    assert replace_item_media("tasks", obj, lambda u: None) is obj
+
+
+# ─── Source tripwire: no hand-written per-type file list ─────────────────
+
+#: The shapes a hand-written list of a space item's files took before the
+#: registry (a gallery item's two files, a cover in a one-element list, a
+#: comment's picture …). A consumer reads ``item_media_urls`` /
+#: ``replace_item_media`` / ``SpaceMediaLocalization.item`` instead.
+_HAND_LIST = re.compile(
+    r"\(\w+\.thumbnail_url, \w+\.url\)|\(\w+\.url, \w+\.thumbnail_url\)"
+    r"|\[\w+\.url, \w+\.thumbnail_url\]|\[\w+\.thumbnail_url, \w+\.url\]"
+    r"|\[\w+\.cover_url\]|\[\w+(\[1\])?\.cover_url\] if"
+    r"|\[\w+\.media_url\] if \w+\.media_url"
+)
+
+#: Hand-written lists that are NOT a space item's files — with the reason.
+HAND_LIST_EXCLUSIONS: dict[str, str] = {
+    "socialhome/services/gallery_share_service.py": (
+        "a share's fresh file copies (``_Copy``: feed post, DM or space "
+        "item alike) — not a stored space item's fields"
+    ),
+}
+
+
+def test_no_hand_written_space_item_file_list() -> None:
+    root = pathlib.Path(__file__).resolve().parents[2]
+    hits = []
+    for path in sorted((root / "socialhome").rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        if rel in HAND_LIST_EXCLUSIONS or rel.endswith("space_media_fields.py"):
+            continue
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            if _HAND_LIST.search(line):
+                hits.append(f"{rel}:{n}: {line.strip()}")
+    assert not hits, "route through the space media-field registry:\n" + "\n".join(hits)

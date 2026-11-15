@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
@@ -98,6 +98,9 @@ class MediaField:
     json_path: str | None = None
     limit: int | None = None
     parent_requires: bool = False
+    #: What a ONE field of a domain object holds when it shows no
+    #: file (``""`` for a ``str``-typed field, else ``None``).
+    empty: str | None = None
 
     @property
     def sql_shape(self) -> str:
@@ -195,8 +198,8 @@ SPACE_MEDIA_ITEMS: Mapping[str, SpaceMediaItem] = MappingProxyType(
             resource="gallery",
             table="gallery_items",
             fields=(
-                MediaField(("thumbnail_url",), _ONE, "thumbnail_filename"),
-                MediaField(("url",), _ONE, "filename"),
+                MediaField(("thumbnail_url",), _ONE, "thumbnail_filename", empty=""),
+                MediaField(("url",), _ONE, "filename", empty=""),
             ),
             media_refs=True,
             file_hashes=True,
@@ -313,6 +316,56 @@ def item_media_urls(resource: str, obj: object) -> list[str]:
                 if url not in urls:
                     urls.append(url)
     return urls
+
+
+def replace_item_media[T](
+    resource: str, obj: T, rename: Callable[[str], str | None]
+) -> T:
+    """The domain object *obj* of *resource* with every file reference in
+    a registered field passed through *rename* (``dataclasses.replace``,
+    nested objects included). *rename* returning ``None`` drops the
+    reference: a ONE field takes its :attr:`~MediaField.empty` value, a
+    LIST loses the entry, a markdown body empties it — and the object
+    holding a :attr:`~MediaField.parent_requires` field is dropped whole
+    (as when it shows no file at all). A wire-only field (no attribute on
+    the object) is skipped."""
+    item = SPACE_MEDIA_ITEMS.get(resource)
+    if item is None:
+        return obj
+
+    def one(value: object) -> object:
+        return rename(value) if isinstance(value, str) and value else value
+
+    changes: dict[str, Any] = {}
+    for f in item.fields:
+        key = f.path[-1]
+        if len(f.path) == 2:
+            holder_key = f.path[0]
+            holder = changes.get(holder_key, getattr(obj, holder_key, None))
+            if holder is None:
+                continue
+            value = getattr(holder, key, None)
+            new = one(value)
+            if new is None and f.parent_requires:
+                changes[holder_key] = None
+            elif new is not value:
+                changes[holder_key] = replace(
+                    holder, **{key: new if new is not None else f.empty}
+                )
+            continue
+        if not hasattr(obj, key):
+            continue
+        value = getattr(obj, key)
+        if f.shape is FieldShape.ONE:
+            new = one(value)
+            changes[key] = new if new is not None else f.empty
+        elif f.shape is FieldShape.LIST:
+            if isinstance(value, (list, tuple)):
+                kept = [n for n in (one(v) for v in value) if n]
+                changes[key] = tuple(kept) if isinstance(value, tuple) else kept
+        elif isinstance(value, str) and value:
+            changes[key] = rewrite_page_body_media(value, lambda u: rename(u) or "")
+    return replace(obj, **changes) if changes else obj  # type: ignore[type-var]
 
 
 def rename_item_media(
@@ -522,6 +575,7 @@ __all__ = [
     "page_body_media_refs",
     "rename_item_media",
     "rename_moderation_payload",
+    "replace_item_media",
     "rewrite_page_body_media",
     "sanitize_item_media",
     "sanitize_moderation_payload",

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -119,6 +120,7 @@ from ...domain.space import (
     validate_zone_name,
     validate_zone_radius,
 )
+from ...domain.space_media_fields import item_media_urls
 from ...domain.space_media_ref import (
     MAX_PAGE_FILES,
     MEDIA_REFS_FIELD,
@@ -349,9 +351,9 @@ class SpaceContentInboundHandlers:
         event: FederationEvent,
         space_id: str,
         item_id: str,
-        urls: list[str | None],
+        urls: Sequence[str | None],
         *,
-        held: list[str | None] | None = None,
+        held: Sequence[str | None] | None = None,
     ) -> SpaceMediaLocalization:
         """This household's names for an item's files, as delivered by the
         envelope's authenticated sender: its direct names
@@ -1786,10 +1788,14 @@ class SpaceContentInboundHandlers:
             event,
             space_id,
             ev.id,
-            [ev.cover_url],
-            held=[existing[1].cover_url] if existing is not None else None,
+            item_media_urls("calendar", ev),
+            held=(
+                item_media_urls("calendar", existing[1])
+                if existing is not None
+                else None
+            ),
         )
-        ev = replace(ev, cover_url=media.url(ev.cover_url))
+        ev = media.item("calendar", ev)
         if not await self._calendar_repo.save_event(ev, space_id=space_id):
             log_cross_space_refusal(
                 event, space_id=space_id, what="calendar event", row_id=event_id
@@ -2776,13 +2782,9 @@ class SpaceContentInboundHandlers:
             return
         is_new = await self._gallery_repo.get_item(item_id) is None
         media = await self._localize_media(
-            event, space_id, item.id, [item.thumbnail_url, item.url]
+            event, space_id, item.id, item_media_urls("gallery", item)
         )
-        item = replace(
-            item,
-            url=media.url(item.url) or "",
-            thumbnail_url=media.url(item.thumbnail_url) or "",
-        )
+        item = media.item("gallery", item)
         try:
             if not await self._gallery_repo.create_item_in_space(
                 item, space_id=space_id
@@ -2961,7 +2963,7 @@ class SpaceContentInboundHandlers:
         # Same rule as ``GalleryService.delete_item``: the files go unless
         # another row still names them.
         await unlink_unreferenced(
-            self._media_dir, self._media_refs, [item.url, item.thumbnail_url]
+            self._media_dir, self._media_refs, item_media_urls("gallery", item)
         )
         await self._bus.publish(
             GalleryItemDeleted(
@@ -3467,13 +3469,10 @@ class SpaceContentInboundHandlers:
         names = self._media_names.localize(
             space_id,
             event.from_instance,
-            list(listing.image_urls),
+            item_media_urls("bazaar", listing),
             hashes=parse_file_hashes(event.payload),
         )
-        listing = replace(
-            listing,
-            image_urls=tuple(names.url(u) or u for u in listing.image_urls),
-        )
+        listing = names.item("bazaar", listing)
         try:
             if not await self._bazaar_repo.save_listing(listing, space_id=space_id):
                 # The wrapper post is not in this space (or has not landed

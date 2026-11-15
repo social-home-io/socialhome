@@ -5,7 +5,6 @@ schedule polls.
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +20,7 @@ from ....domain.calendar import (
 from ....domain.events import CalendarEventDeleted
 from ....domain.federation import FederationEvent
 from ....domain.space_item import stored_stamp
+from ....domain.space_media_fields import item_media_urls
 from ....services.calendar_service import (
     calendar_event_too_large,
     log_calendar_event_not_stored,
@@ -87,17 +87,17 @@ class CalendarMixin(ReceiverBase):
                 space_id,
                 r,
                 event.id,
-                [event.cover_url] if event.cover_url else [],
+                item_media_urls("calendar", event),
                 provider=provider,
                 takes_descriptor=held_event is None or from_host,
                 held=(
-                    [held_event[1].cover_url]
+                    item_media_urls("calendar", held_event[1])
                     if held_event is not None and held_event[1].cover_url
                     else None
                 ),
                 from_host=from_host,
             )
-            event = replace(event, cover_url=media.url(event.cover_url))
+            event = media.item("calendar", event)
             if not await self._space_calendar_repo.save_event(event, space_id=space_id):
                 _log_sync_refusal("calendar event", event.id, space_id)
                 continue
