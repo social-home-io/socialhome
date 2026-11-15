@@ -6533,7 +6533,8 @@ async def test_a_chunk_over_the_route_cap_goes_json():
 @pytest.mark.parametrize(
     "change",
     [
-        {"source": InstanceSource.SPACE_SESSION},
+        # A seat as the redeem stores it: no inbox address.
+        {"source": InstanceSource.SPACE_SESSION, "remote_inbox_url": ""},
         {"remote_inbox_url": ""},
         {"status": PairingStatus.PENDING_SENT},
     ],

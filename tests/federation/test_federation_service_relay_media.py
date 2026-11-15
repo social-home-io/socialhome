@@ -14,6 +14,7 @@ from socialhome.crypto import generate_x25519_keypair
 from socialhome.domain.federation import (
     DELIVERY_ERROR_RELAY_CHUNK_RESIZE,
     DELIVERY_ERROR_RELAY_THROTTLED,
+    SPACE_SESSION_ALLOWED_EVENT_TYPES,
     FederationEventType,
     InstanceSource,
 )
@@ -168,6 +169,28 @@ async def test_a_throttled_relay_frame_is_waitable_and_never_goes_json():
     assert not result.ok
     assert result.error == DELIVERY_ERROR_RELAY_THROTTLED
     assert p.cap.json_envelopes == []
+
+
+async def test_a_seat_never_gets_a_direct_https_media_post():
+    """A household seated from an invite link has no inbox address (the
+    redeem stores ``remote_inbox_url=""`` and a seat may not send
+    ``URL_UPDATED``): with its relay unable to take frames, a chunk
+    goes as a JSON envelope through the relay — never a binary POST to the
+    household itself."""
+    p = _relay_paired()
+    p.cap.relay_ready = False
+    posts: list = []
+
+    async def _https(**kw):
+        posts.append(kw)
+        return True
+
+    p.cap.send_media_https = _https
+    result = await _send(p, os.urandom(RELAY_JSON_CHUNK_BYTES))
+    assert result.ok
+    assert posts == [] and p.cap.relay_media == []
+    assert len(p.cap.json_envelopes) == 1
+    assert FederationEventType.URL_UPDATED not in (SPACE_SESSION_ALLOWED_EVENT_TYPES)
 
 
 async def test_a_paired_direct_peer_never_uses_the_relay_leg():
