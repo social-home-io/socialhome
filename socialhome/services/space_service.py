@@ -1913,7 +1913,18 @@ class SpaceService(
                 heard[0] if heard is not None and heard[0] <= current else None
             ),
         )
+        # Never empty for a space we host: its owner is always a local seat
+        # here, and live seats always ship (``known_version`` drops only
+        # removals). Part 0 carries the extras below (writer cert / key,
+        # channel grant) — a refusal-only household would otherwise never
+        # get them, so an empty roster is a bug worth seeing, not a no-op.
         if not entries:
+            log.warning(
+                "roster-snapshot: no entries for %s in hosted space %s — "
+                "its credentials did not go out",
+                to_instance_id,
+                space.id,
+            )
             return False
         # Sent with the roster, to this one household: its own credentials.
         extras: dict = {}

@@ -8560,6 +8560,27 @@ async def test_a_stale_echo_gets_every_live_seat_again(stack):
     assert u0["payload"]["member_version"] <= current
 
 
+async def test_a_snapshot_always_carries_the_owners_seat(stack):
+    """Review (d): the owner is a local seat of every space we host, so a
+    snapshot — even to the only member household, with an echo that drops
+    every removal — is never empty and part 0 can carry its credentials."""
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    current = (await stack.space_repo.get(space.id)).roster_sequence
+    certs = MagicMock()
+    certs.cert_for_peer = AsyncMock(return_value={"epoch": 7})
+    certs.writer_key_for_peer = AsyncMock(return_value=None)
+    certs.channel_grant_for_peer = AsyncMock(return_value=None)
+    stack.space_svc._writer_certs = certs
+    await stack.space_svc.on_sync_begin_roster_echo(
+        _begin_with_echo(
+            space.id, "peer-0", {"roster_version": current, "cert_epoch": 6}
+        )
+    )
+    assert await stack.space_svc.send_hosted_roster_snapshots() == 1
+    (_to, entries) = _snapshots(fed, to="peer-0")[-1]
+    assert any(e["payload"]["role"] == "owner" for e in entries)
+
+
 async def test_a_stale_echo_or_a_missing_writer_cert_is_sent_again(stack):
     space, _fed, _remote, _insts = await _members_with_households(stack, 1)
     _past_restart_grace(stack)
