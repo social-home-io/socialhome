@@ -2138,6 +2138,7 @@ class SpaceService(
         self._roster_ticks += 1
         grace = self._roster_ticks <= ROSTER_ECHO_GRACE_TICKS
         sent = 0
+        live: set[tuple[str, str]] = set()
         for space in await self._spaces.list_all():
             if space.owner_instance_id != own:
                 continue
@@ -2145,6 +2146,7 @@ class SpaceService(
                 if inst == own:
                     continue
                 key = (space.id, inst)
+                live.add(key)
                 if (
                     grace
                     and key not in self._roster_heard
@@ -2155,6 +2157,12 @@ class SpaceService(
                     space.id, to_instance_id=inst, periodic=True
                 ):
                     sent += 1
+        # The echo memory follows the roster: a household that left a space
+        # (or a space we no longer host) is forgotten here — one place, not
+        # every path that ends a seat.
+        for stale in [k for k in self._roster_heard if k not in live]:
+            del self._roster_heard[stale]
+        self._roster_unechoed &= live
         return sent
 
     async def on_sync_begin_roster_echo(self, event: FederationEvent) -> None:

@@ -8560,6 +8560,27 @@ async def test_a_stale_echo_gets_every_live_seat_again(stack):
     assert u0["payload"]["member_version"] <= current
 
 
+async def test_a_household_that_left_is_forgotten_by_the_echo_memory(stack):
+    """M1: the host's echo memory follows the roster — a household that left
+    the space (its ``space_instances`` row gone) is dropped on the next
+    tick, so neither map outlives a seat."""
+    space, _fed, _remote, insts = await _members_with_households(stack, 2)
+    current = (await stack.space_repo.get(space.id)).roster_sequence
+    await stack.space_svc.on_sync_begin_roster_echo(
+        _begin_with_echo(
+            space.id, insts[0], {"roster_version": current, "cert_epoch": None}
+        )
+    )
+    await stack.space_svc.on_sync_begin_roster_echo(
+        _begin_with_echo(space.id, insts[1], None)
+    )
+    await stack.space_repo.remove_space_instance(space.id, insts[0])
+    await stack.space_repo.remove_space_instance(space.id, insts[1])
+    await stack.space_svc.send_hosted_roster_snapshots()
+    assert stack.space_svc._roster_heard == {}
+    assert stack.space_svc._roster_unechoed == set()
+
+
 async def test_a_snapshot_always_carries_the_owners_seat(stack):
     """Review (d): the owner is a local seat of every space we host, so a
     snapshot — even to the only member household, with an echo that drops
