@@ -1559,12 +1559,15 @@ ONCE, with one small key wrap per mailbox. The GFS stores the body once and
 pushes it, with that mailbox's wrap, to each listed mailbox. Gated on
 `FederationCapability.MIN_FOR_MULTI_MAILBOX` (v_91, slug `multi_mailbox`)
 and the signed GFS capability `envelope_multi: {"max_recipients": 500}`.
-Not space-scoped, no sync-stream change.
+Not space-scoped, no sync-stream change. The sender judges a seat by its
+card mailbox, not its row's version: cards exist only from v_89 and no
+released household is in [v_89, v_91), so every seat holding one opens a
+multi frame.
 
 **What goes multi — one path.** `broadcast_to_space_members` computes
 every target's final payload as before (legacy / relay variants,
 `per_peer`, file maps). Targets that are mailbox seats (`space_session`
-rows with a card mailbox) at v_91, on a GFS that proves `envelope_multi`,
+rows with a card mailbox), on a GFS that proves `envelope_multi`,
 with no deferred mesh queue and an event type in `MULTI_EVENT_TYPES` are
 grouped by ONE key: the normalized GFS URL and the payload content (key
 order aside, `OPT_SORT_KEYS`). Each group of two or more is written to the

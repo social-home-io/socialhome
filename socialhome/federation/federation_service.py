@@ -4028,15 +4028,14 @@ class FederationService:
         *event_type* to it (v_90) — the one eligibility rule of the broadcast
         and the outbox: an event a receiver takes in a multi frame
         (:data:`MULTI_EVENT_TYPES`), a household with no deferred mesh queue,
-        at :attr:`FederationCapability.MIN_FOR_MULTI_MAILBOX` or above (judged
-        from the row itself), a confirmed ``space_session`` seat whose
-        mailbox sits on a GFS of ours that proved ``envelope_multi``. *caps*
+        a confirmed ``space_session`` seat whose mailbox (its card: v_89+,
+        so every household holding one opens a multi frame) sits on a GFS of
+        ours that proved ``envelope_multi``. *caps*
         caches each GFS's capability for the pass. ``None`` → per recipient."""
         assert self._transport is not None
         if (
             event_type not in MULTI_EVENT_TYPES
             or row.id in self._deferred_mesh_queues
-            or int(row.proto_version) < FederationCapability.MIN_FOR_MULTI_MAILBOX
             or row.status is not PairingStatus.CONFIRMED
             or row.source is not InstanceSource.SPACE_SESSION
         ):
