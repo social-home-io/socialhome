@@ -2278,3 +2278,38 @@ async def test_the_owner_never_shares_a_seed_with_a_member_echoing_no_seed(world
     }
     await _echo_to_owner(w, sender=w.m_id, echo=echo)
     assert not w.outbound(event_type=FET.SPACE_ADMIN_KEY_SHARE)
+
+
+# ── D5 (owner decision 2026-11-15): only the owner makes admins ──────────
+
+
+async def test_owner_refuses_gossip_reasserting_an_admin_seat(world):
+    """An admin a delegated admin kicked while the owner was offline must
+    not outrun the kick by re-asserting its own seat at a higher version:
+    on the space it hosts, the owner takes no seed-signed gossip that keeps
+    or sets an ADMIN seat — only the owner grants admin. The later kick
+    then lands and the key rotates."""
+    w = world
+    rm = w.o_app[space_remote_member_repo_key]
+    before = await rm.get(w.space_id, B_ID, "ub")
+    assert before.role == "admin"
+    et, p = _roster(w, w.k1_seed, user="ub", inst=B_ID, role="admin", version=10**6)
+    await _deliver(w.o_app, sender=B_ID, event_type=et, payload=p)
+    after = await rm.get(w.space_id, B_ID, "ub")
+    assert after.member_version == before.member_version
+    # A's kick of B (seed-signed, a version above B's own row) still lands
+    # and retires the key B holds.
+    et, p = _roster(
+        w, w.k1_seed, user="ub", inst=B_ID, role="admin", version=1000, left=True
+    )
+    await _deliver(w.o_app, sender=A_ID, event_type=et, payload=p)
+    assert (await w.o_space()).authority_key_epoch > 0
+
+
+async def test_owner_still_takes_gossip_lowering_an_admin_seat(world):
+    w = world
+    rm = w.o_app[space_remote_member_repo_key]
+    et, p = _roster(w, w.k1_seed, user="ub", inst=B_ID, role="member", version=1000)
+    await _deliver(w.o_app, sender=A_ID, event_type=et, payload=p)
+    assert (await rm.get(w.space_id, B_ID, "ub")).role == "member"
+    assert (await w.o_space()).authority_key_epoch > 0

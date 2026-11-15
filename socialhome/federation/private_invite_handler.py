@@ -1837,6 +1837,23 @@ class PrivateSpaceInviteHandler:
                     role,
                 )
                 return
+            if role == SpaceRole.ADMIN.value:
+                # SECURITY (D5, owner decision 2026-11-15): only the owner
+                # makes admins, so on the space we host no seed-signed gossip
+                # keeps or sets an ADMIN seat either. Otherwise an admin a
+                # delegated admin kicked while we were offline could re-assert
+                # its own seat at a higher version, turn the kick stale here,
+                # and never be rotated out. A JOINED for an admin seat changes
+                # nothing we need (the owner's own writes are the truth).
+                log.warning(
+                    "roster-gossip %s for %s would keep %s@%s an admin on the "
+                    "space we host — refused (only the owner grants admin)",
+                    event_type,
+                    space_id,
+                    user_id,
+                    instance_id,
+                )
+                return
         applied = await self._remote_members.apply_member_event(
             space_id=space_id,
             user_id=user_id,
