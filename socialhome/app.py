@@ -5478,7 +5478,9 @@ def create_app(config: Config | None = None) -> web.Application:
         space_cal_service.attach_media_gfs(space_media_uploader)
         fed.gallery_federation_outbound.attach_media_gfs(space_media_uploader)
         fed.page_federation_outbound.attach_media_gfs(space_media_uploader)
-        # …and no SPACE_MEDIA_BLOB push to them: the relay refuses the bytes.
+        # …and the outbox skips a SPACE_MEDIA_BLOB push to one of them only
+        # while its GFS is known to hold the file (every member is pushed
+        # the rest, through the relay like any envelope).
         space_media_sync_service.attach_relay_readers(space_media_uploader)
         fed.inbound_service.attach_gfs_media(space_media_fetcher)
         # v_82: a page's files keep the names the host's page shows.
