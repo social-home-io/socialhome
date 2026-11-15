@@ -157,6 +157,8 @@ class HostHop:
                     retain=False,
                     # A carded target (cards are minted from v_89) reads a
                     # raw sealed body (a sync chunk's ciphertext unwrapped).
+                    # A card is self-signed: one whose version claims less
+                    # than v_87 only hurts its own household's reads.
                     raw_body_ok=True,
                     # The host's leg to the target is a GFS relay frame.
                     relay_frame_leg=True,
