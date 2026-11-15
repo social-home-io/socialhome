@@ -417,6 +417,7 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ("feed_posts", "media_url", "one", _HOUSEHOLD),
     ("feed_posts", "image_urls_json", "list", _HOUSEHOLD),
     ("feed_posts", "link_preview_json", "json:$.thumbnail_url", _HOUSEHOLD),
+    ("feed_posts", "file_meta_json", "json:$.url", _HOUSEHOLD),
     ("post_comments", "media_url", "one", _HOUSEHOLD),
     (
         "highlight_frames",
@@ -674,6 +675,13 @@ class AbstractMediaReferenceRepo(Protocol):
     ) -> set[str]:
         """Those of *names* that are GFS reader copies (``sg-``) of items
         of space *space_id* (its ``space_media_refs`` rows)."""
+        ...
+
+    async def forget_freed_gfs_copies(
+        self, space_id: str, names: Iterable[str]
+    ) -> None:
+        """Drop the ``space_media_refs`` row of each of *names* (GFS reader
+        copies of space *space_id*) that no row references any more."""
         ...
 
     async def content_names_of_item(self, item_id: str) -> list[str]:
@@ -1127,6 +1135,20 @@ class SqliteMediaReferenceRepo:
         )
         return {str(r["n"]) for r in rows}
 
+    async def forget_freed_gfs_copies(
+        self, space_id: str, names: Iterable[str]
+    ) -> None:
+        """Drop the ``space_media_refs`` row of each of *names* — GFS
+        reader copies (``sg-``) of space *space_id* — that no row
+        references any more (its file was freed with the item that showed
+        it); one still shown keeps its row."""
+        for name in sorted({n for n in names if is_gfs_space_media_name(n)}):
+            if space_id and not await self._is_referenced(name):
+                await self._db.enqueue(
+                    "DELETE FROM space_media_refs WHERE space_id = ? AND local_name = ?",
+                    (space_id, name),
+                )
+
     async def content_names_of_item(self, item_id: str) -> list[str]:
         """The content-addressed (``sc-``, v_85) files item *item_id* shows
         here, each once, in source order."""
@@ -1148,10 +1170,13 @@ class SqliteMediaReferenceRepo:
         return out
 
     async def is_referenced(self, basename: str) -> bool:
-        """``True`` when any row still points at the file ``basename``
-        (a page-scoped ``sp-`` name: when a space page here shows its file)."""
-        if basename.startswith(SPACE_PAGE_MEDIA_PREFIX):
-            return basename in await self._page_scoped_names()
+        """``True`` when any row still points at the file ``basename`` —
+        one rule for every name: a row naming it (any table), or, for a
+        page-scoped ``sp-`` copy, a space page here showing its file."""
+        if basename.startswith(SPACE_PAGE_MEDIA_PREFIX) and (
+            basename in await self._page_scoped_names()
+        ):
+            return True
         return await self._is_referenced(basename)
 
     async def _is_referenced(self, basename: str) -> bool:

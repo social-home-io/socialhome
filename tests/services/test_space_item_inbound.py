@@ -823,3 +823,30 @@ async def test_an_authority_comment_removal_before_its_post_awaits_it(env):
             space=await _space(env), removal=removal
         )
     assert (wait.value.kind, wait.value.parent_id) == (PARENT_POST, "p-late")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "dm-" + "ab" * 20 + ".webp",  # a DM attachment
+        "gm-" + "ab" * 20 + ".webp",  # GFS moment media
+        "sg-" + "ab" * 20 + ".webp",  # another reader copy
+        "sc-" + "ab" * 20 + ".webp",  # a raw content name, no hash
+    ],
+)
+async def test_a_relayed_comment_never_keeps_a_reserved_picture(env, name):
+    """The GFS comment path keeps a picture by the same rule as the paired
+    live path and §25.6 sync (``comment_media_ref``): a name another
+    receiving path owns, or a raw ``sc-`` content name, is dropped."""
+    cid = _cid()
+    image = _inner(
+        "comment",
+        cid,
+        env["post_id"],
+        comment_type="image",
+        media_url=f"api/media/{name}",
+        created_at=_ts(0),
+    )
+    assert await _apply(env, "comment", image)
+    stored = await env["posts"].get_comment(cid)
+    assert stored is not None and stored.media_url is None

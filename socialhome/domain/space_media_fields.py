@@ -120,7 +120,10 @@ class SpaceMediaItem:
     *moderation_feature*: the space moderation feature whose queue payloads
     are items of this type (``None``: not reviewed). *moderation_patch*: an
     edit's queue payload carries the changed fields under ``patch`` (read
-    instead of the payload when it is a dict). *attached*: items nested in
+    instead of the payload when it is a dict). *moderation_mirrors*: keys
+    of an edit's payload holding a reviewer's copy of the patch's values
+    (a calendar edit's ``proposed``): their file fields always follow the
+    patch — never a file of their own. *attached*: items nested in
     a moderation payload — ``(key path, resource)`` (a post's bazaar
     listing at ``attachments.bazaar``). *only_when*: ``(key, value)`` — only
     a record whose *key* is *value* (absent counts as *value*) shows files
@@ -134,6 +137,7 @@ class SpaceMediaItem:
     file_hashes: bool
     moderation_feature: str | None = None
     moderation_patch: bool = False
+    moderation_mirrors: tuple[str, ...] = ()
     attached: tuple[tuple[tuple[str, ...], str], ...] = ()
     only_when: tuple[str, str] | None = None
     max_files: int | None = None
@@ -193,6 +197,7 @@ SPACE_MEDIA_ITEMS: Mapping[str, SpaceMediaItem] = MappingProxyType(
             file_hashes=True,
             moderation_feature="calendar",
             moderation_patch=True,
+            moderation_mirrors=("proposed",),
         ),
         "gallery": SpaceMediaItem(
             resource="gallery",
@@ -485,6 +490,24 @@ def _with_at(
     return {**payload, path[0]: _with_at(inner, path[1:], value)}
 
 
+def _mirrored(item: SpaceMediaItem, payload: dict[str, Any]) -> dict[str, Any]:
+    """*payload* with each :attr:`~SpaceMediaItem.moderation_mirrors` dict's
+    top-level file fields set to the (already sanitized / renamed) patch's
+    — dropped where the patch does not name the field."""
+    patch = payload.get("patch")
+    if not isinstance(patch, dict):
+        return payload
+    keys = [f.path[0] for f in item.fields if len(f.path) == 1]
+    for mirror_key in item.moderation_mirrors:
+        mirror = payload.get(mirror_key)
+        if not isinstance(mirror, dict):
+            continue
+        mirror = {k: v for k, v in mirror.items() if k not in keys}
+        mirror.update({k: patch[k] for k in keys if k in patch})
+        payload = {**payload, mirror_key: mirror}
+    return payload
+
+
 def moderation_media_fields(
     feature: str, payload: Mapping[str, Any]
 ) -> Mapping[str, Any]:
@@ -525,6 +548,7 @@ def rename_moderation_payload(
     patch = out.get("patch")
     if item.moderation_patch and isinstance(patch, dict):
         out["patch"] = rename_item_media(item.resource, patch, rename)
+        out = _mirrored(item, out)
     else:
         out = rename_item_media(item.resource, out, rename)
     for path, resource, node in _attached_payloads(item, out):
@@ -552,6 +576,7 @@ def sanitize_moderation_payload(
         out["patch"] = sanitize_item_media(
             item.resource, patch, keep, fill_absent=False
         )
+        out = _mirrored(item, out)
     for path, resource, node in _attached_payloads(item, out):
         out = _with_at(
             out, path, sanitize_item_media(resource, node, keep, fill_absent=True)

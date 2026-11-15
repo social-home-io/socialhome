@@ -1549,3 +1549,42 @@ async def test_a_household_feed_posts_attachment_is_never_swept(db):
     assert "feeddoc.pdf" in referenced
     assert await repo.is_referenced("feeddoc.pdf")
     assert "gonedoc.pdf" not in referenced
+
+
+async def test_a_page_copy_another_row_names_is_referenced(db):
+    """``is_referenced`` has one rule for every name: a page-scoped
+    (``sp-``) copy no page shows is still referenced while a feed post
+    (or any other row) names it."""
+    await _seed_parents(db)
+    name = space_page_media_name("sp1", "x.webp")
+    repo = SqliteMediaReferenceRepo(db)
+    assert not await repo.is_referenced(name)
+    await db.enqueue(
+        "INSERT INTO feed_posts(id, author, type, media_url)"
+        " VALUES('f9', 'u1', 'image', ?)",
+        (f"api/media/{name}",),
+    )
+    assert await repo.is_referenced(name)
+
+
+async def test_a_feed_attachment_reused_in_a_space_is_not_confined_to_it(db):
+    """A household feed post's attachment (``file_meta_json`` ``$.url``)
+    named again in a space post is not the space's file: never
+    ``confined_to_space`` (so never sealed into the GFS media cache), and
+    ``may_reference`` sees the feed row (a household person may name it)."""
+    await _two_spaces(db)
+    await db.enqueue(
+        "INSERT INTO feed_posts(id, author, type, file_meta_json)"
+        " VALUES('ff', 'u1', 'file', ?)",
+        ('{"url": "api/media/feedfile.pdf"}',),
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    # Only the feed names it: referenced, and open to the household.
+    assert await repo.may_reference("feedfile.pdf", "u1")
+    assert not await repo.may_reference("feedfile.pdf", "nobody")
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, image_urls_json)"
+        " VALUES('sp9', 'sp1', 'u1', 'image', ?)",
+        ('["api/media/feedfile.pdf"]',),
+    )
+    assert not await repo.confined_to_space("feedfile.pdf", "sp1")

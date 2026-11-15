@@ -5,6 +5,7 @@ as not one."""
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import pathlib
 import re
@@ -573,34 +574,136 @@ def test_replace_item_media_drop_shapes() -> None:
 
 # ─── Source tripwire: no hand-written per-type file list ─────────────────
 
-#: The shapes a hand-written list of a space item's files took before the
-#: registry (a gallery item's two files, a cover in a one-element list, a
-#: comment's picture …). A consumer reads ``item_media_urls`` /
-#: ``replace_item_media`` / ``SpaceMediaLocalization.item`` instead.
-_HAND_LIST = re.compile(
-    r"\(\w+\.thumbnail_url, \w+\.url\)|\(\w+\.url, \w+\.thumbnail_url\)"
-    r"|\[\w+\.url, \w+\.thumbnail_url\]|\[\w+\.thumbnail_url, \w+\.url\]"
-    r"|\[\w+\.cover_url\]|\[\w+(\[1\])?\.cover_url\] if"
-    r"|\[\w+\.media_url\] if \w+\.media_url"
+#: Registered media field names reached in one step (``post.media_url``) …
+_MEDIA_ATTRS = frozenset(
+    f.path[0]
+    for item in SPACE_MEDIA_ITEMS.values()
+    for f in item.fields
+    if len(f.path) == 1 and f.shape is not FieldShape.MARKDOWN and f.path[0] != "url"
+)
+#: … and through their holder (``post.file_meta.url``).
+_NESTED_MEDIA_ATTRS = frozenset(
+    (f.path[0], f.path[1])
+    for item in SPACE_MEDIA_ITEMS.values()
+    for f in item.fields
+    if len(f.path) == 2
 )
 
-#: Hand-written lists that are NOT a space item's files — with the reason.
-HAND_LIST_EXCLUSIONS: dict[str, str] = {
+
+def _is_media_attr(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Attribute):
+        return False
+    if node.attr in _MEDIA_ATTRS:
+        return True
+    holder = node.value
+    return isinstance(holder, ast.Attribute) and (
+        (holder.attr, node.attr) in _NESTED_MEDIA_ATTRS
+    )
+
+
+def hand_list_hits(tree: ast.AST) -> list[int]:
+    """Lines where a registered media field is read into a list, tuple or
+    set display (an element or a ``*`` element) or a ``list()`` /
+    ``tuple()`` / ``set()`` call — the shape of a hand-written per-type
+    file list."""
+    out: list[int] = []
+    for node in ast.walk(tree):
+        elts: list[ast.expr] = []
+        if isinstance(node, ast.List | ast.Tuple | ast.Set):
+            elts = list(node.elts)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in ("list", "tuple", "set")
+        ):
+            elts = list(node.args)
+        for e in elts:
+            target = e.value if isinstance(e, ast.Starred) else e
+            if _is_media_attr(target):
+                out.append(target.lineno)
+    return out
+
+
+#: Modules allowed to read media fields into a collection — EXACT counts,
+#: so a new hand list in one of them fails too — each with its reason.
+HAND_LIST_ALLOWED: dict[str, tuple[int, str]] = {
+    # SQL parameter tuples: each column written once, not a file list.
+    "socialhome/repositories/bazaar_repo.py": (2, "SQL parameters (+ JSON column)"),
+    "socialhome/repositories/calendar_repo.py": (2, "SQL parameters"),
+    "socialhome/repositories/conversation_repo.py": (2, "SQL parameters (DMs)"),
+    "socialhome/repositories/highlight_repo.py": (2, "SQL parameters (household)"),
+    "socialhome/repositories/moment_repo.py": (1, "SQL parameters (household)"),
+    "socialhome/repositories/page_repo.py": (4, "SQL parameters"),
+    "socialhome/repositories/post_repo.py": (2, "SQL parameters (household feed)"),
+    "socialhome/repositories/space_post_repo.py": (3, "SQL parameters"),
+    "socialhome/global_server/repositories.py": (1, "the GFS's own space card"),
+    # One wire / API field copied as a list: serialisation, not a file list.
+    "socialhome/federation/sync/space/exporters/bazaar.py": (1, "a record field"),
+    "socialhome/routes/bazaar.py": (1, "an API field"),
+    "socialhome/services/bazaar_outbound.py": (1, "a wire field"),
+    "socialhome/services/space_post_moderation.py": (1, "a queue payload field"),
+    "socialhome/services/space_post_outbound.py": (1, "a wire field"),
+    "socialhome/services/space_public_author.py": (1, "the signed v_25 inner"),
+    "socialhome/services/space_public_authority.py": (1, "the signed v_25 inner"),
+    # Household items (not space items): their own one-file deletes.
+    "socialhome/services/dm_service.py": (1, "a DM's attachment"),
+    "socialhome/services/highlight_service.py": (1, "a highlight frame"),
+    "socialhome/services/moment_service.py": (1, "a moment"),
+    "socialhome/services/feed_service.py": (2, "a household feed post"),
+    # Page version bodies (title, content, cover): compared / returned as
+    # a version, never a file list.
+    "socialhome/services/page_conflict_service.py": (15, "page version bodies"),
+    "socialhome/federation/sync/space/provider.py": (
+        1,
+        "page history (cover, content) pairs for recent_history_files",
+    ),
     "socialhome/services/gallery_share_service.py": (
-        "a share's fresh file copies (``_Copy``: feed post, DM or space "
-        "item alike) — not a stored space item's fields"
+        1,
+        "a share's fresh file copies (``_Copy``), not a space item's fields",
     ),
 }
 
 
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "media = [post.media_url, *post.image_urls]",
+        "urls = list(listing.image_urls)",
+        "media = [post.media_url, post.link_preview.thumbnail_url if x else None]",
+        "names = {item.url, item.thumbnail_url}",
+        "urls = tuple(x.image_urls)",
+        "urls = [*a.image_urls]",
+        "urls = [post.file_meta.url]",
+        "urls = [ev.cover_url] if ev.cover_url else []",
+    ],
+)
+def test_the_hand_list_scan_flags_each_shape(shape: str) -> None:
+    assert hand_list_hits(ast.parse(shape))
+
+
+def test_the_hand_list_scan_ignores_a_registry_read() -> None:
+    src = "urls = item_media_urls('posts', post)\nx = post.media_url\n"
+    assert hand_list_hits(ast.parse(src)) == []
+
+
 def test_no_hand_written_space_item_file_list() -> None:
     root = pathlib.Path(__file__).resolve().parents[2]
-    hits = []
+    found: dict[str, list[int]] = {}
     for path in sorted((root / "socialhome").rglob("*.py")):
         rel = path.relative_to(root).as_posix()
-        if rel in HAND_LIST_EXCLUSIONS or rel.endswith("space_media_fields.py"):
+        if rel.endswith("space_media_fields.py"):
             continue
-        for n, line in enumerate(path.read_text().splitlines(), 1):
-            if _HAND_LIST.search(line):
-                hits.append(f"{rel}:{n}: {line.strip()}")
-    assert not hits, "route through the space media-field registry:\n" + "\n".join(hits)
+        lines = hand_list_hits(ast.parse(path.read_text()))
+        if lines:
+            found[rel] = sorted(lines)
+    unexpected = {
+        rel: lines
+        for rel, lines in found.items()
+        if len(lines) != HAND_LIST_ALLOWED.get(rel, (0, ""))[0]
+    }
+    stale = sorted(set(HAND_LIST_ALLOWED) - set(found))
+    assert not unexpected, (
+        "route through the space media-field registry (item_media_urls / "
+        f"replace_item_media), or allow-list with a reason: {unexpected}"
+    )
+    assert not stale, f"allow-listed but no longer found: {stale}"

@@ -8564,6 +8564,9 @@ class SpaceService(
         # so a file goes only when no other row (any space, feed, DM,
         # gallery, …) still points at it.
         await unlink_unreferenced(self._media_dir, self._media_refs, media)
+        if copies and self._media_refs is not None:
+            # A freed reader copy's descriptor row goes too.
+            await self._media_refs.forget_freed_gfs_copies(space_id, copies)
 
     async def add_reaction(
         self,

@@ -6,6 +6,7 @@ import pathlib
 
 import pytest
 
+from socialhome.domain.space_media_ref import space_page_media_name
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.space_purge import purge_space_and_media
@@ -188,3 +189,43 @@ async def test_purge_never_frees_a_reserved_name_a_legacy_row_holds(db, tmp_path
     assert (tmp_path / _DM).exists()
     assert not (tmp_path / "own.webp").exists()
     assert removed == 1
+
+
+@pytest.mark.parametrize("pages", [1, 12])
+async def test_purge_keeps_a_page_copy_another_row_still_shows(db, tmp_path, pages):
+    """A member household's page-scoped (``sp-``) copy is purge material
+    only when NO row outside the purged space shows it — a feed post
+    naming it keeps it, whether the purge checks names one by one (≤ 8
+    files) or reads the whole reference set (> 8)."""
+    await db.enqueue(
+        "INSERT INTO users(user_id, username, display_name) VALUES('u1', 'u1', 'U')"
+    )
+    # Hosted elsewhere: this household is a member.
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp1', 'S', 'host', 'u1', 'k')"
+    )
+    names = []
+    for i in range(pages):
+        await db.enqueue(
+            "INSERT INTO space_pages(id, space_id, title, created_by,"
+            " cover_image_url) VALUES(?, 'sp1', 'P', 'u1', ?)",
+            (f"pg{i}", f"api/media/cover{i}.webp"),
+        )
+        name = space_page_media_name("sp1", f"cover{i}.webp")
+        (tmp_path / name).write_bytes(b"x")
+        names.append(name)
+    shown = names[0]
+    await db.enqueue(
+        "INSERT INTO feed_posts(id, author, type, media_url)"
+        " VALUES('f1', 'u1', 'image', ?)",
+        (f"api/media/{shown}",),
+    )
+    await purge_space_and_media(
+        space_repo=SqliteSpaceRepo(db),
+        media_dir=tmp_path,
+        media_refs=SqliteMediaReferenceRepo(db),
+        space_id="sp1",
+    )
+    assert (tmp_path / shown).exists()
+    assert all(not (tmp_path / n).exists() for n in names[1:])
