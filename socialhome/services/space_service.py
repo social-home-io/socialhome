@@ -1646,6 +1646,7 @@ class SpaceService(
         space: Space,
         *,
         instance_id: str,
+        mint: bool = True,
     ) -> None:
         """Ship the space's Ed25519 signing seed to a REMOTE admin household
         (delegated-admin authority, v_22).
@@ -1737,7 +1738,14 @@ class SpaceService(
                 FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION,
             )
             return
-        seed = await self.ensure_space_seed(space.id)
+        # ``mint=False``: a caller holding the rotation's per-space lock must
+        # never re-mint a lost seed — that runs a rotation, which takes the
+        # same (non-re-entrant) lock.
+        seed = (
+            await self.ensure_space_seed(space.id)
+            if mint
+            else await self._spaces.get_space_seed(space.id)
+        )
         if seed is None:
             log.warning(
                 "delegated-admin: no signing seed available for space %s — "

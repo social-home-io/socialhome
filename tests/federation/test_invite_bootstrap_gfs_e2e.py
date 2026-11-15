@@ -2638,6 +2638,7 @@ async def test_the_host_hands_its_signing_seed_to_a_link_joined_admin(households
             "UPDATE spaces SET delegated_admin_authority=1 WHERE id=?", (space.id,)
         )
     await a.space_repo.set_role(space.id, a.user_id, "admin")
+    await b.remote_members.set_role(space.id, a.instance_id, a.user_id, "admin")
     await b.federation_repo.set_proto_version(a.instance_id, OURS)
     gfs.mailbox.clear()
 
@@ -2668,9 +2669,13 @@ async def test_a_link_joined_member_never_takes_the_seed(households, gfs):
         await h.db.enqueue(
             "UPDATE spaces SET delegated_admin_authority=1 WHERE id=?", (space.id,)
         )
+    # The host lists a's person as admin (a stale view, say) — a's own
+    # household does not: it refuses the seed.
+    await b.remote_members.set_role(space.id, a.instance_id, a.user_id, "admin")
     await b.federation_repo.set_proto_version(a.instance_id, OURS)
     await b.space_service.share_admin_signing_seed(
         await b.space_repo.get(space.id), instance_id=a.instance_id
     )
     await gfs.drain()
+    assert gfs.mailbox, "the share went out"
     assert await a.space_repo.get_space_seed(space.id) is None

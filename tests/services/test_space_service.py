@@ -12192,3 +12192,17 @@ def test_no_larger_holds_only_for_a_config_stored_over_the_limit():
     legacy = _cfg(description="o" * (_CFG_MAX + 5000))
     same = replace(legacy, name="Clux", config_sequence=99)
     assert _within(same, held=legacy, source="t") is same
+
+
+async def test_a_share_under_the_rotation_lock_never_mints_a_lost_seed(stack):
+    """``mint=False`` (the rotation's and the echo re-share's callers hold
+    the per-space rotation lock): a seed that went missing is NOT re-minted
+    — re-minting a rotated key runs a rotation, which would wait on that
+    same lock forever."""
+    space, fed = await _relay_admin_space(stack)
+    await stack.space_repo.clear_space_seed(space.id)
+    await stack.space_svc.share_admin_signing_seed(
+        space, instance_id="relay-peer", mint=False
+    )
+    assert _seed_shares(fed) == []
+    assert await stack.space_repo.get_space_seed(space.id) is None

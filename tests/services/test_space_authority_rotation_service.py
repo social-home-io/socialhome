@@ -449,7 +449,7 @@ async def test_post_restore_rotation_shares_no_seed_and_asks_the_owner(env):
     shared: list[str] = []
 
     class _Svc:
-        async def share_admin_signing_seed(self, space, *, instance_id):
+        async def share_admin_signing_seed(self, space, *, instance_id, mint=True):
             shared.append(instance_id)
 
         async def roster_snapshot_entries(self, space, *, seed, to_instance_id):
@@ -965,7 +965,7 @@ class _SeedSvc:
     def __init__(self):
         self.shared: list[str] = []
 
-    async def share_admin_signing_seed(self, space, *, instance_id):
+    async def share_admin_signing_seed(self, space, *, instance_id, mint=True):
         self.shared.append(instance_id)
 
     async def roster_snapshot_entries(self, space, *, seed, to_instance_id):
@@ -1279,7 +1279,7 @@ async def test_rotation_drops_every_queued_seed_share_before_sharing_again(env):
     await env.remote.set_role(SPACE, "v44", "u-v44", "admin")
 
     class _SpaceSvc:
-        async def share_admin_signing_seed(self, space, *, instance_id):
+        async def share_admin_signing_seed(self, space, *, instance_id, mint=True):
             await env.fed.send_with_mesh_fallback(
                 to_instance_id=instance_id,
                 event_type=FET.SPACE_ADMIN_KEY_SHARE,
@@ -1389,7 +1389,7 @@ async def test_the_owner_never_reshares_while_delegation_is_off(env):
     shared: list[str] = []
 
     class _SpaceSvc:
-        async def share_admin_signing_seed(self, space, *, instance_id):
+        async def share_admin_signing_seed(self, space, *, instance_id, mint=True):
             shared.append(instance_id)
 
     env.svc.attach_space_service(_SpaceSvc())
@@ -1410,7 +1410,7 @@ async def test_the_echo_reshare_runs_under_the_rotation_lock(env):
     seen: list[int] = []
 
     class _SpaceSvc:
-        async def share_admin_signing_seed(self, space, *, instance_id):
+        async def share_admin_signing_seed(self, space, *, instance_id, mint=True):
             seen.append(space.authority_key_epoch)
 
     env.svc.attach_space_service(_SpaceSvc())

@@ -587,7 +587,7 @@ class SpaceAuthorityRotationService:
             ):
                 for inst in await self._remote_members.list_admin_instances(space_id):
                     await self._space_service.share_admin_signing_seed(
-                        space, instance_id=inst
+                        space, instance_id=inst, mint=False
                     )
             await self._distribute(
                 space,
@@ -1099,12 +1099,20 @@ class SpaceAuthorityRotationService:
         same lock."""
         if self._space_service is None:
             return
+        if self._gfs is not None:
+            # Warm the D1 probe (a ``/gfs/info`` per listing GFS) outside the
+            # lock, so a revocation rotation never waits on the network
+            # behind this re-share; inside, the share reads the cached answer.
+            try:
+                await self._gfs.authority_key_revocable(space_id)
+            except Exception:
+                log.debug("seed re-share: D1 probe failed", exc_info=True)
         async with self._lock(space_id):
             space = await self._spaces.get(space_id)
-            if space is None or await self._spaces.get_space_seed(space_id) is None:
+            if space is None:
                 return
             await self._space_service.share_admin_signing_seed(
-                space, instance_id=instance_id
+                space, instance_id=instance_id, mint=False
             )
 
     def _spawn(self, coro, name: str) -> None:
