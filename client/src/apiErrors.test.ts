@@ -34,6 +34,30 @@ describe('apiErrorMessage — known codes', () => {
       .toBe('Your home is still converting a lot of videos. Try again later.')
   })
 
+  it('says a space item is too large, with the limit', () => {
+    expect(apiErrorMessage(413, '/api/spaces/s/pages', {
+      code: 'SPACE_ITEM_TOO_LARGE', detail: 'x', params: { max_kb: 475 },
+    })).toBe('This is too large to share with the space (at most 475 kB in total). Shorten it or split it up.')
+    // Without the limit: the server's own words.
+    expect(apiErrorMessage(413, '/api/spaces/s/pages', {
+      code: 'SPACE_ITEM_TOO_LARGE', detail: 'Too large.',
+    })).toBe('Too large.')
+  })
+
+  it('names the cap of a space name, an emoji and a calendar list', () => {
+    expect(apiErrorMessage(422, '/api/spaces', {
+      code: 'SPACE_NAME_TOO_LONG', detail: 'x', params: { max: 120 },
+    })).toBe('This name is too long — use at most 120 characters.')
+    expect(apiErrorMessage(422, '/api/spaces', { code: 'SPACE_EMOJI_TOO_LONG', detail: 'x' }))
+      .toBe('Pick a single emoji.')
+    expect(apiErrorMessage(422, '/api/spaces/s/calendar/events', {
+      code: 'CALENDAR_RRULE_INVALID', detail: 'x', params: { max: 512 },
+    })).toBe("This repeat setting can't be used. Choose daily, weekly, monthly or yearly.")
+    expect(apiErrorMessage(422, '/api/spaces/s/calendar/events', {
+      code: 'CALENDAR_ATTENDEES_INVALID', detail: 'x', params: { max: 1000 },
+    })).toBe("This guest list can't be saved. Invite at most 1000 people.")
+  })
+
   it('tells an app turned off by an admin from one that is not for this account', () => {
     expect(apiErrorMessage(403, '/api/apps/chess/store/k', {
       code: 'APP_NOT_ENABLED', detail: "App 'chess' is disabled",

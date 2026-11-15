@@ -32,7 +32,6 @@ from socialhome.federation.gfs_relay_transport import (
 from socialhome.federation.invite_token_redeem import BOOTSTRAP_INBOUND_WINDOW_S
 from socialhome.federation.keywrap_seal import UnsupportedKemSuite
 from socialhome.federation.media_envelope import (
-    MEDIA_HTTPS_EVENT_TYPES,
     build_media_envelope,
     encode_media_body,
 )
@@ -256,47 +255,13 @@ async def test_unknown_kem_suite_is_refused():
         await p.inbound.handle_frame({**frame, "body": bytes(body)})
 
 
-async def test_a_large_moderation_item_rides_one_relay_frame():
-    """A pending item too large for a JSON relay envelope (~191 KiB) goes to
-    a household seated from an invite link as ONE binary relay frame — the
-    existing v_87 frame, the existing event: the signed, sealed metadata
-    names the item, the bytes are its content. Sealed by the real sender,
-    opened by the real relay inbound and run through the whole §24.11 media
-    tail."""
+async def test_an_event_outside_the_seat_vocabulary_in_a_relay_frame_is_refused():
+    """A relay frame carries a media chunk or an event a household
+    behind a GFS may send at all — the framed-event tests are in
+    ``test_federation_service_relay_large_events``."""
     p = _relay_paired()
-
-    async def _record(event):
-        p.received.append(event)
-
-    p.svc_b._event_registry.register(
-        FederationEventType.SPACE_MODERATION_SUBMITTED, _record
-    )
-    body = orjson.dumps({"payload": {"content": os.urandom(125 * 1024).hex()}})
-    assert len(body) > RELAY_MAX_ENVELOPE_BYTES
-    result = await p.svc_a.send_media_chunk(
-        to_instance_id=p.b_id,
-        event_type=FederationEventType.SPACE_MODERATION_SUBMITTED,
-        payload={"space_id": _SPACE_ID, "item_id": "i-1"},
-        raw_chunk=body,
-        space_id=_SPACE_ID,
-        mesh_fallback=True,
-    )
-    assert result.ok and result.via == "gfs_relay"
-    [(header, sealed)] = p.cap.relay_media
-    res = await p.inbound.handle_frame(_relay_frame(p, header, sealed))
-    assert res == {"status": "ok"}
-    [event] = p.received
-    assert event.event_type is FederationEventType.SPACE_MODERATION_SUBMITTED
-    assert event.payload["item_id"] == "i-1" and event.media_bytes == body
-    # Only the relay frame takes it: the inbox's binary media route and the
-    # media channel stay media chunks only.
-    assert FederationEventType.SPACE_MODERATION_SUBMITTED not in MEDIA_HTTPS_EVENT_TYPES
-
-
-async def test_a_non_media_event_in_a_relay_frame_is_refused():
-    p = _relay_paired()
-    header, sealed = _frame(p, event_type=FederationEventType.SPACE_POST_CREATED)
-    with pytest.raises(ValueError):
+    header, sealed = _frame(p, event_type=FederationEventType.DM_MESSAGE)
+    with pytest.raises(ValueError, match="not allowed here"):
         await p.inbound.handle_frame(_relay_frame(p, header, sealed))
     assert p.received == []
 

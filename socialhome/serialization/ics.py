@@ -23,16 +23,21 @@ Limits:
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Iterable
 from datetime import UTC, date, datetime
 
 from ..domain.calendar import CalendarEvent, EventReminder
+from ..utils.rrule import is_rrule_text
 
 #: Conservative line-folding length per RFC 5545 §3.1 (max 75 octets).
 MAX_LINE = 75
 #: ``PRODID`` shipped on every emitted VCALENDAR. Acts as a tracer in
 #: support cases — calendar clients sometimes log the PRODID.
 PRODID = "-//Social Home//Calendar//EN"
+#: Control characters TEXT may not hold (RFC 5545 §3.3.11: all but HTAB),
+#: and the Unicode line / paragraph separators some clients break on.
+_CONTROL = re.compile("[\x00-\x08\x0a-\x1f\x7f\u2028\u2029]")
 
 
 def serialize_event(
@@ -113,8 +118,9 @@ def _event_block(
         lines.append(f"DESCRIPTION:{_escape(event.description)}")
     if event.location:
         lines.append(f"LOCATION:{_escape(event.location)}")
-    if event.rrule:
-        # The stored RRULE is already RFC 5545 — pass through verbatim.
+    if event.rrule and is_rrule_text(event.rrule):
+        # Only RECUR text goes out (never a line break or a ``:`` — a rule
+        # stored before the check could carry another property).
         lines.append(f"RRULE:{event.rrule}")
     if cancelled:
         lines.append("STATUS:CANCELLED")
@@ -145,14 +151,17 @@ def _d(value: datetime | date) -> str:
 
 
 def _escape(value: str) -> str:
-    """Per RFC 5545 §3.3.11 — escape backslash, comma, semicolon, newline."""
-    return (
+    """Per RFC 5545 §3.3.11 — escape backslash, comma, semicolon, newline;
+    a CR and every other control character (TEXT allows none but HTAB) is
+    dropped, so no user text can end its line and start a property."""
+    escaped = (
         value.replace("\\", "\\\\")
         .replace(",", "\\,")
         .replace(";", "\\;")
+        .replace("\r\n", "\n")
         .replace("\n", "\\n")
-        .replace("\r", "")
     )
+    return _CONTROL.sub("", escaped)
 
 
 def _fold(line: str) -> str:

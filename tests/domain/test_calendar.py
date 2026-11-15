@@ -7,6 +7,8 @@ from datetime import UTC, date, datetime
 import pytest
 
 from socialhome.domain.calendar import (
+    LOCATION_MAX_CHARS,
+    MAX_EVENT_ATTENDEES,
     Calendar,
     CalendarEvent,
     CalendarEventCopy,
@@ -16,9 +18,13 @@ from socialhome.domain.calendar import (
     DaySpan,
     RSVPStatus,
     all_day_covers,
+    calendar_record,
+    clean_attendees,
+    clean_location,
     is_occurrence_id,
     material_changes,
 )
+from socialhome.domain.errors import CalendarAttendeesInvalidError
 
 
 def test_calendar_construction():
@@ -284,3 +290,58 @@ def test_material_changes_are_what_people_coming_must_hear(after, expected):
 
 def test_still_coming_is_every_answer_but_declined():
     assert RSVPStatus.STILL_COMING == RSVPStatus.ALL - {RSVPStatus.DECLINED}
+
+
+def test_clean_attendees_keeps_each_id_once_in_order():
+    assert clean_attendees(["b", " a ", "b"]) == ("b", "a")
+    assert clean_attendees(None) == ()
+    assert clean_attendees(()) == ()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["u-1", b"u-1", {"u": 1}, [""], ["  "], [7], [None]],
+)
+def test_clean_attendees_refuses_where_a_person_saves(bad):
+    with pytest.raises(ValueError):
+        clean_attendees(bad)
+
+
+def test_clean_attendees_cap():
+    ids = [str(n) for n in range(MAX_EVENT_ATTENDEES)]
+    assert len(clean_attendees(ids)) == MAX_EVENT_ATTENDEES
+    with pytest.raises(CalendarAttendeesInvalidError):
+        clean_attendees([*ids, "one more"])
+    # Where a household receives: cut, not refused.
+    assert len(clean_attendees([*ids, "x"], strict=False)) == MAX_EVENT_ATTENDEES
+
+
+def test_clean_attendees_on_receive_drops_bad_entries():
+    assert clean_attendees(["", "u", 7, "u", "  "], strict=False) == ("u",)
+    assert clean_attendees("u-1", strict=False) == ()
+
+
+def test_clean_location():
+    assert clean_location("  Hall  ") == "Hall"
+    assert clean_location("   ") is None
+    assert clean_location(None) is None
+    assert clean_location(5) is None
+    assert clean_location("x" * (LOCATION_MAX_CHARS + 9)) == "x" * LOCATION_MAX_CHARS
+
+
+def test_calendar_record_is_every_field_as_it_travels():
+    event = CalendarEvent(
+        id="e",
+        calendar_id="s",
+        summary="S",
+        start=datetime(2027, 4, 1, 10, tzinfo=UTC),
+        end=datetime(2027, 4, 1, 11, tzinfo=UTC),
+        created_by="u",
+        attendees=("a", "b"),
+        rrule="FREQ=DAILY",
+        location="L",
+    )
+    record = calendar_record(event)
+    assert record["start"] == "2027-04-01T10:00:00+00:00"
+    assert record["attendees"] == ["a", "b"]
+    assert {"rrule", "location", "cover_url", "tz", "capacity"} <= set(record)

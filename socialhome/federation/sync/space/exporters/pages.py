@@ -7,11 +7,10 @@ was made from, or not at all (an unsequenced create)."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from dataclasses import asdict, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from .....domain.page_version import version_hash
-from .....services.page_conflict_service import side_to_wire
+from .....domain.page_version import page_record
 
 if TYPE_CHECKING:
     from .....repositories.page_repo import AbstractPageRepo
@@ -53,10 +52,6 @@ class PagesExporter:
                     cover_image_url=base.cover_image_url,
                     seq=base.seq,
                 )
-            record = asdict(p)
-            record.pop("pending_base_seq", None)
-            record["version_hash"] = version_hash(p.title, p.content, p.cover_image_url)
             sides = await self._repo.list_conflict_sides(p.id, space_id=space_id)
-            record["conflict"] = [side_to_wire(s) for s in sides]
-            out.append(record)
+            out.append(page_record(p, sides))
         return out

@@ -104,7 +104,11 @@ from ..task_drain import wait_tasks_done
 from .gfs_connection_service import GfsConnectionError, GfsConnectionService
 from .gfs_directory import GfsDirectoryCache
 from .gfs_http import MAX_GFS_BODY_BYTES, gfs_server_address, read_json_capped
-from .space_service import can_seat_remote_stub, stub_space_from_metadata
+from .space_service import (
+    can_seat_remote_stub,
+    config_within_limit,
+    stub_space_from_metadata,
+)
 
 log = logging.getLogger(__name__)
 
@@ -425,10 +429,16 @@ class GfsSpaceMirrorService:
             # permanently; see the "§D1b crossing" bullet in the module
             # docstring. Deliberately out of scope here: the fix touches the
             # §D1b invite handler path and needs its own review.
-            space = stub_space_from_metadata(
-                space_id,
-                host_instance_id=owning_instance,
-                meta=meta,
+            # The one receiver rule for a space's config: over the limit
+            # and larger than what we hold → mirrored without that text.
+            space = config_within_limit(
+                stub_space_from_metadata(
+                    space_id,
+                    host_instance_id=owning_instance,
+                    meta=meta,
+                ),
+                held=None,  # mirrored only where no row is held (above)
+                source=f"GFS listing from {conn.id}",
             )
             await self._spaces.save(space)
             # v_44 — remember WHICH connection server seated this mirror and

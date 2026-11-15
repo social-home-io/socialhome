@@ -418,6 +418,370 @@ household (the sender waits out each 429). That is why live pictures stay on
 the cache (one upload per GFS, not per member) and the relay carries only
 what the cache cannot.
 
+## Large events in a binary frame
+
+Owner decision 2026-11-13: **a household behind a GFS keeps size parity
+with local federation.** No limit is shrunk to fit the small JSON relay
+envelope; a large item rides the existing big path.
+
+**The rule (one, for every space event).** When the sealed §24.11
+envelope of an outbound event does not fit a JSON envelope on the relay
+(`relay_envelope_fits`: ~191 KiB, the top padding bucket) and the target
+is reached only through a GFS (`space_session`: a relay seat or a
+mailbox), the event goes as **one binary relay frame** — the v_87 frame
+above, no new wire shape and no new event type:
+
+- the header is the same signed envelope (same `event_type`, `msg_id`,
+  `space_id`, `sig_suite`, session-key encryption); its sealed metadata
+  holds only what binds the bytes — `chunk_sha256`, `media_aead_suite`,
+  `media_frame_suite` (every suite tag the frame already carried);
+- the frame's bytes are the event's **payload JSON**, AES-256-GCM-sealed
+  under the directional session key, raw (no base64);
+- the whole is sealed to the recipient (its mailbox's `kem_pk`, else its
+  key-wrap key) and padded to a size bucket, exactly as a media chunk.
+
+It applies in every direction a seat sends — host → member, member →
+host, member ↔ member mailboxes — live (`FederationService.send_event`)
+and from the outbox (a throttled or failed frame is queued and re-sent as
+a frame under the same `msg_id`, so a retry is one message to the
+receiver's replay cache), and to a §25.6 `SPACE_SYNC_CHUNK`, so a
+catch-up carries the same large record
+([sync.md](./sync.md), *One record, one chunk*). One place decides:
+`FederationService.relay_event_frame`.
+
+**Multi-recipient sends (v_91).** A large event is not grouped: a multi
+frame is a JSON upload (`ENVELOPE_MULTI_MAX_CIPHERTEXT_CHARS`, 256 KiB)
+and the binary frame is sealed to ONE recipient. Building the multi frame
+fails on size, the payload is ungrouped and each seat gets its own frame.
+A binary multi frame would be a new wire shape and a new GFS route for a
+rare event — not worth it.
+
+**Receive.** The relay media pipeline's event-type gate takes a media
+chunk or any event of the vocabulary a seat may send at all
+(`RELAY_FRAME_EVENT_TYPES` = the media chunks +
+`SPACE_SESSION_ALLOWED_EVENT_TYPES`; this replaced the single
+moderation entry of the unreleased #1359), and a framed event only from a
+household behind a GFS (`space_session`) — the only kind a sender frames
+for; a paired peer on the relay opt-in has its inbox for large events and
+is refused. Straight after the header's
+decrypt, one extra step (`_open_framed_event`) opens the bytes (suites,
+AEAD, the signed `chunk_sha256`), requires a JSON object and makes it the
+event's payload. It refuses a frame whose signed metadata holds anything
+but the binding fields (one place for the payload — nothing an early
+gate could be shown instead) and one whose payload is under 96 KiB
+(`RELAY_EVENT_FRAME_MIN_PAYLOAD_BYTES`: the frame is for what no JSON
+envelope carries, never a second lane with the media budgets). Every later step then judges the **real payload**, as
+for a JSON envelope: idempotency, ban (the payload's own `space_id`
+too), replay persist, deprovisioned author, archived space, space writer
+(follower seats, the seat buffer) — and before it peer class, mailbox
+sender card, relay opt-in, timestamp, signature, unpair tombstone and
+replay. The handler gets an ordinary event (`media_bytes` unset). The
+inbox's binary route and the `fed-media-v1` channel are unchanged.
+
+**Bounds — one, live and by sync (~503 KiB; before: ~191 KiB).** One
+frame carries a body of `RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES` (532,382
+bytes: the frame's plaintext less 8 KiB for the length field, the framing,
+the signed header — a hybrid signature included — and the AEAD overhead).
+A frame is accepted with a 202 and never retried, and the GFS keeps it
+**one hour** (a JSON envelope: 24 hours) — so the §25.6 sync is what heals
+a lost one, and whatever travels live must also fit a sync chunk (owner
+decision 2026-11-14: one bound, not a smaller live one).
+
+A sync chunk used to cost a third more than its record: the record's
+ciphertext sits as base64url text inside the chunk envelope inside the
+event. **Inside a relay frame it now rides raw** — the body suite
+`sync-chunk-raw-v1` (`federation/relay_event_body.py`):
+
+```
+frame bytes = u32 BE meta length | meta JSON | raw part 1 | raw part 2 …
+meta        = {"payload": {sync_id, chunk: <chunk envelope, encrypted_payload "">},
+               "parts": [<byte length of each raw part>]}       # nonce, ciphertext
+```
+
+The receiver re-encodes the parts and rebuilds the very same
+`{sync_id, chunk}` payload (the sender checks that round trip before it
+picks the suite and falls back to JSON otherwise), so the chunk envelope's
+own signature and content-key AEAD verify unchanged, and the §25.6 stream
+itself — its records, its resources, the DataChannel and inbox paths — is
+untouched (no sync line). The signed header metadata names the suite
+(`event_body_suite`: `json` or `sync-chunk-raw-v1`); a framed event without
+a known one is refused, never defaulted.
+
+A chunk then costs only its wrapper, and the live bound is the frame's
+less that (`domain/relay_media_frame.py`):
+
+```
+RELAY_EVENT_MAX_LIVE_PAYLOAD_BYTES =
+    RELAY_EVENT_FRAME_MAX_PAYLOAD_BYTES - SYNC_CHUNK_WRAP_ALLOWANCE_BYTES   # 515,998 B, ~503 KiB
+```
+
+(16 KiB for the chunk envelope's fields and signatures, the `records`
+wrapper, the nonce and tag, the raw layout's meta and the fields a record
+has that the live event lacks.) A member behind a GFS that was offline for
+more than an hour therefore still gets a page of any allowed size with its
+next sync, before a later small edit of it could be refused for a missing
+row.
+
+| Event | Largest payload | Fits |
+|---|---|---|
+| `SPACE_MODERATION_SUBMITTED` | 256 KiB item cap + ~2 KiB | yes |
+| `SPACE_PAGE_*`, page proposals | the page item + ≤ 40 KiB | yes, by the page limit below |
+| `SPACE_CALENDAR_EVENT_*` | the event item + small fields | yes, by the calendar limit below |
+| `SPACE_CONFIG_CHANGED` (relay variant) | the config item twice + ≤ 155 KiB | yes, by the config limit below |
+| `SPACE_SYNC_CHUNK` with one large record | record + ≤ 16 KiB (raw) | yes, for every record within the record bound |
+| `SPACE_ROSTER_SNAPSHOT` | parts of 96 KiB of entries | yes, any roster size |
+| posts, comments, bazaar, tasks, polls, timetables, app tables, directory parts | ≤ ~175 KiB | yes (most fit the JSON envelope) |
+
+**One limit per kind of space item — the same in every space, on every
+path.** Owner decision 2026-11-14: *"Size should not matter if GFS or
+federation. In the end members are equal."* A page, a space calendar
+event and a space's config each have one fixed limit, which does not look
+at how any household is reached: it is what the worst-case event **and**
+the worst-case sync record of that kind take to cross one relay frame.
+
+**The item is measured whole.** What is measured is the item's record
+exactly as it travels — its JSON as every payload is written (orjson),
+every field, separators and escapes included — not a chosen set of text
+fields: a recurrence rule, an attendee list, a location, a name, a cover
+reference or a field added later all count without anyone listing them.
+Held out is only what **other people add after the item was saved**, each
+under its own hard cap, and reserved next to the limit
+(`domain/relay_media_frame.py`; `tests/federation/test_space_item_worst_case.py`
+builds each kind at exactly its limit, every field at its own cap,
+adversarial shapes — empty and one-character ids, control characters that
+escape to six bytes, non-ASCII — through the real live builders, the real
+exporters and `ChunkBuilder` with a hybrid Ed25519 + ML-DSA-65 signature
+set):
+
+| Kind | The item (measured) | Limit | Held out / reserved |
+|---|---|---|---|
+| Page | its §25.6 record, `page_record`: the row, its version hash and **every open conflict side** (a side is a whole other version, added only by the host, which refuses one that would pass the limit) | `SPACE_PAGE_ITEM_MAX_BYTES` = 515,998 − 40,960 = **475,038 B** (~475 kB) | 40 KiB: the files' descriptors and hashes the provider adds per requester (≤ 64, `MAX_PAGE_DESCRIPTOR_ENTRIES`), the live event's extra fields |
+| Space calendar event | its §25.6 record, `calendar_record`: summary, description, attendee ids, rule, location, cover, ids, stamps | `SPACE_CALENDAR_ITEM_MAX_BYTES` = 515,998 − 132,596 = **383,402 B** (~383 kB) | the RSVPs (added by others): ≤ 500 (`MAX_RSVPS_PER_EVENT`) of ≤ 256 B each (`RSVP_RECORD_MAX_BYTES`; a larger held entry is left out of the record and the list marked `rsvps_partial`) = 500 × 257 + 4 KiB for the RSVP fields, the cover's descriptor and the live event's extra fields |
+| Space config | its plain config fields as they travel, `space_metadata_fields`: name, emoji, description, about text, features, every setting | `SPACE_CONFIG_ITEM_MAX_BYTES` = (515,998 − 158,384) / 2 = **178,807 B** (~178 kB) — halved because `SPACE_CONFIG_CHANGED` carries the config twice (the flat legacy shape and `space_meta`) | the relay variant's cover and icon at their caps (base64), the owner's signed GFS list at its cap (32 KiB), 16 KiB for the authority cert, the owner's statement and the signatures |
+
+Real items sit far below: the SPA allows a 300-character space
+description and an 8,000-character about text; the demo's 450 KiB page
+fits. Next to the limit, each kind keeps small input caps of its own
+(sanity, not size): a calendar event's attendee ids are non-empty
+strings, each kept once, at most 1,000 (`MAX_EVENT_ATTENDEES`); its rule
+is at most 512 characters (`MAX_RRULE_CHARS`) of RFC 5545 RECUR text
+only (`[A-Za-z0-9=;,+-]` — never a line break or a `:` that would start
+another iCalendar property in the ICS feed) and must parse
+(`FREQ=DAILY|WEEKLY|MONTHLY|YEARLY`, `utils/rrule.py`); its location is
+cut at 500 characters; a space's name is at most 120 characters
+(`SPACE_NAME_MAX_CHARS`, the SPA's field) and its emoji at most 16 code
+points (`MAX_EMOJI_CODEPOINTS`). Those hold where a person saves (422,
+coded: `CALENDAR_ATTENDEES_INVALID`, `CALENDAR_RRULE_INVALID`,
+`SPACE_NAME_TOO_LONG`, `SPACE_EMOJI_TOO_LONG` — translated in the SPA).
+Where a household receives, an event saved before these checks stays
+deliverable: bad attendee ids are dropped and the list cut at its cap, a
+rule this build cannot read is kept as it is (it expands to its first
+occurrence, as before); a rule over its length cap or with anything but
+RECUR text refuses the event (WARNING). The ICS writer also writes a rule
+only when it is RECUR text, and escapes SUMMARY / DESCRIPTION / LOCATION
+as RFC 5545 TEXT (a line break escaped; a CR, every other control
+character and U+2028 / U+2029 dropped). The size is the whole item's
+rule either way.
+
+**Ids, stamps and counters are measured at their widest.** A record's
+who / when / which-version fields differ between the household that
+saves an item, the host that sequences it and every receiver (a member's
+new page has no editor yet and `seq` 0; the host's has both). Each kind's
+measure counts them at their widest, so all of them get **the same number
+for the same content**, and every path that reads them from the wire
+bounds them to that width, so what travels is never larger than what was
+measured:
+
+| Field | Bound where read | Measured as |
+|---|---|---|
+| timestamps (a page's `created_at`, `updated_at`, `last_edited_at`, lock and delete stamps; a side's `at`) | ISO 8601 that parses, ≤ 64 characters (`STAMP_MAX_CHARS`), else none | 64 characters |
+| ids (a page's id, space, creator, editor, lock / delete actors; a side's `by`; a proposal's actor; a config's `owner_username`, `identity_public_key`, cover / icon hash) | a string ≤ 128 characters (`ITEM_ID_MAX_CHARS`, the roster's user id cap), else none (a page id over it: not stored) | 128 characters (page fields) |
+| counters (`seq`, a side's `base_seq`, `config_sequence`, `roster_sequence`, a calendar `capacity`) | an integer (never a bool or float) in 0..2^63−1 (`COUNTER_MAX`), else 0 / none | 2^63−1 |
+| a config's `config_hlc` | parsed and stored as `str(HLC)`, each part in 0..2^63−1, else `"0-0"` — never the raw string | its widest |
+| a config's name / emoji / zone / post types | name cut at 120, emoji over 16 code points → none, zone validated (≤ 64 characters), `allowed_post_types` ≤ 32 names of ≤ 32 | as they are |
+
+So everything in a config but its description and about text is bounded
+far below the config limit (under 16 KiB): keeping the held texts always
+brings a config within it, and **every setting and every security step
+after it** (the owner's GFS list and statement, the seed handling of a
+delegation change) **always runs**.
+
+Where it is enforced — unconditionally:
+
+- **Where a person saves**: **413 `SPACE_ITEM_TOO_LARGE`** with
+  `max_kb` — the item's limit in kB (1 kB = 1000 bytes), translated in
+  the SPA ("This is too large to share with the space (at most … kB in
+  total)"; no mention of GFSs or other households) — **after the actor
+  was authorized** (a person without the right gets their 403 first) and
+  before anything is stored or queued for review. Pages: `SpacePageService`
+  on create, on an edit before it is queued for review, and in `_write`,
+  which every local write passes (an edit, a
+  conflict resolution, an approved item's replay); calendar: create and
+  update (an approved item's replay included); the space: `create_space`
+  and `update_config` (checked before anything leaves the household, and
+  the whole new config again before it is stored).
+- **On the host, for every page version it sequences**
+  (`PageConflictService`: `_sequence_create`, `_sequence_edit`): its own
+  people's and a member household's proposal alike. Refused `too_large`
+  through the existing refusal answer, never sequenced; the proposer's
+  draft goes to the page's history and the host's version comes back on
+  top. The same refuses a concurrent edit that would have to be kept as a
+  conflict side when the page with its sides would pass the limit.
+- **Where a household receives — one rule, on every path that stores an
+  item:** an item **over the limit AND larger than the copy held** is not
+  stored, with a WARNING. An honest sender never passes the limit, so no
+  answer is sent. Every path:
+
+  | Path | Kind |
+  |---|---|
+  | `SPACE_PAGE_CREATED / _UPDATED` from the host, its refusal answers, the §25.6 stream's host record — all through `PageConflictService.mirror` | page |
+  | a page event under a pre-v_48 host, a member's new page, the §25.6 stream's other records | page |
+  | `SPACE_CALENDAR_EVENT_CREATED / _UPDATED` from any member household, the §25.6 `calendar` stream | calendar |
+  | `SPACE_CONFIG_CHANGED` (owner or delegated admin, the host included), `SPACE_CREATED`, a join snapshot (invite accept, link redeem), a rotation's config, a GFS listing's mirror | config |
+
+  A skipped §25.6 record is skipped alone: the chunk's other records are
+  applied and the stream completes, so the watermark moves on.
+
+  **A config change never loses its settings for a size reason.** Over
+  the limit and larger than the copy held, its access levels, join mode,
+  archive state, delegation and every other setting are applied; only
+  its text is not taken — the description and about text are kept as
+  held (then the name and emoji too, if that is still not enough;
+  nothing held → none), with a WARNING. A household never keeps
+  enforcing a stale access level because a description was too long, and
+  the security steps after it always run (the rest of a config is bounded
+  where it is read, above, so it always fits).
+- **At the sender, behind all of it**: an event over the frame bound
+  toward a household behind a GFS is refused (`relay_too_large`, WARNING
+  naming household, event and size; never queued, never silently
+  dropped).
+- **In a sync stream over the relay**: a record over
+  `RELAY_SYNC_RECORD_MAX_BYTES` (the bound) is left out with a WARNING
+  naming its resource, id and size, *before* it takes a chunk index — the
+  stream stays whole and clean and the requester's watermark moves on.
+
+**An item that is already over its limit** (saved before this, or by a
+household on an older build) stays as it is. The rule is strict, with
+one exception: when the copy held is **itself** over the limit, a version
+no larger than it (on the same measure — stamps at their widest) is
+taken. A held copy within the limit gives no slack at all:
+
+| | What happens |
+|---|---|
+| Reading it | unchanged, on every household that holds it |
+| Editing it | allowed as long as the save does not make it larger (the same size or smaller passes); a save that grows it answers 413 |
+| A household that holds it | keeps taking versions that do not make it larger, live and by sync |
+| A household that does not hold it yet (paired, mesh or behind a GFS) | does not get it — not stored by the receiver; behind a GFS it is also refused at the sender and left out of the stream (WARNING) — until somebody saves it within the limit |
+
+**Roster.** `SPACE_ROSTER_SNAPSHOT` used to be one event with every seat
+(~0.5 KiB each): past a few hundred seats no JSON envelope, and past
+roughly a thousand no frame, carried it — and the snapshot is how a
+member's roster mirror heals. It now goes in parts of at most 96 KiB of
+entries (`ROSTER_SNAPSHOT_PART_BYTES`, ~190 seats), each an ordinary
+snapshot event small enough for a JSON relay envelope. Every part carries
+the owner's authority cert and the roster version, and names its send
+(`snapshot_id`, `part`, `parts`), so each verifies on its own in any
+order. **The receiver records the version** (which it echoes on its next
+sync BEGIN, and which stops the host's resend) **only once it verified
+and applied every part of one send**: a part lost after the relay
+accepted it, or parts it cannot verify because it missed a rotation,
+leave nothing recorded — the host keeps sending, and no removal is
+skipped. A roster that fits one part is the event it always was.
+
+### Where a household behind a GFS can still miss an item
+
+Stated plainly, after all of the above:
+
+1. **Its build or its GFS takes no frames** — the household is below
+   v_87, or the GFS that reaches it does not prove `envelope_media`:
+   every item between the JSON envelope (~191 KiB sealed, about 140 KiB
+   of payload) and the limit is **lost toward that household**, refused
+   at the sender with a WARNING naming it, the event and the size (never
+   queued). It heals when the household or the GFS is updated and the
+   next sync runs. A large moderation submission that could not reach
+   the space's host that way answers 413 instead.
+2. **An item already over its limit** — saved before the limits
+   existed, or by a household on a build without them. No household on
+   this build that does not hold it yet stores it, whatever the path
+   (above); toward a household behind a GFS it is also refused at the
+   sender and left out of its sync stream (WARNING). It arrives once
+   somebody saves it within the limit. (Paired and mesh households that
+   do not hold it miss it the same way — members are equal.)
+4. **A frame the GFS dropped after its 202** (media queue: one hour,
+   16 MiB per recipient): healed by the next §25.6 sync, not lost.
+5. **Order toward an offline household** (below): a small later change
+   can arrive before the large event it changes; the sync settles it.
+6. **A directory seat with no reachable mailbox** goes through the host
+   hop; the rule applies per hop, but no test covers a large event there.
+7. Not the relay's: a household reached over the **mesh** loses a large
+   event sent while it was down (`fix/mesh-large-inner-lost`).
+
+**Versioning — no new version.** The gate is the one of the frame
+itself: a peer at v_87 (`MIN_FOR_RELAY_MEDIA` — it reads binary relay
+frames at all) through a GFS proving `envelope_media` (the mailbox's GFS,
+else the seat's `relay_via`). v_81–v_94 are unreleased and ship together
+(the last release speaks v_80), so every released build that reads the
+frame also takes a large event in it. To a peer below v_87, or through a
+GFS without `envelope_media`, nothing changes: the JSON relay leg refuses
+the envelope (WARNING, permanent, nothing queued), and a local moderation
+submission that could not reach the space's host that way answers **413**
+before anything is stored (`check_reaches_host`).
+
+**What the GFS sees — unchanged.** A recipient id (a mailbox id or an
+instance id), a time and a size bucket (64 / 128 / 256 / 516 KiB or the
+cap): what it saw of a picture chunk. It cannot tell a large event from
+a chunk, and learns no sender, event type or space. No GFS change, no
+new capability.
+
+**The GFS media queue (16 MiB per recipient, 1 h).** Event frames share
+it with pictures; there is no separate budget. A frame to an online
+household is pushed at once and never queued. For an offline one, 16 MiB
+is ~30 top-bucket frames: a burst of large events past that, or older
+than an hour, is dropped by the GFS after its 202 — exactly what happens
+to picture chunks. The sender cannot see it (the 202 is uniform). The
+household heals on its next §25.6 sync with the host (within 30 minutes
+of reconnecting, at once on a join), which now carries large records;
+pictures heal through `SPACE_MEDIA_WANTED`. A pending moderation item is
+additionally re-sent on the reviewer household's echo
+([moderation.md](./moderation.md#re-delivery-and-catch-up)). A separate
+budget would only move the tail-drop; the sync is the repair.
+
+**Order.** Toward an OFFLINE household the GFS keeps frames and JSON
+envelopes in two queues and drains the envelopes first, so a large
+event can arrive after a small later one about the same item (a page's
+large create after its small rename), or be dropped while the later one
+survives. The sender's per-seat ordering (`_must_queue_behind`) cannot
+see that. Handlers already tolerate it — an update for a row not held
+is what a lost live event looks like on any path — and the same sync
+settles the row. Toward an online household both are pushed at once,
+in order.
+
+**Contention.** The frames of one save share the sender's per-IP byte
+budget at the GFS (64 MiB / min per node) with its pictures: a large page
+saved into a space with 200 households behind a GFS is 200 × 256 KiB ≈
+50 MiB — most of a minute's budget, during which that household's
+picture chunks wait in its outbox (throttled sends are queued, never
+dropped). Storing the sealed body once on the GFS and fanning out a key
+per recipient — what the v_91 multi upload does for small events — is
+the named follow-up for large ones.
+
+**Cost.** One large event to N households behind a GFS = N frames of one
+bucket each: a 240 KiB page is N × 256 KiB up (N × 516 KiB once the
+payload passes 256 KiB). Worst realistic case, a global space with 10,000 GFS-reached
+member households and a 256 KiB page edit: ~5 GiB of uploads from the
+editing household for one save — the same order as the N × ~340 KiB of
+JSON envelopes the same edit costs toward N paired households, and
+bounded by the relay's per-IP byte budget (64 MiB / min per node), so
+it drains from the outbox over time rather than in a burst. Followers
+are not members and get no page events. A sync chunk goes to the one
+requester.
+
+Not covered: a paired peer on the opt-in relay fallback (its inbox is
+its big path; a large event waits for it in the outbox), and a directory
+seat with no reachable mailbox, which goes through the host hop — the
+host hop sends its `SPACE_ROUTED` wrapper with `send_event`, so the rule
+applies to each hop, but that path is not exercised by a test yet.
+
 ## Anonymous mailboxes (GFS redesign PR 1)
 
 Every relay above addresses a household by its **instance id**, so the GFS

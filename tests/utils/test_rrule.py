@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from socialhome.utils.rrule import expand_rrule, parse_rrule
+import pytest
+
+from socialhome.domain.errors import CalendarRuleInvalidError
+from socialhome.utils.rrule import (
+    MAX_RRULE_CHARS,
+    clean_rrule,
+    expand_rrule,
+    parse_rrule,
+)
 
 
 def _dt(iso: str) -> datetime:
@@ -248,3 +256,33 @@ def test_weekly_with_tz_unchanged_for_utc_anchor():
         tz="UTC",
     )
     assert legacy == via_tz
+
+
+@pytest.mark.parametrize("blank", [None, "", "   "])
+def test_clean_rrule_blank_is_no_rule(blank):
+    assert clean_rrule(blank) is None
+    assert clean_rrule(blank, strict=False) is None
+
+
+def test_clean_rrule_keeps_a_rule_this_parser_reads():
+    assert clean_rrule(" FREQ=WEEKLY;BYDAY=MO ") == "FREQ=WEEKLY;BYDAY=MO"
+
+
+@pytest.mark.parametrize("bad", ["NOT A RULE", "FREQ=HOURLY", 5, ["FREQ=DAILY"]])
+def test_clean_rrule_refuses_where_a_person_saves(bad):
+    with pytest.raises(ValueError):
+        clean_rrule(bad)
+
+
+def test_clean_rrule_on_receive_keeps_an_older_rule_and_drops_a_non_string():
+    """An event saved before the checks stays deliverable."""
+    assert clean_rrule("FREQ=HOURLY", strict=False) == "FREQ=HOURLY"
+    assert clean_rrule(5, strict=False) is None
+
+
+@pytest.mark.parametrize("strict", [True, False])
+def test_clean_rrule_length_cap_holds_either_way(strict):
+    at_cap = ("FREQ=DAILY;" + "X" * MAX_RRULE_CHARS)[:MAX_RRULE_CHARS]
+    assert clean_rrule(at_cap, strict=strict) == at_cap
+    with pytest.raises(CalendarRuleInvalidError):
+        clean_rrule(at_cap + "X", strict=strict)

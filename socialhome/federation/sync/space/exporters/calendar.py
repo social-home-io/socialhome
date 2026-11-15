@@ -24,22 +24,25 @@ full stream. A requester below v_92 gets the record without them
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from .....domain.calendar import OCCURRENCE_ID_SEPARATOR, is_occurrence_id
+import orjson
+
+from .....domain.calendar import (
+    MAX_RSVPS_PER_EVENT,
+    OCCURRENCE_ID_SEPARATOR,
+    RSVP_RECORD_MAX_BYTES,
+    calendar_record,
+    is_occurrence_id,
+)
 from ..exporter import PagedExporterMixin
 from ..window import SYNC_PAGE_SIZE, iter_pages
 
 if TYPE_CHECKING:
     from .....domain.calendar import CalendarEvent
     from .....repositories.calendar_repo import AbstractSpaceCalendarRepo
-
-
-#: The most RSVPs one ``calendar`` record carries (a long-running series
-#: with many members): the latest occurrences' first.
-MAX_RSVPS_PER_EVENT: int = 500
 
 
 class CalendarExporter(PagedExporterMixin):
@@ -81,7 +84,7 @@ class CalendarExporter(PagedExporterMixin):
             )
 
         async for events in iter_pages(page):
-            records = [_event_to_dict(e) for e in events]
+            records = [calendar_record(e) for e in events]
             if self._rsvps:
                 for record in records:
                     await self._add_rsvps(record)
@@ -93,16 +96,24 @@ class CalendarExporter(PagedExporterMixin):
         record["rsvps_at"] = datetime.now(UTC).isoformat()
         held = await self._repo.list_rsvps(record["id"])
         held.sort(key=lambda r: (r.occurrence_at, r.user_id), reverse=True)
-        record["rsvps"] = [
-            {
-                "user_id": r.user_id,
-                "occurrence_at": r.occurrence_at,
-                "status": r.status,
-                "updated_at": r.updated_at,
-            }
-            for r in held[:MAX_RSVPS_PER_EVENT]
+        # Held out of the event's measured size under their own hard caps
+        # (``domain/relay_media_frame.py``): an entry larger than
+        # ``RSVP_RECORD_MAX_BYTES`` is not sent, nor any past the count.
+        entries = [
+            entry
+            for entry in (
+                {
+                    "user_id": r.user_id,
+                    "occurrence_at": r.occurrence_at,
+                    "status": r.status,
+                    "updated_at": r.updated_at,
+                }
+                for r in held
+            )
+            if len(orjson.dumps(entry)) <= RSVP_RECORD_MAX_BYTES
         ]
-        if len(held) > MAX_RSVPS_PER_EVENT:
+        record["rsvps"] = entries[:MAX_RSVPS_PER_EVENT]
+        if len(record["rsvps"]) < len(held):
             record["rsvps_partial"] = True
 
 
@@ -150,7 +161,7 @@ class ExpandedCalendarExporter:
             end=now + _EXPANDED_WINDOW,
             since=since,
         )
-        return [_event_to_dict(_as_occurrence(e)) for e in events]
+        return [calendar_record(_as_occurrence(e)) for e in events]
 
 
 def _as_occurrence(event: CalendarEvent) -> CalendarEvent:
@@ -163,13 +174,3 @@ def _as_occurrence(event: CalendarEvent) -> CalendarEvent:
             id=f"{event.id}{OCCURRENCE_ID_SEPARATOR}{event.start.isoformat()}",
         )
     return event
-
-
-def _event_to_dict(event: CalendarEvent) -> dict[str, Any]:
-    d = asdict(event)
-    for field in ("start", "end"):
-        v = d.get(field)
-        if v is not None and not isinstance(v, str):
-            d[field] = v.isoformat()
-    d["attendees"] = list(d.get("attendees") or ())
-    return d

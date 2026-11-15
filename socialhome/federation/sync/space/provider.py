@@ -33,6 +33,7 @@ from ....domain.federation import (
 )
 from ....domain.federation_capabilities import FederationCapability
 from ....domain.file_hashes import file_hashes_to_wire
+from ....domain.relay_media_frame import RELAY_SYNC_RECORD_MAX_BYTES
 from ....domain.space_media_ref import (
     FILE_HASH_RESOURCES,
     MEDIA_REF_RESOURCES,
@@ -798,6 +799,19 @@ class SpaceSyncService:
             return exporter
         return PreModeratorMembersExporter(exporter)
 
+    async def _record_limit(self, session: SyncSessionRecord) -> int | None:
+        """The largest record a stream to this requester carries, or
+        ``None``: a household behind a GFS gets each chunk as one relay
+        frame (:data:`RELAY_SYNC_RECORD_MAX_BYTES`); every other path
+        takes what it always took."""
+        if self._federation is None or getattr(session, "transport_mode", "") != (
+            "https"
+        ):
+            return None
+        if await self._federation.is_space_session_peer(session.requester_instance_id):
+            return RELAY_SYNC_RECORD_MAX_BYTES
+        return None
+
     async def _session_version(self, session: SyncSessionRecord) -> int:
         """The requester's protocol version (a space member household, which
         may be mesh-only), read once per session and kept on it: every
@@ -841,6 +855,7 @@ class SpaceSyncService:
             # v_56: number the chunks (inside the encrypted payload) so the
             # requester counts distinct ones; an older one counts as before.
             indexed = _series_rows(await self._session_version(session))
+            record_limit = await self._record_limit(session)
             for exporter in plan:
                 async for envelope in self._builder.build_chunks(
                     exporter=exporter,
@@ -849,6 +864,7 @@ class SpaceSyncService:
                     sig_suite=self._sig_suite,
                     since=session.since_seq,
                     next_index=_allocator(session) if indexed else None,
+                    max_record_bytes=record_limit,
                 ):
                     sent = await self._send_chunk(session, envelope, waits)
                     chunk_count += 1
@@ -1335,6 +1351,7 @@ class SpaceSyncService:
                 # v_56: from the session's one counter, so a slice never
                 # reuses an index of the stream it runs next to.
                 next_index=_allocator(session) if indexed else None,
+                max_record_bytes=await self._record_limit(session),
             ):
                 result = await self._send(session, envelope)
                 if result.error == SYNC_ERROR_RTC_CHANNEL:

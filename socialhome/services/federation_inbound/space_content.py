@@ -50,6 +50,8 @@ from ...domain.calendar import (
     CalendarEvent,
     CalendarRSVP,
     RSVPStatus,
+    clean_attendees,
+    clean_location,
     coerce_capacity,
     material_changes,
 )
@@ -106,6 +108,7 @@ from ...domain.post import (
     poll_deadline_passed,
     poll_options_from_wire,
 )
+from ...domain.relay_media_frame import ITEM_ID_MAX_CHARS, bounded_id, bounded_stamp
 from ...domain.space import (
     MODERATION_BLOCK_KEY,
     ContentAction,
@@ -161,7 +164,12 @@ from ...infrastructure.event_bus import EventBus
 from ...media.cleanup import unlink_unreferenced
 from ...repositories.bazaar_repo import OfferStateError
 from ...utils.datetime import parse_iso8601_optional
+from ...utils.rrule import clean_rrule
 from ...utils.timezones import coerce_tz
+from ..calendar_service import (
+    calendar_event_too_large,
+    log_calendar_event_not_stored,
+)
 from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
 from ..inbound_media_store import (
     space_media_ref,
@@ -173,6 +181,8 @@ from ..page_conflict_service import (
     PageMode,
     Proposal,
     canonical_from_wire,
+    log_page_not_stored,
+    page_too_large,
     proposal_from_wire,
 )
 from ..space_media_names import SpaceMediaNamer
@@ -236,13 +246,15 @@ def _page_from_payload(p: dict, page_id: str, space_id: str) -> Page:
         id=page_id,
         title=str(p.get("title") or ""),
         content=str(p.get("content") or ""),
-        created_by=str(p.get("created_by") or ""),
-        created_at=str(p.get("created_at") or p.get("occurred_at") or ""),
-        updated_at=str(p.get("updated_at") or p.get("occurred_at") or ""),
+        # Ids and stamps bounded where they are read (the size rule
+        # measures them at their widest).
+        created_by=bounded_id(p.get("created_by")),
+        created_at=bounded_stamp(p.get("created_at") or p.get("occurred_at")),
+        updated_at=bounded_stamp(p.get("updated_at") or p.get("occurred_at")),
         space_id=space_id,
         cover_image_url=cover if isinstance(cover, str) else None,
-        last_editor_user_id=str(
-            p.get("last_editor_user_id") or p.get("actor_user_id") or ""
+        last_editor_user_id=bounded_id(
+            p.get("last_editor_user_id") or p.get("actor_user_id")
         )
         or None,
     )
@@ -947,8 +959,12 @@ class SpaceContentInboundHandlers:
         p = event.payload
         page_id = str(p.get("id") or p.get("page_id") or "")
         title = str(p.get("title") or "")
-        if not page_id or (not title and "sequenced" not in p):
-            log.debug("SPACE_PAGE_* missing required field")
+        if (
+            not page_id
+            or len(page_id) > ITEM_ID_MAX_CHARS
+            or (not title and "sequenced" not in p)
+        ):
+            log.debug("SPACE_PAGE_* missing or oversize required field")
             return
         existing = await self._page_repo.get(page_id)
         if existing is not None and existing.space_id != space_id:
@@ -1012,6 +1028,12 @@ class SpaceContentInboundHandlers:
         ):
             return  # an update of a page we never held, not from the host
         if not await self._page_write_gates(event, space_id, page_id, page, existing):
+            return
+        if page_too_large(
+            page, (), was=(existing, ()) if existing is not None else None
+        ):
+            # The one receiver rule: over the limit and larger than our copy.
+            log_page_not_stored(event.event_type, page, (), event.from_instance)
             return
         if existing is not None and engine is not None:
             # A pre-v_48 host: last write wins, the old body kept in history.
@@ -1369,6 +1391,8 @@ class SpaceContentInboundHandlers:
                 row_owner=existing.created_by if existing else page.created_by,
             ):
                 return
+        # The size rule is the engine's (``mirror``): one rule for every
+        # host version — live, a refusal answer, the §25.6 stream.
         await engine.mirror(space_id=space_id, page_id=page_id, version=version)
         if version.has_state and not refusal:
             await self._keep_page_media(event, space_id, page_id, version)
@@ -1662,7 +1686,23 @@ class SpaceContentInboundHandlers:
         cover = verbatim_local_media_ref(p.get("cover_url"))
         if cover is not None and space_media_ref(cover) is None:
             cover = None  # a reserved (DM / moment) name is never a cover
-        location = p.get("location")
+        try:
+            # Where a household receives: an event saved before the checks
+            # a person's save gets stays deliverable (bad ids dropped, the
+            # list cut at its cap, an unknown rule kept); a rule over its
+            # length cap is refused.
+            attendees = clean_attendees(p.get("attendees"), strict=False)
+            rrule = clean_rrule(p.get("rrule"), strict=False)
+        except ValueError as exc:
+            log.warning(
+                "%s from %s: calendar event %s in space %s — %s; not stored",
+                event.event_type,
+                event.from_instance,
+                event_id,
+                space_id,
+                exc,
+            )
+            return
         ev = CalendarEvent(
             id=event_id,
             calendar_id=calendar_id,
@@ -1672,15 +1712,15 @@ class SpaceContentInboundHandlers:
             created_by=created_by,
             description=p.get("description"),
             all_day=bool(p.get("all_day", False)),
-            attendees=tuple(str(a) for a in (p.get("attendees") or ())),
+            attendees=attendees,
             mirrored_from=p.get("mirrored_from"),
-            rrule=p.get("rrule"),
+            rrule=rrule,
             # The per-occurrence cap members enforce on RSVPs; anything but
             # a non-negative integer (or an older sender's absent field) is
             # no cap.
             capacity=coerce_capacity(p.get("capacity")),
             cover_url=cover,
-            location=location if isinstance(location, str) and location else None,
+            location=clean_location(p.get("location")),
             # IANA wall-clock anchor. Old peers omit; default ``"UTC"``.
             # Peer-supplied, so validated here: an unknown zone name
             # makes ``Intl`` throw in the SPA and one bad row breaks
@@ -1732,6 +1772,15 @@ class SpaceContentInboundHandlers:
             action=ContentAction.CREATE if is_new else ContentAction.EDIT,
             row_owner=created_by if existing is None else existing[1].created_by,
         ):
+            return
+        # The one receiver rule: an event over the limit every household
+        # holds (measured whole) AND larger than our copy is not stored. An
+        # honest sender never passes it (its own save answers 413); one
+        # stored before the limit keeps arriving as long as it does not grow.
+        if calendar_event_too_large(
+            ev, was=existing[1] if existing is not None else None
+        ):
+            log_calendar_event_not_stored(event.event_type, ev, event.from_instance)
             return
         media = await self._localize_media(
             event,

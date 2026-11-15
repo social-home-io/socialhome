@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, date, datetime, time
 from types import SimpleNamespace
 
@@ -36,8 +37,12 @@ from socialhome.federation.owner_bound_id import (
     mint_owner_bound_id,
 )
 from socialhome.federation.sync.space.exporter import serialise_chunk
-from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
+from socialhome.federation.sync.space.receiver import (
+    SpaceSyncReceiver,
+    _calendar_from_record,
+)
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services import calendar_service, page_conflict_service
 from socialhome.services.inbound_media_store import space_direct_media_name
 
 
@@ -207,6 +212,8 @@ class _StickyRepoStub:
 class _CalendarRepoStub:
     def __init__(self, collector):
         self._c = collector
+        #: Events "held here", by id: ``(space_id, event)``.
+        self.held: dict[str, tuple] = {}
 
     async def save_event(self, event, *, space_id):
         self._c.calendar.append((space_id, event))
@@ -216,7 +223,7 @@ class _CalendarRepoStub:
         return False
 
     async def get_event(self, event_id):
-        return None
+        return self.held.get(event_id)
 
 
 class _GalleryRepoStub:
@@ -979,6 +986,112 @@ async def test_calendar(setup):
     assert len(c.calendar) == 1
     _, event = c.calendar[0]
     assert event.id == "e-1"
+
+
+def _calendar_record(event_id: str, **over) -> dict:
+    return {
+        "id": event_id,
+        "calendar_id": "sp-1",
+        "summary": "meeting",
+        "start": "2026-04-18T10:00:00+00:00",
+        "end": "2026-04-18T11:00:00+00:00",
+        "created_by": "u-1",
+        **over,
+    }
+
+
+@pytest.fixture
+def small_limits(monkeypatch):
+    """The page and calendar limits (whole records), small enough to test."""
+    monkeypatch.setattr(calendar_service, "SPACE_CALENDAR_ITEM_MAX_BYTES", 2000)
+    monkeypatch.setattr(page_conflict_service, "SPACE_PAGE_ITEM_MAX_BYTES", 2000)
+
+
+async def test_an_over_limit_calendar_record_is_skipped_and_the_stream_goes_on(
+    setup, small_limits, caplog
+):
+    """The one receiver rule, on the §25.6 stream: a record over the limit
+    (measured whole — here by its location and attendees, which the old
+    text sum skipped) and larger than our copy is not stored, with a
+    WARNING; the records after it in the same chunk still land, so the
+    stream is not stalled and its watermark moves on."""
+    r, c, kp = setup
+    caplog.set_level(logging.WARNING)
+    await _send(
+        r,
+        kp,
+        "calendar",
+        [
+            _calendar_record(
+                "e-big",
+                location="L" * 400,
+                attendees=[f"{n:032d}" for n in range(40)],
+            ),
+            _calendar_record("e-ok", description="fine"),
+        ],
+    )
+    assert [e.id for _, e in c.calendar] == ["e-ok"]
+    assert "e-big" in caplog.text and "not stored" in caplog.text
+
+
+async def test_an_invalid_calendar_record_is_skipped(setup, caplog):
+    r, c, kp = setup
+    caplog.set_level(logging.WARNING)
+    await _send(
+        r,
+        kp,
+        "calendar",
+        [
+            _calendar_record("e-rule", rrule="FREQ=DAILY;" + "X" * 600),
+            _calendar_record("e-crlf", rrule="FREQ=DAILY\r\nURL:https://e.example"),
+            # Saved before the checks: stays deliverable, cleaned.
+            _calendar_record(
+                "e-old", attendees=["", "u-1", "u-1", 5], rrule="FREQ=HOURLY"
+            ),
+        ],
+    )
+    [(_, event)] = c.calendar
+    assert (event.id, event.attendees, event.rrule) == (
+        "e-old",
+        ("u-1",),
+        "FREQ=HOURLY",
+    )
+    assert "e-rule" in caplog.text and "e-crlf" in caplog.text
+
+
+async def test_a_calendar_event_held_over_the_limit_syncs_no_larger(
+    setup, small_limits
+):
+    """An event stored before the limit keeps arriving by sync as long as it
+    does not grow."""
+    r, c, kp = setup
+    held = _calendar_from_record(
+        _calendar_record("e-old", description="o" * 3000), provider="peer-a"
+    )
+    r._space_calendar_repo.held["e-old"] = ("sp-1", held)
+    await _send(r, kp, "calendar", [_calendar_record("e-old", description="p" * 3000)])
+    await _send(r, kp, "calendar", [_calendar_record("e-old", description="p" * 3001)])
+    assert [e.description for _, e in c.calendar] == ["p" * 3000]
+
+
+async def test_an_over_limit_page_record_from_a_member_is_skipped(
+    setup, small_limits, caplog
+):
+    """Under a pre-v_48 host (or a new page from a member) a page record is
+    stored as sent — through the same rule."""
+    r, c, kp = setup
+    caplog.set_level(logging.WARNING)
+    await _send(
+        r,
+        kp,
+        "pages",
+        [
+            {**_PAGE_RECORD, "id": "pg-big", "content": "x" * 3000},
+            _PAGE_RECORD,
+        ],
+    )
+    assert [p.id for p in c.pages] == ["pg-1"]
+    assert "pg-big" in caplog.text
 
 
 async def test_gallery_album_then_item(setup):
@@ -2539,3 +2652,35 @@ async def test_a_non_host_providers_hash_map_never_reaches_the_gfs_namer(
     )
     assert "p-n" in sink.hashes
     assert sink.hashes["p-n"] is None
+
+
+async def test_a_held_event_still_takes_the_hosts_rsvps_when_its_record_is_skipped(
+    setup, small_limits, monkeypatch
+):
+    """RSVPs are not part of the event's measured size: a host record the
+    rule skips (it would grow our copy past the limit) still refreshes the
+    RSVPs of the event we hold."""
+    r, c, kp = setup
+    held = _calendar_from_record(
+        _calendar_record("e-old", description="o" * 3000), provider="peer-a"
+    )
+    r._space_calendar_repo.held["e-old"] = ("sp-1", held)
+    taken: list = []
+
+    async def _is_host(self, space_id, provider):
+        return True
+
+    async def _persist_rsvps(self, event, record, space_id):
+        taken.append((event.id, record["rsvps"]))
+
+    monkeypatch.setattr(SpaceSyncReceiver, "_is_host", _is_host)
+    monkeypatch.setattr(SpaceSyncReceiver, "_persist_rsvps", _persist_rsvps)
+    rsvps = [{"user_id": "u-2", "occurrence_at": "x", "status": "going"}]
+    await _send(
+        r,
+        kp,
+        "calendar",
+        [_calendar_record("e-old", description="p" * 3001, rsvps=rsvps)],
+    )
+    assert c.calendar == []
+    assert taken == [("e-old", rsvps)]

@@ -282,8 +282,16 @@ class ChunkBuilder:
         sig_suite: str,
         since: int | None = None,
         next_index: Callable[[], int] | None = None,
+        max_record_bytes: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Yield encrypted + signed chunk envelopes for ``exporter``.
+
+        ``max_record_bytes``: the largest record (as JSON) the path to the
+        requester carries — a household behind a GFS takes one relay frame
+        per chunk. A larger record is left out with a WARNING, before it
+        takes a chunk index: the stream stays whole and clean, so the
+        requester's watermark moves on instead of the same stream being
+        sent again on every sync for one record that can never arrive.
 
         Each yielded dict can be serialised with :func:`serialise_chunk`
         and sent via ``SyncRtcSession.send_chunk``. ``since``: an
@@ -297,6 +305,10 @@ class ChunkBuilder:
         """
         cursor = 0
         async for batch in record_batches(exporter, space_id, since=since):
+            if max_record_bytes is not None:
+                batch = _records_that_fit(
+                    batch, max_record_bytes, exporter.resource, space_id
+                )
             async for envelope in self._chunks_of(
                 exporter.resource,
                 batch,
@@ -451,6 +463,29 @@ class ChunkBuilder:
             suite=sig_suite,
         )
         return envelope
+
+
+def _records_that_fit(
+    records: list[dict[str, Any]], max_bytes: int, resource: str, space_id: str
+) -> list[dict[str, Any]]:
+    """*records* without those larger than *max_bytes* as JSON, each named
+    in a WARNING (its id and size — never its content)."""
+    kept: list[dict[str, Any]] = []
+    for record in records:
+        size = len(_orjson.dumps(record))
+        if size <= max_bytes:
+            kept.append(record)
+            continue
+        log.warning(
+            "sync: %s record %s of space %s is %d bytes — more than the %d a "
+            "household behind a GFS takes in one chunk; left out of its stream",
+            resource,
+            record.get("id"),
+            space_id,
+            size,
+            max_bytes,
+        )
+    return kept
 
 
 def serialise_chunk(envelope: dict[str, Any]) -> bytes:

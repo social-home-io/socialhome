@@ -40,6 +40,7 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.gallery import GalleryItem
+from socialhome.domain.page import Page
 from socialhome.domain.post import (
     BID_STATES,
     BazaarBid,
@@ -226,7 +227,19 @@ class _FakePageRepo:
         self.confirmed: set[tuple[str, str]] = set()
 
     async def get(self, page_id):
-        return self.rows.row(page_id)
+        row = self.rows.row(page_id)
+        if row is None:
+            return None
+        # A real row: the receiver measures it (the page size rule).
+        return Page(
+            id=row.id,
+            title="T",
+            content=row.content,
+            created_by=row.created_by,
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            space_id=row.space_id,
+        )
 
     async def save(self, page, *, space_id):
         if not self.rows.claim(page.id, space_id):

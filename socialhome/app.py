@@ -940,10 +940,23 @@ async def _redeliver_via_gfs_relay(
             entry.instance_id,
         )
         return DeliveryOutcome.PERMANENT
-    result = await transport.send_via_gfs_relay(
-        instance=instance,
-        envelope_dict=orjson.loads(body),
-    )
+    envelope_dict = orjson.loads(body)
+    result = None
+    if not fallback:
+        try:
+            # v_87 — a row too large for a JSON relay envelope goes as one
+            # binary relay frame (``None``: the JSON envelope below).
+            result = await federation_service.relay_outbox_frame(
+                entry, instance, envelope_dict
+            )
+        except ValueError as exc:
+            log.warning("outbox: unusable entry %s — dropping: %s", entry.id, exc)
+            return DeliveryOutcome.PERMANENT
+    if result is None:
+        result = await transport.send_via_gfs_relay(
+            instance=instance,
+            envelope_dict=envelope_dict,
+        )
     if result.ok:
         # NO ``mark_reachable`` here. The relay answers a uniform 202
         # to every well-formed envelope — recipient online, offline,
@@ -956,9 +969,10 @@ async def _redeliver_via_gfs_relay(
         federation_service.note_relay_accepted(entry.instance_id)
         return DeliveryOutcome.SUCCESS
     if not fallback and result.error == DELIVERY_ERROR_RELAY_TOO_LARGE:
-        # Deterministic: the frame is over the relay's body cap and
-        # will be on every retry too (media does not ride this
-        # transport). Retrying spends the whole attempt budget
+        # Deterministic: the envelope is over the relay's JSON cap and
+        # cannot go as a binary relay frame either (the peer is below
+        # v_87, its GFS carries none, or not even a frame fits it) — and
+        # will be on every retry too. Retrying spends the whole attempt budget
         # re-deriving one length compare and then reports a
         # permanent condition as a transient one. The transport
         # already logged a WARNING naming the peer, event type and

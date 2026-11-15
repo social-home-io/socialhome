@@ -230,3 +230,10 @@ class TestCanonicalEventBound:
     )
     def test_everything_else_is_unchanged(self, kept):
         assert canonical_event_bound(kept, tz="UTC", is_end=False) == kept
+
+
+def test_an_overlong_zone_name_is_no_zone():
+    """A peer's 9 KB zone name made the tzdata lookup recurse past Python's
+    limit; anything longer than an IANA name is no zone."""
+    assert is_valid_tz("Not/AZone" * 1000) is False
+    assert is_valid_tz("") is False

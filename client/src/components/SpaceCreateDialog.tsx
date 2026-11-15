@@ -202,12 +202,13 @@ export function SpaceCreateDialog() {
       <div class="sh-form">
         <label>
           {t('space.create.name')}
-          <input value={name.value} onInput={(e) => name.value = (e.target as HTMLInputElement).value}
+          <input value={name.value} maxLength={120}
+            onInput={(e) => name.value = (e.target as HTMLInputElement).value}
             placeholder={t('space.create.name_placeholder')} />
         </label>
         <label>
           {t('space.create.description')}
-          <textarea value={description.value}
+          <textarea value={description.value} maxLength={300}
             onInput={(e) => description.value = (e.target as HTMLTextAreaElement).value}
             placeholder={t('space.create.description_placeholder')} rows={2} />
         </label>
