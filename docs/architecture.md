@@ -560,6 +560,23 @@ household's IP is still in the connection server's HTTP access log. See
 [`principles.md`](./principles.md) for that residual and the rest of the
 metadata this tier concedes.
 
+**A member behind a GFS is a member like any other.** Tier 4 is only a
+transport: a space member household reached through it gets the same
+content and the same flows as a paired or mesh-only one — the periodic
+roster snapshot (kept at zero envelopes by its `roster_echo`), the media
+outbox's `SPACE_MEDIA_BLOB` pushes (as v_87 binary relay frames, or JSON
+chunks the relay carries), page files it proposes pushed to a host whose
+relay takes frames, and from v_92 the same bounded catch-up push and
+`SPACE_MEDIA_WANTED` as everyone. What stays specific to it is listed, with
+a reason, in `tests/protocol/test_gfs_member_special_case_guard.py`: the
+seat itself (redeem, teardown, the owner's no-seed rule), the transport
+(relay sizes and frames, mailboxes and multi uploads, no direct-sync
+signalling, no inbox POST), the seat's inbound vocabulary, the member
+directory, exclusions from non-space surfaces (DMs, moments, pairing) and
+the GFS media cache — a reader whose GFS keeps one is described its files
+(`media_refs`), and its push is skipped only while that cache is known to
+hold the file.
+
 A tier-4 success is an **acceptance, not a delivery**: the relay answers
 a uniform `202` whether the recipient is online, offline or not one of
 its clients (anything else would be a presence oracle), so
