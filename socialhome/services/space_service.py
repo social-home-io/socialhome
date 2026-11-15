@@ -37,12 +37,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import functools
 import logging
 import re
 import time
 import unicodedata
 import uuid
 import weakref
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -178,6 +180,7 @@ from ..domain.media_constraints import (
     SPACE_COVER_MAX_DIMENSION,
     SPACE_ICON_MAX_BYTES,
     SPACE_ICON_MAX_DIMENSION,
+    SPACE_IMAGE_EMBED_MAX_BYTES,
     SPACE_IMAGE_FIT_MIN_DIMENSION,
     space_media_ref,
 )
@@ -490,6 +493,11 @@ ROSTER_REPAIR_BACKOFF_MAX_S: float = 24 * 60 * 60
 #: ``roster_sequence`` (a seat applied without a sequence bump — a
 #: delegated admin's gossip — shows up after at most this).
 ROSTER_SEATS_CACHE_S: float = 60.0
+
+
+#: Asked only when a peer's space image is over the cap: whether its sender
+#: caps its images (:func:`sender_caps_space_images`).
+SenderCaps = Callable[[], Awaitable[bool]]
 
 
 def _monotonic() -> float:
@@ -7144,6 +7152,9 @@ class SpaceService(
                     icon_repo=self._icons,
                     space_crypto_service=self._space_crypto,
                     inviter_identity_pk=opened.inviter_identity_pk,
+                    sender_caps=functools.partial(
+                        sender_caps_space_images, self._federation, host_instance
+                    ),
                 )
             result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=host_instance,
@@ -10123,8 +10134,16 @@ async def _apply_space_image_from_metadata(
     hash_key: str,
     max_dimension: int,
     max_bytes: int,
+    sender_caps: SenderCaps | None = None,
 ) -> bool:
     """Persist one space image a host shipped in ``meta``; ``True`` if stored.
+
+    ``sender_caps`` — asked only for an image over the cap: whether its
+    sender caps its images (:func:`sender_caps_space_images`; ``None``:
+    it does). From the released v_80 line, which does not, an image over
+    the cap but within :data:`SPACE_IMAGE_EMBED_MAX_BYTES` is re-encoded
+    here and the rendition stored (INFO): that host keeps working until it
+    upgrades.
 
     Bytes from another household are checked before they are kept: at most
     ``max_bytes`` — the one cap every path carries
@@ -10146,12 +10165,18 @@ async def _apply_space_image_from_metadata(
     if not image_hash:
         return False
     # 4/3 base64 overhead: refuse an oversize blob before decoding it.
-    if len(b64) > 4 * -(-max_bytes // 3):
+    lenient = (
+        len(b64) > 4 * -(-max_bytes // 3)
+        and sender_caps is not None
+        and not await sender_caps()
+    )
+    limit = SPACE_IMAGE_EMBED_MAX_BYTES if lenient else max_bytes
+    if len(b64) > 4 * -(-limit // 3):
         log.warning(
             "space %s: shipped %s is over the %d-byte cap — keeping the one held",
             space_id,
             what,
-            max_bytes,
+            limit,
         )
         return False
     try:
@@ -10159,12 +10184,12 @@ async def _apply_space_image_from_metadata(
     except binascii.Error, ValueError:
         log.warning("space %s: shipped %s is not valid base64", space_id, what)
         return False
-    if len(webp) > max_bytes:
+    if len(webp) > limit:
         log.warning(
             "space %s: shipped %s is over the %d-byte cap — keeping the one held",
             space_id,
             what,
-            max_bytes,
+            limit,
         )
         return False
     if not await ImageProcessor().is_valid_webp(webp, max_dimension=max_dimension):
@@ -10175,6 +10200,31 @@ async def _apply_space_image_from_metadata(
             max_dimension,
         )
         return False
+    if len(webp) > max_bytes:
+        # A released (v_80) host's image over the one cap: keep a rendition
+        # within it — every member holds the same size.
+        try:
+            fitted = await ImageProcessor().fit_within(webp, max_bytes)
+        except ValueError:
+            fitted = None
+        if fitted is None:
+            log.warning(
+                "space %s: shipped %s cannot be re-encoded under %d bytes — "
+                "keeping the one held",
+                space_id,
+                what,
+                max_bytes,
+            )
+            return False
+        log.info(
+            "space %s: %s from a released host is %d bytes (> %d) — re-encoded to %d",
+            space_id,
+            what,
+            len(webp),
+            max_bytes,
+            len(fitted),
+        )
+        webp = fitted
     # ``width`` / ``height`` aren't shipped — the SPA renders the image at
     # whatever native dimensions the WebP carries, so 0 is fine.
     await repo.set(
@@ -10187,11 +10237,26 @@ async def _apply_space_image_from_metadata(
     return True
 
 
+async def sender_caps_space_images(federation, instance_id: str) -> bool:
+    """Whether household *instance_id* sends a space's cover / icon within
+    the one cap (:data:`FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES`)
+    — then an over-cap image from it is refused. The released v_80 line
+    does not (it sent paired members up to 256 KiB), and neither does a
+    household whose version is unknown: its images are re-encoded instead.
+    No federation wired: strict."""
+    if federation is None:
+        return True
+    return await federation.space_member_supports(
+        instance_id, min_version=FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES
+    )
+
+
 async def apply_space_cover_from_metadata(
     space_id: str,
     *,
     meta: dict,
     cover_repo,
+    sender_caps: SenderCaps | None = None,
 ) -> bool:
     """When a §D1b stub-creation event (or a cover change) carries the
     host's WebP cover bytes (``meta['cover_webp_base64']``), validate +
@@ -10212,6 +10277,7 @@ async def apply_space_cover_from_metadata(
         hash_key="cover_hash",
         max_dimension=SPACE_COVER_MAX_DIMENSION,
         max_bytes=SPACE_COVER_MAX_BYTES,
+        sender_caps=sender_caps,
     )
 
 
@@ -10220,6 +10286,7 @@ async def apply_space_icon_from_metadata(
     *,
     meta: dict,
     icon_repo,
+    sender_caps: SenderCaps | None = None,
 ) -> bool:
     """Persist the host's icon WebP bytes (``meta['icon_webp_base64']``) on
     a member so ``/api/spaces/{id}/icon`` serves the real avatar. Mirrors
@@ -10233,6 +10300,7 @@ async def apply_space_icon_from_metadata(
         hash_key="icon_hash",
         max_dimension=SPACE_ICON_MAX_DIMENSION,
         max_bytes=SPACE_ICON_MAX_BYTES,
+        sender_caps=sender_caps,
     )
 
 
@@ -10243,6 +10311,7 @@ async def apply_space_images_from_config_change(
     previous: Space,
     cover_repo,
     icon_repo,
+    sender_caps: SenderCaps | None = None,
 ) -> None:
     """Bring a member's stored cover / icon in line with an APPLIED
     ``SPACE_CONFIG_CHANGED``.
@@ -10288,6 +10357,7 @@ async def apply_space_images_from_config_change(
                 hash_key=hash_key,
                 max_dimension=max_dimension,
                 max_bytes=max_bytes,
+                sender_caps=sender_caps,
             )
         elif not meta.get(hash_key) and old_hash:
             await repo.clear(space_id)
@@ -10824,6 +10894,7 @@ async def seat_join_stub(
     icon_repo=None,
     space_crypto_service=None,
     inviter_identity_pk: object = None,
+    sender_caps: SenderCaps | None = None,
 ) -> None:
     """Seat the local stub of a remote space from an admitted join snapshot
     (:func:`admit_join`) — the private-invite accept and the invite-link
@@ -10862,8 +10933,12 @@ async def seat_join_stub(
         claimed_pk_hex=inviter_identity_pk,
         owner_instance_id=owner_instance,
     )
-    await apply_space_cover_from_metadata(space_id, meta=meta, cover_repo=cover_repo)
-    await apply_space_icon_from_metadata(space_id, meta=meta, icon_repo=icon_repo)
+    await apply_space_cover_from_metadata(
+        space_id, meta=meta, cover_repo=cover_repo, sender_caps=sender_caps
+    )
+    await apply_space_icon_from_metadata(
+        space_id, meta=meta, icon_repo=icon_repo, sender_caps=sender_caps
+    )
     await apply_space_content_key_from_metadata(
         space_id, meta=meta, space_crypto_service=space_crypto_service
     )

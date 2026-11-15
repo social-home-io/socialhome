@@ -3834,6 +3834,96 @@ async def test_a_peers_image_over_the_one_cap_is_not_stored(
     assert repo.sets == [fits]
 
 
+@pytest.mark.parametrize(
+    ("what", "cap", "dims"),
+    [
+        ("cover", SPACE_COVER_MAX_BYTES, (700, 500)),
+        ("icon", SPACE_ICON_MAX_BYTES, (256, 256)),
+    ],
+)
+async def test_a_released_v80_hosts_big_image_is_stored_as_a_rendition(
+    stack, caplog, what, cap, dims
+):
+    """Rollout (owner decision 2026-11-15): a host on the released v_80
+    line sends a paired member covers of up to 256 KiB. Its image over the
+    cap is not refused — re-encoded here, off the event loop, and the
+    rendition (within the cap) stored, at INFO. A current host's over-cap
+    image is still refused, and the held one kept."""
+    from socialhome.services.space_service import (
+        apply_space_cover_from_metadata,
+        apply_space_icon_from_metadata,
+        apply_space_images_from_config_change,
+    )
+
+    async def _released():
+        return False
+
+    async def _current():
+        return True
+
+    big = _noise_webp(*dims)
+    assert cap < len(big) <= 256 * 1024
+    meta = {
+        f"{what}_hash": "new",
+        f"{what}_webp_base64": base64.b64encode(big).decode("ascii"),
+    }
+    apply = (
+        apply_space_cover_from_metadata
+        if what == "cover"
+        else apply_space_icon_from_metadata
+    )
+    repo = _RecordingImageRepo(_noise_webp(32, 32))
+    with caplog.at_level(logging.INFO, logger="socialhome.services.space_service"):
+        assert await apply(
+            "sp-x", meta=meta, sender_caps=_released, **{f"{what}_repo": repo}
+        )
+    (stored,) = repo.sets
+    assert len(stored) <= cap and repo.hash == "new"
+    assert Image.open(io.BytesIO(stored)).format == "WEBP"
+    assert "re-encoded" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    # The config-change path the same way.
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    previous = dataclasses.replace(space, cover_hash="old", icon_hash="old")
+    repo = _RecordingImageRepo(_noise_webp(32, 32))
+    await apply_space_images_from_config_change(
+        "sp-x",
+        meta=meta,
+        previous=previous,
+        cover_repo=repo if what == "cover" else None,
+        icon_repo=repo if what == "icon" else None,
+        sender_caps=_released,
+    )
+    assert len(repo.sets) == 1 and len(repo.sets[0]) <= cap
+    # From a current host: refused, the held image kept.
+    held = _noise_webp(32, 32)
+    repo = _RecordingImageRepo(held)
+    assert not await apply(
+        "sp-x", meta=meta, sender_caps=_current, **{f"{what}_repo": repo}
+    )
+    assert repo.sets == [] and repo.webp == held
+
+
+async def test_which_senders_cap_their_space_images():
+    """The released v_80 line ships images over the cap; this build and
+    later never do (``MIN_FOR_CAPPED_SPACE_IMAGES``). An unknown version
+    reads as the released line (the lenient path)."""
+    from socialhome.services.space_service import sender_caps_space_images
+
+    fed = MagicMock()
+    versions = {"v80": 80, "cur": FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES}
+
+    async def _supports(iid, *, min_version):
+        return versions.get(iid, 0) >= min_version
+
+    fed.space_member_supports = _supports
+    assert await sender_caps_space_images(fed, "cur") is True
+    assert await sender_caps_space_images(fed, "v80") is False
+    assert await sender_caps_space_images(fed, "unknown") is False
+    assert await sender_caps_space_images(None, "cur") is True
+
+
 async def test_allowed_post_types_federate_via_space_meta(stack):
     """The per-space post-type allow-list rides the federation metadata so a
     member household enforces the same restriction when its users compose."""

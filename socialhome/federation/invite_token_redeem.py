@@ -39,6 +39,7 @@ through the same :class:`SpaceRoutedHandler` when it was set.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import secrets
 import uuid
@@ -90,6 +91,7 @@ from ..services.space_service import (
     can_seat_remote_stub,
     expire_superseded_invitations,
     seat_join_stub,
+    sender_caps_space_images,
 )
 from .invite_bootstrap import (
     KIND_REDEEM,
@@ -1085,6 +1087,9 @@ class SpaceInviteTokenRedeemCoordinator:
                     cover_repo=self._cover_repo,
                     icon_repo=self._icon_repo,
                     space_crypto_service=self._space_crypto,
+                    sender_caps=functools.partial(
+                        sender_caps_space_images, self._federation, issuer_instance_id
+                    ),
                 )
                 # v_49 — our writer cert for that epoch (needs the key row
                 # just written; verified against the stub's pinned key).

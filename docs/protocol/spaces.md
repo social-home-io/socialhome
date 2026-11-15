@@ -96,11 +96,17 @@ Before storing, it checks the bytes on every inbound path (config change
 and catch-up, join snapshot): at most the cap — an image over it is NOT
 stored, the one already held stays, and a WARNING names the cap — and a
 WebP that fully decodes (Pillow, off the event loop) within 1200 px /
-256 px. A host still on the released v_80 sends a paired member a cover of
-up to 256 KiB; until it upgrades, such a member keeps its previous cover
-(or none) for a cover over 64 KiB — the GFS-reached member of that host
-got the 64 KiB variant all along. No protocol version: the wire shape is
-unchanged and a v_80 receiver accepts any image up to
+256 px. The refusal holds for a sender that caps its images
+(`FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES`, v_94 — this build;
+`sender_caps_space_images`, judged by `space_member_version`). A host on
+the released v_80 line still sends a paired member covers of up to
+256 KiB: from such a sender (or one whose version is unknown) an image
+over the cap but within `SPACE_IMAGE_EMBED_MAX_BYTES` is re-encoded on
+the receiver (`ImageProcessor.fit_within`, off the event loop, logged at
+INFO) and the rendition stored — so no member of a released host loses its
+cover while that host upgrades. No version bump: the wire shape is
+unchanged, the new constant names a version that already ships with this
+batch, and a v_80 receiver accepts any image up to
 `SPACE_IMAGE_EMBED_MAX_BYTES` (1.5 MiB), so the capped image is accepted
 everywhere. A shrunken rendition does not
 digest to the host's hash, so the bytes are stored under the announced hash,

@@ -2273,6 +2273,12 @@ class FederationCapability:
     #: ``SPACE_POLL_VOTE_CAST``) is additive and goes to everyone. A
     #: ``SYNC_RECORD_LINES`` entry (94).
     MIN_FOR_ITEM_MERGE_STAMPS = 94
+    #: v_94 — a household at or above it sends a space's cover / icon
+    #: within the one cap (``SPACE_COVER_MAX_BYTES`` / ``SPACE_ICON_MAX_BYTES``,
+    #: owner decision 2026-11-15), so an image over it from such a sender is
+    #: refused. Below it (the released v_80 line sent paired members up to
+    #: 256 KiB) the receiver re-encodes the image instead. Wire unchanged.
+    MIN_FOR_CAPPED_SPACE_IMAGES = 94
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
