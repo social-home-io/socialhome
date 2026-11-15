@@ -1463,3 +1463,43 @@ async def test_space_files_of_a_member_take_a_pages_scoped_copies(db):
     )
     repo = SqliteMediaReferenceRepo(db)
     assert await repo.space_files("sp1") == [space_page_media_name("sp1", "host.webp")]
+
+
+async def test_a_hostile_hosts_draft_never_names_a_household_file_to_purge(db):
+    """A member's own draft of a page (``pending_base_seq``) still carries
+    the HOST's raw names: a hostile host can put one of our household
+    files (fresh in its grace window) in the body. A purge frees a page's
+    raw names only on the space's host — never through a member's draft."""
+    await _seed_parents(db)  # sp1 is NOT hosted here
+    await db.enqueue(
+        "INSERT INTO space_pages(id, space_id, title, created_by, content,"
+        " pending_base_seq) VALUES('pg', 'sp1', 'P', 'u1',"
+        " '![x](api/media/household.webp)', 3)"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    files = await repo.space_files("sp1")
+    assert "household.webp" not in files
+    # Only its page-scoped copy, which is this space's alone.
+    assert files == [space_page_media_name("sp1", "household.webp")]
+
+
+async def test_space_files_never_name_a_reserved_or_junk_reference(db):
+    """A legacy synced row may hold a value that was never validated (an
+    attachment naming a DM's ``dm-`` file, a GFS reader copy, a foreign
+    URL): only a canonical, non-reserved space file is purge material."""
+    await _seed_parents(db)
+    for i, url in enumerate(
+        (
+            "api/media/dm-0123456789abcdef0123456789abcdef01234567.pdf",
+            "api/media/sg-0123456789abcdef0123456789abcdef01234567.webp",
+            "https://evil.example/api/media/x.pdf",
+            "api/media/ok.pdf",
+        )
+    ):
+        await db.enqueue(
+            "INSERT INTO space_posts(id, space_id, author, type, file_meta_json)"
+            " VALUES(?, 'sp1', 'u1', 'file', ?)",
+            (f"pf{i}", f'{{"url": "{url}"}}'),
+        )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.space_files("sp1") == ["ok.pdf"]

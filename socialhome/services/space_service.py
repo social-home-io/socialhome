@@ -288,7 +288,11 @@ from ..task_drain import wait_tasks_done
 from ..utils.timezones import coerce_tz
 from .content_access import ContentAccessMixin
 from .gfs_connection_service import GfsConnectionError
-from .inbound_media_store import optional_local_media_ref, require_local_media_refs
+from .inbound_media_store import (
+    optional_local_media_ref,
+    require_local_media_refs,
+    space_media_ref,
+)
 from .local_community import (
     LocalAreaBudget,
     hosted_local_area,
@@ -8273,9 +8277,11 @@ class SpaceService(
         # Capture media URLs before soft_delete nulls them; unlinked after
         # the PostDeleted publish unmirrors the shared gallery item. Every
         # file the post shows (the registry's ``posts`` fields — its
-        # attachment included). A bazaar wrapper's photos live on its
-        # listing row, which outlives the post and keeps them referenced.
-        media = item_media_urls("posts", post)
+        # attachment included) that is a space file — never a reserved
+        # (DM / GFS copy / transient) name or junk a legacy synced row kept
+        # unvalidated. A bazaar wrapper's photos live on its listing row,
+        # which outlives the post and keeps them referenced.
+        media = [u for u in item_media_urls("posts", post) if space_media_ref(u)]
         moderated_by: str | None = None
         if post.author != actor_user_id:
             # Moderation path — actor needs content authority

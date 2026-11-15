@@ -66,8 +66,10 @@ import orjson
 from ..db import AsyncDatabase
 from ..domain.file_hashes import is_space_content_media_name
 from ..domain.media_constraints import (
+    MEDIA_REF_PREFIX,
     SPACE_DIRECT_MEDIA_PREFIX,
     SPACE_PAGE_MEDIA_PREFIX,
+    space_media_ref,
 )
 from ..domain.space_media_fields import (
     FieldShape,
@@ -261,16 +263,31 @@ _SPACE_ITEM_FILES: tuple[tuple[str, str, str, str, str, str, str], ...] = (
 
 #: ``(FROM clause over the row t, space, names-are-ours filter)`` of every
 #: registry table — what a space purge collects (:meth:`space_files`). A
-#: page's RAW names count only where they are our own files
-#: (:data:`_SPACE_PAGE_HERE`); a member's page-scoped ``sp-`` copies are
-#: added from :meth:`SqliteMediaReferenceRepo._page_names_of`.
+#: page's RAW names count only on the space's host (:data:`_HOSTED_SPACE`):
+#: a member's own draft still carries the HOST's names, which a hostile
+#: host could point at one of our household files — the draft's own
+#: uploads are left to the orphan sweep; a member's page-scoped ``sp-``
+#: copies come from :meth:`SqliteMediaReferenceRepo._page_names_of`.
 _SPACE_ROWS: dict[str, tuple[str, str, str]] = {
     **{
         t: (src, space, "")
         for t, (src, _k, space, _l, _o) in _SPACE_ITEM_SOURCE.items()
     },
-    "space_pages": ("space_pages t", "t.space_id", f" AND {_SPACE_PAGE_HERE}"),
+    "space_pages": ("space_pages t", "t.space_id", f" AND {_HOSTED_SPACE}"),
 }
+#: Registry tables that store bare basenames, not ``api/media/<file>``.
+_BARE_NAME_TABLES: frozenset[str] = frozenset({"gallery_items"})
+
+
+def _space_file(raw: object, *, bare: bool) -> str | None:
+    """The file name of a stored space reference *raw* when it is a
+    canonical, non-reserved space file (:func:`space_media_ref` — never a
+    DM's, a GFS reader copy, a DM transient, a foreign URL or junk a
+    legacy row kept unvalidated), else ``None``."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    ref = space_media_ref(MEDIA_REF_PREFIX + raw if bare else raw)
+    return ref[len(MEDIA_REF_PREFIX) :] if ref is not None else None
 
 
 #: A moderation queue item still to publish its files: pending, or
@@ -556,6 +573,17 @@ def _hit(shape: str, raw: object, basename: str) -> bool:
 
 def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _json_list(raw: object) -> list[object]:
+    """The entries of a stored JSON array (anything else: none)."""
+    if not isinstance(raw, str) or not raw:
+        return []
+    try:
+        values = orjson.loads(raw)
+    except ValueError, TypeError:
+        return []
+    return values if isinstance(values, list) else []
 
 
 def _names_in_list(raw: object) -> list[str]:
@@ -1009,12 +1037,18 @@ class SqliteMediaReferenceRepo:
         """Every file a row of space *space_id* names in a registry column
         (:func:`space_media_columns`, live or not), each once — what a hard
         purge of the space may free (``unlink_unreferenced`` still keeps a
-        file another row names)."""
+        file another row names). Only a canonical, non-reserved space file
+        (:func:`_space_file`); a page's raw names only on the space's host.
+        Not covered: a page's history (``page_edit_history``) and open
+        conflict sides on the host — the orphan sweep reclaims those once
+        the purge drops their rows."""
         if not space_id:
             return []
         out: list[str] = []
+        seen: set[str] = set()
         for table, col, shape in space_media_columns():
             source, space, here = _SPACE_ROWS[table]
+            bare = table in _BARE_NAME_TABLES
             value = f"t.{col}"
             if shape.startswith("json:"):
                 value = (
@@ -1027,14 +1061,22 @@ class SqliteMediaReferenceRepo:
             )
             for r in rows_to_dicts(rows):
                 raw = r.get("v")
+                refs: list[object]
                 if shape == "list":
-                    names = _names_in_list(raw)
+                    refs = list(_json_list(raw))
                 elif shape == "markdown":
-                    names = sorted(_names_in_markdown(raw))
+                    refs = list(page_body_media_refs(raw))
                 else:
-                    names = [n for n in (media_basename(raw),) if n]
-                out.extend(n for n in names if n not in (".", "..") and n not in out)
-        out.extend(sorted(await self._page_names_of(space_id, live=False)))
+                    refs = [raw]
+                for ref in refs:
+                    name = _space_file(ref, bare=bare)
+                    if name is not None and name not in seen:
+                        seen.add(name)
+                        out.append(name)
+        for name in sorted(await self._page_names_of(space_id, live=False)):
+            if name not in seen:
+                seen.add(name)
+                out.append(name)
         return out
 
     async def content_names_of_item(self, item_id: str) -> list[str]:

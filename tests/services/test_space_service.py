@@ -12041,3 +12041,40 @@ async def test_deleting_a_file_post_removes_its_attachment(stack, tmp_dir):
     assert (media_dir / "doc.pdf").exists()
     await svc.delete_post(p.id, actor_user_id=a.user_id)
     assert not (media_dir / "doc.pdf").exists()
+
+
+async def test_deleting_a_post_never_unlinks_a_reserved_attachment(stack, tmp_dir):
+    """A legacy synced post whose attachment names a DM's (``dm-``) file
+    — never validated — must not take that file with it on delete."""
+    media_dir = tmp_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svc = SpaceService(
+        stack.space_repo,
+        stack.space_post_repo,
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        own_instance_id=stack.iid,
+        media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
+    )
+    a = await stack.provision_user("anna")
+    space = await svc.create_space(owner_username="anna", name="S")
+    dm = "dm-0123456789abcdef0123456789abcdef01234567.pdf"
+    (media_dir / dm).write_bytes(b"%PDF")
+    p = await svc.create_post(
+        space.id, author_user_id=a.user_id, type=PostType.TEXT, content="x"
+    )
+    meta = orjson.dumps(
+        {
+            "url": f"api/media/{dm}",
+            "mime_type": "application/pdf",
+            "original_name": "d.pdf",
+            "size_bytes": 4,
+        }
+    ).decode()
+    await stack.db.enqueue(
+        "UPDATE space_posts SET type='file', file_meta_json=? WHERE id=?",
+        (meta, p.id),
+    )
+    await svc.delete_post(p.id, actor_user_id=a.user_id)
+    assert (media_dir / dm).exists()
