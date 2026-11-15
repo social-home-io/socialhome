@@ -360,9 +360,12 @@ class SpaceMediaGfsUploader:
     async def is_relay_reader(self, instance_id: str) -> bool:
         """Whether *instance_id* is a member household seated from an invite
         link that takes ``media_refs`` (v_80): its items carry the
-        descriptor, and it gets no ``SPACE_MEDIA_BLOB`` push. Not one whose
-        GFS keeps no space media cache while it reads binary relay frames
-        (v_87): that one gets the push, through the relay."""
+        descriptor, and the media outbox skips its ``SPACE_MEDIA_BLOB`` push
+        only while its GFS is known to hold the file (:meth:`reads_from_gfs`)
+        — it gets every other push, through the relay, like any member. Not
+        one whose GFS keeps no space media cache while it reads binary relay
+        frames (v_87): it has nothing to fetch from, so it only gets the
+        push."""
         if self._federation is None:
             return False
         inst = await self._federation_repo.get_instance(instance_id)
