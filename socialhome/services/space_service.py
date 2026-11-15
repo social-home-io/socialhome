@@ -263,6 +263,7 @@ from ..domain.space import (
 )
 from ..domain.space_app_table import SpaceAppNotAllowedError
 from ..domain.space_item import reaction_emoji_ok
+from ..domain.space_media_fields import item_media_urls
 from ..domain.space_place import PlacePin, validate_place_pin
 from ..domain.user import User
 from ..domain.writer_cert import WriterEntitlement
@@ -8270,12 +8271,11 @@ class SpaceService(
         if post.deleted:
             return
         # Capture media URLs before soft_delete nulls them; unlinked after
-        # the PostDeleted publish unmirrors the shared gallery item.
-        media = [
-            post.media_url,
-            *post.image_urls,
-            post.link_preview.thumbnail_url if post.link_preview else None,
-        ]
+        # the PostDeleted publish unmirrors the shared gallery item. Every
+        # file the post shows (the registry's ``posts`` fields — its
+        # attachment included). A bazaar wrapper's photos live on its
+        # listing row, which outlives the post and keeps them referenced.
+        media = item_media_urls("posts", post)
         moderated_by: str | None = None
         if post.author != actor_user_id:
             # Moderation path — actor needs content authority

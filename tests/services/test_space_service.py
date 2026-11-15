@@ -57,7 +57,7 @@ from socialhome.domain.media_constraints import (
     SPACE_COVER_SNAPSHOT_MAX_BYTES,
     SPACE_ICON_SNAPSHOT_MAX_BYTES,
 )
-from socialhome.domain.post import PostType
+from socialhome.domain.post import FileMeta, PostType
 from socialhome.domain.relay_media_frame import SPACE_CONFIG_ITEM_MAX_BYTES as _CFG_MAX
 from socialhome.domain.space import (
     AlreadyMemberError,
@@ -12007,3 +12007,37 @@ def test_no_larger_holds_only_for_a_config_stored_over_the_limit():
     legacy = _cfg(description="o" * (_CFG_MAX + 5000))
     same = replace(legacy, name="Clux", config_sequence=99)
     assert _within(same, held=legacy, source="t") is same
+
+
+async def test_deleting_a_file_post_removes_its_attachment(stack, tmp_dir):
+    """A post's attached file (``file_meta.url``) is one of its files (the
+    registry's ``posts`` fields): deleting the post unlinks it when no
+    other row names it."""
+    media_dir = tmp_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    svc = SpaceService(
+        stack.space_repo,
+        stack.space_post_repo,
+        SqliteUserRepo(stack.db),
+        EventBus(),
+        own_instance_id=stack.iid,
+        media_dir=media_dir,
+        media_refs=SqliteMediaReferenceRepo(stack.db),
+    )
+    a = await stack.provision_user("anna")
+    space = await svc.create_space(owner_username="anna", name="S")
+    (media_dir / "doc.pdf").write_bytes(b"%PDF")
+    p = await svc.create_post(
+        space.id,
+        author_user_id=a.user_id,
+        type=PostType.FILE,
+        file_meta=FileMeta(
+            url="api/media/doc.pdf",
+            mime_type="application/pdf",
+            original_name="doc.pdf",
+            size_bytes=4,
+        ),
+    )
+    assert (media_dir / "doc.pdf").exists()
+    await svc.delete_post(p.id, actor_user_id=a.user_id)
+    assert not (media_dir / "doc.pdf").exists()
