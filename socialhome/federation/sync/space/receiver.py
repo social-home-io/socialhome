@@ -1808,15 +1808,21 @@ class SpaceSyncReceiver:
                 # The one receiver rule: over the limit (measured whole) and
                 # larger than our copy → not stored. The stream goes on; the
                 # watermark moves.
-                if calendar_event_too_large(
-                    event,
-                    was=(
-                        held_event[1]
-                        if held_event is not None and held_event[0] == space_id
-                        else None
-                    ),
-                ):
+                held_here = (
+                    held_event[1]
+                    if held_event is not None and held_event[0] == space_id
+                    else None
+                )
+                if calendar_event_too_large(event, was=held_here):
                     log_calendar_event_not_stored("space sync", event, provider)
+                    # The event we hold still takes the host's RSVPs (they
+                    # are not part of its measured size).
+                    if (
+                        held_here is not None
+                        and from_host
+                        and isinstance(r.get("rsvps"), list)
+                    ):
+                        await self._persist_rsvps(held_here, r, space_id)
                     continue
                 media = await self._localize_record(
                     space_id,
@@ -4359,9 +4365,10 @@ def _calendar_from_record(r: dict[str, Any], *, provider: str) -> CalendarEvent 
     start = _parse_iso(r.get("start"))
     end = _parse_iso(r.get("end"))
     try:
-        # The same checks as where a person saves and on a live event.
-        attendees = clean_attendees(r.get("attendees"))
-        rrule = clean_rrule(r.get("rrule"))
+        # As on a live event: lenient for an event saved before the checks,
+        # a rule over its length cap refused.
+        attendees = clean_attendees(r.get("attendees"), strict=False)
+        rrule = clean_rrule(r.get("rrule"), strict=False)
     except ValueError as exc:
         log.warning(
             "space sync: calendar event %s from %s — %s; skipped", rid, provider, exc

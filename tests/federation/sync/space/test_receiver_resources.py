@@ -1042,14 +1042,20 @@ async def test_an_invalid_calendar_record_is_skipped(setup, caplog):
         kp,
         "calendar",
         [
-            _calendar_record("e-empty-ids", attendees=["", ""]),
             _calendar_record("e-rule", rrule="FREQ=DAILY;" + "X" * 600),
-            _calendar_record("e-ok", attendees=["u-1", "u-1"], rrule="FREQ=WEEKLY"),
+            # Saved before the checks: stays deliverable, cleaned.
+            _calendar_record(
+                "e-old", attendees=["", "u-1", "u-1", 5], rrule="FREQ=HOURLY"
+            ),
         ],
     )
     [(_, event)] = c.calendar
-    assert (event.id, event.attendees, event.rrule) == ("e-ok", ("u-1",), "FREQ=WEEKLY")
-    assert "e-empty-ids" in caplog.text and "e-rule" in caplog.text
+    assert (event.id, event.attendees, event.rrule) == (
+        "e-old",
+        ("u-1",),
+        "FREQ=HOURLY",
+    )
+    assert "e-rule" in caplog.text
 
 
 async def test_a_calendar_event_held_over_the_limit_syncs_no_larger(
@@ -2645,3 +2651,35 @@ async def test_a_non_host_providers_hash_map_never_reaches_the_gfs_namer(
     )
     assert "p-n" in sink.hashes
     assert sink.hashes["p-n"] is None
+
+
+async def test_a_held_event_still_takes_the_hosts_rsvps_when_its_record_is_skipped(
+    setup, small_limits, monkeypatch
+):
+    """RSVPs are not part of the event's measured size: a host record the
+    rule skips (it would grow our copy past the limit) still refreshes the
+    RSVPs of the event we hold."""
+    r, c, kp = setup
+    held = _calendar_from_record(
+        _calendar_record("e-old", description="o" * 3000), provider="peer-a"
+    )
+    r._space_calendar_repo.held["e-old"] = ("sp-1", held)
+    taken: list = []
+
+    async def _is_host(self, space_id, provider):
+        return True
+
+    async def _persist_rsvps(self, event, record, space_id):
+        taken.append((event.id, record["rsvps"]))
+
+    monkeypatch.setattr(SpaceSyncReceiver, "_is_host", _is_host)
+    monkeypatch.setattr(SpaceSyncReceiver, "_persist_rsvps", _persist_rsvps)
+    rsvps = [{"user_id": "u-2", "occurrence_at": "x", "status": "going"}]
+    await _send(
+        r,
+        kp,
+        "calendar",
+        [_calendar_record("e-old", description="p" * 3001, rsvps=rsvps)],
+    )
+    assert c.calendar == []
+    assert taken == [("e-old", rsvps)]

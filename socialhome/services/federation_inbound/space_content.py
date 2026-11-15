@@ -1680,10 +1680,12 @@ class SpaceContentInboundHandlers:
         if cover is not None and space_media_ref(cover) is None:
             cover = None  # a reserved (DM / moment) name is never a cover
         try:
-            # The same checks as where a person saves (ids once each, a
-            # cap; a rule this build reads, a length cap).
-            attendees = clean_attendees(p.get("attendees"))
-            rrule = clean_rrule(p.get("rrule"))
+            # Where a household receives: an event saved before the checks
+            # a person's save gets stays deliverable (bad ids dropped, the
+            # list cut at its cap, an unknown rule kept); a rule over its
+            # length cap is refused.
+            attendees = clean_attendees(p.get("attendees"), strict=False)
+            rrule = clean_rrule(p.get("rrule"), strict=False)
         except ValueError as exc:
             log.warning(
                 "%s from %s: calendar event %s in space %s — %s; not stored",

@@ -58,7 +58,9 @@ from socialhome.domain.media_constraints import (
     SPACE_ICON_SNAPSHOT_MAX_BYTES,
 )
 from socialhome.domain.post import PostType
+from socialhome.domain.relay_media_frame import SPACE_CONFIG_ITEM_MAX_BYTES as _CFG_MAX
 from socialhome.domain.space import (
+    SPACE_NAME_MAX_CHARS,
     AlreadyMemberError,
     ContentAction,
     ContentQueuedForReview,
@@ -116,6 +118,7 @@ from socialhome.services.space_service import (
     keep_local_space_state,
     normalize_category,
 )
+from socialhome.services.space_service import config_within_limit as _within
 from socialhome.services.space_writer_cert_service import (
     SpaceWriterCertService,
 )
@@ -11880,3 +11883,59 @@ async def test_removing_a_reaction_no_household_would_take_is_refused(stack, emo
         p.id, space_id=s.id, user_id=anna.user_id, emoji="nice"
     )
     assert len(seen) == 1
+
+
+# ── The receiver rule for a space's config ───────────────────────────────
+
+
+def _cfg(**over) -> Space:
+    return replace(
+        Space(
+            id="sp-cfg",
+            name="Club",
+            owner_instance_id="h" * 32,
+            owner_username="anna",
+            identity_public_key="ab" * 32,
+            config_sequence=1,
+            features=SpaceFeatures(),
+            space_type=SpaceType.PRIVATE,
+            join_mode=JoinMode.INVITE_ONLY,
+        ),
+        **over,
+    )
+
+
+def test_config_within_limit_takes_a_config_that_fits():
+    space = _cfg(description="d" * 1000)
+    assert _within(space, held=None, source="t") is space
+
+
+def test_config_within_limit_with_nothing_held_drops_the_text(caplog):
+    caplog.set_level(logging.WARNING)
+    space = _cfg(description="d" * _CFG_MAX, about_markdown="a")
+    kept = _within(space, held=None, source="SPACE_CREATED from x")
+    assert kept is not None
+    assert (kept.description, kept.about_markdown, kept.name) == (None, None, "Club")
+    assert "its text is not taken" in caplog.text
+
+
+def test_config_within_limit_cuts_the_name_and_emoji_when_still_too_large():
+    space = _cfg(name="N" * _CFG_MAX, emoji="🏡" * 50)
+    kept = _within(space, held=None, source="t")
+    assert kept is not None
+    assert len(kept.name) == SPACE_NAME_MAX_CHARS and len(kept.emoji or "") == 16
+
+
+def test_config_within_limit_keeps_the_held_name_too():
+    held = _cfg(name="Held", description="h")
+    space = replace(held, name="N" * _CFG_MAX, description="d" * _CFG_MAX)
+    kept = _within(space, held=held, source="t")
+    assert kept is not None and (kept.name, kept.description) == ("Held", "h")
+
+
+def test_config_within_limit_refuses_oversize_settings(caplog):
+    """No honest household sends settings this large: not stored."""
+    caplog.set_level(logging.WARNING)
+    space = _cfg(owner_username="o" * _CFG_MAX)
+    assert _within(space, held=_cfg(), source="t") is None
+    assert "even without its text" in caplog.text

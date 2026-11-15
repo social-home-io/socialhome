@@ -1284,3 +1284,31 @@ async def test_a_page_stored_over_the_limit_keeps_mirroring_no_larger(
     grown = _version(page, "y" * 5001, 10_001)
     assert not await env.svc.mirror(space_id=SID, page_id=env.pid, version=grown)
     assert (await _page(env)).content == "y" * 5000
+
+
+async def test_a_refusal_restores_a_page_stored_over_the_limit_over_our_draft(
+    member, monkeypatch
+):
+    """Our small draft sits on a page held before the limit: the host's
+    refusal carries that page (no larger than the version our draft was
+    made from) and is taken — the draft settles, nothing is stuck."""
+    env = member
+    page = await _page(env)
+    await env.svc.mirror(
+        space_id=SID, page_id=env.pid, version=_version(page, "x" * 5000, 2)
+    )
+    await _draft(env, "short")
+    monkeypatch.setattr(mod, "SPACE_PAGE_ITEM_MAX_BYTES", 3000)
+    refused = Sequenced(
+        proposer_instance="me",
+        proposal_hash=version_hash("T", "short"),
+        outcome="refused",
+        reason="access",
+    )
+    assert await env.svc.mirror(
+        space_id=SID,
+        page_id=env.pid,
+        version=_version(await _page(env), "x" * 5000, 2, sequenced=refused),
+    )
+    page = await _page(env)
+    assert (page.content, page.pending_base_seq) == ("x" * 5000, None)

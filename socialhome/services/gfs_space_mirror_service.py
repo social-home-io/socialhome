@@ -440,6 +440,8 @@ class GfsSpaceMirrorService:
                 held=None,  # mirrored only where no row is held (above)
                 source=f"GFS listing from {conn.id}",
             )
+            if space is None:
+                return None
             await self._spaces.save(space)
             # v_44 — remember WHICH connection server seated this mirror and
             # the re-pin counter it showed: a later pin heal is accepted from

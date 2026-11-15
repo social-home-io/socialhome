@@ -568,8 +568,12 @@ is at most 512 characters (`MAX_RRULE_CHARS`) and must parse
 (`FREQ=DAILY|WEEKLY|MONTHLY|YEARLY`, `utils/rrule.py`); its location is
 cut at 500 characters; a space's name is at most 120 characters
 (`SPACE_NAME_MAX_CHARS`, the SPA's field) and its emoji at most 16 code
-points (`MAX_EMOJI_CODEPOINTS`). Those hold where a person saves (422)
-and where a household receives (the event is not stored, WARNING).
+points (`MAX_EMOJI_CODEPOINTS`). Those hold where a person saves (422).
+Where a household receives, an event saved before these checks stays
+deliverable: bad attendee ids are dropped and the list cut at its cap, a
+rule this build cannot read is kept as it is (it expands to its first
+occurrence, as before); only a rule over its length cap is refused
+(WARNING). The size is the whole item's rule either way.
 
 Where it is enforced — unconditionally:
 
@@ -579,7 +583,8 @@ Where it is enforced — unconditionally:
   total)"; no mention of GFSs or other households) — **after the actor
   was authorized** (a person without the right gets their 403 first) and
   before anything is stored or queued for review. Pages: `SpacePageService`
-  on create and in `_write`, which every local write passes (an edit, a
+  on create, on an edit before it is queued for review, and in `_write`,
+  which every local write passes (an edit, a
   conflict resolution, an approved item's replay); calendar: create and
   update (an approved item's replay included); the space: `create_space`
   and `update_config` (checked before anything leaves the household, and
@@ -611,8 +616,12 @@ Where it is enforced — unconditionally:
   archive state, delegation and every other setting are applied; only
   its text is not taken — the description and about text are kept as
   held (then the name and emoji too, if that is still not enough;
-  nothing held → none), with a WARNING. A household never keeps
-  enforcing a stale access level because a description was too long.
+  nothing held → no description or about text, the name and emoji cut to
+  their caps), with a WARNING. A household never keeps enforcing a stale
+  access level because a description was too long. Only a config whose
+  **settings themselves** are over the limit without any text — a forged
+  list or id no honest household sends — is not stored at all (WARNING;
+  a join snapshot like that fails the join).
 - **At the sender, behind all of it**: an event over the frame bound
   toward a household behind a GFS is refused (`relay_too_large`, WARNING
   naming household, event and size; never queued, never silently

@@ -156,12 +156,14 @@ class SpaceMembershipInboundHandlers:
         )
         # The one receiver rule for a space's config: over the limit and
         # larger than what we hold → seated without that text.
-        space = config_within_limit(
+        kept = config_within_limit(
             space,
             held=await self._space_repo.get(space_id),
             source=f"SPACE_CREATED from {event.from_instance}",
         )
-        await self._space_repo.save(space)
+        if kept is None:
+            return
+        await self._space_repo.save(kept)
         await self._bus.publish(
             RemoteSpaceCreated(
                 space_id=space_id,

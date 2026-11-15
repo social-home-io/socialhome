@@ -100,15 +100,27 @@ def side_to_wire(side: PageConflictSide) -> dict[str, Any]:
     }
 
 
-def page_record(page: Page, sides: Sequence[PageConflictSide]) -> dict[str, Any]:
+#: A version hash's length on the wire, without hashing: what
+#: :func:`page_record` puts in place of the hash when it only measures.
+_MEASURE_HASH = f"{VERSION_HASH_SUITE}:" + "0" * 64
+
+
+def page_record(
+    page: Page, sides: Sequence[PageConflictSide], *, measure: bool = False
+) -> dict[str, Any]:
     """A space page as it travels: its §25.6 ``pages`` record — the row
     (not this household's draft marker), its version hash and every open
     conflict side. What a page's size is measured on (every field, the
-    sides' whole text included), and what the exporter streams."""
+    sides' whole text included), and what the exporter streams.
+
+    *measure*: only its size is wanted — the hash (fixed length) is not
+    computed over the page's text."""
     record = asdict(page)
     record.pop("pending_base_seq", None)
-    record["version_hash"] = version_hash(
-        page.title, page.content, page.cover_image_url
+    record["version_hash"] = (
+        _MEASURE_HASH
+        if measure
+        else version_hash(page.title, page.content, page.cover_image_url)
     )
     record["conflict"] = [side_to_wire(s) for s in sides]
     return record

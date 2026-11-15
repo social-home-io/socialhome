@@ -3877,11 +3877,14 @@ class FederationInboundService(ProtectionGateMixin):
         # over the limit every household holds and larger than ours keeps
         # our text — its settings still apply, so no household keeps
         # enforcing a stale access level for a size reason.
-        refreshed = config_within_limit(
+        kept = config_within_limit(
             refreshed,
             held=existing,
             source=f"SPACE_CONFIG_CHANGED from {event.from_instance}",
         )
+        if kept is None:
+            return  # its settings themselves are oversize — forged
+        refreshed = kept
         if authority_verified:
             # v_44 — the save lands only while the space still pins the key
             # epoch the signature verified against (one atomic write that also

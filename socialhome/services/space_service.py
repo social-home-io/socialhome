@@ -2707,33 +2707,6 @@ class SpaceService(
             await self._require_content_authority(space, actor_username)
         else:
             await self._require_admin_or_owner(space, actor_username)
-        # After authorization, before anything leaves this household: the
-        # name and emoji within their caps, and the config with its texts as
-        # they would be (an unsent one stays as it is) within the limit
-        # every space has — a space stored before it can still be saved no
-        # larger. The whole new config is checked again before it is stored.
-        require_space_name_and_emoji(
-            name.strip() if name is not None else None,
-            (emoji or None) if emoji is not None else None,
-        )
-        require_config_fits(
-            replace(
-                space,
-                name=name.strip() if name is not None else space.name,
-                description=(
-                    (description.strip() or None)
-                    if description is not None
-                    else space.description
-                ),
-                emoji=(emoji or None) if emoji is not None else space.emoji,
-                about_markdown=(
-                    ((about_markdown or "").strip() or None)  # type: ignore[attr-defined]
-                    if about_markdown is not _UNSET_MEMBER_PROFILE
-                    else space.about_markdown
-                ),
-            ),
-            was=space,
-        )
 
         if category is not None and category not in SPACE_CATEGORIES:
             raise ValueError(f"unknown category {category!r}")
@@ -2832,6 +2805,33 @@ class SpaceService(
         # OWNER-only (gate above), so this never lets a non-owner enact the
         # delegation policy. When delegation is OFF or no seed is held, fall
         # through to today's v_15 forward-to-host behaviour.
+        # After every authorization gate, before anything leaves this household: the
+        # name and emoji within their caps, and the config with its texts as
+        # they would be (an unsent one stays as it is) within the limit
+        # every space has — a space stored before it can still be saved no
+        # larger. The whole new config is checked again before it is stored.
+        require_space_name_and_emoji(
+            name.strip() if name is not None else None,
+            (emoji or None) if emoji is not None else None,
+        )
+        require_config_fits(
+            replace(
+                space,
+                name=name.strip() if name is not None else space.name,
+                description=(
+                    (description.strip() or None)
+                    if description is not None
+                    else space.description
+                ),
+                emoji=(emoji or None) if emoji is not None else space.emoji,
+                about_markdown=(
+                    ((about_markdown or "").strip() or None)  # type: ignore[attr-defined]
+                    if about_markdown is not _UNSET_MEMBER_PROFILE
+                    else space.about_markdown
+                ),
+            ),
+            was=space,
+        )
         is_remote_host = bool(space.owner_instance_id) and (
             space.owner_instance_id != self._own_instance_id
         )
@@ -9726,14 +9726,21 @@ def require_space_name_and_emoji(name: str | None, emoji: str | None) -> None:
         )
 
 
-def config_within_limit(space: Space, *, held: Space | None, source: str) -> Space:
+def config_within_limit(
+    space: Space, *, held: Space | None, source: str
+) -> Space | None:
     """The one receiver rule for a space's config (``SPACE_CONFIG_CHANGED``,
-    ``SPACE_CREATED``, a join snapshot, a rotation's config): a config over
-    the limit and larger than the copy held keeps the held TEXT — the
-    description and about text, then (if still too large) the name and
-    emoji; nothing held → none — with a WARNING. Its settings (access
-    levels, join mode, archive, delegation…) are always taken: a size
-    reason never leaves a household enforcing stale settings."""
+    ``SPACE_CREATED``, a join snapshot, a rotation's config, a GFS
+    listing): a config over the limit and larger than the copy held keeps
+    the held TEXT — the description and about text, then (if still too
+    large) the name and emoji; nothing held → no description / about, the
+    name and emoji cut to their caps — with a WARNING. Its settings (access
+    levels, join mode, archive, delegation…) are taken: a long text never
+    leaves a household enforcing stale settings.
+
+    ``None`` — not stored, WARNING — only when the config is still too
+    large without its text: its SETTINGS themselves are oversize (a forged
+    list or id no honest household sends)."""
     if not _config_too_large(space, held):
         return space
     kept = replace(
@@ -9744,19 +9751,31 @@ def config_within_limit(space: Space, *, held: Space | None, source: str) -> Spa
     if _config_too_large(kept, held):
         kept = replace(
             kept,
-            name=held.name if held is not None else space.id[:8],
-            emoji=held.emoji if held is not None else None,
+            name=held.name if held is not None else space.name[:SPACE_NAME_MAX_CHARS],
+            emoji=held.emoji
+            if held is not None
+            else (space.emoji or "")[:MAX_EMOJI_CODEPOINTS] or None,
         )
-    if kept != space:
+    size = space_item_bytes(space_metadata_fields(space))
+    if _config_too_large(kept, held):
         log.warning(
             "%s for space %s: its config is over the limit of its kind (%d of "
-            "%d bytes) and larger than the copy held — its settings apply, "
-            "its text is not taken",
+            "%d bytes) even without its text — not stored",
             source,
             space.id,
-            space_item_bytes(space_metadata_fields(space)),
+            size,
             SPACE_CONFIG_ITEM_MAX_BYTES,
         )
+        return None
+    log.warning(
+        "%s for space %s: its config is over the limit of its kind (%d of "
+        "%d bytes) and larger than the copy held — its settings apply, "
+        "its text is not taken",
+        source,
+        space.id,
+        size,
+        SPACE_CONFIG_ITEM_MAX_BYTES,
+    )
     return kept
 
 
@@ -10550,15 +10569,14 @@ async def seat_join_stub(
     owner_instance = join.owner_instance_id
     # The one receiver rule for a space's config: over the limit and larger
     # than what we hold → seated without that text.
-    await space_repo.save(
-        config_within_limit(
-            stub_space_from_metadata(
-                space_id, host_instance_id=owner_instance, meta=meta
-            ),
-            held=await space_repo.get(space_id),
-            source=f"join snapshot from {issuer_instance_id}",
-        )
+    stub = config_within_limit(
+        stub_space_from_metadata(space_id, host_instance_id=owner_instance, meta=meta),
+        held=await space_repo.get(space_id),
+        source=f"join snapshot from {issuer_instance_id}",
     )
+    if stub is None:
+        raise ValueError("the space's settings are over the size limit")
+    await space_repo.save(stub)
     # Pin the epoch the owner's cert names FIRST (a replayed older cert can
     # never move the pin back), then record the inviting admin + the owner's
     # statement for that key and epoch.

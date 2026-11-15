@@ -7,10 +7,14 @@ import json
 
 import pytest
 
+from socialhome.domain.page import Page
 from socialhome.domain.page_version import (
     SCALAR_CONFLICT,
+    PageConflictSide,
     is_version_hash,
     merge_scalar,
+    page_record,
+    side_to_wire,
     version_hash,
 )
 
@@ -73,3 +77,35 @@ def test_merge_scalar(base, mine, theirs, out):
         merge_scalar(base, mine, theirs) is out
         or merge_scalar(base, mine, theirs) == out
     )
+
+
+def _page() -> Page:
+    return Page(
+        id="p",
+        title="T",
+        content="body",
+        created_by="u",
+        created_at="2026-01-01",
+        updated_at="2026-01-02",
+        space_id="s",
+        seq=3,
+        pending_base_seq=2,
+    )
+
+
+def test_page_record_is_the_row_its_hash_and_every_side():
+    side = PageConflictSide(
+        hash=version_hash("T", "other"), title="T", content="other", by="b", at="t"
+    )
+    record = page_record(_page(), [side])
+    assert "pending_base_seq" not in record  # this household's own marker
+    assert record["version_hash"] == version_hash("T", "body")
+    assert record["conflict"] == [side_to_wire(side)]
+    assert record["seq"] == 3 and record["content"] == "body"
+
+
+def test_measuring_a_page_skips_the_hash_but_not_its_length():
+    full = page_record(_page(), [])
+    measured = page_record(_page(), [], measure=True)
+    assert measured["version_hash"] != full["version_hash"]
+    assert len(json.dumps(measured)) == len(json.dumps(full))

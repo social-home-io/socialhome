@@ -171,12 +171,6 @@ def _updated_cover_url(value: str | None, stored: str | None) -> str | None:
     return _clean_cover_url(value)
 
 
-def _clean_location(value: str | None) -> str | None:
-    """Normalise a location string from the client (``clean_location``:
-    trimmed, blank → ``None``, cut at ``LOCATION_MAX_CHARS``)."""
-    return clean_location(value)
-
-
 def calendar_event_too_large(
     event: CalendarEvent, *, was: CalendarEvent | None = None
 ) -> bool:
@@ -726,7 +720,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
             "cover_url": await self._openable_cover(
                 _clean_cover_url(cover_url), user_id=created_by
             ),
-            "location": _clean_location(location),
+            "location": clean_location(location),
             "tz": event_tz,
         }
 
@@ -1002,7 +996,7 @@ class CalendarService(_CoverGuard, BusPublisherMixin):
             new_location = existing.location
         else:
             assert location is None or isinstance(location, str)
-            new_location = _clean_location(location)
+            new_location = clean_location(location)
         if attendees is not None:
             attendee_tuple, instance_for_user = await self._validate_attendees(
                 attendees,
@@ -1521,8 +1515,6 @@ class SpaceCalendarService(
         summary = (summary or "").strip()
         if not summary:
             raise ValueError("summary must not be empty")
-        attendees = clean_attendees(attendees)
-        rrule = clean_rrule(rrule)
         capacity = validate_capacity(capacity)
         # The tz first: a date-only bound names a day in the event's zone.
         event_tz = await self._resolve_space_event_tz(tz, space_id=space_id)
@@ -1543,10 +1535,13 @@ class SpaceCalendarService(
             ContentAction.CREATE,
             approved_by is None,
         )
+        # After the gate: a person without the right gets their 403 first.
+        attendees = clean_attendees(attendees)
+        rrule = clean_rrule(rrule)
         clean_cover = await self._openable_cover(
             _clean_cover_url(cover_url), user_id=created_by
         )
-        clean_location = _clean_location(location)
+        where = clean_location(location)
         event = CalendarEvent(
             # Owner-bound (v_36): no other household can announce this id
             # first as its own user's event.
@@ -1562,7 +1557,7 @@ class SpaceCalendarService(
             rrule=rrule,
             capacity=capacity,
             cover_url=clean_cover,
-            location=clean_location,
+            location=where,
             tz=event_tz,
             # The longer spelling, so the check holds for either outcome.
             announce_in_feed=False,
@@ -1588,7 +1583,7 @@ class SpaceCalendarService(
                     "rrule": rrule,
                     "capacity": capacity,
                     "cover_url": clean_cover,
-                    "location": clean_location,
+                    "location": where,
                     "tz": tz,
                     "announce_in_feed": bool(announce_in_feed),
                 },
@@ -1995,7 +1990,7 @@ class SpaceCalendarService(
             new_location = existing.location
         else:
             assert location is None or isinstance(location, str)
-            new_location = _clean_location(location)
+            new_location = clean_location(location)
         updated = replace(
             existing,
             summary=new_summary,

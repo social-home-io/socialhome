@@ -133,21 +133,28 @@ def parse_rrule(rrule: str) -> dict:
 MAX_RRULE_CHARS: int = 512
 
 
-def clean_rrule(value: object) -> str | None:
+def clean_rrule(value: object, *, strict: bool = True) -> str | None:
     """A recurrence rule as a space calendar event stores it: ``None`` /
     blank → no rule; else a string of at most :data:`MAX_RRULE_CHARS`
     characters whose ``FREQ`` this parser knows (:func:`parse_rrule`).
-    Raises :class:`ValueError` on anything else."""
+    Raises :class:`ValueError` on anything else.
+
+    Not *strict* (where a household receives): a rule saved before these
+    checks whose ``FREQ`` this parser does not know is kept as it is (it
+    expands to its first occurrence, as it always did); a non-string is
+    no rule. The length cap holds either way."""
     if value is None:
         return None
     rule = value.strip() if isinstance(value, str) else None
     if rule is None:
+        if not strict:
+            return None
         raise ValueError("rrule must be a string")
     if not rule:
         return None
     if len(rule) > MAX_RRULE_CHARS:
         raise ValueError(f"rrule is longer than {MAX_RRULE_CHARS} characters")
-    if parse_rrule(rule)["FREQ"] is None:
+    if strict and parse_rrule(rule)["FREQ"] is None:
         raise ValueError("rrule needs FREQ=DAILY, WEEKLY, MONTHLY or YEARLY")
     return rule
 

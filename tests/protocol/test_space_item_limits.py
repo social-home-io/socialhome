@@ -29,6 +29,7 @@ import secrets
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+import orjson
 import pytest
 
 from socialhome.app_keys import federation_service_key, space_repo_key
@@ -42,6 +43,7 @@ from socialhome.domain.relay_media_frame import (
     SPACE_PAGE_ITEM_MAX_BYTES,
 )
 from socialhome.domain.space import SPACE_NAME_MAX_CHARS, SpaceFeatureAccess
+from socialhome.services import page_conflict_service
 from socialhome.services.space_crypto_service import (
     sign_authority_event,
     strip_authority_sig_fields,
@@ -265,7 +267,44 @@ async def test_authorization_comes_before_the_size_check(mesh):
         headers=a.headers,
     )
     assert r.status == 403, (await r.text())[:300]
+    # Nor a 422 about its lists first.
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/calendar/events",
+        json=_event_body(attendees=[""], rrule="NOT A RULE"),
+        headers=a.headers,
+    )
+    assert r.status == 403, (await r.text())[:300]
     assert await _calendar_rows(a) == []
+
+
+async def test_a_page_edit_for_review_is_checked_before_it_is_queued(mesh, monkeypatch):
+    """A's page edits are reviewed: an edit that would make the page (with
+    its sides) too large answers 413 before it is queued — never at the
+    approver's click."""
+    a, h = mesh["A"], mesh["H"]
+    r = await h.tc.post(
+        f"/api/spaces/{SID}/pages",
+        json={"title": "Plan", "content": "short"},
+        headers=h.headers,
+    )
+    assert r.status in (200, 201)
+    page_id = (await r.json())["id"]
+    await _pump(mesh)
+    monkeypatch.setattr(page_conflict_service, "SPACE_PAGE_ITEM_MAX_BYTES", 3000)
+    queue_before = await _queue_rows(a)
+    r = await a.tc.patch(
+        f"/api/spaces/{SID}/pages/{page_id}",
+        json={"content": "x" * 5000},
+        headers=a.headers,
+    )
+    assert r.status == 413, (await r.text())[:300]
+    assert await _queue_rows(a) == queue_before
+    r = await a.tc.patch(
+        f"/api/spaces/{SID}/pages/{page_id}",
+        json={"content": "fits"},
+        headers=a.headers,
+    )
+    assert r.status == 202, (await r.text())[:300]
 
 
 async def test_a_new_space_is_held_to_the_config_limit_and_its_caps(mesh):
@@ -351,21 +390,34 @@ async def test_an_over_limit_calendar_event_from_a_member_is_not_stored(mesh, ca
         ),
     )
     assert await _calendar_rows(c) == [("Picnic", 10)]
-    # Invalid lists are refused on the way in, as where a person saves.
-    for bad in (
-        {"attendees": [""] * 1000},
-        {"rrule": "FREQ=DAILY;" + "X" * MAX_RRULE_CHARS},
-    ):
-        await _receive(
+    # A rule over its length cap is refused on the way in.
+    await _receive(
+        c,
+        _event(
+            h,
+            FET.SPACE_CALENDAR_EVENT_UPDATED,
+            {
+                **created,
+                "rrule": "FREQ=DAILY;" + "X" * MAX_RRULE_CHARS,
+                "summary": "Bad",
+            },
             c,
-            _event(
-                h,
-                FET.SPACE_CALENDAR_EVENT_UPDATED,
-                {**created, **bad, "summary": "Bad"},
-                c,
-            ),
-        )
-        assert await _calendar_rows(c) == [("Picnic", 10)]
+        ),
+    )
+    assert await _calendar_rows(c) == [("Picnic", 10)]
+    # Lists from an event saved before the checks stay deliverable: bad
+    # ids are dropped, the rest kept once.
+    await _receive(
+        c,
+        _event(
+            h,
+            FET.SPACE_CALENDAR_EVENT_UPDATED,
+            {**created, "attendees": ["", "u-1", "u-1", 7]},
+            c,
+        ),
+    )
+    row = await c.db.fetchone("SELECT attendees_json FROM space_calendar_events", ())
+    assert orjson.loads(row["attendees_json"]) == ["u-1"]
     # Within the limit: applied.
     await _receive(
         c,

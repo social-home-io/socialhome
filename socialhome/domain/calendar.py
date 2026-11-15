@@ -44,12 +44,16 @@ MAX_RSVPS_PER_EVENT: int = 500
 RSVP_RECORD_MAX_BYTES: int = 256
 
 
-def clean_attendees(value: object) -> tuple[str, ...]:
-    """The attendee ids of a space calendar event: a list of non-empty
-    strings, each kept once (in order), at most
-    :data:`MAX_EVENT_ATTENDEES`. ``None`` is no attendees. Raises
-    :class:`ValueError` on anything else — where a person saves (422) and
-    where a household receives (not stored)."""
+def clean_attendees(value: object, *, strict: bool = True) -> tuple[str, ...]:
+    """The attendee ids of a space calendar event: non-empty strings, each
+    kept once (in order), at most :data:`MAX_EVENT_ATTENDEES`. ``None`` is
+    no attendees.
+
+    *strict* (where a person saves): anything else raises
+    :class:`ValueError` (422). Not strict (where a household receives):
+    an event saved before these checks stays deliverable — a bad entry is
+    dropped and the list cut at the cap; its size is the whole item's
+    business."""
     if value is None:
         return ()
     listed = (
@@ -58,14 +62,20 @@ def clean_attendees(value: object) -> tuple[str, ...]:
         else None
     )
     if listed is None:
-        raise ValueError("attendees must be a list of user ids")
+        if strict:
+            raise ValueError("attendees must be a list of user ids")
+        return ()
     ids: dict[str, None] = {}
     for raw in listed:
         if not isinstance(raw, str) or not raw.strip():
-            raise ValueError("an attendee id must be a non-empty string")
+            if strict:
+                raise ValueError("an attendee id must be a non-empty string")
+            continue
         ids[raw.strip()] = None
     if len(ids) > MAX_EVENT_ATTENDEES:
-        raise ValueError(f"at most {MAX_EVENT_ATTENDEES} attendees")
+        if strict:
+            raise ValueError(f"at most {MAX_EVENT_ATTENDEES} attendees")
+        return tuple(ids)[:MAX_EVENT_ATTENDEES]
     return tuple(ids)
 
 

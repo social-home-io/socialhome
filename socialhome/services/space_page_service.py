@@ -587,6 +587,12 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
             user_id=actor_user_id,
             field="cover_image_url",
         )
+        # After the gate, before it is queued for review or stored: the
+        # page as it would be (with its open sides) within the limit. Every
+        # write re-checks under the page lock (``_write``).
+        await self._require_size(
+            replace(page, **patch, last_editor_user_id=actor_user_id), was=page
+        )
         if decision is AccessDecision.QUEUE:
             before = _page_dict(page)
             await self._submit_for_review(

@@ -115,9 +115,12 @@ TOO_LARGE = "too_large"
 
 
 #: A page's who / when stamps and its counter: they change on every save by
-#: design, so a page stored before the limit is judged "no larger" on the
+#: design (or are not carried by every version — a live update names no
+#: creator), so a page stored before the limit is judged "no larger" on the
 #: rest — its words, cover and sides — never failed by a longer ``seq``.
 _PAGE_STAMPS = (
+    "created_by",
+    "created_at",
     "updated_at",
     "last_editor_user_id",
     "last_edited_at",
@@ -144,9 +147,11 @@ def page_too_large(
     if was is not None:
         held_page, held_sides = was
         stamps = {f: getattr(page, f) for f in _PAGE_STAMPS}
-        held = page_record(replace(held_page, **stamps), held_sides)
+        held = page_record(replace(held_page, **stamps), held_sides, measure=True)
     return space_item_too_large(
-        page_record(page, sides), limit=SPACE_PAGE_ITEM_MAX_BYTES, was=held
+        page_record(page, sides, measure=True),
+        limit=SPACE_PAGE_ITEM_MAX_BYTES,
+        was=held,
     )
 
 
@@ -162,7 +167,7 @@ def log_page_not_stored(
         source,
         page.id,
         page.space_id,
-        space_item_bytes(page_record(page, sides)),
+        space_item_bytes(page_record(page, sides, measure=True)),
         SPACE_PAGE_ITEM_MAX_BYTES,
     )
 
@@ -1833,9 +1838,30 @@ class PageConflictService(BusPublisherMixin):
             last_edited_at=version.updated_at or now,
             seq=version.seq,
         )
-        was = (held, await self.sides(space_id, page_id)) if held is not None else None
-        if not page_too_large(incoming, version.conflict, was=was):
-            return False
+        if held is None:
+            if not page_too_large(incoming, version.conflict):
+                return False
+        else:
+            sides = await self.sides(space_id, page_id)
+            held_versions = [held]
+            if held.pending_base_seq is not None:
+                # Our own draft is on top: the host's version is judged
+                # against the version the draft was made from too.
+                base = await self._pages.get_draft_base(page_id, space_id=space_id)
+                if base is not None and base.title:
+                    held_versions.append(
+                        replace(
+                            held,
+                            title=base.title,
+                            content=base.content,
+                            cover_image_url=base.cover_image_url,
+                        )
+                    )
+            if any(
+                not page_too_large(incoming, version.conflict, was=(h, sides))
+                for h in held_versions
+            ):
+                return False
         log_page_not_stored("the host's version", incoming, version.conflict, "host")
         return True
 
