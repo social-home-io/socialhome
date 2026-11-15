@@ -1308,7 +1308,11 @@ def _only_described_files(post: Post) -> Post:
     ``sd-`` file received from some household over federation, or a plain
     name that may be one of this household's own uploads, from another
     space even — would show a file the relayed author never sent. Apply
-    after the localization. The link card stays; only its picture goes."""
+    after the localization. The link card stays; only its picture goes.
+
+    Hand-written over the typed :class:`Post` (``replace`` per field); a
+    tripwire test checks it covers every field the space media-field
+    registry lists for a post (``SPACE_MEDIA_ITEMS["posts"]``)."""
 
     def keep(url: str | None) -> bool:
         return bool(url) and is_gfs_space_media_name(media_basename(url))
