@@ -2598,8 +2598,10 @@ SHA-256 of the live seats it mirrors, `domain/space_roster_digest.py`)
 differs from the host's for it — never on the host's own timer, so with
 gossip working a roster repair costs zero envelopes (an older household's
 `roster_echo` is answered the same way); only an admitted BEGIN counts, and
-at most one repair per household per 30 min, the same one at most daily
-after backoff — and a
+at most one repair per household per 30 min; a household merely behind
+on gossip under 10 min old waits for it, a writer cert waits for its content
+key, and a drift no snapshot heals (a host restored from an older backup, a
+missed host-local removal) costs one snapshot a day and one warning — and a
 write that beat the gossip
 seating its author or household waits in a bounded in-memory buffer until
 the seat lands. The per-family table is in
