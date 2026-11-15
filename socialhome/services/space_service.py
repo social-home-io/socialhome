@@ -53,10 +53,22 @@ from ..crypto import (
     ed25519_public_key,
     generate_identity_keypair,
 )
+from ..domain.emoji import MAX_EMOJI_CODEPOINTS
 from ..domain.errors import (
+    SpaceEmojiTooLongError,
+    SpaceItemTooLargeError,
+    SpaceNameTooLongError,
     SpaceNotPublishableError,
     TierChangeRequiredError,
     WrongTypeError,
+)
+from ..domain.relay_media_frame import (
+    COUNTER_MAX,
+    SPACE_CONFIG_ITEM_MAX_BYTES,
+    bounded_counter,
+    bounded_id,
+    space_item_bytes,
+    space_item_too_large,
 )
 from ..federation.gfs_join_request import APPROVAL_TOKEN_TTL, unverified_names
 from ..federation.host_equivalence import acts_as_host
@@ -72,6 +84,7 @@ from ..federation.owner_bound_id import (
     mint_owner_bound_id,
 )
 from ..gfs_server_list_sig import verify_gfs_server_list
+from ..infrastructure.hlc import HLC
 from ..infrastructure.key_manager import KeyManagerError
 from ..space_owner_statement import (
     MAX_STATEMENT_FUTURE_SKEW_MS,
@@ -188,6 +201,7 @@ from ..domain.space import (
     PUBLIC_SPACE_TIERS,
     SETTINGS_AUTHORITY_ROLES,
     SPACE_CATEGORIES,
+    SPACE_NAME_MAX_CHARS,
     WRITER_ROLES,
     AccessDecision,
     AgeRestrictedError,
@@ -270,6 +284,7 @@ from ..repositories.space_remote_member_repo import SpaceRemoteMember
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
 from ..task_drain import wait_tasks_done
+from ..utils.timezones import coerce_tz
 from .content_access import ContentAccessMixin
 from .gfs_connection_service import GfsConnectionError
 from .inbound_media_store import optional_local_media_ref, require_local_media_refs
@@ -438,6 +453,69 @@ def _require_link_publishable(space: Space) -> None:
     if space.space_type is SpaceType.PUBLIC:
         raise TierChangeRequiredError()
     raise SpaceNotPublishableError()
+
+
+#: Entry bytes (as JSON) one ``SPACE_ROSTER_SNAPSHOT`` part carries: sealed
+#: and base64'ed it stays under the GFS relay's JSON envelope (~191 KiB), so
+#: a roster of any size reaches a household behind a GFS — about 190 seats a
+#: part.
+ROSTER_SNAPSHOT_PART_BYTES: int = 96 * 1024
+
+
+def _roster_parts(entries: list[dict]) -> list[list[dict]]:
+    """*entries* cut into parts of at most
+    :data:`ROSTER_SNAPSHOT_PART_BYTES` (at least one entry each), in order.
+    A roster that fits is one part."""
+    parts: list[list[dict]] = [[]]
+    size = 0
+    for entry in entries:
+        entry_size = len(orjson.dumps(entry))
+        if parts[-1] and size + entry_size > ROSTER_SNAPSHOT_PART_BYTES:
+            parts.append([])
+            size = 0
+        parts[-1].append(entry)
+        size += entry_size
+    return parts
+
+
+def roster_snapshot_parts(
+    space_id: str,
+    entries: list[dict],
+    *,
+    roster_version: int,
+    authority_cert: dict | None = None,
+    extras: dict | None = None,
+) -> list[dict]:
+    """The ``SPACE_ROSTER_SNAPSHOT`` payloads that carry *entries*.
+
+    A roster that fits one part is the event it always was. A larger one
+    goes in parts — each an ordinary snapshot event, small enough for a
+    JSON envelope on the GFS relay, whose entries are signed and merged one
+    by one — that say which send they belong to: ``snapshot_id`` (fresh per
+    send), ``part`` (0-based) and ``parts``. **Every** part carries the
+    version the roster is complete up to and the owner's authority cert, so
+    each can be verified on its own, in any order; a receiver records the
+    version only once it applied every part of one send
+    (``PrivateSpaceInviteHandler``) — a lost or unverifiable part leaves
+    nothing recorded and the host's next send heals it. *extras* (the
+    receiver's own credentials) ride the first part."""
+    cut = _roster_parts(entries)
+    snapshot_id = uuid.uuid4().hex
+    payloads: list[dict] = []
+    for index, part in enumerate(cut):
+        payload: dict = {
+            "space_id": space_id,
+            "entries": part,
+            "roster_version": roster_version,
+        }
+        if len(cut) > 1:
+            payload.update(snapshot_id=snapshot_id, part=index, parts=len(cut))
+        if authority_cert is not None:
+            payload["authority_cert"] = authority_cert
+        if index == 0 and extras:
+            payload.update(extras)
+        payloads.append(payload)
+    return payloads
 
 
 class SpaceService(
@@ -1114,6 +1192,7 @@ class SpaceService(
             raise KeyError(f"owner {owner_username!r} not found")
         if not name.strip():
             raise ValueError("space name must not be empty")
+        require_space_name_and_emoji(name.strip(), emoji)
 
         stype = _coerce_space_type(space_type)
         jmode = _coerce_join_mode(join_mode)
@@ -1188,6 +1267,9 @@ class SpaceService(
                 else None
             ),
         )
+        # The new config, measured whole, within the limit every space has
+        # — before anything is stored.
+        require_config_fits(space)
         await self._spaces.save(space)
         # Persist the space's Ed25519 PRIVATE seed (KEK-wrapped at rest) so
         # this household — the space owner — can later sign space-authority
@@ -1818,23 +1900,11 @@ class SpaceService(
         )
         if not entries:
             return False
-        # The version this snapshot is complete up to — the member echoes it
-        # back on its next BEGIN (additive: an older receiver ignores it).
-        payload: dict = {
-            "space_id": space.id,
-            "entries": entries,
-            "roster_version": current,
-        }
-        # v_44 — the periodic heal also carries the owner's cert for the
-        # current authority key, so a household that missed the rotation
-        # bundle re-pins before verifying these (new-key-signed) entries.
-        # Additive: an older receiver ignores the field.
-        cert = owner_authority_cert_via(self._federation, space)
-        if cert is not None:
-            payload["authority_cert"] = cert
+        # Sent with the roster, to this one household: its own credentials.
+        extras: dict = {}
         if self._writer_certs is not None:
             if writer_cert is not None:
-                payload["writer_cert"] = writer_cert
+                extras["writer_cert"] = writer_cert
                 # v_50 — the epoch's writer group key too (a v_90 publisher of a
                 # publicly readable space).
                 try:
@@ -1849,27 +1919,44 @@ class SpaceService(
                     )
                     writer_key = None
                 if writer_key is not None:
-                    payload["writer_key"] = writer_key
+                    extras["writer_key"] = writer_key
             # v_51 — the recipient's private-space channel grant (readers
             # too, so not nested under the cert).
             grant = await self._writer_certs.channel_grant_for_peer(
                 space.id, to_instance_id
             )
             if grant is not None:
-                payload["gfs_channel"] = grant
-        try:
-            result = await self._federation.send_with_mesh_fallback(
-                to_instance_id=to_instance_id,
-                event_type=FederationEventType.SPACE_ROSTER_SNAPSHOT,
-                payload=payload,
-                space_id=space.id,
-            )
-        except Exception:
-            log.exception(
-                "roster-snapshot: send to %s failed for %s", to_instance_id, space.id
-            )
-            return False
-        return bool(getattr(result, "ok", True))
+                extras["gfs_channel"] = grant
+        payloads = roster_snapshot_parts(
+            space.id,
+            entries,
+            # The version this snapshot is complete up to — the member echoes
+            # it back on its next BEGIN once it applied every part.
+            roster_version=current,
+            # v_44 — the owner's cert for the current authority key, so a
+            # household that missed the rotation bundle re-pins before
+            # verifying these (new-key-signed) entries.
+            authority_cert=owner_authority_cert_via(self._federation, space),
+            extras=extras,
+        )
+        ok = True
+        for payload in payloads:
+            try:
+                result = await self._federation.send_with_mesh_fallback(
+                    to_instance_id=to_instance_id,
+                    event_type=FederationEventType.SPACE_ROSTER_SNAPSHOT,
+                    payload=payload,
+                    space_id=space.id,
+                )
+            except Exception:
+                log.exception(
+                    "roster-snapshot: send to %s failed for %s",
+                    to_instance_id,
+                    space.id,
+                )
+                return False
+            ok = ok and bool(getattr(result, "ok", True))
+        return ok
 
     async def roster_snapshot_entries(
         self,
@@ -2725,6 +2812,33 @@ class SpaceService(
         # OWNER-only (gate above), so this never lets a non-owner enact the
         # delegation policy. When delegation is OFF or no seed is held, fall
         # through to today's v_15 forward-to-host behaviour.
+        # After every authorization gate, before anything leaves this household: the
+        # name and emoji within their caps, and the config with its texts as
+        # they would be (an unsent one stays as it is) within the limit
+        # every space has — a space stored before it can still be saved no
+        # larger. The whole new config is checked again before it is stored.
+        require_space_name_and_emoji(
+            name.strip() if name is not None else None,
+            (emoji or None) if emoji is not None else None,
+        )
+        require_config_fits(
+            replace(
+                space,
+                name=name.strip() if name is not None else space.name,
+                description=(
+                    (description.strip() or None)
+                    if description is not None
+                    else space.description
+                ),
+                emoji=(emoji or None) if emoji is not None else space.emoji,
+                about_markdown=(
+                    ((about_markdown or "").strip() or None)  # type: ignore[attr-defined]
+                    if about_markdown is not _UNSET_MEMBER_PROFILE
+                    else space.about_markdown
+                ),
+            ),
+            was=space,
+        )
         is_remote_host = bool(space.owner_instance_id) and (
             space.owner_instance_id != self._own_instance_id
         )
@@ -2986,6 +3100,7 @@ class SpaceService(
             return space
 
         updated = replace(space, **new_fields)
+        require_config_fits(updated, was=space)
         await self._spaces.save(updated)
         sequence = await self._spaces.increment_config_sequence(space_id)
         # v_24 LWW: record THIS household as the last-applied config author so
@@ -9572,6 +9687,84 @@ def space_metadata_fields(space: Space) -> dict:
     }
 
 
+def _config_measure(space: Space) -> dict:
+    """A space's config as the rule measures it: :func:`space_metadata_fields`
+    with its counters at their widest — they move on every edit and differ
+    between the household that saves and every receiver, so all of them
+    measure the same number for the same settings and texts. Receivers
+    bound them to that width (:func:`stub_space_from_metadata`)."""
+    return space_metadata_fields(
+        replace(
+            space,
+            config_sequence=COUNTER_MAX,
+            roster_sequence=COUNTER_MAX,
+            config_hlc=str(HLC(COUNTER_MAX, COUNTER_MAX)),
+        )
+    )
+
+
+def config_item_bytes(space: Space) -> int:
+    """A space's config size as the rule measures it."""
+    return space_item_bytes(_config_measure(space))
+
+
+def _config_too_large(space: Space, held: Space | None) -> bool:
+    return space_item_too_large(
+        _config_measure(space),
+        limit=SPACE_CONFIG_ITEM_MAX_BYTES,
+        was=_config_measure(held) if held is not None else None,
+    )
+
+
+def require_config_fits(space: Space, *, was: Space | None = None) -> None:
+    """413 (``SPACE_ITEM_TOO_LARGE``) for a space whose config — measured
+    whole (:func:`config_item_bytes`), every setting — is over the limit
+    every space has (``SPACE_CONFIG_ITEM_MAX_BYTES``). *was* matters only
+    when it is itself over the limit (stored before the limit existed):
+    then a save no larger passes."""
+    if _config_too_large(space, was):
+        raise SpaceItemTooLargeError(SPACE_CONFIG_ITEM_MAX_BYTES)
+
+
+def require_space_name_and_emoji(name: str | None, emoji: str | None) -> None:
+    """A space's name and emoji within their own caps (422, coded)."""
+    if name is not None and len(name) > SPACE_NAME_MAX_CHARS:
+        raise SpaceNameTooLongError(SPACE_NAME_MAX_CHARS)
+    if emoji is not None and len(emoji) > MAX_EMOJI_CODEPOINTS:
+        raise SpaceEmojiTooLongError(MAX_EMOJI_CODEPOINTS)
+
+
+def config_within_limit(space: Space, *, held: Space | None, source: str) -> Space:
+    """The one receiver rule for a space's config (``SPACE_CONFIG_CHANGED``,
+    ``SPACE_CREATED``, a join snapshot, a rotation's config, a GFS
+    listing): a config over the limit (and, when the copy held is itself
+    over it, larger than that copy) keeps the held description and about
+    text — nothing held → none — with a WARNING. Every setting is taken,
+    and every security step after it runs: a long text never leaves a
+    household enforcing stale settings.
+
+    The rest of a config is bounded where it is read
+    (:func:`stub_space_from_metadata`: name, emoji, ids, counters, zone,
+    hashes, lists), far below the limit, so the config without its two
+    free texts always fits."""
+    if not _config_too_large(space, held):
+        return space
+    log.warning(
+        "%s for space %s: its config is over the limit of its kind (%d of "
+        "%d bytes) — its settings apply, its description / about text is "
+        "not taken",
+        source,
+        space.id,
+        config_item_bytes(space),
+        SPACE_CONFIG_ITEM_MAX_BYTES,
+    )
+    return replace(
+        space,
+        description=held.description if held is not None else None,
+        about_markdown=held.about_markdown if held is not None else None,
+    )
+
+
 async def apply_space_content_key_from_metadata(
     space_id: str,
     *,
@@ -9892,31 +10085,36 @@ def stub_space_from_metadata(
     features = SpaceFeatures.from_wire_dict(feats_in)
     return Space(
         id=space_id,
-        name=str(meta.get("name") or "Untitled space"),
-        emoji=meta.get("emoji"),
-        description=meta.get("description"),
+        # Everything but the two free texts is bounded here, where it is
+        # read — so the config without them always fits its limit
+        # (:func:`config_within_limit`) and the counters never pass the
+        # width the size rule measures them at.
+        name=(str(meta.get("name") or "") or "Untitled space")[:SPACE_NAME_MAX_CHARS],
+        emoji=_bounded_emoji(meta.get("emoji")),
+        description=_text_or_none(meta.get("description")),
         # The caller decides the owner (see the docstring); this function
         # never reads meta["owner_instance_id"] itself. Every owner-only
         # fact applied later (authority cert, signed GFS list) is verified
         # against that owner's own identity key.
         owner_instance_id=host_instance_id,
-        owner_username=str(meta.get("owner_username") or ""),
-        identity_public_key=str(meta.get("identity_public_key") or ""),
-        config_sequence=int(meta.get("config_sequence") or 0),
+        owner_username=bounded_id(meta.get("owner_username")),
+        identity_public_key=bounded_id(meta.get("identity_public_key")),
+        config_sequence=bounded_counter(meta.get("config_sequence")),
         # Adopt the winning edit's HLC (migration 0037) so a subsequent LOCAL
         # edit ticks causally after it. Fail-soft to "0-0" for an older sender,
         # which ties under the LWW and falls back to the author tie-break.
-        config_hlc=str(meta.get("config_hlc") or "0-0"),
+        # Stored as parsed and bounded — never the raw string.
+        config_hlc=_bounded_hlc(meta.get("config_hlc")),
         # Anchor the stub's roster counter to the host's, failing soft to
         # config_sequence on an older sender (see _coerce_roster_sequence).
         roster_sequence=_coerce_roster_sequence(meta),
         features=features,
         space_type=_coerce_space_type(meta.get("space_type") or "private"),
         join_mode=_coerce_join_mode(meta.get("join_mode") or "invite_only"),
-        tz=str(meta.get("tz") or "UTC"),
-        cover_hash=meta.get("cover_hash"),
-        icon_hash=meta.get("icon_hash"),
-        about_markdown=meta.get("about_markdown"),
+        tz=coerce_tz(meta.get("tz"), context="space config"),
+        cover_hash=bounded_id(meta.get("cover_hash")) or None,
+        icon_hash=bounded_id(meta.get("icon_hash")) or None,
+        about_markdown=_text_or_none(meta.get("about_markdown")),
         archived=bool(meta.get("archived", False)),
         # §CP.F1 — carry the host's age gate into the stub so the joiner
         # household enforces it locally. Fail-soft: older sender omits it
@@ -10360,9 +10558,14 @@ async def seat_join_stub(
     ``join.owner_instance_id``; the joining user's own ``space_members`` row
     is the caller's (its role differs per path)."""
     owner_instance = join.owner_instance_id
-    await space_repo.save(
-        stub_space_from_metadata(space_id, host_instance_id=owner_instance, meta=meta)
+    # The one receiver rule for a space's config: over the limit and larger
+    # than what we hold → seated without that text.
+    stub = config_within_limit(
+        stub_space_from_metadata(space_id, host_instance_id=owner_instance, meta=meta),
+        held=await space_repo.get(space_id),
+        source=f"join snapshot from {issuer_instance_id}",
     )
+    await space_repo.save(stub)
     # Pin the epoch the owner's cert names FIRST (a replayed older cert can
     # never move the pin back), then record the inviting admin + the owner's
     # statement for that key and epoch.
@@ -10635,7 +10838,29 @@ def _coerce_roster_sequence(meta: dict) -> int:
     raw = meta.get("roster_sequence")
     if raw is None:
         raw = meta.get("config_sequence") or 0
-    return int(raw)
+    return bounded_counter(raw)
+
+
+def _bounded_hlc(raw: object) -> str:
+    """A config HLC read from the wire, parsed and bounded (each part a
+    64-bit counter): ``"0-0"`` for anything else."""
+    hlc = HLC.parse(raw)
+    if not (0 <= hlc.physical_ms <= COUNTER_MAX and 0 <= hlc.counter <= COUNTER_MAX):
+        return str(HLC())
+    return str(hlc)
+
+
+def _bounded_emoji(raw: object) -> str | None:
+    """A space emoji read from the wire: within its cap, else none."""
+    if not isinstance(raw, str) or not raw or len(raw) > MAX_EMOJI_CODEPOINTS:
+        return None
+    return raw
+
+
+def _text_or_none(raw: object) -> str | None:
+    """A free text of a space's config read from the wire (measured with
+    the config): a string, else none."""
+    return raw if isinstance(raw, str) else None
 
 
 def _coerce_min_age(value: object) -> int:

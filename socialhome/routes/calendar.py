@@ -636,7 +636,8 @@ class SpaceCalendarEventsView(_SpaceCalendarBase):
                 created_by=ctx.user_id,
                 description=body.get("description"),
                 all_day=bool(body.get("all_day", False)),
-                attendees=tuple(body.get("attendees") or ()),
+                # Validated by the service (ids, once each, a cap).
+                attendees=body.get("attendees"),
                 rrule=body.get("rrule"),
                 capacity=body.get("capacity"),
                 cover_url=strip_signature_query(body.get("cover_url")),
@@ -704,11 +705,7 @@ class SpaceCalendarEventDetailView(_SpaceCalendarBase):
                 end=body.get("end") or body.get("end_at"),
                 all_day=body.get("all_day"),
                 description=body.get("description"),
-                attendees=(
-                    tuple(body["attendees"])
-                    if body.get("attendees") is not None
-                    else None
-                ),
+                attendees=body.get("attendees"),
                 rrule=body.get("rrule"),
                 capacity=body.get("capacity"),
                 clear_capacity=bool(body.get("clear_capacity", False)),

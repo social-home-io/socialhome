@@ -199,6 +199,7 @@ from .space_service import (
     apply_gfs_servers_from_metadata,
     apply_owner_statement_from_metadata,
     apply_space_images_from_config_change,
+    config_within_limit,
     keep_local_space_state,
     stub_space_from_metadata,
 )
@@ -228,6 +229,7 @@ if TYPE_CHECKING:
     from .space_media_gfs_fetcher import SpaceMediaGfsFetcher
 
 log = logging.getLogger(__name__)
+
 
 #: v_93 — most applied ``SPACE_POST_REACTION`` events ANNOUNCED on the bus
 #: (notifications) from one household in one space per minute; one past it
@@ -3870,6 +3872,15 @@ class FederationInboundService(ProtectionGateMixin):
             meta=meta,
             we_host=bool(own_instance_id)
             and existing.owner_instance_id == own_instance_id,
+        )
+        # The one receiver rule (after authorization and ordering): a config
+        # over the limit every household holds and larger than ours keeps
+        # our text — its settings still apply, so no household keeps
+        # enforcing a stale access level for a size reason.
+        refreshed = config_within_limit(
+            refreshed,
+            held=existing,
+            source=f"SPACE_CONFIG_CHANGED from {event.from_instance}",
         )
         if authority_verified:
             # v_44 — the save lands only while the space still pins the key

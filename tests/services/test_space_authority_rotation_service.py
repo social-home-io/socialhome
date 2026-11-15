@@ -30,6 +30,7 @@ from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
 )
+from socialhome.domain.relay_media_frame import SPACE_CONFIG_ITEM_MAX_BYTES
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.infrastructure.event_bus import EventBus
@@ -1223,3 +1224,34 @@ async def test_member_takes_the_channel_grant_from_the_owner_bundle_only(env):
             )
         )
     assert certs.accepted == [(SPACE, {"grant": env.fed.own_instance_id})]
+
+
+async def test_the_bundle_config_over_the_limit_keeps_the_text_and_the_owner_steps(env):
+    """The rotation's config is judged by the one receiver rule: over the
+    limit, the held description stays and the settings apply — and the
+    owner's signed GFS list (a security step after it) is still taken."""
+    member, _handler = await _member_env(env)
+    k2 = generate_identity_keypair()
+    assert await env.spaces.adopt_authority_key(SPACE, k2.public_key.hex(), 9)
+    space = await env.spaces.get(SPACE)
+    gfs_list = sign_gfs_server_list(
+        space_id=SPACE, servers=(), issued_at=3, owner_seed=env.fed.own_identity_seed
+    )
+    meta = {
+        "name": "Baseline",
+        "config_sequence": 1,
+        "description": "d" * SPACE_CONFIG_ITEM_MAX_BYTES,
+        "gfs_servers": gfs_list.to_wire(),
+    }
+    meta.update(
+        sign_authority_event(
+            event_type="space_config_changed",
+            space_id=SPACE,
+            payload=strip_authority_sig_fields(meta),
+            space_seed=k2.private_key,
+        )
+    )
+    await member._reset_config(space, meta, env.fed.own_instance_id, 9)
+    got = await env.spaces.get(SPACE)
+    assert (got.name, got.description) == ("Baseline", space.description)
+    assert got.gfs_servers == gfs_list

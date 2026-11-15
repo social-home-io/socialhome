@@ -39,7 +39,10 @@ from typing import TYPE_CHECKING
 import orjson
 
 from ..crypto import b64url_encode
-from ..domain.federation import FederationEventType
+from ..domain.federation import (
+    SPACE_SESSION_ALLOWED_EVENT_TYPES,
+    FederationEventType,
+)
 from . import media_framing
 
 if TYPE_CHECKING:
@@ -56,14 +59,31 @@ MEDIA_HTTPS_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
     {FederationEventType.SPACE_MEDIA_BLOB, FederationEventType.DM_MEDIA_BLOB}
 )
 
-#: What a binary frame on the GFS relay (v_87) may carry: a media chunk,
-#: or a pending moderation item whose content does not fit a JSON relay
-#: envelope — the same signed frame, the item's content as its bytes
-#: (``services/space_moderation_federation.py``). The relay is the one path
-#: with the small JSON cap, so only its pipeline takes the wider set.
-RELAY_FRAME_EVENT_TYPES: frozenset[FederationEventType] = MEDIA_HTTPS_EVENT_TYPES | {
-    FederationEventType.SPACE_MODERATION_SUBMITTED
-}
+#: What a binary frame on the GFS relay may carry: a media chunk, or any
+#: event a household behind a GFS may send or receive at
+#: all (:data:`~socialhome.domain.federation.SPACE_SESSION_ALLOWED_EVENT_TYPES`)
+#: whose sealed envelope does not fit a JSON envelope on that relay. The
+#: frame is the same signed frame; the event's payload JSON is its bytes
+#: (:data:`FRAME_BINDING_FIELDS` is then all its signed metadata holds). The
+#: relay is the one path with the small JSON cap, so only its pipeline takes
+#: the wider set — and every gate of a JSON envelope still runs on it.
+RELAY_FRAME_EVENT_TYPES: frozenset[FederationEventType] = (
+    MEDIA_HTTPS_EVENT_TYPES | SPACE_SESSION_ALLOWED_EVENT_TYPES
+)
+
+#: The smallest payload a framed event may carry. A sender frames only
+#: what no JSON relay envelope takes (a payload over ~140 KiB: the 191 KiB
+#: envelope holds it encrypted and base64'ed); a receiver refuses a framed
+#: event well below that, so the frame is never a second lane — with the
+#: media leg's own budgets — for ordinary events.
+RELAY_EVENT_FRAME_MIN_PAYLOAD_BYTES: int = 96 * 1024
+
+#: The signed metadata fields that bind a frame's bytes to its envelope and
+#: name how they are sealed. A framed event (v_87) carries these and nothing
+#: else there: its payload is the object in the frame's bytes.
+FRAME_BINDING_FIELDS: frozenset[str] = frozenset(
+    {"chunk_sha256", "media_aead_suite", "media_frame_suite"}
+)
 
 
 def build_media_envelope(
@@ -77,10 +97,14 @@ def build_media_envelope(
     payload: dict,
     raw_chunk: bytes,
     space_id: str | None,
+    msg_id: str | None = None,
 ) -> tuple[dict, bytes]:
     """Return ``(signed_header, sealed_chunk)`` for one media chunk.
 
-    ``payload`` is the chunk metadata **without** the bytes. The header's
+    ``payload`` is the chunk metadata **without** the bytes. ``msg_id``
+    defaults to a fresh one; a framed event (v_87) passes its envelope's,
+    so a retry from the outbox is the same message to the receiver's replay
+    cache. The header's
     signed bytes are ``orjson.dumps`` of the envelope without
     ``signatures``, in the canonical order the inbound
     ``verify_signature`` step reconstructs.
@@ -92,7 +116,7 @@ def build_media_envelope(
         "media_frame_suite": media_framing.MEDIA_FRAME_SUITE_V1,
     }
     envelope: dict = {
-        "msg_id": str(uuid.uuid4()),
+        "msg_id": msg_id or str(uuid.uuid4()),
         "event_type": event_type.value,
         "from_instance": from_instance,
         "to_instance": to_instance,

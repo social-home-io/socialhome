@@ -22,9 +22,15 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING, Any
 
 from ..canonical_json import canonical_utf8_str
+from .relay_media_frame import COUNTER_MAX, WIDEST_ID, WIDEST_STAMP
+
+if TYPE_CHECKING:
+    from .page import Page
 
 #: The suite tag of a version hash — the only one this build speaks.
 VERSION_HASH_SUITE = "sha256"
@@ -80,6 +86,83 @@ def version_hash(title: str, content: str, cover_image_url: str | None = None) -
         }
     )
     return f"{VERSION_HASH_SUITE}:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def side_to_wire(side: PageConflictSide) -> dict[str, Any]:
+    """One open conflict side as it travels (``conflict`` entries)."""
+    return {
+        "side_id": side.hash,
+        "title": side.title,
+        "content": side.content,
+        "cover": side.cover_image_url,
+        "by": side.by,
+        "base_seq": side.base_seq,
+        "at": side.at,
+    }
+
+
+#: A version hash's length on the wire, without hashing: what
+#: :func:`page_record` puts in place of the hash when it only measures.
+_MEASURE_HASH = f"{VERSION_HASH_SUITE}:" + "0" * 64
+
+#: A page's ids and stamps — they differ between the household that saves
+#: it, the host that sequences it and every receiver — and its counter.
+_PAGE_IDS = (
+    "id",
+    "space_id",
+    "created_by",
+    "last_editor_user_id",
+    "locked_by",
+    "delete_requested_by",
+    "delete_approved_by",
+)
+_PAGE_STAMPS = (
+    "created_at",
+    "updated_at",
+    "last_edited_at",
+    "locked_at",
+    "lock_expires_at",
+    "delete_requested_at",
+    "delete_approved_at",
+)
+
+
+def page_record(
+    page: Page, sides: Sequence[PageConflictSide], *, measure: bool = False
+) -> dict[str, Any]:
+    """A space page as it travels: its §25.6 ``pages`` record — the row
+    (not this household's draft marker), its version hash and every open
+    conflict side. What the exporter streams.
+
+    *measure*: the record a page's size is measured on — the same, with
+    every id, stamp and counter at its widest (and the fixed-length hash
+    not computed), so the household that saves a page, the host that
+    sequences it and every receiver measure the same number for the same
+    words. Receivers bound those fields to that width
+    (``domain/relay_media_frame.py``), so what travels is never larger."""
+    record = asdict(page)
+    record.pop("pending_base_seq", None)
+    if measure:
+        record.update(dict.fromkeys(_PAGE_IDS, WIDEST_ID))
+        record.update(dict.fromkeys(_PAGE_STAMPS, WIDEST_STAMP))
+        record["seq"] = COUNTER_MAX
+        record["version_hash"] = _MEASURE_HASH
+        record["conflict"] = [
+            {
+                **side_to_wire(s),
+                "side_id": _MEASURE_HASH,
+                "by": WIDEST_ID,
+                "at": WIDEST_STAMP,
+                "base_seq": COUNTER_MAX,
+            }
+            for s in sides
+        ]
+        return record
+    record["version_hash"] = version_hash(
+        page.title, page.content, page.cover_image_url
+    )
+    record["conflict"] = [side_to_wire(s) for s in sides]
+    return record
 
 
 def is_version_hash(value: object) -> bool:

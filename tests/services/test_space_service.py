@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import pytest
 from PIL import Image
 
@@ -47,6 +48,7 @@ from socialhome.domain.federation import (
     FederationEventType,
     PairingStatus,
 )
+from socialhome.domain.federation import FederationEventType as _RosterFET
 from socialhome.domain.federation_capabilities import (
     FederationCapability,
     space_feature_keys_missing_below,
@@ -56,6 +58,7 @@ from socialhome.domain.media_constraints import (
     SPACE_ICON_SNAPSHOT_MAX_BYTES,
 )
 from socialhome.domain.post import PostType
+from socialhome.domain.relay_media_frame import SPACE_CONFIG_ITEM_MAX_BYTES as _CFG_MAX
 from socialhome.domain.space import (
     AlreadyMemberError,
     ContentAction,
@@ -83,6 +86,7 @@ from socialhome.domain.space_app_table import SpaceAppNotAllowedError
 from socialhome.domain.space_key import SpaceKey
 from socialhome.domain.writer_cert import WriterCert, WriterEntitlement
 from socialhome.domain.writer_key import WriterKeyGrant
+from socialhome.federation.gfs_relay_transport import RELAY_MAX_ENVELOPE_BYTES
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
@@ -106,12 +110,17 @@ from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_moderation_service import SpaceModerationService
 from socialhome.services.space_post_moderation import PostModerationHandler
 from socialhome.services.space_service import (
+    ROSTER_SNAPSHOT_PART_BYTES,
     SPACE_CATEGORIES,
     SpaceService,
     build_space_snapshot_for_federation,
+    config_item_bytes,
     keep_local_space_state,
     normalize_category,
+    space_metadata_fields,
+    stub_space_from_metadata,
 )
+from socialhome.services.space_service import config_within_limit as _within
 from socialhome.services.space_writer_cert_service import (
     SpaceWriterCertService,
 )
@@ -8168,6 +8177,61 @@ async def test_roster_snapshot_entries_are_signed_off_the_event_loop(
     assert threading.get_ident() not in threads
 
 
+async def test_a_roster_of_a_thousand_seats_goes_in_parts_a_gfs_member_can_take(stack):
+    """One event with every seat of a large space passed what a household
+    behind a GFS takes. The snapshot goes in parts — each an ordinary
+    ``SPACE_ROSTER_SNAPSHOT`` (entries are signed and merged one by one, so
+    the receiver is unchanged), each small enough for a JSON envelope on the
+    relay — and the member ends with every seat. Only the last part says
+    what the roster is complete up to."""
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    for n in range(1000):
+        await _seat(remote, space.id, f"peer-{n % 400}", f"u-{n:04d}")
+    await _seat(remote, space.id, "peer-gfs", "u-gfs")
+    fed.send_with_mesh_fallback.reset_mock()
+    assert await stack.space_svc.send_roster_snapshot(
+        space.id, to_instance_id="peer-gfs"
+    )
+    payloads = [
+        c.kwargs["payload"]
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs["event_type"] is _RosterFET.SPACE_ROSTER_SNAPSHOT
+    ]
+    assert len(payloads) > 3
+    seats = [e["payload"]["user_id"] for p in payloads for e in p["entries"]]
+    assert len(seats) == len(set(seats))
+    assert {f"u-{n:04d}" for n in range(1000)} <= set(seats)
+    for payload in payloads:
+        assert payload["space_id"] == space.id
+        entries = payload["entries"]
+        # The entries plus the list's brackets and commas.
+        assert (
+            len(orjson.dumps(entries)) <= ROSTER_SNAPSHOT_PART_BYTES + len(entries) + 1
+        )
+        # Encrypted and base64'ed inside the envelope, next to its fields.
+        assert len(orjson.dumps(payload)) * 4 // 3 + 4096 < RELAY_MAX_ENVELOPE_BYTES
+    # Every part names its send, its place and the version: the receiver
+    # notes the roster complete only once it applied them all.
+    assert {p["roster_version"] for p in payloads} == {payloads[0]["roster_version"]}
+    assert len({p["snapshot_id"] for p in payloads}) == 1
+    assert [p["part"] for p in payloads] == list(range(len(payloads)))
+    assert {p["parts"] for p in payloads} == {len(payloads)}
+
+
+async def test_a_small_roster_is_still_one_snapshot_event(stack):
+    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
+    for n in range(20):
+        await _seat(remote, space.id, f"peer-{n}", f"u-{n}")
+    await _seat(remote, space.id, "peer-new", "u-new")
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-new")
+    [(_to, entries)] = _snapshots(fed, to="peer-new")
+    assert len(entries) >= 21
+    payload = fed.send_with_mesh_fallback.await_args_list[-1].kwargs["payload"]
+    assert "roster_version" in payload
+    assert not {"snapshot_id", "part", "parts"} & set(payload)
+
+
 async def test_an_invite_link_redeem_sends_no_snapshot(stack):
     _owner, space, fed, remote = await _hosted_space_with_seats(stack)
     await _seat(remote, space.id, "peer-new", "u-new")
@@ -11821,3 +11885,125 @@ async def test_removing_a_reaction_no_household_would_take_is_refused(stack, emo
         p.id, space_id=s.id, user_id=anna.user_id, emoji="nice"
     )
     assert len(seen) == 1
+
+
+# ── The receiver rule for a space's config ───────────────────────────────
+
+
+def _cfg(**over) -> Space:
+    return replace(
+        Space(
+            id="sp-cfg",
+            name="Club",
+            owner_instance_id="h" * 32,
+            owner_username="anna",
+            identity_public_key="ab" * 32,
+            config_sequence=1,
+            features=SpaceFeatures(),
+            space_type=SpaceType.PRIVATE,
+            join_mode=JoinMode.INVITE_ONLY,
+        ),
+        **over,
+    )
+
+
+def test_config_within_limit_takes_a_config_that_fits():
+    space = _cfg(description="d" * 1000)
+    assert _within(space, held=None, source="t") is space
+
+
+def test_config_within_limit_with_nothing_held_drops_the_text(caplog):
+    caplog.set_level(logging.WARNING)
+    space = _cfg(description="d" * _CFG_MAX, about_markdown="a")
+    kept = _within(space, held=None, source="SPACE_CREATED from x")
+    assert (kept.description, kept.about_markdown, kept.name) == (None, None, "Club")
+    assert "its settings apply" in caplog.text
+
+
+def test_config_within_limit_keeps_the_held_text_and_takes_the_settings():
+    held = _cfg(description="h", about_markdown="about")
+    space = replace(
+        held,
+        name="Renamed",
+        description="d" * _CFG_MAX,
+        join_mode=JoinMode.OPEN,
+    )
+    kept = _within(space, held=held, source="t")
+    assert (kept.name, kept.description, kept.about_markdown, kept.join_mode) == (
+        "Renamed",
+        "h",
+        "about",
+        JoinMode.OPEN,
+    )
+
+
+def test_a_config_without_its_texts_always_fits():
+    """Everything but the description and the about text is bounded where
+    it is read, far below the limit — so keeping the held texts always
+    brings a config within it (no "settings alone too large" case)."""
+    meta = {
+        "name": "\x01" * 10_000,
+        "emoji": "🏡" * 10_000,
+        "owner_username": "o" * 10_000,
+        "identity_public_key": "k" * 10_000,
+        "tz": "x" * 10_000,
+        "cover_hash": "c" * 10_000,
+        "icon_hash": "i" * 10_000,
+        "category": "c" * 10_000,
+        "features": {
+            "allowed_post_types": [f"t{n}" * 30 for n in range(10_000)],
+            "allowed_apps": [f"a{n}" for n in range(10_000)],
+        },
+        "retention_exempt_types": ["x" * 100] * 10_000,
+    }
+    space = stub_space_from_metadata("s" * 32, host_instance_id="h" * 32, meta=meta)
+    assert config_item_bytes(space) < 16 * 1024
+
+
+def test_a_config_stamp_never_grows_a_stored_config():
+    """A delegated admin's signed ``config_hlc`` of 300,000 digits (or a
+    sequence past 64 bits) is bounded where the config is parsed — the
+    stored config never carries it, and a later joiner's snapshot of it
+    always fits."""
+    meta = {
+        "name": "S",
+        "identity_public_key": "k" * 64,
+        "config_sequence": 2,
+        "config_hlc": "9" * 300_000,
+        "roster_sequence": 10**30,
+        "owner_username": "o" * 10_000,
+        "tz": "Not/AZone" * 1000,
+        "cover_hash": "c" * 10_000,
+    }
+    space = stub_space_from_metadata("sp", host_instance_id="own", meta=meta)
+    assert space.config_hlc == "0-0"
+    assert space.roster_sequence == 0
+    assert len(space.owner_username) <= 128 and len(space.cover_hash or "") <= 128
+    assert space.tz == "UTC"
+    orjson.dumps(space_metadata_fields(space))  # a 64-bit-safe int
+    for big in (1e23, 2**64, -1, True, "7"):
+        bounded = stub_space_from_metadata(
+            "sp", host_instance_id="own", meta={**meta, "config_sequence": big}
+        )
+        assert 0 <= bounded.config_sequence < 2**63
+        orjson.dumps(space_metadata_fields(bounded))
+
+
+def test_a_config_measures_the_same_whatever_its_counters():
+    """The local save, the receivers and the host measure one number for
+    the same config: the counters are measured at their widest."""
+    small = _cfg(description="d")
+    grown = replace(small, config_sequence=2**62, roster_sequence=2**62)
+    grown = replace(grown, config_hlc=f"{2**62}-{2**62}")
+    assert config_item_bytes(small) == config_item_bytes(grown)
+
+
+def test_no_larger_holds_only_for_a_config_stored_over_the_limit():
+    """Within the limit the rule is strict; the "no larger" exception is
+    only for a config that was stored over the limit before it existed."""
+    held = _cfg(description="d" * (_CFG_MAX - 2000))
+    over = replace(held, description="d" * (_CFG_MAX + 10))
+    assert _within(over, held=held, source="t").description == held.description
+    legacy = _cfg(description="o" * (_CFG_MAX + 5000))
+    same = replace(legacy, name="Clux", config_sequence=99)
+    assert _within(same, held=legacy, source="t") is same

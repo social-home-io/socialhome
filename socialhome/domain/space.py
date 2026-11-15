@@ -40,6 +40,11 @@ if TYPE_CHECKING:
     from .post import PostType
 
 
+#: The longest space name (characters) — what the SPA's name field allows.
+#: The emoji is capped at ``domain.emoji.MAX_EMOJI_CODEPOINTS``.
+SPACE_NAME_MAX_CHARS: int = 120
+
+
 # ─── Discovery categories (§23.50) ────────────────────────────────────────
 
 #: Discovery categories (§23.50). A space's ``category`` is one of these;
@@ -399,6 +404,12 @@ RETENTION_EXEMPTABLE_TYPES: frozenset[str] = frozenset(_ALL_POST_TYPES)
 SPACE_ALLOWED_APPS_MAX: int = 20
 #: An app id on the list — the catalog's ids (``chess``, ``gift-draw``).
 _APP_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+#: How many post types, and how long a name, a wire config's
+#: ``allowed_post_types`` keeps.
+_POST_TYPES_MAX = 32
+_POST_TYPE_MAX_CHARS = 32
 
 
 def normalize_allowed_apps(raw: object, *, strict: bool = False) -> tuple[str, ...]:
@@ -828,11 +839,22 @@ class SpaceFeatures:
             "zone_only" if location_mode_raw == "zone_only" else "gps"
         )
         allowed_raw = raw.get("allowed_post_types")
+        # Bounded where it is read (a newer peer's type is kept): distinct
+        # short names, a few dozen at most — a config's settings stay far
+        # below its size limit.
         allowed = (
-            tuple(sorted(str(t) for t in allowed_raw))
+            tuple(
+                sorted(
+                    {
+                        t
+                        for t in allowed_raw
+                        if isinstance(t, str) and 0 < len(t) <= _POST_TYPE_MAX_CHARS
+                    }
+                )
+            )[:_POST_TYPES_MAX]
             if isinstance(allowed_raw, (list, tuple)) and allowed_raw
-            else defaults.allowed_post_types
-        )
+            else ()
+        ) or defaults.allowed_post_types
         return cls(
             calendar=bool(raw.get("calendar", defaults.calendar)),
             todo=bool(raw.get("todo", defaults.todo)),

@@ -104,6 +104,7 @@ from .space_crypto_service import KEY_SUITE_AESGCM_256, SUPPORTED_KEY_SUITES
 from .space_service import (
     apply_gfs_servers_from_metadata,
     apply_owner_statement_from_metadata,
+    config_within_limit,
     keep_local_space_state,
     space_metadata_for_federation,
     stub_space_from_metadata,
@@ -1442,8 +1443,10 @@ class SpaceAuthorityRotationService:
         refreshed = stub_space_from_metadata(
             space.id, host_instance_id=owner, meta=meta
         )
-        refreshed = keep_local_space_state(
-            refreshed, existing=space, meta=meta, we_host=False
+        refreshed = config_within_limit(
+            keep_local_space_state(refreshed, existing=space, meta=meta, we_host=False),
+            held=space,
+            source=f"SPACE_AUTHORITY_ROTATED by {owner}",
         )
         # Conditional in the SAME transaction as the save: a config applied
         # under the new key in the meantime (an inline-cert edit racing this

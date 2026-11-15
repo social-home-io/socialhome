@@ -185,6 +185,20 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
     }),
   VIDEO_UNREADABLE: () => t('error.video_unreadable'),
   TRANSCODE_QUEUE_FULL: () => t('error.transcode_queue_full'),
+  // A space page, calendar event or space settings over the limit of its
+  // kind, measured as a whole (413); max_kb is that limit (1 kB = 1000 B).
+  SPACE_ITEM_TOO_LARGE: (_b, p) => p.max_kb === undefined
+    ? null
+    : t('error.space_item_too_large', { max_kb: str(p, 'max_kb') }),
+  // Caps of a space's name / emoji and of a calendar event's lists (422).
+  SPACE_NAME_TOO_LONG: (_b, p) => p.max === undefined
+    ? null
+    : t('error.space_name_too_long', { max: str(p, 'max') }),
+  SPACE_EMOJI_TOO_LONG: () => t('error.space_emoji_too_long'),
+  CALENDAR_RRULE_INVALID: () => t('error.calendar_rrule_invalid'),
+  CALENDAR_ATTENDEES_INVALID: (_b, p) => p.max === undefined
+    ? null
+    : t('error.calendar_attendees_invalid', { max: str(p, 'max') }),
   // Private albums (D7): privacy follows the upload.
   // Never names the person: apiErrors stays free of stores (no import cycle).
   ALBUM_AUDIENCE: (_b, p) => {

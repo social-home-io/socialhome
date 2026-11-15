@@ -79,6 +79,14 @@ const byText = (c: Element, text: string) =>
 describe('SpaceCreateDialog — local community', () => {
   beforeEach(() => { post.mockReset(); get.mockClear(); gfsConns = []; cleanup() })
 
+  it('the name and description fields hold what the server takes', async () => {
+    const { container } = await open()
+    const name = container.querySelector('.sh-form label input') as HTMLInputElement
+    const description = container.querySelector('.sh-form textarea') as HTMLTextAreaElement
+    expect(name.maxLength).toBe(120)
+    expect(description.maxLength).toBe(300)
+  })
+
   it('module exports exist', () => {
     expect(typeof SpaceCreateDialog).toBe('function')
     expect(typeof openSpaceCreate).toBe('function')

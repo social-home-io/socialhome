@@ -96,6 +96,72 @@ class PayloadTooLargeError(CodedError):
         super().__init__(params={"max_mb": max(1, max_bytes // (1024 * 1024))})
 
 
+class SpaceItemTooLargeError(CodedError, ValueError):
+    """A space page, calendar event or space config over the limit of its
+    kind, measured whole (``domain/relay_media_frame.py``).
+
+    The limit is the same in every space and on every path — members are
+    equal however their household is reached — and is what one item, with
+    what others add to it later, takes to cross to any of them. Refused
+    where it is saved (413), after authorization, before anything is
+    stored.
+    """
+
+    status = 413
+    code = "SPACE_ITEM_TOO_LARGE"
+    detail = "This is too large to share with the space. Shorten it or split it up."
+
+    def __init__(self, max_bytes: int) -> None:
+        # The item's limit as a whole, in kB (1000 bytes) — what the SPA
+        # shows ("at most … kB in total").
+        super().__init__(params={"max_kb": max_bytes // 1000})
+
+
+class SpaceNameTooLongError(CodedError, ValueError):
+    """A space name over its cap (``max`` characters)."""
+
+    status = 422
+    code = "SPACE_NAME_TOO_LONG"
+    detail = "This space name is too long."
+
+    def __init__(self, max_chars: int) -> None:
+        super().__init__(params={"max": max_chars})
+
+
+class SpaceEmojiTooLongError(CodedError, ValueError):
+    """A space emoji over its cap (``max`` code points) — one emoji."""
+
+    status = 422
+    code = "SPACE_EMOJI_TOO_LONG"
+    detail = "Pick a single emoji."
+
+    def __init__(self, max_chars: int) -> None:
+        super().__init__(params={"max": max_chars})
+
+
+class CalendarRuleInvalidError(CodedError, ValueError):
+    """A recurrence rule this build cannot read, or over ``max``
+    characters."""
+
+    status = 422
+    code = "CALENDAR_RRULE_INVALID"
+    detail = "This repeat rule can't be used."
+
+    def __init__(self, max_chars: int) -> None:
+        super().__init__(params={"max": max_chars})
+
+
+class CalendarAttendeesInvalidError(CodedError, ValueError):
+    """An attendee list that is not a list of people, or over ``max``."""
+
+    status = 422
+    code = "CALENDAR_ATTENDEES_INVALID"
+    detail = "This guest list can't be used."
+
+    def __init__(self, max_attendees: int) -> None:
+        super().__init__(params={"max": max_attendees})
+
+
 class DownloadTooLargeError(CodedError):
     """A gallery download asks for more photos or bytes than one ZIP holds.
     The SPA says how many fit (``max_items``) and how big (``max_mb``)."""

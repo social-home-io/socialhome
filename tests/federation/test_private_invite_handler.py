@@ -27,6 +27,7 @@ from socialhome.domain.events import (
     RemoteSpaceMemberRemoved,
     SpaceRemoteSeatEnded,
 )
+from socialhome.domain.relay_media_frame import SPACE_CONFIG_ITEM_MAX_BYTES
 from socialhome.domain.space import (
     JoinMode,
     RemoteAdminOutcome,
@@ -2710,3 +2711,38 @@ async def test_the_last_seats_row_is_gone_before_the_seat_is_announced_ended(han
     ):
         await handler.h._on_space_member_left(ev)
     assert order == ["row dropped", "seat ended"]
+
+
+async def test_a_join_snapshot_over_the_config_limit_seats_the_space_without_its_text(
+    handler,
+):
+    """A join snapshot is a config like any other: over the limit, the
+    space is seated with its settings and without its description — the
+    join never fails for it (nothing is left half-seated)."""
+    issuer = derive_instance_id(generate_identity_keypair().public_key)
+    meta = {
+        "name": "Board",
+        "description": "d" * SPACE_CONFIG_ITEM_MAX_BYTES,
+        "identity_public_key": "ab" * 32,
+        "owner_instance_id": issuer,
+        "config_hlc": "9" * 5000,
+    }
+    await seat_join_stub(
+        space_repo=handler.space_repo,
+        remote_member_repo=handler.remote_members,
+        bus=handler.bus,
+        space_id="sp1",
+        meta=meta,
+        join=resolve_join_owner("sp1", meta, issuer, own_instance_id=None),
+        issuer_instance_id=issuer,
+        joining_user_id="u1",
+        own_instance_id=None,
+        cover_repo=handler.cover_repo,
+        icon_repo=handler.icon_repo,
+    )
+    seated = handler.space_repo.save.await_args.args[0]
+    assert (seated.name, seated.description, seated.config_hlc) == (
+        "Board",
+        None,
+        "0-0",
+    )

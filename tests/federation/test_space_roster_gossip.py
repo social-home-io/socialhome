@@ -30,15 +30,18 @@ from socialhome.domain.space import (
     SpaceFeatures,
     SpaceType,
 )
+from socialhome.federation import private_invite_handler as handler_module
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.services.space_authority_pin import AuthorityCertOutcome
 from socialhome.services.space_crypto_service import (
     sign_authority_event,
     strip_authority_sig_fields,
 )
+from socialhome.services.space_service import roster_snapshot_parts
 
 OWNER = "owner-instance"
 RELAY = "some-relay-instance"
@@ -940,4 +943,158 @@ async def test_only_the_host_can_name_the_owner_seat(tmp_dir):
     )
     await h._on_space_roster_snapshot(_snapshot([_entry(j, elsewhere)]))
     assert await spaces.get_owner_user_id(SPACE_ID) is None
+    await db.shutdown()
+
+
+# ── A roster in parts: complete only when every part was applied ─────────
+
+
+def _thousand_seats(seed: bytes) -> list[dict]:
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    return [
+        _entry(
+            j,
+            _signed_payload(
+                j,
+                seed=seed,
+                member_version=n + 1,
+                user_id=f"u-{n:04d}",
+                instance_id=f"p-{n % 300}",
+            ),
+        )
+        for n in range(1000)
+    ]
+
+
+def _part_events(payloads: list[dict]) -> list:
+    return [
+        _event(FederationEventType.SPACE_ROSTER_SNAPSHOT, payload, from_instance=OWNER)
+        for payload in payloads
+    ]
+
+
+async def _seated(remote) -> int:
+    rows = await remote._db.fetchall(
+        "SELECT COUNT(*) AS n FROM space_remote_members WHERE space_id=?"
+        " AND user_id LIKE 'u-%'",
+        (SPACE_ID,),
+    )
+    return int(rows[0]["n"])
+
+
+async def test_a_roster_in_parts_is_complete_once_every_part_was_applied(tmp_dir):
+    """A 1000-seat roster as the host sends it — parts a household behind a
+    GFS can take — through the real handler: every seat lands, and the
+    version is noted for the echo once, when the last missing part arrived
+    (whatever the order)."""
+    h, _spaces, remote, db, seed = await _make_handler(tmp_dir)
+    noted = _NotingSpaceService()
+    h.attach_space_service(noted)
+    payloads = roster_snapshot_parts(
+        SPACE_ID, _thousand_seats(seed), roster_version=1000
+    )
+    assert len(payloads) > 3
+    events = _part_events(payloads)
+    for event in [events[-1], *events[:-1]]:  # the last part first
+        assert noted.applied == []
+        await h._on_space_roster_snapshot(event)
+    assert noted.applied == [(SPACE_ID, OWNER, 1000)]
+    assert await _seated(remote) == 1000
+    await db.shutdown()
+
+
+async def test_a_roster_with_a_lost_part_is_not_noted_complete(tmp_dir):
+    """A part the relay accepted and then dropped: the household must not
+    echo the version — the host would stop resending, and a removal in the
+    lost part would never arrive."""
+    h, _spaces, remote, db, seed = await _make_handler(tmp_dir)
+    noted = _NotingSpaceService()
+    h.attach_space_service(noted)
+    payloads = roster_snapshot_parts(
+        SPACE_ID, _thousand_seats(seed), roster_version=1000
+    )
+    events = _part_events(payloads)
+    for event in [*events[:1], *events[2:]]:  # part 1 never arrives
+        await h._on_space_roster_snapshot(event)
+    assert noted.applied == []
+    assert 0 < await _seated(remote) < 1000
+    # The host's next send (a new snapshot id) heals it.
+    again = roster_snapshot_parts(SPACE_ID, _thousand_seats(seed), roster_version=1000)
+    for event in _part_events(again):
+        await h._on_space_roster_snapshot(event)
+    assert noted.applied == [(SPACE_ID, OWNER, 1000)]
+    assert await _seated(remote) == 1000
+    await db.shutdown()
+
+
+async def test_a_roster_in_parts_after_a_missed_rotation(tmp_dir, monkeypatch):
+    """The household missed an authority rotation: only a part that carries
+    the host's cert lets it re-pin and verify. With the cert on the last
+    part alone the earlier parts are refused — and then the version must
+    not be noted; with the cert on every part (as the host sends them) all
+    of it is applied and noted."""
+    h, spaces, remote, db, _old_seed = await _make_handler(tmp_dir)
+    noted = _NotingSpaceService()
+    h.attach_space_service(noted)
+    rotated = generate_space_keypair()
+
+    async def _repin(space_repo, space, cert, *, own_instance_id):
+        assert cert == {"cert": "for-the-new-key"}
+        await space_repo.set_space_pubkey(space.id, rotated.public_key.hex())
+        return AuthorityCertOutcome.APPLIED
+
+    monkeypatch.setattr(handler_module, "apply_authority_cert", _repin)
+    entries = _thousand_seats(rotated.private_key)
+    payloads = roster_snapshot_parts(
+        SPACE_ID,
+        entries,
+        roster_version=1000,
+        authority_cert={"cert": "for-the-new-key"},
+    )
+    assert all(p["authority_cert"] == {"cert": "for-the-new-key"} for p in payloads)
+    # The cert on the last part only: parts before it cannot be verified.
+    stripped = [
+        {k: v for k, v in p.items() if k != "authority_cert"} for p in payloads[:-1]
+    ] + [payloads[-1]]
+    for event in _part_events(stripped):
+        await h._on_space_roster_snapshot(event)
+    assert noted.applied == []
+    assert await _seated(remote) < 1000
+    # As the host sends them (a fresh send): every part re-pins or verifies.
+    await spaces.set_space_pubkey(SPACE_ID, "00" * 32)
+    fresh = roster_snapshot_parts(
+        SPACE_ID,
+        entries,
+        roster_version=1000,
+        authority_cert={"cert": "for-the-new-key"},
+    )
+    for event in _part_events(fresh):
+        await h._on_space_roster_snapshot(event)
+    assert noted.applied == [(SPACE_ID, OWNER, 1000)]
+    assert await _seated(remote) == 1000
+    await db.shutdown()
+
+
+async def test_a_part_naming_a_part_out_of_range_never_completes_a_roster(tmp_dir):
+    h, _spaces, _remote, db, seed = await _make_handler(tmp_dir)
+    noted = _NotingSpaceService()
+    h.attach_space_service(noted)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    entry = _entry(j, _signed_payload(j, seed=seed, member_version=4))
+    for bad in (
+        {"snapshot_id": "s1", "part": 5, "parts": 2},
+        {"snapshot_id": "s1", "part": -1, "parts": 2},
+        {"snapshot_id": "s1", "part": 0, "parts": 10**9},
+        {"snapshot_id": "", "part": 0, "parts": 2},
+        {"snapshot_id": "s1", "part": True, "parts": 2},
+        {"snapshot_id": "s1", "part": 0, "parts": 2},  # one of two only
+    ):
+        await h._on_space_roster_snapshot(
+            _event(
+                FederationEventType.SPACE_ROSTER_SNAPSHOT,
+                {"space_id": SPACE_ID, "entries": [entry], "roster_version": 9, **bad},
+                from_instance=OWNER,
+            )
+        )
+    assert noted.applied == []
     await db.shutdown()

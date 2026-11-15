@@ -32,6 +32,10 @@ log = logging.getLogger(__name__)
 DEFAULT_TZ = "UTC"
 
 
+#: Longer than any IANA zone name (the longest is ~32 characters).
+TZ_NAME_MAX_CHARS: int = 64
+
+
 def is_valid_tz(value: str) -> bool:
     """Return whether ``value`` names a zone in the local IANA database.
 
@@ -40,6 +44,10 @@ def is_valid_tz(value: str) -> bool:
     a malformed one (absolute or ``..``-containing paths) — both are just
     "not a zone" here.
     """
+    if not isinstance(value, str) or not value or len(value) > TZ_NAME_MAX_CHARS:
+        # Longer than any IANA name: the tzdata lookup of a deep path can
+        # recurse past Python's limit.
+        return False
     try:
         ZoneInfo(value)
     except ZoneInfoNotFoundError:

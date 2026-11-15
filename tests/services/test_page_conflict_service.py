@@ -5,6 +5,7 @@ and conflict resolution bodies."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from dataclasses import replace
@@ -18,7 +19,7 @@ from socialhome.domain.events import (
     PageProposalSettled,
     PageUpdated,
 )
-from socialhome.domain.page import PageVersion
+from socialhome.domain.page import Page, PageVersion
 from socialhome.domain.page_version import PageConflictSide, version_hash
 from socialhome.repositories.page_repo import (
     PageNotFoundError,
@@ -38,6 +39,8 @@ from socialhome.services.page_conflict_service import (
     canonical_extras,
     canonical_from_wire,
     diff3_merge,
+    page_item_bytes,
+    page_too_large,
     proposal_from_wire,
     side_to_wire,
 )
@@ -194,7 +197,7 @@ def test_canonical_round_trip():
         title="T",
         content="s",
         by="u2",
-        at="t1",
+        at="2026-10-03T00:00:00+00:00",
         base_seq=2,
     )
     page = replace(
@@ -1103,3 +1106,269 @@ async def test_mark_sent_ignores_a_changed_draft(member):
     await env.svc.mark_sent(SID, env.pid, version_hash("T", "one"))
     base = await env.repo.get_draft_base(env.pid, space_id=SID)
     assert base.sent == version_hash("T", "one")
+
+
+# ─── Host: no version over the page limit every space has ────────────────
+
+
+#: A page limit small enough to test with: the measure counts every id and
+#: stamp at its widest (~1.6 KB of a page and ~0.6 KB per side), plus room
+#: for ~1.5 KB of words.
+LIMIT = 3700
+
+
+@pytest.fixture
+def limited(monkeypatch):
+    """The page limit (the whole record), small enough to test with."""
+    monkeypatch.setattr(mod, "SPACE_PAGE_ITEM_MAX_BYTES", LIMIT)
+
+
+async def test_the_host_refuses_a_proposal_that_would_be_too_large(env, limited):
+    """A member household's edit reaches the host from a build that did
+    not check it (or checked it against an older state). The host applies
+    the same rule before it sequences: refused ``too_large``, the proposer is
+    told, nothing is stored or broadcast."""
+    before = await _page(env)
+    r = await _propose(env, "x" * 3000)
+    assert (r.outcome, r.reason) == (SequenceOutcome.REFUSED, "too_large")
+    assert await _page(env) == before
+    to, _event_type, payload = env.fed.sent[-1]
+    assert to == "iid-a" and payload["sequenced"]["outcome"] == "refused"
+    assert payload["sequenced"]["reason"] == "too_large"
+    assert not env.bus.of(PageUpdated)
+    # Under the limit: sequenced as ever.
+    ok = await _propose(env, "x" * 1000)
+    assert ok.outcome is SequenceOutcome.APPLIED
+
+
+async def test_the_host_refuses_a_proposed_create_that_is_too_large(env, limited):
+    r = await env.svc.sequence(
+        space_id=SID,
+        page_id="pg-big",
+        proposal=Proposal(
+            title="N",
+            content="x" * 3000,
+            actor_user_id="u-a",
+            base_seq=0,
+            created_by="u-a",
+        ),
+        proposer_instance="iid-a",
+    )
+    assert (r.outcome, r.reason) == (SequenceOutcome.REFUSED, "too_large")
+    assert await env.repo.get_space_page("pg-big", space_id=SID) is None
+    assert env.fed.sent[-1][2]["sequenced"]["reason"] == "too_large"
+
+
+async def test_a_side_that_would_not_fit_beside_the_page_is_refused(env, limited):
+    """A conflict side is a whole other version, and its text is not capped
+    on its own: the page plus the sides left open is what one event and one
+    sync record must carry, so a side that would push that past the limit
+    is refused instead of kept — a list never grows a page out of reach."""
+    await _propose(env, "a" * 1200, by="u-a")
+    r = await _propose(env, "b" * 1200, by="u-b", proposer="iid-b")
+    assert (r.outcome, r.reason) == (SequenceOutcome.REFUSED, "too_large")
+    assert await _sides(env) == []
+    assert (await _page(env)).content == "a" * 1200
+    # A smaller concurrent edit still becomes a side.
+    kept = await _propose(env, "c" * 300, by="u-c", proposer="iid-c")
+    assert kept.outcome is SequenceOutcome.SIDE
+    assert not page_too_large(await _page(env), await env.svc.sides(SID, env.pid))
+
+
+async def test_an_edit_that_shrinks_an_old_oversize_page_is_taken(env, monkeypatch):
+    """A page stored before the limit stays readable, and can be edited —
+    as long as the edit does not make it larger."""
+    await _propose(env, "x" * 5000)  # stored before the limit
+    monkeypatch.setattr(mod, "SPACE_PAGE_ITEM_MAX_BYTES", LIMIT)
+    assert (await _page(env)).content == "x" * 5000
+    grow = await _propose(env, "x" * 5001, base_seq=2, base="x" * 5000)
+    assert (grow.outcome, grow.reason) == (SequenceOutcome.REFUSED, "too_large")
+    shrink = await _propose(env, "x" * 4000, base_seq=2, base="x" * 5000)
+    assert shrink.outcome is SequenceOutcome.APPLIED
+
+
+async def test_a_too_large_refusal_keeps_the_authors_words_in_history(member):
+    """The author's household saved the draft (its own check had nothing to
+    refuse). When the host answers ``too_large`` the page shows the host's
+    version again — and the draft's words are in the page's history, never
+    lost; the SPA is told through ``PageProposalSettled``."""
+    env = member
+    await _draft(env, "my long words")
+    page = await _page(env)
+    refused = Sequenced(
+        proposer_instance="me",
+        proposal_hash=version_hash("T", "my long words"),
+        outcome="refused",
+        reason="too_large",
+    )
+    await env.svc.mirror(
+        space_id=SID,
+        page_id=env.pid,
+        version=_version(page, BASE, 1, sequenced=refused),
+    )
+    page = await _page(env)
+    assert (page.content, page.pending_base_seq) == (BASE, None)
+    history = await env.repo.list_versions(env.pid, space_id=SID)
+    assert "my long words" in [v.content for v in history]
+    settled = env.bus.of(PageProposalSettled)[-1]
+    assert (settled.outcome, settled.reason) == ("refused", "too_large")
+
+
+# ─── Member: one receiver rule for every host version ────────────────────
+
+
+async def test_a_refusal_carrying_an_over_limit_version_is_not_stored(
+    member, limited, caplog
+):
+    """The host's refusal answer carries its version, which the member
+    stores in place of its draft — through the same rule as every host
+    version: over the limit and larger than the copy held → not stored
+    (WARNING). It used to be stored unchecked."""
+    env = member
+    await _draft(env, "my words")
+    page = await _page(env)
+    refused = Sequenced(
+        proposer_instance="me",
+        proposal_hash=version_hash("T", "my words"),
+        outcome="refused",
+        reason="access",
+    )
+    caplog.set_level(logging.WARNING)
+    changed = await env.svc.mirror(
+        space_id=SID,
+        page_id=env.pid,
+        version=_version(page, "x" * 4000, 1, sequenced=refused),
+    )
+    assert not changed
+    assert (await _page(env)).content == "my words"
+    assert "not stored" in caplog.text
+    # The same refusal within the limit restores the host's version.
+    await env.svc.mirror(
+        space_id=SID,
+        page_id=env.pid,
+        version=_version(page, BASE, 1, sequenced=refused),
+    )
+    assert (await _page(env)).content == BASE
+
+
+async def test_a_host_version_with_over_limit_sides_is_not_stored(member, limited):
+    """The sides are part of the page: a version whose sides make it too
+    large (and larger than what is held) is not stored either."""
+    env = member
+    page = await _page(env)
+    side = PageConflictSide(
+        hash=version_hash("T", "s" * 4000),
+        title="T",
+        content="s" * 4000,
+        by="u-b",
+        at="2026-10-03T00:00:00+00:00",
+        base_seq=1,
+    )
+    assert not await env.svc.mirror(
+        space_id=SID,
+        page_id=env.pid,
+        version=_version(page, BASE + " more", 2, sides=[side]),
+    )
+    assert (await _page(env)).seq == 1
+    assert await env.svc.sides(SID, env.pid) == []
+
+
+async def test_a_page_stored_over_the_limit_keeps_mirroring_no_larger(
+    member, monkeypatch
+):
+    """A page held before the limit keeps taking the host's versions that do
+    not make it larger — a longer ``seq`` or a new editor never counts."""
+    env = member
+    page = await _page(env)
+    await env.svc.mirror(
+        space_id=SID, page_id=env.pid, version=_version(page, "x" * 5000, 2)
+    )
+    monkeypatch.setattr(mod, "SPACE_PAGE_ITEM_MAX_BYTES", LIMIT)
+    page = await _page(env)
+    same = replace(_version(page, "y" * 5000, 10_000), last_editor_user_id="u-z" * 3)
+    assert await env.svc.mirror(space_id=SID, page_id=env.pid, version=same)
+    assert (await _page(env)).content == "y" * 5000
+    grown = _version(page, "y" * 5001, 10_001)
+    assert not await env.svc.mirror(space_id=SID, page_id=env.pid, version=grown)
+    assert (await _page(env)).content == "y" * 5000
+
+
+async def test_a_refusal_restores_a_page_stored_over_the_limit_over_our_draft(
+    member, monkeypatch
+):
+    """Our small draft sits on a page held before the limit: the host's
+    refusal carries that page (no larger than the version our draft was
+    made from) and is taken — the draft settles, nothing is stuck."""
+    env = member
+    page = await _page(env)
+    await env.svc.mirror(
+        space_id=SID, page_id=env.pid, version=_version(page, "x" * 5000, 2)
+    )
+    await _draft(env, "short")
+    monkeypatch.setattr(mod, "SPACE_PAGE_ITEM_MAX_BYTES", LIMIT)
+    refused = Sequenced(
+        proposer_instance="me",
+        proposal_hash=version_hash("T", "short"),
+        outcome="refused",
+        reason="access",
+    )
+    assert await env.svc.mirror(
+        space_id=SID,
+        page_id=env.pid,
+        version=_version(await _page(env), "x" * 5000, 2, sequenced=refused),
+    )
+    page = await _page(env)
+    assert (page.content, page.pending_base_seq) == ("x" * 5000, None)
+
+
+def test_stamps_never_hide_growth():
+    """Stamps are measured at their widest: an incoming version cannot
+    carry 600 KB in ``updated_at`` past a small held page — and the stamp
+    itself is bounded where a version is parsed."""
+    held = Page(
+        id="p",
+        title="t",
+        content="hello",
+        created_by="u",
+        created_at="2026-01-01",
+        updated_at="2026-01-01",
+        space_id="s",
+    )
+    grown = replace(held, updated_at="x" * 600_000, last_editor_user_id="y" * 100_000)
+    assert page_item_bytes(grown, ()) == page_item_bytes(held, ())
+    version = canonical_from_wire(
+        {
+            "seq": 2,
+            "title": "t",
+            "content": "c",
+            "updated_at": "x" * 600_000,
+            "last_editor_user_id": "y" * 100_000,
+            "created_by": "z" * 1000,
+        }
+    )
+    assert version is not None
+    assert version.updated_at == "" and version.last_editor_user_id == ""
+    assert version.created_by == ""
+
+
+def test_the_member_the_host_and_a_receiver_measure_the_same_page():
+    """A page at exactly its limit where a member saves it is at exactly
+    its limit where the host sequences it and where a receiver stores it —
+    no draft is ever stuck between two different numbers."""
+    uid = "u-0123456789abcdef0123456789abcdef"
+    member = new_page(title="T", content="", created_by=uid, space_id="sp-1")
+    base = page_item_bytes(member, ())
+    member = replace(member, content="a" * (mod.SPACE_PAGE_ITEM_MAX_BYTES - base))
+    now = "2026-11-15T09:00:00.123456+00:00"
+    host = replace(
+        member,
+        created_at=now,
+        updated_at=now,
+        last_editor_user_id=uid,
+        last_edited_at=now,
+        seq=1,
+    )
+    receiver = replace(host, seq=2**53, updated_at="2026-11-15 09:00:00")
+    sizes = {page_item_bytes(p, ()) for p in (member, host, receiver)}
+    assert sizes == {mod.SPACE_PAGE_ITEM_MAX_BYTES}
+    assert not any(page_too_large(p, ()) for p in (member, host, receiver))
