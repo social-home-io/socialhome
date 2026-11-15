@@ -223,9 +223,7 @@ MAX_CATCHUP_MEDIA_RECORDS: int = 500
 class _MediaPlanner(Protocol):
     async def is_relay_reader(self, instance_id: str) -> bool: ...
 
-    async def stored_on_reader_gfs(
-        self, instance_id: str, media_urls: list[str]
-    ) -> list[str]: ...
+    def stored_on_gfs(self, plan: Any) -> Any: ...
 
     async def plan_for_reader(
         self, space_id: str, media_urls: list[str], instance_id: str, *, item_id: str
@@ -278,8 +276,6 @@ class _WithMediaRefs:
         out: list[dict[str, Any]] = []
         for row in rows:
             urls = record_media_urls(self.resource, row)
-            if urls and self._stored_only:
-                urls = await self._media.stored_on_reader_gfs(self._requester, urls)
             if urls and self._budget > 0:
                 self._budget -= 1
                 try:
@@ -299,6 +295,10 @@ class _WithMediaRefs:
                         exc_info=True,
                     )
                     plan = None
+                if self._stored_only:
+                    # Only blobs its GFS is known to hold, address for
+                    # address; nothing is uploaded.
+                    plan = self._media.stored_on_gfs(plan)
                 if plan is not None:
                     row = {**row, MEDIA_REFS_FIELD: plan.wire()}
                     if not self._stored_only:

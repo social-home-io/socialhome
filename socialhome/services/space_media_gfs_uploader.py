@@ -797,24 +797,28 @@ class SpaceMediaGfsUploader:
             return False
         return self._stored_names.get((conn.id, filename), 0.0) > _monotonic()
 
-    async def stored_on_reader_gfs(
-        self, instance_id: str, media_urls: Iterable[str | None]
-    ) -> list[str]:
-        """Those of *media_urls* whose file the GFS that relays reader
-        *instance_id* is known to hold now (we uploaded it there, within the
-        cache's TTL — :meth:`_remember`). Empty for no reader."""
-        conn = await self._reader_conn(instance_id)
-        if conn is None:
-            return []
+    def stored_on_gfs(self, plan: SpaceMediaPlan | None) -> SpaceMediaPlan | None:
+        """*plan* narrowed to the refs whose exact blob (the address: file,
+        epoch, item, origin) a target GFS is known to hold now — we uploaded
+        it there, within the cache's TTL (:meth:`_remember`). ``None`` when
+        none is. A file stored under an older epoch or another item is a
+        different blob, so it is never described from here."""
+        if plan is None:
+            return None
         now = _monotonic()
-        out: list[str] = []
-        for url in media_urls:
-            if url is None:
-                continue
-            names = media_names([url])
-            if names and self._stored_names.get((conn.id, names[0]), 0.0) > now:
-                out.append(url)
-        return out
+        refs = tuple(
+            ref
+            for ref in plan.refs
+            if any(
+                self._stored.get((conn.id, ref.blob_id), 0.0) > now
+                for conn in plan.targets
+            )
+        )
+        if not refs:
+            return None
+        return SpaceMediaPlan(
+            space_id=plan.space_id, refs=refs, targets=plan.targets, lazy_ok=False
+        )
 
     async def _reseal(
         self, ref: SpaceMediaRef, scope: str, scope_id: str

@@ -1207,10 +1207,12 @@ async def test_a_reader_reads_a_file_from_its_gfs_only_once_it_is_stored_there(
         assert await fresh.reads_from_gfs("e", "a.webp") is False, version
 
 
-async def test_stored_on_reader_gfs_lists_only_files_its_gfs_holds(tmp_path):
-    """The v_92 catch-up describes only what the reader's GFS is known to
-    hold: files we uploaded there, within the cache's TTL."""
+async def test_stored_on_gfs_keeps_only_blobs_the_gfs_holds(tmp_path):
+    """The v_92 catch-up describes only the exact blobs the reader's GFS is
+    known to hold — matched by address, never by file name: after a key
+    rotation the same file is a different blob, which the GFS lacks."""
     _write(tmp_path, "a.webp", 10)
+    _write(tmp_path, "b.webp", 10)
     g1 = _Conn("g1", "https://g1.example")
     gfs = _Gfs([g1], status=200)
     u = _uploader(
@@ -1220,14 +1222,31 @@ async def test_stored_on_reader_gfs_lists_only_files_its_gfs_holds(tmp_path):
         versions={"e": V},
         seed=b"\2" * 32,
     )
-    urls = ["api/media/a.webp", "api/media/b.webp", None]
-    assert await u.stored_on_reader_gfs("e", urls) == []
-    plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    urls = ["api/media/a.webp", "api/media/b.webp"]
+    assert u.stored_on_gfs(None) is None
+    plan = await u.plan_for_reader(SPACE, urls, "e", item_id=ITEM)
+    assert u.stored_on_gfs(plan) is None  # nothing uploaded yet
+    stored = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
     await u.start()
     try:
-        u.upload(plan)
+        u.upload(stored)
         await asyncio.wait_for(u.drain(), timeout=5)
     finally:
         await u.stop()
-    assert await u.stored_on_reader_gfs("e", urls) == ["api/media/a.webp"]
-    assert await u.stored_on_reader_gfs("b", urls) == []  # no reader
+    narrowed = u.stored_on_gfs(await u.plan_for_reader(SPACE, urls, "e", item_id=ITEM))
+    assert set(narrowed.wire()) == {"a.webp"}
+    assert narrowed.lazy_ok is False
+
+    # Rotated epoch: same file, new address — not on the GFS.
+    async def _rotated(space_id, *, epoch=None):
+        return 5, os.urandom(32)
+
+    real_key = u._crypto.media_key
+    u._crypto.media_key = _rotated
+    rotated = await u.plan_for_reader(SPACE, urls, "e", item_id=ITEM)
+    assert rotated is not None and {r.epoch for r in rotated.refs} == {5}
+    assert u.stored_on_gfs(rotated) is None
+    u._crypto.media_key = real_key
+    # Another item showing the same file is another blob as well.
+    other = await u.plan_for_reader(SPACE, urls, "e", item_id="post-2")
+    assert u.stored_on_gfs(other) is None
