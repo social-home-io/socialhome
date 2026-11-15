@@ -21,20 +21,24 @@ noted:
   * ``conversation_messages.media_url`` — DM media (final blob)
   * ``feed_posts.media_url`` + ``image_urls_json``
   * ``post_comments.media_url``
-  * ``space_posts.media_url`` + ``image_urls_json``
-  * ``space_post_comments.media_url``
-  * ``bazaar_listings.image_urls_json``
-  * ``gallery_items.filename`` + ``thumbnail_filename`` (bare basenames)
+  * every file field of a SPACE item — generated from the registry
+    (:func:`~socialhome.domain.space_media_fields.space_media_columns`):
+    ``space_posts`` (``media_url``, ``image_urls_json``, ``file_meta_json``
+    ``$.url``, ``link_preview_json`` ``$.thumbnail_url``),
+    ``space_post_comments.media_url``, ``space_calendar_events.cover_url``,
+    ``gallery_items.filename`` + ``thumbnail_filename`` (bare basenames),
+    ``bazaar_listings.image_urls_json``, ``space_pages.cover_image_url`` +
+    its markdown ``content``
   * ``highlight_frames.media_url``
   * ``moments.media_url``
-  * ``calendar_events.cover_url`` / ``space_calendar_events.cover_url``
-  * ``pages`` / ``space_pages`` / ``page_edit_history`` ``.cover_image_url``
+  * ``calendar_events.cover_url``
+  * ``pages`` / ``page_edit_history`` ``.cover_image_url``
     and every picture their markdown ``content`` shows (``api/media/<file>``,
     never the same path inside another URL); an open conflict side's
     ``space_page_snapshots.body``
   * ``task_attachments.url``
   * ``post_drafts.media_url``
-  * ``feed_posts`` / ``space_posts`` ``.link_preview_json`` → ``$.thumbnail_url``
+  * ``feed_posts.link_preview_json`` → ``$.thumbnail_url``
     (the re-encoded link-preview image; one file may back several posts
     that linked the same page)
 
@@ -42,8 +46,9 @@ noted:
     post / page / event / listing publishes its media only on approval
     (up to 7 days later), so until then the payload is the reference
 
-A soft-deleted post keeps ``image_urls_json`` (only ``media_url`` is
-cleared), so a post's image list counts only while the post is live.
+A soft-deleted post keeps ``image_urls_json`` and ``file_meta_json`` (only
+``media_url`` and ``link_preview_json`` are cleared), so a post's image
+list and attachment count only while the post is live.
 
 NOT included (owned elsewhere / transient): DM ``.preview.webp`` /
 ``.part<NNNN>`` / ``.assembled`` intermediates and the ``.partial/``
@@ -64,7 +69,12 @@ from ..domain.media_constraints import (
     SPACE_DIRECT_MEDIA_PREFIX,
     SPACE_PAGE_MEDIA_PREFIX,
 )
-from ..domain.space_media_ref import page_body_media_refs, space_page_media_name
+from ..domain.space_media_fields import (
+    FieldShape,
+    page_body_media_refs,
+    space_media_columns,
+)
+from ..domain.space_media_ref import space_page_media_name
 from ..media.cleanup import media_basename
 from .base import rows_to_dicts
 
@@ -86,39 +96,77 @@ _SPACE_PAGE_HERE = f"({_HOSTED_SPACE} OR pending_base_seq IS NOT NULL)"
 _HISTORY_HERE = f"(space_id IS NULL OR {_HOSTED_SPACE})"
 _SNAPSHOT_HERE = _HOSTED_SPACE
 
+# ─── The reference set (orphan sweep, ``is_referenced``) ─────────────────
+#
+# Household rows are listed by hand; every SPACE item's file fields come
+# from the registry (:func:`space_media_columns`) with the live-row filter
+# of :data:`_SPACE_REFERENCE_LIVE` — a table missing there fails at import.
+
+#: The live-row filter of a space item table's references; a column of it
+#: may override (:data:`_SPACE_REFERENCE_LIVE_COLUMN`).
+_SPACE_REFERENCE_LIVE: dict[str, str] = {
+    "space_posts": "",
+    "space_post_comments": "",
+    "space_calendar_events": "",
+    "gallery_items": "",
+    "bazaar_listings": "",
+    "space_pages": _SPACE_PAGE_HERE,
+}
+#: A soft delete clears a post's ``media_url`` and ``link_preview_json``
+#: but keeps its image list and file attachment: those count only while
+#: the post is live.
+_SPACE_REFERENCE_LIVE_COLUMN: dict[tuple[str, str], str] = {
+    ("space_posts", "image_urls_json"): "deleted=0",
+    ("space_posts", "file_meta_json"): "deleted=0",
+}
+
+
+def _space_reference_live(table: str, col: str) -> str:
+    return _SPACE_REFERENCE_LIVE_COLUMN.get((table, col), _SPACE_REFERENCE_LIVE[table])
+
+
+def _space_reference_rows(shape: str) -> tuple[tuple[str, str, str], ...]:
+    """``(table, column, live-row filter)`` of every registry column of
+    *shape* (``one`` / ``list`` / ``markdown``)."""
+    return tuple(
+        (table, col, _space_reference_live(table, col))
+        for table, col, sql_shape in space_media_columns()
+        if sql_shape == shape
+    )
+
+
 #: ``(table, column, live-row filter)`` for single-reference columns.
 _SINGLE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("conversation_messages", "media_url", ""),
     ("feed_posts", "media_url", ""),
     ("post_comments", "media_url", ""),
-    ("space_posts", "media_url", ""),
-    ("space_post_comments", "media_url", ""),
     ("highlight_frames", "media_url", ""),
     ("moments", "media_url", ""),
-    ("gallery_items", "filename", ""),
-    ("gallery_items", "thumbnail_filename", ""),
     ("calendar_events", "cover_url", ""),
-    ("space_calendar_events", "cover_url", ""),
     ("pages", "cover_image_url", ""),
-    ("space_pages", "cover_image_url", _SPACE_PAGE_HERE),
     ("page_edit_history", "cover_image_url", _HISTORY_HERE),
     ("task_attachments", "url", ""),
     ("post_drafts", "media_url", ""),
+    *_space_reference_rows(FieldShape.ONE),
 )
 
 #: ``(table, column, live-row filter)`` for JSON arrays of references.
 _LIST_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("feed_posts", "image_urls_json", "deleted=0"),
-    ("space_posts", "image_urls_json", "deleted=0"),
-    ("bazaar_listings", "image_urls_json", ""),
+    *_space_reference_rows(FieldShape.LIST),
 )
 
 
-#: ``(table, JSON column, JSON path)`` for a reference inside a JSON object.
-#: Soft-deleting a post NULLs its ``link_preview_json``, so no live filter.
-_JSON_FIELD_COLUMNS: tuple[tuple[str, str, str], ...] = (
-    ("feed_posts", "link_preview_json", "$.thumbnail_url"),
-    ("space_posts", "link_preview_json", "$.thumbnail_url"),
+#: ``(table, JSON column, JSON path, live-row filter)`` for a reference
+#: inside a JSON object. Soft-deleting a post NULLs its
+#: ``link_preview_json``, so a card needs no live filter.
+_JSON_FIELD_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
+    ("feed_posts", "link_preview_json", "$.thumbnail_url", ""),
+    *(
+        (table, col, shape[len("json:") :], _space_reference_live(table, col))
+        for table, col, shape in space_media_columns()
+        if shape.startswith("json:")
+    ),
 )
 
 
@@ -134,103 +182,81 @@ _GALLERY_ITEM_LIVE = (
 )
 
 #: Every file a space ITEM shows — a post (its images, its attachment, its
-#: link card's thumbnail: ``record_media_urls``), a comment, a calendar cover, a space-album item (file and
-#: thumbnail), a bazaar listing (by its wrapper post's id) — one list for
-#: every reader by item: :meth:`SqliteMediaReferenceRepo.content_names_of_item`
+#: link card's thumbnail), a comment, a calendar cover, a space-album item
+#: (thumbnail and file), a bazaar listing (by its wrapper post's id): the
+#: registry's columns (:func:`space_media_columns`) — one list for every
+#: reader by item: :meth:`SqliteMediaReferenceRepo.content_names_of_item`
 #: (v_85), :meth:`~SqliteMediaReferenceRepo.space_rows_of` and
 #: :meth:`~SqliteMediaReferenceRepo.live_item_files` (v_92
 #: ``SPACE_MEDIA_WANTED``). ``(FROM clause over the row t, item id, space,
 #: value, shape, live-row condition, owner)`` — the owner is the person the
-#: item belongs to (the catch-up file gate's owner). Pages are not items
-#: here: their files are the host's alone (v_82).
-_SPACE_ITEM_FILES: tuple[tuple[str, str, str, str, str, str, str], ...] = (
-    (
-        "space_posts t",
-        "t.id",
-        "t.space_id",
-        "t.media_url",
-        "one",
-        "t.deleted = 0",
-        "t.author",
-    ),
-    (
-        "space_posts t",
-        "t.id",
-        "t.space_id",
-        "t.image_urls_json",
-        "list",
-        "t.deleted = 0",
-        "t.author",
-    ),
-    (
-        "space_posts t",
-        "t.id",
-        "t.space_id",
-        (
-            "CASE WHEN json_valid(t.link_preview_json)"
-            " THEN json_extract(t.link_preview_json, '$.thumbnail_url') END"
-        ),
-        "one",
-        "t.deleted = 0",
-        "t.author",
-    ),
-    (
-        "space_posts t",
-        "t.id",
-        "t.space_id",
-        (
-            "CASE WHEN json_valid(t.file_meta_json)"
-            " THEN json_extract(t.file_meta_json, '$.url') END"
-        ),
-        "one",
-        "t.deleted = 0",
-        "t.author",
-    ),
-    (
+#: item belongs to (the catch-up file gate's owner).
+#:
+#: :data:`_SPACE_ITEM_SOURCE` holds each item table's ``(FROM, item id,
+#: space, live, owner)``; a registry table missing there fails at import.
+#: Named exclusion (:data:`_NOT_SPACE_ITEM_FILES`): pages are not items
+#: here — their files are the host's alone (v_82), read by the page paths.
+_SPACE_ITEM_SOURCE: dict[str, tuple[str, str, str, str, str]] = {
+    "space_posts": ("space_posts t", "t.id", "t.space_id", "t.deleted = 0", "t.author"),
+    "space_post_comments": (
         "space_post_comments t LEFT JOIN space_posts p ON p.id = t.post_id",
         "t.id",
         "p.space_id",
-        "t.media_url",
-        "one",
         "t.deleted = 0 AND p.deleted = 0",
         "t.author",
     ),
-    (
+    "space_calendar_events": (
         "space_calendar_events t",
         "t.id",
         "t.space_id",
-        "t.cover_url",
-        "one",
         "t.deleted_at IS NULL",
         "t.created_by",
     ),
-    (
+    "gallery_items": (
         "gallery_items t LEFT JOIN gallery_albums a ON a.id = t.album_id",
         "t.id",
         "a.space_id",
-        "t.filename",
-        "one",
         _GALLERY_ITEM_LIVE,
         "t.uploaded_by",
     ),
-    (
-        "gallery_items t LEFT JOIN gallery_albums a ON a.id = t.album_id",
-        "t.id",
-        "a.space_id",
-        "t.thumbnail_filename",
-        "one",
-        _GALLERY_ITEM_LIVE,
-        "t.uploaded_by",
-    ),
-    (
+    "bazaar_listings": (
         "bazaar_listings t LEFT JOIN space_posts p ON p.id = t.post_id",
         "t.post_id",
         "t.space_id",
-        "t.image_urls_json",
-        "list",
         "p.deleted = 0",
         "t.seller_user_id",
     ),
+}
+_NOT_SPACE_ITEM_FILES: frozenset[str] = frozenset({"space_pages"})
+
+
+def _item_value(col: str, shape: str) -> tuple[str, str]:
+    """The SQL value of column *col* of the row ``t`` and its shape as an
+    item file (``one`` / ``list``)."""
+    if shape.startswith("json:"):
+        path = shape[len("json:") :]
+        return (
+            f"CASE WHEN json_valid(t.{col}) THEN json_extract(t.{col}, '{path}') END",
+            "one",
+        )
+    if shape not in ("one", "list"):
+        raise ValueError(f"no item-file shape for {col} ({shape})")
+    return f"t.{col}", shape
+
+
+def _space_item_files() -> tuple[tuple[str, str, str, str, str, str, str], ...]:
+    rows = []
+    for table, col, shape in space_media_columns():
+        if table in _NOT_SPACE_ITEM_FILES:
+            continue
+        source, key, space, live, owner = _SPACE_ITEM_SOURCE[table]
+        value, item_shape = _item_value(col, shape)
+        rows.append((source, key, space, value, item_shape, live, owner))
+    return tuple(rows)
+
+
+_SPACE_ITEM_FILES: tuple[tuple[str, str, str, str, str, str, str], ...] = (
+    _space_item_files()
 )
 
 
@@ -255,9 +281,13 @@ _PAYLOAD_SCANS: tuple[tuple[str, str, str], ...] = (
 #: are references: a page's body, and each version in its history.
 _MARKDOWN_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("pages", "content", ""),
-    ("space_pages", "content", _SPACE_PAGE_HERE),
     ("page_edit_history", "content", _HISTORY_HERE),
+    *_space_reference_rows(FieldShape.MARKDOWN),
 )
+#: The loose ``api/media/<file>`` scan of a free-form JSON payload
+#: (:data:`_PAYLOAD_SCANS`: a held item's whole payload). Named exclusion
+#: from the one markdown pattern (``LOCAL_MEDIA_REF_RE``): it reads no
+#: markdown, and over-matching here only keeps a held file alive longer.
 _MEDIA_REF_RE = re.compile(r"api/media/([A-Za-z0-9._-]+)")
 
 # ─── Who may reference a file (``reference_access``) ─────────────────────
@@ -293,6 +323,40 @@ _HOSTED_SEAT = (
     " WHERE hs.id = t.space_id AND hs.owner_instance_id = ii.instance_id)"
 )
 
+#: The space each space item table's row belongs to (an SQL expression
+#: over the row ``t``) — :data:`_SPACE_OF`, and the seat
+#: :data:`_ACCESS_SOURCES` checks. A registry table missing here fails at
+#: import. Named exclusion (:data:`_OWN_GALLERY_QUERIES`): ``gallery_items``
+#: — its album decides, in its own queries (:data:`_GALLERY_ACCESS_SQL`).
+_SPACE_ITEM_SPACE: dict[str, str] = {
+    "space_posts": "t.space_id",
+    "space_post_comments": (
+        "(SELECT p.space_id FROM space_posts p WHERE p.id = t.post_id)"
+    ),
+    "space_calendar_events": "t.space_id",
+    "bazaar_listings": "t.space_id",
+    "space_pages": "t.space_id",
+}
+_OWN_GALLERY_QUERIES: frozenset[str] = frozenset({"gallery_items"})
+#: Space item tables whose names are their host's choice (v_82): a seat
+#: opens their file only on the space's host (:data:`_HOSTED_SEAT`).
+_HOST_NAMED: frozenset[str] = frozenset({"space_pages"})
+
+
+def _space_access_rows() -> tuple[tuple[str, str, str, str], ...]:
+    rows = []
+    for table, col, shape in space_media_columns():
+        if table in _OWN_GALLERY_QUERIES:
+            continue
+        access = (
+            _HOSTED_SEAT
+            if table in _HOST_NAMED
+            else _SEAT.format(col=_SPACE_ITEM_SPACE[table])
+        )
+        rows.append((table, col, shape, access))
+    return tuple(rows)
+
+
 _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     (
         "conversation_messages",
@@ -307,23 +371,6 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ("feed_posts", "image_urls_json", "list", _HOUSEHOLD),
     ("feed_posts", "link_preview_json", "json:$.thumbnail_url", _HOUSEHOLD),
     ("post_comments", "media_url", "one", _HOUSEHOLD),
-    ("space_posts", "media_url", "one", _SEAT.format(col="t.space_id")),
-    ("space_posts", "image_urls_json", "list", _SEAT.format(col="t.space_id")),
-    (
-        "space_posts",
-        "link_preview_json",
-        "json:$.thumbnail_url",
-        _SEAT.format(col="t.space_id"),
-    ),
-    (
-        "space_post_comments",
-        "media_url",
-        "one",
-        _SEAT.format(
-            col="(SELECT p.space_id FROM space_posts p WHERE p.id = t.post_id)"
-        ),
-    ),
-    ("bazaar_listings", "image_urls_json", "list", _SEAT.format(col="t.space_id")),
     (
         "highlight_frames",
         "media_url",
@@ -335,11 +382,8 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ),
     ("moments", "media_url", "one", "t.author_user_id = me.uid"),
     ("calendar_events", "cover_url", "one", _HOUSEHOLD),
-    ("space_calendar_events", "cover_url", "one", _SEAT.format(col="t.space_id")),
     ("pages", "cover_image_url", "one", _HOUSEHOLD),
     ("pages", "content", "markdown", _HOUSEHOLD),
-    ("space_pages", "cover_image_url", "one", _HOSTED_SEAT),
-    ("space_pages", "content", "markdown", _HOSTED_SEAT),
     (
         "page_edit_history",
         "cover_image_url",
@@ -354,6 +398,7 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ),
     ("task_attachments", "url", "one", "t.uploaded_by = me.uid"),
     ("post_drafts", "media_url", "one", "t.username = me.uname"),
+    *_space_access_rows(),
     # The submitter's own held item (:data:`_HELD_LIVE` — the approve
     # claims the item BEFORE its apply re-checks the files for the
     # submitter). A fallback with its own rules: :data:`_HELD_SOURCE`.
@@ -377,56 +422,32 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
 _HELD_SOURCE = "space_moderation_queue"
 
 #: The LIVE rows of a space that show a file (v_83, :meth:`live_in_space`):
-#: table, column, shape, and the condition (first ``?`` = the space id).
-_LIVE_SPACE_SOURCES: tuple[tuple[str, str, str, str], ...] = (
-    ("space_posts", "media_url", "one", "t.space_id = ? AND t.deleted = 0"),
-    ("space_posts", "image_urls_json", "list", "t.space_id = ? AND t.deleted = 0"),
-    (
-        "space_posts",
-        "link_preview_json",
-        "json:$.thumbnail_url",
-        "t.space_id = ? AND t.deleted = 0",
+#: table, column, shape, and the condition (first ``?`` = the space id) —
+#: the registry's columns with :data:`_SPACE_ITEM_LIVE_HERE`'s condition (a
+#: registry table missing there fails at import). Named exclusion:
+#: ``gallery_items`` (its own query, by album).
+_SPACE_ITEM_LIVE_HERE: dict[str, str] = {
+    "space_posts": "t.space_id = ? AND t.deleted = 0",
+    "space_post_comments": (
+        "t.deleted = 0 AND (SELECT p.space_id FROM space_posts p"
+        " WHERE p.id = t.post_id AND p.deleted = 0) = ?"
     ),
-    (
-        "space_post_comments",
-        "media_url",
-        "one",
-        (
-            "t.deleted = 0 AND (SELECT p.space_id FROM space_posts p"
-            " WHERE p.id = t.post_id AND p.deleted = 0) = ?"
-        ),
+    "bazaar_listings": (
+        "t.space_id = ? AND EXISTS (SELECT 1 FROM space_posts p"
+        " WHERE p.id = t.post_id AND p.deleted = 0)"
     ),
-    (
-        "bazaar_listings",
-        "image_urls_json",
-        "list",
-        (
-            "t.space_id = ? AND EXISTS (SELECT 1 FROM space_posts p"
-            " WHERE p.id = t.post_id AND p.deleted = 0)"
-        ),
-    ),
-    (
-        "space_calendar_events",
-        "cover_url",
-        "one",
-        "t.space_id = ? AND t.deleted_at IS NULL",
-    ),
+    "space_calendar_events": "t.space_id = ? AND t.deleted_at IS NULL",
     # A page's RAW names are our own files only on the space's host; on a
     # member household they are the host's, and only our page-scoped sp-
-    # copies count (:meth:`SqliteMediaReferenceRepo._page_names_of`).
-    (
-        "space_pages",
-        "cover_image_url",
-        "one",
-        f"t.space_id = ? AND t.deleted_at IS NULL AND {_HOSTED_SPACE}",
-    ),
-    # v_82 — every picture a live page's body shows.
-    (
-        "space_pages",
-        "content",
-        "markdown",
-        f"t.space_id = ? AND t.deleted_at IS NULL AND {_HOSTED_SPACE}",
-    ),
+    # copies count (:meth:`SqliteMediaReferenceRepo._page_names_of`) — its
+    # cover and (v_82) every picture its body shows.
+    "space_pages": f"t.space_id = ? AND t.deleted_at IS NULL AND {_HOSTED_SPACE}",
+}
+
+_LIVE_SPACE_SOURCES: tuple[tuple[str, str, str, str], ...] = tuple(
+    (table, col, shape, _SPACE_ITEM_LIVE_HERE[table])
+    for table, col, shape in space_media_columns()
+    if table not in _OWN_GALLERY_QUERIES
 )
 
 #: Page tables whose RAW names make a file this space's only where the
@@ -442,13 +463,7 @@ _PAGE_ROWS_HERE: dict[str, str] = {
 #: expression over the row ``t``); a table not listed is household-level
 #: (``NULL``) — never a space's content (:meth:`confined_to_space`).
 _SPACE_OF: dict[str, str] = {
-    "space_posts": "t.space_id",
-    "space_post_comments": (
-        "(SELECT p.space_id FROM space_posts p WHERE p.id = t.post_id)"
-    ),
-    "bazaar_listings": "t.space_id",
-    "space_calendar_events": "t.space_id",
-    "space_pages": "t.space_id",
+    **_SPACE_ITEM_SPACE,
     "page_edit_history": "t.space_id",
     "space_moderation_queue": "t.space_id",
 }
@@ -626,10 +641,11 @@ class SqliteMediaReferenceRepo:
             )
             for r in rows_to_dicts(rows):
                 out.update(_names_in_list(r.get("v")))
-        for table, col, path in _JSON_FIELD_COLUMNS:
+        for table, col, path, live in _JSON_FIELD_COLUMNS:
             rows = await self._db.fetchall(
                 f"SELECT json_extract({col}, ?) AS v FROM {table} "
-                f"WHERE {col} IS NOT NULL AND json_valid({col})",
+                f"WHERE {col} IS NOT NULL AND json_valid({col})"
+                + (f" AND {live}" if live else ""),
                 (path,),
             )
             for r in rows_to_dicts(rows):
@@ -1022,10 +1038,11 @@ class SqliteMediaReferenceRepo:
             )
             if any(basename in _names_in_list(r["v"]) for r in rows):
                 return True
-        for table, col, path in _JSON_FIELD_COLUMNS:
+        for table, col, path, live in _JSON_FIELD_COLUMNS:
             rows = await self._db.fetchall(
                 f"SELECT json_extract({col}, ?) AS v FROM {table} "
-                f"WHERE {col} LIKE ? ESCAPE '\\' AND json_valid({col})",
+                f"WHERE {col} LIKE ? ESCAPE '\\' AND json_valid({col})"
+                + (f" AND {live}" if live else ""),
                 (path, pattern),
             )
             if any(media_basename(r["v"]) == basename for r in rows):

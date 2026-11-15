@@ -3,7 +3,9 @@
 import pytest
 
 from socialhome.domain.file_hashes import space_content_media_name
+from socialhome.domain.space_media_fields import space_media_columns
 from socialhome.domain.space_media_ref import space_page_media_name
+from socialhome.repositories import media_reference_repo as mrr
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 
 pytestmark = pytest.mark.asyncio
@@ -1122,9 +1124,10 @@ async def test_live_item_files_are_the_files_a_live_item_of_the_space_shows(db):
     assert await repo.live_item_files("sp1", "p-link") == [("sc-x.webp", "u2")]
     assert await repo.live_item_files("sp1", "c1") == [("sc-x.webp", "u2")]
     assert await repo.live_item_files("sp1", "e1") == [("sc-x.webp", "u2")]
+    # Registry order (``SPACE_MEDIA_ITEMS``): the thumbnail, then the file.
     assert await repo.live_item_files("sp1", "g1") == [
-        ("big.webp", "u2"),
         ("sc-x.webp", "u2"),
+        ("big.webp", "u2"),
     ]
     # The bazaar wrapper post shows no file; its listing does.
     assert await repo.live_item_files("sp1", "p-bz") == [("sc-x.webp", "u1")]
@@ -1160,7 +1163,7 @@ async def test_recent_item_files_are_a_spaces_newest_live_items_with_files(db):
     assert [(r[1], r[2], r[3]) for r in rows] == [
         ("p-file", "u2", ["doc.pdf"]),
         ("p-bz", "u1", ["sc-x.webp"]),
-        ("g1", "u2", ["big.webp", "sc-x.webp"]),
+        ("g1", "u2", ["sc-x.webp", "big.webp"]),
         ("e1", "u2", ["sc-x.webp"]),
         ("c1", "u2", ["sc-x.webp"]),
         ("p-link", "u2", ["sc-x.webp"]),
@@ -1258,3 +1261,179 @@ async def test_a_posts_attachment_is_one_of_its_item_files(db):
     assert await repo.live_item_files("sp1", "p-file") == [(doc, "u2")]
     assert ("sp1", "p-file", "2026-11-07 08:00:00") in await repo.space_rows_of(doc)
     assert await repo.content_names_of_item("p-file") == [doc]
+
+
+# ─── A space post's file attachment (file_meta.url) is a reference ───────
+
+
+async def _file_post(db, *, deleted: int = 0) -> None:
+    await _people(db)
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp', 'S', 'i', 'ann', ?)",
+        ("ab" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES('sp', 'u2', 'member')"
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, file_meta_json, deleted)"
+        " VALUES('pf', 'sp', 'u2', 'file', ?, ?)",
+        ('{"url": "api/media/attach.pdf", "mime_type": "application/pdf"}', deleted),
+    )
+
+
+async def test_a_space_posts_attachment_is_never_swept(db):
+    """The orphan sweep's reference set holds a space post's attached file
+    (``file_meta_json`` ``$.url``) — before, only ``_SPACE_ITEM_FILES``
+    named it, so the sweep could delete an attached file."""
+    await _file_post(db)
+    repo = SqliteMediaReferenceRepo(db)
+    assert "attach.pdf" in await repo.referenced_basenames()
+    assert await repo.is_referenced("attach.pdf")
+
+
+async def test_a_deleted_space_posts_attachment_is_released(db):
+    """A soft delete keeps ``file_meta_json`` (like the image list): the
+    attachment counts only while the post is live."""
+    await _file_post(db, deleted=1)
+    repo = SqliteMediaReferenceRepo(db)
+    assert "attach.pdf" not in await repo.referenced_basenames()
+    assert not await repo.is_referenced("attach.pdf")
+
+
+async def test_a_space_posts_attachment_only_for_its_seats(db):
+    """``may_reference``: the attachment is the space's — a seat may name
+    it again, nobody else (before, it read as unreferenced: free to all)."""
+    await _file_post(db)
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.may_reference("attach.pdf", "u2")
+    assert not await repo.may_reference("attach.pdf", "u3")
+
+
+async def test_a_space_posts_attachment_is_live_and_confined_to_its_space(db):
+    """``live_in_space`` / ``confined_to_space``: what a household sends on
+    demand (v_83) and seals for GFS readers includes the attachment."""
+    await _file_post(db)
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.live_in_space("attach.pdf", "sp")
+    assert await repo.confined_to_space("attach.pdf", "sp")
+    assert not await repo.live_in_space("attach.pdf", "other")
+
+
+# ─── Registry tripwire: every space item column in every SQL consumer ────
+
+
+async def test_every_registry_column_is_in_every_sql_consumer():
+    """Each SQL tuple holds every column ``space_media_columns`` names, or
+    the column's table is a named exclusion of that tuple."""
+    refs = {(t, c) for t, c, _ in mrr._SINGLE_COLUMNS + mrr._LIST_COLUMNS}
+    refs |= {(t, c) for t, c, _ in mrr._MARKDOWN_COLUMNS}
+    refs |= {(t, c) for t, c, _, _ in mrr._JSON_FIELD_COLUMNS}
+    access = {(t, c, s) for t, c, s, _ in mrr._ACCESS_SOURCES}
+    live = {(t, c, s) for t, c, s, _ in mrr._LIVE_SPACE_SOURCES}
+    item_values = " ".join(row[3] for row in mrr._SPACE_ITEM_FILES)
+    for table, col, shape in space_media_columns():
+        assert (table, col) in refs, (table, col)
+        if table in mrr._OWN_GALLERY_QUERIES:
+            continue  # gallery: _GALLERY_ACCESS_SQL + its own live query
+        assert (table, col, shape) in access, (table, col)
+        assert (table, col, shape) in live, (table, col)
+        assert table in mrr._SPACE_OF, table
+        if table not in mrr._NOT_SPACE_ITEM_FILES:  # pages: host-only, v_82
+            assert f"t.{col}" in item_values, (table, col)
+
+
+#: The columns a space item row needs besides its files, per table — a new
+#: registry table fails here until it is listed (and so tested).
+_REQUIRED: dict[str, dict[str, object]] = {
+    "space_posts": {"id": "pr", "space_id": "sp1", "author": "u1", "type": "file"},
+    "space_post_comments": {"id": "cr", "post_id": "sp0", "author": "u1"},
+    "space_calendar_events": {
+        "id": "er",
+        "space_id": "sp1",
+        "summary": "S",
+        "start_dt": "2026-01-01T00:00:00+00:00",
+        "end_dt": "2026-01-02T00:00:00+00:00",
+        "created_by": "u1",
+    },
+    "gallery_items": {
+        "id": "gr",
+        "album_id": "al-reg",
+        "uploaded_by": "u1",
+        "item_type": "photo",
+        "width": 1,
+        "height": 1,
+    },
+    "bazaar_listings": {
+        "post_id": "sp0",
+        "space_id": "sp1",
+        "seller_user_id": "u1",
+        "mode": "fixed",
+        "title": "T",
+        "end_time": "2099-01-01",
+        "currency": "EUR",
+    },
+    "space_pages": {"id": "pgr", "space_id": "sp1", "title": "P", "created_by": "u1"},
+}
+
+
+def _registry_value(name: str, shape: str) -> str:
+    url = f"api/media/{name}"
+    if shape == "list":
+        return f'["{url}"]'
+    if shape == "markdown":
+        return f"intro ![x]({url}) end"
+    if shape.startswith("json:"):
+        return f'{{"{shape[len("json:$.") :]}": "{url}"}}'
+    return url
+
+
+async def _registry_rows(db) -> list[str]:
+    """One live row per registry table in sp1 (hosted here, u1 seated),
+    a unique file in each registry column; the file names."""
+    await _seed_parents(db)
+    await _host_here(db)
+    await db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES('sp1', 'u1', 'owner')"
+    )
+    await db.enqueue(
+        "INSERT INTO gallery_albums(id, space_id, name) VALUES('al-reg', 'sp1', 'A')"
+    )
+    rows: dict[str, dict[str, object]] = {}
+    names: list[str] = []
+    for table, col, shape in space_media_columns():
+        name = f"{table}-{col}.webp".replace("_", "")
+        names.append(name)
+        # A gallery item stores bare basenames.
+        value = name if table == "gallery_items" else _registry_value(name, shape)
+        rows.setdefault(table, dict(_REQUIRED[table]))[col] = value
+    for table, values in rows.items():
+        cols = ", ".join(values)
+        marks = ", ".join("?" for _ in values)
+        await db.enqueue(
+            f"INSERT INTO {table}({cols}) VALUES({marks})", tuple(values.values())
+        )
+    return names
+
+
+async def test_every_registry_column_is_a_live_reference(db):
+    names = await _registry_rows(db)
+    repo = SqliteMediaReferenceRepo(db)
+    referenced = await repo.referenced_basenames()
+    for name in names:
+        assert name in referenced, name
+        assert await repo.is_referenced(name), name
+        assert await repo.may_reference(name, "u1"), name
+        assert not await repo.may_reference(name, "u-stranger"), name
+        assert await repo.live_in_space(name, "sp1"), name
+        assert await repo.confined_to_space(name, "sp1"), name
+
+
+async def test_every_registry_item_column_is_an_item_file(db):
+    names = await _registry_rows(db)
+    repo = SqliteMediaReferenceRepo(db)
+    for name in names:
+        if name.startswith("spacepages-"):
+            continue  # pages: v_82 named exclusion
+        assert await repo.space_rows_of(name), name
