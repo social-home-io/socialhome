@@ -1380,13 +1380,12 @@ class SpaceSyncService:
         if not urls or self._media_sync is None:
             return
         try:
-            kwargs: dict[str, Any] = {"push": True} if push else {}
             await self._media_sync.enqueue_for_blob(
                 space_id=space_id,
                 correlation_id=correlation_id,
                 target_instance_ids=[target_instance_id],
                 media_urls=urls,
-                **kwargs,
+                push=push,
             )
         except sqlite3.Error:
             log.exception(

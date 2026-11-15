@@ -322,6 +322,7 @@ async def test_a_drafts_new_files_go_to_the_host(env, media):
             "correlation_id": "pg",
             "target_instance_ids": [HOST],
             "media_urls": ["api/media/c.webp", "/api/media/n.webp"],
+            "push": True,
         }
     ]
 
@@ -436,6 +437,9 @@ async def test_a_link_joined_proposer_pushes_to_a_host_that_takes_relay_frames(
     assert gfs.planned == [] and gfs.uploaded == []
     assert [c["target_instance_ids"] for c in media.calls] == [[HOST]]
     assert [c["media_urls"] for c in media.calls] == [["api/media/a.webp"]]
+    # Note 6: a ``push`` row — the outbox's "reads from its GFS" skip
+    # (matched by file name) never drops a proposal's file to the host.
+    assert [c.get("push") for c in media.calls] == [True]
 
 
 async def test_a_paired_proposer_still_ships_through_the_outbox(env, media):

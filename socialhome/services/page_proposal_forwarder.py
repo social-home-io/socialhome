@@ -382,6 +382,11 @@ class PageProposalForwarder:
                 correlation_id=page_id,
                 target_instance_ids=[host],
                 media_urls=urls,
+                # The host needs these bytes whatever its GFS cache holds:
+                # the outbox's "reads from its GFS" skip matches by file
+                # name, so a plain row could be dropped for a same-named
+                # file there under another item or epoch.
+                push=True,
             )
         except Exception:
             log.exception(

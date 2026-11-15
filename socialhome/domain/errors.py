@@ -252,10 +252,10 @@ class PageFilesNotShareableError(CodedError, ValueError):
     host (422 ``PAGE_FILES_NOT_SHAREABLE``): the host reaches us only through
     a GFS relay (we were seated from an invite link) that carries no binary
     media frames (a v_80–86 seat, a GFS without ``envelope_media``), and we
-    hold no upload
-    authorization for the space's GFS media cache (no writer key, writer
-    cert or channel grant). The words would land and the pictures would
-    stay broken for every member — the edit is refused instead (v_82)."""
+    hold no upload authorization for the space's GFS media cache (no writer
+    key, writer cert or channel grant). The words would land and the
+    pictures would stay broken for every member — the edit is refused
+    instead (v_82)."""
 
     status = 422
     code = "PAGE_FILES_NOT_SHAREABLE"
