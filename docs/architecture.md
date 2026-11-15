@@ -2595,7 +2595,9 @@ upgrade, and in reply to a member's sync BEGIN whose `roster_digest` (a
 SHA-256 of the live seats it mirrors, `domain/space_roster_digest.py`)
 differs from the host's for it — never on the host's own timer, so with
 gossip working a roster repair costs zero envelopes (an older household's
-`roster_echo` is answered the same way) — and a
+`roster_echo` is answered the same way); only an admitted BEGIN counts, and
+at most one repair per household per 30 min, the same one at most daily
+after backoff — and a
 write that beat the gossip
 seating its author or household waits in a bounded in-memory buffer until
 the seat lands. The per-family table is in
