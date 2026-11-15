@@ -54,8 +54,8 @@ from socialhome.domain.federation_capabilities import (
     space_feature_keys_missing_below,
 )
 from socialhome.domain.media_constraints import (
-    SPACE_COVER_SNAPSHOT_MAX_BYTES,
-    SPACE_ICON_SNAPSHOT_MAX_BYTES,
+    SPACE_COVER_MAX_BYTES,
+    SPACE_ICON_MAX_BYTES,
 )
 from socialhome.domain.post import FileMeta, PostType
 from socialhome.domain.relay_media_frame import SPACE_CONFIG_ITEM_MAX_BYTES as _CFG_MAX
@@ -8821,16 +8821,6 @@ async def test_only_the_host_sends_a_roster_snapshot(stack):
 # ─── Snapshot image bounds ─────────────────────────────────────────────
 
 
-class _ImageRepo:
-    """In-memory stand-in for the cover / icon repo (``get`` only)."""
-
-    def __init__(self, webp: bytes) -> None:
-        self.webp = webp
-
-    async def get(self, space_id: str):
-        return self.webp, "h"
-
-
 def _noise_webp(width: int, height: int) -> bytes:
     img = Image.frombytes(
         "RGB",
@@ -8840,6 +8830,62 @@ def _noise_webp(width: int, height: int) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="WEBP", quality=75)
     return buf.getvalue()
+
+
+class _RecordingImageRepo:
+    """The cover / icon repo, recording what is stored."""
+
+    def __init__(self, webp: bytes | None = None) -> None:
+        self.webp = webp
+        self.hash = "h"
+        self.sets: list[bytes] = []
+
+    async def get(self, space_id: str):
+        return None if self.webp is None else (self.webp, self.hash)
+
+    async def set(self, space_id, *, bytes_webp, hash, width, height):
+        self.webp, self.hash = bytes_webp, hash
+        self.sets.append(bytes_webp)
+
+    async def clear(self, space_id):
+        self.webp = None
+
+
+def _noise_png(width: int, height: int) -> bytes:
+    img = Image.frombytes(
+        "RGB", (width, height), random.Random(width).randbytes(width * height * 3)
+    )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("setter", "attr", "cap"),
+    [
+        ("set_cover", "_covers", SPACE_COVER_MAX_BYTES),
+        ("set_icon", "_icons", SPACE_ICON_MAX_BYTES),
+    ],
+)
+async def test_an_uploaded_cover_or_icon_is_stored_within_the_one_cap(
+    stack, setter, attr, cap
+):
+    """Owner decision 2026-11-15: ONE cap per image kind, enforced where
+    it is set — a large photo is re-encoded to a WebP within it, so every
+    member, however reached, gets the same image. Never an error for an
+    ordinary photo."""
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    repo = _RecordingImageRepo()
+    setattr(stack.space_svc, attr, repo)
+    raw = _noise_png(2400, 1600)
+    assert len(raw) > cap
+    await getattr(stack.space_svc, setter)(
+        space.id, actor_username="anna", raw_bytes=raw
+    )
+    (stored,) = repo.sets
+    assert len(stored) <= cap
+    assert Image.open(io.BytesIO(stored)).format == "WEBP"
 
 
 async def _snapshot_with_images(stack, cover: bytes, icon: bytes, **kw):
@@ -8852,8 +8898,8 @@ async def _snapshot_with_images(stack, cover: bytes, icon: bytes, **kw):
         remote_member_repo=None,
         user_repo=stack.space_svc._users,
         own_instance_id=stack.iid,
-        cover_repo=_ImageRepo(cover),
-        icon_repo=_ImageRepo(icon),
+        cover_repo=_RecordingImageRepo(cover),
+        icon_repo=_RecordingImageRepo(icon),
         **kw,
     )
 
@@ -8870,41 +8916,60 @@ async def test_snapshot_bounds_a_big_cover_and_icon(stack, caplog):
     it used to ship verbatim and overflow the envelope carrying it."""
     # 400 px: a stored icon is 256 px, but the bound must hold regardless.
     cover, icon = _noise_webp(1200, 800), _noise_webp(400, 400)
-    assert len(cover) > SPACE_COVER_SNAPSHOT_MAX_BYTES
-    assert len(icon) > SPACE_ICON_SNAPSHOT_MAX_BYTES
+    assert len(cover) > SPACE_COVER_MAX_BYTES
+    assert len(icon) > SPACE_ICON_MAX_BYTES
     with caplog.at_level(logging.INFO, logger="socialhome.services.space_service"):
         snap = await _snapshot_with_images(stack, cover, icon)
     shipped_cover = base64.b64decode(snap["cover_webp_base64"])
     shipped_icon = base64.b64decode(snap["icon_webp_base64"])
-    assert len(shipped_cover) <= SPACE_COVER_SNAPSHOT_MAX_BYTES
-    assert len(shipped_icon) <= SPACE_ICON_SNAPSHOT_MAX_BYTES
+    assert len(shipped_cover) <= SPACE_COVER_MAX_BYTES
+    assert len(shipped_icon) <= SPACE_ICON_MAX_BYTES
     assert Image.open(io.BytesIO(shipped_cover)).format == "WEBP"
     assert "shipping a" in caplog.text
 
 
-async def test_snapshot_honours_caller_bounds(stack):
-    cover, icon = _noise_webp(400, 300), _noise_webp(128, 128)
-    snap = await _snapshot_with_images(
-        stack,
-        cover,
-        icon,
-        cover_max_bytes=20 * 1024,
-        icon_max_bytes=4 * 1024,
+async def test_a_cover_stored_over_the_cap_is_replaced_by_the_rendition_sent(
+    stack,
+):
+    """Item 5: a cover saved before the one cap is over it. The first send
+    that carries it (a cover change, a join, an invite) ships a rendition
+    within the cap — what every member, GFS-reached included, gets — and
+    keeps that rendition (same version tag), so it is re-encoded once."""
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    space = dataclasses.replace(space, cover_hash="c", icon_hash="i")
+    big = _noise_webp(1200, 800)
+    assert len(big) > SPACE_COVER_MAX_BYTES
+    covers = _RecordingImageRepo(big)
+    covers.hash = "c"
+    icons = _RecordingImageRepo(_noise_webp(32, 32))
+    snap = await build_space_snapshot_for_federation(
+        space,
+        space_repo=stack.space_repo,
+        remote_member_repo=None,
+        user_repo=stack.space_svc._users,
+        own_instance_id=stack.iid,
+        cover_repo=covers,
+        icon_repo=icons,
     )
-    assert len(base64.b64decode(snap["cover_webp_base64"])) <= 20 * 1024
-    assert len(base64.b64decode(snap["icon_webp_base64"])) <= 4 * 1024
+    shipped = base64.b64decode(snap["cover_webp_base64"])
+    assert len(shipped) <= SPACE_COVER_MAX_BYTES
+    assert covers.sets == [shipped] and covers.hash == "c"
+    assert icons.sets == []  # within the cap: untouched
 
 
-async def test_snapshot_omits_an_image_it_cannot_fit(stack, caplog):
-    """Undecodable bytes over the bound, or a bound nothing fits under, leave
+async def test_snapshot_omits_an_image_it_cannot_fit(stack, caplog, monkeypatch):
+    """Undecodable bytes over the cap, or a cap nothing fits under, leave
     the image out (WARNING) — the rest of the snapshot still ships."""
+    from socialhome.services import space_service as ss_mod
+
+    monkeypatch.setattr(ss_mod, "SPACE_COVER_MAX_BYTES", 16)
+    monkeypatch.setattr(ss_mod, "SPACE_ICON_MAX_BYTES", 16)
     with caplog.at_level(logging.WARNING, logger="socialhome.services.space_service"):
         snap = await _snapshot_with_images(
             stack,
             b"not a webp" * 10,
             _noise_webp(128, 128),
-            cover_max_bytes=16,
-            icon_max_bytes=16,
         )
     assert "cover_webp_base64" not in snap
     assert "icon_webp_base64" not in snap

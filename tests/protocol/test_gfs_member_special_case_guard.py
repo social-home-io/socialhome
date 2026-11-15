@@ -204,16 +204,9 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
             "no direct-sync signalling with a seat",
         ),
     },
-    "relay_payload": {
-        "socialhome/federation/federation_service.py": (
-            "transport",
-            "a smaller variant under the relay's envelope cap",
-        ),
-        "socialhome/services/space_config_outbound.py": (
-            "transport",
-            "the space cover / icon sized for the relay's envelope cap",
-        ),
-    },
+    # Removed (owner decision 2026-11-15: one space-image cap for every
+    # member). Kept as a marker no module may use again.
+    "relay_payload": {},
     # The source as a string: ``InstanceSource("space_session")``,
     # ``== "space_session"``, SQL text naming it.
     "space_session": {
@@ -340,7 +333,7 @@ _COUNTS: dict[str, dict[str, int]] = {
         "socialhome/app.py": 1,
         "socialhome/domain/federation.py": 1,
         "socialhome/federation/auto_pair_coordinator.py": 1,
-        "socialhome/federation/federation_service.py": 17,
+        "socialhome/federation/federation_service.py": 16,
         "socialhome/federation/inbound_validator.py": 3,
         "socialhome/federation/invite_token_redeem.py": 5,
         "socialhome/federation/routed_envelope.py": 1,
@@ -381,10 +374,7 @@ _COUNTS: dict[str, dict[str, int]] = {
         "socialhome/federation/sync/space/provider.py": 1,
         "socialhome/federation/sync/space/scheduler.py": 1,
     },
-    "relay_payload": {
-        "socialhome/federation/federation_service.py": 3,
-        "socialhome/services/space_config_outbound.py": 1,
-    },
+    "relay_payload": {},
     "space_session": {
         "socialhome/domain/federation.py": 1,
         "socialhome/federation/invite_token_redeem.py": 4,

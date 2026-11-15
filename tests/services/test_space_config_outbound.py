@@ -23,8 +23,7 @@ from socialhome.crypto import generate_space_keypair
 from socialhome.domain.events import SpaceConfigChanged
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.media_constraints import (
-    SPACE_COVER_BOOTSTRAP_MAX_BYTES,
-    SPACE_COVER_SNAPSHOT_MAX_BYTES,
+    SPACE_COVER_MAX_BYTES,
 )
 from socialhome.domain.space import (
     JoinMode,
@@ -505,6 +504,7 @@ def _webp(width: int, height: int, *, noisy: bool = False) -> bytes:
 def _image_repo(data: bytes | None, hash_: str = "h-new"):
     repo = MagicMock()
     repo.get = AsyncMock(return_value=(data, hash_) if data is not None else None)
+    repo.set = AsyncMock()
     return repo
 
 
@@ -545,21 +545,19 @@ async def test_a_cover_change_ships_the_cover_bytes(fed, space_repo):
     assert base64.b64decode(meta["cover_webp_base64"]) == cover
     # Only the image that changed rides the event.
     assert "icon_webp_base64" not in meta
-    # A small cover fits the relay bound too, so both variants carry it.
-    relay_meta = call.kwargs["relay_payload"]["space_meta"]
-    assert base64.b64decode(relay_meta["cover_webp_base64"]) == cover
+    # One payload for every member: no per-transport variant.
+    assert "relay_payload" not in call.kwargs
 
 
-async def test_a_link_joined_member_gets_a_rendition_that_fits_the_relay(
+async def test_every_member_gets_the_same_cover_within_the_one_cap(
     fed,
     space_repo,
 ):
-    """A paired peer's envelope takes a cover up to the snapshot bound; the
-    connection-server relay a link-joined member sits behind takes only the
-    bootstrap bound, so that member is sent a smaller rendition."""
+    """Owner decision 2026-11-15: ONE cap every path carries — a cover
+    stored over it (saved before the cap) ships as a rendition within it,
+    the same bytes for a paired, mesh-only or GFS-reached member."""
     cover = _webp(400, 300, noisy=True)
-    assert SPACE_COVER_BOOTSTRAP_MAX_BYTES < len(cover)
-    assert len(cover) <= SPACE_COVER_SNAPSHOT_MAX_BYTES
+    assert len(cover) > SPACE_COVER_MAX_BYTES
     space_repo.get = AsyncMock(return_value=_space_with(cover_hash="h-new"))
     bus = EventBus()
     await _publish(
@@ -573,13 +571,10 @@ async def test_a_link_joined_member_gets_a_rendition_that_fits_the_relay(
         "cover_updated",
     )
     call = fed.broadcast_to_space_members.await_args
-    full = base64.b64decode(call.args[2]["space_meta"]["cover_webp_base64"])
-    relay = base64.b64decode(
-        call.kwargs["relay_payload"]["space_meta"]["cover_webp_base64"],
-    )
-    assert full == cover
-    assert len(relay) <= SPACE_COVER_BOOTSTRAP_MAX_BYTES
-    assert Image.open(io.BytesIO(relay)).format == "WEBP"
+    shipped = base64.b64decode(call.args[2]["space_meta"]["cover_webp_base64"])
+    assert len(shipped) <= SPACE_COVER_MAX_BYTES
+    assert Image.open(io.BytesIO(shipped)).format == "WEBP"
+    assert "relay_payload" not in call.kwargs
 
 
 async def test_an_icon_change_ships_the_icon_bytes(fed, space_repo):
@@ -644,9 +639,9 @@ async def test_a_cleared_cover_ships_no_bytes(fed, space_repo):
     assert "relay_payload" not in call.kwargs
 
 
-async def test_the_authority_signature_covers_each_variant(fed):
+async def test_the_authority_signature_covers_the_image(fed):
     """The bytes live inside the signed ``space_meta``, so a relay cannot
-    swap the picture — and each variant is signed over its own bytes."""
+    swap the picture."""
     kp = generate_space_keypair()
     space = _space_with(identity_public_key=kp.public_key.hex(), cover_hash="h")
     repo = MagicMock()
@@ -664,17 +659,16 @@ async def test_the_authority_signature_covers_each_variant(fed):
         "cover_updated",
     )
     call = fed.broadcast_to_space_members.await_args
-    variants = [call.args[2]["space_meta"], call.kwargs["relay_payload"]["space_meta"]]
-    assert variants[0]["cover_webp_base64"] != variants[1]["cover_webp_base64"]
-    for meta in variants:
-        assert verify_authority_event(
-            event_type="space_config_changed",
-            space_id="sp-1",
-            payload=strip_authority_sig_fields(meta),
-            authority_sig=meta["authority_sig"],
-            authority_sig_suite=meta["authority_sig_suite"],
-            space_public_key=kp.public_key,
-        )
+    meta = call.args[2]["space_meta"]
+    assert meta["cover_webp_base64"]
+    assert verify_authority_event(
+        event_type="space_config_changed",
+        space_id="sp-1",
+        payload=strip_authority_sig_fields(meta),
+        authority_sig=meta["authority_sig"],
+        authority_sig_suite=meta["authority_sig_suite"],
+        space_public_key=kp.public_key,
+    )
 
 
 async def test_owner_after_rotation_signs_with_the_cert_and_reaches_old_peers_unsigned():

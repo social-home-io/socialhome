@@ -20,7 +20,6 @@ from collections import deque
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import orjson
 import pytest
 
 from socialhome.crypto import (
@@ -295,18 +294,6 @@ async def test_different_payload_bytes_split_the_groups():
     await s.broadcast(per_peer=_per_peer)
     assert sorted(_queued(s).values()) == sorted([sorted(seats[:2]), sorted(seats[2:])])
     assert s.transport.sends == []
-
-
-async def test_a_relay_payload_variant_rides_its_own_group():
-    s = _Sender()
-    seats = [await s.seat() for _ in range(2)]
-    peer = await s.paired()
-    await s.broadcast(payload={"big": "x" * 10}, relay_payload={"big": "small"})
-    [(payload_id, rows)] = _queued(s).items()
-    assert rows == sorted(seats)
-    _stored, payload_json = await s.svc._outbox_payload_json(payload_id)
-    assert orjson.loads(payload_json) == {"big": "small"}
-    assert s.transport.per_recipient_ids() == [peer]
 
 
 @pytest.mark.parametrize(

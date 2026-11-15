@@ -51,6 +51,7 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.federation_capabilities import OURS
+from socialhome.domain.media_constraints import SPACE_COVER_MAX_BYTES
 from socialhome.domain.space import JoinMode, SpacePermissionError, SpaceType
 from socialhome.domain.user import User
 from socialhome.federation import invite_token_redeem as redeem_module
@@ -668,7 +669,9 @@ async def test_a_space_with_a_big_cover_is_still_joinable_by_link(households, gf
     )
     host_cover = await b.cover_repo.get(space.id)
     assert host_cover is not None
-    assert len(host_cover[0]) > 400 * 1024  # the shape that broke the join
+    # A noisy photo that used to be stored at ~500 KiB (the shape that broke
+    # the join) is stored within the one cap (owner decision 2026-11-15).
+    assert len(host_cover[0]) <= SPACE_COVER_MAX_BYTES
 
     result = await a.space_service.redeem_invite_token(
         TOKEN_MARKER,
@@ -681,17 +684,17 @@ async def test_a_space_with_a_big_cover_is_still_joinable_by_link(households, gf
     assert result["space_id"] == space.id
     assert gfs.too_large == 0
     assert await a.space_repo.get_member(space.id, a.user_id) is not None
-    # The joiner still gets art: a size-bounded rendition of the cover and
-    # the icon, each a WebP that decodes, under the host's own hashes.
+    # The joiner gets the very cover and icon every member gets — the same
+    # bytes the host holds, under the host's own hashes.
     seated = await a.space_repo.get(space.id)
     assert seated is not None
     host_space = await b.space_repo.get(space.id)
     assert seated.cover_hash == host_space.cover_hash
-    for repo in (a.cover_repo, a.icon_repo):
-        got = await repo.get(space.id)
+    for mine, theirs in ((a.cover_repo, b.cover_repo), (a.icon_repo, b.icon_repo)):
+        got = await mine.get(space.id)
         assert got is not None
         webp, _hash = got
-        assert webp[8:12] == b"WEBP"
+        assert webp == (await theirs.get(space.id))[0]
         Image.open(io.BytesIO(webp)).verify()
 
 

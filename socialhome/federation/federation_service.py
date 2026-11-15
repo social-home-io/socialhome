@@ -3731,7 +3731,6 @@ class FederationService:
         payload: dict,
         *,
         min_proto_version: int | None = None,
-        relay_payload: dict | None = None,
         legacy_payload: dict | None = None,
         legacy_below: int | None = None,
         per_peer: Callable[[str, dict], Awaitable[dict]] | None = None,
@@ -3748,7 +3747,7 @@ class FederationService:
         is not a member of ``space_id`` gets nothing whatever it lists.
 
         ``per_peer``, when given, is awaited with ``(instance_id, payload)``
-        for each target AFTER the legacy / relay variant is picked and
+        for each target AFTER the legacy variant is picked and
         returns the copy that target receives. For content meant for ONE
         household only — its own v_49 writer cert — so nothing addressed to
         one member ever rides another member's envelope. It must return a
@@ -3763,15 +3762,9 @@ class FederationService:
         ``moderator`` role ships as ``member`` to a v_40 household, which
         drops roles it does not know. Only for payloads that are not signed
         as a whole (the per-peer envelope signature still covers whichever
-        variant a peer gets). ``relay_payload`` takes precedence for a relay
-        seat — callers never combine them today.
-
-        ``relay_payload``, when given, is sent INSTEAD of ``payload`` to a
-        member seated from an invite link (``InstanceSource.SPACE_SESSION``):
-        that household is reached only through the connection-server relay,
-        whose envelope cap (``RELAY_MAX_ENVELOPE_BYTES``, ~191 KiB) is far
-        tighter than a paired peer's ~1 MiB. A caller shipping bulky bytes
-        (a space cover) hands a smaller variant for exactly those members.
+        variant a peer gets). Every member household gets the same payload
+        however it is reached — a caller shipping bulky bytes (a space
+        cover) bounds them so they fit the tightest path (the GFS relay).
 
         Each per-peer ship goes through :meth:`send_with_mesh_fallback`
         so a member whose household is *not* a direct CONFIRMED peer
@@ -3834,13 +3827,6 @@ class FederationService:
                 and not await self.space_member_supports(iid, min_version=legacy_below)
             ):
                 peer_payload = legacy_payload
-            if relay_payload is not None:
-                instance = await self._federation_repo.get_instance(iid)
-                if (
-                    instance is not None
-                    and instance.source is InstanceSource.SPACE_SESSION
-                ):
-                    peer_payload = relay_payload
             if FILES_FIELD in peer_payload and not await self.space_member_supports(
                 iid, min_version=FederationCapability.MIN_FOR_CONTENT_FILE_HASHES
             ):

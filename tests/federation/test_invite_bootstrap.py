@@ -22,8 +22,8 @@ from socialhome.crypto import (
     sign_ed25519,
 )
 from socialhome.domain.media_constraints import (
-    SPACE_COVER_BOOTSTRAP_MAX_BYTES,
-    SPACE_ICON_BOOTSTRAP_MAX_BYTES,
+    SPACE_COVER_MAX_BYTES,
+    SPACE_ICON_MAX_BYTES,
 )
 from socialhome.federation.invite_bootstrap import (
     BOOTSTRAP_SIG_SUITE_ED25519,
@@ -607,10 +607,10 @@ def test_the_bootstrap_image_bounds_leave_room_for_the_snapshot(redeemer, issuer
         kind=KIND_REDEEM_ACK,
         space_meta={
             "cover_webp_base64": base64.b64encode(
-                b"\xff" * SPACE_COVER_BOOTSTRAP_MAX_BYTES,
+                b"\xff" * SPACE_COVER_MAX_BYTES,
             ).decode("ascii"),
             "icon_webp_base64": base64.b64encode(
-                b"\xff" * SPACE_ICON_BOOTSTRAP_MAX_BYTES,
+                b"\xff" * SPACE_ICON_MAX_BYTES,
             ).decode("ascii"),
             "roster": roster,
         },

@@ -56,6 +56,7 @@ from ..crypto import (
 )
 from ..domain.emoji import MAX_EMOJI_CODEPOINTS
 from ..domain.errors import (
+    ImageUnreadableError,
     NotFoundError,
     SpaceEmojiTooLongError,
     SpaceItemTooLargeError,
@@ -173,11 +174,12 @@ from ..domain.local_community import (
     validate_local_area,
 )
 from ..domain.media_constraints import (
+    SPACE_COVER_MAX_BYTES,
     SPACE_COVER_MAX_DIMENSION,
-    SPACE_COVER_SNAPSHOT_MAX_BYTES,
+    SPACE_ICON_MAX_BYTES,
     SPACE_ICON_MAX_DIMENSION,
-    SPACE_ICON_SNAPSHOT_MAX_BYTES,
     SPACE_IMAGE_EMBED_MAX_BYTES,
+    SPACE_IMAGE_FIT_MIN_DIMENSION,
     space_media_ref,
 )
 from ..domain.mention import Mention
@@ -1076,9 +1078,8 @@ class SpaceService(
             raise RuntimeError("cover repo not attached")
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
-        webp = await ImageProcessor().generate_thumbnail(
-            raw_bytes,
-            size=SPACE_COVER_MAX_DIMENSION,
+        webp = await _space_image_within_cap(
+            raw_bytes, size=SPACE_COVER_MAX_DIMENSION, max_bytes=SPACE_COVER_MAX_BYTES
         )
         hash_ = compute_picture_hash(webp)
         await self._covers.set(
@@ -1139,9 +1140,8 @@ class SpaceService(
             raise RuntimeError("icon repo not attached")
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
-        webp = await ImageProcessor().generate_thumbnail(
-            raw_bytes,
-            size=SPACE_ICON_MAX_DIMENSION,
+        webp = await _space_image_within_cap(
+            raw_bytes, size=SPACE_ICON_MAX_DIMENSION, max_bytes=SPACE_ICON_MAX_BYTES
         )
         hash_ = compute_picture_hash(webp)
         await self._icons.set(
@@ -9513,14 +9513,32 @@ async def _bounded_space_image(
     return fitted
 
 
+async def _space_image_within_cap(raw: bytes, *, size: int, max_bytes: int) -> bytes:
+    """An uploaded cover / icon as the WebP every member gets: bounded to
+    *size* px, then re-encoded smaller until it is at most *max_bytes* (the
+    one cap, :data:`SPACE_COVER_MAX_BYTES` / :data:`SPACE_ICON_MAX_BYTES`).
+    Pillow runs off the event loop. An ordinary photo always fits; only an
+    image that does not decode is refused (``ImageUnreadableError``)."""
+    processor = ImageProcessor()
+    webp = await processor.generate_thumbnail(raw, size=size)
+    fitted = await processor.fit_within(webp, max_bytes)
+    if fitted is None:
+        # Not even the smallest rendition the fit tries fits: take a
+        # thumbnail at that size outright (a few KiB for any real image).
+        fitted = await processor.generate_thumbnail(
+            webp, size=SPACE_IMAGE_FIT_MIN_DIMENSION
+        )
+        if len(fitted) > max_bytes:
+            raise ImageUnreadableError()
+    return fitted
+
+
 async def embed_space_images(
     meta: dict,
     space: Space,
     *,
     cover_repo=None,
     icon_repo=None,
-    cover_max_bytes: int = SPACE_COVER_SNAPSHOT_MAX_BYTES,
-    icon_max_bytes: int = SPACE_ICON_SNAPSHOT_MAX_BYTES,
     cover: bool = True,
     icon: bool = True,
 ) -> None:
@@ -9528,13 +9546,15 @@ async def embed_space_images(
 
     The one place a household puts its space's image bytes on the wire:
     the join snapshot (:func:`build_space_snapshot_for_federation`) and a
-    cover / icon change (``SpaceConfigOutbound``). A dimension-capped
-    (1200 px) WebP is NOT byte-capped — a detailed photo is several
-    hundred KiB — so each image is bounded to ``*_max_bytes`` (a smaller
-    rendition, or left out; :func:`_bounded_space_image`). The bytes ship
-    under the host's own ``cover_hash`` / ``icon_hash``, which is therefore
-    a version tag, not a digest of the bytes that travel. Base64 because
-    the envelope is JSON.
+    cover / icon change (``SpaceConfigOutbound``). Every member gets the
+    same image, within the one cap (:data:`SPACE_COVER_MAX_BYTES` /
+    :data:`SPACE_ICON_MAX_BYTES`) every path carries. A new upload is
+    stored within it (:meth:`SpaceService.set_cover`); one stored before
+    the cap existed is re-encoded to fit here (:func:`_bounded_space_image`)
+    and the rendition kept in its place under the same version tag, so it
+    is re-encoded once. The bytes ship under the host's own ``cover_hash``
+    / ``icon_hash``, which is therefore a version tag, not a digest of the
+    bytes that travel. Base64 because the envelope is JSON.
     """
     for wanted, repo, hash_, key, max_bytes, what in (
         (
@@ -9542,25 +9562,39 @@ async def embed_space_images(
             cover_repo,
             space.cover_hash,
             "cover_webp_base64",
-            cover_max_bytes,
+            SPACE_COVER_MAX_BYTES,
             "cover",
         ),
-        (icon, icon_repo, space.icon_hash, "icon_webp_base64", icon_max_bytes, "icon"),
+        (
+            icon,
+            icon_repo,
+            space.icon_hash,
+            "icon_webp_base64",
+            SPACE_ICON_MAX_BYTES,
+            "icon",
+        ),
     ):
         if not wanted or repo is None or not hash_:
             continue
         stored = await repo.get(space.id)
         if stored is None:
             continue
-        webp, _stored_hash = stored
+        webp, stored_hash = stored
         fitted = await _bounded_space_image(
             webp,
             max_bytes=max_bytes,
             what=what,
             space_id=space.id,
         )
-        if fitted is not None:
-            meta[key] = base64.b64encode(fitted).decode("ascii")
+        if fitted is None:
+            continue
+        if fitted is not webp:
+            # Stored before the one cap: keep the rendition every member
+            # gets, so the next send does not re-encode it again.
+            await repo.set(
+                space.id, bytes_webp=fitted, hash=stored_hash, width=0, height=0
+            )
+        meta[key] = base64.b64encode(fitted).decode("ascii")
 
 
 async def build_space_snapshot_for_federation(
@@ -9573,8 +9607,6 @@ async def build_space_snapshot_for_federation(
     cover_repo=None,
     icon_repo=None,
     space_crypto_service=None,
-    cover_max_bytes: int = SPACE_COVER_SNAPSHOT_MAX_BYTES,
-    icon_max_bytes: int = SPACE_ICON_SNAPSHOT_MAX_BYTES,
     authority_cert: dict | None = None,
     owner_statement: dict | None = None,
 ) -> dict:
@@ -9591,12 +9623,9 @@ async def build_space_snapshot_for_federation(
     joiner applies it so a re-invited member whose stub still pins a
     retired key catches up (v_44).
 
-    The cover and icon ship inline, each bounded by ``cover_max_bytes`` /
-    ``icon_max_bytes`` (raw WebP): the whole snapshot rides one
-    size-capped envelope, so an image over its bound ships as a smaller
-    rendition (:func:`_bounded_space_image`) instead of sinking the
-    invite. The defaults suit a paired / mesh-routed peer; the §D2b
-    invite-link ACK passes the tighter ``SPACE_*_BOOTSTRAP_MAX_BYTES``.
+    The cover and icon ship inline within the one cap every path carries
+    (:func:`embed_space_images`) — the same image for a paired, mesh-routed
+    or invite-link joiner; the cap fits the §D2b invite-link ACK too.
 
     The roster lets a §D1b joiner mirror the full member list
     locally — without it the joiner's Members tab on a stub of
@@ -9694,8 +9723,6 @@ async def build_space_snapshot_for_federation(
         space,
         cover_repo=cover_repo,
         icon_repo=icon_repo,
-        cover_max_bytes=cover_max_bytes,
-        icon_max_bytes=icon_max_bytes,
     )
     # §D1b content-key handoff (#117) — the space content key is the
     # symmetric AES-256 secret that decrypts every event in this
