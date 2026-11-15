@@ -575,12 +575,8 @@ member household, not only on the host:
   the writer cert it holds, or `null`). The periodic tick then skips that
   household while the echo still matches the current `roster_sequence`
   and the writer cert the host would send; after a roster change it sends
-  the household **only the seats whose version is above the echoed one**
-  — joins, role changes and removals since — plus the host's own members
-  (they carry the current `roster_sequence`): it applied a snapshot
-  complete up to that version, and the receiver's version-guarded merge
-  would drop every older seat as a duplicate anyway. A snapshot never
-  prunes, so a delta is applied exactly like a full one. The same
+  the household every live seat **without the removals at or below the
+  echoed version** (it applied them in that full snapshot). The same
   BEGIN also echoes `dir_seq`, the version of the space's member directory
   the household holds (v_89, see
   [gfs-relay.md](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89));
@@ -605,20 +601,26 @@ member household, not only on the host:
   households used to send 15 × ~150 entries × ~400 B ≈ 900 KB every
   30 minutes (≈ 43 MB a day; a busy space with thousands of seats or
   removals far more); unchanged, it now sends nothing.
-  **Cost per trigger** (one seat per household, ~500 B per entry, the
-  host's own members L = 1; parts of 96 KiB):
+  **Cost per trigger** (one seat per household, ~500 B per entry, parts
+  of 96 KiB):
 
-  | Trigger | Before (whole roster) | Now |
+  | Trigger | Before this rule | Now |
   |---|---|---|
   | Host restart, 200 households | 200 × 200 entries ≈ 20 MB, ~400 envelopes | 0 for every household that echoes within two ticks |
   | Host restart, 1000 households | 1000 × 1000 entries ≈ 500 MB, ~6000 envelopes | 0 (same) |
-  | One seat joins, 200 households | 200 × 200 entries ≈ 20 MB, ~400 envelopes | 200 × (1 + L) entries ≈ 200 KB, 200 envelopes |
-  | One seat joins, 1000 households | 1000 × 1000 entries ≈ 500 MB, ~6000 envelopes | 1000 × (1 + L) entries ≈ 1 MB, 1000 envelopes |
+  | One seat joins, 200 households | ≈ 20 MB, ~400 envelopes | the same ≈ 20 MB, ~400 envelopes (every household's echo is stale) |
+  | One seat joins, 1000 households | ≈ 500 MB, ~6000 envelopes | the same ≈ 500 MB, ~6000 envelopes |
 
-  The per-change envelope count stays N (one small snapshot per member
-  household, next to the N live gossip envelopes): that is the backstop
-  that heals a mirror whose gossip was lost. A household that never echoes
-  still costs its whole roster per tick, as before.
+  A roster change still costs N households × the full live roster on the
+  next tick — what paired members already paid; households behind a GFS now
+  pay it too. **Open optimisation:** sending only the seats changed since
+  the echo needs a host-counter invariant the roster does not have yet —
+  seats applied from a delegated admin's gossip re-stamped with the host's
+  counter, a restore epoch so a host restored from backup never reuses
+  versions, the member clearing its echo on leave / rejoin / kick, and a
+  v_80 receiver (which records the version after every part) healing a lost
+  part. A household that never echoes still costs its whole roster per
+  tick, as before.
 - **Held writes.** A write naming a user the space has **no record of at
   all** — or, at the Follower gate, coming from a household it holds no
   row for — may simply have beaten the gossip seating them. It is held in a

@@ -8523,10 +8523,12 @@ async def test_after_a_restart_the_host_waits_for_each_households_echo(stack):
     assert [to for to, _ in _snapshots(fed)] == [insts[2]]
 
 
-async def test_a_stale_echo_gets_only_the_seats_changed_since(stack):
-    """After a roster change, a household that echoed version R gets the
-    seats whose version is above R (and the host's own members), never the
-    whole roster again: it applied a snapshot complete up to R."""
+async def test_a_stale_echo_gets_every_live_seat_again(stack):
+    """After a roster change, a household whose echo is stale gets every
+    live seat again — also one whose version is at or below its echo. A
+    seat's version is not a host-counter invariant (a seat applied from a
+    delegated admin's gossip keeps that admin's version, a restored host
+    reuses versions), so only removals at or below the echo are left out."""
     space, fed, remote, insts = await _members_with_households(stack, 3)
     current = (await stack.space_repo.get(space.id)).roster_sequence
     for inst in insts:
@@ -8546,12 +8548,16 @@ async def test_a_stale_echo_gets_only_the_seats_changed_since(stack):
         tombstoned=False,
     )
     assert await stack.space_svc.send_hosted_roster_snapshots() == 3
+    entries = _snapshots(fed, to="peer-1")[-1][1]
     remote_users = {
         e["payload"]["user_id"]
-        for e in _snapshots(fed, to="peer-1")[-1][1]
+        for e in entries
         if e["payload"]["instance_id"] != stack.iid
     }
-    assert remote_users == {"u-extra"}
+    assert remote_users == {"u-0", "u-2", "u-extra"}
+    # u-0's seat is at or below the echoed version — still sent.
+    u0 = next(e for e in entries if e["payload"]["user_id"] == "u-0")
+    assert u0["payload"]["member_version"] <= current
 
 
 async def test_a_stale_echo_or_a_missing_writer_cert_is_sent_again(stack):
