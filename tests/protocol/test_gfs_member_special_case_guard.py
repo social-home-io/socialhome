@@ -418,8 +418,9 @@ _COUNTS: dict[str, dict[str, int]] = {
     },
 }
 
-#: Functions that must stay free of every marker — and so must every
-#: ``self._helper`` they call (followed one level): the roster repair
+#: Functions that must stay free of every marker and of every way to tell
+#: how a household is reached (:func:`_reach_hits`) — and so must every
+#: ``self.method`` they call (followed one level): the roster repair
 #: reaches every member household by one rule.
 _MARKER_FREE: dict[str, tuple[str, ...]] = {
     "socialhome/services/space_service.py": (
@@ -427,12 +428,26 @@ _MARKER_FREE: dict[str, tuple[str, ...]] = {
         "_repair_by_digest",
         "_repair_by_echo",
         "_schedule_roster_repair",
+        "_forget_roster_space",
+        "_forget_roster_repair",
+        "_roster_change_is_fresh",
+        "_cert_epoch_for",
         "_roster_seats_of",
         "roster_digest_of",
         "roster_digest_for",
+        "roster_echo_for",
         "send_roster_snapshot",
+        "roster_snapshot_entries",
     ),
 }
+
+#: Inside a marker-free function, beyond the markers: any identifier naming
+#: a relay, a seat source, a GFS or an inbox (a helper ``_is_relay_only_peer``,
+#: ``row.relay_via``, ``row.remote_inbox_url``) ...
+_REACH_WORD = re.compile(r"relay|space_session|gfs|inbox", re.IGNORECASE)
+#: ... and the instance row's source itself, however it is compared
+#: (``row.source is ...``, ``row.source.value == "space" + "_session"``).
+_REACH_EXACT = frozenset({"source", "InstanceSource"})
 
 #: Functions that MUST keep a seat check (defence in depth): the binary
 #: HTTPS media leg never POSTs to a household met through a GFS, even if a
@@ -497,9 +512,36 @@ def _marker_counts(tree: ast.AST) -> Counter[str]:
     return Counter(n for n in _code_name_list(tree) if n in _ALLOWED)
 
 
+def _identifiers(fn: ast.AST) -> set[str]:
+    """Names, attributes, parameters and keywords of a function body — no
+    string constants (a payload key like ``"gfs_channel"``, which every
+    member household gets alike, is no branch on how one is reached)."""
+    out: set[str] = set()
+    for node in ast.walk(ast.Module(body=list(fn.body), type_ignores=[])):
+        if isinstance(node, ast.Attribute):
+            out.add(node.attr)
+        elif isinstance(node, ast.Name):
+            out.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.add(node.name)
+        elif isinstance(node, ast.arg) or (
+            isinstance(node, ast.keyword) and node.arg is not None
+        ):
+            out.add(node.arg)
+    return out
+
+
+def _reach_hits(fn: ast.AST) -> set[str]:
+    """The markers in *fn*'s body, plus any identifier in it that tells how
+    a household is reached (:data:`_REACH_WORD`, :data:`_REACH_EXACT`)."""
+    return (_body_names(fn) & set(_ALLOWED)) | {
+        n for n in _identifiers(fn) if n in _REACH_EXACT or _REACH_WORD.search(n)
+    }
+
+
 def _marker_free_hits(tree: ast.AST, names: tuple[str, ...]) -> dict[str, set[str]]:
-    """Markers in each of *names*' bodies and in the ``self._helper``
-    methods they call (one level)."""
+    """:func:`_reach_hits` in each of *names*' bodies and in the
+    ``self.method`` methods of the same module they call (one level)."""
     fns = {
         n.name: n
         for n in ast.walk(tree)
@@ -508,18 +550,17 @@ def _marker_free_hits(tree: ast.AST, names: tuple[str, ...]) -> dict[str, set[st
     out: dict[str, set[str]] = {}
     for name in names:
         fn = fns[name]
-        hit = _body_names(fn) & set(_ALLOWED)
+        hit = _reach_hits(fn)
         helpers = {
             n.attr
             for n in ast.walk(fn)
             if isinstance(n, ast.Attribute)
             and isinstance(n.value, ast.Name)
             and n.value.id == "self"
-            and n.attr.startswith("_")
             and n.attr in fns
         }
         for helper in helpers:
-            hit |= _body_names(fns[helper]) & set(_ALLOWED)
+            hit |= _reach_hits(fns[helper])
         out[name] = hit
     return out
 
@@ -619,7 +660,7 @@ def test_the_roster_repair_has_no_seat_special_case():
         tree = ast.parse((_ROOT / path).read_text(encoding="utf-8"))
         for name, hit in _marker_free_hits(tree, names).items():
             assert not hit, (
-                f"{path}:{name} (or a self._helper it calls) references "
+                f"{path}:{name} (or a self.method it calls) references "
                 f"{sorted(hit)}: the roster repair reaches every member "
                 "household by one rule (CLAUDE.md, 'Every space member is "
                 "equal')."
@@ -652,6 +693,104 @@ def test_re_adding_the_removed_seat_skip_fails_the_guard():
     hits = _marker_free_hits(tree, _MARKER_FREE[path])
     assert "SPACE_SESSION" in hits["on_sync_begin_roster"]
     assert _marker_counts(tree)["SPACE_SESSION"] == _COUNTS["SPACE_SESSION"][path] + 1
+
+
+_SNAPSHOT_LOOP = (
+    "        for user_id, inst, display_name, user_pk, role, version, gone in seats:\n"
+)
+_FETCH_ROW = (
+    "        _row = await self._federation._federation_repo.get_instance("
+    "to_instance_id)\n"
+)
+
+#: Review mutations (round 3, S4): ways to skip a household by how it is
+#: reached, injected into the roster snapshot. Each must fail the guard.
+_MUTATIONS: dict[str, tuple[tuple[str, str], ...]] = {
+    # A proxy check: no inbox address but a relay route.
+    "proxy": (
+        (
+            _SNAPSHOT_LOOP,
+            _FETCH_ROW + "        if _row is not None and not _row.remote_inbox_url "
+            "and _row.relay_via:\n            return []\n" + _SNAPSHOT_LOOP,
+        ),
+    ),
+    # A marker-free helper whose NAME gives it away.
+    "relay_only": (
+        (
+            _SNAPSHOT_LOOP,
+            "        if await self._is_relay_only_peer(to_instance_id):\n"
+            "            return []\n" + _SNAPSHOT_LOOP,
+        ),
+        (
+            "    async def roster_snapshot_entries(",
+            (
+                "    async def _is_relay_only_peer(self, iid):\n"
+                "        return False\n\n"
+                "    async def roster_snapshot_entries("
+            ),
+        ),
+    ),
+    # The federation service's own seat check, called inline.
+    "relay_only_named": (
+        (
+            _SNAPSHOT_LOOP,
+            "        if await self._federation.is_space_session_peer("
+            "to_instance_id):\n            return []\n" + _SNAPSHOT_LOOP,
+        ),
+    ),
+    # The source compared as a string built so no constant names it.
+    "source_attr": (
+        (
+            _SNAPSHOT_LOOP,
+            _FETCH_ROW + "        if _row is not None and _row.source.value == "
+            "'space' + '_session':\n            return []\n" + _SNAPSHOT_LOOP,
+        ),
+    ),
+}
+
+
+def _guard_fails(path: str, src: str) -> bool:
+    """Whether *src* (a mutated *path*) fails the pin or the counts."""
+    tree = ast.parse(src)
+    if any(_marker_free_hits(tree, _MARKER_FREE[path]).values()):
+        return True
+    counts = _marker_counts(tree)
+    return any(counts[m] != _COUNTS[m].get(path, 0) for m in _ALLOWED)
+
+
+@pytest.mark.parametrize("which", sorted([*_MUTATIONS, "relay_payload"]))
+def test_each_review_mutation_fails_the_guard(which):
+    path = "socialhome/services/space_service.py"
+    src = (_ROOT / path).read_text(encoding="utf-8")
+    assert not _guard_fails(path, src)
+    if which == "relay_payload":
+        # The removed per-member image cap re-added on a space fan-out: a
+        # last keyword on the first ``broadcast_to_space_members`` call.
+        call = next(
+            n
+            for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "broadcast_to_space_members"
+        )
+        lines = src.splitlines(keepends=True)
+        line = lines[call.end_lineno - 1]
+        col = call.end_col_offset - 1
+        assert line[col] == ")"
+        before = "".join(lines[: call.end_lineno - 1]) + line[:col]
+        kwarg = (
+            "relay_payload=None"
+            if before.rstrip().endswith(",")
+            else (", relay_payload=None")
+        )
+        lines[call.end_lineno - 1] = line[:col] + kwarg + line[col:]
+        mutated = "".join(lines)
+    else:
+        mutated = src
+        for old, new in _MUTATIONS[which]:
+            assert old in mutated, (which, old)
+            mutated = mutated.replace(old, new, 1)
+    assert _guard_fails(path, mutated), which
 
 
 def test_the_https_media_leg_keeps_its_seat_check():
