@@ -899,3 +899,35 @@ def test_unknown_files_sig_suite_is_rejected():
     inner = dict(_signed_with_files(kp), files_sig_suite="rsa-2048")
     with pytest.raises(UnsupportedFilesSigSuite):
         verified_file_hashes(inner)
+
+
+def test_an_older_signed_map_cannot_ride_a_newer_edit():
+    """The map is bound to the post version (``edited_at``): a still validly
+    signed older map moved onto a newer edit of the same post is ignored."""
+    kp = generate_identity_keypair()
+    old = build_signed_author_inner(
+        post=_post(),
+        space_id="sp",
+        author_username="bob",
+        author_pk=kp.public_key,
+        author_identity_seed=kp.private_key,
+        origin_instance_id="origin.home",
+        item_type="post_edit",
+        item_target="p1",
+        edited_at="2026-11-15T10:00:00+00:00",
+        file_hashes=_HASHES,
+    )
+    newer = dict(old, edited_at="2026-11-15T11:00:00+00:00")
+    assert verified_file_hashes(old) != {}
+    assert verified_file_hashes(newer) == {}
+
+
+def test_a_malformed_map_is_refused_before_any_signature_work():
+    kp = generate_identity_keypair()
+    inner = _signed_with_files(kp)
+    deep: dict = {}
+    cur = deep
+    for _ in range(3000):
+        cur["x"] = {}
+        cur = cur["x"]
+    assert verified_file_hashes(dict(inner, files=deep)) == {}

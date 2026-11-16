@@ -124,8 +124,10 @@ from ..infrastructure.event_bus import EventBus
 from ..media.profile_picture import public_profile_picture
 from ..utils.datetime import parse_iso8601_lenient
 from .space_media_names import comment_media_ref
+from .space_public_author import UnsupportedFilesSigSuite, verified_file_hashes
 
 if TYPE_CHECKING:
+    from ..domain.file_hashes import FileHash
     from ..domain.space import Space
     from ..federation.space_authorship import SpaceAuthorship
     from ..repositories.space_author_profile_repo import (
@@ -492,8 +494,12 @@ class SpaceItemInbound:
             parent_id=str(parent) if isinstance(parent, str) and parent else None,
             content=content if isinstance(content, str) else None,
             # The same rule as the paired live path and §25.6 sync: never a
-            # name another receiving path owns, nor a raw content name.
-            media_url=comment_media_ref(item.space.id, media_url, None),
+            # name another receiving path owns, nor a raw content name; with
+            # the author-signed hashes its content name — the one name the
+            # picture has on every path, whichever copy arrives first.
+            media_url=comment_media_ref(
+                item.space.id, media_url, _signed_hashes(item.inner, cid)
+            ),
             edited_at=item.stamp if edited else None,
         )
         if not await self._posts.add_comment(comment, space_id=item.space.id):
@@ -895,3 +901,17 @@ def _bound_here(
         row_id,
     )
     return False
+
+
+def _signed_hashes(inner: dict, item_id: str) -> dict[str, FileHash]:
+    """The item's author-signed file hashes (``files_sig``), or ``{}`` —
+    an unknown signature suite drops them (WARNING), never a fallback."""
+    try:
+        return verified_file_hashes(inner)
+    except UnsupportedFilesSigSuite as exc:
+        log.warning(
+            "space_item: %s file hashes signature suite %s unsupported — dropped",
+            item_id,
+            exc,
+        )
+        return {}

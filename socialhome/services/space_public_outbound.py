@@ -197,7 +197,7 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         self._crypto = space_crypto
         self._users = user_repo
         self._gfs = gfs_service
-        #: v_92 — the post's file hashes, author-signed into the inner.
+        #: The post's file hashes, author-signed into the inner (one name on every path).
         self._file_hasher: MediaFileHasher | None = None
         self._own_instance_id: str = ""
         #: This household's 32-byte Ed25519 identity public key. Shipped as

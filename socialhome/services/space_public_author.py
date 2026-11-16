@@ -163,7 +163,7 @@ class UnsupportedMediaRefsSigSuite(ValueError):
     """A relayed ``media_refs`` names a signature suite we don't support."""
 
 
-#: v_92 — suite of the separate author signature over a post's v_85 file
+#: Suite of the separate author signature over a post's v_85 file
 #: hashes (``files`` + ``files_suite``) on the public relay (see
 #: :func:`verified_file_hashes`). Receivers refuse any other value — the
 #: hashes are dropped, never a fallback.
@@ -180,8 +180,10 @@ class UnsupportedFilesSigSuite(ValueError):
 
 def files_signing_bytes(inner: dict) -> bytes:
     """Canonical bytes of the file-hashes author signature: the hash map and
-    its suite plus the fields that pin it to this one post, author and
-    version.
+    its suite plus the fields that pin it to this one item, author and
+    version — a post inner's ``item_type`` / ``edited_at``, a generic item
+    inner's (:mod:`.space_item_author`, e.g. a comment) ``item_target`` /
+    ``ts``; whichever the inner lacks is ``null``.
 
     A SEPARATE signature, like the link card's and ``media_refs``': a
     released (v_80) household recomputes the main author bytes from its own
@@ -193,7 +195,9 @@ def files_signing_bytes(inner: dict) -> bytes:
         "author_user_id": inner.get("author_user_id"),
         "author_pk": inner.get("author_pk"),
         "item_type": inner.get("item_type"),
+        "item_target": inner.get("item_target"),
         "edited_at": inner.get("edited_at"),
+        "ts": inner.get("ts"),
         FILES_FIELD: inner.get(FILES_FIELD),
         FILES_SUITE_FIELD: inner.get(FILES_SUITE_FIELD),
         "files_sig_suite": inner.get("files_sig_suite"),
@@ -216,6 +220,11 @@ def verified_file_hashes(inner: dict) -> dict[str, FileHash]:
     (:func:`~socialhome.domain.file_hashes.parse_file_hashes`)."""
     if inner.get(FILES_FIELD) is None:
         return {}
+    # The map's shape first (bounded, validated): nothing unchecked is ever
+    # serialised for the signature bytes.
+    hashes = parse_file_hashes(inner)
+    if not hashes:
+        return {}
     suite = inner.get("files_sig_suite")
     if suite is None:
         return {}  # unsigned: never taken
@@ -232,7 +241,7 @@ def verified_file_hashes(inner: dict) -> dict[str, FileHash]:
         return {}
     if not verify_ed25519(author_pk, signing_bytes, sig):
         return {}
-    return parse_file_hashes(inner)
+    return hashes
 
 
 def media_refs_signing_bytes(inner: dict) -> bytes:
@@ -315,6 +324,20 @@ def author_signing_bytes(inner: dict) -> bytes:
             body[k] = inner.get(k)
     canonical = canonical_bytes(body)
     return _AUTHOR_SIG_DOMAIN + canonical
+
+
+def sign_file_hashes(
+    inner: dict, file_hashes: Mapping[str, FileHash] | None, seed: bytes
+) -> None:
+    """Add *file_hashes* to an author-signed relay inner (a post's, or a
+    generic item's such as a comment) under the author's own separate
+    signature (see :func:`verified_file_hashes`); nothing when empty."""
+    files = file_hashes_to_wire(file_hashes or {})
+    if not files:
+        return
+    inner.update(files)
+    inner["files_sig_suite"] = FILES_SIG_SUITE_ED25519
+    inner["files_sig"] = b64url_encode(sign_ed25519(seed, files_signing_bytes(inner)))
 
 
 def build_signed_author_inner(
@@ -415,15 +438,7 @@ def build_signed_author_inner(
         inner["media_refs_sig"] = b64url_encode(
             sign_ed25519(author_identity_seed, media_refs_signing_bytes(inner))
         )
-    # v_92: the post's file hashes, under the author's own separate
-    # signature (see :func:`verified_file_hashes`).
-    files = file_hashes_to_wire(file_hashes or {})
-    if files:
-        inner.update(files)
-        inner["files_sig_suite"] = FILES_SIG_SUITE_ED25519
-        inner["files_sig"] = b64url_encode(
-            sign_ed25519(author_identity_seed, files_signing_bytes(inner))
-        )
+    sign_file_hashes(inner, file_hashes, author_identity_seed)
     preview = link_preview_to_dict(post.link_preview)
     if preview is not None:
         inner["link_preview"] = preview

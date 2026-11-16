@@ -45,7 +45,7 @@ class FileHashesMixin:
 
     async def _file_hashes_of(self, urls: Iterable[str | None]) -> dict[str, FileHash]:
         """The hash map of *urls* by file name — what an author signs into a
-        public relay inner (v_92) — or ``{}`` (not wired, nothing hashed, an
+        public relay inner (one name on every path) — or ``{}`` (not wired, nothing hashed, an
         error: fail-soft, the GFS copy then takes the reader name)."""
         if self._file_hasher is None:
             return {}

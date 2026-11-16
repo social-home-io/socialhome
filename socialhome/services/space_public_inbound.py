@@ -982,7 +982,7 @@ class SpacePublicInbound:
                 "not sign — dropped",
                 post.id,
             )
-        # v_92 — the author-signed file hashes: with them each file takes
+        # The author-signed file hashes: with them each file takes
         # its content name (``sc-``), the one name it has on every path, so
         # a member that gets this copy before the host's direct one names
         # it exactly as that one would (and can still ask the host or a
