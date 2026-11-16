@@ -134,7 +134,6 @@ from socialhome.services.space_service import (
     config_item_bytes,
     keep_local_space_state,
     normalize_category,
-    roster_snapshot_parts,
     sender_caps_space_images,
     space_metadata_fields,
     stub_space_from_metadata,
@@ -8858,16 +8857,6 @@ async def test_a_writer_cert_behind_or_ahead_is_a_mismatch_like_any_other(
     await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=8))
     assert len(_snapshots(fed)) == 2
     certs.issue_for_instance.assert_not_awaited()
-
-
-async def test_every_host_snapshot_is_authoritative(stack):
-    """A: the host's snapshot names every live seat outside the receiver's
-    household, so it says so — the member drops a seat it does not name."""
-    space, fed, _remote, _insts = await _members_with_households(stack, 2)
-    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-0")
-    payload = fed.send_with_mesh_fallback.await_args_list[-1].kwargs["payload"]
-    assert payload["authoritative"] is True
-    assert "authoritative" not in roster_snapshot_parts("s", [], roster_version=1)[0]
 
 
 async def test_a_new_snapshot_drops_every_queued_part_of_an_older_one(stack):

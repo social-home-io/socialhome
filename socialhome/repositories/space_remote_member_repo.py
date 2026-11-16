@@ -101,17 +101,7 @@ class AbstractSpaceRemoteMemberRepo(Protocol):
         member_version: int,
         tombstoned: bool,
         verified_epoch: int | None = None,
-        authoritative: bool = False,
     ) -> bool: ...
-
-    async def tombstone_absent(
-        self,
-        space_id: str,
-        *,
-        keep: set[tuple[str, str]],
-        skip_instance: str,
-        max_version: int,
-    ) -> list[SpaceRemoteMember]: ...
 
     async def reset_member_state(
         self,
@@ -311,15 +301,8 @@ class SqliteSpaceRemoteMemberRepo:
         member_version: int,
         tombstoned: bool,
         verified_epoch: int | None = None,
-        authoritative: bool = False,
     ) -> bool:
         """Version-guarded CRDT merge of an inbound roster event.
-
-        ``authoritative``: the entry comes from the host's authoritative
-        roster snapshot, so at an EQUAL version the host's view wins either
-        way (a seat :meth:`tombstone_absent` dropped comes back once the
-        host names it; a role differing at the same version follows the
-        host). A newer local row still wins.
 
         ``verified_epoch`` (v_44) is the space authority-key epoch whose key
         the event's signature verified against. When given, the write lands
@@ -347,16 +330,8 @@ class SqliteSpaceRemoteMemberRepo:
         if current is not None:
             if member_version < current.member_version:
                 return False
-            if (
-                member_version == current.member_version
-                and not (tombstoned and not current.tombstoned)
-                and not (
-                    authoritative
-                    and (
-                        bool(tombstoned) != bool(current.tombstoned)
-                        or role != current.role
-                    )
-                )
+            if member_version == current.member_version and not (
+                tombstoned and not current.tombstoned
             ):
                 # Equal version only wins when it flips a live row to a
                 # tombstone (removal-wins-tie); otherwise it's a duplicate.
@@ -437,43 +412,6 @@ class SqliteSpaceRemoteMemberRepo:
             ),
         )
         return changed > 0
-
-    async def tombstone_absent(
-        self,
-        space_id: str,
-        *,
-        keep: set[tuple[str, str]],
-        skip_instance: str,
-        max_version: int,
-    ) -> list[SpaceRemoteMember]:
-        """Tombstone every live seat of *space_id* not in *keep* (``(instance,
-        user)``), outside household *skip_instance*, at or below
-        *max_version* — WITHOUT bumping its version, so the host naming the
-        seat again (at that version or later) brings it back. The member
-        side of an authoritative roster snapshot. Returns the seats it
-        tombstoned. One transaction."""
-
-        def _run(conn) -> list[dict]:
-            rows = conn.execute(
-                "SELECT * FROM space_remote_members "
-                "WHERE space_id=? AND tombstoned=0 AND instance_id<>? "
-                "AND member_version<=?",
-                (space_id, skip_instance, max_version),
-            ).fetchall()
-            gone = [
-                dict(r) for r in rows if (r["instance_id"], r["user_id"]) not in keep
-            ]
-            for r in gone:
-                conn.execute(
-                    "UPDATE space_remote_members SET tombstoned=1, "
-                    "removed_at=datetime('now') "
-                    "WHERE space_id=? AND instance_id=? AND user_id=? "
-                    "AND tombstoned=0",
-                    (space_id, r["instance_id"], r["user_id"]),
-                )
-            return gone
-
-        return [_row(r) for r in await self._db.transact(_run)]
 
     async def reset_member_state(
         self,
