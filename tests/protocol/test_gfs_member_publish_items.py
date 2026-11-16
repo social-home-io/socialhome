@@ -308,8 +308,15 @@ MATRIX = [
     ("post_delete", "comment", BOB, False),
     ("post_delete", "write", EVE, False),
     ("reaction_add", "write", EVE, True),
-    # A follower can't tell a comment-only member from a follower.
-    ("reaction_add", "comment", EVE, False),
+    # A comment-only MEMBER reacts (a follower now carries its own scope).
+    ("reaction_add", "comment", EVE, True),
+    # A follower's cert says which switch it was issued under.
+    ("reaction_add", "follower", EVE, True),
+    ("reaction_add", "follower_react", EVE, True),
+    ("reaction_add", "follower_comment", EVE, False),
+    ("comment", "follower_comment", EVE, True),
+    ("comment", "follower_react", EVE, False),
+    ("post_edit", "follower", BOB, False),  # a follower never posts
 ]
 
 
