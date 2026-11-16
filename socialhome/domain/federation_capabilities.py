@@ -1573,7 +1573,8 @@ from __future__ import annotations
 #:   ``MIN_FOR_CAPPED_SPACE_IMAGES`` (v_81, the first unreleased line) and
 #:   re-encoded from the released v_80 line; the host repairs a member's
 #:   roster only on a ``roster_digest`` mismatch (``MIN_FOR_ROSTER_DIGEST``,
-#:   v_81). Wire otherwise unchanged.
+#:   v_81), with an authoritative snapshot (an older receiver ignores the
+#:   flag). Wire otherwise unchanged.
 OURS: int = 94
 
 
