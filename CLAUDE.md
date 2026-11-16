@@ -394,9 +394,10 @@ truth; the panel follows it.
   media chunks reach relay-seated members at mesh size as binary relay
   frames (`\x00SHR`, 512 KiB chunks) when their GFS proves `envelope_media`
   and they are at v_87 (`FederationService.relay_media_ok`); otherwise
-  bulky bytes respect the JSON relay's tighter cap (`relay_payload`,
-  `RELAY_MAX_ENVELOPE_BYTES`, `RELAY_JSON_CHUNK_BYTES`) instead of skipping
-  relay-seated members.
+  bulky bytes respect the JSON relay's tighter cap
+  (`RELAY_MAX_ENVELOPE_BYTES`, `RELAY_JSON_CHUNK_BYTES`; a space's cover /
+  icon has ONE cap for every member, `SPACE_COVER_MAX_BYTES` /
+  `SPACE_ICON_MAX_BYTES`) instead of skipping relay-seated members.
   Only **followers** (subscribers) may get a subset, decided per feature
   and written down there — never a member role.
 - **"Host" for content and sync means `acts_as_host`** — the owner or the
