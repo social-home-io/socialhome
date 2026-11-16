@@ -628,6 +628,14 @@ member household, not only on the host:
   however it is reached (paired, mesh, or seated from an invite link over
   the GFS relay):
   - digest and cert epoch match → nothing;
+  - the digest matches but credentials are missing → a snapshot with NO
+    roster entry, only the household's own credentials (writer cert,
+    writer group key, channel grant): a member household whose cert epoch
+    is behind ours (unasked, as before); a follower household only when its
+    digest says `cert_wanted` (on demand — see "Followers: the role plus
+    the switches"); any household saying `key_wanted` when we would hand it
+    a writer key. `cert_wanted` / `key_wanted` ride the digest only when
+    true; a host that does not know them ignores them. ~1–2 KB sealed.
   - otherwise → one repair snapshot, unless one went to this (space,
     household) within its cooldown. The cooldown is 30 min after a
     snapshot that went out (`send_roster_snapshot` returned true). It
@@ -1435,8 +1443,10 @@ inside the encrypted `SPACE_POST_CREATED` payload:
 ## Writer certificates (v_49)
 
 A **writer certificate** is the space authority key's per-epoch statement
-that one household may write (`scope: "write"`) or only comment (`scope:
-"comment"`) in a space. It is the foundation for members publishing over the
+that one household may write (`scope: "write"`), only comment and react
+(`scope: "comment"`), or — a follower household — what the space's follower
+switches allow (`"follower"`, `"follower_comment"`, `"follower_react"`) in a
+space. It is the foundation for members publishing over the
 connection server without the host signing every post: one host-side
 signature per seat per epoch, never per item. Format and suite:
 [`../crypto.md`](../crypto.md) ("Space writer certificate"); code:
@@ -1451,9 +1461,12 @@ space's `posts` access level, never stored: a seat gets `write` only where
 the level lets that role post directly — `OPEN`: owner / admin / moderator /
 member; `MODERATED`: owner / admin / moderator (a plain member's post keeps
 going through the host's review queue); `ADMIN_ONLY`: owner / admin. Other
-writer seats get `comment`; a follower seat gets `comment` only while
-`allow_subscriber_comment` is on; a household with several seats → one cert
-at its strongest scope; no live seat → no cert.
+writer seats get `comment`; a follower (`subscriber`) seat gets the
+follower scope the switches allow — `follower` with both
+`allow_subscriber_comment` and `allow_subscriber_react` on,
+`follower_comment` or `follower_react` with one, nothing with neither; a
+household with several seats → one cert at its strongest scope (`write`,
+`comment`, then the follower scopes); no live seat → no cert.
 
 **User binding (v2).** The cert also names the household's users that hold
 its scope — `writer_user_ids`, signed by the space authority in a SECOND
@@ -1476,7 +1489,8 @@ connection server is the v1 fields only.
 **Comments and reactions use the same cert.** Comments have no access level
 of their own, so no entitlement change: a `comment` cert lets its bound
 users comment and react over the member relay, `write` adds posts and an
-author's own post edits / deletes (per-type table in
+author's own post edits / deletes; a follower scope grants what its name
+says, never a post (per-type table in
 [`discovery.md`](discovery.md#comments-reactions-and-own-edits--deletes-v_49)).
 A comment-only user of a household holding a `write` cert is not in its
 binding and comments on the host path.
@@ -1617,11 +1631,44 @@ run the gate either.
 **Revocation = rotation.** Any change that weakens a household's rights
 rotates the content key, so its old cert dies with the epoch: a role change
 from write to comment or none (remote or local), a household leaving the
-space (`SPACE_INSTANCE_LEFT`, see "Member leave (v_49)"),
-`allow_subscriber_comment` turned off while a follower seat exists,
-and — as before — every kick and ban. Promotions do not rotate; the new
-cert is delivered in a roster snapshot, and turning follower comments on
-sends each follower household its `comment` cert at once.
+space (`SPACE_INSTANCE_LEFT`, see "Member leave (v_49)"), and — as before —
+every kick and ban. Promotions do not rotate; the new cert is delivered in a
+roster snapshot.
+
+**Followers: the role plus the switches (owner decision 2026-11-16).** A
+follower is a member status — role `subscriber`, read-only, with the
+space's two switches deciding whether it may comment
+(`allow_subscriber_comment`) and react (`allow_subscriber_react`). Turning a
+switch ON or OFF sends nothing but the ordinary `SPACE_CONFIG_CHANGED` —
+no snapshot to every follower (it used to be ≈ 55 GB at 10 000 followers:
+a ~5.5 MB roster snapshot each) and no rotation:
+- **A follower cert is short-lived.** A `follower*` cert is refused by
+  every receiver once its signed `issued_at` is more than
+  `FOLLOWER_CERT_TTL_S` (24 h) old, or dated more than 5 min ahead
+  (`domain.writer_cert.follower_cert_fresh`). Member scopes have no
+  lifetime (they die with their epoch, as before).
+- **Config holders check the switch.** A member household holds the config
+  and the roster: it refuses a follower's comment / reaction the moment its
+  copy of the switch is off — on the direct `SPACE_COMMENT_CREATED` /
+  `SPACE_POST_REACTION` path (§24.11 writer gate) and on the GFS-relayed
+  `space_item` path (`item_seat_admits`). A GFS subscriber holds no config
+  (its directory stub has every follower switch off) and no roster: it
+  checks only the cert — the follower scope says which switch it was issued
+  under, and its lifetime ends it.
+- **Worst case after a switch goes OFF:** seconds (the config event's
+  travel time) at every member household; up to 24 h at a GFS subscriber
+  and at a follower household reading a GFS-relayed item.
+- **The cert goes on demand.** A follower household holds no cert until one
+  of its people comments or reacts. That write takes the host path (as
+  every write without a cert always did), and the household asks the host
+  ONCE: a `SPACE_SYNC_BEGIN` whose roster digest says `cert_wanted` (see
+  "Repair on a digest mismatch"). The host answers with a snapshot holding
+  no roster entry, only the household's own credentials. It asks again when
+  its cert is within an hour of its end and someone writes, or when the
+  cert lacks the right the write needs. The same path brings any household
+  its writer group key (`key_wanted`) when it first publishes over a GFS
+  and holds none — the space gaining a writer key (followers on, a public
+  tier) sends only the owner's GFS epoch notice.
 
 **Residuals.** A revoked writer can still post until the rotation reaches a
 receiver, plus the 10-minute grace — and if no seed holder is online to

@@ -1573,7 +1573,12 @@ from __future__ import annotations
 #:   ``MIN_FOR_CAPPED_SPACE_IMAGES`` (v_81, the first unreleased line) and
 #:   re-encoded from the released v_80 line; the host repairs a member's
 #:   roster only on a ``roster_digest`` mismatch (``MIN_FOR_ROSTER_DIGEST``,
-#:   v_81). Wire otherwise unchanged.
+#:   v_81). Followers (owner decision 2026-11-16): a follower household's
+#:   writer cert has its own scope (``follower`` / ``follower_comment`` /
+#:   ``follower_react``) and lives 24 h, asked for on demand
+#:   (``cert_wanted`` / ``key_wanted`` on the roster digest) and answered
+#:   with the credentials alone; a switch toggle sends only the config
+#:   event. Wire otherwise unchanged.
 OURS: int = 94
 
 
