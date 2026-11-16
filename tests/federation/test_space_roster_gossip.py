@@ -32,6 +32,7 @@ from socialhome.domain.space import (
 )
 from socialhome.federation import private_invite_handler as handler_module
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
+from socialhome.federation.space_authorship import SpaceAuthorship
 from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
@@ -1195,7 +1196,8 @@ async def test_rev_an_equal_version_live_entry_does_not_undo_a_left(tmp_dir):
 async def test_a_seat_the_host_has_not_heard_of_stays_seated(tmp_dir):
     """BLOCKER (round 4): a delegated admin seats X while the owner is
     offline; the owner's snapshot (its BEGIN raced the admin's gossip) does
-    not name X — X stays seated, with no seat-ended effects."""
+    not name X — X stays seated, with no seat-ended effects, and its posts
+    are accepted."""
     h, _spaces, remote, db, seed = await _r5_handler(tmp_dir)
     j = FederationEventType.SPACE_MEMBER_JOINED
     await _r5_mirror(remote, "p-x", "x-by-admin", 5)
@@ -1204,12 +1206,22 @@ async def test_a_seat_the_host_has_not_heard_of_stays_seated(tmp_dir):
     )
     await h._on_space_roster_snapshot(_r5_snapshot([_entry(j, owner)], version=9))
     assert ("p-x", "x-by-admin") in await _r5_live(remote)
+    # No seat-ended effect: the member directory keeps X's card (it clears a
+    # card only on SpaceRemoteSeatEnded) and the household stays a target.
     ended = [
         c.args[0]
         for c in h._bus.publish.await_args_list
         if type(c.args[0]).__name__ == "SpaceRemoteSeatEnded"
     ]
     assert ended == []
+    # X's posts are still accepted (§24.11 authorship over the same mirror).
+    users = AsyncMock()
+    users.get_by_user_id = AsyncMock(return_value=None)
+    authorship = SpaceAuthorship(
+        space_repo=_spaces, remote_member_repo=remote, user_repo=users
+    )
+    post = _event(FederationEventType.SPACE_POST_CREATED, {}, from_instance="p-x")
+    assert await authorship.may_author(post, SPACE_ID, "x-by-admin")
     await db.shutdown()
 
 
