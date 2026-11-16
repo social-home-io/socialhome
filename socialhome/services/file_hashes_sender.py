@@ -14,9 +14,13 @@ Behaviour-only mixin (``__slots__ = ()``): the consumer declares the
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 
+from ..domain.file_hashes import FileHash
 from .media_file_hasher import MediaFileHasher
+
+log = logging.getLogger(__name__)
 
 
 class FileHashesMixin:
@@ -38,3 +42,15 @@ class FileHashesMixin:
         *payload* unchanged (nothing hashed, not wired, an error: fail-soft,
         the item then takes the legacy names on receivers)."""
         return await MediaFileHasher.attach(self._file_hasher, payload, urls)
+
+    async def _file_hashes_of(self, urls: Iterable[str | None]) -> dict[str, FileHash]:
+        """The hash map of *urls* by file name — what an author signs into a
+        public relay inner (v_92) — or ``{}`` (not wired, nothing hashed, an
+        error: fail-soft, the GFS copy then takes the reader name)."""
+        if self._file_hasher is None:
+            return {}
+        try:
+            return await self._file_hasher.hashes_for(urls)
+        except Exception:
+            log.warning("file hashes could not be computed", exc_info=True)
+            return {}

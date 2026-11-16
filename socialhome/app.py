@@ -5471,6 +5471,8 @@ def create_app(config: Config | None = None) -> web.Application:
         space_post_outbound.attach_media_gfs(space_media_uploader)
         if space_public_outbound is not None:
             space_public_outbound.attach_media_gfs(space_media_uploader)
+            # v_92 — the relayed post carries its author-signed file hashes.
+            space_public_outbound.attach_file_hasher(file_hasher)
         space_cal_service.attach_media_gfs(space_media_uploader)
         fed.gallery_federation_outbound.attach_media_gfs(space_media_uploader)
         fed.page_federation_outbound.attach_media_gfs(space_media_uploader)

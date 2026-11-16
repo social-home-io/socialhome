@@ -520,10 +520,17 @@ encrypted payload (live events) and in each §25.6 record:
   refuses them (WARNING, nothing written) unless they are that content
   name's hash (`write_once` writes an `sc-` name only with the hash that
   binds it). Two households describing the same hashed file land on the
-  same name; the first row stays. An **unhashed** described file keeps its
-  reader-derived `sg-` name — the sealed blob binds the item and its origin
-  (AAD), the descriptor is author-signed for followers (whose relayed post
-  carries no map). A holder asked to re-upload a file it stores
+  same name; the first row stays. A post relayed through a GFS (the
+  host's or a seed holder's public relay, a member's anonymous publish)
+  carries the map too, under the author's own separate signature
+  (`files_sig`, see [crypto.md](../crypto.md)), so a member that gets the
+  GFS copy before the host's direct one names each file exactly as that one
+  would — the first copy can no longer leave a member with a reader name it
+  could never ask the host or a helper for (`SPACE_MEDIA_WANTED` asks only
+  for `sc-` / `sd-` names). An **unhashed** described file (an older
+  author, a map whose signature fails) keeps its reader-derived `sg-` name
+  — the sealed blob binds the item and its origin (AAD), the descriptor is
+  author-signed. A holder asked to re-upload a file it stores
   content-addressed tries the item's `sc-` files; the sealed address picks
   the right one.
 * **Sync line 85:** a household crossing it gets one full stream of rows,

@@ -198,6 +198,8 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 item_type=ITEM_TYPE_POST,
                 item_target=post.id,
                 media_refs=media_refs,
+                # v_92 — one name on every path for the post's files.
+                file_hashes=await self._file_hashes_of(item_media_urls("posts", post)),
             )
             self._member_gfs.schedule_post(space_id, post.author, inner)
         except Exception:
@@ -307,6 +309,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 item_target=post.id,
                 edited_at=edited_at or datetime.now(UTC).isoformat(),
                 media_refs=media_plan.wire() if media_plan is not None else None,
+                file_hashes=await self._file_hashes_of(item_media_urls("posts", post)),
             )
             self._upload_media(media_plan)
             self._member_gfs.schedule_item(
@@ -503,6 +506,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                     # so its signed bytes stay v_25-compatible.
                     author_identity_anchor=author.identity_anchor,
                     media_refs=media_refs,
+                    file_hashes=await self._file_hashes_of(media_urls),
                 )
                 # v_49 — our household's writer cert, outside the author
                 # signature (it authenticates itself against the space key).

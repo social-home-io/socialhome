@@ -15,15 +15,19 @@ from socialhome.crypto import (
     sign_ed25519,
     verify_ed25519,
 )
+from socialhome.domain.file_hashes import FileHash
 from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import LocationData, Post, PostType
 from socialhome.services.space_public_author import (
+    UnsupportedFilesSigSuite,
     UnsupportedLinkPreviewSigSuite,
     UnsupportedMediaRefsSigSuite,
     author_signing_bytes,
     build_signed_author_inner,
+    files_signing_bytes,
     media_refs_signing_bytes,
     signed_media_refs,
+    verified_file_hashes,
     verified_link_preview,
     verify_signed_author_inner,
 )
@@ -816,3 +820,82 @@ def test_an_older_descriptor_cannot_ride_a_newer_edit():
     assert signed_media_refs(ridden) is None
     # Nor onto the same post under another item type.
     assert signed_media_refs(dict(old, item_type="post")) is None
+
+
+# ── v_92 one name on every path: the post's file hashes, author-signed ───
+
+_HASHES = {"a.webp": FileHash("a" * 64, 9)}
+
+
+def _signed_with_files(kp, hashes=_HASHES):
+    return build_signed_author_inner(
+        post=_post(),
+        space_id="sp",
+        author_username="bob",
+        author_pk=kp.public_key,
+        author_identity_seed=kp.private_key,
+        origin_instance_id="origin.home",
+        file_hashes=hashes,
+    )
+
+
+def test_file_hashes_ride_the_relay_under_the_author_signature():
+    """The public relay carries the post's v_85 file hashes, so a member
+    that gets the GFS copy first names each file by its content (``sc-``),
+    the one name it has on every path. Signed by the author separately —
+    bound to the post — so nobody re-wrapping the inner can swap them."""
+    kp = generate_identity_keypair()
+    inner = _signed_with_files(kp)
+    assert inner["files"] == {"a.webp": {"h": "a" * 64}}
+    assert inner["files_suite"] == "sha256"
+    assert inner["files_sig_suite"] == "ed25519"
+    assert verified_file_hashes(inner) == {"a.webp": FileHash("a" * 64)}
+    evil = {"a.webp": {"h": "e" * 64}}
+    assert verified_file_hashes(dict(inner, files=evil)) == {}
+    assert verified_file_hashes(dict(inner, post_id="p-other")) == {}
+    other = generate_identity_keypair()
+    forged = dict(
+        inner,
+        files=evil,
+        files_sig=b64url_encode(
+            sign_ed25519(
+                other.private_key, files_signing_bytes(dict(inner, files=evil))
+            )
+        ),
+    )
+    assert verified_file_hashes(forged) == {}
+
+
+def test_file_hashes_never_change_the_main_author_bytes():
+    """A released (v_80) household recomputes the main author bytes from
+    its fixed field list: the hashes must stay outside them, or it would
+    refuse every relayed picture post."""
+    kp = generate_identity_keypair()
+    inner = _signed_with_files(kp)
+    assert b"files" not in author_signing_bytes(inner)
+    assert verify_ed25519(
+        kp.public_key,
+        _v25_author_signing_bytes(inner),
+        b64url_decode(inner["author_sig"]),
+    )
+
+
+def test_no_hashes_no_file_keys_and_nothing_verified():
+    kp = generate_identity_keypair()
+    inner = _signed_with_files(kp, hashes={})
+    assert not {"files", "files_suite", "files_sig", "files_sig_suite"} & set(inner)
+    assert verified_file_hashes(inner) == {}
+
+
+def test_unsigned_file_hashes_are_never_taken():
+    kp = generate_identity_keypair()
+    inner = _signed_with_files(kp)
+    del inner["files_sig"]
+    assert verified_file_hashes(inner) == {}
+
+
+def test_unknown_files_sig_suite_is_rejected():
+    kp = generate_identity_keypair()
+    inner = dict(_signed_with_files(kp), files_sig_suite="rsa-2048")
+    with pytest.raises(UnsupportedFilesSigSuite):
+        verified_file_hashes(inner)

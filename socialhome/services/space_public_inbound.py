@@ -136,9 +136,11 @@ from .space_item_author import (
 )
 from .space_item_inbound import SpaceItemInbound
 from .space_public_author import (
+    UnsupportedFilesSigSuite,
     UnsupportedLinkPreviewSigSuite,
     UnsupportedMediaRefsSigSuite,
     signed_media_refs,
+    verified_file_hashes,
     verified_link_preview,
     verify_signed_author_inner,
 )
@@ -980,12 +982,28 @@ class SpacePublicInbound:
                 "not sign — dropped",
                 post.id,
             )
+        # v_92 — the author-signed file hashes: with them each file takes
+        # its content name (``sc-``), the one name it has on every path, so
+        # a member that gets this copy before the host's direct one names
+        # it exactly as that one would (and can still ask the host or a
+        # helper for it, ``SPACE_MEDIA_WANTED``).
+        try:
+            hashes = verified_file_hashes(inner)
+        except UnsupportedFilesSigSuite as exc:
+            log.warning(
+                "space_public.inbound: post %s file hashes signature suite %s "
+                "unsupported — dropped",
+                post.id,
+                exc,
+            )
+            hashes = {}
         return await self._gfs_media.localize(
             space_id,
             refs,
             post_media_urls(post),
             item_id=post.id,
             origin=origin_instance_id,
+            hashes=hashes,
         )
 
     async def _heal_media(

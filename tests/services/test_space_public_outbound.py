@@ -10,6 +10,7 @@ spaces, and inbound-driven (loop) events do not relay.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -33,6 +34,7 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import CommentDeleted, PostDeleted, SpacePostCreated
+from socialhome.domain.file_hashes import FileHash
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import (
     JoinMode,
@@ -59,11 +61,13 @@ from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services import space_public_outbound
+from socialhome.services.media_file_hasher import MediaFileHasher
 from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_public_author import (
     author_signing_bytes,
     build_signed_author_inner,
     signed_media_refs,
+    verified_file_hashes,
     verify_signed_author_inner,
 )
 from socialhome.services.space_public_authority import is_approved
@@ -1568,3 +1572,33 @@ async def test_a_text_post_carries_no_media_refs(env):
     )
     assert "media_refs" not in inner
     assert media.planned == []
+
+
+async def test_a_relayed_picture_post_carries_its_signed_file_hashes(env, tmp_dir):
+    """v_92 — one name on every path: the relayed inner carries the post's
+    file hashes under the author's signature, so a member that gets this
+    copy first names the file by content, as the host's direct copy does."""
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
+    env["sub"].attach_media_gfs(_MediaGfs())
+    media_dir = tmp_dir / "hashed-media"
+    media_dir.mkdir()
+    (media_dir / "a.webp").write_bytes(b"picture-bytes")
+    env["sub"].attach_file_hasher(MediaFileHasher(media_dir))
+    post = dataclasses.replace(
+        _post(env["author_user_id"]),
+        type=PostType.IMAGE,
+        image_urls=("api/media/a.webp",),
+    )
+    await env["bus"].publish(SpacePostCreated(post=post, space_id="sp-pub"))
+    envelope = env["gfs"].calls[0]["payload"]
+    inner = _unpadded(
+        json.loads(
+            await env["crypto"].decrypt(
+                "sp-pub", envelope["epoch"], envelope["encrypted_payload"]
+            )
+        )
+    )
+    assert verify_signed_author_inner(inner)
+    assert verified_file_hashes(inner) == {
+        "a.webp": FileHash(hashlib.sha256(b"picture-bytes").hexdigest())
+    }
