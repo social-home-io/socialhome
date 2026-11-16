@@ -843,3 +843,51 @@ async def test_a_relayed_comment_never_keeps_a_reserved_picture(env, name):
     assert await _apply(env, "comment", image)
     stored = await env["posts"].get_comment(cid)
     assert stored is not None and stored.media_url is None
+
+
+class _FollowerSeat(_Seats):
+    """The author holds a live ``subscriber`` seat: admitted only when the
+    space's switch says so (``SpaceAuthorship.item_seat_admits``)."""
+
+    async def item_seat_admits(self, **kw):
+        self.calls.append(("seat", kw))
+        return kw["subscriber_ok"]
+
+
+async def _switches(env, *, comment: bool, react: bool) -> None:
+    space = await env["spaces"].get(SPACE)
+    await env["spaces"].save(
+        space.__class__(
+            **{
+                **{f: getattr(space, f) for f in space.__dataclass_fields__},
+                "features": SpaceFeatures(
+                    allow_subscribers=True,
+                    allow_subscriber_comment=comment,
+                    allow_subscriber_react=react,
+                ),
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize("kind", ["comment", "reaction_add"])
+async def test_a_member_household_refuses_a_follower_write_once_its_switch_is_off(
+    env, kind
+):
+    """A member household holds the config: with the switch off it refuses
+    a follower's comment / reaction even though the follower's cert (issued
+    while the switch was on) is still within its 24 h — the window is the
+    config event's travel time, not the cert's lifetime."""
+    inner = (
+        _comment(env, _cid())
+        if kind == "comment"
+        else _react(env, "reaction_add", "👍", 1)
+    )
+    await _switches(env, comment=False, react=False)
+    assert not await _apply(
+        env, kind, inner, cert_scope="follower", member=True, authorship=_FollowerSeat()
+    )
+    await _switches(env, comment=True, react=True)
+    assert await _apply(
+        env, kind, inner, cert_scope="follower", member=True, authorship=_FollowerSeat()
+    )
