@@ -517,6 +517,24 @@ async def test_url_updated_gives_a_gfs_paired_peer_its_first_url(
         await db.shutdown()
 
 
+async def test_url_updated_never_gives_a_seat_an_address(repo, handlers):
+    """Households met through a GFS never talk directly: a seat row (seated
+    from an invite link) never takes an inbox URL, even if a URL_UPDATED
+    from it got past the peer-class step."""
+    repo.instances["peer-a"] = replace(
+        _sample_instance("peer-a", PairingStatus.CONFIRMED),
+        source=InstanceSource.SPACE_SESSION,
+        remote_inbox_url="",
+    )
+    await handlers._on_url_updated(
+        _event(
+            FederationEventType.URL_UPDATED,
+            {"inbox_url": "https://new.example.com/federation/inbox/wh-peer-a"},
+        )
+    )
+    assert repo.instances["peer-a"].remote_inbox_url == ""
+
+
 async def test_url_updated_rejects_empty(repo, handlers):
     repo.instances["peer-a"] = _sample_instance("peer-a", PairingStatus.CONFIRMED)
     original = repo.instances["peer-a"].remote_inbox_url

@@ -205,8 +205,9 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
 
     def attach_files_reach_host(self, check: Callable[[str], Awaitable[bool]]) -> None:
         """Wire ``check(space_id)``: whether a page's new files can reach
-        the space's host from here (v_82; a link-joined household needs a
-        GFS upload authorization)."""
+        the space's host from here (v_82; only a link-joined household
+        whose host's relay takes no binary frames needs a GFS upload
+        authorization)."""
         self._files_reach_host = check
 
     async def _require_files_reach_host(

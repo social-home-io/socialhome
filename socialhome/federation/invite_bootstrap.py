@@ -150,8 +150,9 @@ class UnsupportedBootstrapSigSuite(ValueError):
 
 #: Hard cap on a sealed bootstrap blob. The request is a few hundred
 #: bytes; the ACK carries ``space_meta`` (cover + icon bytes + roster).
-#: The images are bounded by ``SPACE_*_BOOTSTRAP_MAX_BYTES``
-#: (``domain/media_constraints``) so the ACK fits, and
+#: The images are bounded by the one cap every path carries
+#: (``SPACE_COVER_MAX_BYTES`` / ``SPACE_ICON_MAX_BYTES``,
+#: ``domain/media_constraints``) so the ACK fits, and
 #: :func:`seal_bootstrap_envelope` refuses to produce a blob over this
 #: (:class:`BootstrapEnvelopeTooLarge`) rather than hand the relay one the
 #: receiver would drop. Checked BEFORE the unseal on the receiving side so

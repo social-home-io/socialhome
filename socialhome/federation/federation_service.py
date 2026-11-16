@@ -497,6 +497,7 @@ class FederationService:
         "_state_send_seq",
         "_state_sends",
         "_stopping",
+        "_sync_begin_admitted",
         "_sync_manager",
         "_transport",
         "_typing_service",
@@ -630,6 +631,10 @@ class FederationService:
         self._mesh_claim_answer_tasks: set[asyncio.Task[None]] = set()
         #: See :meth:`attach_space_applied`.
         self._space_applied: Callable[[str], None] | None = None
+        #: See :meth:`attach_sync_begin_admitted`.
+        self._sync_begin_admitted: (
+            Callable[[FederationEvent], Awaitable[None]] | None
+        ) = None
         self._deferred_mesh_tasks: dict[str, asyncio.Task[None]] = {}
         #: Per pending target: set to cut its drain task's wait short when a
         #: route to it is learned (:meth:`on_route_learned`).
@@ -1063,6 +1068,7 @@ class FederationService:
         provider_instance_id: str,
         sync_mode: str = "initial",
         have_seq: int | None = None,
+        roster_digest: dict | None = None,
     ) -> None:
         """Note a ``SPACE_SYNC_BEGIN`` we are sending (§25.6).
 
@@ -1079,6 +1085,7 @@ class FederationService:
             provider_instance_id=provider_instance_id,
             sync_mode=sync_mode,
             have_seq=have_seq,
+            roster_digest=roster_digest,
         )
 
     def attach_sync_manager(self, sync_manager) -> None:
@@ -1263,6 +1270,16 @@ class FederationService:
         catch-up — so the files of the rows it stored that never arrived
         are asked for without waiting for a view. O(1) per event."""
         self._space_applied = applied
+
+    def attach_sync_begin_admitted(
+        self, admitted: Callable[[FederationEvent], Awaitable[None]]
+    ) -> None:
+        """Wire ``admitted(event)`` (``SpaceService.on_sync_begin_roster``):
+        called for a ``SPACE_SYNC_BEGIN`` only once the S-6 / S-8 admission
+        let it in — never for one refused (rate limited, too many sessions,
+        not a member) — so whatever it answers costs at most what an
+        admitted BEGIN may. Fail-soft."""
+        self._sync_begin_admitted = admitted
 
     def attach_mesh_claim_answer(
         self, answer: Callable[[str], Awaitable[bool]]
@@ -3089,6 +3106,7 @@ class FederationService:
         dir_seq: int | None = None,
         have_seq: int | None = None,
         mod_held: dict | None = None,
+        roster_digest: dict | None = None,
     ) -> bool:
         """Initiate a §25.6 catch-up sync FROM a mesh-only host.
 
@@ -3099,7 +3117,9 @@ class FederationService:
         (with its ``have_seq``) is the periodic BEGIN after catch-up that
         carries it. ``mod_held`` is the moderation queue echo of a
         household that reviews the space (the items it holds, by state),
-        carried by that same incremental BEGIN.
+        carried by that same incremental BEGIN. ``roster_digest`` is the
+        digest of our roster mirror for the space (only toward its host):
+        the host repairs it only on a mismatch, as for a paired member.
 
         For a space whose host is NOT a confirmed direct peer (we joined over a
         relay), the normal SpaceSyncScheduler never triggers (it only syncs with
@@ -3129,6 +3149,7 @@ class FederationService:
                 provider_instance_id=host_instance_id,
                 sync_mode=sync_mode,
                 have_seq=have_seq,
+                roster_digest=roster_digest,
             )
             self._sync_manager.register_requester_https_session(
                 sync_id=sync_id,
@@ -3150,6 +3171,8 @@ class FederationService:
                 payload["have_seq"] = have_seq
             if mod_held is not None:
                 payload["mod_held"] = mod_held
+            if roster_digest is not None:
+                payload["roster_digest"] = roster_digest
             result = await self.send_with_mesh_fallback(
                 to_instance_id=host_instance_id,
                 event_type=FederationEventType.SPACE_SYNC_BEGIN,
@@ -3336,6 +3359,10 @@ class FederationService:
                 space_id=space_id,
             )
         if (
+            # Defence in depth: a seat has no inbox address (the redeem
+            # stores ``""`` and ``URL_UPDATED`` from a seat is ignored), and a
+            # household met through a GFS is never POSTed to directly even
+            # if it somehow had one.
             instance.source is not InstanceSource.SPACE_SESSION
             and instance.remote_inbox_url
             # A peer already known to be away gets the JSON leg straight
@@ -3704,7 +3731,6 @@ class FederationService:
         payload: dict,
         *,
         min_proto_version: int | None = None,
-        relay_payload: dict | None = None,
         legacy_payload: dict | None = None,
         legacy_below: int | None = None,
         per_peer: Callable[[str, dict], Awaitable[dict]] | None = None,
@@ -3721,7 +3747,7 @@ class FederationService:
         is not a member of ``space_id`` gets nothing whatever it lists.
 
         ``per_peer``, when given, is awaited with ``(instance_id, payload)``
-        for each target AFTER the legacy / relay variant is picked and
+        for each target AFTER the legacy variant is picked and
         returns the copy that target receives. For content meant for ONE
         household only — its own v_49 writer cert — so nothing addressed to
         one member ever rides another member's envelope. It must return a
@@ -3736,15 +3762,9 @@ class FederationService:
         ``moderator`` role ships as ``member`` to a v_40 household, which
         drops roles it does not know. Only for payloads that are not signed
         as a whole (the per-peer envelope signature still covers whichever
-        variant a peer gets). ``relay_payload`` takes precedence for a relay
-        seat — callers never combine them today.
-
-        ``relay_payload``, when given, is sent INSTEAD of ``payload`` to a
-        member seated from an invite link (``InstanceSource.SPACE_SESSION``):
-        that household is reached only through the connection-server relay,
-        whose envelope cap (``RELAY_MAX_ENVELOPE_BYTES``, ~191 KiB) is far
-        tighter than a paired peer's ~1 MiB. A caller shipping bulky bytes
-        (a space cover) hands a smaller variant for exactly those members.
+        variant a peer gets). Every member household gets the same payload
+        however it is reached — a caller shipping bulky bytes (a space
+        cover) bounds them so they fit the tightest path (the GFS relay).
 
         Each per-peer ship goes through :meth:`send_with_mesh_fallback`
         so a member whose household is *not* a direct CONFIRMED peer
@@ -3807,13 +3827,6 @@ class FederationService:
                 and not await self.space_member_supports(iid, min_version=legacy_below)
             ):
                 peer_payload = legacy_payload
-            if relay_payload is not None:
-                instance = await self._federation_repo.get_instance(iid)
-                if (
-                    instance is not None
-                    and instance.source is InstanceSource.SPACE_SESSION
-                ):
-                    peer_payload = relay_payload
             if FILES_FIELD in peer_payload and not await self.space_member_supports(
                 iid, min_version=FederationCapability.MIN_FOR_CONTENT_FILE_HASHES
             ):
@@ -4028,15 +4041,14 @@ class FederationService:
         *event_type* to it (v_90) — the one eligibility rule of the broadcast
         and the outbox: an event a receiver takes in a multi frame
         (:data:`MULTI_EVENT_TYPES`), a household with no deferred mesh queue,
-        at :attr:`FederationCapability.MIN_FOR_MULTI_MAILBOX` or above (judged
-        from the row itself), a confirmed ``space_session`` seat whose
-        mailbox sits on a GFS of ours that proved ``envelope_multi``. *caps*
+        a confirmed ``space_session`` seat whose mailbox (its card: v_89+,
+        so every household holding one opens a multi frame) sits on a GFS of
+        ours that proved ``envelope_multi``. *caps*
         caches each GFS's capability for the pass. ``None`` → per recipient."""
         assert self._transport is not None
         if (
             event_type not in MULTI_EVENT_TYPES
             or row.id in self._deferred_mesh_queues
-            or int(row.proto_version) < FederationCapability.MIN_FOR_MULTI_MAILBOX
             or row.status is not PairingStatus.CONFIRMED
             or row.source is not InstanceSource.SPACE_SESSION
         ):
@@ -5362,6 +5374,11 @@ class FederationService:
                 space_id=space_id,
             )
             return
+        if decision.accepted and self._sync_begin_admitted is not None:
+            try:
+                await self._sync_begin_admitted(event)
+            except Exception:
+                log.exception("sync %s: admitted-BEGIN hook failed", sync_id)
 
         # A requester reachable only via the mesh (not a CONFIRMED direct
         # peer) cannot complete the WebRTC handshake — ICE can't traverse a
@@ -5567,6 +5584,7 @@ class FederationService:
                 # periodic sync behind a NAT stays incremental.
                 sync_mode=pending.sync_mode,
                 have_seq=pending.have_seq,
+                roster_digest=pending.roster_digest,
             )
         except ConnectionError:
             # Closed while the offer was applied (reaped, superseded):

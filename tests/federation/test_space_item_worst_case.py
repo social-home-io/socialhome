@@ -47,8 +47,8 @@ from socialhome.domain.federation import FederationEventType
 from socialhome.domain.file_hashes import FILES_FIELD, FILES_SUITE_FIELD
 from socialhome.domain.gfs_server import MAX_GFS_SERVERS_JSON_BYTES
 from socialhome.domain.media_constraints import (
-    SPACE_COVER_BOOTSTRAP_MAX_BYTES,
-    SPACE_ICON_BOOTSTRAP_MAX_BYTES,
+    SPACE_COVER_MAX_BYTES,
+    SPACE_ICON_MAX_BYTES,
 )
 from socialhome.domain.page import MAX_PAGE_TITLE_LENGTH
 from socialhome.domain.page_version import page_record, version_hash
@@ -541,8 +541,6 @@ async def test_a_config_at_its_limit_fits_with_the_pictures_and_the_gfs_list():
         own="x" * 32,
         cover=False,
         icon=False,
-        cover_max_bytes=SPACE_COVER_BOOTSTRAP_MAX_BYTES,
-        icon_max_bytes=SPACE_ICON_BOOTSTRAP_MAX_BYTES,
     )
     as_json = orjson.dumps(payload).decode()
     assert as_json.count(orjson.dumps(description).decode()) == 2
@@ -550,10 +548,10 @@ async def test_a_config_at_its_limit_fits_with_the_pictures_and_the_gfs_list():
     # its cap, a cert and a statement with hybrid-size signatures.
     meta = payload["space_meta"]
     meta["cover_webp_base64"] = base64.b64encode(
-        os.urandom(SPACE_COVER_BOOTSTRAP_MAX_BYTES)
+        os.urandom(SPACE_COVER_MAX_BYTES)
     ).decode()
     meta["icon_webp_base64"] = base64.b64encode(
-        os.urandom(SPACE_ICON_BOOTSTRAP_MAX_BYTES)
+        os.urandom(SPACE_ICON_MAX_BYTES)
     ).decode()
     meta["gfs_servers"] = {
         "servers": ["g" * (MAX_GFS_SERVERS_JSON_BYTES - 6)],

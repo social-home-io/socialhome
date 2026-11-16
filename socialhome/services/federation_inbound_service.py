@@ -203,6 +203,7 @@ from .space_service import (
     apply_space_images_from_config_change,
     config_within_limit,
     keep_local_space_state,
+    sender_caps_space_images,
     stub_space_from_metadata,
 )
 
@@ -3998,6 +3999,9 @@ class FederationInboundService(ProtectionGateMixin):
             previous=existing,
             cover_repo=self._space_cover_repo,
             icon_repo=self._space_icon_repo,
+            sender_caps=functools.partial(
+                sender_caps_space_images, self._federation_service, event.from_instance
+            ),
         )
         # Record the author of the edit we just applied so a later
         # equal-sequence edit can deterministically tie-break (v_24 LWW).

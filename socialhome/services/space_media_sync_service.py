@@ -162,9 +162,9 @@ class SpaceMediaSyncService:
 
     def attach_relay_readers(self, readers: _RelayReaders) -> None:
         """Wire the v_80 reader check: a member household seated from an
-        invite link at v_80 gets no ``SPACE_MEDIA_BLOB`` push — the GFS
-        relay refuses those bytes, and it fetches the file from its GFS's
-        media cache instead."""
+        invite link gets its ``SPACE_MEDIA_BLOB`` push through the GFS relay
+        like any member, except while its GFS's media cache is known to hold
+        the file (it fetches it from there then)."""
         self._relay_readers = readers
 
     def attach_federation(self, federation: FederationService) -> None:
@@ -469,9 +469,9 @@ class SpaceMediaSyncService:
             )
         ):
             # Decided at send time, not when the row was queued, and only
-            # when the reader's GFS is known to hold the file (or the
-            # reader can ask for it): a GFS whose cache was off when the
-            # file was planned never got it, so that reader keeps the push.
+            # when the reader's GFS is known to hold the file: a GFS whose
+            # cache was off when the file was planned never got it, so that
+            # reader keeps the push.
             # A file the reader asked for (v_92, ``push``) is never dropped:
             # it already missed its GFS.
             log.debug(

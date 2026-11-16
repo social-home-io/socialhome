@@ -30,17 +30,15 @@ from typing import TYPE_CHECKING
 from ..domain.events import CpSpaceAgeGateChanged, SpaceConfigChanged
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
-from ..domain.media_constraints import (
-    SPACE_COVER_BOOTSTRAP_MAX_BYTES,
-    SPACE_COVER_SNAPSHOT_MAX_BYTES,
-    SPACE_ICON_BOOTSTRAP_MAX_BYTES,
-    SPACE_ICON_SNAPSHOT_MAX_BYTES,
-)
 from ..domain.space import SpaceConfigEventType
 from ..infrastructure.event_bus import EventBus
 from .space_authority_pin import owner_authority_cert_via, owner_statement_via
 from .space_crypto_service import sign_authority_event, strip_authority_sig_fields
-from .space_service import embed_space_images, space_metadata_for_federation
+from .space_service import (
+    UnfittableImages,
+    embed_space_images,
+    space_metadata_for_federation,
+)
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -70,7 +68,14 @@ _ROSTER_EVENT_TYPES = {
 class SpaceConfigOutbound:
     """Bus-event → federation broadcaster for space config changes."""
 
-    __slots__ = ("_bus", "_cover_repo", "_federation", "_icon_repo", "_space_repo")
+    __slots__ = (
+        "_bus",
+        "_cover_repo",
+        "_federation",
+        "_icon_repo",
+        "_space_repo",
+        "_unfittable",
+    )
 
     def __init__(
         self,
@@ -88,6 +93,8 @@ class SpaceConfigOutbound:
         #: from here — before, members only ever got the new hash.
         self._cover_repo = cover_repo
         self._icon_repo = icon_repo
+        #: Stored images that cannot fit the cap (not re-encoded each send).
+        self._unfittable = UnfittableImages()
 
     def wire(self) -> None:
         self._bus.subscribe(SpaceConfigChanged, self._on_config_changed)
@@ -196,10 +203,10 @@ class SpaceConfigOutbound:
         # A cover / icon change ships the new image itself (it used to ship
         # only the hash, so no member ever received the new picture). Inside
         # ``space_meta`` — the encrypted payload, and under the authority
-        # signature — bounded per transport: a paired / mesh-routed member
-        # takes the snapshot bound, a link-joined member behind the
-        # connection-server relay the much tighter bootstrap bound, so it is
-        # sent its own (smaller) variant. Any other edit ships no bytes.
+        # signature — within the one cap every member gets, however its
+        # household is reached (``SPACE_COVER_MAX_BYTES`` /
+        # ``SPACE_ICON_MAX_BYTES``, which fit the GFS relay's envelope). Any
+        # other edit ships no bytes.
         cover = event.event_type == SpaceConfigEventType.COVER_UPDATED.value
         icon = event.event_type == SpaceConfigEventType.ICON_UPDATED.value
         payload = await self._build_payload(
@@ -209,8 +216,6 @@ class SpaceConfigOutbound:
             own=own,
             cover=cover,
             icon=icon,
-            cover_max_bytes=SPACE_COVER_SNAPSHOT_MAX_BYTES,
-            icon_max_bytes=SPACE_ICON_SNAPSHOT_MAX_BYTES,
         )
         kwargs: dict = {}
         if min_proto_version is not None:
@@ -227,22 +232,9 @@ class SpaceConfigOutbound:
                 own=own,
                 cover=cover,
                 icon=icon,
-                cover_max_bytes=SPACE_COVER_SNAPSHOT_MAX_BYTES,
-                icon_max_bytes=SPACE_ICON_SNAPSHOT_MAX_BYTES,
             )
             kwargs["legacy_below"] = (
                 FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION
-            )
-        if _carries_image(payload):
-            kwargs["relay_payload"] = await self._build_payload(
-                space,
-                event.event_type,
-                seed=seed,
-                own=own,
-                cover=cover,
-                icon=icon,
-                cover_max_bytes=SPACE_COVER_BOOTSTRAP_MAX_BYTES,
-                icon_max_bytes=SPACE_ICON_BOOTSTRAP_MAX_BYTES,
             )
         try:
             await self._federation.broadcast_to_space_members(
@@ -266,10 +258,8 @@ class SpaceConfigOutbound:
         own: str,
         cover: bool,
         icon: bool,
-        cover_max_bytes: int,
-        icon_max_bytes: int,
     ) -> dict:
-        """One ``SPACE_CONFIG_CHANGED`` payload, images bounded as given.
+        """One ``SPACE_CONFIG_CHANGED`` payload, images within the one cap.
 
         A signed payload from the owner host carries the cert for the
         current authority key (v_44), inside the signed ``space_meta``.
@@ -291,10 +281,9 @@ class SpaceConfigOutbound:
                 space,
                 cover_repo=self._cover_repo,
                 icon_repo=self._icon_repo,
-                cover_max_bytes=cover_max_bytes,
-                icon_max_bytes=icon_max_bytes,
                 cover=cover,
                 icon=icon,
+                unfittable=self._unfittable,
             )
         if seed is not None:
             # Record THIS household as the author of the edit (the v_24 LWW
@@ -326,8 +315,3 @@ class SpaceConfigOutbound:
             # Modern shape — what stub_space_from_metadata consumes.
             "space_meta": meta,
         }
-
-
-def _carries_image(payload: dict) -> bool:
-    meta = payload.get("space_meta") or {}
-    return bool(meta.get("cover_webp_base64") or meta.get("icon_webp_base64"))

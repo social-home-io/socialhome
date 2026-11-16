@@ -99,7 +99,13 @@ class ImageTooLargeError(CodedError):
     detail = "Upload exceeds size limit."
 
     def __init__(self, max_bytes: int) -> None:
-        super().__init__(params={"max_mb": max(1, max_bytes // (1024 * 1024))})
+        # A cap under a megabyte (a space cover / icon) is told in kB
+        # (1 kB = 1000 B) so it never reads as "under 1 MB".
+        if max_bytes < 1024 * 1024:
+            params = {"max_kb": max(1, max_bytes // 1000)}
+        else:
+            params = {"max_mb": max_bytes // (1024 * 1024)}
+        super().__init__(params=params)
 
 
 class PayloadTooLargeError(CodedError):
@@ -250,10 +256,12 @@ class TranscodeQueueFullError(CodedError):
 class PageFilesNotShareableError(CodedError, ValueError):
     """A page edit adds pictures this household can't hand to the space's
     host (422 ``PAGE_FILES_NOT_SHAREABLE``): the host reaches us only through
-    a GFS relay (we were seated from an invite link), and we hold no upload
-    authorization for the space's GFS media cache (no writer key, writer
-    cert or channel grant). The words would land and the pictures would
-    stay broken for every member — the edit is refused instead (v_82)."""
+    a GFS relay (we were seated from an invite link) that carries no binary
+    media frames (a v_80–86 seat, a GFS without ``envelope_media``), and we
+    hold no upload authorization for the space's GFS media cache (no writer
+    key, writer cert or channel grant). The words would land and the
+    pictures would stay broken for every member — the edit is refused
+    instead (v_82)."""
 
     status = 422
     code = "PAGE_FILES_NOT_SHAREABLE"

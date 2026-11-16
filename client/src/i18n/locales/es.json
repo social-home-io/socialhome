@@ -3573,6 +3573,7 @@
   "error.bazaar_faq_used_up": "Este anuncio ya ha tenido {max} preguntas, el máximo. Mejor edita una de las preguntas que muestra.",
   "error.bazaar_faq_rate_limited": "Has cambiado muchas veces las preguntas de este anuncio. Espera un poco y vuelve a intentarlo.",
   "error.image_too_large": "Esta imagen es demasiado grande. Elige una de menos de {max_mb} MB.",
+  "error.image_too_large_kb": "Esta imagen no se puede reducir lo suficiente para el espacio (como máximo {max_kb} kB). Prueba con una imagen más sencilla.",
   "error.app_bundle_too_large": "Esta app es demasiado grande para instalarla.",
   "error.app_download_failed": "No se pudo descargar la app. Comprueba la conexión y vuelve a intentarlo.",
   "error.app_catalog_disabled": "El catálogo de apps está desactivado en este Social Home.",

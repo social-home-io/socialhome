@@ -44,6 +44,7 @@ from ..domain.local_community import Eligibility, parse_join_location
 from ..domain.space import (
     WRITER_ROLES,
     RemoteAdminOutcome,
+    Space,
     SpacePermissionError,
     SpaceRole,
     cap_remote_role,
@@ -286,9 +287,10 @@ class PrivateSpaceInviteHandler:
         #: exercise admin actions can omit it.
         self._space_service = space_service
         #: A roster send in parts still arriving, per (space, host): its
-        #: ``(snapshot_id, parts, roster_version)`` and the parts applied.
+        #: ``(snapshot_id, parts, roster_version)``, the parts applied and
+        #: the host's own live seats (user ids) they named.
         self._snapshot_parts: dict[
-            tuple[str, str], tuple[tuple[str, int, int], set[int]]
+            tuple[str, str], tuple[tuple[str, int, int], set[int], set[str]]
         ] = {}
         #: Optional — multi-admin approval workflow (v_16). Dispatches the
         #: ``propose`` / ``vote`` verbs and the ``SPACE_ADMIN_PROPOSAL_UPDATED``
@@ -2077,25 +2079,78 @@ class PrivateSpaceInviteHandler:
         # noted, and the host's next send heals it.
         roster_version = p.get("roster_version")
         if (
-            from_host
-            and self._space_service is not None
-            and isinstance(roster_version, int)
-            and not isinstance(roster_version, bool)
-            and all(reason is None for reason in reasons)
-            and self._snapshot_complete(space_id, event.from_instance, p)
+            not from_host
+            or not isinstance(roster_version, int)
+            or isinstance(roster_version, bool)
+            or not all(reason is None for reason in reasons)
         ):
+            return
+        host = space.owner_instance_id
+        named = self._snapshot_complete(
+            space_id,
+            event.from_instance,
+            p,
+            {
+                str(payload.get("user_id") or "")
+                for _type, payload, tombstoned in candidates
+                if not tombstoned and payload.get("instance_id") == host
+            },
+        )
+        if named is None:
+            return
+        if host and host != self._own_instance_id:
+            await self._end_unnamed_host_seats(
+                space, named, roster_version=roster_version
+            )
+        if self._space_service is not None:
             self._space_service.note_roster_snapshot_applied(
                 space_id, event.from_instance, roster_version
             )
 
-    def _snapshot_complete(self, space_id: str, host: str, p: dict) -> bool:
-        """Whether the fully verified snapshot event *p* completes the
-        host's roster: a single event does; a part (``snapshot_id`` /
-        ``part`` / ``parts``) only when it is the last missing one of its
+    async def _end_unnamed_host_seats(
+        self, space: Space, named: set[str], *, roster_version: int
+    ) -> None:
+        """A complete, fully verified snapshot from the host names every one
+        of the HOST'S OWN live seats: only the host seats its own people (no
+        delegated admin can seat a user of the owner's household). A
+        mirrored host seat it does not name — a departure or ban whose LEFT
+        gossip we missed — ends here, as a LEFT at the snapshot's version,
+        only where our seat is at or below it (a newer one is gossip that
+        overtook the snapshot). Seats of every other household are never
+        inferred from absence: a seat the host has not heard of yet stays."""
+        host = space.owner_instance_id
+        for seat in await self._remote_members.list_for_instance(
+            space.id, host, include_tombstoned=False
+        ):
+            if seat.user_id in named or seat.member_version > roster_version:
+                continue
+            await self._merge_roster_entry(
+                FederationEventType.SPACE_MEMBER_LEFT,
+                space.id,
+                {
+                    "space_id": space.id,
+                    "user_id": seat.user_id,
+                    "instance_id": host,
+                    "display_name": seat.display_name,
+                    "user_pk": seat.user_pk,
+                    "role": SpaceRole.MEMBER.value,
+                    "member_version": roster_version,
+                },
+                tombstoned=True,
+                verified_epoch=space.authority_key_epoch,
+            )
+
+    def _snapshot_complete(
+        self, space_id: str, host: str, p: dict, named: set[str]
+    ) -> set[str] | None:
+        """The host's own live seats (user ids) its roster names, once the
+        fully verified snapshot event *p* (naming *named*) completes it —
+        else ``None``: a single event completes it; a part (``snapshot_id``
+        / ``part`` / ``parts``) only when it is the last missing one of its
         send. One send is tracked per (space, host); a part of another send
         starts over. A malformed part completes nothing."""
         if "parts" not in p and "part" not in p and "snapshot_id" not in p:
-            return True
+            return named
         snapshot_id, part, parts = p.get("snapshot_id"), p.get("part"), p.get("parts")
         if (
             not isinstance(snapshot_id, str)
@@ -2105,18 +2160,19 @@ class PrivateSpaceInviteHandler:
             or not 0 <= part < parts <= _MAX_ROSTER_SNAPSHOT_PARTS
             or type(p.get("roster_version")) is not int
         ):
-            return False
+            return None
         key = (space_id, host)
         tracked = self._snapshot_parts.get(key)
         stamp = (snapshot_id, parts, p["roster_version"])
         if tracked is None or tracked[0] != stamp:
-            tracked = (stamp, set())
+            tracked = (stamp, set(), set())
             self._snapshot_parts[key] = tracked
         tracked[1].add(part)
+        tracked[2].update(named)
         if len(tracked[1]) < parts:
-            return False
+            return None
         del self._snapshot_parts[key]
-        return True
+        return tracked[2]
 
     @staticmethod
     def _check_snapshot_sigs_sync(

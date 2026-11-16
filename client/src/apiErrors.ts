@@ -152,7 +152,11 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   BAZAAR_FAQ_USED_UP: (_b, p) => t('error.bazaar_faq_used_up', { max: str(p, 'max') || '30' }),
   BAZAAR_FAQ_RATE_LIMITED: () => t('error.bazaar_faq_rate_limited'),
   // Pictures.
-  IMAGE_TOO_LARGE: (_b, p) => t('error.image_too_large', { max_mb: str(p, 'max_mb') }),
+  // max_kb: a space cover / icon that cannot be re-encoded under its cap
+  // (1 kB = 1000 B); max_mb: an upload over the size limit.
+  IMAGE_TOO_LARGE: (_b, p) => p.max_kb !== undefined
+    ? t('error.image_too_large_kb', { max_kb: str(p, 'max_kb') })
+    : t('error.image_too_large', { max_mb: str(p, 'max_mb') }),
   APP_BUNDLE_TOO_LARGE: () => t('error.app_bundle_too_large'),
   APP_DOWNLOAD_FAILED: () => t('error.app_download_failed'),
   APP_CATALOG_DISABLED: () => t('error.app_catalog_disabled'),

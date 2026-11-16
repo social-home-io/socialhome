@@ -517,12 +517,18 @@ async def test_removed_at_is_fresh_after_remove_revive_and_gossip_tombstone(
     assert gone.tombstoned and gone.removed_at not in (None, _OLD)
 
 
-async def test_a_repeated_tombstone_keeps_the_first_removal_time(repo):
+async def test_a_repeated_tombstone_keeps_its_time_a_newer_one_is_stamped(repo):
+    """NOTE 7 (round 5 review): a duplicate tombstone keeps its removal
+    time; a re-issued one at a NEWER version is a new removal — stamped now,
+    so the host's next roster snapshot carries it (30-day window)."""
     await repo.apply_member_event(**_evt(member_version=1, tombstoned=True))
     await _backdate(repo)
-    await repo.apply_member_event(**_evt(member_version=2, tombstoned=True))
+    await repo.apply_member_event(**_evt(member_version=1, tombstoned=True))
     gone = await repo.get_including_tombstones("sp1", "i-a", "u1")
     assert gone.removed_at == _OLD
+    await repo.apply_member_event(**_evt(member_version=2, tombstoned=True))
+    gone = await repo.get_including_tombstones("sp1", "i-a", "u1")
+    assert gone.removed_at != _OLD
 
 
 async def test_a_gossip_tombstone_insert_stamps_removed_at(repo):

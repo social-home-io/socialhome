@@ -219,6 +219,9 @@ def supersede_key(
     the outbox holds at most one pending row per (peer, key): a new one
     replaces it, and a newer one delivered directly drops it.
 
+    A space's roster snapshot to one household is state too (per space
+    and part).
+
     The key is local-only (an outbox column, never on the wire)."""
     if event_type is FederationEventType.SPACE_POLL_VOTE_CAST:
         post_id, voter = payload.get("post_id"), payload.get("voter_user_id")
@@ -236,6 +239,15 @@ def supersede_key(
         # older one carries the seed of a retired key); a rotation drops
         # every queued one by this prefix so none lands after a revocation.
         return f"{admin_seed_key_prefix(space_id)}seed" if space_id else None
+    if event_type is FederationEventType.SPACE_ROSTER_SNAPSHOT:
+        # The host's whole roster for one space, to one household: a newer
+        # one makes a queued older one worthless (the receiver merges by
+        # version, so only the slot is saved). Per part — a multi-part
+        # send's parts replace the older send's same-numbered parts.
+        part = payload.get("part", 0)
+        if not space_id or not isinstance(part, int) or isinstance(part, bool):
+            return None
+        return f"{roster_snapshot_key_prefix(space_id)}{part}"
     user_id = payload.get("user_id")
     if not isinstance(user_id, str) or not user_id:
         return None
@@ -251,6 +263,13 @@ def supersede_key(
         if isinstance(post_id, str) and post_id and isinstance(emoji, str) and emoji:
             return f"reaction:{space_id}:{post_id}:{user_id}:{emoji}"
     return None
+
+
+def roster_snapshot_key_prefix(space_id: str) -> str:
+    """What the outbox key of every queued ``SPACE_ROSTER_SNAPSHOT`` part
+    of *space_id* starts with — a new snapshot drops them all first, so a
+    shorter send never leaves an older one's higher parts behind."""
+    return f"roster-snapshot:{space_id}:"
 
 
 def retention_expires_at(

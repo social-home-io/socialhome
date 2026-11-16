@@ -66,19 +66,63 @@ uses), not just `cover_hash` / `icon_hash`. Before, every member (paired or
 link-joined) kept the image from its join time. The bytes sit inside the
 encrypted payload, and under the authority signature when the edit is signed.
 They go only to space members (`broadcast_to_space_members`) and only on the
-edit that changed the image, so a rename ships no bytes. They are bounded per
-transport through `embed_space_images` / `ImageProcessor.fit_within`. A paired
-or mesh-routed member gets the image under `SPACE_*_SNAPSHOT_MAX_BYTES`
-(256 KiB cover / 64 KiB icon, ~1 MiB envelope). A member seated from an
-invite link (`space_session`) sits behind the connection-server relay
-(~191 KiB envelope), so `broadcast_to_space_members(..., relay_payload=…)`
-sends it a separately signed variant under `SPACE_*_BOOTSTRAP_MAX_BYTES`
-(64 / 16 KiB). The member applies the image only after the change passes
+edit that changed the image, so a rename ships no bytes.
+
+**One cover size for every member** (owner decision 2026-11-15). A space's
+cover and icon have ONE cap each, whichever way a member household is
+reached: `SPACE_COVER_MAX_BYTES` = 64 KiB and `SPACE_ICON_MAX_BYTES` =
+16 KiB of WebP (`domain/media_constraints.py`). They are sized to the
+tightest leg the image travels: base64'ed (4·⌈65,536/3⌉ = 87,384 B and
+4·⌈16,384/3⌉ = 21,848 B) they are exactly what `SPACE_CONFIG_RESERVE_BYTES`
+holds next to a space's config inside ONE GFS-relay envelope
+(`domain/relay_media_frame.py`), and together (~107 KiB of base64) they leave
+~85 KiB of the 256 KiB sealed invite-link ACK for config, content key and
+roster — an ACK whose config and roster need more is resent without both
+images (and DENY'd if even that does not fit), the one case an image is
+dropped on the way. Where the image is SET, `SpaceService.set_cover` / `set_icon`
+re-encode the upload to a WebP within the cap (1200 px / 256 px, then
+`ImageProcessor.fit_within` shrinks it, off the event loop) — an ordinary
+photo always fits. An image that does not decode, or whose header declares
+more than `SPACE_IMAGE_MAX_SOURCE_PIXELS` (40 M), is refused
+(`IMAGE_UNREADABLE`); one not even a 64 px rendition of fits, with
+`IMAGE_TOO_LARGE`. Every path ships that one image: the config change,
+the join snapshot (§D1b invitation, §D2 / §D2b ACKs, join-request ACK) —
+there is no per-transport variant any more (`relay_payload` is gone). A
+cover stored before the cap (up to a few hundred KiB) is re-encoded within
+it the first time a send carries it (`embed_space_images`), and the
+rendition is kept under the same `cover_hash`, so it is re-encoded once;
+until the owner changes it, every member — paired or behind a GFS — gets
+that rendition, which a GFS-reached member already got before (it was the
+relay variant). The write-back is compare-and-set on the version tag
+(`replace_bytes_if_hash`), so a cover set or cleared while the re-encode
+runs is never undone; a stored cover that cannot be made to fit is left
+out of every send and remembered (in memory) per space and version, so it
+is not re-encoded on each send. The GFS directory listing publishes the
+stored bytes, so a pre-cap cover is published at its old size until its
+first send rewrites it. The member applies the image only after the change passes
 the owner / authority and last-writer-wins gates, so an out-of-order older
 change cannot roll the picture back (`apply_space_images_from_config_change`).
-Before storing, it checks the bytes: at most `SPACE_IMAGE_EMBED_MAX_BYTES`, and
-a WebP that fully decodes (Pillow, off the event loop) within 1200 px / 256 px.
-The join-snapshot path runs the same check. A shrunken rendition does not
+Before storing, it checks the bytes on every inbound path (config change
+and catch-up, join snapshot): at most the cap — an image over it is NOT
+stored, the one already held stays, and a WARNING names the cap — and a
+WebP that fully decodes (Pillow, off the event loop) within 1200 px /
+256 px. The refusal holds for a config change from a sender that caps its
+images (`FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES`, v_81 — every
+build after the released v_80 line; `sender_caps_space_images`, judged by
+`space_member_version`). A join snapshot (invitation accept, invite-link /
+redeem ACK) is always taken leniently — it was sealed when the invitation
+was made, maybe by a host that upgraded since — so its over-cap image is
+re-encoded as below. A host on
+the released v_80 line still sends a paired member covers of up to
+256 KiB: from such a sender (or one whose version is unknown) an image
+over the cap but within `SPACE_IMAGE_EMBED_MAX_BYTES` is re-encoded on
+the receiver (`ImageProcessor.fit_within`, off the event loop, logged at
+INFO) and the rendition stored — so no member of a released host loses its
+cover while that host upgrades. No version bump: the wire shape is
+unchanged, v_81–v_94 are unreleased and ship together (so no build that
+sends big covers exists past v_80), and a v_80 receiver accepts any image up to
+`SPACE_IMAGE_EMBED_MAX_BYTES` (1.5 MiB), so the capped image is accepted
+everywhere. A shrunken rendition does not
 digest to the host's hash, so the bytes are stored under the announced hash,
 which works as a version tag. A cleared hash removes the stored image. No
 protocol version is involved: an older member ignores the extra keys, as it
@@ -559,38 +603,164 @@ member household, not only on the host:
   seat — and a host-local member the current `roster_sequence`. Sent when
   the host seats a household (its invitation's roster may be stale: a
   demotion or kick in between would otherwise never reach it), when a
-  member household first advertises v_32, and on the periodic sync tick.
-  Not sent after an invite-link redeem (the ACK's roster is taken at seat
-  time, and the redeemer has no space row yet) nor, on the timer, to a
-  link-joined household (a timed envelope over the connection-server relay
-  would be new traffic metadata for it). The host signs a snapshot's
-  entries, and the receiver verifies them, in a worker thread, off the
-  event loop.
-- **Only what changed, on the timer.** A snapshot names the
-  `roster_version` it is complete up to (the host's `roster_sequence`).
-  A member household that applied one from the host — every entry
-  verified — echoes it on its next `SPACE_SYNC_BEGIN` to the host as
-  `roster_echo {roster_version, cert_epoch}` (`cert_epoch`: the epoch of
-  the writer cert it holds, or `null`). The periodic tick then skips that
-  household while the echo still matches the current `roster_sequence`
-  and the writer cert the host would send; after a roster change it sends
-  the household the snapshot **without the removals at or below the
-  echoed version** (it applied them in that full snapshot). The same
-  BEGIN also echoes `dir_seq`, the version of the space's member directory
-  the household holds (v_89, see
+  member household first advertises v_32, and in reply to a member's sync
+  BEGIN whose mirror is wrong (below). Not sent after an invite-link redeem
+  (the ACK's roster is taken at seat time, and the redeemer has no space row
+  yet). The host signs a snapshot's entries, and the receiver verifies
+  them, in a worker thread, off the event loop.
+- **Repair on a digest mismatch, in reply to an admitted BEGIN.** The host
+  never sends a roster snapshot on its own timer. Every `SPACE_SYNC_BEGIN` a
+  member household (this version) sends to the space's host — direct, the
+  mesh catch-up and incremental BEGINs, the relay re-BEGIN after an ICE
+  timeout, the accept's mesh catch-up and the authority-echo BEGIN —
+  carries `roster_digest {suite: "rd1-sha256", digest, cert_epoch}`
+  (`domain/space_roster_digest.py`): SHA-256 over the canonical JSON list
+  of `[instance_id, user_id, role]` of every LIVE seat it mirrors outside
+  its own household (sorted, the role as every receiver stores it — the
+  host's `owner` as `member`), and the epoch of the writer cert it holds.
+  Only a BEGIN the sync admission let in (S-6: 5 per hour per household) is
+  looked at (`FederationService.attach_sync_begin_admitted`). The host
+  computes the same digest for that household from its own seats (cached
+  per `roster_sequence` for 60 s) and reads the writer-cert epoch it would
+  issue without signing one (`SpaceWriterCertService.cert_epoch_for_peer`).
+
+  **One rule** (`SpaceService._repair_roster`), for every member household
+  however it is reached (paired, mesh, or seated from an invite link over
+  the GFS relay):
+  - digest and cert epoch match → nothing;
+  - otherwise → one repair snapshot, unless one went to this (space,
+    household) within its cooldown. The cooldown is 30 min after a
+    snapshot that went out (`send_roster_snapshot` returned true). It
+    doubles, up to a day, on every CONSECUTIVE mismatch answered with a
+    sent snapshot — whether or not the digest moved meanwhile — and starts
+    over only when the digest matches (or a v_80 echo reached the version
+    sent). A lost snapshot therefore backs off too: live gossip still
+    carries every change, the repair is a safety net. A match also brings
+    the next allowed repair back to at most 30 min after the last snapshot,
+    so a new miss after a day-long backoff does not wait out the day.
+  - A snapshot built but not sent (building it raised — logged at
+    WARNING — or a part's send failed) waits 15 min
+    (`ROSTER_REPAIR_RETRY_S`) without doubling. A send that stops before
+    building (a household below the snapshot line, no signing seed, a
+    space we no longer host) records nothing and costs no budget.
+  - **Budget:** at most `ROSTER_REPAIR_PER_SPACE_PER_MINUTE` (2) repair
+    snapshots a minute for one space and `ROSTER_REPAIR_PER_MINUTE` (6)
+    across every space the household hosts, charged right before a
+    snapshot is built. One space (a restart, a backup restore, sybil
+    followers of a public space) cannot starve the others. A household the
+    budget holds back is not recorded and asks again on its next admitted
+    BEGIN. Nothing is persisted: the budget bounds what a restart costs.
+
+  A writer cert behind or ahead of the host's is a mismatch like any other
+  (the snapshot carries the host's cert). An unknown suite, a suite that is
+  not a string, or a malformed digest (a cert epoch outside 0 … 2^63−1) is
+  refused — no repair, no fall-back to `roster_echo` — and logged at
+  WARNING at most once per (space, household) an hour, its text cut short.
+  The repair memory is per space and live seat (forgotten when the
+  household leaves, and the whole space — with its cached seats — when it
+  is dissolved or no longer hosted here). The snapshot goes as a tracked
+  background task. Followers of a PUBLIC or PRIVATE space sync and so send
+  a digest like any member; only a follower-only household of a GLOBAL
+  space sends no BEGIN at all, so it gets no periodic repair: only seat /
+  upgrade snapshots and live gossip. A new snapshot drops every queued part
+  of an older one to the same household first (outbox key prefix per
+  space), and a queued part is replaced by a newer one (supersede key per
+  space and part). The same BEGIN also echoes `dir_seq`, the version of
+  the space's member directory the household holds (v_89, see
   [gfs-relay.md](./gfs-relay.md#one-mailbox-per-household-reachable-by-every-member-v_89));
-  a host whose directory is newer answers with one directory snapshot. Seat and
-  upgrade snapshots are sent whole, as before. Both sides keep this in
-  memory: a restart costs one full snapshot per household. A household
-  that never echoes (older, or a link-joined one) is unchanged. Additive:
-  an older host ignores `roster_echo`, an older member ignores
-  `roster_version`. Credentials that change without a roster change heal
-  through their own paths (the rekey / rotation per-peer fan-outs, the
-  channel service, the v_46 authority echo) and still ride every snapshot
-  that is sent. Cost: a space with 50 seats, ~100 removals and 15 member
-  households used to send 15 × ~150 entries × ~400 B ≈ 900 KB every
-  30 minutes (≈ 43 MB a day; a busy space with thousands of seats or
-  removals far more); unchanged, it now sends nothing.
+  a host whose directory is newer answers with one directory snapshot.
+  Credentials that change without a roster change heal through their own
+  paths (the rekey / rotation per-peer fan-outs, the channel service, the
+  v_46 authority echo) and ride every snapshot that is sent.
+- **What a snapshot carries, and how it applies.** The host's live seats
+  and the host's own tombstones: every remote seat it removed in the last
+  30 days (`ROSTER_TOMBSTONE_WINDOW_S`, by `removed_at`, re-stamped when a
+  removal is re-issued at a newer version), each with its version and
+  authority signature exactly as live gossip carried it. A CONSECUTIVE
+  repair — the last one did not heal the member — carries every tombstone,
+  whatever its age: a member offline longer than the window (its LEFT
+  gossip left the outbox after 7 days) still learns of a kick and stops
+  sending space content to a removed household. The member merges each
+  entry by the usual per-entry rule (`apply_member_event`): strictly newer
+  wins, a tombstone wins a tie.
+  - **The host's own seats.** Only the host seats its own people (no
+    delegated admin seats a user of the owner's household), so a complete,
+    fully verified snapshot from the host speaks for every live seat OF
+    THE HOST'S INSTANCE: a mirrored host seat it does not name — a
+    departure or ban whose LEFT the member missed — ends as a LEFT at the
+    snapshot's `roster_version`, only where the seat is at or below it (a
+    newer one is gossip that overtook the snapshot). A delayed older
+    snapshot cannot bring it back: its version is lower.
+  - **Every other household's seats are never inferred from absence**: a
+    seat the snapshot does not name stays as the member has it. So a
+    delayed older snapshot (a GFS may hold one for a day) can neither
+    resurrect nor remove anything newer, and a seat a delegated admin made
+    while the owner was offline survives the owner's return even when the
+    members' BEGINs beat the admin's gossip (its card, its game seats and
+    its posts stay).
+
+  Size: ~500 B per tombstone; the 30-day window bounds an ordinary repair
+  by the removals of a month — in the worst case below with 10 % monthly
+  churn, ~1 000 tombstones ≈ 500 KB (~5 parts) on top of the live seats.
+  Only a consecutive repair carries them all (five years of a busy space:
+  ~60 000 ≈ 30 MB), and it is bounded by the doubling cooldown (at most
+  one a day per household once the backoff is at its cap).
+- **Residuals (a mismatch a snapshot cannot heal).** Each stays, its
+  repairs backing off to one snapshot a day per household:
+  - **A seat only the member knows** — one a delegated admin's gossip put
+    on another household that the host refused, or has not heard of yet.
+    The host keeps no tombstone for a seat it never seated.
+  - **A host restored from an older backup.** Its counter and seats are
+    behind what it issued; members keep the newer rows (strictly newer
+    wins), and the mismatch lasts until the host's own changes pass them.
+
+  Bans also reach a member through the §25.6 sync's `bans` resource, and
+  `is_banned` is checked at every authorship check, so a banned user's
+  writes are refused even before its seat ends.
+- **Older households (v_80) keep the echo.** A snapshot names the
+  `roster_version` it is complete up to; a member that applied one echoes
+  it as `roster_echo {roster_version, cert_epoch}` — a v_80 member only on
+  its DIRECT BEGIN. A v_80 household's BEGIN with no `roster_digest` is
+  answered by that echo under the same rule: right while it echoes the
+  current `roster_sequence` and the writer cert the host would send; an
+  echo at or past the version of the snapshot sent means it took it (the
+  cooldown starts over; a newer roster change is a new mismatch after 30
+  min). A stale echo gets every live seat and the recent removals above
+  it; no echo at all, every live seat and every recent removal. So a v_80
+  member's mesh, incremental-mesh and relay BEGINs (no echo) get the whole
+  roster — capped by the same cooldown, i.e. at most what the old periodic
+  timer sent. A household at `FederationCapability.MIN_FOR_ROSTER_DIGEST`
+  (v_81, the first unreleased line) carries the digest on every BEGIN path
+  to the host, so its BEGIN without one asks for nothing. No version bump:
+  `roster_digest` is an optional BEGIN field an older host ignores, and the
+  sync stream's contents do not change (no sync line).
+- **Cost.** ~500 B per roster entry, parts of 96 KiB (~255 KiB sealed for
+  the GFS relay). Per admitted BEGIN: the ~110 B digest field, one read of
+  the space's live seats per 60 s and roster version (cached), a hash over
+  them, and the cert-epoch lookup (a key read and the household's
+  entitlement — no signature). No grace: a BEGIN that overtakes in-flight
+  gossip (a member that just restarted) costs that household one snapshot
+  it would have caught up on anyway — ~25 KB for a 50-seat space, ~6 MB at
+  the worst case below — within the cooldown and the budgets.
+
+  | Case | Before (main: the periodic timer) | Now |
+  |---|---|---|
+  | No roster change, per 30-min tick | the whole roster to every household with a stale or missing echo | ~110 B per BEGIN, **0 snapshot bytes** |
+  | One roster change | live gossip, then the whole roster to every household on the next tick (≈ 20 MB at 200 seats, ≈ 500 MB at 1000) | live gossip only; a snapshot only to a household whose mirror is wrong at its next BEGIN |
+  | A missed remote removal (≤ 30 days old) | healed on the next tick | healed by one snapshot |
+  | A missed departure or ban of the host's own people | never healed (the snapshot named only current seats) | healed by one snapshot |
+  | A residual (above) | the whole roster every 30 min, forever | 30 min, 1 h, 2 h … then one snapshot a day per household |
+  | Lost snapshots in an active space | — | the same backoff (consecutive mismatches double it); gossip still carries changes |
+  | Hostile member | the whole roster every 30 min | at most one snapshot per 30 min (a matching digest in between starts the cooldown over), doubling to one a day while it stays wrong; only admitted BEGINs count, 5 per hour |
+  | Restart, backup restore, or sybil followers in one space | — | ≤ 2 snapshots a minute for that space, ≤ 6 a minute host-wide (≤ 33 MB/min and ~66 000 signatures/min at the worst case below; a few KB each for an ordinary space). Known limit: three busy spaces at their per-space cap take the whole global budget, so a fourth waits until a minute frees a slot |
+  | A member offline past the 30-day window | — | its first repair carries the window, the next (consecutive) one every tombstone — ≤ ~30 MB once for five years of a busy worst-case space |
+  | 1000 member households + 10 000 follower seats (~11 000 entries ≈ 5.5 MB + ≤ ~500 KB of tombstones, ~65 parts) | ≈ 5.5 GB per tick if every echo is stale | 1000 × ~110 B per 30 min ≈ 110 KB; a lost gossip costs that one household one ~6 MB burst; a restore storm in that one space heals at 2 households a minute (~8 h for 1000), ≤ 12 MB/min |
+
+  Seats see a per-space part-count burst only on a digest mismatch.
+  Followers receive the member roster in seat / upgrade snapshots and live
+  gossip today; that is unchanged here. The v_80 echo path costs what it
+  did (the whole roster once per roster change per v_80 household, at most
+  once per cooldown — few, and paired).
 - **Held writes.** A write naming a user the space has **no record of at
   all** — or, at the Follower gate, coming from a household it holds no
   row for — may simply have beaten the gossip seating them. It is held in a
@@ -636,9 +806,6 @@ member household, not only on the host:
 
 Known edges of the snapshot, all self-limiting:
 
-- A **link-joined household** gets no periodic snapshot (see above); its
-  mirror heals when it is seated again or first advertises v_32 after an
-  upgrade, and live gossip keeps reaching it in between.
 - A **v_32 receiver behind an older host** gets no snapshots at all — the
   host does not send them — and converges on live gossip and the §25.6
   catch-up stream as before.
@@ -1318,7 +1485,8 @@ binding and comments on the host path.
 paired joiner receives), on a role change that alters the household's write /
 comment rights, on every content-key rotation (`SPACE_KEY_EXCHANGE_REKEY`)
 and on every authority rotation (`SPACE_AUTHORITY_ROTATED`, signed with the
-new key), plus the v_49 upgrade and the periodic roster-snapshot tick.
+new key), plus the v_49 upgrade and the roster repair a member's sync
+BEGIN asks for (a digest mismatch or a writer-cert epoch it lacks).
 
 **Delivery — existing channels only.** Each household is delivered ITS OWN
 cert, inside that household's encrypted per-peer envelope (a cert is not

@@ -3546,6 +3546,7 @@
   "error.bazaar_faq_used_up": "Diese Anzeige hatte schon {max} Fragen, mehr geht nicht. Bearbeite stattdessen eine der Fragen, die sie zeigt.",
   "error.bazaar_faq_rate_limited": "Du hast die Fragen dieser Anzeige oft geändert. Warte etwas und versuch es dann noch einmal.",
   "error.image_too_large": "Dieses Bild ist zu groß. Wähl eins unter {max_mb} MB.",
+  "error.image_too_large_kb": "Dieses Bild lässt sich für den Space nicht klein genug machen (höchstens {max_kb} kB). Versuch ein einfacheres Bild.",
   "error.app_bundle_too_large": "Diese App ist zu groß zum Installieren.",
   "error.app_download_failed": "Die App konnte nicht heruntergeladen werden. Prüfe die Verbindung und versuch es noch einmal.",
   "error.app_catalog_disabled": "Der App-Katalog ist auf diesem Social Home ausgeschaltet.",

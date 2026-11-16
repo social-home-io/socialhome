@@ -34,6 +34,15 @@ describe('apiErrorMessage — known codes', () => {
       .toBe('Your home is still converting a lot of videos. Try again later.')
   })
 
+  it('names a picture limit under a megabyte in kB, not as "under 1 MB"', () => {
+    expect(apiErrorMessage(422, '/api/spaces/s/cover', {
+      code: 'IMAGE_TOO_LARGE', detail: 'x', params: { max_kb: 65 },
+    })).toBe("This picture can't be made small enough for the space (at most 65 kB). Try a simpler picture.")
+    expect(apiErrorMessage(422, '/api/me/picture', {
+      code: 'IMAGE_TOO_LARGE', detail: 'x', params: { max_mb: 10 },
+    })).toBe('This picture is too big. Pick one under 10 MB.')
+  })
+
   it('says a space item is too large, with the limit', () => {
     expect(apiErrorMessage(413, '/api/spaces/s/pages', {
       code: 'SPACE_ITEM_TOO_LARGE', detail: 'x', params: { max_kb: 475 },

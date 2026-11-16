@@ -39,10 +39,13 @@ import base64
 import binascii
 import logging
 import re
+import time
 import unicodedata
 import uuid
 import weakref
-from dataclasses import replace
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -55,6 +58,7 @@ from ..crypto import (
 )
 from ..domain.emoji import MAX_EMOJI_CODEPOINTS
 from ..domain.errors import (
+    ImageTooLargeError,
     NotFoundError,
     SpaceEmojiTooLongError,
     SpaceItemTooLargeError,
@@ -165,6 +169,7 @@ from ..domain.federation_capabilities import (
     space_feature_keys_missing_below,
     space_features_missing_below,
 )
+from ..domain.federation_retention import roster_snapshot_key_prefix
 from ..domain.gfs_server import SignedGfsServerList
 from ..domain.link_preview import card_survives_edit
 from ..domain.local_community import (
@@ -174,11 +179,12 @@ from ..domain.local_community import (
     validate_local_area,
 )
 from ..domain.media_constraints import (
+    SPACE_COVER_MAX_BYTES,
     SPACE_COVER_MAX_DIMENSION,
-    SPACE_COVER_SNAPSHOT_MAX_BYTES,
+    SPACE_ICON_MAX_BYTES,
     SPACE_ICON_MAX_DIMENSION,
-    SPACE_ICON_SNAPSHOT_MAX_BYTES,
     SPACE_IMAGE_EMBED_MAX_BYTES,
+    SPACE_IMAGE_MAX_SOURCE_PIXELS,
     space_media_ref,
 )
 from ..domain.mention import Mention
@@ -270,6 +276,15 @@ from ..domain.space_app_table import SpaceAppNotAllowedError
 from ..domain.space_item import reaction_emoji_ok
 from ..domain.space_media_fields import item_media_urls
 from ..domain.space_place import PlacePin, validate_place_pin
+from ..domain.space_roster_digest import (
+    RosterSeat,
+    UnsupportedRosterDigestSuite,
+    digest_of_roster_seats,
+    parse_roster_digest,
+    roster_digest,
+    roster_digest_wire,
+    roster_seats,
+)
 from ..domain.user import User
 from ..domain.writer_cert import WriterEntitlement
 from ..federation.invite_link_forward import (
@@ -284,6 +299,7 @@ from ..media.profile_picture import (
     PROFILE_PICTURE_MAX_DIMENSION,
     normalize_profile_picture,
 )
+from ..rate_limiter import RateLimiter
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.space_post_repo import AbstractSpacePostRepo
 from ..repositories.space_remote_member_repo import SpaceRemoteMember
@@ -480,6 +496,90 @@ def _require_link_publishable(space: Space) -> None:
 #: part.
 ROSTER_SNAPSHOT_PART_BYTES: int = 96 * 1024
 
+#: The roster repair's one rule (:meth:`SpaceService.on_sync_begin_roster`):
+#: a mismatch gets a repair snapshot unless one went to that (space, member
+#: household) within its cooldown. The cooldown is this after a snapshot that
+#: went out …
+ROSTER_REPAIR_COOLDOWN_S: float = 30 * 60
+#: … doubling, up to this, on every CONSECUTIVE mismatch answered with a sent
+#: snapshot (whether or not its digest moved). Only a matching digest (or a
+#: v_80 echo that reached the version sent) puts it back at the start. Gossip
+#: still carries every change; the repair is a safety net.
+ROSTER_REPAIR_COOLDOWN_MAX_S: float = 24 * 60 * 60
+#: A snapshot that was built but did not go out waits this before the next
+#: try (no doubling), so a failing household cannot cost a build per BEGIN.
+ROSTER_REPAIR_RETRY_S: float = 15 * 60
+#: Repair snapshots of this household: at most this many a minute across
+#: every space it hosts … The largest roster we plan for — 1000 member
+#: households + 10 000 followers, ~11 000 entries — is ~5.5 MB and ~11 000
+#: signatures a snapshot; six a minute is ≤ 33 MB/min (~4.4 Mbit/s) and
+#: ~66 000 signatures/min (≈ 3 s of one core) at the very worst, a few KB for
+#: an ordinary space. A restart or a backup restore that finds every member
+#: mismatched cannot burst.
+ROSTER_REPAIR_PER_MINUTE: int = 6
+#: … and at most this many a minute for any one space, so one space (sybil
+#: followers of a public space) cannot starve the others' repairs. A
+#: household the budget holds back is not recorded: its next admitted BEGIN
+#: asks again.
+ROSTER_REPAIR_PER_SPACE_PER_MINUTE: int = 2
+#: Tombstones a repair snapshot carries: removals at most this old
+#: (``removed_at``), ~500 B each. A CONSECUTIVE repair (the last one did not
+#: heal the member) carries every tombstone, so a member offline longer than
+#: the window — its LEFT gossip left the outbox after 7 days — still learns
+#: of a kick.
+ROSTER_TOMBSTONE_WINDOW_S: float = 30 * 24 * 60 * 60
+#: A malformed or unknown-suite digest is logged at most once per (space,
+#: household) in this window.
+ROSTER_REFUSAL_LOG_S: float = 60 * 60
+#: How long the host reuses its sorted roster seats for a space at one
+#: ``roster_sequence`` (a seat applied without a sequence bump — a
+#: delegated admin's gossip — shows up after at most this).
+ROSTER_SEATS_CACHE_S: float = 60.0
+
+
+@dataclass(slots=True)
+class _RosterRepair:
+    """The roster repair state of one member household of one space.
+    Service-local, in memory: the budget bounds what a restart costs."""
+
+    #: No new repair before this (monotonic).
+    until: float
+    #: When the last snapshot that went out went (monotonic; ``None``: none
+    #: yet). A match never leaves the next repair waiting longer than
+    #: :data:`ROSTER_REPAIR_COOLDOWN_S` after it.
+    sent_at: float | None
+    #: The cooldown the last snapshot that went out set.
+    cooldown: float
+    #: The ``roster_sequence`` that snapshot carried (a v_80 echo at or
+    #: past it took it).
+    sent_version: int | None
+    #: The last answer was a sent snapshot and no match came since: the
+    #: next one doubles the cooldown.
+    consecutive: bool
+
+
+#: Asked only when a peer's space image is over the cap: whether its sender
+#: caps its images (:func:`sender_caps_space_images`).
+SenderCaps = Callable[[], Awaitable[bool]]
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
+def _removed_since(removed_at: str | None, horizon: datetime) -> bool:
+    """Whether a tombstone's ``removed_at`` (SQLite ``datetime('now')``, UTC)
+    is at or after *horizon*. Unknown (``None``, unparsable) is old."""
+    if not removed_at:
+        return False
+    try:
+        at = datetime.fromisoformat(removed_at)
+    except ValueError:
+        return False
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=UTC)
+    return at >= horizon
+
 
 def _roster_parts(entries: list[dict]) -> list[list[dict]]:
     """*entries* cut into parts of at most
@@ -577,10 +677,16 @@ class SpaceService(
         "_redeem_coordinator",
         "_remote_members",
         "_roster_applied",
-        "_roster_heard",
+        "_roster_budget",
+        "_roster_inflight",
+        "_roster_refused",
+        "_roster_repairs",
+        "_roster_seats_cache",
+        "_roster_tasks",
         "_space_crypto",
         "_spaces",
         "_subscriber_keys",
+        "_unfittable",
         "_users",
         "_writer_certs",
     )
@@ -625,13 +731,27 @@ class SpaceService(
         #: v_49 writer-cert issuer/holder (:class:`SpaceWriterCertService`).
         #: Optional — absent, no cert rides any channel (pre-v_49 behaviour).
         self._writer_certs: SpaceWriterCertService | None = None
-        #: Host side — (space, member household) → the ``roster_echo`` its
-        #: last sync BEGIN carried: (roster version of the last snapshot it
-        #: applied from us, writer-cert epoch it holds). The periodic
-        #: snapshot is skipped while both still match. In memory: after a
-        #: restart every household gets one snapshot until it echoes again.
-        #: Bounded by hosted spaces × their member households.
-        self._roster_heard: dict[tuple[str, str], tuple[int, int | None]] = {}
+        #: Host side — space → member household → the last roster repair
+        #: sent to it (:meth:`on_sync_begin_roster`). Bounded by live seats:
+        #: a household that left is dropped on its space's next BEGIN, a
+        #: space we no longer host (dissolved) at once.
+        self._roster_repairs: dict[str, dict[str, _RosterRepair]] = {}
+        #: Host side — (space, household) repairs being sent right now.
+        self._roster_inflight: set[tuple[str, str]] = set()
+        #: Host side — space → household → when its refused digest was
+        #: last logged (:data:`ROSTER_REFUSAL_LOG_S`).
+        self._roster_refused: dict[str, dict[str, float]] = {}
+        #: Host side — the per-minute budget of repair snapshots across
+        #: every hosted space (:data:`ROSTER_REPAIR_PER_MINUTE`).
+        self._roster_budget = RateLimiter(monotonic=lambda: _monotonic())
+        #: Host side — space → (roster_sequence, cached at, sorted seats).
+        self._roster_seats_cache: dict[
+            str, tuple[int, float, tuple[RosterSeat, ...]]
+        ] = {}
+        #: Repair snapshots in flight (tracked; see :meth:`wait_roster_repairs`).
+        self._roster_tasks: set[asyncio.Task] = set()
+        #: Stored covers / icons that cannot be made to fit the cap.
+        self._unfittable = UnfittableImages()
         #: Member side — space → (host, roster version of the last snapshot
         #: we applied from it), echoed on our BEGIN to that host.
         self._roster_applied: dict[str, tuple[str, int]] = {}
@@ -1055,9 +1175,8 @@ class SpaceService(
             raise RuntimeError("cover repo not attached")
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
-        webp = await ImageProcessor().generate_thumbnail(
-            raw_bytes,
-            size=SPACE_COVER_MAX_DIMENSION,
+        webp = await _space_image_within_cap(
+            raw_bytes, size=SPACE_COVER_MAX_DIMENSION, max_bytes=SPACE_COVER_MAX_BYTES
         )
         hash_ = compute_picture_hash(webp)
         await self._covers.set(
@@ -1118,9 +1237,8 @@ class SpaceService(
             raise RuntimeError("icon repo not attached")
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
-        webp = await ImageProcessor().generate_thumbnail(
-            raw_bytes,
-            size=SPACE_ICON_MAX_DIMENSION,
+        webp = await _space_image_within_cap(
+            raw_bytes, size=SPACE_ICON_MAX_DIMENSION, max_bytes=SPACE_ICON_MAX_BYTES
         )
         hash_ = compute_picture_hash(webp)
         await self._icons.set(
@@ -1432,6 +1550,7 @@ class SpaceService(
             media_refs=self._media_refs,
             space_id=space_id,
         )
+        self._forget_roster_space(space_id)
         for instance_id in member_instances:
             await self.revoke_space_session_if_orphaned(instance_id)
 
@@ -1915,7 +2034,13 @@ class SpaceService(
         return await self._spaces.get_gfs_channel(space.id) is not None
 
     async def send_roster_snapshot(
-        self, space_id: str, *, to_instance_id: str, periodic: bool = False
+        self,
+        space_id: str,
+        *,
+        to_instance_id: str,
+        known_version: int | None = None,
+        charge: Callable[[int], bool] | None = None,
+        all_tombstones: bool = False,
     ) -> bool:
         """Send household ``to_instance_id`` the whole roster of a space we host.
 
@@ -1937,13 +2062,22 @@ class SpaceService(
         the gossip that reached it — a joiner's invitation snapshot goes
         stale, a mesh-only or offline household misses gossip, an upgraded
         household may never have received it. Sent on seat, on a peer's
-        first v_32 advertisement and on the periodic sync tick. v_32+ only;
-        best effort. Returns whether a snapshot was sent.
+        first v_32 advertisement and in reply to a member's sync BEGIN whose
+        roster digest (or, from an older household, ``roster_echo``) shows
+        its mirror is wrong (:meth:`on_sync_begin_roster`). v_32+ only; best
+        effort. Returns whether a snapshot was sent.
 
-        ``periodic`` (the tick): skipped for a household whose last sync
-        BEGIN echoed the current ``roster_version`` and the writer-cert
-        epoch we would send (``roster_echo``); a household that echoed an
-        older version is sent the removals it lacks, not every one again.
+        ``known_version``: the household applied a full snapshot complete up
+        to it (an older household's ``roster_echo``), so removals at or
+        below it are left out.
+
+        ``charge``: asked with the roster version the snapshot will carry,
+        once every cheap check passed, right before it is built (the
+        repair's budget); false → nothing is built or sent. A failure while
+        building is a WARNING and returns false.
+
+        ``all_tombstones``: carry every tombstone, not only those of the
+        last :data:`ROSTER_TOMBSTONE_WINDOW_S`.
         """
         if self._federation is None:
             return False
@@ -1967,6 +2101,70 @@ class SpaceService(
             return False
         if seed is None:
             return False
+        current = int(space.roster_sequence)
+        if charge is not None and not charge(current):
+            return False
+        try:
+            payloads = await self._build_roster_snapshot(
+                space,
+                seed=seed,
+                to_instance_id=to_instance_id,
+                known_version=known_version,
+                current=current,
+                all_tombstones=all_tombstones,
+            )
+        except Exception:
+            log.warning(
+                "roster-snapshot: building it for %s in %s failed — nothing sent",
+                to_instance_id,
+                space.id,
+                exc_info=True,
+            )
+            return False
+        if payloads is None:
+            return False
+        # Supersede the whole older snapshot still queued for this household
+        # (every part — the new one may have fewer).
+        try:
+            await self._federation.drop_queued_with_key_prefix(
+                to_instance_id, roster_snapshot_key_prefix(space.id)
+            )
+        except Exception:
+            log.exception(
+                "roster-snapshot: dropping queued parts for %s failed", space.id
+            )
+        ok = True
+        for payload in payloads:
+            try:
+                result = await self._federation.send_with_mesh_fallback(
+                    to_instance_id=to_instance_id,
+                    event_type=FederationEventType.SPACE_ROSTER_SNAPSHOT,
+                    payload=payload,
+                    space_id=space.id,
+                )
+            except Exception:
+                log.exception(
+                    "roster-snapshot: send to %s failed for %s",
+                    to_instance_id,
+                    space.id,
+                )
+                return False
+            ok = ok and bool(getattr(result, "ok", True))
+        return ok
+
+    async def _build_roster_snapshot(
+        self,
+        space: Space,
+        *,
+        seed: bytes,
+        to_instance_id: str,
+        known_version: int | None,
+        current: int,
+        all_tombstones: bool,
+    ) -> list[dict] | None:
+        """The ``SPACE_ROSTER_SNAPSHOT`` payloads for :meth:`send_roster_snapshot`
+        (``None``: nothing to send)."""
+        assert self._federation is not None
         # v_49 — the recipient's OWN writer cert for the current epoch (and
         # nobody else's): the snapshot goes to this one household, encrypted
         # to it.
@@ -1982,32 +2180,26 @@ class SpaceService(
                     to_instance_id,
                     space.id,
                 )
-        current = int(space.roster_sequence)
-        heard = self._roster_heard.get((space.id, to_instance_id)) if periodic else None
-        if (
-            heard is not None
-            and heard[0] == current
-            and (writer_cert is None or writer_cert.get("epoch") == heard[1])
-        ):
-            # The household echoed this very roster version on its last
-            # sync BEGIN, and holds the writer cert we would send: it has
-            # all of it. Credentials that change without a roster change
-            # heal through their own paths (the rekey / rotation fan-outs,
-            # the channel service, the v_46 authority echo).
-            return False
         entries = await self.roster_snapshot_entries(
             space,
             seed=seed,
             to_instance_id=to_instance_id,
-            # Removals at or below the echoed version were in the full
-            # snapshot it applied — never resend them. (An echo ABOVE ours
-            # means we were restored from an older backup: send it all.)
-            known_version=(
-                heard[0] if heard is not None and heard[0] <= current else None
-            ),
+            known_version=known_version,
+            all_tombstones=all_tombstones,
         )
+        # Never empty for a space we host: its owner is always a local seat
+        # here, and live seats always ship (``known_version`` drops only
+        # removals). Part 0 carries the extras below (writer cert / key,
+        # channel grant) — a refusal-only household would otherwise never
+        # get them, so an empty roster is a bug worth seeing, not a no-op.
         if not entries:
-            return False
+            log.warning(
+                "roster-snapshot: no entries for %s in hosted space %s — "
+                "its credentials did not go out",
+                to_instance_id,
+                space.id,
+            )
+            return None
         # Sent with the roster, to this one household: its own credentials.
         extras: dict = {}
         if self._writer_certs is not None:
@@ -2035,7 +2227,7 @@ class SpaceService(
             )
             if grant is not None:
                 extras["gfs_channel"] = grant
-        payloads = roster_snapshot_parts(
+        return roster_snapshot_parts(
             space.id,
             entries,
             # The version this snapshot is complete up to — the member echoes
@@ -2047,24 +2239,6 @@ class SpaceService(
             authority_cert=owner_authority_cert_via(self._federation, space),
             extras=extras,
         )
-        ok = True
-        for payload in payloads:
-            try:
-                result = await self._federation.send_with_mesh_fallback(
-                    to_instance_id=to_instance_id,
-                    event_type=FederationEventType.SPACE_ROSTER_SNAPSHOT,
-                    payload=payload,
-                    space_id=space.id,
-                )
-            except Exception:
-                log.exception(
-                    "roster-snapshot: send to %s failed for %s",
-                    to_instance_id,
-                    space.id,
-                )
-                return False
-            ok = ok and bool(getattr(result, "ok", True))
-        return ok
 
     async def roster_snapshot_entries(
         self,
@@ -2073,12 +2247,16 @@ class SpaceService(
         seed: bytes,
         to_instance_id: str,
         known_version: int | None = None,
+        all_tombstones: bool = False,
     ) -> list[dict]:
         """Every seat of a space we host, authority-signed with ``seed``, as
         ``SPACE_ROSTER_SNAPSHOT`` entries for household ``to_instance_id``.
 
         ``known_version``: the household applied a full snapshot complete up
         to that roster version, so removals at or below it are left out.
+        Every live seat always ships: a seat's version is not a host-counter
+        invariant (one applied from a delegated admin's gossip keeps that
+        admin's version; a host restored from backup reuses versions).
 
         Shared by :meth:`send_roster_snapshot` and the v_44 rotation bundle
         (which signs with the NEW key). The receiver's own seats are left out
@@ -2111,10 +2289,14 @@ class SpaceService(
                     False,
                 )
             )
+        recent: set[tuple[str, str]] = set()
+        horizon = datetime.now(UTC) - timedelta(seconds=ROSTER_TOMBSTONE_WINDOW_S)
         if self._remote_members is not None:
             for r in await self._remote_members.list_for_space_including_tombstones(
                 space.id
             ):
+                if r.tombstoned and _removed_since(r.removed_at, horizon):
+                    recent.add((r.instance_id, r.user_id))
                 seats.append(
                     (
                         r.user_id,
@@ -2139,6 +2321,9 @@ class SpaceService(
                 continue
             if gone and known_version is not None and version <= known_version:
                 # It holds this removal already (see ``known_version``).
+                continue
+            if gone and not all_tombstones and (inst, user_id) not in recent:
+                # Older than :data:`ROSTER_TOMBSTONE_WINDOW_S`: not carried.
                 continue
             if role == SpaceRole.SUBSCRIBER.value and not subscriber_ok:
                 continue
@@ -2189,62 +2374,286 @@ class SpaceService(
             entries.append({"event_type": event_type, "payload": signed})
         return entries
 
-    async def send_hosted_roster_snapshots(self) -> int:
-        """Periodic self-heal: every space we host → each member household.
+    async def on_sync_begin_roster(self, event: FederationEvent) -> None:
+        """Host side: repair a member household's roster mirror in reply to
+        its ``SPACE_SYNC_BEGIN`` — only for a BEGIN the sync admission let
+        in (wired through ``FederationService.attach_sync_begin_admitted``,
+        so the S-6 limit applies). ONE rule for every member household,
+        however it is reached (paired, mesh, or seated from an invite link
+        over the GFS relay); the host never sends one on its own timer.
 
-        Skips households seated from an invite link: those ride the
-        connection-server relay, and a timed envelope there would be new
-        traffic metadata for the relay; they get a snapshot when they
-        advertise a new protocol version instead.
+        The member is right when its ``roster_digest`` equals ours for it
+        (:meth:`roster_digest_of`) and it holds the writer-cert epoch we
+        would send — then nothing. Otherwise it gets a repair snapshot
+        (:meth:`send_roster_snapshot`: our live seats and our recent
+        tombstones, merged entry by entry, strictly newer wins), unless one
+        went to it within its cooldown
+        (:meth:`_repair_roster`). A BEGIN without a digest from a household
+        at :data:`FederationCapability.MIN_FOR_ROSTER_DIGEST` asks nothing;
+        an older (released v_80) household's ``roster_echo`` stands in for
+        the digest — right when it echoes our current roster version and
+        cert epoch. An unknown suite or a malformed digest is refused
+        (logged at most hourly), never a guess.
         """
-        own = self._own_instance_id
-        if self._federation is None or not own:
-            return 0
-        sent = 0
-        for space in await self._spaces.list_all():
-            if space.owner_instance_id != own:
-                continue
-            for inst in await self._spaces.list_member_instances(space.id):
-                if inst == own or await self._is_relay_only_peer(inst):
-                    continue
-                if await self.send_roster_snapshot(
-                    space.id, to_instance_id=inst, periodic=True
-                ):
-                    sent += 1
-        return sent
-
-    async def on_sync_begin_roster_echo(self, event: FederationEvent) -> None:
-        """Host side: note the ``roster_echo`` a member household's
-        ``SPACE_SYNC_BEGIN`` carries (see :meth:`send_roster_snapshot`).
-
-        Kept only for a space we host and a household seated in it, so a
-        peer cannot grow the map. The echo only ever spares ITS sender a
-        snapshot (or the removals it already holds) — a household that lies
-        here costs itself, nobody else."""
         p = event.payload if isinstance(event.payload, dict) else {}
-        echo = p.get("roster_echo")
-        if not isinstance(echo, dict):
-            return
-        version = echo.get("roster_version")
-        cert_epoch = echo.get("cert_epoch")
-        if (
-            not isinstance(version, int)
-            or isinstance(version, bool)
-            or version < 0
-            or (cert_epoch is not None and not isinstance(cert_epoch, int))
-        ):
-            return
         space_id = str(event.space_id or p.get("space_id") or "")
         sender = event.from_instance
         own = self._own_instance_id
-        if not space_id or not sender or sender == own:
+        if not space_id or not sender or not own or sender == own:
             return
         space = await self._spaces.get(space_id)
-        if space is None or not own or space.owner_instance_id != own:
+        if space is None or space.owner_instance_id != own:
+            self._forget_roster_space(space_id)
             return
-        if sender not in await self._spaces.list_member_instances(space_id):
+        members = set(await self._spaces.list_member_instances(space_id))
+        # The repair memory follows the roster: a household that left this
+        # space is forgotten on the space's next BEGIN.
+        for book in (
+            self._roster_repairs.get(space_id, {}),
+            self._roster_refused.get(space_id, {}),
+        ):
+            for inst in [i for i in book if i not in members]:
+                del book[inst]
+        if sender not in members:
             return
-        self._roster_heard[(space_id, sender)] = (version, cert_epoch)
+        try:
+            digest = parse_roster_digest(p.get("roster_digest"))
+        except UnsupportedRosterDigestSuite as exc:
+            # Receivers reject an unknown suite — never a fallback.
+            self._refuse_roster_digest(space_id, sender, f"unknown suite {exc}")
+            return
+        if digest is None and "roster_digest" in p:
+            self._refuse_roster_digest(space_id, sender, "malformed")
+            return
+        host_epoch = await self._cert_epoch_for(space_id, sender)
+        current = int(space.roster_sequence)
+        if digest is not None:
+            right = digest.digest == await self.roster_digest_of(space, sender) and (
+                host_epoch is None or digest.cert_epoch == host_epoch
+            )
+            await self._repair_roster(
+                space, sender, right=right, took=right, known_version=None
+            )
+            return
+        if (
+            self._federation is not None
+            and await self._federation.space_member_supports(
+                sender, min_version=FederationCapability.MIN_FOR_ROSTER_DIGEST
+            )
+        ):
+            return  # a current household's BEGIN without a digest asks nothing
+        echo = p.get("roster_echo")
+        version: int | None = None
+        echo_epoch: int | None = None
+        if echo is not None:
+            raw = echo.get("roster_version") if isinstance(echo, dict) else None
+            echo_epoch = echo.get("cert_epoch") if isinstance(echo, dict) else None
+            if (
+                not isinstance(raw, int)
+                or isinstance(raw, bool)
+                or raw < 0
+                or (echo_epoch is not None and not isinstance(echo_epoch, int))
+            ):
+                self._refuse_roster_digest(space_id, sender, "malformed echo")
+                return
+            version = raw
+        rec = self._roster_repairs.get(space_id, {}).get(sender)
+        await self._repair_roster(
+            space,
+            sender,
+            # It applied this very roster and holds the cert we would send.
+            right=version == current
+            and (host_epoch is None or host_epoch == echo_epoch),
+            # An echo at or past the version we sent: it took our snapshot.
+            took=version is not None
+            and rec is not None
+            and rec.sent_version is not None
+            and version >= rec.sent_version,
+            # Removals at or below the echoed version were in the snapshot
+            # it applied (an echo ABOVE ours: send it all).
+            known_version=version
+            if version is not None and version <= current
+            else None,
+        )
+
+    def _refuse_roster_digest(self, space_id: str, sender: str, why: str) -> None:
+        """Log a refused digest — at most once per (space, household) per
+        :data:`ROSTER_REFUSAL_LOG_S`, with the sender's text cut short."""
+        now = _monotonic()
+        book = self._roster_refused.setdefault(space_id, {})
+        last = book.get(sender)
+        if last is not None and now - last < ROSTER_REFUSAL_LOG_S:
+            return
+        book[sender] = now
+        log.warning(
+            "roster digest from %s for %s refused (%s) — no repair",
+            sender,
+            space_id,
+            repr(why)[:80],
+        )
+
+    async def _repair_roster(
+        self,
+        space: Space,
+        sender: str,
+        *,
+        right: bool,
+        took: bool,
+        known_version: int | None,
+    ) -> None:
+        """The one rule. Right → nothing. Wrong → a repair snapshot, unless
+        one went to *sender* within its cooldown: 30 min after a snapshot
+        that went out, doubling (to a day) on every consecutive mismatch
+        answered with a sent snapshot; *took* (the digest matched, or a v_80
+        echo reached the version sent) starts it over. Charged against the
+        per-space and global budgets only once the snapshot is about to be
+        built; a household they hold back is not recorded. A snapshot built
+        but not sent waits :data:`ROSTER_REPAIR_RETRY_S`."""
+        book = self._roster_repairs.setdefault(space.id, {})
+        rec = book.get(sender)
+        if took and rec is not None:
+            rec.consecutive = False
+            if rec.sent_at is not None:
+                # Healed: the next miss waits the base cooldown at most.
+                rec.until = min(rec.until, rec.sent_at + ROSTER_REPAIR_COOLDOWN_S)
+        if right:
+            return
+        now = _monotonic()
+        if rec is not None and now < rec.until:
+            return
+        key = (space.id, sender)
+        if key in self._roster_inflight:
+            return
+        cooldown = (
+            min(rec.cooldown * 2, ROSTER_REPAIR_COOLDOWN_MAX_S)
+            if rec is not None and rec.consecutive
+            else ROSTER_REPAIR_COOLDOWN_S
+        )
+        charged = False
+        carried: int | None = None
+        # A repair that follows one which did not heal carries every
+        # tombstone (a member offline past the window).
+        consecutive = rec is not None and rec.consecutive
+
+        def _charge(version: int) -> bool:
+            nonlocal charged, carried
+            space_key = f"roster-repair:{space.id}"
+            if not (
+                self._roster_budget.has_room(
+                    "roster-repair", limit=ROSTER_REPAIR_PER_MINUTE, window_s=60
+                )
+                and self._roster_budget.has_room(
+                    space_key, limit=ROSTER_REPAIR_PER_SPACE_PER_MINUTE, window_s=60
+                )
+            ):
+                log.info(
+                    "roster repair for %s in %s deferred — the per-minute "
+                    "budget is spent; its next BEGIN asks again",
+                    sender,
+                    space.id,
+                )
+                return False
+            self._roster_budget.is_allowed(
+                "roster-repair", limit=ROSTER_REPAIR_PER_MINUTE, window_s=60
+            )
+            self._roster_budget.is_allowed(
+                space_key, limit=ROSTER_REPAIR_PER_SPACE_PER_MINUTE, window_s=60
+            )
+            charged = True
+            carried = version
+            return True
+
+        self._roster_inflight.add(key)
+
+        async def _send() -> None:
+            try:
+                sent = await self.send_roster_snapshot(
+                    space.id,
+                    to_instance_id=sender,
+                    known_version=known_version,
+                    charge=_charge,
+                    all_tombstones=consecutive,
+                )
+            finally:
+                self._roster_inflight.discard(key)
+            done = _monotonic()
+            book = self._roster_repairs.setdefault(space.id, {})
+            if sent:
+                book[sender] = _RosterRepair(
+                    until=done + cooldown,
+                    sent_at=done,
+                    cooldown=cooldown,
+                    sent_version=carried,
+                    consecutive=True,
+                )
+            elif charged:
+                prior = book.get(sender)
+                book[sender] = _RosterRepair(
+                    until=done + ROSTER_REPAIR_RETRY_S,
+                    sent_at=prior.sent_at if prior else None,
+                    cooldown=prior.cooldown if prior else ROSTER_REPAIR_COOLDOWN_S,
+                    sent_version=prior.sent_version if prior else None,
+                    consecutive=prior.consecutive if prior else False,
+                )
+
+        task = asyncio.create_task(_send(), name=f"roster-repair-{space.id}-{sender}")
+        self._roster_tasks.add(task)
+        task.add_done_callback(self._roster_tasks.discard)
+
+    def _forget_roster_space(self, space_id: str) -> None:
+        """Drop the host-side repair memory of a space we no longer host."""
+        self._roster_repairs.pop(space_id, None)
+        self._roster_refused.pop(space_id, None)
+        self._roster_seats_cache.pop(space_id, None)
+
+    async def _cert_epoch_for(self, space_id: str, instance_id: str) -> int | None:
+        """The writer-cert epoch a snapshot to *instance_id* would carry —
+        read without signing one."""
+        if self._writer_certs is None:
+            return None
+        try:
+            return await self._writer_certs.cert_epoch_for_peer(space_id, instance_id)
+        except Exception:
+            log.exception("roster repair: writer-cert epoch for %s failed", instance_id)
+            return None
+
+    async def _roster_seats_of(self, space: Space) -> tuple[RosterSeat, ...]:
+        """*space*'s live seats as hashed, our own members as the ``(us,
+        user, role)`` seats a snapshot ships them as — cached per
+        ``roster_sequence`` for :data:`ROSTER_SEATS_CACHE_S`."""
+        now = _monotonic()
+        sequence = int(space.roster_sequence)
+        cached = self._roster_seats_cache.get(space.id)
+        if (
+            cached is not None
+            and cached[0] == sequence
+            and now - cached[1] < ROSTER_SEATS_CACHE_S
+        ):
+            return cached[2]
+        own = self._own_instance_id or ""
+        raw: list[tuple[str, str, str]] = [
+            (own, m.user_id, str(getattr(m.role, "value", m.role)))
+            for m in await self._spaces.list_members(space.id)
+        ]
+        if self._remote_members is not None:
+            raw.extend(
+                (r.instance_id, r.user_id, r.role)
+                for r in await self._remote_members.list_for_space(space.id)
+            )
+        seats = roster_seats(raw)
+        self._roster_seats_cache[space.id] = (sequence, now, seats)
+        return seats
+
+    async def roster_digest_of(self, space: Space, instance_id: str) -> str:
+        """Our digest of *space*'s roster as member household *instance_id*
+        mirrors it: every live seat outside that household."""
+        return digest_of_roster_seats(
+            await self._roster_seats_of(space), exclude_instance=instance_id
+        )
+
+    async def wait_roster_repairs(self) -> None:
+        """Wait for repair snapshots still being sent (tests, shutdown)."""
+        await wait_tasks_done(lambda: self._roster_tasks)
 
     def note_roster_snapshot_applied(
         self, space_id: str, host_instance_id: str, roster_version: int
@@ -2270,6 +2679,42 @@ class SpaceService(
             epoch = wire.get("epoch") if isinstance(wire, dict) else None
             cert_epoch = epoch if isinstance(epoch, int) else None
         return {"roster_version": applied[1], "cert_epoch": cert_epoch}
+
+    async def roster_digest_for(
+        self, space_id: str, to_instance_id: str
+    ) -> dict | None:
+        """Member side: the ``roster_digest`` our ``SPACE_SYNC_BEGIN`` to
+        ``to_instance_id`` carries — only to the space's host (the owner),
+        never for a space we host — or ``None``. The digest of every live
+        seat we mirror outside our own household
+        (:mod:`~socialhome.domain.space_roster_digest`) and the writer-cert
+        epoch we hold; the host answers with a repair snapshot only
+        when its own digest for us differs."""
+        own = self._own_instance_id
+        if not own or self._remote_members is None:
+            return None
+        space = await self._spaces.get(space_id)
+        if (
+            space is None
+            or space.owner_instance_id in (own, None, "")
+            or (space.owner_instance_id != to_instance_id)
+        ):
+            return None
+        seats = [
+            (r.instance_id, r.user_id, r.role)
+            for r in await self._remote_members.list_for_space(space_id)
+            if r.instance_id != own
+        ]
+        cert_epoch: int | None = None
+        if self._writer_certs is not None:
+            try:
+                wire = await self._writer_certs.current_own_cert_wire(space_id)
+            except Exception:
+                log.exception("roster digest: own writer cert for %s failed", space_id)
+                wire = None
+            epoch = wire.get("epoch") if isinstance(wire, dict) else None
+            cert_epoch = epoch if isinstance(epoch, int) else None
+        return roster_digest_wire(roster_digest(seats), cert_epoch)
 
     async def on_peer_proto_version_raised(self, event: PeerProtoVersionRaised) -> None:
         """A member household just upgraded past the roster-snapshot line:
@@ -2299,12 +2744,6 @@ class SpaceService(
                 await self.send_roster_snapshot(
                     space.id, to_instance_id=event.instance_id
                 )
-
-    async def _is_relay_only_peer(self, instance_id: str) -> bool:
-        if self._federation_repo is None:
-            return False
-        instance = await self._federation_repo.get_instance(instance_id)
-        return instance is not None and instance.source is InstanceSource.SPACE_SESSION
 
     async def _emit_member_roster_gossip(
         self,
@@ -6843,6 +7282,7 @@ class SpaceService(
                     space_crypto_service=self._space_crypto,
                     authority_cert=owner_authority_cert_via(self._federation, space),
                     owner_statement=owner_statement_via(self._federation, space),
+                    unfittable=self._unfittable,
                 ),
             },
         )
@@ -7090,11 +7530,14 @@ class SpaceService(
         # triggers — so initiate it explicitly here. No-op + fail-soft for a
         # confirmed host (the sync scheduler asks it on the
         # SpaceInviteAnswered ``accept_remote_invite`` publishes) or an
-        # unwired sync stack. (A roster snapshot the
-        # host sends on seat is also re-sent on its periodic sync tick.)
+        # unwired sync stack. The BEGIN carries our roster digest, like
+        # every member BEGIN to the host: the host repairs our mirror (a
+        # roster snapshot) only when it differs — there is no periodic
+        # resend.
         await self._federation.begin_mesh_catchup_sync(
             space_id=space_id,
             host_instance_id=host_instance,
+            roster_digest=await self.roster_digest_for(space_id, host_instance),
         )
         # §D1b — seat the local membership row pointing at the stub
         # seated above from the invitation's snapshot (or, for an
@@ -9397,28 +9840,69 @@ async def _bounded_space_image(
     return fitted
 
 
+async def _space_image_within_cap(raw: bytes, *, size: int, max_bytes: int) -> bytes:
+    """An uploaded cover / icon as the WebP every member gets: bounded to
+    *size* px, then re-encoded smaller until it is at most *max_bytes* (the
+    one cap, :data:`SPACE_COVER_MAX_BYTES` / :data:`SPACE_ICON_MAX_BYTES`).
+    Pillow runs off the event loop. An ordinary photo always fits. An image
+    that does not decode, or whose header declares more than
+    :data:`SPACE_IMAGE_MAX_SOURCE_PIXELS`, is ``ImageUnreadableError``; one
+    not even a :data:`SPACE_IMAGE_FIT_MIN_DIMENSION` px rendition of fits is
+    ``ImageTooLargeError`` (422 ``IMAGE_TOO_LARGE``)."""
+    processor = ImageProcessor()
+    webp = await processor.generate_thumbnail(
+        raw, size=size, max_source_pixels=SPACE_IMAGE_MAX_SOURCE_PIXELS
+    )
+    fitted = await processor.fit_within(webp, max_bytes)
+    if fitted is None:
+        raise ImageTooLargeError(max_bytes)
+    return fitted
+
+
+class UnfittableImages:
+    """(space, cover / icon, image version) whose stored bytes cannot be made
+    to fit the cap — left out of every send without re-encoding them again.
+    Owned by each sender (instance state), in memory, bounded."""
+
+    __slots__ = ("_seen",)
+    MAX = 1024
+
+    def __init__(self) -> None:
+        self._seen: OrderedDict[tuple[str, str, str], None] = OrderedDict()
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._seen
+
+    def add(self, key: tuple[str, str, str]) -> None:
+        self._seen[key] = None
+        self._seen.move_to_end(key)
+        while len(self._seen) > self.MAX:
+            self._seen.popitem(last=False)
+
+
 async def embed_space_images(
     meta: dict,
     space: Space,
     *,
     cover_repo=None,
     icon_repo=None,
-    cover_max_bytes: int = SPACE_COVER_SNAPSHOT_MAX_BYTES,
-    icon_max_bytes: int = SPACE_ICON_SNAPSHOT_MAX_BYTES,
     cover: bool = True,
     icon: bool = True,
+    unfittable: UnfittableImages | None = None,
 ) -> None:
     """Add ``cover_webp_base64`` / ``icon_webp_base64`` to ``meta``.
 
     The one place a household puts its space's image bytes on the wire:
     the join snapshot (:func:`build_space_snapshot_for_federation`) and a
-    cover / icon change (``SpaceConfigOutbound``). A dimension-capped
-    (1200 px) WebP is NOT byte-capped — a detailed photo is several
-    hundred KiB — so each image is bounded to ``*_max_bytes`` (a smaller
-    rendition, or left out; :func:`_bounded_space_image`). The bytes ship
-    under the host's own ``cover_hash`` / ``icon_hash``, which is therefore
-    a version tag, not a digest of the bytes that travel. Base64 because
-    the envelope is JSON.
+    cover / icon change (``SpaceConfigOutbound``). Every member gets the
+    same image, within the one cap (:data:`SPACE_COVER_MAX_BYTES` /
+    :data:`SPACE_ICON_MAX_BYTES`) every path carries. A new upload is
+    stored within it (:meth:`SpaceService.set_cover`); one stored before
+    the cap existed is re-encoded to fit here (:func:`_bounded_space_image`)
+    and the rendition kept in its place under the same version tag, so it
+    is re-encoded once. The bytes ship under the host's own ``cover_hash``
+    / ``icon_hash``, which is therefore a version tag, not a digest of the
+    bytes that travel. Base64 because the envelope is JSON.
     """
     for wanted, repo, hash_, key, max_bytes, what in (
         (
@@ -9426,25 +9910,46 @@ async def embed_space_images(
             cover_repo,
             space.cover_hash,
             "cover_webp_base64",
-            cover_max_bytes,
+            SPACE_COVER_MAX_BYTES,
             "cover",
         ),
-        (icon, icon_repo, space.icon_hash, "icon_webp_base64", icon_max_bytes, "icon"),
+        (
+            icon,
+            icon_repo,
+            space.icon_hash,
+            "icon_webp_base64",
+            SPACE_ICON_MAX_BYTES,
+            "icon",
+        ),
     ):
         if not wanted or repo is None or not hash_:
             continue
         stored = await repo.get(space.id)
         if stored is None:
             continue
-        webp, _stored_hash = stored
+        webp, stored_hash = stored
+        fit_key = (space.id, what, stored_hash)
+        if unfittable is not None and fit_key in unfittable:
+            continue
         fitted = await _bounded_space_image(
             webp,
             max_bytes=max_bytes,
             what=what,
             space_id=space.id,
         )
-        if fitted is not None:
-            meta[key] = base64.b64encode(fitted).decode("ascii")
+        if fitted is None:
+            if unfittable is not None:
+                unfittable.add(fit_key)
+            continue
+        if fitted is not webp:
+            # Stored before the one cap: keep the rendition every member
+            # gets, so the next send does not re-encode it again — only over
+            # the very version it was made from (a set / clear while the
+            # re-encode ran stays).
+            await repo.replace_bytes_if_hash(
+                space.id, bytes_webp=fitted, hash=stored_hash
+            )
+        meta[key] = base64.b64encode(fitted).decode("ascii")
 
 
 async def build_space_snapshot_for_federation(
@@ -9457,10 +9962,9 @@ async def build_space_snapshot_for_federation(
     cover_repo=None,
     icon_repo=None,
     space_crypto_service=None,
-    cover_max_bytes: int = SPACE_COVER_SNAPSHOT_MAX_BYTES,
-    icon_max_bytes: int = SPACE_ICON_SNAPSHOT_MAX_BYTES,
     authority_cert: dict | None = None,
     owner_statement: dict | None = None,
+    unfittable: UnfittableImages | None = None,
 ) -> dict:
     """:func:`space_metadata_for_federation` + a roster of every
     member of this space.
@@ -9475,12 +9979,9 @@ async def build_space_snapshot_for_federation(
     joiner applies it so a re-invited member whose stub still pins a
     retired key catches up (v_44).
 
-    The cover and icon ship inline, each bounded by ``cover_max_bytes`` /
-    ``icon_max_bytes`` (raw WebP): the whole snapshot rides one
-    size-capped envelope, so an image over its bound ships as a smaller
-    rendition (:func:`_bounded_space_image`) instead of sinking the
-    invite. The defaults suit a paired / mesh-routed peer; the §D2b
-    invite-link ACK passes the tighter ``SPACE_*_BOOTSTRAP_MAX_BYTES``.
+    The cover and icon ship inline within the one cap every path carries
+    (:func:`embed_space_images`) — the same image for a paired, mesh-routed
+    or invite-link joiner; the cap fits the §D2b invite-link ACK too.
 
     The roster lets a §D1b joiner mirror the full member list
     locally — without it the joiner's Members tab on a stub of
@@ -9578,8 +10079,7 @@ async def build_space_snapshot_for_federation(
         space,
         cover_repo=cover_repo,
         icon_repo=icon_repo,
-        cover_max_bytes=cover_max_bytes,
-        icon_max_bytes=icon_max_bytes,
+        unfittable=unfittable,
     )
     # §D1b content-key handoff (#117) — the space content key is the
     # symmetric AES-256 secret that decrypts every event in this
@@ -9980,13 +10480,23 @@ async def _apply_space_image_from_metadata(
     b64_key: str,
     hash_key: str,
     max_dimension: int,
+    max_bytes: int,
+    sender_caps: SenderCaps | None = None,
 ) -> bool:
     """Persist one space image a host shipped in ``meta``; ``True`` if stored.
 
+    ``sender_caps`` — asked only for an image over the cap: whether its
+    sender caps its images (:func:`sender_caps_space_images`; ``None``:
+    it does). From the released v_80 line, which does not, an image over
+    the cap but within :data:`SPACE_IMAGE_EMBED_MAX_BYTES` is re-encoded
+    here and the rendition stored (INFO): that host keeps working until it
+    upgrades.
+
     Bytes from another household are checked before they are kept: at most
-    :data:`SPACE_IMAGE_EMBED_MAX_BYTES` (the largest any sender ships), and
-    a WebP that fully decodes within ``max_dimension`` (Pillow, off the
-    event loop). Anything else is dropped at WARNING and the stored image
+    ``max_bytes`` — the one cap every path carries
+    (:data:`SPACE_COVER_MAX_BYTES` / :data:`SPACE_ICON_MAX_BYTES`) — and a
+    WebP that fully decodes within ``max_dimension`` (Pillow, off the event
+    loop). Anything else is dropped at WARNING and the stored image
     is left alone. The bytes are stored under the announced hash — the
     host's version tag for the image, which a shrunken rendition does not
     digest to — so the SPA's ``?v=<hash>`` cache-buster follows the host.
@@ -10002,18 +10512,32 @@ async def _apply_space_image_from_metadata(
     if not image_hash:
         return False
     # 4/3 base64 overhead: refuse an oversize blob before decoding it.
-    if len(b64) > 4 * -(-SPACE_IMAGE_EMBED_MAX_BYTES // 3):
+    lenient = (
+        len(b64) > 4 * -(-max_bytes // 3)
+        and sender_caps is not None
+        and not await sender_caps()
+    )
+    limit = SPACE_IMAGE_EMBED_MAX_BYTES if lenient else max_bytes
+    if len(b64) > 4 * -(-limit // 3):
         log.warning(
-            "space %s: shipped %s is over %d bytes — ignoring it",
+            "space %s: shipped %s is over the %d-byte cap — keeping the one held",
             space_id,
             what,
-            SPACE_IMAGE_EMBED_MAX_BYTES,
+            limit,
         )
         return False
     try:
         webp = base64.b64decode(b64, validate=True)
     except binascii.Error, ValueError:
         log.warning("space %s: shipped %s is not valid base64", space_id, what)
+        return False
+    if len(webp) > limit:
+        log.warning(
+            "space %s: shipped %s is over the %d-byte cap — keeping the one held",
+            space_id,
+            what,
+            limit,
+        )
         return False
     if not await ImageProcessor().is_valid_webp(webp, max_dimension=max_dimension):
         log.warning(
@@ -10023,6 +10547,31 @@ async def _apply_space_image_from_metadata(
             max_dimension,
         )
         return False
+    if len(webp) > max_bytes:
+        # A released (v_80) host's image over the one cap: keep a rendition
+        # within it — every member holds the same size.
+        try:
+            fitted = await ImageProcessor().fit_within(webp, max_bytes)
+        except ValueError:
+            fitted = None
+        if fitted is None:
+            log.warning(
+                "space %s: shipped %s cannot be re-encoded under %d bytes — "
+                "keeping the one held",
+                space_id,
+                what,
+                max_bytes,
+            )
+            return False
+        log.info(
+            "space %s: %s from a released host is %d bytes (> %d) — re-encoded to %d",
+            space_id,
+            what,
+            len(webp),
+            max_bytes,
+            len(fitted),
+        )
+        webp = fitted
     # ``width`` / ``height`` aren't shipped — the SPA renders the image at
     # whatever native dimensions the WebP carries, so 0 is fine.
     await repo.set(
@@ -10035,11 +10584,32 @@ async def _apply_space_image_from_metadata(
     return True
 
 
+async def sender_caps_space_images(federation, instance_id: str) -> bool:
+    """Whether household *instance_id* sends a space's cover / icon within
+    the one cap (:data:`FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES`)
+    — then an over-cap image from it is refused. The released v_80 line
+    does not (it sent paired members up to 256 KiB), and neither does a
+    household whose version is unknown: its images are re-encoded instead.
+    No federation wired: strict."""
+    if federation is None:
+        return True
+    return await federation.space_member_supports(
+        instance_id, min_version=FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES
+    )
+
+
+async def _join_snapshot() -> bool:
+    """:data:`SenderCaps` of a join snapshot: lenient (see
+    :func:`seat_join_stub`)."""
+    return False
+
+
 async def apply_space_cover_from_metadata(
     space_id: str,
     *,
     meta: dict,
     cover_repo,
+    sender_caps: SenderCaps | None = None,
 ) -> bool:
     """When a §D1b stub-creation event (or a cover change) carries the
     host's WebP cover bytes (``meta['cover_webp_base64']``), validate +
@@ -10059,6 +10629,8 @@ async def apply_space_cover_from_metadata(
         b64_key="cover_webp_base64",
         hash_key="cover_hash",
         max_dimension=SPACE_COVER_MAX_DIMENSION,
+        max_bytes=SPACE_COVER_MAX_BYTES,
+        sender_caps=sender_caps,
     )
 
 
@@ -10067,6 +10639,7 @@ async def apply_space_icon_from_metadata(
     *,
     meta: dict,
     icon_repo,
+    sender_caps: SenderCaps | None = None,
 ) -> bool:
     """Persist the host's icon WebP bytes (``meta['icon_webp_base64']``) on
     a member so ``/api/spaces/{id}/icon`` serves the real avatar. Mirrors
@@ -10079,6 +10652,8 @@ async def apply_space_icon_from_metadata(
         b64_key="icon_webp_base64",
         hash_key="icon_hash",
         max_dimension=SPACE_ICON_MAX_DIMENSION,
+        max_bytes=SPACE_ICON_MAX_BYTES,
+        sender_caps=sender_caps,
     )
 
 
@@ -10089,6 +10664,7 @@ async def apply_space_images_from_config_change(
     previous: Space,
     cover_repo,
     icon_repo,
+    sender_caps: SenderCaps | None = None,
 ) -> None:
     """Bring a member's stored cover / icon in line with an APPLIED
     ``SPACE_CONFIG_CHANGED``.
@@ -10102,7 +10678,7 @@ async def apply_space_images_from_config_change(
     Only a ``space_meta`` that carries the hash key at all is considered,
     so an old flat-shaped payload never clears anything.
     """
-    for repo, what, hash_key, b64_key, old_hash, max_dimension in (
+    for repo, what, hash_key, b64_key, old_hash, max_dimension, max_bytes in (
         (
             cover_repo,
             "cover",
@@ -10110,6 +10686,7 @@ async def apply_space_images_from_config_change(
             "cover_webp_base64",
             previous.cover_hash,
             SPACE_COVER_MAX_DIMENSION,
+            SPACE_COVER_MAX_BYTES,
         ),
         (
             icon_repo,
@@ -10118,6 +10695,7 @@ async def apply_space_images_from_config_change(
             "icon_webp_base64",
             previous.icon_hash,
             SPACE_ICON_MAX_DIMENSION,
+            SPACE_ICON_MAX_BYTES,
         ),
     ):
         if repo is None or hash_key not in meta:
@@ -10131,6 +10709,8 @@ async def apply_space_images_from_config_change(
                 b64_key=b64_key,
                 hash_key=hash_key,
                 max_dimension=max_dimension,
+                max_bytes=max_bytes,
+                sender_caps=sender_caps,
             )
         elif not meta.get(hash_key) and old_hash:
             await repo.clear(space_id)
@@ -10705,8 +11285,15 @@ async def seat_join_stub(
         claimed_pk_hex=inviter_identity_pk,
         owner_instance_id=owner_instance,
     )
-    await apply_space_cover_from_metadata(space_id, meta=meta, cover_repo=cover_repo)
-    await apply_space_icon_from_metadata(space_id, meta=meta, icon_repo=icon_repo)
+    # A join snapshot is always taken leniently: it was sealed when the
+    # invitation was made, maybe by a host that upgraded since, so its image
+    # over the cap is re-encoded rather than dropped.
+    await apply_space_cover_from_metadata(
+        space_id, meta=meta, cover_repo=cover_repo, sender_caps=_join_snapshot
+    )
+    await apply_space_icon_from_metadata(
+        space_id, meta=meta, icon_repo=icon_repo, sender_caps=_join_snapshot
+    )
     await apply_space_content_key_from_metadata(
         space_id, meta=meta, space_crypto_service=space_crypto_service
     )
