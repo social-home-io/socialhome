@@ -75,7 +75,11 @@ import aiohttp
 from ..canonical_json import canonical_bytes
 from ..capabilities_sig import UnsupportedCapsSigSuite, verify_capabilities
 from ..crypto import b64url_encode, ed25519_public_key, sign_ed25519
-from ..domain.errors import SpaceNotPublishableError, TierChangeRequiredError
+from ..domain.errors import (
+    GfsKeyRotationUnsupportedError,
+    SpaceNotPublishableError,
+    TierChangeRequiredError,
+)
 from ..domain.federation import GfsConnection, GfsSpacePublication
 from ..domain.gfs_mailbox import (
     ENVELOPE_MAILBOX_CAPABILITY,
@@ -2581,6 +2585,7 @@ class GfsConnectionService:
         if conn is None:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
         await self._require_publishable(space_id)
+        await self._require_key_rotation(space_id, conn)
 
         # v_57 — whether this is the space's first listing there (then the
         # epoch is announced below, before members hear of the server).
@@ -3283,6 +3288,33 @@ class GfsConnectionService:
         if space.space_type is SpaceType.PUBLIC:
             raise TierChangeRequiredError()
         raise SpaceNotPublishableError()
+
+    async def _require_key_rotation(self, space_id: str, conn: GfsConnection) -> None:
+        """D1 at listing time: while admins may hold the space's signing key
+        (delegation on, or a seed shared for the current key epoch), refuse
+        to list it on a GFS that has not proved ``authority_rotation`` — it
+        would keep the key pinned after a revocation.
+        :class:`GfsKeyRotationUnsupportedError` (409) tells the owner why."""
+        if self._space_repo is None:
+            return
+        space = await self._space_repo.get(space_id)
+        if space is None:
+            return
+        if not space.features.delegated_admin_authority:
+            shared = await self._space_repo.get_seed_shared_epoch(space_id)
+            if shared is None or shared != space.authority_key_epoch:
+                return
+        if await self._signed_capability_supported(
+            conn, "authority_rotation", self._authority_rotation
+        ):
+            return
+        log.warning(
+            "gfs: not listing space %s on gfs %s — admins may hold its key and "
+            "that server never proved it re-pins a rotated key",
+            space_id,
+            conn.id,
+        )
+        raise GfsKeyRotationUnsupportedError()
 
     async def authority_key_revocable(self, space_id: str) -> bool:
         """Whether every GFS that holds state tied to *space_id*'s authority

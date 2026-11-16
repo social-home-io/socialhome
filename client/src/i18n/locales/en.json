@@ -3536,6 +3536,7 @@
   "error.gfs_relay_not_allowed": "Only households you paired with directly can use the GFS fallback.",
   "error.space_not_public": "Only global spaces can be listed on a GFS.",
   "error.tier_change_required": "A public space is only visible to households you're paired with. Make it global to list it on a GFS.",
+  "error.gfs_key_rotation_unsupported": "This GFS can't take a new space key, so admins acting for you could not be revoked there. Choose another GFS, or turn “Let admins act for me” off first.",
   "error.gfs_selection_required": "Choose at least one GFS to list this global space on.",
   "error.gfs_selection.unknown": "That GFS isn't connected anymore. Choose one of your active GFS connections.",
   "error.gfs_selection.too_many": "A space can be listed on at most {max} GFSs.",

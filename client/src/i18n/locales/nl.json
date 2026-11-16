@@ -3500,6 +3500,7 @@
   "error.gfs_relay_not_allowed": "Alleen direct gekoppelde huishoudens kunnen de GFS-terugvaloptie gebruiken.",
   "error.space_not_public": "Alleen wereldwijde spaces kunnen op een GFS worden vermeld.",
   "error.tier_change_required": "Een openbare space is alleen zichtbaar voor huishoudens waarmee je gekoppeld bent. Maak hem wereldwijd om hem op een GFS te vermelden.",
+  "error.gfs_key_rotation_unsupported": "Deze GFS kan geen nieuwe space-sleutel aannemen, dus beheerders die namens jou handelen kunnen daar niet worden ingetrokken. Kies een andere GFS of zet „Beheerders mogen namens mij handelen” eerst uit.",
   "error.gfs_selection_required": "Kies minstens één GFS waarop deze wereldwijde space wordt vermeld.",
   "error.gfs_selection.unknown": "Die GFS is niet meer verbonden. Kies een van je actieve GFS-verbindingen.",
   "error.gfs_selection.too_many": "Een space kan op hoogstens {max} GFS'en worden vermeld.",
