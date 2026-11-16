@@ -2304,8 +2304,13 @@ class _GfsMediaSink:
         self.items.append((item_id, origin))
         self.hashes.append(hashes)
         described = raw_refs if isinstance(raw_refs, dict) else {}
+        # A file the signed hashes cover takes its content name, as the
+        # real fetcher does; any other its reader name.
         names = {
-            u.rsplit("/", 1)[-1]: "sg-" + u.rsplit("/", 1)[-1]
+            u.rsplit("/", 1)[-1]: (
+                "sc-" if hashes and u.rsplit("/", 1)[-1] in hashes else "sg-"
+            )
+            + u.rsplit("/", 1)[-1]
             for u in urls
             if u.rsplit("/", 1)[-1] in described
         }
@@ -2561,19 +2566,26 @@ async def test_a_real_edit_heals_a_post_a_stripped_copy_created(item_env):
 
 
 def test_only_described_files_filters_every_registered_post_field():
-    """``_only_described_files`` (hand-written over the typed Post) keeps a
-    described ``sg-`` name and drops any other — in EVERY field the
-    registry lists for a post."""
+    """``_only_described_files`` (hand-written over the typed Post) keeps
+    exactly the names the localization produced — a reader ``sg-`` name or,
+    with signed hashes, a content ``sc-`` name — and drops any other, in
+    EVERY field the registry lists for a post."""
     post = synthetic_object("posts")
     urls = item_media_urls("posts", post)
     assert len(urls) == len(SPACE_MEDIA_ITEMS["posts"].fields)
-    assert item_media_urls("posts", _only_described_files(post)) == []
-    names = {u.rsplit("/", 1)[-1]: "sg-" + u.rsplit("/", 1)[-1] for u in urls}
-    described = SpaceMediaLocalization(names=names).post(post)
-    kept = item_media_urls("posts", _only_described_files(described))
-    assert kept == item_media_urls("posts", described)
-    assert len(kept) == len(urls)
-    assert all(u.rsplit("/", 1)[-1].startswith("sg-") for u in kept)
+    none = SpaceMediaLocalization()
+    assert item_media_urls("posts", _only_described_files(post, none)) == []
+    for prefix in ("sg-", "sc-"):
+        names = {u.rsplit("/", 1)[-1]: prefix + u.rsplit("/", 1)[-1] for u in urls}
+        media = SpaceMediaLocalization(names=names)
+        described = media.post(post)
+        kept = item_media_urls("posts", _only_described_files(described, media))
+        assert kept == item_media_urls("posts", described)
+        assert len(kept) == len(urls)
+        assert all(u.rsplit("/", 1)[-1].startswith(prefix) for u in kept)
+        # A name the localization did not produce never survives, even a
+        # well-formed reader or content name.
+        assert item_media_urls("posts", _only_described_files(described, none)) == []
 
 
 # ── v_92 — one name on every path: the relay carries the file hashes ─────
@@ -2593,6 +2605,11 @@ async def test_a_relayed_posts_signed_file_hashes_name_its_files_by_content(env)
     )
     await env["inbound"].handle(_frame(envelope), gfs_id="g1")
     assert sink.hashes == [{"p.webp": FileHash("c" * 64)}]
+    # …and the stored post shows that content name (regression: the relay's
+    # own filter used to keep only ``sg-`` names and dropped it).
+    held = await env["post_repo"].get("post-1")
+    post = held[1] if isinstance(held, tuple) else held
+    assert post.image_urls == ("api/media/sc-p.webp",)
 
 
 async def test_relayed_file_hashes_another_key_signed_are_never_taken(env):
