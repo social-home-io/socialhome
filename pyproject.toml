@@ -74,7 +74,7 @@ dependencies = [
     # (``socialhome/dashboard/advertiser.py``). LGPL-2.1-or-later, used as
     # an unmodified, dynamically imported library — compatible with
     # MPL-2.0. Pure ``asyncio`` API; cp314 wheels on every arch we ship.
-    "zeroconf==0.153.0",
+    "zeroconf==0.154.0",
     # Interface scan for the addresses the dashboard announces (also a
     # zeroconf dependency; declared because we import it directly). MIT.
     "ifaddr==0.2.0",
@@ -83,7 +83,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest==9.2.0",
-    "pytest-asyncio==1.4.1.post1",
+    "pytest-asyncio==1.5.0",
     "pytest-aiohttp==1.1.1",    # provides ``aiohttp_server`` / ``aiohttp_client`` fixtures
     "pytest-cov==7.1.0",
     # ``pytest-xdist`` runs the suite across all available CPU cores
