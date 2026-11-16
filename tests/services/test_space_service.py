@@ -8695,27 +8695,31 @@ async def test_a_begin_without_a_digest_from_a_current_member_asks_nothing(
     assert FederationCapability.MIN_FOR_ROSTER_DIGEST in asked
 
 
-async def test_rev_lost_snapshot_then_gossip_is_repaired_again_in_half_an_hour(
+async def test_consecutive_mismatches_in_an_active_space_double_the_cooldown(
     stack, monkeypatch, caplog
 ):
-    """Round-4 finding 1 (reviewer repro): the snapshot is lost, later
-    gossip reaches the member (its digest moves, still wrong). That is no
-    drift: it gets a snapshot every cooldown (30 min), no WARNING, never
-    a day's wait."""
+    """Round 5 (was the round-4 port of finding 1): snapshots are lost while
+    gossip keeps reaching the member, so its digest moves on every BEGIN.
+    Every CONSECUTIVE mismatch answered with a sent snapshot doubles the
+    cooldown (30 min, 1 h, 2 h … a day), whether or not the digest moved —
+    an unhealable mismatch in an active space cannot cost a snapshot every
+    30 min forever. No WARNING."""
     clock = _Clock(monkeypatch)
     space, fed, remote, _insts = await _members_with_households(stack, 1)
-    await _gossip_a_change(stack, space, remote, "u-a")
-    await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
-    assert len(_snapshots(fed)) == 1
+    sent_at: list[float] = []
     with caplog.at_level(logging.WARNING, logger="socialhome.services.space_service"):
-        for step in range(46):  # 23 h, a change every 30 min, the snapshots lost
+        for step in range(48 * 3):  # 3 days, a change and a BEGIN every 30 min
             await _gossip_a_change(stack, space, remote, f"u-c{step}")
-            clock.advance(30 * 60)
+            before = len(_snapshots(fed))
             await _answer(
                 stack,
-                await _digest_begin(stack, space, "peer-0", digest=f"{step + 1:064x}"),
+                await _digest_begin(stack, space, "peer-0", digest=f"{step:064x}"),
             )
-    assert len(_snapshots(fed)) == 1 + 46
+            if len(_snapshots(fed)) > before:
+                sent_at.append(clock.now)
+            clock.advance(30 * 60)
+    gaps = [round((b - a) / 3600, 1) for a, b in itertools.pairwise(sent_at)]
+    assert gaps == [0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 24.0]
     assert not caplog.records
 
 
@@ -8773,10 +8777,10 @@ async def test_rev_busy_space_member_without_gossip_is_repaired_at_once(
     assert len(sent_at) <= 8
 
 
-async def test_the_cooldown_doubles_only_on_the_same_wrong_digest(stack, monkeypatch):
-    """B: 30 min, then — while the member answers the same wrong digest
-    after each snapshot — 1 h, 2 h … capped at a day; a matching digest
-    puts it back at 30 min."""
+async def test_the_cooldown_doubles_and_starts_over_on_a_match(stack, monkeypatch):
+    """B: 30 min, then — on every consecutive mismatch answered with a sent
+    snapshot — 1 h, 2 h … capped at a day; a matching digest puts it back
+    at 30 min."""
     clock = _Clock(monkeypatch)
     space, fed, _remote, _insts = await _members_with_households(stack, 1)
 
@@ -8786,7 +8790,7 @@ async def test_the_cooldown_doubles_only_on_the_same_wrong_digest(stack, monkeyp
     await wrong()
     assert len(_snapshots(fed)) == 1
     clock.advance(30 * 60)
-    await wrong()  # same digest after 30 min: resent, the cooldown now 1 h
+    await wrong("1" * 64)  # another wrong digest: resent, the cooldown now 1 h
     assert len(_snapshots(fed)) == 2
     clock.advance(59 * 60)
     await wrong()
@@ -8806,36 +8810,76 @@ async def test_the_cooldown_doubles_only_on_the_same_wrong_digest(stack, monkeyp
     assert len(_snapshots(fed)) == 15
 
 
-async def test_a_snapshot_that_did_not_go_out_is_not_recorded(stack, monkeypatch):
-    """Finding 5: ``send_roster_snapshot`` returning False (a send failure,
-    no seed, …) records nothing — the next BEGIN asks again."""
-    _Clock(monkeypatch)
+async def test_a_snapshot_that_did_not_go_out_waits_a_retry_without_doubling(
+    stack, monkeypatch
+):
+    """Finding 5 / round 5: a snapshot built but not sent waits
+    ``ROSTER_REPAIR_RETRY_S`` (no build on every BEGIN, no doubling); one
+    that fails before it is built (a household below the snapshot line)
+    records nothing and costs no budget."""
+    clock = _Clock(monkeypatch)
     space, fed, _remote, _insts = await _members_with_households(stack, 1)
     real = fed.send_with_mesh_fallback
     fed.send_with_mesh_fallback = AsyncMock(side_effect=RuntimeError("down"))
     await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
-    assert "peer-0" not in stack.space_svc._roster_repairs.get(space.id, {})
     fed.send_with_mesh_fallback = real
+    clock.advance(ss_mod.ROSTER_REPAIR_RETRY_S - 60)
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
+    assert _snapshots(fed) == []
+    clock.advance(120)
     await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
     assert len(_snapshots(fed)) == 1
-    assert "peer-0" in stack.space_svc._roster_repairs[space.id]
+    assert stack.space_svc._roster_repairs[space.id]["peer-0"].cooldown == (
+        ss_mod.ROSTER_REPAIR_COOLDOWN_S
+    )
+    supports = fed.space_member_supports
+    fed.space_member_supports = AsyncMock(return_value=False)
+    budget = stack.space_svc._roster_budget
+    used = dict(budget._windows)
+    await _answer(stack, await _digest_begin(stack, space, "peer-1", digest="0" * 64))
+    assert "peer-1" not in stack.space_svc._roster_repairs[space.id]
+    assert budget._windows == used
+    fed.space_member_supports = supports
 
 
-async def test_the_global_budget_bounds_a_restart_burst(stack, monkeypatch):
-    """C: a restart (or a backup restore) that finds every member household
-    mismatched sends at most ``ROSTER_REPAIR_PER_MINUTE`` snapshots a
-    minute across every space; a household held back asks again on its
-    next BEGIN."""
+async def _another_hosted_space(stack, fed, remote, name: str, households: list[str]):
+    space = await stack.space_svc.create_space(owner_username="hosty", name=name)
+    for i, inst in enumerate(households):
+        await _seat(remote, space.id, inst, f"u-{name}-{i}")
+        await stack.space_repo.add_space_instance(space.id, inst)
+    return space
+
+
+async def test_one_space_cannot_starve_the_others_repairs(stack, monkeypatch):
+    """C / round 5: at most ``ROSTER_REPAIR_PER_SPACE_PER_MINUTE`` repair
+    snapshots a minute for one space and ``ROSTER_REPAIR_PER_MINUTE``
+    across all — twenty mismatched households in one space (sybil
+    followers of a public space, a restart) leave room for every other
+    space. A household held back asks again on its next BEGIN."""
     clock = _Clock(monkeypatch)
-    space, fed, _remote, insts = await _members_with_households(stack, 20)
+    big, fed, remote, insts = await _members_with_households(stack, 20)
+    others = [
+        await _another_hosted_space(stack, fed, remote, f"o{n}", [f"q-{n}"])
+        for n in range(5)
+    ]
     for inst in insts:
-        await _answer(stack, await _digest_begin(stack, space, inst, digest="0" * 64))
-    assert len(_snapshots(fed)) == ss_mod.ROSTER_REPAIR_PER_MINUTE
+        await _answer(stack, await _digest_begin(stack, big, inst, digest="0" * 64))
+    assert len(_snapshots(fed)) == ss_mod.ROSTER_REPAIR_PER_SPACE_PER_MINUTE
+    for n, other in enumerate(others):
+        await _answer(
+            stack, await _digest_begin(stack, other, f"q-{n}", digest="0" * 64)
+        )
+    sent = [to for to, _ in _snapshots(fed)]
+    assert len(sent) == ss_mod.ROSTER_REPAIR_PER_MINUTE  # the global cap
+    assert sum(to.startswith("q-") for to in sent) == (
+        ss_mod.ROSTER_REPAIR_PER_MINUTE - ss_mod.ROSTER_REPAIR_PER_SPACE_PER_MINUTE
+    )
     clock.advance(61)
     for inst in insts:
-        await _answer(stack, await _digest_begin(stack, space, inst, digest="0" * 64))
-    assert len(_snapshots(fed)) == 2 * ss_mod.ROSTER_REPAIR_PER_MINUTE
-    assert len({to for to, _ in _snapshots(fed)}) == 2 * ss_mod.ROSTER_REPAIR_PER_MINUTE
+        await _answer(stack, await _digest_begin(stack, big, inst, digest="0" * 64))
+    assert len(_snapshots(fed)) == (
+        ss_mod.ROSTER_REPAIR_PER_MINUTE + ss_mod.ROSTER_REPAIR_PER_SPACE_PER_MINUTE
+    )
 
 
 async def test_a_writer_cert_behind_or_ahead_is_a_mismatch_like_any_other(
@@ -8857,6 +8901,28 @@ async def test_a_writer_cert_behind_or_ahead_is_a_mismatch_like_any_other(
     await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=8))
     assert len(_snapshots(fed)) == 2
     certs.issue_for_instance.assert_not_awaited()
+
+
+async def test_a_snapshot_carries_the_tombstones_of_the_last_30_days(stack):
+    """Round 5: the host's own removals ride a repair snapshot with their
+    version and signature — those at most ``ROSTER_TOMBSTONE_WINDOW_S``
+    old (``removed_at``); older ones stay on the host only."""
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    for user, age_days in (("u-recent", 1), ("u-old", 31)):
+        await _seat(remote, space.id, "peer-x", user)
+        await remote.remove(space.id, "peer-x", user)
+        await stack.db.enqueue(
+            "UPDATE space_remote_members SET removed_at=datetime('now', ?) "
+            "WHERE space_id=? AND user_id=?",
+            (f"-{age_days} days", space.id, user),
+        )
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-0")
+    left = {
+        e["payload"]["user_id"]
+        for e in _snapshots(fed, to="peer-0")[-1][1]
+        if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
+    }
+    assert left == {"u-recent"}
 
 
 async def test_a_new_snapshot_drops_every_queued_part_of_an_older_one(stack):
@@ -8887,24 +8953,26 @@ async def test_the_repair_memory_holds_thousands_of_pairs(stack, monkeypatch):
     households answered once are each held back."""
     _Clock(monkeypatch)
     monkeypatch.setattr(ss_mod, "ROSTER_REPAIR_PER_MINUTE", 10**6)
+    monkeypatch.setattr(ss_mod, "ROSTER_REPAIR_PER_SPACE_PER_MINUTE", 10**6)
     svc = stack.space_svc
     sent: list[str] = []
 
-    async def _send(space_id, *, to_instance_id, known_version=None):
+    async def _send(space_id, *, to_instance_id, known_version=None, charge=None):
+        assert charge is not None and charge()
         sent.append(to_instance_id)
         return True
 
     monkeypatch.setattr(
         SpaceService, "send_roster_snapshot", lambda self, *a, **kw: _send(*a, **kw)
     )
-    space = SimpleNamespace(id="sp")
+    space = SimpleNamespace(id="sp", roster_sequence=7)
     for _round in range(2):
         for i in range(5000):
             await svc._repair_roster(
                 space,  # type: ignore[arg-type]
                 f"peer-{i}",
                 right=False,
-                answered=("digest", "0" * 64, None),
+                took=False,
                 known_version=None,
             )
         await svc.wait_roster_repairs()

@@ -14,10 +14,11 @@ role)`` with the role mirrored the way every receiver stores it
 canonical JSON list (:mod:`socialhome.canonical_json`), SHA-256. Names,
 keys and versions are left out.
 
-The repair snapshot is authoritative for the live seats: once every part
-verified, the member drops a mirrored seat the snapshot does not name (at
-or below its roster version), so ONE snapshot heals any mismatch — a
-missed remote or host-local removal, or a seat the host refused.
+The repair snapshot carries the host's live seats and its recent
+tombstones, each merged by the usual per-entry rule (strictly newer wins);
+nothing is inferred from a seat it does not name. A mismatch it cannot
+heal (a seat only the member knows, a host-local departure the member
+missed) stays, its repairs backing off to one a day.
 
 Wire shape (``roster_digest`` on the BEGIN): ``{"suite": ..., "digest":
 <64 hex>, "cert_epoch": <int|null>}`` — the writer-cert epoch the member

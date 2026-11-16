@@ -481,22 +481,36 @@ def _require_link_publishable(space: Space) -> None:
 ROSTER_SNAPSHOT_PART_BYTES: int = 96 * 1024
 
 #: The roster repair's one rule (:meth:`SpaceService.on_sync_begin_roster`):
-#: a mismatch gets an authoritative snapshot unless one went to that (space,
-#: member household) within its cooldown. The cooldown starts here …
+#: a mismatch gets a repair snapshot unless one went to that (space, member
+#: household) within its cooldown. The cooldown is this after a snapshot that
+#: went out …
 ROSTER_REPAIR_COOLDOWN_S: float = 30 * 60
-#: … and doubles, up to this, only while the member reports the SAME wrong
-#: digest (or echo) again after a snapshot that went out — it did not take
-#: it (a broken member). It is back at the start once the digest matches.
+#: … doubling, up to this, on every CONSECUTIVE mismatch answered with a sent
+#: snapshot (whether or not its digest moved). Only a matching digest (or a
+#: v_80 echo that reached the version sent) puts it back at the start. Gossip
+#: still carries every change; the repair is a safety net.
 ROSTER_REPAIR_COOLDOWN_MAX_S: float = 24 * 60 * 60
-#: All repair snapshots of this household, across every space it hosts: at
-#: most this many per minute (a restart or a backup restore that finds
-#: every member mismatched cannot burst). The largest roster we plan for —
-#: 1000 member households + 10 000 followers, ~11 000 entries — is ~5.5 MB
-#: and ~11 000 signatures a snapshot; six a minute is ≤ 33 MB/min (~4.4
-#: Mbit/s) and ~66 000 signatures/min (≈ 3 s of one core) at the very
-#: worst, a few KB for an ordinary space. A household refused by the
-#: budget is not recorded, so its next admitted BEGIN asks again.
+#: A snapshot that was built but did not go out waits this before the next
+#: try (no doubling), so a failing household cannot cost a build per BEGIN.
+ROSTER_REPAIR_RETRY_S: float = 15 * 60
+#: Repair snapshots of this household: at most this many a minute across
+#: every space it hosts … The largest roster we plan for — 1000 member
+#: households + 10 000 followers, ~11 000 entries — is ~5.5 MB and ~11 000
+#: signatures a snapshot; six a minute is ≤ 33 MB/min (~4.4 Mbit/s) and
+#: ~66 000 signatures/min (≈ 3 s of one core) at the very worst, a few KB for
+#: an ordinary space. A restart or a backup restore that finds every member
+#: mismatched cannot burst.
 ROSTER_REPAIR_PER_MINUTE: int = 6
+#: … and at most this many a minute for any one space, so one space (sybil
+#: followers of a public space) cannot starve the others' repairs. A
+#: household the budget holds back is not recorded: its next admitted BEGIN
+#: asks again.
+ROSTER_REPAIR_PER_SPACE_PER_MINUTE: int = 2
+#: Tombstones a repair snapshot carries: removals at most this old
+#: (``removed_at``). A member online once in the window got any removal it
+#: missed through a repair; older tombstones stay on the host but no longer
+#: ride every snapshot. ~500 B each.
+ROSTER_TOMBSTONE_WINDOW_S: float = 30 * 24 * 60 * 60
 #: A malformed or unknown-suite digest is logged at most once per (space,
 #: household) in this window.
 ROSTER_REFUSAL_LOG_S: float = 60 * 60
@@ -508,17 +522,19 @@ ROSTER_SEATS_CACHE_S: float = 60.0
 
 @dataclass(slots=True)
 class _RosterRepair:
-    """The last roster repair snapshot that went out (``send_roster_snapshot``
-    returned true) to one member household of one space. Service-local,
-    in memory: the global per-minute budget bounds what a restart costs."""
+    """The roster repair state of one member household of one space.
+    Service-local, in memory: the budget bounds what a restart costs."""
 
-    sent_at: float
-    #: Until when another mismatch waits (``ROSTER_REPAIR_COOLDOWN_S`` …
-    #: ``ROSTER_REPAIR_COOLDOWN_MAX_S``).
+    #: No new repair before this (monotonic).
+    until: float
+    #: The cooldown the last snapshot that went out set.
     cooldown: float
-    #: What the member reported when it went out — its digest and cert
-    #: epoch, or its echo. The same again means it did not take it.
-    answered: tuple | None
+    #: The ``roster_sequence`` that snapshot carried (a v_80 echo at or
+    #: past it took it).
+    sent_version: int | None
+    #: The last answer was a sent snapshot and no match came since: the
+    #: next one doubles the cooldown.
+    consecutive: bool
 
 
 #: Asked only when a peer's space image is over the cap: whether its sender
@@ -528,6 +544,20 @@ SenderCaps = Callable[[], Awaitable[bool]]
 
 def _monotonic() -> float:
     return time.monotonic()
+
+
+def _removed_since(removed_at: str | None, horizon: datetime) -> bool:
+    """Whether a tombstone's ``removed_at`` (SQLite ``datetime('now')``, UTC)
+    is at or after *horizon*. Unknown (``None``, unparsable) is old."""
+    if not removed_at:
+        return False
+    try:
+        at = datetime.fromisoformat(removed_at)
+    except ValueError:
+        return False
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=UTC)
+    return at >= horizon
 
 
 def _roster_parts(entries: list[dict]) -> list[list[dict]]:
@@ -553,7 +583,6 @@ def roster_snapshot_parts(
     roster_version: int,
     authority_cert: dict | None = None,
     extras: dict | None = None,
-    authoritative: bool = False,
 ) -> list[dict]:
     """The ``SPACE_ROSTER_SNAPSHOT`` payloads that carry *entries*.
 
@@ -567,11 +596,7 @@ def roster_snapshot_parts(
     version only once it applied every part of one send
     (``PrivateSpaceInviteHandler``) — a lost or unverifiable part leaves
     nothing recorded and the host's next send heals it. *extras* (the
-    receiver's own credentials) ride the first part. *authoritative*: the
-    entries are every live seat the receiver mirrors, so once it applied
-    every part it drops a mirrored seat they do not name (at or below
-    *roster_version*) — set by the host's :meth:`SpaceService.send_roster_snapshot`;
-    an older receiver ignores it."""
+    receiver's own credentials) ride the first part."""
     cut = _roster_parts(entries)
     snapshot_id = uuid.uuid4().hex
     payloads: list[dict] = []
@@ -581,8 +606,6 @@ def roster_snapshot_parts(
             "entries": part,
             "roster_version": roster_version,
         }
-        if authoritative:
-            payload["authoritative"] = True
         if len(cut) > 1:
             payload.update(snapshot_id=snapshot_id, part=index, parts=len(cut))
         if authority_cert is not None:
@@ -1902,6 +1925,7 @@ class SpaceService(
         *,
         to_instance_id: str,
         known_version: int | None = None,
+        charge: Callable[[], bool] | None = None,
     ) -> bool:
         """Send household ``to_instance_id`` the whole roster of a space we host.
 
@@ -1931,6 +1955,10 @@ class SpaceService(
         ``known_version``: the household applied a full snapshot complete up
         to it (an older household's ``roster_echo``), so removals at or
         below it are left out.
+
+        ``charge``: asked once every cheap check passed, right before the
+        snapshot is built (the repair's budget); false → nothing is built
+        or sent.
         """
         if self._federation is None:
             return False
@@ -1953,6 +1981,8 @@ class SpaceService(
             log.exception("roster-snapshot: ensure_space_seed failed for %s", space.id)
             return False
         if seed is None:
+            return False
+        if charge is not None and not charge():
             return False
         # v_49 — the recipient's OWN writer cert for the current epoch (and
         # nobody else's): the snapshot goes to this one household, encrypted
@@ -2027,10 +2057,6 @@ class SpaceService(
             # verifying these (new-key-signed) entries.
             authority_cert=owner_authority_cert_via(self._federation, space),
             extras=extras,
-            # Every live seat outside the receiver's household ships (only
-            # removals are left out with ``known_version``): its mirror ends
-            # equal to ours.
-            authoritative=True,
         )
         # Supersede the whole older snapshot still queued for this household
         # (every part — the new one may have fewer).
@@ -2109,10 +2135,14 @@ class SpaceService(
                     False,
                 )
             )
+        recent: set[tuple[str, str]] = set()
+        horizon = datetime.now(UTC) - timedelta(seconds=ROSTER_TOMBSTONE_WINDOW_S)
         if self._remote_members is not None:
             for r in await self._remote_members.list_for_space_including_tombstones(
                 space.id
             ):
+                if r.tombstoned and _removed_since(r.removed_at, horizon):
+                    recent.add((r.instance_id, r.user_id))
                 seats.append(
                     (
                         r.user_id,
@@ -2137,6 +2167,9 @@ class SpaceService(
                 continue
             if gone and known_version is not None and version <= known_version:
                 # It holds this removal already (see ``known_version``).
+                continue
+            if gone and (inst, user_id) not in recent:
+                # Older than :data:`ROSTER_TOMBSTONE_WINDOW_S`: not carried.
                 continue
             if role == SpaceRole.SUBSCRIBER.value and not subscriber_ok:
                 continue
@@ -2197,9 +2230,10 @@ class SpaceService(
 
         The member is right when its ``roster_digest`` equals ours for it
         (:meth:`roster_digest_of`) and it holds the writer-cert epoch we
-        would send — then nothing. Otherwise it gets ONE authoritative
-        snapshot (:meth:`send_roster_snapshot`), which leaves its mirror
-        equal to ours, unless one went to it within its cooldown
+        would send — then nothing. Otherwise it gets a repair snapshot
+        (:meth:`send_roster_snapshot`: our live seats and our recent
+        tombstones, merged entry by entry, strictly newer wins), unless one
+        went to it within its cooldown
         (:meth:`_repair_roster`). A BEGIN without a digest from a household
         at :data:`FederationCapability.MIN_FOR_ROSTER_DIGEST` asks nothing;
         an older (released v_80) household's ``roster_echo`` stands in for
@@ -2244,11 +2278,7 @@ class SpaceService(
                 host_epoch is None or digest.cert_epoch == host_epoch
             )
             await self._repair_roster(
-                space,
-                sender,
-                right=right,
-                answered=("digest", digest.digest, digest.cert_epoch),
-                known_version=None,
+                space, sender, right=right, took=right, known_version=None
             )
             return
         if (
@@ -2273,13 +2303,18 @@ class SpaceService(
                 self._refuse_roster_digest(space_id, sender, "malformed echo")
                 return
             version = raw
+        rec = self._roster_repairs.get(space_id, {}).get(sender)
         await self._repair_roster(
             space,
             sender,
             # It applied this very roster and holds the cert we would send.
             right=version == current
             and (host_epoch is None or host_epoch == echo_epoch),
-            answered=("echo", version, echo_epoch),
+            # An echo at or past the version we sent: it took our snapshot.
+            took=version is not None
+            and rec is not None
+            and rec.sent_version is not None
+            and version >= rec.sent_version,
             # Removals at or below the echoed version were in the snapshot
             # it applied (an echo ABOVE ours: send it all).
             known_version=version
@@ -2309,54 +2344,91 @@ class SpaceService(
         sender: str,
         *,
         right: bool,
-        answered: tuple,
+        took: bool,
         known_version: int | None,
     ) -> None:
-        """The one rule. Right → nothing (the cooldown is back at its
-        start). Wrong → an authoritative snapshot, unless one went to
-        *sender* within its cooldown; the cooldown doubles (to a day) only
-        when the member answers the SAME wrong digest / echo again after a
-        snapshot went out. Within the global per-minute budget. A snapshot
-        that did not go out records nothing."""
+        """The one rule. Right → nothing. Wrong → a repair snapshot, unless
+        one went to *sender* within its cooldown: 30 min after a snapshot
+        that went out, doubling (to a day) on every consecutive mismatch
+        answered with a sent snapshot; *took* (the digest matched, or a v_80
+        echo reached the version sent) starts it over. Charged against the
+        per-space and global budgets only once the snapshot is about to be
+        built; a household they hold back is not recorded. A snapshot built
+        but not sent waits :data:`ROSTER_REPAIR_RETRY_S`."""
         book = self._roster_repairs.setdefault(space.id, {})
         rec = book.get(sender)
+        if took and rec is not None:
+            rec.consecutive = False
         if right:
-            if rec is not None:
-                rec.cooldown, rec.answered = ROSTER_REPAIR_COOLDOWN_S, None
             return
         now = _monotonic()
-        if rec is not None and now - rec.sent_at < rec.cooldown:
+        if rec is not None and now < rec.until:
             return
         key = (space.id, sender)
         if key in self._roster_inflight:
             return
         cooldown = (
             min(rec.cooldown * 2, ROSTER_REPAIR_COOLDOWN_MAX_S)
-            if rec is not None and rec.answered == answered
+            if rec is not None and rec.consecutive
             else ROSTER_REPAIR_COOLDOWN_S
         )
-        if not self._roster_budget.is_allowed(
-            "roster-repair", limit=ROSTER_REPAIR_PER_MINUTE, window_s=60
-        ):
-            log.info(
-                "roster repair for %s in %s deferred — the per-minute budget "
-                "is spent; its next BEGIN asks again",
-                sender,
-                space.id,
+        charged = False
+
+        def _charge() -> bool:
+            nonlocal charged
+            space_key = f"roster-repair:{space.id}"
+            if not (
+                self._roster_budget.has_room(
+                    "roster-repair", limit=ROSTER_REPAIR_PER_MINUTE, window_s=60
+                )
+                and self._roster_budget.has_room(
+                    space_key, limit=ROSTER_REPAIR_PER_SPACE_PER_MINUTE, window_s=60
+                )
+            ):
+                log.info(
+                    "roster repair for %s in %s deferred — the per-minute "
+                    "budget is spent; its next BEGIN asks again",
+                    sender,
+                    space.id,
+                )
+                return False
+            self._roster_budget.is_allowed(
+                "roster-repair", limit=ROSTER_REPAIR_PER_MINUTE, window_s=60
             )
-            return
+            self._roster_budget.is_allowed(
+                space_key, limit=ROSTER_REPAIR_PER_SPACE_PER_MINUTE, window_s=60
+            )
+            charged = True
+            return True
+
         self._roster_inflight.add(key)
 
         async def _send() -> None:
             try:
                 sent = await self.send_roster_snapshot(
-                    space.id, to_instance_id=sender, known_version=known_version
+                    space.id,
+                    to_instance_id=sender,
+                    known_version=known_version,
+                    charge=_charge,
                 )
             finally:
                 self._roster_inflight.discard(key)
+            done = _monotonic()
+            book = self._roster_repairs.setdefault(space.id, {})
             if sent:
-                self._roster_repairs.setdefault(space.id, {})[sender] = _RosterRepair(
-                    sent_at=_monotonic(), cooldown=cooldown, answered=answered
+                book[sender] = _RosterRepair(
+                    until=done + cooldown,
+                    cooldown=cooldown,
+                    sent_version=int(space.roster_sequence),
+                    consecutive=True,
+                )
+            elif charged:
+                prior = book.get(sender)
+                book[sender] = _RosterRepair(
+                    until=done + ROSTER_REPAIR_RETRY_S,
+                    cooldown=prior.cooldown if prior else ROSTER_REPAIR_COOLDOWN_S,
+                    sent_version=prior.sent_version if prior else None,
+                    consecutive=prior.consecutive if prior else False,
                 )
 
         task = asyncio.create_task(_send(), name=f"roster-repair-{space.id}-{sender}")
@@ -2451,7 +2523,7 @@ class SpaceService(
         never for a space we host — or ``None``. The digest of every live
         seat we mirror outside our own household
         (:mod:`~socialhome.domain.space_roster_digest`) and the writer-cert
-        epoch we hold; the host answers with an authoritative snapshot only
+        epoch we hold; the host answers with a repair snapshot only
         when its own digest for us differs."""
         own = self._own_instance_id
         if not own or self._remote_members is None:
