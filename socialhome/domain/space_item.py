@@ -46,7 +46,12 @@ import orjson
 from .errors import CodedError
 from .item_zdict import ZDICT_V1
 from .user import looks_like_emoji
-from .writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE
+from .writer_cert import (
+    WRITER_ACTION_PROFILE,
+    WRITER_ACTION_REACT,
+    WRITER_SCOPE_COMMENT,
+    WRITER_SCOPE_WRITE,
+)
 
 ITEM_TYPE_POST: str = "post"
 #: The author's own edit of their post (full signed snapshot + ``edited_at``).
@@ -96,10 +101,12 @@ _REQUIRED_SCOPE: dict[str, str] = {
     ITEM_TYPE_COMMENT: WRITER_SCOPE_COMMENT,
     ITEM_TYPE_COMMENT_EDIT: WRITER_SCOPE_COMMENT,
     ITEM_TYPE_COMMENT_DELETE: WRITER_SCOPE_COMMENT,
-    ITEM_TYPE_REACTION_ADD: WRITER_SCOPE_COMMENT,
-    ITEM_TYPE_REACTION_REMOVE: WRITER_SCOPE_COMMENT,
-    # Any member household's own users — the cert's v2 binding names them.
-    ITEM_TYPE_AUTHOR_PROFILE: WRITER_SCOPE_COMMENT,
+    # A reaction is its own right: a follower cert grants it only while the
+    # space's react switch was on.
+    ITEM_TYPE_REACTION_ADD: WRITER_ACTION_REACT,
+    ITEM_TYPE_REACTION_REMOVE: WRITER_ACTION_REACT,
+    # Any publishing household's own users — the cert's v2 binding names them.
+    ITEM_TYPE_AUTHOR_PROFILE: WRITER_ACTION_PROFILE,
 }
 
 #: How far in the future a signed item stamp may lie (seconds). An edit

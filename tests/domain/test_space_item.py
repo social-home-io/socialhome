@@ -18,6 +18,7 @@ from socialhome.domain.space_item import (
     COMPRESSED_PAYLOAD_SUITES,
     GENERIC_ITEM_TYPES,
     ITEM_SIZE_BUCKETS,
+    ITEM_TYPE_AUTHOR_PROFILE,
     ITEM_TYPE_COMMENT,
     ITEM_TYPE_COMMENT_DELETE,
     ITEM_TYPE_COMMENT_EDIT,
@@ -70,8 +71,9 @@ def test_the_two_inner_shapes_partition_the_supported_types():
         (ITEM_TYPE_COMMENT, WRITER_SCOPE_COMMENT),
         (ITEM_TYPE_COMMENT_EDIT, WRITER_SCOPE_COMMENT),
         (ITEM_TYPE_COMMENT_DELETE, WRITER_SCOPE_COMMENT),
-        (ITEM_TYPE_REACTION_ADD, WRITER_SCOPE_COMMENT),
-        (ITEM_TYPE_REACTION_REMOVE, WRITER_SCOPE_COMMENT),
+        (ITEM_TYPE_REACTION_ADD, "react"),
+        (ITEM_TYPE_REACTION_REMOVE, "react"),
+        (ITEM_TYPE_AUTHOR_PROFILE, "profile"),
     ],
 )
 def test_each_type_names_the_scope_it_needs(item_type, scope):
