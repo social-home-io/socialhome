@@ -62,6 +62,9 @@ from .space_media_refs import SpaceMediaRefsMixin
 from .space_public_author import build_signed_author_inner
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from ..domain.file_hashes import FileHash
     from ..domain.post import Post
     from ..federation.federation_service import FederationService
     from ..repositories.space_repo import AbstractSpaceRepo
@@ -198,6 +201,8 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 item_type=ITEM_TYPE_POST,
                 item_target=post.id,
                 media_refs=media_refs,
+                # One name on every path for the post's files.
+                file_hashes=await self._file_hashes_of(item_media_urls("posts", post)),
             )
             self._member_gfs.schedule_post(space_id, post.author, inner)
         except Exception:
@@ -243,6 +248,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         target: str,
         post_id: str,
         ts: str | None = None,
+        file_hashes: Mapping[str, FileHash] | None = None,
         **fields: str | None,
     ) -> None:
         """Sign a generic item inner for our own user and hand it to the
@@ -265,6 +271,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 origin_instance_id=self._own_instance_id,
                 author_identity_anchor=author.identity_anchor,
                 ts=ts or datetime.now(UTC).isoformat(),
+                file_hashes=file_hashes,
                 **fields,
             )
             self._member_gfs.schedule_item(space_id, author_user_id, item_type, inner)
@@ -307,6 +314,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 item_target=post.id,
                 edited_at=edited_at or datetime.now(UTC).isoformat(),
                 media_refs=media_plan.wire() if media_plan is not None else None,
+                file_hashes=await self._file_hashes_of(item_media_urls("posts", post)),
             )
             self._upload_media(media_plan)
             self._member_gfs.schedule_item(
@@ -503,6 +511,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                     # so its signed bytes stay v_25-compatible.
                     author_identity_anchor=author.identity_anchor,
                     media_refs=media_refs,
+                    file_hashes=await self._file_hashes_of(media_urls),
                 )
                 # v_49 — our household's writer cert, outside the author
                 # signature (it authenticates itself against the space key).
@@ -760,6 +769,8 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 content=c.content,
                 media_url=c.media_url,
                 created_at=c.created_at.isoformat() if c.created_at else None,
+                # One name on every path for the comment's picture.
+                file_hashes=await self._file_hashes_of(media_urls),
             )
 
     async def _on_comment_updated(self, event: CommentUpdated) -> None:

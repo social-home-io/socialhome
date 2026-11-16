@@ -520,10 +520,17 @@ encrypted payload (live events) and in each §25.6 record:
   refuses them (WARNING, nothing written) unless they are that content
   name's hash (`write_once` writes an `sc-` name only with the hash that
   binds it). Two households describing the same hashed file land on the
-  same name; the first row stays. An **unhashed** described file keeps its
-  reader-derived `sg-` name — the sealed blob binds the item and its origin
-  (AAD), the descriptor is author-signed for followers (whose relayed post
-  carries no map). A holder asked to re-upload a file it stores
+  same name; the first row stays. A post relayed through a GFS (the
+  host's or a seed holder's public relay, a member's anonymous publish)
+  carries the map too, under the author's own separate signature
+  (`files_sig`, see [crypto.md](../crypto.md)), so a member that gets the
+  GFS copy before the host's direct one names each file exactly as that one
+  would — the first copy can no longer leave a member with a reader name it
+  could never ask the host or a helper for (`SPACE_MEDIA_WANTED` asks only
+  for `sc-` / `sd-` names). An **unhashed** described file (an older
+  author, a map whose signature fails) keeps its reader-derived `sg-` name
+  — the sealed blob binds the item and its origin (AAD), the descriptor is
+  author-signed. A holder asked to re-upload a file it stores
   content-addressed tries the item's `sc-` files; the sealed address picks
   the right one.
 * **Sync line 85:** a household crossing it gets one full stream of rows,
@@ -883,7 +890,7 @@ It rides:
 
 | Item | Where |
 |---|---|
-| Space post | `SPACE_POST_CREATED` (per link-joined v_80 member), the `public_relay` inner (followers, through a seed holder's relay) and the v_49 member-publish inner — the last two **under the author's own signature** (`media_refs_sig`, suite `media_refs_sig_suite: "ed25519"`, domain `space-post-media-refs:v1:`, bound to the post, space and author; `services/space_public_author.py`). It is a separate signature, like the link card's, so a follower on an older build still verifies the post and shows it without GFS pictures. The signature also binds `item_type` and `edited_at`, so an older descriptor can't ride a newer edit. A follower takes the descriptor ONLY when that signature verifies: an unsigned one, or one a re-publisher swapped, is dropped. A copy stripped of its descriptor that wins the race heals add-only: a later copy or edit of the same author's post carrying a signed descriptor renames the stored post's files, but only while the post has no rows. Anyone holding the content key (a member with the writer group key) can re-wrap the author's inner, and the AAD's household proves nothing to a key holder. The post stands without those pictures; an unknown suite is refused. A post edit that can overtake its create carries the signed descriptor too |
+| Space post | `SPACE_POST_CREATED` (per link-joined v_80 member), the `public_relay` inner (followers, through a seed holder's relay) and the v_49 member-publish inner — the last two **under the author's own signature** (`media_refs_sig`, suite `media_refs_sig_suite: "ed25519"`, domain `space-post-media-refs:v1:`, bound to the post, space and author; `services/space_public_author.py`), next to the post's v_85 file hashes under their own author signature (`files_sig`, domain `space-post-files:v1:`). It is a separate signature, like the link card's, so a follower on an older build still verifies the post and shows it without GFS pictures. The signature also binds `item_type` and `edited_at`, so an older descriptor can't ride a newer edit. A follower takes the descriptor ONLY when that signature verifies: an unsigned one, or one a re-publisher swapped, is dropped. A copy stripped of its descriptor that wins the race heals add-only: a later copy or edit of the same author's post carrying a signed descriptor renames the stored post's files, but only while the post has no rows. Anyone holding the content key (a member with the writer group key) can re-wrap the author's inner, and the AAD's household proves nothing to a key holder. The post stands without those pictures; an unknown suite is refused. A post edit that can overtake its create carries the signed descriptor too |
 | Calendar event | `SPACE_CALENDAR_EVENT_CREATED` / `_UPDATED`, only when the cover is new or changed |
 | Gallery item | `SPACE_GALLERY_ITEM_CREATED` (thumbnail + full file) |
 | Space page (v_82) | the host's `SPACE_PAGE_CREATED` / `_UPDATED`, to a link-joined **v_82** member: one descriptor for the whole version and its open sides (≤ `MAX_PAGE_DESCRIPTOR_ENTRIES`, 16 × 4). Kept page-scoped (`space_page_media_name`, never the name the page shows, the page itself unchanged), fetched only while that page or an open side shows the file (`localize_as_shown`) |

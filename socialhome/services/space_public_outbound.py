@@ -142,6 +142,7 @@ from ..domain.writer_cert import (
 )
 from ..federation.space_scope import archive_refusal
 from ..infrastructure.event_bus import EventBus
+from .file_hashes_sender import FileHashesMixin
 from .space_media_refs import SpaceMediaRefsMixin
 from .space_public_author import (
     build_signed_author_inner,
@@ -156,18 +157,20 @@ if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
     from .gfs_connection_service import GfsConnectionService
+    from .media_file_hasher import MediaFileHasher
     from .space_crypto_service import SpaceContentEncryption
     from .space_relay_coverage import SkipTarget, SpaceRelayCoverage
 
 log = logging.getLogger(__name__)
 
 
-class SpacePublicOutbound(SpaceMediaRefsMixin):
+class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
     """Bus-event → GFS-relay producer for public/global space posts."""
 
     __slots__ = (
         "_bus",
         "_crypto",
+        "_file_hasher",
         "_gfs",
         "_media_gfs",
         "_own_identity_seed",
@@ -194,6 +197,8 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
         self._crypto = space_crypto
         self._users = user_repo
         self._gfs = gfs_service
+        #: The post's file hashes, author-signed into the inner (one name on every path).
+        self._file_hasher: MediaFileHasher | None = None
         self._own_instance_id: str = ""
         #: This household's 32-byte Ed25519 identity public key. Shipped as
         #: ``author_pk`` inside the encrypted payload so the subscriber can
@@ -331,6 +336,7 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
             # its signed bytes stay v_25-compatible.
             author_identity_anchor=author.identity_anchor,
             media_refs=media_plan.wire() if media_plan is not None else None,
+            file_hashes=await self._file_hashes_of(post_media_urls(post)),
         )
         # Encrypt under the existing per-space epoch key. Raises if no key —
         # we never relay plaintext (Encryption-First Rule). v_49: our own

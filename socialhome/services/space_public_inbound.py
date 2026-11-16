@@ -93,7 +93,7 @@ from ..domain.gfs_member_publish import (
     SpaceItemFrame,
 )
 from ..domain.link_preview import card_survives_edit
-from ..domain.media_constraints import is_gfs_space_media_name, space_media_ref
+from ..domain.media_constraints import space_media_ref
 from ..domain.post import FEED_POST_MAX_IMAGES, LocationData, Post, PostType
 from ..domain.presence import truncate_coord
 from ..domain.space import SpaceRole
@@ -136,9 +136,11 @@ from .space_item_author import (
 )
 from .space_item_inbound import SpaceItemInbound
 from .space_public_author import (
+    UnsupportedFilesSigSuite,
     UnsupportedLinkPreviewSigSuite,
     UnsupportedMediaRefsSigSuite,
     signed_media_refs,
+    verified_file_hashes,
     verified_link_preview,
     verify_signed_author_inner,
 )
@@ -555,7 +557,7 @@ class SpacePublicInbound:
 
         post = self._post_from_inner(post_id, author_user_id, inner)
         media = await self._localize_media(space_id, post, origin_instance_id, inner)
-        post = _only_described_files(media.post(post))
+        post = _only_described_files(media.post(post), media)
         if await self._posts.save(space_id, post) is None:
             log.warning(
                 "space_public.inbound: post %s already exists in another space "
@@ -980,12 +982,28 @@ class SpacePublicInbound:
                 "not sign — dropped",
                 post.id,
             )
+        # The author-signed file hashes: with them each file takes
+        # its content name (``sc-``), the one name it has on every path, so
+        # a member that gets this copy before the host's direct one names
+        # it exactly as that one would (and can still ask the host or a
+        # helper for it, ``SPACE_MEDIA_WANTED``).
+        try:
+            hashes = verified_file_hashes(inner)
+        except UnsupportedFilesSigSuite as exc:
+            log.warning(
+                "space_public.inbound: post %s file hashes signature suite %s "
+                "unsupported — dropped",
+                post.id,
+                exc,
+            )
+            hashes = {}
         return await self._gfs_media.localize(
             space_id,
             refs,
             post_media_urls(post),
             item_id=post.id,
             origin=origin_instance_id,
+            hashes=hashes,
         )
 
     async def _heal_media(
@@ -1025,7 +1043,7 @@ class SpacePublicInbound:
         )
         if not media.refs:
             return
-        files = _only_described_files(media.post(incoming))
+        files = _only_described_files(media.post(incoming), media)
         preview = post.link_preview
         healed = replace(
             post,
@@ -1093,7 +1111,7 @@ class SpacePublicInbound:
             media = await self._localize_media(
                 space_id, post, origin_instance_id, inner
             )
-            post = _only_described_files(media.post(post))
+            post = _only_described_files(media.post(post), media)
             if await self._posts.save(space_id, post) is None:
                 log.warning(
                     "space_public.inbound: post %s already exists in another space "
@@ -1297,21 +1315,24 @@ class SpacePublicInbound:
         )
 
 
-def _only_described_files(post: Post) -> Post:
+def _only_described_files(post: Post, media: SpaceMediaLocalization) -> Post:
     """``post`` with only the file references a signed GFS descriptor
-    renamed to this household's reader name (``sg-``,
-    :func:`is_gfs_space_media_name`). On the relay path that is the only
-    way the author's bytes reach this household; any other name — an
-    ``sd-`` file received from some household over federation, or a plain
-    name that may be one of this household's own uploads, from another
-    space even — would show a file the relayed author never sent. Apply
-    after the localization. The link card stays; only its picture goes.
+    renamed to this household's name for the GFS copy — a reader name
+    (``sg-``), or the content name (``sc-``) when the author-signed hashes
+    cover the file: exactly the names *media* produced. On the relay path
+    that is the only way the author's bytes reach this household; any other
+    name — an ``sd-`` file received from some household over federation, a
+    raw ``sc-`` name, or a plain name that may be one of this household's
+    own uploads, from another space even — would show a file the relayed
+    author never sent. Apply after the localization. The link card stays;
+    only its picture goes.
 
     Every field the space media-field registry lists for a post
     (:func:`replace_item_media`)."""
+    described = set(media.names.values())
 
     def keep(url: str | None) -> bool:
-        return bool(url) and is_gfs_space_media_name(media_basename(url))
+        return bool(url) and media_basename(url) in described
 
     return replace_item_media("posts", post, lambda u: u if keep(u) else None)
 

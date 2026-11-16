@@ -1046,7 +1046,11 @@ boundary on both ends:
   signs the canonical, domain-separated bytes over the attributable inner
   fields (`services/space_public_author.py:author_signing_bytes`, prefix
   `space-post-author:v1:`, sorted compact JSON, excluding `author_sig`
-  itself). It rides **inside** the ciphertext, so the GFS never sees it. The
+  itself). A picture post also carries its `media_refs` (v_80) and its v_85
+  file hashes (`files` + `files_suite`), each under the author's own separate
+  signature (`media_refs_sig` / `files_sig`, see [crypto.md](../crypto.md)),
+  so a receiver names each file by its content whichever copy of the post
+  arrives first. It rides **inside** the ciphertext, so the GFS never sees it. The
   wire envelope is only `{space_id, epoch, encrypted_payload, authority_sig,
   authority_sig_suite}` — **no plaintext content, author, or author_sig ever
   leaves the household**, so the GFS and any relay stay content-blind
