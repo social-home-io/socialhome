@@ -302,8 +302,8 @@ class SpaceSyncScheduler:
         "_queue",
         "_resume",
         "_roster_authority",
+        "_roster_digest",
         "_roster_echo",
-        "_roster_refresh",
         "_row_marks",
         "_seat_repo",
         "_space_repo",
@@ -353,13 +353,12 @@ class SpaceSyncScheduler:
         #: completes on the first attempt and never retries.
         self._mesh_catchup_done: set[tuple[str, str]] = set()
         self._mesh_catchup_attempts: dict[tuple[str, str], int] = {}
-        #: v_32 roster self-heal, run once per tick (see
-        #: :meth:`attach_roster_refresh`).
-        self._roster_refresh: Callable[[], Awaitable[object]] | None = None
         #: v_46 authority epoch echo builder (see :meth:`attach_authority_echo`).
         self._authority_echo: Callable[[str, str], Awaitable[dict | None]] | None = None
         #: Roster echo builder (see :meth:`attach_roster_echo`).
         self._roster_echo: Callable[[str, str], Awaitable[dict | None]] | None = None
+        #: Roster digest builder (see :meth:`attach_roster_digest`).
+        self._roster_digest: Callable[[str, str], Awaitable[dict | None]] | None = None
         #: v_89 member directory version echo (see :meth:`attach_directory_echo`).
         self._directory_echo: Callable[[str, str], Awaitable[int | None]] | None = None
         #: Moderation queue echo (see :meth:`attach_moderation_echo`).
@@ -438,14 +437,6 @@ class SpaceSyncScheduler:
         if self._row_marks is None:
             self._row_marks = marks
 
-    def attach_roster_refresh(self, refresh: Callable[[], Awaitable[object]]) -> None:
-        """Run ``refresh`` on every periodic tick — the host re-sending each
-        member household the roster of every space it hosts
-        (``SpaceService.send_hosted_roster_snapshots``). Content authors are
-        bound to that roster, so a mirror that missed gossip has to heal on
-        its own, not wait for an operator."""
-        self._roster_refresh = refresh
-
     def attach_authority_echo(
         self, echo: Callable[[str, str], Awaitable[dict | None]]
     ) -> None:
@@ -512,6 +503,28 @@ class SpaceSyncScheduler:
         (``SpaceService.roster_echo_for``): the roster version of the last
         snapshot we applied from that host, so it stops resending it."""
         self._roster_echo = echo
+
+    def attach_roster_digest(
+        self, digest: Callable[[str, str], Awaitable[dict | None]]
+    ) -> None:
+        """``digest(space_id, to_instance_id)`` → the ``roster_digest`` a
+        BEGIN to that household carries, or ``None``
+        (``SpaceService.roster_digest_for``, only to the space's host): the
+        host repairs our roster mirror only when its digest differs. Carried
+        on every BEGIN path — direct, mesh catch-up / incremental, and the
+        relay re-BEGIN after an ICE timeout."""
+        self._roster_digest = digest
+
+    async def _roster_digest_for(
+        self, space_id: str, to_instance_id: str
+    ) -> dict | None:
+        if self._roster_digest is None:
+            return None
+        try:
+            return await self._roster_digest(space_id, to_instance_id)
+        except Exception:
+            log.exception("roster digest for %s failed", space_id)
+            return None
 
     def attach_mesh_announce(self, announce: Callable[[str], Awaitable[bool]]) -> None:
         """``announce(instance_id)`` → ``True`` once nothing more is needed
@@ -604,6 +617,9 @@ class SpaceSyncScheduler:
             space_id=event.space_id,
             host_instance_id=owner,
             extra_payload=await self._echo_for(event.space_id, owner),
+            # Every member BEGIN to the host carries the digest: one without
+            # it from this version asks for no roster repair.
+            roster_digest=await self._roster_digest_for(event.space_id, owner),
         )
 
     async def _on_space_sync_complete(self, event: SpaceSyncComplete) -> None:
@@ -910,10 +926,11 @@ class SpaceSyncScheduler:
                 peer_instance_id=peer_instance_id,
                 sync_mode=sync_mode,
             )
+            roster_digest = await self._roster_digest_for(space_id, peer_instance_id)
             # Record what we are asking for, so the provider's
             # ``SPACE_SYNC_OFFER`` can be recognised as an ANSWER. An
             # offer for a sync_id nobody here issued is refused. The mode
-            # and echo ride along so a relay retry after an ICE timeout
+            # and echoes ride along so a relay retry after an ICE timeout
             # asks for the same stream.
             self._federation.record_sync_request(
                 sync_id=sync_id,
@@ -921,6 +938,7 @@ class SpaceSyncScheduler:
                 provider_instance_id=peer_instance_id,
                 sync_mode=sync_mode,
                 have_seq=fields.get("have_seq"),
+                roster_digest=roster_digest,
             )
             payload: dict = {
                 "sync_id": sync_id,
@@ -937,6 +955,8 @@ class SpaceSyncScheduler:
             roster_echo = await self._roster_echo_for(space_id, peer_instance_id)
             if roster_echo is not None:
                 payload["roster_echo"] = roster_echo
+            if roster_digest is not None:
+                payload["roster_digest"] = roster_digest
             dir_seq = await self._directory_echo_for(space_id, peer_instance_id)
             if dir_seq is not None:
                 payload["dir_seq"] = dir_seq
@@ -1031,12 +1051,6 @@ class SpaceSyncScheduler:
         except Exception:
             log.exception("space-sync-scheduler: mesh catch-up failed")
         await self._tick_mesh_announce()
-
-        if self._roster_refresh is not None:
-            try:
-                await self._roster_refresh()
-            except Exception:
-                log.exception("space-sync-scheduler: roster refresh failed")
 
         confirmed = [
             inst
@@ -1275,6 +1289,7 @@ class SpaceSyncScheduler:
                         else None
                     ),
                     dir_seq=dir_seq,
+                    roster_digest=await self._roster_digest_for(space.id, host),
                 )
             except Exception:  # pragma: no cover — begin_* is fail-soft
                 log.exception(
@@ -1315,6 +1330,7 @@ class SpaceSyncScheduler:
                 dir_seq=dir_seq,
                 have_seq=fields.get("have_seq"),
                 mod_held=await self._moderation_echo_for(space.id, host),
+                roster_digest=await self._roster_digest_for(space.id, host),
             )
         except Exception:  # pragma: no cover — fail-soft
             log.debug("mesh incremental BEGIN failed", exc_info=True)

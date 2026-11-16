@@ -6364,11 +6364,12 @@ def cmd_gfs_invite_link() -> None:
             "would not be exercised. Re-run from a clean 'up'.",
         )
 
-    # 0b. Give the space a BIG cover. A 1200 px WebP is dimension-capped,
-    #     not byte-capped, and the ACK used to embed it verbatim: a ~500 KiB
-    #     cover sealed past the 256 KiB bootstrap-blob cap, the relay
+    # 0b. Upload a BIG cover photo. The ACK used to embed a ~500 KiB cover
+    #     verbatim: sealed past the 256 KiB bootstrap-blob cap, the relay
     #     answered 413, and e's join timed out (504) after a had already
-    #     spent the token and seated e.
+    #     spent the token and seated e. Since the one space-image cap (owner
+    #     decision 2026-11-15) the upload is stored within it, so every
+    #     member — e behind the GFS included — gets the same cover.
     s, cover = _upload_file(
         f"{a_base}/api/spaces/{space_id}/cover",
         token=a["token"],
@@ -6384,10 +6385,13 @@ def cmd_gfs_invite_link() -> None:
         (space_id,),
     )
     host_cover_len = host_cover[0][0] if host_cover else 0
-    if host_cover_len < 400 * 1024:
+    from socialhome.domain.media_constraints import SPACE_COVER_MAX_BYTES
+
+    if not 0 < host_cover_len <= SPACE_COVER_MAX_BYTES:
         raise SystemExit(
-            f"gfs-invite-link: a's stored cover is {host_cover_len} bytes — the "
-            "step needs a ~500 KiB one to prove the join survives a big cover.",
+            f"gfs-invite-link: a's stored cover is {host_cover_len} bytes — "
+            f"an upload must be stored within SPACE_COVER_MAX_BYTES "
+            f"({SPACE_COVER_MAX_BYTES}).",
         )
     print(f"  a's space has a {host_cover_len // 1024} KiB cover")
 
@@ -6532,34 +6536,33 @@ def cmd_gfs_invite_link() -> None:
     # per-user role field, so reading one off it is always ``None``.
     print(f"  e's /api/spaces shows {mine.get('name')!r} (role member) ✓")
 
-    # 5b. The big cover did not sink the join, and e still got art: a
-    #     size-bounded WebP rendition under a's own cover hash.
+    # 5b. The big cover did not sink the join, and e got the very cover
+    #     every member gets: a's bytes, under a's own cover hash.
     e_cover = _rows(
         "e",
         "SELECT bytes_webp, hash FROM space_covers WHERE space_id = ?",
         (space_id,),
     )
     a_hash = _rows("a", "SELECT cover_hash FROM spaces WHERE id = ?", (space_id,))
+    a_cover = _rows(
+        "a",
+        "SELECT bytes_webp FROM space_covers WHERE space_id = ?",
+        (space_id,),
+    )
     if not e_cover or e_cover[0][0][8:12] != b"WEBP":
         raise SystemExit(
             "gfs-invite-link: e holds no WebP cover for the space — the ACK "
-            "shipped none (the big cover should ship as a smaller rendition).",
+            "shipped none.",
         )
-    if len(e_cover[0][0]) > 64 * 1024 or e_cover[0][1] != a_hash[0][0]:
+    if e_cover[0][0] != a_cover[0][0] or e_cover[0][1] != a_hash[0][0]:
         raise SystemExit(
-            f"gfs-invite-link: e's cover is {len(e_cover[0][0])} bytes under "
-            f"hash {e_cover[0][1]!r} — expected <= 64 KiB "
-            "(SPACE_COVER_BOOTSTRAP_MAX_BYTES) under a's hash "
-            f"{a_hash[0][0]!r}.",
-        )
-    if not _log_lines_matching("a", "shipping a", offset=a_off):
-        raise SystemExit(
-            "gfs-invite-link: a never logged shrinking the cover for the ACK "
-            "('space snapshot: cover … shipping a N-byte rendition').",
+            f"gfs-invite-link: e's cover ({len(e_cover[0][0])} bytes, hash "
+            f"{e_cover[0][1]!r}) is not a's ({len(a_cover[0][0])} bytes, hash "
+            f"{a_hash[0][0]!r}) — every member gets the same cover.",
         )
     print(
-        f"  e got a {len(e_cover[0][0]) // 1024} KiB rendition of the "
-        f"{host_cover_len // 1024} KiB cover under a's hash ✓",
+        f"  e got a's {len(e_cover[0][0]) // 1024} KiB cover byte-for-byte "
+        "under a's hash ✓",
     )
 
     # 6. The relay stayed a relay (#677). The routing envelope is

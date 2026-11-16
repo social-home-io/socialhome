@@ -560,6 +560,31 @@ household's IP is still in the connection server's HTTP access log. See
 [`principles.md`](./principles.md) for that residual and the rest of the
 metadata this tier concedes.
 
+**A member behind a GFS is a member like any other.** Tier 4 is only a
+transport: a space member household reached through it gets the same
+content and the same flows as a paired or mesh-only one — the roster
+repair its sync BEGIN asks for (a snapshot only when the roster digest it
+carries is wrong), the media outbox's
+`SPACE_MEDIA_BLOB` pushes, page files it proposes, and from v_92 the same
+bounded catch-up push and `SPACE_MEDIA_WANTED` as everyone. How the bytes
+travel depends on the far end: a seat at v_87 or above whose GFS proves
+`envelope_media` takes full 512 KiB binary relay frames
+(`FederationService.relay_media_ok`); any other seat (v_80–86, or a GFS
+without `envelope_media`) takes the same push as JSON chunks of
+`RELAY_JSON_CHUNK_BYTES` through the relay. Where those small chunks would
+be the only way — a member's page proposal to such a host, a v_92 catch-up
+to such a member — the GFS media cache stays the path instead. What stays specific to it is listed, with
+a reason, in `tests/protocol/test_gfs_member_special_case_guard.py`: the
+seat itself (redeem, teardown), the transport
+(relay sizes and frames, mailboxes and multi uploads, no direct-sync
+signalling, no inbox POST), the seat's inbound vocabulary, the member
+directory, exclusions from non-space surfaces (DMs, moments, pairing) and
+the GFS media cache — a reader whose GFS keeps one is described its files
+(`media_refs`), and its push is skipped only while that cache is known to
+hold the file. One open pre-release gap is not an exception: GFS-only admins and
+moderators don't get the space signing seed yet (a safe seed handoff with
+the same rights as paired admins is tracked separately).
+
 A tier-4 success is an **acceptance, not a delivery**: the relay answers
 a uniform `202` whether the recipient is online, offline or not one of
 its clients (anything else would be a presence oracle), so
@@ -767,7 +792,7 @@ reports it as `mesh_retry_scheduled` (not a terminal failure). While the
 FIFO exists, every later broadcast to the same member queues behind it
 instead of overtaking, so the member sees events in broadcast order. One
 task per target sends the queue in order from the head, on a private copy of
-the exact payload variant that member was sent (legacy / relay variants
+the exact payload variant that member was sent (legacy variants
 included). A delivered item is popped and the next goes; a deferrable miss
 keeps the head first and **backs off**: re-send *n* waits at least
 `MESH_DEFERRED_RETRY_BACKOFF_S[n-1]` (0 s, 60 s, 120 s, 240 s), never inside
@@ -2568,9 +2593,19 @@ never mid-stream; see
 [incremental sessions](./protocol/sync.md#incremental-sessions-change-stamps--per-household-watermark).
 Because every author is bound to the roster mirror, the mirror must heal on
 its own: the host sends a v_32 roster snapshot on seat, on a member's
-upgrade and on the periodic sync tick — on the tick only to a household
-whose last sync BEGIN did not echo the current roster version
-(`roster_echo`), and then without the removals it already holds — and a
+upgrade, and in reply to a member's sync BEGIN whose `roster_digest` (a
+SHA-256 of the live seats it mirrors, `domain/space_roster_digest.py`)
+differs from the host's for it — never on the host's own timer, so with
+gossip working a roster repair costs zero envelopes (an older household's
+`roster_echo` is answered the same way); only an admitted BEGIN counts, and
+by one rule: a mismatch gets one snapshot (the host's live seats and its
+removals of the last 30 days — every removal on a consecutive repair —
+merged entry by entry, strictly newer wins; a seat of the host's own
+household it does not name ends, any other household's seat is never
+inferred from absence) unless one went to that
+household within its cooldown — 30 min, doubling to a day on every
+consecutive mismatch — with at most two repair snapshots a minute per space
+and six host-wide, so a restart cannot burst — and a
 write that beat the gossip
 seating its author or household waits in a bounded in-memory buffer until
 the seat lands. The per-family table is in

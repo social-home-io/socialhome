@@ -223,6 +223,12 @@ MAX_CATCHUP_MEDIA_RECORDS: int = 500
 class _MediaPlanner(Protocol):
     async def is_relay_reader(self, instance_id: str) -> bool: ...
 
+    async def takes_relay_frames(self, instance_id: str) -> bool: ...
+
+    async def stored_plan_for_reader(
+        self, space_id: str, media_urls: list[str], instance_id: str, *, item_id: str
+    ) -> Any: ...
+
     async def plan_for_reader(
         self, space_id: str, media_urls: list[str], instance_id: str, *, item_id: str
     ) -> Any: ...
@@ -232,21 +238,40 @@ class _MediaPlanner(Protocol):
 
 class _WithMediaRefs:
     """v_80 — a resource streamed to a member household seated from an
-    invite link (reached only through a GFS relay, which refuses the
-    ``SPACE_MEDIA_BLOB`` bytes): each record that shows files carries their
-    ``media_refs`` descriptor (computed from our copy of the file — the
-    deterministic seal gives the same address every time) and the blobs are
-    queued for upload to that member's GFS. At most
-    :data:`MAX_CATCHUP_MEDIA_RECORDS` records per resource per stream."""
+    invite link whose GFS keeps a space media cache: each record that shows
+    files carries their ``media_refs`` descriptor (computed from our copy of
+    the file — the deterministic seal gives the same address every time).
+    At most :data:`MAX_CATCHUP_MEDIA_RECORDS` records per resource per
+    stream.
 
-    __slots__ = ("_budget", "_inner", "_media", "_requester", "resource")
+    ``stored_only`` (a v_92 requester whose relay takes binary frames,
+    which gets a catch-up's files like any member — the bounded catch-up
+    push and ``SPACE_MEDIA_WANTED``):
+    only the files its GFS is already known to hold are described, and
+    nothing is uploaded. Otherwise (a v_80 requester, which can ask for
+    nothing) every file is described and queued for upload to its GFS."""
+
+    __slots__ = (
+        "_budget",
+        "_inner",
+        "_media",
+        "_requester",
+        "_stored_only",
+        "resource",
+    )
 
     def __init__(
-        self, inner: ResourceExporter, media: _MediaPlanner, requester: str
+        self,
+        inner: ResourceExporter,
+        media: _MediaPlanner,
+        requester: str,
+        *,
+        stored_only: bool = False,
     ) -> None:
         self._inner = inner
         self._media = media
         self._requester = requester
+        self._stored_only = stored_only
         self._budget = MAX_CATCHUP_MEDIA_RECORDS
         self.resource = inner.resource
 
@@ -257,16 +282,22 @@ class _WithMediaRefs:
         for row in rows:
             urls = record_media_urls(self.resource, row)
             if urls and self._budget > 0:
-                self._budget -= 1
+                item_id = str(row.get("id") or "")
                 try:
-                    # Sealed for the record's own item — the id the
-                    # reader keeps the descriptor (and opens the blob) under.
-                    plan = await self._media.plan_for_reader(
-                        space_id,
-                        urls,
-                        self._requester,
-                        item_id=str(row.get("id") or ""),
-                    )
+                    if self._stored_only:
+                        # Only blobs its GFS is known to hold, address for
+                        # address — looked up, never sealed; nothing is
+                        # uploaded.
+                        plan = await self._media.stored_plan_for_reader(
+                            space_id, urls, self._requester, item_id=item_id
+                        )
+                    else:
+                        # Sealed for the record's own item — the id the
+                        # reader keeps the descriptor (and opens the blob)
+                        # under.
+                        plan = await self._media.plan_for_reader(
+                            space_id, urls, self._requester, item_id=item_id
+                        )
                 except Exception:
                     log.warning(
                         "sync: media of a %s record not described for %s",
@@ -275,9 +306,16 @@ class _WithMediaRefs:
                         exc_info=True,
                     )
                     plan = None
+                if not self._stored_only:
+                    # Every described record costs a seal and an upload.
+                    self._budget -= 1
                 if plan is not None:
+                    if self._stored_only:
+                        # Only a descriptor that goes out spends the budget.
+                        self._budget -= 1
                     row = {**row, MEDIA_REFS_FIELD: plan.wire()}
-                    self._media.upload(plan)
+                    if not self._stored_only:
+                        self._media.upload(plan)
             out.append(row)
         return out
 
@@ -719,9 +757,26 @@ class SpaceSyncService:
             )
         ):
             exporter = _WithMediaRefs(
-                exporter, self._media_gfs, session.requester_instance_id
+                exporter,
+                self._media_gfs,
+                session.requester_instance_id,
+                stored_only=await self._narrow_gfs_catchup(session),
             )
         return exporter
+
+    async def _narrow_gfs_catchup(self, session: SyncSessionRecord) -> bool:
+        """Whether this requester — a member reading a GFS media cache — is
+        at v_92 behind a relay that takes full-size binary frames: the
+        bounded catch-up push then carries its files (descriptors only for
+        blobs its GFS holds). Without frames the pushes would go as small
+        JSON chunks — the GFS cache stays its path."""
+        return (
+            self._media_gfs is not None
+            and await self._session_version(session)
+            >= FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED
+            and await self._media_gfs.is_relay_reader(session.requester_instance_id)
+            and await self._media_gfs.takes_relay_frames(session.requester_instance_id)
+        )
 
     async def _shaped_exporter(
         self, resource: str, session: SyncSessionRecord
@@ -938,6 +993,11 @@ class SpaceSyncService:
             await self._enqueue_catchup_media(
                 space_id,
                 session.requester_instance_id,
+                # The narrow v_92 descriptor matches blobs by address, the
+                # outbox's "reads from its GFS" skip by file name: a file
+                # held under another item or epoch would lose both. Its
+                # catch-up rows go as ``push`` rows, never skipped.
+                push=await self._narrow_gfs_catchup(session),
             )
         except Exception:  # pragma: no cover
             log.exception(
@@ -1187,6 +1247,8 @@ class SpaceSyncService:
         self,
         space_id: str,
         target_instance_id: str,
+        *,
+        push: bool = False,
     ) -> None:
         """Enqueue the files of the space's RECENT items for the requester —
         bounded on every path (paired, mesh, GFS-reached member alike).
@@ -1244,11 +1306,15 @@ class SpaceSyncService:
                 # — nor charged to the stream's budget.
                 urls = (await self._media_sync.held_files(urls))[:budget]
                 budget -= len(urls)
-                await self._enqueue_media(space_id, target_instance_id, item_id, urls)
+                await self._enqueue_media(
+                    space_id, target_instance_id, item_id, urls, push=push
+                )
         # Page files — the host's catch-up only (v_82).
-        await self._enqueue_page_media(space_id, target_instance_id)
+        await self._enqueue_page_media(space_id, target_instance_id, push=push)
 
-    async def _enqueue_page_media(self, space_id: str, target_instance_id: str) -> None:
+    async def _enqueue_page_media(
+        self, space_id: str, target_instance_id: str, *, push: bool = False
+    ) -> None:
         """v_82 — every live page's files, from the space's host only."""
         if self._page_repo is None or not await self._takes_page_media(
             space_id, target_instance_id
@@ -1294,7 +1360,9 @@ class SpaceSyncService:
             # attempt would fail on the missing source.
             if self._media_sync is not None:
                 own = await self._media_sync.held_files(own)
-            await self._enqueue_media(space_id, target_instance_id, page.id, own)
+            await self._enqueue_media(
+                space_id, target_instance_id, page.id, own, push=push
+            )
 
     async def _enqueue_media(
         self,
@@ -1302,10 +1370,13 @@ class SpaceSyncService:
         target_instance_id: str,
         correlation_id: str,
         urls: list[str],
+        *,
+        push: bool = False,
     ) -> None:
         """Enqueue one row's media for the requester. One outbox insert
         hitting a transient SQLite error (lock, disk full) must not kill
-        the whole walk — the next sync re-enqueues."""
+        the whole walk — the next sync re-enqueues. ``push``: never
+        dropped for "reads from its GFS" (:meth:`_enqueue_catchup_media`)."""
         if not urls or self._media_sync is None:
             return
         try:
@@ -1314,6 +1385,7 @@ class SpaceSyncService:
                 correlation_id=correlation_id,
                 target_instance_ids=[target_instance_id],
                 media_urls=urls,
+                push=push,
             )
         except sqlite3.Error:
             log.exception(

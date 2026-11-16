@@ -46,9 +46,10 @@ Cost per item: one upload per file per GFS (never per reader).
 
 **On demand (v_83).** A video whose blob is at least
 :data:`LAZY_VIDEO_MIN_BYTES` is described but NOT uploaded eagerly to a GFS
-that proved ``on_demand`` while every link-joined reader of the space is at
-v_83 or above (followers can't be told apart; an older link-joined reader
-keeps the eager upload) — and only by the household the GFS would ask for
+that proved ``on_demand`` while no member household of the space reads
+through a GFS (only followers, who can't be told apart, ask a GFS for a
+missed blob; a member gets it at once) — and only by the household the GFS
+would ask for
 it: the OWNER of a listed space (a member's or a private channel's large
 video goes eagerly, as before, or nobody could ever be asked for it). It
 goes only when a reader plays it and the GFS
@@ -220,8 +221,8 @@ class SpaceMediaPlan:
     space_id: str
     refs: tuple[SpaceMediaRef, ...]
     targets: tuple[GfsConnection, ...]
-    #: Every link-joined reader can ask for a missed blob (v_83): a large
-    #: video may wait for a GFS's request.
+    #: No member household reads the space through a GFS (v_83): a large
+    #: video may wait for a follower GFS's request.
     lazy_ok: bool = False
 
     def wire(self) -> dict[str, dict]:
@@ -359,9 +360,12 @@ class SpaceMediaGfsUploader:
     async def is_relay_reader(self, instance_id: str) -> bool:
         """Whether *instance_id* is a member household seated from an invite
         link that takes ``media_refs`` (v_80): its items carry the
-        descriptor, and it gets no ``SPACE_MEDIA_BLOB`` push. Not one whose
-        GFS keeps no space media cache while it reads binary relay frames
-        (v_87): that one gets the push, through the relay."""
+        descriptor, and the media outbox skips its ``SPACE_MEDIA_BLOB`` push
+        only while its GFS is known to hold the file (:meth:`reads_from_gfs`)
+        — it gets every other push, through the relay, like any member. Not
+        one whose GFS keeps no space media cache while it reads binary relay
+        frames (v_87): it has nothing to fetch from, so it only gets the
+        push."""
         if self._federation is None:
             return False
         inst = await self._federation_repo.get_instance(instance_id)
@@ -393,6 +397,17 @@ class SpaceMediaGfsUploader:
         )
         return True
 
+    async def takes_relay_frames(self, instance_id: str) -> bool:
+        """Whether *instance_id* — a household seated from an invite link —
+        takes a media push as binary relay frames (v_87, its relay proved
+        ``envelope_media``; :meth:`FederationService.relay_media_ok`). Such
+        a household gets ``SPACE_MEDIA_BLOB`` through the outbox like any
+        member, so a file meant for it alone needs no GFS cache."""
+        if self._federation is None:
+            return False
+        inst = await self._federation_repo.get_instance(instance_id)
+        return inst is not None and await self._federation.relay_media_ok(inst)
+
     async def _reader_conn(self, instance_id: str) -> GfsConnection | None:
         if not await self.is_relay_reader(instance_id):
             return None
@@ -401,34 +416,14 @@ class SpaceMediaGfsUploader:
             return None
         return await self._gfs.connection_for_url(inst.relay_via)
 
-    async def _relay_reader_conns(
-        self, space_id: str
-    ) -> tuple[list[GfsConnection], bool]:
-        """The link-joined readers' GFSs, and whether every such reader can
-        ask for a missed blob (v_83)."""
+    async def _relay_reader_conns(self, space_id: str) -> list[GfsConnection]:
+        """The GFSs of the space's member households that read through one."""
         out: list[GfsConnection] = []
-        all_on_demand = True
         for iid in await self._federation_repo.list_member_instance_ids(space_id):
             conn = await self._reader_conn(iid)
             if conn is not None:
                 out.append(conn)
-                all_on_demand = all_on_demand and await self._on_demand_reader(iid)
-        return out, all_on_demand
-
-    async def _on_demand_reader(self, instance_id: str) -> bool:
-        """Whether *instance_id* asks its GFS for a missed file (v_83) — a
-        reader in [v_83, v_92). From v_92 a member asks its host or a helper
-        with ``SPACE_MEDIA_WANTED`` instead, so its push is dropped only
-        while its GFS is known to hold the file (decision D)."""
-        if self._federation is None:
-            return False
-        return await self._federation.peer_supports(
-            instance_id,
-            min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND,
-        ) and not await self._federation.peer_supports(
-            instance_id,
-            min_version=FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED,
-        )
+        return out
 
     async def _capable(
         self, conns: Iterable[GfsConnection], scope: str
@@ -460,7 +455,11 @@ class SpaceMediaGfsUploader:
         names = media_names(media_urls)
         if not names:
             return None
-        conns, lazy_ok = await self._relay_reader_conns(space_id)
+        conns = await self._relay_reader_conns(space_id)
+        # Lazy (v_83, a large video waits for a follower to play it) only
+        # where no member household reads through a GFS: a member never asks
+        # a GFS for a missed file — it gets it at once.
+        lazy_ok = not conns
         if followers:
             conns.extend(await self._gfs.space_media_follower_targets(space_id))
         return await self._plan(space_id, names, conns, item_id, lazy_ok=lazy_ok)
@@ -479,13 +478,7 @@ class SpaceMediaGfsUploader:
         conn = await self._reader_conn(instance_id) if names else None
         if conn is None:
             return None
-        return await self._plan(
-            space_id,
-            names,
-            [conn],
-            item_id,
-            lazy_ok=await self._on_demand_reader(instance_id),
-        )
+        return await self._plan(space_id, names, [conn], item_id)
 
     async def _plan(
         self,
@@ -510,12 +503,19 @@ class SpaceMediaGfsUploader:
         )
 
     async def _describe_names(
-        self, space_id: str, names: list[str], item_id: str
+        self,
+        space_id: str,
+        names: list[str],
+        item_id: str,
+        *,
+        cached_only: bool = False,
     ) -> list[SpaceMediaRef]:
         """Each file's descriptor entry, sealed for item *item_id* by this
         household — the household a reader authenticates as delivering the
         item, so both are in the blob's AAD (:mod:`~socialhome.space_media_seal`).
-        Nothing before this household knows its own id."""
+        Nothing before this household knows its own id. ``cached_only``:
+        never seal — only entries described before (every uploaded blob
+        was)."""
         origin = self._federation.own_instance_id if self._federation else ""
         if not origin or not item_id:
             return []
@@ -536,6 +536,8 @@ class SpaceMediaGfsUploader:
             if cached is not None:
                 self._described.move_to_end(cache_key)
                 refs.append(cached)
+                continue
+            if cached_only:
                 continue
             data = await self._read(name)
             if data is None:
@@ -797,16 +799,59 @@ class SpaceMediaGfsUploader:
     async def reads_from_gfs(self, instance_id: str, filename: str) -> bool:
         """Whether *instance_id* takes *filename* from its GFS's media cache,
         so the media outbox may drop its push: a relay reader whose GFS we
-        know holds the file (we uploaded it there), or one that can ask its
-        GFS for a missed file (v_83). A v_80–82 reader whose GFS never got
-        the file (its cache was off when the file was planned) keeps its
-        push."""
+        know holds the file (we uploaded it there, within the cache's TTL).
+        A reader whose GFS never got the file keeps its push."""
         conn = await self._reader_conn(instance_id)
         if conn is None:
             return False
-        if await self._on_demand_reader(instance_id):
-            return True
         return self._stored_names.get((conn.id, filename), 0.0) > _monotonic()
+
+    async def stored_plan_for_reader(
+        self,
+        space_id: str,
+        media_urls: Iterable[str | None],
+        instance_id: str,
+        *,
+        item_id: str,
+    ) -> SpaceMediaPlan | None:
+        """The plan for ONE reader holding only the blobs its GFS is known
+        to hold now (:meth:`stored_on_gfs`). Nothing is sealed: a blob we
+        uploaded was described (and its entry kept) when it was planned, so
+        a file with no kept entry cannot be on the GFS and costs nothing
+        here. ``None`` when no such blob."""
+        names = media_names(media_urls)
+        conn = await self._reader_conn(instance_id) if names else None
+        if conn is None:
+            return None
+        refs = await self._describe_names(space_id, names, item_id, cached_only=True)
+        if not refs:
+            return None
+        return self.stored_on_gfs(
+            SpaceMediaPlan(space_id=space_id, refs=tuple(refs), targets=(conn,))
+        )
+
+    def stored_on_gfs(self, plan: SpaceMediaPlan | None) -> SpaceMediaPlan | None:
+        """*plan* narrowed to the refs whose exact blob (the address: file,
+        epoch, item, origin) a target GFS is known to hold now — we uploaded
+        it there, within the cache's TTL (:meth:`_remember`). ``None`` when
+        none is. A file stored under an older epoch or another item is a
+        different blob, so it is never described from here."""
+        if plan is None:
+            return None
+        now = _monotonic()
+        refs = tuple(
+            ref
+            for ref in plan.refs
+            if any(
+                self._stored.get((conn.id, ref.blob_id), 0.0) > now
+                for conn in plan.targets
+            )
+        )
+        if not refs:
+            return None
+        return SpaceMediaPlan(
+            space_id=plan.space_id, refs=refs, targets=plan.targets, lazy_ok=False
+        )
 
     async def _reseal(
         self, ref: SpaceMediaRef, scope: str, scope_id: str

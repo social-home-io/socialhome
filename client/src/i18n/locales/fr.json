@@ -3546,6 +3546,7 @@
   "error.bazaar_faq_used_up": "Cette annonce a déjà eu {max} questions, le maximum. Modifiez plutôt l’une des questions qu’elle affiche.",
   "error.bazaar_faq_rate_limited": "Vous avez souvent modifié les questions de cette annonce. Patientez un peu, puis réessayez.",
   "error.image_too_large": "Cette image est trop lourde. Choisissez-en une de moins de {max_mb} Mo.",
+  "error.image_too_large_kb": "Cette image ne peut pas être rendue assez légère pour l’espace ({max_kb} ko au maximum). Essayez une image plus simple.",
   "error.app_bundle_too_large": "Cette app est trop volumineuse pour être installée.",
   "error.app_download_failed": "Impossible de télécharger l’app. Vérifiez la connexion et réessayez.",
   "error.app_catalog_disabled": "Le catalogue des Apps est désactivé sur ce Social Home.",

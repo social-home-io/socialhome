@@ -22,7 +22,7 @@ from socialhome.domain.federation import (
     DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
 )
-from socialhome.domain.federation_capabilities import FederationCapability
+from socialhome.domain.federation_capabilities import OURS, FederationCapability
 from socialhome.domain.file_hashes import FileHash, space_content_media_name
 from socialhome.domain.space import SpaceMember
 from socialhome.federation.encoder import FederationEncoder
@@ -278,6 +278,28 @@ async def test_an_incremental_resync_ships_no_catchup_media(encoder):
     assert _shipped(media_sync) == [("p-1", ["a.webp"])]
     parsed = orjson.loads(session.rtc.sent[-1])
     assert parsed["resource"] == SENTINEL_RESOURCE
+
+
+@pytest.mark.parametrize(
+    ("requester", "push"),
+    [("peer-e", True), ("peer-paired", False)],
+)
+async def test_a_narrow_v92_catchup_push_is_never_dropped(encoder, requester, push):
+    """Final review I1: a v_92 member behind a frame-taking GFS gets
+    descriptors only for blobs its GFS holds, matched by ADDRESS; the
+    outbox's "reads from its GFS" skip matches by FILE NAME. The same file
+    stored under another item (or an older epoch) would lose both — so its
+    catch-up rows go as ``push`` rows, which the skip never drops. Any
+    other requester keeps the plain rows."""
+    svc, media_sync = _catchup_provider(
+        encoder, [("2026-11-01 10:00:00", "p-1", "u-1", ["a.webp"])]
+    )
+    svc.attach_media_gfs(_ReaderUploader(stored={"a.webp"}))
+    session = _FakeSession(requester=requester)
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    (call,) = media_sync.enqueue_for_blob.call_args_list
+    assert call.kwargs.get("push", False) is push
 
 
 async def test_catchup_never_queues_a_file_this_household_does_not_hold(encoder):
@@ -1809,14 +1831,25 @@ class _ReaderPlan:
 
 
 class _ReaderUploader:
-    def __init__(self, readers=("peer-e",)):
+    def __init__(self, readers=("peer-e",), stored=(), frames=True):
         self.readers = set(readers)
+        self.stored = set(stored)
+        self.frames = frames
+        self.stored_asks: list = []
         self.planned: list = []
         self.items: list = []
         self.uploaded: list = []
 
     async def is_relay_reader(self, iid):
         return iid in self.readers
+
+    async def takes_relay_frames(self, iid):
+        return self.frames and iid in self.readers
+
+    async def stored_plan_for_reader(self, space_id, urls, iid, *, item_id):
+        self.stored_asks.append(item_id)
+        urls = [u for u in urls if u.rsplit("/", 1)[-1] in self.stored]
+        return _ReaderPlan(urls) if urls else None
 
     async def plan_for_reader(self, space_id, urls, iid, *, item_id):
         urls = list(urls)
@@ -1876,6 +1909,85 @@ async def test_a_link_joined_v80_requesters_records_carry_media_refs(encoder):
     assert sorted(uploader.items) == ["e-1", "p-1"]
     assert all("media_refs" not in r for r in _streamed_records(session, "members"))
     # The blobs go to the requester's GFS (once per file).
+    assert len(uploader.uploaded) == 2
+
+
+async def test_a_v92_link_joined_requester_gets_refs_only_for_files_on_its_gfs(
+    encoder,
+):
+    """Members equal: from v_92 a link-joined member gets a catch-up's files
+    like any member — the bounded catch-up push and ``SPACE_MEDIA_WANTED``.
+    Its records describe only the files its GFS is already known to hold
+    (the uploader's ≤ 3-day cache memory); nothing new is sealed for, or
+    uploaded to, its GFS."""
+    uploader = _ReaderUploader(stored={"c.webp"})
+    svc = _media_provider(encoder, uploader)
+    session = _FakeSession(requester="peer-e")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    posts = {r["id"]: r for r in _streamed_records(session, "posts")}
+    assert all("media_refs" not in r for r in posts.values())
+    (event,) = _streamed_records(session, "calendar")
+    assert set(event["media_refs"]) == {"c.webp"}
+    assert uploader.uploaded == []
+
+
+async def test_a_v92_requester_whose_relay_takes_no_frames_keeps_the_full_descriptor(
+    encoder,
+):
+    """Without ``envelope_media`` its pushes fall back to small JSON chunks
+    through the relay, so the GFS cache stays the catch-up path: every file
+    is described and uploaded, as for a v_80 reader."""
+    uploader = _ReaderUploader(stored={"c.webp"}, frames=False)
+    svc = _media_provider(encoder, uploader)
+    session = _FakeSession(requester="peer-e")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    posts = {r["id"]: r for r in _streamed_records(session, "posts")}
+    assert set(posts["p-1"]["media_refs"]) == {"a.webp"}
+    assert len(uploader.uploaded) == 2
+
+
+async def test_a_v92_requester_spends_no_budget_on_files_its_gfs_lacks(
+    encoder, monkeypatch
+):
+    """Review 9: in the narrow v_92 mode nothing is sealed for a file its
+    GFS lacks (only remembered blobs are looked up), and only a record that
+    gets a descriptor spends the per-resource budget — so a stored blob
+    after many unstored ones still gets its descriptor."""
+    monkeypatch.setattr(provider_mod, "MAX_CATCHUP_MEDIA_RECORDS", 1)
+    uploader = _ReaderUploader(stored={"9.webp"})
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    pictures = [
+        {"id": f"p-{i}", "author": "u-1", "image_urls": [f"api/media/{i}.webp"]}
+        for i in range(10)
+    ]
+    svc = SpaceSyncService(
+        builder=builder,
+        exporters={"posts": _FakeExporter("posts", pictures)},
+        sig_suite="ed25519",
+    )
+    svc.attach_media_gfs(uploader)
+    session = _FakeSession(requester="peer-e")
+    session.peer_version = OURS
+    await svc.stream_initial(session)
+    described = [
+        r["id"] for r in _streamed_records(session, "posts") if "media_refs" in r
+    ]
+    assert described == ["p-9"]
+    assert uploader.planned == [] and uploader.uploaded == []
+
+
+async def test_a_v80_link_joined_requester_keeps_the_full_descriptor(encoder):
+    """A v_80 member (released) never asks for a missed file: its stream
+    still describes — and uploads — every file."""
+    uploader = _ReaderUploader(stored={"c.webp"})
+    svc = _media_provider(encoder, uploader)
+    session = _FakeSession(requester="peer-e")
+    session.peer_version = FederationCapability.MIN_FOR_SPACE_MEDIA_REFS
+    await svc.stream_initial(session)
+    posts = {r["id"]: r for r in _streamed_records(session, "posts")}
+    assert set(posts["p-1"]["media_refs"]) == {"a.webp"}
     assert len(uploader.uploaded) == 2
 
 

@@ -24,7 +24,7 @@ from socialhome.crypto import (
     verify_ed25519,
 )
 from socialhome.domain.federation import InstanceSource
-from socialhome.domain.federation_capabilities import FederationCapability
+from socialhome.domain.federation_capabilities import OURS, FederationCapability
 from socialhome.domain.gfs_channel import CHANNEL_SUITE_ED25519
 from socialhome.domain.gfs_space_media import (
     AUTH_AUTHORITY,
@@ -89,6 +89,9 @@ class _Gfs:
     async def space_media_ttl_s(self, conn):
         return self.ttl_s
 
+    def space_media_cache_off(self, conn) -> bool:
+        return False
+
     async def space_media_max_blob(self, conn, *, scope="space"):
         if scope not in self.scopes:
             return None
@@ -136,11 +139,15 @@ class _FedRepo:
 class _Fed:
     own_instance_id = OWN
 
-    def __init__(self, versions):
+    def __init__(self, versions, frames=()):
         self.versions = versions
+        self.frames = set(frames)
 
     async def peer_supports(self, iid, *, min_version):
         return self.versions.get(iid, 0) >= min_version
+
+    async def relay_media_ok(self, instance):
+        return instance.id in self.frames
 
 
 class _Crypto:
@@ -272,6 +279,25 @@ async def test_relay_reader_needs_a_link_seat_at_v80(tmp_path):
     assert await u.is_relay_reader("b") is False
     assert await u.is_relay_reader("old") is False
     assert await u.is_relay_reader("nobody") is False
+
+
+async def test_takes_relay_frames_asks_the_federation_for_the_seat_row(tmp_path):
+    """A seat whose relay carries binary frames (v_87) takes the media push
+    like any member; an unknown household or one without frames does not."""
+    u = _uploader(tmp_path, gfs=_Gfs([]), instances=[RELAY, PAIRED])
+    u.attach_federation(_Fed({}, frames={"e"}))
+    assert await u.takes_relay_frames("e") is True
+    assert await u.takes_relay_frames("b") is False
+    assert await u.takes_relay_frames("nobody") is False
+    no_fed = SpaceMediaGfsUploader(
+        space_repo=_Spaces(None),
+        space_crypto=_Crypto(),
+        federation_repo=_FedRepo([RELAY]),
+        gfs_service=_Gfs([]),
+        media_refs=_MediaRefs(),
+        media_dir=tmp_path,
+    )
+    assert await no_fed.takes_relay_frames("e") is False
 
 
 # ── Planning ─────────────────────────────────────────────────────────────
@@ -967,9 +993,6 @@ async def test_can_upload_answers_with_the_authorization_a_put_would_use(tmp_pat
 # ── On demand (v_83): large videos are uploaded lazily ───────────────────
 
 
-V83 = FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND
-
-
 class _OnDemandGfs(_Gfs):
     def __init__(self, conns, *, wait=25, **kw):
         super().__init__(conns, **kw)
@@ -980,25 +1003,44 @@ class _OnDemandGfs(_Gfs):
 
 
 async def test_a_large_video_is_described_but_not_uploaded_eagerly(tmp_path):
-    """v_83 — a video whose blob is ≥ 1 MiB goes to a GFS only when a
-    reader plays it (the GFS asks for it); a picture still goes at once."""
+    """v_83 — a video whose blob is ≥ 1 MiB goes to a follower GFS only
+    when a reader plays it (the GFS asks for it); a picture still goes at
+    once."""
     _write(tmp_path, "clip.mp4", up_mod.LAZY_VIDEO_MIN_BYTES)
     _write(tmp_path, "a.webp", 5000)
     g1 = _Conn("g1", "https://g1.example")
-    gfs = _OnDemandGfs([g1])
-    u = _uploader(
-        tmp_path,
-        gfs=gfs,
-        instances=[RELAY],
-        versions={"e": V83},
-        seed=generate_identity_keypair().private_key,
-    )
+    gfs = _OnDemandGfs([g1], follower=[g1])
+    u = _uploader(tmp_path, gfs=gfs, seed=generate_identity_keypair().private_key)
     plan = await u.plan(
-        SPACE, ["api/media/clip.mp4", "api/media/a.webp"], item_id=ITEM, followers=False
+        SPACE, ["api/media/clip.mp4", "api/media/a.webp"], item_id=ITEM, followers=True
     )
     assert set(plan.wire()) == {"clip.mp4", "a.webp"}
     await _upload(u, plan)
     assert [p[2] for p in gfs.puts] == [plan.wire()["a.webp"]["blob_id"]]
+
+
+@pytest.mark.parametrize(
+    "version",
+    [FederationCapability.MIN_FOR_SPACE_MEDIA_REFS, OURS],
+)
+async def test_a_link_joined_member_gets_a_large_video_eagerly(tmp_path, version):
+    """A member household behind a GFS never asks that GFS for a missed
+    file (a v_80 one cannot; from v_92 it asks the host or a helper with
+    ``SPACE_MEDIA_WANTED``) — a space with one gets the video at once."""
+    _write(tmp_path, "clip.mp4", up_mod.LAZY_VIDEO_MIN_BYTES)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _OnDemandGfs([g1], follower=[g1])
+    u = _uploader(
+        tmp_path,
+        gfs=gfs,
+        instances=[RELAY],
+        versions={"e": version},
+        seed=generate_identity_keypair().private_key,
+    )
+    await _upload(
+        u, await u.plan(SPACE, ["api/media/clip.mp4"], item_id=ITEM, followers=True)
+    )
+    assert len(gfs.puts) == 1
 
 
 async def test_a_video_over_8_mib_is_never_uploaded_eagerly(tmp_path):
@@ -1007,7 +1049,7 @@ async def test_a_video_over_8_mib_is_never_uploaded_eagerly(tmp_path):
     _write(tmp_path, "long.mp4", 8 * 1024 * 1024 + 1)
     g1 = _Conn("g1", "https://g1.example")
     gfs = _OnDemandGfs([g1])
-    u = _uploader(tmp_path, gfs=gfs, instances=[RELAY], versions={"e": V83})
+    u = _uploader(tmp_path, gfs=gfs, instances=[RELAY], versions={"e": V})
     assert (
         await u.plan(SPACE, ["api/media/long.mp4"], item_id=ITEM, followers=False)
         is None
@@ -1015,24 +1057,14 @@ async def test_a_video_over_8_mib_is_never_uploaded_eagerly(tmp_path):
     assert gfs.puts == []
 
 
-async def test_a_reader_below_v83_keeps_the_eager_video_upload(tmp_path):
-    """A link-joined reader that can't ask for a missed blob gets the video
-    uploaded at once, as before; so does a GFS that proved no on-demand."""
+async def test_a_gfs_without_on_demand_gets_the_video_eagerly(tmp_path):
+    """A follower GFS that proved no on-demand gets the video at once."""
     _write(tmp_path, "clip.mp4", up_mod.LAZY_VIDEO_MIN_BYTES)
     g1 = _Conn("g1", "https://g1.example")
-    seed = generate_identity_keypair().private_key
-    old = _OnDemandGfs([g1])
-    u = _uploader(tmp_path, gfs=old, instances=[RELAY], versions={"e": V}, seed=seed)
+    no_od = _OnDemandGfs([g1], wait=None, follower=[g1])
+    u = _uploader(tmp_path, gfs=no_od, seed=generate_identity_keypair().private_key)
     await _upload(
-        u, await u.plan(SPACE, ["api/media/clip.mp4"], item_id=ITEM, followers=False)
-    )
-    assert len(old.puts) == 1
-    no_od = _OnDemandGfs([g1], wait=None)
-    u = _uploader(
-        tmp_path, gfs=no_od, instances=[RELAY], versions={"e": V83}, seed=seed
-    )
-    await _upload(
-        u, await u.plan(SPACE, ["api/media/clip.mp4"], item_id=ITEM, followers=False)
+        u, await u.plan(SPACE, ["api/media/clip.mp4"], item_id=ITEM, followers=True)
     )
     assert len(no_od.puts) == 1
 
@@ -1045,7 +1077,7 @@ async def test_a_small_clip_is_still_uploaded_eagerly(tmp_path):
         tmp_path,
         gfs=gfs,
         instances=[RELAY],
-        versions={"e": V83},
+        versions={"e": V},
         seed=generate_identity_keypair().private_key,
     )
     await _upload(
@@ -1094,7 +1126,7 @@ async def test_a_members_large_video_still_goes_eagerly(tmp_path):
         tmp_path,
         gfs=gfs,
         instances=[RELAY],
-        versions={"e": V83},
+        versions={"e": V},
         seed=generate_identity_keypair().private_key,
         spaces=_Spaces(generate_identity_keypair().private_key, owner="host-inst"),
     )
@@ -1151,9 +1183,8 @@ async def test_a_reader_reads_a_file_from_its_gfs_only_once_it_is_stored_there(
     tmp_path,
 ):
     """Round 8: the push to a link-joined reader is dropped only when its
-    GFS is known to hold the file (uploaded there), or when the reader can
-    ask its GFS for a missed file (v_83). A v_80–82 reader whose GFS never
-    got the file keeps its push."""
+    GFS is known to hold the file (uploaded there). A reader whose GFS never
+    got the file keeps its push, whatever its version."""
     _write(tmp_path, "a.webp", 10)
     g1 = _Conn("g1", "https://g1.example")
     gfs = _Gfs([g1], status=200)
@@ -1171,26 +1202,78 @@ async def test_a_reader_reads_a_file_from_its_gfs_only_once_it_is_stored_there(
     assert await u.reads_from_gfs("e", "a.webp") is True
     assert await u.reads_from_gfs("e", "b.webp") is False
     assert await u.reads_from_gfs("b", "a.webp") is False  # no reader
-    on_demand = _uploader(
+    for version in (V, OURS):
+        fresh = _uploader(tmp_path, gfs=gfs, instances=[RELAY], versions={"e": version})
+        assert await fresh.reads_from_gfs("e", "a.webp") is False, version
+
+
+async def test_stored_on_gfs_keeps_only_blobs_the_gfs_holds(tmp_path):
+    """The v_92 catch-up describes only the exact blobs the reader's GFS is
+    known to hold — matched by address, never by file name: after a key
+    rotation the same file is a different blob, which the GFS lacks."""
+    _write(tmp_path, "a.webp", 10)
+    _write(tmp_path, "b.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1], status=200)
+    u = _uploader(
         tmp_path,
         gfs=gfs,
-        instances=[RELAY],
-        versions={"e": FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND},
+        instances=[RELAY, PAIRED],
+        versions={"e": V},
+        seed=b"\2" * 32,
     )
-    assert await on_demand.reads_from_gfs("e", "a.webp") is True
+    urls = ["api/media/a.webp", "api/media/b.webp"]
+    assert u.stored_on_gfs(None) is None
+    plan = await u.plan_for_reader(SPACE, urls, "e", item_id=ITEM)
+    assert u.stored_on_gfs(plan) is None  # nothing uploaded yet
+    stored = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    await u.start()
+    try:
+        u.upload(stored)
+        await asyncio.wait_for(u.drain(), timeout=5)
+    finally:
+        await u.stop()
+    narrowed = u.stored_on_gfs(await u.plan_for_reader(SPACE, urls, "e", item_id=ITEM))
+    assert set(narrowed.wire()) == {"a.webp"}
+    assert narrowed.lazy_ok is False
+
+    # Rotated epoch: same file, new address — not on the GFS.
+    async def _rotated(space_id, *, epoch=None):
+        return 5, os.urandom(32)
+
+    real_key = u._crypto.media_key
+    u._crypto.media_key = _rotated
+    rotated = await u.plan_for_reader(SPACE, urls, "e", item_id=ITEM)
+    assert rotated is not None and {r.epoch for r in rotated.refs} == {5}
+    assert u.stored_on_gfs(rotated) is None
+    u._crypto.media_key = real_key
+    # Another item showing the same file is another blob as well.
+    other = await u.plan_for_reader(SPACE, urls, "e", item_id="post-2")
+    assert u.stored_on_gfs(other) is None
 
 
-async def test_a_v92_reader_is_no_on_demand_reader(tmp_path):
-    """v_92: a member at v_92 asks for a missed file with
-    ``SPACE_MEDIA_WANTED``, not its GFS — so it counts as an on-demand
-    reader only in [v_83, v_92): its push is dropped only while its GFS is
-    known to hold the file."""
-    gfs = _NoCacheGfs([_Conn("g1", "https://g1.example")], off=False)
-    for version, on_demand in (
-        (FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND - 1, False),
-        (FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND, True),
-        (FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED - 1, True),
-        (FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED, False),
-    ):
-        u = _uploader(tmp_path, gfs=gfs, instances=[RELAY], versions={"e": version})
-        assert await u.reads_from_gfs("e", "a.webp") is on_demand, version
+async def test_stored_plan_for_reader_seals_nothing(tmp_path):
+    """Review 9: the narrow v_92 lookup never seals — a file with no kept
+    description cannot be on the GFS; one uploaded there is described."""
+    _write(tmp_path, "a.webp", 10)
+    _write(tmp_path, "b.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1], status=200)
+    u = _uploader(
+        tmp_path, gfs=gfs, instances=[RELAY], versions={"e": V}, seed=b"\2" * 32
+    )
+    urls = ["api/media/a.webp", "api/media/b.webp"]
+    assert await u.stored_plan_for_reader(SPACE, urls, "e", item_id=ITEM) is None
+    assert len(u._described) == 0  # nothing sealed
+    stored = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    await u.start()
+    try:
+        u.upload(stored)
+        await asyncio.wait_for(u.drain(), timeout=5)
+    finally:
+        await u.stop()
+    sealed = len(u._described)
+    plan = await u.stored_plan_for_reader(SPACE, urls, "e", item_id=ITEM)
+    assert set(plan.wire()) == {"a.webp"}
+    assert len(u._described) == sealed  # b.webp still not sealed
+    assert await u.stored_plan_for_reader(SPACE, urls, "b", item_id=ITEM) is None

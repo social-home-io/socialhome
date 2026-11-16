@@ -100,8 +100,16 @@ def test_image_too_large_reports_whole_megabytes():
     assert (exc.status, exc.code) == (422, "IMAGE_TOO_LARGE")
     assert exc.params == {"max_mb": 10}
     assert not isinstance(exc, ValueError)
+
+
+def test_image_too_large_under_a_megabyte_reports_kilobytes():
+    """N10: a space cover / icon cap (64 KiB / 16 KiB) is told in kB
+    (1 kB = 1000 B, rounded down), never as "under 1 MB"."""
+    assert ImageTooLargeError(64 * 1024).params == {"max_kb": 65}
+    assert ImageTooLargeError(16 * 1024).params == {"max_kb": 16}
     # Never rounds down to zero.
-    assert ImageTooLargeError(1000).params == {"max_mb": 1}
+    assert ImageTooLargeError(10).params == {"max_kb": 1}
+    assert ImageTooLargeError(1024 * 1024).params == {"max_mb": 1}
 
 
 def test_download_too_large_says_how_many_and_how_big():

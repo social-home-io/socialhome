@@ -56,12 +56,6 @@ from ..domain.federation import (
 )
 from ..domain.federation_capabilities import OURS, FederationCapability
 from ..domain.local_community import Eligibility, parse_join_location
-from ..domain.media_constraints import (
-    SPACE_COVER_BOOTSTRAP_MAX_BYTES,
-    SPACE_COVER_SNAPSHOT_MAX_BYTES,
-    SPACE_ICON_BOOTSTRAP_MAX_BYTES,
-    SPACE_ICON_SNAPSHOT_MAX_BYTES,
-)
 from ..domain.member_card import MemberCard
 from ..domain.space import (
     INVITE_VIA_GFS_LEGACY,
@@ -90,6 +84,7 @@ from ..services.space_authority_pin import (
     owner_statement_via,
 )
 from ..services.space_service import (
+    UnfittableImages,
     _coerce_min_age,
     admit_join,
     build_space_snapshot_for_federation,
@@ -381,6 +376,7 @@ class SpaceInviteTokenRedeemCoordinator:
         "_space_service",
         "_spaces",
         "_timeout",
+        "_unfittable",
         "_users",
         "_writer_certs",
     )
@@ -419,6 +415,8 @@ class SpaceInviteTokenRedeemCoordinator:
         #: placeholder (§D1b #116).
         self._cover_repo = cover_repo
         self._icon_repo = icon_repo
+        #: Stored images that cannot fit the cap (not re-encoded each send).
+        self._unfittable = UnfittableImages()
         #: Optional — when wired, the issuer ships the current
         #: epoch's space content key in the ACK and the receiver
         #: imports it into its local space_keys (#117).
@@ -1359,9 +1357,10 @@ class SpaceInviteTokenRedeemCoordinator:
         refused — and is logged.
 
         ``bootstrap`` marks the §D2b invite-link leg, whose ACK rides the
-        connection server's size-capped relay: the snapshot's cover and
-        icon are bounded to ``SPACE_*_BOOTSTRAP_MAX_BYTES`` instead of the
-        peer-envelope defaults.
+        connection server's size-capped relay. The snapshot's cover and
+        icon are bounded by the one cap every path carries
+        (``SPACE_COVER_MAX_BYTES`` / ``SPACE_ICON_MAX_BYTES``), which fits
+        that relay too — the joiner sees the cover every member sees.
 
         ``over_gfs`` (implied by ``bootstrap``) marks a redeem that reached
         us over the connection-server relay. Such a redeem is refused — the
@@ -1405,7 +1404,6 @@ class SpaceInviteTokenRedeemCoordinator:
             token,
             redeemer_instance_id=redeemer_instance_id,
             redeemer_user_id=redeemer_user_id,
-            bootstrap=bootstrap,
         )
         if reack is not None:
             ack, reason = reack
@@ -1588,7 +1586,6 @@ class SpaceInviteTokenRedeemCoordinator:
                 space_id,
                 seat=seat,
                 pending_admin=pending_admin,
-                bootstrap=bootstrap,
             )
         except Exception:
             log.exception(
@@ -1672,7 +1669,6 @@ class SpaceInviteTokenRedeemCoordinator:
         *,
         seat: str,
         pending_admin: bool,
-        bootstrap: bool,
     ) -> dict:
         """``{space_id, role[, pending_role], space_meta}`` for an ACK.
 
@@ -1698,20 +1694,11 @@ class SpaceInviteTokenRedeemCoordinator:
                 cover_repo=self._cover_repo,
                 icon_repo=self._icon_repo,
                 space_crypto_service=self._space_crypto,
-                cover_max_bytes=(
-                    SPACE_COVER_BOOTSTRAP_MAX_BYTES
-                    if bootstrap
-                    else SPACE_COVER_SNAPSHOT_MAX_BYTES
-                ),
-                icon_max_bytes=(
-                    SPACE_ICON_BOOTSTRAP_MAX_BYTES
-                    if bootstrap
-                    else SPACE_ICON_SNAPSHOT_MAX_BYTES
-                ),
                 # v_44 — the owner's cert for the current authority key, so
                 # a redeemer whose old stub pins a retired key re-pins.
                 authority_cert=owner_authority_cert_via(self._federation, space),
                 owner_statement=owner_statement_via(self._federation, space),
+                unfittable=self._unfittable,
             )
         return ack_body
 
@@ -1721,7 +1708,6 @@ class SpaceInviteTokenRedeemCoordinator:
         *,
         redeemer_instance_id: str,
         redeemer_user_id: str,
-        bootstrap: bool,
     ) -> tuple[dict | None, str | None] | None:
         """Answer the retry of a redeem the issuer already committed.
 
@@ -1762,7 +1748,6 @@ class SpaceInviteTokenRedeemCoordinator:
                 space_id,
                 seat=role,
                 pending_admin=False,
-                bootstrap=bootstrap,
             )
         except Exception:
             log.exception(

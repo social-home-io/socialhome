@@ -775,8 +775,7 @@ sequenceDiagram
 ```
 
 **Fallback.** A provider below v_92 is skipped; a host below v_92 that
-answers, or no helper left, means the file waits for the §25.6 catch-up. A requester below v_92 never asks (a
-v_83–v_91 relay reader still asks its GFS). A member of a space whose
+answers, or no helper left, means the file waits for the §25.6 catch-up. A requester below v_92 never asks. A member of a space whose
 **host** is below v_92 keeps the v_83 GFS on-demand ask during the rollout
 (`SpaceMediaGfsFetcher`, `space_member_supports(host, v_92)`); a member
 with a v_92 host uses it only for a file it holds under a name that is
@@ -1000,9 +999,15 @@ its `sg-` name (an `sc-` name only once the bytes hash to it). An unknown suite,
 blob not at its address (or a channel scope with no channel id known here)
 or a failed decrypt is refused with a WARNING and writes nothing.
 
-**No byte push to them.** `SPACE_MEDIA_BLOB` is no longer queued to a
-link-joined v_80 member (live posts / gallery / covers), nor to any
-link-joined requester of a §25.6 catch-up — the relay refuses those bytes.
+**They are pushed like every member.** `SPACE_MEDIA_BLOB` is queued to a
+link-joined member as to any other (live posts / gallery / covers, page
+files, a §25.6 catch-up); the relay carries it as v_87 binary frames (a GFS
+proving `envelope_media`) or as JSON chunks of `RELAY_JSON_CHUNK_BYTES`.
+The media outbox skips a push only while the reader's GFS is known to hold
+the file (we uploaded it there, within the cache's TTL —
+`SpaceMediaGfsUploader.reads_from_gfs`); a catch-up row of a v_92 reader
+behind frames, and a row it asked for (`SPACE_MEDIA_WANTED`), is never
+skipped.
 
 ```mermaid
 sequenceDiagram
@@ -1057,8 +1062,9 @@ the file sends it again. GFS side, routes, settings and bounds:
 a household holding a member seat (link-joined included) asks its host or
 a helper with [`SPACE_MEDIA_WANTED`](#older-files-on-view--space_media_wanted-v_92)
 instead — unless the space's host is below v_92 (rollout), then it keeps
-this ask — and the uploader counts a reader as one that asks its GFS only in
-[v_83, v_92). Paired and mesh members never use it.
+this ask (the uploader still pushes it the file: a member's push is dropped
+only while its GFS is known to hold the file). Paired and mesh members never
+use it.
 
 **Reader** (`SpaceMediaGfsFetcher`). Only a **view**
 (`GET /api/media/{local_name}`) whose fetch found the blob on no GFS asks —
@@ -1119,8 +1125,8 @@ budget), refunded only when no connection was made.
 **Large videos are lazy.** A video whose blob is at least 1 MiB is
 described but no longer uploaded at once — only when the uploading
 household **owns** the listed space (the one household the GFS would ask
-for it), to a GFS that proves `on_demand`, while every link-joined reader of
-the space is at v_83 or above (an older one keeps the eager upload). It goes
+for it), to a GFS that proves `on_demand`, while no member household of the
+space reads through a GFS (a member gets the video at once). It goes
 only when someone plays it. A member's large video, and any large video of a
 private space's channel, still goes at once, as before; so do pictures.
 
@@ -1133,9 +1139,9 @@ they never hold a page descriptor to ask with (see
 are not told apart by version, so a follower household below v_83 gets no
 lazy video: it never asks, and the video is not in the cache until a v_83
 reader plays it (after that, while it stays cached, it gets it like any
-blob). Members are never in this subset: a link-joined member below v_83
-keeps the eager upload, and paired / mesh members get the bytes from the
-household.
+blob). Members are never in this subset: a space with a link-joined
+member keeps the eager upload, and paired / mesh members get the bytes from
+the household.
 
 **Cache or stream.** The GFS decides per request: content asked
 `cache_after_requests` (3) times within the hour, or content it stored
@@ -1234,9 +1240,19 @@ unchanged (an immutable `GET`, served by the CDN).
 
 **Fallback.** A reader below v_83 never asks (a blob that left the cache
 stays missing for it, as before). A holder below v_83 never listed
-`space_media_serve` and is never asked. A link-joined reader below v_83
+`space_media_serve` and is never asked. A space with a link-joined member
 keeps eager video uploads; a follower below v_83 gets no lazy video (the
 follower subset above). A GFS without `on_demand` is never asked.
+
+## A space's cover and icon
+
+Not media chunks: a space's cover and icon travel inline (`cover_webp_base64` /
+`icon_webp_base64`) in the config change and the join snapshot, within ONE
+cap per image kind for every member however its household is reached —
+`SPACE_COVER_MAX_BYTES` 64 KiB, `SPACE_ICON_MAX_BYTES` 16 KiB (owner decision
+2026-11-15). An upload is re-encoded within it where it is set; a peer's image
+over it is not stored (the held one stays, WARNING). See "One cover size for
+every member" in [spaces.md](./spaces.md).
 
 ## Implementation pointers
 

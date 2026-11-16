@@ -3549,3 +3549,14 @@ def test_item_merge_stamps_capability_threshold():
     assert fc.features_missing_below(94) == []
     assert fc.space_features_missing_below(93) == [label]
     assert fc.CAPABILITY_FEATURE_KEYS[94] == "poll_vote_stamps"
+
+
+def test_capped_space_images_capability_threshold():
+    """A household at or above v_81 sends a space's cover / icon within the
+    one cap (owner decision 2026-11-15); only the released v_80 line does
+    not, so a receiver re-encodes an over-cap image from it and refuses one
+    from any later sender. v_81–v_94 are unreleased and ship together: no
+    bump, no new label (v_81 is labelled already)."""
+    assert fc.FederationCapability.MIN_FOR_CAPPED_SPACE_IMAGES == 81
+    assert fc.OURS == 94
+    assert 81 in fc.CAPABILITY_FEATURE_KEYS

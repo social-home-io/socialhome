@@ -2519,15 +2519,19 @@ def _build_page_files_reach_host(
     page_conflicts: PageConflictService, uploader: SpaceMediaGfsUploader
 ) -> Callable[[str], Awaitable[bool]]:
     """``check(space_id)``: whether a page's new files can reach the space's
-    host from here (v_82). A household seated from an invite link hands
-    them over only through its GFS media cache, which it needs an upload
-    authorization for; any other member uses the outbox."""
+    host from here (v_82). Every member pushes them through the outbox —
+    also over the GFS relay when the host takes binary relay frames (v_87).
+    Only a household whose host's relay cannot carry the push (a v_80–86
+    seat, a GFS without ``envelope_media``) hands them over through its GFS
+    media cache, which it needs an upload authorization for."""
 
     async def _reach(space_id: str) -> bool:
         mode, host = await page_conflicts.mode(space_id)
         if mode is not PageMode.MEMBER or not host:
             return True
         if not await uploader.is_relay_reader(host):
+            return True
+        if await uploader.takes_relay_frames(host):
             return True
         return await uploader.can_upload(space_id)
 
@@ -5117,24 +5121,26 @@ def create_app(config: Config | None = None) -> web.Application:
             space_authority_rotation.authority_epoch_echo
         )
         # v_32 roster snapshots: the host re-sends its whole roster to a
-        # member household that just upgraded, and on every periodic sync
-        # tick, so a roster mirror that missed gossip heals by itself.
+        # member household that just upgraded…
         bus.subscribe(
             PeerProtoVersionRaised,
             real_space_service.on_peer_proto_version_raised,
         )
-        app[K.space_sync_scheduler_key].attach_roster_refresh(
-            real_space_service.send_hosted_roster_snapshots
-        )
-        # …except to a household whose BEGIN echoes the roster version it
-        # already applied (``roster_echo``): the member echoes, the host
-        # reads it next to the sync admission and the v_46 authority echo.
+        # …and repairs a mirror that missed gossip in reply to the member's
+        # sync BEGIN. An older member echoes the roster version it applied
+        # (``roster_echo``); ours carries a digest of the mirror.
         app[K.space_sync_scheduler_key].attach_roster_echo(
             real_space_service.roster_echo_for
         )
-        federation_service._event_registry.register(
-            FederationEventType.SPACE_SYNC_BEGIN,
-            real_space_service.on_sync_begin_roster_echo,
+        # The roster repair: a member's BEGIN carries the digest of its
+        # roster mirror; the host answers with a snapshot only on a mismatch.
+        app[K.space_sync_scheduler_key].attach_roster_digest(
+            real_space_service.roster_digest_for
+        )
+        # …only for a BEGIN the sync admission let in (S-6: 5/h per
+        # household), never for a refused one.
+        federation_service.attach_sync_begin_admitted(
+            real_space_service.on_sync_begin_roster
         )
         # Multi-admin approval (quorum) — rebuild with the real instance_id
         # (mirrors the real_space_service rebuild) and wire federation + the
@@ -5476,7 +5482,9 @@ def create_app(config: Config | None = None) -> web.Application:
         space_cal_service.attach_media_gfs(space_media_uploader)
         fed.gallery_federation_outbound.attach_media_gfs(space_media_uploader)
         fed.page_federation_outbound.attach_media_gfs(space_media_uploader)
-        # …and no SPACE_MEDIA_BLOB push to them: the relay refuses the bytes.
+        # …and the outbox skips a SPACE_MEDIA_BLOB push to one of them only
+        # while its GFS is known to hold the file (every member is pushed
+        # the rest, through the relay like any envelope).
         space_media_sync_service.attach_relay_readers(space_media_uploader)
         fed.inbound_service.attach_gfs_media(space_media_fetcher)
         # v_82: a page's files keep the names the host's page shows.

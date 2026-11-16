@@ -440,6 +440,35 @@ class SpaceWriterCertService:
         cert = await self.issue_for_instance(space_id, instance_id, epoch=epoch)
         return cert.to_wire() if cert is not None else None
 
+    async def cert_epoch_for_peer(self, space_id: str, instance_id: str) -> int | None:
+        """The epoch of the cert :meth:`cert_for_peer` would deliver to
+        ``instance_id`` now, or ``None`` when it would deliver none — read
+        under the same gates WITHOUT signing (the roster repair compares it
+        on every sync BEGIN)."""
+        if self._federation is None or instance_id == self._own_instance_id:
+            return None
+        if not await self._federation.space_member_supports(
+            instance_id,
+            min_version=FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH,
+        ):
+            return None
+        space = await self._spaces.get(space_id)
+        if space is None:
+            return None
+        seed = await self._spaces.get_space_seed(space_id)
+        if seed is None or ed25519_public_key(seed).hex() != space.identity_public_key:
+            return None
+        latest = await self._keys.get_latest(space_id)
+        if latest is None:
+            return None
+        entitlement = await self.entitlement_for_instance(space, instance_id)
+        if entitlement.scope is None:
+            return None
+        pk = await self.verified_instance_pk(instance_id)
+        if pk is None or len(pk) != 32:
+            return None
+        return latest.epoch
+
     def peer_payload_hook(
         self,
         space_id: str,

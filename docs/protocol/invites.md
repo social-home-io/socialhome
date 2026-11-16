@@ -57,7 +57,8 @@ seats the receiver as a ``SpaceRemoteMember`` + records the
 ``(space, instance)`` mapping, then sends ``SPACE_INVITE_TOKEN_REDEEM_ACK``
 back with ``{space_id, role, space_meta}`` — where ``space_meta`` is the
 full ``build_space_snapshot_for_federation`` blob (config + cover/icon
-bytes, each bounded to ``SPACE_*_SNAPSHOT_MAX_BYTES`` + content key + member
+bytes, each within the one cap ``SPACE_COVER_MAX_BYTES`` /
+``SPACE_ICON_MAX_BYTES`` + content key + member
 roster). Any failure (token unknown, expired,
 exhausted, banned, persistence error) → ``SPACE_INVITE_TOKEN_REDEEM_DENY``
 with a string ``reason``.
@@ -275,14 +276,14 @@ the sealed ciphertext) a ~200 KiB cover alone overran the 256 KiB
 `MAX_SEALED_BLOB_BYTES`, so the relay answered 413 (or the redeemer dropped
 the blob before unsealing it): the issuer had spent the token and seated the
 joiner, and the joiner waited out its 10 s timeout for a 504. The snapshot now
-bounds each image (`domain/media_constraints`):
+bounds each image by the one cap every path carries
+(`domain/media_constraints`, owner decision 2026-11-15): `SPACE_COVER_MAX_BYTES`
+64 KiB, `SPACE_ICON_MAX_BYTES` 16 KiB — the same for the §D2b bootstrap ACK
+over `/gfs/envelope`, the §D1b private invite and the §D2 redeem ACK, so a
+joiner sees the cover every member sees. An upload is stored within it.
 
-| Snapshot carried by | Cover | Icon |
-|---|---|---|
-| §D2b bootstrap ACK over `/gfs/envelope` | `SPACE_COVER_BOOTSTRAP_MAX_BYTES` 64 KiB | `SPACE_ICON_BOOTSTRAP_MAX_BYTES` 16 KiB |
-| §D1b private invite, §D2 redeem ACK (paired / mesh-routed peer, ~1 MiB envelope) | `SPACE_COVER_SNAPSHOT_MAX_BYTES` 256 KiB | `SPACE_ICON_SNAPSHOT_MAX_BYTES` 64 KiB |
-
-An image under its bound ships byte-for-byte; one over it ships as a smaller
+An image under the cap ships byte-for-byte; one over it (stored before the
+cap) ships as a smaller
 WebP rendition (`ImageProcessor.fit_within`, shrunk not cropped, logged at
 INFO on the host) under the host's own `cover_hash` / `icon_hash`; one that
 cannot be shrunk under the bound is left out (WARNING). The wire shape is
@@ -300,9 +301,9 @@ rolls the redeem back (see "A redeem is committed only once its ACK is on
 its way" above): no seat, no gossip, and the link keeps its use.
 
 A later cover or icon change reaches a link-joined member too: the
-`SPACE_CONFIG_CHANGED` for it carries the new image, bounded for this member
-to the same `SPACE_*_BOOTSTRAP_MAX_BYTES` so it fits the relay (see "A cover /
-icon change carries the image" in [spaces.md](./spaces.md)). Other space media
+`SPACE_CONFIG_CHANGED` for it carries the new image — the same bytes every
+member gets, within the one cap that fits the relay (see "One cover size for
+every member" in [spaces.md](./spaces.md)). Other space media
 (post pictures, calendar covers, gallery items) reaches a link-joined v_80
 member through the GFS media cache (see "Media through the GFS cache" below).
 
@@ -1459,7 +1460,8 @@ redeem and the GFS-mirror subscribe, re-reading the invitation and the space
 row inside it, so two joins for one space id never both seat. The stub is
 seated BEFORE the ACCEPT goes out, so the host's `SPACE_ROSTER_SNAPSHOT`
 (writer cert / key, channel grant) always finds it — the host re-sends that
-snapshot on its periodic sync tick too. A failed seat, or a send that
+snapshot in reply to the member's sync BEGIN when its roster digest or
+writer cert is behind. A failed seat, or a send that
 definitively cannot reach the host (not confirmed, no route, too large),
 rolls a fresh stub back and leaves the invitation pending; an ACCEPT parked
 for redelivery (durable outbox, relay throttle, mesh retry) reaches the

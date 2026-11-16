@@ -253,9 +253,11 @@ class PageFederationOutbound(SpaceMediaRefsMixin):
         self, space_id: str, page_id: str, media_urls: list[str]
     ) -> None:
         """Queue a version's new files for every other member household at
-        v_82 — paired or mesh-only (the outbox reaches both; a link-joined
-        member is left out by the outbox itself). One outbox row per (file,
-        household). Fail-soft: the version has gone out already."""
+        v_82 — paired, mesh-only or seated from an invite link alike (the
+        outbox reaches all three; it skips a push to a link-joined member
+        only while that member's GFS is known to hold the file). One outbox
+        row per (file, household). Fail-soft: the version has gone out
+        already."""
         if not media_urls or self._media_sync is None or self._spaces is None:
             return
         own = str(self._federation.own_instance_id or "")
