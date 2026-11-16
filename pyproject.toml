@@ -97,7 +97,7 @@ dev = [
     # Schemas (``docs/display-api/v1/``).
     "jsonschema==4.26.0",
     "mypy==2.4.1",
-    "types-aiofiles==25.1.0.20260518",
+    "types-aiofiles==25.1.0.20261107",
     # Keep the pin identical to ``.pre-commit-config.yaml``'s
     # ``ruff-pre-commit`` rev and CI's ``pip install ruff==`` — ruff
     # format rules change between minors, so a dev env on a different
