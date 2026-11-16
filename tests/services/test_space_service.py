@@ -8925,6 +8925,139 @@ async def test_a_snapshot_carries_the_tombstones_of_the_last_30_days(stack):
     assert left == {"u-recent"}
 
 
+def _left_users(fed, to="peer-0"):
+    return {
+        e["payload"]["user_id"]
+        for e in _snapshots(fed, to=to)[-1][1]
+        if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
+    }
+
+
+async def test_a_member_offline_31_days_is_healed_on_the_second_repair(
+    stack, monkeypatch
+):
+    """SF1 (round 5 review): a kick older than the tombstone window — the
+    member was offline 31 days, its LEFT gossip left the outbox after 7 —
+    rides the next, consecutive repair: a repair that follows one which
+    did not heal carries EVERY tombstone, so a kicked household never stays
+    live (and fed space content) forever."""
+    clock = _Clock(monkeypatch)
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    await _seat(remote, space.id, "peer-k", "u-kicked")
+    await remote.remove(space.id, "peer-k", "u-kicked")
+    await stack.db.enqueue(
+        "UPDATE space_remote_members SET removed_at=datetime('now', '-31 days') "
+        "WHERE space_id=? AND user_id='u-kicked'",
+        (space.id,),
+    )
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
+    assert "u-kicked" not in _left_users(fed)
+    clock.advance(30 * 60)
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
+    assert "u-kicked" in _left_users(fed)
+
+
+async def test_a_match_shortens_a_long_cooldown_back_to_30_minutes(stack, monkeypatch):
+    """SF2: at the day cap a matching digest starts the cooldown over — a
+    new miss 30 min after the last snapshot is answered, not 23 h later."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+
+    async def wrong():
+        await _answer(
+            stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64)
+        )
+
+    for _ in range(8):  # up to the day cap
+        await wrong()
+        clock.advance(24 * 60 * 60)
+    sent = len(_snapshots(fed))
+    await wrong()  # a snapshot with a day's cooldown
+    assert len(_snapshots(fed)) == sent + 1
+    clock.advance(10 * 60)
+    await _answer(stack, await _digest_begin(stack, space, "peer-0"))  # it matches
+    clock.advance(21 * 60)
+    await wrong()  # 31 min after the last snapshot
+    assert len(_snapshots(fed)) == sent + 2
+
+
+@pytest.mark.parametrize(
+    "where", ["roster_snapshot_entries", "channel_grant_for_peer", "parts"]
+)
+async def test_a_failed_build_waits_the_retry(stack, monkeypatch, caplog, where):
+    """NOTE 5: an exception while the snapshot is built (after the budget
+    was charged) is a WARNING and a built-not-sent snapshot: it waits
+    ``ROSTER_REPAIR_RETRY_S``, it does not ask again on every BEGIN."""
+    clock = _Clock(monkeypatch)
+    space, _fed, _remote, _insts = await _members_with_households(stack, 1)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("boom")
+
+    if where == "roster_snapshot_entries":
+        monkeypatch.setattr(
+            SpaceService, "roster_snapshot_entries", lambda *a, **kw: _boom()
+        )
+    elif where == "parts":
+        monkeypatch.setattr(ss_mod, "roster_snapshot_parts", _boom)
+    else:
+        certs = _certs(None)
+        certs.channel_grant_for_peer = AsyncMock(side_effect=RuntimeError("boom"))
+        stack.space_svc._writer_certs = certs
+    with caplog.at_level(logging.WARNING, logger="socialhome.services.space_service"):
+        await _answer(
+            stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64)
+        )
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+    rec = stack.space_svc._roster_repairs[space.id]["peer-0"]
+    assert rec.until == clock.now + ss_mod.ROSTER_REPAIR_RETRY_S
+
+
+async def test_sent_version_is_the_version_the_snapshot_carried(stack, monkeypatch):
+    """NOTE 7: a roster change between the BEGIN and the build — the record
+    holds the ``roster_version`` the snapshot carried."""
+    _Clock(monkeypatch)
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    stale = await stack.space_repo.get(space.id)
+    await _gossip_a_change(stack, space, remote, "u-late")
+    await stack.space_svc._repair_roster(
+        stale, "peer-0", right=False, took=False, known_version=None
+    )
+    await stack.space_svc.wait_roster_repairs()
+    carried = fed.send_with_mesh_fallback.await_args_list[-1].kwargs["payload"][
+        "roster_version"
+    ]
+    assert carried > int(stale.roster_sequence)
+    assert stack.space_svc._roster_repairs[space.id]["peer-0"].sent_version == carried
+
+
+async def test_a_re_issued_left_is_carried_with_a_fresh_removed_at(stack):
+    """NOTE 7: a seat removed long ago, re-tombstoned at a newer version (a
+    re-seat and a new kick through gossip) carries a fresh ``removed_at`` —
+    the re-issued LEFT rides the next snapshot."""
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    await _seat(remote, space.id, "peer-x", "u-x")
+    await remote.remove(space.id, "peer-x", "u-x")
+    await stack.db.enqueue(
+        "UPDATE space_remote_members SET removed_at=datetime('now', '-40 days') "
+        "WHERE space_id=? AND user_id='u-x'",
+        (space.id,),
+    )
+    old = await remote.get_including_tombstones(space.id, "peer-x", "u-x")
+    assert await remote.apply_member_event(
+        space_id=space.id,
+        user_id="u-x",
+        instance_id="peer-x",
+        display_name="X",
+        user_pk=None,
+        role="member",
+        member_version=old.member_version + 5,
+        tombstoned=True,
+    )
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-0")
+    assert "u-x" in _left_users(fed)
+
+
 async def test_a_new_snapshot_drops_every_queued_part_of_an_older_one(stack):
     """M2: a newer snapshot with fewer parts would leave the older send's
     higher parts queued — every queued part to that household for that
@@ -8957,8 +9090,10 @@ async def test_the_repair_memory_holds_thousands_of_pairs(stack, monkeypatch):
     svc = stack.space_svc
     sent: list[str] = []
 
-    async def _send(space_id, *, to_instance_id, known_version=None, charge=None):
-        assert charge is not None and charge()
+    async def _send(
+        space_id, *, to_instance_id, known_version=None, charge=None, **_kw
+    ):
+        assert charge is not None and charge(7)
         sent.append(to_instance_id)
         return True
 

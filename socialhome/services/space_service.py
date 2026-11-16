@@ -507,9 +507,10 @@ ROSTER_REPAIR_PER_MINUTE: int = 6
 #: asks again.
 ROSTER_REPAIR_PER_SPACE_PER_MINUTE: int = 2
 #: Tombstones a repair snapshot carries: removals at most this old
-#: (``removed_at``). A member online once in the window got any removal it
-#: missed through a repair; older tombstones stay on the host but no longer
-#: ride every snapshot. ~500 B each.
+#: (``removed_at``), ~500 B each. A CONSECUTIVE repair (the last one did not
+#: heal the member) carries every tombstone, so a member offline longer than
+#: the window — its LEFT gossip left the outbox after 7 days — still learns
+#: of a kick.
 ROSTER_TOMBSTONE_WINDOW_S: float = 30 * 24 * 60 * 60
 #: A malformed or unknown-suite digest is logged at most once per (space,
 #: household) in this window.
@@ -527,6 +528,10 @@ class _RosterRepair:
 
     #: No new repair before this (monotonic).
     until: float
+    #: When the last snapshot that went out went (monotonic; ``None``: none
+    #: yet). A match never leaves the next repair waiting longer than
+    #: :data:`ROSTER_REPAIR_COOLDOWN_S` after it.
+    sent_at: float | None
     #: The cooldown the last snapshot that went out set.
     cooldown: float
     #: The ``roster_sequence`` that snapshot carried (a v_80 echo at or
@@ -1925,7 +1930,8 @@ class SpaceService(
         *,
         to_instance_id: str,
         known_version: int | None = None,
-        charge: Callable[[], bool] | None = None,
+        charge: Callable[[int], bool] | None = None,
+        all_tombstones: bool = False,
     ) -> bool:
         """Send household ``to_instance_id`` the whole roster of a space we host.
 
@@ -1956,9 +1962,13 @@ class SpaceService(
         to it (an older household's ``roster_echo``), so removals at or
         below it are left out.
 
-        ``charge``: asked once every cheap check passed, right before the
-        snapshot is built (the repair's budget); false → nothing is built
-        or sent.
+        ``charge``: asked with the roster version the snapshot will carry,
+        once every cheap check passed, right before it is built (the
+        repair's budget); false → nothing is built or sent. A failure while
+        building is a WARNING and returns false.
+
+        ``all_tombstones``: carry every tombstone, not only those of the
+        last :data:`ROSTER_TOMBSTONE_WINDOW_S`.
         """
         if self._federation is None:
             return False
@@ -1982,82 +1992,28 @@ class SpaceService(
             return False
         if seed is None:
             return False
-        if charge is not None and not charge():
-            return False
-        # v_49 — the recipient's OWN writer cert for the current epoch (and
-        # nobody else's): the snapshot goes to this one household, encrypted
-        # to it.
-        writer_cert: dict | None = None
-        if self._writer_certs is not None:
-            try:
-                writer_cert = await self._writer_certs.cert_for_peer(
-                    space.id, to_instance_id
-                )
-            except Exception:
-                log.exception(
-                    "roster-snapshot: writer cert for %s failed in %s",
-                    to_instance_id,
-                    space.id,
-                )
         current = int(space.roster_sequence)
-        entries = await self.roster_snapshot_entries(
-            space,
-            seed=seed,
-            to_instance_id=to_instance_id,
-            known_version=known_version,
-        )
-        # Never empty for a space we host: its owner is always a local seat
-        # here, and live seats always ship (``known_version`` drops only
-        # removals). Part 0 carries the extras below (writer cert / key,
-        # channel grant) — a refusal-only household would otherwise never
-        # get them, so an empty roster is a bug worth seeing, not a no-op.
-        if not entries:
+        if charge is not None and not charge(current):
+            return False
+        try:
+            payloads = await self._build_roster_snapshot(
+                space,
+                seed=seed,
+                to_instance_id=to_instance_id,
+                known_version=known_version,
+                current=current,
+                all_tombstones=all_tombstones,
+            )
+        except Exception:
             log.warning(
-                "roster-snapshot: no entries for %s in hosted space %s — "
-                "its credentials did not go out",
+                "roster-snapshot: building it for %s in %s failed — nothing sent",
                 to_instance_id,
                 space.id,
+                exc_info=True,
             )
             return False
-        # Sent with the roster, to this one household: its own credentials.
-        extras: dict = {}
-        if self._writer_certs is not None:
-            if writer_cert is not None:
-                extras["writer_cert"] = writer_cert
-                # v_50 — the epoch's writer group key too (a v_90 publisher of a
-                # publicly readable space).
-                try:
-                    writer_key = await self._writer_certs.writer_key_for_peer(
-                        space.id, to_instance_id, epoch=writer_cert.get("epoch")
-                    )
-                except Exception:
-                    log.exception(
-                        "roster-snapshot: writer key for %s failed in %s",
-                        to_instance_id,
-                        space.id,
-                    )
-                    writer_key = None
-                if writer_key is not None:
-                    extras["writer_key"] = writer_key
-            # v_51 — the recipient's private-space channel grant (readers
-            # too, so not nested under the cert).
-            grant = await self._writer_certs.channel_grant_for_peer(
-                space.id, to_instance_id
-            )
-            if grant is not None:
-                extras["gfs_channel"] = grant
-        payloads = roster_snapshot_parts(
-            space.id,
-            entries,
-            # The version this snapshot is complete up to — the member echoes
-            # it back on its next BEGIN once it applied every part.
-            roster_version=current,
-            # v_44 — the owner's cert for the current authority key, so a
-            # household that missed the rotation bundle re-pins before
-            # verifying these (new-key-signed) entries.
-            authority_cert=owner_authority_cert_via(self._federation, space),
-            extras=extras,
-        )
+        if payloads is None:
+            return False
         # Supersede the whole older snapshot still queued for this household
         # (every part — the new one may have fewer).
         try:
@@ -2087,6 +2043,94 @@ class SpaceService(
             ok = ok and bool(getattr(result, "ok", True))
         return ok
 
+    async def _build_roster_snapshot(
+        self,
+        space: Space,
+        *,
+        seed: bytes,
+        to_instance_id: str,
+        known_version: int | None,
+        current: int,
+        all_tombstones: bool,
+    ) -> list[dict] | None:
+        """The ``SPACE_ROSTER_SNAPSHOT`` payloads for :meth:`send_roster_snapshot`
+        (``None``: nothing to send)."""
+        assert self._federation is not None
+        # v_49 — the recipient's OWN writer cert for the current epoch (and
+        # nobody else's): the snapshot goes to this one household, encrypted
+        # to it.
+        writer_cert: dict | None = None
+        if self._writer_certs is not None:
+            try:
+                writer_cert = await self._writer_certs.cert_for_peer(
+                    space.id, to_instance_id
+                )
+            except Exception:
+                log.exception(
+                    "roster-snapshot: writer cert for %s failed in %s",
+                    to_instance_id,
+                    space.id,
+                )
+        entries = await self.roster_snapshot_entries(
+            space,
+            seed=seed,
+            to_instance_id=to_instance_id,
+            known_version=known_version,
+            all_tombstones=all_tombstones,
+        )
+        # Never empty for a space we host: its owner is always a local seat
+        # here, and live seats always ship (``known_version`` drops only
+        # removals). Part 0 carries the extras below (writer cert / key,
+        # channel grant) — a refusal-only household would otherwise never
+        # get them, so an empty roster is a bug worth seeing, not a no-op.
+        if not entries:
+            log.warning(
+                "roster-snapshot: no entries for %s in hosted space %s — "
+                "its credentials did not go out",
+                to_instance_id,
+                space.id,
+            )
+            return None
+        # Sent with the roster, to this one household: its own credentials.
+        extras: dict = {}
+        if self._writer_certs is not None:
+            if writer_cert is not None:
+                extras["writer_cert"] = writer_cert
+                # v_50 — the epoch's writer group key too (a v_90 publisher of a
+                # publicly readable space).
+                try:
+                    writer_key = await self._writer_certs.writer_key_for_peer(
+                        space.id, to_instance_id, epoch=writer_cert.get("epoch")
+                    )
+                except Exception:
+                    log.exception(
+                        "roster-snapshot: writer key for %s failed in %s",
+                        to_instance_id,
+                        space.id,
+                    )
+                    writer_key = None
+                if writer_key is not None:
+                    extras["writer_key"] = writer_key
+            # v_51 — the recipient's private-space channel grant (readers
+            # too, so not nested under the cert).
+            grant = await self._writer_certs.channel_grant_for_peer(
+                space.id, to_instance_id
+            )
+            if grant is not None:
+                extras["gfs_channel"] = grant
+        return roster_snapshot_parts(
+            space.id,
+            entries,
+            # The version this snapshot is complete up to — the member echoes
+            # it back on its next BEGIN once it applied every part.
+            roster_version=current,
+            # v_44 — the owner's cert for the current authority key, so a
+            # household that missed the rotation bundle re-pins before
+            # verifying these (new-key-signed) entries.
+            authority_cert=owner_authority_cert_via(self._federation, space),
+            extras=extras,
+        )
+
     async def roster_snapshot_entries(
         self,
         space: Space,
@@ -2094,6 +2138,7 @@ class SpaceService(
         seed: bytes,
         to_instance_id: str,
         known_version: int | None = None,
+        all_tombstones: bool = False,
     ) -> list[dict]:
         """Every seat of a space we host, authority-signed with ``seed``, as
         ``SPACE_ROSTER_SNAPSHOT`` entries for household ``to_instance_id``.
@@ -2168,7 +2213,7 @@ class SpaceService(
             if gone and known_version is not None and version <= known_version:
                 # It holds this removal already (see ``known_version``).
                 continue
-            if gone and (inst, user_id) not in recent:
+            if gone and not all_tombstones and (inst, user_id) not in recent:
                 # Older than :data:`ROSTER_TOMBSTONE_WINDOW_S`: not carried.
                 continue
             if role == SpaceRole.SUBSCRIBER.value and not subscriber_ok:
@@ -2359,6 +2404,9 @@ class SpaceService(
         rec = book.get(sender)
         if took and rec is not None:
             rec.consecutive = False
+            if rec.sent_at is not None:
+                # Healed: the next miss waits the base cooldown at most.
+                rec.until = min(rec.until, rec.sent_at + ROSTER_REPAIR_COOLDOWN_S)
         if right:
             return
         now = _monotonic()
@@ -2373,9 +2421,13 @@ class SpaceService(
             else ROSTER_REPAIR_COOLDOWN_S
         )
         charged = False
+        carried: int | None = None
+        # A repair that follows one which did not heal carries every
+        # tombstone (a member offline past the window).
+        consecutive = rec is not None and rec.consecutive
 
-        def _charge() -> bool:
-            nonlocal charged
+        def _charge(version: int) -> bool:
+            nonlocal charged, carried
             space_key = f"roster-repair:{space.id}"
             if not (
                 self._roster_budget.has_room(
@@ -2399,6 +2451,7 @@ class SpaceService(
                 space_key, limit=ROSTER_REPAIR_PER_SPACE_PER_MINUTE, window_s=60
             )
             charged = True
+            carried = version
             return True
 
         self._roster_inflight.add(key)
@@ -2410,6 +2463,7 @@ class SpaceService(
                     to_instance_id=sender,
                     known_version=known_version,
                     charge=_charge,
+                    all_tombstones=consecutive,
                 )
             finally:
                 self._roster_inflight.discard(key)
@@ -2418,14 +2472,16 @@ class SpaceService(
             if sent:
                 book[sender] = _RosterRepair(
                     until=done + cooldown,
+                    sent_at=done,
                     cooldown=cooldown,
-                    sent_version=int(space.roster_sequence),
+                    sent_version=carried,
                     consecutive=True,
                 )
             elif charged:
                 prior = book.get(sender)
                 book[sender] = _RosterRepair(
                     until=done + ROSTER_REPAIR_RETRY_S,
+                    sent_at=prior.sent_at if prior else None,
                     cooldown=prior.cooldown if prior else ROSTER_REPAIR_COOLDOWN_S,
                     sent_version=prior.sent_version if prior else None,
                     consecutive=prior.consecutive if prior else False,
