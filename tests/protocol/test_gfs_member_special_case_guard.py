@@ -442,9 +442,22 @@ _MARKER_FREE: dict[str, tuple[str, ...]] = {
 #: a relay, a seat source, a GFS or an inbox (a helper ``_is_relay_only_peer``,
 #: ``row.relay_via``, ``row.remote_inbox_url``) ...
 _REACH_WORD = re.compile(r"relay|space_session|gfs|inbox", re.IGNORECASE)
-#: ... and the instance row's source itself, however it is compared
-#: (``row.source is ...``, ``row.source.value == "space" + "_session"``).
-_REACH_EXACT = frozenset({"source", "InstanceSource"})
+#: ... the instance row's source itself, however it is compared
+#: (``row.source is ...``, ``row.source.value == "space" + "_session"``),
+#: and the other ways to ask how a household is reached: its pairing
+#: (``is_confirmed_peer``), its instance row (``get_instance``) or the
+#: version it claimed over the mesh (``space_member_version``; a gate
+#: names its line with ``space_member_supports``). A ``getattr`` with a
+#: computed name (``getattr(row, "sou" + "rce")``) counts too.
+_REACH_EXACT = frozenset(
+    {
+        "source",
+        "InstanceSource",
+        "is_confirmed_peer",
+        "get_instance",
+        "space_member_version",
+    }
+)
 
 #: Functions that MUST keep a seat check (defence in depth): the binary
 #: HTTPS media leg never POSTs to a household met through a GFS, even if a
@@ -528,12 +541,32 @@ def _identifiers(fn: ast.AST) -> set[str]:
     return out
 
 
+def _computed_getattr(fn: ast.AST) -> bool:
+    """Whether *fn*'s body calls ``getattr`` with a name that is not a
+    string constant."""
+    return any(
+        isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "getattr"
+        and (
+            len(n.args) < 2
+            or not isinstance(n.args[1], ast.Constant)
+            or not isinstance(n.args[1].value, str)
+        )
+        for n in ast.walk(ast.Module(body=list(fn.body), type_ignores=[]))
+    )
+
+
 def _reach_hits(fn: ast.AST) -> set[str]:
     """The markers in *fn*'s body, plus any identifier in it that tells how
-    a household is reached (:data:`_REACH_WORD`, :data:`_REACH_EXACT`)."""
-    return (_body_names(fn) & set(_ALLOWED)) | {
+    a household is reached (:data:`_REACH_WORD`, :data:`_REACH_EXACT`), and
+    ``getattr(computed)``."""
+    hits = (_body_names(fn) & set(_ALLOWED)) | {
         n for n in _identifiers(fn) if n in _REACH_EXACT or _REACH_WORD.search(n)
     }
+    if _computed_getattr(fn):
+        hits.add("getattr(computed)")
+    return hits
 
 
 def _marker_free_hits(tree: ast.AST, names: tuple[str, ...]) -> dict[str, set[str]]:
@@ -733,6 +766,30 @@ _MUTATIONS: dict[str, tuple[tuple[str, str], ...]] = {
             _SNAPSHOT_LOOP,
             "        if await self._federation.is_space_session_peer("
             "to_instance_id):\n            return []\n" + _SNAPSHOT_LOOP,
+        ),
+    ),
+    # Round 4 (reviewer repros, ``test_rev_evasions``): a pairing check, the
+    # source read through a computed ``getattr``, the claimed version.
+    "confirmed": (
+        (
+            _SNAPSHOT_LOOP,
+            "        if not await self._federation.is_confirmed_peer("
+            "to_instance_id):\n            return []\n" + _SNAPSHOT_LOOP,
+        ),
+    ),
+    "getattr": (
+        (
+            _SNAPSHOT_LOOP,
+            _FETCH_ROW
+            + "        if _row is not None and getattr(_row, 'sou' + 'rce').value"
+            " == 'space' + '_session':\n            return []\n" + _SNAPSHOT_LOOP,
+        ),
+    ),
+    "version": (
+        (
+            _SNAPSHOT_LOOP,
+            "        if await self._federation.space_member_version("
+            "to_instance_id) == 0:\n            return []\n" + _SNAPSHOT_LOOP,
         ),
     ),
     # The source compared as a string built so no constant names it.
