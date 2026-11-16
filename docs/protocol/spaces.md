@@ -628,20 +628,25 @@ member household, not only on the host:
   however it is reached (paired, mesh, or seated from an invite link over
   the GFS relay):
   - digest and cert epoch match → nothing;
-  - otherwise → one **authoritative snapshot** (below), unless one went to
-    this (space, household) within its cooldown. The cooldown is 30 min.
-    It doubles, up to a day, only when the member reports the SAME wrong
-    digest again after a snapshot that actually went out
-    (`send_roster_snapshot` returned true) — a member that does not take
-    snapshots. It is back at 30 min once the digest matches. A digest that
-    moved (later gossip arrived, the roster changed) is a new mismatch:
-    answered after 30 min, never treated as drift.
-  - **A global budget:** at most `ROSTER_REPAIR_PER_MINUTE` (6) repair
-    snapshots a minute across every space the household hosts, so a
-    restart or a backup restore that finds every member mismatched cannot
-    burst. A household the budget holds back is not recorded and asks again
-    on its next admitted BEGIN. Nothing is persisted: the budget bounds what
-    a restart costs.
+  - otherwise → one repair snapshot, unless one went to this (space,
+    household) within its cooldown. The cooldown is 30 min after a
+    snapshot that went out (`send_roster_snapshot` returned true). It
+    doubles, up to a day, on every CONSECUTIVE mismatch answered with a
+    sent snapshot — whether or not the digest moved meanwhile — and starts
+    over only when the digest matches (or a v_80 echo reached the version
+    sent). A lost snapshot therefore backs off too: live gossip still
+    carries every change, the repair is a safety net.
+  - A snapshot built but not sent (a part's send failed) waits 15 min
+    (`ROSTER_REPAIR_RETRY_S`) without doubling. A send that stops before
+    building (a household below the snapshot line, no signing seed, a
+    space we no longer host) records nothing and costs no budget.
+  - **Budget:** at most `ROSTER_REPAIR_PER_SPACE_PER_MINUTE` (2) repair
+    snapshots a minute for one space and `ROSTER_REPAIR_PER_MINUTE` (6)
+    across every space the household hosts, charged right before a
+    snapshot is built. One space (a restart, a backup restore, sybil
+    followers of a public space) cannot starve the others. A household the
+    budget holds back is not recorded and asks again on its next admitted
+    BEGIN. Nothing is persisted: the budget bounds what a restart costs.
 
   A writer cert behind or ahead of the host's is a mismatch like any other
   (the snapshot carries the host's cert). An unknown suite, a suite that is
@@ -664,81 +669,79 @@ member household, not only on the host:
   Credentials that change without a roster change heal through their own
   paths (the rekey / rotation per-peer fan-outs, the channel service, the
   v_46 authority echo) and ride every snapshot that is sent.
-- **The snapshot is authoritative.** Every snapshot the host sends
-  (`send_roster_snapshot`) names every live seat outside the receiver's
-  household and says so (`authoritative: true` on every part). Its entries
-  follow the host at an equal version (a seat the member holds removed at
-  that version comes back; a role follows). Once EVERY part verified, the
-  member tombstones each live seat it mirrors that the snapshot does not
-  name, outside its own household, at or below the snapshot's
-  `roster_version` — at the seat's own version, with the same effects as a
-  `SPACE_MEMBER_LEFT` (`tombstone_absent`). So one snapshot heals any
-  mismatch: a missed remote removal, a host-local member's departure or
-  ban the member missed (no host-local tombstone is needed — absence is
-  the removal), or a seat the host refused. This is "the roster decides
-  membership" with the host as the roster's authority: the host's
-  `_merge_roster_entry` already refuses what it does not accept, and the
-  member now converges on exactly that.
-  - **A seat the host has not heard of yet.** A seat newer than the
-    snapshot (`member_version` above its `roster_version` — gossip that
-    overtook the snapshot) stays. A delegated admin's seat at or below it
-    that the host has not applied yet is dropped, and comes back when the
-    host applies it: the host's digest for the member then names it, the
-    next mismatch gets a snapshot naming it at its own version, and the
-    equal-version rule re-seats it (the drop kept that version, so no
-    gossip is lost). Its posts are held for that window like any write
-    that beat its seat.
-  - A v_80 receiver ignores the flag (it keeps merging entries as before).
-  - **Residual: a host restored from an older backup.** Its counter is
-    behind what it issued before; a mirrored seat ABOVE its `roster_version`
-    is kept, so that mismatch stays until the host's counter passes it (each
-    roster change moves it by one); the doubling cooldown bounds it to one
-    snapshot a day per household meanwhile.
+- **What a snapshot carries, and how it applies.** The host's live seats
+  and the host's own tombstones: every remote seat it removed in the last
+  30 days (`ROSTER_TOMBSTONE_WINDOW_S`, by `removed_at`), each with its
+  version and authority signature exactly as live gossip carried it; older
+  tombstones stay on the host (a member online once in 30 days got any
+  removal it missed through a repair). The member merges each entry by the
+  usual per-entry rule (`apply_member_event`): strictly newer wins, a
+  tombstone wins a tie. **Nothing is inferred from a seat the snapshot
+  does not name**: such a seat stays as the member has it. So a delayed
+  older snapshot (a GFS may hold one for a day) can neither resurrect nor
+  remove anything newer, and a seat a delegated admin made while the owner
+  was offline survives the owner's return even when the members' BEGINs
+  beat the admin's gossip (its card, its game seats and its posts stay).
+  Size: ~500 B per tombstone; the 30-day window bounds them by the
+  removals of a month — in the worst case below with 10 % monthly churn,
+  ~1 000 tombstones ≈ 500 KB (~5 parts) on top of the live seats, where
+  five years of unbounded tombstones would be ~60 000 ≈ 30 MB a snapshot.
+- **Residuals (a mismatch a snapshot cannot heal).** Each stays, its
+  repairs backing off to one snapshot a day per household:
+  - **A seat only the member knows** — one a delegated admin's gossip put
+    there that the host refused, or has not heard of yet. The host keeps
+    no tombstone for a seat it never seated.
+  - **A host-local departure or ban the member missed.** The host keeps no
+    versioned tombstone of its own members (`space_members` loses the row;
+    `space_bans` holds no version or signature to ship). Its LEFT gossip is
+    the only carrier (the outbox retries it).
+  - **A remote removal older than 30 days** the member still holds live
+    (it was offline the whole window).
+  - **A host restored from an older backup.** Its counter and seats are
+    behind what it issued; members keep the newer rows (strictly newer
+    wins), and the mismatch lasts until the host's own changes pass them.
 - **Older households (v_80) keep the echo.** A snapshot names the
   `roster_version` it is complete up to; a member that applied one echoes
   it as `roster_echo {roster_version, cert_epoch}` — a v_80 member only on
   its DIRECT BEGIN. A v_80 household's BEGIN with no `roster_digest` is
   answered by that echo under the same rule: right while it echoes the
   current `roster_sequence` and the writer cert the host would send; an
-  echo that reached the version of the snapshot sent is a success (a new
-  roster change is a new mismatch, answered after 30 min), the same echo
-  again doubles the cooldown. A stale echo gets every live seat without
-  the removals at or below it; no echo at all the whole roster. So a v_80
+  echo at or past the version of the snapshot sent means it took it (the
+  cooldown starts over; a newer roster change is a new mismatch after 30
+  min). A stale echo gets every live seat and the recent removals above
+  it; no echo at all, every live seat and every recent removal. So a v_80
   member's mesh, incremental-mesh and relay BEGINs (no echo) get the whole
   roster — capped by the same cooldown, i.e. at most what the old periodic
   timer sent. A household at `FederationCapability.MIN_FOR_ROSTER_DIGEST`
   (v_81, the first unreleased line) carries the digest on every BEGIN path
   to the host, so its BEGIN without one asks for nothing. No version bump:
-  `roster_digest` and `authoritative` are optional fields an older
-  household ignores, and the sync stream's contents do not change (no sync
-  line).
+  `roster_digest` is an optional BEGIN field an older host ignores, and the
+  sync stream's contents do not change (no sync line).
 - **Cost.** ~500 B per roster entry, parts of 96 KiB (~255 KiB sealed for
   the GFS relay). Per admitted BEGIN: the ~110 B digest field, one read of
   the space's live seats per 60 s and roster version (cached), a hash over
   them, and the cert-epoch lookup (a key read and the household's
   entitlement — no signature). No grace: a BEGIN that overtakes in-flight
   gossip (a member that just restarted) costs that household one snapshot
-  it would have caught up on anyway — ~25 KB for a 50-seat space, 5.5 MB
-  at the worst case below — at most one per 30 min per household and
-  within the global budget; a grace would delay every genuine repair by a
-  BEGIN (~30 min) instead.
+  it would have caught up on anyway — ~25 KB for a 50-seat space, ~6 MB at
+  the worst case below — within the cooldown and the budgets.
 
   | Case | Before (main: the periodic timer) | Now |
   |---|---|---|
   | No roster change, per 30-min tick | the whole roster to every household with a stale or missing echo | ~110 B per BEGIN, **0 snapshot bytes** |
   | One roster change | live gossip, then the whole roster to every household on the next tick (≈ 20 MB at 200 seats, ≈ 500 MB at 1000) | live gossip only; a snapshot only to a household whose mirror is wrong at its next BEGIN |
-  | A mismatch a snapshot used to leave (host-local removal, refused seat) | the whole roster every 30 min, forever | ONE snapshot heals it |
-  | Lost snapshot, member keeps getting gossip | — | one snapshot per 30 min until one lands |
-  | Broken member (the same wrong digest after every snapshot) | the whole roster every 30 min | 30 min, 1 h, 2 h … then one a day |
-  | Hostile member | the whole roster every 30 min | at most one snapshot per 30 min (only admitted BEGINs count, 5 per hour) |
-  | Restart or backup restore, every member mismatched | — | at most 6 snapshots a minute host-wide (≤ 33 MB/min and ~66 000 signatures/min at the worst case below; a few KB each for an ordinary space) |
-  | 1000 member households + 10 000 follower seats (~11 000 entries ≈ 5.5 MB, ~60 parts) | ≈ 5.5 GB per tick if every echo is stale | 1000 × ~110 B per 30 min ≈ 110 KB; a lost gossip costs that one household one 5.5 MB burst (~60 parts); a restore storm takes 1000 / 6 ≈ 3 h to heal at ≤ 33 MB/min |
+  | A missed remote removal (≤ 30 days old) | healed on the next tick | healed by one snapshot |
+  | A residual (above) | the whole roster every 30 min, forever | 30 min, 1 h, 2 h … then one snapshot a day per household |
+  | Lost snapshots in an active space | — | the same backoff (consecutive mismatches double it); gossip still carries changes |
+  | Hostile member | the whole roster every 30 min | at most one snapshot per 30 min (a matching digest in between starts the cooldown over), doubling to one a day while it stays wrong; only admitted BEGINs count, 5 per hour |
+  | Restart, backup restore, or sybil followers in one space | — | ≤ 2 snapshots a minute for that space, ≤ 6 a minute host-wide (≤ 33 MB/min and ~66 000 signatures/min at the worst case below; a few KB each for an ordinary space) |
+  | 1000 member households + 10 000 follower seats (~11 000 entries ≈ 5.5 MB + ≤ ~500 KB of tombstones, ~65 parts) | ≈ 5.5 GB per tick if every echo is stale | 1000 × ~110 B per 30 min ≈ 110 KB; a lost gossip costs that one household one ~6 MB burst; a restore storm in that one space heals at 2 households a minute (~8 h for 1000), ≤ 12 MB/min |
 
   Seats see a per-space part-count burst only on a digest mismatch.
   Followers receive the member roster in seat / upgrade snapshots and live
   gossip today; that is unchanged here. The v_80 echo path costs what it
   did (the whole roster once per roster change per v_80 household, at most
-  once per 30 min — few, and paired).
+  once per cooldown — few, and paired).
 - **Held writes.** A write naming a user the space has **no record of at
   all** — or, at the Follower gate, coming from a household it holds no
   row for — may simply have beaten the gossip seating them. It is held in a

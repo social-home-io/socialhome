@@ -2598,11 +2598,12 @@ SHA-256 of the live seats it mirrors, `domain/space_roster_digest.py`)
 differs from the host's for it — never on the host's own timer, so with
 gossip working a roster repair costs zero envelopes (an older household's
 `roster_echo` is answered the same way); only an admitted BEGIN counts, and
-by one rule: a mismatch gets one AUTHORITATIVE snapshot (the member drops
-any mirrored seat it does not name, so one snapshot heals any mismatch)
-unless one went to that household within its cooldown — 30 min, doubling to
-a day only while the member answers the same wrong digest — with at most
-six repair snapshots a minute host-wide, so a restart cannot burst — and a
+by one rule: a mismatch gets one snapshot (the host's live seats and its
+removals of the last 30 days, merged entry by entry — strictly newer wins,
+nothing inferred from a seat it does not name) unless one went to that
+household within its cooldown — 30 min, doubling to a day on every
+consecutive mismatch — with at most two repair snapshots a minute per space
+and six host-wide, so a restart cannot burst — and a
 write that beat the gossip
 seating its author or household waits in a bounded in-memory buffer until
 the seat lands. The per-family table is in
