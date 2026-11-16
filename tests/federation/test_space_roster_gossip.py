@@ -1249,9 +1249,10 @@ async def test_a_tombstone_in_the_snapshot_removes_a_seat_the_member_missed(
 
 async def test_rev_the_reviewers_stale_snapshot_sequence_flaps_nothing(tmp_dir):
     """Reviewer repro, exactly (round 4): S_new (v=20) does not name a
-    host-local seat at v=10, then a delayed S_old (v=12) names it. With no
-    inference from absence nothing is dropped, so nothing flaps: the seat
-    is live throughout and no seat-ended effect ever runs."""
+    host-local seat at v=10, then a delayed S_old (v=12) names it. SF3: a
+    complete host snapshot speaks for the host's OWN seats, so S_new ends
+    the seat — at v=20, so S_old (v=12) cannot bring it back: no flap, one
+    seat-ended effect."""
     h, _spaces, remote, db, seed = await _r5_handler(tmp_dir)
     j = FederationEventType.SPACE_MEMBER_JOINED
     await _r5_mirror(remote, OWNER, "x-leaver", 10)
@@ -1259,7 +1260,7 @@ async def test_rev_the_reviewers_stale_snapshot_sequence_flaps_nothing(tmp_dir):
         j, seed=seed, member_version=20, user_id="x-owner", instance_id=OWNER
     )
     await h._on_space_roster_snapshot(_r5_snapshot([_entry(j, owner_new)], version=20))
-    assert (OWNER, "x-leaver") in await _r5_live(remote)
+    assert (OWNER, "x-leaver") not in await _r5_live(remote)
     owner_old = _signed_payload(
         j, seed=seed, member_version=12, user_id="x-owner", instance_id=OWNER
     )
@@ -1269,10 +1270,95 @@ async def test_rev_the_reviewers_stale_snapshot_sequence_flaps_nothing(tmp_dir):
     await h._on_space_roster_snapshot(
         _r5_snapshot([_entry(j, owner_old), _entry(j, leaver_old)], version=12)
     )
-    assert (OWNER, "x-leaver") in await _r5_live(remote)
-    assert not [
-        c
+    assert (OWNER, "x-leaver") not in await _r5_live(remote)
+    gone = await remote.get_including_tombstones(SPACE_ID, OWNER, "x-leaver")
+    assert gone.tombstoned and gone.member_version == 20
+    ended = [
+        c.args[0]
         for c in h._bus.publish.await_args_list
         if type(c.args[0]).__name__ == "SpaceRemoteSeatEnded"
     ]
+    assert [(e.instance_id, e.user_id) for e in ended] == [(OWNER, "x-leaver")]
+    await db.shutdown()
+
+
+# ── SF3: a complete host snapshot speaks for the host's own seats ────────
+
+
+async def test_a_host_local_departure_the_member_missed_is_healed(tmp_dir):
+    """SF3 (round 5 review): the host's own people are seated only by the
+    host — no delegated admin can seat a user of the owner's household — so
+    a complete, verified host snapshot is authoritative for seats of the
+    HOST'S instance: one it does not name (a departure or ban whose LEFT
+    gossip the member missed) is ended at the snapshot's version. A host
+    seat newer than the snapshot stays; every other household's seat is
+    untouched (the round-4 blocker cannot return)."""
+    h, _spaces, remote, db, seed = await _r5_handler(tmp_dir)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    await _r5_mirror(remote, OWNER, "x-gone", 5)
+    await _r5_mirror(remote, OWNER, "x-newer", 12)
+    await _r5_mirror(remote, "p-admin-seated", "x-by-admin", 5)
+    owner = _signed_payload(
+        j, seed=seed, member_version=10, user_id="x-owner", instance_id=OWNER
+    )
+    await h._on_space_roster_snapshot(_r5_snapshot([_entry(j, owner)], version=10))
+    live = await _r5_live(remote)
+    assert (OWNER, "x-gone") not in live
+    assert {
+        (OWNER, "x-owner"),
+        (OWNER, "x-newer"),
+        ("p-admin-seated", "x-by-admin"),
+    } <= live
+    gone = await remote.get_including_tombstones(SPACE_ID, OWNER, "x-gone")
+    assert gone.tombstoned and gone.member_version == 10
+    await db.shutdown()
+
+
+async def test_only_a_whole_verified_host_snapshot_ends_a_host_seat(tmp_dir):
+    """Not from the host, a refused entry, or a part still missing: no host
+    seat is ended."""
+    h, _spaces, remote, db, seed = await _r5_handler(tmp_dir)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    await _r5_mirror(remote, OWNER, "x-gone", 5)
+    owner = _entry(
+        j,
+        _signed_payload(
+            j, seed=seed, member_version=10, user_id="x-owner", instance_id=OWNER
+        ),
+    )
+    forged = _entry(
+        j, _signed_payload(j, seed=b"\x01" * 32, member_version=3, user_id="x-f")
+    )
+    not_host = _r5_snapshot([owner], version=10)
+    not_host.from_instance = "p-other"
+    for event in (
+        not_host,
+        _r5_snapshot([owner, forged], version=10),
+        _r5_snapshot([owner], version=10, snapshot_id="s1", part=0, parts=2),
+    ):
+        await h._on_space_roster_snapshot(event)
+        assert (OWNER, "x-gone") in await _r5_live(remote)
+    await db.shutdown()
+
+
+async def test_a_host_snapshot_in_parts_ends_a_host_seat_once_complete(tmp_dir):
+    """The host seats named across every part count."""
+    h, _spaces, remote, db, seed = await _r5_handler(tmp_dir)
+    await _r5_mirror(remote, OWNER, "x-gone", 5)
+    entries = _thousand_seats(seed)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    entries.append(
+        _entry(
+            j,
+            _signed_payload(
+                j, seed=seed, member_version=900, user_id="u-host", instance_id=OWNER
+            ),
+        )
+    )
+    events = _part_events(roster_snapshot_parts(SPACE_ID, entries, roster_version=1000))
+    for event in events:
+        assert (OWNER, "x-gone") in await _r5_live(remote)
+        await h._on_space_roster_snapshot(event)
+    live = await _r5_live(remote)
+    assert (OWNER, "x-gone") not in live and (OWNER, "u-host") in live
     await db.shutdown()
