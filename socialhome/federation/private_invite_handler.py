@@ -286,9 +286,11 @@ class PrivateSpaceInviteHandler:
         #: exercise admin actions can omit it.
         self._space_service = space_service
         #: A roster send in parts still arriving, per (space, host): its
-        #: ``(snapshot_id, parts, roster_version)`` and the parts applied.
+        #: ``(snapshot_id, parts, roster_version)``, the parts applied and
+        #: the live seats ``(instance, user)`` they named.
         self._snapshot_parts: dict[
-            tuple[str, str], tuple[tuple[str, int, int], set[int]]
+            tuple[str, str],
+            tuple[tuple[str, int, int], set[int], set[tuple[str, str]]],
         ] = {}
         #: Optional — multi-admin approval workflow (v_16). Dispatches the
         #: ``propose`` / ``vote`` verbs and the ``SPACE_ADMIN_PROPOSAL_UPDATED``
@@ -1734,8 +1736,12 @@ class PrivateSpaceInviteHandler:
         *,
         tombstoned: bool,
         verified_epoch: int,
+        authoritative: bool = False,
     ) -> None:
         """Merge one already-verified roster entry into the mirror.
+
+        ``authoritative``: from the host's authoritative snapshot — an equal
+        version follows the host (``apply_member_event``).
 
         ``verified_epoch`` is the authority-key epoch the entry's signature
         verified against; the write lands only while that key is still
@@ -1823,6 +1829,7 @@ class PrivateSpaceInviteHandler:
             member_version=member_version,
             tombstoned=tombstoned,
             verified_epoch=verified_epoch,
+            authoritative=authoritative,
         )
         if not applied:
             fresh = await self._space_repo.get(space_id)
@@ -1841,31 +1848,8 @@ class PrivateSpaceInviteHandler:
                     space_id=space_id, instance_id=instance_id, user_id=user_id
                 )
             )
-        if (
-            applied
-            and tombstoned
-            and space is not None
-            and instance_id != space.owner_instance_id
-            and not await self._remote_members.list_for_instance(
-                space_id, instance_id, include_tombstoned=False
-            )
-        ):
-            # The household's LAST seat just went: stop treating it as a
-            # member household, exactly as the host's own
-            # ``remove_remote_member`` does — otherwise every later fan-out
-            # (posts, rekeys, a rotation bundle) still reaches it (v_44: a
-            # lingering target would receive the next rekey or rotation
-            # bundle). Before the seat is announced as ended: a listener
-            # that asks "do we still share a space with that household?"
-            # (the member directory ending its lazy seat) must not see the
-            # row.
-            await self._space_repo.remove_space_instance(space_id, instance_id)
         if applied and tombstoned:
-            await self._bus.publish(
-                SpaceRemoteSeatEnded(
-                    space_id=space_id, instance_id=instance_id, user_id=user_id
-                )
-            )
+            await self._after_seat_ended(space, space_id, instance_id, user_id)
         if (
             applied
             and prior is not None
@@ -1894,6 +1878,34 @@ class PrivateSpaceInviteHandler:
         # a gossip row naming our instance is harmless.
         if not tombstoned:
             await self._space_repo.add_space_instance(space_id, instance_id)
+
+    async def _after_seat_ended(
+        self, space: object, space_id: str, instance_id: str, user_id: str
+    ) -> None:
+        """A mirrored seat just ended (a LEFT applied, or an authoritative
+        snapshot dropped it)."""
+        if (
+            space is not None
+            and instance_id != getattr(space, "owner_instance_id", None)
+            and not await self._remote_members.list_for_instance(
+                space_id, instance_id, include_tombstoned=False
+            )
+        ):
+            # The household's LAST seat just went: stop treating it as a
+            # member household, exactly as the host's own
+            # ``remove_remote_member`` does — otherwise every later fan-out
+            # (posts, rekeys, a rotation bundle) still reaches it (v_44: a
+            # lingering target would receive the next rekey or rotation
+            # bundle). Before the seat is announced as ended: a listener
+            # that asks "do we still share a space with that household?"
+            # (the member directory ending its lazy seat) must not see the
+            # row.
+            await self._space_repo.remove_space_instance(space_id, instance_id)
+        await self._bus.publish(
+            SpaceRemoteSeatEnded(
+                space_id=space_id, instance_id=instance_id, user_id=user_id
+            )
+        )
 
     async def _on_space_member_joined(self, event: FederationEvent) -> None:
         """Authority-signed roster JOINED (v_23) — apply (upsert) the member."""
@@ -1999,6 +2011,10 @@ class PrivateSpaceInviteHandler:
         from_host = bool(space.owner_instance_id) and (
             event.from_instance == space.owner_instance_id
         )
+        # The host's own repair snapshot names every live seat we mirror:
+        # its view wins at an equal version, and a seat it does not name is
+        # dropped once every part verified (below).
+        authoritative = from_host and p.get("authoritative") is True
         for (entry_type, payload, tombstoned), reason in zip(
             candidates, reasons, strict=True
         ):
@@ -2025,6 +2041,7 @@ class PrivateSpaceInviteHandler:
                 payload,
                 tombstoned=tombstoned,
                 verified_epoch=space.authority_key_epoch,
+                authoritative=authoritative,
             )
         # The host's snapshot names the roster version it is complete up to;
         # echoed on our next BEGIN to the host, it spares us the periodic
@@ -2036,25 +2053,55 @@ class PrivateSpaceInviteHandler:
         # noted, and the host's next send heals it.
         roster_version = p.get("roster_version")
         if (
-            from_host
-            and self._space_service is not None
-            and isinstance(roster_version, int)
-            and not isinstance(roster_version, bool)
-            and all(reason is None for reason in reasons)
-            and self._snapshot_complete(space_id, event.from_instance, p)
+            not from_host
+            or not isinstance(roster_version, int)
+            or isinstance(roster_version, bool)
+            or not all(reason is None for reason in reasons)
         ):
+            return
+        live = {
+            (str(payload.get("instance_id") or ""), str(payload.get("user_id") or ""))
+            for _type, payload, tombstoned in candidates
+            if not tombstoned
+        }
+        named = self._snapshot_complete(space_id, event.from_instance, p, live)
+        if named is None:
+            return
+        if authoritative and self._own_instance_id:
+            # Every part verified: our mirror now equals the host's view. A
+            # seat it does not name (a removal we missed — remote or
+            # host-local — or a seat the host refused) is tombstoned at its
+            # own version, so the host naming it later brings it back. A
+            # seat newer than this snapshot (gossip that overtook it) stays.
+            for gone in await self._remote_members.tombstone_absent(
+                space_id,
+                keep=named,
+                skip_instance=self._own_instance_id,
+                max_version=roster_version,
+            ):
+                await self._after_seat_ended(
+                    space, space_id, gone.instance_id, gone.user_id
+                )
+        if self._space_service is not None:
             self._space_service.note_roster_snapshot_applied(
                 space_id, event.from_instance, roster_version
             )
 
-    def _snapshot_complete(self, space_id: str, host: str, p: dict) -> bool:
-        """Whether the fully verified snapshot event *p* completes the
-        host's roster: a single event does; a part (``snapshot_id`` /
-        ``part`` / ``parts``) only when it is the last missing one of its
+    def _snapshot_complete(
+        self,
+        space_id: str,
+        host: str,
+        p: dict,
+        live: set[tuple[str, str]],
+    ) -> set[tuple[str, str]] | None:
+        """The live seats ``(instance, user)`` the host's roster names once
+        the fully verified snapshot event *p* (naming *live*) completes it,
+        else ``None``: a single event completes it; a part (``snapshot_id``
+        / ``part`` / ``parts``) only when it is the last missing one of its
         send. One send is tracked per (space, host); a part of another send
         starts over. A malformed part completes nothing."""
         if "parts" not in p and "part" not in p and "snapshot_id" not in p:
-            return True
+            return live
         snapshot_id, part, parts = p.get("snapshot_id"), p.get("part"), p.get("parts")
         if (
             not isinstance(snapshot_id, str)
@@ -2064,18 +2111,19 @@ class PrivateSpaceInviteHandler:
             or not 0 <= part < parts <= _MAX_ROSTER_SNAPSHOT_PARTS
             or type(p.get("roster_version")) is not int
         ):
-            return False
+            return None
         key = (space_id, host)
         tracked = self._snapshot_parts.get(key)
         stamp = (snapshot_id, parts, p["roster_version"])
         if tracked is None or tracked[0] != stamp:
-            tracked = (stamp, set())
+            tracked = (stamp, set(), set())
             self._snapshot_parts[key] = tracked
         tracked[1].add(part)
+        tracked[2].update(live)
         if len(tracked[1]) < parts:
-            return False
+            return None
         del self._snapshot_parts[key]
-        return True
+        return tracked[2]
 
     @staticmethod
     def _check_snapshot_sigs_sync(

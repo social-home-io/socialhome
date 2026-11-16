@@ -1098,3 +1098,147 @@ async def test_a_part_naming_a_part_out_of_range_never_completes_a_roster(tmp_di
         )
     assert noted.applied == []
     await db.shutdown()
+
+
+# ── Authoritative repair snapshot (round 4) ──────────────────────────────
+
+ME = "me-instance"
+
+
+async def _mirror(remote, instance_id, user_id, version, *, tombstoned=False):
+    """A seat already in our mirror (as gossip once wrote it)."""
+    await remote.apply_member_event(
+        space_id=SPACE_ID,
+        user_id=user_id,
+        instance_id=instance_id,
+        display_name=user_id,
+        user_pk=None,
+        role="member",
+        member_version=version,
+        tombstoned=tombstoned,
+    )
+
+
+def _authoritative(entries, *, version, from_instance=OWNER, **extra):
+    return _event(
+        FederationEventType.SPACE_ROSTER_SNAPSHOT,
+        {
+            "space_id": SPACE_ID,
+            "entries": entries,
+            "roster_version": version,
+            "authoritative": True,
+            **extra,
+        },
+        from_instance=from_instance,
+    )
+
+
+async def _live(remote) -> set[tuple[str, str]]:
+    return {(r.instance_id, r.user_id) for r in await remote.list_for_space(SPACE_ID)}
+
+
+async def _member_handler(tmp_dir):
+    h, spaces, remote, db, seed = await _make_handler(tmp_dir)
+    h._own_instance_id = ME
+    return h, spaces, remote, db, seed
+
+
+async def test_an_authoritative_snapshot_leaves_the_mirror_equal_to_the_hosts(
+    tmp_dir,
+):
+    """A: a seat the host does not name — a host-local departure or ban we
+    missed (the snapshot never carries a tombstone for it), or a seat the
+    host refused — is dropped once the snapshot applied, so ONE snapshot
+    heals any mismatch. A seat newer than the snapshot (gossip that
+    overtook it) and our own household's rows stay."""
+    h, _spaces, remote, db, seed = await _member_handler(tmp_dir)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    await _mirror(remote, OWNER, "x-left-host", 3)  # host-local, left unseen
+    await _mirror(remote, "p-refused", "x-refused", 7)  # the host never had it
+    await _mirror(remote, "p-new", "x-new", 12)  # gossip newer than the snapshot
+    await _mirror(remote, ME, "x-me", 2)  # our own household
+    keep = _signed_payload(j, seed=seed, member_version=4)
+    await h._on_space_roster_snapshot(_authoritative([_entry(j, keep)], version=10))
+    assert await _live(remote) == {
+        (MEMBER_INSTANCE, MEMBER_USER),
+        ("p-new", "x-new"),
+        (ME, "x-me"),
+    }
+    dropped = await remote.get_including_tombstones(SPACE_ID, OWNER, "x-left-host")
+    assert dropped is not None and dropped.tombstoned
+    assert dropped.member_version == 3  # no version bump
+    ended = [
+        c.args[0]
+        for c in h._bus.publish.await_args_list
+        if type(c.args[0]).__name__ == "SpaceRemoteSeatEnded"
+    ]
+    assert {(e.instance_id, e.user_id) for e in ended} == {
+        (OWNER, "x-left-host"),
+        ("p-refused", "x-refused"),
+    }
+    await db.shutdown()
+
+
+async def test_a_dropped_seat_comes_back_when_the_host_names_it(tmp_dir):
+    """A delegated admin's seat the host had not applied yet is dropped;
+    once the host applied it, its next snapshot names it at the same
+    version — the host's view wins at an equal version."""
+    h, _spaces, remote, db, seed = await _member_handler(tmp_dir)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    await _mirror(remote, "p-adm", "x-by-admin", 5)
+    owner_seat = _signed_payload(
+        j, seed=seed, member_version=9, user_id="x-owner", instance_id=OWNER
+    )
+    await h._on_space_roster_snapshot(
+        _authoritative([_entry(j, owner_seat)], version=9)
+    )
+    assert ("p-adm", "x-by-admin") not in await _live(remote)
+    back = _signed_payload(
+        j, seed=seed, member_version=5, user_id="x-by-admin", instance_id="p-adm"
+    )
+    await h._on_space_roster_snapshot(
+        _authoritative([_entry(j, owner_seat), _entry(j, back)], version=10)
+    )
+    assert ("p-adm", "x-by-admin") in await _live(remote)
+    await db.shutdown()
+
+
+async def test_only_a_whole_verified_authoritative_host_snapshot_drops_seats(
+    tmp_dir,
+):
+    """Not the host, not flagged (an older host), a refused entry, or a part
+    still missing: nothing is dropped."""
+    h, _spaces, remote, db, seed = await _member_handler(tmp_dir)
+    j = FederationEventType.SPACE_MEMBER_JOINED
+    await _mirror(remote, "p-old", "x-old", 2)
+    good = _entry(j, _signed_payload(j, seed=seed, member_version=4))
+    forged = _entry(
+        j, _signed_payload(j, seed=b"\x01" * 32, member_version=3, user_id="x-f")
+    )
+    for event in (
+        _authoritative([good], version=9, from_instance="p-other"),
+        _versioned_snapshot([good], version=9),
+        _authoritative([good, forged], version=9),
+        _authoritative([good], version=9, snapshot_id="s1", part=0, parts=2),
+    ):
+        await h._on_space_roster_snapshot(event)
+        assert ("p-old", "x-old") in await _live(remote)
+    await db.shutdown()
+
+
+async def test_an_authoritative_roster_in_parts_drops_only_once_complete(tmp_dir):
+    """The live seats of every part count: a 1000-seat roster in parts, in
+    any order; a seat none of them names goes only with the last part."""
+    h, _spaces, remote, db, seed = await _member_handler(tmp_dir)
+    await _mirror(remote, "p-x", "x-stray", 50)
+    payloads = roster_snapshot_parts(
+        SPACE_ID, _thousand_seats(seed), roster_version=1000, authoritative=True
+    )
+    assert len(payloads) > 3 and all(p["authoritative"] for p in payloads)
+    events = _part_events(payloads)
+    for event in [events[-1], *events[:-1]]:
+        assert ("p-x", "x-stray") in await _live(remote)
+        await h._on_space_roster_snapshot(event)
+    assert ("p-x", "x-stray") not in await _live(remote)
+    assert await _seated(remote) == 1000
+    await db.shutdown()
