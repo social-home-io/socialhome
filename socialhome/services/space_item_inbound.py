@@ -108,7 +108,6 @@ from ..domain.space_item import (
     reaction_emoji_ok,
     stamp_to_db,
 )
-from ..domain.writer_cert import WRITER_SCOPE_WRITE
 from ..federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
@@ -817,18 +816,10 @@ class SpaceItemInbound:
         if not reaction_emoji_ok(emoji):
             return False
         features = item.space.features
-        # A follower can't tell a comment-only member from a follower: a
-        # comment-scope reaction counts there only while followers may react.
-        if (
-            not item.member
-            and item.cert_scope != WRITER_SCOPE_WRITE
-            and not features.allow_subscriber_react
-        ):
-            log.info(
-                "space_item: comment-scope reaction where followers may not react "
-                "— dropped"
-            )
-            return False
+        # A follower's reaction was decided with its cert: a follower scope
+        # grants ``react`` only when issued under the react switch. A
+        # ``comment`` cert is a member's (a moderated space's plain member).
+        # A member household also checks the switch itself (``_seat_ok``).
         if not await self._seat_ok(item, subscriber_ok=features.allow_subscriber_react):
             log.warning("space_item: reactor holds no reacting seat here — dropped")
             return False

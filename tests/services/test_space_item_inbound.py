@@ -509,20 +509,13 @@ async def test_a_malformed_emoji_is_dropped(env, emoji):
     assert not await _apply(env, "reaction_add", _react(env, "reaction_add", emoji, 1))
 
 
-async def test_a_follower_needs_a_write_cert_unless_follower_reactions_are_on(env):
+async def test_a_comment_only_members_reaction_is_kept_at_a_gfs_subscriber(env):
+    """A GFS subscriber holds no config (its directory stub has every
+    follower switch off) and no roster: a ``comment`` cert is a MEMBER's
+    (a moderated space's plain member) — its reaction is applied, not
+    mistaken for a follower's. A follower's reaction is decided by its own
+    scope (the react switch it was issued under), checked with the cert."""
     inner = _react(env, "reaction_add", "👍", 1)
-    assert not await _apply(env, "reaction_add", inner, cert_scope="comment")
-    space = await env["spaces"].get(SPACE)
-    await env["spaces"].save(
-        space.__class__(
-            **{
-                **{f: getattr(space, f) for f in space.__dataclass_fields__},
-                "features": SpaceFeatures(
-                    allow_subscribers=True, allow_subscriber_react=True
-                ),
-            }
-        )
-    )
     assert await _apply(env, "reaction_add", inner, cert_scope="comment")
 
 
