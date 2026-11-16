@@ -193,6 +193,7 @@ class SpaceWriterCertService:
         "_remote_members",
         "_spaces",
         "_truncation_warned",
+        "_wanted",
     )
 
     def __init__(
@@ -217,6 +218,10 @@ class SpaceWriterCertService:
         #: (space id, instance id) pairs already warned about a binding
         #: truncated to MAX_WRITER_USERS — once each per process.
         self._truncation_warned: set[tuple[str, str]] = set()
+        #: Member side — space → what this household asked its host for
+        #: (``"cert"`` / ``"key"``), until it arrives. In memory: a restart
+        #: asks again on the next write.
+        self._wanted: dict[str, set[str]] = {}
         #: v_51 — the private-space channel service (grants ride the same
         #: per-peer payloads as certs). ``None`` → no channel grants.
         self._channels: GfsChannelService | None = None
@@ -613,6 +618,8 @@ class SpaceWriterCertService:
             associated_data=self._writer_key_aad(space_id, grant.epoch),
         )
         stored = await self._keys.set_writer_key(space_id, grant.epoch, wrapped)
+        if stored:
+            self._wanted.get(space_id, set()).discard("key")
         if not stored:
             log.info(
                 "writer key for space %s epoch %d: no key for that epoch — dropped",
@@ -718,6 +725,8 @@ class SpaceWriterCertService:
             cert.epoch,
             orjson.dumps(cert.to_wire(), option=orjson.OPT_SORT_KEYS).decode(),
         )
+        if stored:
+            self._wanted.get(space_id, set()).discard("cert")
         if not stored:
             log.info(
                 "writer cert for space %s epoch %d: no key for that epoch — dropped",
@@ -725,6 +734,24 @@ class SpaceWriterCertService:
                 cert.epoch,
             )
         return stored
+
+    def want(self, space_id: str, *, cert: bool = False, key: bool = False) -> bool:
+        """Member side: note that this household wants its writer *cert* /
+        writer group *key* for *space_id* from its host (asked on the next
+        sync BEGIN). ``True`` when something new is wanted — the caller then
+        asks now; ``False`` when it was asked for already."""
+        new = {w for w, on in (("cert", cert), ("key", key)) if on}
+        held = self._wanted.setdefault(space_id, set())
+        fresh = bool(new - held)
+        held |= new
+        if not held:
+            del self._wanted[space_id]
+        return fresh
+
+    def wanted(self, space_id: str) -> tuple[bool, bool]:
+        """``(cert wanted, key wanted)`` for *space_id*."""
+        held = self._wanted.get(space_id, set())
+        return "cert" in held, "key" in held
 
     async def _stored_valid(self, space_id: str, epoch: int) -> WriterCert | None:
         """The stored cert for ``(space, epoch)`` iff it still verifies for

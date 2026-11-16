@@ -15,6 +15,7 @@ import pytest
 from socialhome.domain.events import (
     PairingConfirmed,
     SpaceAuthorityEchoDue,
+    SpaceCredentialsWanted,
     SpaceInviteAnswered,
     SpaceSyncComplete,
     SpaceSyncDeferred,
@@ -1188,6 +1189,35 @@ async def test_the_echo_due_mesh_begin_carries_the_roster_digest(
         SpaceAuthorityEchoDue(space_id="sp-1", owner_instance_id="owner-o")
     )
     assert fed.mesh_fields[-1]["roster_digest"] == digest
+
+
+async def test_credentials_wanted_begins_to_the_host_with_the_digest(
+    bus, queue, sync_manager
+):
+    """On demand: the household's ask for its writer cert / key is a
+    BEGIN to the host now, its roster digest saying what it wants."""
+    fed = _FakeFederation()
+    sched, _ = _echo_sched(bus, queue, sync_manager, fed)
+    digest = {"suite": "rd1-sha256", "digest": "e" * 64, "cert_epoch": None}
+
+    async def _roster_digest(space_id, to):
+        return {**digest, "cert_wanted": True} if to == "owner-o" else None
+
+    sched.attach_roster_digest(_roster_digest)
+    await bus.publish(
+        SpaceCredentialsWanted(space_id="sp-1", host_instance_id="owner-o")
+    )
+    assert fed.mesh_catchups[-1] == ("sp-1", "owner-o")
+    assert fed.mesh_fields[-1]["roster_digest"]["cert_wanted"] is True
+
+
+async def test_credentials_wanted_from_our_own_space_is_ignored(
+    bus, queue, sync_manager
+):
+    fed = _FakeFederation()
+    _echo_sched(bus, queue, sync_manager, fed)
+    await bus.publish(SpaceCredentialsWanted(space_id="sp-1", host_instance_id="self"))
+    assert fed.mesh_catchups == []
 
 
 async def test_echo_due_for_our_own_space_is_ignored(bus, queue, sync_manager):

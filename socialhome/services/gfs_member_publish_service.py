@@ -95,6 +95,7 @@ from ..crypto import b64url_encode, sign_ed25519
 from ..domain.events import (
     SpaceConfigChanged,
     SpaceContentKeyImported,
+    SpaceCredentialsWanted,
     SpaceMemberJoined,
 )
 from ..domain.federation import GfsConnection
@@ -103,7 +104,7 @@ from ..domain.gfs_member_publish import (
     MemberPublishAnonRequest,
     owner_epoch_notice_signing_payload,
 )
-from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole, SpaceType
+from ..domain.space import PUBLIC_SPACE_TIERS, Space, SpaceRole, SpaceType
 from ..domain.space_item import (
     ITEM_TYPE_POST,
     PAYLOAD_SUITE_JSON,
@@ -112,7 +113,12 @@ from ..domain.space_item import (
     required_scope,
     seal_item_plaintext,
 )
-from ..domain.writer_cert import scope_permits
+from ..domain.writer_cert import (
+    FOLLOWER_CERT_RENEW_S,
+    FOLLOWER_CERT_TTL_S,
+    FOLLOWER_SCOPES,
+    scope_permits,
+)
 from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
 from ..outbound_fetch import OutboundFetchRefused
 from ..task_drain import wait_tasks_done
@@ -230,6 +236,7 @@ class GfsMemberPublishService:
     keep member subscriptions."""
 
     __slots__ = (
+        "_bus",
         "_channels",
         "_conn_repo",
         "_crypto",
@@ -285,6 +292,8 @@ class GfsMemberPublishService:
         #: ``private_gfs`` on. ``None`` → private spaces always take the host
         #: path.
         self._channels: GfsChannelService | None = None
+        #: Where an on-demand ask for our credentials goes (:meth:`wire`).
+        self._bus: EventBus | None = None
 
     def attach_seats(self, seats: GfsSpaceMirrorService) -> None:
         """Wire the seat keeper: auto-subscribes go through
@@ -331,6 +340,7 @@ class GfsMemberPublishService:
     def wire(self, bus: EventBus) -> None:
         """Subscribe a newly seated local writer to the GFS fan-out at once
         (the reconnect hook would otherwise only catch it next connect)."""
+        self._bus = bus
         bus.subscribe(SpaceMemberJoined, self._on_member_joined)
         # A key import (a rotation) or a config change (a space entering or
         # leaving a listing) re-reads each server's listing before the next
@@ -439,6 +449,7 @@ class GfsMemberPublishService:
             # channel, and only when our cert lets THIS author post THIS type
             # (the cert rides inside the ciphertext, as always).
             cert = await self._writer_certs.current_own_cert_wire(space_id)
+            await self._ask_for_cert(space, cert, author_user_id, item_type)
             if cert is None or not _cert_lets(cert, author_user_id, item_type):
                 return []
             return await self._channels.plan(space_id)
@@ -448,6 +459,7 @@ class GfsMemberPublishService:
         if item_type == ITEM_TYPE_POST and await self._holds_seed(space_id):
             return []
         cert = await self._writer_certs.current_own_cert_wire(space_id)
+        await self._ask_for_cert(space, cert, author_user_id, item_type)
         if cert is None or not _cert_lets(cert, author_user_id, item_type):
             return []
         epoch = await self._crypto.get_current_epoch(space_id)
@@ -456,11 +468,49 @@ class GfsMemberPublishService:
         ):
             log.info(
                 "gfs.member_publish: no writer key for the current epoch of "
-                "space %s — the host path carries it",
+                "space %s — the host path carries it; asking the host",
                 space_id,
             )
+            await self._ask(space, key=True)
             return []
         return await self._anon_targets(space_id)
+
+    async def _ask_for_cert(
+        self, space: Space, cert: dict | None, author_user_id: str, item_type: str
+    ) -> None:
+        """On demand: ask the host for our cert when we hold none, or when
+        it is a follower cert that does not let this item through (issued
+        under other switches) or ends within
+        :data:`~socialhome.domain.writer_cert.FOLLOWER_CERT_RENEW_S`. A
+        member's cert that merely does not let it post asks nothing (its post
+        waits in the host's queue)."""
+        if cert is None:
+            await self._ask(space, cert=True)
+            return
+        scope = str(cert.get("scope") or "")
+        if scope not in FOLLOWER_SCOPES:
+            return
+        issued = cert.get("issued_at")
+        ending = isinstance(issued, int) and (
+            issued + FOLLOWER_CERT_TTL_S - FOLLOWER_CERT_RENEW_S <= int(time.time())
+        )
+        if ending or not _cert_lets(cert, author_user_id, item_type):
+            await self._ask(space, cert=True)
+
+    async def _ask(
+        self, space: Space, *, cert: bool = False, key: bool = False
+    ) -> None:
+        """Note what we want and, the first time, have the sync scheduler
+        BEGIN to the host now (one request; later writes ask nothing)."""
+        host = space.owner_instance_id
+        if not host or host == self._own_instance_id:
+            return
+        if self._writer_certs.want(space.id, cert=cert, key=key) and (
+            self._bus is not None
+        ):
+            await self._bus.publish(
+                SpaceCredentialsWanted(space_id=space.id, host_instance_id=host)
+            )
 
     async def _anon_targets(self, space_id: str) -> list[GfsConnection]:
         """v_57 — where an ANONYMOUS item goes: every server on the owner's

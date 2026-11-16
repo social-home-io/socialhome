@@ -2665,7 +2665,17 @@ class SpaceService(
                 wire = None
             epoch = wire.get("epoch") if isinstance(wire, dict) else None
             cert_epoch = epoch if isinstance(epoch, int) else None
-        return roster_digest_wire(roster_digest(seats), cert_epoch)
+        cert_wanted, key_wanted = (
+            self._writer_certs.wanted(space_id)
+            if self._writer_certs is not None
+            else (False, False)
+        )
+        return roster_digest_wire(
+            roster_digest(seats),
+            cert_epoch,
+            cert_wanted=cert_wanted,
+            key_wanted=key_wanted,
+        )
 
     async def on_peer_proto_version_raised(self, event: PeerProtoVersionRaised) -> None:
         """A member household just upgraded past the roster-snapshot line:

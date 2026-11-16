@@ -9269,6 +9269,22 @@ async def test_the_members_digest_is_of_the_mirror_it_holds(stack):
     assert await stack.space_svc.roster_digest_for("no-space", "x") is None
 
 
+async def test_the_members_digest_says_what_it_wants(stack):
+    """On demand: the digest carries ``cert_wanted`` / ``key_wanted`` while
+    this household asked for them."""
+    sid, _uid = await _seat_remote_space_with_posts_access(
+        stack, actor="mia", posts_access=SpaceFeatureAccess.OPEN
+    )
+    remote = await _wire_remote_members(stack)
+    stack.space_svc._remote_members = remote
+    certs = MagicMock()
+    certs.current_own_cert_wire = AsyncMock(return_value=None)
+    certs.wanted = MagicMock(return_value=(True, False))
+    stack.space_svc._writer_certs = certs
+    got = await stack.space_svc.roster_digest_for(sid, "inst-remote-owner")
+    assert got["cert_wanted"] is True and "key_wanted" not in got
+
+
 async def test_the_members_echo_is_what_it_applied_from_the_host(stack):
     """The member side: the version of the last snapshot applied from the
     host, and the writer-cert epoch held — only toward that host."""

@@ -504,6 +504,19 @@ def _issued(pk: bytes = OWN_PK, **over) -> dict:
     return sign_writer_cert(**kw).to_wire()
 
 
+async def test_a_wanted_cert_is_asked_for_once_and_cleared_on_arrival():
+    """On demand: ``want`` says "new" once; the cert's arrival clears it."""
+    svc, _keys = _svc(seed=None)
+    assert svc.wanted("sp-1") == (False, False)
+    assert svc.want("sp-1", cert=True) is True
+    assert svc.want("sp-1", cert=True) is False
+    assert svc.want("sp-1", key=True) is True
+    assert svc.wanted("sp-1") == (True, True)
+    assert await svc.accept("sp-1", _issued()) is True
+    assert svc.wanted("sp-1") == (False, True)
+    assert svc.want("sp-1") is False
+
+
 async def test_accept_stores_a_valid_cert_for_us():
     svc, keys = _svc(seed=None)
     wire = _issued()

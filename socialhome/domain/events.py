@@ -1915,6 +1915,20 @@ class SpaceAdminSeedsRetiredAfterRestore(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceCredentialsWanted(DomainEvent):
+    """This household needs its writer cert or writer group key for a space
+    another household hosts — one of its people just commented, reacted or
+    published and it holds none (or its follower cert is about to end). The
+    sync scheduler sends the host a ``SPACE_SYNC_BEGIN`` now; its roster
+    digest says ``cert_wanted`` / ``key_wanted`` and the host answers with the
+    credentials alone."""
+
+    space_id: str
+    host_instance_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class SpaceAuthorityEchoDue(DomainEvent):
     """A member household just learned something its space owner must hear
     now rather than on the next periodic sync (v_46): the owner's

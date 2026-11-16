@@ -31,6 +31,7 @@ from socialhome.crypto import (
 from socialhome.domain.events import (
     SpaceConfigChanged,
     SpaceContentKeyImported,
+    SpaceCredentialsWanted,
     SpaceMemberJoined,
 )
 from socialhome.domain.federation import GfsConnection
@@ -43,7 +44,7 @@ from socialhome.domain.space import (
     SpaceType,
 )
 from socialhome.domain.space_item import ITEM_SIZE_BUCKETS, open_item_plaintext
-from socialhome.domain.writer_cert import WriterCert
+from socialhome.domain.writer_cert import FOLLOWER_CERT_TTL_S, WriterCert
 from socialhome.global_server.app_keys import (
     gfs_envelope_queue_repo_key,
     gfs_fed_repo_key,
@@ -109,6 +110,16 @@ class _Certs:
         #: v_90 publisher of a publicly readable space holds the current one).
         self.strict_epochs: set[int] = {3}
         self.pin_epochs: set[int] = {3}
+        #: When the cert was issued (``None``: now).
+        self.issued_at: int | None = None
+        #: What this household asked its host for (``want``).
+        self.asked: set[tuple[str, str]] = set()
+
+    def want(self, space_id, *, cert=False, key=False) -> bool:
+        new = {(space_id, w) for w, on in (("cert", cert), ("key", key)) if on}
+        fresh = bool(new - self.asked)
+        self.asked |= new
+        return fresh
 
     async def own_cert(self, space_id, epoch) -> WriterCert | None:
         if self.scope is None:
@@ -119,6 +130,7 @@ class _Certs:
             epoch=epoch,
             instance_pk=self.holder.pk,
             scope=self.scope,
+            issued_at=self.issued_at,
         )
         return bind_writer_users(cert, space_seed=SPACE_SEED, user_ids=self.users)
 
@@ -1862,3 +1874,68 @@ async def test_an_old_node_refusing_both_suites_ends_on_json(world):
         (conn.id, SPACE_ID, "zlib1+dict1"),
         (conn.id, SPACE_ID, "zlib1"),
     }
+
+
+# ── On demand: a household asks its host for its credentials ────────────
+
+
+class _Wanted:
+    def __init__(self) -> None:
+        self.events: list[SpaceCredentialsWanted] = []
+
+    async def __call__(self, event: SpaceCredentialsWanted) -> None:
+        self.events.append(event)
+
+
+def _asking(world) -> _Wanted:
+    bus = EventBus()
+    seen = _Wanted()
+    bus.subscribe(SpaceCredentialsWanted, seen)
+    world["svc"].wire(bus)
+    return seen
+
+
+async def test_a_followers_first_comment_asks_its_host_once(world):
+    """A follower household holds no cert until one of its people first
+    comments: that comment takes the host path and asks the host for the
+    cert ONCE (one BEGIN); later comments do not ask again."""
+    seen = _asking(world)
+    world["svc"]._writer_certs.scope = None
+    assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "comment") == []
+    assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "reaction_add") == []
+    assert [(e.space_id, e.host_instance_id) for e in seen.events] == [
+        (SPACE_ID, world["owner"].instance_id)
+    ]
+    assert world["svc"]._writer_certs.asked == {(SPACE_ID, "cert")}
+
+
+async def test_a_follower_cert_near_its_end_is_renewed_while_it_still_works(world):
+    """Within an hour of its 24 h end the follower cert still publishes,
+    and the household asks for the next one."""
+    seen = _asking(world)
+    certs = world["svc"]._writer_certs
+    certs.scope = "follower"
+    certs.issued_at = int(time.time()) - FOLLOWER_CERT_TTL_S + 30 * 60
+    assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "comment") != []
+    assert certs.asked == {(SPACE_ID, "cert")} and len(seen.events) == 1
+    certs.asked.clear()
+    certs.issued_at = None  # a fresh cert: nothing to ask
+    assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "comment") != []
+    assert certs.asked == set() and len(seen.events) == 1
+
+
+async def test_a_household_without_the_writer_key_asks_for_it(world):
+    seen = _asking(world)
+    world["svc"]._writer_certs.strict_epochs = set()
+    assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "comment") == []
+    assert world["svc"]._writer_certs.asked == {(SPACE_ID, "key")}
+    assert len(seen.events) == 1
+
+
+async def test_a_moderated_members_post_asks_for_nothing(world):
+    """A member's comment-scope cert that does not let it post is no
+    reason to ask: its post waits in the host's queue as before."""
+    seen = _asking(world)
+    world["svc"]._writer_certs.scope = "comment"
+    assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "post") == []
+    assert seen.events == [] and world["svc"]._writer_certs.asked == set()
