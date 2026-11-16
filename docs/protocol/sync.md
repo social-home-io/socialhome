@@ -44,7 +44,7 @@ sequenceDiagram
     autonumber
     participant R as Requester (HFS)
     participant P as Provider (HFS)
-    R->>P: SPACE_SYNC_BEGIN<br/>(space_id, sync_mode, have_seq,<br/>prefer_direct, quiet_relay)
+    R->>P: SPACE_SYNC_BEGIN<br/>(space_id, sync_mode, have_seq,<br/>prefer_direct, quiet_relay, roster_digest)
     P->>R: SPACE_SYNC_OFFER<br/>(SDP, ICE)
     R->>P: SPACE_SYNC_ANSWER<br/>(SDP, ICE)
     R-->>P: SPACE_SYNC_ICE (trickle)
@@ -447,6 +447,34 @@ with it the pictures of content it was sent while older. Cost: ~150 B of descrip
 file per record; one upload per file to the requester's GFS (`200
 already_stored` when it is there already).
 
+**From v_92 the descriptor shrinks to what the GFS holds.** A link-joined
+requester at v_92 (`FederationCapability.MIN_FOR_SPACE_MEDIA_WANTED`) whose
+relay takes binary media frames (v_87 `envelope_media`,
+`SpaceMediaGfsUploader.takes_relay_frames`) gets a
+catch-up's files like any member — the bounded catch-up push, then
+`SPACE_MEDIA_WANTED` for an older file it opens — so its records carry
+`media_refs` only for files the provider already uploaded to that
+requester's GFS, matched by blob address — file, epoch, item and origin (`SpaceMediaGfsUploader.stored_plan_for_reader`: looked up, never sealed; only a described record spends the 500-record budget; the ≤ 3-day
+cache memory); nothing new is sealed or uploaded for the stream. Its catch-up rows go as `push` rows (like `SPACE_MEDIA_WANTED`), which the outbox never skips for "reads from its GFS": that skip matches by file name, the descriptor by blob address, so a file held there under another item or epoch would otherwise get neither. A v_80
+requester keeps the full descriptor and the uploads (it can ask for
+nothing). Same sync line 92 (already in `SYNC_RECORD_LINES`). Cost toward
+a v_92 requester: no catch-up upload to its GFS; the catch-up push is the
+same bounded one every member gets (≤ 200 files / 30 days per stream).
+A v_92 requester whose relay takes **no** frames keeps the full descriptor
+and the uploads: its pushes would fall back to small JSON chunks
+(`RELAY_JSON_CHUNK_BYTES`), so the GFS cache stays its catch-up path.
+
+Per join, with pictures of ~300 KiB (illustrative, re-encoded WebP): the
+frame path sends the one joiner ≤ 200 files ≈ ≤ 60 MiB through its GFS
+relay, once, in 512 KiB frames (≈ 200–250 frames); the cache path uploads
+the same ≤ 60 MiB to the GFS once per GFS (a file another reader of that GFS
+already caused is `already_stored`) and the joiner fetches it from there.
+So for one joiner the GFS carries the same bytes either way; for k joiners
+on one GFS within the cache TTL the frame path is k × ≤ 60 MiB of relay
+ingress against ≤ 60 MiB of uploads + k fetches. Joins are one-off and
+bounded per stream, and a file already on its GFS is described, not pushed
+(the outbox skips that push), which recovers the shared case.
+
 **Page files come from the host (v_82).** A page keeps the names the host's
 version shows on every household (its hash is the version's identity); a
 member household keeps the files page-scoped (`sp-`) and takes them from the
@@ -660,7 +688,7 @@ module, `tests/federation/sync/space/test_sync_item_state.py`.
 
 | Item type | Live events | Stream resource | Resume (§4.4) | Deletes heal | Notes |
 |---|---|---|---|---|---|
-| Roster: members, roles, bans | `SPACE_MEMBER_*`, `SPACE_ROSTER_SNAPSHOT` | `members`, `bans` (host only) | — | removals / unbans via `SPACE_ROSTER_SNAPSHOT` | member households never stream the roster |
+| Roster: members, roles, bans | `SPACE_MEMBER_*`, `SPACE_ROSTER_SNAPSHOT` | `members`, `bans` (host only) | — | removals / unbans via `SPACE_ROSTER_SNAPSHOT`, sent in reply to a member's BEGIN whose `roster_digest` differs from the host's ([spaces.md](./spaces.md)) | member households never stream the roster |
 | Member pictures | `SPACE_MEMBER_PROFILE_UPDATED` | `member_pictures` | — | reset via `members` (v_58) | re-encoded on receipt |
 | Posts (create, edit) | `SPACE_POST_CREATED` / `_UPDATED` | `posts` (incremental) | yes | `posts_deleted` | |
 | Post reactions | `SPACE_POST_REACTION` (v_93) | `posts.reaction_stamps` (v_92, incremental) | — | removals as stamps only (30 days) | before v_92 a held post kept its own reactions |

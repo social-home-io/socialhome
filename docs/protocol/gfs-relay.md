@@ -312,12 +312,13 @@ bucket plus the 61-byte seal overhead (`VALID_SEALED_LENGTHS`).
 
 - **Scope:** a household seated from an invite link (`space_session`) at
   v_87, whose `relay_via` GFS proved the signed `envelope_media` capability.
-  Today this carries `SPACE_MEDIA_BLOB` to a link-joined member whose GFS
-  keeps **no** space media cache (its signed block carries no
-  `space_media`); live pictures otherwise keep using the cache. A member
-  that misses a file no longer in the cache asks for it with
-  `SPACE_MEDIA_WANTED` (v_92), answered over this relay; the GFS's v_83
-  on-demand path is for followers.
+  It carries `SPACE_MEDIA_BLOB` to a link-joined member like to any
+  member: live pictures, page files (also a member's page proposal to a
+  host behind such a GFS), the v_92 §25.6 catch-up and the answers to
+  `SPACE_MEDIA_WANTED`. The media outbox skips a live push only while the
+  member's GFS media cache is known to hold the file; a member whose GFS
+  keeps no cache simply gets every push. The GFS's v_83 on-demand path is
+  for followers.
 - **Fallback:** a peer below v_87, or a GFS without `envelope_media`, gets
   JSON chunks of at most 96 KiB (`RELAY_JSON_CHUNK_BYTES`), which fit the
   JSON relay. A binary frame that the relay throttles (429) is waited out;
@@ -541,7 +542,7 @@ row.
 | `SPACE_MODERATION_SUBMITTED` | 256 KiB item cap + ~2 KiB | yes |
 | `SPACE_PAGE_*`, page proposals | the page item + ≤ 40 KiB | yes, by the page limit below |
 | `SPACE_CALENDAR_EVENT_*` | the event item + small fields | yes, by the calendar limit below |
-| `SPACE_CONFIG_CHANGED` (relay variant) | the config item twice + ≤ 155 KiB | yes, by the config limit below |
+| `SPACE_CONFIG_CHANGED` | the config item twice + ≤ 155 KiB | yes, by the config limit below |
 | `SPACE_SYNC_CHUNK` with one large record | record + ≤ 16 KiB (raw) | yes, for every record within the record bound |
 | `SPACE_ROSTER_SNAPSHOT` | parts of 96 KiB of entries | yes, any roster size |
 | posts, comments, bazaar, tasks, polls, timetables, app tables, directory parts | ≤ ~175 KiB | yes (most fit the JSON envelope) |
@@ -571,7 +572,7 @@ set):
 |---|---|---|---|
 | Page | its §25.6 record, `page_record`: the row, its version hash and **every open conflict side** (a side is a whole other version, added only by the host, which refuses one that would pass the limit) | `SPACE_PAGE_ITEM_MAX_BYTES` = 515,998 − 40,960 = **475,038 B** (~475 kB) | 40 KiB: the files' descriptors and hashes the provider adds per requester (≤ 64, `MAX_PAGE_DESCRIPTOR_ENTRIES`), the live event's extra fields |
 | Space calendar event | its §25.6 record, `calendar_record`: summary, description, attendee ids, rule, location, cover, ids, stamps | `SPACE_CALENDAR_ITEM_MAX_BYTES` = 515,998 − 132,596 = **383,402 B** (~383 kB) | the RSVPs (added by others): ≤ 500 (`MAX_RSVPS_PER_EVENT`) of ≤ 256 B each (`RSVP_RECORD_MAX_BYTES`; a larger held entry is left out of the record and the list marked `rsvps_partial`) = 500 × 257 + 4 KiB for the RSVP fields, the cover's descriptor and the live event's extra fields |
-| Space config | its plain config fields as they travel, `space_metadata_fields`: name, emoji, description, about text, features, every setting | `SPACE_CONFIG_ITEM_MAX_BYTES` = (515,998 − 158,384) / 2 = **178,807 B** (~178 kB) — halved because `SPACE_CONFIG_CHANGED` carries the config twice (the flat legacy shape and `space_meta`) | the relay variant's cover and icon at their caps (base64), the owner's signed GFS list at its cap (32 KiB), 16 KiB for the authority cert, the owner's statement and the signatures |
+| Space config | its plain config fields as they travel, `space_metadata_fields`: name, emoji, description, about text, features, every setting | `SPACE_CONFIG_ITEM_MAX_BYTES` = (515,998 − 158,384) / 2 = **178,807 B** (~178 kB) — halved because `SPACE_CONFIG_CHANGED` carries the config twice (the flat legacy shape and `space_meta`) | the cover and icon at the one cap every member gets (base64: 87,384 + 21,848 B), the owner's signed GFS list at its cap (32 KiB), 16 KiB for the authority cert, the owner's statement and the signatures |
 
 Real items sit far below: the SPA allows a 300-character space
 description and an 8,000-character about text; the demo's 450 KiB page
@@ -1559,12 +1560,15 @@ ONCE, with one small key wrap per mailbox. The GFS stores the body once and
 pushes it, with that mailbox's wrap, to each listed mailbox. Gated on
 `FederationCapability.MIN_FOR_MULTI_MAILBOX` (v_91, slug `multi_mailbox`)
 and the signed GFS capability `envelope_multi: {"max_recipients": 500}`.
-Not space-scoped, no sync-stream change.
+Not space-scoped, no sync-stream change. The sender judges a seat by its
+card mailbox, not its row's version: cards exist only from v_89 and no
+released household is in [v_89, v_91), so every seat holding one opens a
+multi frame.
 
 **What goes multi — one path.** `broadcast_to_space_members` computes
-every target's final payload as before (legacy / relay variants,
+every target's final payload as before (legacy variants,
 `per_peer`, file maps). Targets that are mailbox seats (`space_session`
-rows with a card mailbox) at v_91, on a GFS that proves `envelope_multi`,
+rows with a card mailbox), on a GFS that proves `envelope_multi`,
 with no deferred mesh queue and an event type in `MULTI_EVENT_TYPES` are
 grouped by ONE key: the normalized GFS URL and the payload content (key
 order aside, `OPT_SORT_KEYS`). Each group of two or more is written to the

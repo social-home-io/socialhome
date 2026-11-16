@@ -45,3 +45,17 @@ async def test_set_get_clear_roundtrip(repo):
     assert (await repo.get("sp-1"))[1] == "def456"
     await repo.clear("sp-1")
     assert await repo.get("sp-1") is None
+
+
+async def test_replace_bytes_if_hash_writes_only_over_that_version(repo):
+    """A rendition replaces the stored image only while it is still the
+    version it was made from — a set or clear meanwhile is never undone."""
+    await repo.set("sp-1", bytes_webp=b"RIFFold", hash="h1", width=1, height=1)
+    assert await repo.replace_bytes_if_hash("sp-1", bytes_webp=b"RIFFsmall", hash="h1")
+    assert await repo.get("sp-1") == (b"RIFFsmall", "h1")
+    await repo.set("sp-1", bytes_webp=b"RIFFnew", hash="h2", width=1, height=1)
+    assert not await repo.replace_bytes_if_hash("sp-1", bytes_webp=b"RIFFx", hash="h1")
+    assert await repo.get("sp-1") == (b"RIFFnew", "h2")
+    await repo.clear("sp-1")
+    assert not await repo.replace_bytes_if_hash("sp-1", bytes_webp=b"RIFFx", hash="h2")
+    assert await repo.get("sp-1") is None

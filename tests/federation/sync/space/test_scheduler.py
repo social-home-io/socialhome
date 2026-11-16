@@ -69,6 +69,8 @@ class _FakeFederation:
         #: Households below v_92 (``space_member_supports``); others at it.
         self.older: set[str] = set()
         self.version_asks: list[tuple[str, int]] = []
+        #: The ``roster_digest`` recorded with each request (relay retry).
+        self.request_digests: list[dict | None] = []
 
     async def space_member_supports(self, instance_id, *, min_version):
         self.version_asks.append((instance_id, min_version))
@@ -82,12 +84,14 @@ class _FakeFederation:
         provider_instance_id,
         sync_mode="initial",
         have_seq=None,
+        roster_digest=None,
     ):
         """A requester notes the sync_id it is about to ask for, so the
         provider's SPACE_SYNC_OFFER can be recognised as an answer."""
         self.requests.append(
             (sync_id, space_id, provider_instance_id, sync_mode, have_seq)
         )
+        self.request_digests.append(roster_digest)
 
     async def is_confirmed_peer(self, instance_id: str) -> bool:
         return instance_id in self.confirmed
@@ -698,12 +702,14 @@ async def test_a_mesh_only_host_hears_our_directory_version_after_catch_up(
             "sync_mode": "incremental",
             "have_seq": None,
             "mod_held": None,
+            "roster_digest": None,
         },
         {
             "dir_seq": None,
             "sync_mode": "incremental",
             "have_seq": None,
             "mod_held": None,
+            "roster_digest": None,
         },
     ]
     # The startup sweep sends it only for the directory echo.
@@ -957,34 +963,12 @@ async def test_startup_sweep_retries_a_shipped_but_incomplete_sync(
     assert len(fed.mesh_catchups) == MAX_MESH_CATCHUP_ATTEMPTS
 
 
-async def test_tick_runs_the_roster_refresh_and_survives_its_failure(
-    bus, queue, sync_manager
-):
-    """Every tick re-sends hosted rosters (v_32 self-heal); a failure there
-    never costs the rest of the tick."""
-    sched = SpaceSyncScheduler(
-        bus=bus,
-        federation=_FakeFederation(),
-        federation_repo=_FakeFedRepo([]),
-        space_repo=_FakeSpaceRepo(spaces_by_type={}, members_by_space={}),
-        queue=queue,
-        own_instance_id="self",
-        sync_manager=sync_manager,
-    )
-    calls: list[int] = []
-
-    async def _refresh() -> None:
-        calls.append(1)
-        raise RuntimeError("boom")
-
-    sched.attach_roster_refresh(_refresh)
-    await sched._tick_once()
-    await sched._tick_once()
-    assert calls == [1, 1]
-    assert sync_manager.reap_stale.call_count == 2
-
-
-# ── v_46 authority epoch echo ─────────────────────────────────────────────
+def test_the_scheduler_runs_no_roster_timer():
+    """Blocker 1: the host never sends a roster snapshot on its own timer —
+    a member household's BEGIN asks for the repair (its roster digest), so
+    a household that never syncs (a follower-only household of a global
+    space) gets nothing periodic."""
+    assert not hasattr(SpaceSyncScheduler, "attach_roster_refresh")
 
 
 def _echo_sched(bus, queue, sync_manager, fed, *, spaces=None, members=None):
@@ -1066,6 +1050,67 @@ async def test_begin_carries_the_roster_echo_its_builder_returns(
     assert "roster_echo" not in by_key[("sp-boom", "owner-o")]
 
 
+async def test_begin_carries_the_roster_digest_its_builder_returns(
+    bus, queue, sync_manager
+):
+    """The host repairs our roster mirror only when its digest differs from
+    the one our BEGIN carries; the digest is also recorded with the request
+    so a relay re-BEGIN after an ICE timeout carries it too. A builder
+    failure never costs the BEGIN."""
+    fed = _FakeFederation(confirmed={"owner-o"})
+    sched, _ = _echo_sched(bus, queue, sync_manager, fed)
+    digest = {"suite": "rd1-sha256", "digest": "a" * 64, "cert_epoch": None}
+
+    async def _roster_digest(space_id, to):
+        if space_id == "sp-boom":
+            raise RuntimeError("boom")
+        return digest if to == "owner-o" else None
+
+    sched.attach_roster_digest(_roster_digest)
+    await queue.start()
+    try:
+        for space_id, to in (
+            ("sp-1", "owner-o"),
+            ("sp-1", "peer-b"),
+            ("sp-boom", "owner-o"),
+        ):
+            await sched.enqueue_sync_for_space(space_id=space_id, peer_instance_id=to)
+        for _ in range(50):
+            if len(fed.sent) == 3:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await queue.stop()
+    by_key = {(m["payload"]["space_id"], m["to"]): m["payload"] for m in fed.sent}
+    assert by_key[("sp-1", "owner-o")]["roster_digest"] == digest
+    assert "roster_digest" not in by_key[("sp-1", "peer-b")]
+    assert "roster_digest" not in by_key[("sp-boom", "owner-o")]
+    assert digest in fed.request_digests
+
+
+async def test_a_mesh_begin_carries_the_roster_digest(bus, queue, sync_manager):
+    """Should-fix 4: a member reaching its host only over the mesh is
+    repaired by the same rule — the catch-up BEGIN and the periodic
+    incremental one both carry the digest."""
+    fed = _FakeFederation(confirmed=set())
+    sched = _mesh_sched(
+        bus, queue, sync_manager, fed, [_space("sp-mesh", owner_instance_id="host-x")]
+    )
+    digest = {"suite": "rd1-sha256", "digest": "b" * 64, "cert_epoch": 3}
+
+    async def _roster_digest(space_id, to):
+        return digest if to == "host-x" else None
+
+    sched.attach_roster_digest(_roster_digest)
+    await sched._tick_once()
+    assert fed.mesh_fields[-1]["roster_digest"] == digest
+    sched._mesh_catchup_done.add(("sp-mesh", "host-x"))
+    fed.mesh_fields.clear()
+    await sched._tick_once()
+    assert fed.mesh_fields[-1]["sync_mode"] == "incremental"
+    assert fed.mesh_fields[-1]["roster_digest"] == digest
+
+
 async def test_echo_builder_failure_never_blocks_the_begin(bus, queue, sync_manager):
     fed = _FakeFederation(confirmed={"owner-o"})
     sched, _ = _echo_sched(bus, queue, sync_manager, fed)
@@ -1124,6 +1169,25 @@ async def test_echo_due_reaches_a_mesh_only_owner_over_the_mesh(
     )
     assert fed.mesh_catchups == [("sp-1", "owner-o")]
     assert fed.mesh_extras == [{"key_epoch": 7}]
+
+
+async def test_the_echo_due_mesh_begin_carries_the_roster_digest(
+    bus, queue, sync_manager
+):
+    """S1: every member BEGIN to the host carries the digest — a v_81+
+    BEGIN without one asks for no repair, so this path must not drop it."""
+    fed = _FakeFederation()
+    sched, _ = _echo_sched(bus, queue, sync_manager, fed)
+    digest = {"suite": "rd1-sha256", "digest": "e" * 64, "cert_epoch": None}
+
+    async def _roster_digest(space_id, to):
+        return digest if to == "owner-o" else None
+
+    sched.attach_roster_digest(_roster_digest)
+    await bus.publish(
+        SpaceAuthorityEchoDue(space_id="sp-1", owner_instance_id="owner-o")
+    )
+    assert fed.mesh_fields[-1]["roster_digest"] == digest
 
 
 async def test_echo_due_for_our_own_space_is_ignored(bus, queue, sync_manager):
@@ -2331,6 +2395,7 @@ async def test_a_capped_mesh_only_host_still_gets_the_incremental_begin(
             "dir_seq": None,
             "have_seq": None,
             "mod_held": None,
+            "roster_digest": None,
         }
     ]
     assert sched._mesh_catchup_attempts[("sp-1", "host")] == MAX_MESH_CATCHUP_ATTEMPTS

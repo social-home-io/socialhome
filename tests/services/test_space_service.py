@@ -6,6 +6,7 @@ import asyncio
 import base64
 import dataclasses
 import io
+import itertools
 import logging
 import os
 import random
@@ -27,6 +28,8 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.errors import (
+    ImageTooLargeError,
+    ImageUnreadableError,
     InvalidMediaRefError,
     SpaceNotPublishableError,
     TierChangeRequiredError,
@@ -46,6 +49,7 @@ from socialhome.domain.federation import (
     DeliveryResult,
     FederationEvent,
     FederationEventType,
+    InstanceSource,
     PairingStatus,
 )
 from socialhome.domain.federation import FederationEventType as _RosterFET
@@ -53,9 +57,10 @@ from socialhome.domain.federation_capabilities import (
     FederationCapability,
     space_feature_keys_missing_below,
 )
+from socialhome.domain.federation_retention import roster_snapshot_key_prefix
 from socialhome.domain.media_constraints import (
-    SPACE_COVER_SNAPSHOT_MAX_BYTES,
-    SPACE_ICON_SNAPSHOT_MAX_BYTES,
+    SPACE_COVER_MAX_BYTES,
+    SPACE_ICON_MAX_BYTES,
 )
 from socialhome.domain.post import FileMeta, PostType
 from socialhome.domain.relay_media_frame import SPACE_CONFIG_ITEM_MAX_BYTES as _CFG_MAX
@@ -81,9 +86,15 @@ from socialhome.domain.space import (
     SpacePermissionError,
     SpaceRole,
     SpaceType,
+    mirrorable_remote_role,
 )
 from socialhome.domain.space_app_table import SpaceAppNotAllowedError
 from socialhome.domain.space_key import SpaceKey
+from socialhome.domain.space_roster_digest import (
+    ROSTER_DIGEST_SUITE_SHA256,
+    roster_digest,
+    roster_digest_wire,
+)
 from socialhome.domain.writer_cert import WriterCert, WriterEntitlement
 from socialhome.domain.writer_key import WriterKeyGrant
 from socialhome.federation.gfs_relay_transport import RELAY_MAX_ENVELOPE_BYTES
@@ -95,6 +106,7 @@ from socialhome.federation.owner_bound_id import (
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.media import image_processor as ip_mod
 from socialhome.repositories.cp_repo import SqliteCpRepo
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
@@ -104,6 +116,7 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services import space_service as ss_mod
 from socialhome.services.child_protection_service import ChildProtectionService
 from socialhome.services.gfs_connection_service import GfsConnectionError
 from socialhome.services.space_crypto_service import SpaceContentEncryption
@@ -113,10 +126,15 @@ from socialhome.services.space_service import (
     ROSTER_SNAPSHOT_PART_BYTES,
     SPACE_CATEGORIES,
     SpaceService,
+    UnfittableImages,
+    apply_space_cover_from_metadata,
+    apply_space_icon_from_metadata,
+    apply_space_images_from_config_change,
     build_space_snapshot_for_federation,
     config_item_bytes,
     keep_local_space_state,
     normalize_category,
+    sender_caps_space_images,
     space_metadata_fields,
     stub_space_from_metadata,
 )
@@ -3770,6 +3788,149 @@ async def test_apply_space_icon_from_metadata_persists_bytes(stack):
     assert repo3.saved is None
 
 
+@pytest.mark.parametrize(
+    ("what", "cap", "dims"),
+    [
+        ("cover", SPACE_COVER_MAX_BYTES, (1200, 800)),
+        ("icon", SPACE_ICON_MAX_BYTES, (256, 256)),
+    ],
+)
+async def test_a_peers_image_over_the_one_cap_is_not_stored(
+    stack, caplog, what, cap, dims
+):
+    """Item 3: a cover / icon over the one cap from another household is
+    refused on every inbound path — the join snapshot (invitation accept,
+    invite-link and join-request ACKs all seat through
+    ``seat_join_stub`` → ``apply_space_*_from_metadata``) and an applied
+    ``SPACE_CONFIG_CHANGED`` (live and the config catch-up). The image
+    already held stays, and a WARNING says why."""
+    held = _noise_webp(32, 32)
+    big = _noise_webp(*dims)
+    assert len(big) > cap
+    meta = {
+        f"{what}_hash": "new",
+        f"{what}_webp_base64": base64.b64encode(big).decode("ascii"),
+    }
+    apply = (
+        apply_space_cover_from_metadata
+        if what == "cover"
+        else apply_space_icon_from_metadata
+    )
+    repo = _RecordingImageRepo(held)
+    with caplog.at_level(logging.WARNING, logger="socialhome.services.space_service"):
+        stored = await apply("sp-x", meta=meta, **{f"{what}_repo": repo})
+    assert stored is False
+    assert repo.sets == [] and repo.webp == held
+    assert "over the" in caplog.text
+    repo = _RecordingImageRepo(held)
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    previous = dataclasses.replace(space, cover_hash="old", icon_hash="old")
+    await apply_space_images_from_config_change(
+        "sp-x",
+        meta=meta,
+        previous=previous,
+        cover_repo=repo if what == "cover" else None,
+        icon_repo=repo if what == "icon" else None,
+    )
+    assert repo.sets == [] and repo.webp == held
+    # At the cap: stored.
+    fits = _noise_webp(64, 64)
+    assert len(fits) <= cap
+    repo = _RecordingImageRepo(held)
+    ok = {
+        f"{what}_hash": "new",
+        f"{what}_webp_base64": base64.b64encode(fits).decode("ascii"),
+    }
+    assert await apply("sp-x", meta=ok, **{f"{what}_repo": repo})
+    assert repo.sets == [fits]
+
+
+@pytest.mark.parametrize(
+    ("what", "cap", "dims"),
+    [
+        ("cover", SPACE_COVER_MAX_BYTES, (700, 500)),
+        ("icon", SPACE_ICON_MAX_BYTES, (256, 256)),
+    ],
+)
+async def test_a_released_v80_hosts_big_image_is_stored_as_a_rendition(
+    stack, caplog, what, cap, dims
+):
+    """Rollout (owner decision 2026-11-15): a host on the released v_80
+    line sends a paired member covers of up to 256 KiB. Its image over the
+    cap is not refused — re-encoded here, off the event loop, and the
+    rendition (within the cap) stored, at INFO. A current host's over-cap
+    image is still refused, and the held one kept."""
+
+    async def _released():
+        return False
+
+    async def _current():
+        return True
+
+    big = _noise_webp(*dims)
+    assert cap < len(big) <= 256 * 1024
+    meta = {
+        f"{what}_hash": "new",
+        f"{what}_webp_base64": base64.b64encode(big).decode("ascii"),
+    }
+    apply = (
+        apply_space_cover_from_metadata
+        if what == "cover"
+        else apply_space_icon_from_metadata
+    )
+    repo = _RecordingImageRepo(_noise_webp(32, 32))
+    with caplog.at_level(logging.INFO, logger="socialhome.services.space_service"):
+        assert await apply(
+            "sp-x", meta=meta, sender_caps=_released, **{f"{what}_repo": repo}
+        )
+    (stored,) = repo.sets
+    assert len(stored) <= cap and repo.hash == "new"
+    assert Image.open(io.BytesIO(stored)).format == "WEBP"
+    assert "re-encoded" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    # The config-change path the same way.
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    previous = dataclasses.replace(space, cover_hash="old", icon_hash="old")
+    repo = _RecordingImageRepo(_noise_webp(32, 32))
+    await apply_space_images_from_config_change(
+        "sp-x",
+        meta=meta,
+        previous=previous,
+        cover_repo=repo if what == "cover" else None,
+        icon_repo=repo if what == "icon" else None,
+        sender_caps=_released,
+    )
+    assert len(repo.sets) == 1 and len(repo.sets[0]) <= cap
+    # From a current host: refused, the held image kept.
+    held = _noise_webp(32, 32)
+    repo = _RecordingImageRepo(held)
+    assert not await apply(
+        "sp-x", meta=meta, sender_caps=_current, **{f"{what}_repo": repo}
+    )
+    assert repo.sets == [] and repo.webp == held
+
+
+async def test_which_senders_cap_their_space_images():
+    """The released v_80 line ships images over the cap; every later build
+    caps them (``MIN_FOR_CAPPED_SPACE_IMAGES`` = v_81 — v_81–v_94 are
+    unreleased and ship together). An unknown version reads as the released
+    line (the lenient path)."""
+    fed = MagicMock()
+    versions = {"v80": 80, "v81": 81, "cur": 94}
+
+    async def _supports(iid, *, min_version):
+        return versions.get(iid, 0) >= min_version
+
+    fed.space_member_supports = _supports
+    assert await sender_caps_space_images(fed, "cur") is True
+    assert await sender_caps_space_images(fed, "v81") is True
+    assert await sender_caps_space_images(fed, "v80") is False
+    assert await sender_caps_space_images(fed, "unknown") is False
+    assert await sender_caps_space_images(None, "cur") is True
+
+
 async def test_allowed_post_types_federate_via_space_meta(stack):
     """The per-space post-type allow-list rides the federation metadata so a
     member household enforces the same restriction when its users compose."""
@@ -5471,7 +5632,6 @@ async def test_a_follower_household_is_kicked_like_any_member(stack):
     from socialhome.domain.federation import (
         DeliveryResult,
         FederationEventType,
-        InstanceSource,
     )
 
     await stack.provision_user("anna")
@@ -5526,8 +5686,6 @@ async def test_space_session_cleanup_without_a_purger_drops_nothing(stack):
     """Unwired, the seat is never dropped by a bare row delete that would
     leave its queued envelopes behind."""
     from unittest.mock import MagicMock
-
-    from socialhome.domain.federation import InstanceSource
 
     fed_repo = MagicMock()
     fed_repo.get_instance = AsyncMock(
@@ -6384,6 +6542,7 @@ async def test_accept_remote_invite_kicks_mesh_catchup_sync(stack):
     fed.begin_mesh_catchup_sync.assert_awaited_once_with(
         space_id=space_id,
         host_instance_id=host_instance,
+        roster_digest=await stack.space_svc.roster_digest_for(space_id, host_instance),
     )
 
 
@@ -7973,7 +8132,6 @@ async def test_promote_relay_only_admin_withholds_the_signing_seed(stack):
     """
     from unittest.mock import AsyncMock, MagicMock
 
-    from socialhome.domain.federation import InstanceSource
     from socialhome.domain.space import SpaceFeatures, SpaceRole
 
     await stack.provision_user("anna")
@@ -8341,31 +8499,6 @@ async def test_a_kick_before_the_accept_reaches_the_joiner_as_a_removal(stack):
     assert entry["payload"]["member_version"] > invite_version
 
 
-async def test_the_periodic_refresh_skips_link_joined_households(stack):
-    """Timed envelopes to a household seated from an invite link would ride
-    the connection-server relay — new traffic metadata for it."""
-    from socialhome.domain.federation import InstanceSource
-
-    _owner, space, fed, remote = await _hosted_space_with_seats(stack)
-    await _seat(remote, space.id, "peer-direct", "u-d")
-    await _seat(remote, space.id, "peer-link", "u-l")
-    for inst in ("peer-direct", "peer-link"):
-        await stack.space_repo.add_space_instance(space.id, inst)
-
-    async def _get_instance(iid):
-        source = (
-            InstanceSource.SPACE_SESSION
-            if iid == "peer-link"
-            else InstanceSource.MANUAL
-        )
-        return SimpleNamespace(id=iid, source=source)
-
-    stack.space_svc._federation_repo.get_instance = _get_instance
-    sent = await stack.space_svc.send_hosted_roster_snapshots()
-    assert sent == 1
-    assert [to for to, _ in _snapshots(fed)] == ["peer-direct"]
-
-
 async def test_an_upgrade_to_v32_triggers_a_snapshot(stack):
     from socialhome.domain.events import PeerProtoVersionRaised
 
@@ -8384,22 +8517,38 @@ async def test_an_upgrade_to_v32_triggers_a_snapshot(stack):
     assert len(_snapshots(fed)) == 1
 
 
-def _begin_with_echo(space_id: str, sender: str, echo: object):
+def _begin(space_id: str, sender: str, **fields):
+    """A member household's SPACE_SYNC_BEGIN with *fields*."""
     return FederationEvent(
         msg_id="m-begin",
         event_type=FederationEventType.SPACE_SYNC_BEGIN,
         from_instance=sender,
         to_instance="self",
         timestamp="2026-10-22T00:00:00+00:00",
-        payload={"sync_id": "s", "space_id": space_id, "roster_echo": echo},
+        payload={"sync_id": "s", "space_id": space_id, **fields},
         space_id=space_id,
     )
 
 
-async def _members_with_households(stack, n: int):
+def _begin_with_echo(space_id: str, sender: str, echo: object):
+    return _begin(space_id, sender, roster_echo=echo)
+
+
+async def _digest_begin(stack, space, sender, *, digest=None, cert_epoch=None):
+    """A BEGIN carrying *sender*'s roster digest — by default the one the
+    host computes for it (its mirror is right)."""
+    row = await stack.space_repo.get(space.id)
+    if digest is None:
+        digest = await stack.space_svc.roster_digest_of(row, sender)
+    return _begin(
+        space.id, sender, roster_digest=roster_digest_wire(digest, cert_epoch)
+    )
+
+
+async def _members_with_households(stack, n: int, *, source=None):
     _owner, space, fed, remote = await _hosted_space_with_seats(stack)
     stack.space_svc._federation_repo.get_instance = AsyncMock(
-        return_value=SimpleNamespace(source=None)
+        return_value=SimpleNamespace(source=source)
     )
     insts = [f"peer-{i}" for i in range(n)]
     for i, inst in enumerate(insts):
@@ -8408,100 +8557,624 @@ async def _members_with_households(stack, n: int):
     return space, fed, remote, insts
 
 
-async def test_an_unchanged_roster_is_sent_once_not_every_tick(stack):
-    """15 member households, 48 periodic ticks a day, roster unchanged.
-    Before: 15 × 48 = 720 snapshots a day (every seat, every time). Now the
-    first tick sends 15; each household then echoes the version it applied
-    on its next sync BEGIN, and the remaining 47 ticks send nothing."""
-    space, fed, _remote, insts = await _members_with_households(stack, 15)
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 15
-    current = (await stack.space_repo.get(space.id)).roster_sequence
-    for inst in insts:
-        _to, payload = next(
-            (c.kwargs["to_instance_id"], c.kwargs["payload"])
-            for c in fed.send_with_mesh_fallback.await_args_list
-            if c.kwargs["to_instance_id"] == inst
-        )
-        assert payload["roster_version"] == current
-        await stack.space_svc.on_sync_begin_roster_echo(
-            _begin_with_echo(
-                space.id,
-                inst,
-                {"roster_version": payload["roster_version"], "cert_epoch": None},
-            )
-        )
-    for _ in range(47):
-        assert await stack.space_svc.send_hosted_roster_snapshots() == 0
-    assert len(_snapshots(fed)) == 15
+def test_the_host_runs_no_roster_timer():
+    """Blocker 1: no snapshot on the host's own timer — a household that
+    never sends a BEGIN (a follower-only household of a global space) gets
+    nothing periodic, only seat / upgrade snapshots and live gossip."""
+    assert not hasattr(SpaceService, "send_hosted_roster_snapshots")
 
 
-async def test_a_roster_change_is_sent_again(stack):
-    space, _fed, remote, insts = await _members_with_households(stack, 2)
-    await stack.space_svc.send_hosted_roster_snapshots()
-    current = (await stack.space_repo.get(space.id)).roster_sequence
-    for inst in insts:
-        await stack.space_svc.on_sync_begin_roster_echo(
-            _begin_with_echo(
-                space.id, inst, {"roster_version": current, "cert_epoch": None}
-            )
+async def test_the_digest_is_what_a_snapshot_leaves_on_the_member(stack):
+    """The host's digest for a household is exactly the digest of the live
+    seats a snapshot to it carries, as the member mirrors them (the
+    owner's ``owner`` mirrored as ``member``)."""
+    space, fed, remote, _insts = await _members_with_households(stack, 3)
+    await _seat(remote, space.id, "peer-1", "u-admin", role="admin")
+    await _seat(remote, space.id, "peer-2", "u-gone")
+    await remote.remove(space.id, "peer-2", "u-gone")
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-0")
+    (_to, entries) = _snapshots(fed, to="peer-0")[-1]
+    mirrored = [
+        (
+            e["payload"]["instance_id"],
+            e["payload"]["user_id"],
+            mirrorable_remote_role(e["payload"]["role"]),
         )
-    await _seat(remote, space.id, "peer-0", "u-extra")
-    space_row = await stack.space_repo.get(space.id)
+        for e in entries
+        if e["event_type"] == FederationEventType.SPACE_MEMBER_JOINED.value
+    ]
+    row = await stack.space_repo.get(space.id)
+    assert roster_digest(mirrored) == await stack.space_svc.roster_digest_of(
+        row, "peer-0"
+    )
+
+
+@pytest.mark.parametrize("source", [None, "space_session"])
+async def test_a_member_whose_mirror_is_right_is_sent_nothing(stack, source):
+    """No change → 0 envelopes, whatever the path the household is reached
+    by (paired, or seated from an invite link over the GFS relay)."""
+
+    space, fed, _remote, insts = await _members_with_households(
+        stack, 3, source=InstanceSource(source) if source else None
+    )
+    for _ in range(48):
+        for inst in insts:
+            await stack.space_svc.on_sync_begin_roster(
+                await _digest_begin(stack, space, inst)
+            )
+    assert _snapshots(fed) == []
+
+
+class _Clock:
+    """The roster repair's monotonic clock, moved by hand."""
+
+    def __init__(self, monkeypatch) -> None:
+
+        self.now = 1000.0
+        monkeypatch.setattr(ss_mod, "_monotonic", lambda: self.now)
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+async def _answer(stack, event) -> None:
+    """Hand *event* to the repair (an admitted BEGIN) and let the repair
+    snapshot it schedules go out."""
+    await stack.space_svc.on_sync_begin_roster(event)
+    await stack.space_svc.wait_roster_repairs()
+
+
+def _certs(epoch: int | None):
+    certs = MagicMock()
+    certs.cert_epoch_for_peer = AsyncMock(return_value=epoch)
+    certs.cert_for_peer = AsyncMock(
+        return_value=None if epoch is None else {"epoch": epoch}
+    )
+    certs.writer_key_for_peer = AsyncMock(return_value=None)
+    certs.channel_grant_for_peer = AsyncMock(return_value=None)
+    certs.issue_for_instance = AsyncMock(side_effect=AssertionError("signed"))
+    return certs
+
+
+async def test_a_missed_gossip_gets_exactly_one_snapshot(stack, monkeypatch):
+    """A household whose digest differs gets ONE snapshot in reply to its
+    BEGIN; the other household, whose mirror is right, nothing."""
+    _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 2)
+    for _ in range(3):
+        await _answer(
+            stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64)
+        )
+    await _answer(stack, await _digest_begin(stack, space, "peer-1"))
+    assert [to for to, _ in _snapshots(fed)] == ["peer-0"]
+
+
+async def _gossip_a_change(stack, space, remote, user: str) -> None:
+    """A roster change on the host (a seat joins, gossip goes out): its
+    ``roster_sequence`` moves."""
+    await _seat(remote, space.id, "peer-x", user)
     await stack.space_svc._emit_member_roster_gossip(
-        space_row,
-        user_id="u-extra",
-        instance_id="peer-0",
-        display_name="E",
+        await stack.space_repo.get(space.id),
+        user_id=user,
+        instance_id="peer-x",
+        display_name=user,
         user_pk=None,
         role="member",
         tombstoned=False,
     )
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 2
 
 
-async def test_a_household_that_never_echoes_keeps_getting_the_snapshot(stack):
-    """An older member household sends no echo: it is healed every tick, as
-    before — nothing is skipped on a guess."""
-    _space, fed, _remote, _insts = await _members_with_households(stack, 1)
+async def test_fifty_random_digests_in_half_an_hour_buy_one_snapshot(
+    stack, monkeypatch
+):
+    """Review C1(b): a member varying its digest on every BEGIN gets ONE
+    repair per cooldown, whatever it claims."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    for _ in range(50):
+        await _answer(
+            stack,
+            await _digest_begin(stack, space, "peer-0", digest=os.urandom(32).hex()),
+        )
+        clock.advance(30)
+    assert len(_snapshots(fed)) == 1
+
+
+async def test_a_begin_without_a_digest_from_a_current_member_asks_nothing(
+    stack, monkeypatch
+):
+    """S1: from a household at or above the digest line
+    (``MIN_FOR_ROSTER_DIGEST``) a BEGIN without a digest means "no repair
+    asked" — never "send everything"."""
+    _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
     for _ in range(3):
-        assert await stack.space_svc.send_hosted_roster_snapshots() == 1
-    assert len(_snapshots(fed)) == 3
+        await _answer(stack, _begin(space.id, "peer-0"))
+    assert _snapshots(fed) == []
+    asked = [c.kwargs["min_version"] for c in fed.space_member_supports.await_args_list]
+    assert FederationCapability.MIN_FOR_ROSTER_DIGEST in asked
 
 
-async def test_a_stale_echo_or_a_missing_writer_cert_is_sent_again(stack):
-    space, _fed, _remote, _insts = await _members_with_households(stack, 1)
-    current = (await stack.space_repo.get(space.id)).roster_sequence
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, "peer-0", {"roster_version": current - 1, "cert_epoch": None}
-        )
-    )
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 1
-    # Version right, but the household lacks the writer cert we would issue.
-    certs = MagicMock()
-    certs.cert_for_peer = AsyncMock(return_value={"epoch": 7})
-    certs.writer_key_for_peer = AsyncMock(return_value=None)
-    certs.channel_grant_for_peer = AsyncMock(return_value=None)
-    stack.space_svc._writer_certs = certs
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, "peer-0", {"roster_version": current, "cert_epoch": 6}
-        )
-    )
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 1
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, "peer-0", {"roster_version": current, "cert_epoch": 7}
-        )
-    )
-    assert await stack.space_svc.send_hosted_roster_snapshots() == 0
-
-
-async def test_tombstones_a_household_already_holds_are_not_resent(stack):
-    """A snapshot to a household that echoed version R carries no removal
-    at or below R — it applied a full snapshot holding every one of them.
-    A removal after R, and a household without an echo, get them all."""
+async def test_consecutive_mismatches_in_an_active_space_double_the_cooldown(
+    stack, monkeypatch, caplog
+):
+    """Round 5 (was the round-4 port of finding 1): snapshots are lost while
+    gossip keeps reaching the member, so its digest moves on every BEGIN.
+    Every CONSECUTIVE mismatch answered with a sent snapshot doubles the
+    cooldown (30 min, 1 h, 2 h … a day), whether or not the digest moved —
+    an unhealable mismatch in an active space cannot cost a snapshot every
+    30 min forever. No WARNING."""
+    clock = _Clock(monkeypatch)
     space, fed, remote, _insts = await _members_with_households(stack, 1)
+    sent_at: list[float] = []
+    with caplog.at_level(logging.WARNING, logger="socialhome.services.space_service"):
+        for step in range(48 * 3):  # 3 days, a change and a BEGIN every 30 min
+            await _gossip_a_change(stack, space, remote, f"u-c{step}")
+            before = len(_snapshots(fed))
+            await _answer(
+                stack,
+                await _digest_begin(stack, space, "peer-0", digest=f"{step:064x}"),
+            )
+            if len(_snapshots(fed)) > before:
+                sent_at.append(clock.now)
+            clock.advance(30 * 60)
+    gaps = [round((b - a) / 3600, 1) for a, b in itertools.pairwise(sent_at)]
+    assert gaps == [0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 24.0]
+    assert not caplog.records
+
+
+async def test_rev_v80_active_space_is_answered_every_cooldown_without_a_warning(
+    stack, monkeypatch, caplog
+):
+    """Round-4 finding 2 (reviewer repro): a released v_80 household in an
+    active space applies every snapshot (its echo reaches the version sent)
+    and is answered again after each roster change — never called drift,
+    never backed off."""
+    clock = _Clock(monkeypatch)
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    fed.space_member_supports = AsyncMock(
+        side_effect=lambda iid, *, min_version: min_version < 81
+    )
+    await _gossip_a_change(stack, space, remote, "u-a")
+    await _answer(stack, _begin(space.id, "peer-0"))  # no echo yet: everything
+    assert len(_snapshots(fed)) == 1
+    applied = int((await stack.space_repo.get(space.id)).roster_sequence)
+    with caplog.at_level(logging.WARNING, logger="socialhome.services.space_service"):
+        for step in range(8):  # 4 h, one roster change per 30 min
+            clock.advance(15 * 60)
+            await _gossip_a_change(stack, space, remote, f"u-b{step}")
+            clock.advance(15 * 60)
+            echo = {"roster_version": applied, "cert_epoch": None}
+            await _answer(stack, _begin_with_echo(space.id, "peer-0", echo))
+            applied = int((await stack.space_repo.get(space.id)).roster_sequence)
+    assert len(_snapshots(fed)) == 1 + 8
+    assert not caplog.records
+
+
+async def test_rev_busy_space_member_without_gossip_is_repaired_at_once(
+    stack, monkeypatch
+):
+    """Round-4 finding 3 (reviewer repro): in a space whose roster moves
+    every 5 min, a member whose gossip never arrives is repaired on its
+    first BEGIN (there is no grace keyed on the host's latest change); while
+    it keeps answering the SAME wrong digest the cooldown doubles to a day."""
+    clock = _Clock(monkeypatch)
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    sent_at: list[float] = []
+    for step in range(48 * 3):  # 3 days of 30 min, a change every 5 min
+        await _gossip_a_change(stack, space, remote, f"u-d{step}")
+        clock.advance(5 * 60)
+        if step % 6 == 5:
+            before = len(_snapshots(fed))
+            await _answer(
+                stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64)
+            )
+            if len(_snapshots(fed)) > before:
+                sent_at.append(clock.now)
+    assert sent_at and sent_at[0] == 1000.0 + 30 * 60
+    gaps = [b - a for a, b in itertools.pairwise(sent_at)]
+    assert gaps == sorted(gaps) and max(gaps) <= 24 * 60 * 60 + 30 * 60
+    assert len(sent_at) <= 8
+
+
+async def test_the_cooldown_doubles_and_starts_over_on_a_match(stack, monkeypatch):
+    """B: 30 min, then — on every consecutive mismatch answered with a sent
+    snapshot — 1 h, 2 h … capped at a day; a matching digest puts it back
+    at 30 min."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+
+    async def wrong(digest="0" * 64):
+        await _answer(stack, await _digest_begin(stack, space, "peer-0", digest=digest))
+
+    await wrong()
+    assert len(_snapshots(fed)) == 1
+    clock.advance(30 * 60)
+    await wrong("1" * 64)  # another wrong digest: resent, the cooldown now 1 h
+    assert len(_snapshots(fed)) == 2
+    clock.advance(59 * 60)
+    await wrong()
+    assert len(_snapshots(fed)) == 2
+    clock.advance(60)
+    await wrong()  # cooldown now 2 h
+    assert len(_snapshots(fed)) == 3
+    for _ in range(10):
+        clock.advance(24 * 60 * 60)
+        await wrong()
+    assert len(_snapshots(fed)) == 13  # capped at one a day
+    await _answer(stack, await _digest_begin(stack, space, "peer-0"))  # it matches
+    clock.advance(24 * 60 * 60)
+    await wrong()
+    clock.advance(30 * 60)
+    await wrong()  # back at 30 min
+    assert len(_snapshots(fed)) == 15
+
+
+async def test_a_snapshot_that_did_not_go_out_waits_a_retry_without_doubling(
+    stack, monkeypatch
+):
+    """Finding 5 / round 5: a snapshot built but not sent waits
+    ``ROSTER_REPAIR_RETRY_S`` (no build on every BEGIN, no doubling); one
+    that fails before it is built (a household below the snapshot line)
+    records nothing and costs no budget."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    real = fed.send_with_mesh_fallback
+    fed.send_with_mesh_fallback = AsyncMock(side_effect=RuntimeError("down"))
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
+    fed.send_with_mesh_fallback = real
+    clock.advance(ss_mod.ROSTER_REPAIR_RETRY_S - 60)
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
+    assert _snapshots(fed) == []
+    clock.advance(120)
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
+    assert len(_snapshots(fed)) == 1
+    assert stack.space_svc._roster_repairs[space.id]["peer-0"].cooldown == (
+        ss_mod.ROSTER_REPAIR_COOLDOWN_S
+    )
+    supports = fed.space_member_supports
+    fed.space_member_supports = AsyncMock(return_value=False)
+    budget = stack.space_svc._roster_budget
+    used = dict(budget._windows)
+    await _answer(stack, await _digest_begin(stack, space, "peer-1", digest="0" * 64))
+    assert "peer-1" not in stack.space_svc._roster_repairs[space.id]
+    assert budget._windows == used
+    fed.space_member_supports = supports
+
+
+async def _another_hosted_space(stack, fed, remote, name: str, households: list[str]):
+    space = await stack.space_svc.create_space(owner_username="hosty", name=name)
+    for i, inst in enumerate(households):
+        await _seat(remote, space.id, inst, f"u-{name}-{i}")
+        await stack.space_repo.add_space_instance(space.id, inst)
+    return space
+
+
+async def test_one_space_cannot_starve_the_others_repairs(stack, monkeypatch):
+    """C / round 5: at most ``ROSTER_REPAIR_PER_SPACE_PER_MINUTE`` repair
+    snapshots a minute for one space and ``ROSTER_REPAIR_PER_MINUTE``
+    across all — twenty mismatched households in one space (sybil
+    followers of a public space, a restart) leave room for every other
+    space. A household held back asks again on its next BEGIN."""
+    clock = _Clock(monkeypatch)
+    big, fed, remote, insts = await _members_with_households(stack, 20)
+    others = [
+        await _another_hosted_space(stack, fed, remote, f"o{n}", [f"q-{n}"])
+        for n in range(5)
+    ]
+    for inst in insts:
+        await _answer(stack, await _digest_begin(stack, big, inst, digest="0" * 64))
+    assert len(_snapshots(fed)) == ss_mod.ROSTER_REPAIR_PER_SPACE_PER_MINUTE
+    for n, other in enumerate(others):
+        await _answer(
+            stack, await _digest_begin(stack, other, f"q-{n}", digest="0" * 64)
+        )
+    sent = [to for to, _ in _snapshots(fed)]
+    assert len(sent) == ss_mod.ROSTER_REPAIR_PER_MINUTE  # the global cap
+    assert sum(to.startswith("q-") for to in sent) == (
+        ss_mod.ROSTER_REPAIR_PER_MINUTE - ss_mod.ROSTER_REPAIR_PER_SPACE_PER_MINUTE
+    )
+    clock.advance(61)
+    for inst in insts:
+        await _answer(stack, await _digest_begin(stack, big, inst, digest="0" * 64))
+    assert len(_snapshots(fed)) == (
+        ss_mod.ROSTER_REPAIR_PER_MINUTE + ss_mod.ROSTER_REPAIR_PER_SPACE_PER_MINUTE
+    )
+
+
+async def test_a_writer_cert_behind_or_ahead_is_a_mismatch_like_any_other(
+    stack, monkeypatch
+):
+    """N6, folded into the one rule: the digest right but the writer-cert
+    epoch not the one we would send is a mismatch — one snapshot (which
+    carries our cert), read without signing a cert."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    certs = _certs(7)
+    stack.space_svc._writer_certs = certs
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=7))
+    assert _snapshots(fed) == []
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=6))
+    (_to, entries) = _snapshots(fed, to="peer-0")[-1]
+    assert any(e["payload"]["role"] == "owner" for e in entries)  # never empty
+    clock.advance(30 * 60)
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=8))
+    assert len(_snapshots(fed)) == 2
+    certs.issue_for_instance.assert_not_awaited()
+
+
+async def test_a_snapshot_carries_the_tombstones_of_the_last_30_days(stack):
+    """Round 5: the host's own removals ride a repair snapshot with their
+    version and signature — those at most ``ROSTER_TOMBSTONE_WINDOW_S``
+    old (``removed_at``); older ones stay on the host only."""
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    for user, age_days in (("u-recent", 1), ("u-old", 31)):
+        await _seat(remote, space.id, "peer-x", user)
+        await remote.remove(space.id, "peer-x", user)
+        await stack.db.enqueue(
+            "UPDATE space_remote_members SET removed_at=datetime('now', ?) "
+            "WHERE space_id=? AND user_id=?",
+            (f"-{age_days} days", space.id, user),
+        )
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-0")
+    left = {
+        e["payload"]["user_id"]
+        for e in _snapshots(fed, to="peer-0")[-1][1]
+        if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
+    }
+    assert left == {"u-recent"}
+
+
+def _left_users(fed, to="peer-0"):
+    return {
+        e["payload"]["user_id"]
+        for e in _snapshots(fed, to=to)[-1][1]
+        if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
+    }
+
+
+async def test_a_member_offline_31_days_is_healed_on_the_second_repair(
+    stack, monkeypatch
+):
+    """SF1 (round 5 review): a kick older than the tombstone window — the
+    member was offline 31 days, its LEFT gossip left the outbox after 7 —
+    rides the next, consecutive repair: a repair that follows one which
+    did not heal carries EVERY tombstone, so a kicked household never stays
+    live (and fed space content) forever."""
+    clock = _Clock(monkeypatch)
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    await _seat(remote, space.id, "peer-k", "u-kicked")
+    await remote.remove(space.id, "peer-k", "u-kicked")
+    await stack.db.enqueue(
+        "UPDATE space_remote_members SET removed_at=datetime('now', '-31 days') "
+        "WHERE space_id=? AND user_id='u-kicked'",
+        (space.id,),
+    )
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
+    assert "u-kicked" not in _left_users(fed)
+    clock.advance(30 * 60)
+    await _answer(stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64))
+    assert "u-kicked" in _left_users(fed)
+
+
+async def test_a_match_shortens_a_long_cooldown_back_to_30_minutes(stack, monkeypatch):
+    """SF2: at the day cap a matching digest starts the cooldown over — a
+    new miss 30 min after the last snapshot is answered, not 23 h later."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+
+    async def wrong():
+        await _answer(
+            stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64)
+        )
+
+    for _ in range(8):  # up to the day cap
+        await wrong()
+        clock.advance(24 * 60 * 60)
+    sent = len(_snapshots(fed))
+    await wrong()  # a snapshot with a day's cooldown
+    assert len(_snapshots(fed)) == sent + 1
+    clock.advance(10 * 60)
+    await _answer(stack, await _digest_begin(stack, space, "peer-0"))  # it matches
+    clock.advance(21 * 60)
+    await wrong()  # 31 min after the last snapshot
+    assert len(_snapshots(fed)) == sent + 2
+
+
+@pytest.mark.parametrize(
+    "where", ["roster_snapshot_entries", "channel_grant_for_peer", "parts"]
+)
+async def test_a_failed_build_waits_the_retry(stack, monkeypatch, caplog, where):
+    """NOTE 5: an exception while the snapshot is built (after the budget
+    was charged) is a WARNING and a built-not-sent snapshot: it waits
+    ``ROSTER_REPAIR_RETRY_S``, it does not ask again on every BEGIN."""
+    clock = _Clock(monkeypatch)
+    space, _fed, _remote, _insts = await _members_with_households(stack, 1)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("boom")
+
+    if where == "roster_snapshot_entries":
+        monkeypatch.setattr(
+            SpaceService, "roster_snapshot_entries", lambda *a, **kw: _boom()
+        )
+    elif where == "parts":
+        monkeypatch.setattr(ss_mod, "roster_snapshot_parts", _boom)
+    else:
+        certs = _certs(None)
+        certs.channel_grant_for_peer = AsyncMock(side_effect=RuntimeError("boom"))
+        stack.space_svc._writer_certs = certs
+    with caplog.at_level(logging.WARNING, logger="socialhome.services.space_service"):
+        await _answer(
+            stack, await _digest_begin(stack, space, "peer-0", digest="0" * 64)
+        )
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+    rec = stack.space_svc._roster_repairs[space.id]["peer-0"]
+    assert rec.until == clock.now + ss_mod.ROSTER_REPAIR_RETRY_S
+
+
+async def test_sent_version_is_the_version_the_snapshot_carried(stack, monkeypatch):
+    """NOTE 7: a roster change between the BEGIN and the build — the record
+    holds the ``roster_version`` the snapshot carried."""
+    _Clock(monkeypatch)
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    stale = await stack.space_repo.get(space.id)
+    await _gossip_a_change(stack, space, remote, "u-late")
+    await stack.space_svc._repair_roster(
+        stale, "peer-0", right=False, took=False, known_version=None
+    )
+    await stack.space_svc.wait_roster_repairs()
+    carried = fed.send_with_mesh_fallback.await_args_list[-1].kwargs["payload"][
+        "roster_version"
+    ]
+    assert carried > int(stale.roster_sequence)
+    assert stack.space_svc._roster_repairs[space.id]["peer-0"].sent_version == carried
+
+
+async def test_a_re_issued_left_is_carried_with_a_fresh_removed_at(stack):
+    """NOTE 7: a seat removed long ago, re-tombstoned at a newer version (a
+    re-seat and a new kick through gossip) carries a fresh ``removed_at`` —
+    the re-issued LEFT rides the next snapshot."""
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    await _seat(remote, space.id, "peer-x", "u-x")
+    await remote.remove(space.id, "peer-x", "u-x")
+    await stack.db.enqueue(
+        "UPDATE space_remote_members SET removed_at=datetime('now', '-40 days') "
+        "WHERE space_id=? AND user_id='u-x'",
+        (space.id,),
+    )
+    old = await remote.get_including_tombstones(space.id, "peer-x", "u-x")
+    assert await remote.apply_member_event(
+        space_id=space.id,
+        user_id="u-x",
+        instance_id="peer-x",
+        display_name="X",
+        user_pk=None,
+        role="member",
+        member_version=old.member_version + 5,
+        tombstoned=True,
+    )
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-0")
+    assert "u-x" in _left_users(fed)
+
+
+async def test_a_new_snapshot_drops_every_queued_part_of_an_older_one(stack):
+    """M2: a newer snapshot with fewer parts would leave the older send's
+    higher parts queued — every queued part to that household for that
+    space is dropped before the new one goes."""
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    order: list[str] = []
+    fed.drop_queued_with_key_prefix = AsyncMock(
+        side_effect=lambda *a, **kw: order.append("drop") or 0
+    )
+    real_send = fed.send_with_mesh_fallback
+
+    async def _send(**kw):
+        order.append("send")
+        return await real_send(**kw)
+
+    fed.send_with_mesh_fallback = _send
+    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-0")
+    fed.drop_queued_with_key_prefix.assert_awaited_once_with(
+        "peer-0", roster_snapshot_key_prefix(space.id)
+    )
+    assert order[0] == "drop" and "send" in order
+
+
+async def test_the_repair_memory_holds_thousands_of_pairs(stack, monkeypatch):
+    """I4 / N8: bounded by live seats, indexed by space — 5000 member
+    households answered once are each held back."""
+    _Clock(monkeypatch)
+    monkeypatch.setattr(ss_mod, "ROSTER_REPAIR_PER_MINUTE", 10**6)
+    monkeypatch.setattr(ss_mod, "ROSTER_REPAIR_PER_SPACE_PER_MINUTE", 10**6)
+    svc = stack.space_svc
+    sent: list[str] = []
+
+    async def _send(
+        space_id, *, to_instance_id, known_version=None, charge=None, **_kw
+    ):
+        assert charge is not None and charge(7)
+        sent.append(to_instance_id)
+        return True
+
+    monkeypatch.setattr(
+        SpaceService, "send_roster_snapshot", lambda self, *a, **kw: _send(*a, **kw)
+    )
+    space = SimpleNamespace(id="sp", roster_sequence=7)
+    for _round in range(2):
+        for i in range(5000):
+            await svc._repair_roster(
+                space,  # type: ignore[arg-type]
+                f"peer-{i}",
+                right=False,
+                took=False,
+                known_version=None,
+            )
+        await svc.wait_roster_repairs()
+    assert len(sent) == 5000
+    assert len(svc._roster_repairs["sp"]) == 5000
+
+
+async def test_the_repair_memory_forgets_leavers_and_dissolved_spaces(
+    stack, monkeypatch
+):
+    """N8: pruned per space — a household that left on the space's next
+    BEGIN, a dissolved space at once (its cached seats too)."""
+    _Clock(monkeypatch)
+    space, _fed, _remote, insts = await _members_with_households(stack, 2)
+    await _answer(stack, await _digest_begin(stack, space, insts[0], digest="0" * 64))
+    assert insts[0] in stack.space_svc._roster_repairs[space.id]
+    await stack.space_repo.remove_space_instance(space.id, insts[0])
+    await _answer(stack, await _digest_begin(stack, space, insts[1]))
+    assert insts[0] not in stack.space_svc._roster_repairs.get(space.id, {})
+    await _answer(stack, await _digest_begin(stack, space, insts[1], digest="0" * 64))
+    assert stack.space_svc._roster_repairs[space.id]
+    assert space.id in stack.space_svc._roster_seats_cache
+    await stack.space_svc.dissolve_space(space.id, actor_username="hosty")
+    assert space.id not in stack.space_svc._roster_repairs
+    assert space.id not in stack.space_svc._roster_seats_cache
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"suite": [], "digest": "a" * 64},
+        {"suite": "rd9-" + "x" * 5000, "digest": "a"},
+        {"suite": "rd1-sha256", "digest": "x"},
+        {"suite": "rd1-sha256", "digest": "a" * 64, "cert_epoch": 2**64},
+    ],
+)
+async def test_a_refused_digest_is_logged_once_an_hour_and_repairs_nothing(
+    stack, caplog, monkeypatch, raw
+):
+    """N5 / round 4: an unknown suite, a suite that is not a string (it used
+    to raise TypeError — an ERROR per BEGIN) or a malformed digest repairs
+    nothing, falls back to nothing, and is logged at WARNING at most once
+    per (space, household) an hour, with the sender's text cut short."""
+    clock = _Clock(monkeypatch)
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    with caplog.at_level("WARNING"):
+        for _ in range(5):
+            await _answer(stack, _begin(space.id, "peer-0", roster_digest=raw))
+        clock.advance(61 * 60)
+        await _answer(stack, _begin(space.id, "peer-0", roster_digest=raw))
+    refused = [r for r in caplog.records if "refused" in r.getMessage()]
+    assert len(refused) == 2
+    assert all(r.levelno == logging.WARNING for r in caplog.records)
+    assert all(len(r.getMessage()) < 300 for r in refused)
+    assert _snapshots(fed) == []
+
+
+async def test_an_older_household_keeps_the_echo_rule(stack, monkeypatch):
+    """v_80 (released, below the digest line) sends only ``roster_echo``:
+    nothing while it echoes the current roster; a stale echo gets every
+    live seat without the removals at or below it; no echo at all the whole
+    roster — each at most once per cooldown."""
+    clock = _Clock(monkeypatch)
+    space, fed, remote, _insts = await _members_with_households(stack, 1)
+    fed.space_member_supports = AsyncMock(
+        side_effect=lambda iid, *, min_version: min_version < 81  # a v_80 member
+    )
     space_row = await stack.space_repo.get(space.id)
     for user in ("u-gone-1", "u-gone-2"):
         await _seat(remote, space.id, "peer-x", user)
@@ -8516,11 +9189,9 @@ async def test_tombstones_a_household_already_holds_are_not_resent(stack):
             tombstoned=True,
         )
     echoed = (await stack.space_repo.get(space.id)).roster_sequence
-    await stack.space_svc.on_sync_begin_roster_echo(
-        _begin_with_echo(
-            space.id, "peer-0", {"roster_version": echoed, "cert_epoch": None}
-        )
-    )
+    echo = {"roster_version": echoed, "cert_epoch": None}
+    await _answer(stack, _begin_with_echo(space.id, "peer-0", echo))
+    assert _snapshots(fed) == []
     await _seat(remote, space.id, "peer-x", "u-gone-3")
     await remote.remove(space.id, "peer-x", "u-gone-3")
     await stack.space_svc._emit_member_roster_gossip(
@@ -8532,37 +9203,67 @@ async def test_tombstones_a_household_already_holds_are_not_resent(stack):
         role="member",
         tombstoned=True,
     )
-    await stack.space_svc.send_hosted_roster_snapshots()
+    await _answer(stack, _begin_with_echo(space.id, "peer-0", echo))
+    entries = _snapshots(fed, to="peer-0")[-1][1]
     left = [
         e["payload"]["user_id"]
-        for e in _snapshots(fed, to="peer-0")[-1][1]
+        for e in entries
         if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
     ]
     assert left == ["u-gone-3"]
-    # A household with no echo gets every removal.
-    await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-new")
-    left_new = sorted(
+    assert "u-0" not in {e["payload"]["user_id"] for e in entries}  # its own
+    assert any(e["payload"]["role"] == "owner" for e in entries)
+    # No echo at all: the whole roster — after the cooldown.
+    await _answer(stack, _begin(space.id, "peer-0"))
+    assert len(_snapshots(fed, to="peer-0")) == 1
+    clock.advance(30 * 60)
+    await _answer(stack, _begin(space.id, "peer-0"))
+    left_all = sorted(
         e["payload"]["user_id"]
-        for e in _snapshots(fed, to="peer-new")[-1][1]
+        for e in _snapshots(fed, to="peer-0")[-1][1]
         if e["event_type"] == FederationEventType.SPACE_MEMBER_LEFT.value
     )
-    assert left_new == ["u-gone-1", "u-gone-2", "u-gone-3"]
+    assert left_all == ["u-gone-1", "u-gone-2", "u-gone-3"]
+    assert len(_snapshots(fed, to="peer-0")) == 2
 
 
-async def test_an_echo_from_a_non_member_or_for_a_space_we_do_not_host_is_ignored(
+async def test_a_begin_from_a_non_member_or_for_a_space_we_do_not_host_is_ignored(
     stack,
 ):
-    space, _fed, _remote, _insts = await _members_with_households(stack, 1)
-    for space_id, sender, echo in (
-        (space.id, "stranger", {"roster_version": 1, "cert_epoch": None}),
-        ("unknown-space", "peer-0", {"roster_version": 1, "cert_epoch": None}),
-        (space.id, "peer-0", {"roster_version": "x"}),
-        (space.id, "peer-0", "junk"),
+    space, fed, _remote, _insts = await _members_with_households(stack, 1)
+    for event in (
+        _begin(space.id, "stranger"),
+        _begin("unknown-space", "peer-0"),
+        _begin_with_echo(space.id, "peer-0", {"roster_version": "x"}),
+        _begin_with_echo(space.id, "peer-0", {"roster_version": 1, "cert_epoch": "x"}),
     ):
-        await stack.space_svc.on_sync_begin_roster_echo(
-            _begin_with_echo(space_id, sender, echo)
-        )
-    assert stack.space_svc._roster_heard == {}
+        await stack.space_svc.on_sync_begin_roster(event)
+    assert _snapshots(fed) == []
+
+
+async def test_the_members_digest_is_of_the_mirror_it_holds(stack):
+    """Member side: the digest of every live seat it mirrors outside its
+    own household, only toward the space's host."""
+    sid, _uid = await _seat_remote_space_with_posts_access(
+        stack, actor="mia", posts_access=SpaceFeatureAccess.OPEN
+    )
+    remote = await _wire_remote_members(stack)
+    stack.space_svc._remote_members = remote
+    await _seat(remote, sid, "inst-remote-owner", "u-owner")
+    await _seat(remote, sid, "peer-z", "u-z", role="admin")
+    await _seat(remote, sid, stack.iid, "u-self")
+    await _seat(remote, sid, "peer-z", "u-gone")
+    await remote.remove(sid, "peer-z", "u-gone")
+    got = await stack.space_svc.roster_digest_for(sid, "inst-remote-owner")
+    assert got == {
+        "suite": ROSTER_DIGEST_SUITE_SHA256,
+        "digest": roster_digest(
+            [("inst-remote-owner", "u-owner", "member"), ("peer-z", "u-z", "admin")]
+        ),
+        "cert_epoch": None,
+    }
+    assert await stack.space_svc.roster_digest_for(sid, "peer-z") is None
+    assert await stack.space_svc.roster_digest_for("no-space", "x") is None
 
 
 async def test_the_members_echo_is_what_it_applied_from_the_host(stack):
@@ -8593,16 +9294,6 @@ async def test_only_the_host_sends_a_roster_snapshot(stack):
 # ─── Snapshot image bounds ─────────────────────────────────────────────
 
 
-class _ImageRepo:
-    """In-memory stand-in for the cover / icon repo (``get`` only)."""
-
-    def __init__(self, webp: bytes) -> None:
-        self.webp = webp
-
-    async def get(self, space_id: str):
-        return self.webp, "h"
-
-
 def _noise_webp(width: int, height: int) -> bytes:
     img = Image.frombytes(
         "RGB",
@@ -8612,6 +9303,143 @@ def _noise_webp(width: int, height: int) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="WEBP", quality=75)
     return buf.getvalue()
+
+
+class _RecordingImageRepo:
+    """The cover / icon repo, recording what is stored."""
+
+    def __init__(self, webp: bytes | None = None) -> None:
+        self.webp = webp
+        self.hash = "h"
+        self.sets: list[bytes] = []
+
+    async def get(self, space_id: str):
+        return None if self.webp is None else (self.webp, self.hash)
+
+    async def set(self, space_id, *, bytes_webp, hash, width, height):
+        self.webp, self.hash = bytes_webp, hash
+        self.sets.append(bytes_webp)
+
+    async def replace_bytes_if_hash(self, space_id, *, bytes_webp, hash):
+        if self.webp is None or self.hash != hash:
+            return False
+        self.webp = bytes_webp
+        self.sets.append(bytes_webp)
+        return True
+
+    async def clear(self, space_id):
+        self.webp = None
+
+
+def _noise_png(width: int, height: int) -> bytes:
+    img = Image.frombytes(
+        "RGB", (width, height), random.Random(width).randbytes(width * height * 3)
+    )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("setter", "attr", "cap"),
+    [
+        ("set_cover", "_covers", SPACE_COVER_MAX_BYTES),
+        ("set_icon", "_icons", SPACE_ICON_MAX_BYTES),
+    ],
+)
+async def test_an_uploaded_cover_or_icon_is_stored_within_the_one_cap(
+    stack, setter, attr, cap
+):
+    """Owner decision 2026-11-15: ONE cap per image kind, enforced where
+    it is set — a large photo is re-encoded to a WebP within it, so every
+    member, however reached, gets the same image. Never an error for an
+    ordinary photo."""
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    repo = _RecordingImageRepo()
+    setattr(stack.space_svc, attr, repo)
+    raw = _noise_png(2400, 1600)
+    assert len(raw) > cap
+    await getattr(stack.space_svc, setter)(
+        space.id, actor_username="anna", raw_bytes=raw
+    )
+    (stored,) = repo.sets
+    assert len(stored) <= cap
+    assert Image.open(io.BytesIO(stored)).format == "WEBP"
+
+
+async def test_an_upload_nothing_fits_is_a_cap_error_not_unreadable(stack, monkeypatch):
+    """Minor: when not even the smallest rendition fits the cap, the owner
+    is told the image is too large (422 IMAGE_TOO_LARGE) — honest, not
+    IMAGE_UNREADABLE. Decodable images practically always fit."""
+
+    async def _never(self, data, max_bytes, **kw):
+        return None
+
+    monkeypatch.setattr(ip_mod.ImageProcessor, "fit_within", _never)
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    stack.space_svc._covers = _RecordingImageRepo()
+    with pytest.raises(ImageTooLargeError) as err:
+        await stack.space_svc.set_cover(
+            space.id, actor_username="anna", raw_bytes=_noise_png(120, 80)
+        )
+    # N10: the real cap, in kB — not "under 1 MB".
+    assert err.value.params == {"max_kb": SPACE_COVER_MAX_BYTES // 1000}
+
+
+async def test_an_upload_over_the_source_pixel_cap_is_refused_before_decoding(
+    stack, monkeypatch
+):
+    """Minor: the set-time thumbnail is bounded by
+    ``SPACE_IMAGE_MAX_SOURCE_PIXELS`` (checked on the header, before any
+    pixel is decoded), like a profile picture."""
+    monkeypatch.setattr(ss_mod, "SPACE_IMAGE_MAX_SOURCE_PIXELS", 100)
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    stack.space_svc._covers = _RecordingImageRepo()
+    with pytest.raises(ImageUnreadableError):
+        await stack.space_svc.set_cover(
+            space.id, actor_username="anna", raw_bytes=_noise_png(120, 80)
+        )
+
+
+async def test_a_pre_cap_cover_that_cannot_fit_is_not_retried_every_send(
+    stack, monkeypatch
+):
+    """Minor: a cover stored before the cap that cannot be made to fit is
+    left out (nothing stored) and remembered per (space, version), so the
+    next send does not re-encode it again."""
+    calls: list[int] = []
+
+    async def _never(self, data, max_bytes, **kw):
+        calls.append(len(data))
+
+    monkeypatch.setattr(ip_mod.ImageProcessor, "fit_within", _never)
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    space = dataclasses.replace(space, cover_hash="c-unfit", icon_hash=None)
+    covers = _RecordingImageRepo(_noise_webp(1200, 800))
+    covers.hash = "c-unfit"
+    # N12: the memory is the sender's own (instance state), not a module
+    # global — a fresh one starts empty.
+    memory = UnfittableImages()
+    for _ in range(3):
+        snap = await build_space_snapshot_for_federation(
+            space,
+            space_repo=stack.space_repo,
+            remote_member_repo=None,
+            user_repo=stack.space_svc._users,
+            own_instance_id=stack.iid,
+            cover_repo=covers,
+            unfittable=memory,
+        )
+        assert "cover_webp_base64" not in snap
+    assert len(calls) == 1
+    assert covers.sets == []
+    assert (space.id, "cover", "c-unfit") in memory
+    assert not hasattr(ss_mod, "_UNFITTABLE")
+    assert isinstance(stack.space_svc._unfittable, UnfittableImages)
 
 
 async def _snapshot_with_images(stack, cover: bytes, icon: bytes, **kw):
@@ -8624,8 +9452,8 @@ async def _snapshot_with_images(stack, cover: bytes, icon: bytes, **kw):
         remote_member_repo=None,
         user_repo=stack.space_svc._users,
         own_instance_id=stack.iid,
-        cover_repo=_ImageRepo(cover),
-        icon_repo=_ImageRepo(icon),
+        cover_repo=_RecordingImageRepo(cover),
+        icon_repo=_RecordingImageRepo(icon),
         **kw,
     )
 
@@ -8642,41 +9470,96 @@ async def test_snapshot_bounds_a_big_cover_and_icon(stack, caplog):
     it used to ship verbatim and overflow the envelope carrying it."""
     # 400 px: a stored icon is 256 px, but the bound must hold regardless.
     cover, icon = _noise_webp(1200, 800), _noise_webp(400, 400)
-    assert len(cover) > SPACE_COVER_SNAPSHOT_MAX_BYTES
-    assert len(icon) > SPACE_ICON_SNAPSHOT_MAX_BYTES
+    assert len(cover) > SPACE_COVER_MAX_BYTES
+    assert len(icon) > SPACE_ICON_MAX_BYTES
     with caplog.at_level(logging.INFO, logger="socialhome.services.space_service"):
         snap = await _snapshot_with_images(stack, cover, icon)
     shipped_cover = base64.b64decode(snap["cover_webp_base64"])
     shipped_icon = base64.b64decode(snap["icon_webp_base64"])
-    assert len(shipped_cover) <= SPACE_COVER_SNAPSHOT_MAX_BYTES
-    assert len(shipped_icon) <= SPACE_ICON_SNAPSHOT_MAX_BYTES
+    assert len(shipped_cover) <= SPACE_COVER_MAX_BYTES
+    assert len(shipped_icon) <= SPACE_ICON_MAX_BYTES
     assert Image.open(io.BytesIO(shipped_cover)).format == "WEBP"
     assert "shipping a" in caplog.text
 
 
-async def test_snapshot_honours_caller_bounds(stack):
-    cover, icon = _noise_webp(400, 300), _noise_webp(128, 128)
-    snap = await _snapshot_with_images(
-        stack,
-        cover,
-        icon,
-        cover_max_bytes=20 * 1024,
-        icon_max_bytes=4 * 1024,
+async def test_a_cover_stored_over_the_cap_is_replaced_by_the_rendition_sent(
+    stack,
+):
+    """Item 5: a cover saved before the one cap is over it. The first send
+    that carries it (a cover change, a join, an invite) ships a rendition
+    within the cap — what every member, GFS-reached included, gets — and
+    keeps that rendition (same version tag), so it is re-encoded once."""
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    space = dataclasses.replace(space, cover_hash="c", icon_hash="i")
+    big = _noise_webp(1200, 800)
+    assert len(big) > SPACE_COVER_MAX_BYTES
+    covers = _RecordingImageRepo(big)
+    covers.hash = "c"
+    icons = _RecordingImageRepo(_noise_webp(32, 32))
+    snap = await build_space_snapshot_for_federation(
+        space,
+        space_repo=stack.space_repo,
+        remote_member_repo=None,
+        user_repo=stack.space_svc._users,
+        own_instance_id=stack.iid,
+        cover_repo=covers,
+        icon_repo=icons,
     )
-    assert len(base64.b64decode(snap["cover_webp_base64"])) <= 20 * 1024
-    assert len(base64.b64decode(snap["icon_webp_base64"])) <= 4 * 1024
+    shipped = base64.b64decode(snap["cover_webp_base64"])
+    assert len(shipped) <= SPACE_COVER_MAX_BYTES
+    assert covers.sets == [shipped] and covers.hash == "c"
+    assert icons.sets == []  # within the cap: untouched
 
 
-async def test_snapshot_omits_an_image_it_cannot_fit(stack, caplog):
-    """Undecodable bytes over the bound, or a bound nothing fits under, leave
+@pytest.mark.parametrize("change", ["replace", "clear"])
+async def test_a_cover_change_during_the_re_encode_is_not_undone(
+    stack, monkeypatch, change
+):
+    """I2: the re-encode of a pre-cap cover runs in a thread; a set_cover or
+    clear_cover meanwhile must not be overwritten by the old version's
+    rendition (compare-and-set on the version tag)."""
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    space = dataclasses.replace(space, cover_hash="c", icon_hash=None)
+    covers = _RecordingImageRepo(_noise_webp(1200, 800))
+    covers.hash = "c"
+    real_fit = ip_mod.ImageProcessor.fit_within
+
+    async def _fit_with_a_change(self, data, max_bytes, **kw):
+        out = await real_fit(self, data, max_bytes, **kw)
+        if change == "replace":
+            covers.webp, covers.hash = b"RIFFnew-cover", "c2"
+        else:
+            covers.webp = None
+        return out
+
+    monkeypatch.setattr(ip_mod.ImageProcessor, "fit_within", _fit_with_a_change)
+    await build_space_snapshot_for_federation(
+        space,
+        space_repo=stack.space_repo,
+        remote_member_repo=None,
+        user_repo=stack.space_svc._users,
+        own_instance_id=stack.iid,
+        cover_repo=covers,
+    )
+    if change == "replace":
+        assert (covers.webp, covers.hash) == (b"RIFFnew-cover", "c2")
+    else:
+        assert covers.webp is None
+    assert covers.sets == []
+
+
+async def test_snapshot_omits_an_image_it_cannot_fit(stack, caplog, monkeypatch):
+    """Undecodable bytes over the cap, or a cap nothing fits under, leave
     the image out (WARNING) — the rest of the snapshot still ships."""
+    monkeypatch.setattr(ss_mod, "SPACE_COVER_MAX_BYTES", 16)
+    monkeypatch.setattr(ss_mod, "SPACE_ICON_MAX_BYTES", 16)
     with caplog.at_level(logging.WARNING, logger="socialhome.services.space_service"):
         snap = await _snapshot_with_images(
             stack,
             b"not a webp" * 10,
             _noise_webp(128, 128),
-            cover_max_bytes=16,
-            icon_max_bytes=16,
         )
     assert "cover_webp_base64" not in snap
     assert "icon_webp_base64" not in snap
@@ -10523,7 +11406,6 @@ async def _cert_space(stack, *, version: int = 49):
     """A hosted space with a content epoch, a v_``version`` federation double
     and a REAL :class:`SpaceWriterCertService` over the stack's repos.
     Returns ``(space, fed, remote, peer_pk)``."""
-
     _owner, space, fed, remote = await _hosted_space_with_seats(stack)
     keys = SqliteSpaceKeyRepo(stack.db)
     await keys.save(SpaceKey(space_id=space.id, epoch=0, content_key_hex="k"))
@@ -10710,7 +11592,6 @@ async def _rekeys(stack, monkeypatch):
 async def test_a_scope_reducing_remote_role_change_rotates(stack, monkeypatch):
     """write → comment: the household's old write cert must die with the
     epoch, so the content key rotates."""
-
     space, _fed, remote, _pks = await _cert_space(stack)
     await stack.db.enqueue(
         "UPDATE spaces SET allow_subscriber_comment=1 WHERE id=?", (space.id,)

@@ -355,6 +355,7 @@ class SqliteSpaceRemoteMemberRepo:
                         WHEN excluded.tombstoned = 0 THEN NULL
                         WHEN space_remote_members.tombstoned = 1
                         AND space_remote_members.removed_at IS NOT NULL
+                        AND space_remote_members.member_version >= excluded.member_version
                         THEN space_remote_members.removed_at
                         ELSE datetime('now') END,
                     authority_epoch=excluded.authority_epoch
@@ -392,6 +393,7 @@ class SqliteSpaceRemoteMemberRepo:
                     WHEN excluded.tombstoned = 0 THEN NULL
                     WHEN space_remote_members.tombstoned = 1
                     AND space_remote_members.removed_at IS NOT NULL
+                    AND space_remote_members.member_version >= excluded.member_version
                     THEN space_remote_members.removed_at
                     ELSE datetime('now') END,
                 authority_epoch=excluded.authority_epoch
@@ -452,6 +454,7 @@ class SqliteSpaceRemoteMemberRepo:
                     WHEN excluded.tombstoned = 0 THEN NULL
                     WHEN space_remote_members.tombstoned = 1
                     AND space_remote_members.removed_at IS NOT NULL
+                    AND space_remote_members.member_version >= excluded.member_version
                     THEN space_remote_members.removed_at
                     ELSE datetime('now') END,
                 authority_epoch=excluded.authority_epoch

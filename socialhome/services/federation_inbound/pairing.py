@@ -248,6 +248,15 @@ class PairingInboundHandlers:
                 event.from_instance,
             )
             return
+        if instance.source is InstanceSource.SPACE_SESSION:
+            # Households met through a GFS never talk directly: a seat
+            # never takes an address (the peer-class step refuses this
+            # event from one already; this keeps the rule local).
+            log.warning(
+                "URL_UPDATED from space-session seat %s ignored",
+                event.from_instance,
+            )
+            return
         await self._repo.update_inbox(event.from_instance, new_url)
         log.info(
             "URL_UPDATED from %s: remote_inbox_url -> %s",

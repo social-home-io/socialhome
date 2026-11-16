@@ -559,6 +559,9 @@ class SyncSessionRecord:
     #: of the last stream it applied cleanly. ``None`` (absent / malformed):
     #: a full stream. The session streams since ``min(watermark, have_seq)``.
     have_seq: int | None = None
+    #: … (requester side) the ``roster_digest`` our BEGIN carried, re-sent
+    #: by a relay re-BEGIN after an ICE timeout …
+    roster_digest: dict | None = None
     #: … the requester's protocol version, read once when the session is
     #: planned (``None``: not yet) — the exporter choice, the shape and the
     #: chunk numbering all follow it …

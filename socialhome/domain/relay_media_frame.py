@@ -39,8 +39,8 @@ from .errors import SpaceItemTooLargeError
 from .federation import FederationEventType
 from .gfs_server import MAX_GFS_SERVERS_JSON_BYTES
 from .media_constraints import (
-    SPACE_COVER_BOOTSTRAP_MAX_BYTES,
-    SPACE_ICON_BOOTSTRAP_MAX_BYTES,
+    SPACE_COVER_MAX_BYTES,
+    SPACE_ICON_MAX_BYTES,
 )
 
 #: First bytes of a binary relay media body (household → GFS → household).
@@ -203,13 +203,13 @@ def _base64_len(n: int) -> int:
     return 4 * -(-n // 3)
 
 
-#: Next to a space's config in ``SPACE_CONFIG_CHANGED``: the relay variant's
-#: cover and icon at their caps (base64'ed), the owner's signed GFS list at
+#: Next to a space's config in ``SPACE_CONFIG_CHANGED``: the cover and icon
+#: at the one cap every member gets (base64'ed: 87,384 + 21,848 bytes), the owner's signed GFS list at
 #: its cap, and 16 KiB for the authority cert, the owner's statement, the
 #: signatures (a hybrid set included) and the event's own fields.
 SPACE_CONFIG_RESERVE_BYTES: int = (
-    _base64_len(SPACE_COVER_BOOTSTRAP_MAX_BYTES)
-    + _base64_len(SPACE_ICON_BOOTSTRAP_MAX_BYTES)
+    _base64_len(SPACE_COVER_MAX_BYTES)
+    + _base64_len(SPACE_ICON_MAX_BYTES)
     + MAX_GFS_SERVERS_JSON_BYTES
     + 16 * 1024
 )

@@ -358,6 +358,24 @@ async def test_cert_for_peer_gated_on_v49():
     assert await svc.cert_for_peer("sp-1", "old") is None
 
 
+async def test_cert_epoch_for_peer_signs_nothing(monkeypatch):
+    """I5: the roster repair compares the writer-cert epoch per BEGIN — it
+    is read without signing a cert, under the same gates as delivery."""
+    svc, _ = _svc(
+        remote_rows=[_remote("peer", "member"), _remote("old", "member")],
+    )
+    wire = await svc.cert_for_peer("sp-1", "peer")
+
+    async def _never(*a, **kw):
+        raise AssertionError("signed a cert")
+
+    monkeypatch.setattr(SpaceWriterCertService, "issue_for_instance", _never)
+    assert await svc.cert_epoch_for_peer("sp-1", "peer") == wire["epoch"]
+    assert await svc.cert_epoch_for_peer("sp-1", "old") is None  # below v_49
+    assert await svc.cert_epoch_for_peer("sp-1", "nobody") is None  # no seat
+    assert await svc.cert_epoch_for_peer("sp-1", "own") is None
+
+
 async def test_peer_payload_hook_adds_only_the_named_households_cert():
     svc, _ = _svc(
         remote_rows=[

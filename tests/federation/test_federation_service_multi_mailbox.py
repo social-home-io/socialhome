@@ -20,7 +20,6 @@ from collections import deque
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import orjson
 import pytest
 
 from socialhome.crypto import (
@@ -252,12 +251,16 @@ async def test_three_seats_on_one_gfs_are_one_payload_and_one_upload():
     assert s.repo.reachable_calls == [peer]
 
 
-async def test_a_seat_below_v90_goes_per_recipient():
+async def test_a_seat_is_judged_by_its_mailbox_not_its_row_version():
+    """A mailbox card exists only from v_89, and no released household is in
+    [v_89, v_91): a seat with a mailbox takes the multi frame whatever its
+    row says; one without (a v_80 seat) goes per recipient."""
     s = _Sender()
     new = [await s.seat() for _ in range(2)]
-    old = await s.seat(version=V90 - 1)
+    low = await s.seat(version=V90 - 1)
+    old = await s.seat(version=80, mailbox=False)
     await s.broadcast()
-    assert list(_queued(s).values()) == [sorted(new)]
+    assert list(_queued(s).values()) == [sorted([*new, low])]
     assert s.transport.per_recipient_ids() == [old]
 
 
@@ -291,18 +294,6 @@ async def test_different_payload_bytes_split_the_groups():
     await s.broadcast(per_peer=_per_peer)
     assert sorted(_queued(s).values()) == sorted([sorted(seats[:2]), sorted(seats[2:])])
     assert s.transport.sends == []
-
-
-async def test_a_relay_payload_variant_rides_its_own_group():
-    s = _Sender()
-    seats = [await s.seat() for _ in range(2)]
-    peer = await s.paired()
-    await s.broadcast(payload={"big": "x" * 10}, relay_payload={"big": "small"})
-    [(payload_id, rows)] = _queued(s).items()
-    assert rows == sorted(seats)
-    _stored, payload_json = await s.svc._outbox_payload_json(payload_id)
-    assert orjson.loads(payload_json) == {"big": "small"}
-    assert s.transport.per_recipient_ids() == [peer]
 
 
 @pytest.mark.parametrize(

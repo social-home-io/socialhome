@@ -1733,13 +1733,14 @@ mesh-reachable from one another, so a redeem between any two of them
 takes the direct or ``SPACE_ROUTED`` branch and the bootstrap code
 never executes outside its unit tests.
 
-0. **A big cover.** a first gives the space a ~500 KiB cover (a noise
-   PNG, WebP's worst case). The ACK used to embed it verbatim, seal past
-   the 256 KiB bootstrap-blob cap, and earn a 413 from the relay — e's
-   join then timed out (504) with the token already spent on a. After
-   the redeem the step asserts e holds a WebP rendition of at most
-   ``SPACE_COVER_BOOTSTRAP_MAX_BYTES`` (64 KiB) under a's own
-   ``cover_hash``, and that a logged shrinking it.
+0. **A big cover.** a first uploads a big cover photo (a noise PNG,
+   WebP's worst case). The ACK used to embed a ~500 KiB cover verbatim,
+   seal past the 256 KiB bootstrap-blob cap, and earn a 413 from the
+   relay — e's join then timed out (504) with the token already spent on
+   a. Now the upload is stored within the one cap
+   (``SPACE_COVER_MAX_BYTES``, 64 KiB); the step asserts that, and after
+   the redeem that e holds a's cover byte-for-byte under a's own
+   ``cover_hash``.
 1. **Mint.** a mints a ``member`` link with
    ``publish_to_gfs`` — the blob is parked on the connection server's
    bulletin board and the response carries the shareable ``gfs.url``.
