@@ -50,6 +50,7 @@
   "notification.space.feature.stickies": "Sticky notes",
   "notification.space.feature.calendar": "Calendar events",
   "notification.space.admins_reconfirm": "Restored from backup: review space admins, then turn delegated admin back on",
+  "notification.space.delegation_blocked": "Admins can't act for you in a space yet: one of its GFSs can't take a new space key or isn't reachable",
   "notification.space.report.filed": "New report in {space_name}",
   "dashboard.login.title": "Open the dashboard",
   "dashboard.login.password": "Dashboard password",

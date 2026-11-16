@@ -1382,46 +1382,117 @@ async def test_a_failing_drop_never_stops_the_rotation(env):
     assert _sent(env, "v44", FET.SPACE_AUTHORITY_ROTATED)
 
 
+class _ReshareSvc:
+    """Space-service stand-in for the echo re-share: records the build (the
+    key epoch it saw), the re-check and the send; ``prepare_ok`` /
+    ``due`` decide those gates, ``send_gate`` (an Event) holds a send."""
+
+    def __init__(self, *, prepare_ok=True, due=True, send_gate=None):
+        self.prepare_ok = prepare_ok
+        self.due = due
+        self.send_gate = send_gate
+        self.built: list[int] = []
+        self.sent: list[str] = []
+
+    async def prepare_admin_seed_share(self, space, *, instance_id, mint=True):
+        assert mint is False  # never re-mint under the rotation lock
+        self.built.append(space.authority_key_epoch)
+        return (space, {"space_id": space.id}) if self.prepare_ok else None
+
+    async def admin_seed_share_still_due(self, prepared, *, instance_id):
+        return self.due
+
+    async def send_admin_seed_share(self, prepared, *, instance_id):
+        if self.send_gate is not None:
+            await self.send_gate.wait()
+        self.sent.append(instance_id)
+
+    async def share_admin_signing_seed(self, space, *, instance_id, mint=True):
+        self.sent.append(instance_id)
+        return True
+
+    async def roster_snapshot_entries(self, space, *, seed, to_instance_id):
+        return []
+
+
+async def _echo_reshare(env, svc):
+    env.svc.attach_space_service(svc)
+    space = await env.spaces.get(SPACE)
+    seats = await env.remote.list_for_instance(SPACE, "v44", include_tombstoned=False)
+    env.svc._maybe_reshare_seed(space, "v44", seats)
+
+
 async def test_the_owner_never_reshares_while_delegation_is_off(env):
     """An admin's ``seed_held: false`` earns nothing once the owner stopped
     letting admins act for it."""
     await env.remote.set_role(SPACE, "v44", "u-v44", "admin")
-    shared: list[str] = []
-
-    class _SpaceSvc:
-        async def share_admin_signing_seed(self, space, *, instance_id, mint=True):
-            shared.append(instance_id)
-
-    env.svc.attach_space_service(_SpaceSvc())
     await env.db.enqueue(
         "UPDATE spaces SET delegated_admin_authority=0 WHERE id=?", (SPACE,)
     )
-    space = await env.spaces.get(SPACE)
-    seats = await env.remote.list_for_instance(SPACE, "v44", include_tombstoned=False)
-    env.svc._maybe_reshare_seed(space, "v44", seats)
+    svc = _ReshareSvc()
+    await _echo_reshare(env, svc)
     await env.svc.wait_idle()
-    assert shared == []
+    assert svc.built == [] and svc.sent == []
 
 
-async def test_the_echo_reshare_runs_under_the_rotation_lock(env):
+async def test_the_echo_reshare_is_built_under_the_rotation_lock(env):
     """A rotation in progress (the revocation of that very household)
     finishes before an echo-triggered re-share reads the space."""
     await env.remote.set_role(SPACE, "v44", "u-v44", "admin")
-    seen: list[int] = []
-
-    class _SpaceSvc:
-        async def share_admin_signing_seed(self, space, *, instance_id, mint=True):
-            seen.append(space.authority_key_epoch)
-
-    env.svc.attach_space_service(_SpaceSvc())
-    space = await env.spaces.get(SPACE)
-    seats = await env.remote.list_for_instance(SPACE, "v44", include_tombstoned=False)
+    svc = _ReshareSvc()
     async with env.svc._lock(SPACE):
-        env.svc._maybe_reshare_seed(space, "v44", seats)
+        await _echo_reshare(env, svc)
         await asyncio.sleep(0.01)
-        assert seen == []
+        assert svc.built == []
         await env.db.enqueue(
             "UPDATE spaces SET authority_key_epoch=5 WHERE id=?", (SPACE,)
         )
     await env.svc.wait_idle()
-    assert seen == [5]
+    assert svc.built == [5]
+    assert svc.sent == ["v44"]
+
+
+async def test_a_slow_reshare_send_never_holds_up_a_rotation(env):
+    """SF4: the send runs outside the rotation lock — a revocation rotation
+    is not stuck behind a re-share's network timeout."""
+    await env.remote.set_role(SPACE, "v44", "u-v44", "admin")
+    gate = asyncio.Event()
+    svc = _ReshareSvc(send_gate=gate)
+    await _echo_reshare(env, svc)
+    for _ in range(50):
+        if svc.built:
+            break
+        await asyncio.sleep(0.01)
+    assert svc.built and not svc.sent  # built, send pending
+    assert await asyncio.wait_for(env.svc.rotate(SPACE), timeout=5) is not None
+    gate.set()
+    await env.svc.wait_idle()
+
+
+async def test_a_reshare_that_is_no_longer_due_is_not_sent(env):
+    """Re-checked right before the send: a household revoked (or a key
+    rotated) after the build gets nothing."""
+    await env.remote.set_role(SPACE, "v44", "u-v44", "admin")
+    svc = _ReshareSvc(due=False)
+    await _echo_reshare(env, svc)
+    await env.svc.wait_idle()
+    assert svc.built and svc.sent == []
+
+
+async def test_a_refused_reshare_costs_no_window(env):
+    """SF3: a share refused at a gate (a GFS down, its probe failing) does not
+    stamp the hourly window — the admin's next echo tries again."""
+    await env.remote.set_role(SPACE, "v44", "u-v44", "admin")
+    svc = _ReshareSvc(prepare_ok=False)
+    await _echo_reshare(env, svc)
+    await env.svc.wait_idle()
+    assert svc.sent == []
+    assert (SPACE, "v44") not in env.svc._seed_reshared
+    svc.prepare_ok = True
+    await _echo_reshare(env, svc)
+    await env.svc.wait_idle()
+    assert svc.sent == ["v44"]
+    # …and a share that passed stamps it: the next echo inside the hour waits.
+    await _echo_reshare(env, svc)
+    await env.svc.wait_idle()
+    assert svc.sent == ["v44"]

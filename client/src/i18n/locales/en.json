@@ -6339,6 +6339,7 @@
   "notifications.row.space_ownership_transferred_none": "You now own {space}",
   "notifications.row.space_location_enabled_none": "Location sharing turned on in {space}",
   "notifications.row.space_admins_reconfirm_none": "Restored from backup: review space admins, then turn delegated admin back on",
+  "notifications.row.space_delegation_blocked_none": "Admins can't act for you in a space yet: one of its GFSs can't take a new space key or isn't reachable",
   "notifications.row.post_moderated_none": "Your post was moderated",
   "notifications.row.post_moderated_none_in": "Your post in {space} was moderated",
   "notifications.row.bazaar_bid_placed_none": "New bid on your listing",

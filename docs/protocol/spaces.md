@@ -2340,18 +2340,34 @@ never see the signing key.
 from an invite link or the GFS directory (`InstanceSource.SPACE_SESSION`)
 — gets the seed exactly like a paired or mesh one: same triggers, same
 payload and suite, sealed under that seat's session key and carried by the
-GFS mailbox / relay as ciphertext. The GFS sees one sealed frame for one
-mailbox: no space id, no event type, no key. Gated on
+GFS mailbox / relay as ciphertext. The share itself is one sealed frame
+for one mailbox: no space id, no event type, no key. Two
+residuals, stated plainly: an admin household without a mailbox (an older
+sealed-redeem seat) is reached by an instance-addressed relay frame, whose
+routing body shows the GFS its instance id (`to_instance`) — as every frame
+to such a seat does; and until the follow-up that keeps a seed holder's GFS
+behaviour identical to any writer's lands (same release), the GFS can infer
+which household became a seed holder from what that household does next — it
+stops its identified member publish and fan-out seat for the space and
+re-announces the space's epoch when its socket reconnects. See
+[gfs-relay.md](./gfs-relay.md#residuals). Gated on
 `MIN_FOR_RELAY_ADMIN_KEY_SHARE` (94): an older link-seated admin is skipped
 at WARNING and acts through the host. The seed goes to nobody while a GFS
 that lists the space has not proved `authority_rotation` (the owner could
-not retire the key there). An admin also only takes it while one of its
+not retire the key there) — probed again at most every 30 s while it is
+unreachable, and the owner is told (notification `space_delegation_blocked`,
+at most once a day per space) — and such a space is never listed on such a
+GFS in the first place (`409 GFS_KEY_ROTATION_UNSUPPORTED`). An admin also only takes it while one of its
 own people holds a live admin seat, and only when the payload's space is
 the envelope's. A share that is definitively not sent (no seat, no route,
 no host hop) is not counted as shared; a queued one is. An admin household
 of a delegating space echoes `seed_held` in its `authority_epoch_echo`
 (from key epoch 0 on), and the owner re-shares on an explicit `false` at
-most hourly per household — a share lost in a 24 h GFS queue heals.
+most hourly per household — a share lost in a 24 h GFS queue heals. The
+hour counts only from a re-share that passed every gate (a refused one is
+tried again on the next echo); it is built under the rotation's per-space
+lock and sent outside it (checked again right before), so a revocation
+never waits behind a send.
 
 The receiver **fails closed**: it stores the seed only when the
 §24.11-verified `from_instance` is the space's `owner_instance_id` (or the

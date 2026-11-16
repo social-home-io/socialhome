@@ -6303,6 +6303,7 @@
   "notifications.row.space_ownership_transferred_none": "Vous êtes maintenant propriétaire de {space}",
   "notifications.row.space_location_enabled_none": "Partage de position activé dans {space}",
   "notifications.row.space_admins_reconfirm_none": "Restauré depuis une sauvegarde : vérifiez les admins de l'espace, puis réactivez l'administration déléguée",
+  "notifications.row.space_delegation_blocked_none": "Les admins ne peuvent pas encore agir pour vous dans un espace : l'un de ses GFS ne peut pas prendre une nouvelle clé d'espace ou est injoignable",
   "notifications.row.post_moderated_none": "Votre publication a été modérée",
   "notifications.row.post_moderated_none_in": "Votre publication dans {space} a été modérée",
   "notifications.row.bazaar_bid_placed_none": "Nouvelle enchère sur votre annonce",

@@ -2313,3 +2313,52 @@ async def test_owner_still_takes_gossip_lowering_an_admin_seat(world):
     await _deliver(w.o_app, sender=A_ID, event_type=et, payload=p)
     assert (await rm.get(w.space_id, B_ID, "ub")).role == "member"
     assert (await w.o_space()).authority_key_epoch > 0
+
+
+# ── Review NOTE 12: late and reordered shares ────────────────────────────
+
+
+async def test_a_share_delivered_a_day_late_after_a_rotation_is_refused(world):
+    """A relayed envelope may arrive up to ~24 h late (the GFS queue): a K1
+    share that lands after the rotation names a key the household no longer
+    pins — refused, even by a household that is still an admin."""
+    w = world
+    await _m_plays_an_admin(w)
+    k1_share = {
+        "space_id": w.space_id,
+        "space_seed": base64.urlsafe_b64encode(w.k1_seed).decode("ascii"),
+        "seed_suite": "ed25519-seed",
+        "key_epoch": 0,
+    }
+    await _rotated(w)
+    await _deliver(
+        w.m_app, sender=w.o_id, event_type=FET.SPACE_ADMIN_KEY_SHARE, payload=k1_share
+    )
+    assert await w.m_app[space_repo_key].get_space_seed(w.space_id) is None
+
+
+@pytest.mark.parametrize("share_first", [True, False])
+async def test_the_new_seed_survives_either_order_of_share_and_bundle(
+    world, share_first
+):
+    """A GFS may reorder the remaining admin's K2 share and its rotation
+    bundle: either way it ends holding K2 (the cert applies first; the
+    bundle clears only a seed for a retired key)."""
+    w = world
+    await _m_plays_an_admin(w)
+    await _demote_b(w)
+    share = w.outbound(to=A_ID, event_type=FET.SPACE_ADMIN_KEY_SHARE)[-1]
+
+    async def deliver_share():
+        await _deliver(
+            w.m_app, sender=w.o_id, event_type=FET.SPACE_ADMIN_KEY_SHARE, payload=share
+        )
+
+    if share_first:
+        await deliver_share()
+        await _deliver_bundle_to_m(w)
+    else:
+        await _deliver_bundle_to_m(w)
+        await deliver_share()
+    k2 = await w.o_app[space_repo_key].get_space_seed(w.space_id)
+    assert await w.m_app[space_repo_key].get_space_seed(w.space_id) == k2

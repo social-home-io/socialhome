@@ -6303,6 +6303,7 @@
   "notifications.row.space_ownership_transferred_none": "Je bent nu eigenaar van {space}",
   "notifications.row.space_location_enabled_none": "Locatie delen is aangezet in {space}",
   "notifications.row.space_admins_reconfirm_none": "Hersteld uit back-up: controleer de beheerders van de space en zet gedelegeerd beheer daarna weer aan",
+  "notifications.row.space_delegation_blocked_none": "Beheerders kunnen in een space nog niet namens jou handelen: een van de GFS'en kan geen nieuwe space-sleutel aannemen of is niet bereikbaar",
   "notifications.row.post_moderated_none": "Je bericht is gemodereerd",
   "notifications.row.post_moderated_none_in": "Je bericht in {space} is gemodereerd",
   "notifications.row.bazaar_bid_placed_none": "Nieuw bod op je aanbieding",

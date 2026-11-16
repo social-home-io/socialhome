@@ -1543,9 +1543,10 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
             return
-        if event.space_id and event.space_id != space_id:
+        if event.space_id != space_id:
             # The pipeline's gates (mailbox sender, ban) judged the envelope's
-            # signed ``space_id``; the payload must name the same space.
+            # signed ``space_id``; the payload must name the same space — and
+            # a share without one on its envelope skipped those gates.
             log.warning(
                 "SPACE_ADMIN_KEY_SHARE from %s names space %s in its payload "
                 "but %s on its envelope — dropping",

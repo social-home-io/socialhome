@@ -2111,3 +2111,13 @@ async def test_a_multi_payload_naming_another_space_is_refused():
         else:
             with pytest.raises(ValueError, match="another space"):
                 await step(ctx)
+
+
+async def test_a_seed_share_inside_a_multi_frame_is_refused():
+    """The signing seed is for ONE admin household: a multi frame (whose body
+    every listed household can read) carrying it is refused before any
+    decrypt."""
+    with pytest.raises(ValueError, match="never rides a multi-recipient frame"):
+        await _multi_step()(
+            _multi_ctx(event_type=FederationEventType.SPACE_ADMIN_KEY_SHARE.value)
+        )

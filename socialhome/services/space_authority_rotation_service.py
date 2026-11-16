@@ -182,6 +182,7 @@ class SpaceAuthorityRotationService:
         "_remote_members",
         "_restore_pending",
         "_seed_reshared",
+        "_seed_resharing",
         "_space_crypto",
         "_space_service",
         "_spaces",
@@ -230,6 +231,8 @@ class SpaceAuthorityRotationService:
         #: admin's ``seed_held: false`` echo triggered, monotonic seconds.
         #: Only live admin seats get an entry.
         self._seed_reshared: dict[tuple[str, str], float] = {}
+        #: Echo-triggered re-shares in flight, one per (space, household).
+        self._seed_resharing: set[tuple[str, str]] = set()
         #: Owner side: the highest cert-proven forgotten epoch per space that
         #: arrived while the rotation window was closed — rotated past when
         #: it opens (on the next echo for the space), never dropped.
@@ -1080,7 +1083,11 @@ class SpaceAuthorityRotationService:
         last = self._seed_reshared.get(key)
         if last is not None and now - last < ECHO_REACTION_INTERVAL_S:
             return
-        self._seed_reshared[key] = now
+        if key in self._seed_resharing:
+            return  # one already in flight
+        # Stamped only once a share passed every gate (:meth:`_reshare_seed`):
+        # a refused attempt (a GFS down, a probe failing) costs no hour.
+        self._seed_resharing.add(key)
         log.info(
             "space %s: admin household %s holds no seed of the current key — "
             "sharing it again",
@@ -1090,30 +1097,37 @@ class SpaceAuthorityRotationService:
         self._spawn(self._reshare_seed(space.id, sender), f"reshare-{space.id}")
 
     async def _reshare_seed(self, space_id: str, instance_id: str) -> None:
-        """The echo-triggered re-share, under the rotation's per-space lock:
-        a rotation (a revocation of that very household) either finishes
-        first — then the share re-checks the seat and sends the new key's
-        seed only to a household still an admin — or starts after it, and
-        drops the share from the outbox. Never while we hold no seed: the
-        share would re-mint it through :meth:`rotate`, which takes this
-        same lock."""
-        if self._space_service is None:
-            return
-        if self._gfs is not None:
-            # Warm the D1 probe (a ``/gfs/info`` per listing GFS) outside the
-            # lock, so a revocation rotation never waits on the network
-            # behind this re-share; inside, the share reads the cached answer.
-            try:
-                await self._gfs.authority_key_revocable(space_id)
-            except Exception:
-                log.debug("seed re-share: D1 probe failed", exc_info=True)
-        async with self._lock(space_id):
-            space = await self._spaces.get(space_id)
-            if space is None:
+        """The echo-triggered re-share. Built under the rotation's per-space
+        lock — a rotation (a revocation of that very household) either
+        finishes first, and the share then sees the new key and the seat as
+        it is, or starts after the build — and SENT outside it, so a
+        revocation never waits behind a send's timeout. Right before the
+        send the share is checked again (same key, delegation on, live admin
+        seat). Never re-mints a lost seed (that runs :meth:`rotate`, which
+        takes this same lock). Stamps the per-household window only when a
+        share passed every gate."""
+        key = (space_id, instance_id)
+        try:
+            svc = self._space_service
+            if svc is None:
                 return
-            await self._space_service.share_admin_signing_seed(
-                space, instance_id=instance_id, mint=False
-            )
+            async with self._lock(space_id):
+                space = await self._spaces.get(space_id)
+                if space is None:
+                    return
+                prepared = await svc.prepare_admin_seed_share(
+                    space, instance_id=instance_id, mint=False
+                )
+            if prepared is None:
+                return
+            self._seed_reshared[key] = time.monotonic()
+            if not await svc.admin_seed_share_still_due(
+                prepared, instance_id=instance_id
+            ):
+                return
+            await svc.send_admin_seed_share(prepared, instance_id=instance_id)
+        finally:
+            self._seed_resharing.discard(key)
 
     def _spawn(self, coro, name: str) -> None:
         if self._closed:

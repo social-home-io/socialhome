@@ -1809,6 +1809,20 @@ household migration 0145.
 
 ### Residuals
 
+- **Who holds a space's signing seed (until the seed-holder follow-up, same
+  release).** The seed share itself is a sealed single-recipient frame
+  (`SPACE_ADMIN_KEY_SHARE`, v_94). But a household that holds a space's seed
+  stops its identified member publish and drops its identified fan-out seat
+  for that space, and re-announces the space's epoch whenever its socket
+  reconnects — so the GFS can infer which household became a seed holder
+  (the owner, or an admin the owner lets act for it). A paired delegated
+  admin connected to the GFS shows the same. The follow-up makes a seed
+  holder's GFS behaviour the same as any writer's.
+- **An instance-addressed frame shows its recipient.** A seat without a
+  mailbox (an older sealed-redeem seat) is reached by `{to_instance,
+  sealed}`: the GFS sees the recipient's instance id on every frame to it,
+  a seed share included. A v_89+ household gets mailbox delivery instead.
+
 - **A malicious server cannot plant a route.** A server one household
   uses (X) may re-post that household's sealed probe onto another server
   the peer uses (Z). The peer then acks through Z, where the prober never

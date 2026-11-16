@@ -1235,8 +1235,17 @@ and only the owner's click (`set_remote_member_role`) makes it an admin. From
 then on it is an admin like a paired one. While the owner lets admins act for
 it (`delegated_admin_authority`), the owner hands it the seed with
 `SPACE_ADMIN_KEY_SHARE`, sealed under the seat's session key and carried by
-the GFS mailbox or relay as ciphertext. The connection server sees one sealed
-frame for one mailbox: no space id, no event type, no key. With delegation
+the GFS mailbox or relay as ciphertext. The share itself is one sealed frame
+for one mailbox: no space id, no event type, no key. Two
+residuals, stated plainly: an admin household without a mailbox (an older
+sealed-redeem seat) is reached by an instance-addressed relay frame, whose
+routing body shows the GFS its instance id (`to_instance`) — as every frame
+to such a seat does; and until the follow-up that keeps a seed holder's GFS
+behaviour identical to any writer's lands (same release), the GFS can infer
+which household became a seed holder from what that household does next — it
+stops its identified member publish and fan-out seat for the space and
+re-announces the space's epoch when its socket reconnects. See
+[gfs-relay.md](./gfs-relay.md#residuals). With delegation
 off, no admin holds the seed on any path, and a link-joined admin acts
 through the host (`SPACE_REMOTE_ADMIN_ACTION`) like a paired one.
 

@@ -38,6 +38,7 @@ from socialhome.domain.events import (
     PeerProtoVersionRaised,
     SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
+    SpaceDelegationBlocked,
     SpaceMemberJoined,
     SpaceModerationQueued,
     SpacePostCreated,
@@ -13245,3 +13246,52 @@ async def test_a_freed_gfs_reader_copy_takes_its_descriptor_row_with_it(stack, t
     rows = await stack.db.fetchall("SELECT local_name FROM space_media_refs")
     assert {r["local_name"] for r in rows} == {shared}
     assert not (media_dir / freed).exists() and (media_dir / shared).exists()
+
+
+async def test_a_blocked_delegation_is_told_to_the_owner_once_a_day(stack):
+    """SF3: when D1 refuses the seed, the owner is told (a notice event) —
+    once per space per day, however many admins' echoes retry it."""
+    space, fed = await _relay_admin_space(stack)
+    gfs = MagicMock()
+    gfs.authority_key_revocable = AsyncMock(return_value=False)
+    stack.space_svc._gfs = gfs
+    told: list = []
+    stack.bus.subscribe(SpaceDelegationBlocked, told.append)
+    for _ in range(3):
+        assert not await stack.space_svc.share_admin_signing_seed(
+            space, instance_id="relay-peer"
+        )
+    assert [e.space_id for e in told] == [space.id]
+    assert _seed_shares(fed) == []
+
+
+async def test_a_share_built_earlier_is_not_due_after_a_rotation_or_demotion(stack):
+    """The re-check a caller runs right before sending a share it built
+    under the rotation lock (SF4)."""
+    space, _fed = await _relay_admin_space(stack)
+    prepared = await stack.space_svc.prepare_admin_seed_share(
+        space, instance_id="relay-peer"
+    )
+    assert prepared is not None
+    assert await stack.space_svc.admin_seed_share_still_due(
+        prepared, instance_id="relay-peer"
+    )
+    await stack.space_svc._remote_members.set_role(
+        space.id, "relay-peer", "ru1", "member"
+    )
+    assert not await stack.space_svc.admin_seed_share_still_due(
+        prepared, instance_id="relay-peer"
+    )
+    await stack.space_svc._remote_members.set_role(
+        space.id, "relay-peer", "ru1", "admin"
+    )
+    other = generate_identity_keypair()
+    await stack.space_svc._spaces.rotate_authority_key(
+        space.id,
+        public_key_hex=other.public_key.hex(),
+        seed=other.private_key,
+        key_epoch=space.authority_key_epoch + 1,
+    )
+    assert not await stack.space_svc.admin_seed_share_still_due(
+        prepared, instance_id="relay-peer"
+    )

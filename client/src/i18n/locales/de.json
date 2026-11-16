@@ -6303,6 +6303,7 @@
   "notifications.row.space_ownership_transferred_none": "{space} gehört jetzt dir",
   "notifications.row.space_location_enabled_none": "Standortfreigabe in {space} eingeschaltet",
   "notifications.row.space_admins_reconfirm_none": "Aus Backup wiederhergestellt: Prüfe die Space-Admins und schalte dann die delegierte Verwaltung wieder ein",
+  "notifications.row.space_delegation_blocked_none": "Admins können in einem Space noch nicht für dich handeln: Einer seiner GFS kann keinen neuen Space-Schlüssel übernehmen oder ist nicht erreichbar",
   "notifications.row.post_moderated_none": "Dein Beitrag wurde moderiert",
   "notifications.row.post_moderated_none_in": "Dein Beitrag in {space} wurde moderiert",
   "notifications.row.bazaar_bid_placed_none": "Neues Gebot für deine Anzeige",

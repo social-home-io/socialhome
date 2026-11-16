@@ -364,3 +364,14 @@ async def test_rejects_seed_whose_payload_names_another_space_than_the_envelope(
         assert await space_repo.get_space_seed(SPACE_ID) is None
     finally:
         await db.shutdown()
+
+
+async def test_rejects_seed_whose_envelope_names_no_space(tmp_dir):
+    """A share whose envelope carries no ``space_id`` skipped the space
+    gates of the pipeline (mailbox sender, ban): refused."""
+    h, space_repo, db = await _make_handler(tmp_dir, delegation=True)
+    try:
+        await h._on_admin_key_share(_event(_share_payload(), space_id=None))
+        assert await space_repo.get_space_seed(SPACE_ID) is None
+    finally:
+        await db.shutdown()
