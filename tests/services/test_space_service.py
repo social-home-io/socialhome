@@ -11705,7 +11705,7 @@ async def test_comment_rights_on_delivers_comment_certs_at_once(stack):
         if "writer_cert" in c.kwargs.get("payload", {})
     ]
     assert [k["to_instance_id"] for k in sent] == ["peer-a"]
-    assert _cert_of(sent[0]["payload"]).scope == "comment"
+    assert _cert_of(sent[0]["payload"]).scope == "follower_comment"
 
 
 # ─── v_49: a member household's leave reaches the host ────────────────────

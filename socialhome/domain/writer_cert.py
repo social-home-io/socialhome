@@ -55,6 +55,15 @@ WRITER_SCOPES: frozenset[str] = frozenset(
 #: profile (every scope publishes its people's profiles).
 WRITER_ACTION_REACT: str = "react"
 WRITER_ACTION_PROFILE: str = "profile"
+#: Everything a receiver may ask a cert for.
+WRITER_REQUIREMENTS: frozenset[str] = frozenset(
+    {
+        WRITER_SCOPE_WRITE,
+        WRITER_SCOPE_COMMENT,
+        WRITER_ACTION_REACT,
+        WRITER_ACTION_PROFILE,
+    }
+)
 
 #: What each scope grants. Receiver-side only (the wire carries the scope).
 _GRANTS: dict[str, frozenset[str]] = {

@@ -29,6 +29,7 @@ from .crypto import b64url_decode, b64url_encode, sign_ed25519, verify_ed25519
 from .domain.writer_cert import (
     MAX_WRITER_CERT_EPOCH,
     MAX_WRITER_USERS,
+    WRITER_REQUIREMENTS,
     WRITER_SCOPES,
     WriterCert,
     scope_permits,
@@ -188,7 +189,7 @@ def verify_writer_cert(
         raise InvalidWriterCert("instance_pk is not base64url") from exc
     if cert_pk != author_pk:
         raise InvalidWriterCert("instance_pk does not match the author")
-    if required_scope not in WRITER_SCOPES or not scope_permits(
+    if required_scope not in WRITER_REQUIREMENTS or not scope_permits(
         cert.scope, required_scope
     ):
         raise InvalidWriterCert(

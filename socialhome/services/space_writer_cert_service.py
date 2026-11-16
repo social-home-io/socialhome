@@ -48,6 +48,7 @@ retires the writer key with it.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -61,9 +62,14 @@ from ..domain.space import PUBLIC_SPACE_TIERS, SpaceFeatureAccess, SpaceRole
 from ..domain.writer_cert import (
     MAX_WRITER_USERS,
     WRITER_SCOPE_COMMENT,
+    WRITER_SCOPE_FOLLOWER,
+    WRITER_SCOPE_FOLLOWER_COMMENT,
+    WRITER_SCOPE_FOLLOWER_REACT,
     WRITER_SCOPE_WRITE,
     WriterCert,
     WriterEntitlement,
+    follower_cert_fresh,
+    follower_scope,
     scope_permits,
     strongest_scope,
 )
@@ -131,8 +137,11 @@ WRITER_CERT_EPOCH_GRACE_S: int = 600
 #: Ordering of scopes for "did this household's rights get weaker?".
 _SCOPE_RANK: dict[str | None, int] = {
     None: 0,
-    WRITER_SCOPE_COMMENT: 1,
-    WRITER_SCOPE_WRITE: 2,
+    WRITER_SCOPE_FOLLOWER_COMMENT: 1,
+    WRITER_SCOPE_FOLLOWER_REACT: 1,
+    WRITER_SCOPE_FOLLOWER: 2,
+    WRITER_SCOPE_COMMENT: 3,
+    WRITER_SCOPE_WRITE: 4,
 }
 
 
@@ -276,8 +285,10 @@ class SpaceWriterCertService:
         authority (owner / admin / moderator), so a plain member's post keeps
         going through the host's review queue; ``OPEN``: every writer role.
         A seat that may not post keeps ``comment`` (comments are judged per
-        item by the receivers); a follower seat gets ``comment`` only while
-        ``allow_subscriber_comment`` is on."""
+        item by the receivers); a follower seat gets the follower scope the
+        space's switches allow (:func:`follower_scope`: comments while
+        ``allow_subscriber_comment``, reactions while
+        ``allow_subscriber_react``), never a member's."""
         if instance_id == self._own_instance_id:
             # Our own people only: ``space_members`` on a member household
             # (a seed-holding delegated admin) also mirrors the host's —
@@ -296,22 +307,26 @@ class SpaceWriterCertService:
                 )
             ]
         posting = _POSTING_ROLES[space.features.access_level("posts")]
-        by_scope: dict[str, set[str]] = {
-            WRITER_SCOPE_WRITE: set(),
-            WRITER_SCOPE_COMMENT: set(),
-        }
+        following = follower_scope(
+            comment=space.features.allow_subscriber_comment,
+            react=space.features.allow_subscriber_react,
+        )
+        by_scope: dict[str, set[str]] = {}
         for user_id, role in seats:
             if role in posting:
-                by_scope[WRITER_SCOPE_WRITE].add(user_id)
-            elif role in _WRITE_ROLES or (
-                role == SpaceRole.SUBSCRIBER.value
-                and space.features.allow_subscriber_comment
-            ):
-                by_scope[WRITER_SCOPE_COMMENT].add(user_id)
-        scope = strongest_scope(k for k, v in by_scope.items() if v)
-        if scope is None:
+                scope: str | None = WRITER_SCOPE_WRITE
+            elif role in _WRITE_ROLES:
+                scope = WRITER_SCOPE_COMMENT
+            elif role == SpaceRole.SUBSCRIBER.value:
+                scope = following
+            else:
+                scope = None
+            if scope is not None:
+                by_scope.setdefault(scope, set()).add(user_id)
+        strongest = strongest_scope(k for k, v in by_scope.items() if v)
+        if strongest is None:
             return WriterEntitlement(None)
-        return WriterEntitlement(scope, frozenset(by_scope[scope]))
+        return WriterEntitlement(strongest, frozenset(by_scope[strongest]))
 
     async def verified_instance_pk(
         self, instance_id: str, *, claimed: bytes | None = None
@@ -773,10 +788,15 @@ class SpaceWriterCertService:
     ) -> bool:
         """True iff ``raw`` is a valid cert for ``author_pk`` at
         ``required_scope`` in ``space`` / ``epoch`` against the pinned space
-        key (``space_pubkey_hex`` overrides the space row's pin). Logs the
-        reason at WARNING on failure."""
+        key (``space_pubkey_hex`` overrides the space row's pin), and — a
+        follower cert — within its lifetime (:func:`follower_cert_fresh`).
+        Logs the reason at WARNING on failure."""
         try:
             cert = WriterCert.from_wire(raw)
+            if not follower_cert_fresh(cert, now=int(time.time())):
+                raise ValueError(
+                    f"follower cert issued at {cert.issued_at} is outside its lifetime"
+                )
             verify_writer_cert(
                 cert,
                 space_pubkey=bytes.fromhex(
