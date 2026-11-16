@@ -14,6 +14,7 @@ from socialhome.domain.space_roster_digest import (
     roster_digest_wire,
     roster_seats,
 )
+from socialhome.domain.writer_cert import MAX_WRITER_CERT_EPOCH
 
 
 def test_order_and_duplicates_do_not_matter():
@@ -66,8 +67,6 @@ def test_a_malformed_digest_is_none(raw):
 def test_an_unknown_suite_is_refused():
     with pytest.raises(UnsupportedRosterDigestSuite):
         parse_roster_digest({"suite": "rd2", "digest": "a" * 64})
-    with pytest.raises(UnsupportedRosterDigestSuite):
-        parse_roster_digest({"digest": "a" * 64})
 
 
 def test_a_separator_inside_an_id_never_collides():
@@ -93,25 +92,26 @@ def test_the_sorted_seats_hash_like_the_raw_ones_without_one_household():
     )
 
 
-def test_the_wire_carries_the_applied_roster_version_and_key_epoch():
-    """S2 / N6: the member also says which roster version it has applied
-    and which content-key epoch it holds, so the host can tell "behind
-    while gossip is in flight" and "key not caught up yet" apart."""
-    wire = roster_digest_wire("a" * 64, 7, roster_version=12, key_epoch=7)
-    assert wire["roster_version"] == 12 and wire["key_epoch"] == 7
-    assert parse_roster_digest(wire) == RosterDigest(
-        digest="a" * 64, cert_epoch=7, roster_version=12, key_epoch=7
-    )
-    bare = roster_digest_wire("b" * 64, None)
-    assert parse_roster_digest(bare) == RosterDigest(
-        digest="b" * 64, cert_epoch=None, roster_version=None, key_epoch=None
+def test_the_wire_is_the_digest_and_the_cert_epoch():
+    """Round 4: the host's one rule compares the seats' digest and the
+    writer-cert epoch, nothing else — no other field rides the BEGIN."""
+    wire = roster_digest_wire("a" * 64, 7)
+    assert set(wire) == {"suite", "digest", "cert_epoch"}
+    assert parse_roster_digest(wire) == RosterDigest(digest="a" * 64, cert_epoch=7)
+    assert parse_roster_digest(roster_digest_wire("b" * 64, None)) == RosterDigest(
+        digest="b" * 64, cert_epoch=None
     )
 
 
-@pytest.mark.parametrize(
-    "field", [("roster_version", -1), ("roster_version", "1"), ("key_epoch", True)]
-)
-def test_a_malformed_version_or_epoch_is_none(field):
+@pytest.mark.parametrize("cert_epoch", [-1, "1", True, 1.5, MAX_WRITER_CERT_EPOCH + 1])
+def test_a_cert_epoch_out_of_range_is_malformed(cert_epoch):
     wire = roster_digest_wire("a" * 64, None)
-    wire[field[0]] = field[1]
+    wire["cert_epoch"] = cert_epoch
     assert parse_roster_digest(wire) is None
+
+
+@pytest.mark.parametrize("suite", [[], {}, ["rd1-sha256"], 7, None])
+def test_a_suite_that_is_not_a_string_is_malformed_not_a_crash(suite):
+    """Round 4: ``{"suite": []}`` used to raise TypeError (unhashable) —
+    an ERROR stack trace per BEGIN. A non-string suite is malformed."""
+    assert parse_roster_digest({"suite": suite, "digest": "a" * 64}) is None

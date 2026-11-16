@@ -425,12 +425,9 @@ _COUNTS: dict[str, dict[str, int]] = {
 _MARKER_FREE: dict[str, tuple[str, ...]] = {
     "socialhome/services/space_service.py": (
         "on_sync_begin_roster",
-        "_repair_by_digest",
-        "_repair_by_echo",
-        "_schedule_roster_repair",
+        "_repair_roster",
+        "_refuse_roster_digest",
         "_forget_roster_space",
-        "_forget_roster_repair",
-        "_roster_change_is_fresh",
         "_cert_epoch_for",
         "_roster_seats_of",
         "roster_digest_of",

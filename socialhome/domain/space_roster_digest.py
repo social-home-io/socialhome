@@ -14,23 +14,16 @@ role)`` with the role mirrored the way every receiver stores it
 canonical JSON list (:mod:`socialhome.canonical_json`), SHA-256. Names,
 keys and versions are left out.
 
-A missed REMOTE removal shows up as a live seat the host no longer has, and
-the snapshot (which carries the remote tombstones) heals it. Some drift a
-snapshot cannot heal: a host-local member's departure or ban the member
-missed (the snapshot names the host's current local members, never a
-tombstone for a past one), or a seat a delegated admin's gossip put on the
-member that the host refused. Such a digest stays different; the host's
-repair backoff bounds it to one snapshot a day. An authoritative full
-snapshot (with host-local tombstones) is the open fix.
+The repair snapshot is authoritative for the live seats: once every part
+verified, the member drops a mirrored seat the snapshot does not name (at
+or below its roster version), so ONE snapshot heals any mismatch — a
+missed remote or host-local removal, or a seat the host refused.
 
 Wire shape (``roster_digest`` on the BEGIN): ``{"suite": ..., "digest":
-<64 hex>, "cert_epoch": <int|null>, "roster_version": <int|null>,
-"key_epoch": <int|null>}`` — the writer-cert epoch the member holds, the
-highest roster version it has applied (its mirror's newest
-``member_version``, so the host can tell a member that is merely behind
-while gossip is in flight from one that drifted) and the content-key epoch
-it holds (a cert-only repair waits until its key caught up). A receiver
-refuses an unknown suite — no repair, never a fallback.
+<64 hex>, "cert_epoch": <int|null>}`` — the writer-cert epoch the member
+holds (0 … :data:`~socialhome.domain.writer_cert.MAX_WRITER_CERT_EPOCH`).
+A receiver refuses an unknown suite — no repair, never a fallback; a suite
+that is not a string, or any other malformed field, is malformed.
 """
 
 from __future__ import annotations
@@ -42,6 +35,7 @@ from dataclasses import dataclass
 
 from ..canonical_json import canonical_bytes
 from .space import mirrorable_remote_role
+from .writer_cert import MAX_WRITER_CERT_EPOCH
 
 #: The one digest suite: SHA-256 over the canonical JSON seat list.
 ROSTER_DIGEST_SUITE_SHA256: str = "rd1-sha256"
@@ -59,14 +53,11 @@ class UnsupportedRosterDigestSuite(ValueError):
 
 @dataclass(slots=True, frozen=True)
 class RosterDigest:
-    """A parsed ``roster_digest``: the seats' hash, the writer-cert epoch
-    the member holds, the newest roster version it has applied and its
-    content-key epoch (each ``None``: none / not said)."""
+    """A parsed ``roster_digest``: the seats' hash and the writer-cert
+    epoch the member holds (``None``: none)."""
 
     digest: str
     cert_epoch: int | None
-    roster_version: int | None = None
-    key_epoch: int | None = None
 
 
 def roster_seats(seats: Iterable[tuple[str, str, str]]) -> tuple[RosterSeat, ...]:
@@ -97,54 +88,35 @@ def roster_digest(seats: Iterable[tuple[str, str, str]]) -> str:
     return digest_of_roster_seats(roster_seats(seats))
 
 
-def roster_digest_wire(
-    digest: str,
-    cert_epoch: int | None,
-    *,
-    roster_version: int | None = None,
-    key_epoch: int | None = None,
-) -> dict:
+def roster_digest_wire(digest: str, cert_epoch: int | None) -> dict:
     """The ``roster_digest`` field of a BEGIN."""
     return {
         "suite": ROSTER_DIGEST_SUITE_SHA256,
         "digest": digest,
         "cert_epoch": cert_epoch,
-        "roster_version": roster_version,
-        "key_epoch": key_epoch,
     }
-
-
-def _opt_nonneg_int(value: object) -> tuple[bool, int | None]:
-    """``(ok, value)`` for an optional non-negative int field."""
-    if value is None:
-        return True, None
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        return False, None
-    return True, value
 
 
 def parse_roster_digest(raw: object) -> RosterDigest | None:
     """The ``roster_digest`` of a BEGIN, or ``None`` when absent or
-    malformed. Raises :class:`UnsupportedRosterDigestSuite` for an unknown
-    suite (never a default)."""
+    malformed (a suite that is not a string included). Raises
+    :class:`UnsupportedRosterDigestSuite` for an unknown suite (never a
+    default)."""
     if not isinstance(raw, dict):
         return None
     suite = raw.get("suite")
+    if not isinstance(suite, str):
+        return None
     if suite not in SUPPORTED_ROSTER_DIGEST_SUITES:
-        raise UnsupportedRosterDigestSuite(str(suite))
+        raise UnsupportedRosterDigestSuite(suite)
     digest = raw.get("digest")
     if not isinstance(digest, str) or not _HEX64.fullmatch(digest):
         return None
-    fields: list[int | None] = []
-    for name in ("cert_epoch", "roster_version", "key_epoch"):
-        ok, value = _opt_nonneg_int(raw.get(name))
-        if not ok:
-            return None
-        fields.append(value)
-    cert_epoch, roster_version, key_epoch = fields
-    return RosterDigest(
-        digest=digest,
-        cert_epoch=cert_epoch,
-        roster_version=roster_version,
-        key_epoch=key_epoch,
-    )
+    cert_epoch = raw.get("cert_epoch")
+    if cert_epoch is not None and (
+        not isinstance(cert_epoch, int)
+        or isinstance(cert_epoch, bool)
+        or not 0 <= cert_epoch <= MAX_WRITER_CERT_EPOCH
+    ):
+        return None
+    return RosterDigest(digest=digest, cert_epoch=cert_epoch)
