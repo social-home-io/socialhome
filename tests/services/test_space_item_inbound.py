@@ -28,6 +28,7 @@ from socialhome.domain.events import (
     PostDeleted,
     PostReactionChanged,
 )
+from socialhome.domain.file_hashes import FileHash, space_content_media_name
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.domain.space_item import AuthorityRemoval
@@ -850,3 +851,58 @@ async def test_a_relayed_comment_never_keeps_a_reserved_picture(env, name):
     assert await _apply(env, "comment", image)
     stored = await env["posts"].get_comment(cid)
     assert stored is not None and stored.media_url is None
+
+
+# ── one name on every path: a relayed comment's picture by content ───────
+
+
+async def test_a_relayed_image_comment_with_signed_hashes_takes_its_content_name(env):
+    """A comment that reaches a member through the GFS before the host's
+    direct copy names its picture exactly as that copy does (``sc-``)."""
+    cid = _cid()
+    h = "d" * 64
+    image = _inner(
+        "comment",
+        cid,
+        env["post_id"],
+        comment_type="image",
+        media_url="api/media/x.webp",
+        created_at=_ts(0),
+        file_hashes={"x.webp": FileHash(h)},
+    )
+    assert await _apply(env, "comment", image)
+    stored = await env["posts"].get_comment(cid)
+    assert stored.media_url == "api/media/" + space_content_media_name(
+        SPACE, h, "x.webp"
+    )
+
+
+async def test_a_relayed_comments_hashes_moved_to_another_comment_are_ignored(env):
+    cid, other = _cid(), _cid()
+    signed = _inner(
+        "comment",
+        cid,
+        env["post_id"],
+        comment_type="image",
+        media_url="api/media/x.webp",
+        created_at=_ts(0),
+        file_hashes={"x.webp": FileHash("d" * 64)},
+    )
+    plain = _inner(
+        "comment",
+        other,
+        env["post_id"],
+        comment_type="image",
+        media_url="api/media/x.webp",
+        created_at=_ts(0),
+    )
+    moved = dict(
+        plain,
+        **{
+            k: signed[k]
+            for k in ("files", "files_suite", "files_sig", "files_sig_suite")
+        },
+    )
+    assert await _apply(env, "comment", moved)
+    stored = await env["posts"].get_comment(other)
+    assert stored.media_url == "api/media/x.webp"

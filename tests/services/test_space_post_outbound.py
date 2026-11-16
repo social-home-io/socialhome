@@ -23,6 +23,7 @@ from socialhome.domain.events import (
     SpacePostCreated,
 )
 from socialhome.domain.federation import FederationEventType
+from socialhome.domain.file_hashes import FileHash
 from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import Comment, CommentType, FileMeta, Post, PostType
 from socialhome.domain.space import JoinMode, SpaceType
@@ -33,6 +34,7 @@ from socialhome.services.space_post_outbound import SpacePostOutbound
 from socialhome.services.space_public_author import (
     author_signing_bytes,
     signed_media_refs,
+    verified_file_hashes,
     verify_signed_author_inner,
 )
 from tests.services.test_space_public_author import _v25_author_signing_bytes
@@ -1833,3 +1835,36 @@ async def test_a_comment_ships_and_hashes_every_registered_field(tmp_path):
     payload = federation.broadcast_to_space_members.call_args.args[2]
     assert set(payload["files"]) == {u.rsplit("/", 1)[-1] for u in urls}
     assert media_sync.enqueue_for_blob.call_args.kwargs["media_urls"] == urls
+
+
+async def test_relay_hint_carries_the_posts_signed_file_hashes(tmp_path):
+    """v_92 — the pre-signed relay inner of a picture post carries its file
+    hashes under the author's signature, so whoever relays it, the GFS copy
+    names the file by content on a member that gets it first."""
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    keypair = generate_identity_keypair()
+    uid = derive_user_id(keypair.public_key, "alice")
+    out = _make_outbound(
+        bus=bus,
+        federation=federation,
+        space_repo=_FakeSpaceRepo({"sp-1": _FakeSpace(space_type=SpaceType.PUBLIC)}),
+        user_repo=_FakeUserRepo({uid: _FakeUser(username="alice")}),
+        identity=(keypair, "inst-self"),
+    )
+    (tmp_path / "p.webp").write_bytes(b"pixels")
+    out.attach_file_hasher(MediaFileHasher(tmp_path))
+    post = Post(
+        id="post-f",
+        author=uid,
+        type=PostType.IMAGE,
+        image_urls=("api/media/p.webp",),
+        created_at=datetime(2026, 5, 23, 12, 0, 0, tzinfo=UTC),
+    )
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    relay = federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
+    assert verify_signed_author_inner(relay)
+    assert verified_file_hashes(relay) == {
+        "p.webp": FileHash(hashlib.sha256(b"pixels").hexdigest())
+    }

@@ -719,6 +719,45 @@ author's post that carries a signed descriptor heals it, add-only: only
 while the post has no `space_media_refs` rows, never replacing names or
 rows it already has.
 
+**File hashes on the GFS public relay (`files_sig`)**
+(`services/space_public_author.py`, no new version — it ships with v_81..v_94)
+— a relayed post's (and a member-published comment's) v_85 file hashes ride
+the encrypted relay inner too, so every receiver names each file by its
+content (`sc-…`) whichever copy of the item it gets first — the v_92 promise
+of one name on every path. A third separate author
+signature, for the same reason as the two above: a released (v_80)
+household recomputes the main author bytes from its own fixed field list,
+so a new signed field there would make it refuse every relayed picture
+post. The hash map keeps its own v_85 suite tag (`files_suite`):
+
+```
+files           : {"<file>": {"h": "<64 hex>"}}
+files_suite     : "sha256"     # FILE_HASH_SUITE_SHA256; unknown → map refused
+files_sig       : "<b64url>"   # Ed25519 over the bytes below
+files_sig_suite : "ed25519"    # SUPPORTED_FILES_SIG_SUITES; unknown → rejected
+
+b"space-post-files:v1:" + canonical_json({
+  post_id, space_id, author_user_id, author_pk,
+  item_type, item_target,        # null when absent
+  edited_at, ts,                 # a post's / a generic item's version, null when absent
+  files, files_suite, files_sig_suite
+})
+```
+
+A receiver takes the map only when this verifies against the
+already-verified `author_pk` (`verified_file_hashes`), after the map's
+shape checked out; an unsigned, malformed or swapped map is `{}` and the
+files keep their reader (or sender) names. Residual: an `sc-` name is
+shared by every item of the space showing that file and its first
+`space_media_refs` row stays, so a writer who knows a file's hash can
+publish its own item claiming it first and make that copy's GFS fetch fail
+for a household that has not described the file yet (the bytes never land
+— they must hash to the name). Members carried this since v_85; followers
+now too (they are unused today). Follow-up: let a later describer's row
+replace one whose fetch was refused for a hash mismatch. The hashes only
+choose a name: the bytes fetched from the GFS are still checked against the
+hash before anything is written under it.
+
 **Page proposal `media_refs` (v_82) — no extra signature.** A member
 household seated from an invite link describes its page proposal's new files
 (blobs sealed `aesgcm-256-pad-det` for the page and the proposing household)
