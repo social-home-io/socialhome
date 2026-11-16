@@ -41,3 +41,30 @@ async def test_a_hasher_error_is_fail_soft(tmp_path: pathlib.Path) -> None:
     sender = _Sender()
     sender.attach_file_hasher(_Broken(tmp_path))
     assert await sender._with_file_hashes({"id": "p"}, ["api/media/x"]) == {"id": "p"}
+
+
+# ── v_92: the map an author signs into a public relay inner ──────────────
+
+
+async def test_file_hashes_of_without_a_hasher_is_empty() -> None:
+    assert await _Sender()._file_hashes_of(["api/media/x.webp"]) == {}
+
+
+async def test_file_hashes_of_maps_each_file(tmp_path: pathlib.Path) -> None:
+    (tmp_path / "x.webp").write_bytes(b"x")
+    sender = _Sender()
+    sender.attach_file_hasher(MediaFileHasher(tmp_path))
+    got = await sender._file_hashes_of(["api/media/x.webp"])
+    assert {k: v.h for k, v in got.items()} == {
+        "x.webp": hashlib.sha256(b"x").hexdigest()
+    }
+
+
+async def test_file_hashes_of_is_fail_soft(tmp_path: pathlib.Path) -> None:
+    class _Broken(MediaFileHasher):
+        async def hashes_for(self, urls):  # type: ignore[override]
+            raise OSError("disk gone")
+
+    sender = _Sender()
+    sender.attach_file_hasher(_Broken(tmp_path))
+    assert await sender._file_hashes_of(["api/media/x.webp"]) == {}

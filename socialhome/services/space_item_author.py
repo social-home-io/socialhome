@@ -30,6 +30,8 @@ Signed fields (every one always present — ``None`` when unused — except
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from ..canonical_json import canonical_bytes
 from ..crypto import (
     b64url_decode,
@@ -38,6 +40,12 @@ from ..crypto import (
     sign_ed25519,
     verify_ed25519,
 )
+from .space_public_author import sign_file_hashes
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from ..domain.file_hashes import FileHash
 
 #: Suite of the generic item author signature. Receivers reject any other
 #: value — never a default fallback.
@@ -111,6 +119,7 @@ def build_signed_item_inner(
     media_url: str | None = None,
     created_at: str | None = None,
     emoji: str | None = None,
+    file_hashes: Mapping[str, FileHash] | None = None,
 ) -> dict:
     """Build and sign one generic item inner (see the module docstring).
 
@@ -140,6 +149,9 @@ def build_signed_item_inner(
     inner["author_sig"] = b64url_encode(
         sign_ed25519(author_identity_seed, item_signing_bytes(inner))
     )
+    # A comment's picture hashes ride outside the main item bytes under the
+    # author's separate signature (one name on every path, as for a post).
+    sign_file_hashes(inner, file_hashes, author_identity_seed)
     return inner
 
 
