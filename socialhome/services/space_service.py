@@ -1932,6 +1932,7 @@ class SpaceService(
         known_version: int | None = None,
         charge: Callable[[int], bool] | None = None,
         all_tombstones: bool = False,
+        credentials_only: bool = False,
     ) -> bool:
         """Send household ``to_instance_id`` the whole roster of a space we host.
 
@@ -1969,6 +1970,11 @@ class SpaceService(
 
         ``all_tombstones``: carry every tombstone, not only those of the
         last :data:`ROSTER_TOMBSTONE_WINDOW_S`.
+
+        ``credentials_only``: no roster entry — only the household's own
+        credentials (writer cert, writer group key, channel grant), which a
+        receiver applies from a host snapshot with no entries. Nothing goes
+        when it has none.
         """
         if self._federation is None:
             return False
@@ -2003,6 +2009,7 @@ class SpaceService(
                 known_version=known_version,
                 current=current,
                 all_tombstones=all_tombstones,
+                credentials_only=credentials_only,
             )
         except Exception:
             log.warning(
@@ -2052,6 +2059,7 @@ class SpaceService(
         known_version: int | None,
         current: int,
         all_tombstones: bool,
+        credentials_only: bool = False,
     ) -> list[dict] | None:
         """The ``SPACE_ROSTER_SNAPSHOT`` payloads for :meth:`send_roster_snapshot`
         (``None``: nothing to send)."""
@@ -2071,19 +2079,23 @@ class SpaceService(
                     to_instance_id,
                     space.id,
                 )
-        entries = await self.roster_snapshot_entries(
-            space,
-            seed=seed,
-            to_instance_id=to_instance_id,
-            known_version=known_version,
-            all_tombstones=all_tombstones,
+        entries = (
+            []
+            if credentials_only
+            else await self.roster_snapshot_entries(
+                space,
+                seed=seed,
+                to_instance_id=to_instance_id,
+                known_version=known_version,
+                all_tombstones=all_tombstones,
+            )
         )
         # Never empty for a space we host: its owner is always a local seat
         # here, and live seats always ship (``known_version`` drops only
         # removals). Part 0 carries the extras below (writer cert / key,
         # channel grant) — a refusal-only household would otherwise never
         # get them, so an empty roster is a bug worth seeing, not a no-op.
-        if not entries:
+        if not entries and not credentials_only:
             log.warning(
                 "roster-snapshot: no entries for %s in hosted space %s — "
                 "its credentials did not go out",
@@ -2118,6 +2130,8 @@ class SpaceService(
             )
             if grant is not None:
                 extras["gfs_channel"] = grant
+        if credentials_only and not extras:
+            return None
         return roster_snapshot_parts(
             space.id,
             entries,
@@ -2319,11 +2333,29 @@ class SpaceService(
         host_epoch = await self._cert_epoch_for(space_id, sender)
         current = int(space.roster_sequence)
         if digest is not None:
-            right = digest.digest == await self.roster_digest_of(space, sender) and (
-                host_epoch is None or digest.cert_epoch == host_epoch
+            if digest.digest != await self.roster_digest_of(space, sender):
+                await self._repair_roster(
+                    space, sender, right=False, took=False, known_version=None
+                )
+                return
+            # The roster is right: at most the household's own credentials
+            # are missing — they go alone (no roster entry). A member's cert
+            # behind ours goes unasked; a follower household's only when it
+            # asks (``cert_wanted``: on demand, its people comment / react);
+            # the writer group key when asked (``key_wanted``).
+            follower = await self._follower_household(space.id, sender)
+            wants = host_epoch is not None and (
+                digest.cert_wanted if follower else digest.cert_epoch != host_epoch
             )
+            if not wants and digest.key_wanted:
+                wants = await self._writer_key_for(space.id, sender)
             await self._repair_roster(
-                space, sender, right=right, took=right, known_version=None
+                space,
+                sender,
+                right=not wants,
+                took=not wants,
+                known_version=None,
+                credentials_only=True,
             )
             return
         if (
@@ -2383,6 +2415,32 @@ class SpaceService(
             repr(why)[:80],
         )
 
+    async def _follower_household(self, space_id: str, instance_id: str) -> bool:
+        """Whether *instance_id* holds only follower (``subscriber``) seats
+        in *space_id* — its writer cert is asked for, never pushed."""
+        if self._remote_members is None:
+            return False
+        roles = {
+            str(r.role)
+            for r in await self._remote_members.list_for_instance(
+                space_id, instance_id, include_tombstoned=False
+            )
+        }
+        return roles == {SpaceRole.SUBSCRIBER.value}
+
+    async def _writer_key_for(self, space_id: str, instance_id: str) -> bool:
+        """Whether we would hand *instance_id* a writer group key now."""
+        if self._writer_certs is None:
+            return False
+        try:
+            return (
+                await self._writer_certs.writer_key_for_peer(space_id, instance_id)
+                is not None
+            )
+        except Exception:
+            log.exception("roster repair: writer key for %s failed", instance_id)
+            return False
+
     async def _repair_roster(
         self,
         space: Space,
@@ -2391,6 +2449,7 @@ class SpaceService(
         right: bool,
         took: bool,
         known_version: int | None,
+        credentials_only: bool = False,
     ) -> None:
         """The one rule. Right → nothing. Wrong → a repair snapshot, unless
         one went to *sender* within its cooldown: 30 min after a snapshot
@@ -2464,6 +2523,7 @@ class SpaceService(
                     known_version=known_version,
                     charge=_charge,
                     all_tombstones=consecutive,
+                    credentials_only=credentials_only,
                 )
             finally:
                 self._roster_inflight.discard(key)
@@ -3405,19 +3465,7 @@ class SpaceService(
         delegated_admin_just_enabled = False
         delegated_admin_just_disabled = False
         subscribers_just_disabled = False
-        comment_just_disabled = False
-        comment_just_enabled = False
         if features is not None:
-            # v_49 — follower comment rights decide the ``comment`` writer
-            # certs: OFF must retire them (rotation), ON issues them.
-            comment_just_disabled = (
-                space.features.allow_subscriber_comment
-                and not features.allow_subscriber_comment
-            )
-            comment_just_enabled = (
-                not space.features.allow_subscriber_comment
-                and features.allow_subscriber_comment
-            )
             location_mode_changed = (
                 features.location_mode != space.features.location_mode
             )
@@ -3660,10 +3708,6 @@ class SpaceService(
                 space_id
             ):
                 await self.share_admin_signing_seed(updated, instance_id=admin_instance)
-        if comment_just_disabled or comment_just_enabled:
-            await self._writer_certs_after_comment_toggle(
-                space_id, enabled=comment_just_enabled
-            )
         if (
             features is not None
             and features.posts_access != space.features.posts_access
@@ -3719,24 +3763,14 @@ class SpaceService(
         """A config change gave the space we host a writer group key it
         did not have (followers turned on, or the space entered a public
         tier): pin the current epoch's key at every GFS listing it (the
-        owner's epoch notice) and hand it to the member households (their
-        roster snapshot carries it) — without waiting for the next rotation,
-        or members' anonymous publishes are refused until then."""
+        owner's epoch notice). Each household asks for the key itself when
+        it first publishes (``key_wanted`` on its sync BEGIN, answered with
+        its credentials alone) — nothing goes to every member household."""
         if self._member_gfs is not None:
             try:
                 await self._member_gfs.announce_epoch(space.id)
             except Exception:
                 log.exception("writer key: GFS notice failed for %s", space.id)
-        own = self._own_instance_id
-        for inst in await self._spaces.list_member_instances(space.id):
-            if inst == own:
-                continue
-            try:
-                await self.send_roster_snapshot(space.id, to_instance_id=inst)
-            except Exception:
-                log.exception(
-                    "writer key: roster snapshot to %s failed for %s", inst, space.id
-                )
 
     async def enable_private_gfs_for_legacy_link(
         self, space_id: str, *, gfs_id: str | None = None
@@ -3921,32 +3955,6 @@ class SpaceService(
         for instance_id in gained:
             if instance_id != self._own_instance_id:
                 await self.send_roster_snapshot(after.id, to_instance_id=instance_id)
-
-    async def _writer_certs_after_comment_toggle(
-        self, space_id: str, *, enabled: bool
-    ) -> None:
-        """v_49 — ``allow_subscriber_comment`` flipped. OFF with at least one
-        follower seat: rotate, so every ``comment`` cert dies with the epoch.
-        ON: deliver the follower households their ``comment`` cert right
-        away, in a roster snapshot to each (the owner's channel)."""
-        if self._writer_certs is None or self._remote_members is None:
-            return
-        followers = {
-            r.instance_id
-            for r in await self._remote_members.list_for_space(space_id)
-            if r.role == SpaceRole.SUBSCRIBER.value and r.instance_id
-        }
-        local_follower = any(
-            m.role == SpaceRole.SUBSCRIBER
-            for m in await self._spaces.list_members(space_id)
-        )
-        if not enabled:
-            if followers or local_follower:
-                await self._rotate_and_distribute_space_key(space_id)
-            return
-        for instance_id in sorted(followers):
-            if instance_id != self._own_instance_id:
-                await self.send_roster_snapshot(space_id, to_instance_id=instance_id)
 
     # ── Membership ─────────────────────────────────────────────────────
 

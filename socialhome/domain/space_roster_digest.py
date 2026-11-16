@@ -24,7 +24,12 @@ repairs backing off to one a day.
 
 Wire shape (``roster_digest`` on the BEGIN): ``{"suite": ..., "digest":
 <64 hex>, "cert_epoch": <int|null>}`` — the writer-cert epoch the member
-holds (0 … :data:`~socialhome.domain.writer_cert.MAX_WRITER_CERT_EPOCH`).
+holds (0 … :data:`~socialhome.domain.writer_cert.MAX_WRITER_CERT_EPOCH`) —
+plus, only when true, ``"cert_wanted": true`` (one of its people wants to
+comment or react and it holds no fresh cert: a follower household's
+on-demand ask) and ``"key_wanted": true`` (it wants to publish over a GFS and
+holds no writer group key for the current epoch). A host that does not know
+them ignores them.
 A receiver refuses an unknown suite — no repair, never a fallback; a suite
 that is not a string, or any other malformed field, is malformed.
 """
@@ -61,6 +66,9 @@ class RosterDigest:
 
     digest: str
     cert_epoch: int | None
+    #: The household asks for its writer cert / writer group key now.
+    cert_wanted: bool = False
+    key_wanted: bool = False
 
 
 def roster_seats(seats: Iterable[tuple[str, str, str]]) -> tuple[RosterSeat, ...]:
@@ -91,13 +99,24 @@ def roster_digest(seats: Iterable[tuple[str, str, str]]) -> str:
     return digest_of_roster_seats(roster_seats(seats))
 
 
-def roster_digest_wire(digest: str, cert_epoch: int | None) -> dict:
+def roster_digest_wire(
+    digest: str,
+    cert_epoch: int | None,
+    *,
+    cert_wanted: bool = False,
+    key_wanted: bool = False,
+) -> dict:
     """The ``roster_digest`` field of a BEGIN."""
-    return {
+    wire: dict = {
         "suite": ROSTER_DIGEST_SUITE_SHA256,
         "digest": digest,
         "cert_epoch": cert_epoch,
     }
+    if cert_wanted:
+        wire["cert_wanted"] = True
+    if key_wanted:
+        wire["key_wanted"] = True
+    return wire
 
 
 def parse_roster_digest(raw: object) -> RosterDigest | None:
@@ -122,4 +141,12 @@ def parse_roster_digest(raw: object) -> RosterDigest | None:
         or not 0 <= cert_epoch <= MAX_WRITER_CERT_EPOCH
     ):
         return None
-    return RosterDigest(digest=digest, cert_epoch=cert_epoch)
+    wanted = [raw.get(name, False) for name in ("cert_wanted", "key_wanted")]
+    if not all(isinstance(flag, bool) for flag in wanted):
+        return None
+    return RosterDigest(
+        digest=digest,
+        cert_epoch=cert_epoch,
+        cert_wanted=wanted[0],
+        key_wanted=wanted[1],
+    )

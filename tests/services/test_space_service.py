@@ -8886,8 +8886,9 @@ async def test_a_writer_cert_behind_or_ahead_is_a_mismatch_like_any_other(
     stack, monkeypatch
 ):
     """N6, folded into the one rule: the digest right but the writer-cert
-    epoch not the one we would send is a mismatch — one snapshot (which
-    carries our cert), read without signing a cert."""
+    epoch not the one we would send is a mismatch — one snapshot carrying
+    only the credentials (the roster matched), read without signing a cert
+    to decide."""
     clock = _Clock(monkeypatch)
     space, fed, _remote, _insts = await _members_with_households(stack, 1)
     certs = _certs(7)
@@ -8896,7 +8897,9 @@ async def test_a_writer_cert_behind_or_ahead_is_a_mismatch_like_any_other(
     assert _snapshots(fed) == []
     await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=6))
     (_to, entries) = _snapshots(fed, to="peer-0")[-1]
-    assert any(e["payload"]["role"] == "owner" for e in entries)  # never empty
+    assert entries == []
+    payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
+    assert payload["writer_cert"] == {"epoch": 7}
     clock.advance(30 * 60)
     await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=8))
     assert len(_snapshots(fed)) == 2
@@ -11656,56 +11659,176 @@ async def test_rotate_if_scope_weakened_needs_a_weaker_scope(stack, monkeypatch)
     assert rekeys == [space.id]
 
 
-async def test_comment_rights_off_with_followers_rotates(stack, monkeypatch):
-    space, _fed, remote, _pks = await _cert_space(stack)
-    await stack.space_svc.update_config(
-        space.id,
-        actor_username="hosty",
-        features=SpaceFeatures(allow_subscriber_comment=True),
-    )
-    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
-    rekeys = await _rekeys(stack, monkeypatch)
-    await stack.space_svc.update_config(
-        space.id,
-        actor_username="hosty",
-        features=SpaceFeatures(allow_subscriber_comment=False),
-    )
-    assert rekeys == [space.id]
+def _payloads(fed):
+    return [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_ROSTER_SNAPSHOT
+    ]
 
 
-async def test_comment_rights_off_without_followers_does_not_rotate(stack, monkeypatch):
-    space, _fed, _remote, _pks = await _cert_space(stack)
-    await stack.space_svc.update_config(
-        space.id,
-        actor_username="hosty",
-        features=SpaceFeatures(allow_subscriber_comment=True),
-    )
-    rekeys = await _rekeys(stack, monkeypatch)
-    await stack.space_svc.update_config(
-        space.id,
-        actor_username="hosty",
-        features=SpaceFeatures(allow_subscriber_comment=False),
-    )
-    assert rekeys == []
-
-
-async def test_comment_rights_on_delivers_comment_certs_at_once(stack):
+@pytest.mark.parametrize(
+    "switch", ["allow_subscriber_comment", "allow_subscriber_react"]
+)
+async def test_toggling_a_follower_switch_sends_only_the_config_event(
+    stack, monkeypatch, switch
+):
+    """Owner decision 2026-11-16: the switch reaches everyone in the normal
+    config event — no snapshot to every follower when it turns on (≈ 55 GB
+    at 10 000 followers), no rotation when it turns off (follower certs
+    live 24 h and config holders check the switch)."""
     space, fed, remote, _pks = await _cert_space(stack)
     await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
-    await _seat(remote, space.id, "peer-b", "u-b", role="member")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    rekeys = await _rekeys(stack, monkeypatch)
+    fed.send_with_mesh_fallback.reset_mock()
+    configs: list[object] = []
+
+    async def _config(event: SpaceConfigChanged) -> None:
+        configs.append(event)
+
+    stack.space_svc._bus.subscribe(SpaceConfigChanged, _config)
+    for on in (True, False):
+        await stack.space_svc.update_config(
+            space.id,
+            actor_username="hosty",
+            features=SpaceFeatures(**{switch: on}),
+        )
+    assert _payloads(fed) == []
+    assert rekeys == []
+    assert len(configs) == 2
+
+
+async def test_followers_turning_on_sends_no_roster_snapshot(stack):
+    """The writer group key a public tier with followers gives the space is
+    asked for by each household when it first publishes (``key_wanted``) —
+    no snapshot to every member household. The GFS epoch notice stays."""
+    space, fed, remote, _pks = await _cert_space(stack)
+    await _seat(remote, space.id, "peer-a", "u-a", role="member")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    notices: list[str] = []
+
+    class _Gfs:
+        async def announce_epoch(self, space_id, **_kw):
+            notices.append(space_id)
+
+    stack.space_svc._member_gfs = _Gfs()
+    await stack.db.enqueue(
+        "UPDATE spaces SET space_type='public' WHERE id=?", (space.id,)
+    )
     fed.send_with_mesh_fallback.reset_mock()
     await stack.space_svc.update_config(
         space.id,
         actor_username="hosty",
-        features=SpaceFeatures(allow_subscriber_comment=True),
+        features=SpaceFeatures(allow_subscribers=True),
     )
-    sent = [
-        c.kwargs
-        for c in fed.send_with_mesh_fallback.await_args_list
-        if "writer_cert" in c.kwargs.get("payload", {})
-    ]
-    assert [k["to_instance_id"] for k in sent] == ["peer-a"]
-    assert _cert_of(sent[0]["payload"]).scope == "follower_comment"
+    assert _payloads(fed) == []
+    assert notices == [space.id]
+
+
+async def _follower_space(stack, *, comment=True, react=False):
+    space, fed, remote, pks = await _cert_space(stack, version=94)
+    await stack.db.enqueue(
+        "UPDATE spaces SET allow_subscriber_comment=?, allow_subscriber_react=? "
+        "WHERE id=?",
+        (int(comment), int(react), space.id),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    await _seat(remote, space.id, "peer-b", "u-b", role="member")
+    for inst in ("peer-a", "peer-b"):
+        await stack.space_repo.add_space_instance(space.id, inst)
+    fed.send_with_mesh_fallback.reset_mock()
+    return space, fed, remote, pks
+
+
+async def _wanting(stack, space, sender, *, cert=False, key=False, cert_epoch=None):
+    row = await stack.space_repo.get(space.id)
+    return _begin(
+        space.id,
+        sender,
+        roster_digest=roster_digest_wire(
+            await stack.space_svc.roster_digest_of(row, sender),
+            cert_epoch,
+            cert_wanted=cert,
+            key_wanted=key,
+        ),
+    )
+
+
+async def test_a_follower_asks_for_its_cert_and_gets_credentials_only(
+    stack, monkeypatch
+):
+    """On demand: a follower household's BEGIN saying ``cert_wanted`` (one
+    of its people comments, it holds no fresh cert) gets ONE small snapshot
+    carrying only its own follower cert — no roster entry, nothing of the
+    members. Without asking it gets nothing."""
+    _Clock(monkeypatch)
+    space, fed, _remote, pks = await _follower_space(stack)
+    await _answer(stack, await _wanting(stack, space, "peer-a"))
+    assert _payloads(fed) == []
+    await _answer(stack, await _wanting(stack, space, "peer-a", cert=True))
+    [sent] = _payloads(fed)
+    assert sent["to_instance_id"] == "peer-a"
+    assert sent["payload"]["entries"] == []
+    cert = _cert_of(sent["payload"])
+    assert cert.scope == "follower_comment"
+    assert cert.instance_pk == b64url_encode(pks["peer-a"])
+    assert set(sent["payload"]) <= {
+        "space_id",
+        "entries",
+        "roster_version",
+        "authority_cert",
+        "writer_cert",
+        "writer_key",
+        "gfs_channel",
+    }
+
+
+@pytest.mark.parametrize("who", ["stranger", "switch-off"])
+async def test_a_cert_request_from_a_non_follower_or_with_the_switch_off_is_refused(
+    stack, monkeypatch, who
+):
+    _Clock(monkeypatch)
+    if who == "switch-off":
+        space, fed, _remote, _pks = await _follower_space(stack, comment=False)
+        sender = "peer-a"
+    else:
+        space, fed, _remote, _pks = await _follower_space(stack)
+        sender = "stranger"
+    await _answer(stack, await _wanting(stack, space, sender, cert=True))
+    assert _payloads(fed) == []
+
+
+async def test_a_members_cert_still_arrives_without_asking(stack, monkeypatch):
+    """A member's own write / comment cert flow is unchanged: a cert epoch
+    behind ours is repaired without ``cert_wanted`` — now with the
+    credentials alone (its roster digest matched)."""
+    _Clock(monkeypatch)
+    space, fed, _remote, _pks = await _follower_space(stack)
+    await _answer(stack, await _wanting(stack, space, "peer-b"))
+    [sent] = _payloads(fed)
+    assert sent["payload"]["entries"] == []
+    assert _cert_of(sent["payload"]).scope == "write"
+
+
+async def test_a_household_without_the_writer_key_asks_for_it(stack, monkeypatch):
+    """``key_wanted``: the writer group key of a publicly readable space,
+    on demand, with the credentials alone."""
+    _Clock(monkeypatch)
+    space, fed, _remote, _pks = await _follower_space(stack)
+    await stack.db.enqueue(
+        "UPDATE spaces SET space_type='public', allow_subscribers=1 WHERE id=?",
+        (space.id,),
+    )
+    epoch = (await stack.space_svc._writer_certs._keys.get_latest(space.id)).epoch
+    await _answer(stack, await _wanting(stack, space, "peer-b", cert_epoch=epoch))
+    assert _payloads(fed) == []
+    await _answer(
+        stack, await _wanting(stack, space, "peer-b", cert_epoch=epoch, key=True)
+    )
+    [sent] = _payloads(fed)
+    assert sent["payload"]["entries"] == []
+    assert "writer_key" in sent["payload"]
 
 
 # ─── v_49: a member household's leave reaches the host ────────────────────
@@ -12294,8 +12417,9 @@ async def test_an_upgrade_to_v90_delivers_the_writer_key(stack):
 
 async def test_turning_followers_on_pins_and_hands_out_the_writer_key(stack):
     """A global space that just became publicly readable gets a writer key
-    at once — the owner's epoch notice pins it at its GFSs and the member
-    households' roster snapshots carry it (no rotation needed)."""
+    at once — the owner's epoch notice pins it at its GFSs. The member
+    households ask for it (``key_wanted``) when they first publish: no
+    snapshot goes to every member household."""
     space, fed, remote, _pks = await _cert_space(stack, version=_V90)
     await stack.db.enqueue(
         "UPDATE spaces SET space_type='global', allow_subscribers=0 WHERE id=?",
@@ -12321,7 +12445,7 @@ async def test_turning_followers_on_pins_and_hands_out_the_writer_key(stack):
         for c in fed.send_with_mesh_fallback.await_args_list
         if c.kwargs.get("to_instance_id") == "peer-a"
     ]
-    assert any("writer_key" in kw["payload"] for kw in sent)
+    assert sent == []
 
 
 async def test_no_writer_key_below_v90(stack):
