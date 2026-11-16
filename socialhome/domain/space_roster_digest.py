@@ -15,10 +15,12 @@ canonical JSON list (:mod:`socialhome.canonical_json`), SHA-256. Names,
 keys and versions are left out.
 
 The repair snapshot carries the host's live seats and its recent
-tombstones, each merged by the usual per-entry rule (strictly newer wins);
-nothing is inferred from a seat it does not name. A mismatch it cannot
-heal (a seat only the member knows, a host-local departure the member
-missed) stays, its repairs backing off to one a day.
+tombstones (all of them on a consecutive repair), each merged by the usual
+per-entry rule (strictly newer wins). Only the host's OWN seats are
+inferred from absence (a complete snapshot names all of them); another
+household's seat it does not name stays. A mismatch it cannot heal (a seat
+only the member knows, a host restored from an older backup) stays, its
+repairs backing off to one a day.
 
 Wire shape (``roster_digest`` on the BEGIN): ``{"suite": ..., "digest":
 <64 hex>, "cert_epoch": <int|null>}`` — the writer-cert epoch the member

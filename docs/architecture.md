@@ -2599,8 +2599,10 @@ differs from the host's for it — never on the host's own timer, so with
 gossip working a roster repair costs zero envelopes (an older household's
 `roster_echo` is answered the same way); only an admitted BEGIN counts, and
 by one rule: a mismatch gets one snapshot (the host's live seats and its
-removals of the last 30 days, merged entry by entry — strictly newer wins,
-nothing inferred from a seat it does not name) unless one went to that
+removals of the last 30 days — every removal on a consecutive repair —
+merged entry by entry, strictly newer wins; a seat of the host's own
+household it does not name ends, any other household's seat is never
+inferred from absence) unless one went to that
 household within its cooldown — 30 min, doubling to a day on every
 consecutive mismatch — with at most two repair snapshots a minute per space
 and six host-wide, so a restart cannot burst — and a
