@@ -1124,13 +1124,18 @@ the compressed item (e logs ``refused a compressed item``), e sent JSON
 ### ``gfs-follower-comment`` — a follower comments under the switch; its cert comes on demand
 
 Needs ``gfs-invite-link`` (e holds a link-joined FOLLOWER seat on a's third,
-global space). a turns ``allow_subscriber_comment`` on — only the config
-event goes out. a posts; e (the follower) comments: the comment takes the
-host path (e holds no cert yet) and a holds it; e asks a for its own cert
-with one ``SPACE_CREDENTIALS_WANTED`` (never a sync) and stores a
-``follower_comment`` cert (e's ``space_keys``). e's second comment reaches a
-too. a turns the switch off: e's next comment never reaches a. The switch is
-left off (its default). Reads a's / e's DB (no REST bucket).
+global space). a opens the space to readers (``allow_subscribers``, left
+on: only a publicly readable space is published over a GFS, so only there
+does a household ask for a writer cert) and turns
+``allow_subscriber_comment`` on — only the config event goes out. a posts; e
+(the follower) comments: the comment takes the host path (e holds no cert
+yet) and a holds it; e asks a for its own cert with one
+``SPACE_CREDENTIALS_WANTED`` (e logs ``credentials: asking host``; never a
+sync) and stores a ``follower_comment`` cert and the writer group key (e's
+``space_keys``). e's second comment reaches a too and goes over the GFS
+(``POST /gfs/member-publish-anon`` 200 in the GFS log). a turns the switch
+off: e's next comment never reaches a. The comment switch is left off (its
+default). Reads a's / e's DB (no REST bucket).
 
 ### ``gfs-member-publish-strict`` — anonymous member publish (v_50; the one mode since v_90)
 

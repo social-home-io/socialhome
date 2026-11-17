@@ -9577,6 +9577,9 @@ def cmd_gfs_follower_comment() -> None:
     third (global) space (``gfs_invite_follower_space_id``).
 
     Sequence:
+    0. a opens the space to readers (``allow_subscribers``): only a publicly
+       readable space is published over a GFS, so only there is a writer
+       cert used (and asked for) at all.
     1. a turns ``allow_subscriber_comment`` on — the config event is all
        that goes out (no snapshot to every follower).
     2. a posts; e receives it.
@@ -9584,7 +9587,8 @@ def cmd_gfs_follower_comment() -> None:
        holds it, and e asks a for its cert with ONE
        ``SPACE_CREDENTIALS_WANTED`` (e's log) — never a sync.
     4. e stores a ``follower_comment`` cert (e's ``space_keys``).
-    5. e comments again; a holds that one too.
+    5. e comments again; a holds that one too, and e publishes it
+       anonymously over the GFS (the writer group key came with the cert).
     6. a turns the switch off; e's next comment is refused at a (a never
        holds it). The switch is left off (its default).
     """
@@ -9595,7 +9599,6 @@ def cmd_gfs_follower_comment() -> None:
     if not space_id:
         raise SystemExit("run 'gfs-invite-link' first (it seats e as a follower)")
     a = state["instances"]["a"]
-    e = state["instances"]["e"]
     a_base = f"http://127.0.0.1:{a['port']}"
 
     def _switch(on: bool) -> None:
@@ -9612,6 +9615,17 @@ def cmd_gfs_follower_comment() -> None:
             _rows("a", "SELECT 1 FROM space_post_comments WHERE id = ?", (comment_id,))
         )
 
+    # 0. The space takes readers: only a publicly readable space is
+    #    published over a GFS, so only there does a household use a writer
+    #    cert at all (elsewhere the host path carries every write and nobody
+    #    asks for one). Left on.
+    s, patched = _request(
+        f"{a_base}/api/spaces/{space_id}",
+        token=a["token"],
+        method="PATCH",
+        body={"features": {"allow_subscribers": True}},
+    )
+    _must("a opens the follower space to readers", s, patched, ok=(200,))
     # 1–2.
     _switch(True)
     s, post = _request(
@@ -9623,6 +9637,14 @@ def cmd_gfs_follower_comment() -> None:
     post_id = _must("a posts in the follower space", s, post, ok=(201,))["id"]
     _await_space_post(state, "e", space_id, post_id)
     e_log = _log_size("e")
+    # A re-run finds the cert of the first run (it lives 24 h): no new ask.
+    had_cert = bool(
+        _rows(
+            "e",
+            "SELECT 1 FROM space_keys WHERE space_id = ? AND writer_cert IS NOT NULL",
+            (space_id,),
+        )
+    )
 
     def _comment(text: str) -> str:
         st, body = _e_request(
@@ -9656,7 +9678,12 @@ def cmd_gfs_follower_comment() -> None:
             f"gfs-follower-comment: e stored {rows[0][0]!r}, expected a "
             "follower_comment cert"
         )
-    asks = _log_lines_matching("e", "space_credentials_wanted", offset=e_log)
+    asks = _log_lines_matching("e", "credentials: asking host", offset=e_log)
+    if not asks and not had_cert:
+        raise SystemExit(
+            "gfs-follower-comment: e holds a cert but its log shows no "
+            "'credentials: asking host' line — it did not come on demand"
+        )
     begins = [
         line
         for line in _log_lines_matching("e", "SPACE_SYNC_BEGIN", offset=e_log)
@@ -9665,7 +9692,16 @@ def cmd_gfs_follower_comment() -> None:
     print(f"  e asked for its cert ({len(asks)} log line(s)); no sync BEGIN for it ✓")
     if begins:
         print(f"  (note: {len(begins)} BEGIN line(s) for the space — periodic sync)")
-    # 5.
+    # 5. The writer group key came with the cert: the second comment is
+    #    also published anonymously over the GFS, under the follower cert.
+    _poll_rows(
+        "e",
+        "SELECT 1 FROM space_keys WHERE space_id = ? AND writer_key IS NOT NULL",
+        (space_id,),
+        bool,
+        what="e never stored the writer group key that rides with its cert",
+    )
+    gfs_off = _gfs_log_size()
     second = _comment(f"A follower's second comment — {time.time_ns()}")
     _poll_rows(
         "a",
@@ -9674,6 +9710,25 @@ def cmd_gfs_follower_comment() -> None:
         bool,
         what="a never held e's second follower comment",
     )
+    deadline = time.monotonic() + 30.0
+    anon: list[str] = []
+    while time.monotonic() < deadline and not anon:
+        anon = [
+            line
+            for line in _gfs_log_lines_matching(
+                "/gfs/member-publish-anon", offset=gfs_off
+            )
+            if "POST" in line and '" 200 ' in line
+        ]
+        if not anon:
+            time.sleep(2.0)
+    if not anon:
+        raise SystemExit(
+            "gfs-follower-comment: e's second comment was not published over "
+            f"the GFS. Check {_instance_dir('e') / 'log.txt'} for "
+            "'gfs.member_publish'."
+        )
+    print("  e's second comment went over the GFS under its follower cert ✓")
     # 6. Switch off: refused at the host.
     _switch(False)
     time.sleep(5.0)

@@ -2827,7 +2827,19 @@ class SpaceService(
         if not await self._federation.space_member_supports(
             host, min_version=FederationCapability.MIN_FOR_CREDENTIALS_WANTED
         ):
+            log.info(
+                "credentials: host %s of %s does not answer asks yet — not asked",
+                host,
+                event.space_id,
+            )
             return
+        log.info(
+            "credentials: asking host %s for %s (cert=%s key=%s)",
+            host,
+            event.space_id,
+            cert_wanted,
+            key_wanted,
+        )
         try:
             await self._federation.send_with_mesh_fallback(
                 to_instance_id=host,
