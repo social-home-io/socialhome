@@ -24,6 +24,7 @@ import pytest
 
 from socialhome.app_keys import federation_service_key
 from socialhome.domain.calendar import CalendarEvent
+from socialhome.domain.federation import DeliveryResult
 from socialhome.domain.federation import FederationEventType as FET
 from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.post import Post, PostType
@@ -90,6 +91,21 @@ async def _helper_household(app, db, tmp_dir, monkeypatch) -> list[dict]:
         sent.append({"to": to_instance_id, "type": event_type, "payload": payload})
 
     monkeypatch.setattr(type(app[federation_service_key]), "send_event", _send_event)
+
+    async def _routed(self, *, to_instance_id, event_type, payload, space_id=None):
+        # The replay's route (direct, mesh or mailbox): recorded the same.
+        await _send_event(
+            self,
+            to_instance_id=to_instance_id,
+            event_type=event_type,
+            payload=payload,
+            space_id=space_id,
+        )
+        return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+    monkeypatch.setattr(
+        type(app[federation_service_key]), "send_with_mesh_fallback", _routed
+    )
     return sent
 
 
@@ -146,8 +162,11 @@ class _Mesh:
     async def space_member_supports(self, instance_id, *, min_version):
         return True
 
-    async def send_event(self, *, to_instance_id, event_type, payload, space_id=None):
+    async def send_with_mesh_fallback(
+        self, *, to_instance_id, event_type, payload, space_id=None
+    ):
         self.sent.append((event_type, payload))
+        return DeliveryResult(instance_id=to_instance_id, ok=True)
 
 
 class _HelperPosts:

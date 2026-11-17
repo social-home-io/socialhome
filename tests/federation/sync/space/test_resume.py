@@ -81,6 +81,18 @@ class _FakeFederation:
     async def send_with_mesh_fallback(
         self, *, to_instance_id, event_type, payload, space_id=None
     ):
+        if event_type is not FederationEventType.SPACE_SYNC_RESUME:
+            # A replayed row: the direct send when the path reaches it.
+            if self.route_ok:
+                await self.send_event(
+                    to_instance_id=to_instance_id,
+                    event_type=event_type,
+                    payload=payload,
+                    space_id=space_id,
+                )
+            return SimpleNamespace(
+                ok=self.route_ok, error=None if self.route_ok else "no_route"
+            )
         self.routed.append(
             {
                 "to": to_instance_id,
@@ -1846,3 +1858,29 @@ async def test_a_calendar_events_feed_card_is_never_replayed(provider_factory):
         for s in fed.sent
         if s["type"] is FederationEventType.SPACE_CALENDAR_EVENT_CREATED
     ] == ["ev-0"]
+
+
+async def test_a_replay_takes_the_route_the_request_came_by(provider_factory):
+    """The requester may be a member household we are not paired with
+    (reached over the mesh, or at its GFS mailbox): the rows go out the way
+    the request does (``send_with_mesh_fallback``), not by a direct send
+    that needs a pairing — and only the rows that found a path count."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    posts = [_post(i, base + timedelta(minutes=i + 1)) for i in range(2)]
+    provider, fed, _ = provider_factory(posts=posts, members=["peer-a"])
+    calls: list[str] = []
+    routed = fed.send_with_mesh_fallback
+
+    async def _spy(**kw):
+        calls.append(kw["payload"]["id"])
+        return await routed(**kw)
+
+    fed.send_with_mesh_fallback = _spy
+    request = _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    assert await provider.handle_request(request) == 2
+    assert calls == ["p-0", "p-1"]
+
+    unreachable, fed2, _ = provider_factory(posts=posts, members=["peer-a"])
+    fed2.route_ok = False
+    assert await unreachable.handle_request(request) == 0
+    assert fed2.sent == []

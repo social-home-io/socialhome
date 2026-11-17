@@ -12,12 +12,13 @@ from __future__ import annotations
 import copy
 import hashlib
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time
 from enum import StrEnum
 from typing import Any
 
 from .link_preview import LinkPreview, link_preview_to_dict
+from .media_constraints import space_media_ref
 
 # ─── Core enums ───────────────────────────────────────────────────────────
 
@@ -818,4 +819,58 @@ def post_to_wire_dict(post: Post, space_id: str) -> dict[str, Any]:
             "original_name": post.file_meta.original_name,
             "size_bytes": post.file_meta.size_bytes,
         }
+    # When the words were last edited (tz-aware; a stored stamp is naive
+    # UTC) — only on an edited post, so a new post's payload is unchanged.
+    # A receiver that holds the post orders this copy against its own by
+    # it (:func:`keep_newer_edit`); older receivers ignore the key.
+    if post.edited_at is not None:
+        payload["edited_at"] = _as_utc(post.edited_at).isoformat()
     return payload
+
+
+def _as_utc(stamp: datetime) -> datetime:
+    """*stamp* tz-aware; a naive one is UTC (every stored stamp is)."""
+    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
+
+
+def keep_newer_edit(incoming: Post, held: Post) -> Post:
+    """*incoming* — another copy of the post *held* here (a re-sent
+    ``SPACE_POST_CREATED``, the host's §25.6 record) — with what an edit
+    writes (the words, the link card, the stamp) taken from whichever copy
+    was edited last. Last writer wins on ``edited_at``:
+
+    * the held row was edited and *incoming* is not newer (it was never
+      edited, or earlier): the held words stay — a provider that missed
+      the edit cannot bring the old ones back;
+    * otherwise *incoming* as it is: the same words, or an edit this
+      household missed, with its stamp."""
+    if held.edited_at is None:
+        return incoming
+    if incoming.edited_at is not None and _as_utc(incoming.edited_at) > _as_utc(
+        held.edited_at
+    ):
+        return incoming
+    return replace(
+        incoming,
+        content=held.content,
+        link_preview=held.link_preview,
+        edited_at=held.edited_at,
+    )
+
+
+def file_meta_from_wire(raw: object) -> FileMeta | None:
+    """A received post's file attachment (a live payload's or a §25.6
+    record's ``file_meta``), kept only when its ``url`` is a space file
+    (:func:`~.media_constraints.space_media_ref` — never a name another
+    receiving path owns, a foreign URL or junk), normalised. A file post
+    means nothing without its file, so a refused url drops the whole
+    attachment (the registry's ``parent_requires``)."""
+    if not isinstance(raw, dict):
+        return None
+    url = space_media_ref(raw.get("url"))
+    if url is None:
+        return None
+    try:
+        return FileMeta(**{**raw, "url": url})
+    except TypeError:
+        return None

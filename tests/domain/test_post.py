@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, time
 
 import pytest
@@ -27,6 +28,8 @@ from socialhome.domain.post import (
     PostType,
     SchedulePoll,
     ScheduleSlot,
+    file_meta_from_wire,
+    keep_newer_edit,
     poll_closes_at_from_wire,
     poll_deadline_passed,
     poll_option_id,
@@ -359,3 +362,65 @@ def test_post_to_wire_dict_adds_the_optional_blocks_only_when_set():
     )
     assert plain["occurred_at"] is None
     assert not {"file_meta", "location", "link_preview", "linked_event_id"} & set(plain)
+
+
+def test_post_to_wire_dict_carries_the_edit_stamp_of_an_edited_post_only():
+    """Tz-aware on the wire (a stored stamp is naive UTC); a post never
+    edited sends no key, so a new post's payload is what it always was."""
+    base = Post(
+        id="p-1",
+        author="alice",
+        type=PostType.TEXT,
+        created_at=datetime(2026, 4, 1, tzinfo=UTC),
+    )
+    assert "edited_at" not in post_to_wire_dict(base, "sp-1")
+    for stamp in (datetime(2026, 4, 2, 10), datetime(2026, 4, 2, 10, tzinfo=UTC)):
+        wire = post_to_wire_dict(replace(base, edited_at=stamp), "sp-1")
+        assert wire["edited_at"] == "2026-04-02T10:00:00+00:00"
+
+
+def _words(content: str, edited_at: datetime | None = None) -> Post:
+    return Post(
+        id="p-1",
+        author="alice",
+        type=PostType.TEXT,
+        created_at=datetime(2026, 4, 1, tzinfo=UTC),
+        content=content,
+        edited_at=edited_at,
+        link_preview=LinkPreview(url=f"https://example.com/{content}"),
+    )
+
+
+def test_keep_newer_edit_is_last_writer_wins_on_the_edit_stamp():
+    ten = datetime(2026, 4, 2, 10, tzinfo=UTC)
+    nine_naive = datetime(2026, 4, 2, 9)  # a stored stamp: naive UTC
+    # Held never edited: the copy as it is (with an edit we missed).
+    assert keep_newer_edit(_words("new", ten), _words("old")).content == "new"
+    assert keep_newer_edit(_words("copy"), _words("held")).content == "copy"
+    # Held edited, the copy older or never edited: the held words stay.
+    for stale in (_words("stale"), _words("stale", nine_naive), _words("stale", ten)):
+        kept = keep_newer_edit(stale, _words("held", ten))
+        assert (kept.content, kept.edited_at) == ("held", ten)
+        assert kept.link_preview.url == "https://example.com/held"
+    # Held edited, the copy newer: the copy.
+    newer = keep_newer_edit(_words("new", ten), _words("held", nine_naive))
+    assert (newer.content, newer.edited_at) == ("new", ten)
+
+
+def test_file_meta_from_wire_keeps_only_a_space_file():
+    meta = {
+        "url": "api/media/doc.pdf",
+        "mime_type": "application/pdf",
+        "original_name": "doc.pdf",
+        "size_bytes": 7,
+    }
+    assert file_meta_from_wire(meta) == FileMeta(**meta)
+    for bad in (
+        None,
+        "x",
+        {**meta, "url": "https://example.com/doc.pdf"},
+        {**meta, "url": "api/media/dm-stolen.pdf"},
+        {**meta, "surprise": 1},
+        {"url": "api/media/doc.pdf"},
+    ):
+        assert file_meta_from_wire(bad) is None

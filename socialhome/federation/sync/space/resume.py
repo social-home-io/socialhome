@@ -54,10 +54,12 @@ picture, the file attachment, the feed flag), a calendar event too
 (:func:`~socialhome.domain.calendar.calendar_event_to_wire_dict` — its
 time zone, location and whether it is announced in the feed: a receiver
 reads an absent flag as "announce"), and a post, comment, calendar event
-or gallery item with files carries their hashes (v_85 ``files``, as the live senders attach them), so
-the receiver stores them under the content names every other path gives
-them. A mirror of a post's media in the system "Posts" album is never
-replayed (the repo leaves it out): each household rebuilds its own.
+or gallery item with files carries their hashes (v_85 ``files``, as the
+live senders attach them), so the receiver stores them under the content
+names every other path gives them. A mirror of a post's media in the
+system "Posts" album is never replayed (the repo leaves it out), nor a
+calendar event's feed card: each household rebuilds its own. The rows go
+out the way the request came (``send_with_mesh_fallback``).
 """
 
 from __future__ import annotations
@@ -1056,13 +1058,15 @@ class SpaceSyncResumeProvider(FileHashesMixin):
                 if urls and hashed:
                     payload = await self._with_file_hashes(payload, urls)
             try:
-                await self._federation.send_event(
+                # The way the request came: direct to a paired household,
+                # over the mesh or to its GFS mailbox otherwise — a member
+                # we are not paired with asked us too.
+                result = await self._federation.send_with_mesh_fallback(
                     to_instance_id=to,
                     event_type=event_type,
                     payload=payload,
                     space_id=space_id,
                 )
-                sent += 1
             except Exception as exc:  # pragma: no cover — defensive
                 log.debug(
                     "SPACE_SYNC_RESUME %s replay to %s failed: %s",
@@ -1070,6 +1074,16 @@ class SpaceSyncResumeProvider(FileHashesMixin):
                     to,
                     exc,
                     exc_info=True,
+                )
+                continue
+            if result.ok:
+                sent += 1
+            else:
+                log.debug(
+                    "SPACE_SYNC_RESUME %s replay to %s not delivered: %s",
+                    event_type,
+                    to,
+                    result.error,
                 )
         return sent
 

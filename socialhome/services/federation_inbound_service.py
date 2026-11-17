@@ -104,6 +104,8 @@ from ..domain.post import (
     LocationData,
     Post,
     PostType,
+    file_meta_from_wire,
+    keep_newer_edit,
 )
 from ..domain.presence import truncate_coord
 from ..domain.space import (
@@ -118,6 +120,7 @@ from ..domain.space_item import (
     item_stamp,
     reaction_emoji_ok,
     stamp_to_db,
+    stored_stamp,
 )
 from ..domain.space_media_fields import item_media_urls
 from ..domain.space_media_ref import (
@@ -2080,14 +2083,16 @@ class FederationInboundService(ProtectionGateMixin):
                 deleted=row.deleted,
                 moderated=row.moderated,
                 hidden_from_feed=row.hidden_from_feed,
-                # What no create carries (or this handler reads from one):
-                # the row's edit stamp, its "no link card" choice and its
-                # file attachment came from an edit or the host's §25.6
-                # stream — a re-sent create (a resume replay) keeps them.
-                edited_at=row.edited_at,
+                # The "no link card" choice never travels, and a copy
+                # without the file attachment (an older sender's) keeps
+                # the one held.
                 no_link_preview=row.no_link_preview,
-                file_meta=row.file_meta,
+                file_meta=post.file_meta or row.file_meta,
             )
+            # Last writer wins on ``edited_at``: a re-sent create (a resume
+            # replay) from a household that missed an edit never brings the
+            # old words back, and one that carries a newer edit brings it.
+            post = keep_newer_edit(post, row)
         elif not await authorship.may_author(event, space_id, post.author):
             await authorship.hold_or_refuse(
                 event,
@@ -5686,7 +5691,14 @@ class FederationInboundService(ProtectionGateMixin):
             # (``api/media/<name>``), never a reserved (DM / moment) name;
             # anything else is dropped.
             media_url=space_media_ref(payload.get("media_url")),
-            file_meta=None,
+            # The file attachment, past the §5.2 gate
+            # (``_validate_inbound_media`` strips a non-conforming one) —
+            # a space file only, like the §25.6 stream's.
+            file_meta=file_meta_from_wire(payload.get("file_meta")),
+            # v_49 shape, on an edited post only: when the words were last
+            # edited (no more than the live skew ahead of our clock — a
+            # far-future stamp would block every later edit).
+            edited_at=stored_stamp(payload.get("edited_at")),
             location=location,
             created_at=parse_iso8601_lenient(payload.get("occurred_at")),
             # Mirror the host's feed visibility. Absent on an older sender
