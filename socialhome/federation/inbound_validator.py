@@ -1395,6 +1395,10 @@ async def _sender_hosts_space(
 #: do.
 _SUBSCRIBER_OPT_INS: dict[FederationEventType, tuple[str, str]] = {
     FederationEventType.SPACE_COMMENT_CREATED: ("author", "allow_subscriber_comment"),
+    #: A follower's edit / delete of its own comment follows the same switch
+    #: (the handler checks the comment is the sending household's own).
+    FederationEventType.SPACE_COMMENT_UPDATED: ("author", "allow_subscriber_comment"),
+    FederationEventType.SPACE_COMMENT_DELETED: ("author", "allow_subscriber_comment"),
     #: v_93 — a follower's reaction on a space post.
     FederationEventType.SPACE_POST_REACTION: ("user_id", "allow_subscriber_react"),
 }

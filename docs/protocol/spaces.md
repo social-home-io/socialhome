@@ -448,11 +448,16 @@ The rule, precisely:
   editing or deleting somebody else's row is a write. The classification
   is exhaustive over the enum and pinned by a test, so a new space event
   type is refused-by-default until somebody classifies it.
-- **Two opt-ins:** `SPACE_COMMENT_CREATED`, when the space has
+- **Two opt-ins:** `SPACE_COMMENT_CREATED` — and a follower's edit /
+  delete of its own comment, `SPACE_COMMENT_UPDATED` / `SPACE_COMMENT_DELETED`
+  (their payload names the comment's `author`; the handler checks the
+  comment is the sender household's own) — when the space has
   `allow_subscriber_comment` on, and (v_93) `SPACE_POST_REACTION`, when it
   has `allow_subscriber_react` on — each only when the payload's acting
   user (`author` / `user_id`) names a live `subscriber` seat of that same
-  household. Neither flag covers the other's event. Reactions on space
+  household. Neither flag covers the other's event. The GFS-relayed
+  `space_item` path follows the same switches for the same items
+  (`comment`, `comment_edit`, `comment_delete`; `reaction_*`). Reactions on space
   posts reach every member household since v_93 — see
   [feeds.md](./feeds.md#reactions-on-space-posts-v_93).
 - **A household the receiver holds no roster row for is not a writer** —

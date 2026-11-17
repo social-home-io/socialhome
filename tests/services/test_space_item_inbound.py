@@ -947,3 +947,30 @@ async def test_a_relayed_comments_hashes_moved_to_another_comment_are_ignored(en
     assert await _apply(env, "comment", moved)
     stored = await env["posts"].get_comment(other)
     assert stored.media_url == "api/media/x.webp"
+
+
+@pytest.mark.parametrize("kind", ["comment_edit", "comment_delete"])
+async def test_a_follower_edit_or_delete_over_the_gfs_follows_the_comment_switch(
+    env, kind
+):
+    """S2 (#1375 review): a follower's edit / delete of its own comment was
+    admitted with the switch off (``subscriber_ok=True``) — for 24 h it could
+    rewrite its comments at every member household. It follows the comment
+    switch like a create."""
+    cid = _cid()
+    await _switches(env, comment=True, react=False)
+    assert await _apply(
+        env,
+        "comment",
+        _comment(env, cid),
+        cert_scope="follower",
+        member=True,
+        authorship=_FollowerSeat(),
+    )
+    await _switches(env, comment=False, react=False)
+    seats = _FollowerSeat()
+    change = _inner(kind, cid, env["post_id"], content="rewritten", created_at=_ts(5))
+    assert not await _apply(
+        env, kind, change, cert_scope="follower", member=True, authorship=seats
+    )
+    assert seats.calls and all(not kw["subscriber_ok"] for _k, kw in seats.calls)

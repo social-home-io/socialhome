@@ -1442,6 +1442,32 @@ async def test_space_writer_allows_a_comment_only_with_the_opt_in():
     assert allowed.early_response is None
 
 
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.SPACE_COMMENT_UPDATED,
+        FederationEventType.SPACE_COMMENT_DELETED,
+    ],
+)
+async def test_a_follower_edits_or_deletes_its_comment_only_with_the_opt_in(
+    event_type,
+):
+    """S2 (#1375 review): a follower's own comment edit / delete follows the
+    comment switch exactly like its create, on the direct path as on the GFS
+    path — refused with the switch off, allowed with it on (the handler
+    still checks the comment is the sender household's own)."""
+    payload = {
+        "id": "c-1",
+        "comment_id": "c-1",
+        "post_id": "p1",
+        "author": "u-follower",
+    }
+    blocked = await _run(_writer_step(allow_comment=False), event_type, payload)
+    assert blocked.drop_reason == REFUSED
+    allowed = await _run(_writer_step(allow_comment=True), event_type, payload)
+    assert allowed.early_response is None
+
+
 async def test_space_writer_binds_the_comment_opt_in_to_a_real_seat():
     """Even under the opt-in the author must name a LIVE ``subscriber``
     seat of that same household — otherwise the exception would be the

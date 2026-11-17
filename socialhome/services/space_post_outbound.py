@@ -787,6 +787,9 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             "content": c.content,
             # Receivers order a comment's edits by it (last writer wins).
             "edited_at": datetime.now(UTC).isoformat(),
+            # The comment's author: a follower's own edit passes the §24.11
+            # writer gate only under the comment switch, bound to its seat.
+            "author": c.author,
         }
         try:
             await self._federation.broadcast_to_space_members(
@@ -828,6 +831,9 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             "post_id": event.post_id,
             "space_id": event.space_id,
         }
+        if event.author_user_id:
+            # As for an edit: a follower's own delete is bound to its seat.
+            payload["author"] = event.author_user_id
         try:
             await self._federation.broadcast_to_space_members(
                 event.space_id,

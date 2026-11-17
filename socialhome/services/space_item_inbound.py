@@ -546,7 +546,9 @@ class SpaceItemInbound:
         if comment.deleted or comment.type is not CommentType.TEXT:
             log.debug("space_item: comment %s deleted or not text — edit dropped", cid)
             return False
-        if not await self._seat_ok(item, subscriber_ok=True):
+        if not await self._seat_ok(
+            item, subscriber_ok=item.space.features.allow_subscriber_comment
+        ):
             return False
         if not await self._posts.edit_comment(
             cid,
@@ -595,7 +597,9 @@ class SpaceItemInbound:
             return False
         if comment.deleted:
             return False
-        if not await self._seat_ok(item, subscriber_ok=True):
+        if not await self._seat_ok(
+            item, subscriber_ok=item.space.features.allow_subscriber_comment
+        ):
             return False
         if not await self._posts.soft_delete_comment(cid, space_id=item.space.id):
             return False
@@ -625,7 +629,9 @@ class SpaceItemInbound:
                 cid,
             )
             return False
-        await self._await_post(item, subscriber_ok=True)
+        await self._await_post(
+            item, subscriber_ok=item.space.features.allow_subscriber_comment
+        )
         post = await self._post_here(item.post_id, item)
         if post is None:
             log.info(
@@ -634,7 +640,9 @@ class SpaceItemInbound:
                 cid,
             )
             return False
-        if not await self._seat_ok(item, subscriber_ok=True):
+        if not await self._seat_ok(
+            item, subscriber_ok=item.space.features.allow_subscriber_comment
+        ):
             return False
         tombstone = Comment(
             id=cid,
