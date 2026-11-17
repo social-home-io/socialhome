@@ -505,17 +505,36 @@ def _issued(pk: bytes = OWN_PK, **over) -> dict:
     return sign_writer_cert(**kw).to_wire()
 
 
-async def test_a_wanted_cert_is_asked_for_once_and_cleared_on_arrival():
-    """On demand: ``want`` says "new" once; the cert's arrival clears it."""
+async def test_an_unanswered_ask_is_retried_with_a_bounded_backoff(monkeypatch):
+    """B2 (#1375 review): ``want`` said "ask" once and cleared only on
+    store, so an ask that went unanswered was never repeated until a
+    restart. It is due again after 10 min, then 20, 40 … up to 6 h; the
+    credential's arrival clears it (and the backoff)."""
+    now = [1000.0]
+    monkeypatch.setattr(wcs_mod.time, "monotonic", lambda: now[0])
     svc, _keys = _svc(seed=None)
     assert svc.wanted("sp-1") == (False, False)
     assert svc.want("sp-1", cert=True) is True
     assert svc.want("sp-1", cert=True) is False
-    assert svc.want("sp-1", key=True) is True
+    asked = []
+    for _ in range(8):
+        now[0] += 60
+        if svc.want("sp-1", cert=True):
+            asked.append(now[0])
+    assert asked == []
+    gaps = []
+    last = 1000.0
+    for _ in range(60 * 60):  # 60 h in minutes
+        now[0] += 60
+        if svc.want("sp-1", cert=True):
+            gaps.append(round((now[0] - last) / 60))
+            last = now[0]
+    assert gaps[:5] == [10, 20, 40, 80, 160]
+    assert max(gaps) == 360
+    assert svc.want("sp-1", key=True) is False  # one ask carries both
     assert svc.wanted("sp-1") == (True, True)
     assert await svc.accept("sp-1", _issued()) is True
     assert svc.wanted("sp-1") == (False, True)
-    assert svc.want("sp-1") is False
 
 
 async def test_accept_stores_a_valid_cert_for_us():

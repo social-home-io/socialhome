@@ -95,7 +95,6 @@ from typing import TYPE_CHECKING, Protocol
 from ....domain.events import (
     PairingConfirmed,
     SpaceAuthorityEchoDue,
-    SpaceCredentialsWanted,
     SpaceInviteAnswered,
     SpaceSyncComplete,
     SpaceSyncDeferred,
@@ -542,7 +541,6 @@ class SpaceSyncScheduler:
         self._bus.subscribe(PairingConfirmed, self._on_pairing_confirmed)
         self._bus.subscribe(SpaceSyncComplete, self._on_space_sync_complete)
         self._bus.subscribe(SpaceAuthorityEchoDue, self._on_authority_echo_due)
-        self._bus.subscribe(SpaceCredentialsWanted, self._on_credentials_wanted)
         self._bus.subscribe(SpaceSyncDeferred, self._on_sync_deferred)
         self._bus.subscribe(SpaceInviteAnswered, self._on_invite_answered)
 
@@ -622,25 +620,6 @@ class SpaceSyncScheduler:
             # Every member BEGIN to the host carries the digest: one without
             # it from this version asks for no roster repair.
             roster_digest=await self._roster_digest_for(event.space_id, owner),
-        )
-
-    async def _on_credentials_wanted(self, event: SpaceCredentialsWanted) -> None:
-        """On demand: ask the host for our writer cert / key now — one BEGIN
-        whose roster digest says what we want (the host answers with the
-        credentials alone). Bounded at the host by its sync admission and
-        its repair cooldown and budget."""
-        host = event.host_instance_id
-        if not host or host == self._own_instance_id:
-            return
-        if await self._federation.is_confirmed_peer(host):
-            await self.enqueue_sync_for_space(
-                space_id=event.space_id, peer_instance_id=host, priority=P4_DM
-            )
-            return
-        await self._federation.begin_mesh_catchup_sync(
-            space_id=event.space_id,
-            host_instance_id=host,
-            roster_digest=await self._roster_digest_for(event.space_id, host),
         )
 
     async def _on_space_sync_complete(self, event: SpaceSyncComplete) -> None:
@@ -1473,8 +1452,10 @@ class SpaceSyncScheduler:
         )
         # A GLOBAL space is synced like any other for its members (a
         # household seated from an invite link included) — but never for a
-        # household that only follows it: the GFS shields followers from
-        # hosts, so a follower must not BEGIN the host or ask a helper.
+        # household that only follows it: it reads through the GFS, so a
+        # follower never BEGINs the host or asks a helper. (A seated
+        # follower asks its host for its own credentials with
+        # ``SPACE_CREDENTIALS_WANTED`` — not a sync.)
         for space in await self._space_repo.list_by_type(SpaceType.GLOBAL):
             if await self._holds_member_seat(space):
                 spaces.append(space)

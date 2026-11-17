@@ -135,6 +135,12 @@ PeerPayloadHook = Callable[[str, dict], Awaitable[dict]]
 #: needs no seed holder online (an expiry on the cert itself would).
 WRITER_CERT_EPOCH_GRACE_S: int = 600
 
+#: Member side: an ask for our credentials that went unanswered is repeated
+#: after this (the host answers at most once per 10 min), doubling up to
+#: :data:`CREDENTIALS_RETRY_MAX_S` — and only while someone still writes.
+CREDENTIALS_RETRY_S: float = 10 * 60
+CREDENTIALS_RETRY_MAX_S: float = 6 * 60 * 60
+
 #: Ordering of scopes for "did this household's rights get weaker?".
 _SCOPE_RANK: dict[str | None, int] = {
     None: 0,
@@ -185,6 +191,7 @@ class SpaceWriterCertService:
     """Writer-cert issuer (seed holders) and holder (every household)."""
 
     __slots__ = (
+        "_asked",
         "_channels",
         "_federation",
         "_kek",
@@ -223,6 +230,8 @@ class SpaceWriterCertService:
         #: (``"cert"`` / ``"key"``), until it arrives. In memory: a restart
         #: asks again on the next write.
         self._wanted: dict[str, set[str]] = {}
+        #: Member side — space → (when the next ask is due, its backoff).
+        self._asked: dict[str, tuple[float, float]] = {}
         #: v_51 — the private-space channel service (grants ride the same
         #: per-peer payloads as certs). ``None`` → no channel grants.
         self._channels: GfsChannelService | None = None
@@ -620,7 +629,7 @@ class SpaceWriterCertService:
         )
         stored = await self._keys.set_writer_key(space_id, grant.epoch, wrapped)
         if stored:
-            self._wanted.get(space_id, set()).discard("key")
+            self._got(space_id, "key")
         if not stored:
             log.info(
                 "writer key for space %s epoch %d: no key for that epoch — dropped",
@@ -728,7 +737,7 @@ class SpaceWriterCertService:
             orjson.dumps(cert.to_wire(), option=orjson.OPT_SORT_KEYS).decode(),
         )
         if stored:
-            self._wanted.get(space_id, set()).discard("cert")
+            self._got(space_id, "cert")
         if not stored:
             log.info(
                 "writer cert for space %s epoch %d: no key for that epoch — dropped",
@@ -739,16 +748,34 @@ class SpaceWriterCertService:
 
     def want(self, space_id: str, *, cert: bool = False, key: bool = False) -> bool:
         """Member side: note that this household wants its writer *cert* /
-        writer group *key* for *space_id* from its host (asked on the next
-        sync BEGIN). ``True`` when something new is wanted — the caller then
-        asks now; ``False`` when it was asked for already."""
+        writer group *key* for *space_id* from its host. ``True`` when the
+        caller should ask now (``SPACE_CREDENTIALS_WANTED``, carrying
+        everything wanted): never asked yet, or the last ask went unanswered
+        for :data:`CREDENTIALS_RETRY_S`, doubling to
+        :data:`CREDENTIALS_RETRY_MAX_S`. The credential's arrival clears it."""
         new = {w for w, on in (("cert", cert), ("key", key)) if on}
         held = self._wanted.setdefault(space_id, set())
-        fresh = bool(new - held)
         held |= new
         if not held:
             del self._wanted[space_id]
-        return fresh
+            return False
+        now = time.monotonic()
+        due_at, backoff = self._asked.get(space_id, (now, CREDENTIALS_RETRY_S / 2))
+        if now < due_at:
+            return False
+        backoff = min(backoff * 2, CREDENTIALS_RETRY_MAX_S)
+        self._asked[space_id] = (now + backoff, backoff)
+        return True
+
+    def _got(self, space_id: str, what: str) -> None:
+        """A wanted credential arrived: nothing more to ask for it."""
+        held = self._wanted.get(space_id)
+        if held is None:
+            return
+        held.discard(what)
+        if not held:
+            del self._wanted[space_id]
+            self._asked.pop(space_id, None)
 
     def wanted(self, space_id: str) -> tuple[bool, bool]:
         """``(cert wanted, key wanted)`` for *space_id*."""

@@ -130,6 +130,7 @@ from ..domain.events import (
     RemoteJoinRequestApproved,
     SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
+    SpaceCredentialsWanted,
     SpaceInviteAnswered,
     SpaceJoinApproved,
     SpaceJoinDenied,
@@ -512,6 +513,11 @@ ROSTER_REPAIR_PER_SPACE_PER_MINUTE: int = 2
 #: the window — its LEFT gossip left the outbox after 7 days — still learns
 #: of a kick.
 ROSTER_TOMBSTONE_WINDOW_S: float = 30 * 24 * 60 * 60
+#: At most one answer to a household's ``SPACE_CREDENTIALS_WANTED`` per
+#: space in this window (no doubling): a renewal a day, or a second ask after
+#: a switch change, is answered; a household cannot make us build more than
+#: one small snapshot per 10 min.
+CREDENTIALS_ANSWER_INTERVAL_S: float = 10 * 60
 #: A malformed or unknown-suite digest is logged at most once per (space,
 #: household) in this window.
 ROSTER_REFUSAL_LOG_S: float = 60 * 60
@@ -632,6 +638,7 @@ class SpaceService(
         "_bus",
         "_child_protection",
         "_covers",
+        "_credentials_answered",
         "_federation",
         "_federation_repo",
         "_gallery",
@@ -722,6 +729,9 @@ class SpaceService(
         self._roster_repairs: dict[str, dict[str, _RosterRepair]] = {}
         #: Host side — (space, household) repairs being sent right now.
         self._roster_inflight: set[tuple[str, str]] = set()
+        #: Host side — space → household → when its last credentials ask
+        #: was answered (:data:`CREDENTIALS_ANSWER_INTERVAL_S`).
+        self._credentials_answered: dict[str, dict[str, float]] = {}
         #: Host side — space → household → when its refused digest was
         #: last logged (:data:`ROSTER_REFUSAL_LOG_S`).
         self._roster_refused: dict[str, dict[str, float]] = {}
@@ -904,6 +914,8 @@ class SpaceService(
         forward-secrecy rekey then carry each household its own cert."""
         self._writer_certs = writer_certs
         self._bus.subscribe(SpaceRemoteSeatLive, self._reissue_cert_on_new_seat)
+        # A household that needs its cert / writer key asks its host.
+        self._bus.subscribe(SpaceCredentialsWanted, self.ask_host_for_credentials)
 
     async def _reissue_cert_on_new_seat(self, event: SpaceRemoteSeatLive) -> None:
         """v_49 v2 — a user just took a seat in a household that already
@@ -2316,6 +2328,7 @@ class SpaceService(
         for book in (
             self._roster_repairs.get(space_id, {}),
             self._roster_refused.get(space_id, {}),
+            self._credentials_answered.get(space_id, {}),
         ):
             for inst in [i for i in book if i not in members]:
                 del book[inst]
@@ -2338,17 +2351,16 @@ class SpaceService(
                     space, sender, right=False, took=False, known_version=None
                 )
                 return
-            # The roster is right: at most the household's own credentials
-            # are missing — they go alone (no roster entry). A member's cert
-            # behind ours goes unasked; a follower household's only when it
-            # asks (``cert_wanted``: on demand, its people comment / react);
-            # the writer group key when asked (``key_wanted``).
-            follower = await self._follower_household(space.id, sender)
-            wants = host_epoch is not None and (
-                digest.cert_wanted if follower else digest.cert_epoch != host_epoch
+            # The roster is right: at most a MEMBER household's cert is
+            # behind ours — it goes alone (no roster entry). A follower
+            # household asks for its cert itself, and any household for the
+            # writer group key, with ``SPACE_CREDENTIALS_WANTED``
+            # (:meth:`on_credentials_wanted`).
+            wants = (
+                host_epoch is not None
+                and digest.cert_epoch != host_epoch
+                and not await self._follower_household(space.id, sender)
             )
-            if not wants and digest.key_wanted:
-                wants = await self._writer_key_for(space.id, sender)
             await self._repair_roster(
                 space,
                 sender,
@@ -2556,6 +2568,92 @@ class SpaceService(
         self._roster_repairs.pop(space_id, None)
         self._roster_refused.pop(space_id, None)
         self._roster_seats_cache.pop(space_id, None)
+        self._credentials_answered.pop(space_id, None)
+
+    async def on_credentials_wanted(self, event: FederationEvent) -> None:
+        """Host side of ``SPACE_CREDENTIALS_WANTED``: a household of a space
+        we host asks for its OWN writer cert (``cert_wanted``) and / or
+        writer group key (``key_wanted``) — one of its people just wrote.
+
+        Answered with a ``SPACE_ROSTER_SNAPSHOT`` holding no roster entry,
+        only the asker's credentials — never a sync, never a roster repair.
+        The asker must hold a live seat here (the §24.11-authenticated
+        sender); what it gets is re-derived from our roster and the space's
+        switches, so a follower that may not write, or a household asking for
+        a key we would not give, gets nothing. At most one answer per (space,
+        household) per :data:`CREDENTIALS_ANSWER_INTERVAL_S`, no doubling, and
+        outside the roster repair's budget."""
+        p = event.payload if isinstance(event.payload, dict) else {}
+        space_id = str(event.space_id or p.get("space_id") or "")
+        sender = event.from_instance
+        own = self._own_instance_id
+        if not space_id or not sender or not own or sender == own:
+            return
+        cert_wanted = p.get("cert_wanted") is True
+        key_wanted = p.get("key_wanted") is True
+        if not (cert_wanted or key_wanted):
+            return
+        space = await self._spaces.get(space_id)
+        if space is None or space.owner_instance_id != own:
+            return
+        if sender not in set(await self._spaces.list_member_instances(space_id)):
+            return
+        now = _monotonic()
+        book = self._credentials_answered.setdefault(space_id, {})
+        last = book.get(sender)
+        if last is not None and now - last < CREDENTIALS_ANSWER_INTERVAL_S:
+            return
+        has = (
+            cert_wanted and await self._cert_epoch_for(space_id, sender) is not None
+        ) or (key_wanted and await self._writer_key_for(space_id, sender))
+        if not has:
+            log.info(
+                "credentials for %s in %s: nothing it may hold — not answered",
+                sender,
+                space_id,
+            )
+            return
+        book[sender] = now
+        try:
+            await self.send_roster_snapshot(
+                space_id, to_instance_id=sender, credentials_only=True
+            )
+        except Exception:
+            log.exception(
+                "credentials for %s in %s could not be sent", sender, space_id
+            )
+
+    async def ask_host_for_credentials(self, event: SpaceCredentialsWanted) -> None:
+        """Member side: send the space's host ``SPACE_CREDENTIALS_WANTED``
+        with what this household wants (:meth:`SpaceWriterCertService.wanted`)
+        — one small request, never a sync."""
+        if self._federation is None or self._writer_certs is None:
+            return
+        host = event.host_instance_id
+        if not host or host == self._own_instance_id:
+            return
+        cert_wanted, key_wanted = self._writer_certs.wanted(event.space_id)
+        if not (cert_wanted or key_wanted):
+            return
+        if not await self._federation.space_member_supports(
+            host, min_version=FederationCapability.MIN_FOR_CREDENTIALS_WANTED
+        ):
+            return
+        try:
+            await self._federation.send_with_mesh_fallback(
+                to_instance_id=host,
+                event_type=FederationEventType.SPACE_CREDENTIALS_WANTED,
+                payload={
+                    "space_id": event.space_id,
+                    "cert_wanted": cert_wanted,
+                    "key_wanted": key_wanted,
+                },
+                space_id=event.space_id,
+            )
+        except Exception:
+            log.exception(
+                "credentials: asking host %s for %s failed", host, event.space_id
+            )
 
     async def _cert_epoch_for(self, space_id: str, instance_id: str) -> int | None:
         """The writer-cert epoch a snapshot to *instance_id* would carry —
@@ -2665,17 +2763,7 @@ class SpaceService(
                 wire = None
             epoch = wire.get("epoch") if isinstance(wire, dict) else None
             cert_epoch = epoch if isinstance(epoch, int) else None
-        cert_wanted, key_wanted = (
-            self._writer_certs.wanted(space_id)
-            if self._writer_certs is not None
-            else (False, False)
-        )
-        return roster_digest_wire(
-            roster_digest(seats),
-            cert_epoch,
-            cert_wanted=cert_wanted,
-            key_wanted=key_wanted,
-        )
+        return roster_digest_wire(roster_digest(seats), cert_epoch)
 
     async def on_peer_proto_version_raised(self, event: PeerProtoVersionRaised) -> None:
         """A member household just upgraded past the roster-snapshot line:
@@ -3774,8 +3862,8 @@ class SpaceService(
         did not have (followers turned on, or the space entered a public
         tier): pin the current epoch's key at every GFS listing it (the
         owner's epoch notice). Each household asks for the key itself when
-        it first publishes (``key_wanted`` on its sync BEGIN, answered with
-        its credentials alone) — nothing goes to every member household."""
+        it first publishes (``key_wanted`` in ``SPACE_CREDENTIALS_WANTED``,
+        answered with its credentials alone) — nothing goes to every member household."""
         if self._member_gfs is not None:
             try:
                 await self._member_gfs.announce_epoch(space.id)

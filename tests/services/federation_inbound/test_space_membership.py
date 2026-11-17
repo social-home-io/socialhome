@@ -141,7 +141,7 @@ def handlers(bus, repo):
     return h
 
 
-async def test_attach_registers_eight_event_types(bus, repo):
+async def test_attach_registers_nine_event_types(bus, repo):
     h = SpaceMembershipInboundHandlers(bus=bus, space_repo=repo)
     fed = _FakeFederationService()
     h.attach_to(fed)
@@ -155,6 +155,7 @@ async def test_attach_registers_eight_event_types(bus, repo):
         FederationEventType.SPACE_MEMBER_UNBANNED,
         FederationEventType.SPACE_AGE_GATE_UPDATED,
         FederationEventType.SPACE_CONFIG_CATCH_UP,
+        FederationEventType.SPACE_CREDENTIALS_WANTED,
     }
 
 
@@ -945,3 +946,19 @@ async def test_space_created_never_wipes_the_owners_gfs_list(db):
     await handlers._on_created(created)
     got = await repo.get("sp-1")
     assert got is not None and got.gfs_servers == signed
+
+
+async def test_a_credentials_ask_reaches_the_space_service(bus, repo):
+    """``SPACE_CREDENTIALS_WANTED`` goes to the space service (the host
+    answers there)."""
+    seen: list = []
+
+    class _Svc:
+        async def on_credentials_wanted(self, event):
+            seen.append(event)
+
+    h = SpaceMembershipInboundHandlers(bus=bus, space_repo=repo)
+    h.attach_space_service(_Svc())  # type: ignore[arg-type]
+    event = _event(FederationEventType.SPACE_CREDENTIALS_WANTED, {"space_id": "sp"})
+    await h._on_credentials_wanted(event)
+    assert seen == [event]

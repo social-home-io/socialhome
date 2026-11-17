@@ -115,15 +115,3 @@ def test_a_suite_that_is_not_a_string_is_malformed_not_a_crash(suite):
     """Round 4: ``{"suite": []}`` used to raise TypeError (unhashable) —
     an ERROR stack trace per BEGIN. A non-string suite is malformed."""
     assert parse_roster_digest({"suite": suite, "digest": "a" * 64}) is None
-
-
-def test_the_wanted_flags_ride_only_when_set():
-    """On demand: ``cert_wanted`` / ``key_wanted`` ride the BEGIN only when
-    true; anything but a bool there is malformed."""
-    assert set(roster_digest_wire("a" * 64, None)) == {"suite", "digest", "cert_epoch"}
-    wire = roster_digest_wire("a" * 64, 3, cert_wanted=True, key_wanted=True)
-    assert parse_roster_digest(wire) == RosterDigest(
-        digest="a" * 64, cert_epoch=3, cert_wanted=True, key_wanted=True
-    )
-    for bad in ("yes", 1, None):
-        assert parse_roster_digest({**wire, "cert_wanted": bad}) is None

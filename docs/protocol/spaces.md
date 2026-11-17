@@ -371,6 +371,14 @@ household asks the host, then one trusted helper at a time, for files of
 live items it holds but never received; the answer is `SPACE_MEDIA_BLOB`.
 See [media.md](./media.md#older-files-on-view--space_media_wanted-v_92).
 
+**Credentials on demand (followers, unreleased)**
+
+`SPACE_CREDENTIALS_WANTED` `{space_id, cert_wanted, key_wanted}` — a member
+or follower household asks the space's host for its OWN writer cert and / or
+writer group key when one of its people first writes; the answer is a
+`SPACE_ROSTER_SNAPSHOT` with no roster entry. See "Followers: the role plus
+the switches" below.
+
 **GFS public-content relay (Phase 5)**
 
 `SPACE_SUBSCRIBER_KEY_HANDOFF` (`space_subscriber_key_handoff`). These ride the
@@ -633,14 +641,12 @@ member household, not only on the host:
   however it is reached (paired, mesh, or seated from an invite link over
   the GFS relay):
   - digest and cert epoch match → nothing;
-  - the digest matches but credentials are missing → a snapshot with NO
-    roster entry, only the household's own credentials (writer cert,
-    writer group key, channel grant): a member household whose cert epoch
-    is behind ours (unasked, as before); a follower household only when its
-    digest says `cert_wanted` (on demand — see "Followers: the role plus
-    the switches"); any household saying `key_wanted` when we would hand it
-    a writer key. `cert_wanted` / `key_wanted` ride the digest only when
-    true; a host that does not know them ignores them. ~1–2 KB sealed.
+  - the digest matches but a MEMBER household's cert epoch is behind ours
+    → a snapshot with NO roster entry, only its own credentials (writer
+    cert, writer group key, channel grant), unasked as before. ~1–2 KB
+    sealed. A follower household's cert, and any household's writer group
+    key, are asked for with `SPACE_CREDENTIALS_WANTED` instead (see
+    "Followers: the role plus the switches").
   - otherwise → one repair snapshot, unless one went to this (space,
     household) within its cooldown. The cooldown is 30 min after a
     snapshot that went out (`send_roster_snapshot` returned true). It
@@ -674,8 +680,10 @@ member household, not only on the host:
   is dissolved or no longer hosted here). The snapshot goes as a tracked
   background task. Followers of a PUBLIC or PRIVATE space sync and so send
   a digest like any member; only a follower-only household of a GLOBAL
-  space sends no BEGIN at all, so it gets no periodic repair: only seat /
-  upgrade snapshots and live gossip. A new snapshot drops every queued part
+  space sends no BEGIN at all (it reads through the GFS), so it gets no
+  periodic repair: only seat / upgrade snapshots and live gossip. It DOES
+  send its host `SPACE_CREDENTIALS_WANTED` when one of its people writes
+  (over the seat's own transport — the GFS relay for a link-joined seat). A new snapshot drops every queued part
   of an older one to the same household first (outbox key prefix per
   space), and a queued part is replaced by a newer one (supersede key per
   space and part). The same BEGIN also echoes `dir_seq`, the version of
@@ -1666,14 +1674,26 @@ a ~5.5 MB roster snapshot each) and no rotation:
 - **The cert goes on demand.** A follower household holds no cert until one
   of its people comments or reacts. That write takes the host path (as
   every write without a cert always did), and the household asks the host
-  ONCE: a `SPACE_SYNC_BEGIN` whose roster digest says `cert_wanted` (see
-  "Repair on a digest mismatch"). The host answers with a snapshot holding
-  no roster entry, only the household's own credentials. It asks again when
-  its cert is within an hour of its end and someone writes, or when the
-  cert lacks the right the write needs. The same path brings any household
-  its writer group key (`key_wanted`) when it first publishes over a GFS
-  and holds none — the space gaining a writer key (followers on, a public
-  tier) sends only the owner's GFS epoch notice.
+  with one small request — never a sync:
+  `SPACE_CREDENTIALS_WANTED {space_id, cert_wanted, key_wanted}` (inside
+  the encrypted payload; to the host only, over the seat's own transport;
+  allowed from a link-joined seat and from a reader). The host checks the
+  sender holds a live seat, re-derives what it may hold from its roster and
+  the switches (nothing → no answer), and answers with a
+  `SPACE_ROSTER_SNAPSHOT` holding no roster entry, only the asker's own
+  credentials. Its own limiter: at most one answer per (space, household)
+  per 10 min (`CREDENTIALS_ANSWER_INTERVAL_S`), no doubling, outside the
+  roster repair's budget — a renewal a day, a re-ask after a switch change,
+  and many followers asking at once are all answered. The asker repeats an
+  unanswered ask after 10 min, doubling to 6 h
+  (`CREDENTIALS_RETRY_S` / `_MAX_S`), and only while someone writes. It asks
+  again when its cert is within an hour of its end, or lacks the right the
+  write needs. The same request brings any household its writer group key
+  (`key_wanted`) when it first publishes over a GFS and holds none — the
+  space gaining a writer key (followers on, a public tier) sends only the
+  owner's GFS epoch notice. Gated on the host's version
+  (`FederationCapability.MIN_FOR_CREDENTIALS_WANTED`, the first unreleased
+  line); a released v_80 host never gets it.
 
 **Residuals.** A revoked writer can still post until the rotation reaches a
 receiver, plus the 10-minute grace — and if no seed holder is online to

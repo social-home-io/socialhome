@@ -1918,9 +1918,9 @@ class SpaceAdminSeedsRetiredAfterRestore(DomainEvent):
 class SpaceCredentialsWanted(DomainEvent):
     """This household needs its writer cert or writer group key for a space
     another household hosts — one of its people just commented, reacted or
-    published and it holds none (or its follower cert is about to end). The
-    sync scheduler sends the host a ``SPACE_SYNC_BEGIN`` now; its roster
-    digest says ``cert_wanted`` / ``key_wanted`` and the host answers with the
+    published and it holds none (or its follower cert is about to end).
+    ``SpaceService.ask_host_for_credentials`` sends the host one small
+    ``SPACE_CREDENTIALS_WANTED`` (never a sync); the host answers with the
     credentials alone."""
 
     space_id: str
