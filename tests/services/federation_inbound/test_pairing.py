@@ -36,6 +36,7 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.services.federation_inbound import PairingInboundHandlers
 from socialhome.services.peer_unpair_service import PeerUnpairService
+from tests.pairing_fakes import SavesPendingMixin
 
 
 class _FakeRegistry:
@@ -46,17 +47,33 @@ class _FakeRegistry:
         self.registered.append((event_type, handler))
 
 
+class _StagedHalves:
+    """Stands in for ``PendingPairings``: records whose half kept beside a
+    space seat an abort cancelled."""
+
+    def __init__(self) -> None:
+        self.cancelled: list[tuple[str, str | None]] = []
+
+    async def cancel(self, instance_id: str, *, token: str | None = None):
+        self.cancelled.append((instance_id, token))
+        return self.result
+
+    #: What ``cancel`` answers: ``None`` — nothing was staged.
+    result = None
+
+
 class _FakeFederationService:
     def __init__(self) -> None:
         self._event_registry = _FakeRegistry()
         self.mesh_claims: list[FederationEvent] = []
+        self.pending_pairings = _StagedHalves()
 
     async def record_mesh_member_claim(self, event, *, notify=True):
         self.mesh_claims.append(event)
         return True
 
 
-class _FakeFederationRepo:
+class _FakeFederationRepo(SavesPendingMixin):
     def __init__(self) -> None:
         self.instances: dict[str, RemoteInstance] = {}
         self.pairings: dict[str, PairingSession] = {}
@@ -415,6 +432,36 @@ async def test_abort_keeps_confirmed_instance(repo, handlers):
         )
     )
     assert "peer-a" in repo.instances
+
+
+async def test_abort_cancels_the_half_kept_beside_the_senders_space_seat(
+    repo, handlers
+):
+    """The sender shares a space with us (its row is a confirmed seat) and
+    cancelled the pairing code: our half waits beside the seat and goes —
+    the seat, which the row check below reads as "confirmed", stays."""
+    seat = replace(
+        _sample_instance("peer-a", PairingStatus.CONFIRMED),
+        source=InstanceSource.SPACE_SESSION,
+    )
+    repo.instances["peer-a"] = seat
+    await handlers._on_abort(
+        _event(FederationEventType.PAIRING_ABORT, {"token": "tok-1"})
+    )
+    # Bound to the code the abort names — never "whatever is staged".
+    assert handlers._federation.pending_pairings.cancelled == [("peer-a", "tok-1")]
+    assert repo.instances["peer-a"] is seat
+
+
+async def test_abort_without_a_token_cancels_no_half_kept_beside_a_seat(repo, handlers):
+    seat = replace(
+        _sample_instance("peer-a", PairingStatus.CONFIRMED),
+        source=InstanceSource.SPACE_SESSION,
+    )
+    repo.instances["peer-a"] = seat
+    await handlers._on_abort(_event(FederationEventType.PAIRING_ABORT, {}))
+    assert handlers._federation.pending_pairings.cancelled == []
+    assert repo.instances["peer-a"] is seat
 
 
 async def test_unpair_deletes_instance_and_publishes(bus, repo, handlers):
@@ -1014,4 +1061,31 @@ async def test_approval_withdrawn_after_the_requester_confirmed_is_forgotten(
     await handlers._on_unpair(_event(FederationEventType.UNPAIR, {}))
 
     assert "peer-a" not in repo.instances
+    assert [e.instance_id for e in captured] == ["peer-a"]
+
+
+async def test_abort_that_cancels_nothing_publishes_nothing(bus, repo, handlers):
+    """A paired household (or a seat) sending an abort that matches no
+    handshake of ours must not put its sender-chosen reason in front of
+    our admins (review finding)."""
+    repo.instances["peer-a"] = _sample_instance("peer-a", PairingStatus.CONFIRMED)
+    captured: list[PairingAborted] = []
+    bus.subscribe(PairingAborted, captured.append)
+    await handlers._on_abort(
+        _event(FederationEventType.PAIRING_ABORT, {"token": "nope", "reason": "boo"})
+    )
+    assert captured == []
+
+
+async def test_abort_that_cancels_a_staged_half_publishes(bus, repo, handlers):
+    repo.instances["peer-a"] = replace(
+        _sample_instance("peer-a", PairingStatus.CONFIRMED),
+        source=InstanceSource.SPACE_SESSION,
+    )
+    handlers._federation.pending_pairings.result = (object(), ["tok-1"])
+    captured: list[PairingAborted] = []
+    bus.subscribe(PairingAborted, captured.append)
+    await handlers._on_abort(
+        _event(FederationEventType.PAIRING_ABORT, {"token": "tok-1"})
+    )
     assert [e.instance_id for e in captured] == ["peer-a"]

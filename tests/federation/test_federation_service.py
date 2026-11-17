@@ -88,6 +88,7 @@ from socialhome.hardening import DEFAULT_JSON_MAX_BYTES
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.json_text import dumps_str
+from tests.pairing_fakes import SavesPendingMixin
 
 # ─── Shared fixtures & stubs ──────────────────────────────────────────────
 
@@ -147,7 +148,7 @@ def _make_remote_instance(
     return inst, session_key
 
 
-class InMemoryFederationRepo:
+class InMemoryFederationRepo(SavesPendingMixin):
     """Minimal in-memory federation repo for tests."""
 
     def __init__(self):

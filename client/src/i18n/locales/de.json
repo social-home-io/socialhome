@@ -2195,6 +2195,7 @@
   "connections.meta.waiting_code": "Wartet darauf, dass der Kopplungscode verwendet wird",
   "connections.meta.waiting_request": "Wartet darauf, dass {name} deine Anfrage annimmt",
   "connections.meta.waiting_approval": "Wartet auf die Bestätigung von {name}",
+  "connections.meta.pending_shares_space": "Euer gemeinsamer Space funktioniert währenddessen weiter",
   "connections.pending.request_title": "Deine Kopplungsanfrage an {name} zurückziehen?",
   "connections.pending.request_body": "{name} kann sie dann nicht mehr annehmen.",
   "connections.pending.request_ok": "Anfrage zurückziehen",

@@ -10,6 +10,7 @@ is mocked with :class:`AsyncMock`.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
@@ -30,6 +31,7 @@ from socialhome.domain.federation import (
     PairingAlreadyConfirmedError,
     PairingStatus,
     RemoteInstance,
+    is_space_seat,
 )
 from socialhome.domain.preferences import HouseholdPreferences
 from socialhome.federation.auto_pair_coordinator import (
@@ -38,15 +40,20 @@ from socialhome.federation.auto_pair_coordinator import (
     _derive_session_keys,
     _vouch_blob,
 )
+from socialhome.federation.pending_pairing import (
+    PendingPairings,
+    TooManyPendingPairingsError,
+)
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services.auto_pair_inbox import (
     AUTO_PAIR_REQUEST_TTL_SECONDS,
     AutoPairInbox,
 )
+from tests.pairing_fakes import SavesPendingMixin
 
 
-class _InMemoryFederationRepo:
+class _InMemoryFederationRepo(SavesPendingMixin):
     """Minimal fake for :class:`AbstractFederationRepo`."""
 
     def __init__(self) -> None:
@@ -74,6 +81,17 @@ class _InMemoryFederationRepo:
             return False
         self.instances[inst.id] = inst
         return True
+
+    async def upgrade_seat_instance(self, inst, *, token=None):
+        """Mirrors the SQLite repo: over a live seat (or no row) only."""
+        row = self.instances.get(inst.id)
+        if row is not None and not is_space_seat(row):
+            return False
+        self.instances[inst.id] = inst
+        return True
+
+    async def cancel_pairing_sessions(self, *, local_inbox_id, peer_identity_pk):
+        return []
 
     async def list_social_instances(self):
         return await self.list_instances(status="confirmed")
@@ -103,6 +121,19 @@ def _make_peer_remote_instance(
         local_inbox_id="loc-" + os.urandom(4).hex(),
         status=status,
         source=source,
+    )
+
+
+def _seat_of(pk_hex: str) -> RemoteInstance:
+    """The space seat we hold for a household we share a space with: a
+    confirmed ``space_session`` row with the seat's own keys, no address."""
+    return replace(
+        _make_peer_remote_instance(pk_hex, source=InstanceSource.SPACE_SESSION),
+        key_self_to_remote="seat-out",
+        key_remote_to_self="seat-in",
+        remote_inbox_url="",
+        local_inbox_id="seat-inbox",
+        display_name="",
     )
 
 
@@ -901,15 +932,20 @@ async def test_on_ack_at_originator_rejects_invalid_c_inbox_url(
 # ── cancelling an outstanding request (A side) ─────────────────────
 
 
-async def _request_and_signed_ack(coord, fed_repo, identity) -> tuple[str, dict]:
+async def _request_and_signed_ack(
+    coord, fed_repo, identity, *, seat: bool = False
+) -> tuple[str, dict]:
     """A (``coord``) asks B to introduce it to C; return ``(c_id, ack)`` where
     ``ack`` is the valid ``PAIRING_INTRO_AUTO_ACK`` payload B would forward
-    once C's admin approved (vouch signed by B, ack signed by C)."""
+    once C's admin approved (vouch signed by B, ack signed by C). With
+    ``seat`` A already holds a space seat for C."""
     b_kp = generate_identity_keypair()
     b = _make_peer_remote_instance(b_kp.public_key.hex())
     fed_repo.instances[b.id] = b
     c_kp = generate_identity_keypair()
     c_id = derive_instance_id(c_kp.public_key)
+    if seat:
+        fed_repo.instances[c_id] = _seat_of(c_kp.public_key.hex())
     r = await coord.request_via(
         via_instance_id=b.id,
         target_instance_id=c_id,
@@ -1338,3 +1374,307 @@ async def test_without_preferences_the_documented_default_applies(
         req.request_id, own_inbox_base_url="https://c.example/federation/inbox"
     )
     assert inst.share_home is True
+
+
+# ── Pairing with a household we already share a space with ────────────────
+#
+# A space seat (a confirmed ``space_session`` row) is not a pairing: the
+# trust relay must go through over it, and the seat must keep carrying the
+# space until the people have confirmed.
+
+
+async def test_request_via_over_a_space_seat_is_not_already_paired(
+    coord, fed_repo, fed_service, identity
+):
+    c_id, _ack = await _request_and_signed_ack(coord, fed_repo, identity, seat=True)
+    # The request went out…
+    kwargs = fed_service.send_event.await_args.kwargs
+    assert kwargs["event_type"] == FederationEventType.PAIRING_INTRO_AUTO
+    assert kwargs["payload"]["target_id"] == c_id
+    # The same wire body as without a seat — nothing an older introducer
+    # or target (v_80) would not know.
+    assert set(kwargs["payload"]) == {
+        "target_id",
+        "a_dh_pk",
+        "a_inbox_url",
+        "ts",
+        "nonce",
+        "token",
+    }
+    # …and the seat is exactly as it was: still carrying the space.
+    seat = fed_repo.instances[c_id]
+    assert is_space_seat(seat)
+    assert (seat.key_self_to_remote, seat.local_inbox_id) == ("seat-out", "seat-inbox")
+    # The pending request waits beside it.
+    staged = coord.pending_pairings.staged(c_id)
+    assert staged is not None and staged.status is PairingStatus.PENDING_SENT
+    assert staged.local_inbox_id != "seat-inbox"
+
+
+async def test_ack_over_a_space_seat_replaces_the_seat_with_the_pairing(
+    coord, fed_repo, identity, bus, kek_manager
+):
+    c_id, ack = await _request_and_signed_ack(coord, fed_repo, identity, seat=True)
+    request_inbox = coord.pending_pairings.staged(c_id).local_inbox_id
+    confirmed: list[PairingConfirmed] = []
+    bus.subscribe(PairingConfirmed, confirmed.append)
+
+    await coord.on_ack_at_originator(_evt("b", ack))
+
+    row = fed_repo.instances[c_id]
+    assert row.status is PairingStatus.CONFIRMED
+    assert row.source is InstanceSource.MANUAL
+    assert row.remote_identity_pk == ack["c_pk"]
+    assert row.remote_inbox_url == ack["c_inbox_url"]
+    # The inbox id C was given in the request — not the seat's.
+    assert row.local_inbox_id == request_inbox
+    assert row.key_self_to_remote not in ("", "seat-out")
+    assert len(kek_manager.decrypt(row.key_self_to_remote)) == 32
+    assert [e.instance_id for e in confirmed] == [c_id]
+    assert coord.pending_pairings.staged(c_id) is None
+
+
+async def test_a_cancelled_request_over_a_space_seat_leaves_the_seat(
+    coord, fed_repo, identity, bus
+):
+    c_id, ack = await _request_and_signed_ack(coord, fed_repo, identity, seat=True)
+    confirmed: list[PairingConfirmed] = []
+    bus.subscribe(PairingConfirmed, confirmed.append)
+
+    # What ``PairingCancelService`` does for a request kept beside a seat.
+    assert await coord.pending_pairings.cancel(c_id) is not None
+    assert coord.forget_requests_to(c_id) == 1
+    await coord.on_ack_at_originator(_evt("b", ack))
+
+    assert is_space_seat(fed_repo.instances[c_id])
+    assert fed_repo.instances[c_id].key_self_to_remote == "seat-out"
+    assert confirmed == []
+
+
+async def test_an_ack_after_the_staged_request_is_gone_never_replaces_the_seat(
+    coord, fed_repo, identity, bus
+):
+    """The in-memory session survived but the staged half did not (cancelled
+    between the two reads): a seat is never taken for our pending request."""
+    c_id, ack = await _request_and_signed_ack(coord, fed_repo, identity, seat=True)
+    await coord.pending_pairings.cancel(c_id)
+
+    await coord.on_ack_at_originator(_evt("b", ack))
+
+    assert is_space_seat(fed_repo.instances[c_id])
+
+
+@pytest.mark.parametrize("seat", [True, False])
+async def test_an_ack_never_confirms_a_half_that_is_not_our_request(
+    coord, fed_repo, identity, bus, seat
+):
+    """Our half for C stopped being the request (a pairing code was scanned
+    meanwhile, or we approved C's own introduction): the ack belongs to
+    no handshake we still hold and must not write its keys anywhere."""
+    c_id, ack = await _request_and_signed_ack(coord, fed_repo, identity, seat=seat)
+    code_half = replace(
+        _make_peer_remote_instance(ack["c_pk"], status=PairingStatus.PENDING_RECEIVED),
+        key_self_to_remote="code-out",
+    )
+    await coord.pending_pairings.save(code_half, ttl_s=300)
+    confirmed: list[PairingConfirmed] = []
+    bus.subscribe(PairingConfirmed, confirmed.append)
+
+    await coord.on_ack_at_originator(_evt("b", ack))
+
+    assert confirmed == []
+    assert (await coord.pending_pairings.get(c_id)) == code_half
+    if seat:
+        assert is_space_seat(fed_repo.instances[c_id])
+
+
+async def test_an_approval_never_reuses_the_inbox_a_pairing_code_gave_out(
+    coord, inbox, fed_repo, fed_service
+):
+    """A code half and an approval are different handshakes with different
+    keys; sharing one inbox id is what let a confirm of the first promote
+    the second."""
+    req = _queued_request(inbox)
+    code_half = replace(
+        _make_peer_remote_instance(
+            req.from_a_pk, status=PairingStatus.PENDING_RECEIVED
+        ),
+        local_inbox_id="code-inbox",
+    )
+    fed_repo.instances[req.from_a_id] = code_half
+
+    inst = await coord.finalize_pending(
+        req.request_id, own_inbox_base_url="https://c.example/federation/inbox"
+    )
+
+    assert inst.local_inbox_id != "code-inbox"
+    ack = fed_service.send_event.await_args.kwargs["payload"]
+    assert ack["c_inbox_url"].endswith("/" + inst.local_inbox_id)
+
+
+async def test_an_approval_never_reuses_any_inbox(coord, inbox, fed_repo):
+    """Not a code's, not a request's, not an earlier approval's — an
+    entered pairing code waits as an approval too, and its inbox is the
+    code's (review finding)."""
+    first = await coord.finalize_pending(
+        _queued_request(inbox).request_id,
+        own_inbox_base_url="https://c.example/federation/inbox",
+    )
+    req = _queued_request(inbox)
+    fed_repo.instances[req.from_a_id] = replace(first, id=req.from_a_id)
+    again = await coord.finalize_pending(
+        req.request_id, own_inbox_base_url="https://c.example/federation/inbox"
+    )
+    assert again.local_inbox_id != first.local_inbox_id
+
+
+async def test_an_introduction_from_a_household_we_share_a_space_with_is_queued(
+    coord, fed_repo, inbox, identity
+):
+    b_kp = generate_identity_keypair()
+    b = _make_peer_remote_instance(b_kp.public_key.hex())
+    fed_repo.instances[b.id] = b
+    payload = _vouched_intro(
+        b_kp,
+        c_id=derive_instance_id(identity.public_key),
+        a_inbox_url="https://a.example/federation/inbox/x",
+    )
+    a_id = payload["from_a_id"]
+    fed_repo.instances[a_id] = _seat_of(payload["from_a_pk"])
+
+    await coord.on_intro_at_target(_evt(b.id, payload))
+
+    assert [r.from_a_id for r in inbox.list_pending()] == [a_id]
+
+
+async def test_approval_over_a_space_seat_keeps_the_seat_until_the_requester_confirms(
+    coord, inbox, fed_repo, fed_service, bus, kek_manager
+):
+    confirmed: list[PairingConfirmed] = []
+    bus.subscribe(PairingConfirmed, confirmed.append)
+    req = _queued_request(inbox)
+    fed_repo.instances[req.from_a_id] = _seat_of(req.from_a_pk)
+
+    inst = await coord.finalize_pending(
+        req.request_id, own_inbox_base_url="https://c.example/federation/inbox"
+    )
+
+    # The approval is keyed and pending, exactly as without a seat…
+    assert inst.status is PairingStatus.PENDING_SENT
+    assert inst.source is InstanceSource.MANUAL
+    assert len(kek_manager.decrypt(inst.key_remote_to_self)) == 32
+    # …but it waits beside the seat, which is untouched.
+    seat = fed_repo.instances[req.from_a_id]
+    assert is_space_seat(seat) and seat.key_remote_to_self == "seat-in"
+    assert coord.pending_pairings.staged(req.from_a_id) == inst
+    assert confirmed == []
+    # The requester is told a fresh inbox of ours — never the seat's id —
+    # and the inbound pipeline resolves exactly that inbox to the approval.
+    assert inst.local_inbox_id != "seat-inbox"
+    ack = fed_service.send_event.await_args.kwargs["payload"]
+    assert ack["c_inbox_url"].endswith("/" + inst.local_inbox_id)
+    assert set(ack) == {
+        "a_id",
+        "c_id",
+        "c_pk",
+        "c_inbox_url",
+        "c_dh_pk",
+        "via_b_id",
+        "vouch_sig",
+        "ack_sig",
+        "ts",
+        "nonce",
+        "token",
+        "to_a_id",
+    }
+    assert coord.pending_pairings.keyed_for_inbox(inst.local_inbox_id) == inst
+
+
+@pytest.mark.parametrize("seated", ["sender", "target"])
+async def test_the_introducer_never_vouches_across_a_space_seat(
+    coord, fed_repo, fed_service, seated
+):
+    """B vouches for households it is PAIRED with. One it merely shares a
+    space with is nobody it can introduce — or introduce somebody to."""
+    a_kp = generate_identity_keypair()
+    c_kp = generate_identity_keypair()
+    a = _make_peer_remote_instance(a_kp.public_key.hex())
+    c = _make_peer_remote_instance(c_kp.public_key.hex())
+    if seated == "sender":
+        a = _seat_of(a_kp.public_key.hex())
+    else:
+        c = _seat_of(c_kp.public_key.hex())
+    fed_repo.instances[a.id] = a
+    fed_repo.instances[c.id] = c
+
+    await coord.on_intro_from_peer(
+        _evt(
+            a.id,
+            {
+                "target_id": c.id,
+                "a_dh_pk": generate_x25519_keypair().public_key.hex(),
+                "a_inbox_url": "https://a.example/federation/inbox/x",
+                "ts": datetime.now(UTC).isoformat(),
+                "nonce": "n" * 16,
+                "token": "tk",
+            },
+        )
+    )
+
+    fed_service.send_event.assert_not_awaited()
+
+
+async def test_an_introduction_vouched_by_a_space_seat_is_refused(
+    coord, fed_repo, inbox, identity
+):
+    b_kp = generate_identity_keypair()
+    payload = _vouched_intro(
+        b_kp,
+        c_id=derive_instance_id(identity.public_key),
+        a_inbox_url="https://a.example/federation/inbox/x",
+    )
+    fed_repo.instances[payload["via_b_id"]] = _seat_of(b_kp.public_key.hex())
+
+    await coord.on_intro_at_target(_evt(payload["via_b_id"], payload))
+
+    assert inbox.list_pending() == []
+
+
+async def test_a_request_that_cannot_be_stored_leaves_no_session_behind(
+    coord, fed_repo, fed_service, monkeypatch
+):
+    """The session is what an ack is accepted against: a request whose half
+    was refused (the store is full) must not leave one that a later ack
+    could confirm (review finding: it was recorded before the save)."""
+    b = _make_peer_remote_instance(generate_identity_keypair().public_key.hex())
+    fed_repo.instances[b.id] = b
+
+    async def _full(*_a, **_kw):
+        raise TooManyPendingPairingsError("too many pairings are waiting")
+
+    monkeypatch.setattr(PendingPairings, "save", _full)
+    with pytest.raises(TooManyPendingPairingsError):
+        await coord.request_via(
+            via_instance_id=b.id,
+            target_instance_id=derive_instance_id(
+                generate_identity_keypair().public_key
+            ),
+            target_display_name="C",
+            own_inbox_base_url=_OWN_INBOX_BASE,
+        )
+    assert coord._pending == {}
+    fed_service.send_event.assert_not_awaited()
+
+
+async def test_an_approval_beside_a_seat_does_not_expire(coord, inbox, fed_repo):
+    """As the row of an approval never did: it waits for the requester's
+    first envelope, or our admin's cancel."""
+    clock = [0.0]
+    coord.pending_pairings._clock = lambda: clock[0]
+    req = _queued_request(inbox)
+    fed_repo.instances[req.from_a_id] = _seat_of(req.from_a_pk)
+    inst = await coord.finalize_pending(
+        req.request_id, own_inbox_base_url="https://c.example/federation/inbox"
+    )
+    clock[0] += 30 * 24 * 3600
+    assert coord.pending_pairings.staged(req.from_a_id) == inst

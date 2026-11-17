@@ -52,6 +52,7 @@ from ..domain.events import (
     ConnectionReachable,
     ConnectionUnreachable,
     LocalHomeLocationUpdated,
+    PairingAborted,
     PairingConfirmed,
     PairingIntroRelayReceived,
     PeerHomeChanged,
@@ -83,6 +84,7 @@ from ..domain.federation import (
     InstanceSource,
     PairingStatus,
     RemoteInstance,
+    is_paired,
     pending_kind,
 )
 from ..domain.federation_capabilities import FederationCapability
@@ -137,6 +139,7 @@ from .inbound_validator import (
     make_check_replay,
     make_check_space_archived,
     make_check_space_writer,
+    make_check_staged_half,
     make_check_timestamp,
     make_check_unpairing,
     make_confirm_relay_approval,
@@ -181,6 +184,7 @@ from .multi_recipient import (
 from .pairing_coordinator import PairingCoordinator
 from .pairing_gfs_reach import PairingGfsReach
 from .peer_pairing_client import PeerPairingClient
+from .pending_pairing import PendingPairings
 from .pq_signer import PqSigner
 from .relay_event_body import (
     EVENT_BODY_SUITE_FIELD,
@@ -480,6 +484,7 @@ class FederationService:
         "_own_pq_pk",
         "_own_pq_seed",
         "_pairing",
+        "_pending_pairings",
         "_pending_seat_buffer",
         "_presence_service",
         "_relay_accepted_at",
@@ -658,6 +663,10 @@ class FederationService:
         # §11 QR-code pairing handshake delegate. The peer-pairing
         # client (plaintext Ed25519-signed bootstrap transport) is
         # attached right after construction — circular-free.
+        #: Where a pairing handshake keeps its pending half: the row, or
+        #: beside a space seat. ONE instance for the QR handshake, the
+        #: trust relay, the cancel path and the inbound pipeline.
+        self._pending_pairings = PendingPairings(federation_repo)
         self._pairing = PairingCoordinator(
             federation_repo,
             key_manager,
@@ -665,6 +674,7 @@ class FederationService:
             own_pq_pk=own_pq_pk,
             own_sig_suite=sig_suite,
             bus=bus,
+            pending_pairings=self._pending_pairings,
         )
         self._pairing.attach_peer_pairing_client(
             PeerPairingClient(
@@ -747,10 +757,29 @@ class FederationService:
             self._common_pipeline_steps(
                 lookup_step=make_lookup_instance(
                     repo=self._federation_repo,
-                    lookup_fn=_lookup_by_inbox_id,
+                    lookup_fn=self._lookup_inbox,
                 ),
             )
         )
+
+    async def _lookup_inbox(
+        self, repo: AbstractFederationRepo, inbox_id: str
+    ) -> _InboxInstance | None:
+        """Who an envelope on *inbox_id* is from: the household whose row
+        holds that inbox id — or, first, one we hold a space seat for and
+        are pairing with. That pending half is kept beside the seat with
+        an inbox id of its own (:meth:`PendingPairings.keyed_for_inbox`),
+        and what it may be sent is narrow (:func:`make_check_staged_half`):
+        an approval takes the requester's first envelope under the
+        approved keys, which confirms the pair
+        (:func:`make_confirm_relay_approval` — fail closed for it). Only
+        an approval is ever resolved (a trust-relay approval, or a pairing
+        code our admin entered); the by-id pipelines find the same half
+        through ``staged_for``."""
+        half = self._pending_pairings.keyed_for_inbox(inbox_id)
+        if half is not None:
+            return _InboxInstance(half, staged=True)
+        return await _lookup_by_inbox_id(repo, inbox_id)
 
     def _build_media_https_pipeline(self):
         """The §24.11 inbox pipeline for a binary media body on the inbox.
@@ -839,6 +868,10 @@ class FederationService:
                 lookup_step=make_lookup_instance_by_id(
                     repo=self._federation_repo,
                     unpaired_recently=self._unpaired_recently,
+                    # The relay, a mailbox and a DataChannel know the sender
+                    # by its id: an approved pairing kept beside its seat
+                    # is found there too (GFS-reach pairings have no inbox).
+                    staged_for=self._pending_pairings.keyed_for,
                 ),
             )
         )
@@ -860,12 +893,16 @@ class FederationService:
             # seat) is taken only from a sender whose member card we hold
             # for its space. No-op elsewhere.
             make_check_mailbox_sender(lambda: self._mailbox_sender_check),
+            # A pending pairing kept beside a space seat: its keys open
+            # only what its kind allows (an approval's first envelope, a
+            # pairing code's abort). No-op for every row.
+            make_check_staged_half(),
             # §D2b peer-class gate: a household seated from an invite link
             # may only speak the space vocabulary. Straight after the
             # lookup (the first step that knows WHO the sender is) and
             # before any crypto, so an off-vocabulary envelope costs a
             # set lookup.
-            make_check_peer_class(),
+            make_check_peer_class(may_abort=self._pending_pairings.has_code_half),
             # Relay opt-in gate: a paired peer reaches us over the GFS
             # relay only when we opted into the relay with it. Also before
             # any crypto.
@@ -888,7 +925,10 @@ class FederationService:
             # envelope that verified AND decrypted — proof it completed the
             # pairing on its side. Before dispatch, so the handler already
             # sees a confirmed peer.
-            make_confirm_relay_approval(on_contact=self._on_relay_approval_contact),
+            make_confirm_relay_approval(
+                on_contact=self._on_relay_approval_contact,
+                on_cancel=self._on_staged_approval_cancelled,
+            ),
             make_idempotency_check(
                 cache_holder=lambda: self._idempotency_cache,
             ),
@@ -903,20 +943,52 @@ class FederationService:
         steps.extend(self.post_decrypt_gate_steps())
         return steps
 
-    async def _on_relay_approval_contact(self, instance_id: str) -> None:
+    @property
+    def pending_pairings(self) -> PendingPairings:
+        """Where this household's pending pairing halves live."""
+        return self._pending_pairings
+
+    async def _on_staged_approval_cancelled(
+        self, instance_id: str, inbox_id: str
+    ) -> None:
+        """The household we wait for (our approval kept beside its space
+        seat) sent a ``PAIRING_ABORT`` / ``UNPAIR`` under that approval's
+        keys: the half of exactly that handshake (*inbox_id*) and its
+        sessions go; the seat stays."""
+        if await self._pending_pairings.cancel(instance_id, inbox_id=inbox_id):
+            log.info("pairing: %s cancelled the pairing we approved", instance_id)
+            await self._bus.publish(
+                PairingAborted(instance_id=instance_id, reason="cancelled")
+            )
+
+    async def _on_relay_approval_contact(
+        self, instance_id: str, inbox_id: str = ""
+    ) -> bool:
         """The household whose introduction our admin approved just sent its
         first authenticated envelope — confirm the pair (§11 simple
-        pairing). Atomic and only while the row is still an approval
-        (:func:`~socialhome.domain.federation.pending_kind`): a cancel that
-        committed first leaves nothing to confirm."""
-        inst = await self._federation_repo.get_instance(instance_id)
-        if inst is None or pending_kind(inst) != PENDING_KIND_APPROVAL:
-            return
-        confirmed = replace(inst, status=PairingStatus.CONFIRMED)
-        if not await self._federation_repo.promote_pending_instance(confirmed):
-            return
-        log.info("auto-pair: %s confirmed the approved pairing", instance_id)
-        await self._bus.publish(PairingConfirmed(instance_id=instance_id))
+        pairing). Atomic and only while our half is still an approval
+        (:func:`~socialhome.domain.federation.pending_kind`) — in the row,
+        or beside the household's space seat, which the confirmed pair then
+        replaces: a cancel that committed first leaves nothing to confirm.
+        Returns whether the pair is confirmed now — also when another
+        envelope of the requester's got here first (it sends several at
+        once when its side confirms): the pair is announced once, and
+        every one of those envelopes goes on."""
+        inst = await self._pending_pairings.get(instance_id)
+        if (
+            inst is not None
+            and pending_kind(inst) == PENDING_KIND_APPROVAL
+            # The half the envelope was read under — not another
+            # handshake's that took its place meanwhile.
+            and inbox_id in ("", inst.local_inbox_id)
+        ):
+            confirmed = replace(inst, status=PairingStatus.CONFIRMED)
+            if await self._pending_pairings.promote(confirmed):
+                log.info("pairing: %s confirmed the approved pairing", instance_id)
+                await self._bus.publish(PairingConfirmed(instance_id=instance_id))
+                await self._pairing.probe_routes(confirmed)
+                return True
+        return is_paired(await self._federation_repo.get_instance(instance_id))
 
     async def drop_queued(
         self,

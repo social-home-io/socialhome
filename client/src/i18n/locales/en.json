@@ -2499,6 +2499,7 @@
   "connections.meta.waiting_code": "Waiting for the pairing code to be used",
   "connections.meta.waiting_request": "Waiting for {name} to accept your request",
   "connections.meta.waiting_approval": "Waiting for {name} to confirm",
+  "connections.meta.pending_shares_space": "Your shared space keeps working meanwhile",
   "connections.pending.request_title": "Cancel your request to pair with {name}?",
   "connections.pending.request_body": "{name} won't be able to accept it any more.",
   "connections.pending.request_ok": "Cancel request",

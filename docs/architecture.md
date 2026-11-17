@@ -513,7 +513,11 @@ selects it in two cases:
   followers); a member seats each carded household lazily as a
   `space_session` row with no `relay_via` (static-static keys from the
   card's key-wrap key), so its own fan-out reaches that household's
-  mailbox. Such a directory seat is skipped by the 30-min sync tick and
+  mailbox. A seat is not a pairing: a pairing handshake between the
+  two keeps its pending half in memory beside the seat
+  (`federation/pending_pairing.py`) and only the confirmed pair replaces
+  the row; an unpair re-seats from the card. Such a directory seat is
+  skipped by the 30-min sync tick and
   the capabilities fan-out, and is never sent an instance-addressed relay
   frame: when no mailbox is reachable (no connection to that GFS, or the
   household has none) `FederationService.send_with_mesh_fallback` sends a
