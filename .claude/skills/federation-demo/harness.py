@@ -9569,6 +9569,133 @@ def _ensure_gfs_client(state: dict, label: str) -> None:
     _wait_for_gfs_ws(info["instance_id"])
 
 
+def cmd_gfs_follower_comment() -> None:
+    """Followers (owner decision 2026-11-16): a follower household comments
+    under the space's switch, and its cert comes on demand.
+
+    Prereqs: ``gfs-invite-link`` — e holds a link-joined FOLLOWER seat on a's
+    third (global) space (``gfs_invite_follower_space_id``).
+
+    Sequence:
+    1. a turns ``allow_subscriber_comment`` on — the config event is all
+       that goes out (no snapshot to every follower).
+    2. a posts; e receives it.
+    3. e comments. The comment takes the host path (e holds no cert yet), a
+       holds it, and e asks a for its cert with ONE
+       ``SPACE_CREDENTIALS_WANTED`` (e's log) — never a sync.
+    4. e stores a ``follower_comment`` cert (e's ``space_keys``).
+    5. e comments again; a holds that one too.
+    6. a turns the switch off; e's next comment is refused at a (a never
+       holds it). The switch is left off (its default).
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run the gfs chain through 'gfs-invite-link' first")
+    space_id = state.get("gfs_invite_follower_space_id")
+    if not space_id:
+        raise SystemExit("run 'gfs-invite-link' first (it seats e as a follower)")
+    a = state["instances"]["a"]
+    e = state["instances"]["e"]
+    a_base = f"http://127.0.0.1:{a['port']}"
+
+    def _switch(on: bool) -> None:
+        s, patched = _request(
+            f"{a_base}/api/spaces/{space_id}",
+            token=a["token"],
+            method="PATCH",
+            body={"features": {"allow_subscriber_comment": on}},
+        )
+        _must(f"a turns follower comments {'on' if on else 'off'}", s, patched, ok=(200,))
+
+    def _a_holds(comment_id: str) -> bool:
+        return bool(
+            _rows("a", "SELECT 1 FROM space_post_comments WHERE id = ?", (comment_id,))
+        )
+
+    # 1–2.
+    _switch(True)
+    s, post = _request(
+        f"{a_base}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": f"Followers may comment — {time.time_ns()}"},
+    )
+    post_id = _must("a posts in the follower space", s, post, ok=(201,))["id"]
+    _await_space_post(state, "e", space_id, post_id)
+    e_log = _log_size("e")
+
+    def _comment(text: str) -> str:
+        st, body = _e_request(
+            state,
+            "POST",
+            f"/api/spaces/{space_id}/posts/{post_id}/comments",
+            {"content": text},
+        )
+        return _must("e (a follower) comments", st, body, ok=(200, 201))["id"]
+
+    # 3. The first comment: host path, and one ask.
+    first = _comment(f"A follower's first comment — {time.time_ns()}")
+    _poll_rows(
+        "a",
+        "SELECT 1 FROM space_post_comments WHERE id = ?",
+        (first,),
+        bool,
+        what="a never held e's first follower comment",
+    )
+    # 4. The cert arrives on demand.
+    rows = _poll_rows(
+        "e",
+        "SELECT writer_cert FROM space_keys WHERE space_id = ? "
+        "AND writer_cert IS NOT NULL ORDER BY epoch DESC LIMIT 1",
+        (space_id,),
+        bool,
+        what="e never stored its follower cert",
+    )
+    if json.loads(rows[0][0]).get("scope") != "follower_comment":
+        raise SystemExit(
+            f"gfs-follower-comment: e stored {rows[0][0]!r}, expected a "
+            "follower_comment cert"
+        )
+    asks = _log_lines_matching("e", "space_credentials_wanted", offset=e_log)
+    begins = [
+        line
+        for line in _log_lines_matching("e", "SPACE_SYNC_BEGIN", offset=e_log)
+        if space_id in line
+    ]
+    print(f"  e asked for its cert ({len(asks)} log line(s)); no sync BEGIN for it ✓")
+    if begins:
+        print(f"  (note: {len(begins)} BEGIN line(s) for the space — periodic sync)")
+    # 5.
+    second = _comment(f"A follower's second comment — {time.time_ns()}")
+    _poll_rows(
+        "a",
+        "SELECT 1 FROM space_post_comments WHERE id = ?",
+        (second,),
+        bool,
+        what="a never held e's second follower comment",
+    )
+    # 6. Switch off: refused at the host.
+    _switch(False)
+    time.sleep(5.0)
+    st, body = _e_request(
+        state,
+        "POST",
+        f"/api/spaces/{space_id}/posts/{post_id}/comments",
+        {"content": f"After the switch went off — {time.time_ns()}"},
+    )
+    third = body.get("id") if isinstance(body, dict) else None
+    time.sleep(10.0)
+    if third and _a_holds(third):
+        raise SystemExit(
+            "gfs-follower-comment: a holds e's comment made after follower "
+            "comments were turned off"
+        )
+    print(
+        "gfs-follower-comment: ok (follower comments follow the switch; the "
+        "cert came on demand; the switch-off comment never reached a)"
+    )
+
+
 @_offline_step
 def cmd_gfs_private_channel() -> None:
     """v_51 + the owner's ``private_gfs`` option: a PRIVATE space whose owner

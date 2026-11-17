@@ -1003,6 +1003,7 @@ python .claude/skills/federation-demo/harness.py gfs-space-healing
 python .claude/skills/federation-demo/harness.py gfs-relay-media
 python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
+python .claude/skills/federation-demo/harness.py gfs-follower-comment
 python .claude/skills/federation-demo/harness.py gfs-private-channel
 python .claude/skills/federation-demo/harness.py gfs-b-up
 python .claude/skills/federation-demo/harness.py gfs-multi-listing
@@ -1118,6 +1119,17 @@ older follower: it clears bits 2 and 4 of d's seat (``space_subscribers
 .reads_space_item``) in the GFS DB, has e post, and asserts the GFS refused
 the compressed item (e logs ``refused a compressed item``), e sent JSON
 (``suite=json``) and d still got the post. The bit is restored afterwards.
+
+### ``gfs-follower-comment`` — a follower comments under the switch; its cert comes on demand
+
+Needs ``gfs-invite-link`` (e holds a link-joined FOLLOWER seat on a's third,
+global space). a turns ``allow_subscriber_comment`` on — only the config
+event goes out. a posts; e (the follower) comments: the comment takes the
+host path (e holds no cert yet) and a holds it; e asks a for its own cert
+with one ``SPACE_CREDENTIALS_WANTED`` (never a sync) and stores a
+``follower_comment`` cert (e's ``space_keys``). e's second comment reaches a
+too. a turns the switch off: e's next comment never reaches a. The switch is
+left off (its default). Reads a's / e's DB (no REST bucket).
 
 ### ``gfs-member-publish-strict`` — anonymous member publish (v_50; the one mode since v_90)
 
