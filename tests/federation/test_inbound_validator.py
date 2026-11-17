@@ -52,6 +52,7 @@ from socialhome.federation.inbound_validator import (
     make_lookup_instance_by_id,
     make_parse_json,
     make_persist_replay,
+    make_verify_signature,
     run_post_decrypt_gates,
 )
 from socialhome.federation.multi_recipient import (
@@ -995,7 +996,7 @@ async def test_unpairing_gate_lets_only_unpair_through_from_a_tombstone():
 
 
 async def test_unpairing_gate_refuses_even_when_the_nudge_fails():
-    async def _boom(iid: str) -> None:
+    async def _boom(iid: str, _inbox: str = "") -> None:
         raise RuntimeError("db down")
 
     step = make_check_unpairing(on_refused=_boom)
@@ -1093,6 +1094,7 @@ class _StubPipelineOwner:
     _pending_seat_buffer = None
     _on_tombstone_contact = None
     _on_relay_approval_contact = None
+    _on_staged_approval_cancelled = None
     _own_instance_id = "own-1"
 
     class _pending_pairings:
@@ -1861,7 +1863,7 @@ class _KeyedStatusInstance(_StatusInstance):
 async def test_relay_approval_step_confirms_on_the_requesters_first_envelope():
     seen: list[str] = []
 
-    async def _confirm(iid: str) -> None:
+    async def _confirm(iid: str, _inbox: str = "") -> None:
         seen.append(iid)
 
     step = make_confirm_relay_approval(on_contact=_confirm)
@@ -1888,7 +1890,7 @@ async def test_relay_approval_step_confirms_on_the_requesters_first_envelope():
 async def test_relay_approval_step_ignores_every_other_row(status):
     seen: list[str] = []
 
-    async def _confirm(iid: str) -> None:
+    async def _confirm(iid: str, _inbox: str = "") -> None:
         seen.append(iid)
 
     step = make_confirm_relay_approval(on_contact=_confirm)
@@ -1904,7 +1906,7 @@ async def test_relay_approval_step_ignores_every_other_row(status):
 async def test_relay_approval_step_never_rejects_the_envelope():
     """Fail-soft: a promotion that blows up leaves the envelope alone."""
 
-    async def _boom(iid: str) -> None:
+    async def _boom(iid: str, _inbox: str = "") -> None:
         raise RuntimeError("db down")
 
     step = make_confirm_relay_approval(on_contact=_boom)
@@ -2000,7 +2002,7 @@ async def test_the_staged_gate_runs_before_any_crypto():
 
 
 async def test_a_staged_approval_that_confirms_lets_the_envelope_through():
-    async def _confirm(iid: str) -> bool:
+    async def _confirm(iid: str, _inbox: str = "") -> bool:
         return True
 
     step = make_confirm_relay_approval(on_contact=_confirm)
@@ -2018,7 +2020,7 @@ async def test_a_staged_approval_that_does_not_confirm_refuses_the_envelope():
     envelope — sealed under keys of a pairing that did not happen — for
     trusted. It is refused like an unknown inbox; the sender retries."""
 
-    async def _refuse(iid: str) -> bool:
+    async def _refuse(iid: str, _inbox: str = "") -> bool:
         return False
 
     step = make_confirm_relay_approval(on_contact=_refuse)
@@ -2032,7 +2034,7 @@ async def test_a_staged_approval_that_does_not_confirm_refuses_the_envelope():
 
 
 async def test_a_staged_approval_whose_promotion_fails_refuses_the_envelope():
-    async def _boom(iid: str) -> bool:
+    async def _boom(iid: str, _inbox: str = "") -> bool:
         raise RuntimeError("db down")
 
     step = make_confirm_relay_approval(on_contact=_boom)
@@ -2049,7 +2051,7 @@ async def test_a_row_approval_that_does_not_confirm_still_proceeds():
     """Unchanged for an approval stored in the row (no seat): the row
     itself says ``pending_sent`` to every handler."""
 
-    async def _refuse(iid: str) -> bool:
+    async def _refuse(iid: str, _inbox: str = "") -> bool:
         return False
 
     step = make_confirm_relay_approval(on_contact=_refuse)
@@ -2421,3 +2423,114 @@ async def test_the_seats_own_traffic_stays_the_seats():
         key_manager=_KeyRing(), encoder=_SeatKeyEncoder(), loads=orjson.loads
     )(ctx)
     assert isinstance(ctx.instance, _SeatRow)
+
+
+# ── What confirms a waiting pairing, and what ends it ─────────────────────
+
+
+def _approval_ctx(event_type, *, staged: bool) -> InboundContext:
+    inst = (_StagedApproval if staged else _KeyedStatusInstance)(
+        PairingStatus.PENDING_SENT
+    )
+    inst.local_inbox_id = "appr-inbox"
+    return InboundContext(
+        envelope=_minimal_envelope(event_type=event_type.value),
+        inbox_id="appr-inbox",
+        instance=inst,
+    )
+
+
+@pytest.mark.parametrize("staged", [True, False])
+@pytest.mark.parametrize(
+    "event_type", [FederationEventType.PAIRING_ABORT, FederationEventType.UNPAIR]
+)
+async def test_a_cancel_never_confirms_an_approval(event_type, staged):
+    """The peer's first envelope proves it confirmed — unless that envelope
+    says the opposite. A staged approval is cancelled and the envelope
+    answered (nothing is dispatched: the row is the seat); a row approval
+    is left to the event's own handler, unconfirmed."""
+    confirmed: list[str] = []
+    cancelled: list[tuple[str, str]] = []
+
+    async def _confirm(iid: str, inbox_id: str = "") -> bool:
+        confirmed.append(iid)
+        return True
+
+    async def _cancel(iid: str, inbox_id: str) -> None:
+        cancelled.append((iid, inbox_id))
+
+    ctx = _approval_ctx(event_type, staged=staged)
+    await make_confirm_relay_approval(on_contact=_confirm, on_cancel=_cancel)(ctx)
+
+    assert confirmed == []
+    if staged:
+        assert cancelled == [("remote-iid", "appr-inbox")]
+        assert ctx.early_response == {"status": "ok"}
+    else:
+        assert cancelled == [] and ctx.early_response is None
+
+
+async def test_the_confirm_step_names_the_half_the_envelope_was_read_under():
+    seen: list[tuple[str, str]] = []
+
+    async def _confirm(iid: str, inbox_id: str = "") -> bool:
+        seen.append((iid, inbox_id))
+        return True
+
+    await make_confirm_relay_approval(on_contact=_confirm)(
+        _approval_ctx(FederationEventType.SPACE_POST_CREATED, staged=True)
+    )
+    assert seen == [("remote-iid", "appr-inbox")]
+
+
+class _HybridOnlyEncoder:
+    """Verifies only with the PQ key — a hybrid-suite envelope."""
+
+    def verify_signatures_all(
+        self, _bytes, *, suite, signatures, ed_public_key, pq_public_key
+    ):
+        return pq_public_key == bytes.fromhex("cd" * 4)
+
+
+def _signed_ctx(*, alt) -> InboundContext:
+    seat = _SeatRow()
+    seat.remote_identity_pk = "ab" * 32
+    seat.remote_pq_identity_pk = None  # a seat holds no PQ key
+    return InboundContext(
+        envelope={
+            **_minimal_envelope(),
+            "from_instance": "remote-iid",
+            "to_instance": "own-1",
+            "msg_id": "m1",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "encrypted_payload": "ct",
+            "sig_suite": "ed25519+mldsa65",
+            "signatures": {},
+        },
+        instance=seat,
+        staged_alt=alt,
+    )
+
+
+async def test_a_hybrid_signature_is_verified_under_the_approved_half():
+    """A GFS-reach pairing negotiated a hybrid suite; its first envelope
+    arrives on a by-id transport, where the lookup found the SEAT row —
+    which holds no PQ key. The signature is checked against the approved
+    half's keys, and the envelope goes on under the half."""
+    half = _ApprovedHalf()
+    half.remote_identity_pk = "ab" * 32
+    half.remote_pq_identity_pk = "cd" * 4
+    ctx = _signed_ctx(alt=half)
+    await make_verify_signature(encoder=_HybridOnlyEncoder())(ctx)
+    assert ctx.instance is half and ctx.staged_alt is None
+
+
+async def test_a_signature_neither_key_set_verifies_is_refused():
+    half = _ApprovedHalf()
+    half.remote_identity_pk = "ab" * 32
+    half.remote_pq_identity_pk = "ee" * 4
+    ctx = _signed_ctx(alt=half)
+    with pytest.raises(ValueError, match="Invalid envelope signature"):
+        await make_verify_signature(encoder=_HybridOnlyEncoder())(ctx)
+    with pytest.raises(ValueError, match="Invalid envelope signature"):
+        await make_verify_signature(encoder=_HybridOnlyEncoder())(_signed_ctx(alt=None))

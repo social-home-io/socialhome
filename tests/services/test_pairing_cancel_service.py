@@ -546,18 +546,20 @@ async def test_a_pairing_code_beside_a_seat_is_cancelled_and_the_seat_stays(
     # The sessions and the half go first; only then is the peer told — as
     # the SEAT's own traffic (queued, on whatever route reaches the seat),
     # never as a one-shot POST to an inbox a GFS-only household lacks.
+    # …and once on the code's own inbox under the code's keys, for a
+    # household on an older release (its half is its row).
     assert env.log == [
         ("cancel_sessions", half.local_inbox_id),
         ("forget_auto_pair", "peer-s"),
         ("send_over_seat", "peer-s"),
+        ("send", "peer-s"),
     ]
-    assert env.fed.sent == [
-        {
-            "to": "peer-s",
-            "event_type": FederationEventType.PAIRING_ABORT,
-            "payload": {"token": "tok-s", "reason": PAIRING_CANCEL_REASON},
-        }
-    ]
+    abort = {
+        "to": "peer-s",
+        "event_type": FederationEventType.PAIRING_ABORT,
+        "payload": {"token": "tok-s", "reason": PAIRING_CANCEL_REASON},
+    }
+    assert env.fed.sent == [abort, abort]
     assert env.repo.sessions == {"tok-other": "wh-other"}
     assert env.pending.staged("peer-s") is None
     # The row transaction that deletes a pending ROW never ran.
@@ -603,13 +605,14 @@ async def test_a_cancel_after_the_code_was_entered_still_tells_the_peer(staged_e
 
     assert await env.svc.cancel_pending("peer-s") is True
 
-    assert env.fed.sent == [
-        {
-            "to": "peer-s",
-            "event_type": FederationEventType.PAIRING_ABORT,
-            "payload": {"token": "tok-s", "reason": PAIRING_CANCEL_REASON},
-        }
-    ]
+    # Both routes carry the CODE's abort — also now that our half waits
+    # as an approval (never an UNPAIR, which is a trust-relay approval's).
+    abort = {
+        "to": "peer-s",
+        "event_type": FederationEventType.PAIRING_ABORT,
+        "payload": {"token": "tok-s", "reason": PAIRING_CANCEL_REASON},
+    }
+    assert env.fed.sent == [abort, abort]
 
 
 async def test_a_queued_cancel_over_a_seat_is_not_reported_as_delivered(staged_env):

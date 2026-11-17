@@ -52,6 +52,7 @@ from ..domain.events import (
     ConnectionReachable,
     ConnectionUnreachable,
     LocalHomeLocationUpdated,
+    PairingAborted,
     PairingConfirmed,
     PairingIntroRelayReceived,
     PeerHomeChanged,
@@ -924,7 +925,10 @@ class FederationService:
             # envelope that verified AND decrypted — proof it completed the
             # pairing on its side. Before dispatch, so the handler already
             # sees a confirmed peer.
-            make_confirm_relay_approval(on_contact=self._on_relay_approval_contact),
+            make_confirm_relay_approval(
+                on_contact=self._on_relay_approval_contact,
+                on_cancel=self._on_staged_approval_cancelled,
+            ),
             make_idempotency_check(
                 cache_holder=lambda: self._idempotency_cache,
             ),
@@ -944,7 +948,22 @@ class FederationService:
         """Where this household's pending pairing halves live."""
         return self._pending_pairings
 
-    async def _on_relay_approval_contact(self, instance_id: str) -> bool:
+    async def _on_staged_approval_cancelled(
+        self, instance_id: str, inbox_id: str
+    ) -> None:
+        """The household we wait for (our approval kept beside its space
+        seat) sent a ``PAIRING_ABORT`` / ``UNPAIR`` under that approval's
+        keys: the half of exactly that handshake (*inbox_id*) and its
+        sessions go; the seat stays."""
+        if await self._pending_pairings.cancel(instance_id, inbox_id=inbox_id):
+            log.info("pairing: %s cancelled the pairing we approved", instance_id)
+            await self._bus.publish(
+                PairingAborted(instance_id=instance_id, reason="cancelled")
+            )
+
+    async def _on_relay_approval_contact(
+        self, instance_id: str, inbox_id: str = ""
+    ) -> bool:
         """The household whose introduction our admin approved just sent its
         first authenticated envelope — confirm the pair (§11 simple
         pairing). Atomic and only while our half is still an approval
@@ -956,7 +975,13 @@ class FederationService:
         once when its side confirms): the pair is announced once, and
         every one of those envelopes goes on."""
         inst = await self._pending_pairings.get(instance_id)
-        if inst is not None and pending_kind(inst) == PENDING_KIND_APPROVAL:
+        if (
+            inst is not None
+            and pending_kind(inst) == PENDING_KIND_APPROVAL
+            # The half the envelope was read under — not another
+            # handshake's that took its place meanwhile.
+            and inbox_id in ("", inst.local_inbox_id)
+        ):
             confirmed = replace(inst, status=PairingStatus.CONFIRMED)
             if await self._pending_pairings.promote(confirmed):
                 log.info("pairing: %s confirmed the approved pairing", instance_id)

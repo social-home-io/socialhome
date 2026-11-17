@@ -177,6 +177,12 @@ class PairingCancelService:
             # it arrives however the two households reach each other. The
             # receiver takes it from a seat only for the code it names.
             notified = await self._notify_over_seat(inst, tokens[0])
+            if _has_signed_channel(inst) and inst.remote_inbox_url:
+                # …and on the code's own inbox, under the code's keys: a
+                # household on an older release keeps its half in its ROW
+                # (it overwrote its seat) and cannot read the seat's
+                # traffic any more. Whichever it is hears one of the two.
+                notified = await self._notify_peer(inst, tokens, code=True) or notified
         elif _has_signed_channel(inst):
             notified = await self._notify_peer(inst, tokens)
         log.info(
@@ -224,8 +230,13 @@ class PairingCancelService:
             raise PendingPairingNotFoundError()
         return tokens
 
-    async def _notify_peer(self, inst: RemoteInstance, tokens: list[str]) -> bool:
-        event_type, payload = _cancel_message(inst, tokens)
+    async def _notify_peer(
+        self, inst: RemoteInstance, tokens: list[str], *, code: bool = False
+    ) -> bool:
+        """One attempt to tell the peer with the half's own keys. *code*:
+        the half is a pairing code's whatever its status says by now (our
+        admin may have entered it) — the message is the code's abort."""
+        event_type, payload = _cancel_message(inst, tokens, code=code)
         try:
             result = await asyncio.wait_for(
                 self._federation.send_event_once(
@@ -265,7 +276,7 @@ class PairingCancelService:
 
 
 def _cancel_message(
-    inst: RemoteInstance, tokens: list[str]
+    inst: RemoteInstance, tokens: list[str], *, code: bool = False
 ) -> tuple[FederationEventType, dict]:
     """What tells the peer: a ``PAIRING_ABORT`` for a pairing-code
     half-pair; an ``UNPAIR`` for a trust-relay approval.
@@ -275,7 +286,7 @@ def _cancel_message(
     half, so it would keep a one-sided pairing. ``UNPAIR``'s receiver
     forgets the signer whatever the row's status (bound to the verified
     signature; the payload is empty, like a local unpair's)."""
-    if pending_kind(inst) == PENDING_KIND_APPROVAL:
+    if not code and pending_kind(inst) == PENDING_KIND_APPROVAL:
         return FederationEventType.UNPAIR, {}
     # The peer already holds the token (it is the one from the code); the
     # receiver binds it to the signer before dropping anything.

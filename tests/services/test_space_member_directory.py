@@ -2798,3 +2798,61 @@ async def test_a_directory_card_never_seats_over_an_unpair_tombstone():
     )
     await w.dir._seat(_card(b, gfs=GFS))
     assert w.seated == []
+
+
+# ── The sealed redeem that seated a pair: recorded once, never guessed ────
+
+
+async def test_the_redeem_role_is_recorded_once_and_survives_everything():
+    """Two shared spaces, in which the "host" differs, and an ownership
+    transfer later: the pair has ONE seat, made by ONE redeem with one
+    role each. That role is recorded from the redeem itself, on its space
+    only, and nothing rewrites it (review finding: it was guessed per
+    space row from who hosts the space, and the first row won — a re-made
+    seat then derived the wrong keys)."""
+    w, a = _reseat_world()
+    card = _card(a, gfs=GFS)
+    # We redeemed a's link for SPACE (role: redeemer).
+    await w.dir.store_seat_card(SPACE, card, redeem=(GFS, True))
+    assert await w.dir._gfs_seat(a["id"]) == (GFS, True)
+
+    # A second shared space that WE host (a would look like "the issuer's
+    # joiner" there), joined over the existing seat: no new redeem seat.
+    w.spaces.rows[SPACE_2] = {w.me["id"]: None, a["id"]: None}
+    w.spaces.owner[SPACE_2] = w.me["id"]
+    w.spaces.local[SPACE_2] = ["u-local"]
+    await w.dir.store_seat_card(SPACE_2, card)
+    assert "gfs" not in w.spaces.doc(SPACE_2, a["id"])
+    # A later redeem in the other direction over that same seat (the seat
+    # writer made no new row) records nothing either.
+    await w.dir.store_seat_card(SPACE_2, card, redeem=(GFS, False))
+    assert await w.dir._gfs_seat(a["id"]) == (GFS, True)
+
+    # SPACE changes hands: a becomes its owner.
+    w.spaces.owner[SPACE] = a["id"]
+    await w.dir.sweep_once()
+    assert await w.dir._gfs_seat(a["id"]) == (GFS, True)
+
+    # The pairing with a ended: the seat is re-made with the redeem's role.
+    remade: list[tuple[str, str, bool]] = []
+
+    async def relay_seater(c, gfs_url, is_redeemer):
+        remade.append((c.instance_id, gfs_url, is_redeemer))
+        w.fed_repo.instances[c.instance_id] = SimpleNamespace(
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.SPACE_SESSION,
+            relay_via=gfs_url,
+        )
+
+    w.dir.attach_seater(w.dir._seater, relay_seater)
+    await w.dir.reseat(a["id"])
+    assert remade == [(a["id"], GFS, True)]
+
+
+async def test_a_dropped_card_takes_its_redeem_note_with_it():
+    w, a = _reseat_world()
+    await w.dir.store_seat_card(SPACE, _card(a, gfs=GFS), redeem=(GFS, False))
+    await w.dir._clear(SPACE, a["id"])
+    assert await w.dir._gfs_seat(a["id"]) is None
+    doc = w.spaces.doc(SPACE, a["id"])
+    assert "gfs" not in doc and "gfs_role" not in doc

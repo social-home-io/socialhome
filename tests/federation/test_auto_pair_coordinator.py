@@ -1512,7 +1512,10 @@ async def test_an_approval_never_reuses_the_inbox_a_pairing_code_gave_out(
     assert ack["c_inbox_url"].endswith("/" + inst.local_inbox_id)
 
 
-async def test_a_repeated_approval_keeps_its_inbox(coord, inbox, fed_repo):
+async def test_an_approval_never_reuses_any_inbox(coord, inbox, fed_repo):
+    """Not a code's, not a request's, not an earlier approval's — an
+    entered pairing code waits as an approval too, and its inbox is the
+    code's (review finding)."""
     first = await coord.finalize_pending(
         _queued_request(inbox).request_id,
         own_inbox_base_url="https://c.example/federation/inbox",
@@ -1522,7 +1525,7 @@ async def test_a_repeated_approval_keeps_its_inbox(coord, inbox, fed_repo):
     again = await coord.finalize_pending(
         req.request_id, own_inbox_base_url="https://c.example/federation/inbox"
     )
-    assert again.local_inbox_id == first.local_inbox_id
+    assert again.local_inbox_id != first.local_inbox_id
 
 
 async def test_an_introduction_from_a_household_we_share_a_space_with_is_queued(

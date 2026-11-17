@@ -88,6 +88,7 @@ class AbstractFederationRepo(Protocol):
     async def cancel_pairing_sessions(
         self, *, local_inbox_id: str, peer_identity_pk: str
     ) -> list[str]: ...
+    async def pairing_token_for_inbox(self, local_inbox_id: str) -> str | None: ...
     async def mark_unpairing(self, instance_id: str) -> None: ...
     async def mark_reachable(self, instance_id: str) -> None: ...
     async def mark_unreachable(self, instance_id: str) -> None: ...
@@ -618,6 +619,16 @@ class SqliteFederationRepo:
             lambda conn: _drop_pairing_sessions(conn, local_inbox_id, peer_identity_pk)
         )
         return list(tokens)
+
+    async def pairing_token_for_inbox(self, local_inbox_id: str) -> str | None:
+        """The token of the pairing-code session that minted
+        *local_inbox_id*, or ``None`` (no code: a trust-relay half)."""
+        token = await self._db.fetchval(
+            "SELECT token FROM pending_pairings WHERE own_local_inbox_id=? LIMIT 1",
+            (local_inbox_id,),
+            default=None,
+        )
+        return str(token) if token else None
 
     async def mark_unpairing(self, instance_id: str) -> None:
         """Turn a pairing into an unpair tombstone, atomically.

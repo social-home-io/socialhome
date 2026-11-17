@@ -424,6 +424,9 @@ class SpaceMemberDirectory:
     async def _clear(self, space_id: str, instance_id: str) -> None:
         doc = await self._doc(space_id, instance_id)
         if doc.pop("card", None) is not None:
+            # The redeem note goes with the card it was written beside.
+            doc.pop("gfs", None)
+            doc.pop("gfs_role", None)
             await self._put(space_id, instance_id, doc)
 
     async def _in_use(self, space_id: str) -> bool:
@@ -544,9 +547,9 @@ class SpaceMemberDirectory:
             # The two paired since (the row is a pairing now, or gone with
             # one that ended): how the household JOINED did not change —
             # every other member still reaches it through that GFS.
-            gfs = (await self._doc(space_id, inst)).get("gfs")
-            if isinstance(gfs, str) and gfs:
-                urls.add(gfs)
+            redeem = await self._gfs_seat(inst)
+            if redeem is not None:
+                urls.add(redeem[0])
         return urls
 
     async def _member_gfs(self, space_id: str) -> set[str]:
@@ -579,31 +582,31 @@ class SpaceMemberDirectory:
 
     async def _gfs_seat(self, instance_id: str) -> tuple[str, bool] | None:
         """``(gfs_url, we_redeemed)`` of the sealed redeem that seated us
-        and *instance_id* (:meth:`_note_gfs_seat`), from any space we
-        share; ``None`` when the two never were a sealed-redeem pair."""
+        and *instance_id* (:meth:`_note_gfs_seat` — one note per pair, on
+        the redeem's space); ``None`` when no such redeem was recorded."""
         for (_space, inst), doc in sorted((await self._rows()).items()):
             gfs = doc.get("gfs")
             if inst == instance_id and isinstance(gfs, str) and gfs:
                 return gfs, doc.get("gfs_role") == "redeemer"
         return None
 
-    async def _note_gfs_seat(self, space_id: str, instance_id: str) -> None:
-        """Remember, on the household's row of *space_id*, that our seat
-        with it is a sealed-redeem seat through a GFS, and which side of
-        the redeem we were. Written while the seat row says so (at seat
-        time, and by the sweep for seats older than this); read once the
-        row no longer does (the two paired)."""
-        row = await self._federation_repo.get_instance(instance_id)
-        if row is None or not _is_relay_seat(row):
+    async def _note_gfs_seat(
+        self, space_id: str, instance_id: str, gfs_url: str, we_redeemed: bool
+    ) -> None:
+        """Record the sealed redeem that just MADE our seat with
+        *instance_id*: its GFS and our side of it, on the household's row
+        of the redeem's space. Once per pair and never rewritten — the
+        seat's keys came from that one redeem, whatever space the two
+        share later and whoever hosts it then. Read when the row is no
+        longer that seat (the two paired, or unpaired again)."""
+        if await self._gfs_seat(instance_id) is not None:
             return
         doc = await self._doc(space_id, instance_id)
-        gfs = normalize_gfs_base(row.relay_via or "")
-        # We redeemed a link of a household that acts as host here; a
-        # household that redeemed ours does not.
-        role = "redeemer" if instance_id in await self.hosts_of(space_id) else "issuer"
-        if "card" in doc and (doc.get("gfs"), doc.get("gfs_role")) != (gfs, role):
-            doc["gfs"], doc["gfs_role"] = gfs, role
-            await self._put(space_id, instance_id, doc)
+        if "card" not in doc:
+            return
+        doc["gfs"] = normalize_gfs_base(gfs_url)
+        doc["gfs_role"] = "redeemer" if we_redeemed else "issuer"
+        await self._put(space_id, instance_id, doc)
 
     def _card_rev(self) -> int:
         """Our card's revision: the mailbox service's (it moves with every
@@ -676,13 +679,22 @@ class SpaceMemberDirectory:
             return None
         return card
 
-    async def store_seat_card(self, space_id: str, card: MemberCard) -> None:
+    async def store_seat_card(
+        self,
+        space_id: str,
+        card: MemberCard,
+        *,
+        redeem: tuple[str, bool] | None = None,
+    ) -> None:
         """Store a verified seat card once the seat row exists; a household
         acting as host then brings the space's directory up to date.
         Fail-soft."""
         try:
             await self._store(space_id, card)
-            await self._note_gfs_seat(space_id, card.instance_id)
+            if redeem is not None:
+                # ``(gfs_url, we_redeemed)`` — only when this redeem made
+                # the seat row (the caller knows).
+                await self._note_gfs_seat(space_id, card.instance_id, *redeem)
             if await self.serves(space_id):
                 await self._mark_direct(space_id, card.instance_id)
                 # Its "seated" card came before our seat row (the commit
@@ -1807,8 +1819,6 @@ class SpaceMemberDirectory:
                     continue
                 await self._drop_lapsed(space_id)
                 await self._adopt_waiting(space_id)
-                for inst in await self._space_cards(space_id):
-                    await self._note_gfs_seat(space_id, inst)
                 if await self.serves(space_id):
                     await self.reconcile(space_id)
             except Exception:

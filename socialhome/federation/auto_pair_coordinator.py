@@ -89,7 +89,6 @@ from ..domain.events import (
     PairingConfirmed,
 )
 from ..domain.federation import (
-    PENDING_KIND_APPROVAL,
     PENDING_KIND_REQUEST,
     AutoPairRequestExpiredError,
     FederationEventType,
@@ -671,15 +670,12 @@ class AutoPairCoordinator:
             is_initiator=False,
         )
         now = datetime.now(UTC).isoformat()
-        # An approval has an inbox of its own — never a seat's (that is how
-        # the inbound pipeline tells A's first envelope under the new keys
-        # from the seat's traffic) and never the one a pairing code or a
-        # request of ours gave out: only a repeated approval keeps its id.
-        inbox_id = (
-            existing.local_inbox_id
-            if existing is not None and pending_kind(existing) == PENDING_KIND_APPROVAL
-            else secrets.token_urlsafe(24)
-        )
+        # An approval has an inbox of its own, always a fresh one — never
+        # a seat's (that is how the inbound pipeline tells A's first
+        # envelope under the new keys from the seat's traffic) and never
+        # one another handshake gave out (a pairing code's, also once its
+        # admin entered it; a request's; an earlier approval's).
+        inbox_id = secrets.token_urlsafe(24)
         # Pending, not confirmed: A may have cancelled its request meanwhile,
         # and a one-sided confirmed row would be a pairing A never agreed
         # to. A confirms when our ack reaches it and then talks to us; its

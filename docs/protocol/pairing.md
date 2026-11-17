@@ -534,7 +534,7 @@ handshake with the same household starts, so every confirmation checks the
 half first: a pairing code (the admin's entry, the signed peer-confirm)
 confirms only a `code` half whose inbox is the one that code's session
 minted; an ack only our `request`; a first envelope only an `approval` —
-and an approval never reuses the inbox id a code or a request gave out. A
+and a trust-relay approval always gets a fresh inbox id. A
 code can therefore never confirm keys and an address an introducer vouched
 for, nor another code's. A half without the peer's identity key or session
 keys is never confirmed. Saving, confirming and cancelling a half kept
@@ -559,18 +559,31 @@ verified, and our own keyless request, open nothing.
   not send, or a payload that opens only under the approval's keys. Over
   the relay the approval must itself be a relay pairing (its code had a
   GFS reach), the rule a paired peer's row is held to.
-- The first such envelope confirms the pair before dispatch; the others
-  the peer sent at the same time go on once it is confirmed. If the pair
+- **A cancel never confirms.** `PAIRING_ABORT` and `UNPAIR` are what a
+  household sends to end a handshake; read under an approval's keys they
+  prove the opposite of "it confirmed". A staged approval is cancelled by
+  them (exactly the half those keys belong to) and nothing is dispatched;
+  a row approval is left unconfirmed to the event's handler. Every other
+  event is something a household sends only once its own side is
+  confirmed.
+- The first such envelope confirms the pair before dispatch — the half it
+  was read under, not another handshake's that took its place meanwhile;
+  the others the peer sent at the same time go on once it is confirmed.
+  A hybrid-suite signature is checked against the approval's keys (a seat
+  row holds no post-quantum key). If the pair
   is NOT confirmed by then (the approval was withdrawn in that very
   moment), the envelope is refused with the answer an unknown inbox gets
   (fail closed).
 
 The seat's own traffic keeps using the seat row.
 
-**Cancelling over a seat.** The cancel of a pairing code is sent as the
-seat's own traffic: a `PAIRING_ABORT {token}` under the seat's keys, on
-whatever route reaches the seat (mailbox, relay, host hop), queued in the
-outbox like any envelope. A seat may send exactly that one pairing event,
+**Cancelling over a seat.** The cancel of a pairing code is sent on both
+routes: as the seat's own traffic — a `PAIRING_ABORT {token}` under the
+seat's keys, on whatever route reaches the seat (mailbox, relay, host
+hop), queued in the outbox like any envelope — and once to the code's own
+inbox under the code's keys, when the peer gave one (for a household on
+an older release, whose half is its row and which no longer reads the
+seat). A seat may send exactly that one pairing event,
 and only while a pairing code's half is kept beside it
 (`make_check_peer_class`); the receiver cancels only the half of the code
 the abort names. So the other household hears it however the two reach
@@ -599,10 +612,12 @@ message apart.
 **Reached through a GFS stays true.** A household that joined by link is
 flagged "GFS-reached" by its host and keeps one mailbox at that GFS; every
 other member reaches it there. That does not change when the household and
-its host pair: the GFS and each side's role in the sealed redeem are kept
-on the card's row (`space_instances.mailbox`: `gfs`, `gfs_role`, written
-while the seat row still says so), and `_reached_by_gfs` / `_space_gfs`
-read them when the row is a pairing.
+its host pair: the redeem that MADE the seat records its GFS and each
+side's role once, on the card's row of that redeem's space
+(`space_instances.mailbox`: `gfs`, `gfs_role`) — never guessed from who
+hosts a space, never rewritten by a later space or an ownership transfer,
+dropped with the card — and `_reached_by_gfs` / `_space_gfs` read it when
+the row is a pairing.
 
 **After an unpair** the seat is back: the purge of the pair's row is
 followed by the member directory seating the household again from its
@@ -616,15 +631,24 @@ before. Limits:
 
 - without a member card (a household below v_89) there is nothing to
   re-seat from;
-- a sealed-redeem seat made before this release is noted (`gfs`,
-  `gfs_role`) at the directory's next sweep; a pair that paired and
-  unpaired before that sweep gets a directory seat;
+- a sealed-redeem seat made before this release has no such record: if
+  its two households pair, the joiner is no longer flagged GFS-reached,
+  and after an unpair they get a directory seat. Joining by the link
+  again restores it;
+- a sealed redeem (a link join) over an unpair tombstone replaces the
+  tombstone and with it the queued `UNPAIR`: this side holds a seat, the
+  other still the pairing until its own traffic is refused for good
+  (`PAIR_WINDOW_404_ATTEMPTS`) or its people remove the connection;
 - an unpair tombstone (the peer was offline) is re-seated only once it is
   purged.
 
 **Mixed versions (v_80 and earlier releases).** An older household knows
 none of this and needs none of it on the wire. Paired with one that does:
 
+- a **cancel** from an older scanner before our admin entered the code is
+  sent under the code's keys to the code's inbox and refused there (404):
+  our half ends with the code (5 min). Our own cancel reaches an older
+  household on the code's inbox (above);
 - as the **approver** of a trust-relay request from a household it holds a
   seat for, it answers nothing ("already paired") — the request expires;
 - as the **requester**, it refuses to ask ("already paired");

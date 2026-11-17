@@ -347,7 +347,11 @@ class PendingPairings:
         return True
 
     async def cancel(
-        self, instance_id: str, *, token: str | None = None
+        self,
+        instance_id: str,
+        *,
+        token: str | None = None,
+        inbox_id: str | None = None,
     ) -> tuple[RemoteInstance, list[str]] | None:
         """Cancel the pending half kept beside *instance_id*'s seat: forget
         it and drop the ``pending_pairings`` sessions behind it. Returns
@@ -355,11 +359,16 @@ class PendingPairings:
         staged (the caller then cancels the row). The seat stays.
 
         With *token* (the peer's ``PAIRING_ABORT`` names one) only the
-        half of THAT pairing code is cancelled — never another handshake
-        with the same household."""
+        half of THAT pairing code is cancelled, with *inbox_id* only the
+        half an envelope was read under — never another handshake with
+        the same household."""
         async with self._locked(instance_id):
             entry = self._live(instance_id)
-            if entry is None or (token is not None and entry.token != token):
+            if (
+                entry is None
+                or (token is not None and entry.token != token)
+                or (inbox_id is not None and entry.instance.local_inbox_id != inbox_id)
+            ):
                 # Nothing staged, another handshake's — or a confirm took
                 # the half first.
                 return None

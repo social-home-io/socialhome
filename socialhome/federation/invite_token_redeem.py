@@ -1070,8 +1070,9 @@ class SpaceInviteTokenRedeemCoordinator:
                 bootstrap.proto_version if bootstrap is not None else 1,
                 _int_or_one(result.get("proto_version")),
             )
+            made_seat = False
             if bootstrap is not None:
-                await self._seat_space_session_instance(
+                made_seat = await self._seat_space_session_instance(
                     instance_id=issuer_instance_id,
                     display_name=(bootstrap.display_hint or issuer_instance_id[:8]),
                     identity_pk=bootstrap.identity_pk,
@@ -1162,7 +1163,12 @@ class SpaceInviteTokenRedeemCoordinator:
                     gfs_url=bootstrap.gfs_url,
                 )
                 if host_card is not None:
-                    await self._directory.store_seat_card(space_id, host_card)
+                    await self._directory.store_seat_card(
+                        space_id,
+                        host_card,
+                        # This redeem made the seat: its GFS, our role.
+                        redeem=(bootstrap.gfs_url, True) if made_seat else None,
+                    )
         if self._directory is not None:
             # v_89 — every redeem path: our card to the host, which doubles
             # as "seated, send my directory" (a snapshot that raced the
@@ -2330,7 +2336,7 @@ class SpaceInviteTokenRedeemCoordinator:
         # joiner's first envelopes after it applies the ACK find a row;
         # a rollback drops it again.
         try:
-            await self._seat_space_session_instance(
+            made_seat = await self._seat_space_session_instance(
                 instance_id=redeemer_instance_id,
                 display_name=str(body.get("display_name") or redeemer_instance_id[:8]),
                 identity_pk=str(body["identity_pk"]),
@@ -2386,7 +2392,11 @@ class SpaceInviteTokenRedeemCoordinator:
             await self._commit_redeem(reservation)
         # After the commit: its ``space_instances`` row now exists.
         if joiner_card is not None and self._directory is not None:
-            await self._directory.store_seat_card(space_id, joiner_card)
+            await self._directory.store_seat_card(
+                space_id,
+                joiner_card,
+                redeem=(gfs_url, False) if made_seat else None,
+            )
         if reservation is None:
             return {"ok": True, "space_id": ack_body["space_id"]}
         # The ONE operator-visible record that a stranger joined through a
@@ -2631,8 +2641,10 @@ class SpaceInviteTokenRedeemCoordinator:
         proto_version: int,
         is_redeemer: bool,
         gfs_url: str = "",
-    ) -> None:
+    ) -> bool:
         """Persist the counterpart as a **space-scoped** instance row.
+        Returns whether a seat row was written (``False``: an existing
+        relationship was kept).
 
         :data:`~socialhome.domain.federation.InstanceSource.SPACE_SESSION`
         is what makes this row space-scoped rather than a full social
@@ -2688,7 +2700,7 @@ class SpaceInviteTokenRedeemCoordinator:
             # Never downgrade or re-key an existing RELATIONSHIP (a real
             # pairing, or a second space joined with the same household)
             # off the back of an invite link.
-            return
+            return False
         pending = (
             existing
             if existing is not None and existing.status is not PairingStatus.CONFIRMED
@@ -2754,6 +2766,7 @@ class SpaceInviteTokenRedeemCoordinator:
         )
         if pending is not None:
             await self._keep_pending_beside_seat(pending)
+        return True
 
     async def _keep_pending_beside_seat(self, pending: RemoteInstance) -> None:
         """The seat just took the row of a pairing handshake in flight:
@@ -2774,7 +2787,15 @@ class SpaceInviteTokenRedeemCoordinator:
                 # The relay opt-in of a GFS-reach code is the pairing's,
                 # not the seat's (the half carries it to the confirmation).
                 await self._federation_repo.set_gfs_relay(pending.id, enabled=False)
-            await self._federation.pending_pairings.save(pending, ttl_s=ttl_s)
+            await self._federation.pending_pairings.save(
+                pending,
+                ttl_s=ttl_s,
+                # Still the half of its pairing code: the peer's cancel
+                # over the seat names that token.
+                token=await self._federation_repo.pairing_token_for_inbox(
+                    pending.local_inbox_id
+                ),
+            )
         except Exception:
             log.warning(
                 "invite bootstrap: could not keep the pending pairing with "

@@ -230,6 +230,7 @@ DROP_DEPROVISIONED_AUTHOR = "deprovisioned-author"
 DROP_SUBSCRIBER_WRITE = "subscriber-write"
 DROP_HELD_AWAITING_SEAT = "awaiting-seat"
 DROP_ARCHIVED_SPACE = "archived-space"
+DROP_PAIRING_CANCELLED = "pairing-cancelled"
 
 #: The one body every accepted envelope gets — dispatched OR dropped by a
 #: gate. A distinct body per drop reason (``archived-space``,
@@ -273,6 +274,12 @@ class _InboxInstance:
         on only once it has confirmed the pairing
         (:func:`make_confirm_relay_approval`)."""
         return self._staged
+
+    @property
+    def local_inbox_id(self) -> str:
+        """Our inbox id of this row / half — what names the handshake an
+        envelope was read under (:func:`make_confirm_relay_approval`)."""
+        return self._inst.local_inbox_id
 
     @property
     def pending_kind(self) -> str | None:
@@ -852,9 +859,19 @@ def make_check_unpairing(
     return check_unpairing
 
 
+#: What a household sends to END a handshake. Read under the keys of a
+#: pairing that waits for the peer's first envelope, these prove the
+#: opposite of "it confirmed": they never confirm it. Every other event is
+#: something a household sends only once its own side is confirmed.
+_ENDS_A_PAIRING: frozenset[str] = frozenset(
+    {FederationEventType.PAIRING_ABORT.value, FederationEventType.UNPAIR.value}
+)
+
+
 def make_confirm_relay_approval(
     *,
-    on_contact: Callable[[str], Awaitable[object]],
+    on_contact: Callable[[str, str], Awaitable[object]],
+    on_cancel: Callable[[str, str], Awaitable[object]] | None = None,
 ) -> InboundStep:
     """Step 6b: an approved trust-relay pair confirms on the requester's
     first authenticated envelope.
@@ -895,16 +912,31 @@ def make_confirm_relay_approval(
         if not getattr(inst, "remote_identity_pk", ""):
             return
         sender = getattr(inst, "from_instance", "")
+        # The handshake this envelope was verified and decrypted under.
+        inbox_id = str(getattr(inst, "local_inbox_id", "") or "")
+        staged = getattr(inst, "staged", False) is True
+        if ctx.envelope.get("event_type") in _ENDS_A_PAIRING:
+            # The peer cancelled (or unpaired): never a confirmation. A
+            # row approval is left to the event's handler, which drops the
+            # pending row. A half beside a seat has no row of its own —
+            # the handlers would act on the SEAT — so it is cancelled here
+            # (exactly the half these keys belong to) and the envelope is
+            # answered without a dispatch.
+            if staged:
+                if on_cancel is not None:
+                    await on_cancel(sender, inbox_id)
+                drop(ctx, DROP_PAIRING_CANCELLED)
+            return
         confirmed: object = False
         try:
-            confirmed = await on_contact(sender)
+            confirmed = await on_contact(sender, inbox_id)
         except Exception:
             log.warning(
                 "inbound: could not confirm the approved pairing with %s",
                 sender,
                 exc_info=True,
             )
-        if getattr(inst, "staged", False) is True and confirmed is not True:
+        if staged and confirmed is not True:
             log.info(
                 "inbound: refusing %r from %s — its approved pairing did not confirm",
                 ctx.envelope.get("event_type"),
@@ -939,7 +971,6 @@ def make_verify_signature(*, encoder) -> InboundStep:
         claimed_from = data["from_instance"]
         if claimed_from != signer_id:
             raise ValueError("Invalid envelope signature")
-        remote_pk = bytes.fromhex(ctx.instance.remote_identity_pk)
         # Reconstruct the signed bytes (envelope without the signatures map).
         # CANONICAL FIELD ORDER — must stay byte-identical to the order in
         # FederationService.send_event and resign_for_redelivery (the signer
@@ -957,16 +988,29 @@ def make_verify_signature(*, encoder) -> InboundStep:
             "sig_suite": data["sig_suite"],
         }
         envelope_bytes = orjson.dumps(envelope_for_verify)
-        remote_pq_pk_hex = getattr(ctx.instance, "remote_pq_identity_pk", None)
-        pq_pk = bytes.fromhex(remote_pq_pk_hex) if remote_pq_pk_hex else None
-        if not encoder.verify_signatures_all(
-            envelope_bytes,
-            suite=data["sig_suite"],
-            signatures=data["signatures"],
-            ed_public_key=remote_pk,
-            pq_public_key=pq_pk,
-        ):
-            raise ValueError("Invalid envelope signature")
+
+        def _verifies(instance: Any) -> bool:
+            pq_hex = getattr(instance, "remote_pq_identity_pk", None)
+            return bool(
+                encoder.verify_signatures_all(
+                    envelope_bytes,
+                    suite=data["sig_suite"],
+                    signatures=data["signatures"],
+                    ed_public_key=bytes.fromhex(instance.remote_identity_pk),
+                    pq_public_key=bytes.fromhex(pq_hex) if pq_hex else None,
+                )
+            )
+
+        if _verifies(ctx.instance):
+            return
+        if ctx.staged_alt is not None and _verifies(ctx.staged_alt):
+            # Not under the seat row's keys (a seat holds no post-quantum
+            # key), but under those of the approved pairing beside it: a
+            # hybrid-suite pairing's envelope on a transport that knows
+            # the sender only by its id.
+            _take_staged(ctx)
+            return
+        raise ValueError("Invalid envelope signature")
 
     return verify_signature
 

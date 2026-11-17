@@ -22,6 +22,7 @@ it. After an unpair the plain seat is back.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from types import SimpleNamespace
 
 import orjson
@@ -564,7 +565,9 @@ async def test_a_cancel_is_heard_by_the_household_that_showed_the_code(world):
     assert await c.cancel.cancel_pending(a.h.instance_id) is True
     await world.gfs.drain()
 
-    assert a.refused == []
+    # (Its copy on the code's own inbox finds nothing to read it under —
+    # nobody verified the code here — and is refused; the seat's did it.)
+    assert [t for t, _ in a.refused] in ([], ["pairing_abort"])
     assert a.h.federation.pending_pairings.staged(c.h.instance_id) is None
     assert await a.h.federation_repo.get_pairing(code["token"]) is None
     with pytest.raises(ValueError, match="No pending pairing"):
@@ -1080,6 +1083,8 @@ async def test_a_seat_made_during_a_handshake_keeps_the_handshake_beside_it(worl
     assert is_space_seat(await _row(a, c))
     staged = a.h.federation.pending_pairings.staged(c.h.instance_id)
     assert staged is not None and staged.local_inbox_id == half.local_inbox_id
+    # Still the half of ITS code: the peer's cancel over the seat is heard.
+    assert a.h.federation.pending_pairings.has_code_half(c.h.instance_id)
     assert staged.key_self_to_remote == half.key_self_to_remote
     await _assert_space_over_the_seat(world, "seated-mid-handshake")
 
@@ -1148,3 +1153,100 @@ async def test_a_peer_confirm_for_an_older_code_never_confirms_the_newer_half(
         )
     )
     assert c.confirmed == [a.h.instance_id] and is_paired(await _row(c, a))
+
+
+# ── A cancel never confirms ───────────────────────────────────────────────
+
+
+async def _code_entered_but_the_scanner_never_heard(
+    world,
+) -> tuple[dict, RemoteInstance]:
+    """a showed the code and its admin entered it (a's half waits as an
+    approval for c's first envelope); the peer-confirm never reached c, so
+    c still holds its unconfirmed half. Returns the code and c's half."""
+    a, c = world.a, world.c
+    code, accepted = await _scan(world)
+    client = a.h.federation._pairing._peer_pairing_client
+    a.h.federation._pairing._peer_pairing_client = None  # the confirm is lost
+    try:
+        await a.h.federation.confirm_pairing(
+            code["token"], accepted["verification_code"]
+        )
+    finally:
+        a.h.federation._pairing._peer_pairing_client = client
+    assert a.h.federation.pending_pairings.keyed_for(c.h.instance_id) is not None
+    half = c.h.federation.pending_pairings.staged(a.h.instance_id)
+    assert half is not None and c.confirmed == []
+    return code, half
+
+
+@pytest.mark.parametrize(
+    "event_type", [FederationEventType.PAIRING_ABORT, FederationEventType.UNPAIR]
+)
+async def test_a_cancel_under_the_codes_keys_never_confirms_the_waiting_side(
+    world, event_type
+):
+    """a waits for c's first envelope under the code's keys as proof that c
+    confirmed. c's CANCEL is sealed under those same keys — it proves the
+    opposite and must end a's half, never promote it (review finding: any
+    event promoted; a ended up paired with a household that had cancelled)."""
+    a, c = world.a, world.c
+    seats = (await _seat_keys(a, c), await _seat_keys(c, a))
+    code, c_half = await _code_entered_but_the_scanner_never_heard(world)
+
+    result = await c.h.federation.send_event_once(
+        instance=c_half,
+        event_type=event_type,
+        payload={"token": code["token"], "reason": "cancelled"},
+    )
+
+    assert result.ok
+    assert a.confirmed == [] and is_space_seat(await _row(a, c))
+    assert a.h.federation.pending_pairings.staged(c.h.instance_id) is None
+    assert await _seat_keys(a, c) == seats[0]
+    await c.cancel.cancel_pending(a.h.instance_id)
+    await _assert_space_over_the_seat(world, "cancelled-not-confirmed")
+
+
+async def test_a_scanners_cancel_goes_out_on_both_routes(world):
+    """Over the seat (heard by a household that keeps its half beside the
+    seat, with or without an address) AND to the code's own inbox under
+    the code's keys (heard by a released household, whose half IS its row
+    and which cannot read the seat any more)."""
+    a, c = world.a, world.c
+    code, _accepted = await _scan(world)
+    world.gfs.mailbox.clear()
+    a.refused.clear()
+
+    # "Told" by the seat's route alone: the copy on the code's inbox is
+    # refused here (a's half is an unverified code — nothing reads it).
+    assert await c.cancel.cancel_pending(a.h.instance_id) is True
+    await world.gfs.drain()
+
+    # The direct route: a PAIRING_ABORT arrived on the code's own inbox.
+    code_inbox = code["inbox_url"].rsplit("/", 1)[1]
+    assert a.refused == [
+        ("pairing_abort", f"No instance found for inbox_id={code_inbox!r}")
+    ]
+    # The seat route: something for a's mailbox at the GFS — and it worked.
+    assert _mailbox_of(a.h, world.gfs) in [to for to, _ in world.gfs.mailbox]
+    assert a.h.federation.pending_pairings.staged(c.h.instance_id) is None
+
+
+async def test_an_envelope_confirms_only_the_half_it_was_read_under(world):
+    """The pair is confirmed with the half the envelope verified and
+    decrypted under — not with whatever is staged for that household by
+    the time the confirm step runs."""
+    a, c = world.a, world.c
+    approval = await _request_and_approve(world)
+    fed = c.h.federation
+    # The same household, another handshake's half, staged meanwhile.
+    newer = dataclasses.replace(approval, local_inbox_id="another-handshake")
+    await fed.pending_pairings.save(newer, ttl_s=None)
+
+    assert (
+        await fed._on_relay_approval_contact(a.h.instance_id, approval.local_inbox_id)
+        is False
+    )
+    assert is_space_seat(await _row(c, a)) and c.confirmed == []
+    assert fed.pending_pairings.staged(a.h.instance_id) == newer
