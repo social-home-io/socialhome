@@ -26,7 +26,9 @@ older edit never lands over a newer one.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -51,11 +53,13 @@ from socialhome.federation.owner_bound_id import (
     SPACE_POST_KIND,
     mint_owner_bound_id,
 )
+from socialhome.federation.space_authorship import SpaceAuthorship
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.space_key_repo import SqliteSpaceKeyRepo
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 from socialhome.repositories.space_remote_member_repo import (
+    SpaceRemoteMember,
     SqliteSpaceRemoteMemberRepo,
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
@@ -615,3 +619,134 @@ async def test_a_late_copy_of_a_reaction_never_undoes_its_removal(env):
     await env["inbound"].handle(dict(remove))
     await env["inbound"].handle(dict(add))
     assert not await _landed(env, "reaction_add")
+
+
+# ── B1 (#1375 review): a follower's cert, end to end ─────────────────────
+
+
+class _HostSpaces:
+    """The host's view: it holds the seed; the follower switch is on."""
+
+    def __init__(self, space: Space, seed: bytes) -> None:
+        self.space = space
+        self.seed = seed
+
+    async def get(self, space_id):
+        return self.space if space_id == self.space.id else None
+
+    async def get_space_seed(self, space_id):
+        return self.seed
+
+    async def list_members(self, space_id):
+        return []
+
+    async def list_local_member_user_ids(self, space_id):
+        return []
+
+
+class _HostSeats:
+    def __init__(self, rows) -> None:
+        self.rows = rows
+
+    async def list_for_instance(
+        self, space_id, instance_id, *, include_tombstoned=True
+    ):
+        return [r for r in self.rows if r.instance_id == instance_id]
+
+    async def get(self, space_id, instance_id, user_id):
+        return next(
+            (
+                r
+                for r in self.rows
+                if (r.instance_id, r.user_id) == (instance_id, user_id)
+            ),
+            None,
+        )
+
+
+class _HostFed:
+    def __init__(self, pks: dict[str, bytes]) -> None:
+        self.pks = pks
+
+    async def space_member_supports(self, instance_id, *, min_version):
+        return True
+
+    async def peer_identity_public_key(self, instance_id):
+        return self.pks.get(instance_id)
+
+    async def mesh_member_identity_pk(self, instance_id):
+        return None
+
+
+async def test_a_followers_cert_works_end_to_end(env):
+    """B1 (#1375 review): host issues → the follower household stores it →
+    publishes a comment under it → a GFS subscriber accepts it (cert alone)
+    → a member household accepts it (cert, roster seat and switch). Before
+    the fix the follower could not store its own follower cert at all."""
+    space = await env["spaces"].get(SPACE)
+    on = replace(space, features=replace(space.features, allow_subscriber_comment=True))
+    await env["spaces"].save(on)
+    follower_seat = SpaceRemoteMember(
+        space_id=SPACE,
+        instance_id=EVE.origin,
+        user_id=EVE.user_id,
+        role="subscriber",
+    )
+    # 1. The host issues the follower household its cert.
+    host_keys = SimpleNamespace(
+        get_latest=lambda space_id: _latest(env),
+    )
+    host = SpaceWriterCertService(
+        space_repo=_HostSpaces(on, env["space_kp"].private_key),  # type: ignore[arg-type]
+        remote_member_repo=_HostSeats([follower_seat]),  # type: ignore[arg-type]
+        space_key_repo=host_keys,  # type: ignore[arg-type]
+        own_instance_id="host.home",
+        own_identity_pk=generate_identity_keypair().public_key,
+    )
+    host.attach_federation(_HostFed({EVE.origin: EVE.kp.public_key}))  # type: ignore[arg-type]
+    wire = await host.cert_for_peer(SPACE, EVE.origin)
+    assert wire is not None and wire["scope"] == "follower_comment"
+    # 2. The follower household stores it (and it is its current cert).
+    follower = SpaceWriterCertService(
+        space_repo=env["spaces"],
+        remote_member_repo=SqliteSpaceRemoteMemberRepo(env["db"]),
+        space_key_repo=SqliteSpaceKeyRepo(env["db"]),
+        own_instance_id=EVE.origin,
+        own_identity_pk=EVE.kp.public_key,
+    )
+    assert await follower.accept(SPACE, wire) is True
+    held = await follower.current_own_cert_wire(SPACE)
+    assert held == wire
+    # 3–4. It publishes a comment under that cert; a GFS subscriber (its
+    # row is a GFS mirror stub: the cert alone decides) applies it.
+    await env["spaces"].set_mirror_provenance(SPACE, gfs_id="gfs-1", rotation_seq=0)
+    inner = _build(env, "comment", EVE)
+    await _send(env, "comment", inner, held)
+    assert await _landed(env, "comment")
+    # 5. A member household applies the same item: it checks EVE's seat on
+    # its roster and the switch.
+    authorship = SpaceAuthorship(
+        space_repo=env["spaces"],
+        remote_member_repo=_HostSeats([follower_seat]),  # type: ignore[arg-type]
+        user_repo=SimpleNamespace(get_by_user_id=_none),  # type: ignore[arg-type]
+    )
+    member_inner = _build(env, "comment", EVE)
+    assert await env["inbound"]._items.apply(
+        space=on,
+        item_type="comment",
+        inner={**member_inner, "writer_cert": held},
+        origin_instance_id=EVE.origin,
+        cert_scope=held["scope"],
+        member_household=True,
+        authorship=authorship,
+    )
+    assert await env["posts"].get_comment(env["new_comment_id"]) is not None
+
+
+async def _latest(env):
+    epoch = await env["crypto"].get_current_epoch(SPACE)
+    return SimpleNamespace(epoch=epoch)
+
+
+async def _none(*_a, **_kw):
+    return None
