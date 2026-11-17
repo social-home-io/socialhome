@@ -466,6 +466,55 @@ async def test_seed_holder_uploads_with_the_space_authority(tmp_path):
     )
 
 
+@pytest.mark.security
+async def test_a_delegated_admin_uploads_with_the_writer_key_like_any_writer(
+    tmp_path,
+):
+    """It holds the seed, but an authority-signed upload from a household
+    that is not the owner would mark it as a seed holder: where the space
+    has a writer group key it signs with that, as every writer does."""
+    _write(tmp_path, "a.webp", 10)
+    kp = generate_identity_keypair()
+    wk = generate_identity_keypair()
+    gfs = _Gfs([_Conn("g1", "https://g1.example")])
+    u = _uploader(
+        tmp_path,
+        gfs=gfs,
+        instances=[RELAY],
+        versions={"e": V},
+        spaces=_Spaces(kp.private_key, owner="owner.elsewhere"),
+        certs=_Certs(writer_key=wk.private_key),
+    )
+    await _upload(
+        u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    )
+    auth = SpaceMediaUploadAuth.from_header(gfs.puts[0][4])
+    assert auth.kind == AUTH_WRITER_KEY and auth.epoch == 4
+
+
+async def test_a_delegated_admin_without_a_writer_key_uploads_as_the_authority(
+    tmp_path,
+):
+    """A space with no writer group key (not publicly readable): the seed
+    is the one authorization there is, so members reading through a GFS
+    still get the picture."""
+    _write(tmp_path, "a.webp", 10)
+    kp = generate_identity_keypair()
+    gfs = _Gfs([_Conn("g1", "https://g1.example")])
+    u = _uploader(
+        tmp_path,
+        gfs=gfs,
+        instances=[RELAY],
+        versions={"e": V},
+        spaces=_Spaces(kp.private_key, owner="owner.elsewhere"),
+        certs=_Certs(),
+    )
+    await _upload(
+        u, await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    )
+    assert SpaceMediaUploadAuth.from_header(gfs.puts[0][4]).kind == AUTH_AUTHORITY
+
+
 async def test_writer_key_holder_uploads_anonymously(tmp_path):
     _write(tmp_path, "a.webp", 10)
     wk = generate_identity_keypair()

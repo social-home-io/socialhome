@@ -979,34 +979,48 @@ class SpaceMediaGfsUploader:
         return None
 
     async def _authorize(self, claim: SpaceMediaClaim) -> SpaceMediaUploadAuth | None:
-        """The authorization this household holds: the space authority (seed
-        holder), else the writer group key. Both are anonymous."""
+        """The authorization this household uploads with. The space's OWNER:
+        the space authority (its seed). Everyone else: the writer group key
+        — a delegated admin too, although it holds the seed, so its uploads
+        look like any writer's; it signs as the authority only where the
+        space has no writer key (not publicly readable). All anonymous."""
         space_id = claim.scope_id
         try:
             seed = await self._spaces.get_space_seed(space_id)
         except RuntimeError:
             seed = None
-        if seed is not None:
-            sig = sign_ed25519(seed, claim.authority_signing_bytes())
-            return SpaceMediaUploadAuth(
-                claim=claim,
-                kind=AUTH_AUTHORITY,
-                sig=b64url_encode(sig),
-                sig_suite=AUTHORITY_SIG_SUITE_ED25519,
-            )
+        if seed is not None and await self._owns(space_id):
+            return self._authority_auth(claim, seed)
+        auth = await self._writer_key_auth(claim)
+        if auth is None and seed is not None:
+            return self._authority_auth(claim, seed)
+        return auth
+
+    @staticmethod
+    def _authority_auth(claim: SpaceMediaClaim, seed: bytes) -> SpaceMediaUploadAuth:
+        return SpaceMediaUploadAuth(
+            claim=claim,
+            kind=AUTH_AUTHORITY,
+            sig=b64url_encode(sign_ed25519(seed, claim.authority_signing_bytes())),
+            sig_suite=AUTHORITY_SIG_SUITE_ED25519,
+        )
+
+    async def _writer_key_auth(
+        self, claim: SpaceMediaClaim
+    ) -> SpaceMediaUploadAuth | None:
         if self._certs is None:
             return None
-        epoch = await self._crypto.get_current_epoch(space_id)
+        epoch = await self._crypto.get_current_epoch(claim.scope_id)
         if epoch is None:
             return None
-        writer_seed = await self._certs.own_writer_key(space_id, epoch)
-        if writer_seed is not None:
-            msg = claim.writer_signing_bytes(kind=AUTH_WRITER_KEY, epoch=epoch)
-            return SpaceMediaUploadAuth(
-                claim=claim,
-                kind=AUTH_WRITER_KEY,
-                sig=sign_with_writer_key(writer_seed, msg),
-                sig_suite=WRITER_KEY_SUITE_ED25519,
-                epoch=epoch,
-            )
-        return None
+        writer_seed = await self._certs.own_writer_key(claim.scope_id, epoch)
+        if writer_seed is None:
+            return None
+        msg = claim.writer_signing_bytes(kind=AUTH_WRITER_KEY, epoch=epoch)
+        return SpaceMediaUploadAuth(
+            claim=claim,
+            kind=AUTH_WRITER_KEY,
+            sig=sign_with_writer_key(writer_seed, msg),
+            sig_suite=WRITER_KEY_SUITE_ED25519,
+            epoch=epoch,
+        )
