@@ -1809,15 +1809,19 @@ household migration 0145.
 
 ### Residuals
 
-- **Who holds a space's signing seed (until the seed-holder follow-up, same
-  release).** The seed share itself is a sealed single-recipient frame
-  (`SPACE_ADMIN_KEY_SHARE`, v_94). But a household that holds a space's seed
-  stops its identified member publish and drops its identified fan-out seat
-  for that space, and re-announces the space's epoch whenever its socket
-  reconnects — so the GFS can infer which household became a seed holder
-  (the owner, or an admin the owner lets act for it). A paired delegated
-  admin connected to the GFS shows the same. The follow-up makes a seed
-  holder's GFS behaviour the same as any writer's.
+- **That a delegated admin exists — not which household.** The seed share
+  itself is a sealed single-recipient frame (`SPACE_ADMIN_KEY_SHARE`, v_94),
+  and a household that holds a space's seed without owning the space sends
+  the GFS what any writer household sends: anonymous items, the same
+  fan-out seat, nothing on a reconnect
+  ([discovery.md](./discovery.md#a-delegated-admin-is-a-writer-to-the-gfs)).
+  What only the seed can sign still goes out when that household itself
+  acts for the space — the notice of a rotation it runs, a removal or a
+  released post it relays — anonymously and in the owner's wire shape. Seen
+  while the owner's socket is down, such a request tells the GFS that
+  someone else holds the seed. It names nobody; linking it to a household
+  takes the sender's address (the IP limit below). The owner household is
+  known to the GFS by design: it signs the listing.
 - **An instance-addressed frame shows its recipient.** A seat without a
   mailbox (an older sealed-redeem seat) is reached by `{to_instance,
   sealed}`: the GFS sees the recipient's instance id on every frame to it,

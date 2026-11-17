@@ -795,13 +795,19 @@ class SpaceSubscriberKeyOutbound:
         self, gfs_base_url: str, space_id: str, gfs_id: str | None = None
     ) -> None:
         """Pull + re-seal for one published space. Skips a space this household
-        doesn't hold the seed for, or a non-PUBLIC/GLOBAL space (its key must
-        never leave via the GFS). Only reached after :meth:`reconcile` has
-        confirmed the HTTP session is wired."""
+        doesn't own or hold the seed for, or a non-PUBLIC/GLOBAL space (its
+        key must never leave via the GFS). Only reached after
+        :meth:`reconcile` has confirmed the HTTP session is wired."""
         if self._http_session is None:
             return
         space = await self._spaces.get(space_id)
         if space is None or space.space_type not in PUBLIC_SPACE_TIERS:
+            return
+        # Only the owner lists a space, so only it has publications to
+        # reconcile. A leftover row on a delegated admin is never used: the
+        # query below rides our identified session, and would name this
+        # household to the GFS as a seed holder.
+        if space.owner_instance_id != self._own_instance_id:
             return
         # Subscribers off ⇒ listed for discovery but not publicly readable.
         # Gated here (before the subscriber-list round-trip) so we never even

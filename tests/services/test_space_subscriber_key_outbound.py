@@ -159,13 +159,14 @@ async def env(tmp_dir):
         with_seed,
         join_mode=JoinMode.OPEN,
         allow_subscribers=True,
+        owner=own_iid,
     ):
         skp = generate_space_keypair()
         await space_repo.save(
             Space(
                 id=space_id,
                 name="S",
-                owner_instance_id=own_iid,
+                owner_instance_id=owner,
                 owner_username="alice",
                 identity_public_key=skp.public_key.hex(),
                 config_sequence=0,
@@ -502,6 +503,25 @@ async def test_reconcile_skips_space_without_seed(recon_env):
     recon_env["conn_repo"].publish("gfs-1", "sp-noseed")
 
     await recon_env["svc"].reconcile("gfs-1")
+
+    assert recon_env["session"].gets == []
+    assert recon_env["gfs"].calls == []
+
+
+@pytest.mark.security
+async def test_reconcile_skips_a_space_this_household_does_not_own(recon_env):
+    """Only the owner lists a space. A leftover publication row on a
+    delegated admin (it holds the seed) must not make it ask the GFS for the
+    subscriber list on its identified session — that names it as a seed
+    holder — on a reconnect or after a rotation."""
+    await recon_env["make_space"](
+        "sp-del", SpaceType.GLOBAL, with_seed=True, owner="owner.home"
+    )
+    recon_env["conn_repo"].add_conn("gfs-1")
+    recon_env["conn_repo"].publish("gfs-1", "sp-del")
+
+    await recon_env["svc"].reconcile("gfs-1")
+    await recon_env["svc"].reconcile_space_everywhere("sp-del")
 
     assert recon_env["session"].gets == []
     assert recon_env["gfs"].calls == []

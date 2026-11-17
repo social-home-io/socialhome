@@ -926,10 +926,13 @@ relayed to for followers — keeps the ones whose signed block proved
 `space_media` (and whose `max_blob_bytes` the blob fits), seals each file
 once, computes its scope-bound address and `PUT`s it once per GFS to the one
 scope-free path `PUT /gfs/media/{blob_id}` — the scope rides only inside the
-signed claim header (`scope`, `scope_id`, `addr_suite`), never in a URL. Authorization, strongest first: the
-**space authority** signature (this household holds the space seed — host
-or delegated admin), else the **writer group key** (both anonymous; the
-identified writer-cert kind is gone since v_90). A **private** space that
+signed claim header (`scope`, `scope_id`, `addr_suite`), never in a URL. Authorization: the
+space's owner signs as the **space authority** (its seed); every other
+household signs with the **writer group key** — a delegated admin too,
+although it holds the seed, so its uploads look like any writer's (it signs
+as the authority only where the space has no writer key). Both are
+anonymous; the
+identified writer-cert kind is gone since v_90. A **private** space that
 uses an opaque channel (v_51, `private_gfs` on) uploads under the GFS's
 **channel scope** instead (the claim names the channel), only to a GFS whose
 signed `space_media.scopes` lists `channel` — so the GFS learns the random

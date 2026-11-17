@@ -1057,7 +1057,10 @@ boundary on both ends:
   (Encryption-First Rule). The envelope is **space-authority**-signed with
   the space seed under `space_post_public` and POSTed to every GFS the space
   is published to (`gfs_connection_service.publish_space_event`). Skipped: a
-  household without the seed, a non-public space, and an inbound-driven
+  household without the seed, a delegated admin's own post (it publishes it
+  as an anonymous `space_item` like any writer — see
+  [A delegated admin is a writer to the GFS](#a-delegated-admin-is-a-writer-to-the-gfs)),
+  a non-public space, and an inbound-driven
   (`origin_instance_id` set) event with no relay hint (pure loop guard).
 
   Two independent signatures protect a relayed post: the **space-authority**
@@ -1237,9 +1240,9 @@ exact cleartext key set of each payload.
 
 A Phase-5a relay reaches a GFS subscriber, but the subscriber **drops** it —
 it has no content key to decrypt. Phase 5b-b delivers that key, **GFS-blind**,
-on a fast path driven by the GFS `new_subscriber` notify (the owner-offline
-RECONCILE — a seed-holder pulling the subscriber list to catch up missed
-deliveries — is **Phase 5b-c**, below):
+on a fast path driven by the GFS `new_subscriber` notify (the
+RECONCILE — the owner pulling the subscriber list to catch up deliveries
+missed while it was offline — is **Phase 5b-c**, below):
 
 1. **GFS notify.** On a successful `subscribe` that creates a **new** seat,
    the GFS pushes a `new_subscriber` frame (`reason:"subscribe"`) to the space
@@ -1309,11 +1312,15 @@ The 5b-b notify reaches **only the owner** (the GFS authoritatively knows
 `owning_instance`, so that's the only socket it pushes to). If the owner is
 offline when a household subscribes — or the notify is simply missed — the
 content key is never delivered on the fast path. Phase 5b-c closes the gap with
-a **pull-based reconcile** that any seed-holder can run, so a **delegated admin
-delivers the key while the owner is offline**:
+a **pull-based reconcile** the **owner** runs when it is back. (Only the
+owner lists a space, so only it has publications to reconcile; a delegated
+admin never asks a GFS for a subscriber list — the query rides the
+identified session and would name it as a seed holder. A follower that
+subscribes while the owner is offline gets its key when the owner
+reconnects.)
 
 1. **Trigger.** On each GFS-WS `(re)connect` (`gfs_ws_client` `on_connected`),
-   the seed-holder runs `space_subscriber_key_outbound.reconcile(gfs_id)`.
+   the owner runs `space_subscriber_key_outbound.reconcile(gfs_id)`.
    A **content-key rotation** triggers it too, scoped to the rotated space:
    after the forward-secrecy rekey a member removal / ban / §D1b kick mints
    (`_rotate_and_distribute_space_key`), the member fan-out targets
@@ -1322,10 +1329,11 @@ delivers the key while the owner is offline**:
    `reconcile_space(gfs_id, space_id)`, same guards, same seal path). Without
    it a subscriber stays dark, silently dropping every relayed frame, until
    its next reconnect. Fail-soft: a GFS that is down never fails the removal.
-2. **Enumerate "spaces I hold the seed for on this GFS."** It lists every space
+2. **Enumerate "spaces I own on this GFS."** It lists every space
    **published to that GFS** (`gfs_connection_repo.list_publications(gfs_id)`)
-   and keeps those that are **PUBLIC/GLOBAL** *and* whose **seed this household
-   holds** (`get_space_seed` non-None). A private/household space, or a space it
+   and keeps those that are **PUBLIC/GLOBAL**, that **this household owns**
+   *and* whose **seed it holds** (`get_space_seed` non-None). A
+   private/household space, a space hosted elsewhere, or a space it
    doesn't hold the seed for, is skipped (its key must never leave via the GFS,
    and only a seed-holder can authority-sign the query).
 3. **Pull the subscriber list under a space-authority signature.** It signs
@@ -1388,7 +1396,7 @@ Both paths above assume the **subscriber's** GFS socket is up when the sealed
 handoff is fanned out. It is relayed back over that socket, and if it is down
 the key is simply **lost** — the subscriber stays keyless for the epoch and
 silently drops every relayed post. Nothing retries, and 5b-c does not cover it:
-that reconcile fires when a **seed-holder** reconnects, not the subscriber.
+that reconcile fires when the **owner** reconnects, not the subscriber.
 
 There is no other delivery path. The GFS holds no household address: GFS
 migration `0018` dropped the `inbox_url` a household once registered, together
@@ -1613,14 +1621,15 @@ POST /gfs/member-publish-anon
 - **The host path always carries the item.** The member publish runs in
   the background after the member broadcast (post creation never waits on a
   connection server). The member broadcast (members and the host) runs
-  before and independent of any GFS publish, and seed holders keep relaying
+  before and independent of any GFS publish, and the owner keeps relaying
   posts to followers as `space_post_public` (authority-signed, identity-free;
   see step 12 below for when a copy is skipped). So an older household, a
   missing key or a refusing GFS costs live delivery while the host is
   offline — never the post. A follower that reads both copies drops the
   second by post id.
 - **Auto-subscribe looks like a follower.** A household with a local writer
-  seat (and no seed) subscribes to the fan-out of the space on every
+  seat (every one but the owner's — a delegated admin keeps its seat like
+  any writer) subscribes to the fan-out of the space on every
   capable server listing it — when the seat is created
   (`SpaceMemberJoined`) and on every GFS (re)connect, never on the spot
   before a publish — with the very same signed `{action:"subscribe",
@@ -1695,7 +1704,8 @@ POST /gfs/member-publish-anon
 **Hard requirements on households** (the GFS check is only as sound as
 these; adversarial review of PR 2):
 
-1. **Epoch notice at every rotation.** A seed holder sends the epoch
+1. **Epoch notice at every rotation.** The seed holder that runs a
+   rotation sends the epoch
    notice for the new epoch — the owner's household-signed form when the
    owner rotates (it may jump), a delegated admin's authority-signed form
    (+1) otherwise — to EVERY GFS the space is listed on, at every content-key rotation — kick, ban, leave, scope drop
@@ -1707,7 +1717,9 @@ these; adversarial review of PR 2):
    A re-pin clears the GFS epoch state, so the owner re-sends the current
    epoch's (owner-signed) notice right after any authority-key rotation,
    and on each GFS (re)connect, which also confirms rotations a delegated
-   admin made while the owner was away.
+   admin made while the owner was away. Only the owner does this: a
+   delegated admin sends no notice on a reconnect (it would tie the space's
+   notices to that household's socket).
 3. **`gfs_instance_id` in every signed request** — the id pinned from that
    server's `/gfs/info`, never a value from another server.
 4. **The `writer_cert` never leaves the ciphertext** (it names the
@@ -1723,16 +1735,18 @@ these; adversarial review of PR 2):
    [Comments, reactions and own edits / deletes](#comments-reactions-and-own-edits--deletes-v_49)
    below.
 
-### A seed holder's copy of a member's post (step 12)
+### The owner's copy of a member's post (step 12)
 
 A member household publishes its own post to every GFS the owner listed
-(`space_item`, v_57). Every seed holder of the space **also** relays that
+(`space_item`, v_57). The space's owner **also** relays that
 post as `space_post_public` (`SpacePublicOutbound._relay_remote_authored`),
-because a follower on an older build reads only that copy. With 10 000
-followers, three seed holders and 400 member posts a day, those copies are
-three extra fan-outs of every post.
+because a follower on an older build reads only that copy. (Before v_94
+every seed holder did: with 10 000 followers, three seed holders and 400
+member posts a day, three extra fan-outs of every post. A delegated admin
+no longer relays posts at all — see
+[A delegated admin is a writer to the GFS](#a-delegated-admin-is-a-writer-to-the-gfs).)
 
-A seed holder now skips its copy **on a given GFS** only when all of these
+The owner skips its copy **on a given GFS** only when all of these
 hold (`services/space_relay_coverage.py`):
 
 1. the author's household is at v_90 or later
@@ -1755,7 +1769,60 @@ the cookie-less publish session and names no household. A post released
 from the moderation queue (`_relay_approved`) is never skipped, because
 its author did not publish it. Remaining risk: an author whose own
 publish fails for good (a permanent refusal; transient ones are retried)
-is no longer backed by the seed holders' copies on such a server.
+is no longer backed by the owner's copy on such a server.
+
+### A delegated admin is a writer to the GFS
+
+A GFS must not learn which household holds a space's signing seed. The
+owner is known to it by design: the listing is signed by the owner
+household's registered key and names it (`owning_instance`), the owner
+gets the `new_subscriber` notifies and signs the identified epoch notice.
+A **delegated admin** — a household the owner handed the seed
+(`SPACE_ADMIN_KEY_SHARE`), paired, over the mesh or reached only through
+the GFS — is not known to it, and nothing that household sends a GFS
+depends on the seed (v_94, `GfsMemberPublishService._relays_as_owner`):
+
+| Toward the GFS | Owner | Delegated admin | Plain writer |
+|---|---|---|---|
+| Own post | `space_post_public` (authority-signed) | anonymous `space_item` | anonymous `space_item` |
+| Other members' posts | relays a copy (step 12) | nothing | nothing |
+| Fan-out seat (identified subscribe) | none | kept, re-taken on every reconnect | kept, re-taken on every reconnect |
+| On a socket reconnect | pin heal, epoch notice, key reconcile | seat re-take only | seat re-take only |
+| Picture upload | space authority | writer group key | writer group key |
+
+Before v_94 a delegated admin behaved like the owner in every row, so the
+GFS saw a household's identified seat for the space disappear when it was
+handed the seed, and the space's epoch notices follow that household's
+reconnects.
+
+**What a delegated admin still sends with the seed** — each only when it
+itself acts for the space, anonymous (the cookie-less publish session, no
+household identity in the body), and in the same wire shape the owner
+sends:
+
+- the **epoch notice of a rotation it runs** (it removed a writer while
+  acting for the owner). It cannot wait for the owner: until the notice
+  lands the GFS keeps relaying the removed writer's items;
+- a **removal** it applies and a **post released from the moderation
+  queue** on it (`space_post_public`, which the GFS cannot tell from a
+  post). No other path carries these to followers;
+- a picture upload signed as the space authority, only in a space that has
+  no writer group key (not publicly readable).
+
+So the GFS can learn that *some* household other than the owner holds the
+seed (an authority-signed request while the owner's socket is down), not
+which one. A GFS that logs addresses can still link an anonymous request to
+the household behind that address — the stated IP limit
+([`principles.md`](../principles.md#no-random-delays-for-gfs-unlinkability)),
+the same for every anonymous publish.
+
+**Effect on followers.** A post by an author below v_90 (it holds no writer
+group key and publishes nothing itself) reaches GFS followers through the
+owner's copy alone: while the owner is offline it waits, and it is relayed
+when the owner receives the post (a post the owner gets only through space
+sync is not). Authors at v_90 or later publish their own posts and are not
+affected. Members are not affected at all: they get every post over the
+member broadcast.
 
 ### What one post costs a follower
 
@@ -2405,8 +2472,9 @@ acts on bound inside the author signature:
 for a local user's comment, comment edit / delete, own post edit / delete
 and reaction in a PUBLIC/GLOBAL space with `allow_subscribers`, when the
 household's cert for the current epoch grants the type's scope and binds
-the user. Unlike posts, seed holders publish these too: the host relays
-posts with the authority signature, but nothing else reached followers.
+the user. Unlike posts, the owner publishes these too: it relays its
+posts with the authority signature, but nothing else reached followers. (A
+delegated admin publishes all its items here, posts included.)
 Otherwise the write takes the host path silently.
 
 **Followers before this release** received only posts (`space_post_public`);
