@@ -37,7 +37,7 @@ export function PendingCard({ conn, onCancel, onRestart }: Props) {
       meta={[
         <span data-pending-kind={kind}><ConnIcon name={meta.icon} />{t(meta.key, { name: conn.display_name })}</span>,
         conn.shares_space
-          ? <span data-shares-space><ConnIcon name="users" />{t('connections.meta.pending_shares_space')}</span>
+          ? <span data-shares-space><ConnIcon name="spaces" />{t('connections.meta.pending_shares_space')}</span>
           : null,
         conn.paired_at ? <span>{relativeDocsTime(conn.paired_at)}</span> : null,
       ]}
