@@ -335,7 +335,8 @@ class SpaceSubscriberKeyOutbound:
         # household's socket — and an answer would tell it that household
         # holds the seed (a delegated admin).
         if space.owner_instance_id != self._own_instance_id:
-            log.warning(
+            # INFO, not WARNING: a server could repeat the frame at will.
+            log.info(
                 "space_subscriber_key.outbound: new_subscriber for space %s, "
                 "which this household does not own — ignored",
                 space_id,
@@ -703,10 +704,11 @@ class SpaceSubscriberKeyOutbound:
         )
 
     async def reconcile(self, gfs_id: str) -> None:
-        """Owner-offline RECONCILE (Phase-5b-c). Never raises.
+        """The owner's RECONCILE (Phase-5b-c). Never raises.
 
         Triggered on each GFS-WS (re)connect. For every PUBLIC/GLOBAL space
-        this household (a) holds the seed for and (b) has published to *gfs_id*,
+        this household (a) owns and holds the seed for and (b) has published
+        to *gfs_id*,
         pull the GFS subscriber list under a space-authority-signed query and
         re-seal the content key to each subscriber via :meth:`_seal_and_relay`.
         This delivers the key to subscribers whose owner was offline at

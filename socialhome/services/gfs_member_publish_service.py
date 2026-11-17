@@ -56,7 +56,7 @@ as anonymous items, it keeps its fan-out seat, and a reconnect re-takes that
 seat and announces nothing. So the server cannot tell which household was
 handed the seed. What only the seed can sign still goes out, anonymously,
 for something done on that household itself: the notice of a rotation it
-runs, and a removal or released post made there
+runs, and a removal made there
 (:mod:`socialhome.services.space_public_outbound`).
 
 **Every listed GFS (v_57).** Once the owner's signed GFS list is known
@@ -746,7 +746,7 @@ class GfsMemberPublishService:
     async def announce_epoch(self, space_id: str, *, only: str | None = None) -> int:
         """Tell every capable GFS listing *space_id* its current content
         epoch — at every rotation (before the subscriber re-seal), after
-        every authority re-pin, and on every GFS (re)connect. The OWNER signs
+        every authority re-pin, and (the owner only) on every GFS (re)connect. The OWNER signs
         with its household key (the GFS confirms any jump); a delegated admin
         signs with the space seed (+1 at most). ``only`` limits it to one
         connection. No-op without the seed or for a space that is not

@@ -1247,7 +1247,7 @@ Residuals, stated plainly: an admin household without a mailbox (an older
 sealed-redeem seat) is reached by an instance-addressed relay frame, whose
 routing body shows the GFS its instance id (`to_instance`) — as every frame
 to such a seat does; what only the seed can sign (the notice of a
-rotation the admin runs, a removal or released post made on its household)
+rotation the admin runs, a removal made on its household)
 still goes out, anonymously, so the GFS can learn that some household
 besides the owner holds the seed, not which; and on a private space's
 opaque channel a delegated admin's seat can still be told apart after a

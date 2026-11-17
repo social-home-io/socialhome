@@ -1716,10 +1716,13 @@ async def test_the_owner_without_an_identity_still_warns(env, caplog):
     assert "identity not attached" in caplog.text
 
 
-async def test_a_delegated_admin_still_relays_a_post_it_released(env):
-    """A remote member's post released from the queue here reaches followers
-    on no other path (its author holds only a ``comment`` cert)."""
-    skp, _author_kp, _iid, post, relay = await _approved_env(
+@pytest.mark.security
+async def test_a_delegated_admin_relays_no_post_even_one_marked_released(env):
+    """Only the owner releases a queued post, so a release never happens
+    here; should a ``SpacePostCreated`` ever arrive marked approved, it must
+    still not open an authority-signed relay on a household that merely
+    holds the seed."""
+    _skp, _author_kp, _iid, post, relay = await _approved_env(
         env, owner=_OWNER_ELSEWHERE
     )
     await env["bus"].publish(
@@ -1730,19 +1733,6 @@ async def test_a_delegated_admin_still_relays_a_post_it_released(env):
             public_relay=relay,
         )
     )
-    assert len(env["gfs"].calls) == 1
-    inner = await _removal_inner(env, skp)
-    assert is_approved(inner)
-    assert verify_signed_author_inner(inner)
-
-
-async def test_a_delegated_admin_still_relays_its_own_members_released_post(env):
-    """A local plain member's post released from the queue: its household's
-    cert does not let that member publish a post itself, so the authority
-    relay is the one path to followers."""
-    await env["make_space"](
-        "sp-pub", SpaceType.GLOBAL, with_seed=True, owner=_OWNER_ELSEWHERE
-    )
     await env["bus"].publish(
         SpacePostCreated(
             post=_post(env["author_user_id"]),
@@ -1750,6 +1740,30 @@ async def test_a_delegated_admin_still_relays_its_own_members_released_post(env)
             approved_by="the-moderator",
         )
     )
-    assert len(env["gfs"].calls) == 1
-    _envelope, inner = await _decrypted(env, "sp-pub")
-    assert verify_signed_author_inner(inner)
+    assert env["gfs"].calls == []
+
+
+async def test_the_owner_still_relays_a_removal_that_reached_it(env):
+    skp = await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
+    await env["bus"].publish(
+        CommentDeleted(
+            post_id="post-1",
+            comment_id="c-1",
+            space_id="sp-pub",
+            origin_instance_id="m.home",
+            author_user_id="someone",
+        )
+    )
+    assert (await _removal_inner(env, skp))["item_id"] == "c-1"
+
+
+async def test_a_removal_without_an_identity_warns(env, caplog):
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
+    env["sub"].attach_identity(
+        own_instance_id="", own_instance_public_key=b"", own_identity_seed=b""
+    )
+    await env["bus"].publish(
+        PostDeleted(post_id="post-9", space_id="sp-pub", origin_instance_id="m.home")
+    )
+    assert env["gfs"].calls == []
+    assert "identity not attached" in caplog.text

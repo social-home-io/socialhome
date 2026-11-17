@@ -1026,7 +1026,7 @@ how people find the space and ask to be let in — but its **content stream
 stops at the member households**:
 
 - no post is relayed to the GFS (`services/space_public_outbound.py`, both
-  the local-author and the owner-offline remote-author paths);
+  the local-author and the remote-author paths);
 - the per-space AES-256 content key is never sealed to a GFS subscriber
   (`services/space_subscriber_key_outbound.py`, the `new_subscriber` handoff
   and every reconcile entry point), so a subscriber cannot open even a
@@ -2409,7 +2409,7 @@ Residuals, stated plainly: an admin household without a mailbox (an older
 sealed-redeem seat) is reached by an instance-addressed relay frame, whose
 routing body shows the GFS its instance id (`to_instance`) — as every frame
 to such a seat does; what only the seed can sign (the notice of a
-rotation the admin runs, a removal or released post made on its household)
+rotation the admin runs, a removal made on its household)
 still goes out, anonymously, so the GFS can learn that some household
 besides the owner holds the seed, not which; and on a private space's
 opaque channel a delegated admin's seat can still be told apart after a

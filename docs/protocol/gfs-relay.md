@@ -1818,8 +1818,8 @@ household migration 0145.
   differently (a `new_subscriber` frame, a delete delivered to its seat)
   ([discovery.md](./discovery.md#a-delegated-admin-is-a-writer-to-the-gfs)).
   What only the seed can sign still goes out for something done on that
-  household itself — the notice of a rotation it runs, a removal or a
-  released post made there — anonymously and in the owner's wire shape. Seen
+  household itself — the notice of a rotation it runs, a removal made
+  there — anonymously and in the owner's wire shape. Seen
   while the owner's socket is down, such a request tells the GFS that
   someone else holds the seed. It names nobody; linking it to a household
   takes the sender's address (the IP limit below). The owner household is
