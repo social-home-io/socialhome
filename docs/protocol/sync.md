@@ -115,6 +115,60 @@ which replaced the never-released v_87 `refill` field of this request.
 Every `since` comparison runs through `datetime()` on both sides, so a
 naive stored stamp and a tz-aware `since` compare as times.
 
+**A replayed row is its live event.** A receiver applies a create for a
+row it already holds as an upsert of that row, and reads an absent field
+by its default — so a replay carries what the live fan-out carries, built
+by the same function:
+
+- a post is `post_to_wire_dict`: every picture in `image_urls`,
+  `hidden_from_feed`, the file attachment (`file_meta`; a live receiver
+  stores it when it passes the §5.2 gate — WebP / WebM — and is a space
+  file with well-typed fields) and — on an edited post only — `edited_at`
+  (not taken when more than the live skew ahead of the receiver's clock);
+- a calendar event is `calendar_event_to_wire_dict`: `tz`, `location`,
+  `capacity`, `announce_in_feed` (absent reads as "announce");
+- a post, comment, calendar event or gallery item with files also names
+  their hashes: the v_85 `files` map, to a household at v_85 or later, as
+  `broadcast_to_space_members` sends it. The receiver stores the files
+  under their content names and the replaying household's
+  `SPACE_MEDIA_BLOB`s fill them.
+
+The rows go out the way the request came (`send_with_mesh_fallback`:
+direct to a paired household, over the mesh or to its GFS mailbox
+otherwise), so a member the provider is not paired with is served too.
+
+What a member healed by a helper's replay then holds, compared with one
+healed by the host's §25.6 stream: the same posts (their words, pictures,
+file attachment and feed flag), comments, calendar events, tasks, pages,
+stickies and gallery items of the HELPER'S OWN people, with the same
+content names for their hashed files — and nothing of other people's rows,
+which only the host (or a delegated admin) sends. Reactions, votes, RSVPs
+and an approved announce card heal on the host's stream alone.
+
+**A post that arrives again is merged, not laid over** (the re-sent
+`SPACE_POST_CREATED` of a replay, and the host's §25.6 `posts` record for
+a post held here — `keep_newer_edit`):
+
+- **Last writer wins on `edited_at`.** A copy that was never edited, or
+  edited earlier than the row held, keeps the held words, link card and
+  stamp: a provider that missed an edit cannot bring the old words back.
+  A copy edited later — or carrying the same edit (an equal stamp: the
+  same words, unless the row here was damaged) — brings its words and
+  stamp. Either way the author's
+  next edit still lands. `edited_at` has ONE stored shape (`stamp_to_db`,
+  `YYYY-MM-DD HH:MM:SS.ffffff`, naive UTC) whoever writes it, because the
+  stamped edit compares it as a string; a row an older build stamped in
+  ISO (`…T…`) is read as the same time.
+- **Fields the copy does not own stay**: the reactions and comment count
+  (as before), the event / highlight link, the bot and the "no link card"
+  choice; on a re-sent create also the pin, the moderation state, the
+  feed flag and — when the copy carries none — the file attachment.
+
+(Before these rules the replay had its own, shorter payloads: a post it
+touched lost its `image_urls` on the receiver, whose bytes were then
+refused as "not a file of the row as held here", and an unannounced event
+got a feed card there.)
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -133,7 +187,18 @@ Implemented by `socialhome/federation/sync/space/resume.py`
 poll as `SPACE_POLL_CREATED` (created once on the receiver; votes and
 closure heal on the host's stream). Today's cut replays:
 
-- `SPACE_POST_CREATED` — posts (`space_post_repo.list_since`)
+- `SPACE_POST_CREATED` — posts (`space_post_repo.list_since`) — never a
+  calendar event's feed card (`linked_event_id`): as live, every
+  household's bridge mints its own from the replayed event. The §25.6
+  `posts` resource does carry the host's card, for a household whose
+  bridge never ran for the event (a calendar record mints none): its
+  receiver takes a card only from the host, only while it holds no card
+  for that event, only for an event of this space (held here in it, or —
+  `posts` streams before `calendar` — an id owner-bound to the card's
+  author in this space), and stores it
+  linked — so the bridge finds it when the event arrives live and mints
+  no second one (`receive_posts._feed_card_link`). A member household's
+  card in its own stream is dropped.
 - `SPACE_COMMENT_CREATED` — comments on those posts
   (`space_post_repo.list_comments_since`, JOIN through `space_posts`)
 - `SPACE_TASK_CREATED` — tasks (`space_task_repo.list_since`)
@@ -142,7 +207,12 @@ closure heal on the host's stream). Today's cut replays:
 - `SPACE_CALENDAR_EVENT_CREATED` — calendar events
   (`space_calendar_repo.list_events_since`, RRULEs included)
 - `SPACE_GALLERY_ITEM_CREATED` — gallery items, joined via
-  `gallery_items.album_id` → `gallery_albums.space_id`. The albums go
+  `gallery_items.album_id` → `gallery_albums.space_id` — never a mirror
+  of a post's media (`source_post_id`, the system "Posts" album): like
+  the live push and the §25.6 `gallery` resource, the replay leaves them
+  out, because every household rebuilds its own mirror from the post in
+  its OWN system album (a replayed one named an album the receiver does
+  not hold and was refused there). The albums go
   out first (v_33; never the system "Posts" album): the album deletes
   recorded since `since` as `SPACE_GALLERY_ALBUM_DELETED`, every album of
   the space as `SPACE_GALLERY_ALBUM_CREATED` (a no-op for one the receiver

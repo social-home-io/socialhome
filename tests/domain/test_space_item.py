@@ -115,6 +115,14 @@ def test_stamp_to_db_is_naive_utc_and_orders_like_sqlite_now():
     assert "2026-10-03 12:00:00" < stamp_to_db(stamp)
 
 
+def test_stamp_to_db_reads_a_naive_stamp_as_utc():
+    """A stored stamp read back is naive UTC: written again it keeps its
+    time, whatever this machine's time zone."""
+    naive = datetime(2026, 10, 3, 12, 0, 0, 250000)
+    assert stamp_to_db(naive) == "2026-10-03 12:00:00.250000"
+    assert stamp_to_db(naive) == stamp_to_db(naive.replace(tzinfo=UTC))
+
+
 def test_stored_stamp_reads_naive_as_utc_and_keeps_the_skew_rule():
     now = datetime(2026, 10, 3, 12, tzinfo=UTC)
     assert stored_stamp("2026-10-03 11:00:00.500000", now=now) == datetime(

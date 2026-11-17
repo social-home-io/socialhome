@@ -29,7 +29,11 @@ from socialhome.app_keys import (
     space_task_service_key,
 )
 from socialhome.config import Config
-from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.federation import (
+    DeliveryResult,
+    FederationEvent,
+    FederationEventType,
+)
 from socialhome.domain.task import (
     Task,
     TaskList,
@@ -196,8 +200,11 @@ class _Capture:
     def __init__(self) -> None:
         self.sent: list[tuple[FederationEventType, dict]] = []
 
-    async def send_event(self, *, to_instance_id, event_type, payload, space_id):
+    async def send_with_mesh_fallback(
+        self, *, to_instance_id, event_type, payload, space_id
+    ):
         self.sent.append((event_type, payload))
+        return DeliveryResult(instance_id=to_instance_id, ok=True)
 
 
 async def _resume(host, member, since: str) -> list[FederationEventType]:

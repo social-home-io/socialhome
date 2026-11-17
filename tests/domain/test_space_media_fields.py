@@ -642,7 +642,7 @@ HAND_LIST_ALLOWED: dict[str, tuple[int, str]] = {
     "socialhome/routes/bazaar.py": (1, "an API field"),
     "socialhome/services/bazaar_outbound.py": (1, "a wire field"),
     "socialhome/services/space_post_moderation.py": (1, "a queue payload field"),
-    "socialhome/services/space_post_outbound.py": (1, "a wire field"),
+    "socialhome/domain/post.py": (1, "a wire field (post_to_wire_dict)"),
     "socialhome/services/space_public_author.py": (1, "the signed v_25 inner"),
     "socialhome/services/space_public_authority.py": (1, "the signed v_25 inner"),
     # Household items (not space items): their own one-file deletes.

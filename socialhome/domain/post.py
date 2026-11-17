@@ -12,12 +12,13 @@ from __future__ import annotations
 import copy
 import hashlib
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time
 from enum import StrEnum
 from typing import Any
 
-from .link_preview import LinkPreview
+from .link_preview import LinkPreview, link_preview_to_dict
+from .media_constraints import space_media_ref
 
 # ─── Core enums ───────────────────────────────────────────────────────────
 
@@ -771,3 +772,119 @@ class Comment:
     def soft_delete(self) -> Comment:
         """Clear content but keep the node in the tree (children remain)."""
         return copy.replace(self, content=None, media_url=None, deleted=True)
+
+
+def post_to_wire_dict(post: Post, space_id: str) -> dict[str, Any]:
+    """The ``SPACE_POST_CREATED`` payload of a space post — what
+    ``FederationInboundService._post_from_payload`` reads.
+
+    ONE shape for every sender: the live fan-out (``SpacePostOutbound``,
+    which adds who made the write, the file hashes and the relay hints) and
+    a ``SPACE_SYNC_RESUME`` replay. A receiver applies a create for a post
+    it already holds as an upsert of that row, so a field one sender left
+    out would be a field wiped there — a replay without ``image_urls`` took
+    the pictures off every post it touched."""
+    payload: dict[str, Any] = {
+        "id": post.id,
+        "space_id": space_id,
+        "author": post.author,
+        "type": post.type.value,
+        "content": post.content,
+        "media_url": post.media_url,
+        "image_urls": list(post.image_urls),
+        "occurred_at": post.created_at.isoformat() if post.created_at else None,
+        # Mirror feed visibility on member households: a Bazaar listing's
+        # anchor post is hidden from the feed unless the seller announced
+        # it. Omitted-on-older-sender → receiver defaults to visible.
+        "hidden_from_feed": post.hidden_from_feed,
+    }
+    if post.location is not None:
+        # Coords are already 4dp-truncated before the post is persisted.
+        payload["location"] = {
+            "lat": post.location.lat,
+            "lon": post.location.lon,
+            "label": post.location.label,
+        }
+    # The author-built link card rides inside the encrypted payload like
+    # the text; receivers validate it and never fetch the URL. Older
+    # receivers ignore the key and show the post without a card.
+    if post.link_preview is not None:
+        payload["link_preview"] = link_preview_to_dict(post.link_preview)
+    if post.linked_event_id is not None:
+        payload["linked_event_id"] = post.linked_event_id
+    if post.file_meta is not None:
+        payload["file_meta"] = {
+            "url": post.file_meta.url,
+            "mime_type": post.file_meta.mime_type,
+            "original_name": post.file_meta.original_name,
+            "size_bytes": post.file_meta.size_bytes,
+        }
+    # When the words were last edited (tz-aware; a stored stamp is naive
+    # UTC) — only on an edited post, so a new post's payload is unchanged.
+    # A receiver that holds the post orders this copy against its own by
+    # it (:func:`keep_newer_edit`); older receivers ignore the key.
+    if post.edited_at is not None:
+        payload["edited_at"] = _as_utc(post.edited_at).isoformat()
+    return payload
+
+
+def _as_utc(stamp: datetime) -> datetime:
+    """*stamp* tz-aware; a naive one is UTC (every stored stamp is)."""
+    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
+
+
+def keep_newer_edit(incoming: Post, held: Post) -> Post:
+    """*incoming* — another copy of the post *held* here (a re-sent
+    ``SPACE_POST_CREATED``, the host's §25.6 record) — with what an edit
+    writes (the words, the link card, the stamp) taken from whichever copy
+    was edited last. Last writer wins on ``edited_at``:
+
+    * the held row was edited and *incoming* is older (it was never
+      edited, or earlier): the held words stay — a provider that missed
+      the edit cannot bring the old ones back;
+    * otherwise *incoming* as it is: an edit this household missed, with
+      its stamp — or the same edit (an equal stamp), whose words are the
+      same unless this household's copy was damaged (a restore), which
+      the copy then repairs."""
+    if held.edited_at is None:
+        return incoming
+    if incoming.edited_at is not None and _as_utc(incoming.edited_at) >= _as_utc(
+        held.edited_at
+    ):
+        return incoming
+    return replace(
+        incoming,
+        content=held.content,
+        link_preview=held.link_preview,
+        edited_at=held.edited_at,
+    )
+
+
+def file_meta_from_wire(raw: object) -> FileMeta | None:
+    """A received post's file attachment (a live payload's or a §25.6
+    record's ``file_meta``), kept only when its ``url`` is a space file
+    (:func:`~.media_constraints.space_media_ref` — never a name another
+    receiving path owns, a foreign URL or junk), normalised. A file post
+    means nothing without its file, so a refused url drops the whole
+    attachment (the registry's ``parent_requires``). Exactly the four
+    fields, each of its type: a stored attachment with a wrong-typed one
+    would make every read of the row raise."""
+    if not isinstance(raw, dict) or set(raw) != _FILE_META_KEYS:
+        return None
+    url = space_media_ref(raw.get("url"))
+    mime_type, name, size = raw["mime_type"], raw["original_name"], raw["size_bytes"]
+    if (
+        url is None
+        or not isinstance(mime_type, str)
+        or not isinstance(name, str)
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+        or size < 0
+    ):
+        return None
+    return FileMeta(url=url, mime_type=mime_type, original_name=name, size_bytes=size)
+
+
+_FILE_META_KEYS: frozenset[str] = frozenset(
+    {"url", "mime_type", "original_name", "size_bytes"}
+)

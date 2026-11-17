@@ -2340,6 +2340,8 @@ def _wire_federation_stack(
         # v_82: only a replayed page's own files ship.
         media_refs=media_reference_repo,
         budget=file_budget,
+        # v_85: a replayed row names its files' hashes, as its live event.
+        file_hasher=space_media_sync_service.file_hasher,
     )
 
     # v_86 — which files of a row we ship: on a catch-up, as a non-host

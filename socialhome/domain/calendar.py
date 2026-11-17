@@ -242,6 +242,48 @@ class CalendarEvent:
     announce_in_feed: bool = False
 
 
+def calendar_event_to_wire_dict(event: CalendarEvent, space_id: str) -> dict[str, Any]:
+    """The ``SPACE_CALENDAR_EVENT_CREATED`` / ``_UPDATED`` payload of a
+    space event — what the receiver's ``_on_calendar_saved`` reads.
+
+    ONE shape for every sender: the live fan-out (``SpaceCalendarService``,
+    which adds who made the write, a moderation release and the file
+    hashes) and a ``SPACE_SYNC_RESUME`` replay. A receiver upserts an event
+    it holds and reads an absent ``announce_in_feed`` as True and an absent
+    ``tz`` as UTC, so a sender that left a field out would mint a feed card
+    nobody asked for and move the event's wall clock."""
+    return {
+        # The space this write belongs to, in the payload as well as the
+        # routing field. A mesh-relayed envelope (SPACE_ROUTED) carries no
+        # plaintext routing ``space_id`` — a relay must not learn which
+        # space is being served — so the payload's copy is the only thing
+        # the receiver's §24.11 space-writer gate can read there.
+        "space_id": space_id,
+        "event_id": event.id,
+        "calendar_id": event.calendar_id,
+        "summary": event.summary,
+        "description": event.description,
+        "start": event.start.isoformat(),
+        "end": event.end.isoformat(),
+        "all_day": event.all_day,
+        "attendees": list(event.attendees),
+        "created_by": event.created_by,
+        "rrule": event.rrule,
+        "cover_url": event.cover_url,
+        "location": event.location,
+        # IANA wall-clock anchor.
+        "tz": event.tz,
+        # §23.15 opt-in feed mirror. The receiver's CalendarFeedBridge
+        # reads this to decide whether to mint a feed post. Absent on an
+        # older sender → the receiver defaults to True (the historic
+        # always-mirror behaviour) so events still surface there.
+        "announce_in_feed": event.announce_in_feed,
+        # The per-occurrence cap (Phase C) — members enforce it on RSVPs.
+        # A receiver keeps its held value when it is absent.
+        "capacity": event.capacity,
+    }
+
+
 @dataclass(slots=True, frozen=True)
 class CalendarEventCopy:
     """One sibling row of a household fan-out, resolved by

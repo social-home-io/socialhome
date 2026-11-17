@@ -24,9 +24,10 @@ from ....domain.post import (
     MAX_POLL_OPTIONS,
     Comment,
     CommentType,
-    FileMeta,
     Post,
     PostType,
+    file_meta_from_wire,
+    keep_newer_edit,
 )
 from ....domain.space import ContentAction
 from ....domain.space_item import reaction_emoji_ok, stamp_to_db, stored_stamp
@@ -35,6 +36,7 @@ from ....services.inbound_media_store import space_media_refs
 from ....services.link_preview_service import space_wire_link_preview
 from ....services.space_media_names import comment_media_ref
 from ...owner_bound_id import (
+    SPACE_CALENDAR_EVENT_KIND,
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
     OwnerBinding,
@@ -153,12 +155,32 @@ class PostsMixin(ReceiverBase):
                 # state: its reactions (ordered by the stamps written
                 # with them — a provider's snapshot would wipe relayed
                 # ones and the stamps would then refuse the copy that
-                # could restore them) and its comment count.
-                post = replace(
-                    post,
-                    reactions=held_post[1].reactions,
-                    comment_count=held_post[1].comment_count,
+                # could restore them) and its comment count — and what a
+                # record does not own: the event / highlight link, the
+                # bot, the "no link card" choice (``save`` would clear
+                # them). The words follow the newest edit: a provider
+                # that missed one never brings the old ones back.
+                row = held_post[1]
+                post = keep_newer_edit(
+                    replace(
+                        post,
+                        reactions=row.reactions,
+                        comment_count=row.comment_count,
+                        linked_event_id=row.linked_event_id,
+                        linked_highlight_id=row.linked_highlight_id,
+                        bot_id=row.bot_id,
+                        no_link_preview=row.no_link_preview,
+                    ),
+                    row,
                 )
+            else:
+                admitted, linked = await self._feed_card_link(
+                    space_id, r, post.id, provider=provider, from_host=from_host
+                )
+                if not admitted:
+                    continue
+                if linked is not None:
+                    post = replace(post, linked_event_id=linked)
             media = await self._localize_record(
                 space_id,
                 r,
@@ -207,6 +229,71 @@ class PostsMixin(ReceiverBase):
             # Derived local state only (the system album's mirror of its
             # media) — no notification, no fan-out.
             await self._bus.publish(SpacePostSynced(post=post, space_id=space_id))
+
+    async def _feed_card_link(
+        self,
+        space_id: str,
+        r: dict[str, Any],
+        post_id: str,
+        *,
+        provider: str,
+        from_host: bool,
+    ) -> tuple[bool, str | None]:
+        """``(admitted, link)`` for a record of a post not held here: the
+        calendar event it is the feed card of (``linked_event_id``), or
+        ``None`` for any other post.
+
+        Every household's ``CalendarFeedBridge`` mints its OWN card for an
+        announced event, under its own id, so a provider's card is not a
+        post we lack — it is taken only from the **host**, only while no
+        card for the event is held here (ours, or one taken earlier), and
+        stored linked, so the bridge finds it when the event arrives and
+        mints no second one. Stored unlinked, as before, the host's card
+        stood next to ours: two cards per event.
+
+        The event must be THIS space's (a card linked to another space's
+        event would have that event's words written into it here): held
+        here in this space, or — ``posts`` streams before ``calendar``, so
+        on a first sync it is not held yet — proved by its id, owner-bound
+        (v_36) to the card's author in this space. A legacy id not held
+        proves nothing: the card waits for a stream that finds the event."""
+        linked = r.get("linked_event_id")
+        if not isinstance(linked, str) or not linked:
+            return True, None
+        if not from_host:
+            log.debug(
+                "sync: feed card %s of event %s from member household %s — skipped",
+                post_id,
+                linked,
+                provider,
+            )
+            return False, None
+        if await self._space_post_repo.get_by_linked_event_id(linked) is not None:
+            return False, None
+        held_event = await self._space_calendar_repo.get_event(linked)
+        if held_event is not None:
+            ours = held_event[0] == space_id
+        else:
+            ours = (
+                check_owner_bound_id(
+                    SPACE_CALENDAR_EVENT_KIND,
+                    linked,
+                    space_id=space_id,
+                    owner_user_id=str(r.get("author") or ""),
+                )
+                is OwnerBinding.VALID
+            )
+        if not ours:
+            log.warning(
+                "space sync: feed card %s from %s links calendar event %s, "
+                "which is not proved to be of space %s — refusing the write",
+                post_id,
+                provider,
+                linked,
+                space_id,
+            )
+            return False, None
+        return True, linked
 
     async def _persist_comments(
         self, space_id: str, records: list[dict[str, Any]], *, provider: str
@@ -668,9 +755,11 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
         comment_count=int(r.get("comment_count") or 0),
         pinned=bool(r.get("pinned", False)),
         deleted=bool(r.get("deleted", False)),
-        edited_at=_parse_iso(r.get("edited_at")) if r.get("edited_at") else None,
+        # No more than the live skew ahead of our clock (a far-future
+        # stamp would block every later edit); a naive stamp is UTC.
+        edited_at=stored_stamp(r.get("edited_at")),
         moderated=bool(r.get("moderated", False)),
-        file_meta=_file_meta_from_record(r.get("file_meta")),
+        file_meta=file_meta_from_wire(r.get("file_meta")),
         # An unannounced listing / event anchor must stay out of the
         # joiner's feed exactly as it is out of the provider's.
         hidden_from_feed=bool(r.get("hidden_from_feed", False)),
@@ -683,23 +772,6 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
         # its own — see the ``posts`` branch).
         reactions=_reactions_from_record(r.get("reactions")),
     )
-
-
-def _file_meta_from_record(raw: object) -> FileMeta | None:
-    """A record's file attachment, kept only when its ``url`` is a space
-    file (:func:`space_media_ref` — never a name another receiving path
-    owns, a foreign URL or junk), normalised. A file post means nothing
-    without its file, so a refused url drops the whole attachment (the
-    registry's ``parent_requires``)."""
-    if not isinstance(raw, dict):
-        return None
-    url = space_media_ref(raw.get("url"))
-    if url is None:
-        return None
-    try:
-        return FileMeta(**{**raw, "url": url})
-    except TypeError:
-        return None
 
 
 def _reactions_from_record(raw: object) -> dict[str, frozenset[str]]:

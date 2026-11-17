@@ -1130,14 +1130,20 @@ class SqliteGalleryRepo:
         Joins ``gallery_items`` with ``gallery_albums`` so resume can
         scope by space — the item row itself only knows its album.
         Items in household-level albums (NULL ``space_id``) are
-        intentionally excluded; they don't federate. Oldest-first by
-        ``created_at`` so the receiver applies them in chronological
-        order.
+        intentionally excluded; they don't federate. Neither does a
+        mirror of a post's media (``source_post_id``) or anything else in
+        the system "Posts" album: every household rebuilds its own from
+        the posts, in its own system album — the live push
+        (``GalleryFederationOutbound``) and the §25.6 stream
+        (:meth:`list_items_sync_page`) leave them out the same way.
+        Oldest-first by ``created_at`` so the receiver applies them in
+        chronological order.
         """
         rows = await self._db.fetchall(
             "SELECT i.* FROM gallery_items i "
             "JOIN gallery_albums a ON a.id = i.album_id "
             "WHERE a.space_id=? AND datetime(i.created_at) > datetime(?) "
+            "AND i.source_post_id IS NULL AND a.is_system = 0 "
             "AND i.deleted_at IS NULL AND a.deleted_at IS NULL "
             "ORDER BY i.created_at ASC LIMIT ?",
             (space_id, since, int(limit)),

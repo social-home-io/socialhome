@@ -41,7 +41,7 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
-from ..domain.link_preview import link_preview_to_dict
+from ..domain.post import post_to_wire_dict
 from ..domain.space import PUBLIC_SPACE_TIERS
 from ..domain.space_item import (
     ITEM_TYPE_COMMENT,
@@ -420,48 +420,18 @@ class SpacePostOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             release is None or event.approved_by is None
         ):
             return
+        # The post itself in the one shape a resume replays too
+        # (``post_to_wire_dict``), plus v_42: who made the write — receivers
+        # check it against the space's ``posts`` access level. A create's
+        # actor is its author — a release from the moderation queue too
+        # (v_43: the approver is named in the approval block instead); a
+        # v_42 host's release named the approver here.
         payload: dict = {
-            "id": post.id,
-            "space_id": event.space_id,
-            "author": post.author,
-            # v_42: who made the write — receivers check it against the
-            # space's ``posts`` access level. A create's actor is its author
-            # — a release from the moderation queue too (v_43: the approver
-            # is named in the approval block instead); a v_42 host's release
-            # named the approver here.
+            **post_to_wire_dict(post, event.space_id),
             "actor_user_id": (
                 post.author if release is not None else event.approved_by or post.author
             ),
-            "type": post.type.value,
-            "content": post.content,
-            "media_url": post.media_url,
-            "image_urls": list(post.image_urls),
-            "occurred_at": post.created_at.isoformat() if post.created_at else None,
-            # Mirror feed visibility on member households: a Bazaar listing's
-            # anchor post is hidden from the feed unless the seller announced
-            # it. Omitted-on-older-sender → receiver defaults to visible.
-            "hidden_from_feed": post.hidden_from_feed,
         }
-        if post.location is not None:
-            payload["location"] = {
-                "lat": post.location.lat,
-                "lon": post.location.lon,
-                "label": post.location.label,
-            }
-        # The author-built link card rides inside the encrypted payload like
-        # the text; receivers validate it and never fetch the URL. Older
-        # receivers ignore the key and show the post without a card.
-        if post.link_preview is not None:
-            payload["link_preview"] = link_preview_to_dict(post.link_preview)
-        if post.linked_event_id is not None:
-            payload["linked_event_id"] = post.linked_event_id
-        if post.file_meta is not None:
-            payload["file_meta"] = {
-                "url": post.file_meta.url,
-                "mime_type": post.file_meta.mime_type,
-                "original_name": post.file_meta.original_name,
-                "size_bytes": post.file_meta.size_bytes,
-            }
         # Attach a pre-signed relay hint so a seed-holding member can forward this
         # public/global post to the GFS subscribers even when the owner is offline
         # (remote-author relay). Built only for a public/global space + a local

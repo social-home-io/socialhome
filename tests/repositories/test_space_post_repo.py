@@ -10,6 +10,7 @@ import pytest
 
 from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import Comment, CommentType, FileMeta, Post, PostType
+from socialhome.domain.space_item import stamp_to_db
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 
 
@@ -1235,3 +1236,48 @@ async def test_a_space_post_has_no_post_wide_emoji_cap(env):
         )
     _sid, post = await env.repo.get("p1")
     assert len(post.reactions) == 25
+
+
+# ── ``edited_at`` keeps ONE stored shape ──────────────────────────────────
+
+
+@pytest.mark.parametrize("aware", [True, False], ids=["tz-aware", "naive-utc"])
+async def test_a_saved_edit_stamp_has_the_shape_stamped_edits_compare(env, aware):
+    """``edit`` compares ``edited_at`` as a string in the ``stamp_to_db``
+    shape (``YYYY-MM-DD HH:MM:SS.ffffff``). ``save`` — the §25.6 stream and
+    a re-sent create write a held row's stamp through it — once wrote
+    ``…T10:00:00``: 'T' sorts after ' ', so every later edit of the same
+    UTC day was silently dropped."""
+    db, repo = env.db, env.repo
+    ten = datetime(2026, 6, 1, 10, tzinfo=UTC)
+    await repo.save(
+        "sp-1",
+        replace(_post("p-1"), edited_at=ten if aware else ten.replace(tzinfo=None)),
+    )
+    row = await db.fetchone("SELECT edited_at FROM space_posts WHERE id='p-1'")
+    assert row["edited_at"] == "2026-06-01 10:00:00.000000"
+    later = stamp_to_db(datetime(2026, 6, 1, 15, tzinfo=UTC))
+    assert await repo.edit("p-1", "same day", space_id="sp-1", edited_at=later)
+    assert (await repo.get("p-1"))[1].content == "same day"
+    # … and an older one still loses.
+    older = stamp_to_db(datetime(2026, 6, 1, 9, tzinfo=UTC))
+    assert not await repo.edit("p-1", "stale", space_id="sp-1", edited_at=older)
+
+
+@pytest.mark.parametrize("stored", ["2026-06-01T10:00:00", "2026-06-01T10:00:00+00:00"])
+async def test_a_row_stamped_in_the_old_shape_still_takes_a_later_edit(env, stored):
+    """Rows the old ``save`` stamped stay on disk: the comparison reads
+    their 'T' as the space it stands for."""
+    db, repo = env.db, env.repo
+    await repo.save("sp-1", _post("p-1"))
+    await repo.add_comment(_comment("c-1", "p-1"), space_id="sp-1")
+    await db.enqueue("UPDATE space_posts SET edited_at=? WHERE id='p-1'", (stored,))
+    await db.enqueue(
+        "UPDATE space_post_comments SET edited_at=? WHERE id='c-1'", (stored,)
+    )
+    later = stamp_to_db(datetime(2026, 6, 1, 15, tzinfo=UTC))
+    older = stamp_to_db(datetime(2026, 6, 1, 9, tzinfo=UTC))
+    assert not await repo.edit("p-1", "stale", space_id="sp-1", edited_at=older)
+    assert await repo.edit("p-1", "same day", space_id="sp-1", edited_at=later)
+    assert not await repo.edit_comment("c-1", "stale", space_id="sp-1", edited_at=older)
+    assert await repo.edit_comment("c-1", "same day", space_id="sp-1", edited_at=later)
