@@ -33,7 +33,10 @@ does both on top of the household's ONE mailbox per GFS
   directly, and frames from it verify.
 * **Rows.** Everything lives on the pair's ``space_instances.mailbox`` JSON
   (migration 0144), keyed by (space, household): ``card`` (that
-  household's verified card); on the host also ``snap`` (which directory
+  household's verified card) and ``gfs`` / ``gfs_role`` (the GFS of the
+  sealed redeem that seated the pair and our side of it — kept so a
+  household stays "reached through a GFS" after the two pair, and its
+  seat can be re-made after they unpair); on the host also ``snap`` (which directory
   that household was given: ``"all"`` / ``"mbx"``), and on the host's own
   row ``listed`` + ``own_rev``; on a member's row of the host, ``sent``
   (the card ``rev`` the host got).
@@ -111,9 +114,18 @@ WAIT_MAX: int = 100
 
 #: Seats a household lazily from its verified card.
 Seater = Callable[[MemberCard], Awaitable[None]]
+#: Re-makes a sealed-redeem seat from a verified card: ``(card, gfs_url,
+#: is_redeemer)`` — the GFS and the role of the redeem that seated it.
+RelaySeater = Callable[[MemberCard, str, bool], Awaitable[None]]
 #: Told ``(space_id, instance_id)`` on the host when a member household says
 #: it is seated (its "seated" card, or its first sync).
 SeatedHook = Callable[[str, str], Awaitable[object]]
+
+
+def _is_relay_seat(row: Any) -> bool:
+    """A sealed-redeem seat: a ``space_session`` row with the GFS of the
+    redeem as its relay (a seat made from a directory card has none)."""
+    return row.source is InstanceSource.SPACE_SESSION and bool(row.relay_via)
 
 
 def _loads(raw: str | None) -> dict[str, Any]:
@@ -187,6 +199,7 @@ class SpaceMemberDirectory:
         "_mailboxes",
         "_on_seated",
         "_reconciling",
+        "_relay_seater",
         "_seat_ender",
         "_seater",
         "_seats",
@@ -226,6 +239,7 @@ class SpaceMemberDirectory:
         self._keywrap_sig = keywrap_sig
         self._federation: FederationService | None = None
         self._seater: Seater | None = None
+        self._relay_seater: RelaySeater | None = None
         self._seat_ender: Callable[[str], Awaitable[object]] | None = None
         self._on_seated: SeatedHook | None = None
         self._clock = clock
@@ -314,10 +328,15 @@ class SpaceMemberDirectory:
         .end_space_session_if_unused``)."""
         self._seat_ender = ender
 
-    def attach_seater(self, seater: Seater) -> None:
+    def attach_seater(
+        self, seater: Seater, relay_seater: RelaySeater | None = None
+    ) -> None:
         """How a directory card becomes a lazy ``space_session`` seat (the
-        redeem coordinator's seat path)."""
+        redeem coordinator's seat path) — and, *relay_seater*, how the
+        sealed-redeem seat of a link-joined pair is re-made after a
+        pairing between the two ended (:meth:`reseat`)."""
         self._seater = seater
+        self._relay_seater = relay_seater
 
     def attach_on_seated(self, hook: SeatedHook) -> None:
         """Who else answers a member household's "I am seated" on the host
@@ -519,12 +538,15 @@ class SpaceMemberDirectory:
         urls: set[str] = set()
         for inst in await self._space_cards(space_id):
             instance = await self._federation_repo.get_instance(inst)
-            if (
-                instance is not None
-                and instance.source is InstanceSource.SPACE_SESSION
-                and instance.relay_via
-            ):
-                urls.add(normalize_gfs_base(instance.relay_via))
+            if instance is not None and _is_relay_seat(instance):
+                urls.add(normalize_gfs_base(instance.relay_via or ""))
+                continue
+            # The two paired since (the row is a pairing now, or gone with
+            # one that ended): how the household JOINED did not change —
+            # every other member still reaches it through that GFS.
+            gfs = (await self._doc(space_id, inst)).get("gfs")
+            if isinstance(gfs, str) and gfs:
+                urls.add(gfs)
         return urls
 
     async def _member_gfs(self, space_id: str) -> set[str]:
@@ -547,11 +569,41 @@ class SpaceMemberDirectory:
         """Host side: *instance_id* reaches us only through a GFS (its
         sealed-redeem seat with a relay)."""
         row = await self._federation_repo.get_instance(instance_id)
-        return (
-            row is not None
-            and row.source is InstanceSource.SPACE_SESSION
-            and bool(row.relay_via)
-        )
+        if row is not None and _is_relay_seat(row):
+            return True
+        # Not decided by the row's source: a household that joined through
+        # a GFS and then PAIRED with us is reached directly by us — and
+        # still only through the GFS by every other member, who need its
+        # mailbox and its "GFS-reached" flag exactly as before.
+        return await self._gfs_seat(instance_id) is not None
+
+    async def _gfs_seat(self, instance_id: str) -> tuple[str, bool] | None:
+        """``(gfs_url, we_redeemed)`` of the sealed redeem that seated us
+        and *instance_id* (:meth:`_note_gfs_seat`), from any space we
+        share; ``None`` when the two never were a sealed-redeem pair."""
+        for (_space, inst), doc in sorted((await self._rows()).items()):
+            gfs = doc.get("gfs")
+            if inst == instance_id and isinstance(gfs, str) and gfs:
+                return gfs, doc.get("gfs_role") == "redeemer"
+        return None
+
+    async def _note_gfs_seat(self, space_id: str, instance_id: str) -> None:
+        """Remember, on the household's row of *space_id*, that our seat
+        with it is a sealed-redeem seat through a GFS, and which side of
+        the redeem we were. Written while the seat row says so (at seat
+        time, and by the sweep for seats older than this); read once the
+        row no longer does (the two paired)."""
+        row = await self._federation_repo.get_instance(instance_id)
+        if row is None or not _is_relay_seat(row):
+            return
+        doc = await self._doc(space_id, instance_id)
+        gfs = normalize_gfs_base(row.relay_via or "")
+        # We redeemed a link of a household that acts as host here; a
+        # household that redeemed ours does not.
+        role = "redeemer" if instance_id in await self.hosts_of(space_id) else "issuer"
+        if "card" in doc and (doc.get("gfs"), doc.get("gfs_role")) != (gfs, role):
+            doc["gfs"], doc["gfs_role"] = gfs, role
+            await self._put(space_id, instance_id, doc)
 
     def _card_rev(self) -> int:
         """Our card's revision: the mailbox service's (it moves with every
@@ -630,6 +682,7 @@ class SpaceMemberDirectory:
         Fail-soft."""
         try:
             await self._store(space_id, card)
+            await self._note_gfs_seat(space_id, card.instance_id)
             if await self.serves(space_id):
                 await self._mark_direct(space_id, card.instance_id)
                 # Its "seated" card came before our seat row (the commit
@@ -1132,8 +1185,19 @@ class SpaceMemberDirectory:
             return
         if card.mailbox is None and not self._mailboxes.mailbox_gfs_urls():
             return
-        existing = await self._federation_repo.get_instance(card.instance_id)
-        if existing is not None and existing.status is PairingStatus.CONFIRMED:
+        # Seats only create rows or refresh seat rows: never over a
+        # confirmed row (a pairing, or a seat), and never over an unpair
+        # tombstone — replacing that would cancel the ``UNPAIR`` still
+        # queued for a household that was offline. The seat is made when
+        # the tombstone is purged (:meth:`reseat`). (A pending pairing's
+        # row is kept by the seater itself, beside the new seat.)
+        existing = await self._federation_repo.get_instance(
+            card.instance_id, include_unpairing=True
+        )
+        if existing is not None and existing.status in (
+            PairingStatus.CONFIRMED,
+            PairingStatus.UNPAIRING,
+        ):
             return
         try:
             await self._seater(card)
@@ -1145,8 +1209,11 @@ class SpaceMemberDirectory:
         either side) — but we may still share a space with it. Seat it
         again from a card we may use NOW (:meth:`_usable`: our roster
         decides, exactly as for any send), in a space our people are still
-        in: the plain lazy seat both households held before they paired,
-        with the same static-static keys, so the space is as it was.
+        in — the seat both households held before they paired, with the
+        same static-static keys, so the space is as it was: the lazy
+        directory seat of two members, or, for a link-joined household
+        and its host, the sealed-redeem seat through the GFS of that
+        redeem with each side's role in it (:meth:`_note_gfs_seat`).
         Returns whether a seat exists afterwards.
 
         Never over a row (:meth:`_seat` leaves a confirmed one alone, and
@@ -1163,7 +1230,17 @@ class SpaceMemberDirectory:
             hosts = await self.hosts_of(space_id)
             if not await self._usable(space_id, instance_id, doc, hosts):
                 continue
-            await self._seat(card)
+            redeem = await self._gfs_seat(instance_id)
+            if redeem is not None and self._relay_seater is not None:
+                try:
+                    await self._relay_seater(card, redeem[0], redeem[1])
+                except Exception:
+                    log.warning(
+                        "directory: re-making a member's redeem seat failed",
+                        exc_info=True,
+                    )
+            else:
+                await self._seat(card)
             if is_space_seat(await self._federation_repo.get_instance(instance_id)):
                 log.info(
                     "directory: %s is seated again from its member card — "
@@ -1730,6 +1807,8 @@ class SpaceMemberDirectory:
                     continue
                 await self._drop_lapsed(space_id)
                 await self._adopt_waiting(space_id)
+                for inst in await self._space_cards(space_id):
+                    await self._note_gfs_seat(space_id, inst)
                 if await self.serves(space_id):
                     await self.reconcile(space_id)
             except Exception:

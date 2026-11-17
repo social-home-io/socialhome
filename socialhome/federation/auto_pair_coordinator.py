@@ -332,17 +332,6 @@ class AutoPairCoordinator:
         # pairing.
         own_local_inbox_id = secrets.token_urlsafe(24)
         a_inbox_url = f"{own_inbox_base_url.rstrip('/')}/{own_local_inbox_id}"
-        self._pending[token] = _PendingAutoSession(
-            token=token,
-            target_instance_id=target_instance_id,
-            via_instance_id=via_instance_id,
-            dh_sk=dh_kp.private_key,
-            dh_pk_hex=dh_kp.public_key.hex(),
-            ts=ts,
-            nonce=nonce,
-            a_inbox_url=a_inbox_url,
-        )
-
         provisional = RemoteInstance(
             id=target_instance_id,
             display_name=target_display_name or target_instance_id[:8],
@@ -359,6 +348,18 @@ class AutoPairCoordinator:
         )
         await self._pending_pairings.save(
             provisional, ttl_s=AUTO_PAIR_REQUEST_TTL_SECONDS
+        )
+        # Only once the half is stored (it can be refused): an ack is
+        # accepted against this session alone.
+        self._pending[token] = _PendingAutoSession(
+            token=token,
+            target_instance_id=target_instance_id,
+            via_instance_id=via_instance_id,
+            dh_sk=dh_kp.private_key,
+            dh_pk_hex=dh_kp.public_key.hex(),
+            ts=ts,
+            nonce=nonce,
+            a_inbox_url=a_inbox_url,
         )
 
         payload = {
@@ -700,7 +701,9 @@ class AutoPairCoordinator:
             paired_at=now,
             share_home=await self._share_home_default(),
         )
-        await self._pending_pairings.save(approved, ttl_s=AUTO_PAIR_REQUEST_TTL_SECONDS)
+        # No expiry, as for an approval stored in the row: it waits for
+        # the requester's first envelope or our admin's cancel.
+        await self._pending_pairings.save(approved, ttl_s=None)
 
         # Sign ack and send back to A.
         c_id = derive_instance_id(self._own_identity_pk)

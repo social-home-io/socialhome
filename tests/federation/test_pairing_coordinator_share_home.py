@@ -33,6 +33,7 @@ from socialhome.domain.federation import (
 from socialhome.federation.pairing_coordinator import PairingCoordinator
 from socialhome.federation.peer_pairing_client import sign_peer_body
 from socialhome.infrastructure.key_manager import KeyManager
+from tests.pairing_fakes import SavesPendingMixin
 
 _HOME = {
     "instance_id": "self",
@@ -42,7 +43,7 @@ _HOME = {
 }
 
 
-class _FakeRepo:
+class _FakeRepo(SavesPendingMixin):
     def __init__(self, local_identity: dict | None = None) -> None:
         self.instances: dict = {}
         self.pairings: dict = {}
@@ -271,9 +272,16 @@ async def test_scanning_over_a_space_seat_applies_the_choice_only_on_confirm():
     assert repo.instances[iid] is seat
     assert repo.share_home_writes == []
 
-    confirmed = await coord.confirm("tok-seat", accepted["verification_code"])
+    waiting = await coord.confirm("tok-seat", accepted["verification_code"])
 
-    assert confirmed.share_home is True
+    # The code is verified here; the seat stays until the other household
+    # is provably in (its first envelope under the code's keys).
+    assert waiting.status is PairingStatus.PENDING_SENT
+    assert repo.instances[iid] is seat and repo.share_home_writes == []
+
+    assert await coord._pending.promote(
+        replace(waiting, status=PairingStatus.CONFIRMED)
+    )
     row = repo.instances[iid]
     assert row.source is InstanceSource.MANUAL and row.share_home is True
     assert row.local_inbox_id == accepted["local_inbox_id"]

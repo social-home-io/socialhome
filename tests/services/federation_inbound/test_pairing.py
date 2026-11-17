@@ -36,6 +36,7 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.services.federation_inbound import PairingInboundHandlers
 from socialhome.services.peer_unpair_service import PeerUnpairService
+from tests.pairing_fakes import SavesPendingMixin
 
 
 class _FakeRegistry:
@@ -51,10 +52,10 @@ class _StagedHalves:
     space seat an abort cancelled."""
 
     def __init__(self) -> None:
-        self.cancelled: list[str] = []
+        self.cancelled: list[tuple[str, str | None]] = []
 
-    async def cancel(self, instance_id: str):
-        self.cancelled.append(instance_id)
+    async def cancel(self, instance_id: str, *, token: str | None = None):
+        self.cancelled.append((instance_id, token))
 
 
 class _FakeFederationService:
@@ -68,7 +69,7 @@ class _FakeFederationService:
         return True
 
 
-class _FakeFederationRepo:
+class _FakeFederationRepo(SavesPendingMixin):
     def __init__(self) -> None:
         self.instances: dict[str, RemoteInstance] = {}
         self.pairings: dict[str, PairingSession] = {}
@@ -440,8 +441,22 @@ async def test_abort_cancels_the_half_kept_beside_the_senders_space_seat(
         source=InstanceSource.SPACE_SESSION,
     )
     repo.instances["peer-a"] = seat
+    await handlers._on_abort(
+        _event(FederationEventType.PAIRING_ABORT, {"token": "tok-1"})
+    )
+    # Bound to the code the abort names — never "whatever is staged".
+    assert handlers._federation.pending_pairings.cancelled == [("peer-a", "tok-1")]
+    assert repo.instances["peer-a"] is seat
+
+
+async def test_abort_without_a_token_cancels_no_half_kept_beside_a_seat(repo, handlers):
+    seat = replace(
+        _sample_instance("peer-a", PairingStatus.CONFIRMED),
+        source=InstanceSource.SPACE_SESSION,
+    )
+    repo.instances["peer-a"] = seat
     await handlers._on_abort(_event(FederationEventType.PAIRING_ABORT, {}))
-    assert handlers._federation.pending_pairings.cancelled == ["peer-a"]
+    assert handlers._federation.pending_pairings.cancelled == []
     assert repo.instances["peer-a"] is seat
 
 

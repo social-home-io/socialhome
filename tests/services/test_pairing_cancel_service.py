@@ -41,6 +41,7 @@ from socialhome.services.pairing_cancel_service import (
     PAIRING_CANCEL_REASON,
     PairingCancelService,
 )
+from tests.pairing_fakes import SavesPendingMixin
 
 _PENDING = (PairingStatus.PENDING_SENT, PairingStatus.PENDING_RECEIVED)
 
@@ -113,6 +114,20 @@ class _Federation:
         self._log = log
         self.sent: list[dict] = []
         self.result = "ok"  # ok | fail | hang | raise
+
+    async def send_event(self, *, to_instance_id, event_type, payload):
+        """The ordinary, queued send — to the household's ROW (its seat)."""
+        self._log.append(("send_over_seat", to_instance_id))
+        self.sent.append(
+            {"to": to_instance_id, "event_type": event_type, "payload": payload}
+        )
+        if self.result == "raise":
+            raise RuntimeError("boom")
+        return DeliveryResult(
+            instance_id=to_instance_id,
+            ok=self.result == "ok",
+            error=None if self.result == "ok" else "queued",
+        )
 
     async def send_event_once(self, *, instance, event_type, payload):
         self._log.append(("send", instance.id))
@@ -475,7 +490,7 @@ def _seat(iid: str = "peer-s") -> RemoteInstance:
     )
 
 
-class _StagedRepo(_Repo):
+class _StagedRepo(SavesPendingMixin, _Repo):
     async def save_instance(self, inst):
         self.instances[inst.id] = inst
         return inst
@@ -522,17 +537,19 @@ async def test_a_pairing_code_beside_a_seat_is_cancelled_and_the_seat_stays(
     seat = env.repo.instances["peer-s"] = _seat()
     half = _qr_pending("peer-s")
     assert await env.pending.save(half, ttl_s=300)
+    assert await env.pending.save(half, ttl_s=300, token="tok-s")
     env.repo.sessions["tok-s"] = half.local_inbox_id
     env.repo.sessions["tok-other"] = "wh-other"
 
     assert await env.svc.cancel_pending("peer-s") is True
 
-    # The sessions and the half go first; only then is the peer told —
-    # with the HALF's keys and inbox, never the seat's.
+    # The sessions and the half go first; only then is the peer told — as
+    # the SEAT's own traffic (queued, on whatever route reaches the seat),
+    # never as a one-shot POST to an inbox a GFS-only household lacks.
     assert env.log == [
         ("cancel_sessions", half.local_inbox_id),
         ("forget_auto_pair", "peer-s"),
-        ("send", "peer-s"),
+        ("send_over_seat", "peer-s"),
     ]
     assert env.fed.sent == [
         {
@@ -572,3 +589,47 @@ async def test_a_space_seat_alone_is_not_a_pending_pairing(staged_env):
     assert env.repo.instances["peer-s"] is seat
     assert env.fed.sent == [] and env.published == []
     assert ("cancel_txn", "peer-s") not in env.log
+
+
+async def test_a_cancel_after_the_code_was_entered_still_tells_the_peer(staged_env):
+    """Our admin entered the code (its session is used up, the half waits
+    for the scanner) and then cancels: the scanner is told by the token."""
+    env = staged_env
+    env.repo.instances["peer-s"] = _seat()
+    await env.pending.save(_qr_pending("peer-s"), ttl_s=300, token="tok-s")
+    assert await env.pending.await_peer("peer-s", token="tok-s", ttl_s=60)
+
+    assert await env.svc.cancel_pending("peer-s") is True
+
+    assert env.fed.sent == [
+        {
+            "to": "peer-s",
+            "event_type": FederationEventType.PAIRING_ABORT,
+            "payload": {"token": "tok-s", "reason": PAIRING_CANCEL_REASON},
+        }
+    ]
+
+
+async def test_a_queued_cancel_over_a_seat_is_not_reported_as_delivered(staged_env):
+    env = staged_env
+    env.repo.instances["peer-s"] = _seat()
+    await env.pending.save(_qr_pending("peer-s"), ttl_s=300, token="tok-s")
+    env.fed.result = "fail"  # the outbox keeps it
+    assert await env.svc.cancel_pending("peer-s") is False
+    assert env.pending.staged("peer-s") is None
+
+
+async def test_a_withdrawn_trust_relay_approval_over_a_seat_sends_unpair(staged_env):
+    """No pairing code, so no abort: the requester may already have
+    confirmed on our ack — it is told with the approval's own keys."""
+    env = staged_env
+    env.repo.instances["peer-s"] = _seat()
+    approval = replace(_qr_pending("peer-s"), status=PairingStatus.PENDING_SENT)
+    await env.pending.save(approval, ttl_s=None)
+
+    assert await env.svc.cancel_pending("peer-s") is True
+
+    assert [(m["to"], m["event_type"]) for m in env.fed.sent] == [
+        ("peer-s", FederationEventType.UNPAIR)
+    ]
+    assert ("send", "peer-s") in env.log

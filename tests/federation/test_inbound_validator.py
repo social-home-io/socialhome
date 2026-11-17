@@ -1095,6 +1095,11 @@ class _StubPipelineOwner:
     _on_relay_approval_contact = None
     _own_instance_id = "own-1"
 
+    class _pending_pairings:
+        @staticmethod
+        def has_code_half(instance_id: str) -> bool:
+            return False
+
     async def _notify_archived_write(self, event, space) -> None:
         return None
 
@@ -1948,23 +1953,21 @@ async def test_a_staged_approval_takes_the_requesters_envelope(event_type):
     await _staged_gate("approval", event_type)
 
 
-async def test_a_staged_pairing_code_takes_the_peers_abort():
-    await _staged_gate("code", FederationEventType.PAIRING_ABORT)
-
-
 @pytest.mark.parametrize(
     "event_type",
     [
         FederationEventType.SPACE_POST_CREATED,
         FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
         FederationEventType.UNPAIR,
+        FederationEventType.PAIRING_ABORT,
         FederationEventType.PAIRING_CONFIRM,
         FederationEventType.PAIRING_INTRO_AUTO,
     ],
 )
-async def test_a_staged_pairing_code_takes_nothing_else(event_type):
+async def test_a_staged_pairing_code_takes_nothing(event_type):
     """Nobody verified the code yet, and the household's row says
-    "confirmed" (its seat): nothing under the code's keys is dispatched."""
+    "confirmed" (its seat): nothing under the code's keys is read — its
+    cancel arrives as the seat's own traffic instead."""
     with pytest.raises(ValueError, match="No instance found"):
         await _staged_gate("code", event_type)
 
@@ -2269,3 +2272,152 @@ async def test_a_seed_share_inside_a_multi_frame_is_refused():
         await _multi_step()(
             _multi_ctx(event_type=FederationEventType.SPACE_ADMIN_KEY_SHARE.value)
         )
+
+
+# ── A seat with a pending pairing beside it ───────────────────────────────
+
+
+class _SeatRow:
+    """A seat as ``make_lookup_instance_by_id`` wraps it."""
+
+    source = InstanceSource.SPACE_SESSION
+    status = PairingStatus.CONFIRMED
+    from_instance = "remote-iid"
+    key_remote_to_self = "seat-key"
+    gfs_relay = False
+
+
+class _ApprovedHalf:
+    staged = True
+    pending_kind = "approval"
+    source = InstanceSource.MANUAL
+    status = PairingStatus.PENDING_SENT
+    from_instance = "remote-iid"
+    key_remote_to_self = "pair-key"
+
+    def __init__(self, *, gfs_relay: bool = True) -> None:
+        self.gfs_relay = gfs_relay
+
+
+def _seat_ctx(event_type, *, alt=None, transport: str = "") -> InboundContext:
+    return InboundContext(
+        envelope={
+            **_minimal_envelope(event_type=event_type.value),
+            "encrypted_payload": "ct",
+        },
+        instance=_SeatRow(),
+        staged_alt=alt,
+        transport=transport,
+    )
+
+
+async def test_a_seat_may_abort_only_while_a_pairing_code_waits_beside_it():
+    asked: list[str] = []
+
+    def _has_code(instance_id: str) -> bool:
+        asked.append(instance_id)
+        return instance_id == "remote-iid"
+
+    ctx = _seat_ctx(FederationEventType.PAIRING_ABORT)
+    await make_check_peer_class(may_abort=_has_code)(ctx)
+    # Still the seat: its keys, its route — the handler binds the token.
+    assert isinstance(ctx.instance, _SeatRow) and asked == ["remote-iid"]
+
+    with pytest.raises(ValueError, match="not permitted from a space-scoped peer"):
+        await make_check_peer_class(may_abort=lambda _i: False)(
+            _seat_ctx(FederationEventType.PAIRING_ABORT)
+        )
+    with pytest.raises(ValueError, match="not permitted from a space-scoped peer"):
+        await make_check_peer_class()(_seat_ctx(FederationEventType.PAIRING_ABORT))
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [FederationEventType.UNPAIR, FederationEventType.DM_MESSAGE],
+)
+async def test_a_code_half_lets_a_seat_send_nothing_but_the_abort(event_type):
+    with pytest.raises(ValueError, match="not permitted from a space-scoped peer"):
+        await make_check_peer_class(may_abort=lambda _i: True)(_seat_ctx(event_type))
+
+
+async def test_an_event_a_seat_may_not_send_is_the_approved_pairings():
+    """On a transport that knows the sender only by its id, an event
+    outside the space vocabulary from a seat with an APPROVED pairing
+    beside it can only be that pairing's: it goes on under the half (whose
+    keys and the confirm step decide)."""
+    half = _ApprovedHalf()
+    ctx = _seat_ctx(FederationEventType.DM_MESSAGE, alt=half)
+    await make_check_peer_class()(ctx)
+    assert ctx.instance is half and ctx.staged_alt is None
+
+
+async def test_a_pairing_without_a_gfs_reach_is_not_read_off_the_relay():
+    """Over the GFS relay the pairing must be a relay pairing — our half
+    holds the opt-in only when its code had a GFS reach."""
+    ctx = _seat_ctx(
+        FederationEventType.DM_MESSAGE,
+        alt=_ApprovedHalf(gfs_relay=False),
+        transport=TRANSPORT_GFS_RELAY,
+    )
+    with pytest.raises(ValueError, match="GFS relay is not enabled"):
+        await make_check_peer_class()(ctx)
+
+
+class _KeyRing:
+    def decrypt(self, key):
+        return key
+
+
+class _OneKeyEncoder:
+    """Opens the payload only under ``pair-key``."""
+
+    def decrypt_payload(self, payload, key):
+        if key != "pair-key":
+            raise ValueError("bad tag")
+        return '{"hello": 1}'
+
+
+async def test_a_payload_the_seat_keys_do_not_open_is_read_under_the_approved_half():
+    """The scanner's first envelope after it confirmed a GFS-reach code:
+    in the seat's vocabulary (its capabilities, a space post), through the
+    relay, under the PAIRING's keys."""
+    half = _ApprovedHalf()
+    ctx = _seat_ctx(
+        FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+        alt=half,
+        transport=TRANSPORT_GFS_RELAY,
+    )
+    step = make_decrypt_and_parse(
+        key_manager=_KeyRing(), encoder=_OneKeyEncoder(), loads=orjson.loads
+    )
+    await step(ctx)
+    assert ctx.instance is half and ctx.event.payload == {"hello": 1}
+
+
+async def test_a_payload_neither_key_opens_is_refused():
+    class _NoKeyEncoder:
+        def decrypt_payload(self, payload, key):
+            raise ValueError("bad tag")
+
+    ctx = _seat_ctx(FederationEventType.SPACE_POST_CREATED, alt=_ApprovedHalf())
+    step = make_decrypt_and_parse(
+        key_manager=_KeyRing(), encoder=_NoKeyEncoder(), loads=orjson.loads
+    )
+    with pytest.raises(ValueError, match="Failed to decrypt payload"):
+        await step(ctx)
+    assert isinstance(ctx.instance, _SeatRow)
+
+
+async def test_the_seats_own_traffic_stays_the_seats():
+    """Opens under the seat's keys: the approved half is not consulted."""
+
+    class _SeatKeyEncoder:
+        def decrypt_payload(self, payload, key):
+            assert key == "seat-key"
+            return "{}"
+
+    ctx = _seat_ctx(FederationEventType.SPACE_POST_CREATED, alt=_ApprovedHalf())
+    await make_decrypt_and_parse(
+        key_manager=_KeyRing(), encoder=_SeatKeyEncoder(), loads=orjson.loads
+    )(ctx)
+    assert isinstance(ctx.instance, _SeatRow)

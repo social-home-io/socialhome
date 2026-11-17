@@ -40,13 +40,17 @@ from socialhome.domain.federation import (
     is_space_seat,
 )
 from socialhome.federation.auto_pair_coordinator import AutoPairCoordinator
+from socialhome.federation.pairing_gfs_reach import PairingGfsReach
 from socialhome.federation.transport import FederationTransport
 from socialhome.repositories.dm_media_outbox_repo import SqliteDmMediaOutboxRepo
 from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
+from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.outbox_repo import SqliteOutboxRepo
 from socialhome.repositories.space_media_outbox_repo import SqliteSpaceMediaOutboxRepo
 from socialhome.services.auto_pair_inbox import AutoPairInbox
 from socialhome.services.federation_inbound import PairingInboundHandlers
+from socialhome.services.gfs_connection_service import GfsConnectionService
+from socialhome.services.gfs_envelope_sender import GfsEnvelopeSender
 from socialhome.services.pairing_cancel_service import PairingCancelService
 from socialhome.services.peer_unpair_service import PeerUnpairService
 from tests.federation.test_invite_bootstrap_gfs_e2e import (  # noqa: F401 — fixtures
@@ -140,6 +144,19 @@ async def _wire(h, session) -> SimpleNamespace:
     )
     registry.register(
         FederationEventType.PAIRING_INTRO_AUTO_ACK_VIA, auto.on_ack_via_at_relay
+    )
+    gfs_repo = SqliteGfsConnectionRepo(h.db)
+    gfs_service = GfsConnectionService(
+        gfs_repo, http_client=session, publish_client=session
+    )
+    h.federation.attach_pairing_gfs_reach(
+        PairingGfsReach(
+            gfs_connection_repo=gfs_repo,
+            envelope_relay_supported=gfs_service.envelope_relay_supported,
+            relay_sender=GfsEnvelopeSender(gfs_service=gfs_service, gfs_repo=gfs_repo),
+            keywrap_public_key=h.keywrap_pub,
+            keywrap_sig=h.keywrap_sig,
+        )
     )
     confirmed: list[str] = []
 
@@ -479,7 +496,7 @@ async def test_an_envelope_under_other_keys_on_the_approval_inbox_is_refused(wor
 # ── Pairing code (a shows it, c scans it) ─────────────────────────────────
 
 
-async def _scan(world) -> tuple[dict, dict]:
+async def _scan(world, **_unused) -> tuple[dict, dict]:
     """a mints a code, c scans it; c's signed peer-accept reaches a."""
     a, c = world.a, world.c
     code = await a.h.federation.initiate_pairing(a.base, share_home=False)
@@ -534,17 +551,16 @@ async def test_a_cancelled_pairing_code_keeps_the_seat(world):
 
 
 async def test_a_cancel_is_heard_by_the_household_that_showed_the_code(world):
-    """c scanned a's code and then cancelled. Its ``PAIRING_ABORT`` is
-    sealed with the keys of the half and goes to the inbox the code gave
-    out — which, over a seat, no row holds. a must hear it all the same:
-    otherwise a's admin enters the code a minute later, a replaces its
-    seat with a pairing c refused, and the space between the two is dead
-    (review finding; without a seat the abort always arrived)."""
+    """c scanned a's code and then cancelled. a must hear it — the abort
+    travels as the seat's own traffic — or a's admin enters the code a
+    minute later for a pairing c refused (review finding; without a seat
+    the abort always arrived)."""
     a, c = world.a, world.c
     seats = (await _seat_keys(a, c), await _seat_keys(c, a))
     code, accepted = await _scan(world)
 
     assert await c.cancel.cancel_pending(a.h.instance_id) is True
+    await world.gfs.drain()
 
     assert a.refused == []
     assert a.h.federation.pending_pairings.staged(c.h.instance_id) is None
@@ -611,14 +627,38 @@ async def test_a_pairing_code_never_confirms_our_own_keyless_request(world):
     await _assert_space_over_the_seat(world, "still-a-seat")
 
 
+async def _pair_by_code(world, **scan) -> tuple[dict, dict]:
+    """The whole handshake: scan, the code owner's admin enters the code,
+    the scanner confirms on the signed peer-confirm and says hello under
+    the new keys — which is what lets the code owner replace ITS seat."""
+    a = world.a
+    code, accepted = await _scan(world, **scan)
+    await a.h.federation.confirm_pairing(code["token"], accepted["verification_code"])
+    await world.gfs.drain()
+    return code, accepted
+
+
 async def test_a_confirmed_pairing_code_replaces_the_seat_on_both_sides(world):
     a, c = world.a, world.c
     code, accepted = await _scan(world)
 
-    await a.h.federation.confirm_pairing(code["token"], accepted["verification_code"])
+    waiting = await a.h.federation.confirm_pairing(
+        code["token"], accepted["verification_code"]
+    )
 
-    # a entered the code; its signed peer-confirm confirmed c.
-    assert a.confirmed == [c.h.instance_id] and c.confirmed == [a.h.instance_id]
+    # a entered the code and told c; c confirmed on that signed
+    # peer-confirm and replaced its seat. a keeps ITS seat until it has
+    # proof that c is in — c's first envelope under the code's keys: a
+    # household that replaced its seat alone has lost the space.
+    assert c.confirmed == [a.h.instance_id] and is_paired(await _row(c, a))
+    assert waiting.status is PairingStatus.PENDING_SENT
+    assert a.confirmed == [] and is_space_seat(await _row(a, c))
+    assert await a.h.federation_repo.get_pairing(code["token"]) is None
+
+    # c says hello (in the app: its capabilities, sent when it confirms).
+    assert not await _space_reaches(world, c, a, "hello-from-c")
+
+    assert a.confirmed == [c.h.instance_id]
     a_row, c_row = await _row(a, c), await _row(c, a)
     # Each side's row holds the inbox the handshake gave the other — never
     # the seat's — and the per-pair choice made in THIS handshake.
@@ -630,6 +670,168 @@ async def test_a_confirmed_pairing_code_replaces_the_seat_on_both_sides(world):
     assert a.refused == [] and c.refused == []
 
     await _assert_space_over_the_pairing(world, "qr-paired")
+
+
+async def test_the_code_owner_keeps_its_seat_when_the_scanner_is_gone(world):
+    """c scanned, then lost its half (it restarted — the half is in
+    memory) before a's admin entered the code. a must not replace its seat
+    for a pairing c can no longer complete: one household paired and the
+    other still seated is a dead space between the two (review finding)."""
+    a, c = world.a, world.c
+    seats = (await _seat_keys(a, c), await _seat_keys(c, a))
+    code, accepted = await _scan(world)
+    await c.h.federation.pending_pairings.cancel(a.h.instance_id)  # c restarted
+
+    with pytest.raises(ValueError, match="no longer waiting"):
+        await a.h.federation.confirm_pairing(
+            code["token"], accepted["verification_code"]
+        )
+
+    assert a.confirmed == [] and c.confirmed == []
+    assert a.h.federation.pending_pairings.staged(c.h.instance_id) is None
+    assert (await _seat_keys(a, c), await _seat_keys(c, a)) == seats
+    await _assert_space_over_the_seat(world, "scanner-gone")
+
+
+# ── Pairing codes with a GFS reach (households that met through the GFS) ──
+
+
+def _no_address(row: RemoteInstance) -> bool:
+    return is_paired(row) and not row.remote_inbox_url and row.gfs_relay
+
+
+async def _space_over_the_relay(world, sender, receiver, marker: str) -> None:
+    """*sender*'s space post reaches *receiver* under the PAIR's keys,
+    instance-addressed through the GFS relay (no inbox, no mailbox)."""
+    receiver.h.received.clear()
+    world.gfs.mailbox.clear()
+    await sender.h.federation.broadcast_to_space_members(
+        world.space.id, FederationEventType.SPACE_POST_CREATED, _post_payload(marker)
+    )
+    await world.gfs.drain()
+    got = [
+        (e.from_instance, e.payload["content"])
+        for e in receiver.h.received
+        if e.event_type is FederationEventType.SPACE_POST_CREATED
+    ]
+    assert got == [(sender.h.instance_id, marker)], receiver.refused
+    assert receiver.h.instance_id in [to for to, _ in world.gfs.mailbox]
+
+
+async def test_a_gfs_only_pairing_code_over_a_seat_pairs_both_sides(world):
+    """Neither household gives the other an address (reach ``gfs``): the
+    peer-accept, the peer-confirm and the scanner's first envelope all
+    travel through the GFS, where the code owner knows the scanner only by
+    its id — the seat's row."""
+    a, c = world.a, world.c
+    code = await a.h.federation.initiate_pairing(None, reach="gfs")
+    accepted = await c.h.federation.accept_pairing(
+        code, own_inbox_base_url=None, share_home=False
+    )
+    await world.gfs.drain()
+    # Both halves wait beside the seats; the space is untouched.
+    assert a.h.federation.pending_pairings.staged(c.h.instance_id) is not None
+    assert c.h.federation.pending_pairings.staged(a.h.instance_id) is not None
+    await _assert_space_over_the_seat(world, "gfs-code-out")
+
+    await a.h.federation.confirm_pairing(code["token"], accepted["verification_code"])
+    await world.gfs.drain()
+
+    assert c.confirmed == [a.h.instance_id] and _no_address(await _row(c, a))
+    assert is_space_seat(await _row(a, c))
+    # c's first envelope under the code's keys, through the relay.
+    await _space_over_the_relay(world, c, a, "hello-over-the-relay")
+    assert a.confirmed == [c.h.instance_id] and _no_address(await _row(a, c))
+    # Each side holds the route the code named.
+    for me, other in ((a, c), (c, a)):
+        routes = await me.h.federation_repo.list_gfs_routes(other.h.instance_id)
+        assert [r.gfs_connection_id for r in routes] == ["gfs-1"]
+    await _space_over_the_relay(world, a, c, "paired-a-to-c")
+    await _space_over_the_relay(world, c, a, "paired-c-to-a")
+    assert a.refused == [] and c.refused == []
+
+
+async def test_a_url_and_gfs_pairing_code_over_a_seat_pairs_both_sides(world):
+    a, c = world.a, world.c
+    code = await a.h.federation.initiate_pairing(a.base, reach="url_gfs")
+    accepted = await c.h.federation.accept_pairing(
+        code, own_inbox_base_url=c.base, share_home=False
+    )
+    await _assert_space_over_the_seat(world, "url-gfs-code-out")
+
+    await a.h.federation.confirm_pairing(code["token"], accepted["verification_code"])
+    await world.gfs.drain()
+    assert c.confirmed == [a.h.instance_id]
+    assert not await _space_reaches(world, c, a, "hello")
+
+    assert a.confirmed == [c.h.instance_id]
+    for me, other in ((a, c), (c, a)):
+        row = await _row(me, other)
+        assert is_paired(row) and row.gfs_relay and row.remote_keywrap_pk
+        assert row.remote_inbox_url.startswith(other.base + "/")
+    await _assert_space_over_the_pairing(world, "url-gfs-paired")
+
+
+@pytest.mark.parametrize("reach", ["gfs", "url_gfs", "url"])
+async def test_a_cancel_is_heard_on_whatever_reaches_the_seat(world, reach):
+    """c scanned a's code and cancelled. However the two reach each other,
+    a hears it — the abort travels as the seat's own traffic, queued like
+    any envelope, not as a one-shot POST to an inbox a GFS-only household
+    does not have — and a's half and session go with it."""
+    a, c = world.a, world.c
+    seats = (await _seat_keys(a, c), await _seat_keys(c, a))
+    base = None if reach == "gfs" else a.base
+    code = await a.h.federation.initiate_pairing(base, reach=reach)
+    accepted = await c.h.federation.accept_pairing(
+        code,
+        own_inbox_base_url=None if reach == "gfs" else c.base,
+        share_home=False,
+    )
+    await world.gfs.drain()
+    assert a.h.federation.pending_pairings.staged(c.h.instance_id) is not None
+
+    assert await c.cancel.cancel_pending(a.h.instance_id) is True
+    await world.gfs.drain()
+
+    assert a.h.federation.pending_pairings.staged(c.h.instance_id) is None
+    assert await a.h.federation_repo.get_pairing(code["token"]) is None
+    with pytest.raises(ValueError, match="No pending pairing"):
+        await a.h.federation.confirm_pairing(
+            code["token"], accepted["verification_code"]
+        )
+    assert a.confirmed == [] and c.confirmed == []
+    assert (await _seat_keys(a, c), await _seat_keys(c, a)) == seats
+    await _assert_space_over_the_seat(world, f"cancelled-{reach}")
+
+
+async def test_an_abort_from_a_seat_cancels_only_the_handshake_it_names(world):
+    """A seat may send ``PAIRING_ABORT`` only while a pairing code's half
+    is kept beside it, and it cancels the half of THAT code only."""
+    a, c = world.a, world.c
+    code, _accepted = await _scan(world)
+
+    # c aborts some other token: a's half and session stay.
+    await c.h.federation.send_event(
+        to_instance_id=a.h.instance_id,
+        event_type=FederationEventType.PAIRING_ABORT,
+        payload={"token": "not-this-handshake", "reason": "cancelled"},
+    )
+    await world.gfs.drain()
+    assert a.h.federation.pending_pairings.staged(c.h.instance_id) is not None
+    assert await a.h.federation_repo.get_pairing(code["token"]) is not None
+
+    # With no half staged at all, a seat's abort is refused like any other
+    # event outside the space vocabulary.
+    await a.cancel.cancel_pending(c.h.instance_id)
+    await world.gfs.drain()
+    a.refused.clear()
+    result = await c.h.federation.send_event(
+        to_instance_id=a.h.instance_id,
+        event_type=FederationEventType.PAIRING_ABORT,
+        payload={"token": code["token"], "reason": "cancelled"},
+    )
+    await world.gfs.drain()
+    assert is_space_seat(await _row(a, c)) and result is not None
 
 
 async def test_an_unverified_pairing_code_opens_no_inbox(world):
@@ -662,8 +864,8 @@ async def test_an_unverified_pairing_code_opens_no_inbox(world):
 async def test_after_an_unpair_the_plain_seat_is_back_on_both_sides(world):
     a, c = world.a, world.c
     seats = (await _seat_keys(a, c), await _seat_keys(c, a))
-    code, accepted = await _scan(world)
-    await a.h.federation.confirm_pairing(code["token"], accepted["verification_code"])
+    await _pair_by_code(world)
+    assert not await _space_reaches(world, c, a, "hello-from-c")
     await _assert_space_over_the_pairing(world, "paired")
 
     # a's admin removes the connection: a signed UNPAIR, then forget.

@@ -24,6 +24,7 @@ from socialhome.federation.pending_pairing import (
     PendingPairings,
     TooManyPendingPairingsError,
 )
+from tests.pairing_fakes import SavesPendingMixin
 
 PEER = "peer-1"
 
@@ -58,7 +59,7 @@ def _seat(iid: str = PEER) -> RemoteInstance:
     )
 
 
-class _Repo:
+class _Repo(SavesPendingMixin):
     def __init__(self) -> None:
         self.rows: dict[str, RemoteInstance] = {}
         self.calls: list[tuple] = []
@@ -293,31 +294,83 @@ async def test_promote_must_carry_the_staged_handshake(pending, repo):
     assert repo.calls == []
 
 
-# ── the inbox lookup ─────────────────────────────────────────────────────
+# ── what the inbound pipeline may read ───────────────────────────────────
 
 
-@pytest.mark.parametrize(
-    "status", [PairingStatus.PENDING_SENT, PairingStatus.PENDING_RECEIVED]
-)
-async def test_a_keyed_staged_half_resolves_by_its_inbox_id(pending, repo, status):
-    """An approval and a pairing code's half both resolve; what either may
-    then be sent is the pipeline's staged-half gate."""
+async def test_only_a_staged_approval_is_ever_read(pending, repo):
     repo.rows[PEER] = _seat()
-    half = _inst(status, inbox="pair")
-    await pending.save(half, ttl_s=300)
-    assert pending.keyed_for_inbox("pair") is half
+    approval = _inst(PairingStatus.PENDING_SENT, inbox="appr")
+    await pending.save(approval, ttl_s=300)
+    assert pending.keyed_for_inbox("appr") is approval
+    assert pending.keyed_for(PEER) is approval
     assert pending.keyed_for_inbox("") is None
     assert pending.keyed_for_inbox("other") is None
     # Never by the seat's own inbox id.
     assert pending.keyed_for_inbox("seat-inbox") is None
+    assert pending.keyed_for("somebody-else") is None
 
 
-async def test_our_own_keyless_request_never_resolves_by_inbox_id(pending, repo):
+@pytest.mark.parametrize(
+    "half",
+    [
+        # A pairing code nobody verified yet.
+        _inst(PairingStatus.PENDING_RECEIVED, inbox="code"),
+        # Our own request: no key to check anything against.
+        _inst(PairingStatus.PENDING_SENT, inbox="code", keyed=False),
+    ],
+)
+async def test_no_other_staged_half_is_read(pending, repo, half):
     repo.rows[PEER] = _seat()
-    await pending.save(
-        _inst(PairingStatus.PENDING_SENT, inbox="req", keyed=False), ttl_s=300
-    )
-    assert pending.keyed_for_inbox("req") is None
+    await pending.save(half, ttl_s=300)
+    assert pending.keyed_for_inbox("code") is None
+    assert pending.keyed_for(PEER) is None
+
+
+# ── a pairing code our admin entered waits for the scanner ───────────────
+
+
+async def test_await_peer_turns_the_code_half_into_an_approval(pending, repo, clock):
+    seat = repo.rows[PEER] = _seat()
+    half = _inst(PairingStatus.PENDING_RECEIVED)
+    await pending.save(half, ttl_s=300, gfs_route="gfs-1", token="tok")
+    assert pending.has_code_half(PEER) and pending.keyed_for(PEER) is None
+
+    waiting = await pending.await_peer(PEER, token="tok", ttl_s=3600)
+
+    assert waiting == replace(half, status=PairingStatus.PENDING_SENT)
+    assert pending.keyed_for(PEER) == waiting
+    assert pending.staged_route(PEER) == "gfs-1"
+    assert repo.rows[PEER] is seat
+    # It outlives the code's five minutes (the scanner's hello may take a
+    # while), and is still the half its code's abort cancels.
+    clock.now += 600
+    assert pending.staged(PEER) == waiting and pending.has_code_half(PEER)
+    assert await pending.promote(replace(waiting, status=PairingStatus.CONFIRMED))
+    assert ("route", PEER, "gfs-1") in repo.calls
+
+
+@pytest.mark.parametrize("token", ["another-code", "tok"])
+async def test_await_peer_needs_the_code_half_of_that_code(pending, repo, token):
+    repo.rows[PEER] = _seat()
+    if token == "tok":
+        # The right token, but the half is no longer the code's.
+        await pending.save(_inst(PairingStatus.PENDING_SENT), ttl_s=300, token="tok")
+    else:
+        await pending.save(
+            _inst(PairingStatus.PENDING_RECEIVED), ttl_s=300, token="tok"
+        )
+    before = pending.staged(PEER)
+    assert await pending.await_peer(PEER, token=token, ttl_s=60) is None
+    assert pending.staged(PEER) is before
+
+
+async def test_an_approval_can_wait_without_an_expiry(pending, repo, clock):
+    """As the row of an approval does: until it confirms or is cancelled."""
+    repo.rows[PEER] = _seat()
+    approval = _inst(PairingStatus.PENDING_SENT)
+    await pending.save(approval, ttl_s=None)
+    clock.now += 10 * 24 * 3600
+    assert pending.staged(PEER) is approval
 
 
 # ── cancel ──────────────────────────────────────────────────────────────
@@ -462,3 +515,99 @@ async def test_a_handshake_started_during_a_confirm_is_not_swept_away(clock):
     assert await promote is False
     assert await save is True
     assert pending.staged(PEER) is newer
+
+
+async def test_a_cancel_naming_another_code_cancels_nothing(pending, repo):
+    """The peer's abort names a token: only that handshake's half goes."""
+    repo.rows[PEER] = _seat()
+    half = _inst(PairingStatus.PENDING_RECEIVED)
+    await pending.save(half, ttl_s=300, token="this-code")
+    assert await pending.cancel(PEER, token="another-code") is None
+    assert pending.staged(PEER) is half and repo.calls == []
+    got = await pending.cancel(PEER, token="this-code")
+    assert got is not None and got[0] is half
+    # A half without a token (a trust-relay approval) is never cancelled
+    # by an abort.
+    await pending.save(_inst(PairingStatus.PENDING_SENT), ttl_s=300)
+    assert await pending.cancel(PEER, token="this-code") is None
+
+
+async def test_a_cancel_after_the_code_was_entered_still_names_the_code(pending, repo):
+    """The session is used up by then; the peer is told by the token."""
+    repo.rows[PEER] = _seat()
+    await pending.save(_inst(PairingStatus.PENDING_RECEIVED), ttl_s=300, token="code-1")
+
+    async def _no_sessions(**_kw):
+        return []
+
+    repo.cancel_pairing_sessions = _no_sessions
+    _half, tokens = await pending.cancel(PEER)
+    assert tokens == ["code-1"]
+
+
+async def test_a_half_that_expires_during_the_write_does_not_break_the_confirm(clock):
+    """The write decides: an expiry noticed by another reader while the
+    upgrade is in flight (review finding: ``del`` raised ``KeyError``
+    after the upgrade had committed — the caller then never sent the
+    peer-confirm or announced the pair)."""
+    repo = _SlowRepo()
+    pending = PendingPairings(repo, clock=clock)
+    repo.rows[PEER] = _seat()
+    half = _inst(PairingStatus.PENDING_SENT)
+    await pending.save(half, ttl_s=300)
+    confirmed = replace(half, status=PairingStatus.CONFIRMED)
+
+    promote = asyncio.create_task(pending.promote(confirmed))
+    await repo.writing.wait()
+    clock.now += 301
+    assert pending.list_staged() == []  # any reader prunes the expired half
+    repo.release.set()
+
+    assert await promote is True
+    assert repo.rows[PEER] is confirmed
+
+
+async def test_the_lock_table_never_drops_a_lock_somebody_waits_for(clock):
+    """Three writers on one household run strictly one after the other,
+    and the table is empty once the last one is done."""
+    repo = _SlowRepo()
+    pending = PendingPairings(repo, clock=clock)
+    repo.rows[PEER] = _seat()
+    half = _inst(PairingStatus.PENDING_SENT)
+    await pending.save(half, ttl_s=300)
+
+    first = asyncio.create_task(
+        pending.promote(replace(half, status=PairingStatus.CONFIRMED))
+    )
+    await repo.writing.wait()
+    second = asyncio.create_task(pending.cancel(PEER))
+    third = asyncio.create_task(
+        pending.save(_inst(PairingStatus.PENDING_RECEIVED), ttl_s=300)
+    )
+    await asyncio.sleep(0)
+    assert len(pending._locks) == 1 and pending._locks[PEER][1] == 3
+    repo.release.set()
+
+    assert await first is True
+    assert await second is None
+    # The confirmed pair is a row now: the next handshake writes the row.
+    assert await third is False
+    assert pending._locks == {}
+
+
+async def test_a_seat_made_during_the_save_is_never_overwritten(clock):
+    """Whether the row is a seat is decided inside the write: a seat that
+    appears after a caller looked is kept, and the half waits beside it
+    (review finding — the read-then-upsert overwrote it)."""
+
+    class _Racy(_Repo):
+        async def save_pending_instance(self, inst):
+            self.rows[inst.id] = _seat()  # the directory seats it right now
+            return await super().save_pending_instance(inst)
+
+    repo = _Racy()
+    pending = PendingPairings(repo, clock=clock)
+    half = _inst(PairingStatus.PENDING_RECEIVED)
+    assert await pending.save(half, ttl_s=300) is True
+    assert pending.staged(PEER) is half
+    assert repo.rows[PEER].source is InstanceSource.SPACE_SESSION

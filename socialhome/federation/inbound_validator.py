@@ -61,7 +61,6 @@ from ..domain.federation import (
     ARCHIVED_ALLOWED_REMOVAL_TYPES,
     MULTI_EVENT_TYPES,
     PENDING_KIND_APPROVAL,
-    PENDING_KIND_CODE,
     SPACE_SESSION_ALLOWED_EVENT_TYPES,
     SPACE_WRITE_EVENT_TYPES,
     FederationEvent,
@@ -69,6 +68,7 @@ from ..domain.federation import (
     InstanceSource,
     PairingStatus,
     RemoteInstance,
+    is_space_seat,
     pending_kind,
 )
 from ..domain.space import WRITER_ROLES, SpaceRole
@@ -176,6 +176,14 @@ class InboundContext:
 
     #: Resolved RemoteInstance wrapper (populated by ``lookup_instance``).
     instance: Any = None
+
+    #: The sender's approved pairing kept BESIDE its space seat, when the
+    #: lookup resolved the seat row by the sender's id (relay, mailbox,
+    #: DataChannel) and such a half exists. The envelope is the seat's
+    #: unless it turns out to be the pairing's — an event a seat may not
+    #: send, or a payload that opens only under the pairing's keys
+    #: (:func:`_take_staged`).
+    staged_alt: Any = None
 
     #: Fully validated FederationEvent (populated by ``decrypt_and_parse``).
     event: FederationEvent | None = None
@@ -416,6 +424,7 @@ def make_lookup_instance_by_id(
     *,
     repo,
     unpaired_recently: Callable[[str], bool] | None = None,
+    staged_for: Callable[[str], RemoteInstance | None] | None = None,
 ) -> InboundStep:
     """Step 2 (WebRTC): resolve RemoteInstance by instance_id.
 
@@ -460,6 +469,13 @@ def make_lookup_instance_by_id(
         # Wrap in the same shape the HTTPS inbox lookup returns so the
         # remaining pipeline steps (sig verify, decrypt) work unchanged.
         ctx.instance = _InboxInstance(instance)
+        if staged_for is not None and is_space_seat(instance):
+            # ``staged_for`` (``PendingPairings.keyed_for``): the approved
+            # pairing waiting beside this seat, if any. Its household has
+            # one id and, here, two sets of keys.
+            half = staged_for(instance.id)
+            if half is not None:
+                ctx.staged_alt = _InboxInstance(half, staged=True)
 
     return lookup_instance_by_id
 
@@ -493,7 +509,32 @@ def make_check_timestamp() -> InboundStep:
     return check_timestamp
 
 
-def make_check_peer_class() -> InboundStep:
+def _take_staged(ctx: InboundContext) -> None:
+    """The envelope is the approved pairing's, not the seat's: go on with
+    the half kept beside the seat (:attr:`InboundContext.staged_alt`).
+
+    Over the GFS relay that pairing must itself be a relay pairing (its
+    code had a GFS reach, so OUR half holds the opt-in) — the rule
+    :func:`make_check_relay_opt_in` applies to a paired peer's row."""
+    half = ctx.staged_alt
+    ctx.staged_alt = None
+    if (
+        ctx.transport in RELAY_TRANSPORTS
+        and getattr(half, "gfs_relay", False) is not True
+    ):
+        log.info(
+            "inbound: refusing a relayed %r under the keys of a pending "
+            "pairing without a GFS reach",
+            ctx.envelope.get("event_type"),
+        )
+        raise ValueError("GFS relay is not enabled for this peer")
+    ctx.instance = half
+
+
+def make_check_peer_class(
+    *,
+    may_abort: Callable[[str], bool] | None = None,
+) -> InboundStep:
     """Step 2b: hold a space-scoped peer to the space vocabulary (§D2b).
 
     Runs straight after the instance lookup — the first point at which
@@ -522,6 +563,24 @@ def make_check_peer_class() -> InboundStep:
         event_type = FederationEventType(raw_type)
         if event_type in SPACE_SESSION_ALLOWED_EVENT_TYPES:
             return
+        sender = getattr(ctx.instance, "from_instance", "")
+        if (
+            event_type is FederationEventType.PAIRING_ABORT
+            and may_abort is not None
+            and may_abort(sender)
+        ):
+            # The one pairing event a seat may send, and only while a
+            # pairing code's half is kept beside it
+            # (``PendingPairings.has_code_half``): the household cancelled
+            # the handshake. It travels as the seat's own traffic so it
+            # arrives however the two reach each other; its handler
+            # cancels only the half of the code it names.
+            return
+        if ctx.staged_alt is not None:
+            # Not something a seat sends: it can only be the approved
+            # pairing's (the signature and the pairing's keys decide).
+            _take_staged(ctx)
+            return
         # INFO, not WARNING: an older peer that still sends a type we now
         # refuse is a normal, expected rejection, and this surface is
         # reachable by anyone holding an invite link. Type + sender only
@@ -540,38 +599,28 @@ def make_check_peer_class() -> InboundStep:
 
 
 def make_check_staged_half() -> InboundStep:
-    """Step 2b': what a pending pairing kept beside a space seat may be
-    sent under its keys.
+    """Step 2b': a pending pairing kept beside a space seat is read under
+    its keys only when it is an **approval**
+    (:func:`~socialhome.domain.federation.pending_kind`).
 
     The household's row is still its seat — "confirmed" to every handler —
     so the half's keys must not open the door a row's ``pending_*`` status
-    keeps shut. By the half's kind
-    (:func:`~socialhome.domain.federation.pending_kind`):
+    keeps shut. An approval is a pairing our people approved that waits
+    for the other household's first envelope under the new keys (a
+    trust-relay approval; a pairing code after our admin entered it): that
+    envelope confirms the pair before dispatch, or is refused
+    (:func:`make_confirm_relay_approval`). A pairing code nobody verified
+    and our own keyless request open nothing.
 
-    * an **approval** (our admin approved the introduction): anything —
-      the requester's first envelope confirms the pair before dispatch, or
-      is refused (:func:`make_confirm_relay_approval`);
-    * a **pairing code** nobody verified yet: only the peer's
-      ``PAIRING_ABORT`` (it cancelled; our half and session go too);
-    * anything else: nothing.
-
-    Refused like an unknown inbox (the sender's outbox retries that; by
-    then the pair has confirmed, or the half is gone). Runs straight after
-    the lookup, before any crypto. A no-op for every row.
+    Refused like an unknown inbox. Runs straight after the lookup, before
+    any crypto. A no-op for every row.
     """
 
     async def check_staged_half(ctx: InboundContext) -> None:
         inst = ctx.instance
         if getattr(inst, "staged", False) is not True:
             return
-        kind = getattr(inst, "pending_kind", None)
-        if kind == PENDING_KIND_APPROVAL:
-            return
-        if (
-            kind == PENDING_KIND_CODE
-            and ctx.envelope.get("event_type")
-            == FederationEventType.PAIRING_ABORT.value
-        ):
+        if getattr(inst, "pending_kind", None) == PENDING_KIND_APPROVAL:
             return
         log.info(
             "inbound: refusing %r under the keys of an unconfirmed pairing",
@@ -943,6 +992,16 @@ def make_check_replay(*, replay_cache) -> InboundStep:
 def make_decrypt_and_parse(*, key_manager, encoder, loads) -> InboundStep:
     """Steps 6+7: decrypt payload + parse inner JSON → FederationEvent."""
 
+    def _open_payload(instance: Any, encrypted_payload: Any) -> str:
+        try:
+            session_key = key_manager.decrypt(instance.key_remote_to_self)
+        except Exception as exc:
+            raise ValueError(f"Failed to decrypt session key: {exc}") from exc
+        try:
+            return encoder.decrypt_payload(encrypted_payload, session_key)
+        except Exception as exc:
+            raise ValueError(f"Failed to decrypt payload: {exc}") from exc
+
     async def decrypt_and_parse(ctx: InboundContext) -> None:
         data = ctx.envelope
         if ctx.multi_frame:
@@ -953,17 +1012,17 @@ def make_decrypt_and_parse(*, key_manager, encoder, loads) -> InboundStep:
                 raise ValueError("multi-recipient payload is not a JSON string")
         else:
             try:
-                session_key = key_manager.decrypt(ctx.instance.key_remote_to_self)
-            except Exception as exc:
-                raise ValueError(f"Failed to decrypt session key: {exc}") from exc
-
-            try:
-                decrypted_json = encoder.decrypt_payload(
-                    data["encrypted_payload"],
-                    session_key,
-                )
-            except Exception as exc:
-                raise ValueError(f"Failed to decrypt payload: {exc}") from exc
+                decrypted_json = _open_payload(ctx.instance, data["encrypted_payload"])
+            except ValueError:
+                if ctx.staged_alt is None:
+                    raise
+                # Not the seat's keys. The sender is seated AND we approved
+                # a pairing with it: this is its first word under the
+                # pairing's keys, on a transport that knows it only by its
+                # id — or it is nothing we can read.
+                half = ctx.staged_alt
+                decrypted_json = _open_payload(half, data["encrypted_payload"])
+                _take_staged(ctx)
 
         try:
             inner = loads(decrypted_json)

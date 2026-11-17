@@ -46,6 +46,7 @@ class AbstractFederationRepo(Protocol):
         include_unpairing: bool = False,
     ) -> RemoteInstance | None: ...
     async def save_instance(self, inst: RemoteInstance) -> RemoteInstance: ...
+    async def save_pending_instance(self, inst: RemoteInstance) -> bool: ...
     async def set_proto_version(
         self,
         instance_id: str,
@@ -240,6 +241,44 @@ class SqliteFederationRepo:
 
         await self._db.transact(_run)
         return inst
+
+    async def save_pending_instance(self, inst: RemoteInstance) -> bool:
+        """Write the pending half *inst* of a pairing handshake as its
+        household's row — unless that row is a live space seat. Returns
+        whether it was written; ``False`` means the row is a seat and was
+        not touched (the caller keeps the half beside it,
+        :class:`~socialhome.federation.pending_pairing.PendingPairings`).
+
+        ONE transaction decides and writes, so a seat made between a
+        caller's read and its write is never overwritten by a pending
+        half. An unpair tombstone is replaced outright, as in
+        :meth:`save_instance`. Unlike that upsert, the row takes the
+        half's ``local_inbox_id`` even over an existing row: a new
+        handshake hands out a new inbox, and the session that confirms it
+        is bound to that inbox (``handle_peer_confirm``).
+        """
+
+        def _run(conn) -> bool:
+            row = conn.execute(
+                "SELECT status, source FROM remote_instances WHERE id=?",
+                (inst.id,),
+            ).fetchone()
+            if row is not None and (str(row[0]), str(row[1])) == (
+                PairingStatus.CONFIRMED.value,
+                InstanceSource.SPACE_SESSION.value,
+            ):
+                return False
+            if row is not None and str(row[0]) == PairingStatus.UNPAIRING.value:
+                conn.execute("DELETE FROM remote_instances WHERE id=?", (inst.id,))
+                _purge_instance_side_rows(conn, [inst.id])
+            conn.execute(_UPSERT_INSTANCE_SQL, _instance_params(inst))
+            conn.execute(
+                "UPDATE remote_instances SET local_inbox_id=? WHERE id=?",
+                (inst.local_inbox_id, inst.id),
+            )
+            return True
+
+        return bool(await self._db.transact(_run))
 
     async def set_proto_version(
         self,

@@ -771,8 +771,10 @@ class FederationService:
         and what it may be sent is narrow (:func:`make_check_staged_half`):
         an approval takes the requester's first envelope under the
         approved keys, which confirms the pair
-        (:func:`make_confirm_relay_approval` — fail closed for it); a
-        pairing code's half takes the peer's ``PAIRING_ABORT`` only."""
+        (:func:`make_confirm_relay_approval` — fail closed for it). Only
+        an approval is ever resolved (a trust-relay approval, or a pairing
+        code our admin entered); the by-id pipelines find the same half
+        through ``staged_for``."""
         half = self._pending_pairings.keyed_for_inbox(inbox_id)
         if half is not None:
             return _InboxInstance(half, staged=True)
@@ -865,6 +867,10 @@ class FederationService:
                 lookup_step=make_lookup_instance_by_id(
                     repo=self._federation_repo,
                     unpaired_recently=self._unpaired_recently,
+                    # The relay, a mailbox and a DataChannel know the sender
+                    # by its id: an approved pairing kept beside its seat
+                    # is found there too (GFS-reach pairings have no inbox).
+                    staged_for=self._pending_pairings.keyed_for,
                 ),
             )
         )
@@ -895,7 +901,7 @@ class FederationService:
             # lookup (the first step that knows WHO the sender is) and
             # before any crypto, so an off-vocabulary envelope costs a
             # set lookup.
-            make_check_peer_class(),
+            make_check_peer_class(may_abort=self._pending_pairings.has_code_half),
             # Relay opt-in gate: a paired peer reaches us over the GFS
             # relay only when we opted into the relay with it. Also before
             # any crypto.
@@ -953,8 +959,9 @@ class FederationService:
         if inst is not None and pending_kind(inst) == PENDING_KIND_APPROVAL:
             confirmed = replace(inst, status=PairingStatus.CONFIRMED)
             if await self._pending_pairings.promote(confirmed):
-                log.info("auto-pair: %s confirmed the approved pairing", instance_id)
+                log.info("pairing: %s confirmed the approved pairing", instance_id)
                 await self._bus.publish(PairingConfirmed(instance_id=instance_id))
+                await self._pairing.probe_routes(confirmed)
                 return True
         return is_paired(await self._federation_repo.get_instance(instance_id))
 

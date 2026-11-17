@@ -170,7 +170,14 @@ class PairingCancelService:
         # Only now, with the cancel committed, does anything leave this
         # household — sealed with the keys of the row we just removed.
         notified = False
-        if _has_signed_channel(inst):
+        if staged is not None and tokens:
+            # A pairing code over a space seat: the cancel goes out as the
+            # SEAT's traffic (its keys, its route — mailbox, relay or
+            # host hop — and the outbox when it does not get through), so
+            # it arrives however the two households reach each other. The
+            # receiver takes it from a seat only for the code it names.
+            notified = await self._notify_over_seat(inst, tokens[0])
+        elif _has_signed_channel(inst):
             notified = await self._notify_peer(inst, tokens)
         log.info(
             "pairing cancel: pending pairing with %s cancelled (peer told: %s)",
@@ -179,6 +186,26 @@ class PairingCancelService:
         )
         await self._bus.publish(PeerUnpaired(instance_id=instance_id))
         return notified
+
+    async def _notify_over_seat(self, inst: RemoteInstance, token: str) -> bool:
+        try:
+            result = await asyncio.wait_for(
+                self._federation.send_event(
+                    to_instance_id=inst.id,
+                    event_type=FederationEventType.PAIRING_ABORT,
+                    payload={"token": token, "reason": PAIRING_CANCEL_REASON},
+                ),
+                timeout=self._notify_timeout_s,
+            )
+        except Exception:
+            log.warning(
+                "pairing cancel: %s to %s over its space seat failed",
+                FederationEventType.PAIRING_ABORT.value,
+                inst.id,
+                exc_info=True,
+            )
+            return False
+        return bool(result.ok)
 
     async def _cancel_row(self, instance_id: str) -> list[str]:
         """One transaction: the sessions (the only right to finish the

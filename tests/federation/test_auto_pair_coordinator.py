@@ -46,9 +46,10 @@ from socialhome.services.auto_pair_inbox import (
     AUTO_PAIR_REQUEST_TTL_SECONDS,
     AutoPairInbox,
 )
+from tests.pairing_fakes import SavesPendingMixin
 
 
-class _InMemoryFederationRepo:
+class _InMemoryFederationRepo(SavesPendingMixin):
     """Minimal fake for :class:`AbstractFederationRepo`."""
 
     def __init__(self) -> None:
