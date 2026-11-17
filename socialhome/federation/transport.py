@@ -1368,6 +1368,13 @@ class _RtcPeer:
     # ─── Sending ──────────────────────────────────────────────────────────
 
     @property
+    def awaits_remote_description(self) -> bool:
+        """Whether a candidate handed to :meth:`add_ice_candidate` now
+        would park (up to :data:`ICE_BUFFER_TIMEOUT_S`) instead of being
+        applied."""
+        return not self._remote_description_applied.is_set()
+
+    @property
     def is_ready(self) -> bool:
         """Whether the DataChannel is currently open."""
         return self._open.is_set() and not self._closed
@@ -1913,6 +1920,7 @@ class FederationTransport:
         #: Inbound DataChannel handlers in flight. Shielded from their
         #: receive task (see :meth:`_inbound_factory`), so this set is what
         #: holds them and lets :meth:`close_all` cancel and await them.
+        #: Also the candidates :meth:`on_rtc_ice` parked off its caller.
         self._inbound_tasks: set[asyncio.Task] = set()
         #: Set once by :meth:`close_all`. Checked by
         #: :meth:`_ensure_handshake` so a ``send()`` parked on the
@@ -2823,10 +2831,31 @@ class FederationTransport:
         peer = await self._answering_peer(from_instance)
         if peer is None:
             return
-        await peer.add_ice_candidate(
+        applying = peer.add_ice_candidate(
             candidate=str(payload.get("candidate") or ""),
             sdp_mid=str(payload.get("sdp_mid") or "0"),
         )
+        if not peer.awaits_remote_description:
+            await applying
+            return
+        # The candidate has to wait for its OFFER / ANSWER. It waits on a
+        # task of its own, never on the caller: the caller is the inbox
+        # request (or the DataChannel receive loop) that carried it, and
+        # holding that for up to ``ICE_BUFFER_TIMEOUT_S`` blocks the very
+        # description it waits for. The sender's POST times out after
+        # 10 s, its outbox stalls our rows for the pass, and an OFFER
+        # queued behind its candidates (the outbox orders by a jittered
+        # retry time, not by send order) arrives 30 s late — just after
+        # the candidates were dropped. That, not slow signalling, is what
+        # made handshakes after an outage lose candidates and restart.
+        task = asyncio.create_task(applying, name=f"fed-rtc-ice[{from_instance}]")
+        self._inbound_tasks.add(task)
+        task.add_done_callback(self._parked_candidate_done)
+
+    def _parked_candidate_done(self, task: asyncio.Task) -> None:
+        self._inbound_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            log.warning("fed RTC: a parked ICE candidate failed: %r", task.exception())
 
     async def _answering_peer(self, from_instance: str) -> _RtcPeer | None:
         """The peer an inbound OFFER / ICE candidate from *from_instance*

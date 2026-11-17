@@ -1639,6 +1639,12 @@ def _stub_peer(t: FederationTransport, iid: str) -> _RtcPeer:
     return peer
 
 
+async def _settle_parked_candidates(t: FederationTransport) -> None:
+    """Wait until every candidate ``on_rtc_ice`` parked off its caller has
+    been applied or dropped."""
+    await asyncio.gather(*list(t._inbound_tasks), return_exceptions=True)
+
+
 def _offers(signal: _FakeSignaler) -> list:
     return [
         ev for ev in signal.events if ev[1] is FederationEventType.FEDERATION_RTC_OFFER
@@ -2313,6 +2319,7 @@ async def test_send_rebuilds_a_starved_stub_peer(monkeypatch):
         from_instance=inst.id,
         payload={"candidate": "candidate:1 udp", "sdp_mid": "0"},
     )
+    await _settle_parked_candidates(t)
     stub = t._peers[inst.id]
     assert stub._dropped_candidates == 1
     assert stub._starved_awaiting_offer is True
@@ -2622,6 +2629,7 @@ async def test_torn_down_answerer_rebuilds_as_offerer_on_next_send(monkeypatch):
         from_instance=inst.id,
         payload={"candidate": "candidate:1 udp", "sdp_mid": "0"},
     )
+    await _settle_parked_candidates(t)
     peer = t._peers[inst.id]
     await t.on_rtc_offer(
         from_instance=inst.id,
@@ -2807,6 +2815,104 @@ async def test_accepting_an_offer_ends_the_ignored_offer():
 
     assert peer._ignoring_offer is False
     peer.close()
+
+
+# ─── A parked candidate must not hold the request that carried it ─────────
+#
+# REGRESSION (same log, live timeline): after an outage our outbox held an
+# OFFER and its candidates for the peer. The candidate rows went out
+# first; the peer parked each one for up to 30 s INSIDE the inbox request,
+# our POST timed out after 10 s and the outbox stalled that peer for the
+# pass — so the OFFER the candidates were waiting for arrived 30 s late,
+# just after they had been dropped. Signalling was not slow: the parked
+# candidate was blocking its own OFFER.
+
+
+async def test_candidate_ahead_of_its_offer_does_not_hold_the_request(monkeypatch):
+    """``on_rtc_ice`` returns at once while the candidate waits for the
+    remote description, and the candidate is applied when the OFFER
+    lands. The real 30 s buffer timeout is in force."""
+    seen: list[str] = []
+
+    async def _add(self, candidate: str, mid: str = "") -> None:
+        seen.append(candidate)
+
+    monkeypatch.setattr(rtc.PeerConnection, "add_remote_candidate", _add)
+    signal = _FakeSignaler()
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        signaling_send=signal,
+    )
+    t.mark_ice_primed()
+
+    await asyncio.wait_for(
+        t.on_rtc_ice(
+            from_instance="peer-early",
+            payload={"candidate": "candidate:early udp", "sdp_mid": "0"},
+        ),
+        timeout=1.0,
+    )
+    assert seen == []
+
+    await t.on_rtc_offer(
+        from_instance="peer-early",
+        payload={"sdp": _STUB_SDP, "sdp_type": "offer"},
+    )
+    await _settle_parked_candidates(t)
+
+    assert seen == ["candidate:early udp"]
+    assert t._peers["peer-early"]._dropped_candidates == 0
+    await t.close_all()
+
+
+async def test_candidate_after_the_description_is_applied_inline(monkeypatch):
+    """Nothing to wait for: the candidate is on the PeerConnection when
+    ``on_rtc_ice`` returns (backpressure and order as before)."""
+    seen: list[str] = []
+
+    async def _add(self, candidate: str, mid: str = "") -> None:
+        seen.append(candidate)
+
+    monkeypatch.setattr(rtc.PeerConnection, "add_remote_candidate", _add)
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        signaling_send=_FakeSignaler(),
+    )
+    t.mark_ice_primed()
+    await t.on_rtc_offer(
+        from_instance="peer-1",
+        payload={"sdp": _STUB_SDP, "sdp_type": "offer"},
+    )
+
+    await t.on_rtc_ice(
+        from_instance="peer-1",
+        payload={"candidate": "candidate:late udp", "sdp_mid": "0"},
+    )
+
+    assert seen == ["candidate:late udp"]
+    await t.close_all()
+
+
+async def test_close_all_ends_parked_candidates():
+    """A parked candidate does not outlive the transport."""
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_RecordingHttpsInbox(),
+        signaling_send=_FakeSignaler(),
+    )
+    await t.on_rtc_ice(
+        from_instance="peer-early",
+        payload={"candidate": "candidate:early udp", "sdp_mid": "0"},
+    )
+    parked = list(t._inbound_tasks)
+    assert len(parked) == 1 and not parked[0].done()
+
+    await t.close_all()
+
+    assert parked[0].done()
+    assert not t._inbound_tasks
 
 
 # ─── Retire rate floor ────────────────────────────────────────────────────
