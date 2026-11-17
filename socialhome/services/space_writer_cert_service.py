@@ -863,15 +863,19 @@ class SpaceWriterCertService:
             return None
         raw = item.get(WRITER_CERT_FIELD)
         try:
+            held = WriterCert.from_wire(raw)
             verify_writer_cert(
-                WriterCert.from_wire(raw),
+                held,
                 space_pubkey=bytes.fromhex(space.identity_public_key),
                 space_id=space.id,
                 epoch=epoch,
                 author_pk=author_pk,
                 required_scope=required_scope,
             )
-            return raw if isinstance(raw, dict) else None
+            # A follower cert past its lifetime is refused by every
+            # receiver: re-stamp it like an old-key one.
+            if follower_cert_fresh(held, now=int(time.time())):
+                return raw if isinstance(raw, dict) else None
         except ValueError:
             pass
         origin = str(item.get("origin_instance_id") or "")

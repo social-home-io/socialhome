@@ -24,6 +24,7 @@ from socialhome.domain.space import (
 from socialhome.domain.writer_cert import (
     FOLLOWER_CERT_SKEW_S,
     FOLLOWER_CERT_TTL_S,
+    WRITER_ACTION_PROFILE,
     WRITER_ACTION_REACT,
     WRITER_SCOPE_COMMENT,
     WRITER_SCOPE_FOLLOWER,
@@ -1267,3 +1268,34 @@ async def test_a_household_stores_its_cert_whatever_its_scope(scope):
     wire = _issued(scope=scope)
     assert await svc.accept("sp-1", wire) is True
     assert await svc.current_own_cert_wire("sp-1") == wire
+
+
+async def test_a_bundled_item_with_an_expired_follower_cert_is_re_stamped():
+    """S3 (#1375 review): a new-follower bundle took an item's own cert
+    while it verified — an expired follower cert verifies (the signature
+    is fine), so the receiver refused the bundled profile. A follower cert
+    past its lifetime is re-issued like one from an old authority key."""
+    space = _space(allow_subscribers=True, allow_subscriber_comment=True)
+    old = bind_writer_users(
+        sign_writer_cert(
+            space_seed=SEED,
+            space_id="sp-1",
+            epoch=2,
+            instance_pk=FOLLOWER_PK,
+            scope=WRITER_SCOPE_FOLLOWER_COMMENT,
+            issued_at=int(wcs_mod.time.time()) - FOLLOWER_CERT_TTL_S - 60,
+        ),
+        space_seed=SEED,
+        user_ids=["u@fol"],
+    )
+    svc, _ = _svc(space=space, remote_rows=[_remote("fol", "subscriber")])
+    item = _profile_item(old, author="u@fol")
+    item["author_pk"] = FOLLOWER_PK.hex()
+    item["origin_instance_id"] = "fol"
+    got = await svc.current_item_cert(
+        space, item, epoch=2, required_scope=WRITER_ACTION_PROFILE
+    )
+    assert got is not None and got != old.to_wire()
+    assert SpaceWriterCertService.check_item_cert(
+        space, got, epoch=2, author_pk=FOLLOWER_PK, required_scope=WRITER_ACTION_PROFILE
+    )
