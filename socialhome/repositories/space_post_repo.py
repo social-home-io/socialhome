@@ -352,7 +352,10 @@ class SqliteSpacePostRepo:
                 int(post.comment_count),
                 int(post.pinned),
                 int(post.deleted),
-                _iso_or_none(post.edited_at),
+                # The one stored shape (``stamp_to_db``): ``edit`` compares
+                # it as a string. An ISO ``…T…`` stamp here once sorted
+                # after every same-day edit and dropped them.
+                stamp_to_db(post.edited_at) if post.edited_at is not None else None,
                 int(post.no_link_preview),
                 int(post.moderated),
                 _encode_file_meta(post.file_meta),
@@ -592,7 +595,9 @@ class SqliteSpacePostRepo:
                 "UPDATE space_posts SET content=?, edited_at=?, "
                 "link_preview_json=CASE WHEN ? THEN NULL ELSE link_preview_json END "
                 "WHERE id=? AND space_id=? AND deleted=0 "
-                "AND (edited_at IS NULL OR edited_at < ?)",
+                # A row an older build stamped ``…T…`` (ISO) still on disk
+                # compares as the shape it stands for.
+                "AND (edited_at IS NULL OR replace(edited_at, 'T', ' ') < ?)",
                 (
                     new_content,
                     edited_at,
@@ -1143,7 +1148,8 @@ class SqliteSpacePostRepo:
                      SELECT 1 FROM space_posts
                       WHERE id = space_post_comments.post_id AND space_id=?
                  )
-                   AND (? IS NULL OR edited_at IS NULL OR edited_at < ?)
+                   AND (? IS NULL OR edited_at IS NULL
+                        OR replace(edited_at, 'T', ' ') < ?)
                 """,
                 (new_content, edited_at, comment_id, space_id, edited_at, edited_at),
             )

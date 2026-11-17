@@ -193,7 +193,11 @@ class TooManyReactionsError(CodedError, ValueError):
 def stamp_to_db(stamp: datetime) -> str:
     """A stamp in the naive-UTC shape of SQLite's ``datetime('now')``, with
     microseconds — so the ``edited_at`` column keeps one shape and compares
-    as a string against rows the local edit paths stamped."""
+    as a string against rows the local edit paths stamped. A naive stamp is
+    UTC (every stored one is): a row read back and saved again keeps its
+    time. EVERY writer of an ``edited_at`` column goes through here."""
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
     return (
         stamp.astimezone(UTC)
         .replace(tzinfo=None)

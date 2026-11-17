@@ -343,3 +343,41 @@ async def test_a_helpers_replay_of_an_unannounced_event_mints_no_feed_card(env):
         )
         is None
     )
+
+
+_HELD = {
+    "id": "p-kept",
+    "author": "u-a",
+    "type": "image",
+    "content": "v1",
+    "image_urls": [f"api/media/{PIC_SC}"],
+    "files": {PIC_SC: {"h": PIC_H}},
+    "files_suite": "sha256",
+}
+
+
+async def _edit(app, content: str, at: str) -> None:
+    await _deliver(
+        app,
+        FET.SPACE_POST_UPDATED,
+        {"id": "p-kept", "content": content, "edited_at": at},
+        sender=AUTHOR,
+    )
+
+
+async def _content(db) -> str:
+    row = await db.fetchone("SELECT content FROM space_posts WHERE id='p-kept'")
+    return row["content"]
+
+
+async def test_an_edit_after_a_replay_the_same_day_still_lands(env):
+    """A re-sent create keeps the held row's edit stamp — in the shape the
+    next edit is compared against: an edit later the same UTC day lands."""
+    app, db = env
+    await _deliver(app, FET.SPACE_POST_CREATED, _HELD, sender=AUTHOR)
+    await _edit(app, "v2", "2026-06-01T10:00:00+00:00")
+    await _deliver(
+        app, FET.SPACE_POST_CREATED, {**_HELD, "content": "v2"}, sender=AUTHOR
+    )
+    await _edit(app, "v3", "2026-06-01T15:00:00+00:00")
+    assert await _content(db) == "v3"
