@@ -29,6 +29,7 @@ from ..domain.calendar import (
     EventReminder,
     RsvpPastError,
     RSVPStatus,
+    calendar_event_to_wire_dict,
     calendar_record,
     clean_attendees,
     clean_location,
@@ -2613,41 +2614,12 @@ class SpaceCalendarService(
         per_peer = self._media_refs_per_peer(media_plan)
         extra: dict = {"per_peer": per_peer} if per_peer is not None else {}
         payload: dict = {
-            # The space this write belongs to, in the payload as well as
-            # the routing field. A mesh-relayed envelope (SPACE_ROUTED)
-            # carries no plaintext routing ``space_id`` — a relay must not
-            # learn which space is being served — so the payload's copy is
-            # the only thing the receiver's §24.11 space-writer gate can
-            # read there. Additive; older peers ignore it.
-            "space_id": space_id,
-            "event_id": event.id,
-            "calendar_id": event.calendar_id,
-            "summary": event.summary,
-            "description": event.description,
-            "start": event.start.isoformat(),
-            "end": event.end.isoformat(),
-            "all_day": event.all_day,
-            "attendees": list(event.attendees),
-            "created_by": event.created_by,
-            "rrule": event.rrule,
-            "cover_url": event.cover_url,
-            "location": event.location,
-            # IANA wall-clock anchor — additive on the wire. Old peers
-            # without this field ignore it on the inbound side.
-            "tz": event.tz,
-            # §23.15 opt-in feed mirror. The receiver's CalendarFeedBridge
-            # reads this to decide whether to mint a feed post. Absent on
-            # an older sender → the receiver defaults to True (the historic
-            # always-mirror behaviour) so events still surface there.
-            "announce_in_feed": event.announce_in_feed,
+            # The event itself in the one shape a resume replays too.
+            **calendar_event_to_wire_dict(event, space_id),
             # v_42: who made the write — receivers check it against the
             # space's ``calendar`` access level. Older peers ignore it.
             "actor_user_id": actor_user_id,
         }
-        # The per-occurrence cap (Phase C) — members enforce it on RSVPs.
-        # Additive: an older receiver ignores it, and a receiver keeps its
-        # held value when it is absent.
-        payload["capacity"] = event.capacity
         # A write released from the moderation queue names it (v_43).
         payload = with_release(payload)
         payload = await self._with_file_hashes(

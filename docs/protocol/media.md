@@ -291,7 +291,9 @@ sending household was sent it for. Both blob types share
   is unchanged, so there is no protocol version.
 
   The resume / resync replay enqueues the replayed rows' files for the
-  one household that asked, with these bounds:
+  one household that asked — the rows name the files' hashes like their
+  live events ([sync.md](./sync.md), "A replayed row is its live event"),
+  so the bytes land under the rows' content names — with these bounds:
   - at most 50 files and 32 MiB per (requester, space) per 30 min, ONE
     budget shared with `SPACE_MEDIA_WANTED` (`file_gate.SpaceFileBudget`);
     a file past the budget, or one that isn't here, is skipped;

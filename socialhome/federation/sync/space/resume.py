@@ -46,6 +46,18 @@ Resource types replayed today:
 The replay payload for every type matches what its corresponding
 ``federation_inbound_*`` handler reads, so the receiver applies a
 re-emitted event with no special-case logic and dedups by primary key.
+
+A receiver applies a create for a row it already holds as an upsert, so a
+replayed row carries everything the live event does: a post goes out in
+the live shape (:func:`~socialhome.domain.post.post_to_wire_dict` — every
+picture, the file attachment, the feed flag), a calendar event too
+(:func:`~socialhome.domain.calendar.calendar_event_to_wire_dict` — its
+time zone, location and whether it is announced in the feed: a receiver
+reads an absent flag as "announce"), and every row with files
+carries their hashes (v_85 ``files``, as the live senders attach them), so
+the receiver stores them under the content names every other path gives
+them. A mirror of a post's media in the system "Posts" album is never
+replayed (the repo leaves it out): each household rebuilds its own.
 """
 
 from __future__ import annotations
@@ -62,12 +74,12 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import aiofiles.os
 
+from ....domain.calendar import calendar_event_to_wire_dict
 from ....domain.federation import FederationEventType
 from ....domain.federation_capabilities import FederationCapability
-from ....domain.link_preview import link_preview_to_dict
 from ....domain.page import page_tombstone_to_wire_dict
 from ....domain.page_version import version_hash
-from ....domain.post import PostType, poll_to_wire_dict
+from ....domain.post import PostType, poll_to_wire_dict, post_to_wire_dict
 from ....domain.space_media_fields import item_media_urls
 from ....domain.space_media_ref import page_media_urls
 from ....domain.task import (
@@ -76,13 +88,13 @@ from ....domain.task import (
     task_to_wire_dict,
     task_tombstone_to_wire_dict,
 )
+from ....services.file_hashes_sender import FileHashesMixin
 from ....services.inbound_media_store import media_basename, media_file_path
 from ....services.page_conflict_service import side_to_wire
 from ....services.space_media_names import space_own_files
 from .file_gate import SpaceFileBudget
 
 if TYPE_CHECKING:
-    from ....domain.calendar import CalendarEvent
     from ....domain.federation import FederationEvent
     from ....domain.gallery import GalleryAlbum, GalleryItem
     from ....domain.page import Page
@@ -97,6 +109,7 @@ if TYPE_CHECKING:
     from ....repositories.space_repo import AbstractSpaceRepo
     from ....repositories.sticky_repo import AbstractStickyRepo
     from ....repositories.task_repo import AbstractSpaceTaskRepo
+    from ....services.media_file_hasher import MediaFileHasher
     from ...federation_service import FederationService
 
 
@@ -177,7 +190,7 @@ def _clamped_since(since: str) -> str:
     return floor.isoformat() if asked < floor else since
 
 
-class SpaceSyncResumeProvider:
+class SpaceSyncResumeProvider(FileHashesMixin):
     """Receiver- and provider-side helper for ``SPACE_SYNC_RESUME``.
 
     Construct once per app and register :meth:`handle_request` for
@@ -191,6 +204,7 @@ class SpaceSyncResumeProvider:
         "_budget",
         "_clock",
         "_federation",
+        "_file_hasher",
         "_gallery_repo",
         "_last_resume",
         "_media_dir",
@@ -225,8 +239,12 @@ class SpaceSyncResumeProvider:
         clock: Callable[[], float] = time.monotonic,
         media_refs: AbstractMediaReferenceRepo | None = None,
         budget: SpaceFileBudget | None = None,
+        file_hasher: MediaFileHasher | None = None,
     ) -> None:
         self._federation = federation_service
+        #: v_85 — hashes the replayed rows' files (``FileHashesMixin``).
+        #: ``None``: no ``files`` map (the receiver takes the legacy names).
+        self._file_hasher = file_hasher
         #: The replayed posts' reply polls. ``None``: posts only.
         self._space_poll_repo = space_poll_repo
         #: The (requester, space) file budget shared with SPACE_MEDIA_WANTED.
@@ -547,7 +565,7 @@ class SpaceSyncResumeProvider:
         sent = await self._send_each(
             posts,
             FederationEventType.SPACE_POST_CREATED,
-            _post_to_payload,
+            partial(post_to_wire_dict, space_id=space_id),
             space_id=space_id,
             to=to,
             own=own,
@@ -885,7 +903,7 @@ class SpaceSyncResumeProvider:
         return await self._send_each(
             events,
             FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
-            _calendar_to_payload,
+            partial(calendar_event_to_wire_dict, space_id=space_id),
             space_id=space_id,
             to=to,
             own=own,
@@ -1011,20 +1029,30 @@ class SpaceSyncResumeProvider:
         :meth:`_ship_media`. With *own* (a household that is not the roster
         authority) only the rows whose person (*owner_of*, default
         :func:`_owner_of`) is one of ours go out, with their files only —
-        other people's files come on view (``SPACE_MEDIA_WANTED``)."""
+        other people's files come on view (``SPACE_MEDIA_WANTED``).
+
+        A row with files (*media_of*) names their hashes (v_85 ``files``),
+        like its live event — only to a household that reads the map, as
+        ``broadcast_to_space_members`` sends it."""
         sent = 0
+        hashed = media_of is not None and await self._federation.space_member_supports(
+            to, min_version=FederationCapability.MIN_FOR_CONTENT_FILE_HASHES
+        )
         for row in rows:
             if own is not None and (owner_of or _owner_of)(row) not in own:
                 continue
-            if media_of is not None and media is not None:
+            payload = to_payload(row)
+            if media_of is not None:
                 urls = media_of(row)
-                if urls:
+                if urls and media is not None:
                     media.append((row.id, list(urls)))
+                if urls and hashed:
+                    payload = await self._with_file_hashes(payload, urls)
             try:
                 await self._federation.send_event(
                     to_instance_id=to,
                     event_type=event_type,
-                    payload=to_payload(row),
+                    payload=payload,
                     space_id=space_id,
                 )
                 sent += 1
@@ -1040,29 +1068,6 @@ class SpaceSyncResumeProvider:
 
 
 # ─── Payload shapers ─────────────────────────────────────────────────────
-
-
-def _post_to_payload(post: Post) -> dict:
-    payload: dict = {
-        "id": post.id,
-        "author": post.author,
-        "type": post.type.value,
-        "content": post.content,
-        "media_url": post.media_url,
-        "occurred_at": _iso(post.created_at),
-    }
-    # Location posts ride on the existing SPACE_POST_CREATED event —
-    # no new event type. Coords are already 4dp-truncated by
-    # feed_service / space_service before the post is persisted, so
-    # the payload carries the canonical wire form.
-    if post.location is not None:
-        loc: dict = {"lat": post.location.lat, "lon": post.location.lon}
-        if post.location.label is not None:
-            loc["label"] = post.location.label
-        payload["location"] = loc
-    if post.link_preview is not None:
-        payload["link_preview"] = link_preview_to_dict(post.link_preview)
-    return payload
 
 
 def _comment_to_payload(post_id: str, comment: Comment) -> dict:
@@ -1100,22 +1105,6 @@ def _sticky_to_payload(sticky: Sticky) -> dict:
         "position_y": sticky.position_y,
         "created_at": sticky.created_at,
         "updated_at": sticky.updated_at,
-    }
-
-
-def _calendar_to_payload(event: CalendarEvent) -> dict:
-    return {
-        "id": event.id,
-        "calendar_id": event.calendar_id,
-        "summary": event.summary,
-        "description": event.description,
-        "start": _iso(event.start),
-        "end": _iso(event.end),
-        "all_day": event.all_day,
-        "attendees": list(event.attendees),
-        "created_by": event.created_by,
-        "rrule": event.rrule,
-        "cover_url": event.cover_url,
     }
 
 

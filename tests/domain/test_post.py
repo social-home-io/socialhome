@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, time
 
 import pytest
 
+from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import (
     MAX_POLL_CLOSES_AT,
     MAX_POLL_OPTIONS,
@@ -17,6 +18,8 @@ from socialhome.domain.post import (
     BazaarStatus,
     Comment,
     CommentType,
+    FileMeta,
+    LocationData,
     Poll,
     PollData,
     PollOption,
@@ -29,6 +32,7 @@ from socialhome.domain.post import (
     poll_option_id,
     poll_options_from_wire,
     poll_to_wire_dict,
+    post_to_wire_dict,
 )
 
 
@@ -292,3 +296,66 @@ def test_an_older_polls_ids_are_taken_as_stored():
 )
 def test_poll_closes_at_from_wire(raw, want):
     assert poll_closes_at_from_wire(raw) == want
+
+
+# ── post_to_wire_dict (the one SPACE_POST_CREATED shape) ──────────────────
+
+
+def test_post_to_wire_dict_carries_every_file_and_the_feed_flag():
+    """The live fan-out and a ``SPACE_SYNC_RESUME`` replay send this one
+    shape: a receiver upserts what it gets, so a field left out here is a
+    field wiped there (the replay once dropped ``image_urls``)."""
+    post = Post(
+        id="p-1",
+        author="alice",
+        type=PostType.IMAGE,
+        created_at=datetime(2026, 4, 1, tzinfo=UTC),
+        content="two pictures",
+        media_url="api/media/a.webp",
+        image_urls=("api/media/a.webp", "api/media/b.webp"),
+        hidden_from_feed=True,
+    )
+    assert post_to_wire_dict(post, "sp-1") == {
+        "id": "p-1",
+        "space_id": "sp-1",
+        "author": "alice",
+        "type": "image",
+        "content": "two pictures",
+        "media_url": "api/media/a.webp",
+        "image_urls": ["api/media/a.webp", "api/media/b.webp"],
+        "occurred_at": "2026-04-01T00:00:00+00:00",
+        "hidden_from_feed": True,
+    }
+
+
+def test_post_to_wire_dict_adds_the_optional_blocks_only_when_set():
+    post = Post(
+        id="p-2",
+        author="alice",
+        type=PostType.FILE,
+        created_at=datetime(2026, 4, 1, tzinfo=UTC),
+        file_meta=FileMeta(
+            url="api/media/doc.pdf",
+            mime_type="application/pdf",
+            original_name="doc.pdf",
+            size_bytes=7,
+        ),
+        location=LocationData(lat=52.52, lon=4.06),
+        link_preview=LinkPreview(url="https://example.com/", title="T"),
+        linked_event_id="ev-1",
+    )
+    wire = post_to_wire_dict(post, "sp-1")
+    assert wire["file_meta"] == {
+        "url": "api/media/doc.pdf",
+        "mime_type": "application/pdf",
+        "original_name": "doc.pdf",
+        "size_bytes": 7,
+    }
+    assert wire["location"] == {"lat": 52.52, "lon": 4.06, "label": None}
+    assert wire["link_preview"]["url"] == "https://example.com/"
+    assert wire["linked_event_id"] == "ev-1"
+    plain = post_to_wire_dict(
+        Post(id="p-3", author="alice", type=PostType.TEXT, created_at=None), "sp-1"
+    )
+    assert plain["occurred_at"] is None
+    assert not {"file_meta", "location", "link_preview", "linked_event_id"} & set(plain)

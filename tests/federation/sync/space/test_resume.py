@@ -4,19 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
-from socialhome.domain.calendar import CalendarEvent
+from socialhome.domain.calendar import CalendarEvent, calendar_event_to_wire_dict
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.gallery import GalleryAlbum, GalleryItem
 from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.page import Page, PageTombstone
 from socialhome.domain.page_version import DraftBase
-from socialhome.domain.post import Comment, CommentType, LocationData, Post, PostType
+from socialhome.domain.post import (
+    Comment,
+    CommentType,
+    FileMeta,
+    LocationData,
+    Post,
+    PostType,
+    post_to_wire_dict,
+)
 from socialhome.domain.sticky import Sticky
 from socialhome.domain.task import (
     Task,
@@ -33,8 +42,8 @@ from socialhome.federation.sync.space.file_gate import SpaceFileBudget
 from socialhome.federation.sync.space.resume import (
     MAX_PER_RESOURCE,
     SpaceSyncResumeProvider,
-    _post_to_payload,
 )
+from socialhome.services.media_file_hasher import MediaFileHasher
 
 
 @pytest.fixture(autouse=True)
@@ -818,7 +827,7 @@ async def test_handle_request_replays_calendar_events(provider_factory):
         s["type"] == FederationEventType.SPACE_CALENDAR_EVENT_CREATED for s in fed.sent
     )
     payload = fed.sent[0]["payload"]
-    assert {"id", "calendar_id", "summary", "start", "end"} <= set(payload)
+    assert {"event_id", "calendar_id", "summary", "start", "end"} <= set(payload)
 
 
 async def test_handle_request_replays_gallery_items(provider_factory):
@@ -1043,7 +1052,7 @@ def test_post_to_payload_omits_location_when_unset():
         created_at=datetime(2026, 4, 1, tzinfo=UTC),
         content="hi",
     )
-    payload = _post_to_payload(post)
+    payload = post_to_wire_dict(post, "sp-1")
     assert "location" not in payload
 
 
@@ -1058,13 +1067,14 @@ def test_post_to_payload_includes_location_with_label():
         content="Sunset",
         location=LocationData(lat=52.52, lon=4.06, label="Marina"),
     )
-    payload = _post_to_payload(post)
+    payload = post_to_wire_dict(post, "sp-1")
     assert payload["type"] == "location"
     assert payload["location"] == {"lat": 52.52, "lon": 4.06, "label": "Marina"}
 
 
-def test_post_to_payload_omits_label_when_none():
-    """A LocationData with label=None ⇒ no `label` key on the wire."""
+def test_post_to_payload_carries_a_null_label():
+    """A LocationData with label=None goes out as the live fan-out sends
+    it: ``label: null`` (the receiver reads it with ``.get``)."""
     post = Post(
         id="p-loc-2",
         author="alice",
@@ -1072,8 +1082,8 @@ def test_post_to_payload_omits_label_when_none():
         created_at=datetime(2026, 4, 1, tzinfo=UTC),
         location=LocationData(lat=10.0, lon=20.0),
     )
-    payload = _post_to_payload(post)
-    assert payload["location"] == {"lat": 10.0, "lon": 20.0}
+    payload = post_to_wire_dict(post, "sp-1")
+    assert payload["location"] == {"lat": 10.0, "lon": 20.0, "label": None}
 
 
 async def test_resume_replays_every_album_state_the_peer_may_have_missed(
@@ -1164,9 +1174,9 @@ def test_post_to_payload_carries_link_preview_only_when_set():
         "created_at": datetime(2026, 4, 1, tzinfo=UTC),
         "content": "https://example.com/",
     }
-    assert "link_preview" not in _post_to_payload(Post(**base))
+    assert "link_preview" not in post_to_wire_dict(Post(**base), "sp-1")
     card = LinkPreview(url="https://example.com/", title="T")
-    payload = _post_to_payload(Post(**base, link_preview=card))
+    payload = post_to_wire_dict(Post(**base, link_preview=card), "sp-1")
     assert payload["link_preview"]["title"] == "T"
     assert payload["link_preview"]["url"] == "https://example.com/"
 
@@ -1660,3 +1670,150 @@ async def test_without_a_poll_repo_only_the_posts_replay(provider_factory):
         )
         == 1
     )
+
+
+# ── A replay is the live payload (pictures, files, hashes) ───────────────
+
+
+async def test_a_replayed_post_is_the_live_payload(provider_factory):
+    """A receiver upserts a ``SPACE_POST_CREATED`` for a post it holds, so a
+    replay that left out ``image_urls`` wiped the pictures of every post it
+    touched (the helper resume of the GFS demo chain). The replay sends
+    what the live fan-out sends: every picture, the file attachment, the
+    feed flag."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    at = base + timedelta(minutes=1)
+    pictures = replace(
+        _post(0, at),
+        type=PostType.IMAGE,
+        image_urls=("api/media/a.webp", "api/media/b.webp"),
+        hidden_from_feed=True,
+    )
+    attachment = replace(
+        _post(1, at),
+        type=PostType.FILE,
+        media_url="api/media/doc.pdf",
+        file_meta=FileMeta(
+            url="api/media/doc.pdf",
+            mime_type="application/pdf",
+            original_name="doc.pdf",
+            size_bytes=7,
+        ),
+    )
+    provider, fed, _ = provider_factory(
+        posts=[pictures, attachment], members=["peer-a"]
+    )
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    assert [s["payload"] for s in fed.sent] == [
+        post_to_wire_dict(pictures, "sp-1"),
+        post_to_wire_dict(attachment, "sp-1"),
+    ]
+    assert fed.sent[0]["payload"]["image_urls"] == [
+        "api/media/a.webp",
+        "api/media/b.webp",
+    ]
+    assert fed.sent[0]["payload"]["hidden_from_feed"] is True
+    assert fed.sent[1]["payload"]["file_meta"]["original_name"] == "doc.pdf"
+
+
+def _hashing_provider(tmp_path, fed, **repos):
+    return SpaceSyncResumeProvider(
+        federation_service=fed,
+        space_repo=_FakeSpaceRepo(["peer-a"]),
+        media_dir=tmp_path,
+        file_hasher=MediaFileHasher(tmp_path),
+        **repos,
+    )
+
+
+async def test_replayed_rows_carry_their_files_hashes(tmp_path):
+    """v_85 — a replayed row names its files' hashes like the live event,
+    so the receiver stores them under the one content name every other path
+    gives them (a helper-healed member ends up with the host-healed
+    names). A file not held here is left out (fail-soft)."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    at = base + timedelta(minutes=1)
+    for name in ("a.webp", "c.webp", "cover.webp", "orig-0.jpg", "thumb-0.jpg"):
+        (tmp_path / name).write_bytes(name.encode())
+
+    def h(name: str) -> dict:
+        return {"h": hashlib.sha256(name.encode()).hexdigest()}
+
+    fed = _FakeFederation()
+    fed.versions["peer-a"] = 85
+    comment = replace(_comment(0, "p-0", at), media_url="api/media/c.webp")
+    provider = _hashing_provider(
+        tmp_path,
+        fed,
+        space_post_repo=_FakePostRepo(
+            posts=[_image_post(0, at, "a.webp", "gone.webp")],
+            comments=[("p-0", comment)],
+        ),
+        space_calendar_repo=_FakeListSinceRepo(
+            [replace(_cal_event(0, at), cover_url="api/media/cover.webp")]
+        ),
+        gallery_repo=_FakeGalleryRepo([_gallery_item(0, at.isoformat())], {}),
+    )
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    by_type = {s["type"]: s["payload"] for s in fed.sent}
+    FET = FederationEventType
+    assert by_type[FET.SPACE_POST_CREATED]["files"] == {"a.webp": h("a.webp")}
+    assert by_type[FET.SPACE_POST_CREATED]["files_suite"] == "sha256"
+    assert by_type[FET.SPACE_COMMENT_CREATED]["files"] == {"c.webp": h("c.webp")}
+    assert by_type[FET.SPACE_CALENDAR_EVENT_CREATED]["files"] == {
+        "cover.webp": h("cover.webp")
+    }
+    assert by_type[FET.SPACE_GALLERY_ITEM_CREATED]["files"] == {
+        "orig-0.jpg": h("orig-0.jpg"),
+        "thumb-0.jpg": h("thumb-0.jpg"),
+    }
+
+
+async def test_a_household_below_v85_is_replayed_no_hash_map(tmp_path):
+    """Like the live fan-out: the map goes only to a household that reads
+    it."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    at = base + timedelta(minutes=1)
+    (tmp_path / "a.webp").write_bytes(b"a")
+    fed = _FakeFederation()
+    fed.versions["peer-a"] = 84
+    provider = _hashing_provider(
+        tmp_path,
+        fed,
+        space_post_repo=_FakePostRepo(posts=[_image_post(0, at, "a.webp")]),
+    )
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    assert fed.sent[0]["payload"]["image_urls"] == ["api/media/a.webp"]
+    assert "files" not in fed.sent[0]["payload"]
+
+
+async def test_a_replayed_calendar_event_is_the_live_payload(provider_factory):
+    """A receiver reads an absent ``announce_in_feed`` as "announce" and an
+    absent ``tz`` as UTC, and upserts an event it holds: a replay without
+    them minted a feed card for an event its creator kept out of the feed
+    (the helper resume of the GFS demo chain) and moved a held event's wall
+    clock. The replay sends what the live fan-out sends."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    quiet = replace(
+        _cal_event(0, base + timedelta(minutes=1)),
+        tz="Europe/Berlin",
+        location="Kitchen",
+        announce_in_feed=False,
+        capacity=4,
+    )
+    provider, fed, _ = provider_factory(cal_events=[quiet], members=["peer-a"])
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    payload = fed.sent[0]["payload"]
+    assert payload == calendar_event_to_wire_dict(quiet, "sp-1")
+    assert payload["announce_in_feed"] is False
+    assert payload["tz"] == "Europe/Berlin"
+    assert payload["location"] == "Kitchen"
+    assert payload["capacity"] == 4

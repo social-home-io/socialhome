@@ -115,6 +115,23 @@ which replaced the never-released v_87 `refill` field of this request.
 Every `since` comparison runs through `datetime()` on both sides, so a
 naive stored stamp and a tz-aware `since` compare as times.
 
+**A replayed row is its live event.** A receiver applies a create for a
+row it already holds as an upsert of that row, and reads an absent field
+by its default — so a replay carries everything the live fan-out does,
+built by the same function: a post is `post_to_wire_dict` (every picture
+in `image_urls`, the file attachment, `hidden_from_feed`), a calendar
+event `calendar_event_to_wire_dict` (`tz`, `location`, `capacity`,
+`announce_in_feed` — absent reads as "announce"). Every row with files
+also names their hashes (the v_85 `files` map, to a household at v_85 or
+later, as `broadcast_to_space_members` sends it), so the receiver stores
+them under the content names every other path gives them and the
+replaying household's `SPACE_MEDIA_BLOB`s fill them. A member healed by a
+helper's replay therefore holds the same rows, pictures and names as one
+healed by the host. (Before this rule the replay had its own, shorter
+payloads: a post it touched lost its `image_urls` on the receiver, whose
+bytes were then refused as "not a file of the row as held here", and an
+unannounced event got a feed card there.)
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -142,7 +159,12 @@ closure heal on the host's stream). Today's cut replays:
 - `SPACE_CALENDAR_EVENT_CREATED` — calendar events
   (`space_calendar_repo.list_events_since`, RRULEs included)
 - `SPACE_GALLERY_ITEM_CREATED` — gallery items, joined via
-  `gallery_items.album_id` → `gallery_albums.space_id`. The albums go
+  `gallery_items.album_id` → `gallery_albums.space_id` — never a mirror
+  of a post's media (`source_post_id`, the system "Posts" album): like
+  the live push and the §25.6 `gallery` resource, the replay leaves them
+  out, because every household rebuilds its own mirror from the post in
+  its OWN system album (a replayed one named an album the receiver does
+  not hold and was refused there). The albums go
   out first (v_33; never the system "Posts" album): the album deletes
   recorded since `since` as `SPACE_GALLERY_ALBUM_DELETED`, every album of
   the space as `SPACE_GALLERY_ALBUM_CREATED` (a no-op for one the receiver

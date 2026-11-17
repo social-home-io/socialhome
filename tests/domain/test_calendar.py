@@ -18,6 +18,7 @@ from socialhome.domain.calendar import (
     DaySpan,
     RSVPStatus,
     all_day_covers,
+    calendar_event_to_wire_dict,
     calendar_record,
     clean_attendees,
     clean_location,
@@ -345,3 +346,38 @@ def test_calendar_record_is_every_field_as_it_travels():
     assert record["start"] == "2027-04-01T10:00:00+00:00"
     assert record["attendees"] == ["a", "b"]
     assert {"rrule", "location", "cover_url", "tz", "capacity"} <= set(record)
+
+
+def test_calendar_event_to_wire_dict_is_the_whole_event():
+    """The one ``SPACE_CALENDAR_EVENT_CREATED`` / ``_UPDATED`` shape — the
+    live fan-out and a ``SPACE_SYNC_RESUME`` replay. A receiver defaults an
+    absent ``announce_in_feed`` to True and an absent ``tz`` to UTC, so
+    every field goes out, set or not."""
+    event = CalendarEvent(
+        id="ev-1",
+        calendar_id="sp-1",
+        summary="Dinner",
+        start=datetime(2026, 4, 1, 18, tzinfo=UTC),
+        end=datetime(2026, 4, 1, 20, tzinfo=UTC),
+        created_by="alice",
+        attendees=("bob",),
+        tz="Europe/Berlin",
+    )
+    assert calendar_event_to_wire_dict(event, "sp-1") == {
+        "space_id": "sp-1",
+        "event_id": "ev-1",
+        "calendar_id": "sp-1",
+        "summary": "Dinner",
+        "description": None,
+        "start": "2026-04-01T18:00:00+00:00",
+        "end": "2026-04-01T20:00:00+00:00",
+        "all_day": False,
+        "attendees": ["bob"],
+        "created_by": "alice",
+        "rrule": None,
+        "cover_url": None,
+        "location": None,
+        "tz": "Europe/Berlin",
+        "announce_in_feed": False,
+        "capacity": None,
+    }

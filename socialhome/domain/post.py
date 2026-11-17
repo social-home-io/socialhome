@@ -17,7 +17,7 @@ from datetime import UTC, date, datetime, time
 from enum import StrEnum
 from typing import Any
 
-from .link_preview import LinkPreview
+from .link_preview import LinkPreview, link_preview_to_dict
 
 # ─── Core enums ───────────────────────────────────────────────────────────
 
@@ -771,3 +771,51 @@ class Comment:
     def soft_delete(self) -> Comment:
         """Clear content but keep the node in the tree (children remain)."""
         return copy.replace(self, content=None, media_url=None, deleted=True)
+
+
+def post_to_wire_dict(post: Post, space_id: str) -> dict[str, Any]:
+    """The ``SPACE_POST_CREATED`` payload of a space post — what
+    ``FederationInboundService._post_from_payload`` reads.
+
+    ONE shape for every sender: the live fan-out (``SpacePostOutbound``,
+    which adds who made the write, the file hashes and the relay hints) and
+    a ``SPACE_SYNC_RESUME`` replay. A receiver applies a create for a post
+    it already holds as an upsert of that row, so a field one sender left
+    out would be a field wiped there — a replay without ``image_urls`` took
+    the pictures off every post it touched."""
+    payload: dict[str, Any] = {
+        "id": post.id,
+        "space_id": space_id,
+        "author": post.author,
+        "type": post.type.value,
+        "content": post.content,
+        "media_url": post.media_url,
+        "image_urls": list(post.image_urls),
+        "occurred_at": post.created_at.isoformat() if post.created_at else None,
+        # Mirror feed visibility on member households: a Bazaar listing's
+        # anchor post is hidden from the feed unless the seller announced
+        # it. Omitted-on-older-sender → receiver defaults to visible.
+        "hidden_from_feed": post.hidden_from_feed,
+    }
+    if post.location is not None:
+        # Coords are already 4dp-truncated before the post is persisted.
+        payload["location"] = {
+            "lat": post.location.lat,
+            "lon": post.location.lon,
+            "label": post.location.label,
+        }
+    # The author-built link card rides inside the encrypted payload like
+    # the text; receivers validate it and never fetch the URL. Older
+    # receivers ignore the key and show the post without a card.
+    if post.link_preview is not None:
+        payload["link_preview"] = link_preview_to_dict(post.link_preview)
+    if post.linked_event_id is not None:
+        payload["linked_event_id"] = post.linked_event_id
+    if post.file_meta is not None:
+        payload["file_meta"] = {
+            "url": post.file_meta.url,
+            "mime_type": post.file_meta.mime_type,
+            "original_name": post.file_meta.original_name,
+            "size_bytes": post.file_meta.size_bytes,
+        }
+    return payload
