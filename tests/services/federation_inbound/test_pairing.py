@@ -46,10 +46,22 @@ class _FakeRegistry:
         self.registered.append((event_type, handler))
 
 
+class _StagedHalves:
+    """Stands in for ``PendingPairings``: records whose half kept beside a
+    space seat an abort cancelled."""
+
+    def __init__(self) -> None:
+        self.cancelled: list[str] = []
+
+    async def cancel(self, instance_id: str):
+        self.cancelled.append(instance_id)
+
+
 class _FakeFederationService:
     def __init__(self) -> None:
         self._event_registry = _FakeRegistry()
         self.mesh_claims: list[FederationEvent] = []
+        self.pending_pairings = _StagedHalves()
 
     async def record_mesh_member_claim(self, event, *, notify=True):
         self.mesh_claims.append(event)
@@ -415,6 +427,22 @@ async def test_abort_keeps_confirmed_instance(repo, handlers):
         )
     )
     assert "peer-a" in repo.instances
+
+
+async def test_abort_cancels_the_half_kept_beside_the_senders_space_seat(
+    repo, handlers
+):
+    """The sender shares a space with us (its row is a confirmed seat) and
+    cancelled the pairing code: our half waits beside the seat and goes —
+    the seat, which the row check below reads as "confirmed", stays."""
+    seat = replace(
+        _sample_instance("peer-a", PairingStatus.CONFIRMED),
+        source=InstanceSource.SPACE_SESSION,
+    )
+    repo.instances["peer-a"] = seat
+    await handlers._on_abort(_event(FederationEventType.PAIRING_ABORT, {}))
+    assert handlers._federation.pending_pairings.cancelled == ["peer-a"]
+    assert repo.instances["peer-a"] is seat
 
 
 async def test_unpair_deletes_instance_and_publishes(bus, repo, handlers):
