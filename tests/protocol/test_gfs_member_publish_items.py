@@ -120,6 +120,10 @@ async def env(tmp_dir):
             join_mode=JoinMode.OPEN,
         )
     )
+    # The receiver is a GFS subscriber: its row is a mirror stub seated off
+    # a GFS listing (provenance recorded), so it knows no follower switch and
+    # decides a follower's item by the cert alone.
+    await spaces.set_mirror_provenance(SPACE, gfs_id="gfs-1", rotation_seq=0)
     await crypto.initialise_for_space(SPACE)
     inbound = SpacePublicInbound(
         bus=EventBus(), space_repo=spaces, space_crypto=crypto, space_post_repo=posts
@@ -330,6 +334,36 @@ async def test_the_authorization_matrix(env, item_type, scope, signer, lands):
         env, item_type, _build(env, item_type, signer), await _cert(env, signer, scope)
     )
     assert await _landed(env, item_type) is lands
+
+
+@pytest.mark.parametrize(
+    ("item_type", "scope"),
+    [("comment", "follower_comment"), ("reaction_add", "follower_react")],
+)
+async def test_a_seated_follower_household_follows_its_copy_of_the_switch(
+    env, item_type, scope
+):
+    """N4 (#1375 review): a follower household SEATED in the space (its row
+    is no GFS mirror stub) holds the owner's config, so a follower's item
+    relayed over the GFS is refused there while the switch is off and lands
+    once it is on — the cert alone does not decide."""
+    await env["db"].enqueue("UPDATE spaces SET mirror_gfs_id=NULL WHERE id=?", (SPACE,))
+    cert = await _cert(env, EVE, scope)
+    await _send(env, item_type, _build(env, item_type, EVE), cert)
+    assert await _landed(env, item_type) is False
+    space = await env["spaces"].get(SPACE)
+    await env["spaces"].save(
+        replace(
+            space,
+            features=replace(
+                space.features,
+                allow_subscriber_comment=True,
+                allow_subscriber_react=True,
+            ),
+        )
+    )
+    await _send(env, item_type, _build(env, item_type, EVE), cert)
+    assert await _landed(env, item_type) is True
 
 
 async def test_reactions_need_no_write_cert_where_followers_may_react(env):
