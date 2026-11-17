@@ -603,7 +603,7 @@ async def test_no_seed_or_no_readability_announces_nothing(world):
     assert await svc.announce_epoch(SPACE_ID) == 0
 
 
-async def test_announce_held_epochs_covers_seed_held_spaces_on_one_server(world):
+async def test_announce_held_epochs_covers_owned_spaces_on_one_server(world):
     owner_svc = _owner_svc(world)
     world["crypto"].epoch = 9
     assert await owner_svc.announce_held_epochs("conn-1") == 1
@@ -798,7 +798,7 @@ async def test_the_gfs_sees_a_delegated_admin_as_any_writer(world):
 
 
 @pytest.mark.security
-async def test_a_plain_writer_gives_the_gfs_the_same_view(world, tmp_dir):
+async def test_a_plain_writer_gives_the_gfs_the_same_view(world):
     """The reference the test above is held to: the very same trace."""
     plain = await _gfs_view(world, delegated_admin=False)
     assert plain["seat_on_join"] == 1

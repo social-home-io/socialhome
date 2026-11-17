@@ -1673,6 +1673,49 @@ async def test_a_delegated_admin_still_relays_a_removal(env):
     assert inner[AUTHORITY_KIND_FIELD] == AUTHORITY_KIND_REMOVAL
 
 
+@pytest.mark.security
+@pytest.mark.parametrize("origin", ["m.home", _OWNER_ELSEWHERE])
+async def test_a_delegated_admin_answers_no_removal_it_only_received(env, origin):
+    """A delete that reached it from another household — over federation,
+    by sync or through its fan-out seat on the GFS — gets no authority-signed
+    answer. Otherwise a GFS could hand one household's seat a delete and
+    watch for the removal notice only a seed holder sends."""
+    await env["make_space"](
+        "sp-pub", SpaceType.GLOBAL, with_seed=True, owner=_OWNER_ELSEWHERE
+    )
+    await env["bus"].publish(
+        PostDeleted(
+            post_id="post-9",
+            space_id="sp-pub",
+            origin_instance_id=origin,
+            author_user_id="author-user",
+        )
+    )
+    await env["bus"].publish(
+        CommentDeleted(
+            post_id="post-9",
+            comment_id="c-9",
+            space_id="sp-pub",
+            origin_instance_id=origin,
+            author_user_id="author-user",
+        )
+    )
+    assert env["gfs"].calls == []
+
+
+async def test_the_owner_without_an_identity_still_warns(env, caplog):
+    """The owner gate must not swallow the wiring warning."""
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
+    env["sub"].attach_identity(
+        own_instance_id="", own_instance_public_key=b"", own_identity_seed=b""
+    )
+    await env["bus"].publish(
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
+    )
+    assert env["gfs"].calls == []
+    assert "identity not attached" in caplog.text
+
+
 async def test_a_delegated_admin_still_relays_a_post_it_released(env):
     """A remote member's post released from the queue here reaches followers
     on no other path (its author holds only a ``comment`` cert)."""

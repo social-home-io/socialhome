@@ -1,11 +1,11 @@
-"""When a seed holder's relay copy of a member's public post is redundant.
+"""When the owner's relay copy of a member's public post is redundant.
 
 A member household publishes its own post over the GFS (``space_item``,
-v_49; anonymously to every GFS the owner listed, v_57 / v_90). Every seed holder of the
-space also relays the same post as ``space_post_public``
+v_49; anonymously to every GFS the owner listed, v_57 / v_90). The space's
+owner also relays the same post as ``space_post_public``
 (:meth:`SpacePublicOutbound._relay_remote_authored`), because a follower on
 an older build reads only that copy. That is one extra fan-out of every
-post per seed holder.
+post. (A delegated admin relays no posts, so it never asks here.)
 
 On a given GFS the copy can be skipped only when all of these hold
 (owner decision 2026-10-23, option A of finding #3):

@@ -1,7 +1,7 @@
-"""Seed-holder producer for the Phase-5b subscriber content-key handoff.
+"""The owner's producer for the Phase-5b subscriber content-key handoff.
 
-When a household subscribes to a PUBLIC/GLOBAL space at the GFS and a
-seed-holder (the owner or a delegated admin) is online, the GFS notifies
+When a household subscribes to a PUBLIC/GLOBAL space at the GFS and the
+space's owner is online, the GFS notifies
 the owner with a ``new_subscriber`` frame carrying the subscriber's
 published identity + key-wrap material. This service answers it: it seals
 the per-space content key to the subscriber's static X25519 key-wrap pubkey
@@ -15,8 +15,10 @@ never sees the content key.
 
 Pipeline (fail-closed at every step):
 
-1. **Gate on seed + tier + readability.** Act only if this household holds the
-   space seed (``get_space_seed`` non-None → owner or delegated admin), the
+1. **Gate on owner + seed + tier + readability.** Act only if this
+   household OWNS the space and holds its seed (a delegated admin holds the
+   seed too, but never answers: an answer to a frame a curious GFS pushed to
+   its socket would name it as a seed holder), the
    space is PUBLIC/GLOBAL, and its ``features.allow_subscribers`` is ON. A
    non-seed-holder can't authority-sign; a private/household space is never
    GFS-discoverable, so its key must never leave via the GFS; and a
@@ -72,12 +74,12 @@ and a follower that
 churns its seat (unsubscribe → subscribe) is bundled at most once an hour
 (:data:`BUNDLE_PER_FOLLOWER_EVERY_S`).
 
-Phase 5b-c adds the owner-offline RECONCILE (:meth:`reconcile`): on each GFS-WS
-(re)connect, a seed-holder pulls the GFS subscriber list for every local
-PUBLIC/GLOBAL space it holds the seed of + has published to that GFS, and runs
+Phase 5b-c adds the RECONCILE (:meth:`reconcile`): on each GFS-WS
+(re)connect, the owner pulls the GFS subscriber list for every
+PUBLIC/GLOBAL space it owns + has published to that GFS, and runs
 the SAME verified-seal+relay for each subscriber. This catches handoffs missed
-while no seed-holder was online (e.g. the owner was offline at subscribe time
-and only a delegated admin is up now) and is idempotent — the subscriber's
+while the owner was offline (owner only: the query rides the identified
+session) and is idempotent — the subscriber's
 key import is per-epoch idempotent, so re-sealing is harmless.
 """
 
@@ -318,7 +320,6 @@ class SpaceSubscriberKeyOutbound:
                 space_id,
             )
             return
-        # Only a seed-holder (owner or delegated admin) can authority-sign.
         seed = await self._spaces.get_space_seed(space_id)
         if seed is None:
             return
@@ -326,6 +327,17 @@ class SpaceSubscriberKeyOutbound:
             log.warning(
                 "space_subscriber_key.outbound: identity not attached — "
                 "dropping handoff for space %s",
+                space_id,
+            )
+            return
+        # Only the OWNER answers. An honest GFS notifies nobody else; a
+        # curious one could push this frame, with a key it minted, to any
+        # household's socket — and an answer would tell it that household
+        # holds the seed (a delegated admin).
+        if space.owner_instance_id != self._own_instance_id:
+            log.warning(
+                "space_subscriber_key.outbound: new_subscriber for space %s, "
+                "which this household does not own — ignored",
                 space_id,
             )
             return
@@ -698,8 +710,8 @@ class SpaceSubscriberKeyOutbound:
         pull the GFS subscriber list under a space-authority-signed query and
         re-seal the content key to each subscriber via :meth:`_seal_and_relay`.
         This delivers the key to subscribers whose owner was offline at
-        subscribe time (any delegated admin can do it) and catches notifies
-        missed while no seed-holder was online. Idempotent — the subscriber's
+        subscribe time and catches notifies missed meanwhile (spaces this
+        household owns only). Idempotent — the subscriber's
         import is per-epoch idempotent, so re-sealing is harmless.
 
         Fail-soft at every level: a missing reconcile context, an unknown /

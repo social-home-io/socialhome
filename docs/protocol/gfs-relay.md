@@ -1811,17 +1811,25 @@ household migration 0145.
 
 - **That a delegated admin exists — not which household.** The seed share
   itself is a sealed single-recipient frame (`SPACE_ADMIN_KEY_SHARE`, v_94),
-  and a household that holds a space's seed without owning the space sends
-  the GFS what any writer household sends: anonymous items, the same
-  fan-out seat, nothing on a reconnect
+  and in a publicly readable space a household that holds the seed without
+  owning the space sends the GFS what any writer household sends —
+  anonymous items, the same fan-out seat, nothing on a reconnect beyond the
+  seat re-take every writer sends — and answers nothing the GFS hands it
+  differently (a `new_subscriber` frame, a delete delivered to its seat)
   ([discovery.md](./discovery.md#a-delegated-admin-is-a-writer-to-the-gfs)).
-  What only the seed can sign still goes out when that household itself
-  acts for the space — the notice of a rotation it runs, a removal or a
-  released post it relays — anonymously and in the owner's wire shape. Seen
+  What only the seed can sign still goes out for something done on that
+  household itself — the notice of a rotation it runs, a removal or a
+  released post made there — anonymously and in the owner's wire shape. Seen
   while the owner's socket is down, such a request tells the GFS that
   someone else holds the seed. It names nobody; linking it to a household
   takes the sender's address (the IP limit below). The owner household is
   known to the GFS by design: it signs the listing.
+- **A delegated admin's seat on a private space's channel (open
+  follow-up).** On an opaque channel (`private_gfs`) a delegated admin
+  issues no grant to itself, so after a rotation it runs itself its seat is
+  the one not renewed for the new epoch until the owner's next grant. The
+  GFS knows neither the space nor its owner there, but can tell that seat
+  apart. To be fixed, not accepted.
 - **An instance-addressed frame shows its recipient.** A seat without a
   mailbox (an older sealed-redeem seat) is reached by `{to_instance,
   sealed}`: the GFS sees the recipient's instance id on every frame to it,

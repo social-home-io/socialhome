@@ -23,9 +23,10 @@ media is created in a space that has such readers, this household:
    kept in memory meanwhile; the file is re-checked as the space's own) and
    PUTs it once per target GFS to the one scope-free path
    ``PUT /gfs/media/{blob_id}`` — the scope rides only inside the signed
-   claim — authorized as the GFS requires: the space-authority signature when
-   this household holds the space seed (host or delegated admin), else the
-   writer group key. Nothing names the household; never ``from_instance``.
+   claim — authorized as the GFS requires: the space-authority signature on
+   the space's owner, the writer group key on every other household (a
+   delegated admin too; it signs as the authority only where the space has
+   no writer key). Nothing names the household; never ``from_instance``.
    A PRIVATE space reached through its v_51 opaque channel uploads under the
    channel scope instead (the claim names the channel; the channel key for a
    seed holder, else the member's channel writer key from its grant) — the
@@ -104,6 +105,7 @@ from ..space_media_seal import (
 from ..writer_key import sign_with_writer_key
 from .inbound_media_store import media_file_path
 from .space_crypto_service import AUTHORITY_SIG_SUITE_ED25519
+from .space_writer_cert_service import writer_key_min_version
 
 if TYPE_CHECKING:
     from ..domain.federation import GfsConnection
@@ -983,7 +985,8 @@ class SpaceMediaGfsUploader:
         the space authority (its seed). Everyone else: the writer group key
         — a delegated admin too, although it holds the seed, so its uploads
         look like any writer's; it signs as the authority only where the
-        space has no writer key (not publicly readable). All anonymous."""
+        space has no writer key (not publicly readable) — never because its
+        own writer key is not here yet. All anonymous."""
         space_id = claim.scope_id
         try:
             seed = await self._spaces.get_space_seed(space_id)
@@ -992,7 +995,11 @@ class SpaceMediaGfsUploader:
         if seed is not None and await self._owns(space_id):
             return self._authority_auth(claim, seed)
         auth = await self._writer_key_auth(claim)
-        if auth is None and seed is not None:
+        if (
+            auth is None
+            and seed is not None
+            and writer_key_min_version(await self._spaces.get(space_id)) is None
+        ):
             return self._authority_auth(claim, seed)
         return auth
 

@@ -118,11 +118,12 @@ space seed (wire shape, checks and residuals:
   seed holder can attribute a post. No copy (an older submitter) → members
   only, as before. Rejected and expired items, and anything still
   pending, never reach a connection server.
-- **A removal.** Every post or comment delete a seed holder applies to an
-  item it holds — a moderator's, an admin's or the author's, local or a
+- **A removal.** Every post or comment delete the space's owner applies to
+  an item it holds — a moderator's, an admin's or the author's, local or a
   federated `SPACE_POST_DELETED` / `SPACE_COMMENT_DELETED` from a moderator
   household — is relayed as a removal notice naming the item and its
-  author. Followers soft-delete it, or leave a tombstone (only for an id
+  author. A delegated admin relays only a delete made on its own household
+  ([discovery.md](./discovery.md#a-delegated-admin-is-a-writer-to-the-gfs)). Followers soft-delete it, or leave a tombstone (only for an id
   owner-bound to that author in this space) if it has not reached them
   yet, so a late create never brings it back.
 

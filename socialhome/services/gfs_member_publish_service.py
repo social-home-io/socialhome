@@ -55,8 +55,8 @@ sends a connection server what any writer household sends: its posts go out
 as anonymous items, it keeps its fan-out seat, and a reconnect re-takes that
 seat and announces nothing. So the server cannot tell which household was
 handed the seed. What only the seed can sign still goes out, anonymously,
-when that household itself acts for the space: the notice of a rotation it
-runs, and the removals and approved posts it relays
+for something done on that household itself: the notice of a rotation it
+runs, and a removal or released post made there
 (:mod:`socialhome.services.space_public_outbound`).
 
 **Every listed GFS (v_57).** Once the owner's signed GFS list is known
@@ -1039,8 +1039,8 @@ class GfsMemberPublishService:
     async def member_subscription_ids(self, gfs_id: str) -> list[str]:
         """The spaces this household should hold a fan-out seat in on
         *gfs_id* because it writes there (publicly readable, a local writer
-        seat, not the owner, listed there) — for the reconnect batch, which merges
-        them with the followed spaces and shuffles the lot
+        seat, not the owner, listed there) — for the reconnect batch, which
+        merges them with the followed spaces and shuffles the lot
         (:meth:`GfsSpaceMirrorService.resubscribe_all`). ``[]`` for an
         inactive or incapable connection."""
         conn = await self._conn_repo.get(gfs_id)

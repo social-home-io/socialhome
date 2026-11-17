@@ -34,8 +34,9 @@ the owner handed the seed, so it can act while the owner is offline) relays
 no posts — its own go out as its household's anonymous ``space_item`` like
 any writer's, so a connection server cannot tell which household was handed
 the seed. It relays only what no other path carries and only the seed can
-sign: the removals it applies and the posts released from the moderation
-queue on it (authority-only items, below). Effect: a post by an author below
+sign: the removals made on its own household and the posts released from
+the moderation queue on it (authority-only items, below) — never an answer
+to something it merely received. Effect: a post by an author below
 v_90 (who publishes nothing itself) reaches GFS followers once the owner
 has it — while the owner is offline it waits.
 
@@ -95,9 +96,10 @@ migration tripwire — once every member ships v_49 it can become a refusal.
 
 Authority-only items (:mod:`socialhome.services.space_public_authority`):
 
-* **Removals.** Every space post or comment delete this seed holder applies —
+* **Removals.** Every space post or comment delete the owner applies —
   a moderator's, an admin's or the author's own, local or federated (the host
-  path already authorized it) — is relayed as an
+  path already authorized it) — and every one a delegated admin's own
+  household makes is relayed as an
   :class:`~socialhome.domain.space_item.AuthorityRemoval` naming the item
   and its author: never who removed it or why. Followers soft-delete, or keep
   a tombstone under an id owner-bound to that author in this space.
@@ -256,12 +258,9 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
         self._own_identity_seed = own_identity_seed
 
     def _owns(self, space: Space) -> bool:
-        """Whether this household is *space*'s owner. Empty until
-        :meth:`attach_identity` ran → nobody's owner (nothing is relayed
-        without an identity anyway)."""
-        return bool(self._own_instance_id) and (
-            space.owner_instance_id == self._own_instance_id
-        )
+        """Whether this household is *space*'s owner (callers check the
+        identity is attached first)."""
+        return space.owner_instance_id == self._own_instance_id
 
     def wire(self) -> None:
         self._bus.subscribe(SpacePostCreated, self._on_space_post_created)
@@ -271,7 +270,7 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
     async def _on_space_post_created(self, event: SpacePostCreated) -> None:
         # Inbound (another member's post). Relay it to the GFS subscribers
         # only when it carries a verified, author-signed public_relay hint and
-        # we hold the space seed (remote-author relay, owner-offline). Otherwise
+        # we own the space (remote-author relay). Otherwise
         # this is the loop guard — never re-fan an inbound post.
         if event.origin_instance_id is not None:
             await self._relay_remote_authored(event)
@@ -299,15 +298,11 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 event.space_id,
             )
             return
-        # Only a seed-holder (owner or delegated admin) relays. A NULL seed
-        # means this household can't authority-sign — skip silently.
+        # Only a seed-holder relays (the owner; a delegated admin only a
+        # released post, below). A NULL seed means this household can't
+        # authority-sign — skip silently.
         seed = await self._spaces.get_space_seed(event.space_id)
         if seed is None:
-            return
-        # A delegated admin's own post goes out as its household's anonymous
-        # item, like any writer's. From here it relays only a post released
-        # from the moderation queue — no other path carries that one.
-        if not self._owns(space) and not event.approved_by:
             return
         if (
             not self._own_instance_id
@@ -319,6 +314,11 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 "dropping relay for space %s",
                 event.space_id,
             )
+            return
+        # A delegated admin's own post goes out as its household's anonymous
+        # item, like any writer's. From here it relays only a post released
+        # from the moderation queue — no other path carries that one.
+        if not self._owns(space) and not event.approved_by:
             return
         author = await self._users.get_by_user_id(post.author)
         if author is None:
@@ -410,11 +410,6 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 event.space_id,
             )
             return
-        if not self._owns(space):
-            # A delegated admin relays no member's post: answering each one
-            # with an authority-signed copy would set it apart from every
-            # other writer household.
-            return
         seed = await self._spaces.get_space_seed(event.space_id)
         if seed is None:
             return  # no seed here — can't authority-sign the relay
@@ -424,6 +419,12 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 "remote-authored post for space %s",
                 event.space_id,
             )
+            return
+        if not self._owns(space):
+            # A delegated admin relays no member's post: answering each one
+            # with an authority-signed copy would set it apart from every
+            # other writer household — and a GFS could test a household by
+            # handing a post to its seat alone.
             return
         # Verify the ORIGINAL author's signature + self-cert before relaying —
         # never relay unverifiable / forgeable content (the subscriber
@@ -582,7 +583,12 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
                 return  # a calendar-derived post was never relayed
             author = author or got[1].author
         await self._relay_removal(
-            event.space_id, REMOVAL_TARGET_POST, event.post_id, event.post_id, author
+            event.space_id,
+            REMOVAL_TARGET_POST,
+            event.post_id,
+            event.post_id,
+            author,
+            origin=event.origin_instance_id,
         )
 
     async def _on_comment_deleted(self, event: CommentDeleted) -> None:
@@ -600,15 +606,28 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             event.comment_id,
             event.post_id,
             author,
+            origin=event.origin_instance_id,
         )
 
     async def _relay_removal(
-        self, space_id: str, target: str, item_id: str, post_id: str, author: str
+        self,
+        space_id: str,
+        target: str,
+        item_id: str,
+        post_id: str,
+        author: str,
+        *,
+        origin: str | None,
     ) -> None:
-        """Relay a post or comment removal applied here — a moderator's, an
-        admin's or the author's own, local or federated (the host path
-        already authorized it) — to the space's GFS followers, on this seed
-        holder's authority. The notice names the item and its author (for
+        """Relay a post or comment removal to the space's GFS followers, on
+        this seed holder's authority. The OWNER relays every removal applied
+        here — a moderator's, an admin's or the author's own, local or
+        federated (the host path already authorized it). A delegated admin
+        relays only a removal made on its own household (*origin* ``None``):
+        one that merely reached it — over federation, by sync or through its
+        fan-out seat — gets no answer, or a connection server could hand a
+        delete to one household's seat and learn from the reply that it
+        holds the seed. Such a removal reaches followers through the owner. The notice names the item and its author (for
         the follower's tombstone rule) — never who removed it or why. Inside
         the ciphertext and padded, so the connection server cannot tell it
         from a short post. A follower that already applied it is unaffected
@@ -620,6 +639,8 @@ class SpacePublicOutbound(SpaceMediaRefsMixin, FileHashesMixin):
             return
         if archive_refusal(space, "") is not None:
             return  # read-only: followers drop it anyway
+        if origin is not None and not self._owns(space):
+            return
         seed = await self._spaces.get_space_seed(space_id)
         if seed is None:
             return  # only a seed holder speaks for the space

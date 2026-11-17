@@ -833,6 +833,29 @@ async def test_reconcile_space_everywhere_is_fail_soft(recon_env):
 # ─── allow_subscribers OFF: listed for discovery, never publicly readable ──
 
 
+@pytest.mark.security
+async def test_a_new_subscriber_frame_gets_no_answer_from_a_delegated_admin(env):
+    """An honest GFS notifies only the owner. A curious one could push the
+    frame, with a key it minted, to any household's socket: an answer would
+    say "this socket holds the seed". Only the owner answers."""
+    await env["make_space"](
+        "sp-del", SpaceType.GLOBAL, with_seed=True, owner="owner.home"
+    )
+    id_kp, kw_kp, sub_iid, keywrap_sig = _subscriber_identity()
+    for reason in (None, "subscribe", "reconnect"):
+        await env["svc"].handle(
+            _new_subscriber_frame(
+                "sp-del",
+                sub_iid,
+                id_kp.public_key,
+                kw_kp.public_key,
+                keywrap_sig,
+                reason=reason,
+            )
+        )
+    assert env["gfs"].calls == []
+
+
 async def test_space_without_subscribers_seals_no_key_on_new_subscriber(env):
     """A GLOBAL space whose owner has NOT opted into subscribers is listed in
     the GFS directory (so people can discover it and ask for an invite) but is
