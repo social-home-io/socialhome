@@ -108,6 +108,7 @@ from ..domain.space_item import (
     reaction_emoji_ok,
     stamp_to_db,
 )
+from ..domain.writer_cert import FOLLOWER_SCOPES
 from ..federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
@@ -146,6 +147,7 @@ class _Item:
         "author",
         "authorship",
         "cert_scope",
+        "config_holder",
         "epoch",
         "inner",
         "member",
@@ -167,6 +169,7 @@ class _Item:
         member: bool,
         authorship: SpaceAuthorship | None,
         epoch: int | None = None,
+        config_holder: bool = False,
     ) -> None:
         self.space = space
         self.epoch = epoch
@@ -179,6 +182,9 @@ class _Item:
         self.cert_scope = cert_scope
         self.member = member
         self.authorship = authorship
+        #: We hold the space's real config (a member household, or a
+        #: follower household seated in the space — not a GFS mirror stub).
+        self.config_holder = config_holder
 
 
 class SpaceItemInbound:
@@ -216,9 +222,11 @@ class SpaceItemInbound:
         member_household: bool,
         authorship: SpaceAuthorship | None,
         epoch: int | None = None,
+        config_holder: bool = False,
     ) -> bool:
         """Apply one verified generic item (``epoch``: the content-key epoch
-        it was verified under). ``True`` when it changed
+        it was verified under; ``config_holder``: we hold the space's real
+        config, so a follower's item follows its switch here too). ``True`` when it changed
         something here; every refusal is logged.
 
         Raises :class:`AwaitingParent` when the item's post (or a reply's
@@ -239,6 +247,7 @@ class SpaceItemInbound:
             member=member_household,
             authorship=authorship,
             epoch=epoch,
+            config_holder=config_holder or member_household,
         )
         if not item.target:
             return False
@@ -378,8 +387,17 @@ class SpaceItemInbound:
     # ── Shared checks ────────────────────────────────────────────────────
 
     async def _seat_ok(self, item: _Item, *, subscriber_ok: bool) -> bool:
+        """Whether the author's seat admits the item (``subscriber_ok``: the
+        space's switch for this kind of item). A member household asks its
+        roster; a follower household seated here holds the config, so a
+        follower-scope item follows the switch; a GFS subscriber knows no
+        switch — the cert alone (and its lifetime) decided."""
         if item.authorship is None or not item.member:
-            return True
+            return not (
+                item.config_holder
+                and item.cert_scope in FOLLOWER_SCOPES
+                and not subscriber_ok
+            )
         return await item.authorship.item_seat_admits(
             origin_instance_id=item.origin,
             space_id=item.space.id,

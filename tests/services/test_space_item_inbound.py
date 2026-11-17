@@ -172,6 +172,7 @@ async def _apply(
     cert_scope="write",
     member=False,
     authorship=None,
+    config_holder=False,
 ) -> bool:
     space = await env["spaces"].get(SPACE)
     return await env["applier"].apply(
@@ -182,6 +183,7 @@ async def _apply(
         cert_scope=cert_scope,
         member_household=member,
         authorship=authorship,
+        config_holder=config_holder,
     )
 
 
@@ -974,3 +976,33 @@ async def test_a_follower_edit_or_delete_over_the_gfs_follows_the_comment_switch
         env, kind, change, cert_scope="follower", member=True, authorship=seats
     )
     assert seats.calls and all(not kw["subscriber_ok"] for _k, kw in seats.calls)
+
+
+@pytest.mark.parametrize("kind", ["comment", "reaction_add"])
+async def test_a_seated_follower_household_checks_the_switch_itself(env, kind):
+    """N4 (#1375 review): a follower household seated in the space holds the
+    config — it refuses a follower's comment / reaction once the switch is
+    off (seconds), like a member household. A GFS subscriber, whose stub
+    knows no switch, still decides by the cert alone (its 24 h)."""
+    inner = (
+        _comment(env, _cid())
+        if kind == "comment"
+        else _react(env, "reaction_add", "👍", 1)
+    )
+    await _switches(env, comment=False, react=False)
+    assert not await _apply(env, kind, inner, cert_scope="follower", config_holder=True)
+    # The same item at a GFS subscriber: the cert alone decides.
+    assert await _apply(env, kind, inner, cert_scope="follower")
+
+
+async def test_a_seated_follower_household_keeps_a_members_comment_scope_items(env):
+    """Only a follower's scope follows the switch there: a comment-only
+    member's reaction is applied whatever the follower switches say."""
+    await _switches(env, comment=False, react=False)
+    assert await _apply(
+        env,
+        "reaction_add",
+        _react(env, "reaction_add", "👍", 1),
+        cert_scope="comment",
+        config_holder=True,
+    )
