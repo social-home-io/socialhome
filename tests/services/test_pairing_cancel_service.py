@@ -597,7 +597,9 @@ async def test_a_cancel_after_the_code_was_entered_still_tells_the_peer(staged_e
     env = staged_env
     env.repo.instances["peer-s"] = _seat()
     await env.pending.save(_qr_pending("peer-s"), ttl_s=300, token="tok-s")
-    assert await env.pending.await_peer("peer-s", token="tok-s", ttl_s=60)
+    assert await env.pending.await_peer(
+        "peer-s", inbox_id="wh-peer-s", token="tok-s", ttl_s=60
+    )
 
     assert await env.svc.cancel_pending("peer-s") is True
 

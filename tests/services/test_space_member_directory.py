@@ -196,8 +196,15 @@ class FakeFederationRepo:
         self.instances: dict[str, SimpleNamespace] = {}
         self.proto_set: list[tuple[str, int]] = []
 
-    async def get_instance(self, instance_id):
-        return self.instances.get(instance_id)
+    async def get_instance(self, instance_id, *, include_unpairing=False):
+        row = self.instances.get(instance_id)
+        if (
+            row is not None
+            and getattr(row, "status", None) is PairingStatus.UNPAIRING
+            and not include_unpairing
+        ):
+            return None
+        return row
 
     async def set_proto_version(self, instance_id, version):
         self.proto_set.append((instance_id, version))
@@ -2774,4 +2781,20 @@ async def test_reseat_never_touches_a_household_we_are_still_paired_with():
         relay_via=None,
     )
     assert await w.dir.reseat(a["id"]) is False
+    assert w.seated == []
+
+
+async def test_a_directory_card_never_seats_over_an_unpair_tombstone():
+    """The row still has an ``UNPAIR`` to deliver to a household that was
+    offline; a seat written over it would cancel that. The seat is made
+    when the tombstone is purged (:meth:`reseat`)."""
+    w, _a = _reseat_world()
+    b = _hh()
+    w.member(b)
+    w.fed_repo.instances[b["id"]] = SimpleNamespace(
+        status=PairingStatus.UNPAIRING,
+        source=InstanceSource.MANUAL,
+        relay_via=None,
+    )
+    await w.dir._seat(_card(b, gfs=GFS))
     assert w.seated == []

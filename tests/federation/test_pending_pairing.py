@@ -335,7 +335,9 @@ async def test_await_peer_turns_the_code_half_into_an_approval(pending, repo, cl
     await pending.save(half, ttl_s=300, gfs_route="gfs-1", token="tok")
     assert pending.has_code_half(PEER) and pending.keyed_for(PEER) is None
 
-    waiting = await pending.await_peer(PEER, token="tok", ttl_s=3600)
+    waiting = await pending.await_peer(
+        PEER, inbox_id="pair-inbox", token="tok", ttl_s=3600
+    )
 
     assert waiting == replace(half, status=PairingStatus.PENDING_SENT)
     assert pending.keyed_for(PEER) == waiting
@@ -360,7 +362,10 @@ async def test_await_peer_needs_the_code_half_of_that_code(pending, repo, token)
             _inst(PairingStatus.PENDING_RECEIVED), ttl_s=300, token="tok"
         )
     before = pending.staged(PEER)
-    assert await pending.await_peer(PEER, token=token, ttl_s=60) is None
+    assert (
+        await pending.await_peer(PEER, inbox_id="pair-inbox", token=token, ttl_s=60)
+        is None
+    )
     assert pending.staged(PEER) is before
 
 
@@ -611,3 +616,26 @@ async def test_a_seat_made_during_the_save_is_never_overwritten(clock):
     assert await pending.save(half, ttl_s=300) is True
     assert pending.staged(PEER) is half
     assert repo.rows[PEER].source is InstanceSource.SPACE_SESSION
+
+
+async def test_await_peer_is_bound_to_the_inbox_the_codes_session_minted(pending, repo):
+    repo.rows[PEER] = _seat()
+    half = _inst(PairingStatus.PENDING_RECEIVED, inbox="this-code")
+    await pending.save(half, ttl_s=300, token="tok")
+    assert (
+        await pending.await_peer(PEER, inbox_id="another-code", token="tok", ttl_s=60)
+        is None
+    )
+    assert pending.staged(PEER) is half
+
+
+async def test_a_code_half_adopted_beside_a_new_seat_learns_its_token(pending, repo):
+    """The half was a row until a seat took the row (no token known
+    then): the code's session still confirms it, by its inbox."""
+    repo.rows[PEER] = _seat()
+    await pending.save(_inst(PairingStatus.PENDING_RECEIVED), ttl_s=300)
+    assert not pending.has_code_half(PEER)
+    waiting = await pending.await_peer(
+        PEER, inbox_id="pair-inbox", token="tok", ttl_s=60
+    )
+    assert waiting is not None and pending.has_code_half(PEER)

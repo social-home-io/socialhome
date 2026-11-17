@@ -1616,3 +1616,52 @@ async def test_cancel_pairing_sessions_without_a_key_matches_the_inbox_only(env)
         local_inbox_id="pair-inbox", peer_identity_pk=""
     ) == ["tok-a"]
     assert await env.fed_repo.get_pairing("tok-b") is not None
+
+
+# ── save_pending_instance: seat-or-row decided inside the write ────────────
+
+
+async def test_save_pending_instance_writes_the_row_when_there_is_no_seat(env):
+    half = _half("peer-s", "pair-inbox")
+    assert await env.fed_repo.save_pending_instance(half) is True
+    got = await env.fed_repo.get_instance("peer-s")
+    assert got.status is PairingStatus.PENDING_RECEIVED
+    assert got.local_inbox_id == "pair-inbox"
+
+
+async def test_save_pending_instance_never_writes_over_a_seat(env):
+    await env.fed_repo.save_instance(_seat_row("peer-s"))
+    assert await env.fed_repo.save_pending_instance(_half("peer-s", "pair-inbox")) is (
+        False
+    )
+    got = await env.fed_repo.get_instance("peer-s")
+    assert got.source is InstanceSource.SPACE_SESSION
+    assert got.status is PairingStatus.CONFIRMED
+    assert (got.key_self_to_remote, got.local_inbox_id) == ("seat-k1", "seat-inbox")
+
+
+async def test_save_pending_instance_gives_a_new_handshake_its_new_inbox(env):
+    """Unlike the plain upsert, which keeps ``local_inbox_id``: the session
+    that confirms this handshake is bound to the inbox it minted."""
+    await env.fed_repo.save_instance(_half("peer-s", "first-scan"))
+    assert await env.fed_repo.save_pending_instance(_half("peer-s", "second-scan"))
+    assert (await env.fed_repo.get_instance("peer-s")).local_inbox_id == "second-scan"
+    # …also over a live pairing that is being paired again.
+    await env.fed_repo.save_instance(_tomb_inst("peer-live", "old-inbox"))
+    assert await env.fed_repo.save_pending_instance(_half("peer-live", "new-inbox"))
+    got = await env.fed_repo.get_instance("peer-live")
+    assert (got.status, got.local_inbox_id) == (
+        PairingStatus.PENDING_RECEIVED,
+        "new-inbox",
+    )
+
+
+async def test_save_pending_instance_replaces_an_unpair_tombstone(env):
+    await env.fed_repo.save_instance(_tomb_inst("peer-t", "wh-t"))
+    await env.fed_repo.mark_unpairing("peer-t")
+    await _seed_side_rows(env.db, "peer-t")
+    assert await env.fed_repo.save_pending_instance(_half("peer-t", "pair-inbox"))
+    got = await env.fed_repo.get_instance("peer-t")
+    assert got.status is PairingStatus.PENDING_RECEIVED
+    assert got.local_inbox_id == "pair-inbox"
+    assert await _side_row_counts(env.db, "peer-t") == (0, 0, 0, 0)

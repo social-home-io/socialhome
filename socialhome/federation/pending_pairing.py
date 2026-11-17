@@ -255,24 +255,36 @@ class PendingPairings:
         return entry is not None and entry.token is not None
 
     async def await_peer(
-        self, instance_id: str, *, token: str, ttl_s: float | None
+        self,
+        instance_id: str,
+        *,
+        inbox_id: str,
+        token: str,
+        ttl_s: float | None,
     ) -> RemoteInstance | None:
         """Our admin verified the pairing code *token*: the staged half of
         *instance_id* now waits for the scanner's first envelope under the
         code's keys (it becomes an approval), and the seat stays until
-        then. Returns the half, or ``None`` when no code half of that
-        handshake is staged (cancelled, expired, replaced)."""
+        then. Returns the half, or ``None`` when the code half of that
+        handshake — the one whose inbox the code's session minted,
+        *inbox_id* — is not staged (cancelled, expired, replaced)."""
         async with self._locked(instance_id):
             entry = self._live(instance_id)
             if (
                 entry is None
-                or entry.token != token
+                or entry.instance.local_inbox_id != inbox_id
+                or entry.token not in (None, token)
                 or pending_kind(entry.instance) != PENDING_KIND_CODE
             ):
                 return None
             waiting = replace(entry.instance, status=PairingStatus.PENDING_SENT)
             self._staged[instance_id] = replace(
-                entry, instance=waiting, expires_at=self._expiry(ttl_s)
+                entry,
+                instance=waiting,
+                expires_at=self._expiry(ttl_s),
+                # A half that was a row until a seat took the row carries
+                # no token yet: it is this code's from here on.
+                token=token,
             )
             return waiting
 

@@ -40,6 +40,10 @@ from socialhome.federation.auto_pair_coordinator import (
     _derive_session_keys,
     _vouch_blob,
 )
+from socialhome.federation.pending_pairing import (
+    PendingPairings,
+    TooManyPendingPairingsError,
+)
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services.auto_pair_inbox import (
@@ -1631,3 +1635,43 @@ async def test_an_introduction_vouched_by_a_space_seat_is_refused(
     await coord.on_intro_at_target(_evt(payload["via_b_id"], payload))
 
     assert inbox.list_pending() == []
+
+
+async def test_a_request_that_cannot_be_stored_leaves_no_session_behind(
+    coord, fed_repo, fed_service, monkeypatch
+):
+    """The session is what an ack is accepted against: a request whose half
+    was refused (the store is full) must not leave one that a later ack
+    could confirm (review finding: it was recorded before the save)."""
+    b = _make_peer_remote_instance(generate_identity_keypair().public_key.hex())
+    fed_repo.instances[b.id] = b
+
+    async def _full(*_a, **_kw):
+        raise TooManyPendingPairingsError("too many pairings are waiting")
+
+    monkeypatch.setattr(PendingPairings, "save", _full)
+    with pytest.raises(TooManyPendingPairingsError):
+        await coord.request_via(
+            via_instance_id=b.id,
+            target_instance_id=derive_instance_id(
+                generate_identity_keypair().public_key
+            ),
+            target_display_name="C",
+            own_inbox_base_url=_OWN_INBOX_BASE,
+        )
+    assert coord._pending == {}
+    fed_service.send_event.assert_not_awaited()
+
+
+async def test_an_approval_beside_a_seat_does_not_expire(coord, inbox, fed_repo):
+    """As the row of an approval never did: it waits for the requester's
+    first envelope, or our admin's cancel."""
+    clock = [0.0]
+    coord.pending_pairings._clock = lambda: clock[0]
+    req = _queued_request(inbox)
+    fed_repo.instances[req.from_a_id] = _seat_of(req.from_a_pk)
+    inst = await coord.finalize_pending(
+        req.request_id, own_inbox_base_url="https://c.example/federation/inbox"
+    )
+    clock[0] += 30 * 24 * 3600
+    assert coord.pending_pairings.staged(req.from_a_id) == inst

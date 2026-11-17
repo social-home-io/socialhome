@@ -632,7 +632,10 @@ class PairingCoordinator:
         token = session.token
         route = self._pending.staged_route(half.id)
         waiting = await self._pending.await_peer(
-            half.id, token=token, ttl_s=PEER_HELLO_WAIT_SECONDS
+            half.id,
+            inbox_id=session.own_local_inbox_id,
+            token=token,
+            ttl_s=PEER_HELLO_WAIT_SECONDS,
         )
         if waiting is None:
             raise ValueError("No pending pairing for this token")
