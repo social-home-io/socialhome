@@ -2190,6 +2190,7 @@
   "connections.meta.waiting_code": "Wacht tot de koppelcode wordt gebruikt",
   "connections.meta.waiting_request": "Wacht tot {name} je verzoek accepteert",
   "connections.meta.waiting_approval": "Wacht op bevestiging van {name}",
+  "connections.meta.pending_shares_space": "Jullie gedeelde space blijft intussen werken",
   "connections.pending.request_title": "Je koppelverzoek aan {name} annuleren?",
   "connections.pending.request_body": "{name} kan het dan niet meer accepteren.",
   "connections.pending.request_ok": "Verzoek annuleren",

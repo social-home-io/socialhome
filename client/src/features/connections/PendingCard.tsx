@@ -3,7 +3,9 @@
  * only). Ghost avatar + pending badge, a meta line that says what it waits
  * on (``pending_kind``), a tertiary "Cancel" (confirmed in a dialog by the
  * page) and — for a pairing code only — a secondary "Start again" (a fresh
- * code).
+ * code). For a household we already share a space with (``shares_space``)
+ * a second meta item says the space keeps working meanwhile: pairing does
+ * not interrupt it, and neither does cancelling.
  */
 import type { Connection } from '@/store/connections'
 import { t } from '@/i18n/i18n'
@@ -34,6 +36,9 @@ export function PendingCard({ conn, onCancel, onRestart }: Props) {
       name={conn.display_name}
       meta={[
         <span data-pending-kind={kind}><ConnIcon name={meta.icon} />{t(meta.key, { name: conn.display_name })}</span>,
+        conn.shares_space
+          ? <span data-shares-space><ConnIcon name="users" />{t('connections.meta.pending_shares_space')}</span>
+          : null,
         conn.paired_at ? <span>{relativeDocsTime(conn.paired_at)}</span> : null,
       ]}
       mods={['dashed', 'action']}

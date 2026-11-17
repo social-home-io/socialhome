@@ -101,7 +101,34 @@ describe('wireConnectionsWs', () => {
       { instance_id: 'peer-1', display_name: 'Bob', reachable: true },
       { instance_id: 'peer-2', display_name: 'Carol', reachable: true },
     ]
+    apiGet.mockReturnValue(new Promise(() => {}))
     handlers['connection.removed']({ data: { type: 'connection.removed', instance_id: 'peer-1' } })
+    expect(connections.value.map(c => c.instance_id)).toEqual(['peer-2'])
+  })
+
+  it('connection.removed refetches: a household we still share a space with is back as space-only', async () => {
+    connections.value = [
+      { instance_id: 'peer-1', display_name: 'Bob', reachable: true, status: 'pending_received', shares_space: true },
+    ]
+    apiGet.mockResolvedValueOnce([
+      { instance_id: 'peer-1', display_name: 'Bob', reachable: true, status: 'confirmed', source: 'space_session' },
+    ])
+    handlers['connection.removed']({ data: { type: 'connection.removed', instance_id: 'peer-1' } })
+    expect(connections.value).toEqual([])
+    await vi.waitFor(() => expect(connections.value).toHaveLength(1))
+    expect(apiGet).toHaveBeenCalledWith('/api/connections')
+    expect(connections.value[0].source).toBe('space_session')
+  })
+
+  it('connection.removed keeps the row dropped when the refetch fails', async () => {
+    connections.value = [
+      { instance_id: 'peer-1', display_name: 'Bob', reachable: true },
+      { instance_id: 'peer-2', display_name: 'Carol', reachable: true },
+    ]
+    apiGet.mockRejectedValueOnce(new Error('offline'))
+    handlers['connection.removed']({ data: { instance_id: 'peer-1' } })
+    await vi.waitFor(() => expect(apiGet).toHaveBeenCalled())
+    await Promise.resolve()
     expect(connections.value.map(c => c.instance_id)).toEqual(['peer-2'])
   })
 

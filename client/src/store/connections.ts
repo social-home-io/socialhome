@@ -7,7 +7,9 @@
  * finished the handshake — ours or theirs) refetches the list, since
  * the frame carries only the instance id and the row needs the full
  * REST shape; `connection.removed` (a pairing was torn down, by our
- * admin or by the peer) drops the row in place.
+ * admin or by the peer, or a pending one was cancelled) drops the row in
+ * place and then refetches too: a household we still share a space with
+ * is back in the list as a space-only row.
  *
  * Also holds the local household's home coords (updated via
  * `local.home_changed` WS frames) and patches peer coords on
@@ -44,6 +46,10 @@ export interface Connection {
    *  know; ``approval`` — we approved their request and wait for them to
    *  confirm. Absent on older servers. */
   pending_kind?: 'code' | 'request' | 'approval' | null
+  /** A pending pairing with a household we already share a space with:
+   *  the space keeps working while it waits, and when it is cancelled the
+   *  household is a space-only row again. Absent on older servers. */
+  shares_space?: boolean
   paired_at?: string | null
   source?: string
   reachable:     boolean
@@ -190,6 +196,9 @@ export function wireConnectionsWs(): void {
     const d = e.data as unknown as { instance_id: string }
     if (!d?.instance_id) return
     connections.value = connections.value.filter((c) => c.instance_id !== d.instance_id)
+    // The pairing is gone at once; what is left of the household (a
+    // space-only row, when we still share a space) comes from the server.
+    void refreshConnections()
   })
   ws.on('local.home_changed', (e) => {
     const d = e.data as unknown as { latitude: number; longitude: number }
