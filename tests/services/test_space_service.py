@@ -2454,6 +2454,84 @@ async def test_space_delete_comment_non_admin_rejected(stack):
         await stack.space_svc.delete_comment(c.id, actor_user_id=carl.user_id)
 
 
+async def _follower_with_a_comment(stack):
+    """A local follower of a space whose comment switch is on, their own
+    comment, and the switch turned off again."""
+    anna = await stack.provision_user("anna")
+    fan = await stack.provision_user("fan")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.db.enqueue(
+        "UPDATE spaces SET allow_subscriber_comment=1 WHERE id=?", (s.id,)
+    )
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id=s.id,
+            user_id=fan.user_id,
+            role=SpaceRole.SUBSCRIBER,
+            joined_at="2026-11-17T00:00:00+00:00",
+        )
+    )
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    c = await stack.space_svc.add_comment(
+        p.id, author_user_id=fan.user_id, content="hi"
+    )
+    return s, anna, fan, c
+
+
+async def test_a_follower_edits_or_deletes_its_comment_only_under_the_switch(stack):
+    """One rule for a comment, its edit and its delete: the author's seat
+    must hold the comment right (a follower's is the space's switch). The
+    local path let a follower edit or delete its own comment with the switch
+    off — every other household refuses that change, so the copies diverged
+    (and on the host it went out as the host's). A moderator's delete is
+    content authority and still works."""
+    s, anna, fan, c = await _follower_with_a_comment(stack)
+    # Switch on: both work for the follower's own comment.
+    edited = await stack.space_svc.edit_comment(
+        c.id, editor_user_id=fan.user_id, new_content="hello"
+    )
+    assert edited.content == "hello"
+    await stack.db.enqueue(
+        "UPDATE spaces SET allow_subscriber_comment=0 WHERE id=?", (s.id,)
+    )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.edit_comment(
+            c.id, editor_user_id=fan.user_id, new_content="again"
+        )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.delete_comment(c.id, actor_user_id=fan.user_id)
+    held = await stack.space_post_repo.get_comment(c.id)
+    assert held is not None and not held.deleted and held.content == "hello"
+    # The owner still removes it.
+    await stack.space_svc.delete_comment(c.id, actor_user_id=anna.user_id)
+    held = await stack.space_post_repo.get_comment(c.id)
+    assert held is not None and held.deleted
+
+
+async def test_an_author_without_a_seat_cannot_change_their_comment(stack):
+    """The same rule as writing one: no seat, no comment right — every
+    other household would refuse the change anyway."""
+    anna = await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    await stack.space_svc.add_member(s.id, actor_username="anna", user_id=bob.user_id)
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=anna.user_id, type=PostType.TEXT, content="x"
+    )
+    c = await stack.space_svc.add_comment(
+        p.id, author_user_id=bob.user_id, content="hi"
+    )
+    await stack.space_repo.delete_member(s.id, bob.user_id)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.edit_comment(
+            c.id, editor_user_id=bob.user_id, new_content="again"
+        )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.delete_comment(c.id, actor_user_id=bob.user_id)
+
+
 async def test_space_list_feed(stack):
     """list_feed returns posts scoped to the space."""
     anna = await stack.provision_user("anna")
@@ -9073,8 +9151,9 @@ async def test_a_writer_cert_behind_or_ahead_is_a_mismatch_like_any_other(
     stack, monkeypatch
 ):
     """N6, folded into the one rule: the digest right but the writer-cert
-    epoch not the one we would send is a mismatch — one snapshot (which
-    carries our cert), read without signing a cert."""
+    epoch not the one we would send is a mismatch — one snapshot carrying
+    only the credentials (the roster matched), read without signing a cert
+    to decide."""
     clock = _Clock(monkeypatch)
     space, fed, _remote, _insts = await _members_with_households(stack, 1)
     certs = _certs(7)
@@ -9083,7 +9162,9 @@ async def test_a_writer_cert_behind_or_ahead_is_a_mismatch_like_any_other(
     assert _snapshots(fed) == []
     await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=6))
     (_to, entries) = _snapshots(fed, to="peer-0")[-1]
-    assert any(e["payload"]["role"] == "owner" for e in entries)  # never empty
+    assert entries == []
+    payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
+    assert payload["writer_cert"] == {"epoch": 7}
     clock.advance(30 * 60)
     await _answer(stack, await _digest_begin(stack, space, "peer-0", cert_epoch=8))
     assert len(_snapshots(fed)) == 2
@@ -11895,6 +11976,110 @@ async def test_comment_rights_on_delivers_comment_certs_at_once(stack):
     assert _cert_of(sent[0]["payload"]).scope == "comment"
 
 
+async def test_comment_rights_on_sends_followers_their_credentials_alone(stack):
+    """Owner decision 2026-11-17 — followers are members with a read-only
+    role: turning "followers may comment" on gives each follower household
+    the SAME ``comment`` cert a comment-only member holds, in a snapshot
+    with NO roster entry (it used to be the whole roster to every follower
+    household — ~5.5 MB each at 11 000 seats). It never drops a roster
+    snapshot still queued for that household."""
+    space, fed, remote, _pks = await _cert_space(stack, version=94)
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    await _seat(remote, space.id, "peer-b", "u-b", role="member")
+    fed.send_with_mesh_fallback.reset_mock()
+    fed.drop_queued_with_key_prefix = AsyncMock(return_value=0)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    sent = [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_ROSTER_SNAPSHOT
+    ]
+    assert [k["to_instance_id"] for k in sent] == ["peer-a"]
+    assert sent[0]["payload"]["entries"] == []
+    assert _cert_of(sent[0]["payload"]).scope == "comment"
+    fed.drop_queued_with_key_prefix.assert_not_awaited()
+
+
+async def test_a_gain_and_a_loss_in_one_change_rotate_once(stack, monkeypatch):
+    """One rule for every role: a change that takes a right from one
+    household and gives one to another rotates ONCE — the rekey carries
+    every household its new cert — and sends no separate credentials."""
+    space, fed, remote, _pks = await _cert_space(stack, version=94)
+    # The access-level change consults the space's peer versions.
+    stack.space_svc._federation_repo.list_instances_in_space = AsyncMock(
+        return_value=[]
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    await _seat(remote, space.id, "peer-b", "u-b", role="member")
+    rekeys = await _rekeys(stack, monkeypatch)
+    fed.send_with_mesh_fallback.reset_mock()
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(
+            allow_subscriber_comment=True,
+            posts_access=SpaceFeatureAccess.ADMIN_ONLY,
+        ),
+    )
+    assert rekeys == [space.id]
+    assert [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_ROSTER_SNAPSHOT
+    ] == []
+
+
+async def test_comment_rights_off_rotates_only_if_a_household_loses_a_right(
+    stack, monkeypatch
+):
+    """A household with a member seat next to its follower seat keeps its
+    cert when "followers may comment" goes off: nobody's entitlement
+    shrinks, so nothing rotates."""
+    space, _fed, remote, _pks = await _cert_space(stack, version=94)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=True),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    await _seat(remote, space.id, "peer-a", "u-a2", role="member")
+    rekeys = await _rekeys(stack, monkeypatch)
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=SpaceFeatures(allow_subscriber_comment=False),
+    )
+    assert rekeys == []
+
+
+async def test_the_react_switch_changes_no_cert_and_sends_only_the_config(
+    stack, monkeypatch
+):
+    """The react right has no cert of its own (a ``comment`` cert carries
+    reactions, for members and followers alike): toggling it rotates
+    nothing and sends no credentials — the config event is all."""
+    space, fed, remote, _pks = await _cert_space(stack, version=94)
+    await _seat(remote, space.id, "peer-a", "u-a", role="subscriber")
+    rekeys = await _rekeys(stack, monkeypatch)
+    fed.send_with_mesh_fallback.reset_mock()
+    for on in (True, False):
+        await stack.space_svc.update_config(
+            space.id,
+            actor_username="hosty",
+            features=SpaceFeatures(allow_subscriber_react=on),
+        )
+    assert rekeys == []
+    assert [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("event_type") is FederationEventType.SPACE_ROSTER_SNAPSHOT
+    ] == []
+
+
 # ─── v_49: a member household's leave reaches the host ────────────────────
 
 
@@ -12256,7 +12441,7 @@ async def test_opening_posts_does_not_rotate_but_re_issues(stack, monkeypatch):
     rekeys = await _rekeys(stack, monkeypatch)
     snapshots: list[str] = []
 
-    async def _snapshot(self, space_id, *, to_instance_id):
+    async def _snapshot(self, space_id, *, to_instance_id, credentials_only=False):
         snapshots.append(to_instance_id)
 
     monkeypatch.setattr(type(stack.space_svc), "send_roster_snapshot", _snapshot)
@@ -12481,8 +12666,9 @@ async def test_an_upgrade_to_v90_delivers_the_writer_key(stack):
 
 async def test_turning_followers_on_pins_and_hands_out_the_writer_key(stack):
     """A global space that just became publicly readable gets a writer key
-    at once — the owner's epoch notice pins it at its GFSs and the member
-    households' roster snapshots carry it (no rotation needed)."""
+    at once — the owner's epoch notice pins it at its GFSs and each member
+    household gets it with its credentials alone, no roster entry (no
+    rotation needed)."""
     space, fed, remote, _pks = await _cert_space(stack, version=_V90)
     await stack.db.enqueue(
         "UPDATE spaces SET space_type='global', allow_subscribers=0 WHERE id=?",
@@ -12509,6 +12695,8 @@ async def test_turning_followers_on_pins_and_hands_out_the_writer_key(stack):
         if c.kwargs.get("to_instance_id") == "peer-a"
     ]
     assert any("writer_key" in kw["payload"] for kw in sent)
+    # Its credentials alone — never the whole roster to every household.
+    assert all(kw["payload"]["entries"] == [] for kw in sent)
 
 
 async def test_no_writer_key_below_v90(stack):

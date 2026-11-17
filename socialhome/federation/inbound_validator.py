@@ -1261,9 +1261,11 @@ def make_check_space_writer(
     bytes, is a refusal. Tombstones are still read, so a household we
     KICKED is refused, never held.
 
-    The two exceptions (:data:`_SUBSCRIBER_OPT_INS`) are
-    ``SPACE_COMMENT_CREATED`` when the space has ``allow_subscriber_comment``
-    on, and (v_93) ``SPACE_POST_REACTION`` when it has
+    The exceptions (:data:`_SUBSCRIBER_OPT_INS`) are
+    ``SPACE_COMMENT_CREATED`` — and the author's own
+    ``SPACE_COMMENT_UPDATED`` / ``SPACE_COMMENT_DELETED`` — when the space
+    has ``allow_subscriber_comment`` on, and (v_93) ``SPACE_POST_REACTION``
+    when it has
     ``allow_subscriber_react`` on — each only when the payload's acting
     user names a LIVE ``subscriber`` seat of that same household: the user
     is bound to a real row, so a flag cannot be used to smuggle the spoof
@@ -1395,6 +1397,10 @@ async def _sender_hosts_space(
 #: do.
 _SUBSCRIBER_OPT_INS: dict[FederationEventType, tuple[str, str]] = {
     FederationEventType.SPACE_COMMENT_CREATED: ("author", "allow_subscriber_comment"),
+    #: A follower's edit / delete of its own comment follows the same switch
+    #: (the handler checks the comment is the sending household's own).
+    FederationEventType.SPACE_COMMENT_UPDATED: ("author", "allow_subscriber_comment"),
+    FederationEventType.SPACE_COMMENT_DELETED: ("author", "allow_subscriber_comment"),
     #: v_93 — a follower's reaction on a space post.
     FederationEventType.SPACE_POST_REACTION: ("user_id", "allow_subscriber_react"),
 }

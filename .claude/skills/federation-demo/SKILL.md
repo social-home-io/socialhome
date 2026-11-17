@@ -1003,6 +1003,7 @@ python .claude/skills/federation-demo/harness.py gfs-space-healing
 python .claude/skills/federation-demo/harness.py gfs-relay-media
 python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
+python .claude/skills/federation-demo/harness.py gfs-follower-comment
 python .claude/skills/federation-demo/harness.py gfs-private-channel
 python .claude/skills/federation-demo/harness.py relay-pair   # a ↔ d, after members-mesh-restart (needs them unpaired), before gfs-multi-listing (needs them paired)
 python .claude/skills/federation-demo/harness.py gfs-b-up
@@ -1119,6 +1120,21 @@ older follower: it clears bits 2 and 4 of d's seat (``space_subscribers
 .reads_space_item``) in the GFS DB, has e post, and asserts the GFS refused
 the compressed item (e logs ``refused a compressed item``), e sent JSON
 (``suite=json``) and d still got the post. The bit is restored afterwards.
+
+### ``gfs-follower-comment`` — a follower comments like a comment-only member
+
+Needs ``gfs-invite-link`` (e holds a link-joined FOLLOWER seat on a's third,
+global space). a opens the space to readers (``allow_subscribers``, left
+on: only a publicly readable space is published over a GFS), d subscribes to
+it over the GFS (left subscribed), and a turns
+``allow_subscriber_comment`` on: e gets its credentials alone — the same
+``comment`` cert and writer group key a comment-only member holds (e's
+``space_keys``). a posts; e (the follower) comments on the normal member
+path: a holds the comment, the GFS accepted e's anonymous publish (``POST
+/gfs/member-publish-anon`` 200) and d, a GFS subscriber, holds it too. a
+turns the switch off: exactly one rotation (a's content epoch + 1), and e's
+next comment is refused. The comment switch is left off (its default). Reads
+a's / e's DB (no REST bucket).
 
 ### ``gfs-member-publish-strict`` — anonymous member publish (v_50; the one mode since v_90)
 

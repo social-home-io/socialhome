@@ -9569,6 +9569,175 @@ def _ensure_gfs_client(state: dict, label: str) -> None:
     _wait_for_gfs_ws(info["instance_id"])
 
 
+def cmd_gfs_follower_comment() -> None:
+    """Followers are members with a read-only role (owner decision
+    2026-11-17): a follower household comments under the space's switch,
+    with the same cert and writer key a comment-only member holds.
+
+    Prereqs: ``gfs-invite-link`` — e holds a link-joined FOLLOWER seat on a's
+    third (global) space (``gfs_invite_follower_space_id``).
+
+    Sequence:
+    0. a opens the space to readers (``allow_subscribers``, left on): only a
+       publicly readable space is published over a GFS. d subscribes to it
+       over the GFS (left subscribed).
+    1. a turns ``allow_subscriber_comment`` on. e gets its credentials alone
+       (a snapshot with no roster entry): a ``comment`` cert and the writer
+       group key (e's ``space_keys``).
+    2. a posts; e receives it.
+    3. e comments — the normal member path: a (a member household) holds
+       the comment, e publishes it anonymously over the GFS (``POST
+       /gfs/member-publish-anon`` 200), and d — a GFS subscriber with no
+       seat, subscribed in step 0 — holds it too.
+    4. a turns the switch off: ONE rotation (a's content epoch moves on), and
+       e's next comment is refused — at e, or a never holds it. The comment
+       switch is left off (its default).
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run the gfs chain through 'gfs-invite-link' first")
+    space_id = state.get("gfs_invite_follower_space_id")
+    if not space_id:
+        raise SystemExit("run 'gfs-invite-link' first (it seats e as a follower)")
+    a = state["instances"]["a"]
+    a_base = f"http://127.0.0.1:{a['port']}"
+
+    def _features(what: str, **features: bool) -> None:
+        s, patched = _request(
+            f"{a_base}/api/spaces/{space_id}",
+            token=a["token"],
+            method="PATCH",
+            body={"features": features},
+        )
+        _must(what, s, patched, ok=(200,))
+
+    def _epoch() -> int:
+        rows = _rows(
+            "a", "SELECT MAX(epoch) FROM space_keys WHERE space_id = ?", (space_id,)
+        )
+        return int(rows[0][0])
+
+    # 0–1. Readers (d subscribes over the GFS), then the switch: e's
+    #      credentials arrive alone.
+    _features("a opens the follower space to readers", allow_subscribers=True)
+    d = state["instances"]["d"]
+    d_base = f"http://127.0.0.1:{d['port']}"
+    deadline = time.monotonic() + 60.0
+    sub: object = None
+    while time.monotonic() < deadline:
+        _request(f"{d_base}/api/public_spaces/refresh", token=d["token"], method="POST")
+        time.sleep(3.0)
+        s, sub = _request(
+            f"{d_base}/api/spaces/{space_id}/subscribe", token=d["token"], method="POST"
+        )
+        if s == 200 and isinstance(sub, dict) and sub.get("subscribed"):
+            break
+    else:
+        raise SystemExit(
+            f"gfs-follower-comment: d could not subscribe to the space over "
+            f"the GFS within 60 s (last answer {sub!r})"
+        )
+    print("  d reads the space through the GFS (a subscriber, no seat) ✓")
+    _features("a turns follower comments on", allow_subscriber_comment=True)
+    rows = _poll_rows(
+        "e",
+        "SELECT writer_cert FROM space_keys WHERE space_id = ? "
+        "AND writer_cert IS NOT NULL AND writer_key IS NOT NULL "
+        "ORDER BY epoch DESC LIMIT 1",
+        (space_id,),
+        bool,
+        what="e never stored its comment cert and writer key",
+    )
+    scope = json.loads(rows[0][0]).get("scope")
+    if scope != "comment":
+        raise SystemExit(
+            f"gfs-follower-comment: e stored a {scope!r} cert, expected the "
+            "'comment' cert a comment-only member holds"
+        )
+    print("  switch on: e holds a comment cert and the writer key ✓")
+
+    # 2.
+    s, post = _request(
+        f"{a_base}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "text", "content": f"Followers may comment — {time.time_ns()}"},
+    )
+    post_id = _must("a posts in the follower space", s, post, ok=(201,))["id"]
+    _await_space_post(state, "e", space_id, post_id)
+    _await_space_post(state, "d", space_id, post_id)
+
+    def _comment(text: str) -> tuple[int, object]:
+        return _e_request(
+            state,
+            "POST",
+            f"/api/spaces/{space_id}/posts/{post_id}/comments",
+            {"content": text},
+        )
+
+    def _a_holds(comment_id: str) -> bool:
+        return bool(
+            _rows("a", "SELECT 1 FROM space_post_comments WHERE id = ?", (comment_id,))
+        )
+
+    # 3. The normal member path: direct to a, and over the GFS to d.
+    gfs_off = _gfs_log_size()
+    st, body = _comment(f"A follower's comment — {time.time_ns()}")
+    first = _must("e (a follower) comments", st, body, ok=(200, 201))["id"]
+    _poll_rows(
+        "a",
+        "SELECT 1 FROM space_post_comments WHERE id = ?",
+        (first,),
+        bool,
+        what="a never held e's follower comment",
+    )
+    _poll_rows(
+        "d",
+        "SELECT 1 FROM space_post_comments WHERE id = ?",
+        (first,),
+        bool,
+        what="d (a GFS subscriber) never held e's follower comment",
+    )
+    anon = [
+        line
+        for line in _gfs_log_lines_matching("/gfs/member-publish-anon", offset=gfs_off)
+        if "POST" in line and '" 200 ' in line
+    ]
+    if not anon:
+        raise SystemExit(
+            "gfs-follower-comment: the GFS log shows no accepted anonymous "
+            "publish for e's comment"
+        )
+    print("  e's comment reached a directly and d over the GFS ✓")
+
+    # 4. Switch off: one rotation, and the next comment is refused.
+    before = _epoch()
+    _features("a turns follower comments off", allow_subscriber_comment=False)
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and _epoch() <= before:
+        time.sleep(1.0)
+    after = _epoch()
+    if after != before + 1:
+        raise SystemExit(
+            f"gfs-follower-comment: switch off moved a's content epoch "
+            f"{before} → {after}, expected exactly one rotation"
+        )
+    time.sleep(5.0)
+    st, body = _comment(f"After the switch went off — {time.time_ns()}")
+    third = body.get("id") if isinstance(body, dict) else None
+    time.sleep(10.0)
+    if third and _a_holds(third):
+        raise SystemExit(
+            "gfs-follower-comment: a holds e's comment made after follower "
+            "comments were turned off"
+        )
+    print(
+        "gfs-follower-comment: ok (switch on → comment cert + writer key, the "
+        "comment reached a and the GFS subscriber d; switch off → one rotation "
+        f"(epoch {before} → {after}), e's next comment refused, HTTP {st})"
+    )
+
+
 @_offline_step
 def cmd_gfs_private_channel() -> None:
     """v_51 + the owner's ``private_gfs`` option: a PRIVATE space whose owner

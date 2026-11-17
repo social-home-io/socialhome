@@ -301,9 +301,9 @@ class SpaceAuthorship:
         A live writer seat (``member`` / ``moderator`` / ``admin``) — the
         :meth:`acts_for` rule of every federated create — or, with
         ``subscriber_ok``, a live ``subscriber`` seat: a follower's comment
-        while ``allow_subscriber_comment`` is on, a follower's reaction while
-        ``allow_subscriber_react`` is on, a change to the follower's own
-        row. Banned users, removed seats and unknown users hold nothing.
+        (or an edit / delete of its own comment) while
+        ``allow_subscriber_comment`` is on, a follower's reaction while
+        ``allow_subscriber_react`` is on. Banned users, removed seats and unknown users hold nothing.
         Never the host leniency of :meth:`may_author`: a member-published
         item is the author's own, never relayed for someone else."""
         if not author_user_id or not origin_instance_id or not space_id:

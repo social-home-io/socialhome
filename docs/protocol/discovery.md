@@ -2309,9 +2309,9 @@ acts on bound inside the author signature:
 | `post_edit` | post — full snapshot + signed `edited_at` | `write` | the post's author only | `posts` access level |
 | `post_delete` | generic (`space_item_author`) | `write` | the post's author only | `posts` access level |
 | `comment` | generic | `comment` (`write` implies it) | anyone whose cert binds them; id owner-bound to them | live writer seat on the origin, or a follower seat while `allow_subscriber_comment` is on |
-| `comment_edit` | generic — full snapshot | `comment` | the comment's author only | any live seat on the origin (own row) |
-| `comment_delete` | generic | `comment` | the comment's author only | any live seat on the origin (own row) |
-| `reaction_add` / `reaction_remove` | generic | `comment` — at a follower `write`, unless the space lets followers react | the reactor | live writer seat, or a follower seat while `allow_subscriber_react` is on |
+| `comment_edit` | generic — full snapshot | `comment` | the comment's author only | as for `comment` (own row) |
+| `comment_delete` | generic | `comment` | the comment's author only | as for `comment` (own row) |
+| `reaction_add` / `reaction_remove` | generic | `comment` | the reactor | live writer seat, or a follower seat while `allow_subscriber_react` is on |
 | `author_profile` (v_60) | generic — the profile in the signed `content` | `comment` | the author, about themself only (`item_target == post_id == author_user_id`) | — (kept, never a seat; see [Author profiles for followers](#author-profiles-for-followers-v_60)) |
 
 - **Never more permissive than the host path.** The rules mirror the
@@ -2332,10 +2332,8 @@ acts on bound inside the author signature:
   signed author — else a household could pre-empt someone else's row.
   New comment ids must be owner-bound to their author.
 - **Followers rely on the cert.** They hold no roster: the scope plus the v2
-  user binding is the whole check — except a reaction, where a follower
-  cannot tell a comment-only member from a follower, so it accepts a
-  `comment`-scope reaction only while its copy of the space lets followers
-  react.
+  user binding is the whole check. `comment` is every commenter's scope (a
+  comment-only member, a follower who may comment) and carries reactions.
 
 **Ordering independence.**
 

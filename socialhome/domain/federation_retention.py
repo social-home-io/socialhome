@@ -247,6 +247,11 @@ def supersede_key(
         part = payload.get("part", 0)
         if not space_id or not isinstance(part, int) or isinstance(part, bool):
             return None
+        if payload.get("entries") == []:
+            # A credentials-only snapshot (no roster entry — a real roster
+            # is never empty): its own slot, outside the roster prefix, so
+            # it never replaces or drops a queued roster snapshot.
+            return f"roster-credentials:{space_id}"
         return f"{roster_snapshot_key_prefix(space_id)}{part}"
     user_id = payload.get("user_id")
     if not isinstance(user_id, str) or not user_id:

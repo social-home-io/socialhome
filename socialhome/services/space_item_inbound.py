@@ -17,12 +17,12 @@ with the same rules as the federated ``SPACE_COMMENT_*`` /
   and space; so must the id of a delete for a row not held yet.
 * **Member households also check the roster** — the author's live seat on
   the origin household (:meth:`SpaceAuthorship.item_seat_admits`; a
-  follower seat only where the space lets followers comment / react, or for
-  a change to its own row); a post delete runs the ``posts`` access level
+  follower seat only where the space lets followers comment / react — an
+  edit or delete of its own comment needs the comment right like the
+  comment itself); a post delete runs the ``posts`` access level
   (:meth:`SpaceAuthorship.item_access_admits`), matching the ``write`` scope
-  the cert already proves. Followers hold no roster and rely on the cert
-  scope plus the user binding — and accept a ``comment``-scope reaction only
-  while their copy of the space lets followers react.
+  the cert already proves. A household without the roster (a GFS
+  subscriber) relies on the cert scope plus the user binding.
 
 **Ordering independence** (hard requirement 5 of the member-publish docs):
 the GFS delivers one space's items in order, but the host relay, the
@@ -108,7 +108,6 @@ from ..domain.space_item import (
     reaction_emoji_ok,
     stamp_to_db,
 )
-from ..domain.writer_cert import WRITER_SCOPE_WRITE
 from ..federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
@@ -146,7 +145,6 @@ class _Item:
     __slots__ = (
         "author",
         "authorship",
-        "cert_scope",
         "epoch",
         "inner",
         "member",
@@ -164,7 +162,6 @@ class _Item:
         inner: dict[str, Any],
         origin: str,
         stamp: datetime,
-        cert_scope: str,
         member: bool,
         authorship: SpaceAuthorship | None,
         epoch: int | None = None,
@@ -177,7 +174,6 @@ class _Item:
         self.target = str(inner.get("item_target") or "")
         self.post_id = str(inner.get("post_id") or "")
         self.stamp = stamp
-        self.cert_scope = cert_scope
         self.member = member
         self.authorship = authorship
 
@@ -213,7 +209,6 @@ class SpaceItemInbound:
         item_type: str,
         inner: dict[str, Any],
         origin_instance_id: str,
-        cert_scope: str,
         member_household: bool,
         authorship: SpaceAuthorship | None,
         epoch: int | None = None,
@@ -236,7 +231,6 @@ class SpaceItemInbound:
             inner=inner,
             origin=origin_instance_id,
             stamp=stamp,
-            cert_scope=cert_scope,
             member=member_household,
             authorship=authorship,
             epoch=epoch,
@@ -547,7 +541,9 @@ class SpaceItemInbound:
         if comment.deleted or comment.type is not CommentType.TEXT:
             log.debug("space_item: comment %s deleted or not text — edit dropped", cid)
             return False
-        if not await self._seat_ok(item, subscriber_ok=True):
+        if not await self._seat_ok(
+            item, subscriber_ok=item.space.features.allow_subscriber_comment
+        ):
             return False
         if not await self._posts.edit_comment(
             cid,
@@ -596,7 +592,9 @@ class SpaceItemInbound:
             return False
         if comment.deleted:
             return False
-        if not await self._seat_ok(item, subscriber_ok=True):
+        if not await self._seat_ok(
+            item, subscriber_ok=item.space.features.allow_subscriber_comment
+        ):
             return False
         if not await self._posts.soft_delete_comment(cid, space_id=item.space.id):
             return False
@@ -626,7 +624,9 @@ class SpaceItemInbound:
                 cid,
             )
             return False
-        await self._await_post(item, subscriber_ok=True)
+        await self._await_post(
+            item, subscriber_ok=item.space.features.allow_subscriber_comment
+        )
         post = await self._post_here(item.post_id, item)
         if post is None:
             log.info(
@@ -635,7 +635,9 @@ class SpaceItemInbound:
                 cid,
             )
             return False
-        if not await self._seat_ok(item, subscriber_ok=True):
+        if not await self._seat_ok(
+            item, subscriber_ok=item.space.features.allow_subscriber_comment
+        ):
             return False
         tombstone = Comment(
             id=cid,
@@ -823,18 +825,9 @@ class SpaceItemInbound:
         if not reaction_emoji_ok(emoji):
             return False
         features = item.space.features
-        # A follower can't tell a comment-only member from a follower: a
-        # comment-scope reaction counts there only while followers may react.
-        if (
-            not item.member
-            and item.cert_scope != WRITER_SCOPE_WRITE
-            and not features.allow_subscriber_react
-        ):
-            log.info(
-                "space_item: comment-scope reaction where followers may not react "
-                "— dropped"
-            )
-            return False
+        # A household without the roster (a GFS subscriber) goes by the cert:
+        # ``comment`` is every commenter's scope, member or follower alike. A
+        # member household also checks the seat and the switch (``_seat_ok``).
         if not await self._seat_ok(item, subscriber_ok=features.allow_subscriber_react):
             log.warning("space_item: reactor holds no reacting seat here — dropped")
             return False

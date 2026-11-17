@@ -169,7 +169,6 @@ async def _apply(
     item_type: str,
     inner: dict,
     *,
-    cert_scope="write",
     member=False,
     authorship=None,
 ) -> bool:
@@ -179,7 +178,6 @@ async def _apply(
         item_type=item_type,
         inner=inner,
         origin_instance_id=ORIGIN,
-        cert_scope=cert_scope,
         member_household=member,
         authorship=authorship,
     )
@@ -510,21 +508,14 @@ async def test_a_malformed_emoji_is_dropped(env, emoji):
     assert not await _apply(env, "reaction_add", _react(env, "reaction_add", emoji, 1))
 
 
-async def test_a_follower_needs_a_write_cert_unless_follower_reactions_are_on(env):
+async def test_a_comment_only_members_reaction_is_kept_at_a_gfs_subscriber(env):
+    """A GFS subscriber holds no config (its directory stub has every
+    follower switch off) and no roster: it goes by the cert. ``comment`` is
+    every commenter's scope (a moderated space's plain member, a follower
+    alike) and carries reactions — it used to be dropped there as "maybe a
+    follower's"."""
     inner = _react(env, "reaction_add", "👍", 1)
-    assert not await _apply(env, "reaction_add", inner, cert_scope="comment")
-    space = await env["spaces"].get(SPACE)
-    await env["spaces"].save(
-        space.__class__(
-            **{
-                **{f: getattr(space, f) for f in space.__dataclass_fields__},
-                "features": SpaceFeatures(
-                    allow_subscribers=True, allow_subscriber_react=True
-                ),
-            }
-        )
-    )
-    assert await _apply(env, "reaction_add", inner, cert_scope="comment")
+    assert await _apply(env, "reaction_add", inner)
 
 
 async def test_a_member_household_checks_the_reactor_seat(env):
@@ -534,7 +525,6 @@ async def test_a_member_household_checks_the_reactor_seat(env):
         env,
         "reaction_add",
         inner,
-        cert_scope="comment",
         member=True,
         authorship=seats,
     )
@@ -853,6 +843,50 @@ async def test_a_relayed_comment_never_keeps_a_reserved_picture(env, name):
     assert stored is not None and stored.media_url is None
 
 
+class _FollowerSeat(_Seats):
+    """The author holds a live ``subscriber`` seat: admitted only when the
+    space's switch says so (``SpaceAuthorship.item_seat_admits``)."""
+
+    async def item_seat_admits(self, **kw):
+        self.calls.append(("seat", kw))
+        return kw["subscriber_ok"]
+
+
+async def _switches(env, *, comment: bool, react: bool) -> None:
+    space = await env["spaces"].get(SPACE)
+    await env["spaces"].save(
+        space.__class__(
+            **{
+                **{f: getattr(space, f) for f in space.__dataclass_fields__},
+                "features": SpaceFeatures(
+                    allow_subscribers=True,
+                    allow_subscriber_comment=comment,
+                    allow_subscriber_react=react,
+                ),
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize("kind", ["comment", "reaction_add"])
+async def test_a_member_household_refuses_a_follower_write_once_its_switch_is_off(
+    env, kind
+):
+    """A member household holds the config and the roster: with the switch
+    off it refuses a follower's comment / reaction at once, whatever cert
+    the item carries (the rotation that follows a comment switch-off then
+    ends that cert everywhere)."""
+    inner = (
+        _comment(env, _cid())
+        if kind == "comment"
+        else _react(env, "reaction_add", "👍", 1)
+    )
+    await _switches(env, comment=False, react=False)
+    assert not await _apply(env, kind, inner, member=True, authorship=_FollowerSeat())
+    await _switches(env, comment=True, react=True)
+    assert await _apply(env, kind, inner, member=True, authorship=_FollowerSeat())
+
+
 # ── one name on every path: a relayed comment's picture by content ───────
 
 
@@ -906,3 +940,26 @@ async def test_a_relayed_comments_hashes_moved_to_another_comment_are_ignored(en
     assert await _apply(env, "comment", moved)
     stored = await env["posts"].get_comment(other)
     assert stored.media_url == "api/media/x.webp"
+
+
+@pytest.mark.parametrize("kind", ["comment_edit", "comment_delete"])
+async def test_a_follower_edit_or_delete_over_the_gfs_follows_the_comment_switch(
+    env, kind
+):
+    """A follower's edit / delete of its own comment was admitted with the
+    switch off (``subscriber_ok=True``). It needs the comment right, like the
+    comment itself — one rule for every role."""
+    cid = _cid()
+    await _switches(env, comment=True, react=False)
+    assert await _apply(
+        env,
+        "comment",
+        _comment(env, cid),
+        member=True,
+        authorship=_FollowerSeat(),
+    )
+    await _switches(env, comment=False, react=False)
+    seats = _FollowerSeat()
+    change = _inner(kind, cid, env["post_id"], content="rewritten", created_at=_ts(5))
+    assert not await _apply(env, kind, change, member=True, authorship=seats)
+    assert seats.calls and all(not kw["subscriber_ok"] for _k, kw in seats.calls)
