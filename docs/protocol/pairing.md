@@ -48,14 +48,15 @@ taken for a pairing, and the two households can still pair
 - A household we hold a space seat for is not paired: every pairing check
   asks `is_paired` (confirmed and not `space_session`), never the status
   alone. Its pending half waits beside the seat
-  ([below](#pairing-with-a-household-you-share-a-space-with)); an approval
-  kept that way that does not confirm on the requester's first envelope
-  refuses that envelope.
+  ([below](#pairing-with-a-household-you-share-a-space-with)), and the
+  seat is replaced only on proof that the other household confirmed.
 - `PAIRING_ABORT` cancels a pending session only when the peer identity
   stored on it derives to the envelope's `from_instance` — a household
   can cancel its own handshake, never another's. It also drops the
-  sender's half-pair row unless that pairing is confirmed, and our half
-  kept beside the sender's space seat (never the seat). Sent by an admin
+  sender's half-pair row unless that pairing is confirmed, and — only the
+  one of the code it names — our half kept beside the sender's space seat
+  (never the seat). A space seat may send it only while such a half
+  exists. Sent by an admin
   cancelling a pending pairing ([below](#cancelling-a-pending-pairing)) and
   by a trust-relay target declining a request.
 
@@ -452,13 +453,32 @@ upgrades a seat, and both handshakes follow one rule
   a handshake normally stores in the `remote_instances` row (its keys, the
   peer's inbox URL, our inbox id for it, the per-pair choices) is kept in
   memory instead, and the seat row is not touched. The space keeps flowing
-  under the seat's keys the whole time — there is no pause while the
-  people compare a code or wait for an approval.
-- **Only the confirmed pairing replaces the seat**, in one transaction
-  (`upgrade_seat_instance`): keys, inbox URL, a fresh inbox id (a seat has
-  no address; the pairing never inherits the seat's), `share_home` /
-  `gfs_relay` as chosen in this handshake. What is queued for the seat
-  goes out to the pair (queued envelopes are sealed at delivery).
+  under the seat's keys the whole time. Whether the row is a seat is
+  decided inside the write (`save_pending_instance`).
+- **A seat and a pending pairing never overwrite each other**, whichever
+  comes first: a seat made while a handshake's row is pending takes the
+  row and the handshake goes on beside it; a lazy seat is never made over
+  an unpair tombstone (it would cancel the queued `UNPAIR`).
+- **A seat is replaced only on proof that the other household confirmed**,
+  in one transaction (`upgrade_seat_instance`): keys, inbox URL, a fresh
+  inbox id, `share_home` / `gfs_relay` as chosen in this handshake.
+  Replacing it cuts the seat's keys, so a household that replaced its seat
+  alone would have lost the space between the two. The proof is:
+
+  | Handshake | Side | Replaces its seat on |
+  |---|---|---|
+  | Trust relay | requester | the approver's signed ack |
+  | Trust relay | approver | the requester's first envelope under the approved keys |
+  | Pairing code | scanner | the code owner's signed peer-confirm |
+  | Pairing code | code owner (its admin entered the code) | the scanner's first envelope under the code's keys |
+
+  The last row is the difference to a pairing without a seat, where the
+  code owner's row confirms at once: here its half turns into an
+  *approval* that waits (`PEER_HELLO_WAIT_SECONDS`, 24 h), the wizard says
+  "waiting for them to confirm", and the Connections list shows it as
+  pending. A scanner that answers the peer-confirm with a refusal is no
+  longer waiting: the half is dropped, the seat is untouched, the admin is
+  told to start again.
 - **A cancel or an expiry forgets the half.** The seat is as it was.
 - **A seat is never "already paired"**, never vouches for an
   introduction, and is nobody an introducer vouches to.
@@ -477,102 +497,144 @@ sequenceDiagram
     C->>B: PAIRING_INTRO_AUTO_ACK_VIA
     B->>A: PAIRING_INTRO_AUTO_ACK
     Note over A: sigs verify → the confirmed pair REPLACES the seat
-    A->>C: first envelope, under the NEW keys, on the approval's inbox
+    A->>C: first envelope, under the NEW keys
     Note over C: verifies + decrypts under the approved keys<br/>→ the confirmed pair REPLACES the seat → dispatch
     Note over A,C: paired: SPACE_* and everything else go direct
 ```
 
-The wire is unchanged — no new event, no new field; a household that has
-no seat for the other (or runs an older version) sees and stores exactly
-what it always did.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as HFS A — shows the code<br/>(seat for C)
+    participant C as HFS C — scans<br/>(seat for A)
+    C->>A: PAIRING_PEER_ACCEPT (inbox, or sealed through the code's GFS)
+    Note over A,C: both halves kept BESIDE the seats — SPACE_* keep flowing under the seat keys
+    Note over A: admin enters the code → the half waits as an approval<br/>the seat STAYS
+    A->>C: PAIRING_PEER_CONFIRM (signed)
+    Note over C: the confirmed pair REPLACES the seat
+    C->>A: first envelope under the code's keys<br/>(inbox, DataChannel or GFS relay)
+    Note over A: verifies + decrypts under the code's keys<br/>→ the confirmed pair REPLACES the seat → dispatch
+```
 
-**Bounds.** A staged half lives as long as its handshake can complete —
-`PAIRING_TTL_SECONDS` (5 min) for a pairing code,
-`AUTO_PAIR_REQUEST_TTL_SECONDS` (24 h) for a trust-relay request or
-approval — and at most 64 are kept. They are in memory only, and no key
-of an unconfirmed handshake is written to disk. The connections list shows
-a staged half as the pending pairing it is, in the seat's place
-(`shares_space: true`).
+The wire is unchanged — no new event, no new field. What a household
+without a seat for the other (or an older one, see below) sees and stores
+is what it always was.
+
+**Bounds.** A pairing code's half lives for `PAIRING_TTL_SECONDS` (5 min),
+a trust-relay request for `AUTO_PAIR_REQUEST_TTL_SECONDS` (24 h), a code
+whose admin entered it for `PEER_HELLO_WAIT_SECONDS` (24 h); a trust-relay
+approval has no expiry, as its row never had — it ends with the
+requester's first envelope or our admin's cancel. At most 64 halves are
+kept. They are in memory only, and no key of an unconfirmed handshake is
+written to disk. The connections list shows a staged half as the pending
+pairing it is, in the seat's place (`shares_space: true`).
 
 **Each handshake confirms its own half.** A half is replaced when another
 handshake with the same household starts, so every confirmation checks the
-half's kind first: a pairing code (the admin's entry, the signed
-peer-confirm) confirms only a `code` half, an ack only our `request`, the
-requester's first envelope only an `approval` — and an approval never
-reuses the inbox id a code or a request gave out. A code can therefore
-never confirm keys and an address an introducer vouched for. A half
-without the peer's identity key or session keys is never confirmed.
-Saving, confirming and cancelling a half kept beside a seat are
-serialised per household, so a confirm and a cancel of the same half have
-exactly one winner, as the row path's single transaction guarantees. (Two
-households that each request the other through a friend, and each approve
-before either ack arrives, both hold an approval and both ignore the ack
-for their own request: either cancels and pairs again.)
+half first: a pairing code (the admin's entry, the signed peer-confirm)
+confirms only a `code` half whose inbox is the one that code's session
+minted; an ack only our `request`; a first envelope only an `approval` —
+and an approval never reuses the inbox id a code or a request gave out. A
+code can therefore never confirm keys and an address an introducer vouched
+for, nor another code's. A half without the peer's identity key or session
+keys is never confirmed. Saving, confirming and cancelling a half kept
+beside a seat are serialised per household, so a confirm and a cancel of
+the same half have exactly one winner, as the row path's single
+transaction guarantees. (Two households that each request the other
+through a friend, and each approve before either ack arrives, both hold an
+approval and both ignore the ack for their own request: either cancels and
+pairs again.)
 
-**What the inbound pipeline accepts.** A keyed staged half is resolved by
-its own inbox id (`FederationService._lookup_inbox`) and then held to its
-kind, straight after the lookup and before any crypto
-(`make_check_staged_half`) — the row still says "confirmed seat", so the
-half's keys must not open what a pending row's status keeps shut:
+**What the inbound pipeline accepts.** Only an **approval** is ever read
+under a staged half's keys (`make_check_staged_half`): a trust-relay
+approval, or a pairing code our own admin entered. A pairing code nobody
+verified, and our own keyless request, open nothing.
 
-- an **approval** takes the requester's first envelope under the approved
-  keys; it verifies and decrypts against the approval and confirms the
-  pair before dispatch. The requester sends several envelopes at once
-  when its side confirms: the first confirms, the pair is announced once,
-  and the others go on as soon as it is confirmed. If the pair is NOT
-  confirmed by then (the approval was withdrawn or expired in that very
+- On the HTTPS inbox the approval is resolved by its own inbox id
+  (`FederationService._lookup_inbox`).
+- On the transports that know the sender only by its id (GFS relay,
+  mailbox, DataChannel — the only ones a GFS-reach pairing has) the lookup
+  finds the seat row and carries the approval beside it. The envelope is
+  the seat's unless it turns out to be the pairing's: an event a seat may
+  not send, or a payload that opens only under the approval's keys. Over
+  the relay the approval must itself be a relay pairing (its code had a
+  GFS reach), the rule a paired peer's row is held to.
+- The first such envelope confirms the pair before dispatch; the others
+  the peer sent at the same time go on once it is confirmed. If the pair
+  is NOT confirmed by then (the approval was withdrawn in that very
   moment), the envelope is refused with the answer an unknown inbox gets
-  (fail closed);
-- a **pairing code**'s half takes exactly one event, the peer's
-  `PAIRING_ABORT` — the other household cancelled, and our half and its
-  session go with it, so our admin cannot confirm alone afterwards;
-- nothing else, and nothing for our own keyless request.
+  (fail closed).
 
-The seat's own traffic (mailbox, relay, host hop) is resolved by the
-household's id and keeps using the seat row.
+The seat's own traffic keeps using the seat row.
+
+**Cancelling over a seat.** The cancel of a pairing code is sent as the
+seat's own traffic: a `PAIRING_ABORT {token}` under the seat's keys, on
+whatever route reaches the seat (mailbox, relay, host hop), queued in the
+outbox like any envelope. A seat may send exactly that one pairing event,
+and only while a pairing code's half is kept beside it
+(`make_check_peer_class`); the receiver cancels only the half of the code
+the abort names. So the other household hears it however the two reach
+each other — also with no inbox address at all — and cannot enter the code
+afterwards. Withdrawing a trust-relay approval sends `UNPAIR` under the
+approval's keys, as without a seat.
 
 **The moment of the switch, and its limits.** Each side switches from the
 seat's keys to the pair's when IT confirms; the two confirmations are one
-message apart (the peer-confirm, or the requester's first envelope).
+message apart.
 
 - A space envelope sealed under the seat's keys that reaches the side
-  which already switched is refused there; the GFS accepted it, so it is
-  not re-sent. Normally that is the instant between two messages, against
-  a pause that used to last until the people had finished (or for good,
-  after a cancel) — but it lasts as long as the second confirmation takes
-  to arrive.
-- If the second confirmation never arrives — the approver restarted
-  between its approval and the requester's first envelope (the approval
-  was in memory), or a scanner did between its scan and the peer-confirm —
-  one household holds the pairing and the other still the seat, and
-  nothing flows between the two. The household holding the pairing sees a
-  connection that never connects and removes it: its `UNPAIR` is answered
-  `unknown_inbox`, which settles after a few attempts
+  which already switched is refused there and not re-sent. Because each
+  side switches only on proof that the other is in, that is the instant
+  between two messages.
+- The side that confirms first is the one that received a signed message
+  (the ack, the peer-confirm). If the OTHER side loses its half before
+  the first envelope arrives — it restarted (the half is in memory), or
+  its 24 h ran out — one household holds the pairing and the other still
+  the seat, and nothing flows between the two. The household holding the
+  pairing sees a connection that never connects and removes it: its
+  `UNPAIR` is answered `unknown_inbox`, which settles after a few attempts
   (`PAIR_WINDOW_404_ATTEMPTS`), and it is seated again from the card
   (below). Then the people can pair again.
+
+**Reached through a GFS stays true.** A household that joined by link is
+flagged "GFS-reached" by its host and keeps one mailbox at that GFS; every
+other member reaches it there. That does not change when the household and
+its host pair: the GFS and each side's role in the sealed redeem are kept
+on the card's row (`space_instances.mailbox`: `gfs`, `gfs_role`, written
+while the seat row still says so), and `_reached_by_gfs` / `_space_gfs`
+read them when the row is a pairing.
 
 **After an unpair** the seat is back: the purge of the pair's row is
 followed by the member directory seating the household again from its
 member card (`SpaceMemberDirectory.reseat`, wired as
 `PeerUnpairService.attach_after_purge`), when we hold a card of it that
-our own roster still lets us use, in a space our people are in. Both
-households derive the same static-static keys as before. Limits:
+our own roster still lets us use, in a space our people are in — the
+directory seat of two members, or, for a link-joined household and its
+host, the sealed-redeem seat through the GFS of that redeem with each
+side's role in it. Both households derive the same static-static keys as
+before. Limits:
 
-- the re-made seat is always a **directory seat** (no `relay_via`). For
-  two members of a space that is the seat they had. For a link-joined
-  household and its host — whose seat was a sealed-redeem seat with the
-  GFS in `relay_via` — it is not the same seat: the host no longer counts
-  the household as GFS-reached, a host hop through that row and the
-  30-minute sync with it stop, and without another GFS-reached member its
-  mailbox may be released. Their space content still reaches each other's
-  mailbox while one exists; joining by the link again restores the
-  original seat. (Before, a pairing over such a seat left no seat at all
-  after an unpair.)
 - without a member card (a household below v_89) there is nothing to
   re-seat from;
+- a sealed-redeem seat made before this release is noted (`gfs`,
+  `gfs_role`) at the directory's next sweep; a pair that paired and
+  unpaired before that sweep gets a directory seat;
 - an unpair tombstone (the peer was offline) is re-seated only once it is
-  purged — a seat made earlier would replace the tombstone and cancel the
-  queued `UNPAIR`.
+  purged.
+
+**Mixed versions (v_80 and earlier releases).** An older household knows
+none of this and needs none of it on the wire. Paired with one that does:
+
+- as the **approver** of a trust-relay request from a household it holds a
+  seat for, it answers nothing ("already paired") — the request expires;
+- as the **requester**, it refuses to ask ("already paired");
+- with a **pairing code**, it overwrites its own seat with the pending
+  row, as before: the space between the two pauses until the people
+  finish. If the older household SHOWS the code, it confirms its row when
+  its admin enters it, and its peer-confirm completes our side. If it
+  SCANS, it confirms on our peer-confirm and then announces its
+  capabilities under the code's keys — the first envelope our side waits
+  for. The pairing completes either way.
 
 ## Roster catch-up on pair-confirm — `USERS_SYNC`
 
@@ -881,11 +943,10 @@ A pending pairing with a household we share a space with has no row of its
 own ([above](#pairing-with-a-household-you-share-a-space-with)): its
 cancel drops the sessions, then forgets the half, then tells the peer with
 the half's keys — and never touches the seat: the space keeps working, and
-a second cancel is a `404` like any other. The peer's half is beside ITS
-seat too; when it has an inbox address, its pipeline takes the
-`PAIRING_ABORT` on the handshake's inbox and drops that half and its
-session (a peer without an address is not told, as for any pending
-pairing: its half expires with its session). `DELETE
+a second cancel is a `404` like any other. For a pairing code the peer
+is told over the seat (a queued `PAIRING_ABORT {token}`, on whatever
+route reaches the seat), so it hears it with or without an inbox address
+and drops the half of that code and its session. `DELETE
 /api/pairing/connections/{instance_id}` never unpairs a seat (`404`).
 
 ### Pending states
