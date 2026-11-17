@@ -53,8 +53,8 @@ the live shape (:func:`~socialhome.domain.post.post_to_wire_dict` — every
 picture, the file attachment, the feed flag), a calendar event too
 (:func:`~socialhome.domain.calendar.calendar_event_to_wire_dict` — its
 time zone, location and whether it is announced in the feed: a receiver
-reads an absent flag as "announce"), and every row with files
-carries their hashes (v_85 ``files``, as the live senders attach them), so
+reads an absent flag as "announce"), and a post, comment, calendar event
+or gallery item with files carries their hashes (v_85 ``files``, as the live senders attach them), so
 the receiver stores them under the content names every other path gives
 them. A mirror of a post's media in the system "Posts" album is never
 replayed (the repo leaves it out): each household rebuilds its own.
@@ -1040,7 +1040,9 @@ class SpaceSyncResumeProvider(FileHashesMixin):
         like its live event — only to a household that reads the map, as
         ``broadcast_to_space_members`` sends it."""
         sent = 0
-        hashed = media_of is not None and await self._federation.space_member_supports(
+        hashed = bool(
+            rows and media_of is not None
+        ) and await self._federation.space_member_supports(
             to, min_version=FederationCapability.MIN_FOR_CONTENT_FILE_HASHES
         )
         for row in rows:

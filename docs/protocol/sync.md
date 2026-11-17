@@ -119,10 +119,12 @@ naive stored stamp and a tz-aware `since` compare as times.
 row it already holds as an upsert of that row, and reads an absent field
 by its default — so a replay carries everything the live fan-out does,
 built by the same function: a post is `post_to_wire_dict` (every picture
-in `image_urls`, the file attachment, `hidden_from_feed`), a calendar
+in `image_urls`, `hidden_from_feed`; what no create carries — a held
+post's edit stamp, its "no link card" choice, its file attachment — the
+receiver keeps), a calendar
 event `calendar_event_to_wire_dict` (`tz`, `location`, `capacity`,
-`announce_in_feed` — absent reads as "announce"). Every row with files
-also names their hashes (the v_85 `files` map, to a household at v_85 or
+`announce_in_feed` — absent reads as "announce"). A post, comment,
+calendar event or gallery item with files also names their hashes (the v_85 `files` map, to a household at v_85 or
 later, as `broadcast_to_space_members` sends it), so the receiver stores
 them under the content names every other path gives them and the
 replaying household's `SPACE_MEDIA_BLOB`s fill them. A member healed by a

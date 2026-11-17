@@ -23,9 +23,14 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from socialhome.app_keys import federation_service_key
+from socialhome.domain.calendar import CalendarEvent
 from socialhome.domain.federation import FederationEventType as FET
 from socialhome.domain.file_hashes import space_content_media_name
 from socialhome.domain.post import Post, PostType
+from socialhome.federation.owner_bound_id import (
+    SPACE_CALENDAR_EVENT_KIND,
+    mint_owner_bound_id,
+)
 from socialhome.federation.sync.space.resume import SpaceSyncResumeProvider
 from socialhome.services.media_file_hasher import MediaFileHasher
 from tests.protocol.test_content_file_hashes import _image_urls, _media, env
@@ -240,3 +245,101 @@ async def test_a_helpers_replay_leaves_a_post_its_pictures(env, tmp_dir, held):
     assert PIC_SC in (await _image_urls(db, "p-kept") or "")
     await _blob(app, "p-kept")
     assert (_media(tmp_dir) / PIC_SC).read_bytes() == PIC
+
+
+async def test_a_replay_keeps_what_a_create_never_carries(env, tmp_dir):
+    """A ``SPACE_POST_CREATED`` carries no edit stamp, no "no link card"
+    choice, and its receiver reads no file attachment from it — a held
+    post got those from an edit or the host's §25.6 stream. A re-sent
+    create (a replay) upserts the row: it must not clear them."""
+    app, db = env
+    await _deliver(
+        app,
+        FET.SPACE_POST_CREATED,
+        {
+            "id": "p-kept",
+            "author": "u-a",
+            "type": "image",
+            "content": "posted while the host was away",
+            "image_urls": [f"api/media/{PIC_SC}"],
+            "files": {PIC_SC: {"h": PIC_H}},
+            "files_suite": "sha256",
+        },
+        sender=AUTHOR,
+    )
+    meta = (
+        '{"url": "api/media/doc.pdf", "mime_type": "application/pdf",'
+        ' "original_name": "doc.pdf", "size_bytes": 7}'
+    )
+    await db.enqueue(
+        "UPDATE space_posts SET edited_at='2026-06-01T10:00:00+00:00',"
+        " no_link_preview=1, file_meta_json=? WHERE id='p-kept'",
+        (meta,),
+    )
+    for event_type, payload in await _helper_replay(tmp_dir / "helper-media"):
+        await _deliver(app, event_type, payload, sender=AUTHOR)
+    row = await db.fetchone(
+        "SELECT edited_at, no_link_preview, file_meta_json FROM space_posts"
+        " WHERE id='p-kept'"
+    )
+    assert row["edited_at"] is not None
+    assert row["no_link_preview"] == 1
+    assert "doc.pdf" in (row["file_meta_json"] or "")
+
+
+class _HelperEvents:
+    def __init__(self, events: list[CalendarEvent]) -> None:
+        self._events = events
+
+    async def list_events_since(self, space_id, since, *, limit=500):
+        return list(self._events)
+
+
+async def test_a_helpers_replay_of_an_unannounced_event_mints_no_feed_card(env):
+    """The GFS demo chain: d created an event it did not announce while e
+    was offline; d's replay carried no ``announce_in_feed``, which e read
+    as "announce" — a feed card on e that neither a nor d shows. The replay
+    is the live payload: no card, and the event keeps its time zone."""
+    app, db = env
+    event_id = mint_owner_bound_id(
+        SPACE_CALENDAR_EVENT_KIND, space_id=SP, owner_user_id="u-a"
+    )
+    start = datetime.now(UTC) + timedelta(days=30)
+    mesh = _Mesh()
+    provider = SpaceSyncResumeProvider(
+        federation_service=mesh,
+        space_repo=_HelperSpaces(),
+        space_post_repo=_HelperPosts([]),
+        space_calendar_repo=_HelperEvents(
+            [
+                CalendarEvent(
+                    id=event_id,
+                    calendar_id=SP,
+                    summary="Missed while the host was away",
+                    start=start,
+                    end=start + timedelta(hours=2),
+                    created_by="u-a",
+                    tz="Europe/Berlin",
+                    announce_in_feed=False,
+                )
+            ]
+        ),
+    )
+    assert (
+        await provider.replay_space_to(space_id=SP, instance_id="us", since=_ago(2))
+        == 1
+    )
+    for event_type, payload in mesh.sent:
+        await _deliver(app, event_type, payload, sender=AUTHOR)
+    row = await db.fetchone(
+        "SELECT tz, announce_in_feed FROM space_calendar_events WHERE id=?",
+        (event_id,),
+    )
+    assert row is not None and row["tz"] == "Europe/Berlin"
+    assert row["announce_in_feed"] == 0
+    assert (
+        await db.fetchone(
+            "SELECT 1 FROM space_posts WHERE linked_event_id=?", (event_id,)
+        )
+        is None
+    )

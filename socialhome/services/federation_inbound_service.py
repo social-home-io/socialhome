@@ -2080,6 +2080,13 @@ class FederationInboundService(ProtectionGateMixin):
                 deleted=row.deleted,
                 moderated=row.moderated,
                 hidden_from_feed=row.hidden_from_feed,
+                # What no create carries (or this handler reads from one):
+                # the row's edit stamp, its "no link card" choice and its
+                # file attachment came from an edit or the host's §25.6
+                # stream — a re-sent create (a resume replay) keeps them.
+                edited_at=row.edited_at,
+                no_link_preview=row.no_link_preview,
+                file_meta=row.file_meta,
             )
         elif not await authorship.may_author(event, space_id, post.author):
             await authorship.hold_or_refuse(
