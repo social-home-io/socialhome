@@ -1247,3 +1247,23 @@ async def test_no_current_cert_for_an_author_who_left_or_without_the_seed():
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        WRITER_SCOPE_FOLLOWER,
+        WRITER_SCOPE_FOLLOWER_COMMENT,
+        WRITER_SCOPE_FOLLOWER_REACT,
+        WRITER_SCOPE_COMMENT,
+        WRITER_SCOPE_WRITE,
+    ],
+)
+async def test_a_household_stores_its_cert_whatever_its_scope(scope):
+    """B1 (#1375 review): ``accept`` / ``_stored_valid`` verified a cert
+    "for its own scope" — a follower scope is no requirement, so a follower
+    household could never store its cert (and kept asking for it)."""
+    svc, _keys = _svc(seed=None)
+    wire = _issued(scope=scope)
+    assert await svc.accept("sp-1", wire) is True
+    assert await svc.current_own_cert_wire("sp-1") == wire

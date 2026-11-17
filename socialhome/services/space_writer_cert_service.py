@@ -61,6 +61,7 @@ from ..domain.gfs_channel import GFS_CHANNEL_FIELD
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceFeatureAccess, SpaceRole
 from ..domain.writer_cert import (
     MAX_WRITER_USERS,
+    WRITER_ACTION_PROFILE,
     WRITER_SCOPE_COMMENT,
     WRITER_SCOPE_FOLLOWER,
     WRITER_SCOPE_FOLLOWER_COMMENT,
@@ -703,7 +704,8 @@ class SpaceWriterCertService:
                 space_id=space_id,
                 epoch=cert.epoch,
                 author_pk=self._own_pk,
-                required_scope=cert.scope,
+                # Every scope grants ``profile``: "is this a cert at all".
+                required_scope=WRITER_ACTION_PROFILE,
             )
         except (UnsupportedWriterCertSuite, InvalidWriterCert) as exc:
             log.warning("writer cert for space %s refused: %s", space_id, exc)
@@ -770,7 +772,8 @@ class SpaceWriterCertService:
                 space_id=space_id,
                 epoch=epoch,
                 author_pk=self._own_pk,
-                required_scope=cert.scope,
+                # Every scope grants ``profile``: "is this a cert at all".
+                required_scope=WRITER_ACTION_PROFILE,
             )
         except ValueError as exc:
             log.info(
