@@ -117,6 +117,8 @@ from ..domain.writer_cert import (
     FOLLOWER_CERT_RENEW_S,
     FOLLOWER_CERT_TTL_S,
     FOLLOWER_SCOPES,
+    WriterCert,
+    follower_cert_fresh,
     scope_permits,
 )
 from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
@@ -167,14 +169,20 @@ _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 def _cert_lets(cert: dict, author_user_id: str, item_type: str) -> bool:
     """Whether our wire cert lets ``author_user_id`` publish ``item_type``:
-    the scope the type needs (:func:`required_scope` — ``write`` for a post
-    and its edit / delete, ``comment`` for comments and reactions) and a v2
-    user binding naming them. The binding names the users holding the
+    within its lifetime (a follower cert lives 24 h), the right the type
+    needs (:func:`required_scope` — ``write`` for a post and its edit /
+    delete, ``comment`` for comments, ``react`` for reactions, ``profile``
+    for an author profile) and a v2 user binding naming them. The binding names the users holding the
     cert's scope, so a comment-only user of a household holding a ``write``
     cert is not bound and keeps the host path."""
     users = cert.get("writer_user_ids")
+    try:
+        fresh = follower_cert_fresh(WriterCert.from_wire(cert), now=int(time.time()))
+    except ValueError:
+        return False
     return (
-        scope_permits(str(cert.get("scope") or ""), required_scope(item_type))
+        fresh
+        and scope_permits(str(cert.get("scope") or ""), required_scope(item_type))
         and bool(cert.get("users_sig"))
         and isinstance(users, list)
         and author_user_id in users
@@ -672,7 +680,11 @@ class GfsMemberPublishService:
             if epoch is None:
                 return None
             cert = await self._writer_certs.own_cert(space_id, epoch)
-            if cert is None or not scope_permits(cert.scope, needed):
+            if (
+                cert is None
+                or not scope_permits(cert.scope, needed)
+                or not follower_cert_fresh(cert, now=int(time.time()))
+            ):
                 log.info(
                     "gfs.member_publish: no %s cert for space %s epoch %d",
                     needed,

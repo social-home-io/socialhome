@@ -1939,3 +1939,29 @@ async def test_a_moderated_members_post_asks_for_nothing(world):
     world["svc"]._writer_certs.scope = "comment"
     assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "post") == []
     assert seen.events == [] and world["svc"]._writer_certs.asked == set()
+
+
+async def test_an_expired_follower_cert_takes_the_host_path(world):
+    """S4 (#1375 review): the publisher used a follower cert past its
+    lifetime — every receiver refuses it while the server takes it, so an
+    author profile was even recorded as published. Past its lifetime it
+    publishes nothing (the host path carries the write), asks for a new
+    cert, and nothing is recorded."""
+    _asking(world)
+    certs = world["svc"]._writer_certs
+    certs.scope = "follower"
+    certs.issued_at = int(time.time()) - FOLLOWER_CERT_TTL_S - 60
+    assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "comment") == []
+    assert certs.asked == {(SPACE_ID, "cert")}
+    published: list[bool] = []
+
+    async def _on_published() -> None:
+        published.append(True)
+
+    assert world["svc"].schedule_item(
+        SPACE_ID, AUTHOR, "comment", {"item_target": "c-9"}, on_published=_on_published
+    )
+    await world["svc"].wait_idle()
+    assert published == []
+    # Sealing refuses it too, whatever planned it.
+    assert await world["svc"]._seal(SPACE_ID, "comment", {"item_target": "c-9"}) is None
