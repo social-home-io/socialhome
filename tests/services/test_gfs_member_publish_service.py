@@ -1915,6 +1915,10 @@ async def test_a_follower_cert_near_its_end_is_renewed_while_it_still_works(worl
     seen = _asking(world)
     certs = world["svc"]._writer_certs
     certs.scope = "follower"
+    space = world["spaces"].spaces[SPACE_ID]
+    world["spaces"].spaces[SPACE_ID] = replace(
+        space, features=replace(space.features, allow_subscriber_comment=True)
+    )
     certs.issued_at = int(time.time()) - FOLLOWER_CERT_TTL_S + 30 * 60
     assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "comment") != []
     assert certs.asked == {(SPACE_ID, "cert")} and len(seen.events) == 1
@@ -1965,3 +1969,26 @@ async def test_an_expired_follower_cert_takes_the_host_path(world):
     assert published == []
     # Sealing refuses it too, whatever planned it.
     assert await world["svc"]._seal(SPACE_ID, "comment", {"item_target": "c-9"}) is None
+
+
+async def test_a_follower_does_not_publish_what_its_switch_no_longer_allows(world):
+    """N1 (#1375 review): the writer group key outlives a follower cert (no
+    rotation on switch-off). The follower household holds the config, so
+    it stops publishing over the GFS the moment its switch is off — its
+    write takes the host path, which every member household refuses."""
+    certs = world["svc"]._writer_certs
+    certs.scope = "follower"
+    space = world["spaces"].spaces[SPACE_ID]
+    world["spaces"].spaces[SPACE_ID] = replace(
+        space,
+        features=replace(
+            space.features, allow_subscriber_comment=True, allow_subscriber_react=False
+        ),
+    )
+    assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "comment") != []
+    assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "reaction_add") == []
+    world["spaces"].spaces[SPACE_ID] = replace(
+        space, features=replace(space.features, allow_subscriber_comment=False)
+    )
+    assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "comment") == []
+    assert await world["svc"].plan_item(SPACE_ID, AUTHOR, "comment_delete") == []

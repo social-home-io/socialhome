@@ -117,6 +117,8 @@ from ..domain.writer_cert import (
     FOLLOWER_CERT_RENEW_S,
     FOLLOWER_CERT_TTL_S,
     FOLLOWER_SCOPES,
+    WRITER_ACTION_REACT,
+    WRITER_SCOPE_COMMENT,
     WriterCert,
     follower_cert_fresh,
     scope_permits,
@@ -187,6 +189,22 @@ def _cert_lets(cert: dict, author_user_id: str, item_type: str) -> bool:
         and isinstance(users, list)
         and author_user_id in users
     )
+
+
+def _follower_switch_allows(space: Space, cert: dict, item_type: str) -> bool:
+    """Whether the space's follower switch still allows a follower-scope
+    *item_type* (we hold the config; a member's scope is not affected). The
+    writer group key outlives a follower cert, so an honest follower stops
+    here the moment the switch is off."""
+    if str(cert.get("scope") or "") not in FOLLOWER_SCOPES:
+        return True
+    features = space.features
+    needed = required_scope(item_type)
+    if needed == WRITER_SCOPE_COMMENT:
+        return features.allow_subscriber_comment
+    if needed == WRITER_ACTION_REACT:
+        return features.allow_subscriber_react
+    return features.allow_subscriber_comment or features.allow_subscriber_react
 
 
 #: Random offset (seconds, either way) on an anonymous request's ``ts``. Well
@@ -458,7 +476,11 @@ class GfsMemberPublishService:
             # (the cert rides inside the ciphertext, as always).
             cert = await self._writer_certs.current_own_cert_wire(space_id)
             await self._ask_for_cert(space, cert, author_user_id, item_type)
-            if cert is None or not _cert_lets(cert, author_user_id, item_type):
+            if (
+                cert is None
+                or not _cert_lets(cert, author_user_id, item_type)
+                or not _follower_switch_allows(space, cert, item_type)
+            ):
                 return []
             return await self._channels.plan(space_id)
         if not self._publicly_readable(space):
@@ -468,7 +490,11 @@ class GfsMemberPublishService:
             return []
         cert = await self._writer_certs.current_own_cert_wire(space_id)
         await self._ask_for_cert(space, cert, author_user_id, item_type)
-        if cert is None or not _cert_lets(cert, author_user_id, item_type):
+        if (
+            cert is None
+            or not _cert_lets(cert, author_user_id, item_type)
+            or not _follower_switch_allows(space, cert, item_type)
+        ):
             return []
         epoch = await self._crypto.get_current_epoch(space_id)
         if epoch is None or (
