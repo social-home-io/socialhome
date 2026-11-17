@@ -1817,3 +1817,32 @@ async def test_a_replayed_calendar_event_is_the_live_payload(provider_factory):
     assert payload["tz"] == "Europe/Berlin"
     assert payload["location"] == "Kitchen"
     assert payload["capacity"] == 4
+
+
+async def test_a_calendar_events_feed_card_is_never_replayed(provider_factory):
+    """Every household mints its own feed card for an announced calendar
+    event (``CalendarFeedBridge``, a random id per household), so the live
+    fan-out never sends one. A replayed card would land as a SECOND,
+    unlinked card next to the receiver's own: the replay leaves it out and
+    replays the calendar event, from which the receiver's bridge works."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    at = base + timedelta(minutes=1)
+    card = replace(_post(0, at), type=PostType.EVENT, linked_event_id="ev-0")
+    provider, fed, _ = provider_factory(
+        posts=[card, _post(1, at)],
+        cal_events=[_cal_event(0, at)],
+        members=["peer-a"],
+    )
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    assert [
+        s["payload"]["id"]
+        for s in fed.sent
+        if s["type"] is FederationEventType.SPACE_POST_CREATED
+    ] == ["p-1"]
+    assert [
+        s["payload"]["event_id"]
+        for s in fed.sent
+        if s["type"] is FederationEventType.SPACE_CALENDAR_EVENT_CREATED
+    ] == ["ev-0"]

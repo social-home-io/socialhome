@@ -150,7 +150,9 @@ Implemented by `socialhome/federation/sync/space/resume.py`
 poll as `SPACE_POLL_CREATED` (created once on the receiver; votes and
 closure heal on the host's stream). Today's cut replays:
 
-- `SPACE_POST_CREATED` — posts (`space_post_repo.list_since`)
+- `SPACE_POST_CREATED` — posts (`space_post_repo.list_since`) — never a
+  calendar event's feed card (`linked_event_id`): as live, every
+  household's bridge mints its own from the replayed event
 - `SPACE_COMMENT_CREATED` — comments on those posts
   (`space_post_repo.list_comments_since`, JOIN through `space_posts`)
 - `SPACE_TASK_CREATED` — tasks (`space_task_repo.list_since`)

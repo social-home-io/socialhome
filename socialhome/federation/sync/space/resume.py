@@ -562,6 +562,11 @@ class SpaceSyncResumeProvider(FileHashesMixin):
             since,
             limit=MAX_PER_RESOURCE,
         )
+        # A calendar event's feed card is never sent, live or replayed:
+        # every household's ``CalendarFeedBridge`` mints its own (under its
+        # own id) from the event, which is replayed below — a replayed card
+        # would land as a second, unlinked one.
+        posts = [p for p in posts if p.linked_event_id is None]
         sent = await self._send_each(
             posts,
             FederationEventType.SPACE_POST_CREATED,
