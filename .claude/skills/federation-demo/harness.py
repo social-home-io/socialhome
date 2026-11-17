@@ -9579,14 +9579,16 @@ def cmd_gfs_follower_comment() -> None:
 
     Sequence:
     0. a opens the space to readers (``allow_subscribers``, left on): only a
-       publicly readable space is published over a GFS.
+       publicly readable space is published over a GFS. d subscribes to it
+       over the GFS (left subscribed).
     1. a turns ``allow_subscriber_comment`` on. e gets its credentials alone
        (a snapshot with no roster entry): a ``comment`` cert and the writer
        group key (e's ``space_keys``).
     2. a posts; e receives it.
-    3. e comments — the normal member path: a holds the comment, e publishes
-       it anonymously over the GFS (``POST /gfs/member-publish-anon`` 200),
-       and a, a member household, takes the relayed ``space_item``.
+    3. e comments — the normal member path: a (a member household) holds
+       the comment, e publishes it anonymously over the GFS (``POST
+       /gfs/member-publish-anon`` 200), and d — a GFS subscriber with no
+       seat, subscribed in step 0 — holds it too.
     4. a turns the switch off: ONE rotation (a's content epoch moves on), and
        e's next comment is refused — at e, or a never holds it. The comment
        switch is left off (its default).
@@ -9615,8 +9617,27 @@ def cmd_gfs_follower_comment() -> None:
         )
         return int(rows[0][0])
 
-    # 0–1. Readers, then the switch: e's credentials arrive alone.
+    # 0–1. Readers (d subscribes over the GFS), then the switch: e's
+    #      credentials arrive alone.
     _features("a opens the follower space to readers", allow_subscribers=True)
+    d = state["instances"]["d"]
+    d_base = f"http://127.0.0.1:{d['port']}"
+    deadline = time.monotonic() + 60.0
+    sub: object = None
+    while time.monotonic() < deadline:
+        _request(f"{d_base}/api/public_spaces/refresh", token=d["token"], method="POST")
+        time.sleep(3.0)
+        s, sub = _request(
+            f"{d_base}/api/spaces/{space_id}/subscribe", token=d["token"], method="POST"
+        )
+        if s == 200 and isinstance(sub, dict) and sub.get("subscribed"):
+            break
+    else:
+        raise SystemExit(
+            f"gfs-follower-comment: d could not subscribe to the space over "
+            f"the GFS within 60 s (last answer {sub!r})"
+        )
+    print("  d reads the space through the GFS (a subscriber, no seat) ✓")
     _features("a turns follower comments on", allow_subscriber_comment=True)
     rows = _poll_rows(
         "e",
@@ -9644,6 +9665,7 @@ def cmd_gfs_follower_comment() -> None:
     )
     post_id = _must("a posts in the follower space", s, post, ok=(201,))["id"]
     _await_space_post(state, "e", space_id, post_id)
+    _await_space_post(state, "d", space_id, post_id)
 
     def _comment(text: str) -> tuple[int, object]:
         return _e_request(
@@ -9658,9 +9680,8 @@ def cmd_gfs_follower_comment() -> None:
             _rows("a", "SELECT 1 FROM space_post_comments WHERE id = ?", (comment_id,))
         )
 
-    # 3. The normal member path: direct to a, and over the GFS.
+    # 3. The normal member path: direct to a, and over the GFS to d.
     gfs_off = _gfs_log_size()
-    a_log = _log_size("a")
     st, body = _comment(f"A follower's comment — {time.time_ns()}")
     first = _must("e (a follower) comments", st, body, ok=(200, 201))["id"]
     _poll_rows(
@@ -9670,33 +9691,24 @@ def cmd_gfs_follower_comment() -> None:
         bool,
         what="a never held e's follower comment",
     )
-    deadline = time.monotonic() + 30.0
-    anon: list[str] = []
-    relayed: list[str] = []
-    while time.monotonic() < deadline and not (anon and relayed):
-        anon = [
-            line
-            for line in _gfs_log_lines_matching(
-                "/gfs/member-publish-anon", offset=gfs_off
-            )
-            if "POST" in line and '" 200 ' in line
-        ]
-        relayed = [
-            line
-            for line in _log_lines_matching(
-                "a", f"gfs.relay.received: space={space_id}", offset=a_log
-            )
-            if "space_item" in line
-        ]
-        if not (anon and relayed):
-            time.sleep(2.0)
-    if not anon or not relayed:
+    _poll_rows(
+        "d",
+        "SELECT 1 FROM space_post_comments WHERE id = ?",
+        (first,),
+        bool,
+        what="d (a GFS subscriber) never held e's follower comment",
+    )
+    anon = [
+        line
+        for line in _gfs_log_lines_matching("/gfs/member-publish-anon", offset=gfs_off)
+        if "POST" in line and '" 200 ' in line
+    ]
+    if not anon:
         raise SystemExit(
-            "gfs-follower-comment: e's comment did not go over the GFS "
-            f"(accepted publishes={len(anon)}, relayed to a={len(relayed)}). "
-            f"Check {_instance_dir('e') / 'log.txt'} for 'gfs.member_publish'."
+            "gfs-follower-comment: the GFS log shows no accepted anonymous "
+            "publish for e's comment"
         )
-    print("  e's comment reached a directly and over the GFS ✓")
+    print("  e's comment reached a directly and d over the GFS ✓")
 
     # 4. Switch off: one rotation, and the next comment is refused.
     before = _epoch()
@@ -9721,7 +9733,7 @@ def cmd_gfs_follower_comment() -> None:
         )
     print(
         "gfs-follower-comment: ok (switch on → comment cert + writer key, the "
-        "comment went direct and over the GFS; switch off → one rotation "
+        "comment reached a and the GFS subscriber d; switch off → one rotation "
         f"(epoch {before} → {after}), e's next comment refused, HTTP {st})"
     )
 

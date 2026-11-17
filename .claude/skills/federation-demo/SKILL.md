@@ -1125,12 +1125,13 @@ the compressed item (e logs ``refused a compressed item``), e sent JSON
 
 Needs ``gfs-invite-link`` (e holds a link-joined FOLLOWER seat on a's third,
 global space). a opens the space to readers (``allow_subscribers``, left
-on: only a publicly readable space is published over a GFS) and turns
+on: only a publicly readable space is published over a GFS), d subscribes to
+it over the GFS (left subscribed), and a turns
 ``allow_subscriber_comment`` on: e gets its credentials alone — the same
 ``comment`` cert and writer group key a comment-only member holds (e's
 ``space_keys``). a posts; e (the follower) comments on the normal member
 path: a holds the comment, the GFS accepted e's anonymous publish (``POST
-/gfs/member-publish-anon`` 200) and a took the relayed ``space_item``. a
+/gfs/member-publish-anon`` 200) and d, a GFS subscriber, holds it too. a
 turns the switch off: exactly one rotation (a's content epoch + 1), and e's
 next comment is refused. The comment switch is left off (its default). Reads
 a's / e's DB (no REST bucket).
