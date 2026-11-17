@@ -193,6 +193,12 @@ def is_long_lived(event_type: FederationEventType, key: str | None) -> bool:
     return key is None or not key.startswith(CAPPED_DELETE_KEY_PREFIX)
 
 
+def admin_seed_key_prefix(space_id: str) -> str:
+    """The outbox-key prefix of every queued ``SPACE_ADMIN_KEY_SHARE`` for
+    *space_id* (:func:`supersede_key`) — what an authority rotation drops."""
+    return f"admin-seed:{space_id}:"
+
+
 def supersede_key(
     event_type: FederationEventType,
     *,
@@ -228,6 +234,11 @@ def supersede_key(
         ):
             return None
         return f"poll-vote:{space_id}:{post_id}:{voter}"
+    if event_type is FederationEventType.SPACE_ADMIN_KEY_SHARE:
+        # Only the newest seed share of a space is worth delivering (an
+        # older one carries the seed of a retired key); a rotation drops
+        # every queued one by this prefix so none lands after a revocation.
+        return f"{admin_seed_key_prefix(space_id)}seed" if space_id else None
     if event_type is FederationEventType.SPACE_ROSTER_SNAPSHOT:
         # The host's whole roster for one space, to one household: a newer
         # one makes a queued older one worthless (the receiver merges by

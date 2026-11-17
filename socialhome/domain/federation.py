@@ -835,6 +835,14 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: later authority-signed event. Authorized by the owner household's
         #: own signature on the cert, never by the sender's class.
         FederationEventType.SPACE_AUTHORITY_ROTATED,
+        #: The space signing seed for a delegated admin (v_22). Every space
+        #: admin is equal, whichever way its household is reached (owner
+        #: decision 2026-11-15): an admin seated from an invite link or the
+        #: GFS directory takes it too. Authorized by the handler, never by the
+        #: sender's class: only from the acting host, only into a space whose
+        #: local copy delegates, only by a household holding a live admin
+        #: seat, and only a seed that is the private half of the pinned key.
+        FederationEventType.SPACE_ADMIN_KEY_SHARE,
         # ── Catch-up sync (§25.6) ──
         #: The chunked backfill that populates a fresh seat. The RTC
         #: *signalling* half of sync (``SPACE_SYNC_OFFER`` / ``_ANSWER`` /
@@ -884,9 +892,7 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
 )
 #: Deliberately **excluded**, for the record: every DM / presence / call /
 #: highlight / moment / user-sync / pairing / public-directory type (none of
-#: it is space federation); ``SPACE_ADMIN_KEY_SHARE`` (handing the space
-#: seed to a household that walked in off a link is never right);
-#: ``SPACE_JOIN_REQUEST*`` (they are already a member);
+#: it is space federation); ``SPACE_JOIN_REQUEST*`` (they are already a member);
 #: ``SPACE_PRIVATE_INVITE*`` and ``SPACE_INVITE*`` (§D1b social invites);
 #: ``SPACE_CREATED`` (the shared space is seated by the redeem ACK — a
 #: ``SPACE_CREATED`` from this peer class would seat an unrelated one);
@@ -934,6 +940,9 @@ MULTI_SEND_EXCLUDED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_KEY_EXCHANGE,
         FederationEventType.SPACE_KEY_EXCHANGE_ACK,
         FederationEventType.SPACE_KEY_EXCHANGE_REKEY,
+        #: The space signing seed: for ONE admin household, never a body
+        #: every listed household can read.
+        FederationEventType.SPACE_ADMIN_KEY_SHARE,
         # ── Pairwise streams ──
         #: Catch-up backfill to one newcomer and its acks/flow control, the
         #: config catch-up answer, and partition repair between two peers.

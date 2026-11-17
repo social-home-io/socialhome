@@ -20,13 +20,16 @@ from socialhome.domain.space import (
     JoinMode,
     Space,
     SpaceFeatures,
+    SpaceMember,
     SpaceType,
 )
+from socialhome.domain.user import User
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
 
 OWNER = "owner-instance"
 OTHER = "evil-instance"
@@ -34,12 +37,12 @@ SPACE_ID = "sp-1"
 GOOD_SEED = bytes(range(32))
 
 
-def _event(payload: dict, *, from_instance: str = OWNER):
+def _event(payload: dict, *, from_instance: str = OWNER, space_id: str = SPACE_ID):
     return SimpleNamespace(
         event_type="SPACE_ADMIN_KEY_SHARE",
         payload=payload,
         from_instance=from_instance,
-        space_id=SPACE_ID,
+        space_id=space_id,
     )
 
 
@@ -57,9 +60,12 @@ async def _make_handler(
     delegation: bool,
     owner: str = OWNER,
     pin: str | None = None,
+    local_role: str | None = "admin",
 ):
     """A handler backed by a real space repo (so get_space_seed round-trips)
-    seeded with a local stub of the owner's space."""
+    seeded with a local stub of the owner's space. ``local_role`` seats one
+    of OUR people in it (``None``: none) — a seed is taken only by a
+    household holding a live admin seat itself."""
     from socialhome.db.database import AsyncDatabase
     from socialhome.infrastructure.key_manager import KeyManager
 
@@ -81,6 +87,17 @@ async def _make_handler(
             join_mode=JoinMode.INVITE_ONLY,
         )
     )
+    if local_role is not None:
+        users = SqliteUserRepo(db)
+        await users.save(User(user_id="me-uid", username="me", display_name="Me"))
+        await space_repo.save_member(
+            SpaceMember(
+                space_id=SPACE_ID,
+                user_id="me-uid",
+                role=local_role,
+                joined_at="2026-11-15T00:00:00+00:00",
+            )
+        )
     remote_members = SqliteSpaceRemoteMemberRepo(db)
     bus = AsyncMock()
     h = PrivateSpaceInviteHandler(
@@ -304,6 +321,57 @@ async def test_share_for_an_older_epoch_than_held_is_dropped(tmp_dir):
         assert (await space_repo.get(SPACE_ID)).identity_public_key == (
             k3.public_key.hex()
         )
+        assert await space_repo.get_space_seed(SPACE_ID) is None
+    finally:
+        await db.shutdown()
+
+
+# ─── Every path (owner decision 2026-11-15): who may take the seed ───────
+
+
+async def test_rejects_seed_without_a_live_local_admin_seat(tmp_dir):
+    """SECURITY: the seed is taken only by a household one of whose people
+    holds a live ADMIN seat in the space — never by a plain member's
+    household, even from the owner (a stale share that outlived a demotion,
+    or an inviting admin pushing it at an invitee)."""
+    h, space_repo, db = await _make_handler(
+        tmp_dir, delegation=True, local_role="member"
+    )
+    try:
+        await h._on_admin_key_share(_event(_share_payload()))
+        assert await space_repo.get_space_seed(SPACE_ID) is None
+    finally:
+        await db.shutdown()
+
+
+async def test_rejects_seed_with_no_local_seat_at_all(tmp_dir):
+    h, space_repo, db = await _make_handler(tmp_dir, delegation=True, local_role=None)
+    try:
+        await h._on_admin_key_share(_event(_share_payload()))
+        assert await space_repo.get_space_seed(SPACE_ID) is None
+    finally:
+        await db.shutdown()
+
+
+async def test_rejects_seed_whose_payload_names_another_space_than_the_envelope(
+    tmp_dir,
+):
+    """The pipeline's gates (mailbox sender, ban) judged the envelope's
+    signed ``space_id``; a payload naming another space is refused."""
+    h, space_repo, db = await _make_handler(tmp_dir, delegation=True)
+    try:
+        await h._on_admin_key_share(_event(_share_payload(), space_id="sp-other"))
+        assert await space_repo.get_space_seed(SPACE_ID) is None
+    finally:
+        await db.shutdown()
+
+
+async def test_rejects_seed_whose_envelope_names_no_space(tmp_dir):
+    """A share whose envelope carries no ``space_id`` skipped the space
+    gates of the pipeline (mailbox sender, ban): refused."""
+    h, space_repo, db = await _make_handler(tmp_dir, delegation=True)
+    try:
+        await h._on_admin_key_share(_event(_share_payload(), space_id=None))
         assert await space_repo.get_space_seed(SPACE_ID) is None
     finally:
         await db.shutdown()

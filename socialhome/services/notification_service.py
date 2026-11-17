@@ -141,6 +141,7 @@ from ..domain.events import (
     SchedulePollFinalized,
     SpaceAdminSeedsRetiredAfterRestore,
     SpaceConfigChanged,
+    SpaceDelegationBlocked,
     SpaceInviteAnswered,
     SpaceJoinApproved,
     SpaceJoinDenied,
@@ -705,6 +706,7 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "space_member_joined",
         "space_dissolved",
         "space_admins_reconfirm",
+        "space_delegation_blocked",
         "space_join_requested",
         "space_join_approved",
         "space_ownership_transferred",
@@ -1616,6 +1618,7 @@ class NotificationService(ProtectionGateMixin):
         )
         self._subscribe(RemoteSpaceDissolved, self.on_remote_space_dissolved)
         self._subscribe(SpaceAdminSeedsRetiredAfterRestore, self.on_admin_seeds_retired)
+        self._subscribe(SpaceDelegationBlocked, self.on_delegation_blocked)
         # Momentum (§Momentum) — reactions, replies, and new follows.
         self._subscribe(MomentReactionChanged, self.on_moment_reaction_changed)
         # D13: reactions on posts (household feed and spaces).
@@ -5630,6 +5633,35 @@ class NotificationService(ProtectionGateMixin):
                         fallback=(
                             "Restored from backup: review space admins, then "
                             "turn delegated admin back on"
+                        ),
+                    ),
+                    body=None,
+                    link_url=f"/spaces/{event.space_id}",
+                ),
+                about=NotificationSubject.of(
+                    NotificationObject.SPACE, event.space_id, space_id=event.space_id
+                ),
+                actor_user_id=None,
+            )
+
+    async def on_delegation_blocked(self, event: SpaceDelegationBlocked) -> None:
+        """D1: no admin of the space can get its signing seed while a GFS it
+        is listed on can't take a new space key (or can't be reached). Tell
+        the space's OWNER (only) — delegated admin must not fail silently."""
+        for member in await self._space_members(event.space_id):
+            if member.role != SpaceRole.OWNER:
+                continue
+            owner = await self._local_user(member.user_id)
+            await self._save_notif(
+                new_notification(
+                    user_id=member.user_id,
+                    type="space_delegation_blocked",
+                    title=self._t(
+                        "notification.space.delegation_blocked",
+                        locale=self._locale(owner),
+                        fallback=(
+                            "Admins can't act for you in a space yet: one of its "
+                            "GFSs can't take a new space key or isn't reachable"
                         ),
                     ),
                     body=None,

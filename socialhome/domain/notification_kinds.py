@@ -148,6 +148,7 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     "space_ownership_transferred": NotifKind.ABOUT_YOU,
     "space_dissolved": NotifKind.ABOUT_YOU,
     "space_admins_reconfirm": NotifKind.ABOUT_YOU,
+    "space_delegation_blocked": NotifKind.ABOUT_YOU,
     # A space you're in now offers location sharing — yours to opt into.
     "space_location_enabled": NotifKind.ABOUT_YOU,
     "report_answer": NotifKind.ABOUT_YOU,

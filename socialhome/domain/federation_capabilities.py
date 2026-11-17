@@ -1568,6 +1568,18 @@ from __future__ import annotations
 #:   getting the ``votes`` list; a host below v_94 sends ``votes``, which a
 #:   v_94 receiver applies as before v_94 (it replaces everybody's votes
 #:   but its own people's). Space-scoped. Labelled "Poll votes count the
+#:   same in every household". Ships in the same build (no new version,
+#:   v_81..v_94 ship together): **the signing seed reaches an admin on every
+#:   path** (owner decision 2026-11-15) — ``SPACE_ADMIN_KEY_SHARE`` joins the
+#:   seat vocabulary (never a multi frame), so an admin household reached
+#:   only through a GFS holds the seed like a paired one
+#:   (:data:`FederationCapability.MIN_FOR_RELAY_ADMIN_KEY_SHARE`); the
+#:   receiver takes it only with a live admin seat of its own; the owner
+#:   host refuses seed-signed roster gossip from anyone else that keeps or
+#:   sets an admin seat (only the owner makes admins); an admin's
+#:   ``authority_epoch_echo`` carries ``seed_held`` so a lost share is
+#:   re-sent. **Fallback**: a link-seated admin below v_94 is skipped
+#:   (WARNING) and acts through the host.
 #:   same in every household". Also in this batch: ONE space cover / icon
 #:   cap for every member; an over-cap image is refused from a sender at
 #:   ``MIN_FOR_CAPPED_SPACE_IMAGES`` (v_81, the first unreleased line) and
@@ -2284,6 +2296,14 @@ class FederationCapability:
     #: ``SPACE_POLL_VOTE_CAST``) is additive and goes to everyone. A
     #: ``SYNC_RECORD_LINES`` entry (94).
     MIN_FOR_ITEM_MERGE_STAMPS = 94
+    #: v_94 — a household seated from an invite link or the GFS directory
+    #: (``InstanceSource.SPACE_SESSION``) at or above it takes
+    #: ``SPACE_ADMIN_KEY_SHARE`` over the GFS relay: an admin reached only
+    #: through a GFS holds the space signing seed like any other admin
+    #: (owner decision 2026-11-15). No new version — v_81..v_94 ship
+    #: together. Below it the owner skips the share (WARNING) and the admin
+    #: acts through the host.
+    MIN_FOR_RELAY_ADMIN_KEY_SHARE = 94
     #: v_81 (shipped with v_94, see its history entry) — a household at or
     #: above it sends a space's cover / icon within the one cap
     #: (``SPACE_COVER_MAX_BYTES`` / ``SPACE_ICON_MAX_BYTES``, owner decision

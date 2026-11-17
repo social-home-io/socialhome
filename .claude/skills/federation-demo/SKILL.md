@@ -1005,6 +1005,7 @@ python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
 python .claude/skills/federation-demo/harness.py gfs-follower-comment
 python .claude/skills/federation-demo/harness.py gfs-private-channel
+python .claude/skills/federation-demo/harness.py relay-pair   # a ↔ d, after members-mesh-restart (needs them unpaired), before gfs-multi-listing (needs them paired)
 python .claude/skills/federation-demo/harness.py gfs-b-up
 python .claude/skills/federation-demo/harness.py gfs-multi-listing
 python .claude/skills/federation-demo/harness.py gfs-private-channel-multi
@@ -1805,9 +1806,11 @@ never executes outside its unit tests.
    approves it, and only then does a's ``space_remote_members`` role for
    e become ``admin`` — with **no** space signing seed
    (``spaces.identity_private_key`` stays NULL and a ships no
-   ``SPACE_ADMIN_KEY_SHARE``). A connection server pins a space's identity
-   key TOFU-immutably, so that credential could never be taken back from a
-   household whose only introduction was a public string.
+   ``SPACE_ADMIN_KEY_SHARE``): this space does not let admins act for its
+   owner (delegated admin is off), so no admin holds the seed on any path.
+   With it on, an admin reached only through the GFS gets the seed exactly
+   like a paired one (v_94), and revoking it rotates the key and re-pins
+   every GFS that lists the space.
 
    Then e — an admin on a MEMBER household, reaching a only over the
    relay — mints a ``moderator`` link on that space: the mint is forwarded

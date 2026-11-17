@@ -1929,6 +1929,18 @@ class SpaceCredentialsWanted(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceDelegationBlocked(DomainEvent):
+    """No admin household of a space this household owns can get the
+    space's signing seed right now (D1, owner decision 2026-11-15): a GFS the
+    space is listed on can't take a new space key, or couldn't be reached to
+    prove it can. Told to the owner so delegated admin never fails silently;
+    the next share after that GFS proves it goes out as usual."""
+
+    space_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class SpaceAuthorityEchoDue(DomainEvent):
     """A member household just learned something its space owner must hear
     now rather than on the next periodic sync (v_46): the owner's

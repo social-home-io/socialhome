@@ -78,7 +78,7 @@ from ..services.space_service import (
     seal_join_snapshot,
 )
 from ..services.space_writer_households import holds_member_seat
-from .host_equivalence import acts_as_host
+from .host_equivalence import acts_as_host, holds_local_admin_seat
 from .invite_link_forward import FORWARDED_INVITE_LINK_ACTIONS
 
 if TYPE_CHECKING:
@@ -1543,6 +1543,18 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
             return
+        if event.space_id != space_id:
+            # The pipeline's gates (mailbox sender, ban) judged the envelope's
+            # signed ``space_id``; the payload must name the same space — and
+            # a share without one on its envelope skipped those gates.
+            log.warning(
+                "SPACE_ADMIN_KEY_SHARE from %s names space %s in its payload "
+                "but %s on its envelope — dropping",
+                event.from_instance,
+                space_id,
+                event.space_id,
+            )
+            return
         space = await self._space_repo.get(space_id)
         if space is None:
             log.warning(
@@ -1571,6 +1583,19 @@ class PrivateSpaceInviteHandler:
             log.warning(
                 "SPACE_ADMIN_KEY_SHARE: delegated_admin_authority is OFF "
                 "locally for %s — refusing signing-seed share from %s",
+                space_id,
+                event.from_instance,
+            )
+            return
+        # SECURITY: only a household one of whose people holds a live ADMIN
+        # seat takes the seed — never a plain member's household (a share
+        # that outlived a demotion or kick, queued in an outbox or a GFS; an
+        # inviting admin pushing it at an invitee). A share that beat the
+        # promotion here is re-sent through the admin's authority epoch echo.
+        if not await holds_local_admin_seat(self._space_repo, space_id):
+            log.warning(
+                "SPACE_ADMIN_KEY_SHARE: none of our people holds an admin seat "
+                "in %s — refusing signing-seed share from %s",
                 space_id,
                 event.from_instance,
             )
@@ -1813,6 +1838,23 @@ class PrivateSpaceInviteHandler:
                     instance_id,
                     ceiling,
                     role,
+                )
+                return
+            if role == SpaceRole.ADMIN.value:
+                # SECURITY (D5, owner decision 2026-11-15): only the owner
+                # makes admins, so on the space we host no seed-signed gossip
+                # keeps or sets an ADMIN seat either. Otherwise an admin a
+                # delegated admin kicked while we were offline could re-assert
+                # its own seat at a higher version, turn the kick stale here,
+                # and never be rotated out. A JOINED for an admin seat changes
+                # nothing we need (the owner's own writes are the truth).
+                log.warning(
+                    "roster-gossip %s for %s would keep %s@%s an admin on the "
+                    "space we host — refused (only the owner grants admin)",
+                    event_type,
+                    space_id,
+                    user_id,
+                    instance_id,
                 )
                 return
         applied = await self._remote_members.apply_member_event(

@@ -70,6 +70,9 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("federation/sync/space/scheduler.py", "_tick_mesh_catchup"): (
         "the authority-epoch echo is the owner's business alone"
     ),
+    ("federation/sync/space/scheduler.py", "_mesh_incremental"): (
+        "the authority-epoch echo is the owner's business alone"
+    ),
 }
 
 

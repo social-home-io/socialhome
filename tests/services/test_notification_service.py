@@ -64,6 +64,7 @@ from socialhome.domain.events import (
     RemoteSpaceInviteDeclined,
     SpaceAdminSeedsRetiredAfterRestore,
     SpaceConfigChanged,
+    SpaceDelegationBlocked,
     SpaceJoinDenied,
     SpaceJoinRequested,
     SpaceLocationFeatureEnabled,
@@ -5747,3 +5748,36 @@ async def test_gift_draw_rows_never_name_whom_you_give_to(stack):
         )
     )
     assert len(push.calls) == 2
+
+
+async def test_a_blocked_delegation_tells_the_owner_only(stack):
+    """D1 liveness (SF3): when a GFS the space is listed on can't take a new
+    space key (or can't be reached to prove it), no admin gets the seed —
+    the owner (only) is told why, so delegation never fails silently."""
+    alice = await stack.provision_user("alice-db")
+    bob = await stack.provision_user("bob-db")
+    space_svc = SpaceService(
+        stack.space_repo,
+        SqliteSpacePostRepo(stack.db),
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        own_instance_id="iid",
+    )
+    space = await space_svc.create_space(owner_username="alice-db", name="Crew")
+    await space_svc.add_member(space.id, actor_username="alice-db", user_id=bob.user_id)
+
+    await stack.bus.publish(SpaceDelegationBlocked(space_id=space.id))
+
+    owner_notes = [
+        n
+        for n in await stack.notif_repo.list(alice.user_id, limit=10)
+        if n.type == "space_delegation_blocked"
+    ]
+    assert len(owner_notes) == 1
+    assert "GFS" in owner_notes[0].title
+    assert owner_notes[0].link_url == f"/spaces/{space.id}"
+    assert not [
+        n
+        for n in await stack.notif_repo.list(bob.user_id, limit=10)
+        if n.type == "space_delegation_blocked"
+    ]

@@ -626,7 +626,6 @@ async def test_peer_class_gate_rejects_every_unclassified_type_by_default():
 @pytest.mark.parametrize(
     "event_type",
     [
-        FederationEventType.SPACE_ADMIN_KEY_SHARE,
         FederationEventType.SPACE_FIND_ROUTE,
         FederationEventType.SPACE_ROUTE_FOUND,
         # SPACE_ROUTED passes this gate since v_89 — only in the host-hop
@@ -652,6 +651,20 @@ async def test_peer_class_gate_names_the_types_the_review_probed(event_type):
     )
     with pytest.raises(ValueError, match="not permitted"):
         await step(ctx)
+
+
+async def test_peer_class_gate_lets_the_seed_share_reach_a_gfs_only_admin():
+    """Every space admin is equal on every path (owner decision
+    2026-11-15): the seed share passes the class gate; the handler decides
+    (acting host, delegation, live admin seat, seed matches the pin)."""
+    step = make_check_peer_class()
+    ctx = InboundContext(
+        envelope=_minimal_envelope(
+            event_type=FederationEventType.SPACE_ADMIN_KEY_SHARE.value
+        ),
+        instance=_SourcedInstance(InstanceSource.SPACE_SESSION),
+    )
+    await step(ctx)
 
 
 async def test_peer_class_gate_logs_type_and_instance_but_never_payload(caplog):
@@ -2124,3 +2137,13 @@ async def test_a_multi_payload_naming_another_space_is_refused():
         else:
             with pytest.raises(ValueError, match="another space"):
                 await step(ctx)
+
+
+async def test_a_seed_share_inside_a_multi_frame_is_refused():
+    """The signing seed is for ONE admin household: a multi frame (whose body
+    every listed household can read) carrying it is refused before any
+    decrypt."""
+    with pytest.raises(ValueError, match="never rides a multi-recipient frame"):
+        await _multi_step()(
+            _multi_ctx(event_type=FederationEventType.SPACE_ADMIN_KEY_SHARE.value)
+        )

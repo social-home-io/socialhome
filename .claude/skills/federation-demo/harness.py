@@ -6308,9 +6308,9 @@ def cmd_gfs_invite_link() -> None:
        decision, 2026-09-19 — a link can leak, so admin is never granted
        straight through); a sees the pending elevation, approves it, and
        only then is e's household an admin on the host — still with no
-       signing seed, which a link-joined admin must never hold (the
-       connection server pins a space's identity key TOFU-immutably, so
-       that credential could never be taken back). e, now an admin on a
+       signing seed: this space does not let admins act for its owner, so
+       no admin holds it on any path (with that on, a GFS-only admin gets it
+       like a paired one, v_94). e, now an admin on a
        member household, mints a moderator link there: forwarded to a (v_52),
        minted in a's table, redeemed by b into a moderator seat; e lists the
        host's links and revokes a second one (gone from a's table); e's
@@ -6806,10 +6806,10 @@ def cmd_gfs_invite_link() -> None:
             f"e is {host_role!r}, expected 'admin'",
         )
     print("  a approved the elevation — e's household is now admin on the host ✓")
-    # …and NOT the signing seed. An admin met through a public link
-    # manages the space through SPACE_REMOTE_ADMIN_ACTION; the seed is a
-    # credential nobody could take back, because the connection server
-    # pins a space's identity key TOFU-immutably on first publish.
+    # …and NOT the signing seed: this space does not let admins act for
+    # its owner (delegated admin off), so no admin holds the seed on any
+    # path and e manages the space through SPACE_REMOTE_ADMIN_ACTION. (With
+    # delegation on, a GFS-only admin gets it like a paired one, v_94.)
     seed_rows = _rows(
         "e",
         "SELECT identity_private_key FROM spaces WHERE id = ?",
@@ -6818,8 +6818,8 @@ def cmd_gfs_invite_link() -> None:
     if seed_rows and seed_rows[0][0]:
         raise SystemExit(
             "gfs-invite-link: e holds the space SIGNING SEED for the "
-            "admin-link space — a household that walked in off a public link "
-            "must never get authority that cannot be revoked.",
+            "admin-link space although that space does not let admins act "
+            "for its owner (delegated admin is off).",
         )
     shared = _log_lines_matching(
         "a", "space_admin_key_share", offset=a_off
@@ -14609,11 +14609,11 @@ def cmd_verify() -> None:
             )
             if seed and seed[0][0]:
                 failures.append(
-                    f"e: holds the signing seed for {il_admin} — an admin met "
-                    "through a public link must never hold space authority",
+                    f"e: holds the signing seed for {il_admin} although that "
+                    "space does not let admins act for its owner",
                 )
             else:
-                print("  e's link-admin seat still carries no signing seed ✓")
+                print("  e's link-admin seat carries no seed (delegation off) ✓")
         if not il_space:
             failures.append("gfs-invite-link state is incoherent (no space id)")
     else:
