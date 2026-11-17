@@ -38,6 +38,7 @@
   "notification.space.feature.stickies": "Stickies",
   "notification.space.feature.calendar": "Termine",
   "notification.space.admins_reconfirm": "Aus Backup wiederhergestellt: Prüfe die Space-Admins und schalte dann die delegierte Verwaltung wieder ein",
+  "notification.space.delegation_blocked": "Admins können in einem Space noch nicht für dich handeln: Einer seiner GFS kann keinen neuen Space-Schlüssel übernehmen oder ist nicht erreichbar",
   "notification.space.report.filed": "Neue Meldung in {space_name}",
   "dashboard.login.title": "Dashboard öffnen",
   "dashboard.login.password": "Dashboard-Passwort",

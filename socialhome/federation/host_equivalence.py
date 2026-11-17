@@ -174,17 +174,24 @@ async def serves_as_host(
     features = getattr(space, "features", None)
     if not getattr(features, "delegated_admin_authority", False):
         return False
-    local = set(await space_repo.list_local_member_user_ids(space.id))
-    if not any(
-        m.user_id in local and m.role == SpaceRole.ADMIN
-        for m in await space_repo.list_members(space.id)
-    ):
+    if not await holds_local_admin_seat(space_repo, space.id):
         return False
     seed = await space_repo.get_space_seed(space.id)
     return (
         seed is not None
         and ed25519_public_key(seed).hex()
         == str(space.identity_public_key or "").lower()
+    )
+
+
+async def holds_local_admin_seat(space_repo: AbstractSpaceRepo, space_id: str) -> bool:
+    """Whether one of THIS household's people holds a live ``admin`` seat in
+    *space_id* — what makes it a delegated admin household at all (the seed
+    is taken, and host-equivalence served, only with one)."""
+    local = set(await space_repo.list_local_member_user_ids(space_id))
+    return any(
+        m.user_id in local and m.role == SpaceRole.ADMIN
+        for m in await space_repo.list_members(space_id)
     )
 
 
@@ -215,6 +222,7 @@ async def touches_owner_household(
 __all__ = [
     "acting_hosts",
     "acts_as_host",
+    "holds_local_admin_seat",
     "is_trusted_inviter",
     "owner_statement_current",
     "serves_as_host",

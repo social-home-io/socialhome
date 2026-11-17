@@ -147,9 +147,9 @@ _ALLOWED: dict[str, dict[str, tuple[str, str]]] = {
         "socialhome/services/space_service.py": (
             "seat",
             (
-                "seat teardown, private-GFS link check, join routing; open "
-                "pre-release gap (seed handoff for GFS-only admins), tracked "
-                "separately"
+                "seat teardown, private-GFS link check, join routing; the "
+                "seed share's version gate for a seat (v_94: an older build "
+                "refuses the type at its peer-class gate)"
             ),
         ),
         "socialhome/services/federation_inbound/pairing.py": (

@@ -797,6 +797,7 @@
   "notifications.row.space_join_denied_none": "The person's request to join a space was declined. No space name on purpose.",
   "notifications.row.space_location_enabled_none": "Location sharing was turned on in a space; tapping it opens the person's own sharing settings. {space} is the space name.",
   "notifications.row.space_admins_reconfirm_none": "To a space's owner after the household was restored from a backup.",
+  "notifications.row.space_delegation_blocked_none": "To a space's owner when no admin can get the space key: a GFS the space is listed on can't take a new key, or isn't reachable to show it can.",
   "notifications.row.post_moderated_none": "A moderator changed or removed the person's post. \"_in\" adds the space: {space}.",
   "notifications.row.bazaar_bid_placed_none": "Bazaar: someone bid on the person's listing (glossary: Bazaar).",
   "notifications.row.bazaar_offer_accepted_none": "Bazaar: the seller accepted the person's offer.",

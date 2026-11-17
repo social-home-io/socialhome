@@ -261,6 +261,11 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # space, the delegation flag's caller and the peer's version; no
         # actor to authorize, no route reaches it.
         "share_admin_signing_seed",
+        # …and its two halves (built under the rotation lock, sent outside
+        # it) plus the re-check between them — same callers, same gates.
+        "prepare_admin_seed_share",
+        "send_admin_seed_share",
+        "admin_seed_share_still_due",
         # v_49 writer certs — a read of the roster-derived scope, and the
         # forward-secrecy rotation the private-invite handler runs on the
         # host when a household leaves. Both act on state the host already

@@ -38,6 +38,7 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.errors import (
+    GfsKeyRotationUnsupportedError,
     SpaceNotPublishableError,
     TierChangeRequiredError,
 )
@@ -2613,6 +2614,9 @@ class _FakeSpaceRepo:
             raise RuntimeError("space seed access requires a key_manager")
         return self._seeds.get(space_id)
 
+    async def get_seed_shared_epoch(self, space_id: str) -> int | None:
+        return None  # no seed shared with an admin household
+
 
 def _fake_space(space_id: str):
     from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
@@ -2761,6 +2765,9 @@ class _SeedSpaceRepo:
 
     async def get_space_seed(self, space_id: str) -> bytes | None:
         return self._seed if space_id == self._space.id else None
+
+    async def get_seed_shared_epoch(self, space_id: str) -> int | None:
+        return None  # no seed shared with an admin household
 
 
 def _ws_hello(instance_id: str, seed: bytes) -> dict:
@@ -5338,3 +5345,113 @@ async def test_an_item_with_only_the_dictionary_copy_skips_zlib1(env):
         compressed_payloads={"zlib1+dict1": _DICT_ENV},
     )
     assert [b["payload"] for _u, b in session.posts] == [_JSON_ENV]
+
+
+# ── D1 (2026-11-15): a seed goes out only where its revocation can follow ──
+
+
+async def test_authority_key_revocable_with_no_listing(env):
+    """A space listed on no GFS holds no GFS pin: nothing blocks a seed."""
+    session = _AnonSession(info=_signed_info(gfs_instance_id="inst-g1"))
+    svc, _owner, _owner_id, _k2 = await _rotated_publish_svc(env, session)
+    assert await svc.authority_key_revocable("sp-rot") is True
+
+
+async def test_authority_key_revocable_when_every_listing_rotates(env):
+    session = _AnonSession(
+        info=_signed_info(
+            gfs_instance_id="inst-g1",
+            capabilities={"anonymous_publish": True, "authority_rotation": True},
+        )
+    )
+    svc, _owner, _owner_id, _k2 = await _rotated_publish_svc(env, session)
+    await svc.publish_space("sp-rot", "g1")
+    assert await svc.authority_key_revocable("sp-rot") is True
+
+
+async def test_authority_key_not_revocable_on_a_listing_without_rotation(env):
+    """A GFS that never proved the signed ``authority_rotation`` capability
+    keeps the old pin after a rotation — so no seed may go out while the
+    space is listed there (a revoked admin would keep the key there)."""
+    session = _AnonSession(info=_signed_info(gfs_instance_id="inst-g1"))
+    svc, _owner, _owner_id, _k2 = await _rotated_publish_svc(env, session)
+    await svc.publish_space("sp-rot", "g1")
+    assert await svc.authority_key_revocable("sp-rot") is False
+
+
+# ── D1 at listing time: no GFS that could not follow a revocation ────────
+
+
+async def _delegating_publish_svc(env, session, *, delegated=True, shared=False):
+    """An owner whose GLOBAL space delegates to admins (or shared a seed
+    for its current key epoch), about to be listed on g1."""
+    from socialhome.crypto import derive_instance_id
+    from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
+    from socialhome.infrastructure.key_manager import KeyManager
+    from socialhome.repositories.space_repo import SqliteSpaceRepo
+
+    db, conn_repo = env
+    await conn_repo.save(_make_conn("g1", public_key=_GFS_KP.public_key.hex()))
+    owner = generate_identity_keypair()
+    owner_id = derive_instance_id(owner.public_key)
+    space_repo = SqliteSpaceRepo(db, key_manager=KeyManager(b"\x05" * 32))
+    k1 = generate_identity_keypair()
+    await space_repo.save(
+        Space(
+            id="sp-del",
+            name="Del",
+            owner_instance_id=owner_id,
+            owner_username="alice",
+            identity_public_key=k1.public_key.hex(),
+            config_sequence=0,
+            features=SpaceFeatures(delegated_admin_authority=delegated),
+            space_type=SpaceType.GLOBAL,
+            join_mode=JoinMode.OPEN,
+        )
+    )
+    await space_repo.set_space_seed("sp-del", k1.private_key)
+    if shared:
+        await space_repo.mark_seed_shared("sp-del")
+    svc = GfsConnectionService(conn_repo, http_client=session, publish_client=session)
+    svc.attach_publish_context(
+        space_repo=space_repo,
+        own_instance_id=owner_id,
+        own_signing_key=owner.private_key,
+    )
+    return svc
+
+
+@pytest.mark.parametrize("delegated,shared", [(True, False), (False, True)])
+async def test_a_delegating_space_is_never_listed_on_a_gfs_without_rotation(
+    env, delegated, shared
+):
+    """D1 at listing time: while admins may hold the space key (delegation
+    on, or a seed shared for the current epoch), a GFS that never proved
+    ``authority_rotation`` would keep that key pinned after a revocation —
+    so the space is not listed there, and the owner is told why."""
+    session = _AnonSession(info=_signed_info(gfs_instance_id="inst-g1"))
+    svc = await _delegating_publish_svc(
+        env, session, delegated=delegated, shared=shared
+    )
+    with pytest.raises(GfsKeyRotationUnsupportedError):
+        await svc.publish_space("sp-del", "g1")
+    assert session.posts == []
+
+
+async def test_a_delegating_space_lists_on_a_gfs_that_rotates(env):
+    session = _AnonSession(
+        info=_signed_info(
+            gfs_instance_id="inst-g1",
+            capabilities={"anonymous_publish": True, "authority_rotation": True},
+        )
+    )
+    svc = await _delegating_publish_svc(env, session)
+    await svc.publish_space("sp-del", "g1")
+    assert len(session.posts) == 1
+
+
+async def test_a_space_without_delegation_still_lists_on_an_older_gfs(env):
+    session = _AnonSession(info=_signed_info(gfs_instance_id="inst-g1"))
+    svc = await _delegating_publish_svc(env, session, delegated=False)
+    await svc.publish_space("sp-del", "g1")
+    assert len(session.posts) == 1

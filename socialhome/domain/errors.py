@@ -327,6 +327,24 @@ class TierChangeRequiredError(SpaceNotPublishableError):
     )
 
 
+class GfsKeyRotationUnsupportedError(SpaceNotPublishableError):
+    """A space whose admins may hold its signing key (delegation on, or a
+    seed shared for the current key epoch) is never listed on a GFS that
+    has not proved it re-pins the space key from the owner's cert
+    (``authority_rotation``): revoking such an admin could not be enforced
+    there (D1, owner decision 2026-11-15). Raised before anything is sent.
+    A subclass of :class:`SpaceNotPublishableError` so every caller that
+    skips an unpublishable space (re-publish, heal) skips this one too."""
+
+    status = 409
+    code = "GFS_KEY_ROTATION_UNSUPPORTED"
+    detail = (
+        "This GFS can't take a new space key, so admins acting for you "
+        "could not be revoked there. Choose another GFS, or turn off "
+        "\u201cLet admins act for me\u201d first."
+    )
+
+
 class GfsSelectionRequiredError(CodedError, ValueError):
     """A new global space must name at least one GFS to be listed on, as
     long as the household has an active GFS connection to choose from."""

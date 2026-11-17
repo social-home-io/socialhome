@@ -77,6 +77,9 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   // Listing a space on a GFS: only a global space, on servers its owner
   // picks. Publishing a public space would make it global (a tier change).
   TIER_CHANGE_REQUIRED: () => t('error.tier_change_required'),
+  // Admins may hold the space key: never listed on a GFS that can't take
+  // a new one (a revoked admin would keep it there).
+  GFS_KEY_ROTATION_UNSUPPORTED: () => t('error.gfs_key_rotation_unsupported'),
   GFS_SELECTION_REQUIRED: () => t('error.gfs_selection_required'),
   GFS_SELECTION_INVALID: (_b, p) => {
     switch (p.reason) {

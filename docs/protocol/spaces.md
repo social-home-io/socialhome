@@ -2331,11 +2331,48 @@ deduped by instance via `space_remote_members.role == 'admin'`). The
 payload is `{space_id, space_seed: b64url(32-byte seed),
 seed_suite: "ed25519-seed"}` and it travels **only** over the
 encrypted peer-pair path (`send_with_mesh_fallback`) addressed to that
-one household — **never broadcast**, because a non-member relay must
+one household — **never broadcast** and never inside a v_91 multi frame
+(`MULTI_SEND_EXCLUDED_EVENT_TYPES`), because a non-member relay must
 never see the signing key.
 
+**Every admin, whichever way it is reached** (owner decision
+2026-11-15, v_94). An admin household reached only through a GFS — seated
+from an invite link or the GFS directory (`InstanceSource.SPACE_SESSION`)
+— gets the seed exactly like a paired or mesh one: same triggers, same
+payload and suite, sealed under that seat's session key and carried by the
+GFS mailbox / relay as ciphertext. The share itself is one sealed frame
+for one mailbox: no space id, no event type, no key. Two
+residuals, stated plainly: an admin household without a mailbox (an older
+sealed-redeem seat) is reached by an instance-addressed relay frame, whose
+routing body shows the GFS its instance id (`to_instance`) — as every frame
+to such a seat does; and until the follow-up that keeps a seed holder's GFS
+behaviour identical to any writer's lands (same release), the GFS can infer
+which household became a seed holder from what that household does next — it
+stops its identified member publish and fan-out seat for the space and
+re-announces the space's epoch when its socket reconnects. See
+[gfs-relay.md](./gfs-relay.md#residuals). Gated on
+`MIN_FOR_RELAY_ADMIN_KEY_SHARE` (94): an older link-seated admin is skipped
+at WARNING and acts through the host. The seed goes to nobody while a GFS
+that lists the space has not proved `authority_rotation` (the owner could
+not retire the key there) — probed again at most every 30 s while it is
+unreachable, and the owner is told (notification `space_delegation_blocked`,
+at most once a day per space) — and such a space is never listed on such a
+GFS in the first place (`409 GFS_KEY_ROTATION_UNSUPPORTED`). An admin also only takes it while one of its
+own people holds a live admin seat, and only when the payload's space is
+the envelope's. A share that is definitively not sent (no seat, no route,
+no host hop) is not counted as shared; a queued one is. An admin household
+of a delegating space echoes `seed_held` in its `authority_epoch_echo`
+(from key epoch 0 on), and the owner re-shares on an explicit `false` at
+most hourly per household — a share lost in a 24 h GFS queue heals. The
+hour counts only from a re-share that passed every gate (a refused one is
+tried again on the next echo); it is built under the rotation's per-space
+lock and sent outside it (checked again right before), so a revocation
+never waits behind a send.
+
 The receiver **fails closed**: it stores the seed only when the
-§24.11-verified `from_instance` is the space's `owner_instance_id`,
+§24.11-verified `from_instance` is the space's `owner_instance_id` (or the
+delegated admin that invited it, `host_equivalence`), the payload names the
+envelope's space, one of its own people holds a live admin seat there,
 its *own* local copy of the space has `delegated_admin_authority` ON,
 the `seed_suite` is recognised (`SUPPORTED_SEED_SUITES`, no default
 fallback), and the seed b64url-decodes to exactly 32 bytes. Anything
@@ -2355,7 +2392,13 @@ through that decide whose content the §24.11 authorship rule accepts.
 Sharing the seed makes that household a co-authority of the space, not
 just an admin; the owner opts into it per space. From v_44 that authority
 ends with the admin seat: the owner rotates the key the moment the
-household's last admin seat goes (or the flag is turned off).
+household's last admin seat goes (or the flag is turned off). It cannot
+make admins, though: on the space it hosts the owner refuses seed-signed
+gossip that keeps or sets an ADMIN seat (D5, 2026-11-15) — so a kicked
+admin cannot re-assert its own seat at a higher version and turn a
+delegated admin's kick stale on the owner, which then rotates when it learns
+of the kick. Other member households may still mirror such a re-assertion
+until the owner's rotation; the rotation stops that household signing.
 
 Gated on `FederationCapability.MIN_FOR_SPACE_ADMIN_KEY_SHARE`: against
 a sub-v_22 admin household (no handler) the owner SKIPS the send and
@@ -2369,11 +2412,17 @@ sequenceDiagram
     participant O as HFS O (owner)
     participant A as HFS A (remote admin)
     participant R as HFS R (relay / non-member)
+    participant G as GFS (A reached only through it)
     Note over O: delegated_admin_authority ON<br/>+ promote A to ADMIN (or flag flips on)
-    O->>O: peer_supports(A, v_22)?
-    O-->>A: SPACE_ADMIN_KEY_SHARE<br/>(encrypted peer-pair; seed + ed25519-seed suite)
+    O->>O: peer_supports(A, v_22)? (v_94 if A is GFS-only)<br/>every listing GFS proved authority_rotation?
+    alt A paired / mesh
+        O-->>A: SPACE_ADMIN_KEY_SHARE<br/>(encrypted peer-pair; seed + ed25519-seed suite)
+    else A reached only through the GFS
+        O->>G: sealed mailbox frame (session key)
+        G->>A: sealed frame — no space id, no type, no key
+    end
     Note over R: never on the path — seed is<br/>NEVER broadcast / relayed
-    A->>A: verify from_instance == owner<br/>+ local flag ON + 32-byte seed
+    A->>A: verify from_instance == owner<br/>+ local flag ON + own live admin seat<br/>+ 32-byte seed == pinned key
     A->>A: set_space_seed(space_id, seed)<br/>(INFO audit log)
     Note over A: A can now sign space-authority<br/>events with O offline
 ```
@@ -2604,7 +2653,18 @@ no revoked household.
 
 **Steps on the owner.** (1) mint a fresh keypair at
 `authority_key_epoch + 1` in one compare-and-set write; (2) sign the cert;
-(3) rotate the content key, the rekey signed with the NEW key; (4) send
+(3) rotate the content key, the rekey signed with the NEW key; (3a)
+re-publish a public / global space to every GFS that already lists it — each
+re-pins from the cert, so from here on no GFS takes the retired key's relays,
+epoch notices or media uploads (this runs BEFORE the per-member sends, which
+can take minutes in a large space; a rotation never tells a new GFS the space
+exists) and re-announce its epoch; (3b) drop every `SPACE_ADMIN_KEY_SHARE`
+of the space still queued in the owner's outbox — to each member household
+and to the revoked one, which may hold no seat any more (a seed share also
+supersedes per space there). A frame a GFS already accepted is out of reach:
+it carries the retired key's seed, which every re-pinned receiver refuses
+(residual: a member that missed the rotation still verifies that key until
+its cert arrives); (4) send
 each member household `SPACE_AUTHORITY_ROTATED` over its encrypted
 pairwise path — only `space_id` is plaintext; the payload carries the
 cert, the owner's full `space_meta` (signed with the new key, including
@@ -2612,9 +2672,8 @@ the cert, `authority_key_epoch` and `config_sequence`), the content key
 (signed with the new key) and the household's roster entries (as in a
 roster snapshot, signed with the new key); (5) if delegation is still on,
 re-share the new seed with the cert to every remaining admin household;
-(6) re-publish a public / global space to every GFS that already lists it
-(each re-pins from the cert; a rotation never tells a new GFS the space
-exists), then re-seal the content key to GFS subscribers. The remaining
+(6) re-seal the content key to GFS subscribers (after the re-pin of step
+3a). The remaining
 admins' seed share (step 5) is sent BEFORE the bundles, and the bundle and
 legacy rekey go only to households that still hold a live seat — a
 household whose last seat was just tombstoned (also through gossip, which

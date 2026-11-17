@@ -459,3 +459,18 @@ def test_space_post_reaction_is_member_content_on_every_path():
     assert t in SPACE_WRITE_EVENT_TYPES
     assert t not in SPACE_READER_EVENT_TYPES
     assert t not in ARCHIVED_ALLOWED_REMOVAL_TYPES
+
+
+# ─── v_94: the signing seed reaches an admin on every path ───────────────
+
+
+def test_admin_key_share_reaches_a_gfs_only_admin_one_household_at_a_time():
+    """Every space admin is equal, whichever way its household is reached
+    (owner decision 2026-11-15): an admin seated from an invite link or the
+    GFS directory takes the space signing seed too, so the type is in the
+    seat vocabulary. It is key material for ONE household, so it never rides
+    a multi frame, whose body every listed household can read."""
+    t = FederationEventType.SPACE_ADMIN_KEY_SHARE
+    assert t in SPACE_SESSION_ALLOWED_EVENT_TYPES
+    assert t in MULTI_SEND_EXCLUDED_EVENT_TYPES
+    assert t not in MULTI_EVENT_TYPES

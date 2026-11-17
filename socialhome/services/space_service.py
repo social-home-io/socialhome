@@ -77,6 +77,7 @@ from ..domain.relay_media_frame import (
 )
 from ..federation.gfs_join_request import APPROVAL_TOKEN_TTL, unverified_names
 from ..federation.host_equivalence import acts_as_host
+from ..federation.host_hop import HOST_HOP_UNAVAILABLE
 from ..federation.invite_code import (
     build_invite_code,
     build_invite_payload,
@@ -130,6 +131,7 @@ from ..domain.events import (
     RemoteJoinRequestApproved,
     SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
+    SpaceDelegationBlocked,
     SpaceInviteAnswered,
     SpaceJoinApproved,
     SpaceJoinDenied,
@@ -150,8 +152,10 @@ from ..domain.events import (
 )
 from ..domain.federation import (
     DELIVERY_ERROR_MESH_DEFERRED,
+    DELIVERY_ERROR_NO_ROUTE,
     DELIVERY_ERROR_QUEUED,
     DELIVERY_ERROR_RELAY_THROTTLED,
+    DELIVERY_ERROR_ROUTE_COOLDOWN,
     BehindMember,
     DeliveryResult,
     FederationEvent,
@@ -373,6 +377,22 @@ _UNSET_MEMBER_PROFILE = object()
 
 
 #: Wire-suite tag for the delegated-admin signing-seed share (v_22).
+#: At most one "delegation blocked" notice per space this often (D1).
+DELEGATION_BLOCKED_NOTICE_S: float = 24 * 3600.0
+
+#: Delivery outcomes after which a ``SPACE_ADMIN_KEY_SHARE`` is definitively
+#: NOT out (no seat, no route, no host hop): only these leave the seed
+#: unmarked as shared. Every other outcome — delivered, or queued in an
+#: outbox / behind a hop where it may still land — counts as out.
+_SEED_SHARE_NOT_SENT: frozenset[str] = frozenset(
+    {
+        "not_confirmed",
+        DELIVERY_ERROR_NO_ROUTE,
+        DELIVERY_ERROR_ROUTE_COOLDOWN,
+        HOST_HOP_UNAVAILABLE,
+    }
+)
+
 #: The ``space_seed`` field of a ``SPACE_ADMIN_KEY_SHARE`` payload carries
 #: the raw 32-byte Ed25519 seed, b64url-encoded. The suite tag travels
 #: alongside it so a future seed format (e.g. a hybrid PQ signing key) is a
@@ -632,6 +652,7 @@ class SpaceService(
         "_bus",
         "_child_protection",
         "_covers",
+        "_delegation_blocked_told",
         "_federation",
         "_federation_repo",
         "_gallery",
@@ -690,6 +711,9 @@ class SpaceService(
         self._posts = space_post_repo
         self._users = user_repo
         self._bus = bus
+        #: D1 notices told per space (monotonic seconds), see
+        #: :meth:`_tell_owner_delegation_blocked`.
+        self._delegation_blocked_told: dict[str, float] = {}
         self._own_instance_id = own_instance_id
         # When both are set, a deleted space post's media file(s) are
         # removed once the post row + its gallery system-album mirror are
@@ -1748,7 +1772,8 @@ class SpaceService(
         space: Space,
         *,
         instance_id: str,
-    ) -> None:
+        mint: bool = True,
+    ) -> bool:
         """Ship the space's Ed25519 signing seed to a REMOTE admin household
         (delegated-admin authority, v_22).
 
@@ -1773,33 +1798,34 @@ class SpaceService(
         the seed. Failures are logged and swallowed — a missed share never
         breaks the triggering role/config write; the admin simply can't act
         offline until a later re-share succeeds.
+
+        ``True`` when a share passed every gate and was handed to the send
+        path (:meth:`prepare_admin_seed_share` + :meth:`send_admin_seed_share`,
+        which a caller holding the rotation lock runs apart: build under the
+        lock, send outside it).
         """
+        prepared = await self.prepare_admin_seed_share(
+            space, instance_id=instance_id, mint=mint
+        )
+        if prepared is None:
+            return False
+        await self.send_admin_seed_share(prepared, instance_id=instance_id)
+        return True
+
+    async def prepare_admin_seed_share(
+        self, space: Space, *, instance_id: str, mint: bool = True
+    ) -> tuple[Space, dict] | None:
+        """Every gate of :meth:`share_admin_signing_seed`, and the payload —
+        ``(space as read, payload)`` — or ``None`` (nothing to send). No
+        network send; the D1 probe may fetch ``/gfs/info``."""
         if self._federation is None:
-            return
-        # A relay-only household (met through a connection server via an
-        # invite link, ``InstanceSource.SPACE_SESSION``) does not receive the
-        # signing seed yet — an open pre-release gap (seed handoff for
-        # GFS-only admins), tracked separately. Until then such an admin
-        # acts through the host. The check also holds when an admin/mod
-        # elevation is approved through :meth:`set_remote_member_role`
-        # rather than seated directly.
-        if self._federation_repo is not None:
-            peer = await self._federation_repo.get_instance(instance_id)
-            if peer is not None and peer.source is InstanceSource.SPACE_SESSION:
-                log.info(
-                    "delegated-admin: not sharing the signing seed with "
-                    "relay-only household %s for space %s (open pre-release "
-                    "gap: no seed handoff for GFS-only admins yet)",
-                    instance_id,
-                    space.id,
-                )
-                return
+            return None
         if (
             self._own_instance_id is None
             or space.owner_instance_id != self._own_instance_id
         ):
             # Not the owner — we don't hold the authoritative seed.
-            return
+            return None
         if not await self._federation.peer_supports(
             instance_id,
             min_version=FederationCapability.MIN_FOR_SPACE_ADMIN_KEY_SHARE,
@@ -1812,7 +1838,31 @@ class SpaceService(
                 space.id,
                 FederationCapability.MIN_FOR_SPACE_ADMIN_KEY_SHARE,
             )
-            return
+            return None
+        # Every space admin is equal, whichever way its household is reached
+        # (owner decision 2026-11-15): one seated from an invite link or the
+        # GFS directory (``InstanceSource.SPACE_SESSION``) takes the seed too,
+        # over the GFS relay — once its build has the type in its seat
+        # vocabulary (v_94). An older one would refuse it at its peer-class
+        # gate, so it is not sent and the admin acts through the host.
+        if not await self._seed_share_reaches_seat(space, instance_id):
+            return None
+        # D1 (owner decision 2026-11-15): a seed goes out only while every GFS
+        # holding state tied to the space's authority key can be moved onto a
+        # new one — otherwise revoking that admin could not be enforced there.
+        if self._gfs is not None and not await self._gfs.authority_key_revocable(
+            space.id
+        ):
+            await self._tell_owner_delegation_blocked(space.id)
+            log.warning(
+                "delegated-admin: not sharing the signing seed for space %s "
+                "with %s — a GFS that holds the space's authority key could "
+                "not be moved onto a new key, so a revocation would not be "
+                "enforced there; the admin acts through the host until then",
+                space.id,
+                instance_id,
+            )
+            return None
         # Re-read: a rotation may have moved the key since the caller
         # fetched ``space`` (the share must name the CURRENT key + epoch).
         space = await self._spaces.get(space.id) or space
@@ -1833,8 +1883,15 @@ class SpaceService(
                 space.id,
                 FederationCapability.MIN_FOR_SPACE_AUTHORITY_ROTATION,
             )
-            return
-        seed = await self.ensure_space_seed(space.id)
+            return None
+        # ``mint=False``: a caller holding the rotation's per-space lock must
+        # never re-mint a lost seed — that runs a rotation, which takes the
+        # same (non-re-entrant) lock.
+        seed = (
+            await self.ensure_space_seed(space.id)
+            if mint
+            else await self._spaces.get_space_seed(space.id)
+        )
         if seed is None:
             log.warning(
                 "delegated-admin: no signing seed available for space %s — "
@@ -1842,7 +1899,38 @@ class SpaceService(
                 space.id,
                 instance_id,
             )
-            return
+            return None
+        # The seed, the key it is for and the cert must be one rotation's: a
+        # rotation landing between these reads would otherwise ship the new
+        # seed under the old epoch and cert (the rotation re-shares to the
+        # admins it keeps on its own).
+        current = await self._spaces.get(space.id)
+        if (
+            current is None
+            or current.authority_key_epoch != space.authority_key_epoch
+            or ed25519_public_key(seed).hex()
+            != (current.identity_public_key or "").lower()
+        ):
+            log.info(
+                "delegated-admin: the authority key of %s moved while sharing "
+                "its seed with %s — skipped (the rotation re-shares)",
+                space.id,
+                instance_id,
+            )
+            return None
+        space = current
+        # Last word before the payload: the household must STILL hold a live
+        # admin seat here and delegation must still be on. A share that
+        # waited (a GFS probe, an echo-triggered re-share) must not hand the
+        # new seed to a household a rotation revoked meanwhile.
+        if not await self._seed_share_still_due(space, instance_id):
+            log.info(
+                "delegated-admin: %s holds no admin seat in %s (or delegation "
+                "is off) — no seed share",
+                instance_id,
+                space.id,
+            )
+            return None
         payload: dict = {
             "space_id": space.id,
             "space_seed": base64.urlsafe_b64encode(seed).decode("ascii"),
@@ -1856,6 +1944,15 @@ class SpaceService(
             cert = owner_authority_cert_via(self._federation, space)
             if cert is not None:
                 payload["authority_cert"] = cert
+        return space, payload
+
+    async def send_admin_seed_share(
+        self, prepared: tuple[Space, dict], *, instance_id: str
+    ) -> None:
+        """Send a share :meth:`prepare_admin_seed_share` built, and mark the
+        seed as out unless the send definitively did not go out."""
+        space, payload = prepared
+        assert self._federation is not None
         try:
             # Audit: log the key-blast radius at INFO (recipient + space).
             log.info(
@@ -1864,21 +1961,106 @@ class SpaceService(
                 space.id,
                 instance_id,
             )
-            await self._federation.send_with_mesh_fallback(
+            result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=instance_id,
                 event_type=FederationEventType.SPACE_ADMIN_KEY_SHARE,
                 payload=payload,
                 space_id=space.id,
             )
-            # v_44 — remember that a seed for the CURRENT key is out, so a
-            # later revocation rotates even if delegation is off by then.
-            await self._spaces.mark_seed_shared(space.id)
         except Exception:
             log.exception(
                 "delegated-admin: signing-seed share to %s for space %s failed",
                 instance_id,
                 space.id,
             )
+            # Whether it left is unknown: count it as out (the safe side).
+            await self._spaces.mark_seed_shared(space.id)
+            return
+        if (
+            isinstance(result, DeliveryResult)
+            and not result.ok
+            and result.error in _SEED_SHARE_NOT_SENT
+        ):
+            # Definitively not sent (no seat, no route, no host hop): no seed
+            # is out. Anything else — delivered, or queued in an outbox /
+            # behind a hop where it may still land — counts as out.
+            log.warning(
+                "delegated-admin: signing-seed share to %s for space %s could "
+                "not be sent (%s); the admin acts through the host until a "
+                "later share reaches it",
+                instance_id,
+                space.id,
+                result.error,
+            )
+            return
+        # v_44 — remember that a seed for the CURRENT key may be out, so a
+        # later revocation rotates even if delegation is off by then.
+        await self._spaces.mark_seed_shared(space.id)
+
+    async def _seed_share_still_due(self, space: Space, instance_id: str) -> bool:
+        """Delegation is on and *instance_id* holds a live admin seat in
+        *space* (as passed — the caller compares its key epoch itself)."""
+        if not space.features.delegated_admin_authority:
+            return False
+        return (
+            self._remote_members is None
+            or instance_id in await self._remote_members.list_admin_instances(space.id)
+        )
+
+    async def admin_seed_share_still_due(
+        self, prepared: tuple[Space, dict], *, instance_id: str
+    ) -> bool:
+        """Re-check a share built under the rotation lock right before it is
+        sent outside it: same key epoch and pin as built, delegation on, and
+        the household still holds a live admin seat."""
+        built, _payload = prepared
+        current = await self._spaces.get(built.id)
+        return (
+            current is not None
+            and current.authority_key_epoch == built.authority_key_epoch
+            and current.identity_public_key == built.identity_public_key
+            and await self._seed_share_still_due(current, instance_id)
+        )
+
+    async def _tell_owner_delegation_blocked(self, space_id: str) -> None:
+        """D1 liveness: no admin can get the seed while a listing GFS can't
+        take a new key (or prove it) — tell the owner, at most once per space
+        per :data:`DELEGATION_BLOCKED_NOTICE_S` (a share is retried on every
+        admin's echo; one notice is enough)."""
+        now = time.monotonic()
+        last = self._delegation_blocked_told.get(space_id)
+        if last is not None and now - last < DELEGATION_BLOCKED_NOTICE_S:
+            return
+        self._delegation_blocked_told[space_id] = now
+        try:
+            await self._bus.publish(SpaceDelegationBlocked(space_id=space_id))
+        except Exception:
+            log.exception("delegated-admin: notice for %s failed", space_id)
+
+    async def _seed_share_reaches_seat(self, space: Space, instance_id: str) -> bool:
+        """Whether a seed share to *instance_id* can be taken there: any
+        paired / mesh household, and a household seated from an invite link
+        or the GFS directory at or above
+        :data:`FederationCapability.MIN_FOR_RELAY_ADMIN_KEY_SHARE`."""
+        if self._federation is None or self._federation_repo is None:
+            return True
+        peer = await self._federation_repo.get_instance(instance_id)
+        if peer is None or peer.source is not InstanceSource.SPACE_SESSION:
+            return True
+        if await self._federation.peer_supports(
+            instance_id,
+            min_version=FederationCapability.MIN_FOR_RELAY_ADMIN_KEY_SHARE,
+        ):
+            return True
+        log.warning(
+            "delegated-admin: skipping signing-seed share to %s for space %s — "
+            "a household reached through a GFS takes it from v_%d on; it acts "
+            "through the host until it upgrades",
+            instance_id,
+            space.id,
+            FederationCapability.MIN_FOR_RELAY_ADMIN_KEY_SHARE,
+        )
+        return False
 
     async def broadcast_remote_member_joined(
         self,

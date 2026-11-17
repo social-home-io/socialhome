@@ -1490,10 +1490,11 @@ class SpaceInviteTokenRedeemCoordinator:
         # An admin/mod link does NOT grant admin straight through (owner
         # decision, 2026-09-19). The redeeming household is seated as a
         # MEMBER now and a pending elevation is filed on the HOST; the owner
-        # approves it with a click (``set_remote_member_role``), and the
-        # relay-only seed guard in ``share_admin_signing_seed`` keeps the
-        # standing "a link-joined admin never holds the seed" rule. A leaked
-        # admin link is therefore at worst a member on the host.
+        # approves it with a click (``set_remote_member_role``). Only then,
+        # and only while the owner lets admins act for it, does that
+        # household get the signing seed — like any admin, on any path
+        # (owner decision 2026-11-15). A leaked admin link is therefore at
+        # worst a member on the host.
         pending_admin = seat == SpaceRole.ADMIN.value
         if pending_admin:
             seat = SpaceRole.MEMBER.value
